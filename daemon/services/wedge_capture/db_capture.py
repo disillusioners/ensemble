@@ -72,6 +72,47 @@ MAX_EXECUTING_TURNS = 50
 CHECKPOINT_TABLES = ("checkpoints", "checkpoint_blobs", "checkpoint_writes", "checkpoint_migrations")
 
 
+#: The typed statuses of the metadata-row write.
+ROW_STATUS_OK = "ok"
+ROW_STATUS_FAILED = "failed"
+#: The budget-exhausted status (W2) — the phase was SKIPPED, not
+#: attempted against an exhausted budget. The snapshot payload and the
+#: row-write result both carry ``reason="skipped:budget"``.
+STATUS_SKIPPED = "skipped"
+SKIPPED_BUDGET_REASON = "skipped:budget"
+
+
+def _apply_budget(
+    *,
+    budget_s: float,
+    connect_timeout_s: int,
+    statement_timeout_ms: int,
+    statements: int,
+) -> tuple[int, int] | None:
+    """Scale one DB phase's timeouts to its phase budget (W2).
+
+    The capture deadline is END-TO-END: a DB phase may never run
+    against a budget the capture does not have. Returns ``None`` when
+    the budget is exhausted — the caller SKIPS the phase and records
+    ``skipped:budget``. Otherwise the connect gets at most 40% of the
+    phase budget (``psycopg``'s ``connect_timeout`` is integral
+    seconds, so the granularity floor is 1 s) and each statement gets
+    an equal share of what remains.
+
+    Without a budget (``budget_s=None`` at the call site) the caller's
+    defaults stand — the hermetic shape the unit packs drive.
+    """
+    if budget_s <= 0:
+        return None
+    connect = max(1, min(connect_timeout_s, int(budget_s * 0.4)))
+    remaining_ms = max(0.0, budget_s - connect) * 1000.0
+    statement = max(
+        1,
+        min(statement_timeout_ms, int(remaining_ms) // max(1, statements)),
+    )
+    return connect, statement
+
+
 def _strip_driver(dsn: str) -> str:
     """``postgresql+psycopg://`` → ``postgresql://`` (raw psycopg)."""
     if "://" not in dsn:
@@ -142,14 +183,47 @@ def capture_db_snapshot(
     boot_epoch: str | None = None,
     connect_timeout_s: int = 10,
     statement_timeout_ms: int = 5000,
+    budget_s: float | None = None,
 ) -> dict[str, Any]:
     """The DB-side sub-capture.
 
     Never raises. Returns a dict whose ``status`` is one of ``ok`` /
-    ``unavailable`` / ``denied`` / ``timeout`` / ``error``.
+    ``unavailable`` / ``denied`` / ``timeout`` / ``error`` / — since
+    W2 — ``skipped`` (``reason="skipped:budget"``): the capture's phase
+    budget was exhausted BEFORE this phase ran, so it was never
+    attempted.
+
+    Args:
+        budget_s: This phase's budget in seconds (the capture's
+            remaining budget, scaled — W2). ``None`` keeps the raw
+            ``connect_timeout_s`` / ``statement_timeout_ms`` defaults —
+            the hermetic shape the unit packs drive directly.
     """
     if not dsn:
         return {"status": STATUS_UNAVAILABLE, "reason": "no_postgres_dsn"}
+
+    scaled = (
+        None
+        if budget_s is None
+        else _apply_budget(
+            budget_s=budget_s,
+            connect_timeout_s=connect_timeout_s,
+            statement_timeout_ms=statement_timeout_ms,
+            statements=3,
+        )
+    )
+    if budget_s is not None and scaled is None:
+        return {
+            "status": STATUS_SKIPPED,
+            "reason": SKIPPED_BUDGET_REASON,
+            "boot_epoch": boot_epoch,
+            "executing_turns": [],
+            "executing_turns_count": 0,
+            "checkpoint_store_census": {},
+            "resume_history": [],
+        }
+    if scaled is not None:
+        connect_timeout_s, statement_timeout_ms = scaled
 
     payload: dict[str, Any] = {
         "status": STATUS_OK,
@@ -326,18 +400,42 @@ def write_capture_row(
     *,
     connect_timeout_s: int = 10,
     statement_timeout_ms: int = 5000,
+    budget_s: float | None = None,
 ) -> dict[str, Any]:
     """Insert the metadata row over the OWN one-shot connection (T11).
 
     The row write is **deferred-tolerant** (D22): a failure is logged
     with the capture directory path and the capture is still valid on
     disk — the caller writes the ``.pending_row.json`` sidecar.
+    Since W2 the write is ALSO budget-bounded: an exhausted phase
+    budget (``budget_s <= 0``) returns ``{"status": "skipped",
+    "reason": "skipped:budget"}`` WITHOUT attempting a connect — the
+    pending-sidecar path recovers the row on the next reconcile.
+
+    Args:
+        budget_s: This phase's budget in seconds (the capture's
+            remaining budget, scaled — W2). ``None`` keeps the raw
+            defaults — the hermetic shape the unit packs drive.
 
     Returns:
-        ``{"status": "ok"|"failed", "reason": ...}``.
+        ``{"status": "ok"|"failed"|"skipped", "reason": ...}``.
     """
     if not dsn:
         return {"status": "failed", "reason": "no_postgres_dsn"}
+    scaled = (
+        None
+        if budget_s is None
+        else _apply_budget(
+            budget_s=budget_s,
+            connect_timeout_s=connect_timeout_s,
+            statement_timeout_ms=statement_timeout_ms,
+            statements=1,
+        )
+    )
+    if budget_s is not None and scaled is None:
+        return {"status": STATUS_SKIPPED, "reason": SKIPPED_BUDGET_REASON}
+    if scaled is not None:
+        connect_timeout_s, statement_timeout_ms = scaled
     connection = None
     try:
         connection = _connect(
@@ -422,9 +520,13 @@ __all__ = [
     "CAPTURE_APPLICATION_NAME",
     "CHECKPOINT_TABLES",
     "MAX_EXECUTING_TURNS",
+    "ROW_STATUS_FAILED",
+    "ROW_STATUS_OK",
+    "SKIPPED_BUDGET_REASON",
     "STATUS_DENIED",
     "STATUS_ERROR",
     "STATUS_OK",
+    "STATUS_SKIPPED",
     "STATUS_TIMEOUT",
     "STATUS_UNAVAILABLE",
     "capture_db_snapshot",

@@ -20,11 +20,17 @@ EVERY ARTIFACT WRITE IS INDIVIDUALLY GUARDED
 One failing artifact never loses the others, and the writer NEVER
 raises. Each artifact's outcome is recorded in the manifest.
 
-THE DEADLINE IS A HARD BUDGET (D3 / A5)
----------------------------------------
-The whole capture is bounded by ``deadline_s`` (20 s by default). A
-step whose budget is exhausted is **skipped** and recorded as
-``skipped:budget`` in the manifest — the capture still completes.
+THE DEADLINE IS END-TO-END (D3 / A5 / W2)
+------------------------------------------
+The whole capture is bounded by ``deadline_s`` (20 s by default) —
+measured from the CAPTURE'S ENTRY, not from the writer's own start:
+the pre-writer phases (the DB sub-capture above all — a 10 s connect
+plus three 5 s statements in the pre-fix shape) consume the SAME
+budget the write phase spends. The caller passes its clock via
+``started_monotonic``. A step whose budget is exhausted is **skipped**
+and recorded as ``skipped:budget`` in the manifest — the capture still
+completes. The DB steps are scaled to their remaining budget the same
+way (``db_capture``), so no phase can run against a fresh clock.
 
 RETENTION IS **DIRECTORY-AUTHORITATIVE** (D23 / A3 / F-05)
 ---------------------------------------------------------
@@ -299,7 +305,10 @@ class CaptureWriter:
 
     Args:
         root: The capture root (the directory that holds the captures).
-        deadline_s: The whole-capture wall-clock budget.
+        deadline_s: The whole-CAPTURE wall-clock budget — measured from
+            the capture's entry (the caller passes ``started_monotonic``
+            to :meth:`write_capture`), never from the writer's own
+            start (W2: the deadline is end-to-end).
         object_census: Whether the O(heap) object census runs.
     """
 
@@ -316,12 +325,12 @@ class CaptureWriter:
 
     # ── the budget ─────────────────────────────────────────────────────
     def _budget_left(self, started: float) -> float:
-        """Seconds left in the capture budget (never negative)."""
-        return max(0.0, self.deadline_s - (time.monotonic() - started))
+        """Seconds left in the capture budget (never negative).
 
-    def _step_budget(self, started: float, share: float = 0.25) -> float:
-        """The per-step budget — a quarter of what is left, at least 1 s."""
-        return max(1.0, self._budget_left(started) * share)
+        ``started`` is the CAPTURE'S entry instant (the caller's clock
+        — W2), not the writer's.
+        """
+        return max(0.0, self.deadline_s - (time.monotonic() - started))
 
     # ── the capture ────────────────────────────────────────────────────
     def write_capture(
@@ -345,13 +354,26 @@ class CaptureWriter:
         readyz: dict[str, Any] | None = None,
         checkpoint_perf_tail: list[dict[str, Any]] | None = None,
         extra_manifest: dict[str, Any] | None = None,
+        started_monotonic: float | None = None,
     ) -> CaptureResult:
         """Write the whole capture directory.
 
         Never raises. Returns a :class:`CaptureResult` carrying the
         per-artifact outcome map.
+
+        Args:
+            started_monotonic: The CAPTURE'S entry instant (the caller's
+                budget clock — W2). ``None`` (the default) starts the
+                budget at the writer's own entry — the hermetic shape
+                the unit packs drive directly; the production path
+                (``run_capture``) ALWAYS passes its entry so the
+                deadline is end-to-end.
         """
-        started = time.monotonic()
+        started = (
+            time.monotonic()
+            if started_monotonic is None
+            else float(started_monotonic)
+        )
         capture_dir = self.root / capture_id
         result = CaptureResult(
             capture_id=capture_id,

@@ -272,6 +272,119 @@ class TestDeadline:
         ]
 
 
+# ── AC9 END-TO-END (W2): the deadline covers the WHOLE capture ────────────
+
+
+class TestEndToEndDeadline:
+    """The capture deadline is measured from ``run_capture``'s ENTRY.
+
+    The pre-fix shape started a FRESH 20 s clock at the writer's own
+    entry and let the DB phases (a 10 s connect + three 5 s statements)
+    run before it with no budget at all — a watchdog stall of 55-70 s.
+    These pins FAIL on that shape: the write phase must spend the
+    budget the capture opened, and an exhausted phase must skip + record
+    rather than run against a fresh clock.
+    """
+
+    def test_the_writer_honors_the_callers_budget_clock(
+        self, tmp_path: Path
+    ) -> None:
+        """A pre-writer phase that consumed the budget ⇒ every data step
+        ``skipped:budget``; the manifest still lands (never gated)."""
+        result = _capture(
+            CaptureWriter(tmp_path, deadline_s=20.0),
+            started_monotonic=time.monotonic() - 25.0,
+        )
+        for name in ("stacks.txt", "threads.csv", "lag.json", "metrics.json",
+                     "db.json", "readyz.json", "checkpoint_perf_tail.json"):
+            assert result.artifacts[name] == SKIPPED_BUDGET, name
+        assert result.artifacts["manifest.json"] == "ok"
+        assert (result.capture_dir / "manifest.json").exists()
+        # The duration is reported against the CAPTURE's clock, not the
+        # writer's.
+        assert result.duration_s >= 20.0
+
+    def test_a_slow_pre_writer_phase_forces_the_late_steps_to_skip(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """END-TO-END through ``run_capture``: the DB snapshot phase
+        ALONE exceeds the budget — the write phase's data steps and the
+        metadata row must degrade, never run against a fresh clock."""
+        watchdog = _watchdog(tmp_path, deadline_s=0.4)
+        seen_budgets: list[float | None] = []
+
+        def _slow_snapshot(dsn, *, boot_epoch=None, budget_s=None, **kwargs):
+            seen_budgets.append(budget_s)
+            time.sleep(0.5)  # the pre-writer phase alone exceeds 0.4 s
+            return {"status": "unavailable", "reason": "test_slow_connect"}
+
+        monkeypatch.setattr(
+            "daemon.services.wedge_capture.watchdog._db_capture.capture_db_snapshot",
+            _slow_snapshot,
+        )
+
+        result = watchdog.run_capture(reason="sustained_cpu")
+
+        # The DB phase received a BOUNDED budget (the W2 wiring) — never
+        # the raw unbounded defaults.
+        assert seen_budgets, "the snapshot was invoked"
+        assert seen_budgets[0] is not None
+        assert seen_budgets[0] <= 0.4 + 0.01
+
+        # The pre-writer phase consumed the whole budget: the write
+        # phase's data steps skip + record, measured from run_capture's
+        # entry.
+        for name in ("stacks.txt", "threads.csv", "lag.json", "metrics.json",
+                     "db.json", "readyz.json", "checkpoint_perf_tail.json"):
+            assert result.artifacts[name] == SKIPPED_BUDGET, name
+        assert result.artifacts["manifest.json"] == "ok"
+        assert result.duration_s >= 0.5
+
+        # The row write is budget-exhausted too → skipped (never a fresh
+        # connect) → the D22 pending-sidecar path recovers it later.
+        assert result.row_written is False
+        assert (result.capture_dir / PENDING_ROW_SIDECAR).exists()
+
+    def test_the_row_write_skips_when_the_budget_is_exhausted(
+        self, tmp_path: Path
+    ) -> None:
+        """``write_capture_row(budget_s=0.0)`` must NOT attempt a
+        connect — it returns the typed ``skipped`` status."""
+        from daemon.services.wedge_capture.db_capture import (
+            SKIPPED_BUDGET_REASON,
+            STATUS_SKIPPED,
+            write_capture_row,
+        )
+
+        outcome = write_capture_row(
+            "postgresql://user:pw@127.0.0.1:1/nowhere", {"capture_dir": "/x"},
+            budget_s=0.0,
+        )
+        assert outcome["status"] == STATUS_SKIPPED
+        assert outcome["reason"] == SKIPPED_BUDGET_REASON
+
+    def test_the_snapshot_phase_skips_when_the_budget_is_exhausted(
+        self, tmp_path: Path
+    ) -> None:
+        """``capture_db_snapshot(budget_s=0.0)`` must NOT attempt a
+        connect — it returns the typed ``skipped`` payload skeleton."""
+        from daemon.services.wedge_capture.db_capture import (
+            SKIPPED_BUDGET_REASON,
+            STATUS_SKIPPED,
+            capture_db_snapshot,
+        )
+
+        payload = capture_db_snapshot(
+            "postgresql://user:pw@127.0.0.1:1/nowhere",
+            boot_epoch="2026-10-22T11:00:00",
+            budget_s=0.0,
+        )
+        assert payload["status"] == STATUS_SKIPPED
+        assert payload["reason"] == SKIPPED_BUDGET_REASON
+        assert payload["executing_turns"] == []
+        assert payload["boot_epoch"] == "2026-10-22T11:00:00"
+
+
 # ── AC44 / D45: the saver-pool independence (SC-4) ────────────────────────
 
 

@@ -516,6 +516,7 @@ class WedgeCaptureWatchdog:
         db_payload = _db_capture.capture_db_snapshot(
             self._dsn,
             boot_epoch=self._boot_epoch.isoformat() if self._boot_epoch else None,
+            budget_s=self._phase_budget(started),
         )
 
         readyz_payload = _collector.collect_readiness(
@@ -563,6 +564,11 @@ class WedgeCaptureWatchdog:
             readyz=readyz_payload,
             checkpoint_perf_tail=tail,
             extra_manifest=manifest_extra,
+            # W2: the writer spends the SAME budget the capture opened —
+            # the deadline is measured from run_capture's ENTRY, so a
+            # pre-writer phase that burned it forces the write phase's
+            # data steps to skip + record (never a fresh 20 s clock).
+            started_monotonic=started,
         )
 
         # ── the metadata row (file-first, D12) ─────────────────────────
@@ -587,7 +593,11 @@ class WedgeCaptureWatchdog:
             },
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        write_result = _db_capture.write_capture_row(self._dsn, row)
+        write_result = _db_capture.write_capture_row(
+            self._dsn,
+            row,
+            budget_s=self._phase_budget(started),
+        )
         if write_result.get("status") == "ok":
             result.row_written = True
         else:
@@ -615,6 +625,19 @@ class WedgeCaptureWatchdog:
         return result
 
     # ── helpers ────────────────────────────────────────────────────────
+    def _phase_budget(self, started: float, share: float = 0.25) -> float:
+        """A DB phase's budget — a quarter of what is left, at least
+        1 s, never MORE than what is left (W2: the deadline is
+        end-to-end, measured from the capture's entry ``started``).
+
+        ``0.0`` (budget exhausted) makes the DB step SKIP + record
+        ``skipped:budget`` instead of attempting a fresh connect.
+        """
+        left = max(0.0, self._config.deadline_s - (time.monotonic() - started))
+        if left <= 0:
+            return 0.0
+        return min(left, max(1.0, left * share))
+
     def _sampler_last_threads(self) -> list[Any]:
         """The last sample's per-thread attribution."""
         return list(self._sampler.last_threads)
