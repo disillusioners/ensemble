@@ -17,7 +17,11 @@ this codebase before.
 
 import os
 import re
+import stat
+import sys
+import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from langchain_core.tools import tool
@@ -878,6 +882,226 @@ Returns:
 """
 
 
+# ---------------------------------------------------------------------------
+# Per-canonical-path write serialization + atomic write (2026-10-23 race fix)
+# ---------------------------------------------------------------------------
+#
+# Incident 2026-10-22: LangGraph executes one message's tool calls in a
+# THREAD POOL. Two edit_file calls on the SAME file inside one block
+# interleaved at the read -> replace -> write seams: each thread read the
+# same original content, computed its replacement against that same
+# snapshot, and the last whole-file write discarded the other thread's
+# replacement — while BOTH tools reported SUCCESS (phantom success). The
+# non-atomic truncate+write also exposed readers (and a crash) to a
+# half-written file.
+#
+# Fix, three layers (tool-level, in-process — tool calls run inside the
+# daemon process, so in-process locking is the correct scope):
+#   1. Per-canonical-path lock registry (_canonical_path_lock): same-file
+#      writes serialize across edit_file AND write_file; different files
+#      take different locks and stay parallel (no global lock).
+#   2. Atomic replace (_atomic_write_text): unique temp file in the
+#      target's own directory + os.replace() inode swap. A crash mid-write
+#      leaves the original byte-identical; the file mode is preserved; the
+#      temp file is removed on every failure path.
+#   3. Read-back verification in both tool bodies: after the write the
+#      file is re-read and compared against the intended post-write
+#      content; a mismatch returns an honest ERROR instead of SUCCESS.
+#
+# Lock-key normalization (2026-10-23 reviewer fix): the registry key is
+# case-normalized on case-insensitive filesystems (macOS default volumes)
+# so every spelling of one file — "Config.txt" and "config.txt" — shares
+# ONE lock. Without it, two spellings of one inode took two locks and
+# raced into a lost write with both callers reporting SUCCESS (live-
+# reproduced on Darwin 2026-10-23).
+_PATH_WRITE_LOCKS: dict[str, threading.RLock] = {}
+_PATH_WRITE_LOCKS_GUARD = threading.Lock()
+
+# macOS APFS / HFS+ default volumes are case-INSENSITIVE: "Config.txt" and
+# "config.txt" are ONE inode with two spellings, but ``os.path.realpath``
+# does NOT normalize case — the two spellings would otherwise key TWO
+# locks and race each other into a lost update.
+#
+# Linux filesystems are case-SENSITIVE by default: normalizing there would
+# collapse two genuinely DISTINCT files ("a.txt" / "A.txt") onto ONE lock
+# — a pure throughput loss with no correctness gain — so the normalization
+# is platform-gated rather than unconditional.
+#
+# Residual caveat (accepted): on a case-SENSITIVE volume on macOS (APFS
+# with case-sensitive formatting) "a.txt" and "A.txt" are genuinely
+# distinct files that now share one lock — over-serialization (throughput
+# loss only; no correctness loss: both files are still written correctly,
+# just not concurrently). Unicode normalization variants (NFC vs NFD) are
+# likewise out of scope: they are a distinct spelling class that macOS
+# also treats as one file.
+_LOCK_KEY_CASE_INSENSITIVE = sys.platform == "darwin"
+
+
+def _lock_key(canonical: Path) -> str:
+    """Return the registry key for a canonical path.
+
+    The key is the canonical path string, case-normalized on platforms
+    whose default filesystem is case-insensitive (see
+    ``_LOCK_KEY_CASE_INSENSITIVE``). Case normalization touches ONLY the
+    key — the canonical path itself (used for the actual I/O) keeps the
+    caller's spelling, so the write still lands on the same inode.
+    """
+    key = str(canonical)
+    if _LOCK_KEY_CASE_INSENSITIVE:
+        key = key.casefold()
+    return key
+
+
+def _canonical_path_lock(file_path: Path) -> tuple[Path, threading.RLock]:
+    """Return the canonical write target and its per-path serialization lock.
+
+    The canonical target is ``os.path.realpath(file_path)``: symlinks are
+    resolved so (a) two spellings of the same file share ONE lock, and
+    (b) the atomic replace swaps the symlink TARGET's inode — preserving
+    the historical write-through-the-symlink behavior of ``open(..., "w")``.
+    The lock KEY is additionally case-normalized on case-insensitive
+    filesystems (see ``_lock_key``) so "Config.txt" and "config.txt" — one
+    inode, two spellings — share ONE lock instead of racing each other.
+
+    Deadlock safety: the registry guard lock is released before the path
+    lock is acquired (never nested), and a path lock is never held while
+    acquiring another path lock. The lock is a ``threading.RLock`` so that
+    a future refactor acquiring the same path lock twice on one thread
+    cannot self-deadlock (no nested acquisition exists today).
+
+    Known trade-offs (accepted):
+      * Unbounded registry growth — one entry per distinct file ever
+        written by this process (a lock + a path string each). Deliberate:
+        evicting an entry could hand a still-running thread a DIFFERENT
+        lock and reopen the race. A registry-size diagnostic (and any
+        eviction policy) is a follow-up, not part of this fix.
+      * No lock-acquisition timeout — a thread parked on a path lock waits
+        for the holder. Intended: the holder always releases (the ``with``
+        block), and a timeout would reintroduce the unsynchronized-write
+        window it is meant to prevent.
+      * The lock is released on EVERY exit path — including the fault
+        paths — because it is held by a ``with`` block.
+    """
+    canonical = Path(os.path.realpath(file_path))
+    key = _lock_key(canonical)
+    with _PATH_WRITE_LOCKS_GUARD:
+        lock = _PATH_WRITE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _PATH_WRITE_LOCKS[key] = lock
+    return canonical, lock
+
+
+def _read_process_umask() -> int:
+    """Return the process umask WITHOUT leaving it changed.
+
+    ``os.umask(0)`` returns the current mask while setting it to 0; the
+    original value is restored immediately in the ``finally`` block. The
+    zero-mask window is process-global (a file created by another thread
+    inside that window would get 0o777 & ~0), so the mask is read once per
+    write and restored right away.
+    """
+    mask = os.umask(0)
+    try:
+        return mask
+    finally:
+        os.umask(mask)
+
+
+def _atomic_write_text(target: Path, content: str) -> None:
+    """Atomically replace ``target`` with ``content`` (UTF-8 text).
+
+    Writes a unique temp file in the target's own directory (same
+    filesystem — ``os.replace`` cannot cross devices) and then
+    ``os.replace``s it over the target: readers see either the old or the
+    new file, never a truncated mix, and a crash mid-write leaves the
+    original untouched. The original file is never opened for mutation.
+
+    Failure paths remove the temp file and re-raise, so the tool body
+    reports an honest ERROR with the original byte-identical on disk.
+
+    Mode handling: the temp file is created 0o600 — NEVER 0o666 — so the
+    window between creation and the final chmod can never widen a secret
+    target's permissions (the baseline in-place ``open(path, "w")`` kept the
+    target's 0o600). An existing target's permission bits are then copied
+    onto the temp file BEFORE the content fsync, so the mode is made durable
+    together with the content and a crash right after cannot revert it to
+    the creation mode. A new file is chmod'ed to the mode the baseline
+    ``open(path, "w")`` would have produced (0o666 & ~umask — identical to
+    the kernel's default for a fresh file).
+
+    Known trade-offs (accepted): ``os.replace`` swaps the target's inode,
+    so hard links elsewhere on disk stop sharing content with this path
+    (the old truncate-in-place write kept them shared), and the write is
+    O(file) in memory. Both are negligible for tool-scale text files.
+
+    Further accepted trade-offs:
+      * Parent-directory write permission is now required: the temp file is
+        created and renamed inside the target's own directory, so a file
+        that is writable but whose DIRECTORY is not now fails (the
+        baseline ``open(path, "w")`` only needed write permission on the
+        file itself).
+      * Mode-ONLY preservation: the target's permission bits are copied
+        onto the temp file, but owner / group / ACLs / xattrs are NOT —
+        the swapped-in inode is a fresh one. The baseline in-place write
+        kept the original inode and therefore all of its metadata.
+      * The temp file path may appear in some ERROR strings (it is part of
+        the failing operation's context); the error text is not a stable
+        contract.
+      * File fsync is FATAL by design: a failing ``fsync`` (FUSE / NFS
+        mounts that reject fsync) aborts the write and surfaces an ERROR,
+        where the baseline ``open(path, "w")`` succeeded. Durability is
+        preferred over a silent best-effort write.
+    """
+    tmp_path: Path | None = None
+    fd: int | None = None
+    try:
+        try:
+            target_mode = stat.S_IMODE(os.stat(target).st_mode)
+        except OSError:
+            target_mode = None  # new file — use the umask-derived default
+        # The temp file is created 0o600 — NEVER 0o666. Between creation and
+        # the final chmod the temp lives in the TARGET'S OWN DIRECTORY: a
+        # 0o666 create (0o644 under the usual umask) would expose a secret
+        # target's new content to every user on the machine for the whole
+        # write+fsync window — a WIDENING of the baseline ``open(path, "w")``
+        # behaviour, which kept the target's 0o600 (CWE-732).
+        tmp_path = target.parent / f".{target.name}.tmp-{uuid.uuid4().hex}"
+        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = None  # ownership transferred to the file object
+            f.write(content)
+            f.flush()
+            # The FINAL mode is applied BEFORE the content fsync: the fsync
+            # then makes the content AND the mode durable together, and a
+            # crash right after cannot revert the mode (a crash leaves the
+            # temp at its 0o600 creation mode — never wider than the
+            # target). Ordering rule: chmod -> fsync -> replace.
+            if target_mode is not None:
+                os.chmod(tmp_path, target_mode)
+            else:
+                # New file — baseline-equivalent mode: exactly what
+                # ``open(path, "w")`` would have produced (0o666 & ~umask).
+                os.chmod(tmp_path, 0o666 & ~_read_process_umask())
+            os.fsync(f.fileno())
+        os.replace(tmp_path, target)
+        tmp_path = None  # renamed into place — nothing left to clean up
+        try:
+            dir_fd = os.open(str(target.parent), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)  # best-effort: make the rename itself durable
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass  # dir fsync is best-effort; the write already succeeded
+    except BaseException:
+        if fd is not None:
+            os.close(fd)
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+        raise
+
+
 @register_tool_category("filesystem")
 @tool
 def write_file(
@@ -901,14 +1125,51 @@ def write_file(
     try:
         # Create parent directories if they don't exist
         file_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        mode = "a" if append else "w"
-        with open(file_path, mode, encoding="utf-8") as f:
-            f.write(content)
-        
+
+        # Same-file serialization with edit_file (see the race-fix banner
+        # above): whole-file writes go through the atomic replace; appends
+        # are written under the same per-path lock (an edit_file + append
+        # in one superstep would otherwise interleave into a lost update).
+        lock_target, path_lock = _canonical_path_lock(file_path)
+        with path_lock:
+            if append:
+                with open(lock_target, "a", encoding="utf-8") as f:
+                    f.write(content)
+                # Read-back verify: the appended content must be the file's
+                # tail. (In-process writers are excluded by the lock; a
+                # mismatch means an out-of-process writer intervened.)
+                # newline="" disables universal-newline translation, so a
+                # CRLF-bearing append is compared byte-exactly against what
+                # was written (the default newline=None would rewrite
+                # "\r\n" to "\n" and report a spurious mismatch).
+                if not lock_target.read_text(encoding="utf-8", newline="").endswith(
+                    content
+                ):
+                    return (
+                        "ERROR: Read-back verification failed after appending to "
+                        f"{path}: file tail does not match the appended content "
+                        "(concurrent external modification?). Re-read the file "
+                        "and retry."
+                    )
+            else:
+                _atomic_write_text(lock_target, content)
+                # Read-back verify: the file must be exactly the intended
+                # content — never report SUCCESS on anything else.
+                # newline="" disables universal-newline translation, so the
+                # comparison is byte-exact against what was written (the
+                # default newline=None rewrites "\r\n" to "\n" and reports a
+                # spurious mismatch on a correct CRLF write).
+                if lock_target.read_text(encoding="utf-8", newline="") != content:
+                    return (
+                        "ERROR: Read-back verification failed after writing "
+                        f"{path}: file content does not match the intended "
+                        "content (concurrent external modification?). Re-read "
+                        "the file and retry."
+                    )
+
         action = "Appended to" if append else "Written to"
         return f"SUCCESS: {action} {file_path}"
-        
+
     except Exception as e:
         return f"ERROR: {str(e)}"
 
@@ -924,6 +1185,12 @@ Args:
 
 Returns:
     Success message with the file path
+
+Note:
+    Whole-file writes land via a same-directory temp file + atomic rename, and the
+    file is re-read after the write to verify the content before SUCCESS is reported.
+    Same-path writes (including appends and edit_file calls) are serialized per
+    canonical path within the daemon process.
 """
 
 
@@ -1268,23 +1535,64 @@ def edit_file(
         if not file_path.is_file():
             return f"ERROR: Not a file: {path}"
         
-        content = file_path.read_text(encoding="utf-8")
-        
-        if old_string not in content:
-            return f"ERROR: String not found in file: {old_string[:100]}"
-        
-        count = content.count(old_string)
-        
-        if replace_all:
-            new_content = content.replace(old_string, new_string)
-            action = f"Replaced all {count} occurrences"
-        else:
-            if count > 1:
-                return f"ERROR: String found {count} times. Use replace_all=True to replace all occurrences."
-            new_content = content.replace(old_string, new_string, 1)
-            action = "Replaced 1 occurrence"
-        
-        file_path.write_text(new_content, encoding="utf-8")
+        # Serialize same-file edits (see the race-fix banner above write_file):
+        # read -> replace -> write -> verify all happen under the ONE
+        # per-canonical-path lock, so a concurrent edit_file / write_file on
+        # the same file cannot interleave into a lost update or a torn write.
+        # Different files take different locks and stay parallel.
+        lock_target, path_lock = _canonical_path_lock(file_path)
+        with path_lock:
+            # Pre-edit read — the NEEDLE-MATCHING buffer. It keeps the
+            # default universal-newline translation (newline=None) on
+            # purpose: that is the historical matching semantics (an
+            # "old_string" of "line\n" matches a CRLF file) AND the
+            # historical ON-DISK behaviour (the pre-fix baseline read the
+            # whole file the same way and wrote it back whole, so the
+            # untouched lines of a CRLF file were rewritten as LF there
+            # too). The folding consequence is INHERITED, not introduced:
+            # an edit to one line of a CRLF file leaves the other lines LF
+            # on disk.
+            # Reading raw (newline="") would have LEFT THE UNTOUCHED BYTES
+            # ALONE — but it would also make the matching CRLF-sensitive and
+            # turn "String not found" on the most common agent needle shape
+            # ("line\n" against a CRLF file), a measured behavior change in
+            # the opposite direction. The fold is kept because it matches
+            # the baseline on BOTH axes (needle matching and on-disk bytes).
+            content = lock_target.read_text(encoding="utf-8")
+            
+            if old_string not in content:
+                return f"ERROR: String not found in file: {old_string[:100]}"
+            
+            count = content.count(old_string)
+            
+            if replace_all:
+                new_content = content.replace(old_string, new_string)
+                action = f"Replaced all {count} occurrences"
+            else:
+                if count > 1:
+                    return f"ERROR: String found {count} times. Use replace_all=True to replace all occurrences."
+                new_content = content.replace(old_string, new_string, 1)
+                action = "Replaced 1 occurrence"
+            
+            _atomic_write_text(lock_target, new_content)
+            
+            # Read-back verification — never report SUCCESS on a file whose
+            # content is not exactly the intended post-edit content. (A
+            # mismatch means something outside this process modified the
+            # file mid-edit; the caller gets an honest failure and should
+            # re-read before retrying.)
+            # newline="" disables universal-newline translation, so the
+            # comparison is byte-exact against the string that was just
+            # written: the default newline=None would fold "\r\n" to "\n"
+            # on the re-read and report a spurious mismatch on a
+            # byte-correct CRLF write (honest-failure false negative).
+            if lock_target.read_text(encoding="utf-8", newline="") != new_content:
+                return (
+                    "ERROR: Read-back verification failed after editing "
+                    f"{path}: file content does not match the intended "
+                    "post-edit content (concurrent external modification?). "
+                    "Re-read the file and retry."
+                )
         
         return f"SUCCESS: {action} in {file_path}"
         
@@ -1308,4 +1616,15 @@ Returns:
 Note:
     Use replace_all=True when the string appears multiple times and you want to replace all.
     Omit replace_all (or set False) for single replacements to avoid unintended changes.
+    Same-file edits are serialized per canonical path within the daemon process and
+    verified by re-reading the file after the write, so parallel edit_file calls on
+    one file no longer lose updates; a SUCCESS result means the replacement is
+    provably present in the file (a mismatch reports an ERROR instead).
+
+    CRLF files: the needle is matched against a universal-newline (folded) buffer,
+    so an old_string of "line\n" matches a CRLF file. Because the file is rewritten
+    whole, the lines you did NOT touch are rewritten with LF endings — inherited
+    baseline behaviour (the pre-fix in-place write folded the same way), not a
+    side effect of the atomic write. A CRLF-bearing needle does NOT match a CRLF
+    file (the buffer is folded), and the file's bytes are left unchanged.
 """
