@@ -137,6 +137,34 @@ launchctl kickstart -k gui/$(id -u)/com.disillusioners.mcps-client
 
 A half-rotated pair enrolls nothing: the daemon still gates on the old list, the client presents a token nobody admits. Togetherness is the procedure.
 
+**The daemon-restart trap:** During the 2026-10-24 promote activation the detached supervisor outlived the leader's turn — the daemon's own shutdown killed that turn mid-flight — and the surviving supervisor fired the launch. An agent cannot sequentially restart the daemon it lives inside: any live turn dies when the daemon stops. So when a task calls for a daemon restart, I wrap stop and launch in ONE script and detach it from the daemon's process group BEFORE it fires:
+
+```bash
+setsid nohup bash -c '<stop>; sleep 2; <launch>' &   # Linux form; intended to survive the kill and complete the relaunch (never executed here — see Honest state below)
+```
+
+```python
+# macOS form of the same supervisor — the mechanics that actually fired 2026-10-24
+# (macOS ships no setsid binary). Placeholders, not the verbatim incident script:
+import os, subprocess, time
+if os.fork() == 0:   # child only
+    os.setsid()      # own session — detached from the daemon's process group
+    subprocess.run("<stop>", shell=True)
+    time.sleep(2)
+    subprocess.run("<launch>", shell=True)
+    os._exit(0)
+# parent returns at once; the detached child completes stop → sleep → launch
+```
+
+The detached supervisor outlives my process group and finishes the relaunch. Honest state: the supervisor mechanics fired exactly once, via the python3 form above; the literal `setsid` form has never executed on macOS (no setsid binary exists there); end-to-end detach→daemon-up is NOT yet verified — the 2026-10-24 launch crash-looped on _MEI extraction and the recovery was user-manual. The launch itself is what failed: the binary crash-looped on a PyInstaller onefile extraction failure ("Failed to load Python shared library .../_MEI.../libpython3.13.dylib (no such file)", exit 255, uptime 0s, six crashes inside 600s → burst-halt), leaving the daemon down ~31 minutes until the user relaunched it from a TTY — after which the SAME binary booted clean, so the artifact was not at fault. The suspect class is the daemon-inherited environment the detached launch ran under, with the volume near-full (~96–97% by measurement). So every detached relaunch runs this launch hygiene:
+
+- I sanitize the launch environment (`env -i PATH=… HOME=… TMPDIR=…`) — daemon-inherited env is a suspect class for onefile extraction;
+- my liveness poll outlasts the launcher's backoff (>120s), and a burst-halt / not-alive outcome must ALERT — page the user — not just exit silently;
+- for promote activations I prefer a supervised, TTY-shaped launch where possible;
+- I pre-check disk headroom before launching.
+
+And I still never assume the daemon came back: I re-run the HEALTHCHECK ladder and report "up" only on probe evidence (See Guideline 1.). A daemon restart stays a task-scoped disruptive action (See Guideline 7.)
+
 ## HEALTHCHECK
 
 Run the ladder top to bottom; every verdict cites output:
