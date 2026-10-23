@@ -94,6 +94,7 @@ I am part of **ensemble**, a multi-agent system.
 | **wanderer** | Read-only investigation & research | When the leader needs to read file(s), explore investigate codebase, answer questions about source code, or research libraries — ANY read-only exploration task |
 | `maintenancer` | Centralized repair agent for the ensemble daemon — log forensics, controlled DB repair, knowledge-base consultation, gated live-system operations | Ensemble system issues — daemon crashes, errors, abnormal behavior, log forensics, `ensemble_prod` repair preparation, restart / upgrade preparation. See System Maintenance Delegation. |
 | **doc-writer** | Produces polished documentation (.md, .csv, .docx, .pdf, .pptx) with charts/diagrams | When a documentation deliverable is needed — user-facing docs, reports, guides; writes document files only, never code |
+| **gaia** | Environment terraformer — provisions, configures, upgrades, healthchecks, repairs machine infrastructure; first scope: mcps_client lifecycle | Infrastructure tasks — build/sign/install/config/upgrade/healthcheck of mcps_client, machine enrollment, TCC ceremony hand-offs; never product-code changes |
 
 **Each agent has ONE job. I must respect their specialization.**
 

@@ -1,7 +1,16 @@
-"""Comprehensive tests for the Gaia agent.
+"""Comprehensive tests for the Gaia agent (v2.0.0 — environment terraformer).
 
-Tests Gaia agent discovery, loading, tool filtering, and script accessibility.
-All tests run in the unit test environment with langgraph mocks from conftest.py.
+Gaia was redefined from a guide-only "environment setup assistant" (npx scenario
+scripts) into the ENVIRONMENT-TERRAFORM agent: it provisions, configures,
+upgrades, healthchecks, and repairs ensemble's machine infrastructure, with the
+mcps_client lifecycle (build / sign / install / config / upgrade / healthcheck /
+repair) as its first scope.
+
+These tests pin the NEW shape end-to-end: meta.json identity + exact tool
+allow-list, real-registry discovery, prompt composition (soul → rule → tools →
+workflow), the lifecycle runbook content, and the negative space (no privileged
+categories, no spawn authority, no deny-list model). All tests run in the unit
+test environment with langgraph mocks from conftest.py.
 """
 
 import json
@@ -13,10 +22,20 @@ import pytest
 # Path constants
 GAIA_AGENT_DIR = Path(__file__).parent.parent.parent / "agents" / "gaia"
 
-# Tool categories for testing (mirrors what the registry should contain)
+# The EXACT allow-list Gaia v2.0.0 must carry: bash/proc/filesystem = the core
+# terraforming mandate; help = convention; system = READ-ONLY daemon info for
+# healthchecks. Everything else (project, instance, mcp, shared_meta_kv, service,
+# system_upgrade, system-log, ens-db, mcp_rpc) is absent BY OMISSION — Gaia's
+# grant model is a strict allow-list with no deny field.
+GAIA_TOOLS_ALLOW = ["bash", "proc", "filesystem", "help", "system"]
+
+# Tool categories for synthetic filter-resolution tests (mirrors the shape of the
+# real registry's categories; keeps the negative fixtures self-contained).
 TOOL_CATEGORIES: dict[str, list[str]] = {
     "bash": ["bash"],
+    "proc": ["proc_list", "proc_logs", "proc_run", "proc_status", "proc_stop"],
     "filesystem": ["list_directory", "read_file", "write_file", "glob_files", "grep_files", "edit_file"],
+    "system": ["system_env", "system_config", "system_health"],
     "time": ["time"],
     "instance": [
         "spawn_instance", "send_message", "terminate_instance",
@@ -26,106 +45,128 @@ TOOL_CATEGORIES: dict[str, list[str]] = {
     "project": [
         "project_create", "project_get", "project_list", "project_search",
         "project_get_by_instance", "project_get_by_directory", "project_update",
-        "project_set_status", "project_add_directory", "project_remove_directory",
-        "project_set_tags", "project_add_tag", "project_remove_tag",
-        "project_set_shortnames", "project_add_shortname", "project_remove_shortname",
-        "project_set_metadata", "project_delete_metadata",
-        "project_link", "project_unlink", "project_delete",
     ],
     "help": ["tool_help"],
-    "mother": ["agent_list", "agent_create", "agent_read", "agent_modify", "agent_delete"],
 }
 
 
+def _load_meta() -> dict:
+    meta_path = GAIA_AGENT_DIR / "meta.json"
+    with open(meta_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 # =============================================================================
-# 1. Meta.json Validation
+# 1. Meta.json Validation — the v2.0.0 shape
 # =============================================================================
 
 
 class TestGaiaMetaJsonValidation:
-    """Tests for Gaia's meta.json structure and content."""
+    """Tests for Gaia's meta.json structure and content (environment-terraform shape)."""
 
     def test_meta_json_exists(self) -> None:
         """meta.json file should exist in the Gaia agent directory."""
-        meta_path = GAIA_AGENT_DIR / "meta.json"
-        assert meta_path.exists(), f"meta.json not found at {meta_path}"
+        assert (GAIA_AGENT_DIR / "meta.json").exists(), (
+            f"meta.json not found at {GAIA_AGENT_DIR / 'meta.json'}"
+        )
 
     def test_meta_json_is_valid_json(self) -> None:
         """meta.json should be parseable as valid JSON."""
-        meta_path = GAIA_AGENT_DIR / "meta.json"
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-        assert isinstance(meta, dict)
+        assert isinstance(_load_meta(), dict)
 
     def test_required_fields_exist(self) -> None:
         """meta.json should contain all required fields."""
-        meta_path = GAIA_AGENT_DIR / "meta.json"
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-
-        required_fields = ["id", "name", "description"]
-        for field in required_fields:
+        meta = _load_meta()
+        for field in ["id", "name", "description", "icon", "color", "version", "system",
+                      "capabilities", "tags", "innate_skills", "tools", "llm_model",
+                      "team_members"]:
             assert field in meta, f"Required field '{field}' missing from meta.json"
 
     def test_agent_name_is_gaia(self) -> None:
         """Agent id and name should be 'gaia' / 'Gaia'."""
-        meta_path = GAIA_AGENT_DIR / "meta.json"
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-
+        meta = _load_meta()
         assert meta.get("id") == "gaia", f"Agent id should be 'gaia', got '{meta.get('id')}'"
         assert meta.get("name") == "Gaia", f"Agent name should be 'Gaia', got '{meta.get('name')}'"
 
+    def test_description_is_terraform_purpose(self) -> None:
+        """The description must state the environment-terraform purpose (purpose redefinition)."""
+        description = _load_meta().get("description", "")
+        assert description.startswith("Environment terraformer"), (
+            "description should open with the environment-terraform purpose, "
+            f"got: {description[:80]!r}"
+        )
+        assert "mcps_client" in description, (
+            "description should name the first scope: mcps_client lifecycle"
+        )
+
+    def test_version_is_2_0_0(self) -> None:
+        """The purpose redefinition is a major version bump: version must be 2.0.0."""
+        assert _load_meta().get("version") == "2.0.0"
+
+    def test_identity_fields_unchanged(self) -> None:
+        """Icon, color, and the non-system flag survive the redefinition unchanged."""
+        meta = _load_meta()
+        assert meta.get("icon") == "🌍"
+        assert meta.get("color") == "accent-green"
+        assert meta.get("system") is False
+        assert meta.get("llm_model") is None
+
+    def test_tags_are_terraform_tags(self) -> None:
+        """tags must carry the new domain vocabulary."""
+        meta = _load_meta()
+        assert meta.get("tags") == ["environment", "terraform", "mcps-client", "infrastructure"]
+
+    def test_capabilities_are_terraform_capabilities(self) -> None:
+        """capabilities must carry the two new capability slugs."""
+        meta = _load_meta()
+        assert meta.get("capabilities") == ["environment-terraform", "mcps-client-lifecycle"]
+
+    def test_innate_skills_unchanged(self) -> None:
+        """innate_skills stays ['todo'] — no new innate skills in the redefinition."""
+        assert _load_meta().get("innate_skills") == ["todo"]
+
+    def test_team_members_empty_no_spawn_authority(self) -> None:
+        """team_members must stay [] — Gaia spawns nothing; it reports to its dispatcher."""
+        meta = _load_meta()
+        assert meta.get("team_members") == [], (
+            "gaia must hold NO team_members (empty list = no spawn authority)"
+        )
+
+    def test_tools_allow_exact_list(self) -> None:
+        """tools.allow must be EXACTLY the five-category terraforming set."""
+        meta = _load_meta()
+        assert meta["tools"]["allow"] == GAIA_TOOLS_ALLOW
+
+    def test_tools_no_deny_field_allow_list_model(self) -> None:
+        """Gaia's grant model is allow-list-only: no deny key, and deny resolves to None."""
+        meta = _load_meta()
+        assert "deny" not in meta["tools"], (
+            "tools must NOT carry a deny field — prohibitions are enforced by the "
+            "allow-list (absent = not granted), never by a deny list"
+        )
+        assert meta["tools"].get("deny") is None
+
     def test_field_types_are_correct(self) -> None:
         """meta.json field types should match expected types."""
-        meta_path = GAIA_AGENT_DIR / "meta.json"
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
+        meta = _load_meta()
+        assert isinstance(meta.get("id"), str)
+        assert isinstance(meta.get("name"), str)
+        assert isinstance(meta.get("description"), str)
+        assert isinstance(meta.get("icon"), str)
+        assert isinstance(meta.get("color"), str)
+        assert isinstance(meta.get("version"), str)
+        assert isinstance(meta.get("system"), bool)
+        assert isinstance(meta.get("capabilities"), list)
+        assert isinstance(meta.get("tags"), list)
+        assert isinstance(meta.get("innate_skills"), list)
+        assert isinstance(meta.get("team_members"), list)
+        assert "tools" in meta
 
-        assert isinstance(meta.get("id"), str), "id should be a string"
-        assert isinstance(meta.get("name"), str), "name should be a string"
-        assert isinstance(meta.get("description"), str), "description should be a string"
-        assert isinstance(meta.get("icon"), str), "icon should be a string"
-        assert isinstance(meta.get("color"), str), "color should be a string"
-        assert isinstance(meta.get("system"), bool), "system should be a boolean"
-        assert isinstance(meta.get("capabilities"), list), "capabilities should be a list"
-        assert isinstance(meta.get("tags"), list), "tags should be a list"
-        assert isinstance(meta.get("innate_skills"), list), "innate_skills should be a list"
-        assert "tools" in meta, "tools field should be present"
-
-    def test_tools_config_structure(self) -> None:
-        """tools configuration should have the expected structure."""
-        meta_path = GAIA_AGENT_DIR / "meta.json"
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-
-        tools_config = meta.get("tools")
-        assert tools_config is not None, "tools config should not be None"
-        assert "allow" in tools_config, "tools config should have 'allow' key"
-        assert isinstance(tools_config["allow"], list), "'allow' should be a list"
-
-    def test_tools_allowed_list(self) -> None:
-        """tools.allow should contain bash, filesystem, and help."""
-        meta_path = GAIA_AGENT_DIR / "meta.json"
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-
-        tools_config = meta.get("tools", {})
-        allowed = tools_config.get("allow", [])
-
-        assert "bash" in allowed, "bash should be in allowed tools"
-        assert "filesystem" in allowed, "filesystem should be in allowed tools"
-        assert "help" in allowed, "help should be in allowed tools"
-
-    def test_llm_model_can_be_null(self) -> None:
-        """llm_model field should exist and be nullable."""
-        meta_path = GAIA_AGENT_DIR / "meta.json"
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-
-        # llm_model can be null (no override)
-        assert "llm_model" in meta, "llm_model field should be present"
-        assert meta["llm_model"] is None, "llm_model should be null for Gaia"
+    def test_scenario_dir_is_gone(self) -> None:
+        """The obsolete guide-only scenario/ directory (npx.md) must not exist."""
+        assert not (GAIA_AGENT_DIR / "scenario").exists(), (
+            "the obsolete scenario/ directory must be deleted in the redefinition"
+        )
 
 
 # =============================================================================
@@ -136,76 +177,55 @@ class TestGaiaMetaJsonValidation:
 class TestGaiaRegistryDiscovery:
     """Tests for Gaia agent discovery via AgentRegistry."""
 
-    def test_gaia_discovered_in_real_registry(self) -> None:
-        """Gaia should be discovered when scanning the real agents directory."""
+    def _registry(self):
         from daemon.registry import AgentRegistry
 
-        agents_dir = GAIA_AGENT_DIR.parent
-        registry = AgentRegistry(agents_dir)
+        registry = AgentRegistry(GAIA_AGENT_DIR.parent)
         registry.discover()
+        return registry
 
+    def test_gaia_discovered_in_real_registry(self) -> None:
+        """Gaia should be discovered when scanning the real agents directory."""
+        registry = self._registry()
         assert registry.exists("gaia"), "Gaia should be discovered in the agents directory"
 
     def test_gaia_in_agent_list(self) -> None:
         """Gaia should appear in the list of all agents."""
-        from daemon.registry import AgentRegistry
-
-        agents_dir = GAIA_AGENT_DIR.parent
-        registry = AgentRegistry(agents_dir)
-        registry.discover()
-
-        agents = registry.list_all()
-        agent_ids = {a.id for a in agents}
+        registry = self._registry()
+        agent_ids = {a.id for a in registry.list_all()}
         assert "gaia" in agent_ids, "gaia should be in the list of agents"
 
     def test_gaia_metadata_loaded_correctly(self) -> None:
-        """Gaia metadata loaded from registry should match meta.json."""
-        from daemon.registry import AgentRegistry
-
-        agents_dir = GAIA_AGENT_DIR.parent
-        registry = AgentRegistry(agents_dir)
-        registry.discover()
-
-        gaia = registry.get("gaia")
+        """Gaia metadata loaded from registry should match meta.json (v2.0.0 shape)."""
+        gaia = self._registry().get("gaia")
         assert gaia is not None, "Gaia should be retrievable from registry"
         assert gaia.id == "gaia"
         assert gaia.name == "Gaia"
-        assert gaia.description.startswith("Environment setup")
+        assert gaia.description.startswith("Environment terraformer")
+        assert "mcps_client" in gaia.description
         assert gaia.icon == "🌍"
         assert gaia.color == "accent-green"
-        assert gaia.version == "1.0.0"
+        assert gaia.version == "2.0.0"
         assert gaia.system is False
         assert gaia.path == GAIA_AGENT_DIR
 
     def test_gaia_tools_config_in_registry(self) -> None:
         """Gaia's tool filter should be correctly loaded into registry."""
-        from daemon.registry import AgentRegistry, ToolFilter
+        from daemon.registry import ToolFilter
 
-        agents_dir = GAIA_AGENT_DIR.parent
-        registry = AgentRegistry(agents_dir)
-        registry.discover()
-
-        gaia = registry.get("gaia")
+        gaia = self._registry().get("gaia")
         assert gaia is not None
         assert gaia.tools is not None
         assert isinstance(gaia.tools, ToolFilter)
-        assert gaia.tools.allow == ["bash", "proc", "filesystem", "help", "mcp", "system", "shared_meta_kv", "service"]
+        assert gaia.tools.allow == GAIA_TOOLS_ALLOW
         assert gaia.tools.deny is None
 
     def test_gaia_tags_and_capabilities(self) -> None:
-        """Gaia should have correct tags and capabilities."""
-        from daemon.registry import AgentRegistry
-
-        agents_dir = GAIA_AGENT_DIR.parent
-        registry = AgentRegistry(agents_dir)
-        registry.discover()
-
-        gaia = registry.get("gaia")
+        """Gaia should have the terraform tags and capabilities."""
+        gaia = self._registry().get("gaia")
         assert gaia is not None
-        assert "environment" in gaia.tags
-        assert "setup" in gaia.tags
-        assert "dependencies" in gaia.tags
-        assert gaia.capabilities == []
+        assert gaia.tags == ["environment", "terraform", "mcps-client", "infrastructure"]
+        assert gaia.capabilities == ["environment-terraform", "mcps-client-lifecycle"]
 
 
 # =============================================================================
@@ -222,62 +242,70 @@ class TestGaiaAgentLoading:
 
         prompts = load_agent_prompts(GAIA_AGENT_DIR)
 
-        # Should have soul, rule, workflow, tools (from tools_note.md)
         assert "soul" in prompts, "soul.md should be loaded"
         assert "rule" in prompts, "rule.md should be loaded"
         assert "workflow" in prompts, "workflow.md should be loaded"
-        assert "tools" in prompts, "tools_note.md (or tools.md) should be loaded"
+        assert "tools" in prompts, "tools_note.md should be loaded"
 
-    def test_soul_content_included(self) -> None:
-        """soul.md content should be included in the loaded prompts."""
+    def test_soul_content_is_terraform_identity(self) -> None:
+        """soul.md should carry the terraformer identity and executor nature."""
         from daemon.loader import load_agent_prompts
 
-        prompts = load_agent_prompts(GAIA_AGENT_DIR)
+        soul = load_agent_prompts(GAIA_AGENT_DIR)["soul"]
 
-        assert "Gaia" in prompts["soul"]
-        assert "environment" in prompts["soul"].lower()
+        assert "Gaia" in soul
+        assert "environment terraformer" in soul.lower()
+        assert "executor" in soul.lower(), "soul must state the EXECUTOR nature"
+        assert "healthcheck" in soul.lower()
 
-    def test_rule_content_included(self) -> None:
-        """rule.md content should be included in the loaded prompts."""
+    def test_rule_content_cardinals_plus_guidelines(self) -> None:
+        """rule.md must carry the Cardinal Rules / Guidelines split."""
         from daemon.loader import load_agent_prompts
 
-        prompts = load_agent_prompts(GAIA_AGENT_DIR)
+        rule = load_agent_prompts(GAIA_AGENT_DIR)["rule"]
 
-        assert "Rules" in prompts["rule"]
-        assert "Must" in prompts["rule"]
-        assert "Must Not" in prompts["rule"]
+        assert "Cardinal Rules" in rule
+        assert "Guidelines" in rule
+        # the four mission-mandated cardinals
+        assert "file-to-file" in rule.lower(), "token hygiene cardinal missing"
+        assert "mcps-client-signing" in rule, "stable signing identity cardinal missing"
+        assert "ad-hoc" in rule.lower(), "never-ad-hoc-sign cardinal missing"
+        assert "0600" in rule, "config mode 0600 cardinal missing"
+        # the OS-blocked class
+        assert "OS-BLOCKED" in rule.upper() or "os-blocked" in rule.lower()
 
-    def test_workflow_content_included(self) -> None:
-        """workflow.md content should be included in the loaded prompts."""
+    def test_cardinal_rules_capped_at_seven(self) -> None:
+        """The Cardinal Rules section holds at most 7 numbered rules (guide rule)."""
         from daemon.loader import load_agent_prompts
 
-        prompts = load_agent_prompts(GAIA_AGENT_DIR)
-
-        assert "Workflow" in prompts["workflow"]
-        assert "Step" in prompts["workflow"]
+        rule = load_agent_prompts(GAIA_AGENT_DIR)["rule"]
+        section = rule.split("## Cardinal Rules", 1)[1].split("## Guidelines", 1)[0]
+        numbered = [line for line in section.splitlines() if line.strip().startswith(("1.", "2.", "3.", "4.", "5.", "6.", "7.", "8.", "9."))]
+        assert 1 <= len(numbered) <= 7, (
+            f"Cardinal Rules must be ≤7 numbered rules, found {len(numbered)}"
+        )
 
     def test_tools_note_content_included(self) -> None:
         """tools_note.md content should be included as the tools prompt."""
         from daemon.loader import load_agent_prompts
 
-        prompts = load_agent_prompts(GAIA_AGENT_DIR)
+        tools = load_agent_prompts(GAIA_AGENT_DIR)["tools"]
 
-        # Should use tools_note.md content
-        assert "Tools Reference" in prompts["tools"]
-        assert "list_directory" in prompts["tools"] or "bash" in prompts["tools"]
+        assert "Tool Usage Notes" in tools
+        for category in ("bash", "filesystem", "proc", "system", "help"):
+            assert category in tools, f"tools_note should cover the {category} grant"
 
     def test_compose_system_prompt_includes_all_sections(self) -> None:
-        """Composed system prompt should include soul, rule, workflow, tools."""
+        """Composed system prompt should include soul, rule, tools, workflow."""
         from daemon.loader import compose_system_prompt, load_agent_prompts
 
         prompts = load_agent_prompts(GAIA_AGENT_DIR)
         system_prompt = compose_system_prompt(prompts)
 
-        # All sections should be present
         assert "Gaia" in system_prompt, "soul content should be in system prompt"
-        assert "Rules" in system_prompt, "rule content should be in system prompt"
-        assert "Workflow" in system_prompt, "workflow content should be in system prompt"
-        assert "Tools" in system_prompt or "list_directory" in system_prompt, "tools content should be in system prompt"
+        assert "Cardinal Rules" in system_prompt, "rule content should be in system prompt"
+        assert "Lifecycle Runbook" in system_prompt, "workflow content should be in system prompt"
+        assert "Tool Usage Notes" in system_prompt, "tools content should be in system prompt"
 
     def test_system_prompt_composition_order(self) -> None:
         """System prompt should follow correct order: soul → rule → tools → workflow."""
@@ -286,10 +314,9 @@ class TestGaiaAgentLoading:
         prompts = load_agent_prompts(GAIA_AGENT_DIR)
         system_prompt = compose_system_prompt(prompts)
 
-        # Find positions
-        soul_pos = system_prompt.find("# Gaia")
+        soul_pos = system_prompt.find("Gaia")
         rule_pos = system_prompt.find("# Rules")
-        tools_pos = system_prompt.find("Tools Reference")
+        tools_pos = system_prompt.find("# Tool Usage Notes")
         workflow_pos = system_prompt.find("# Workflow")
 
         assert soul_pos != -1, "soul (Gaia) should be in system prompt"
@@ -297,7 +324,6 @@ class TestGaiaAgentLoading:
         assert tools_pos != -1, "tools should be in system prompt"
         assert workflow_pos != -1, "workflow should be in system prompt"
 
-        # Order should be soul → rule → tools → workflow
         assert soul_pos < rule_pos, "soul should come before rule"
         assert rule_pos < tools_pos, "rule should come before tools"
         assert tools_pos < workflow_pos, "tools should come before workflow"
@@ -313,7 +339,7 @@ class TestGaiaAgentLoading:
         assert len(prompt) > 0
         assert tokens > 0
         assert "Gaia" in prompt
-        assert "Rules" in prompt
+        assert "Cardinal Rules" in prompt
 
     def test_load_and_cache_prompt_caches(self) -> None:
         """load_and_cache_prompt should cache the result."""
@@ -321,10 +347,8 @@ class TestGaiaAgentLoading:
 
         cache = PromptCache()
 
-        # First load
         prompt1, tokens1 = load_and_cache_prompt("gaia", GAIA_AGENT_DIR, cache)
 
-        # Should be cached
         cached = cache.get("gaia")
         assert cached is not None
         assert cached[0] == prompt1
@@ -332,19 +356,206 @@ class TestGaiaAgentLoading:
 
     def test_no_errors_during_loading(self) -> None:
         """Loading Gaia should not raise any exceptions."""
-        from daemon.loader import load_agent_prompts, compose_system_prompt, PromptCache, load_and_cache_prompt
+        from daemon.loader import (
+            PromptCache,
+            compose_system_prompt,
+            load_agent_prompts,
+            load_and_cache_prompt,
+        )
 
-        # Should not raise
         prompts = load_agent_prompts(GAIA_AGENT_DIR)
         system_prompt = compose_system_prompt(prompts)
         cache = PromptCache()
-        prompt, tokens = load_and_cache_prompt("gaia", GAIA_AGENT_DIR, cache)
+        prompt, _tokens = load_and_cache_prompt("gaia", GAIA_AGENT_DIR, cache)
 
+        assert len(system_prompt) > 0
         assert len(prompt) > 0
 
 
 # =============================================================================
-# 4. Tool Filtering
+# 4. The mcps_client Lifecycle Runbook (the core artifact)
+# =============================================================================
+
+
+class TestGaiaRunbookContent:
+    """The workflow.md runbook must encode the full mcps_client lifecycle."""
+
+    def _workflow(self) -> str:
+        from daemon.loader import load_agent_prompts
+
+        return load_agent_prompts(GAIA_AGENT_DIR)["workflow"]
+
+    def test_all_lifecycle_phase_markers_present(self) -> None:
+        """BUILD / SIGN / INSTALL / CONFIG / HEALTHCHECK / TCC / UPGRADE / UNINSTALL."""
+        workflow = self._workflow()
+        for marker in ("BUILD", "SIGN", "INSTALL", "CONFIG", "HEALTHCHECK",
+                       "TCC CEREMONY", "UPGRADE", "UNINSTALL"):
+            assert marker in workflow, f"runbook phase marker missing: {marker}"
+
+    def test_stable_signing_identity_pinned(self) -> None:
+        """The runbook pins the stable signing identity and forbids ad-hoc signing."""
+        workflow = self._workflow()
+        assert "MCPS_SIGN_IDENTITY=mcps-client-signing" in workflow
+        assert "ad-hoc" in workflow.lower()
+        assert "8C9F52D3932FCFF7ACC0BD84A8358AB050183DF4" in workflow, (
+            "the public signing fingerprint (safe metadata) should be pinned for verification"
+        )
+
+    def test_build_environment_pinned(self) -> None:
+        """The runbook pins the toolchain: go path, nvm node 22, build entry points."""
+        workflow = self._workflow()
+        assert "/usr/local/go/bin" in workflow
+        assert "nvm" in workflow
+        assert "make build" in workflow
+        assert "scripts/build.sh" in workflow
+
+    def test_install_steps_pinned(self) -> None:
+        """The runbook pins ditto install, the admin fallback, and the LaunchAgent installer."""
+        workflow = self._workflow()
+        assert "ditto dist/McpsClient.app /Applications/McpsClient.app" in workflow
+        assert "administrator privileges" in workflow, "admin fallback (user types password) missing"
+        assert "scripts/install-launchagent.sh install" in workflow
+        # the PATH trap: installer bakes the node runtime — re-run after node upgrades
+        assert "nvm" in workflow and ("PATH trap" in workflow or "bakes" in workflow)
+
+    def test_config_and_token_hygiene_pinned(self) -> None:
+        """The runbook pins the config path, mode, center URL, and file-to-file token flow."""
+        workflow = self._workflow()
+        assert "~/.config/mcps-client/config.yaml" in workflow
+        assert "0600" in workflow
+        assert "ws://127.0.0.1:9797/api/mcps-gateway/ws" in workflow
+        assert "MCPS_GATEWAY_TOKENS" in workflow
+        assert "file-to-file" in workflow.lower(), "token file-to-file flow missing"
+
+    def test_healthcheck_ladder_pinned(self) -> None:
+        """The runbook pins the healthcheck evidence ladder."""
+        workflow = self._workflow()
+        assert "/livez" in workflow
+        assert "401" in workflow, "the WS probe expecting 401 + WWW-Authenticate missing"
+        assert "WWW-Authenticate" in workflow
+        assert "launchctl" in workflow
+        assert "~/Library/Logs/McpsClient" in workflow
+        assert "loopback" in workflow.lower(), "the expected-noise loopback warning must be documented"
+
+    def test_tcc_ceremony_handoff_pinned(self) -> None:
+        """The runbook encodes the OS-blocked TCC hand-off: detect → instruct → verify → continue."""
+        workflow = self._workflow()
+        assert "Accessibility" in workflow
+        assert "Screen" in workflow, "the Screen & System Audio Recording pane missing"
+        assert "x-apple.systempreferences" in workflow
+        assert "kickstart" in workflow
+
+    def test_verify_after_handoff_loop_present(self) -> None:
+        """The runbook names the verify-after-handoff loop explicitly."""
+        workflow = self._workflow()
+        assert "Verify-After-Handoff" in workflow
+        lowered = workflow.lower()
+        for step in ("detect", "hand off", "wait", "verify", "continue"):
+            assert step in lowered, f"loop step missing: {step}"
+
+    def test_uninstall_leaves_tcc_cleanup_note(self) -> None:
+        """The runbook requires a TCC cleanup note on every uninstall."""
+        workflow = self._workflow()
+        assert "install-launchagent.sh uninstall" in workflow
+        assert "cleanup note" in workflow.lower()
+
+    def test_upgrade_preserves_config_and_verifies(self) -> None:
+        """The upgrade path must prove config preservation (before/after checksum)."""
+        workflow = self._workflow()
+        assert "git pull" in workflow
+        assert "BEFORE" in workflow and "AFTER" in workflow
+
+    def test_reference_library_uses_fenced_paths_only(self) -> None:
+        """Repo doc paths appear only inside fenced blocks; prose names the docs."""
+        workflow = self._workflow()
+        assert "mcps-gateway.md" in workflow, "the gateway reference should be in the fenced doc map"
+        assert "13" in workflow and "MCPS_GATEWAY_" in workflow, (
+            "the 13-knob fact should be stated"
+        )
+        assert "fail-closed" in workflow.lower(), "MCPS_GATEWAY_TOKENS fail-closed semantics missing"
+        assert "restart" in workflow.lower(), "knob flips need daemon restart — must be stated"
+
+
+# =============================================================================
+# 5. Negative Pins — the allow-list boundary
+# =============================================================================
+
+
+class TestGaiaNegativePins:
+    """Gaia must NOT carry privileged, spawn-capable, or coordination categories."""
+
+    def test_no_privileged_categories_in_allow(self) -> None:
+        """No system_upgrade / system-log / ens-db / mcp_rpc in the allow-list."""
+        meta = _load_meta()
+        allowed = set(meta["tools"]["allow"])
+        for forbidden in ("system_upgrade", "system-log", "ens-db", "mcp_rpc",
+                          "db", "ens-db-tools"):
+            assert forbidden not in allowed, (
+                f"privileged category '{forbidden}' must NOT be granted to gaia"
+            )
+
+    def test_no_spawn_or_coordination_categories(self) -> None:
+        """No instance / shared_meta_kv / service / project / mcp / self / time categories."""
+        meta = _load_meta()
+        allowed = set(meta["tools"]["allow"])
+        for forbidden in ("instance", "shared_meta_kv", "service", "project",
+                          "mcp", "self", "time", "knowledge"):
+            assert forbidden not in allowed, (
+                f"category '{forbidden}' must NOT be granted to gaia"
+            )
+
+    def test_allow_list_is_exactly_five_categories(self) -> None:
+        """The allow-list carries exactly the five sanctioned categories — nothing else."""
+        assert sorted(_load_meta()["tools"]["allow"]) == sorted(GAIA_TOOLS_ALLOW)
+
+    def test_synthetic_filter_resolution_matches_grant(self) -> None:
+        """Resolving Gaia's allow-list over synthetic categories yields no spawn/privileged tools."""
+        from daemon.tools.instance import resolve_tool_filter
+
+        allowed_tools = resolve_tool_filter(
+            allow=list(GAIA_TOOLS_ALLOW),
+            deny=None,
+            tool_categories=TOOL_CATEGORIES,
+        )
+
+        assert allowed_tools is not None
+        # the sanctioned surfaces resolve
+        assert "bash" in allowed_tools
+        assert "tool_help" in allowed_tools
+        for tool in ("list_directory", "read_file", "write_file", "edit_file"):
+            assert tool in allowed_tools, f"{tool} should be in Gaia's allowed tools"
+        for tool in ("proc_list", "proc_run", "proc_status"):
+            assert tool in allowed_tools, f"{tool} should be in Gaia's allowed tools"
+        for tool in ("system_env", "system_config", "system_health"):
+            assert tool in allowed_tools, f"{tool} should be in Gaia's allowed tools"
+        # the negative space stays negative
+        spawn_tools = {"spawn_instance", "send_message", "terminate_instance",
+                       "list_instances", "get_instance_info"}
+        for tool in spawn_tools:
+            assert tool not in allowed_tools, f"{tool} should NOT be in Gaia's allowed tools"
+        for tool in ("project_create", "project_get", "project_list"):
+            assert tool not in allowed_tools, f"{tool} should NOT be in Gaia's allowed tools"
+        for tool in ("inner_soul", "access_memory", "time"):
+            assert tool not in allowed_tools, f"{tool} should NOT be in Gaia's allowed tools"
+
+    def test_spawn_capable_allow_is_negative_control(self) -> None:
+        """Negative fixture: an allow-list WITH instance does grant spawn tools (guard liveness)."""
+        from daemon.tools.instance import resolve_tool_filter
+
+        allowed_tools = resolve_tool_filter(
+            allow=["instance"],
+            deny=None,
+            tool_categories=TOOL_CATEGORIES,
+        )
+
+        assert allowed_tools is not None
+        assert "spawn_instance" in allowed_tools, (
+            "the negative control must stay live: an instance grant DOES resolve spawn tools"
+        )
+
+
+# =============================================================================
+# 6. Tool Filtering (registry-level)
 # =============================================================================
 
 
@@ -352,17 +563,16 @@ class TestGaiaToolFiltering:
     """Tests for Gaia's tool filtering configuration."""
 
     def test_gaia_tool_filter_from_registry(self) -> None:
-        """Gaia should have a tool filter configured in the registry."""
+        """Gaia should have the exact tool filter configured in the registry."""
         from daemon.registry import AgentRegistry
 
-        agents_dir = GAIA_AGENT_DIR.parent
-        registry = AgentRegistry(agents_dir)
+        registry = AgentRegistry(GAIA_AGENT_DIR.parent)
         registry.discover()
 
         gaia = registry.get("gaia")
         assert gaia is not None
         assert gaia.tools is not None
-        assert gaia.tools.allow == ["bash", "proc", "filesystem", "help", "mcp", "system", "shared_meta_kv", "service"]
+        assert gaia.tools.allow == GAIA_TOOLS_ALLOW
 
     def test_gaia_tools_doc_loads(self, monkeypatch) -> None:
         """load_tools_doc_for_agent should return docs for Gaia's allowed tools."""
@@ -372,12 +582,11 @@ class TestGaiaToolFiltering:
         import daemon.registry
 
         # Initialize and discover an AgentRegistry using the correct agents directory,
-        # following the existing project test pattern (see test_gaia_discovered_in_real_registry).
-        # load_tools_doc_for_agent() resolves agent metadata through the global
-        # registry returned by get_registry(); a freshly discovered registry wired
-        # into that global slot guarantees the gaia's tool filter is visible.
-        agents_dir = GAIA_AGENT_DIR.parent
-        registry = AgentRegistry(agents_dir)
+        # following the existing project test pattern. load_tools_doc_for_agent()
+        # resolves agent metadata through the global registry returned by
+        # get_registry(); a freshly discovered registry wired into that global slot
+        # guarantees gaia's tool filter is visible.
+        registry = AgentRegistry(GAIA_AGENT_DIR.parent)
         registry.discover()
 
         # monkeypatch handles auto-restore of the module-level registry slot
@@ -393,10 +602,7 @@ class TestGaiaToolFiltering:
 
         try:
             # Reset _tool_metadata so load_tools_doc_for_agent's
-            # _ensure_tool_metadata_populated() runs the full scan. The daemon.tools
-            # package transitively registers ``language_skip_check`` at import time,
-            # which would otherwise trigger the ensure function's early-return branch
-            # and leave bash/filesystem/etc. tools unregistered.
+            # _ensure_tool_metadata_populated() runs the full scan.
             clear_registry()
             docs = load_tools_doc_for_agent("gaia")
 
@@ -414,104 +620,13 @@ class TestGaiaToolFiltering:
             _full_docs.clear()
             _full_docs.update(saved_full_docs)
 
-    def test_gaia_has_bash_tool(self) -> None:
-        """Gaia should have bash tool available."""
-        from daemon.tools.instance import resolve_tool_filter
-
-        allowed_tools = resolve_tool_filter(
-            allow=["bash", "filesystem", "help"],
-            deny=None,
-            tool_categories=TOOL_CATEGORIES,
-        )
-
-        assert allowed_tools is not None
-        assert "bash" in allowed_tools
-
-    def test_gaia_has_filesystem_tools(self) -> None:
-        """Gaia should have filesystem tools available."""
-        from daemon.tools.instance import resolve_tool_filter
-
-        allowed_tools = resolve_tool_filter(
-            allow=["bash", "filesystem", "help"],
-            deny=None,
-            tool_categories=TOOL_CATEGORIES,
-        )
-
-        assert allowed_tools is not None
-        filesystem_tools = {"list_directory", "read_file", "write_file", "glob_files", "grep_files", "edit_file"}
-        for tool in filesystem_tools:
-            assert tool in allowed_tools, f"{tool} should be in Gaia's allowed tools"
-
-    def test_gaia_has_help_tool(self) -> None:
-        """Gaia should have help tool available."""
-        from daemon.tools.instance import resolve_tool_filter
-
-        allowed_tools = resolve_tool_filter(
-            allow=["bash", "filesystem", "help"],
-            deny=None,
-            tool_categories=TOOL_CATEGORIES,
-        )
-
-        assert allowed_tools is not None
-        assert "tool_help" in allowed_tools
-
-    def test_gaia_does_not_have_instance_tools(self) -> None:
-        """Gaia should NOT have instance management tools."""
-        from daemon.tools.instance import resolve_tool_filter
-
-        allowed_tools = resolve_tool_filter(
-            allow=["bash", "filesystem", "help"],
-            deny=None,
-            tool_categories=TOOL_CATEGORIES,
-        )
-
-        assert allowed_tools is not None
-        instance_tools = {"spawn_instance", "send_message", "terminate_instance", "list_instances", "get_instance_info"}
-        for tool in instance_tools:
-            assert tool not in allowed_tools, f"{tool} should NOT be in Gaia's allowed tools"
-
-    def test_gaia_does_not_have_project_tools(self) -> None:
-        """Gaia should NOT have project management tools."""
-        from daemon.tools.instance import resolve_tool_filter
-
-        allowed_tools = resolve_tool_filter(
-            allow=["bash", "filesystem", "help"],
-            deny=None,
-            tool_categories=TOOL_CATEGORIES,
-        )
-
-        assert allowed_tools is not None
-        project_tools = {"project_create", "project_get", "project_list", "project_search"}
-        for tool in project_tools:
-            assert tool not in allowed_tools, f"{tool} should NOT be in Gaia's allowed tools"
-
-    def test_gaia_does_not_have_self_tools(self) -> None:
-        """Gaia should NOT have self-modification tools."""
-        from daemon.tools.instance import resolve_tool_filter
-
-        allowed_tools = resolve_tool_filter(
-            allow=["bash", "filesystem", "help"],
-            deny=None,
-            tool_categories=TOOL_CATEGORIES,
-        )
-
-        assert allowed_tools is not None
-        self_tools = {"inner_soul", "access_memory"}
-        for tool in self_tools:
-            assert tool not in allowed_tools, f"{tool} should NOT be in Gaia's allowed tools"
-
     def test_gaia_tool_filter_config_parsed_correctly(self) -> None:
         """Gaia's tool filter should be parseable from meta.json."""
         from daemon.registry import ToolFilter
 
-        meta_path = GAIA_AGENT_DIR / "meta.json"
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
+        tool_filter = ToolFilter.model_validate(_load_meta()["tools"])
 
-        tools_config = meta.get("tools")
-        tool_filter = ToolFilter.model_validate(tools_config)
-
-        assert tool_filter.allow == ["bash", "proc", "filesystem", "help", "mcp", "system", "shared_meta_kv", "service"]
+        assert tool_filter.allow == GAIA_TOOLS_ALLOW
         assert tool_filter.deny is None
 
 
@@ -525,20 +640,15 @@ class TestGaiaFullLoadingPipeline:
 
     def test_gaia_loads_without_errors(self) -> None:
         """Gaia should load successfully through the full pipeline."""
-        from daemon.loader import load_and_cache_prompt
+        from daemon.loader import PromptCache, load_and_cache_prompt
         from daemon.registry import AgentRegistry
 
-        # Get registry
-        agents_dir = GAIA_AGENT_DIR.parent
-        registry = AgentRegistry(agents_dir)
+        registry = AgentRegistry(GAIA_AGENT_DIR.parent)
         registry.discover()
 
-        # Get Gaia metadata
         gaia = registry.get("gaia")
         assert gaia is not None
 
-        # Load prompts
-        from daemon.loader import PromptCache
         cache = PromptCache()
         prompt, tokens = load_and_cache_prompt("gaia", GAIA_AGENT_DIR, cache)
 
@@ -547,29 +657,22 @@ class TestGaiaFullLoadingPipeline:
 
     def test_gaia_system_prompt_is_self_contained(self) -> None:
         """Gaia's system prompt should contain all necessary sections."""
-        from daemon.loader import load_and_cache_prompt
-        from daemon.loader import PromptCache
+        from daemon.loader import PromptCache, load_and_cache_prompt
 
         cache = PromptCache()
         prompt, _ = load_and_cache_prompt("gaia", GAIA_AGENT_DIR, cache)
 
-        # Check all required sections are present
         assert "Gaia" in prompt, "Should contain identity (Gaia)"
-        assert "Rules" in prompt, "Should contain rules"
-        assert "Workflow" in prompt, "Should contain workflow"
+        assert "Cardinal Rules" in prompt, "Should contain rules"
+        assert "Lifecycle Runbook" in prompt, "Should contain the lifecycle runbook"
         assert ("Tools" in prompt or "tools" in prompt), "Should contain tools reference"
 
     def test_gaia_description_matches_meta(self) -> None:
         """Gaia's registry description should match meta.json."""
         from daemon.registry import AgentRegistry
 
-        agents_dir = GAIA_AGENT_DIR.parent
-        registry = AgentRegistry(agents_dir)
+        registry = AgentRegistry(GAIA_AGENT_DIR.parent)
         registry.discover()
 
-        meta_path = GAIA_AGENT_DIR / "meta.json"
-        with open(meta_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-
         gaia = registry.get("gaia")
-        assert gaia.description == meta["description"]
+        assert gaia.description == _load_meta()["description"]
