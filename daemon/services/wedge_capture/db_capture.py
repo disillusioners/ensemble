@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -167,6 +168,7 @@ def resolve_dsn(engine: Any = None) -> str | None:
     host = os.environ.get("POSTGRES_HOST")
     db = os.environ.get("POSTGRES_DB")
     if host and db:
+        # stdlib-only: no import failure surface — kept local to its one use site.
         from urllib.parse import quote_plus
 
         user = os.environ.get("POSTGRES_USER", "")
@@ -180,8 +182,14 @@ def resolve_dsn(engine: Any = None) -> str | None:
     return None
 
 
-def _connect(dsn: str, *, connect_timeout_s: int, statement_timeout_ms: int) -> Any:
+def _connect(
+    dsn: str,
+    *,
+    connect_timeout_s: int,
+    statement_timeout_ms: int,
+) -> "psycopg.Connection":
     """Open the own one-shot connection (raises — the caller guards)."""
+    # lazy: psycopg is the optional driver — a missing driver must not break module import.
     import psycopg
 
     return psycopg.connect(
@@ -436,7 +444,7 @@ def write_capture_row(
         ``{"status": "ok"|"failed"|"skipped", "reason": ...}``.
     """
     if not dsn:
-        return {"status": "failed", "reason": "no_postgres_dsn"}
+        return {"status": ROW_STATUS_FAILED, "reason": "no_postgres_dsn"}
     scaled = (
         None
         if budget_s is None
@@ -476,7 +484,7 @@ def write_capture_row(
                 ON CONFLICT (capture_dir) DO NOTHING
                 """,
                 {
-                    "id": row.get("id") or __import__("uuid").uuid4().hex,
+                    "id": row.get("id") or uuid.uuid4().hex,
                     "capture_id": row.get("capture_id"),
                     "capture_dir": row.get("capture_dir"),
                     "trigger_reason": row.get("trigger_reason"),
@@ -495,13 +503,13 @@ def write_capture_row(
                 },
             )
         connection.commit()
-        return {"status": "ok"}
+        return {"status": ROW_STATUS_OK}
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "Wedge-capture: metadata row write failed for %s: %s",
             row.get("capture_dir"), exc,
         )
-        return {"status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+        return {"status": ROW_STATUS_FAILED, "reason": f"{type(exc).__name__}: {exc}"}
     finally:
         try:
             if connection is not None:

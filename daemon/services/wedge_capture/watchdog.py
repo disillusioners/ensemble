@@ -320,6 +320,7 @@ class WedgeCaptureWatchdog:
             self._dsn = None
 
         try:
+            # lazy + guarded: a repository import failure must not disable the watchdog.
             from daemon.repositories.wedge_captures.repository import (
                 WedgeCaptureRepository,
             )
@@ -332,6 +333,7 @@ class WedgeCaptureWatchdog:
 
         # The stall-ledger cut (D15 / D18).
         try:
+            # lazy + guarded: a checkpoint_perf import failure must not disable the watchdog.
             from daemon.checkpoint_perf import set_slow_saver_cut_ms
 
             set_slow_saver_cut_ms(self._config.slow_saver_ms)
@@ -656,6 +658,7 @@ class WedgeCaptureWatchdog:
     def _read_stall_ledger(self) -> list[dict[str, Any]]:
         """The stall-ledger tail (D18)."""
         try:
+            # lazy + guarded: a stall-ledger import failure must not break the capture.
             from daemon.checkpoint_perf import (
                 get_slow_saver_cut_ms,
                 read_slow_saver_ops,

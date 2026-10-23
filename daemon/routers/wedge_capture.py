@@ -111,6 +111,7 @@ def _capture_root(request: Request) -> Path:
             return Path(config.capture_dir)
     state = getattr(request.app, "state", None)
     data_dir = getattr(state, "data_dir", None) if state else None
+    # lazy + guarded: a config import failure must not break request handling.
     from daemon.services.wedge_capture.config import WedgeCaptureConfig
 
     return Path(WedgeCaptureConfig.from_env(data_dir=data_dir).capture_dir)
@@ -129,6 +130,7 @@ def _repository(request: Request) -> Any:
     if engine is None:
         return None
     try:
+        # lazy + guarded: an import failure degrades to the filesystem fallback, not a 500.
         from daemon.repositories.wedge_captures.repository import (
             WedgeCaptureRepository,
         )
@@ -184,6 +186,7 @@ async def list_captures(request: Request, limit: int = 50) -> dict[str, Any]:
             rows = []
     if not rows:
         source = "filesystem"
+        # lazy: the filesystem fallback is the only consumer of writer here.
         from daemon.services.wedge_capture.writer import capture_directories
 
         # ``reversed(list)`` is an ITERATOR — slicing it raises

@@ -139,6 +139,7 @@ def _resolve_root(manager: Any) -> Path:
         config = getattr(watchdog, "_config", None)
         if config is not None:
             return Path(config.capture_dir)
+    # lazy + guarded: the tool factory is built at boot — a config import failure must not break it.
     from daemon.services.wedge_capture.config import WedgeCaptureConfig
 
     return Path(WedgeCaptureConfig.from_env().capture_dir)
@@ -292,6 +293,7 @@ def _list_captures(root: Path, limit: int) -> list[dict[str, Any]]:
     """
     rows: list[dict[str, Any]] = []
     try:
+        # lazy + guarded: the list must degrade to an empty scan, never raise.
         from daemon.services.wedge_capture.writer import capture_directories
 
         # Materialise BEFORE slicing: ``reversed()`` yields an iterator,

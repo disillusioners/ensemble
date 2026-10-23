@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
@@ -129,7 +130,7 @@ class TriggerDecision:
 
 def _trailing_run(
     samples: Sequence[TriggerSample],
-    predicate,
+    predicate: Callable[[TriggerSample], bool],
 ) -> list[TriggerSample]:
     """The trailing run of samples satisfying ``predicate``.
 
@@ -329,7 +330,6 @@ class TriggerEngine:
         longest = max(
             config.cpu_sustain_s,
             config.lag_sustain_s,
-            config.cpu_sustain_s,
             0.0,
         )
         span = window_seconds if window_seconds is not None else longest + 10.0

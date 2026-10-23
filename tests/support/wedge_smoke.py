@@ -481,6 +481,7 @@ def live_daemon_fence() -> dict[str, str]:
 
 def livez_version(port: int = 9797, *, timeout: float = 2.0) -> str:
     """The live daemon's ``/livez`` version ("" when unreachable)."""
+    # stdlib-only: no import failure surface — kept local to the single probe site.
     import urllib.error
     import urllib.request
 
@@ -540,6 +541,7 @@ def run_injected_leg(
     the leg's knobs (``apply_leg_env``) before constructing the config,
     so the watchdog's "read once at start" contract is honoured.
     """
+    # stdlib asyncio; the daemon imports below stay lazy so the harness imports without the app.
     import asyncio
 
     from daemon.services.wedge_capture.config import WedgeCaptureConfig

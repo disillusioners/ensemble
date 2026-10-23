@@ -52,6 +52,7 @@ import os
 import re
 import shutil
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -152,8 +153,6 @@ def make_capture_id(
     ``20261022T050351Z-web01-sustained_cpu-3f2a91c4``. The timestamp
     and the host make the directory triage-able by ``ls`` alone.
     """
-    import uuid
-
     token = suffix if suffix else uuid.uuid4().hex[:8]
     safe_host = "".join(ch if (ch.isalnum() or ch in ".-") else "_" for ch in (host or "unknown"))
     safe_reason = "".join(
@@ -448,19 +447,19 @@ class CaptureWriter:
         # ── lag.json ─────────────────────────────────────────────────
         artifacts["lag.json"] = self._guarded(
             started,
-            lambda: self._write_json(capture_dir / "lag.json", lag or {}),
+            lambda: self._write_json_artifact(capture_dir / "lag.json", lag or {}),
         )
 
         # ── metrics.json ─────────────────────────────────────────────
         artifacts["metrics.json"] = self._guarded(
             started,
-            lambda: self._write_json(capture_dir / "metrics.json", metrics or {}),
+            lambda: self._write_json_artifact(capture_dir / "metrics.json", metrics or {}),
         )
 
         # ── db.json ──────────────────────────────────────────────────
         artifacts["db.json"] = self._guarded(
             started,
-            lambda: self._write_json(capture_dir / "db.json", db or {}),
+            lambda: self._write_json_artifact(capture_dir / "db.json", db or {}),
         )
 
         # ── readyz.json (OMITTED when the composite is absent — D25) ──
@@ -469,13 +468,13 @@ class CaptureWriter:
         else:
             artifacts["readyz.json"] = self._guarded(
                 started,
-                lambda: self._write_json(capture_dir / "readyz.json", readyz),
+                lambda: self._write_json_artifact(capture_dir / "readyz.json", readyz),
             )
 
         # ── checkpoint_perf_tail.json ────────────────────────────────
         artifacts["checkpoint_perf_tail.json"] = self._guarded(
             started,
-            lambda: self._write_json(
+            lambda: self._write_json_artifact(
                 capture_dir / "checkpoint_perf_tail.json",
                 {"ops": checkpoint_perf_tail or []},
             ),
@@ -517,7 +516,7 @@ class CaptureWriter:
         # ``skipped:budget``; the manifest write is always ATTEMPTED, and
         # its failure is still swallowed into ``ok=False`` (never raises).
         try:
-            self._write_json(capture_dir / "manifest.json", manifest)
+            self._write_json_artifact(capture_dir / "manifest.json", manifest)
             manifest_status = "ok"
         except Exception as exc:  # noqa: BLE001 — one artifact degrades
             manifest_status = f"failed:{type(exc).__name__}"
@@ -543,7 +542,7 @@ class CaptureWriter:
         _write_text(path, render_threads_csv(threads))
         return "ok"
 
-    def _write_json(self, path: Path, payload: Any) -> str:
+    def _write_json_artifact(self, path: Path, payload: Any) -> str:
         _write_json(path, payload)
         return "ok"
 
