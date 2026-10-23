@@ -26,7 +26,9 @@ independent triggers**.
 | `thread_concentration` | ONE thread holds the process's CPU | **85 %** of process CPU | **30 s** (wall-time) |
 
 The sustain windows are **wall-time**, so the verdict is identical at a 1 s
-and a 5 s tick cadence. The concentration ratio is only evaluated when the
+and a 5 s tick cadence. The concentration trigger reuses `CPU_SUSTAIN_S`
+as its sustain — there is no separate knob. The concentration ratio is
+only evaluated when the
 process actually burned CPU (an absolute **5 %-of-one-core floor**) — an
 unfloored ratio is trivially true on a near-idle daemon and would
 manufacture false positives.
@@ -159,7 +161,9 @@ The base URL is resolved as `--base-url` → `ENSEMBLE_DAEMON_URL` →
 `DAEMON_PORT` → `PORT` → `http://127.0.0.1:9797`. The port is **never**
 hard-coded.
 
-Exit codes: `0` ok · `1` not-found · `2` usage · `3` transport error.
+Exit codes: `0` ok · `1` not-found or typed refusal (`capture_busy` /
+`manual_rate_limited` / `watchdog_disabled` — token printed verbatim) ·
+`2` usage · `3` transport error.
 
 ### The admin API
 
@@ -305,9 +309,7 @@ Read this before you over-trust a capture.
 
 The capture opens its **own one-shot** connection — it never borrows the
 saver pool (the resource it may be diagnosing). That connection consumes
-`max_connections` headroom. The requirement is **≥ 2× the daemon's
-connection demand + 1** (the daemon's demand is roughly 5 saver-pool + 5
-asyncpg + the engine pool).
+`max_connections` headroom.
 
 Measured on the host's PostgreSQL server (2026-10-22, the implementation
 lane's fenced dev connection — ``max_connections`` is a SERVER-level

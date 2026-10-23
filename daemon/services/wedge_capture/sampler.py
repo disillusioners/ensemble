@@ -17,11 +17,14 @@ IMPORTS those readers and does NOT modify them; the readers are NOT
 extended with wedge-specific fields. One ``/proc`` dialect in the
 tree.
 
-THE OBSERVER IS EXCLUDED FROM THE OBSERVED (MR-6)
---------------------------------------------------
-The watchdog's OWN thread is filtered out of ``per_thread``: it is the
-observer, and including it would inflate the measured concentration
-with the observer's own sampling cost.
+THE OBSERVER-EXCLUSION MECHANISM (MR-6)
+----------------------------------------
+The sampler CAN filter the observer out of ``per_thread``: the
+exclusion applies to thread ids passed via ``exclude_native_ids`` /
+``exclude_thread`` — including the observer would inflate the measured
+concentration with the observer's own sampling cost. The daemon
+wiring does not currently pass the watchdog's tid, so the mechanism
+is available but not engaged there.
 
 EVERY THREAD CARRIES BOTH NAMES (D6)
 ------------------------------------
@@ -43,10 +46,8 @@ from typing import Any
 
 from daemon.services.resource_monitor.proc_readers import _parse_proc_stat
 
-#: ``USER_HZ`` — the jiffy rate of ``/proc/<pid>/stat``'s utime/stime.
-#: ``os.sysconf("SC_CLK_TCK")`` is authoritative; the tree's own readers
-#: hard-code 100 with a comment, so 100 is the fallback.
 def _clock_ticks_per_second() -> int:
+    """Resolve the ``USER_HZ`` jiffy rate (sysconf-authoritative; 100 fallback)."""
     try:
         value = int(os.sysconf("SC_CLK_TCK"))
     except (AttributeError, ValueError, OSError):  # pragma: no cover
@@ -54,6 +55,9 @@ def _clock_ticks_per_second() -> int:
     return value if value > 0 else 100
 
 
+#: ``USER_HZ`` — the jiffy rate of ``/proc/<pid>/stat``'s utime/stime.
+#: ``os.sysconf("SC_CLK_TCK")`` is authoritative; the tree's own readers
+#: hard-code 100 with a comment, so 100 is the fallback.
 CLOCK_TICKS_PER_SECOND = _clock_ticks_per_second()
 
 #: The default ``/proc`` root (the tree is Linux-only).
@@ -239,7 +243,8 @@ class CpuSampler:
 
     # ── the previous-tick bookkeeping ──────────────────────────────────
     def reset(self) -> None:
-        """Forget the previous reading — the next tick re-baselines."""
+        """Test seam: forget the previous reading — the next tick
+        re-baselines. No production caller."""
         self._prev_process = None
         self._prev_threads = {}
         self._last_tick_started = None

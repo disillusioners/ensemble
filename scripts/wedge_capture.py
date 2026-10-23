@@ -20,7 +20,9 @@ Subcommands
 
 Exit codes
 ----------
-0 ok · 1 not-found · 2 usage · 3 transport error
+0 ok · 1 not-found or typed refusal (capture_busy /
+manual_rate_limited / watchdog_disabled — token printed verbatim) ·
+2 usage · 3 transport error
 
 The three typed refusals (``capture_busy``, ``manual_rate_limited``,
 ``watchdog_disabled``) are surfaced VERBATIM with their house token.

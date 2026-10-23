@@ -94,7 +94,8 @@ class ManualCaptureRequest:
             the operator is told about in the 202.
         reason: The capture's reason label (``manual`` by default).
         requested_at: The monotonic timestamp of the request.
-        requested_by: Who asked for it (the CLI's ``--by``, optional).
+        requested_by: Who asked for it — set by the router/tool
+            caller that enqueues the request (no CLI flag exists).
     """
 
     capture_id: str

@@ -189,9 +189,10 @@ def create_wedge_capture_tools(
     """Build the two ``wedge-capture`` tools for one instance/agent.
 
     Args:
-        manager: The ``InstanceManager`` — the tools read the capture
-            directory and (when reachable) the metadata table through
-            it; they never write.
+        manager: The ``InstanceManager`` — used only to resolve the
+            capture directory root. The tools read the capture
+            directory ONLY; the metadata table is the HTTP router's
+            path, never the agent tools'. They never write.
         current_instance_id: The caller's instance id (unused by the
             reads; kept for factory-signature parity).
         agent_id: The caller's agent id. Captured at factory time and
