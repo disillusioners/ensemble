@@ -2803,7 +2803,7 @@ async def lifespan(app: FastAPI):
                 app_state=app.state,
                 loop=getattr(manager, "_loop", None),
                 boot_epoch=get_boot_epoch(),
-                release_version=getattr(daemon, "__version__", ""),
+                release_version=__version__,
             )
             _wedge_watchdog.start()
             app.state.wedge_capture_watchdog = _wedge_watchdog
