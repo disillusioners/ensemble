@@ -301,7 +301,10 @@ export class McpsGatewayService {
         }
         this.machines.set(res.machines ?? []);
         this.gatewayEnabled.set(res.gateway_enabled !== false);
-        this.machinesDegraded.set(res.degraded === true);
+        // Healthy fall-through: the `degraded === true` case returned
+        // above, so this is the recovery path — clear a stale flag
+        // (the audit lane's healthy tail does exactly the same).
+        this.machinesDegraded.set(false);
         this.machinesError.set(null);
       }),
       catchError((err) => {
@@ -340,7 +343,10 @@ export class McpsGatewayService {
         }
         this.sessions.set(res.sessions ?? []);
         this.gatewayEnabled.set(res.gateway_enabled !== false);
-        this.sessionsDegraded.set(res.degraded === true);
+        // Healthy fall-through: the `degraded === true` case returned
+        // above, so this is the recovery path — clear a stale flag
+        // (the audit lane's healthy tail does exactly the same).
+        this.sessionsDegraded.set(false);
         this.sessionsError.set(null);
       }),
       catchError((err) => {
