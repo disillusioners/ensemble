@@ -44,7 +44,7 @@ from __future__ import annotations
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 from .config import WedgeCaptureConfig
 from .lag_probe import PROBE_INITIALIZING, PROBE_STOPPED, PROBE_UNKNOWN

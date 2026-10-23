@@ -322,13 +322,8 @@ def _list_captures(root: Path, limit: int) -> list[dict[str, Any]]:
     The capture directory is the authority (D23): this tool walks
     ``manifest.json`` files directly and NEVER consults the metadata
     table, so the list works even when the DB is the thing that is
-    wedged. (An earlier revision of this docstring claimed
-    "table first, the FILESYSTEM second" — that described the HTTP
-    router's fallback shape, not this tool; A6 re-words the docstring
-    to the implementation. The dead ``manager_repository`` placeholder
-    below is the tidier lane's cleanup, deliberately left.)
+    wedged.
     """
-    manager_repository = None
     rows: list[dict[str, Any]] = []
     try:
         from daemon.services.wedge_capture.writer import capture_directories
@@ -362,7 +357,6 @@ def _list_captures(root: Path, limit: int) -> list[dict[str, Any]]:
             )
     except Exception as exc:  # noqa: BLE001
         logger.warning("wedge_capture_list scan failed: %s", exc)
-    _ = manager_repository
     return rows
 
 

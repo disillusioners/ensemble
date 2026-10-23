@@ -143,16 +143,6 @@ class LoopLagProbe:
         self._last_probe_age_s: float | None = None
         self._histogram = LagHistogram()
 
-    # ── wiring ─────────────────────────────────────────────────────────
-    def set_loop(self, loop: asyncio.AbstractEventLoop | None) -> None:
-        """Bind (or rebind) the loop under test."""
-        with self._lock:
-            self._loop = loop
-            if loop is None:
-                self._probe_state = PROBE_UNKNOWN
-            elif self._probe_state in (PROBE_INITIALIZING, PROBE_UNKNOWN):
-                self._probe_state = PROBE_INITIALIZING
-
     @property
     def probe_state(self) -> str:
         """The probe's state — ``initializing`` / ``ok`` / ``unknown`` / ``stopped``."""
@@ -191,11 +181,6 @@ class LoopLagProbe:
         """
         with self._lock:
             return self._last_exec_at is None
-
-    @property
-    def histogram(self) -> LagHistogram:
-        """The rolling histogram (the watchdog copies it at capture)."""
-        return self._histogram
 
     def snapshot_histogram(self) -> dict[str, Any]:
         """A JSON-safe snapshot of the histogram."""

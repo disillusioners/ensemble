@@ -39,7 +39,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine
 from sqlmodel import Session, select
 
 from .models import WedgeCapture

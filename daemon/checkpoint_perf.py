@@ -27,7 +27,6 @@ from typing import Any, Awaitable
 
 from daemon.checkpoint_metrics import (
     checkpoint_list_total,
-    reset_for_tests,
     saver_op_latency_seconds,
 )
 
@@ -120,13 +119,6 @@ def read_slow_saver_ops() -> list[dict[str, Any]]:
     """A copy of the ledger — the capture reads it under the SAME lock."""
     with _slow_saver_ledger_lock:
         return list(_slow_saver_ledger)
-
-
-def clear_slow_saver_ops() -> None:
-    """Empty the ledger (test hygiene)."""
-    with _slow_saver_ledger_lock:
-        _slow_saver_ledger.clear()
-
 
 
 def _logs_enabled() -> bool:

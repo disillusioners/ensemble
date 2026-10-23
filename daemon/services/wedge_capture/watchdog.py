@@ -69,11 +69,7 @@ from .lag_probe import LoopLagProbe
 from .sampler import CpuSampler
 from .triggers import (
     REASON_MANUAL,
-    REASON_SUSTAINED_CPU,
-    REASON_SUSTAINED_LOOP_LAG,
-    REASON_THREAD_CONCENTRATION,
     TriggerEngine,
-    TriggerSample,
     samples_from,
 )
 
