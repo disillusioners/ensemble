@@ -8,7 +8,10 @@ WHAT THIS PACK PROVES
   RESETS the window;
 * the **cooldown / episode de-dup** (D13): a sustained wedge produces
   exactly ONE decision per cooldown window per reason, and two DIFFERENT
-  reasons in one window produce TWO decisions;
+  reasons in one window produce TWO decisions — and (W1) the cooldown is
+  stamped ONLY on the ACTUAL capture (the capture path's caller-ack),
+  so a decision the watchdog could not service stays armed for the
+  next tick;
 * the **concentration absolute floor** (D7 / F-06): a high ratio over a
   near-idle process does NOT fire, and the single-sample window case
   (no elapsed span) uses that tick's own percentage rather than an
@@ -329,10 +332,24 @@ class TestProbeStates:
 
 
 class TestCooldown:
+    @staticmethod
+    def _tick_and_capture(engine: TriggerEngine, sample: TriggerSample) -> list:
+        """The watchdog's per-tick shape: observe, capture the FIRST
+        decision only, and ack it from the capture path (W1)."""
+        decisions = engine.observe(sample)
+        if decisions:
+            engine.note_capture_started(reason=decisions[0].reason)
+        return decisions
+
     def test_ten_trigger_ticks_inside_one_window_yield_one_decision(
         self, tmp_path: Path
     ) -> None:
-        """SC-6's unit-level core: a sustained wedge must NOT spam."""
+        """SC-6's unit-level core: a sustained wedge must NOT spam.
+
+        The loop mirrors ``run_once``: every tick observes, captures
+        the first decision and acks it (W1 — the cooldown is stamped by
+        the capture path, never by ``observe``).
+        """
         config = _config(tmp_path, cpu_sustain_s=0.0, cooldown_s=300.0)
         engine = TriggerEngine(config)
         fired = []
@@ -340,7 +357,7 @@ class TestCooldown:
             sample = TriggerSample(
                 t=float(index), process_cpu_pct=99.0, process_cpu_delta_s=0.9
             )
-            fired.extend(engine.observe(sample))
+            fired.extend(self._tick_and_capture(engine, sample))
         assert len(fired) == 1
         assert fired[0].reason == REASON_SUSTAINED_CPU
         assert len(engine.window()) == 10
@@ -352,6 +369,8 @@ class TestCooldown:
             TriggerSample(t=0.0, process_cpu_pct=99.0, process_cpu_delta_s=0.9)
         )
         assert len(first) == 1
+        # The actual capture acks the reason (W1) — on the sample's clock.
+        engine.note_capture_started(0.0, reason=first[0].reason)
         still_cooling = engine.observe(
             TriggerSample(t=299.0, process_cpu_pct=99.0, process_cpu_delta_s=0.9)
         )
@@ -378,13 +397,58 @@ class TestCooldown:
             [REASON_SUSTAINED_CPU, REASON_SUSTAINED_LOOP_LAG]
         )
 
+    def test_an_unserviced_reason_stays_armed_for_the_next_tick(
+        self, tmp_path: Path
+    ) -> None:
+        """W1 (the D13 seam): the cooldown is stamped ONLY on the
+        ACTUAL capture — never on the ALLOWED decision.
+
+        Two reasons mature on ONE tick, but the watchdog services only
+        the FIRST (one capture per tick). The unserviced reason must be
+        returned again on the NEXT tick — under the pre-fix shape it
+        was suppressed for the WHOLE 300 s cooldown without ever being
+        captured.
+        """
+        config = _config(
+            tmp_path, cpu_sustain_s=0.0, lag_sustain_s=0.0, cooldown_s=300.0
+        )
+        engine = TriggerEngine(config)
+
+        def _both_sample(t: float) -> TriggerSample:
+            return TriggerSample(
+                t=t,
+                process_cpu_pct=99.0,
+                process_cpu_delta_s=0.9,
+                lag_s=9.0,
+                lag_state=PROBE_OK,
+            )
+
+        fired = engine.observe(_both_sample(0.0))
+        assert sorted(_reasons(fired)) == sorted(
+            [REASON_SUSTAINED_CPU, REASON_SUSTAINED_LOOP_LAG]
+        )
+        # The watchdog captured ONLY fired[0] (one capture per tick);
+        # the capture path acks THAT reason alone — on the sample's
+        # clock:
+        engine.note_capture_started(0.0, reason=fired[0].reason)
+
+        next_tick = engine.observe(_both_sample(1.0))
+        assert _reasons(next_tick) == [REASON_SUSTAINED_LOOP_LAG], (
+            "the unserviced reason must stay armed for the next tick — "
+            "only the CAPTURED reason is cooling down"
+        )
+
     def test_the_cooldown_is_per_reason_fingerprint(self, tmp_path: Path) -> None:
         config = _config(
             tmp_path, cpu_sustain_s=0.0, lag_sustain_s=0.0, cooldown_s=300.0
         )
         engine = TriggerEngine(config)
-        # Tick 1: CPU only — CPU's cooldown starts.
-        engine.observe(TriggerSample(t=0.0, process_cpu_pct=99.0, process_cpu_delta_s=0.9))
+        # Tick 1: CPU only — the capture acks CPU (W1) and CPU's cooldown
+        # starts.
+        first = engine.observe(
+            TriggerSample(t=0.0, process_cpu_pct=99.0, process_cpu_delta_s=0.9)
+        )
+        engine.note_capture_started(reason=first[0].reason)
         # Tick 2: the lag crosses the line INSIDE the CPU cooldown — the
         # lag reason has its own fingerprint and MUST fire.
         fired = engine.observe(
@@ -402,6 +466,9 @@ class TestCooldown:
         assert engine.last_capture_started is None
         engine.note_capture_started(123.0)
         assert engine.last_capture_started == pytest.approx(123.0)
+        # The reason-bearing ack stamps the per-reason fingerprint (W1).
+        engine.note_capture_started(124.0, reason=REASON_SUSTAINED_CPU)
+        assert engine.cooldown_state()[REASON_SUSTAINED_CPU] == pytest.approx(124.0)
 
 
 # ── the canonical vocabulary ───────────────────────────────────────────────
@@ -423,3 +490,4 @@ def test_the_decision_payload_is_json_safe(tmp_path: Path) -> None:
     assert isinstance(payload["detail"], str)
     assert isinstance(payload["observed"], dict)
     assert "since" in payload
+

@@ -452,9 +452,10 @@ class WedgeCaptureWatchdog:
             summary["captured"] = True
             summary["capture"] = result.as_dict()
             summary["reason"] = decision.reason
-            # One capture per tick — the cooldown is per reason, and a
-            # second reason in the SAME tick is captured on the next
-            # tick (the capture is single-threaded).
+            # One capture per tick — the capture is single-threaded. A
+            # second reason in the SAME tick stays ARMED for the next
+            # tick (W1): the cooldown is stamped only on the ACTUAL
+            # capture (run_capture's caller-ack), never on the decision.
             break
 
         summary["sample"] = {
@@ -614,7 +615,10 @@ class WedgeCaptureWatchdog:
             self._last_capture_id = capture_id
             self._capture_count += 1
             self._last_trigger_detail = summary
-        self._engine.note_capture_started(started)
+        # The per-reason cooldown is stamped HERE — the capture path's
+        # caller-ack (W1 / D13): a decision that was never serviced
+        # (one capture per tick) stays armed for the next tick.
+        self._engine.note_capture_started(started, reason=reason)
 
         logger.info(
             "Wedge-capture: capture written dir=%s reason=%s artifacts=%s "

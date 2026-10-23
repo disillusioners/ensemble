@@ -309,7 +309,9 @@ class TriggerEngine:
     The engine keeps a bounded rolling window of samples (long enough
     to cover the longest sustain window) and a per-reason cooldown
     timestamp. The cooldown is measured from the START of the previous
-    capture for that reason.
+    capture for that reason and is STAMPED BY THE CAPTURE PATH (W1):
+    :meth:`observe` gates but never stamps, so a decision the watchdog
+    could not service (one capture per tick) stays armed.
 
     Args:
         config: The effective configuration.
@@ -339,8 +341,15 @@ class TriggerEngine:
     def observe(self, sample: TriggerSample) -> list[TriggerDecision]:
         """Feed one sample and return the decisions that are allowed to fire.
 
-        The cooldown is enforced HERE (per reason fingerprint) and the
-        decision's ``since`` is the START of the over-threshold run.
+        The cooldown is ENFORCED here (per reason fingerprint) but never
+        STAMPED here (W1): a decision this method returns may never be
+        serviced — the watchdog captures at most one decision per tick.
+        Stamping on the ALLOWED decision would suppress an unserviced
+        reason for the whole cooldown without it ever being captured.
+        The stamp belongs to the CAPTURE PATH, via
+        :meth:`note_capture_started`.
+
+        The decision's ``since`` is the START of the over-threshold run.
         """
         self._window.append(sample)
         decisions = evaluate(list(self._window), self._config)
@@ -350,17 +359,24 @@ class TriggerEngine:
             last = self._last_fire.get(decision.reason)
             if last is not None and (now - last) < self._config.cooldown_s:
                 continue
-            self._last_fire[decision.reason] = now
             allowed.append(decision)
-        if allowed:
-            self._last_capture_started = now
         return allowed
 
-    def note_capture_started(self, when: float | None = None) -> None:
-        """Record that a capture STARTED (the cooldown's reference point)."""
-        self._last_capture_started = (
-            time.monotonic() if when is None else when
-        )
+    def note_capture_started(
+        self,
+        when: float | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Record that a capture STARTED — the cooldown's reference point.
+
+        This is the caller-ack from the capture path (W1): the per-reason
+        cooldown is stamped ONLY on an ACTUAL capture. Pass the captured
+        ``reason``; an unserviced decision stays armed for the next tick.
+        """
+        moment = time.monotonic() if when is None else when
+        self._last_capture_started = moment
+        if reason is not None:
+            self._last_fire[reason] = moment
 
     @property
     def last_capture_started(self) -> float | None:
