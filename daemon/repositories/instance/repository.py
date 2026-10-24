@@ -69,7 +69,12 @@ class FleetCounts(NamedTuple):
                   number, plus an explicit equality flag.
     """
 
-    groups: list[tuple[str, str, int]]
+    # A group key may be ``None`` — a NULL ``status``/``agent_id``
+    # column groups into a NULL bucket. The keys are handed over AS
+    # ``None`` (NOT coerced with ``str()``, which would produce the
+    # literal string "None" — a TRUTHY key that defeats the consumer's
+    # ``or "unknown"`` bucket).
+    groups: list[tuple[str | None, str | None, int]]
     total: int
 
 
@@ -1565,7 +1570,11 @@ class SQLModelInstanceRepository:
             rows = db_session.exec(group_stmt).all()
 
         groups = [
-            (str(status), str(agent_id), int(count or 0))
+            (
+                str(status) if status is not None else None,
+                str(agent_id) if agent_id is not None else None,
+                int(count or 0),
+            )
             for status, agent_id, count in rows
         ]
         return FleetCounts(groups=groups, total=int(total or 0))

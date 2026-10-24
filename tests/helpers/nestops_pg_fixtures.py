@@ -51,6 +51,7 @@ SAFETY FENCES (binding)
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import uuid
@@ -62,6 +63,9 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session
+
+logger = logging.getLogger(__name__)
+
 
 # ── the environment fence ──────────────────────────────────────────────────
 
@@ -255,16 +259,38 @@ class DisposableDB:
                     conn.execute(
                         text(f'DROP DATABASE IF EXISTS "{self.db_name}" WITH (FORCE)')
                     )
-                except Exception:  # noqa: BLE001 — older PG without FORCE
+                except Exception as exc:  # noqa: BLE001 — older PG without FORCE
+                    # LOUD, not silent: the fallback path runs only on a
+                    # PG without WITH (FORCE), and a swallowed failure
+                    # here leaves the disposable DATABASE BEHIND on the
+                    # server with nobody the wiser.
+                    logger.warning(
+                        "DROP DATABASE ... WITH (FORCE) failed for %s "
+                        "(this PG version may not support it) — retrying "
+                        "without FORCE: %s",
+                        self.db_name,
+                        exc,
+                    )
                     conn.execute(
                         text(f'DROP DATABASE IF EXISTS "{self.db_name}"')
                     )
-            except Exception:  # noqa: BLE001 — best-effort cleanup
-                pass
+            except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+                logger.warning(
+                    "the disposable database %s could not be "
+                    "terminated/dropped — it may still exist on the PG "
+                    "server: %s",
+                    self.db_name,
+                    exc,
+                )
             try:
                 conn.execute(text(f'DROP ROLE IF EXISTS "{self.role}"'))
-            except Exception:  # noqa: BLE001 — best-effort cleanup
-                pass
+            except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+                logger.warning(
+                    "the disposable role %s could not be dropped — it may "
+                    "still exist on the PG server: %s",
+                    self.role,
+                    exc,
+                )
         self._created = False
 
 

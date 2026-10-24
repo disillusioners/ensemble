@@ -878,12 +878,29 @@ class TestHttpReservedSourceGate:
 
 # ── the asyncio marker ─────────────────────────────────────────────────────
 
+#: Set when the house pytest-asyncio plugin is NOT importable. Without
+#: it, every ``async def`` test in this file is collected and SILENTLY
+#: SKIPPED — the file would report green while asserting nothing.
+_ASYNCIO_MARKER_MISSING = False
+
 try:  # pragma: no cover — the marker is installed by the house plugin
     import pytest_asyncio  # noqa: F401
 except ImportError:  # pragma: no cover
-    pass
+    _ASYNCIO_MARKER_MISSING = True
 
 
 def test_asyncio_marker_is_available():
-    """Guard: the async pins above must actually run, not skip."""
+    """Guard: the async pins above must actually RUN, not silently skip.
+
+    The pre-fix guard asserted only that an asyncio event-loop policy
+    existed — which is ALWAYS true, on any interpreter. It never
+    checked the thing that actually matters: whether the plugin that
+    runs the async pins is importable. The absence is now recorded in
+    a flag and asserted here.
+    """
+    assert not _ASYNCIO_MARKER_MISSING, (
+        "pytest_asyncio is not importable — every async pin in this file "
+        "would be SILENTLY SKIPPED, so the file would report green "
+        "while asserting nothing"
+    )
     assert asyncio.get_event_loop_policy() is not None

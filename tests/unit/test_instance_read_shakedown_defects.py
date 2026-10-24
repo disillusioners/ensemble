@@ -1324,6 +1324,59 @@ class TestF2Census:
 
         assert len(checkouts) == 1
 
+    async def test_a_null_census_group_key_is_bucketed_as_unknown(self):
+        """A NULL group key must reach the consumer AS None.
+
+        The repository used to coerce the group keys with ``str()``,
+        which turned a NULL into the LITERAL string "None" — a TRUTHY
+        key, so the consumer's ``or "unknown"`` bucket never fired and
+        the payload carried an agent named "None".
+        """
+        from daemon.repositories.instance.repository import FleetCounts
+
+        class _NullKeyRepo:
+            def count_fleet_by_status_and_agent(self, *, exclude_kb: bool = True):
+                return FleetCounts(groups=[("idle", None, 1)], total=1)
+
+        class _Manager:
+            engine = None
+            _instance_repository = _NullKeyRepo()
+            _worker_pool = None
+
+        payload = await asyncio.to_thread(
+            ir._build_capacity_summary, _Manager()
+        )
+
+        assert "None" not in payload["counts_by_agent"], (
+            "a NULL census group key must not surface as the literal "
+            f"'None' — got {payload['counts_by_agent']!r}"
+        )
+        assert payload["counts_by_agent"]["unknown"] == 1
+
+    def test_the_census_does_not_coerce_a_null_group_key_to_a_string(self):
+        """The repository hands a NULL group key over AS None.
+
+        The pre-fix comprehension was ``(str(status), str(agent_id),
+        ...)`` — ``str(None)`` is the literal "None", which defeats
+        the consumer's ``or "unknown"`` bucket.
+        """
+        source = (
+            REPO_ROOT
+            / "daemon"
+            / "repositories"
+            / "instance"
+            / "repository.py"
+        ).read_text(encoding="utf-8")
+        block = source[
+            source.index("def count_fleet_by_status_and_agent(") : source.index(
+                "def list_by_parent("
+            )
+        ]
+        assert "(str(status), str(agent_id)," not in block, (
+            "the census must NOT coerce a NULL group key with str() — "
+            "str(None) is the literal 'None'"
+        )
+
     def test_census_is_fleet_size_independent(self, fleet_db):
         """A fleet far larger than one census window still counts every
         row — the defect that created F2 was a census that silently
