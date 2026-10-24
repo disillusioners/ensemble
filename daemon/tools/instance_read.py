@@ -373,6 +373,14 @@ async def _resolve_target(manager: Any, instance_id: str) -> str:
     would be circular. The deferred import resolves at call time, when
     both modules are fully loaded.
 
+    .. deprecated:: 2026-10-24 (nest-ops shakedown F8)
+        The WRITE-path resolver hydrates the instance: it goes through
+        ``manager.get_instance``, whose cold path runs MCP schema
+        discovery AND ``_restore_instance`` — which WRITES the row.
+        A read must not do either. ``instance_get`` now uses
+        :func:`_resolve_target_readonly`; this helper remains for any
+        caller that genuinely wants the hydration side effect.
+
     Raises:
         ValueError: when the id is empty, unknown, or ambiguous — the
             caller maps it to the ``instance-not-found`` refusal.
@@ -380,6 +388,99 @@ async def _resolve_target(manager: Any, instance_id: str) -> str:
     from .instance import _resolve_instance_id
 
     return await _resolve_instance_id(manager, instance_id)
+
+
+async def _resolve_target_readonly(
+    manager: Any, instance_id: str, *, repo: Any = None
+) -> tuple[str, Any]:
+    """Resolve an instance id WITHOUT hydrating the instance (F8).
+
+    Repo-only exact match, then the existing fuzzy matcher — and it
+    RETURNS THE FETCHED ROW so the caller does not pay a second
+    ``repo.get``. It NEVER calls ``manager.get_instance``: that path's
+    cold branch runs ``ensure_mcp_preloaded`` (per-server
+    ``get_schemas_for_server`` — external discovery, uncached on empty)
+    and ``_restore_instance`` (whose re-elevation WRITES
+    ``agent_tag``/``agent_dir`` on the row).
+
+    Behaviour parity with the write-path resolver it replaces — all
+    four refusal texts are reproduced BYTE-FOR-BYTE from
+    ``daemon/tools/instance.py::_resolve_instance_id``, and the loud
+    WARNING on an exact-miss is kept (that failure is otherwise silent:
+    the tool surface renders it as a ``ToolMessage``, never a log line).
+    The shared helper itself is NOT touched — it is pinned by
+    ``tests/unit/test_find_near_instance.py`` and remains the write
+    path's resolver.
+
+    Args:
+        manager: The ``InstanceManager`` — only its repository and
+            ``find_near_instance`` are touched.
+        instance_id: The id to resolve (short form accepted).
+        repo: The instance repository, when the caller already has it
+            (avoids a second ``getattr``); resolved from the manager
+            otherwise.
+
+    Returns:
+        ``(resolved_id, row)`` — the row is the fetched ``Instance``
+        (never ``None`` on success, so the caller need not re-read).
+
+    Raises:
+        ValueError: when the id is empty, unknown, or ambiguous — the
+            caller maps it to the ``instance-not-found`` refusal.
+    """
+    if repo is None:
+        repo = getattr(manager, "_instance_repository", None)
+    if repo is None:
+        raise RuntimeError("instance repository unavailable")
+
+    if not instance_id:
+        raise ValueError("ERROR: instance_id cannot be empty")
+
+    # Exact match — repository read only. NO hydration, NO MCP, NO write.
+    try:
+        row = repo.get(instance_id)
+    except Exception:
+        logger.exception("instance_get exact read failed")
+        raise
+    if row is not None:
+        return instance_id, row
+
+    # WARNING parity with the write-path resolver: this failure is
+    # otherwise silent (the tool wrapper renders it as a ToolMessage,
+    # not a log line), and a just-spawned-but-unresolvable instance is
+    # exactly the ghost-creation signature operators look for.
+    logger.warning(
+        "instance resolution failed (exact repo lookup miss): "
+        "instance_id=%s — not in the instances table; "
+        "check for a failed spawn / cold-load None-read "
+        "(ghost-child risk for spawning parents)",
+        instance_id,
+        extra={"unresolved_instance_id": instance_id},
+    )
+
+    # Fuzzy match — ``manager.find_near_instance`` is repo-only (it
+    # lists ids and computes edit distance in Python), so the fuzzy leg
+    # hydrates nothing either.
+    from ..utils import DEFAULT_FUZZY_MATCH_DISTANCE
+
+    near_matches = manager.find_near_instance(
+        instance_id, max_distance=DEFAULT_FUZZY_MATCH_DISTANCE
+    )
+    if near_matches:
+        if len(near_matches) == 1:
+            raise ValueError(
+                f"ERROR: instance '{instance_id}' not found. "
+                f"Did you mean '{near_matches[0]}'? Please retry with the corrected instance_id."
+            )
+        candidates = "', '".join(near_matches)
+        raise ValueError(
+            f"ERROR: instance '{instance_id}' not found. Multiple similar instances found: "
+            f"'{candidates}'. Please retry with the correct instance_id."
+        )
+    raise ValueError(
+        f"ERROR: instance '{instance_id}' not found and no similar instance found. "
+        f"Please check the instance ID or spawn a new instance for your task."
+    )
 
 
 def _census_row(
@@ -664,7 +765,10 @@ Returns:
     that reason — do not fold it into `liveness`.
 
 Side effects:
-    NONE. Read-only; no audit row.
+    NONE. Read-only; no audit row. The census issues SELECTs only (the
+    per-row pending-count probe is one grouped query, never one per
+    row). The `truncated` flag is computed from the page numbers the
+    payload already carries.
 
 Examples:
     instance_list(status="running", limit=100)          # live fleet
@@ -693,22 +797,24 @@ Examples:
         if not _is_instance_read_authorized(caller_agent_id):
             return _error("instance_read operation not permitted for this agent")
 
-        try:
-            instance_id = await _resolve_target(manager, id)
-        except ValueError as exc:
-            return _refusal("INSTANCE_GET", "instance-not-found", str(exc))
-        except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
-            logger.exception("instance_get resolve failed")
-            return _error(f"instance_get failed: {type(exc).__name__}")
-
         repo = getattr(manager, "_instance_repository", None)
         if repo is None:
             return _error("instance_get: instance repository unavailable")
 
         try:
-            row = await asyncio.to_thread(repo.get, instance_id)
+            # F8: the READ-scoped resolver — repo exact match + the
+            # repo-only fuzzy matcher. It NEVER calls
+            # ``manager.get_instance``, so a read triggers no MCP schema
+            # discovery and never takes the ``_restore_instance`` path
+            # that writes the row. The fetched row comes back with the
+            # id, so the caller does not re-read it.
+            instance_id, row = await _resolve_target_readonly(
+                manager, id, repo=repo
+            )
+        except ValueError as exc:
+            return _refusal("INSTANCE_GET", "instance-not-found", str(exc))
         except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
-            logger.exception("instance_get row read failed")
+            logger.exception("instance_get resolve failed")
             return _error(f"instance_get failed: {type(exc).__name__}")
         if row is None:
             return _refusal(
@@ -913,7 +1019,9 @@ Returns:
     null, never a fabricated pack.
 
 Side effects:
-    NONE. Read-only; no audit row.
+    NONE. Read-only; no audit row. A read never triggers MCP schema discovery and never restores the instance into memory — a cold instance stays cold.
+
+    RESIDUALS of that purity (2026-10-24, F8): reads no longer warm the instance cache, so the next real operation on a cold instance pays the restore cost then; cold reads no longer PROMOTE `agent_tag` / `agent_dir`, so a row whose versioned agent dir reappeared after a fallback now reports its STORED fallback tag (payload-visible, and the correct read-pure behaviour); and a restore that used to ERROR now becomes a successful plain read.
 
 Examples:
     instance_get(id="a1b2c3d4")     # short form accepted
@@ -1031,7 +1139,9 @@ Returns:
     never flagged.
 
 Side effects:
-    NONE. A health report never triggers a repair.
+    NONE. A health report never triggers a repair. The scan issues
+    SELECTs only — the fleet walk, the per-candidate evidence probes
+    (two batched round trips) and the job-active census are all reads.
 
 Examples:
     instance_health()                 # 30-minute threshold
@@ -1079,7 +1189,9 @@ Returns:
     records the intent, the instance records the fact.
 
 Side effects:
-    NONE. Read-only.
+    NONE. Read-only. The census is one grouped COUNT/GROUP BY over the
+    instances table plus SELECTs on the queue, worker-pool (in-memory
+    stats) and audit surfaces.
 
 Examples:
     fleet_capacity_summary()

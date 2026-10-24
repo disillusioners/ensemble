@@ -603,12 +603,30 @@ class RepoBackedManager:
     a scratch SQLite file.
     """
 
-    def __init__(self, engine, *, tasks=None, packs=None):
+    def __init__(self, engine, *, tasks=None, packs=None, near_matches=None):
         self.engine = engine
         self._instance_repository = SpyRepo(engine)
         self._task_repo = FakeTaskRepo(tasks)
         self._question_manager = FakeQuestionManager(packs)
         self.list_calls: list[dict] = []
+        #: F8 spies — the read path must NEVER touch either seam.
+        self.get_instance_calls: list[str] = []
+        self.mcp_preload_calls: list[str] = []
+        self._near_matches = list(near_matches or [])
+
+    async def get_instance(self, instance_id):
+        """The HYDRATION seam (F8) — recorded, never used by a read."""
+        self.get_instance_calls.append(instance_id)
+        return object()  # sentinel: a real call would compile a graph
+
+    async def ensure_mcp_preloaded(self, instance_id):
+        """The MCP-discovery seam (F8) — recorded, never used by a read."""
+        self.mcp_preload_calls.append(instance_id)
+        return []
+
+    def find_near_instance(self, instance_id, max_distance=7):
+        """The fuzzy matcher — repo-only in production; a stub here."""
+        return list(self._near_matches)
 
     def list_instances(
         self,
@@ -1228,3 +1246,243 @@ class TestF2Census:
 
         assert census.total == len(ids)
         assert sum(c for _s, _a, c in census.groups) == len(ids)
+
+
+# ────────────────────────────────────────────────────────────────────────
+# F8 — read-path purity
+# ────────────────────────────────────────────────────────────────────────
+
+FULL_GET_PAYLOAD_KEYS = (
+    "instance_id",
+    "agent_id",
+    "agent_name",
+    "agent_tag",
+    "status",
+    "liveness",
+    "instance_metadata",
+    "project_id",
+    "parent_id",
+    "children",
+    "children_count",
+    "ancestors",
+    "descendants",
+    "created_at",
+    "updated_at",
+    "last_activity_at",
+    "age_seconds",
+    "idle_seconds",
+    "stale",
+    "paused_at",
+    "pause_marker",
+    "pending_question_pack",
+    "current_task",
+    "last_messages",
+    "spawned_by",
+    "mission_ref",
+)
+
+#: The four refusal texts, BYTE-FOR-BYTE from
+#: ``daemon/tools/instance.py::_resolve_instance_id`` — the read-scoped
+#: resolver must reproduce them exactly (the operator-facing text does
+#: not change).
+NOT_FOUND_NO_MATCH = (
+    "ERROR: instance 'nope-1' not found and no similar instance found. "
+    "Please check the instance ID or spawn a new instance for your task."
+)
+NOT_FOUND_ONE_MATCH = (
+    "ERROR: instance 'nope-1' not found. "
+    "Did you mean 'real-1'? Please retry with the corrected instance_id."
+)
+NOT_FOUND_MULTI_MATCH = (
+    "ERROR: instance 'nope-1' not found. Multiple similar instances found: "
+    "'real-1', 'real-2'. Please retry with the correct instance_id."
+)
+EMPTY_ID = "ERROR: instance_id cannot be empty"
+
+
+class TestF8ReadPurity:
+    """F8 — ``instance_get`` is genuinely side-effect-free.
+
+    PLANNED MUTATION: point the resolver back at
+    ``manager.get_instance`` (the hydration seam) — the spy pin goes RED
+    (the seam fires), and with a fixture row whose ``agent_tag`` is
+    stale the ROW-IDENTITY pin goes RED too (the re-elevation write
+    lands).
+    """
+
+    async def _get(self, manager, instance_id="real-1"):
+        return await _call(_read_tools(manager), "instance_get", id=instance_id)
+
+    def _manager(self, fleet_db, **kw):
+        now = datetime.now(timezone.utc)
+        _insert_instances(
+            fleet_db,
+            [
+                _instance(
+                    "real-1",
+                    created_at=now,
+                    last_activity_at=now,
+                    metadata={"title": "t", "question_paused": None},
+                )
+            ],
+        )
+        # Put a second row in so a fuzzy hit has something to hit.
+        _insert_instances(
+            fleet_db, [_instance("real-2", created_at=now, last_activity_at=now)]
+        )
+        manager = RepoBackedManager(fleet_db, **kw)
+        return manager
+
+    async def test_cold_read_triggers_no_discovery_and_no_hydration(
+        self, fleet_db
+    ):
+        manager = self._manager(fleet_db)
+
+        payload = await self._get(manager)
+
+        assert manager.mcp_preload_calls == []
+        assert manager.get_instance_calls == []
+        assert payload["instance_id"] == "real-1"
+
+    async def test_cold_read_leaves_the_row_byte_identical(self, fleet_db):
+        """No write: the row (including ``agent_tag``, ``agent_dir`` and
+        ``metadata``) is identical before and after the read."""
+        manager = self._manager(fleet_db)
+        repo = manager._instance_repository
+
+        before = repo.get("real-1").to_dict()
+        await self._get(manager)
+        after = repo.get("real-1").to_dict()
+
+        assert before == after
+
+    async def test_full_payload_still_returned(self, fleet_db):
+        """Purity must not cost functionality."""
+        manager = self._manager(fleet_db)
+
+        payload = await self._get(manager)
+
+        for key in FULL_GET_PAYLOAD_KEYS:
+            assert key in payload, f"payload lost {key!r}"
+        assert payload["current_task"] is None
+        assert payload["last_messages"] == []
+        assert payload["children"] == []
+
+    async def test_fuzzy_miss_refuses_with_the_suggestion(self, fleet_db):
+        """The fuzzy leg still works — and behaves EXACTLY like the write
+        path: it refuses with the corrected id rather than
+        auto-resolving, so a short form is a two-step call, unchanged by
+        F8."""
+        manager = self._manager(fleet_db, near_matches=["real-1"])
+        tools = _read_tools(manager)
+
+        out = await _by_name(tools, "instance_get").ainvoke({"id": "real-"})
+
+        assert out == (
+            "Error: INSTANCE_GET REFUSED — reason=instance-not-found: "
+            "ERROR: instance 'real-' not found. "
+            "Did you mean 'real-1'? Please retry with the corrected instance_id."
+        )
+        # the fuzzy matcher itself WAS consulted (the repo-only one)
+        assert manager.get_instance_calls == []
+        assert manager.mcp_preload_calls == []
+
+    @pytest.mark.parametrize(
+        ("near_matches", "expected"),
+        [
+            ([], NOT_FOUND_NO_MATCH),
+            (["real-1"], NOT_FOUND_ONE_MATCH),
+            (["real-1", "real-2"], NOT_FOUND_MULTI_MATCH),
+        ],
+    )
+    async def test_refusal_texts_are_byte_identical(
+        self, fleet_db, near_matches, expected
+    ):
+        manager = self._manager(fleet_db, near_matches=near_matches)
+        tools = _read_tools(manager)
+
+        out = await _by_name(tools, "instance_get").ainvoke({"id": "nope-1"})
+
+        assert out == (
+            f"Error: INSTANCE_GET REFUSED — reason=instance-not-found: {expected}"
+        )
+
+    async def test_empty_id_guard_is_byte_identical(self, fleet_db):
+        manager = self._manager(fleet_db)
+        tools = _read_tools(manager)
+
+        out = await _by_name(tools, "instance_get").ainvoke({"id": ""})
+
+        assert out == (
+            f"Error: INSTANCE_GET REFUSED — reason=instance-not-found: {EMPTY_ID}"
+        )
+
+
+class TestF8DocSurface:
+    """F8 — the doc surface states CURRENT semantics (the D-V2 lesson).
+
+    PLANNED MUTATION: revert any docstring — the corresponding text pin
+    goes RED.
+    """
+
+    def test_instance_get_doc_states_the_cold_read_contract(self):
+        tools = ir.create_instance_read_tools(
+            FakeFleetManager(), current_instance_id="m", agent_id="maintenancer"
+        )
+        doc = _by_name(tools, "instance_get")._full_doc_ or ""
+
+        assert "never triggers MCP schema discovery" in doc
+        assert "a cold instance stays cold" in doc
+        # the residual disclosure (arch §5 correction 1)
+        assert "agent_tag" in doc and "agent_dir" in doc
+        assert "no longer warm the instance cache" in doc
+        assert "now becomes a successful plain read" in doc
+        assert "Side effects:\n    NONE." in doc
+
+    def test_health_doc_states_seven_detectors(self):
+        tools = ir.create_instance_read_tools(
+            FakeFleetManager(), current_instance_id="m", agent_id="maintenancer"
+        )
+        doc = _by_name(tools, "instance_health")._full_doc_ or ""
+
+        assert "seven read-only detector classes" in doc
+        assert "never-dispatched-husk" in doc
+        assert "DEFAULT_HUSK_MIN_AGE_SECONDS" in doc
+        assert "`idle_seconds` is the AGE since `created_at`" in doc
+
+    def test_health_doc_states_the_live_fleet_paging_disclosure(self):
+        tools = ir.create_instance_read_tools(
+            FakeFleetManager(), current_instance_id="m", agent_id="maintenancer"
+        )
+        doc = _by_name(tools, "instance_health")._full_doc_ or ""
+
+        assert "OFFSET WINDOW LOOP" in doc
+        assert "scan_stop_reason" in doc
+        assert "time_budget" in doc
+        assert "window_cap" in doc
+        assert "end_of_set" in doc
+
+    def test_list_doc_states_the_honest_truncated_contract(self):
+        tools = ir.create_instance_read_tools(
+            FakeFleetManager(), current_instance_id="m", agent_id="maintenancer"
+        )
+        doc = _by_name(tools, "instance_list")._full_doc_ or ""
+
+        assert "total_matching > filters_applied.offset + count" in doc
+
+    def test_list_doc_states_the_f12_truth(self):
+        tools = ir.create_instance_read_tools(
+            FakeFleetManager(), current_instance_id="m", agent_id="maintenancer"
+        )
+        doc = _by_name(tools, "instance_list")._full_doc_ or ""
+
+        # wrapped-safe: the sentence breaks across lines in the source
+        assert "applied in" in doc and "SQL" in doc
+        assert "CORRECT" in doc
+        assert "F12" in doc
+
+    def test_category_doc_says_seven_detectors(self):
+        assert "seven detector classes" in ir.CATEGORY_DOC
+
+    def test_module_doc_says_five_tools(self):
+        assert "5 tools" in (ir.__doc__ or "")
