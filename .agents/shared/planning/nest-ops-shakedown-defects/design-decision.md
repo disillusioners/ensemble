@@ -245,3 +245,33 @@ Separately, `SEALED_SHA_BASELINES` in
 `agents/ari/rule.md` (pinned `bb784e8c41af`, actual `7b056aedb1e9`) —
 also inherited; re-pinned in its own small commit (payload untouched —
 the v0.26.0 V-1 precedent).
+
+### 8.1 A1 — the migration delta: EMPTY for THIS LANE, +2 base→HEAD (upstream-inherited)
+
+**The claim, and its two scopes.** This lane authored NO `.sql` file
+and touched NO migration: `git log cdf348057..HEAD --
+daemon/migrations/versions/` returns **zero** commits (any author), and
+`git diff cdf348057..HEAD -- daemon/migrations/versions/` is **empty**.
+Scoped to this lane's own work, the migration delta is **EMPTY**.
+
+Scoped to **base→HEAD** it is **+2**, and both files are UPSTREAM
+-INHERITED — they arrive with the lane's merge `cdf348057` (which
+merged `074833b45`, "Merge feature/remove-cu-builtin"), and the lane's
+base `b257842c9` carried NEITHER of them
+(`git ls-tree b257842c9 daemon/migrations/versions/` lists no
+`20261022_*`):
+
+| File (added in the base→HEAD diff) | Upstream authoring commit | Upstream lane |
+|---|---|---|
+| `20261022_000001_create_mcp_gateway_audit.sql` | `46d34d8d0` — *feat(mcps-gateway): Phase B — the remote-hands center gateway + mcp_rpc tools* | mcps-gateway |
+| `20261022_000002_create_wedge_captures.sql` | added by `d78412ceb` — *feat(wedge-capture): the evidence-instrument core*; amended by `4f9f01e1f` — *fix(wedge-capture): migration record — jsonb mapping note + neutralized DOWN* | wedge-capture |
+
+**Why the disclosure is load-bearing.** A stage-time gate that reads
+"the lane's migration delta is EMPTY" and compares **base→HEAD** would
+compute +2 and (correctly, per the house rule) demand an explicit
+adjudication. The adjudication is now on the record: the +2 are
+inherited upstream migrations that this lane neither authored nor
+modified, they are additive CREATE-TABLE records, and the lane's own
+schema contribution is nil. A future stage MUST report the +2 (and the
+`known_schema_gen` head moves to `20261022_000002_create_wedge_captures.sql`)
+— it must NOT report "EMPTY" on a base→HEAD comparison.
