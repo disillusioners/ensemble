@@ -332,9 +332,16 @@ projects** — a bespoke RPC vocabulary would kill that reuse.
 ### Operational notes
 
 - **Screenshot payloads are large** — quality/diff knobs are the
-  lever (the cu tools already have quality parameters).
-- **Per-command timeouts** — `CU_TOOL_CALL_TIMEOUT_SECONDS`
-  already exists on the ensemble side and is the precedent shape.
+  lever (the cu builtin's quality parameters went away with the
+  builtin on 2026-10-24, so the knob now lives in the controlled
+  machine's wrapper tool catalog — the gateway surfaces that catalog
+  verbatim).
+- **Per-command timeouts** — the cu builtin's
+  `CU_TOOL_CALL_TIMEOUT_SECONDS` went away with the builtin on
+  2026-10-24; the living precedent is the gateway's session
+  deadline (`MCPS_GATEWAY_SESSION_TTL_MS` /
+  `MCPS_GATEWAY_SESSION_IDLE_TIMEOUT_MS`) plus its per-command bound
+  (`MCPS_GATEWAY_COMMAND_TIMEOUT_MS`).
 - **One-time local admin grant per enrolled machine** — the TCC
   grant to the wrapper `.app` is a manual local-admin action per
   machine; MDM profiles are the at-scale answer.

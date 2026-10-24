@@ -15,6 +15,11 @@ What SURVIVED the removal (ported here, verbatim in behaviour):
      The gate is GENERIC (it resolves any
      ``BuiltinServerDefinition`` from the global registry); the cu
      built-in was merely its first consumer.
+     Both branches of that gate are pinned here: the SKIP branch (an
+     unavailable built-in — modelled by a stub whose
+     ``is_available()`` returns ``False`` — is skipped during
+     preload) and the BYPASS branch (non-builtin and healthy
+     built-ins are untouched).
   2. The privilege-stamp helper
      (``_privilege_stamp_category_for_prefix``) and the lazy-tool
      factory's non-stamping contract for the standard ``mcp_{slug}_``
@@ -66,6 +71,9 @@ if _mock_tool_adapter is not None:
     sys.modules["daemon.mcp.tool_adapter"] = _mock_tool_adapter
 
 from daemon.mcp.models import McpToolSchema  # noqa: E402
+from daemon.mcp.builtin_servers.base import (  # noqa: E402
+    BuiltinServerDefinition,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +128,66 @@ class _FakeSessionProvider:
 
     async def get_session(self, server_name: str):
         return MagicMock()
+
+
+class _UnavailableStubBuiltin(BuiltinServerDefinition):
+    """Stub built-in whose ``is_available()`` always returns ``False``.
+
+    The vehicle for the S1 gate's SKIP branch. It replaces the
+    deleted cu-vehicle: the cu builtin's kill-switch was the gate's
+    first consumer and died with the builtin, but the gate itself is
+    GENERIC — it resolves ANY registered
+    ``BuiltinServerDefinition`` from the global registry and asks it
+    ``is_available()``.
+
+    The shape mirrors ``_UnavailableTestBuiltin`` in
+    ``tests/unit/test_builtin_mcp_servers.py`` — a real subclass of
+    the abstract base (so the registry accepts it and the gate
+    resolves it BY NAME) with only ``is_available()`` overridden.
+    """
+
+    @property
+    def name(self) -> str:
+        return "unavailable-test-builtin"
+
+    @property
+    def display_name(self) -> str:
+        return "Unavailable Test Built-in"
+
+    @property
+    def description(self) -> str:
+        return "A test built-in that always reports itself unavailable"
+
+    @property
+    def schema_version(self) -> str:
+        return "1.0"
+
+    def get_config_schema(self) -> list[dict]:
+        return []
+
+    @classmethod
+    def is_available(cls) -> bool:
+        return False
+
+
+@pytest.fixture
+def registry_with_unavailable_builtin():
+    """Register the unavailable stub built-in for the test's duration.
+
+    The built-in registry is a process-wide singleton, so the fixture
+    ADDS only the stub — it does NOT clear the real built-ins (they
+    are not part of the preload set under test and must stay
+    registered for the rest of the suite). The stub is removed again
+    on teardown.
+    """
+    from daemon.mcp.builtin_servers import get_registry
+
+    registry = get_registry()
+    registry.register(_UnavailableStubBuiltin())
+    try:
+        yield registry
+    finally:
+        registry.unregister("unavailable-test-builtin")
 
 
 # ---------------------------------------------------------------------------
@@ -468,6 +536,98 @@ class TestPreloadBuiltinAvailabilityGate:
         mgr._mcp_server_repository = MagicMock()
         mgr.config = MagicMock(mcp_pool=MagicMock(tool_call_timeout=120))
         return mgr
+
+    @pytest.mark.asyncio
+    async def test_gate_skips_preload_for_unavailable_builtin(
+        self, registry_with_unavailable_builtin, caplog
+    ):
+        """S1 main pin: an unavailable built-in is SKIPPED during preload.
+
+        Port of the deleted cu-vehicle pin
+        (``test_kill_switch_off_skips_cu_preload`` in
+        ``tests/unit/test_computer_use_mcp.py`` — readable at
+        ``git show 68cdbcd69^:tests/unit/test_computer_use_mcp.py``)
+        with the vehicle swapped: the cu builtin's kill-switch died
+        with the builtin, so the SKIP branch is pinned through a STUB
+        built-in whose ``is_available()`` returns ``False``. The gate
+        is generic, so the CONTRACT is unchanged.
+
+        The state under test is the post-boot flip: the server's
+        ``mcp_servers`` row is still ACTIVE from a prior ON boot while
+        its definition now reports unavailable. The preload loop must
+        skip the server ENTIRELY — no schema fetch (no cold spawn),
+        no session-cache entry (no future spawn escape hatch), no
+        surfaced tools — and emit exactly ONE one-shot INFO
+        diagnostic naming the skip.
+        """
+        from daemon.services.mcp_service import McpService
+
+        # The ACTIVE row left behind by a prior ON boot — the
+        # post-boot-flip state the gate exists for.
+        unavailable_server = MagicMock()
+        unavailable_server.name = "unavailable-test-builtin"
+        unavailable_server.config = {
+            "transport": "stdio", "command": "npx"
+        }
+        unavailable_server.is_active = True
+
+        manager = self._make_mock_manager()
+        manager._mcp_server_repository.list_mcp_servers.return_value = [
+            unavailable_server
+        ]
+
+        service = McpService(manager=manager)
+
+        # The gate is supposed to short-circuit BEFORE this is
+        # awaited. A raising side_effect turns a gate leak into a
+        # loud failure instead of a silent one.
+        async def _fail_if_called(server_arg):
+            raise AssertionError(
+                "get_schemas_for_server MUST NOT be awaited for "
+                "'unavailable-test-builtin' when its is_available() "
+                "returns False — the S1 gate is broken, the preload "
+                "loop is leaking past the gate"
+            )
+
+        service.get_schemas_for_server = AsyncMock(
+            side_effect=_fail_if_called
+        )
+
+        with caplog.at_level(
+            logging.INFO, logger="daemon.services.mcp_service"
+        ):
+            await service.preload_mcp_tools("inst-1")
+
+        # (a) the schema fetch never reached the server.
+        service.get_schemas_for_server.assert_not_awaited()
+
+        # (b) NO tools surfaced for the instance — the cache entry
+        # exists but is EMPTY (the strongest enforcement of the skip).
+        assert service._tools_cache.get("inst-1") == [], (
+            "an unavailable builtin MUST surface ZERO tools; got "
+            f"{[type(t).__name__ for t in service._tools_cache.get('inst-1', [])]}"
+        )
+
+        # (c) NO session-cache entry for the skipped server — no
+        # session spawn path survives the skip.
+        session_state = service._session_caches.get("inst-1", {})
+        assert "unavailable-test-builtin" not in session_state, (
+            "the session cache MUST NOT contain the skipped builtin — "
+            "no session spawn path"
+        )
+
+        # (d) EXACTLY ONE one-shot INFO diagnostic naming the skip
+        # (the live string at ``mcp_service.py``'s gate site).
+        skip_msgs = [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.INFO
+            and "skipping unavailable builtin" in r.getMessage()
+        ]
+        assert len(skip_msgs) == 1, (
+            "expected EXACTLY ONE INFO log line containing "
+            f"'skipping unavailable builtin'; got {len(skip_msgs)}: "
+            f"{skip_msgs}"
+        )
 
     @pytest.mark.asyncio
     async def test_gate_bypassed_for_non_builtin_server(self):

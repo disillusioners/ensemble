@@ -320,6 +320,11 @@ async def test_mcp_server_connection(test_request: McpServerTestConnectionReques
     Creates a temporary connection to the specified MCP server,
     verifies it responds correctly, and immediately cleans up.
     This does NOT save anything to the database.
+
+    Since the cu D7 guard removal (2026-10-24) this probe path
+    enforces NO builtin-availability kill-switch, so a future builtin
+    that needs probe-path protection must reintroduce a
+    registry-aware guard here.
     """
     conn_mgr = get_mcp_connection_manager()
     timeout = 15.0
