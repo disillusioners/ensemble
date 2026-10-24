@@ -531,12 +531,16 @@ assert_adjacent_chmod "mode-pin mutation restore (GREEN): create-site pin recove
     "$MUT_PIN/stage.sh" 'failed to create $ENV_FILE'
 rm -rf "$MUT_PIN"
 
-# BEHAVIORAL-PIN DISCLOSURE (D5b): the full stage-harness behavioral
-# exercise of the marker-rewrite chmod lives in
-# tests/test_stage_freshness_guard.sh (real stage.sh under a FAKE_REPO
-# fence). It is NOT duplicated here — see that pack; disclosure per the
-# plan: the static + mutation pins above are the P5-owned surface in THIS
-# pack.
+# BEHAVIORAL-PIN DISCLOSURE (D5b) — accurate wording: the existing
+# FAKE_REPO harness in tests/test_stage_freshness_guard.sh (real stage.sh
+# under a FAKE_REPO fence, one reused sandbox INSTALL_DIR across its
+# scenarios) REACHES the marker-rewrite path, and the chmod is exercised
+# there FAIL-LOUD: a chmod failure makes stage.sh exit 1, which reddens
+# that harness's exit-code assertions.
+# WHAT THAT HARNESS DOES NOT DO: it has NO mode assertion on .env (its
+# only .env touch is creating its own fixture at :89) — so mode-600
+# itself is NOT covered there. Mode-600 coverage lives in THIS pack: the
+# static byte-adjacency pins (above) + the W5 mutation leg (RED/GREEN).
 
 rm -rf "$WORK"
 
