@@ -300,3 +300,87 @@ directions** (arch §10 and every plan/ops-side line cite).
 **Every other anchor in §10 held EXACTLY** — the merged lane's changes landed in other files, so no ops-side
 anchor shifted. The only two cites superseded are the `_tool_registry.py` KNOWN-list line and the
 `test_instance_ops_registration.py` token-pin line, both shifted by upstream's own rewrite.
+
+---
+
+## 7. Phase-3 outcome (appended by the Phase-3 implementer)
+
+### Commits (in order)
+
+| SHA | Message |
+|---|---|
+| `3d49f2197` | docs(planning): phase-2 journal — DF-4 merge gate, premise checks, anchor table |
+| `56bcaf67e` | feat(instance-ops): F11 — the daemon-minted delegation chain |
+| `c6aa51ebb` | feat(instance-ops): F6 — the protected gate splits at the dry-run fork |
+| `df41df2dc` | feat(instance-ops): F7 + F10 + F9 — protection reflection, the audit row id, the reclaim copy |
+| `65335ff3c` | docs(rider): the two stale doc nits Phase 1 left behind |
+| `23845a455` | fix(test): the F11 pin file must not spell the retired provenance token |
+| `7b8583512` | fix(test): DF-4's real-PG closure pin follows the F6 gate split |
+
+### The corrected net-new ladder (D-21) — the leg labels come from the recorded parents
+
+| Leg | Range | Owner | Result |
+|---|---|---|---|
+| leg 0 | base `b257842c9` → M^1 `dfed5926f` | OURS (Phase 1) | Phase-1 suites green |
+| leg A | M^1 `dfed5926f` → M `cdf34805` | MERGED LANES + conflict resolution | registry tripwire green |
+| leg B | M `cdf34805` → HEAD `7b8583512` | OURS (Phase 3) | **net-new reds = 0** (see below) |
+| containment | base `b257842c9` → HEAD | whole patch | — |
+
+### Pre-existing reds (NOT ours — measured at BOTH `dfed5926f` and `cdf34805`)
+
+| Red | Where | Attribution |
+|---|---|---|
+| `tests/test_job_queue_tools.py::TestResolverRoutedTools::test_watch_job_terminal_enriches_result_from_instance` | 4 tests in the class | RED at the Phase-1 tip AND at the merge commit M — base debt, not ours |
+| `tests/postgres/test_06f500af_bug_class_eliminated_pg.py::test_orphan_watcher_cancelled_on_startup_sweep` | 1 test | RED at M — base debt, not ours |
+
+Both were proven by running the SAME commands in the throwaway worktrees `/tmp/wt-base-P1`
+(at `dfed5926f`) and `/tmp/wt-base-M` (at `cdf34805`). **Net-new reds introduced by the
+Phase-3 lane = 0.**
+
+### Pins seeded for the Phase-4 tester
+
+* `tests/unit/test_instance_ops_delegation_chain.py` — 35 F11 per-seam unit pins (NEW FILE).
+* `tests/unit/test_instance_ops_behaviour.py` — 5 F6 pins + 4 F7 + 3 F10 + 2 F9 = **14 new**
+  pins, plus **2 existing pins UPDATED** (never deleted) for the F6 gate split, plus the
+  **AC-16-style doc pin UPDATED** (never deleted) with the apply-only sentence.
+* `tests/postgres/test_df4_provenance_closure.py` — DF-4's real-PG closure pin **UPDATED**
+  (never deleted) to follow the F6 gate split: the preview reports the apply-path
+  requirement as data, the destructive act still refuses with `no-user-provenance` and still
+  writes the REFUSED audit row.
+
+Mutation spot-checks done by the implementer (the full 12-cycle mutation run is the
+TESTER's Phase-4 job): removing the seam's unconditional pop → 2 pins RED; removing the
+`agent:` mint lane → 3 pins RED; both restored to GREEN.
+
+### DISCLOSURE — the prompt-artifact baseline gate is RED, inherited from upstream
+
+`scripts/protection/generate_prompt_artifact_baseline.py --check --tree .` exits **1** on
+this branch (6 drifted `agents/` files: `agents/gaia/{rule,soul,tools_note,workflow}.md`,
+`agents/leader/soul.md`, +1).
+
+**Attribution (measured, not assumed):**
+
+| Rev | rc | drifted files |
+|---|---|---|
+| Phase-1 tip `dfed5926f` (before the T2.1 merge) | **0** | 0 |
+| merge commit `cdf34805` (M) | **1** | 6 |
+| `origin/latest` `074833b45` | **1** | 6 (the SAME set) |
+| this branch HEAD | **1** | 6 (the SAME set) |
+
+The drift is an **UPSTREAM defect** — the merged lane (the gaia redefinition) changed 6
+`agents/` prompt files without re-stamping the baseline. It arrives with the mandated T2.1
+merge and is NOT caused by the Phase-3 code: `git diff cdf348057..HEAD -- agents/` is EMPTY
+(this lane edits zero `agents/` files).
+
+**Owner: Phase 5** (it owns the one batched `agents/` edit + the same-commit re-stamp) or
+the giter lane. The implementer did NOT re-stamp it: re-stamping here would mask the
+upstream lane's missing stamp, and Phase 5's ceremony is the designated place for it.
+
+### Other disclosures
+
+* **DF-5 sibling residual (disclosed, not silently skipped):** the defer-resend at
+  `job_queue_service.py:2608` re-enqueues with `source="api"` → the child gets a **DIRECT**
+  window — MORE authority than any delegation chain, with no chain. F11 does not close it
+  (DF-5 owns it). Owner needed.
+* **The REST-ingress class stays OPEN** (critical note `257488dc`) — F11 does not close it.
+* **`preview_run_id` threading stays DEFERRED** (D-10) — the join is post-hoc (target+time+actor).
