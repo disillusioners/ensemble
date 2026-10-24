@@ -1337,6 +1337,16 @@ def _parent_status_of(
     the map is the only cross-row state). A parent that is not in the
     map is fetched from the repository — the cost is paid ONCE per
     distinct parent because the resolved value is memoized in ``cache``.
+
+    THE CACHE DISCIPLINE (tidier fold): the cache holds RESOLVED
+    FACTS only. A parent that was found (its status) and a parent whose
+    row is genuinely ABSENT (a stable fact — the row is gone) are both
+    cached. A PROBE FAILURE is NOT cached: the repository raised, so
+    the parent's liveness is UNKNOWN, and a failed probe is
+    indistinguishable from "the parent is gone" to the detectors. Memoizing
+    it poisoned EVERY child of that parent with a false orphan /
+    dead-parent flag for the rest of the scan. The failure is logged
+    instead, and the next child re-probes.
     """
     if not parent_id:
         return None
@@ -1346,8 +1356,16 @@ def _parent_status_of(
     if status is None:
         try:
             prow = repo.get(parent_id)
-        except Exception:  # noqa: BLE001 — read-only probe
-            prow = None
+        except Exception as exc:  # noqa: BLE001 — read-only probe
+            # NOT cached — see the cache discipline above. The caller
+            # sees ``None`` for this row only; the next child of the
+            # same parent re-probes and gets the truth.
+            logger.warning(
+                "instance_read: parent-status probe failed for %s: %s",
+                parent_id,
+                exc,
+            )
+            return None
         status = getattr(prow, "status", None) if prow is not None else None
     if cache is not None:
         cache[parent_id] = status

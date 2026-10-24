@@ -1715,3 +1715,155 @@ class TestF1Alias:
         assert "PRE-RENAME SPELLING" in text
         # the rename verdict rows themselves are untouched
         assert "Rename `instance_fleet_summary` → `fleet_capacity_summary`" in text
+
+
+# ────────────────────────────────────────────────────────────────────────
+# The tidier fold — the parent-status cache discipline + the husk
+# evidence-leg disclosure (two ADDITIVE observability fixes).
+# ────────────────────────────────────────────────────────────────────────
+
+
+class _FlakyParentRepo:
+    """A repository double whose ``get`` FAILS ONCE for one parent.
+
+    The failure models a transient database error on the parent-status
+    probe. Before the cache-discipline fix the failure was memoized as
+    "the parent is gone" — and a failed probe is indistinguishable from
+    a missing parent to the detectors, so EVERY LATER child of that
+    parent was flagged as a false orphan / dead-parent row.
+    """
+
+    def __init__(self, parent_row, *, fail_first: bool = True):
+        self.parent_row = parent_row
+        self.fail_first = fail_first
+        self.calls: list[str] = []
+
+    def get(self, iid):
+        self.calls.append(iid)
+        if self.fail_first and self.calls.count(iid) == 1:
+            raise RuntimeError("transient parent-status probe failure")
+        if iid == self.parent_row.instance_id:
+            return self.parent_row
+        return None
+
+
+class _UnlistedParentFleetManager:
+    """A manager double over two children of ONE parent.
+
+    The parent row is deliberately NOT in the fleet listing — it is
+    only reachable through the repository. That is what forces the
+    parent-status PROBE (the ``status_by_id`` fast path never applies).
+    """
+
+    def __init__(self, children: list[FakeRow], repo):
+        self.rows = list(children)
+        self._instance_repository = repo
+        self._task_repo = FakeTaskRepo()
+        self._question_manager = FakeQuestionManager()
+        self.engine = None
+
+    def list_instances(self, limit=10, offset=0, status=None, **kw):
+        matching = [r for r in self.rows if status is None or r.status == status]
+        matching.sort(key=lambda r: r.instance_id)
+        total = len(matching)
+        page = matching[offset : offset + limit]
+        out = []
+        for row in page:
+            info = row.to_dict()
+            info["children"] = []
+            out.append(info)
+        return out, total, False
+
+
+class TestParentStatusCache:
+    """The parent-status cache holds RESOLVED FACTS only.
+
+    PLANNED MUTATION (one behaviour per run):
+      * cache the probe-failure leg again → the no-poisoning pin RED
+        (the second child is flagged as a false orphan);
+      * stop caching a genuinely-missing parent → the cost pin RED
+        (the probe runs once per child).
+    """
+
+    def _child(self, iid: str) -> FakeRow:
+        return FakeRow(
+            iid,
+            agent_id="worker",
+            parent_id="parent-1",
+            status="waiting_children",
+        )
+
+    def _parent(self) -> FakeRow:
+        return FakeRow("parent-1", agent_id="worker", status="running")
+
+    def test_a_probe_failure_is_not_cached(self):
+        """The direct contract: a raised probe leaves the cache EMPTY."""
+        repo = _FlakyParentRepo(self._parent())
+        cache: dict[str, str | None] = {}
+
+        status = ir._parent_status_of(repo, {}, "parent-1", cache)
+
+        assert status is None
+        assert "parent-1" not in cache, (
+            "a FAILED probe must not be memoized — the parent's liveness "
+            "is unknown, and a cached 'gone' poisons every later child"
+        )
+
+    def test_a_failed_probe_is_retried_on_the_next_child(self):
+        """The next child RE-PROBES and gets the truth."""
+        repo = _FlakyParentRepo(self._parent())
+        cache: dict[str, str | None] = {}
+
+        first = ir._parent_status_of(repo, {}, "parent-1", cache)
+        second = ir._parent_status_of(repo, {}, "parent-1", cache)
+
+        assert first is None
+        assert second == "running"
+        assert repo.calls == ["parent-1", "parent-1"]
+
+    def test_a_genuinely_missing_parent_IS_cached(self):
+        """A MISSING parent row is a stable fact — it stays cached."""
+        calls: list[str] = []
+
+        class _MissingRepo:
+            def get(self, iid):
+                calls.append(iid)
+                return None
+
+        cache: dict[str, str | None] = {}
+        first = ir._parent_status_of(_MissingRepo(), {}, "parent-1", cache)
+        second = ir._parent_status_of(_MissingRepo(), {}, "parent-1", cache)
+
+        assert first is None and second is None
+        assert cache["parent-1"] is None
+        assert calls == ["parent-1"], (
+            "a resolved 'the parent row is gone' fact is cached — the "
+            "probe must not run again for the same parent"
+        )
+
+    async def test_a_transient_failure_does_not_poison_the_next_child(self):
+        """END-TO-END: only the child that HIT the failure is flagged.
+
+        Pre-fix, the second child read the poisoned cache entry and was
+        flagged as a dead-parent row even though its parent was alive.
+        """
+        repo = _FlakyParentRepo(self._parent())
+        manager = _UnlistedParentFleetManager(
+            [self._child("child-1"), self._child("child-2")], repo
+        )
+        payload = await _call(_read_tools(manager), "instance_health")
+        detector = next(
+            d
+            for d in payload["detectors"]
+            if d["detector"] == "waiting-on-a-dead-parent"
+        )
+        flagged = {row["instance_id"] for row in detector["instances"]}
+
+        assert flagged == {"child-1"}, (
+            "only the child that hit the transient failure may be "
+            f"flagged; got {sorted(flagged)}"
+        )
+        assert repo.calls == ["parent-1", "parent-1"], (
+            "the second child must RE-PROBE, not read a poisoned entry"
+        )
+
