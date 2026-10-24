@@ -467,6 +467,45 @@ class SQLModelInstanceRepository:
             instance = db_session.get(Instance, instance_id)
             return self._enrich_instance(db_session, instance)
 
+    def find_by_instance_id_prefix(self, prefix: str, limit: int = 2) -> list[str]:
+        """Find instance ids that START with ``prefix`` (D3 prefix lane).
+
+        Bounded, status-agnostic prefix lookup backing the agent-tool id
+        resolver (``daemon/tools/instance.py::_resolve_instance_id``) so a
+        TRUNCATED uuid resolves deterministically instead of always
+        failing:
+
+        * 0 hits  → the caller falls through to its fuzzy path.
+        * 1 hit   → the id is resolved.
+        * >= 2    → the caller raises with the candidate list.
+
+        The universe is EVERY instance row — NO status filter — because
+        agents legitimately address terminal / just-completed instances
+        (same posture as ``InstanceManager.find_near_instance``, which
+        also searches across statuses).
+
+        Args:
+            prefix: The id prefix to match. Callers MUST pre-validate the
+                shape (hex digits + dashes only) — ``%`` and ``_`` are
+                LIKE wildcards and are NOT escaped here, so an
+                unvalidated prefix could match unintended rows.
+            limit: Maximum number of ids to return. The resolver needs at
+                most 2 (one hit resolves; two hits disambiguate).
+
+        Returns:
+            The matching instance ids, ordered by id, at most ``limit``.
+        """
+        if not prefix:
+            return []
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(Instance.instance_id)
+                .where(Instance.instance_id.like(f"{prefix}%"))
+                .order_by(Instance.instance_id)
+                .limit(limit)
+            )
+            return [str(row) for row in db_session.exec(stmt).all()]
+
     def get_by_agent_id(self, agent_id: str) -> list[Instance]:
         """Get all instances for a given agent ID.
         

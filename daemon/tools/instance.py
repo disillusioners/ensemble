@@ -23,6 +23,7 @@ dedicated extraction PR).
 import asyncio
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from functools import partial
@@ -1472,6 +1473,65 @@ def _route_send_message(
     return ("enqueue", prior_status)
 
 
+# ── D3 — unique-prefix instance-id resolution ────────────────────────────
+# An agent routinely addresses a peer by a TRUNCATED uuid ("8ade5d22",
+# "8ade5d22-1f3c"). Before this lane EVERY such id failed: the exact
+# match missed and the fuzzy path (edit distance) had no anchor to
+# match on. The prefix lane resolves the id deterministically:
+#
+#   0 hits → fall through to the existing fuzzy / ValueError path.
+#   1 hit  → resolve to that instance id.
+#   >= 2   → raise ValueError listing the candidates (the existing
+#            multi-match wording is reused verbatim).
+#
+# Shape gate: a uuid prefix is hex digits + dashes, 8–35 chars. A full
+# uuid is 36 chars — the EXACT path owns that, so the prefix lane never
+# sees it (the exact path stays untouched). The gate also keeps `%` and
+# `_` out of the LIKE pattern (`_` is a LIKE wildcard) — the repository
+# method deliberately does NOT escape.
+_UUID_PREFIX_MIN_LEN = 8
+_UUID_PREFIX_MAX_LEN = 35
+_UUID_PREFIX_SHAPE_RE = re.compile(r"^[0-9a-fA-F-]{8,35}$")
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _is_uuid_prefix_shape(instance_id: str) -> bool:
+    """True when ``instance_id`` can be a truncated uuid (hex + dashes)."""
+    if not isinstance(instance_id, str):
+        return False
+    if not (_UUID_PREFIX_MIN_LEN <= len(instance_id) <= _UUID_PREFIX_MAX_LEN):
+        return False
+    if not _UUID_PREFIX_SHAPE_RE.match(instance_id):
+        return False
+    # At least the first uuid group's worth of hex digits — a run of
+    # dashes is not a uuid prefix.
+    return sum(1 for ch in instance_id if ch in _HEX_DIGITS) >= _UUID_PREFIX_MIN_LEN
+
+
+async def _find_instances_by_id_prefix(manager: Any, prefix: str) -> list[str]:
+    """Up to 2 instance ids whose id starts with ``prefix`` (D3 lane).
+
+    Fail-MISS posture: any lookup error degrades to "no hits" so the
+    caller falls through to its fuzzy path — a probe that cannot be
+    evaluated must NEVER resolve to a wrong instance.
+    """
+    repo = getattr(manager, "_instance_repository", None)
+    finder = getattr(repo, "find_by_instance_id_prefix", None)
+    if finder is None:
+        return []
+    try:
+        hits = await asyncio.to_thread(finder, prefix, 2)
+    except Exception as exc:  # noqa: BLE001 — fail-MISS, never fail-open
+        logger.warning(
+            "instance prefix lookup failed (D3 prefix lane): prefix=%s "
+            "error=%s — falling through to the fuzzy path",
+            prefix,
+            type(exc).__name__,
+        )
+        return []
+    return [str(hit) for hit in (hits or [])]
+
+
 async def _resolve_instance_id(
     manager: "InstanceManager",
     instance_id: str | None,
@@ -1501,6 +1561,23 @@ async def _resolve_instance_id(
         await manager.get_instance(instance_id)
         return instance_id
     except KeyError:
+        # ── D3 unique-prefix lane (runs BEFORE the fuzzy fallback) ──
+        # A truncated uuid resolves deterministically here: 0 hits falls
+        # through to the fuzzy path below, 1 hit resolves, >= 2 raises
+        # with the candidate list. The lane runs BEFORE the exact-miss
+        # WARNING so a SUCCESSFULLY resolved prefix does not log the
+        # ghost-child-risk warning (the instance WAS found — under its
+        # full id).
+        if _is_uuid_prefix_shape(instance_id):
+            prefix_hits = await _find_instances_by_id_prefix(manager, instance_id)
+            if len(prefix_hits) == 1:
+                return prefix_hits[0]
+            if len(prefix_hits) >= 2:
+                candidates = "', '".join(prefix_hits)
+                raise ValueError(
+                    f"ERROR: instance '{instance_id}' not found. Multiple similar instances found: "
+                    f"'{candidates}'. Please retry with the correct instance_id."
+                )
         # Exact match failed. Log authoritatively — this failure is otherwise
         # silent: ``_resolve_instance_id`` returns a ValueError that the tool
         # wrappers surface to the LLM as a ``ToolMessage`` string, NOT as a

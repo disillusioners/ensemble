@@ -4023,6 +4023,25 @@ Provide a concise summary:"""
 
             # Create completion report message for parent
             # Include message_id in source for per-message idempotency
+            #
+            # GUARD (D3 fusion pin, 2026-10-24) — the ``source`` shape
+            # below is ``internal_report:{child_instance_id}:{anchor}``.
+            # The COLON terminator is what makes the consumer-side
+            # delivery-evidence LIKE an EXACT-BOUNDARY comparison:
+            # ``source LIKE 'internal_report:' || c.instance_id || ':%'``
+            # (``daemon/repositories/report_injection/repository.py``
+            # ~:1105 and ~:1145-1147). A sibling child whose id EXTENDS
+            # this child's id therefore does NOT alias onto it — its
+            # source is ``internal_report:{child_id}2:...``, and the
+            # character after the child's id is ``2``, not ``:``. The
+            # repository documents this at ~:2098-2108.
+            #
+            # Do NOT "simplify" this shape by dropping the trailing
+            # ``:`` or by prefix-matching on the bare id — that re-opens
+            # the aliasing hole. The regression pin lives in
+            # ``tests/repositories/test_report_injection_prefix_boundary.py``
+            # (sibling-prefix source must NOT count as this child's
+            # delivery evidence; the child's own source MUST).
             report_message_id = str(uuid.uuid4())
             report_message = MessageQueue(
                 message_id=report_message_id,
