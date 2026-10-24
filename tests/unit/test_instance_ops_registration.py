@@ -597,6 +597,54 @@ class TestProvenanceVocabulary:
             f"hardcoded token, got: {value_src!r}"
         )
 
+        # …and the preview's ``act_gate_would_pass.reason`` is the
+        # gate's token too. This is the SECOND half of the derivation:
+        # the old shape hardcoded the token in BOTH preview fields, so
+        # a token-recovery miss could report a CONFIRMATION refusal as
+        # provenance data in two places at once.
+        pass_dicts = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Dict)
+            and any(
+                isinstance(key, ast.Constant)
+                and key.value == "act_gate_would_pass"
+                for key in node.keys
+            )
+        ]
+        assert len(pass_dicts) == 1, (
+            "the preview payload must carry exactly one "
+            f"'act_gate_would_pass' key (found {len(pass_dicts)})"
+        )
+        pass_dict = pass_dicts[0]
+        # the OUTER payload dict carries the "act_gate_would_pass" KEY;
+        # its VALUE is the inner {ok, reason} dict.
+        outer_index = next(
+            i
+            for i, key in enumerate(pass_dict.keys)
+            if isinstance(key, ast.Constant)
+            and key.value == "act_gate_would_pass"
+        )
+        inner = pass_dict.values[outer_index]
+        assert isinstance(inner, ast.Dict), (
+            "act_gate_would_pass must be a dict literal, got "
+            f"{ast.unparse(inner)!r}"
+        )
+        reason_index = next(
+            i
+            for i, key in enumerate(inner.keys)
+            if isinstance(key, ast.Constant) and key.value == "reason"
+        )
+        reason_src = ast.unparse(inner.values[reason_index])
+        assert "gate_token" in reason_src, (
+            "the preview's act_gate_would_pass.reason must be the gate's "
+            f"own token, got: {reason_src!r}"
+        )
+        assert "GATE_TOKEN_" not in reason_src, (
+            "the preview's act_gate_would_pass.reason must not re-spell "
+            f"a hardcoded token, got: {reason_src!r}"
+        )
+
 
 # ── the kill-switch surface ──────────────────────────────────────────────
 
