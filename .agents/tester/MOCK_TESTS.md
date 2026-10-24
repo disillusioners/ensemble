@@ -775,21 +775,32 @@ d. **Verbatim live shape — probe CLEAN, no removal**: the exact incident tuple
 - Artifact round-trip: 200, correct content-type, nosniff, sha256-identical body
 - Uniform 404 at real boot (unknown root / traversal / unknown path)
 
-## Mock Test: cu_smoke_live_mock_test + cu_smoke_killswitch_mock_test — RETIRED 2026-10-24
+## Mock Test: cu_smoke_live_mock_test — RETIRED 2026-10-24
 
-> **RETIRED 2026-10-24** (branch `feature/remove-cu-builtin`): the
-> daemon-side `computer-use` builtin MCP server was REMOVED. Both mock
-> tests below drove the cu builtin's own surface (its `mcp_servers`
+Status: RETIRED — the daemon-side `computer-use` builtin MCP server this
+entry drove was REMOVED 2026-10-24 (branch `feature/remove-cu-builtin`);
+the entry is no longer re-runnable. Historical run evidence:
+`RESULTS/2026-10-16-cu-mcp-computer-use-verification.md` and the matching
+`LESSONS/` row (`LESSONS/2026-10-16-cu-mcp-tcc-wallpaper-signature.md`).
+
+## Mock Test: cu_smoke_killswitch_mock_test — RETIRED 2026-10-24
+
+Status: RETIRED — the daemon-side `computer-use` builtin MCP server this
+entry drove was REMOVED 2026-10-24 (branch `feature/remove-cu-builtin`);
+the entry is no longer re-runnable. Historical run evidence:
+`RESULTS/2026-10-16-cu-mcp-computer-use-verification.md` and the matching
+`LESSONS/` row (`LESSONS/2026-10-16-cu-mcp-tcc-wallpaper-signature.md`).
+
+> Both entries drove the cu builtin's own surface (its `mcp_servers`
 > bootstrap row, its `core`-profile session with 38 tools, its TCC
-> signature capture, and its `COMPUTER_USE_MCP_ENABLED=0` kill-switch
-> OFF-path) — none of that surface exists any more, so the two entries
-> are retired rather than re-runnable.
+> signature capture, and — for the kill-switch entry — its
+> `COMPUTER_USE_MCP_ENABLED=0` kill-switch OFF-path) — none of that
+> surface exists any more, so the two entries are retired rather than
+> re-runnable.
 >
 > The harness PATTERN (ephemeral `/tmp` driver + disposable PG cluster +
-> isolated uvicorn daemon booted via
-> `frontend/scripts/boot-e2e-maintenance-daemon.sh`) is documented in
-> the surviving entries above and in `PACKS.md`; it stays reusable for
-> other boot smokes. The historical run evidence is preserved in
+> isolated uvicorn daemon) stays reusable for other boot smokes. The
+> historical run evidence is preserved in
 > `RESULTS/2026-10-16-cu-mcp-computer-use-verification.md` and the
 > matching `LESSONS/` row
 > (`LESSONS/2026-10-16-cu-mcp-tcc-wallpaper-signature.md`) — untouched

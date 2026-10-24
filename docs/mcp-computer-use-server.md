@@ -87,4 +87,10 @@ git show 0774f3fe1:docs/mcp-computer-use-server.md
 `0774f3fe1` ("docs: reviewer suggestions — comment/doc truth for S1 gate
 semantics") was the last commit to touch this file before the removal.
 The cu builtin's own source (`daemon/mcp/builtin_servers/computer_use.py`)
-lives in history at the same commit.
+has its own history — its last touch before the removal was `a6c32de04`
+("[cu-mcp] S2: docstring truth-fix — is_available() is a 3-gate AND, not
+4-gate"):
+
+```bash
+git show a6c32de04:daemon/mcp/builtin_servers/computer_use.py
+```

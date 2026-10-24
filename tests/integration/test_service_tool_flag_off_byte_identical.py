@@ -792,7 +792,7 @@ def test_manager_logs_disabled_when_off(
 # Sanity — PRIVILEGED_TOOL_CATEGORIES is the post-override trio
 # (system_upgrade + system-log + ens-db) plus ``ens-env`` (W4 leader
 # decision 2026-10-02), ``view-views`` (REWORK 2026-10-07 M1),
-# ``cu`` (cu-mcp 2026-10-16), ``secrets`` (agent-secrets P1
+# ``secrets`` (agent-secrets P1
 # 2026-10-17), ``settings`` (settings-worker-slots P2 2026-10-18),
 # the ari-tools trio (``board`` / ``self-alarm`` / ``view-write`` /
 # ``board-link``), the nest-ops pair (``instance_read`` /
@@ -885,7 +885,7 @@ def test_privileged_category_set_is_pinned() -> None:
             "board-link",
             # wedge-capture (2026-10-22): the READ-ONLY capture-evidence
             # surface — ``wedge_capture_list`` + ``wedge_capture_get``.
-            # PRIVILEGED (entry #16): the capture payload is a privileged
+            # PRIVILEGED (entry #12): the capture payload is a privileged
             # diagnostic artifact (all-thread stack dumps, per-thread CPU
             # maps, process RSS); the empty-allow inherit universe must
             # NOT auto-grant it. The ari + leader + maintenancer allow

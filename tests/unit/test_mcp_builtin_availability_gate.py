@@ -59,11 +59,12 @@ import pytest
 # Unmock daemon.mcp.tool_adapter so we import the REAL module. The root
 # conftest.py replaces it with a stub that lacks ``create_lazy_mcp_tools``
 # / ``_build_lazy_coroutine`` / ``is_mcp_tool`` (it stubs them as
-# MagicMock). Same ritual as the deleted cu suite.
+# MagicMock). Same ritual as ``test_plane_mcp.py``.
 # ---------------------------------------------------------------------------
 _mock_tool_adapter = sys.modules.pop("daemon.mcp.tool_adapter", None)
 from daemon.mcp.tool_adapter import (  # noqa: E402
     _privilege_stamp_category_for_prefix,
+    adapt_mcp_tools,
     create_lazy_mcp_tools,
     is_mcp_tool,
 )
@@ -77,11 +78,13 @@ from daemon.mcp.builtin_servers.base import (  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# THE CONSTANT-PIN TAUTOLOGY RULE
+# CANONICAL-PIN FIXTURE DISCIPLINE — carried over from the deleted cu suite
 #
 # Relocated here (2026-10-24) from the deleted
-# ``tests/unit/test_computer_use_mcp.py`` header — that file was the
-# rule's only home in the tree, and the rule must not be lost with it.
+# ``tests/unit/test_computer_use_mcp.py`` header. This is NOT the
+# rule's only home: ``tests/unit/test_mcps_gateway_tool_filter.py:15``
+# carries a live statement of the same CONSTANT-PIN TAUTOLOGY rule and
+# never depended on the cu suite.
 #
 # WHEN A TEST PINS A PRODUCTION CONSTANT (a package pin, a version, a
 # tool-name prefix, a category name), THE PIN FIXTURE MUST REFERENCE
@@ -260,6 +263,82 @@ class TestPrivilegeStamp:
         )
         assert len(tools) == 1
         assert getattr(tools[0], "_tool_category", None) is None
+
+    def test_positive_pin_privileged_prefix_override_stamps_category(
+        self, monkeypatch
+    ):
+        """POSITIVE pin: a prefix in BOTH sets stamps its category.
+
+        Vehicle-independent: a fake prefix (``fakecat``) is patched
+        into BOTH ``DYNAMIC_TOOL_PREFIXES`` and
+        ``PRIVILEGED_TOOL_CATEGORIES`` at the
+        ``daemon.tools._tool_registry`` module-attribute seam — the
+        lazy import inside ``_privilege_stamp_category_for_prefix``
+        re-reads these names at call time. Every other stamp test in
+        this class asserts ``is None`` (the correct post-cu-removal
+        truth), so WITHOUT this test the positive branch could
+        regress to an unconditional ``return None`` with nothing
+        going red.
+
+        The negative legs are asserted in the SAME test so the pin
+        is self-checking: a DYNAMIC-but-unprivileged prefix and an
+        unpatched prefix both stay ``None``.
+        """
+        from daemon.tools import _tool_registry
+
+        monkeypatch.setattr(
+            _tool_registry,
+            "DYNAMIC_TOOL_PREFIXES",
+            frozenset({"fakecat", "freecat"}),
+        )
+        monkeypatch.setattr(
+            _tool_registry,
+            "PRIVILEGED_TOOL_CATEGORIES",
+            _tool_registry.PRIVILEGED_TOOL_CATEGORIES | {"fakecat"},
+        )
+
+        # Positive helper leg: the bare category comes back.
+        assert _privilege_stamp_category_for_prefix("fakecat") == "fakecat"
+
+        # Positive factory leg (lazy factory): the created tool
+        # carries ``_tool_category == "fakecat"``.
+        schemas = [_schema_dict(name="do_thing")]
+        lazy_tools = create_lazy_mcp_tools(
+            server_name="fakecat_srv",
+            schemas=schemas,
+            session_provider=_FakeSessionProvider(),
+            shared_session_cache={},
+            shared_session_lock=asyncio.Lock(),
+            tool_name_prefix="fakecat",
+        )
+        assert len(lazy_tools) == 1
+        assert getattr(lazy_tools[0], "_tool_category", None) == "fakecat"
+
+        # Positive factory leg (sync factory): same stamp contract.
+        from langchain_core.tools import StructuredTool
+
+        async def _fake_acall(**kwargs):
+            return "ok"
+
+        source_tool = StructuredTool(
+            name="do_thing",
+            description="d",
+            args_schema={"type": "object", "properties": {}},
+            coroutine=_fake_acall,
+        )
+        sync_tools = adapt_mcp_tools(
+            "fakecat_srv",
+            [source_tool],
+            tool_name_prefix="fakecat",
+        )
+        assert len(sync_tools) == 1
+        assert getattr(sync_tools[0], "_tool_category", None) == "fakecat"
+
+        # Negative legs (self-checking pin): a prefix present in
+        # DYNAMIC_TOOL_PREFIXES but NOT privileged → None; a prefix
+        # patched into NEITHER set → None.
+        assert _privilege_stamp_category_for_prefix("freecat") is None
+        assert _privilege_stamp_category_for_prefix("plane") is None
 
 
 # ---------------------------------------------------------------------------
@@ -764,11 +843,17 @@ class TestPreloadBuiltinAvailabilityGate:
     async def test_gate_exception_isolates_to_one_server(self, caplog):
         """A bad ``is_available()`` MUST NOT abort the loop.
 
-        Per-server error isolation: the gate is wrapped in
-        ``try/except`` and any exception inside the helper logs
-        a WARNING and skips the server, mirroring the
-        schema-lookup failure path right below it in the loop.
-        The next server on the iteration MUST still be processed.
+        Per-server error isolation: the gate call is wrapped in a
+        LOOP-SITE ``try/except`` (``mcp_service.py`` preload loop,
+        ~:776-786) — a raise logs the "Built-in availability gate
+        raised for ..." WARNING and skips the server, mirroring the
+        schema-lookup failure path right below it in the loop. This
+        test patches ``_is_builtin_server_available`` itself, so the
+        net it exercises is the loop-site one; the IN-HELPER net
+        (``mcp_service.py`` ~:1127-1146) inside the real method is
+        bypassed by this patch — a companion test exercising it is
+        deferred. The next server on the
+        iteration MUST still be processed.
         """
         from daemon.services.mcp_service import McpService
 

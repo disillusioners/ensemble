@@ -434,11 +434,13 @@ def create_lazy_mcp_tools(
     that hasn't opted in.
 
     Privilege-stamp (cu-mcp, 2026-10-16): when ``tool_name_prefix``
-    names a PRIVILEGED category (configured via
-    ``DYNAMIC_TOOL_PREFIXES`` ∩ ``PRIVILEGED_TOOL_CATEGORIES`` —
-    a prefix present in BOTH sets gets its bare name stamped; as of
-    the 2026-10-24 cu-builtin removal that intersection is EMPTY,
-    so no dynamic prefix stamps a category today), each created tool
+    names a PRIVILEGED category (the implemented rule: a prefix
+    with its trailing underscore stripped must be present in BOTH
+    ``DYNAMIC_TOOL_PREFIXES`` AND ``PRIVILEGED_TOOL_CATEGORIES``
+    for its bare name to be stamped — the raw sets never
+    intersected, since ``"cu_"`` was never the category string
+    ``"cu"``; after the 2026-10-24 cu-builtin removal no dynamic
+    prefix qualifies today), each created tool
     receives
     ``_tool_category`` matching the prefix's bare name. This is what
     enables ``_strip_privileged_category_tools``

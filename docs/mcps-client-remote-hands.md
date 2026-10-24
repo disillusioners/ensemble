@@ -1,21 +1,20 @@
 # mcps_client — CU Wrapper & Remote-Hands Architecture
 
-> **STATUS — SHIPPED (v0.27.5):** the `mcps_client` wrapper, gateway,
-> and `mcp_rpc` transport all exist; the `cu` builtin this design
-> targeted was REMOVED 2026-10-24. See the STATUS UPDATE below.
-
-> **STATUS UPDATE — 2026-10-24.** The daemon-side `cu` builtin described
-> below was REMOVED in `feature/remove-cu-builtin`; the `mcps_client`
-> wrapper + gateway + `mcp_rpc` path has since shipped and superseded it.
-> This document remains the architecture reference for that path — see the
-> historical stub at [`docs/mcp-computer-use-server.md`](./mcp-computer-use-server.md).
+> **STATUS — SHIPPED (v0.27.5); header current as of 2026-10-24.** The
+> `mcps_client` wrapper, gateway, and `mcp_rpc` transport all exist and
+> superseded the daemon-side `cu` builtin this design targeted (the `cu`
+> builtin was REMOVED 2026-10-24 in `feature/remove-cu-builtin`). The
+> diagrams and phase sections below are the 2026-10-16 design snapshots,
+> kept for reference. This document remains the architecture reference
+> for the shipped path — see the historical stub at
+> [`docs/mcp-computer-use-server.md`](./mcp-computer-use-server.md).
 
 | Field | Value |
 |---|---|
 | **Date** | 2026-10-16 |
 | **Status** | **SHIPPED** (v0.27.5) — kept as the architecture reference; the `cu` builtin it targeted was removed 2026-10-24 |
-| **Audience** | Daemon operators; future maintainers of the `cu` builtin and of the standalone `mcps_client` project |
-| **Applies to** | The `cu` builtin ONLY — see Scope below |
+| **Audience** | Daemon operators; maintainers of the `mcps_client` wrapper, the MCP gateway, and the `mcp_rpc` tools |
+| **Applies to** | The `mcps_client` wrapper + MCP gateway + `mcp_rpc` tools — the `cu` builtin they replaced was removed 2026-10-24 |
 | **Related** | [`docs/mcp-computer-use-server.md`](./mcp-computer-use-server.md) — the retired cu builtin's historical stub (npx-stdio wiring, TCC notes, pin policy) |
 
 ---
@@ -131,7 +130,7 @@ flowchart TD
         T1 -.-> TA2
     end
 
-    subgraph PROP["Proposed Phase 1 — mcps_client local wrapper"]
+    subgraph PROP["Phase 1 (2026-10-16 proposal — since shipped) — mcps_client local wrapper"]
         P1["ensemble daemon — cu builtin, now a streamable-http client"]
         P2["McpsClient.app — Go supervisor; proper .app bundle with Info.plist + stable bundle ID; installed as LaunchAgent; its OWN TCC responsibility root; code-signed with one stable self-signed cert"]
         P3["node child — vendored pinned node runtime, immune to nvm upgrades, running @zavora-ai/computer-use-mcp@7.6.1 in streamable-http mode"]
@@ -186,7 +185,7 @@ must therefore sign with the same stable identity:
 | (a) Integrated into this repo's `make install` | the ensemble build pipeline |
 | (b) A standalone build script | inside the `mcps_client` project |
 
-### Ensemble side (small change, future PR)
+### Ensemble side (2026-10-16 design notes — the mcps_client path has since shipped; see STATUS above)
 
 The cu builtin switches from npx-stdio spawn to a
 **streamable-http client against `127.0.0.1`**. Implementer
@@ -230,8 +229,8 @@ JSONL) that the wrapper can model its layer on.
 
 ```mermaid
 flowchart LR
-    %% Phase-2 remote-hands fleet — DESIGN PROPOSAL (nothing exists today)
-    NOTE["DESIGN PROPOSAL — nothing in this diagram exists today"]
+    %% Phase-2 remote-hands fleet — 2026-10-16 design snapshot (kept for reference)
+    NOTE["2026-10-16 DESIGN PROPOSAL — the gateway + wrapper have since shipped (v0.27.5); this diagram is kept as the design snapshot"]
     TR["transport: mutual TLS — gateway verifies per-machine client certs; wrapper verifies gateway via pre-provisioned CA + cert pinning — trust established at enrollment, never via DNS — NO trust-on-first-use"]
     UN["optional underlay: WireGuard / Tailscale mesh — gateway listens on the tailnet, solving transport identity wholesale"]
 

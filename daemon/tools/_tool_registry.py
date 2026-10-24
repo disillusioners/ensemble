@@ -71,7 +71,7 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     # ari-tools Phase 1 (the Workbook) — the board tools are created
     # by the create_board_tools() factory
     # (daemon/tools/board_tools.py). The ``board`` category is
-    # PRIVILEGED (entry #9 of PRIVILEGED_TOOL_CATEGORIES): the
+    # PRIVILEGED (entry #8 of PRIVILEGED_TOOL_CATEGORIES): the
     # empty-allow inherit universe must NOT auto-grant write
     # authority over the global board. Explicit
     # ``tools.allow: ["board"]`` is the only access path.
@@ -82,7 +82,7 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     # ari-tools Phase 2 (the self-alarm wrapper) — the self_alarm tool is
     # created by the create_self_alarm_tools() factory
     # (daemon/tools/self_alarm.py). The ``self-alarm`` category is
-    # PRIVILEGED (entry #10 of PRIVILEGED_TOOL_CATEGORIES): the
+    # PRIVILEGED (entry #9 of PRIVILEGED_TOOL_CATEGORIES): the
     # empty-allow inherit universe must NOT auto-grant the power to arm
     # an alarm whose text a fresh Ari instance executes verbatim. An
     # explicit ``tools.allow: ["self-alarm"]`` entry (ari only) is the
@@ -110,7 +110,7 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     # ari-tools Phase 3 (the live-views surface) — the view_write tool is
     # created by the create_view_write_tools() factory
     # (daemon/tools/view_write.py). The ``view-write`` category is
-    # PRIVILEGED (entry #11 of PRIVILEGED_TOOL_CATEGORIES): the
+    # PRIVILEGED (entry #10 of PRIVILEGED_TOOL_CATEGORIES): the
     # empty-allow inherit universe must NOT auto-grant write authority
     # over the shared, customer-facing ``reports`` root. Explicit
     # ``tools.allow: ["view-write"]`` on ari is the only access path
@@ -120,7 +120,7 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     # ari-tools Phase 3 (the live board view) — the board_link tool is
     # created by the create_board_link_tools() factory
     # (daemon/tools/board_link.py). The ``board-link`` category is
-    # PRIVILEGED (entry #12 of PRIVILEGED_TOOL_CATEGORIES): minting the
+    # PRIVILEGED (entry #11 of PRIVILEGED_TOOL_CATEGORIES): minting the
     # board's passcode authorises reading the user's whole work board.
     # Explicit ``tools.allow: ["board-link"]`` on ari is the only
     # access path (ARI-ONLY — user ruling 2026-10-20); the tool body
@@ -187,10 +187,11 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     # agent-secrets P1 tools (2026-10-17, plan f11965039) — created
     # by create_secret_tools() factory
     # (daemon/tools/secrets_tools.py). Six factory-built tools behind
-    # the ``secrets`` privileged category (#7 in
-    # ``PRIVILEGED_TOOL_CATEGORIES`` — sextet → septet per the
-    # Q1/Q2/Q3 rulings; ``cu`` joined 2026-10-16 before this
-    # entry). Day-one allow-list is ``worker`` /
+    # the ``secrets`` privileged category (#6 in
+    # ``PRIVILEGED_TOOL_CATEGORIES`` — quintet → sextet per the
+    # Q1/Q2/Q3 rulings; ``cu``, which joined 2026-10-16 before
+    # this entry, was REMOVED 2026-10-24). Day-one allow-list is
+    # ``worker`` /
     # ``tester`` / ``leader`` / ``ari``; agents outside that list
     # get ZERO of these tools through both the
     # ``_strip_privileged_category_tools`` default-deny strip
@@ -210,8 +211,8 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     # settings-worker-slots P2 tools (2026-10-18) — created by
     # create_settings_tools() factory
     # (daemon/tools/settings_tools.py). Three factory-built tools
-    # behind the ``settings`` privileged category (#8 in
-    # ``PRIVILEGED_TOOL_CATEGORIES`` — septet → octet; ``secrets``
+    # behind the ``settings`` privileged category (#7 in
+    # ``PRIVILEGED_TOOL_CATEGORIES`` — sextet → septet; ``secrets``
     # joined 2026-10-17 before this entry). The ari + leader
     # meta.json allow entries landed 2026-10-18 (P3); the category
     # remains opt-in-only (NEVER default-granted). HONEST contract:
@@ -356,11 +357,12 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # is the privileged-category strip + per-agent allow entry.
     "view-views",
     # agent-secrets P1 (2026-10-17, plan f11965039): ``secrets`` is
-    # the encrypted-secret-store tool category (#7 in
-    # PRIVILEGED_TOOL_CATEGORIES — sextet → septet per the
-    # Q1/Q2/Q3 user rulings 2026-10-17; ``cu`` joined 2026-10-16
-    # making the count 6 before this entry — ``cu`` itself was
-    # REMOVED 2026-10-24 with the cu builtin). The category owns
+    # the encrypted-secret-store tool category (#6 in
+    # PRIVILEGED_TOOL_CATEGORIES — quintet → sextet per the
+    # Q1/Q2/Q3 user rulings 2026-10-17; the count before this
+    # entry is 5 — ``cu``, the category that joined 2026-10-16
+    # ahead of this entry, was REMOVED 2026-10-24 with the cu
+    # builtin). The category owns
     # six factory-built tools (``secret_generate_ssh_keypair`` /
     # ``secret_generate_api_token`` / ``secret_store`` /
     # ``secret_list`` / ``secret_read_public`` / ``secret_retire``)
@@ -388,9 +390,9 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # mandatory (the A14/D18 silent-additions-visible rule).
     "secrets",
     # settings-worker-slots P2 (2026-10-18): ``settings`` is the
-    # daemon-runtime-settings tool category (#8 in
-    # PRIVILEGED_TOOL_CATEGORIES — septet → octet; ``secrets``
-    # joined 2026-10-17 making the count 7 before this entry).
+    # daemon-runtime-settings tool category (#7 in
+    # PRIVILEGED_TOOL_CATEGORIES — sextet → septet; ``secrets``
+    # joined 2026-10-17 making the count 6 before this entry).
     # The category owns three factory-built tools
     # (``settings_get`` / ``settings_set`` / ``settings_clear``)
     # that read tier values and WRITE DB overrides for
@@ -414,9 +416,9 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # SAME-PR RULE comment above are mandatory.
     "settings",
     # ari-tools Phase 1 (the Workbook, 2026-10-20): ``board`` is the
-    # global work-board tool category (#9 in
-    # PRIVILEGED_TOOL_CATEGORIES — octet → nonet; ``settings``
-    # joined 2026-10-18 making the count 8 before this entry). The
+    # global work-board tool category (#8 in
+    # PRIVILEGED_TOOL_CATEGORIES — septet → octet; ``settings``
+    # joined 2026-10-18 making the count 7 before this entry). The
     # category owns four factory-built tools (``board_create`` /
     # ``board_update`` / ``board_list`` / ``board_get``) over the three
     # ``board_items`` / ``board_notes`` / ``board_item_tags`` tables.
@@ -437,8 +439,8 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # insertions — the set must never be red between two commits).
     "board",
     # ari-tools Phase 2 (the self-alarm wrapper, 2026-10-20): ``self-alarm``
-    # is the alarm/timer category (#10 in PRIVILEGED_TOOL_CATEGORIES —
-    # nonet → decet; ``board`` joined 2026-10-20 making the count 9 before
+    # is the alarm/timer category (#9 in PRIVILEGED_TOOL_CATEGORIES —
+    # octet → nonet; ``board`` joined 2026-10-20 making the count 8 before
     # this entry). The category owns ONE factory-built tool
     # (``self_alarm``) that arms a reminder to ari at least 30 minutes
     # out, delivered into a FRESH ari instance that then executes the
@@ -459,9 +461,9 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # commits).
     "self-alarm",
     # ari-tools Phase 3 (the live-views surface, 2026-10-20): ``view-write``
-    # is the report-page WRITER category (#11 in
-    # PRIVILEGED_TOOL_CATEGORIES — decet → undecet; ``self-alarm`` joined
-    # 2026-10-20 making the count 10 before this entry). The category owns
+    # is the report-page WRITER category (#10 in
+    # PRIVILEGED_TOOL_CATEGORIES — nonet → decet; ``self-alarm`` joined
+    # 2026-10-20 making the count 9 before this entry). The category owns
     # ONE factory-built tool (``view_write``) that writes an HTML page under
     # the daemon-global ``reports`` live-view root and returns the
     # passcode-gated public URL in a single call. Why privileged: the
@@ -481,9 +483,9 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # never be red between two commits).
     "view-write",
     # ari-tools Phase 3 (the live board view, 2026-10-20): ``board-link`` is
-    # the LIVE BOARD's link-minter category (#12 in
-    # PRIVILEGED_TOOL_CATEGORIES — undecet → duodecet; ``view-write`` joined
-    # 2026-10-20 making the count 11 before this entry). The category owns
+    # the LIVE BOARD's link-minter category (#11 in
+    # PRIVILEGED_TOOL_CATEGORIES — decet → undecet; ``view-write`` joined
+    # 2026-10-20 making the count 10 before this entry). The category owns
     # ONE factory-built tool (``board_link``) that mints the passcode row
     # for the server-rendered board at ``/views/public/board/index.html``.
     # Why privileged: the board's passcode authorises reading the user's
@@ -931,7 +933,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # scheduling is job-adjacent (the adapter fires JobItems).
     "scheduling": "daemon.tools.scheduling",
     # ari-tools Phase 1 (the Workbook) — the global, DB-backed work
-    # board. PRIVILEGED category (entry #9 of
+    # board. PRIVILEGED category (entry #8 of
     # PRIVILEGED_TOOL_CATEGORIES): the board is global and shared, so
     # the empty-allow inherit universe must NOT auto-grant it. Placed
     # near "job" — the board is work-adjacent (it links job ids).
@@ -944,7 +946,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "instance_ops": "daemon.tools.instance_ops",
     "board": "daemon.tools.board_tools",
     # ari-tools Phase 2 (the self-alarm wrapper) — the alarm/timer
-    # category. PRIVILEGED category (entry #10 of
+    # category. PRIVILEGED category (entry #9 of
     # PRIVILEGED_TOOL_CATEGORIES): the empty-allow inherit universe must
     # NOT auto-grant the power to arm an alarm whose text a fresh Ari
     # instance executes verbatim.
@@ -958,7 +960,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # module, the service module is a library, never a category target.
     "self-alarm": "daemon.tools.self_alarm",
     # ari-tools Phase 3 (the live-views surface) — the report-page WRITER
-    # category. PRIVILEGED category (entry #11 of
+    # category. PRIVILEGED category (entry #10 of
     # PRIVILEGED_TOOL_CATEGORIES): the empty-allow inherit universe must
     # NOT auto-grant write authority over the shared, customer-facing
     # ``reports`` live-view root. Placed next to "view-views" — the
@@ -973,7 +975,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # tool modules, never a category target.
     "view-write": "daemon.tools.view_write",
     # ari-tools Phase 3 (the live board view) — the board's link-minter
-    # category. PRIVILEGED category (entry #12 of
+    # category. PRIVILEGED category (entry #11 of
     # PRIVILEGED_TOOL_CATEGORIES): minting the board's passcode
     # authorises reading the user's whole work board, so the empty-allow
     # inherit universe must never auto-grant it.
@@ -1131,9 +1133,10 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # ``secrets_audit`` PG tables via the in-process
     # ``SecretService`` (colocated ``SecretCipher`` reads
     # ``SYSTEM_ENCRYPTION_KEY`` at construction time). The
-    # category is entry #7 in ``PRIVILEGED_TOOL_CATEGORIES``
-    # (sextet → septet; ``cu`` joined 2026-10-16 before this
-    # entry); opt-in only via
+    # category is entry #6 in ``PRIVILEGED_TOOL_CATEGORIES``
+    # (quintet → sextet; ``cu``, the category that joined
+    # 2026-10-16 before this entry, was REMOVED 2026-10-24);
+    # opt-in only via
     # ``tools.allow: ["secrets"]`` on the day-one allow-list
     # (Q2 ruling: ``worker``, ``tester``, ``leader``,
     # ``ari``). See ``daemon/tools/secrets_tools.py`` for the
@@ -1149,8 +1152,8 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # that read tier values and write DB overrides for the
     # daemon-global managed keys through the wired
     # ``SettingsService`` (router-owned DI global — the
-    # council-B3 option-(b) seam). Category is entry #8 in
-    # ``PRIVILEGED_TOOL_CATEGORIES`` (septet → octet; ``secrets``
+    # council-B3 option-(b) seam). Category is entry #7 in
+    # ``PRIVILEGED_TOOL_CATEGORIES`` (sextet → septet; ``secrets``
     # joined 2026-10-17 before this entry); opt-in only — the
     # ari + leader ``tools.allow`` entries landed 2026-10-18 (P3).
     # See ``daemon/tools/settings_tools.py`` for the honest
@@ -1226,7 +1229,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     # create_board_tools() factory (daemon/tools/board_tools.py).
     # Factory-built (not import-time registered), so they belong in
     # DYNAMIC_TOOL_NAMES and KNOWN_TOOL_NAMES. The category is
-    # PRIVILEGED (entry #9 of PRIVILEGED_TOOL_CATEGORIES) — opt-in
+    # PRIVILEGED (entry #8 of PRIVILEGED_TOOL_CATEGORIES) — opt-in
     # only, never default-granted.
     "board_create",
     "board_get",
@@ -1236,7 +1239,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     # created by the create_self_alarm_tools() factory
     # (daemon/tools/self_alarm.py). Factory-built (not import-time
     # registered), so it belongs in DYNAMIC_TOOL_NAMES and
-    # KNOWN_TOOL_NAMES. The category is PRIVILEGED (entry #10 of
+    # KNOWN_TOOL_NAMES. The category is PRIVILEGED (entry #9 of
     # PRIVILEGED_TOOL_CATEGORIES) — opt-in only, never default-granted;
     # the ari-only runtime gate lives in the tool body.
     "self_alarm",
@@ -1246,7 +1249,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     # create_view_write_tools() factory (daemon/tools/view_write.py).
     # Factory-built (not import-time registered), so it belongs in
     # DYNAMIC_TOOL_NAMES and KNOWN_TOOL_NAMES. The category is PRIVILEGED
-    # (entry #11 of PRIVILEGED_TOOL_CATEGORIES) — opt-in only, never
+    # (entry #10 of PRIVILEGED_TOOL_CATEGORIES) — opt-in only, never
     # default-granted; the ari-only runtime gate lives in the tool body.
     "view_write",
     # ari-tools Phase 3 (the live board view): board_link — mints the
@@ -1255,7 +1258,7 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     # create_board_link_tools() factory (daemon/tools/board_link.py).
     # Factory-built (not import-time registered), so it belongs in
     # DYNAMIC_TOOL_NAMES and KNOWN_TOOL_NAMES. The category is PRIVILEGED
-    # (entry #12 of PRIVILEGED_TOOL_CATEGORIES) — opt-in only, never
+    # (entry #11 of PRIVILEGED_TOOL_CATEGORIES) — opt-in only, never
     # default-granted; the ari+leader runtime gate lives in the tool body.
     "board_link",
     # wedge-capture (2026-10-22): the two READ-ONLY capture-evidence

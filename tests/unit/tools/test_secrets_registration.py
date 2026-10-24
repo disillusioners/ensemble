@@ -191,7 +191,7 @@ class TestStaticRegistrationChecklist:
         )
 
     def test_secrets_in_privileged_categories(self) -> None:
-        """The ``secrets`` category is entry #7 in
+        """The ``secrets`` category is entry #6 in
         ``PRIVILEGED_TOOL_CATEGORIES`` (sextet → septet → octet →
         nonet; the sextet→septet step per the Q2 ruling 2026-10-17
         promoted ``secrets`` to #7, the septet→octet step
@@ -269,7 +269,7 @@ class TestStaticRegistrationChecklist:
             "board-link",
             # wedge-capture (2026-10-22): the READ-ONLY capture-evidence
             # surface — ``wedge_capture_list`` + ``wedge_capture_get``.
-            # PRIVILEGED (entry #16): the capture payload is a privileged
+            # PRIVILEGED (entry #12): the capture payload is a privileged
             # diagnostic artifact (all-thread stack dumps, per-thread CPU
             # maps, process RSS); the empty-allow inherit universe must
             # NOT auto-grant it. The ari + leader + maintenancer allow

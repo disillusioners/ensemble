@@ -85,7 +85,7 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "board-link",
     # wedge-capture (2026-10-22): the READ-ONLY capture-evidence
     # surface — ``wedge_capture_list`` + ``wedge_capture_get``.
-    # PRIVILEGED (entry #16): the capture payload is a privileged
+    # PRIVILEGED (entry #12): the capture payload is a privileged
     # diagnostic artifact; the empty-allow inherit universe must
     # NOT auto-grant it. The ari + leader + maintenancer allow
     # entries are the only access path, and every tool body ALSO

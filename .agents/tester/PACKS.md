@@ -2866,7 +2866,8 @@ Lane-keeper note: bump Last Run on the two registered rows above (`concurrency_a
 
 > **RETIRED 2026-10-24** (branch `feature/remove-cu-builtin`): the
 > daemon-side `computer-use` builtin MCP server was REMOVED — the eight
-> cu pack rows below are deleted. `cu_new_suite_unit_test` invoked
+> cu pack rows that lived in this section were deleted.
+> `cu_new_suite_unit_test` invoked
 > `tests/unit/test_computer_use_mcp.py`, which no longer exists (its
 > generic half was ported to
 > `tests/unit/test_mcp_builtin_availability_gate.py`); the other seven
@@ -2874,7 +2875,7 @@ Lane-keeper note: bump Last Run on the two registered rows above (`concurrency_a
 > that gate, though most invoked still-present, non-cu-specific files
 > (the sibling QUARANTINE 2026-10-16 row words this precisely). The full historical report stays in
 > `RESULTS/2026-10-16-cu-mcp-computer-use-verification.md` and the
-> evidence rows in `LESSONS/` / `EVIDENCE/` are untouched (history).
+> `LESSONS/` row is untouched (history).
 
 ---
 
