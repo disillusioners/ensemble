@@ -1298,11 +1298,37 @@ def _format_enqueue_result_status(result: Any) -> str:
     queued = getattr(result, "queued", None)
     text = f"status={status}"
     if queued is False:
-        text += (
-            " (queued=False — the deferred-pause marker_guard skipped the "
-            "dispatch Task, so the message row was kept as an audit record "
-            "only and the target was NOT woken by it)"
-        )
+        # W1 (2026-10-24) — the TWO reasons a message can be
+        # ``queued=False`` are DISTINCT and must not be conflated:
+        #
+        # * ``deferred_pause_marker`` — the deferred-pause marker guard
+        #   skipped the dispatch Task. The message row was kept as an
+        #   audit record only and the target was NOT woken by it.
+        # * ``task_id_refresh_failed`` — the dispatch Task row EXISTS
+        #   (the commit succeeded) but its id could not be read back.
+        #   The target WILL be woken. The pre-split prose claimed
+        #   "NOT woken" here too — a false marker.
+        #
+        # An unknown / absent reason degrades to the SOFTENED wording
+        # (no claim about whether the target was woken).
+        reason = getattr(result, "not_queued_reason", None)
+        if reason == "deferred_pause_marker":
+            text += (
+                " (queued=False — the deferred-pause marker_guard skipped "
+                "the dispatch Task, so the message row was kept as an audit "
+                "record only and the target was NOT woken by it)"
+            )
+        elif reason == "task_id_refresh_failed":
+            text += (
+                " (queued=False — the dispatch Task row was created but its "
+                "id could not be read back; the message WAS committed and "
+                "the target WILL be woken by it)"
+            )
+        else:
+            text += (
+                " (queued=False — no dispatch Task could be confirmed for "
+                "this message; the message row was kept as an audit record)"
+            )
     return text
 
 

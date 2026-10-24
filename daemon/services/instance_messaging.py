@@ -858,6 +858,13 @@ class _PreparedEnqueueContext(NamedTuple):
     # NamedTuple requires defaults on trailing fields — kept here so
     # the fresh-episode flag rides at the tail.
     is_fresh_episode_user_message: bool = False
+    # W1 (2026-10-24) — WHY no dispatch Task was confirmed (``None``
+    # when the Task row WAS created). The two cases are distinct:
+    # ``"deferred_pause_marker"`` (the Task was skipped — the target
+    # was NOT woken) vs ``"task_id_refresh_failed"`` (the Task row
+    # EXISTS but its id could not be read back — the target WILL be
+    # woken). Threaded onto ``AsyncMessageResult.not_queued_reason``.
+    not_queued_reason: str | None = None
 
 
 class ActivityCallbackHandler(BaseCallbackHandler):
@@ -2211,6 +2218,12 @@ class InstanceMessagingService:
         # Task primary key (int | None); callers already treat None as "no
         # resolvable task id available".
         task_id: int | None = None
+        # W1 (2026-10-24) — WHY no dispatch Task was confirmed. ``None``
+        # when the Task row was created. The two failure modes are
+        # DISTINCT: the marker guard SKIPPED the Task (the target was
+        # NOT woken) vs a refresh failure left the Task row in place
+        # but unreadable (the target WILL be woken).
+        not_queued_reason: str | None = None
         # Virtual Job Management Surface (Phase 1, Batch 3,
         # 2026-06-27): capture ``Task.work_id`` alongside ``task.id``.
         # The Task model's ``work_id`` column has a ``default_factory``
@@ -2415,6 +2428,9 @@ class InstanceMessagingService:
             #    carve-out override above so the revival carrier is
             #    NEVER born deferred.
             if deferred_pause_marker_set:
+                # W1 — the dispatch Task was SKIPPED: the target was
+                # NOT woken by this message.
+                not_queued_reason = "deferred_pause_marker"
                 logger.warning(
                     f"instance_messaging: SKIPPING PROCESS_MESSAGE Task creation "
                     f"for instance {instance_id[:8]}... — reason=marker "
@@ -2654,6 +2670,10 @@ class InstanceMessagingService:
                         f"Failed to refresh Task row for message {message_id}: {e}"
                     )
                     task_id = None
+                    # W1 — the Task row EXISTS (the commit succeeded);
+                    # only the id read-back failed. The target WILL be
+                    # woken — this is NOT the marker-guard case.
+                    not_queued_reason = "task_id_refresh_failed"
 
         return _PreparedEnqueueContext(
             message_id=message_id,
@@ -2671,6 +2691,8 @@ class InstanceMessagingService:
             # stamped at ``_build_graph_input`` time (see the helper's
             # ``fresh_episode_attestation_reset`` parameter).
             is_fresh_episode_user_message=is_fresh_episode_user_message,
+            # W1 — the not-queued reason travels with the context.
+            not_queued_reason=not_queued_reason,
         )
 
     async def enqueue_message(
@@ -2838,6 +2860,10 @@ class InstanceMessagingService:
             # (``"queued"`` on every build site) — no new value is
             # invented here.
             queued=ctx.task_id is not None,
+            # W1 — WHY ``queued`` is False (marker-skip vs refresh-fail).
+            # The tool prose must not claim "the target was NOT woken"
+            # for the refresh-fail case — the Task row exists there.
+            not_queued_reason=ctx.not_queued_reason,
         )
 
     @property

@@ -13,9 +13,23 @@ and applies it to every prose-returning enqueue path:
 * ``convene_council_with_skill`` → appended to the ``hint``.
 
 The formatter renders ``status={result.status}`` and, when
-``result.queued is False``, the marker-guard sentence (the deferred-pause
-marker guard skipped the dispatch Task → the message row survives as an
-audit record only and the target was NOT woken).
+``result.queued is False``, a reason-scoped sentence.
+
+W1 (2026-10-24) SPLIT THE TWO NOT-QUEUED REASONS: there are TWO
+distinct reasons a message can be ``queued=False``, and the pre-split
+prose asserted "the target was NOT woken" for BOTH — a false marker in
+the refresh-fail case (the dispatch Task row EXISTS there, so the
+target IS woken):
+
+* ``deferred_pause_marker`` — the marker guard skipped the dispatch
+  Task → the message row survives as an audit record only and the
+  target was NOT woken.
+* ``task_id_refresh_failed`` — the dispatch Task row was created but
+  its id could not be read back → the message WAS committed and the
+  target WILL be woken.
+
+An absent/unknown reason degrades to a SOFTENED sentence that claims
+nothing about whether the target was woken.
 
 The status vocabulary is unchanged: ``"queued"`` on every build site.
 No new status value is invented.
@@ -35,7 +49,12 @@ from tests.helpers.send_message_fixtures import (
 )
 
 
-def _enqueue_result(*, status: str = "queued", queued: bool = True) -> AsyncMessageResult:
+def _enqueue_result(
+    *,
+    status: str = "queued",
+    queued: bool = True,
+    not_queued_reason: str | None = None,
+) -> AsyncMessageResult:
     """A REAL ``AsyncMessageResult`` (the class the service builds)."""
     return AsyncMessageResult(
         message_id="msg-abc-123",
@@ -43,6 +62,7 @@ def _enqueue_result(*, status: str = "queued", queued: bool = True) -> AsyncMess
         status=status,
         job_id="job-abc-123",
         queued=queued,
+        not_queued_reason=not_queued_reason,
     )
 
 
@@ -53,10 +73,40 @@ class TestStatusFormatter:
         assert _format_enqueue_result_status(_enqueue_result()) == "status=queued"
 
     def test_renders_the_marker_guard_sentence_when_not_queued(self):
-        text = _format_enqueue_result_status(_enqueue_result(queued=False))
+        text = _format_enqueue_result_status(
+            _enqueue_result(
+                queued=False, not_queued_reason="deferred_pause_marker"
+            )
+        )
         assert text.startswith("status=queued")
         assert "queued=False" in text
         assert "marker_guard" in text
+        assert "NOT woken" in text
+
+    def test_the_refresh_fail_reason_does_not_claim_the_target_was_not_woken(
+        self,
+    ):
+        """W1 — the false-marker corner. The dispatch Task row EXISTS
+        in the refresh-fail case, so the prose must say the target WILL
+        be woken."""
+        text = _format_enqueue_result_status(
+            _enqueue_result(
+                queued=False, not_queued_reason="task_id_refresh_failed"
+            )
+        )
+        assert "queued=False" in text
+        assert "NOT woken" not in text
+        assert "WILL be woken" in text
+        assert "marker_guard" not in text
+
+    def test_an_unknown_reason_degrades_to_the_softened_sentence(self):
+        """No reason → claim NOTHING about whether the target was
+        woken."""
+        text = _format_enqueue_result_status(_enqueue_result(queued=False))
+        assert "queued=False" in text
+        assert "NOT woken" not in text
+        assert "WILL be woken" not in text
+        assert "marker_guard" not in text
 
     def test_omits_the_marker_guard_sentence_when_queued(self):
         text = _format_enqueue_result_status(_enqueue_result(queued=True))
@@ -97,7 +147,9 @@ class TestSendMessageProse:
     async def test_prose_carries_the_marker_guard_sentence(self):
         manager = make_send_message_manager(status="waiting_children")
         manager.enqueue_message = AsyncMock(
-            return_value=_enqueue_result(queued=False)
+            return_value=_enqueue_result(
+                queued=False, not_queued_reason="deferred_pause_marker"
+            )
         )
         send_message = get_send_message_tool(manager)
 
@@ -200,7 +252,9 @@ class TestConvenePaths:
     async def test_convene_hint_carries_the_marker_guard_sentence(self):
         manager = self._make_convene_manager()
         manager.enqueue_message = AsyncMock(
-            return_value=_enqueue_result(queued=False)
+            return_value=_enqueue_result(
+                queued=False, not_queued_reason="deferred_pause_marker"
+            )
         )
         tool = self._get_tool(manager, "convene_council")
 

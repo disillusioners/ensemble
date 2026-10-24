@@ -35,7 +35,42 @@ class AsyncMessageResult:
     instance_id: str
     status: str = "queued"
     job_id: str | None = None  # job_id of the enqueued MESSAGE job (None for non-JQ paths)
+    # ── PER-LANE ``queued`` POLARITY (W2, 2026-10-24) ──────────────────
+    #
+    # ``queued`` means DIFFERENT things on different lanes. Read this
+    # before touching a call site:
+    #
+    # * messaging-service lanes (``InstanceMessagingService.enqueue_message``
+    #   / ``enqueue_message_job``) — ``True`` means "the PROCESS_MESSAGE
+    #   dispatch Task row was created, so the target WILL be woken";
+    #   ``False`` means "no dispatch Task was confirmed".
+    # * HTTP lane (``POST /messages`` → ``MessageResponse.queued``) —
+    #   ``True`` means "enqueued as a first-class turn" (the same
+    #   meaning, surfaced on the wire).
+    # * job-tool lane (``job_inject``'s WC branch) — ``True`` is a
+    #   LITERAL "enqueued as a first-class turn" (the LOCKED C1-D3
+    #   decision); it is NOT the ``AsyncMessageResult.queued`` field.
+    #
+    # ``queued`` is NEVER "blocked at capacity" — that reading was a
+    # doc drift, corrected here (the field used to fall through to the
+    # dataclass default ``False`` on EVERY plain enqueue, which made it
+    # unreadable; D4(iv) made it mirror the Task creation).
     queued: bool = False
+    # W1 (2026-10-24) — WHY ``queued`` is ``False`` (``None`` when the
+    # message WAS queued).
+    #
+    # * ``"deferred_pause_marker"`` — the deferred-pause marker guard
+    #   skipped the dispatch Task. The message row survives as an audit
+    #   record and the target was NOT woken by it.
+    # * ``"task_id_refresh_failed"`` — the dispatch Task row EXISTS but
+    #   its id could not be read back (the commit succeeded; only the
+    #   ``session.refresh`` failed). The target WILL be woken.
+    #
+    # The two cases must NOT be conflated: the marker case means "not
+    # woken", the refresh case means "woken". Before this split the
+    # tool prose asserted "the target was NOT woken" for BOTH — a
+    # false marker in the refresh-fail case.
+    not_queued_reason: str | None = None
 
 
 class LinkageContractError(RuntimeError):

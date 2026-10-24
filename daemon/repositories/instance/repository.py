@@ -55,6 +55,40 @@ _MAX_TRAVERSAL_DEPTH = 256
 # statement unreadable in the query log.
 _METADATA_LOOKUP_CHUNK = 500
 
+#: The ESCAPE character used by the LIKE-wildcard hardening in
+#: :meth:`SQLModelInstanceRepository.find_by_instance_id_prefix` (T2,
+#: 2026-10-24 — defense in depth). Dialect-neutral: SQLite and
+#: PostgreSQL both honour ``ESCAPE '\\'``.
+_LIKE_ESCAPE_CHAR = "\\"
+
+
+def _escape_like_pattern(value: str) -> str:
+    """Escape the LIKE wildcards in ``value`` so it matches LITERALLY.
+
+    ``%`` (any sequence) and ``_`` (any single character) are the two
+    LIKE wildcards; the escape character itself must be escaped first
+    or the escape would be applied to its own output.
+
+    A caller-supplied prefix that reaches a LIKE pattern unescaped can
+    match unintended rows — e.g. ``%`` alone matches EVERY row. The
+    repository method that builds the pattern escapes here rather than
+    relying on a single upstream shape gate.
+
+    Args:
+        value: The raw pattern fragment.
+
+    Returns:
+        The escaped fragment (safe to embed in a LIKE pattern with
+        ``escape=_LIKE_ESCAPE_CHAR``).
+    """
+    if not isinstance(value, str) or not value:
+        return ""
+    return (
+        value.replace(_LIKE_ESCAPE_CHAR, _LIKE_ESCAPE_CHAR * 2)
+        .replace("%", _LIKE_ESCAPE_CHAR + "%")
+        .replace("_", _LIKE_ESCAPE_CHAR + "_")
+    )
+
 
 def _chunked(items: list[Any], size: int) -> list[list[Any]]:
     """Split ``items`` into consecutive chunks of at most ``size``."""
@@ -484,11 +518,21 @@ class SQLModelInstanceRepository:
         (same posture as ``InstanceManager.find_near_instance``, which
         also searches across statuses).
 
+        LIKE-WILDCARD HARDENING (T2, 2026-10-24 — defense in depth):
+        the LIKE pattern is built from a caller-supplied string, so
+        ``%`` and ``_`` inside ``prefix`` would be interpreted as
+        WILDCARDS and could match unintended rows. The caller
+        (``_resolve_instance_id``) pre-validates the shape (hex digits
+        + dashes, 8-35 chars), but the repository does NOT rely on that
+        single gate: it ESCAPES the wildcards itself, so a
+        wildcard-bearing prefix matches LITERALLY. The escape is
+        dialect-neutral (``ESCAPE '\\'`` is supported by SQLite and
+        PostgreSQL alike).
+
         Args:
-            prefix: The id prefix to match. Callers MUST pre-validate the
-                shape (hex digits + dashes only) — ``%`` and ``_`` are
-                LIKE wildcards and are NOT escaped here, so an
-                unvalidated prefix could match unintended rows.
+            prefix: The id prefix to match. Callers SHOULD pre-validate
+                the shape (hex digits + dashes only); the LIKE wildcards
+                are escaped here regardless.
             limit: Maximum number of ids to return. The resolver needs at
                 most 2 (one hit resolves; two hits disambiguate).
 
@@ -497,10 +541,15 @@ class SQLModelInstanceRepository:
         """
         if not prefix:
             return []
+        escaped = _escape_like_pattern(prefix)
         with SQLModelSession(self.engine) as db_session:
             stmt = (
                 select(Instance.instance_id)
-                .where(Instance.instance_id.like(f"{prefix}%"))
+                .where(
+                    Instance.instance_id.like(
+                        f"{escaped}%", escape=_LIKE_ESCAPE_CHAR
+                    )
+                )
                 .order_by(Instance.instance_id)
                 .limit(limit)
             )
