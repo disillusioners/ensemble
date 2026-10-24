@@ -13836,10 +13836,12 @@ class InstanceManager:
                 no source filter.
             status: Optional exact ``InstanceStatus`` filter, applied
                 **in SQL** by the repository. Added for the nest-ops
-                ``instance_read`` category (GT-3 / AC-21): a status filter
-                applied in Python over a fetched page silently returns an
-                arbitrary pinned-ordered subset past the first page.
-                ``None`` (default) applies no status filter.
+                ``instance_read`` category (GT-8 in the nest-ops
+                shakedown defect-patch plan set — the filter must reach
+                SQL; the lifecycle→repo seam forward is F12): a status
+                filter applied in Python over a fetched page silently
+                returns an arbitrary pinned-ordered subset past the
+                first page. ``None`` (default) applies no status filter.
 
         Returns:
             Tuple of (list of instance info dicts, total count, truncated flag).

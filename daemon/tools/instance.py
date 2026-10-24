@@ -6101,9 +6101,12 @@ Returns:
     # either invisible to the help tool or BYPASSES the privileged strip.
     #
     # BOTH categories are PRIVILEGED (entries #13 / #14):
-    #   * ``instance_read`` — the four fleet reads (census, deep detail,
-    #     wedge report, capacity summary). Fleet-wide telemetry; the
-    #     empty-allow inherit universe must never auto-grant it.
+    #   * ``instance_read`` — the fleet reads (census, deep detail, wedge
+    #     report, capacity summary — plus the ADDITIVE alias
+    #     ``instance_fleet_summary``, a fifth NAME for the capacity
+    #     summary, added by the nest-ops shakedown F1). Fleet-wide
+    #     telemetry; the empty-allow inherit universe must never
+    #     auto-grant it.
     #   * ``instance_ops``  — the six audited acts (terminate, reclaim,
     #     nudge, mark, answer, dismiss). Destructive; single-owner
     #     (maintenancer) with a kill switch on the act side only.
