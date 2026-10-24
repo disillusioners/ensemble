@@ -155,6 +155,15 @@ on test hosts).
      never auto-rolls-back; §5 is the manual procedure). The marker is
      cleared ONLY on verify success — a step-d failure leaves the marker
      present so a concurrent promote refuses; see §3b for stale-recovery.
+
+**PRECONDITION (stage ownership — unit-secret-exposure, 2026-10-24):** any
+pipeline stage against this install (`scripts/upgrade/stage.sh`) must run as
+the INSTALL OWNER — the account named by the unit's `User=` — because the
+stage's `.env` marker rewrite replaces the file's inode and re-owns it to
+the staging uid, so a cross-uid stage leaves a 0600 `.env` the unit's
+`User=` cannot read (launcher WARN → no `POSTGRES_*` → boot-block) — a
+DOCUMENTED precondition, with no mechanical check enforcing it.
+
 5. **Confirm:**
    ```bash
    systemctl status <unit>            # active; MainPID = the launcher
