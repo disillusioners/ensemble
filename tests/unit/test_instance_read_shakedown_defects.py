@@ -1060,3 +1060,171 @@ class TestF3xF4Coupling:
         # and the scan covered the whole fleet
         assert payload["scan_truncated"] is False
         assert payload["scan_stop_reason"] == "end_of_set"
+
+
+# ────────────────────────────────────────────────────────────────────────
+# F2 — the fleet census
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestF2Census:
+    """F2 — the census counts the WHOLE fleet and reconciles.
+
+    PLANNED MUTATION (one behaviour per run):
+      * revert to the windowed Python loop — the coverage pin goes RED
+        (the sum drops to the window size, so it no longer equals
+        ``total_rows`` / ``total_matching``);
+      * drop the KB exclusion from the new repository method — the
+        KB-parity pin goes RED (the census total diverges from
+        ``instance_list.total_matching``);
+      * derive ``counts_by_liveness`` by adding an ``idle`` key — the
+        no-idle-in-liveness pin goes RED;
+      * copy the repository's constant ``False`` into
+        ``totals.scan_truncated`` — no observable change (the value is
+        already the literal ``False``); this pin is the SHAPE pin.
+    """
+
+    def _fleet(self, engine):
+        now = datetime.now(timezone.utc)
+        rows = [
+            _instance("census-idle-1", status="idle", created_at=now),
+            _instance("census-idle-2", status="idle", created_at=now),
+            _instance("census-run-1", status="running", created_at=now),
+            _instance("census-done-1", status="completed", created_at=now),
+            _instance(
+                "census-kb-1",
+                agent_id="kb-writer",
+                status="idle",
+                created_at=now,
+            ),
+        ]
+        return _insert_instances(engine, rows)
+
+    async def test_totals_reconcile_with_instance_list(self, fleet_db):
+        ids = self._fleet(fleet_db)
+        manager = RepoBackedManager(fleet_db)
+        tools = _read_tools(manager)
+
+        capacity = await _call(tools, "fleet_capacity_summary")
+        listing = await _call(tools, "instance_list", limit=200, offset=0)
+
+        totals = capacity["totals"]
+        assert (
+            sum(capacity["counts_by_status"].values())
+            == totals["counted_rows"]
+        )
+        assert totals["counted_rows"] == totals["total_rows"]
+        # The census and the census page describe the SAME population
+        # (unfiltered): the KB row is excluded from BOTH.
+        assert totals["total_rows"] == listing["total_matching"] == 4
+        assert totals["reconciled"] is True
+
+    async def test_idle_is_a_status_bucket(self, fleet_db):
+        """`idle` appears in ``counts_by_status`` (a STATUS bucket) and
+        DELIBERATELY NOT in ``counts_by_liveness`` — the canonical map
+        sends idle → "processing"."""
+        self._fleet(fleet_db)
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await _call(_read_tools(manager), "fleet_capacity_summary")
+
+        assert payload["counts_by_status"].get("idle") == 2
+        assert "idle" not in payload["counts_by_liveness"]
+        # idle → "processing" (the canonical map) and running →
+        # "processing" too, so the liveness bucket carries BOTH.
+        assert payload["counts_by_liveness"].get("processing") == 3
+
+    async def test_both_marginals_sum_to_counted_rows(self, fleet_db):
+        """The free third cross-check (arch §2.3)."""
+        self._fleet(fleet_db)
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await _call(_read_tools(manager), "fleet_capacity_summary")
+
+        counted = payload["totals"]["counted_rows"]
+        assert sum(payload["counts_by_status"].values()) == counted
+        assert sum(payload["counts_by_agent"].values()) == counted
+
+    async def test_scan_truncated_is_the_literal_false(self, fleet_db):
+        self._fleet(fleet_db)
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await _call(_read_tools(manager), "fleet_capacity_summary")
+
+        assert payload["totals"]["scan_truncated"] is False
+        assert payload["scan_truncated"] is False
+
+    async def test_note_carries_both_caveats(self, fleet_db):
+        """The note states the filtered-page caveat AND the
+        two-statement race disclosure."""
+        self._fleet(fleet_db)
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await _call(_read_tools(manager), "fleet_capacity_summary")
+
+        note = payload["totals"]["note"]
+        assert "status filter" in note
+        assert "total_matching" in note
+        assert "between the two statements" in note
+
+    def test_kb_parity_between_census_and_list(self, fleet_db):
+        """With a KB-agent row present, the census total and
+        ``instance_list.total_matching`` BOTH exclude it and agree."""
+        self._fleet(fleet_db)
+        manager = RepoBackedManager(fleet_db)
+
+        census = manager._instance_repository.count_fleet_by_status_and_agent(
+            exclude_kb=True
+        )
+        _rows, total_matching, _trunc = manager._instance_repository.list(
+            limit=1000, offset=0, exclude_kb=True
+        )
+
+        assert census.total == total_matching == 4
+
+    def test_census_runs_both_statements_on_one_session(self, fleet_db):
+        """ONE connection checkout for the COUNT and the GROUP BY
+        (arch §2.1)."""
+        from sqlalchemy import event
+
+        self._fleet(fleet_db)
+        manager = RepoBackedManager(fleet_db)
+
+        checkouts: list[int] = []
+
+        def _on_checkout(dbapi_conn, record_proxy, counter):
+            checkouts.append(counter)
+
+        event.listen(fleet_db, "checkout", _on_checkout)
+        try:
+            manager._instance_repository.count_fleet_by_status_and_agent(
+                exclude_kb=True
+            )
+        finally:
+            event.remove(fleet_db, "checkout", _on_checkout)
+
+        assert len(checkouts) == 1
+
+    def test_census_is_fleet_size_independent(self, fleet_db):
+        """A fleet far larger than one census window still counts every
+        row — the defect that created F2 was a census that silently
+        degraded past 1000 rows."""
+        now = datetime.now(timezone.utc)
+        rows = [
+            _instance(
+                f"bulk-{i:05d}",
+                created_at=now - timedelta(seconds=i),
+                last_activity_at=now - timedelta(seconds=i),
+                status="running" if i % 2 else "completed",
+            )
+            for i in range(1200)
+        ]
+        ids = _insert_instances(fleet_db, rows)
+        manager = RepoBackedManager(fleet_db)
+
+        census = manager._instance_repository.count_fleet_by_status_and_agent(
+            exclude_kb=True
+        )
+
+        assert census.total == len(ids)
+        assert sum(c for _s, _a, c in census.groups) == len(ids)

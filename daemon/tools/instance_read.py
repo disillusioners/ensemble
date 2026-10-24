@@ -1701,21 +1701,44 @@ def _build_health_report(
 
 
 def _build_capacity_summary(manager: Any) -> dict[str, Any]:
-    """Build the capacity payload — counts, queue depth, pool, DLQ."""
-    rows, _total, truncated = manager.list_instances(
-        limit=FLEET_SCAN_LIMIT, offset=0
-    )
+    """Build the capacity payload — counts, queue depth, pool, DLQ.
+
+    The census half is ONE grouped query over the WHOLE fleet (F2): the
+    old shape counted a bounded window in Python, so its
+    ``counts_by_status`` summed to the window size while
+    ``instance_list.total_matching`` reported the real fleet — two true
+    numbers that could not reconcile. See
+    ``SQLModelInstanceRepository.count_fleet_by_status_and_agent`` for
+    the query shape and the KB-exclusion contract.
+    """
+    repo = getattr(manager, "_instance_repository", None)
+    if repo is None or not hasattr(repo, "count_fleet_by_status_and_agent"):
+        raise RuntimeError(
+            "fleet census unavailable: the instance repository does not "
+            "expose count_fleet_by_status_and_agent"
+        )
+    census = repo.count_fleet_by_status_and_agent(exclude_kb=True)
 
     counts_by_agent: dict[str, int] = {}
     counts_by_status: dict[str, int] = {}
+    for status, agent_id, count in census.groups:
+        agent_key = agent_id or "unknown"
+        status_key = status or "unknown"
+        counts_by_agent[agent_key] = counts_by_agent.get(agent_key, 0) + count
+        counts_by_status[status_key] = counts_by_status.get(status_key, 0) + count
+
+    # Liveness is a pure function of status — the canonical map, no
+    # fork, no extra query. NOTE (F2): `idle` is a STATUS bucket only.
+    # `_STATUS_CANONICAL_MAP` maps idle → "processing", so
+    # counts_by_liveness deliberately has NO `idle` key.
     counts_by_liveness: dict[str, int] = {}
-    for info in rows:
-        agent = info.get("agent_id") or "unknown"
-        status = info.get("status") or "unknown"
-        liveness = _liveness_for(status)
-        counts_by_agent[agent] = counts_by_agent.get(agent, 0) + 1
-        counts_by_status[status] = counts_by_status.get(status, 0) + 1
-        counts_by_liveness[liveness] = counts_by_liveness.get(liveness, 0) + 1
+    for status_key, count in counts_by_status.items():
+        liveness = _liveness_for(status_key)
+        counts_by_liveness[liveness] = counts_by_liveness.get(liveness, 0) + count
+
+    total_rows = int(census.total)
+    counted_rows = sum(counts_by_status.values())
+    reconciled = counted_rows == total_rows
 
     # Queue depth — one grouped query across queues and admission states.
     queue_depth: list[dict[str, Any]] = []
@@ -1809,7 +1832,33 @@ def _build_capacity_summary(manager: Any) -> dict[str, Any]:
         "worker_pool": worker_pool,
         "dlq_depth": dlq_depth,
         "audit_pending": audit_pending,
+        # F2: the reconciliation block. `counted_rows` and `total_rows`
+        # are two INDEPENDENT computations of the same number over the
+        # same WHERE; `reconciled` is their explicit agreement flag.
+        "totals": {
+            "total_rows": total_rows,
+            "counted_rows": counted_rows,
+            # The census no longer reads a bounded window, so this key
+            # is False BY CONSTRUCTION. It stays for shape stability —
+            # consumers (and the _full_doc_ contract) read it.
+            "scan_truncated": False,
+            "reconciled": reconciled,
+            "note": (
+                "counts_by_status is computed over the FULL fleet with one "
+                "GROUP BY query (no scan window). total_rows is the COUNT(*) "
+                "over the same WHERE (KB agents excluded) — the same number "
+                "instance_list reports as total_matching for an UNFILTERED "
+                "call. counted_rows is the sum of counts_by_status; "
+                "reconciled = (counted_rows == total_rows). A FILTERED "
+                "instance_list page is a different population: with a "
+                "status filter its total_matching counts only the matching "
+                "rows, so do not compare it to these totals. reconciled="
+                "false can transiently reflect a write landing between the "
+                "two statements of this scan."
+            ),
+        },
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        # M8: the census ceiling is visible, never silent.
-        "scan_truncated": bool(truncated),
+        # F2: the census no longer scans a bounded window — the flag is
+        # False by construction, never a copied constant.
+        "scan_truncated": False,
     }

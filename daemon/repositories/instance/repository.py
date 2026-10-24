@@ -9,7 +9,7 @@ import time
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from sqlalchemy import bindparam, case, delete as sql_delete, exists, func, literal, not_, or_, String, text
 from sqlalchemy import cast as sa_cast
@@ -54,6 +54,39 @@ _MAX_TRAVERSAL_DEPTH = 256
 # ``SQLITE_MAX_VARIABLE_NUMBER``, PostgreSQL's 65535) without making the
 # statement unreadable in the query log.
 _METADATA_LOOKUP_CHUNK = 500
+
+
+class FleetCounts(NamedTuple):
+    """The fleet census result (nest-ops shakedown F2).
+
+    ``groups``  — the ``(status, agent_id, count)`` rows, cardinality
+                  ≤ |statuses| × |agents| (~10 × ~20).
+    ``total``   — the independent ``SELECT COUNT(*)`` over the SAME
+                  WHERE. The census's reconciliation contract compares
+                  THIS number to ``sum`` of the marginalized group
+                  counts — two independent computations of the same
+                  number, plus an explicit equality flag.
+    """
+
+    groups: list[tuple[str, str, int]]
+    total: int
+
+
+def _kb_filter(exclude_kb: bool) -> ColumnElement[bool] | None:
+    """The KB-exclusion predicate — SHARED by ``list()`` and the census.
+
+    Extracted from ``list()``'s WHERE so the fleet census
+    (:meth:`SQLModelInstanceRepository.count_fleet_by_status_and_agent`)
+    CANNOT drift from the list WHERE clause (nest-ops shakedown F2,
+    D-2 amendment, arch §2.2): both callers take the predicate from
+    THIS helper, so the same constant (``KB_AGENT_IDS``), the same flag
+    and the same predicate object are in play. A mutation that drops
+    the exclusion on one side only diverges the two numbers and fails
+    the KB-parity pin.
+    """
+    if not exclude_kb:
+        return None
+    return Instance.agent_id.not_in(KB_AGENT_IDS)
 
 #: The bind-parameter chunk size for the EVIDENCE probes
 #: (``filter_without_any_evidence_ids`` and the grouped JobItem probe
@@ -1229,9 +1262,10 @@ class SQLModelInstanceRepository:
                 if project_id is not None:
                     count_stmt = count_stmt.where(Instance.project_id == project_id)
                     stmt = stmt.where(Instance.project_id == project_id)
-                if exclude_kb:
-                    count_stmt = count_stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
-                    stmt = stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
+                kb_cond = _kb_filter(exclude_kb)
+                if kb_cond is not None:
+                    count_stmt = count_stmt.where(kb_cond)
+                    stmt = stmt.where(kb_cond)
                 search_cond = self._build_search_condition(db_session, search)
                 if search_cond is not None:
                     count_stmt = count_stmt.where(search_cond)
@@ -1482,6 +1516,65 @@ class SQLModelInstanceRepository:
                 ]
 
             return self._enrich_instances(db_session, all_instances), total, truncated
+
+    def count_fleet_by_status_and_agent(
+        self, *, exclude_kb: bool = True
+    ) -> "FleetCounts":
+        """Count the WHOLE fleet grouped by ``(status, agent_id)``.
+
+        The fleet census behind ``fleet_capacity_summary`` (nest-ops
+        shakedown F2, D-2 amendment / arch §2.1). The old census counted
+        a bounded WINDOW of rows in Python, so its ``counts_by_status``
+        summed to the window size while ``instance_list.total_matching``
+        reported the real fleet — two true numbers that could not
+        reconcile.
+
+        Shape: **ONE method / TWO statements / ONE session** —
+
+        1. ``SELECT COUNT(*)`` over the SAME WHERE (taken FIRST);
+        2. ``SELECT status, agent_id, COUNT(*) … GROUP BY status, agent_id``.
+
+        Both statements run on one session, so both see one connection
+        checkout. NO ``GROUPING SETS``: the repository must stay
+        SQLite-compatible (the unit pins run scratch SQLite), and the
+        two-statement shape is what makes the reconciliation honest —
+        ``total_rows`` and ``counted_rows`` are two INDEPENDENT
+        computations of the same number, and the caller surfaces their
+        agreement as an explicit flag.
+
+        The KB exclusion comes from the shared :func:`_kb_filter`
+        helper — the SAME predicate ``list()`` uses, so the census total
+        and ``instance_list.total_matching`` describe the SAME
+        population by construction, not by convention.
+
+        Race disclosure: on a busy nest a write landing BETWEEN the two
+        statements yields ``reconciled=False`` for an internally
+        consistent fleet. The caller's note text says so.
+
+        Returns:
+            A :class:`FleetCounts` — ``groups`` (the
+            ``(status, agent_id, count)`` rows, cardinality
+            ≤ |statuses| × |agents|) and ``total`` (the COUNT over the
+            same WHERE).
+        """
+        kb_cond = _kb_filter(exclude_kb)
+        count_stmt = select(func.count()).select_from(Instance)
+        group_stmt = select(
+            Instance.status, Instance.agent_id, func.count()
+        ).group_by(Instance.status, Instance.agent_id)
+        if kb_cond is not None:
+            count_stmt = count_stmt.where(kb_cond)
+            group_stmt = group_stmt.where(kb_cond)
+
+        with SQLModelSession(self.engine) as db_session:
+            total = db_session.exec(count_stmt).one()
+            rows = db_session.exec(group_stmt).all()
+
+        groups = [
+            (str(status), str(agent_id), int(count or 0))
+            for status, agent_id, count in rows
+        ]
+        return FleetCounts(groups=groups, total=int(total or 0))
 
     def list_by_parent(self, parent_id: str) -> list[Instance]:
         """List all child instances of a parent."""

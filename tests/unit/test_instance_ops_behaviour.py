@@ -41,6 +41,7 @@ from sqlalchemy import create_engine
 from sqlmodel import Session, SQLModel, select
 
 import daemon.tools.instance_ops as io
+from daemon.repositories.instance.repository import KB_AGENT_IDS
 from daemon.repositories.instance_ops.models import InstanceOpsAudit
 from daemon.repositories.instance_ops.repository import InstanceOpsAuditRepository
 
@@ -91,6 +92,28 @@ class FakeRepo:
 
     def get(self, iid):
         return self.rows.get(iid)
+
+    def count_fleet_by_status_and_agent(self, *, exclude_kb: bool = True):
+        """The census shape the read tool consumes (F2).
+
+        Mirrors the real repository method over the fake fleet: ONE
+        grouped pass + an independent COUNT over the same WHERE.
+        """
+        from daemon.repositories.instance.repository import FleetCounts
+
+        groups: dict[tuple[str, str], int] = {}
+        total = 0
+        for row in self.rows.values():
+            if exclude_kb and row.agent_id in KB_AGENT_IDS:
+                continue
+            groups[(row.status, row.agent_id)] = (
+                groups.get((row.status, row.agent_id), 0) + 1
+            )
+            total += 1
+        return FleetCounts(
+            groups=[(s, a, c) for (s, a), c in sorted(groups.items())],
+            total=total,
+        )
 
     def set_metadata(self, iid, key, value, session=None):
         # Test-side stand-in for the repo's dotted-key metadata write
