@@ -25,24 +25,38 @@ class — not tied to the one script. Plan:
 
 ## Why .env lock-down could NOT happen earlier (earliest-safe ruling)
 
-Evidence captured 2026-10-12:
+Evidence captured 2026-10-12 (posture UPDATED 2026-10-23 — zero-env unit
+contract, unit-secret-exposure):
 
 - `ensemble-main.service` runs `User=nea`, `ExecStart=launcher.sh`, and has
-  **no `EnvironmentFile=`** — PORT/POSTGRES secrets are inline `Environment=`
-  lines in the root-owned 0600 unit (that is why the unit is 0600).
-- `launcher.sh:1558` executes `load_env_file "$INSTALL_DIR/.env"` **as the
-  unit user (nea) at every start**; the binary's own .env loader (run_app.py)
-  re-reads it as the same user.
+  **no `EnvironmentFile=`**. Since the zero-env generator strip
+  (2026-10-23) the unit also carries **NO inline secret env**: its only
+  `Environment=` directive is the static `Environment=MALLOC_ARENA_MAX=2`.
+  `.env` is now the SINGLE secret surface on the unit path — which
+  STRENGTHENS this runbook's chown reasoning (one surface to own and lock,
+  not two). (The PRE-STRIP live unit still carries six minted
+  `Environment=` lines until the one-time remediation lands — see
+  `docs/runbooks/systemd-adoption.md` §One-time live remediation.)
+- `launcher.sh:1649` executes `load_env_file "$INSTALL_DIR/.env"` **as the
+  unit user (nea) at every start**; the binary's own .env loader (run_app.py,
+  frozen-binary-only) re-reads it as the same user.
 - Therefore `chown ensemble:ensemble + chmod 600 .env` **before** the unit
   flips `User=ensemble` breaks the NEXT restart (launcher as nea cannot read
   .env → missing OPENAI_*/SYSTEM_* env → degraded boot or exit-78 refusal).
+- **Ownership precondition of the 0600 posture (A6):** a future
+  ROOT-owned 0600 `.env` would recreate exactly this failure
+  (launcher can't read it) — **ownership == `User=` is a precondition of
+  the 600 mode posture**; equally, stages/deploys must run as the install
+  owner (a cross-uid stage re-owns `.env` via its `mv -f` inode replacement).
 - Not provably safe for the running daemon + next boot ⇒ deferred into this
   window, where it lands automatically as part of the chown step (step 2).
   This is the commission's "runbook step 1b" fallback, by its own criteria.
 
-Related observation for the deferred key-rotation workstream (report-only):
-the unit file itself carries inline POSTGRES_* secrets; rotation must also
-consider regenerating the unit (adopt-unit.sh) — flag to the upgrade lane.
+Related observation for the deferred key-rotation workstream (report-only;
+SCOPE SHRUNK 2026-10-23 — D8): post-strip the unit never needs rotation
+edits again — secret rotation scope is the `.env` file ALONE (update the
+standing deferred-key-rotation critical-note coupling when remediation
+lands).
 
 ## Preconditions (verify at window open)
 

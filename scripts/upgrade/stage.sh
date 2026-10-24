@@ -678,15 +678,46 @@ prompt_artifact_drift_leg "$REL" "$VERSION"
 # tool layer).
 ENV_FILE="$INSTALL_DIR/.env"
 MARKER="ENSEMBLE_SELF_ENV=$UP_TARGET"
+# unit-secret-exposure P5 (umask fence): the two update paths below
+# materialise the FULL .env content (incl. POSTGRES_PASSWORD) into a temp
+# file created at a typical 022 umask (mode 0644 → world-readable for the
+# write WINDOW); the fresh-creation path writes only the marker +
+# PORT/POSTGRES_DB directly to the file. Fence the block with umask 077 and
+# restore it right after — the explicit chmod 600 statements below remain
+# the pinned posture (they cover the file AFTER the mv, which replaces
+# the inode).
+_PREV_UMASK="$(umask)"
+umask 077
 if [ -f "$ENV_FILE" ]; then
     if grep -qE '^[[:space:]]*(export[[:space:]]+)?ENSEMBLE_SELF_ENV=' "$ENV_FILE"; then
         tmp="$ENV_FILE.tmp.$$"
         sed -E "s/^[[:space:]]*(export[[:space:]]+)?ENSEMBLE_SELF_ENV=.*/$MARKER/" "$ENV_FILE" > "$tmp" \
             && mv -f "$tmp" "$ENV_FILE" || { rm -f "$tmp"; _warn "failed to update $ENV_FILE marker"; exit 1; }
+        # mode-0600 (P5) — must FOLLOW the mv (inode replacement). Stage must
+        # run as the install owner (N3) — see runbook §3(d) PRECONDITION.
+        chmod 600 "$ENV_FILE" || { _warn "failed to chmod 600 $ENV_FILE"; exit 1; }
+        # The cross-uid case is NOT loud HERE: under root/sudo the mv re-owns
+        # the live .env to root and the chmod SUCCEEDS (root bypasses the
+        # permission check) → this stage exits 0 SILENTLY, and the failure
+        # surfaces only POST-restart — as the unreadable-.env boot-block
+        # family (exit-75 retry loop; the unit stays "active"; the journal is
+        # the only signal). A cross-uid NON-root stage USUALLY fails loudly
+        # one step earlier (at the temp-file create or the mv — both need
+        # write permission on the install DIR, not ownership of the file),
+        # but this is NOT guaranteed: a group/other-writable install dir
+        # lets the mv succeed SILENTLY and re-own the .env. The ONLY guard
+        # is the documented stage-ownership precondition (runbook §3(d)) —
+        # there is no mechanical check.
     else
         tmp="$ENV_FILE.tmp.$$"
         { cat "$ENV_FILE"; printf '%s\n' "$MARKER"; } > "$tmp" \
             && mv -f "$tmp" "$ENV_FILE" || { rm -f "$tmp"; _warn "failed to append marker to $ENV_FILE"; exit 1; }
+        # mode-0600 hygiene (unit-secret-exposure P5) — must FOLLOW the mv
+        # (the mv replaces the inode; a chmod before it would be discarded).
+        chmod 600 "$ENV_FILE" || { _warn "failed to chmod 600 $ENV_FILE"; exit 1; }
+        # Same stage-ownership caveat as the rewrite path above: under
+        # root/sudo the chmod SUCCEEDS and this stage exits 0 SILENTLY —
+        # see runbook §3(d) PRECONDITION (stage ownership).
     fi
 else
     {
@@ -694,8 +725,12 @@ else
         printf 'PORT=%s\n' "$PORT"
         printf 'POSTGRES_DB=%s\n' "$POSTGRES_DB"
     } > "$ENV_FILE" || { _warn "failed to create $ENV_FILE"; exit 1; }
+    # mode-0600 hygiene (unit-secret-exposure P5): fresh creation lands at
+    # 0600 via the umask fence above — pin 0600 explicitly.
+    chmod 600 "$ENV_FILE" || { _warn "failed to chmod 600 $ENV_FILE"; exit 1; }
     _log "created $ENV_FILE (self-env marker + resolved port/db; operator completes secrets per .env.prod.example)"
 fi
+umask "$_PREV_UMASK"
 _log "ENSEMBLE_SELF_ENV marker staged: $MARKER (in $ENV_FILE — never inside the release dir)"
 
 # ── Final post-stage verification on the swapped-in release ─────────────────
