@@ -483,6 +483,81 @@ def _protected_gate(
     return None, None
 
 
+def _build_act_gate_payload(
+    *,
+    protected: bool,
+    gate_refusal: str | None,
+    gate_token: str | None,
+) -> dict[str, Any] | None:
+    """The F6 preview's ``act_gate`` block — what APPLY would require.
+
+    The gate verdict is rendered as DATA — TOKENS ONLY, never the raw
+    refusal string (it embeds the target id and the caller's own
+    confirmation value). A confirmed preview that cannot pass the
+    provenance leg reports ``act_gate_would_pass.ok == false`` with the
+    reason token: the operator cannot self-satisfy that without a
+    genuine user turn.
+
+    ``would_refuse_with`` is DERIVED from the token the gate actually
+    minted — never a hardcoded guess (the pre-fix shape hardcoded the
+    provenance token, and a token-recovery miss mislabelled a
+    confirmation refusal as provenance data).
+
+    Returns:
+        The block, or ``None`` when the target is not protected (the
+        preview then carries no gate at all).
+    """
+    if not protected:
+        return None
+    return {
+        "confirmation": "confirmed_target_id must equal target verbatim",
+        "provenance": (
+            "a LIVE user-origin provenance window on this turn; a "
+            "delegated chain (send_message OR job dispatch) is accepted; "
+            "apply refuses with no-user-provenance when absent"
+        ),
+        "would_refuse_with": ([gate_token] if gate_token else []),
+    }
+
+
+def _write_gate_refusal(
+    audit: Any,
+    *,
+    action: str,
+    target_id: str,
+    reason: str,
+    refusal: str,
+    caller_instance_id: str,
+    caller_agent_id: str,
+    confirmed_target_id: str | None,
+    verdict: ProvenanceVerdict,
+) -> None:
+    """Write the protected-gate refusal row to the audit ledger.
+
+    A no-op when there is no audit repository (the ledger is optional;
+    the refusal itself is still returned to the caller).
+
+    The provenance fields come from the VERDICT — the same object the
+    gate keyed on — so the row and the gate can never disagree about
+    what was observed.
+    """
+    if audit is None:
+        return
+    audit.write_refusal(
+        action=action,
+        target=target_id,
+        reason=reason,
+        error_message=refusal,
+        actor_instance_id=caller_instance_id,
+        actor_agent_id=caller_agent_id,
+        confirmed_target_id=confirmed_target_id,
+        provenance_class=verdict.pclass or None,
+        provenance_depth=verdict.depth or None,
+        root_source=verdict.root_source,
+        root_message_id=verdict.root_message_id,
+    )
+
+
 async def _resolve_target(manager: Any, instance_id: str) -> str:
     """Fuzzy-resolve an instance id (deferred import — see module doc)."""
     from .instance import _resolve_instance_id
@@ -789,20 +864,17 @@ def create_instance_ops_tools(
             ):
                 # The real refusal path — a refusal row is written and
                 # the refusal is returned to the caller.
-                if audit is not None:
-                    audit.write_refusal(
-                        action="instance_terminate",
-                        target=target_id,
-                        reason=reason,
-                        error_message=gate_refusal,
-                        actor_instance_id=caller_instance_id,
-                        actor_agent_id=caller_agent_id,
-                        confirmed_target_id=confirmed_target_id,
-                        provenance_class=verdict.pclass or None,
-                        provenance_depth=verdict.depth or None,
-                        root_source=verdict.root_source,
-                        root_message_id=verdict.root_message_id,
-                    )
+                _write_gate_refusal(
+                    audit,
+                    action="instance_terminate",
+                    target_id=target_id,
+                    reason=reason,
+                    refusal=gate_refusal,
+                    caller_instance_id=caller_instance_id,
+                    caller_agent_id=caller_agent_id,
+                    confirmed_target_id=confirmed_target_id,
+                    verdict=verdict,
+                )
                 return gate_refusal
 
         before_snapshot = {
@@ -867,29 +939,10 @@ def create_instance_ops_tools(
                 # ``act_gate_would_pass.ok == false`` with the reason
                 # token — the operator cannot self-satisfy that without
                 # a genuine user turn.
-                "act_gate": (
-                    {
-                        "confirmation": (
-                            "confirmed_target_id must equal target verbatim"
-                        ),
-                        "provenance": (
-                            "a LIVE user-origin provenance window on this "
-                            "turn; a delegated chain (send_message OR job "
-                            "dispatch) is accepted; apply refuses with "
-                            "no-user-provenance when absent"
-                        ),
-                        "would_refuse_with": (
-                            # The ACTUAL token the gate minted — never a
-                            # hardcoded guess. (Pre-fix this was a
-                            # literal fallback: a regex non-match
-                            # degraded a CONFIRMATION refusal into
-                            # preview data attributed to the provenance
-                            # token.)
-                            [gate_token] if gate_token else []
-                        ),
-                    }
-                    if protected
-                    else None
+                "act_gate": _build_act_gate_payload(
+                    protected=protected,
+                    gate_refusal=gate_refusal,
+                    gate_token=gate_token,
                 ),
                 "act_gate_would_pass": {
                     "ok": gate_refusal is None,

@@ -1966,6 +1966,56 @@ def _build_health_report(
     return detectors, scan_truncated, stop_reason, evidence_legs
 
 
+def _marginalize_census(census: Any) -> tuple[
+    dict[str, int], dict[str, int], dict[str, int], int, int, bool
+]:
+    """Marginalize the fleet census into the three count maps.
+
+    ONE place for the marginalization (the tidier fold): the agent
+    buckets, the status buckets and the liveness buckets, plus the
+    reconciliation triple (``total_rows`` / ``counted_rows`` /
+    ``reconciled``).
+
+    A NULL group key lands in the ``"unknown"`` bucket — the
+    repository hands the key over AS ``None`` (never the literal
+    string ``"None"``, which would be a TRUTHY key and would defeat
+    the ``or "unknown"`` fallback).
+
+    Liveness is a pure function of status — the canonical map, no fork,
+    no extra query. NOTE (F2): ``idle`` is a STATUS bucket only.
+    ``_STATUS_CANONICAL_MAP`` maps idle → "processing", so
+    ``counts_by_liveness`` deliberately has NO ``idle`` key.
+
+    Returns:
+        ``(counts_by_agent, counts_by_status, counts_by_liveness,
+        total_rows, counted_rows, reconciled)``.
+    """
+    counts_by_agent: dict[str, int] = {}
+    counts_by_status: dict[str, int] = {}
+    for status, agent_id, count in census.groups:
+        agent_key = agent_id or "unknown"
+        status_key = status or "unknown"
+        counts_by_agent[agent_key] = counts_by_agent.get(agent_key, 0) + count
+        counts_by_status[status_key] = counts_by_status.get(status_key, 0) + count
+
+    counts_by_liveness: dict[str, int] = {}
+    for status_key, count in counts_by_status.items():
+        liveness = _liveness_for(status_key)
+        counts_by_liveness[liveness] = counts_by_liveness.get(liveness, 0) + count
+
+    total_rows = int(census.total)
+    counted_rows = sum(counts_by_status.values())
+    reconciled = counted_rows == total_rows
+    return (
+        counts_by_agent,
+        counts_by_status,
+        counts_by_liveness,
+        total_rows,
+        counted_rows,
+        reconciled,
+    )
+
+
 def _build_capacity_summary(manager: Any) -> dict[str, Any]:
     """Build the capacity payload — counts, queue depth, pool, DLQ.
 
@@ -1985,26 +2035,14 @@ def _build_capacity_summary(manager: Any) -> dict[str, Any]:
         )
     census = repo.count_fleet_by_status_and_agent(exclude_kb=True)
 
-    counts_by_agent: dict[str, int] = {}
-    counts_by_status: dict[str, int] = {}
-    for status, agent_id, count in census.groups:
-        agent_key = agent_id or "unknown"
-        status_key = status or "unknown"
-        counts_by_agent[agent_key] = counts_by_agent.get(agent_key, 0) + count
-        counts_by_status[status_key] = counts_by_status.get(status_key, 0) + count
-
-    # Liveness is a pure function of status — the canonical map, no
-    # fork, no extra query. NOTE (F2): `idle` is a STATUS bucket only.
-    # `_STATUS_CANONICAL_MAP` maps idle → "processing", so
-    # counts_by_liveness deliberately has NO `idle` key.
-    counts_by_liveness: dict[str, int] = {}
-    for status_key, count in counts_by_status.items():
-        liveness = _liveness_for(status_key)
-        counts_by_liveness[liveness] = counts_by_liveness.get(liveness, 0) + count
-
-    total_rows = int(census.total)
-    counted_rows = sum(counts_by_status.values())
-    reconciled = counted_rows == total_rows
+    (
+        counts_by_agent,
+        counts_by_status,
+        counts_by_liveness,
+        total_rows,
+        counted_rows,
+        reconciled,
+    ) = _marginalize_census(census)
 
     # Queue depth — one grouped query across queues and admission states.
     queue_depth: list[dict[str, Any]] = []
