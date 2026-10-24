@@ -24,10 +24,11 @@ THE CHAIN IS A POINTER, NEVER A CREDENTIAL. Three forgery controls
   (c) the HTTP reserved-source gate rejects ``source="agent:…"`` with
       422.
 
-CONSTRUCTION-NEVER-LITERAL (hard constraint 4): the retired token
-``direct-provenance-insufficient`` must never appear as a LITERAL in a
-new file — it is reconstructed from its two halves below. DF-4's
-tree-wide pin greps the whole tree, so a literal here would fail it.
+CONSTRUCTION-NEVER-LITERAL (hard constraint 4): the RETIRED provenance
+token must never appear as a LITERAL in a new file — it is reconstructed
+from its two halves below. DF-4's tree-wide pin greps BOTH ``daemon/``
+and ``tests/``, so a literal here would fail it (and DID, the first
+time this file was written — the docstring spelled it out).
 
 SAFETY FENCE: no HOME-derived or live-shaped path is ever resolved; the
 audit-ledger scratch DB (where one is needed) is a ``tempfile`` SQLite
@@ -725,11 +726,17 @@ class TestMintLogic:
         assert silent_idx < inherit_idx
 
     def test_retired_token_is_absent_from_the_tree(self):
-        """DF-4's closure, re-proven in this file's own tree."""
+        """DF-4's closure, re-proven in this file's own tree.
+
+        BOTH trees are scanned (the retired token must not survive
+        anywhere under ``daemon/`` OR ``tests/``) — the same rule DF-4's
+        own registration pin enforces.
+        """
         hits = []
-        for path in (REPO_ROOT / "daemon").rglob("*.py"):
-            if RETIRED_TOKEN in path.read_text():
-                hits.append(str(path))
+        for scope in ("daemon", "tests"):
+            for path in (REPO_ROOT / scope).rglob("*.py"):
+                if RETIRED_TOKEN in path.read_text():
+                    hits.append(str(path.relative_to(REPO_ROOT)))
         assert hits == []
 
 
