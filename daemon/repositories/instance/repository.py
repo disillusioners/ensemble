@@ -1713,7 +1713,7 @@ class SQLModelInstanceRepository:
             return current_count + 1
 
     def _update_attestation_columns(
-        self, instance_id: str, **values: Any
+        self, instance_id: str, *, clear_denial_epochs: bool = False, **values: Any
     ) -> bool:
         """Shared UPDATE skeleton for the attestation ledger writes.
 
@@ -1746,9 +1746,23 @@ class SQLModelInstanceRepository:
         from sqlmodel import update as sqlmodel_update
 
         with SQLModelSession(self.engine) as db_session:
-            instance = db_session.get(Instance, instance_id)
+            instance = db_session.get(
+                Instance, instance_id, with_for_update=clear_denial_epochs
+            )
             if instance is None:
                 return False
+            if clear_denial_epochs:
+                # D5(i) — clear the deny-epoch ledger in the SAME
+                # transaction. The dialect-aware single-key UPDATE
+                # rides THIS session (it does NOT commit — the caller
+                # owns the transaction), so the epoch clear and the
+                # counter reset commit together or neither commits.
+                # The row lock above is the SAME lock the append path
+                # takes (``with_for_update=True``), so the two
+                # serialize against each other.
+                self._set_metadata_on_session(
+                    db_session, instance_id, "attestation:denial_epochs", []
+                )
             stmt = (
                 sqlmodel_update(Instance)
                 .where(Instance.instance_id == instance_id)
@@ -1780,6 +1794,17 @@ class SQLModelInstanceRepository:
           HUMAN.value`` AND ``priority == 1`` — internal reports and
           agent-to-agent revives are NOT new episodes).
 
+        D5(i) — the reset ALSO clears the O4 deny-epoch ledger
+        (``instance_metadata["attestation:denial_epochs"]`` → ``[]``)
+        in the SAME transaction. The epoch array is the O4 dedup key
+        set: without the clear it grows without bound across episodes
+        (KG-3) and a deny replayed under a pre-reset epoch key would
+        be silently swallowed instead of re-counting.
+
+        REPLAY HAZARD (accepted): a shrink-replayed pre-reset deny
+        re-counts ONCE toward bound 3. The failure direction is LOUD
+        escalation, never a silent allow.
+
         Returns:
             ``True`` when the row was found and reset; ``False`` when
             the instance is missing (caller treats as DB error →
@@ -1794,6 +1819,8 @@ class SQLModelInstanceRepository:
             attestation_denied_count=0,
             completion_gate_escalated=False,
             updated_at=datetime.now(timezone.utc).isoformat(),
+            # D5(i) — the deny-epoch ledger clears with the counter.
+            clear_denial_epochs=True,
         )
 
     def reset_attestation_ledger_with_escalation(
@@ -1811,6 +1838,10 @@ class SQLModelInstanceRepository:
         the attested-allow and trigger-3 paths (where the flag is
         already False).
 
+        D5(i) — the deny-epoch ledger is cleared in the SAME
+        transaction here too (the escalation is a FINAL state; the
+        episode's deny memory ends with it).
+
         Returns:
             ``True`` when the row was found and the atomic write
             landed; ``False`` when the instance is missing.
@@ -1824,6 +1855,9 @@ class SQLModelInstanceRepository:
             attestation_denied_count=0,
             completion_gate_escalated=True,
             updated_at=datetime.now(timezone.utc).isoformat(),
+            # D5(i) — the escalation is a FINAL state; the episode's
+            # deny memory (the epoch ledger) ends with it.
+            clear_denial_epochs=True,
         )
 
     def set_completion_gate_escalated(self, instance_id: str) -> bool:

@@ -2550,6 +2550,36 @@ class InstanceMessagingService:
                         if is_fresh_episode_user_message:
                             instance.attestation_denied_count = 0
                             instance.completion_gate_escalated = False
+                            # ─── D5(i) (completion-subsystem Phase 1):
+                            # clear the O4 deny-epoch ledger too, in the
+                            # SAME transaction as the column clears (this
+                            # site is the transaction's status=RUNNING
+                            # write — the reset rides along with it).
+                            #
+                            # ``instance_metadata`` is a plain
+                            # ``JSONBType`` column WITHOUT mutable
+                            # tracking, so the dict must be REASSIGNED
+                            # (never mutated in place) or the write is
+                            # silently dropped — the same caveat the
+                            # append path documents
+                            # (``repositories/instance/repository.py``
+                            # ``increment_attestation_denied_count``).
+                            #
+                            # WHY: the epochs array is the O4 dedup key
+                            # set. Left uncleared it grows without bound
+                            # across episodes (KG-3) and a deny replayed
+                            # under a PRE-reset epoch key would be
+                            # silently swallowed instead of re-counting
+                            # toward the bound. The failure direction of
+                            # a bounded re-count is LOUD escalation,
+                            # never a silent allow.
+                            fresh_episode_metadata = dict(
+                                instance.instance_metadata or {}
+                            )
+                            fresh_episode_metadata[
+                                "attestation:denial_epochs"
+                            ] = []
+                            instance.instance_metadata = fresh_episode_metadata
                             # 7d4a3bd9 reviewer-flagged A1 (2026-09-26,
                             # stale-flag leak): the SessionState
                             # channels (substantive + progress) are
@@ -2573,8 +2603,9 @@ class InstanceMessagingService:
                                 f"Attestation ledger reset on fresh-episode "
                                 f"revive: instance={instance_id[:8]}... "
                                 f"(was {previous_status}) cleared "
-                                f"attestation_denied_count and "
-                                f"completion_gate_escalated"
+                                f"attestation_denied_count, "
+                                f"completion_gate_escalated and the "
+                                f"attestation:denial_epochs ledger"
                             )
                 # Naive-UTC digits (DC-A fix): last_activity_at is a
                 # tz-naive column on PostgreSQL.
