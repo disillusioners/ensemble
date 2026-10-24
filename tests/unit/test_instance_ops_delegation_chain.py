@@ -582,6 +582,58 @@ class TestDispatchSeam:
         assert "metadata={DISPATCH_CHAIN_KEY: chain}" not in src
 
 
+class TestJobQueueChainBuilder:
+    """ONE builder for the two mint sites (the tidier fold).
+
+    The two copies — the ``job_create`` mint and the ``job_continue``
+    forward — were near-verbatim and their COMMENTS had already
+    drifted, while the value they produced is identical.
+
+    PLANNED MUTATION:
+      * inline the dict at one site again → the "both sites use the
+        builder" pin RED;
+      * drop the ``caller_agent_id`` field → the shape pin RED.
+    """
+
+    def test_the_builder_returns_none_without_a_submitting_instance(self):
+        from daemon.tools import job_queue
+
+        assert job_queue._build_dispatch_chain("", "agent") is None
+        assert job_queue._build_dispatch_chain(None, "agent") is None
+
+    def test_the_builder_carries_both_fields(self):
+        from daemon.tools import job_queue
+
+        assert job_queue._build_dispatch_chain("inst-1", "agent") == {
+            "caller_instance_id": "inst-1",
+            "caller_agent_id": "agent",
+        }
+
+    def test_both_mint_sites_use_the_shared_builder(self):
+        import ast
+
+        from daemon.tools import job_queue
+
+        src = Path(job_queue.__file__).read_text()
+        tree = ast.parse(src)
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_build_dispatch_chain"
+        ]
+        # EXACTLY TWO mint sites — the definition is a FunctionDef, not
+        # a Call, so it is not counted here.
+        assert len(calls) == 2, (
+            "both mint sites must use the shared builder; found "
+            f"{len(calls)} call site(s)"
+        )
+        # the chain is spelled ONCE — in the builder, never inline at a
+        # mint site.
+        assert src.count('"caller_instance_id": current_instance_id') == 1
+
+
 # ── E. the claim seam (S5) ─────────────────────────────────────────────────
 
 
