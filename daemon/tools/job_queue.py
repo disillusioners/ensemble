@@ -66,7 +66,6 @@ from daemon.models.common import ErrorCodes
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
 from daemon.services.project_normalizer import normalize_project_id
-from daemon.services.job_queue_service import DISPATCH_CHAIN_KEY
 from daemon.services.queue_ref import (
     QUEUE_ALIAS_TO_CANONICAL,
     describe_valid_queues,
