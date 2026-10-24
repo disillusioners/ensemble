@@ -227,6 +227,20 @@ pin (trivially satisfied when the ambient var is absent).
 `.venv` in-worktree assertion (arch §11.5 gap) and the corrected
 `ensure.md` citation (`:6` + `:45`).
 
+## 5a. The tidier fold's follow-up ledger (2026-10-25)
+
+The fold's deferred items are recorded in the sibling file
+`follow-up-ledger.md` (same planning directory) — the tidier's defer
+list (H1 `_build_health_report` SRP split, H3 the >3000-line
+repository decomposition, the CHANGELOG placeholder ordering, and the
+remaining cosmetic lows), the reviewer verdict's ML-1 (the unreachable
+defensive message-lane metadata pop at
+`daemon/services/instance_messaging.py:2206`), and three rows this
+fold recorded about its OWN work.
+
+The ledger is a RECORD, not a task list: every row there is deferred
+and NOT actioned by this lane.
+
 ## 6. Deviations (with authority)
 
 1. **T4.8 per-window attribution upgraded from average to EXACT** (the
