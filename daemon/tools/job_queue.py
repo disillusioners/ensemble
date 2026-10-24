@@ -1202,6 +1202,41 @@ def _check_job_access(
     return None
 
 
+def _build_dispatch_chain(
+    current_instance_id: str, caller_agent_id: str
+) -> dict[str, Any] | None:
+    """The F11 delegation chain — or ``None`` when there is no caller.
+
+    ONE builder for the two mint sites (the tidier fold). The two
+    copies were near-verbatim and had already drifted in their
+    comments; the VALUE they produced is identical.
+
+    ``current_instance_id`` is the daemon-bound factory closure value
+    (the SUBMITTING instance), never a caller argument — so a caller
+    can never name someone else's instance. ``caller_agent_id`` is
+    OBSERVABILITY ONLY; the mint never trusts it for authorization.
+
+    The chain is a POINTER, not authority: the provenance mint re-reads
+    the named instance's live window and re-checks expiry at claim
+    time. Absent chain ⇒ ``None`` ⇒ byte-identical to today
+    (default-off).
+
+    Args:
+        current_instance_id: the SUBMITTING instance id (factory-bound).
+        caller_agent_id: the submitting agent id (observability only).
+
+    Returns:
+        The chain dict, or ``None`` when there is no submitting
+        instance.
+    """
+    if not current_instance_id:
+        return None
+    return {
+        "caller_instance_id": current_instance_id,
+        "caller_agent_id": caller_agent_id,
+    }
+
+
 def create_job_tools(
     job_service: "JobQueueService",
     queue_mgmt_service: "JobQueueMgmtService",
@@ -1320,6 +1355,11 @@ def create_job_tools(
                 if caller_agent_id
                 else "internal_agent:unknown"
             )
+            # F11 — the DELEGATION CHAIN (ONE builder; see
+            # ``_build_dispatch_chain`` for the full contract).
+            dispatch_chain = _build_dispatch_chain(
+                current_instance_id, caller_agent_id
+            )
             normalized_project_id = normalize_project_id(project_id)
 
             # Queue reference resolution (tool-layer only — service
@@ -1426,6 +1466,11 @@ def create_job_tools(
                 project_id=normalized_project_id,
                 priority=priority,
                 metadata=metadata,
+                # F11: the chain rides a KEYWORD, never the metadata map
+                # (the service seam pops the reserved key from any
+                # caller-supplied metadata, so a metadata-borne chain
+                # would be erased before it reached the row).
+                dispatch_chain=dispatch_chain,
                 queue_id=resolved_queue_id,
                 idempotency_key=idempotency_key,
                 # F2: thread the caller's version tag so a versioned agent
@@ -2060,6 +2105,15 @@ def create_job_tools(
                 # empty-caller fallback — "api" arms the live gate via the
                 # exact-match path.
                 source=f"agent:{caller_agent_id}" if caller_agent_id else "internal_agent:unknown",
+                # F11: the chain rides a KEYWORD on the messaging
+                # facade — NEVER via ``metadata`` (the service seam pops
+                # the reserved key from any caller-supplied metadata, so
+                # a metadata-borne chain would be erased before it
+                # reached the job row). Same daemon-bound closure value
+                # as the ``job_create`` mint site, and the SAME builder.
+                dispatch_chain=_build_dispatch_chain(
+                    current_instance_id, caller_agent_id
+                ),
             )
 
             # 6b. Counter increment AFTER successful enqueue_message_job

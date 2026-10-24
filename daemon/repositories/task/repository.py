@@ -23,6 +23,7 @@ from sqlalchemy import (
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
+from daemon.chunking import chunked
 from daemon.constants import (
     CHAT_SOURCE_PREFIXES,
     TERMINAL_INSTANCE_STATUSES,
@@ -58,13 +59,6 @@ logger = logging.getLogger(__name__)
 # ``IN (...)`` statement inside the bind-parameter limits of both engines
 # (SQLite's ``SQLITE_MAX_VARIABLE_NUMBER``, PostgreSQL's 65535).
 _ANSWER_HANDLE_LOOKUP_CHUNK = 500
-
-
-def _chunked(items: list[Any], size: int) -> list[list[Any]]:
-    """Split ``items`` into consecutive chunks of at most ``size``."""
-    if size <= 0:
-        return [list(items)]
-    return [items[i : i + size] for i in range(0, len(items), size)]
 
 
 # F-1 (durability-f1-f2 / phase1, plan §2c, §13c) — operator
@@ -977,7 +971,7 @@ class TaskRepository:
             return []
         found: list[str] = []
         with SQLModelSession(self.engine) as db_session:
-            for chunk in _chunked(list(instance_ids), _ANSWER_HANDLE_LOOKUP_CHUNK):
+            for chunk in chunked(list(instance_ids), _ANSWER_HANDLE_LOOKUP_CHUNK):
                 stmt = (
                     select(Task.instance_id)
                     .where(Task.instance_id.in_(chunk))

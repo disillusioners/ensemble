@@ -9,7 +9,7 @@ import time
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from sqlalchemy import bindparam, case, delete as sql_delete, exists, func, literal, not_, or_, String, text
 from sqlalchemy import cast as sa_cast
@@ -17,6 +17,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.sql.elements import ColumnElement, TextClause
 from sqlmodel import Session as SQLModelSession, select, col
 
+from daemon.chunking import chunked
 from .models import Instance, InstanceHierarchy, InstanceStatus
 from daemon.repositories.task.models import Task
 from daemon.repositories.event.models import Event
@@ -56,11 +57,91 @@ _MAX_TRAVERSAL_DEPTH = 256
 _METADATA_LOOKUP_CHUNK = 500
 
 
-def _chunked(items: list[Any], size: int) -> list[list[Any]]:
-    """Split ``items`` into consecutive chunks of at most ``size``."""
-    if size <= 0:
-        return [list(items)]
-    return [items[i : i + size] for i in range(0, len(items), size)]
+class FleetCounts(NamedTuple):
+    """The fleet census result (nest-ops shakedown F2).
+
+    ``groups``  — the ``(status, agent_id, count)`` rows, cardinality
+                  ≤ |statuses| × |agents| (~10 × ~20).
+    ``total``   — the independent ``SELECT COUNT(*)`` over the SAME
+                  WHERE. The census's reconciliation contract compares
+                  THIS number to ``sum`` of the marginalized group
+                  counts — two independent computations of the same
+                  number, plus an explicit equality flag.
+    """
+
+    # A group key may be ``None`` — a NULL ``status``/``agent_id``
+    # column groups into a NULL bucket. The keys are handed over AS
+    # ``None`` (NOT coerced with ``str()``, which would produce the
+    # literal string "None" — a TRUTHY key that defeats the consumer's
+    # ``or "unknown"`` bucket).
+    groups: list[tuple[str | None, str | None, int]]
+    total: int
+
+
+def _kb_filter(exclude_kb: bool) -> ColumnElement[bool] | None:
+    """The KB-exclusion predicate — SHARED by ``list()`` and the census.
+
+    Extracted from ``list()``'s WHERE so the fleet census
+    (:meth:`SQLModelInstanceRepository.count_fleet_by_status_and_agent`)
+    CANNOT drift from the list WHERE clause (nest-ops shakedown F2,
+    D-2 amendment, arch §2.2): both callers take the predicate from
+    THIS helper, so the same constant (``KB_AGENT_IDS``), the same flag
+    and the same predicate object are in play. A mutation that drops
+    the exclusion on one side only diverges the two numbers and fails
+    the KB-parity pin.
+    """
+    if not exclude_kb:
+        return None
+    return Instance.agent_id.not_in(KB_AGENT_IDS)
+
+#: The bind-parameter chunk size for the EVIDENCE probes
+#: (``filter_without_any_evidence_ids`` and the grouped JobItem probe
+#: its caller runs). Keeps the rendered ``IN (...)`` inside the
+#: bind-parameter limits of both engines (SQLite's
+#: ``SQLITE_MAX_VARIABLE_NUMBER`` = 999, PostgreSQL's 65535). Same
+#: rationale as ``_METADATA_LOOKUP_CHUNK``; a separate constant so the
+#: two call sites can move independently.
+_EVIDENCE_PROBE_CHUNK = 500
+
+
+def never_dispatched_evidence_expr() -> tuple[ColumnElement[bool], ColumnElement[bool]]:
+    """The NEVER-DISPATCHED evidence expression — SINGLE-HOMED (D-19).
+
+    Returns the TWO ``~exists(...)`` clauses that mean "this instance
+    has never received any work": zero ``message_queue`` rows and zero
+    ``task`` rows.
+
+    This is the ONLY copy of that predicate in the repository module.
+    Both callers compose it:
+
+    * :meth:`SQLModelInstanceRepository.filter_never_dispatched_ids`
+      (``idle ∧ version == 1 ∧ ¬∃msg ∧ ¬∃task``) — the canonical ghost
+      signature, bound by the lockstep pin
+      ``tests/unit/test_pause_never_dispatched_ghosts.py``;
+    * :meth:`SQLModelInstanceRepository.filter_without_any_evidence_ids`
+      (evidence ONLY — no status/version conjuncts) — the husk
+      detector's probe.
+
+    The twin expression in ``ChildReportsService._ghost_child_filter``
+    (``daemon/services/child_reports.py``) is the OTHER canonical copy;
+    it is pinned in lockstep with
+    ``filter_never_dispatched_ids`` and is DELIBERATELY not re-pointed
+    at this factory in the nest-ops shakedown patch (the parent-completion
+    gate is out of that patch's blast radius) — the clean-up is routed,
+    not cancelled.
+
+    No import cycle: this module already imports the two models the
+    clauses reference.
+    """
+    no_messages = ~exists(
+        select(MessageQueue.message_id).where(
+            MessageQueue.instance_id == Instance.instance_id
+        )
+    )
+    no_tasks = ~exists(
+        select(Task.id).where(Task.instance_id == Instance.instance_id)
+    )
+    return no_messages, no_tasks
 
 
 # Safety cap on descendants loaded per page during root-based pagination.
@@ -770,14 +851,7 @@ class SQLModelInstanceRepository:
         """
         if not instance_ids:
             return set()
-        no_messages = ~exists(
-            select(MessageQueue.message_id).where(
-                MessageQueue.instance_id == Instance.instance_id
-            )
-        )
-        no_tasks = ~exists(
-            select(Task.id).where(Task.instance_id == Instance.instance_id)
-        )
+        no_messages, no_tasks = never_dispatched_evidence_expr()
         stmt = (
             select(Instance.instance_id)
             .where(Instance.instance_id.in_(instance_ids))
@@ -791,6 +865,55 @@ class SQLModelInstanceRepository:
         with SQLModelSession(self.engine) as db_session:
             rows = db_session.exec(stmt).all()
         return set(rows)
+
+    def filter_without_any_evidence_ids(self, instance_ids: list[str]) -> set[str]:
+        """Return the subset of ``instance_ids`` that carry NO evidence of
+        any dispatch attempt.
+
+        Evidence-only probe (nest-ops shakedown F3, D-1/D-19): the subset
+        with zero ``message_queue`` rows and zero ``task`` rows — and
+        NOTHING ELSE. No ``status`` conjunct, no ``version`` conjunct:
+        a row that is ``running`` or ``version > 1`` but evidence-free is
+        still evidence-free, and the caller decides what else matters.
+
+        This is deliberately NOT
+        :meth:`filter_never_dispatched_ids` — that method's
+        ``idle ∧ version == 1`` conjuncts are a STATE signature (they
+        describe the canonical pause-cascade ghost), not an EVIDENCE
+        signature, and using it as the husk probe would silently
+        false-negative any non-idle / version>1 evidence-free row. The
+        containment ``filter_never_dispatched_ids(ids) ⊆
+        filter_without_any_evidence_ids(ids)`` is pinned.
+
+        The evidence expression is the SINGLE-HOMED
+        :func:`never_dispatched_evidence_expr` factory — this method
+        introduces no second copy of the predicate.
+
+        ONE batched query (chunked — the rendered ``IN (...)`` must stay
+        inside the bind-parameter limits of both engines), so the husk
+        detector pays one round trip for the whole candidate set.
+
+        Args:
+            instance_ids: Candidate instance IDs.
+
+        Returns:
+            The subset of IDs with no ``message_queue`` and no ``task``
+            rows. Unknown IDs are simply not returned. Empty input
+            returns an empty set without touching the DB.
+        """
+        if not instance_ids:
+            return set()
+        no_messages, no_tasks = never_dispatched_evidence_expr()
+        found: set[str] = set()
+        with SQLModelSession(self.engine) as db_session:
+            for chunk in chunked(list(instance_ids), _EVIDENCE_PROBE_CHUNK):
+                stmt = (
+                    select(Instance.instance_id)
+                    .where(Instance.instance_id.in_(chunk))
+                    .where(no_messages, no_tasks)
+                )
+                found.update(db_session.exec(stmt).all())
+        return found
 
     def get_statuses(self, instance_ids: list[str]) -> dict[str, str]:
         """Return ``{instance_id: status}`` for ``instance_ids``.
@@ -1138,9 +1261,10 @@ class SQLModelInstanceRepository:
                 if project_id is not None:
                     count_stmt = count_stmt.where(Instance.project_id == project_id)
                     stmt = stmt.where(Instance.project_id == project_id)
-                if exclude_kb:
-                    count_stmt = count_stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
-                    stmt = stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
+                kb_cond = _kb_filter(exclude_kb)
+                if kb_cond is not None:
+                    count_stmt = count_stmt.where(kb_cond)
+                    stmt = stmt.where(kb_cond)
                 search_cond = self._build_search_condition(db_session, search)
                 if search_cond is not None:
                     count_stmt = count_stmt.where(search_cond)
@@ -1391,6 +1515,69 @@ class SQLModelInstanceRepository:
                 ]
 
             return self._enrich_instances(db_session, all_instances), total, truncated
+
+    def count_fleet_by_status_and_agent(
+        self, *, exclude_kb: bool = True
+    ) -> "FleetCounts":
+        """Count the WHOLE fleet grouped by ``(status, agent_id)``.
+
+        The fleet census behind ``fleet_capacity_summary`` (nest-ops
+        shakedown F2, D-2 amendment / arch §2.1). The old census counted
+        a bounded WINDOW of rows in Python, so its ``counts_by_status``
+        summed to the window size while ``instance_list.total_matching``
+        reported the real fleet — two true numbers that could not
+        reconcile.
+
+        Shape: **ONE method / TWO statements / ONE session** —
+
+        1. ``SELECT COUNT(*)`` over the SAME WHERE (taken FIRST);
+        2. ``SELECT status, agent_id, COUNT(*) … GROUP BY status, agent_id``.
+
+        Both statements run on one session, so both see one connection
+        checkout. NO ``GROUPING SETS``: the repository must stay
+        SQLite-compatible (the unit pins run scratch SQLite), and the
+        two-statement shape is what makes the reconciliation honest —
+        ``total_rows`` and ``counted_rows`` are two INDEPENDENT
+        computations of the same number, and the caller surfaces their
+        agreement as an explicit flag.
+
+        The KB exclusion comes from the shared :func:`_kb_filter`
+        helper — the SAME predicate ``list()`` uses, so the census total
+        and ``instance_list.total_matching`` describe the SAME
+        population by construction, not by convention.
+
+        Race disclosure: on a busy nest a write landing BETWEEN the two
+        statements yields ``reconciled=False`` for an internally
+        consistent fleet. The caller's note text says so.
+
+        Returns:
+            A :class:`FleetCounts` — ``groups`` (the
+            ``(status, agent_id, count)`` rows, cardinality
+            ≤ |statuses| × |agents|) and ``total`` (the COUNT over the
+            same WHERE).
+        """
+        kb_cond = _kb_filter(exclude_kb)
+        count_stmt = select(func.count()).select_from(Instance)
+        group_stmt = select(
+            Instance.status, Instance.agent_id, func.count()
+        ).group_by(Instance.status, Instance.agent_id)
+        if kb_cond is not None:
+            count_stmt = count_stmt.where(kb_cond)
+            group_stmt = group_stmt.where(kb_cond)
+
+        with SQLModelSession(self.engine) as db_session:
+            total = db_session.exec(count_stmt).one()
+            rows = db_session.exec(group_stmt).all()
+
+        groups = [
+            (
+                str(status) if status is not None else None,
+                str(agent_id) if agent_id is not None else None,
+                int(count or 0),
+            )
+            for status, agent_id, count in rows
+        ]
+        return FleetCounts(groups=groups, total=int(total or 0))
 
     def list_by_parent(self, parent_id: str) -> list[Instance]:
         """List all child instances of a parent."""
@@ -2373,7 +2560,7 @@ class SQLModelInstanceRepository:
                 if db_session.bind is not None
                 else "sqlite"
             )
-            for chunk in _chunked(list(instance_ids), _METADATA_LOOKUP_CHUNK):
+            for chunk in chunked(list(instance_ids), _METADATA_LOOKUP_CHUNK):
                 if dialect == "postgresql":
                     stmt = text(
                         "SELECT instance_id FROM instances "

@@ -1,15 +1,16 @@
-"""Instance READ tools — the ``instance_read`` privileged category (4 tools).
+"""Instance READ tools — the ``instance_read`` privileged category (5 tools).
 
-The four tools answer the questions the maintenancer could not answer
+The five tools answer the questions the maintenancer could not answer
 before this category existed: *what is in the fleet*, *what is this one
 instance doing*, *what looks wedged*, and *how much capacity is left*.
 
-Four tools
+Five tools
 ----------
 ``instance_list``            — fleet census (cheap rows, SQL-side filters)
 ``instance_get``             — deep detail for ONE instance (hydration)
-``instance_health``          — wedge report (six reporting predicates)
+``instance_health``          — wedge report (seven reporting predicates)
 ``fleet_capacity_summary``   — "how's the nest?" (counts, queue, pool, DLQ)
+``instance_fleet_summary``   — ALIAS of ``fleet_capacity_summary`` (F1)
 
 CENSUS AND DETAIL ARE COMPLEMENTARY, NOT NESTED
 ------------------------------------------------
@@ -68,12 +69,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from ..chunking import chunked
 from ..repositories.instance.models import InstanceStatus
 from ..services.work_status import _STATUS_CANONICAL_MAP
 from ._tool_registry import register_tool_category
@@ -88,8 +91,9 @@ instance's deep detail, the wedge report, and the capacity summary.
 Tools in this category:
 - ``instance_list``           — fleet census (one cheap row per instance)
 - ``instance_get``            — deep detail for ONE instance
-- ``instance_health``         — wedge report (six detector classes)
+- ``instance_health``         — wedge report (seven detector classes)
 - ``fleet_capacity_summary``  — counts, queue depth, worker pool, DLQ
+- ``instance_fleet_summary``  — alias of fleet_capacity_summary
 
 These tools READ. They never change anything, never write an audit
 row, and never trigger a repair. They stay available even when the
@@ -106,6 +110,14 @@ field on the returned rows.
 
 ``instance_health`` NEVER repairs anything. It reports what looks
 sick so you can decide; the acts are separate tools.
+
+MEASURES — read them for what they count (F5): `dlq_depth` is the row
+count of the legacy `dead_letter_items` SNAPSHOT table (DLQ-service
+writes only, retention-pruned); `dead_jobs_total` is the canonical
+count of `job_queue_items` in the terminal `dead` admission state. A
+dead job can exist with NO snapshot row, so `dlq_depth <=
+dead_jobs_total` is expected — `dlq_depth = 0` with
+`dead_jobs_total > 0` is NOT an error.
 """
 
 #: The agents allowed to READ the instance fleet. The privileged
@@ -123,6 +135,20 @@ DEFAULT_STALE_MINUTES = 30
 #: The default staleness threshold, in seconds — DERIVED from the one
 #: minute constant so the two tools can never disagree (L3 fix).
 DEFAULT_STALE_SECONDS = DEFAULT_STALE_MINUTES * 60
+
+#: The minimum age (seconds) of a NEVER-ACTIVATED instance before the
+#: husk detector reports it (nest-ops shakedown F3, D-1). 24h — four
+#: times the longest legitimate spawn→dispatch horizon in the tree and
+#: twelve times the age of the youngest known production husk, so
+#: fixture age jitter cannot flip a verdict.
+#:
+#: It is deliberately NOT derived from ``stale_minutes``: that argument
+#: answers "a RUNNING instance with no activity for N minutes" (a
+#: turn-in-flight judgement); this constant answers "this instance
+#: never had a turn AT ALL" (an evidence judgement). It is deliberately
+#: NOT a tool argument either — the threshold moves by editing this
+#: constant, never by widening the tool schema.
+DEFAULT_HUSK_MIN_AGE_SECONDS: int = 86_400
 #: The maximum number of checkpoint messages ``instance_get`` returns.
 MAX_LAST_MESSAGES = 20
 
@@ -131,6 +157,23 @@ MAX_LAST_MESSAGES = 20
 #: OLDEST rows are invisible to the scan — both payloads surface
 #: ``scan_truncated`` so the blind spot is VISIBLE, never silent.
 FLEET_SCAN_LIMIT = 1000
+
+#: The number of offset windows ``instance_health`` may walk before it
+#: gives up (F4b). ``FLEET_SCAN_LIMIT`` is the WINDOW SIZE; this is the
+#: window COUNT, so one report covers at most
+#: ``FLEET_SCAN_LIMIT * FLEET_SCAN_MAX_WINDOWS`` rows (20 000 at the
+#: shipped constants). The cap exists so a huge fleet cannot turn one
+#: tool call into an unbounded walk — and when it fires, the payload
+#: says so (``scan_truncated`` + ``scan_stop_reason``).
+FLEET_SCAN_MAX_WINDOWS = 20
+
+#: The wall-clock budget (seconds) for the ``instance_health`` fleet
+#: scan (D-20). Checked BEFORE each window; on exhaustion the walk
+#: breaks with ``scan_truncated=True`` and
+#: ``scan_stop_reason="time_budget"``. A 20-second tool call would eat
+#: a sixth of the LLM read window — the budget converts an unbounded
+#: cost into a loud bounded one.
+FLEET_SCAN_TIME_BUDGET_SECONDS = 10
 
 #: The metadata keys that ``instance_get`` is allowed to surface. The
 #: raw metadata blob is NEVER returned — the existing
@@ -331,21 +374,104 @@ def _lineage_max_activity(manager: Any, instance_id: str) -> str | None:
 # ─────────────────────────────────────────────────────────────────────
 # Internal plumbing shared by the tools
 # ─────────────────────────────────────────────────────────────────────
-async def _resolve_target(manager: Any, instance_id: str) -> str:
-    """Resolve an instance id with the existing fuzzy-match helper.
+async def _resolve_target_readonly(
+    manager: Any, instance_id: str, *, repo: Any = None
+) -> tuple[str, Any]:
+    """Resolve an instance id WITHOUT hydrating the instance (F8).
 
-    Deferred import: ``daemon/tools/instance.py`` imports THIS module's
-    factory (the third registration leg), so a module-level import here
-    would be circular. The deferred import resolves at call time, when
-    both modules are fully loaded.
+    Repo-only exact match, then the existing fuzzy matcher — and it
+    RETURNS THE FETCHED ROW so the caller does not pay a second
+    ``repo.get``. It NEVER calls ``manager.get_instance``: that path's
+    cold branch runs ``ensure_mcp_preloaded`` (per-server
+    ``get_schemas_for_server`` — external discovery, uncached on empty)
+    and ``_restore_instance`` (whose re-elevation WRITES
+    ``agent_tag``/``agent_dir`` on the row).
+
+    Behaviour parity with the write-path resolver it replaces — all
+    four refusal texts are reproduced BYTE-FOR-BYTE from
+    ``daemon/tools/instance.py::_resolve_instance_id``, and the loud
+    WARNING on an exact-miss is kept (that failure is otherwise silent:
+    the tool surface renders it as a ``ToolMessage``, never a log line).
+    The shared helper itself is NOT touched — it is pinned by
+    ``tests/unit/test_find_near_instance.py`` and remains the write
+    path's resolver.
+
+    Args:
+        manager: The ``InstanceManager`` — only its repository and
+            ``find_near_instance`` are touched.
+        instance_id: The id to resolve (short form accepted).
+        repo: The instance repository, when the caller already has it
+            (avoids a second ``getattr``); resolved from the manager
+            otherwise.
+
+    Returns:
+        ``(resolved_id, row)`` — the row is the fetched ``Instance``
+        (never ``None`` on success, so the caller need not re-read).
 
     Raises:
         ValueError: when the id is empty, unknown, or ambiguous — the
             caller maps it to the ``instance-not-found`` refusal.
     """
-    from .instance import _resolve_instance_id
+    if repo is None:
+        repo = getattr(manager, "_instance_repository", None)
+    if repo is None:
+        raise RuntimeError("instance repository unavailable")
 
-    return await _resolve_instance_id(manager, instance_id)
+    if not instance_id:
+        raise ValueError("ERROR: instance_id cannot be empty")
+
+    # Exact match — repository read only. NO hydration, NO MCP, NO write.
+    #
+    # The read is a PostgreSQL round-trip (SQLAlchemy), so it runs off
+    # the event loop via ``asyncio.to_thread`` — the module's own
+    # convention (cf. the ``repo.get`` calls further down this file and
+    # ``daemon/graph.py``).
+    try:
+        row = await asyncio.to_thread(repo.get, instance_id)
+    except Exception:
+        logger.exception("instance_get exact read failed")
+        raise
+    if row is not None:
+        return instance_id, row
+
+    # WARNING parity with the write-path resolver: this failure is
+    # otherwise silent (the tool wrapper renders it as a ToolMessage,
+    # not a log line), and a just-spawned-but-unresolvable instance is
+    # exactly the ghost-creation signature operators look for.
+    logger.warning(
+        "instance resolution failed (exact repo lookup miss): "
+        "instance_id=%s — not in the instances table; "
+        "check for a failed spawn / cold-load None-read "
+        "(ghost-child risk for spawning parents)",
+        instance_id,
+        extra={"unresolved_instance_id": instance_id},
+    )
+
+    # Fuzzy match — ``manager.find_near_instance`` is repo-only (it
+    # lists ids and computes edit distance in Python), so the fuzzy leg
+    # hydrates nothing either.
+    from ..utils import DEFAULT_FUZZY_MATCH_DISTANCE
+
+    near_matches = await asyncio.to_thread(
+        manager.find_near_instance,
+        instance_id,
+        max_distance=DEFAULT_FUZZY_MATCH_DISTANCE,
+    )
+    if near_matches:
+        if len(near_matches) == 1:
+            raise ValueError(
+                f"ERROR: instance '{instance_id}' not found. "
+                f"Did you mean '{near_matches[0]}'? Please retry with the corrected instance_id."
+            )
+        candidates = "', '".join(near_matches)
+        raise ValueError(
+            f"ERROR: instance '{instance_id}' not found. Multiple similar instances found: "
+            f"'{candidates}'. Please retry with the correct instance_id."
+        )
+    raise ValueError(
+        f"ERROR: instance '{instance_id}' not found and no similar instance found. "
+        f"Please check the instance ID or spawn a new instance for your task."
+    )
 
 
 def _census_row(
@@ -401,7 +527,7 @@ def create_instance_read_tools(
     agent_id: str = "",
     agent_tag: str | None = None,
 ) -> list:
-    """Build the four ``instance_read`` tools for one instance/agent.
+    """Build the five ``instance_read`` tools for one instance/agent.
 
     Args:
         manager: The ``InstanceManager`` — the tools read through its
@@ -416,7 +542,8 @@ def create_instance_read_tools(
         agent_tag: The caller's version tag (unused; signature parity).
 
     Returns:
-        A list of the four ``@tool``-decorated callables.
+        A list of the five ``@tool``-decorated callables (four reads +
+        the ``instance_fleet_summary`` alias, F1).
     """
     caller_agent_id = agent_id or ""
 
@@ -502,7 +629,7 @@ def create_instance_read_tools(
             clamped_offset = True
 
         try:
-            rows, total, truncated = await asyncio.to_thread(
+            rows, total, _repo_truncated = await asyncio.to_thread(
                 manager.list_instances,
                 limit=limit,
                 offset=applied_offset,
@@ -536,11 +663,37 @@ def create_instance_read_tools(
                 )
             )
 
+        # F4a: an HONEST truncation flag.
+        #
+        # The repository's flat path returns a CONSTANT ``False``
+        # (``daemon/repositories/instance/repository.py`` — the flat path
+        # never runs the descendant BFS), so copying that flag verbatim
+        # made ``truncated`` dead: a census that stopped at the page
+        # boundary read as "complete". The tool computes the flag from the
+        # numbers it already has:
+        #
+        #   total_matching — the COUNT(*) over the SAME WHERE (all matching
+        #                   rows, NOT the remaining-after-offset count);
+        #   applied_offset — the clamped offset the page was taken at;
+        #   len(census)   — the rows actually returned in THIS page.
+        #
+        # ``offset + len(rows)`` is therefore the number of matching rows
+        # consumed so far, and the comparison is EXACT. The empty page
+        # case reads ``True`` ONLY when ``total > offset`` — the
+        # exhausted case (``len(rows) == 0 and total <= offset``) reads
+        # ``False``, because nothing exists past the caller's offset.
+        #
+        # ``_repo_truncated`` is the repository's descendant-cap flag; it
+        # is False on the flat path this tool always uses
+        # (``include_descendants`` is never set here), so it carries no
+        # signal the formula above does not already express.
+        truncated = bool(total > applied_offset + len(census))
+
         payload = {
             "rows": census,
             "count": len(census),
             "total_matching": total,
-            "truncated": bool(truncated),
+            "truncated": truncated,
             "filters_applied": {
                 "status": status,
                 "limit": limit,
@@ -566,6 +719,11 @@ Args:
         completed, error, terminated, queued, waiting_children, failed.
         Omit for all statuses. Any other value is refused with
         `reason=unknown-status-value`.
+        F12 (2026-10-24): the filter used to be dropped on the way to
+        the repository, so this paragraph was FALSE — the rows came back
+        unfiltered while `total_matching` counted only the matching
+        population. The filter now reaches SQL, and `total_matching`
+        counts exactly the population the returned rows are drawn from.
     limit: Max rows to return (1-{MAX_LIST_LIMIT}, default
         {DEFAULT_LIST_LIMIT}). Out of range is refused with
         `reason=invalid-limit`.
@@ -578,6 +736,13 @@ Returns:
     One JSON string: `rows` (the census), `count` (rows in THIS page),
     `total_matching` (all rows matching the status filter), `truncated`,
     and `filters_applied`.
+
+    `truncated` is HONEST and re-derivable from this payload alone:
+    `truncated == (total_matching > filters_applied.offset + count)`.
+    It is `true` when more matching rows exist past this page, and
+    `false` on an exhausted page (nothing matches past your offset).
+    It was a constant `false` before 2026-10-24 (F4a) — a census that
+    stopped at the page boundary used to read as "complete".
 
     Each row: `instance_id`, `agent_id`, `agent_name`, `status` (the
     raw 10-value instance status), `liveness` (the canonical vocabulary,
@@ -592,7 +757,10 @@ Returns:
     that reason — do not fold it into `liveness`.
 
 Side effects:
-    NONE. Read-only; no audit row.
+    NONE. Read-only; no audit row. The census issues SELECTs only (the
+    per-row pending-count probe is one grouped query, never one per
+    row). The `truncated` flag is computed from the page numbers the
+    payload already carries.
 
 Examples:
     instance_list(status="running", limit=100)          # live fleet
@@ -621,30 +789,25 @@ Examples:
         if not _is_instance_read_authorized(caller_agent_id):
             return _error("instance_read operation not permitted for this agent")
 
-        try:
-            instance_id = await _resolve_target(manager, id)
-        except ValueError as exc:
-            return _refusal("INSTANCE_GET", "instance-not-found", str(exc))
-        except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
-            logger.exception("instance_get resolve failed")
-            return _error(f"instance_get failed: {type(exc).__name__}")
-
         repo = getattr(manager, "_instance_repository", None)
         if repo is None:
             return _error("instance_get: instance repository unavailable")
 
         try:
-            row = await asyncio.to_thread(repo.get, instance_id)
-        except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
-            logger.exception("instance_get row read failed")
-            return _error(f"instance_get failed: {type(exc).__name__}")
-        if row is None:
-            return _refusal(
-                "INSTANCE_GET",
-                "instance-not-found",
-                f"no instance row for {instance_id!r}",
+            # F8: the READ-scoped resolver — repo exact match + the
+            # repo-only fuzzy matcher. It NEVER calls
+            # ``manager.get_instance``, so a read triggers no MCP schema
+            # discovery and never takes the ``_restore_instance`` path
+            # that writes the row. The fetched row comes back with the
+            # id, so the caller does not re-read it.
+            instance_id, row = await _resolve_target_readonly(
+                manager, id, repo=repo
             )
-
+        except ValueError as exc:
+            return _refusal("INSTANCE_GET", "instance-not-found", str(exc))
+        except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
+            logger.exception("instance_get resolve failed")
+            return _error(f"instance_get failed: {type(exc).__name__}")
         info = row.to_dict()
         now = datetime.now(timezone.utc)
 
@@ -841,7 +1004,9 @@ Returns:
     null, never a fabricated pack.
 
 Side effects:
-    NONE. Read-only; no audit row.
+    NONE. Read-only; no audit row. A read never triggers MCP schema discovery and never restores the instance into memory — a cold instance stays cold.
+
+    RESIDUALS of that purity (2026-10-24, F8): reads no longer warm the instance cache, so the next real operation on a cold instance pays the restore cost then; cold reads no longer PROMOTE `agent_tag` / `agent_dir`, so a row whose versioned agent dir reappeared after a fallback now reports its STORED fallback tag (payload-visible, and the correct read-pure behaviour); and a restore that used to ERROR now becomes a successful plain read.
 
 Examples:
     instance_get(id="a1b2c3d4")     # short form accepted
@@ -866,7 +1031,7 @@ Examples:
     @register_tool_category("instance_read")
     @tool(args_schema=InstanceHealthInput)
     async def instance_health(stale_minutes: int = DEFAULT_STALE_MINUTES) -> str:
-        """Wedge report — six read-only detectors. Use tool_help("instance_health") for details."""
+        """Wedge report — seven read-only detectors. Use tool_help("instance_health") for details."""
         if not _is_instance_read_authorized(caller_agent_id):
             return _error("instance_read operation not permitted for this agent")
 
@@ -883,7 +1048,12 @@ Examples:
 
         threshold_seconds = stale_minutes * 60
         try:
-            report, scan_truncated = await asyncio.to_thread(
+            (
+                report,
+                scan_truncated,
+                scan_stop_reason,
+                evidence_legs,
+            ) = await asyncio.to_thread(
                 _build_health_report, manager, threshold_seconds
             )
         except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
@@ -894,13 +1064,24 @@ Examples:
             "stale_minutes": stale_minutes,
             "detectors": report,
             "total_flagged": sum(d["count"] for d in report),
-            # M8: a VISIBLE blind spot — past FLEET_SCAN_LIMIT the
-            # oldest long-wedged instances are invisible to this scan.
+            # M8: a VISIBLE blind spot — the scan walks the whole fleet
+            # in offset windows, so the blind spot is now the WINDOW CAP
+            # (or the wall-clock budget), not "the newest 1000 rows".
             "scan_truncated": bool(scan_truncated),
+            # F4b: WHY the walk stopped — `end_of_set` (the whole fleet
+            # was covered), `window_cap` (too many windows) or
+            # `time_budget` (the walk ran out of wall-clock).
+            "scan_stop_reason": scan_stop_reason,
+            # The husk detector's evidence-leg state — "ok" or
+            # "degraded". "degraded" means an evidence leg COULD NOT
+            # RUN, so the husk count is a LOWER BOUND, not the truth.
+            # Without this field a failed probe and a genuinely empty
+            # husk set are indistinguishable (both read "count: 0").
+            "evidence_legs": evidence_legs,
         }
         return json.dumps(payload, default=str)
 
-    instance_health._full_doc_ = """Wedge report — six read-only detector classes.
+    instance_health._full_doc_ = """Wedge report — seven read-only detector classes.
 
 This NEVER repairs anything. It reports what looks sick so you can
 decide what to do; the acts are separate tools.
@@ -921,9 +1102,31 @@ Returns:
     is pinned against, or `null` where no observable counterpart
     exists (an honest gap, not a pretend one).
 
-    The six classes: `stale-running`, `waiting-on-a-dead-parent`,
+    The seven classes: `stale-running`, `waiting-on-a-dead-parent`,
     `question-paused-without-task-row`, `zombie-pending`, `orphans`,
-    `failed-with-unreported-result`.
+    `failed-with-unreported-result`, `never-dispatched-husk`.
+
+    `never-dispatched-husk` is the SEVENTH detector (added 2026-10-24,
+    F3): a row that was SPAWNED but never received any work at all —
+    no task, no job item, no message, no child, no pending question,
+    no pause marker, and no activity EVER (`last_activity_at` is null)
+    — aged past 24h (`DEFAULT_HUSK_MIN_AGE_SECONDS`). For a husk,
+    `idle_seconds` is the AGE since `created_at`, because "how long
+    since it last did anything" has no answer: it never did anything.
+    The `detail` string names the mechanism, so a husk row is never
+    mistaken for an activity-derived idle.
+
+    `scan_truncated` says whether the fleet was covered COMPLETELY;
+    `scan_stop_reason` says WHY the walk stopped —
+    `end_of_set` (the whole fleet was read), `window_cap` (the walk hit
+    its window ceiling) or `time_budget` (the walk hit its wall-clock
+    budget).
+
+    THE SCAN IS AN OFFSET WINDOW LOOP over a LIVE fleet: rows created
+    or pinned mid-scan may be counted twice or missed, and
+    `scan_truncated=true` means the OLDEST rows may not be covered.
+    Read the flag as "this report may not see everything", never as
+    "the fleet is healthy".
 
     IMPORTANT — a deliberately parked instance is NOT wedged. The
     `pause_marker` on a flagged row tells you which one you are looking
@@ -932,7 +1135,9 @@ Returns:
     never flagged.
 
 Side effects:
-    NONE. A health report never triggers a repair.
+    NONE. A health report never triggers a repair. The scan issues
+    SELECTs only — the fleet walk, the per-candidate evidence probes
+    (two batched round trips) and the job-active census are all reads.
 
 Examples:
     instance_health()                 # 30-minute threshold
@@ -963,6 +1168,9 @@ Two thirds of this payload is SYSTEM capacity (queue depth, worker
 pool, dead-letter depth), not instances — that is why the tool is named
 for the fleet's capacity rather than for an instance.
 
+`instance_fleet_summary` is an alias of this tool; both return the same
+payload.
+
 Args:
     (none)
 
@@ -970,8 +1178,29 @@ Returns:
     One JSON string: `counts_by_agent`, `counts_by_status`,
     `counts_by_liveness`, `queue_depth` (one row per queue with
     `queue_name`, `pending`, `active`, `dead`), `worker_pool` (`size`,
-    `busy`, `idle`, `saturated`), `dlq_depth`, `audit_pending`
+    `busy`, `idle`, `saturated`), `dlq_depth`, `dead_jobs_total`,
+    `dlq_note`, `totals` (`total_rows`, `counted_rows`,
+    `scan_truncated`, `reconciled`, `note`), `audit_pending`
     (`count` + `oldest_age_seconds`), `generated_at`.
+
+    `dead_jobs_total` — the canonical count of jobs in the terminal
+    `dead` admission state (summed from the per-queue `dead` column).
+    `dlq_depth` is a **different** measure: the row count of the legacy
+    `dead_letter_items` snapshot table, written only when a job is moved
+    to the dead-letter queue through the DLQ service and pruned by the
+    retention sweep. A dead job can exist with **no** snapshot row (the
+    drift-recovery path finalizes to `dead` directly), so
+    `dlq_depth <= dead_jobs_total` is expected and `dlq_depth = 0` with
+    `dead_jobs_total > 0` is **not** an error. The same text rides the
+    payload as `dlq_note`.
+
+    `totals` is the reconciliation surface: `total_rows` is the
+    independent COUNT(*) over the census WHERE, `counted_rows` is the
+    sum of `counts_by_status`, and `reconciled` is their agreement flag.
+    The census covers the WHOLE fleet (one GROUP BY, no scan window), so
+    for an UNFILTERED `instance_list` call `totals.total_rows` equals
+    that tool's `total_matching`. A FILTERED page is a different
+    population — see the note in the payload.
 
     `audit_pending` is the reconciliation surface: a row stuck in
     `pending` means an ACT's intent was recorded but its outcome was
@@ -980,10 +1209,67 @@ Returns:
     records the intent, the instance records the fact.
 
 Side effects:
-    NONE. Read-only.
+    NONE. Read-only. The census is one grouped COUNT/GROUP BY over the
+    instances table plus SELECTs on the queue, worker-pool (in-memory
+    stats) and audit surfaces.
 
 Examples:
     fleet_capacity_summary()
+"""
+
+    # ── instance_fleet_summary (ALIAS of fleet_capacity_summary) ─────
+    # F1 (nest-ops shakedown): the ratified rename specified
+    # ``instance_fleet_summary``; the shipped surface is
+    # ``fleet_capacity_summary``. BOTH names resolve. This is a SECOND
+    # LITERAL ``@tool`` closure — a distinct named def, NOT
+    # code-generated: the registry's AST discovery scans ``@tool`` at
+    # any nesting depth (_tool_registry.py), so a loop/partial/helper
+    # generated alias would be SILENTLY INVISIBLE to registration and
+    # to the bidirectional name-drift pin.
+    #
+    # The LIVE name is untouched — same function, same decorator, same
+    # payload (ONE builder), same doc (bar the one-sentence alias
+    # mention). This is an ADDITIVE alias, never a rename. Its own
+    # ``_full_doc_`` is mandatory: full docs are keyed by the tool
+    # NAME, so without one the alias would show up in ``tool_help``
+    # with an empty body.
+    class InstanceFleetSummaryInput(BaseModel):
+        """Input schema for instance_fleet_summary (no arguments)."""
+
+    @register_tool_category("instance_read")
+    @tool(args_schema=InstanceFleetSummaryInput)
+    async def instance_fleet_summary() -> str:
+        """Alias of fleet_capacity_summary — same payload. Use tool_help("fleet_capacity_summary") for details."""
+        if not _is_instance_read_authorized(caller_agent_id):
+            return _error("instance_read operation not permitted for this agent")
+
+        try:
+            payload = await asyncio.to_thread(_build_capacity_summary, manager)
+        except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
+            logger.exception("instance_fleet_summary failed")
+            return _error(f"instance_fleet_summary failed: {type(exc).__name__}")
+        return json.dumps(payload, default=str)
+
+    instance_fleet_summary._full_doc_ = """Alias of `fleet_capacity_summary` — the SAME payload, ONE builder.
+
+The ratified rename (the nest-ops planning set specified
+`instance_fleet_summary`) shipped as `fleet_capacity_summary`; both
+names resolve to the same view and cannot drift, because both delegate
+to the same builder. Use whichever name you already know.
+
+Args:
+    (none)
+
+Returns:
+    Identical to `fleet_capacity_summary` — see
+    tool_help("fleet_capacity_summary") for the full field reference.
+
+Side effects:
+    NONE. Read-only; no audit row.
+
+Examples:
+    instance_fleet_summary()
+    fleet_capacity_summary()   # the same payload, the live name
 """
 
     return [
@@ -991,6 +1277,7 @@ Examples:
         instance_get,
         instance_health,
         fleet_capacity_summary,
+        instance_fleet_summary,
     ]
 
 
@@ -1025,19 +1312,51 @@ def _flagged_row(
 
 
 def _parent_status_of(
-    repo: Any, by_id: dict[str, dict[str, Any]], parent_id: str | None
+    repo: Any,
+    status_by_id: dict[str, str],
+    parent_id: str | None,
+    cache: dict[str, str | None] | None = None,
 ) -> str | None:
-    """The parent's status, or ``None`` when the parent row is gone."""
+    """The parent's status, or ``None`` when the parent row is gone.
+
+    ``status_by_id`` is the COMPACT ``instance_id -> status`` map the
+    streaming scan keeps (the fleet's rows are never materialized, so
+    the map is the only cross-row state). A parent that is not in the
+    map is fetched from the repository — the cost is paid ONCE per
+    distinct parent because the resolved value is memoized in ``cache``.
+
+    THE CACHE DISCIPLINE (tidier fold): the cache holds RESOLVED
+    FACTS only. A parent that was found (its status) and a parent whose
+    row is genuinely ABSENT (a stable fact — the row is gone) are both
+    cached. A PROBE FAILURE is NOT cached: the repository raised, so
+    the parent's liveness is UNKNOWN, and a failed probe is
+    indistinguishable from "the parent is gone" to the detectors. Memoizing
+    it poisoned EVERY child of that parent with a false orphan /
+    dead-parent flag for the rest of the scan. The failure is logged
+    instead, and the next child re-probes.
+    """
     if not parent_id:
         return None
-    parent = by_id.get(parent_id)
-    if parent is not None:
-        return parent.get("status")
-    try:
-        prow = repo.get(parent_id)
-    except Exception:  # noqa: BLE001 — read-only probe
-        return None
-    return getattr(prow, "status", None) if prow is not None else None
+    if cache is not None and parent_id in cache:
+        return cache[parent_id]
+    status = status_by_id.get(parent_id)
+    if status is None:
+        try:
+            prow = repo.get(parent_id)
+        except Exception as exc:  # noqa: BLE001 — read-only probe
+            # NOT cached — see the cache discipline above. The caller
+            # sees ``None`` for this row only; the next child of the
+            # same parent re-probes and gets the truth.
+            logger.warning(
+                "instance_read: parent-status probe failed for %s: %s",
+                parent_id,
+                exc,
+            )
+            return None
+        status = getattr(prow, "status", None) if prow is not None else None
+    if cache is not None:
+        cache[parent_id] = status
+    return status
 
 
 def _has_live_task(task_repo: Any, instance_id: str) -> bool:
@@ -1052,135 +1371,247 @@ def _has_live_task(task_repo: Any, instance_id: str) -> bool:
     return any(getattr(t, "status", None) not in terminal for t in tasks)
 
 
+#: The bind-parameter chunk size for the husk detector's batched
+#: JobItem probe. SQLite's ``SQLITE_MAX_VARIABLE_NUMBER`` is 999; 500
+#: leaves headroom and matches the repository's evidence-probe chunk.
+_HUSK_PROBE_CHUNK = 500
+
+
+def _job_item_counts_by_instance(
+    manager: Any, instance_ids: list[str]
+) -> dict[str, int] | None:
+    """ONE batched grouped query: JobItem rows per instance, ANY state.
+
+    E3 of the husk predicate (nest-ops shakedown F3). A ``job_queue_items``
+    row is real evidence that a dispatch was attempted and mirrored —
+    in ANY admission state, soft-deleted included (a soft-deleted job
+    still proves a dispatch happened), so there is deliberately NO
+    ``deleted_at`` filter. The repository's own helpers cannot answer
+    "any row, any state" (``JobRepository.get_by_instance`` filters
+    ``deleted_at IS NULL`` and returns only the newest;
+    ``find_jobs_by_instance`` filters to the ACTIVE admission states).
+
+    Chunked so the rendered ``IN (...)`` stays inside SQLite's bind
+    limit.
+
+    Returns the ``{instance_id: count}`` mapping, or ``None`` when the
+    probe could not run — the caller must then NOT flag (a husk verdict
+    must not rest on an unavailable leg).
+    """
+    engine = getattr(manager, "engine", None)
+    if engine is None or not instance_ids:
+        return None
+    counts: dict[str, int] = {}
+    try:
+        from sqlalchemy import bindparam, text
+
+        stmt = text(
+            "SELECT instance_id, COUNT(*) FROM job_queue_items "
+            "WHERE instance_id IN :ids GROUP BY instance_id"
+        ).bindparams(bindparam("ids", expanding=True))
+        with engine.connect() as conn:
+            for chunk in chunked(list(instance_ids), _HUSK_PROBE_CHUNK):
+                if not chunk:
+                    continue
+                rows = conn.execute(stmt, {"ids": list(chunk)}).all()
+                for instance_id, count in rows:
+                    if instance_id:
+                        counts[str(instance_id)] = int(count or 0)
+    except Exception as exc:  # noqa: BLE001 — read-only probe
+        # WARNING, not DEBUG: this leg's failure DEGRADES the husk
+        # detector's verdict (it cannot clear a candidate), and the
+        # operator must be able to see that in the payload (see
+        # ``_husk_flagged_rows`` and the ``evidence_legs`` field).
+        logger.warning(
+            "instance_read: job-item evidence read failed — the husk "
+            "detector's evidence legs are DEGRADED: %s",
+            exc,
+        )
+        return None
+    return counts
+
+
+def _husk_row_local_candidate(
+    manager: Any,
+    info: dict[str, Any],
+    *,
+    now: datetime,
+    terminal_statuses: Any,
+    threshold: int,
+) -> int | None:
+    """The row-local legs of the husk predicate — the candidate's AGE.
+
+    Non-terminal ∧ ``last_activity_at is None`` ∧ no children (E4, the
+    per-row attach) ∧ no question pack (E5, RAM) ∧ no pause marker (E6)
+    ∧ age > threshold. ``None`` means "not a candidate". The BATCHED
+    evidence legs (E1/E2/E3) are resolved later, for the whole candidate
+    set at once — see :func:`_husk_flagged_rows`.
+    """
+    if info.get("status") in terminal_statuses:
+        return None
+    if info.get("last_activity_at") is not None:
+        return None
+    age = _seconds_since(info.get("created_at"), now=now)
+    if age is None or age <= threshold:
+        return None
+    if info.get("children"):
+        return None
+    if _question_pack_of(manager, info.get("instance_id") or "") is not None:
+        return None
+    if _pause_marker_of(info.get("metadata")) is not None:
+        return None
+    return age
+
+
+def _husk_flagged_rows(
+    manager: Any,
+    candidates: list[tuple[dict[str, Any], int]],
+    *,
+    threshold: int,
+) -> list[dict[str, Any]]:
+    """Resolve the BATCHED evidence legs over the husk candidates.
+
+    The candidate list is the output of the row-local filter, run
+    per-window while the fleet streamed past. Two batched round trips
+    settle it, independent of the candidate count:
+
+    1. ``repo.filter_without_any_evidence_ids`` — the SINGLE-HOMED
+       evidence expression (E1 no task rows, E2 no message rows). The
+       detector NEVER calls ``filter_never_dispatched_ids``: that
+       method's ``idle ∧ version == 1`` conjuncts are a STATE
+       signature, not an evidence signature, and would silently
+       false-negative a ``running``/``version>1`` evidence-free row
+       (D-1 amendment, arch §1.1-§1.2).
+    2. the grouped JobItem probe (E3) over the surviving ids.
+
+    Either leg being UNAVAILABLE (a probe failure) suppresses the
+    verdict for that run: a husk report must never rest on a leg the
+    scanner could not actually evaluate.
+
+    Returns ``(flagged, degraded)``:
+
+    * ``flagged`` — the husk rows (unchanged semantics).
+    * ``degraded`` — ``True`` when an evidence leg COULD NOT RUN, so
+      the reported count is a LOWER BOUND, not the truth. The
+      pre-fix shape swallowed the failure into an empty list, and an
+      empty husk list is indistinguishable from "there are no husks"
+      — a clean ``count: 0`` on a scan that never actually looked.
+      The caller surfaces this as the additive ``evidence_legs`` field.
+    """
+    if not candidates:
+        # Nothing to probe — "0 husks" is TRUE, not degraded.
+        return [], False
+    repo = getattr(manager, "_instance_repository", None)
+    if repo is None:
+        logger.warning(
+            "instance_read: husk evidence legs are DEGRADED — no instance "
+            "repository is available, so the evidence legs could not run"
+        )
+        return [], True
+
+    candidate_ids = [
+        (info.get("instance_id") or "") for info, _age in candidates
+    ]
+    try:
+        evidence_free = repo.filter_without_any_evidence_ids(candidate_ids)
+    except Exception as exc:  # noqa: BLE001 — read-only probe
+        logger.warning(
+            "instance_read: husk evidence probe failed — the husk "
+            "detector's evidence legs are DEGRADED: %s",
+            exc,
+        )
+        return [], True
+
+    surviving = [iid for iid in candidate_ids if iid in evidence_free]
+    if not surviving:
+        # E1/E2 cleared EVERY candidate — there is nothing left for the
+        # E3 probe to check. "0 husks" is TRUE, not degraded.
+        return [], False
+    job_counts = _job_item_counts_by_instance(manager, surviving)
+    if job_counts is None:
+        # The E3 leg could not run — the count is a LOWER BOUND.
+        return [], True
+
+    flagged: list[dict[str, Any]] = []
+    for info, age in candidates:
+        instance_id = info.get("instance_id") or ""
+        if instance_id not in evidence_free:
+            continue
+        if job_counts.get(instance_id, 0):
+            continue
+        flagged.append(
+            _flagged_row(
+                info,
+                idle_seconds=age,
+                detail=(
+                    "never dispatched: no activity ever (last_activity_at is "
+                    "null), no task, no job item, no messages, no children, "
+                    "no question pack, no pause marker; "
+                    f"age {age}s (threshold {threshold}s)"
+                ),
+            )
+        )
+    return flagged, False
+
+
 def _build_health_report(
     manager: Any, threshold_seconds: int
-) -> tuple[list[dict[str, Any]], bool]:
-    """Build the six detector rows + the scan-truncated flag.
+) -> tuple[list[dict[str, Any]], bool, str, str]:
+    """Build the detector rows, the scan-truncated flag and the stop reason.
 
-    NEVER repairs anything. The flag (M8) tells the caller the scan hit
-    ``FLEET_SCAN_LIMIT`` — the OLDEST instances are invisible and the
-    payload must say so instead of failing silently."""
+    NEVER repairs anything.
+
+    THE SCAN IS AN OFFSET WINDOW LOOP (F4b)
+    ---------------------------------------
+    The old shape read ONE window (``limit=FLEET_SCAN_LIMIT``) of the
+    NEWEST rows and threw the rest away: the OLDEST rows — the day-scale
+    never-dispatched husks — were invisible, and the blind spot was
+    reported as a constant ``False``. The walk now covers the whole
+    fleet, window by window, and says WHY it stopped.
+
+    Invariants (each one is pinned):
+
+    * ``total`` is captured from the FIRST window ONLY and is never
+      reassigned. A concurrent INSERT at the front of the
+      ``created_at DESC`` order shifts every later row down, so a
+      recomputed total would make the walk stop early and silently skip
+      the tail — the exact rows the husks live in.
+    * The walk breaks ONLY on an EMPTY window (end of set) or a cap
+      (window count / wall-clock). It NEVER breaks on
+      ``len(read) >= total``.
+    * Rows are consumed PER WINDOW: only the FLAGGED rows, a compact
+      ``instance_id -> status`` map and the job-active rows survive the
+      loop. The whole fleet is never materialized.
+    * ``scan_stop_reason`` says why the walk stopped —
+      ``end_of_set`` / ``window_cap`` / ``time_budget``.
+
+    Returns:
+        ``(detectors, scan_truncated, scan_stop_reason, evidence_legs)``.
+
+        ``evidence_legs`` is ``"ok"`` or ``"degraded"`` — the state of
+        the husk detector's batched EVIDENCE legs (the E1/E2 message +
+        task probe and the E3 JobItem probe). ``"degraded"`` means a
+        leg COULD NOT RUN, so the husk count is a LOWER BOUND rather
+        than the truth; the pre-fix shape swallowed the failure into
+        an empty list and the operator could not tell "0 husks" from
+        "the scan never looked".
+    """
     from ..constants import ALIVE_INSTANCE_STATUSES, TERMINAL_INSTANCE_STATUSES
 
     now = datetime.now(timezone.utc)
-    rows, _total, truncated = manager.list_instances(
-        limit=FLEET_SCAN_LIMIT, offset=0
-    )
-    by_id = {r.get("instance_id"): r for r in rows if r.get("instance_id")}
+    deadline = time.monotonic() + FLEET_SCAN_TIME_BUDGET_SECONDS
     repo = getattr(manager, "_instance_repository", None)
     task_repo = getattr(manager, "_task_repo", None)
-    detectors: list[dict[str, Any]] = []
 
-    # ── 1. stale-running ────────────────────────────────────────────
-    # The LINEAGE-MAX aggregate (R4, hard): `last_activity_at` FREEZES
-    # on a waiting_children parent while a descendant streams mid-LLM,
-    # so a per-row check false-positives on every live parent.
-    flagged: list[dict[str, Any]] = []
-    for info in rows:
-        if info.get("status") != "running":
-            continue
-        instance_id = info.get("instance_id") or ""
-        activity = _lineage_max_activity(manager, instance_id)
-        idle = _seconds_since(
-            activity if activity else info.get("last_activity_at"), now=now
-        )
-        if idle is not None and idle > threshold_seconds:
-            flagged.append(
-                _flagged_row(
-                    info,
-                    idle_seconds=idle,
-                    detail=(
-                        f"no activity in the lineage for {idle}s "
-                        f"(threshold {threshold_seconds}s)"
-                    ),
-                )
-            )
-    detectors.append(
-        {
-            "detector": "stale-running",
-            "instances": flagged,
-            "count": len(flagged),
-            # NO observable classify-only counterpart on the stale-task
-            # recovery sweep — an honest gap, declared.
-            "disagreement_pin": None,
-        }
-    )
-
-    # ── 2. waiting-on-a-dead-parent ────────────────────────────────
-    flagged = []
-    for info in rows:
-        if info.get("status") != "waiting_children":
-            continue
-        parent_id = info.get("parent_id") or None
-        if not parent_id:
-            continue
-        parent_status = _parent_status_of(repo, by_id, parent_id)
-        if parent_status in ALIVE_INSTANCE_STATUSES:
-            continue
-        idle = _seconds_since(info.get("last_activity_at"), now=now)
-        if idle is not None and idle <= threshold_seconds:
-            continue
-        flagged.append(
-            _flagged_row(
-                info,
-                idle_seconds=idle,
-                detail=(
-                    f"waiting on children; parent {parent_id} is "
-                    f"{parent_status or 'missing'}"
-                ),
-            )
-        )
-    detectors.append(
-        {
-            "detector": "waiting-on-a-dead-parent",
-            "instances": flagged,
-            "count": len(flagged),
-            # OBSERVABLE counterpart — the disagreement test runs two
-            # independent code paths over one labelled corpus.
-            "disagreement_pin": "WaitingChildrenWatchdog.wedge_episodes()",
-        }
-    )
-
-    # ── 3. question-paused-without-task-row ────────────────────────
-    flagged = []
-    for info in rows:
-        if info.get("status") != "paused":
-            continue
-        instance_id = info.get("instance_id") or ""
-        idle = _seconds_since(info.get("last_activity_at"), now=now)
-        if idle is None or idle <= threshold_seconds:
-            continue
-        if _question_pack_of(manager, instance_id) is not None:
-            continue
-        if _has_live_task(task_repo, instance_id):
-            continue
-        marker = _pause_marker_of(info.get("metadata"))
-        deliberate = bool(marker) and marker.get("deliberate") is True
-        flagged.append(
-            _flagged_row(
-                info,
-                idle_seconds=idle,
-                detail=(
-                    "paused, aged, no live turn and no pending question"
-                    + (" (DELIBERATE PARK — not a wedge)" if deliberate else "")
-                ),
-            )
-        )
-    detectors.append(
-        {
-            "detector": "question-paused-without-task-row",
-            "instances": flagged,
-            "count": len(flagged),
-            # The sweep's predicate is DOCUMENTED in its docstring but its
-            # selectors are private — the pin is fixture-labelled, which
-            # is materially weaker than an executable counterpart.
-            "disagreement_pin": "stale_pause_sweep (documented classification)",
-        }
-    )
-
-    # ── 4. zombie-pending ──────────────────────────────────────────
-    # admission_state='active', no Task row, instance not alive.
-    flagged = []
+    # ── the job-active instance ids (detector 4's global query) ──────
+    # Taken ONCE, before the walk: the detector needs the set of
+    # instances owning an ACTIVE job item — including ids that are NOT
+    # in the fleet at all (a deleted instance with a live job row is
+    # still a zombie). The rows that ARE in the fleet are picked up
+    # during the walk (the detail map below); the ids that are NOT are
+    # reported as "missing" — the pre-existing semantics.
+    job_active_ids: set[str] = set()
+    job_active_rows: dict[str, dict[str, Any]] = {}
     try:
         from sqlalchemy import text
 
@@ -1194,128 +1625,424 @@ def _build_health_report(
                         "AND instance_id IS NOT NULL"
                     )
                 ).all()
-            for (instance_id,) in active_rows:
-                info = by_id.get(instance_id)
-                status = info.get("status") if info else None
-                if status in ALIVE_INSTANCE_STATUSES:
-                    continue
-                if _has_live_task(task_repo, instance_id):
-                    continue
-                flagged.append(
-                    _flagged_row(
-                        info
-                        or {
-                            "instance_id": instance_id,
-                            "agent_id": None,
-                            "status": status,
-                            "metadata": {},
-                        },
-                        idle_seconds=None,
-                        detail=(
-                            "job item is ACTIVE but the instance is "
-                            f"{status or 'missing'} and owns no task row"
-                        ),
-                    )
-                )
+            job_active_ids = {str(r[0]) for r in active_rows if r[0]}
     except Exception as exc:  # noqa: BLE001 — read-only probe
         logger.debug("instance_read: zombie-pending scan failed: %s", exc)
-    detectors.append(
+
+    # ── the per-detector accumulators ───────────────────────────────
+    # Only FLAGGED rows are retained — the fleet itself is never kept.
+    stale_running: list[dict[str, Any]] = []
+    dead_parent: list[dict[str, Any]] = []
+    paused_no_task: list[dict[str, Any]] = []
+    zombie_pending: list[dict[str, Any]] = []
+    orphans: list[dict[str, Any]] = []
+    failed_unreported: list[dict[str, Any]] = []
+    # The husk detector's row-local candidates: (row, age-since-created).
+    # The id list is the ONLY thing that survives the walk — the batched
+    # evidence legs are resolved once, after the loop.
+    husk_candidates: list[tuple[dict[str, Any], int]] = []
+
+    # Compact cross-row state: the ONLY per-row field a detector needs
+    # from another row is the parent's STATUS.
+    status_by_id: dict[str, str] = {}
+    # A parent's status is resolved at most ONCE per report.
+    parent_status_cache: dict[str, str | None] = {}
+    # The rows the detectors have already PROCESSED (the tidier fold).
+    #
+    # A concurrent INSERT at the front of the ``created_at DESC`` order
+    # shifts every later row down, so the LAST row of window N is
+    # served AGAIN at the head of window N+1. The id-keyed maps
+    # (``status_by_id`` / ``job_active_rows`` / ``parent_status_cache``)
+    # dedupe on their own — they are keyed by id. The LIST-backed
+    # accumulators (``stale_running`` / ``dead_parent`` /
+    # ``paused_no_task`` / ``orphans`` / ``failed_unreported`` /
+    # ``husk_candidates``) do NOT: a row served twice was APPENDED
+    # twice, so the payload's counts and ``total_flagged`` were
+    # inflated by exactly the drift the F4b walk exists to survive.
+    # This set closes the gap for EVERY accumulator at once.
+    seen_ids: set[str] = set()
+
+    total_first: int | None = None
+    reached_end_of_set = False
+    stop_reason = "end_of_set"
+    window_index = 0
+    while window_index < FLEET_SCAN_MAX_WINDOWS:
+        if time.monotonic() >= deadline:
+            stop_reason = "time_budget"
+            break
+        rows, total, _repo_truncated = manager.list_instances(
+            limit=FLEET_SCAN_LIMIT, offset=window_index * FLEET_SCAN_LIMIT
+        )
+        if total_first is None:
+            # FIRST window only — never reassigned (see the docstring).
+            total_first = total
+        if not rows:
+            reached_end_of_set = True
+            stop_reason = "end_of_set"
+            break
+
+        # Pass 1 — the window's statuses, so a child can resolve a
+        # parent that sits in the SAME window (the common case).
+        for info in rows:
+            instance_id = info.get("instance_id")
+            if instance_id:
+                status_by_id[instance_id] = info.get("status")
+
+        # Pass 2 — the detectors, per row, streaming.
+        for info in rows:
+            instance_id = info.get("instance_id") or ""
+            if instance_id:
+                if instance_id in seen_ids:
+                    # This row was already processed in an EARLIER
+                    # window (the concurrent-insert drift shape). The
+                    # detectors below are all list-backed, so without
+                    # this guard the row would be counted TWICE.
+                    continue
+                seen_ids.add(instance_id)
+            status = info.get("status")
+
+            # ── 1. stale-running ────────────────────────────────────
+            # The LINEAGE-MAX aggregate (R4, hard): `last_activity_at`
+            # FREEZES on a waiting_children parent while a descendant
+            # streams mid-LLM, so a per-row check false-positives on
+            # every live parent.
+            if status == "running":
+                activity = _lineage_max_activity(manager, instance_id)
+                idle = _seconds_since(
+                    activity if activity else info.get("last_activity_at"), now=now
+                )
+                if idle is not None and idle > threshold_seconds:
+                    stale_running.append(
+                        _flagged_row(
+                            info,
+                            idle_seconds=idle,
+                            detail=(
+                                f"no activity in the lineage for {idle}s "
+                                f"(threshold {threshold_seconds}s)"
+                            ),
+                        )
+                    )
+
+            # ── 2. waiting-on-a-dead-parent ──────────────────────────
+            if status == "waiting_children":
+                parent_id = info.get("parent_id") or None
+                if parent_id:
+                    parent_status = _parent_status_of(
+                        repo, status_by_id, parent_id, parent_status_cache
+                    )
+                    if parent_status not in ALIVE_INSTANCE_STATUSES:
+                        idle = _seconds_since(info.get("last_activity_at"), now=now)
+                        if idle is None or idle > threshold_seconds:
+                            dead_parent.append(
+                                _flagged_row(
+                                    info,
+                                    idle_seconds=idle,
+                                    detail=(
+                                        f"waiting on children; parent {parent_id} is "
+                                        f"{parent_status or 'missing'}"
+                                    ),
+                                )
+                            )
+
+            # ── 3. question-paused-without-task-row ──────────────────
+            if status == "paused":
+                idle = _seconds_since(info.get("last_activity_at"), now=now)
+                if idle is not None and idle > threshold_seconds:
+                    if _question_pack_of(manager, instance_id) is None:
+                        if not _has_live_task(task_repo, instance_id):
+                            marker = _pause_marker_of(info.get("metadata"))
+                            deliberate = bool(marker) and marker.get("deliberate") is True
+                            paused_no_task.append(
+                                _flagged_row(
+                                    info,
+                                    idle_seconds=idle,
+                                    detail=(
+                                        "paused, aged, no live turn and no pending question"
+                                        + (
+                                            " (DELIBERATE PARK — not a wedge)"
+                                            if deliberate
+                                            else ""
+                                        )
+                                    ),
+                                )
+                            )
+
+            # ── 4. zombie-pending (the row half) ─────────────────────
+            # The OTHER half — instances with an active job row that
+            # are NOT in the fleet at all — is settled after the walk.
+            if instance_id and instance_id in job_active_ids:
+                job_active_rows[instance_id] = info
+
+            # ── 5. orphans ───────────────────────────────────────────
+            if status != "waiting_children" and status not in TERMINAL_INSTANCE_STATUSES:
+                parent_id = info.get("parent_id") or None
+                if parent_id:
+                    parent_status = _parent_status_of(
+                        repo, status_by_id, parent_id, parent_status_cache
+                    )
+                    if parent_status not in ALIVE_INSTANCE_STATUSES:
+                        orphans.append(
+                            _flagged_row(
+                                info,
+                                idle_seconds=_seconds_since(
+                                    info.get("last_activity_at"), now=now
+                                ),
+                                detail=(
+                                    f"parent {parent_id} is {parent_status or 'missing'}; "
+                                    "this instance is still live"
+                                ),
+                            )
+                        )
+
+            # ── 6. failed-with-unreported-result ─────────────────────
+            if status in ("failed", "error"):
+                children = info.get("children") or []
+                if children:
+                    failed_unreported.append(
+                        _flagged_row(
+                            info,
+                            idle_seconds=_seconds_since(
+                                info.get("last_activity_at"), now=now
+                            ),
+                            detail=(
+                                f"failed with {len(children)} descendant(s); the child's "
+                                "report may never have been delivered"
+                            ),
+                        )
+                    )
+
+            # ── 7. never-dispatched-husk (the ROW-LOCAL legs) ────────
+            # Only the cheap legs run here (F3, D-1): non-terminal,
+            # never active, aged, no children, no pending question, no
+            # pause marker. The BATCHED evidence legs (E1/E2/E3) are
+            # settled once, after the walk, over the whole candidate
+            # set — two round trips for the whole report, independent
+            # of the fleet size.
+            candidate_age = _husk_row_local_candidate(
+                manager,
+                info,
+                now=now,
+                terminal_statuses=TERMINAL_INSTANCE_STATUSES,
+                threshold=DEFAULT_HUSK_MIN_AGE_SECONDS,
+            )
+            if candidate_age is not None:
+                husk_candidates.append((info, candidate_age))
+
+        window_index += 1
+    else:
+        # The window cap fired without ever seeing an empty window.
+        stop_reason = "window_cap"
+
+    # ── 4. zombie-pending (the missing-instance half) ───────────────
+    for instance_id in sorted(job_active_ids):
+        info = job_active_rows.get(instance_id)
+        status = info.get("status") if info else None
+        if status in ALIVE_INSTANCE_STATUSES:
+            continue
+        if _has_live_task(task_repo, instance_id):
+            continue
+        zombie_pending.append(
+            _flagged_row(
+                info
+                or {
+                    "instance_id": instance_id,
+                    "agent_id": None,
+                    "status": status,
+                    "metadata": {},
+                },
+                idle_seconds=None,
+                detail=(
+                    "job item is ACTIVE but the instance is "
+                    f"{status or 'missing'} and owns no task row"
+                ),
+            )
+        )
+
+    detectors: list[dict[str, Any]] = [
+        {
+            "detector": "stale-running",
+            "instances": stale_running,
+            "count": len(stale_running),
+            # NO observable classify-only counterpart on the stale-task
+            # recovery sweep — an honest gap, declared.
+            "disagreement_pin": None,
+        },
+        {
+            "detector": "waiting-on-a-dead-parent",
+            "instances": dead_parent,
+            "count": len(dead_parent),
+            # OBSERVABLE counterpart — the disagreement test runs two
+            # independent code paths over one labelled corpus.
+            "disagreement_pin": "WaitingChildrenWatchdog.wedge_episodes()",
+        },
+        {
+            "detector": "question-paused-without-task-row",
+            "instances": paused_no_task,
+            "count": len(paused_no_task),
+            # The sweep's predicate is DOCUMENTED in its docstring but its
+            # selectors are private — the pin is fixture-labelled, which
+            # is materially weaker than an executable counterpart.
+            "disagreement_pin": "stale_pause_sweep (documented classification)",
+        },
         {
             "detector": "zombie-pending",
-            "instances": flagged,
-            "count": len(flagged),
+            "instances": zombie_pending,
+            "count": len(zombie_pending),
             # The one public method is a RECONCILER (mutating); the
             # predicate is documented — the pin is fixture-labelled.
             "disagreement_pin": (
                 "job_recovery_service.reconcile_drift_states "
                 "(documented classification)"
             ),
-        }
-    )
-
-    # ── 5. orphans ─────────────────────────────────────────────────
-    # A non-terminal instance whose parent is gone or terminal — the
-    # shape the orphan sweep's selectors act on.
-    flagged = []
-    for info in rows:
-        if info.get("status") == "waiting_children":
-            continue  # detector 2 owns this class
-        if info.get("status") in TERMINAL_INSTANCE_STATUSES:
-            continue
-        parent_id = info.get("parent_id") or None
-        if not parent_id:
-            continue
-        parent_status = _parent_status_of(repo, by_id, parent_id)
-        if parent_status in ALIVE_INSTANCE_STATUSES:
-            continue
-        flagged.append(
-            _flagged_row(
-                info,
-                idle_seconds=_seconds_since(info.get("last_activity_at"), now=now),
-                detail=(
-                    f"parent {parent_id} is {parent_status or 'missing'}; "
-                    "this instance is still live"
-                ),
-            )
-        )
-    detectors.append(
+        },
         {
             "detector": "orphans",
-            "instances": flagged,
-            "count": len(flagged),
+            "instances": orphans,
+            "count": len(orphans),
             # OBSERVABLE counterpart.
             "disagreement_pin": "OrphanWatcherSweepService.counters()",
-        }
-    )
-
-    # ── 6. failed-with-unreported-result ───────────────────────────
-    flagged = []
-    for info in rows:
-        if info.get("status") not in ("failed", "error"):
-            continue
-        children = info.get("children") or []
-        if not children:
-            continue
-        idle = _seconds_since(info.get("last_activity_at"), now=now)
-        flagged.append(
-            _flagged_row(
-                info,
-                idle_seconds=idle,
-                detail=(
-                    f"failed with {len(children)} descendant(s); the child's "
-                    "report may never have been delivered"
-                ),
-            )
-        )
-    detectors.append(
+        },
         {
             "detector": "failed-with-unreported-result",
-            "instances": flagged,
-            "count": len(flagged),
+            "instances": failed_unreported,
+            "count": len(failed_unreported),
             # NO observable classify-only counterpart — an honest gap.
             "disagreement_pin": None,
+        },
+    ]
+
+    # ── 7. never-dispatched-husk (the BATCHED evidence legs) ────────
+    # Appended LAST: a pure addition, so the six existing detector
+    # indices stay stable for any consumer that reads them positionally.
+    husk_flagged, evidence_degraded = _husk_flagged_rows(
+        manager, husk_candidates, threshold=DEFAULT_HUSK_MIN_AGE_SECONDS
+    )
+    # The payload speaks the STRING vocabulary; the helper speaks
+    # booleans. One conversion, one seam.
+    evidence_legs = "degraded" if evidence_degraded else "ok"
+    detectors.append(
+        {
+            "detector": "never-dispatched-husk",
+            "instances": husk_flagged,
+            "count": len(husk_flagged),
+            # The evidence-leg state, ON THE ROW THAT CARRIES THE COUNT:
+            # "degraded" means an evidence leg could not run, so this
+            # count is a LOWER BOUND. Without it, a failed probe and a
+            # genuinely empty husk set look identical.
+            "evidence_legs": evidence_legs,
+            # D-1 amendment (arch §1.2 item 6): the containment holds on
+            # the EVIDENCE conjuncts only. The canonical twins carry a
+            # STATE signature (idle ∧ version==1) on top of the same
+            # evidence, so "husk ⊆ canonical ghost set" would be FALSE —
+            # a paused evidence-free row is a husk and not a canonical
+            # ghost.
+            "disagreement_pin": (
+                "ChildReportsService._ghost_child_filter / "
+                "InstanceRepository.filter_never_dispatched_ids "
+                "(the never-dispatched EVIDENCE signature — zero "
+                "message_queue rows, zero task rows, via the shared "
+                "expression never_dispatched_evidence_expr). "
+                "EVIDENCE-CONJUNCT CONTAINMENT ONLY: every husk-flagged "
+                "row satisfies no-message-rows AND no-task-rows (via "
+                "that shared expression) AND non-terminal AND "
+                "last_activity_at IS NULL AND age > "
+                "DEFAULT_HUSK_MIN_AGE_SECONDS. The husk set is NOT a "
+                "subset of the canonical ghost set — that set adds the "
+                "idle ∧ version==1 state conjuncts, which are not "
+                "evidence."
+            ),
         }
     )
 
-    return detectors, bool(truncated)
+    # F4b: the flag is TRUE when the walk did NOT cover the fleet —
+    # either fewer distinct rows than the count promised, or the walk
+    # stopped on a cap without ever seeing the end of the set.
+    distinct_read = len(status_by_id)
+    scan_truncated = bool(
+        (total_first is not None and distinct_read < total_first)
+        or (not reached_end_of_set)
+    )
+
+    return detectors, scan_truncated, stop_reason, evidence_legs
+
+
+def _marginalize_census(census: Any) -> tuple[
+    dict[str, int], dict[str, int], dict[str, int], int, int, bool
+]:
+    """Marginalize the fleet census into the three count maps.
+
+    ONE place for the marginalization (the tidier fold): the agent
+    buckets, the status buckets and the liveness buckets, plus the
+    reconciliation triple (``total_rows`` / ``counted_rows`` /
+    ``reconciled``).
+
+    A NULL group key lands in the ``"unknown"`` bucket — the
+    repository hands the key over AS ``None`` (never the literal
+    string ``"None"``, which would be a TRUTHY key and would defeat
+    the ``or "unknown"`` fallback).
+
+    Liveness is a pure function of status — the canonical map, no fork,
+    no extra query. NOTE (F2): ``idle`` is a STATUS bucket only.
+    ``_STATUS_CANONICAL_MAP`` maps idle → "processing", so
+    ``counts_by_liveness`` deliberately has NO ``idle`` key.
+
+    Returns:
+        ``(counts_by_agent, counts_by_status, counts_by_liveness,
+        total_rows, counted_rows, reconciled)``.
+    """
+    counts_by_agent: dict[str, int] = {}
+    counts_by_status: dict[str, int] = {}
+    for status, agent_id, count in census.groups:
+        agent_key = agent_id or "unknown"
+        status_key = status or "unknown"
+        counts_by_agent[agent_key] = counts_by_agent.get(agent_key, 0) + count
+        counts_by_status[status_key] = counts_by_status.get(status_key, 0) + count
+
+    counts_by_liveness: dict[str, int] = {}
+    for status_key, count in counts_by_status.items():
+        liveness = _liveness_for(status_key)
+        counts_by_liveness[liveness] = counts_by_liveness.get(liveness, 0) + count
+
+    total_rows = int(census.total)
+    counted_rows = sum(counts_by_status.values())
+    reconciled = counted_rows == total_rows
+    return (
+        counts_by_agent,
+        counts_by_status,
+        counts_by_liveness,
+        total_rows,
+        counted_rows,
+        reconciled,
+    )
 
 
 def _build_capacity_summary(manager: Any) -> dict[str, Any]:
-    """Build the capacity payload — counts, queue depth, pool, DLQ."""
-    rows, _total, truncated = manager.list_instances(
-        limit=FLEET_SCAN_LIMIT, offset=0
-    )
+    """Build the capacity payload — counts, queue depth, pool, DLQ.
 
-    counts_by_agent: dict[str, int] = {}
-    counts_by_status: dict[str, int] = {}
-    counts_by_liveness: dict[str, int] = {}
-    for info in rows:
-        agent = info.get("agent_id") or "unknown"
-        status = info.get("status") or "unknown"
-        liveness = _liveness_for(status)
-        counts_by_agent[agent] = counts_by_agent.get(agent, 0) + 1
-        counts_by_status[status] = counts_by_status.get(status, 0) + 1
-        counts_by_liveness[liveness] = counts_by_liveness.get(liveness, 0) + 1
+    The census half is ONE grouped query over the WHOLE fleet (F2): the
+    old shape counted a bounded window in Python, so its
+    ``counts_by_status`` summed to the window size while
+    ``instance_list.total_matching`` reported the real fleet — two true
+    numbers that could not reconcile. See
+    ``SQLModelInstanceRepository.count_fleet_by_status_and_agent`` for
+    the query shape and the KB-exclusion contract.
+    """
+    repo = getattr(manager, "_instance_repository", None)
+    if repo is None or not hasattr(repo, "count_fleet_by_status_and_agent"):
+        raise RuntimeError(
+            "fleet census unavailable: the instance repository does not "
+            "expose count_fleet_by_status_and_agent"
+        )
+    census = repo.count_fleet_by_status_and_agent(exclude_kb=True)
+
+    (
+        counts_by_agent,
+        counts_by_status,
+        counts_by_liveness,
+        total_rows,
+        counted_rows,
+        reconciled,
+    ) = _marginalize_census(census)
 
     # Queue depth — one grouped query across queues and admission states.
     queue_depth: list[dict[str, Any]] = []
@@ -1386,6 +2113,18 @@ def _build_capacity_summary(manager: Any) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 — read-only probe
         logger.debug("instance_read: dlq depth read failed: %s", exc)
 
+    # F5: the CANONICAL dead-job measure, derived from data already in
+    # hand — zero extra queries. `dlq_depth` and the per-queue `dead`
+    # column are TWO TRUE FACTS ABOUT TWO DIFFERENT TABLES, not a
+    # contradiction: `dlq_depth` counts the legacy `dead_letter_items`
+    # SNAPSHOT rows (DLQ-service writes only, retention-pruned) while
+    # `dead` counts `job_queue_items` in the terminal `dead` admission
+    # state (canonical — a dead job can exist with no snapshot row, the
+    # drift-recovery path finalizes to `dead` directly). The payload
+    # carries both plus a one-line note so an operator reading raw JSON
+    # does not have to consult the docstring.
+    dead_jobs_total = sum(int(row.get("dead") or 0) for row in queue_depth)
+
     # The Tier-2 reconciliation surface (W4).
     audit_pending = {"count": 0, "oldest_age_seconds": None}
     try:
@@ -1408,8 +2147,41 @@ def _build_capacity_summary(manager: Any) -> dict[str, Any]:
         "queue_depth": queue_depth,
         "worker_pool": worker_pool,
         "dlq_depth": dlq_depth,
+        "dead_jobs_total": dead_jobs_total,
+        "dlq_note": (
+            "dlq_depth counts dead_letter_items snapshot rows "
+            "(DLQ-service writes only, retention-pruned); "
+            "dead_jobs_total counts job_queue_items in the 'dead' "
+            "admission state (canonical). They measure different tables."
+        ),
         "audit_pending": audit_pending,
+        # F2: the reconciliation block. `counted_rows` and `total_rows`
+        # are two INDEPENDENT computations of the same number over the
+        # same WHERE; `reconciled` is their explicit agreement flag.
+        "totals": {
+            "total_rows": total_rows,
+            "counted_rows": counted_rows,
+            # The census no longer reads a bounded window, so this key
+            # is False BY CONSTRUCTION. It stays for shape stability —
+            # consumers (and the _full_doc_ contract) read it.
+            "scan_truncated": False,
+            "reconciled": reconciled,
+            "note": (
+                "counts_by_status is computed over the FULL fleet with one "
+                "GROUP BY query (no scan window). total_rows is the COUNT(*) "
+                "over the same WHERE (KB agents excluded) — the same number "
+                "instance_list reports as total_matching for an UNFILTERED "
+                "call. counted_rows is the sum of counts_by_status; "
+                "reconciled = (counted_rows == total_rows). A FILTERED "
+                "instance_list page is a different population: with a "
+                "status filter its total_matching counts only the matching "
+                "rows, so do not compare it to these totals. reconciled="
+                "false can transiently reflect a write landing between the "
+                "two statements of this scan."
+            ),
+        },
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        # M8: the census ceiling is visible, never silent.
-        "scan_truncated": bool(truncated),
+        # F2: the census no longer scans a bounded window — the flag is
+        # False by construction, never a copied constant.
+        "scan_truncated": False,
     }

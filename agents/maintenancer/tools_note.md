@@ -41,13 +41,48 @@ the whole tree, the protection determination, the confirmation
 requirement, the budget state — and touches nothing. I apply it with
 `dry_run=False` only after I have read the preview.
 
-**A protected target needs a named confirmation and a genuine user turn
-above me.** A protected target is a user-facing chat session, the
-leader, or an instance I have marked protected. To touch one I must
-name the exact instance in `confirmed_target_id` AND the turn must
-carry a user-origin provenance inherited from a delegation chain. A
-direct turn on my own session is refused on purpose — the request has
-to come down a chain from the user-facing turn.
+**Preview semantics on a protected target (F6).** The confirmation
+conditions run on BOTH paths (a preview on a protected target without
+confirmation still refuses `protected-target-confirmation-required`);
+the user-provenance conditions are APPLY ONLY (a dry-run preview reports
+`act_gate_would_pass` instead of requiring user provenance); the act
+gate is unchanged — apply requires confirmation AND a live user-origin
+window. The preview's `no-user-provenance` verdict is NOT something I
+can satisfy from my side — it needs a genuine user turn above me; a
+preview that reports it is a finding to relay, not "one more call from
+termination". And if the budget or a cascade refusal fires first, THAT
+token surfaces before the protected-target token — both are refusals,
+neither grants authority.
+
+**A protected target needs a named confirmation and a live user-origin
+window on my own session.** A protected target is a user-facing chat
+session, the leader, or an instance I have marked protected. To touch
+one I must name the exact instance in `confirmed_target_id` AND my
+session must hold a LIVE user-origin window — the one this turn gave
+me, or one inherited from a delegation. The gate reads LIVENESS, not
+where the window came from: a direct user turn on my own session is
+enough, and a delegated turn inherits the sender's window.
+
+**How the window actually reaches me (F11).** Both delegation lanes land
+the window the same way — the target INHERITS the sender's live window,
+one level down. A `send_message` names the sending instance in its
+source; a job dispatch (`job_create`, and a `job_continue` that hands
+the work on) carries a daemon-minted POINTER to the submitting instance
+instead, which the daemon threads to me before my turn runs. Either
+way I inherit only when the sender still holds a live window; with
+nothing to inherit the act refuses `no-user-provenance`. One deliberate
+edge: a checkpoint-RESUMED turn of mine never inherits a window — a
+resume after a daemon restart or a pause lands windowless and the act
+refuses the same way. That is today's semantics, on purpose (the
+windows are in-memory and fail closed); I re-run the delegation instead
+of trying to argue with the gate.
+
+**A nudge is not a diagnostic (F9).** When `instance_reclaim` refuses a
+non-terminal target with `reason=target-not-terminal`, the refusal
+names the real paths — `instance_terminate` dry-run first,
+`instance_health`/`instance_get` for evidence, `instance_mark(marker='park')`
+for a deliberate hold. It will NEVER suggest `instance_nudge`: a nudge
+DISPATCHES a context-free turn; it is not a diagnostic.
 
 **I never act on my own session.** Every act refuses a self-target.
 
@@ -56,7 +91,25 @@ act refuses and the reads keep working — so I can still diagnose while
 acting is disabled.
 
 **The wedge report never repairs.** It tells me what looks sick; I
-decide what to do, and the act tools do it.
+decide what to do, and the act tools do it. This includes the
+`never-dispatched-husk` class (detector #7): a spawned-but-never-
+dispatched row — idle, no task, no message, no job, no activity stamp,
+aged past 24h — is REPORTED in the wedge report and nothing more. The
+report never repairs; a husk is a finding for the operator, not a
+target I clean up on my own initiative.
+
+**Read-surface facts I rely on.** `fleet_capacity_summary` is the live
+capacity census; `instance_fleet_summary` is its ADDITIVE ALIAS — same
+builder, byte-identical payload, both names resolve and both are
+documented; the live name is unchanged. `instance_list`'s `status`
+filter is applied in SQL (a filtered page returns only matching rows
+and `total_matching` counts exactly the filtered population), and the
+honest `truncated` flag is re-derivable from the payload alone
+(`total_matching > offset + len(rows)`). `dead_jobs_total` and
+`dlq_depth` are DIFFERENT measures from different tables — both are
+reported, and the doc says which is which. `instance_get` on a cold
+instance never triggers MCP schema discovery and never writes to the
+row.
 
 
 ---

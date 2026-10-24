@@ -48,8 +48,10 @@ from sqlalchemy import create_engine
 from sqlmodel import Session, SQLModel, select
 
 import daemon.tools.instance_ops as io
+from daemon.repositories.instance.repository import KB_AGENT_IDS
 from daemon.repositories.instance_ops.models import InstanceOpsAudit
 from daemon.repositories.instance_ops.repository import InstanceOpsAuditRepository
+from tests.helpers.nestops_pg_fixtures import by_name, install_fake_home
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -92,12 +94,47 @@ class FakeRow:
         }
 
 
+
+@pytest.fixture(autouse=True)
+def _fake_home_fence(monkeypatch, tmp_path):
+    """The S6 mechanical HOME fence (see ``install_fake_home``).
+
+    HOME is redirected at a throwaway directory for EVERY test in this
+    file, so a HOME-derived path resolution can never reach the live
+    install — and the redirect is verified in-process, so a broken
+    fence fails here rather than somewhere unrelated later.
+    """
+    install_fake_home(monkeypatch, tmp_path)
+
+
 class FakeRepo:
     def __init__(self, rows: dict[str, FakeRow]):
         self.rows = rows
 
     def get(self, iid):
         return self.rows.get(iid)
+
+    def count_fleet_by_status_and_agent(self, *, exclude_kb: bool = True):
+        """The census shape the read tool consumes (F2).
+
+        Mirrors the real repository method over the fake fleet: ONE
+        grouped pass + an independent COUNT over the same WHERE.
+        """
+        from daemon.repositories.instance.repository import FleetCounts
+
+        groups: dict[tuple[str, str], int] = {}
+        total = 0
+        for row in self.rows.values():
+            if exclude_kb and row.agent_id in KB_AGENT_IDS:
+                continue
+            groups[(row.status, row.agent_id)] = (
+                groups.get((row.status, row.agent_id), 0) + 1
+            )
+            total += 1
+        return FleetCounts(
+            groups=[(s, a, c) for (s, a), c in sorted(groups.items())],
+            total=total,
+        )
 
     def set_metadata(self, iid, key, value, session=None):
         # Test-side stand-in for the repo's dotted-key metadata write
@@ -206,10 +243,6 @@ def _act_tools(manager, instance_id="maint-iid", agent="maintenancer"):
     )
 
 
-def _by_name(tools, name):
-    return next(t for t in tools if t.name == name)
-
-
 def _z(dt: datetime) -> str:
     """The REAL window timestamp format: ``YYYY-MM-DDTHH:MM:SSZ`` —
     the stammer writes ``iso_plus``/``now_iso`` output, and
@@ -253,14 +286,14 @@ class TestProtectedGateLadder:
 
     async def test_reason_required(self, fleet):
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": "target-1", "reason": "  "}
         )
         assert "reason=reason-required" in out
 
     async def test_self_surgery_refused(self, fleet):
         tools = _act_tools(fleet, instance_id="target-1")
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": "target-1", "reason": "r"}
         )
         assert "reason=self-surgery-refused" in out
@@ -268,7 +301,7 @@ class TestProtectedGateLadder:
     async def test_target_too_young(self, fleet):
         fleet.rows["fresh"] = FakeRow("fresh", created_at=datetime.now(timezone.utc).isoformat())
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": "fresh", "reason": "r"}
         )
         assert "reason=target-too-young" in out
@@ -276,22 +309,50 @@ class TestProtectedGateLadder:
     async def test_confirmation_required_then_mismatch(self, fleet):
         iid = self._protected_target(fleet)
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "r"}
         )
         assert "reason=protected-target-confirmation-required" in out
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "r", "confirmed_target_id": "someone-else"}
         )
         assert "reason=confirmed-target-mismatch" in out
 
     async def test_no_user_provenance(self, fleet):
+        """F6 (D-8): the provenance leg is APPLY-ONLY.
+
+        A CONFIRMED dry-run preview on a protected target REPORTS the
+        requirement as data (``act_gate_would_pass``) — it does not
+        refuse, because the operator cannot self-satisfy a live
+        user-origin window. The destructive act keeps the gate exactly
+        as it was: it refuses with ``no-user-provenance``.
+
+        (Updated, never deleted — the old assertion pinned the refusal
+        on the DEFAULT preview path.)
+        """
+        import json as _json
+
         iid = self._protected_target(fleet)
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+
+        # The preview path: the requirement is REPORTED, not refused.
+        preview = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "r", "confirmed_target_id": iid}
         )
-        assert "reason=no-user-provenance" in out
+        assert "NO mutation happened (dry-run)" in preview
+        payload = _json.loads(preview.split("\nNO mutation happened")[0])
+        assert payload["act_gate_would_pass"] == {
+            "ok": False,
+            "reason": "no-user-provenance",
+        }
+        # The preview carries TOKENS ONLY — never the raw refusal string.
+        assert "confirmed_target_id=" not in preview
+
+        # The apply path: the gate refuses exactly as before.
+        applied = await by_name(tools, "instance_terminate").ainvoke(
+            {"id": iid, "reason": "r", "confirmed_target_id": iid, "dry_run": False}
+        )
+        assert "reason=no-user-provenance" in applied
 
     async def test_genuine_direct_window_admits_protected_act(self, fleet):
         """AC-23a (DF-4 / P2, RE-POINTED) — this test IS pin (i): the
@@ -308,7 +369,7 @@ class TestProtectedGateLadder:
         iid = self._protected_target(fleet)
         fleet._user_origin_windows = _stamp_direct("maint-iid", source="api")
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "r", "confirmed_target_id": iid, "dry_run": False}
         )
         # ADMITTED — the act proceeds.
@@ -376,7 +437,7 @@ class TestProtectedGateLadder:
         # …and my inherited window was minted from it.
         fleet._inherited_provenance_windows = _stamp_inherited("maint-iid", depth=1, root_source="api")
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "r", "confirmed_target_id": iid, "dry_run": False}
         )
         # ADMITTED — the genuine delegated chain.
@@ -404,7 +465,7 @@ class TestProtectedGateLadder:
 
     async def test_delegated_turn_on_another_lane_clears_the_window(self, fleet):
         """AC-23b (DF-4 / P2, re-pointed) — with NO live window the gate
-        REFUSES with ``no-user-provenance``.
+        REFUSES with ``no-user-provenance`` on the APPLY path.
 
         The cleared-window shape is SIMULATED (the inherited store is
         emptied by hand); this test does NOT exercise the dispatch that
@@ -415,12 +476,27 @@ class TestProtectedGateLadder:
 
         (The retired token is spelled in TWO HALVES on purpose — it must
         not survive anywhere under ``daemon/`` or ``tests/``.)
+
+        F6 (D-8) UPDATE (never deleted): the default call is a PREVIEW,
+        and the provenance leg is apply-only — the preview REPORTS the
+        requirement as ``act_gate_would_pass`` instead of refusing. The
+        destructive act still refuses with the token, and that is what
+        this pin asserts (plus the preview's data rendering).
         """
+        import json as _json
+
         iid = self._protected_target(fleet)
         fleet._inherited_provenance_windows = {}  # cleared by the dispatch
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+
+        preview = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "r", "confirmed_target_id": iid}
+        )
+        payload = _json.loads(preview.split("\nNO mutation happened")[0])
+        assert payload["act_gate_would_pass"]["reason"] == "no-user-provenance"
+
+        out = await by_name(tools, "instance_terminate").ainvoke(
+            {"id": iid, "reason": "r", "confirmed_target_id": iid, "dry_run": False}
         )
         assert "reason=no-user-provenance" in out
 
@@ -431,7 +507,7 @@ class TestProtectedGateLadder:
 class TestBudgetRails:
     async def test_fourth_terminate_in_24h_refuses(self, fleet):
         tools = _act_tools(fleet)
-        term = _by_name(tools, "instance_terminate")
+        term = by_name(tools, "instance_terminate")
         for i in range(3):
             fleet.rows[f"t-{i}"] = FakeRow(f"t-{i}", created_at=(datetime.now(timezone.utc) - timedelta(hours=3)).isoformat())
             out = await term.ainvoke({"id": f"t-{i}", "reason": "r", "dry_run": False})
@@ -483,7 +559,7 @@ class TestBudgetRails:
             )
 
         tools = _act_tools(fleet)
-        term = _by_name(tools, "instance_terminate")
+        term = by_name(tools, "instance_terminate")
 
         # 1st protected terminate: ADMITTED — the pending/refused rows
         # consumed nothing — and it CONSUMES the N=1 protected budget.
@@ -521,7 +597,7 @@ class TestBudgetRails:
 class TestCascadeOrphans:
     async def test_cascade_false_with_live_descendants_refuses(self, fleet):
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": "target-1", "reason": "r", "cascade": False}
         )
         assert "reason=cascade-false-would-orphan-descendants" in out
@@ -529,7 +605,7 @@ class TestCascadeOrphans:
 
     async def test_allow_orphan_names_them_in_preview_and_row(self, fleet):
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": "target-1", "reason": "r", "cascade": False,
              "allow_orphan_descendants": True}
         )
@@ -573,7 +649,7 @@ class TestTier1FaultInjection:
             lambda self, session, **kw: (_ for _ in ()).throw(RuntimeError("audit INSERT failed"))
         )
         try:
-            out = await _by_name(tools, "instance_terminate").ainvoke(
+            out = await by_name(tools, "instance_terminate").ainvoke(
                 {"id": "target-1", "reason": "r", "dry_run": False}
             )
         finally:
@@ -603,7 +679,7 @@ class TestTier2WriteAhead:
         crash = CrashManager(fleet.rows)
         crash.rows["dead-1"] = FakeRow("dead-1", status="completed")
         tools = _act_tools(crash)
-        out = await _by_name(tools, "instance_reclaim").ainvoke(
+        out = await by_name(tools, "instance_reclaim").ainvoke(
             {"id": "dead-1", "message": "revive", "reason": "r", "dry_run": False}
         )
         assert "ERROR" in out
@@ -623,7 +699,7 @@ class TestKillSwitch:
     async def test_off_acts_refuse_reads_live(self, fleet, monkeypatch):
         monkeypatch.setenv("ENSEMBLE_INSTANCE_OPS_ENABLED", "0")
         act_tools = _act_tools(fleet)
-        out = await _by_name(act_tools, "instance_terminate").ainvoke(
+        out = await by_name(act_tools, "instance_terminate").ainvoke(
             {"id": "target-1", "reason": "r"}
         )
         assert out == io.KILL_SWITCH_REFUSAL
@@ -634,7 +710,7 @@ class TestKillSwitch:
         read_tools = ir.create_instance_read_tools(
             fleet, current_instance_id="maint-iid", agent_id="maintenancer"
         )
-        out = await _by_name(read_tools, "instance_list").ainvoke({})
+        out = await by_name(read_tools, "instance_list").ainvoke({})
         assert '"rows"' in out
 
 
@@ -670,7 +746,7 @@ class TestDocSurface:
 
     def test_terminate_doc_states_the_current_semantics(self):
         tools = self._tools()
-        term = _by_name(tools, "instance_terminate")._full_doc_
+        term = by_name(tools, "instance_terminate")._full_doc_
         assert "dry_run` defaults to TRUE" in term or "dry_run` defaults to `True" in term or "defaults to TRUE" in term
         assert "reason` is required" in term
         # DF-4 / P2 (AC-16, re-pointed): the CURRENT semantics are
@@ -681,23 +757,41 @@ class TestDocSurface:
         assert "NOT a gate input" in term
         assert "INHERITED" not in term
         assert "kill switch" in term.lower() or "kill-switch" in term.lower()
-        fields = _by_name(tools, "instance_terminate").args_schema.model_json_schema()["properties"]
+        # F6 (D-8) — the apply-only sentence. The gate SPLITS at the
+        # dry-run fork: the confirmation conditions run on BOTH paths and
+        # ONLY the user-provenance condition is apply-only. A preview
+        # reports what apply requires (``act_gate_would_pass``) instead
+        # of demanding a window the caller cannot self-satisfy.
+        assert "BOTH paths" in term
+        assert "(APPLY" in term
+        assert "ONLY — a dry-run preview reports" in term
+        assert "act_gate_would_pass" in term
+        # F6 (D-8) — the apply-only sentence. The gate SPLITS at the
+        # dry-run fork: the confirmation conditions run on BOTH paths and
+        # ONLY the user-provenance condition is apply-only. A preview
+        # reports what apply requires (``act_gate_would_pass``) instead
+        # of demanding a window the caller cannot self-satisfy.
+        assert "BOTH paths" in term
+        assert "(APPLY" in term
+        assert "ONLY — a dry-run preview reports" in term
+        assert "act_gate_would_pass" in term
+        fields = by_name(tools, "instance_terminate").args_schema.model_json_schema()["properties"]
         assert "dry_run" in fields
         assert "confirmed_target_id" in fields  # D-17 (not user_confirmed)
         assert "user_confirmed" not in fields
 
     def test_reclaim_doc_states_terminal_only(self):
-        doc = _by_name(self._tools(), "instance_reclaim")._full_doc_
+        doc = by_name(self._tools(), "instance_reclaim")._full_doc_
         assert "TERMINAL" in doc and "target-not-terminal" in doc
 
     def test_mark_doc_states_the_tiers(self):
-        doc = _by_name(self._tools(), "instance_mark")._full_doc_
+        doc = by_name(self._tools(), "instance_mark")._full_doc_
         assert "Tier-1" in doc or "TIER-1" in doc
         assert "Tier-2" in doc or "TIER-2" in doc
         assert "There is NO `unprotect`" in doc or "NO `unprotect`" in doc
 
     def test_answer_doc_states_the_parity(self):
-        doc = _by_name(self._tools(), "instance_answer")._full_doc_
+        doc = by_name(self._tools(), "instance_answer")._full_doc_
         for token in ("no-pending-question", "question-pack-lost", "stale-question-pack"):
             assert token in doc
 
@@ -708,7 +802,7 @@ class TestDocSurface:
 class TestReclaim:
     async def test_non_terminal_refuses(self, fleet):
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_reclaim").ainvoke(
+        out = await by_name(tools, "instance_reclaim").ainvoke(
             {"id": "target-1", "message": "m", "reason": "r"}
         )
         assert "reason=target-not-terminal" in out
@@ -716,7 +810,7 @@ class TestReclaim:
     async def test_terminal_revives_with_message(self, fleet):
         fleet.rows["done-1"] = FakeRow("done-1", status="completed")
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_reclaim").ainvoke(
+        out = await by_name(tools, "instance_reclaim").ainvoke(
             {"id": "done-1", "message": "welcome back", "reason": "r", "dry_run": False}
         )
         assert "revived" in out
@@ -725,7 +819,7 @@ class TestReclaim:
     async def test_self_refuses(self, fleet):
         tools = _act_tools(fleet, instance_id="done-1")
         fleet.rows["done-1"] = FakeRow("done-1", status="completed")
-        out = await _by_name(tools, "instance_reclaim").ainvoke(
+        out = await by_name(tools, "instance_reclaim").ainvoke(
             {"id": "done-1", "message": "m", "reason": "r"}
         )
         assert "reason=self-surgery-refused" in out
@@ -743,13 +837,13 @@ class TestReadTools:
         )
 
     async def test_unknown_status_is_a_typed_refusal(self, fleet):
-        out = await _by_name(self._read(fleet), "instance_list").ainvoke(
+        out = await by_name(self._read(fleet), "instance_list").ainvoke(
             {"status": "zombie"}
         )
         assert "reason=unknown-status-value" in out
 
     async def test_invalid_limit_is_a_typed_refusal(self, fleet):
-        out = await _by_name(self._read(fleet), "instance_list").ainvoke({"limit": 0})
+        out = await by_name(self._read(fleet), "instance_list").ainvoke({"limit": 0})
         assert "reason=invalid-limit" in out
 
     async def test_sql_side_status_filter_paginates_correctly(self, fleet):
@@ -757,7 +851,7 @@ class TestReadTools:
         page 2 continues correctly (never a pinned-ordered subset)."""
         for i in range(5):
             fleet.rows[f"run-{i}"] = FakeRow(f"run-{i}", status="running")
-        out = await _by_name(self._read(fleet), "instance_list").ainvoke(
+        out = await by_name(self._read(fleet), "instance_list").ainvoke(
             {"status": "running", "limit": 2, "offset": 0}
         )
         import json as _json
@@ -765,7 +859,7 @@ class TestReadTools:
         page1 = _json.loads(out)
         assert page1["count"] == 2 and page1["total_matching"] == 5
         assert all(r["status"] == "running" for r in page1["rows"])
-        out2 = await _by_name(self._read(fleet), "instance_list").ainvoke(
+        out2 = await by_name(self._read(fleet), "instance_list").ainvoke(
             {"status": "running", "limit": 2, "offset": 4}
         )
         page3 = _json.loads(out2)
@@ -774,7 +868,7 @@ class TestReadTools:
     async def test_census_row_has_no_hydration(self, fleet):
         import json as _json
 
-        out = await _by_name(self._read(fleet), "instance_list").ainvoke({})
+        out = await by_name(self._read(fleet), "instance_list").ainvoke({})
         rows = _json.loads(out)["rows"]
         assert rows
         for r in rows:
@@ -799,16 +893,21 @@ class TestReadTools:
         )
         import json as _json
 
-        out = await _by_name(self._read(fleet), "instance_list").ainvoke({"status": "paused"})
+        out = await by_name(self._read(fleet), "instance_list").ainvoke({"status": "paused"})
         row = next(r for r in _json.loads(out)["rows"] if r["instance_id"] == "parked")
         assert row["pause_marker"] and row["pause_marker"].get("deliberate") is True
         assert row["stale"] is True
         assert row["liveness"] == "paused"  # unchanged by staleness
 
-    async def test_health_report_has_six_detectors_and_never_repairs(self, fleet):
+    async def test_health_report_has_seven_detectors_and_never_repairs(self, fleet):
+        """F3 (2026-10-24): the detector list gained the SEVENTH class,
+        ``never-dispatched-husk`` — appended LAST so the six existing
+        indices stay stable. This pin was ``..._has_six_detectors_...``
+        before the nest-ops shakedown patch; the list grew by one
+        DETECTED CLASS, not by a reshuffle."""
         import json as _json
 
-        out = await _by_name(self._read(fleet), "instance_health").ainvoke({})
+        out = await by_name(self._read(fleet), "instance_health").ainvoke({})
         payload = _json.loads(out)
         names = [d["detector"] for d in payload["detectors"]]
         assert names == [
@@ -818,6 +917,7 @@ class TestReadTools:
             "zombie-pending",
             "orphans",
             "failed-with-unreported-result",
+            "never-dispatched-husk",
         ]
         # disagreement pins: 2 and 5 observable; 1 and 6 honest gaps
         by = {d["detector"]: d for d in payload["detectors"]}
@@ -834,7 +934,7 @@ class TestReadTools:
         InstanceOpsAuditRepository(fleet.engine).write_audit_ahead(
             action="instance_nudge", target="t", reason="r"
         )
-        out = await _by_name(self._read(fleet), "fleet_capacity_summary").ainvoke({})
+        out = await by_name(self._read(fleet), "fleet_capacity_summary").ainvoke({})
         payload = _json.loads(out)
         assert payload["audit_pending"]["count"] >= 1
         assert "generated_at" in payload
@@ -843,7 +943,7 @@ class TestReadTools:
         import daemon.tools.instance_read as ir
 
         tools = ir.create_instance_read_tools(fleet, agent_id="leader")
-        out = await _by_name(tools, "instance_list").ainvoke({})
+        out = await by_name(tools, "instance_list").ainvoke({})
         assert "not permitted" in out
 
 
@@ -870,7 +970,7 @@ class TestGetHonestyReviewFixes:
         fleet.rows["kid-1"] = FakeRow(
             "kid-1", agent_id="worker", parent_id="parent-1"
         )
-        out = await _by_name(self._read(fleet), "instance_get").ainvoke(
+        out = await by_name(self._read(fleet), "instance_get").ainvoke(
             {"id": "kid-1"}
         )
         payload = _json.loads(out)
@@ -882,7 +982,7 @@ class TestGetHonestyReviewFixes:
     async def test_spawned_by_root_is_null_with_explicit_marker(self, fleet):
         import json as _json
 
-        out = await _by_name(self._read(fleet), "instance_get").ainvoke(
+        out = await by_name(self._read(fleet), "instance_get").ainvoke(
             {"id": "target-1"}
         )
         payload = _json.loads(out)
@@ -896,7 +996,7 @@ class TestGetHonestyReviewFixes:
 
         tools = _act_tools(fleet)
         for marker in ("protect", "suspect"):
-            out = await _by_name(tools, "instance_mark").ainvoke(
+            out = await by_name(tools, "instance_mark").ainvoke(
                 {
                     "id": "old-worker",
                     "marker": marker,
@@ -907,7 +1007,7 @@ class TestGetHonestyReviewFixes:
             )
             assert "ERROR" not in out, out
             got = _json.loads(
-                await _by_name(self._read(fleet), "instance_get").ainvoke(
+                await by_name(self._read(fleet), "instance_get").ainvoke(
                     {"id": "old-worker"}
                 )
             )
@@ -928,7 +1028,7 @@ class TestGetHonestyReviewFixes:
 
         monkeypatch.setattr(svc, "dismiss_question_pack", _boom)
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_dismiss").ainvoke(
+        out = await by_name(tools, "instance_dismiss").ainvoke(
             {"id": "target-1", "reason": "cascade retry demo", "dry_run": False}
         )
         assert "dismiss-cascade-failed" in out
@@ -949,10 +1049,516 @@ class TestGetHonestyReviewFixes:
         import json as _json
 
         health = _json.loads(
-            await _by_name(self._read(fleet), "instance_health").ainvoke({})
+            await by_name(self._read(fleet), "instance_health").ainvoke({})
         )
         assert health["scan_truncated"] is False
         cap = _json.loads(
-            await _by_name(self._read(fleet), "fleet_capacity_summary").ainvoke({})
+            await by_name(self._read(fleet), "fleet_capacity_summary").ainvoke({})
         )
         assert cap["scan_truncated"] is False
+
+
+# ── F6 / F7 / F9 / F10 — the ops-side act defects (Phase 3) ──────────────
+#
+# F6  — the protected gate SPLITS at the dry_run fork (D-8): the
+#        confirmation conditions gate BOTH paths; only the
+#        user-provenance condition is apply-only.
+# F7  — ``already_protected`` means PROTECTED, not "marked"; the three
+#        protection layers have ONE home (``_protection_reasons``).
+# F9  — the reclaim refusal must not recommend a dispatch.
+# F10 — the mark apply echoes the committed audit row id.
+
+
+class TestGateTokenStructure:
+    """The gate's refusal token is RETURNED STRUCTURALLY (tidier fold).
+
+    The pre-fix shape recovered the token by re-parsing the refusal
+    string with an ANCHORED regex, and the preview's
+    ``would_refuse_with`` carried a HARDCODED token. A regex non-match
+    therefore degraded a CONFIRMATION refusal into preview data
+    attributed to the provenance token — a silent mislabel.
+
+    This class pins the STRUCTURAL contract:
+
+      * the gate returns ``(refusal, token)``;
+      * the token IS the constant that minted the refusal;
+      * the token and the refusal string never drift apart (the token
+        is EXACTLY the one embedded in the envelope);
+      * a passing gate returns ``(None, None)`` — never a token;
+      * the preview's ``would_refuse_with`` is DERIVED from the token
+        the gate actually returned (it agrees with
+        ``act_gate_would_pass.reason``).
+
+    PLANNED MUTATION (one behaviour per run):
+      * make the gate return the refusal string only (the pre-fix
+        shape) → the structural-arity pin RED;
+      * mint the refusal with a DIFFERENT token than the one returned
+        → the no-drift pin RED;
+      * hardcode ``would_refuse_with`` back to the provenance token
+        → the derivation pin RED (on a gate whose token is not that
+        one).
+    """
+
+    @staticmethod
+    def _verdict(ok: bool):
+        from daemon.tools.provenance import ProvenanceVerdict
+
+        return ProvenanceVerdict(ok=ok, pclass="direct" if ok else "")
+
+    def _gate(self, *, confirmed, ok, target="target-1"):
+        return io._protected_gate(
+            target_id=target,
+            confirmed_target_id=confirmed,
+            verdict=self._verdict(ok),
+            label="INSTANCE_TERMINATE",
+        )
+
+    def test_a_passing_gate_returns_no_refusal_and_no_token(self):
+        refusal, token = self._gate(confirmed="target-1", ok=True)
+        assert refusal is None
+        assert token is None
+
+    def test_the_gate_returns_a_two_tuple(self):
+        """The arity is STRUCTURAL — a bare refusal string is RED."""
+        result = self._gate(confirmed=None, ok=True)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+
+    def test_the_confirmation_required_token_is_the_constant(self):
+        refusal, token = self._gate(confirmed=None, ok=True)
+        assert token == io.GATE_TOKEN_CONFIRMATION_REQUIRED
+        assert f"reason={io.GATE_TOKEN_CONFIRMATION_REQUIRED}:" in refusal
+
+    def test_the_confirmation_mismatch_token_is_the_constant(self):
+        refusal, token = self._gate(confirmed="other-id", ok=True)
+        assert token == io.GATE_TOKEN_CONFIRMATION_MISMATCH
+        assert f"reason={io.GATE_TOKEN_CONFIRMATION_MISMATCH}:" in refusal
+
+    def test_the_provenance_token_is_the_constant(self):
+        refusal, token = self._gate(confirmed="target-1", ok=False)
+        assert token == io.GATE_TOKEN_NO_USER_PROVENANCE
+        assert f"reason={io.GATE_TOKEN_NO_USER_PROVENANCE}:" in refusal
+
+    def test_the_refusal_strings_are_byte_identical_to_the_pre_fix_shape(self):
+        """The refusal STRING set is unchanged — only its derivation moved.
+
+        The pre-fix strings are reproduced VERBATIM here, so a reworded
+        envelope is RED. (The refusal envelope's shape is pinned by the
+        house format: ``Error: <label> REFUSED — reason=<token>: <msg>``.)
+        """
+        refusal, _token = self._gate(confirmed=None, ok=True)
+        assert refusal.startswith(
+            "Error: INSTANCE_TERMINATE REFUSED — reason="
+            f"{io.GATE_TOKEN_CONFIRMATION_REQUIRED}: "
+        )
+        assert "'target-1' is a protected target." in refusal
+        assert "confirmed_target_id='target-1'" in refusal
+
+        refusal, _token = self._gate(confirmed="other-id", ok=True)
+        assert refusal.startswith(
+            "Error: INSTANCE_TERMINATE REFUSED — reason="
+            f"{io.GATE_TOKEN_CONFIRMATION_MISMATCH}: "
+        )
+        assert "confirmed_target_id='other-id' does not name the target" in refusal
+
+    async def test_the_preview_derives_would_refuse_with_from_the_token(
+        self, fleet
+    ):
+        """``would_refuse_with`` AGREES with the gate's own token.
+
+        The pre-fix shape hardcoded the provenance token there. The
+        derivation is now structural, so the two payload fields can
+        never disagree.
+        """
+        import json as _json
+
+        iid = "user-chat"
+        fleet.rows[iid] = FakeRow(
+            iid, agent_id="leader", metadata={"source_type": "telegram"}
+        )
+        tools = _act_tools(fleet)
+        out = await by_name(tools, "instance_terminate").ainvoke(
+            {"id": iid, "reason": "r", "confirmed_target_id": iid}
+        )
+        payload = _json.loads(out.split("\nNO mutation happened")[0])
+        reason = payload["act_gate_would_pass"]["reason"]
+        assert payload["act_gate"]["would_refuse_with"] == [reason]
+        assert reason == io.GATE_TOKEN_NO_USER_PROVENANCE
+
+
+class TestF6GateSplit:
+    """F6 — the gate split (D-8 minimal reading).
+
+    PLANNED MUTATION (one behaviour per run — T4.4, ops-side §7.2):
+      * move the CONFIRMATION conditions below the dry-run fork →
+        F6-i(a) RED;
+      * move the PROVENANCE condition back above the fork → F6-i(b) RED;
+      * delete the gate call on the apply path → F6-ii RED;
+      * make the preview write ``outcome="committed"`` → F6-iii RED;
+      * swap the guard order so the protected gate runs BEFORE the
+        budget/cascade rails → F6-iv RED (the budget token no longer
+        wins).
+    """
+
+    def _protected_target(self, fleet):
+        fleet.rows["user-chat"] = FakeRow(
+            "user-chat", agent_id="leader", parent_id=None,
+            metadata={"source_type": "telegram"},
+        )
+        return "user-chat"
+
+    async def test_f6_i_a_unconfirmed_preview_still_refuses(self, fleet):
+        """F6-i(a): the CONFIRMATION conditions gate BOTH paths."""
+        iid = self._protected_target(fleet)
+        tools = _act_tools(fleet)
+        out = await by_name(tools, "instance_terminate").ainvoke(
+            {"id": iid, "reason": "r"}
+        )
+        assert "reason=protected-target-confirmation-required" in out
+        # A refusal is NOT a preview body.
+        assert "NO mutation happened (dry-run)" not in out
+
+    async def test_f6_i_b_confirmed_preview_reports_the_gate(self, fleet):
+        """F6-i(b): a confirmed preview REPORTS the apply requirement."""
+        import json as _json
+
+        iid = self._protected_target(fleet)
+        tools = _act_tools(fleet)
+        out = await by_name(tools, "instance_terminate").ainvoke(
+            {"id": iid, "reason": "r", "confirmed_target_id": iid}
+        )
+        assert "NO mutation happened (dry-run)" in out
+        payload = _json.loads(out.split("\nNO mutation happened")[0])
+        assert payload["protected"] is True
+        assert payload["act_gate_would_pass"] == {
+            "ok": False,
+            "reason": "no-user-provenance",
+        }
+        assert payload["act_gate"]["would_refuse_with"] == ["no-user-provenance"]
+        # The preview carries TOKENS ONLY — never the raw refusal string.
+        assert "REFUSED" not in out
+        # The target is untouched.
+        assert iid not in fleet.terminated
+        # A ``previewed`` row exists (system observability, budget-neutral).
+        with Session(fleet.engine) as s:
+            rows = [
+                r
+                for r in s.exec(select(InstanceOpsAudit)).all()
+                if r.action == "instance_terminate"
+            ]
+        assert rows, "the preview row must exist"
+        assert rows[-1].outcome == "previewed"
+
+    async def test_f6_ii_apply_still_refuses(self, fleet):
+        """F6-ii: the destructive act keeps ALL gates."""
+        iid = self._protected_target(fleet)
+        tools = _act_tools(fleet)
+        out = await by_name(tools, "instance_terminate").ainvoke(
+            {"id": iid, "reason": "r", "confirmed_target_id": iid, "dry_run": False}
+        )
+        assert "reason=no-user-provenance" in out
+        assert iid not in fleet.terminated
+        with Session(fleet.engine) as s:
+            rows = [
+                r
+                for r in s.exec(select(InstanceOpsAudit)).all()
+                if r.action == "instance_terminate"
+            ]
+        assert rows[-1].outcome == "refused"
+
+    async def test_f6_iii_preview_is_budget_neutral(self, fleet):
+        """F6-iii: a preview does not consume the protected budget."""
+        iid = self._protected_target(fleet)
+        tools = _act_tools(fleet)
+        term = by_name(tools, "instance_terminate")
+        for _ in range(3):
+            out = await term.ainvoke(
+                {"id": iid, "reason": "r", "confirmed_target_id": iid}
+            )
+            assert "NO mutation happened (dry-run)" in out
+        repo = InstanceOpsAuditRepository(fleet.engine)
+        assert repo.count_committed_protected_terminates(hours=24) == 0
+
+    async def test_f6_iv_budget_precedes_the_protected_gate(self, fleet):
+        """F6-iv: the precedence inversion — guards 8-9 run FIRST.
+
+        An exhausted budget on a protected target yields the BUDGET
+        token, not the confirmation token. Both are refusals — no
+        authority is granted either way — but the precedence is a
+        behaviour change outside the provenance-only claim, so it is
+        pinned.
+        """
+        iid = self._protected_target(fleet)
+        # Exhaust the PROTECTED budget (N=1/24h) with a committed row.
+        # Seed a COMMITTED protected-terminate row — the rail counts
+        # committed rows whose ``before_snapshot["protected"]`` flag is
+        # set (no extra column; the rows are read in Python).
+        with Session(fleet.engine) as session:
+            row = InstanceOpsAudit(
+                action="instance_terminate",
+                target=iid,
+                reason="pre-existing committed protected terminate",
+                dry_run=False,
+                before_snapshot={"protected": True},
+                outcome="committed",
+            )
+            session.add(row)
+            session.commit()
+
+        tools = _act_tools(fleet)
+        out = await by_name(tools, "instance_terminate").ainvoke(
+            {"id": iid, "reason": "r"}
+        )
+        assert "reason=terminate-budget-exceeded" in out
+        assert "protected-target-confirmation-required" not in out
+
+
+class TestF7ProtectionReflection:
+    """F7 — one home for the protection determination.
+
+    PLANNED MUTATION (T4.4, ops-side §7.2): revert
+    ``_protection_reasons`` to the marker-only expression → F7-i (the
+    leader static case) RED; drop the chat-root leg → F7-ii RED; scope
+    the marker-already-set refusal to reasons WITHOUT ``marker`` →
+    F7-iii RED; refuse instead of succeed-with-disclosure on the
+    static+marker apply → F7-iv RED.
+    """
+
+    async def test_f7_i_leader_target_previews_as_protected(self, fleet):
+        import json as _json
+
+        fleet.rows["leader-row"] = FakeRow("leader-row", agent_id="leader")
+        tools = _act_tools(fleet)
+        out = await by_name(tools, "instance_mark").ainvoke(
+            {"id": "leader-row", "marker": "protect", "reason": "r"}
+        )
+        payload = _json.loads(out.split("\nNO mutation happened")[0])
+        assert payload["already_protected"] is True
+        assert payload["protection_reasons"] == ["leader"]
+
+    async def test_f7_ii_chat_root_target_previews_as_protected(self, fleet):
+        import json as _json
+
+        fleet.rows["chat-root"] = FakeRow(
+            "chat-root", agent_id="worker", parent_id=None,
+            metadata={"source_type": "telegram"},
+        )
+        tools = _act_tools(fleet)
+        out = await by_name(tools, "instance_mark").ainvoke(
+            {"id": "chat-root", "marker": "protect", "reason": "r"}
+        )
+        payload = _json.loads(out.split("\nNO mutation happened")[0])
+        assert payload["already_protected"] is True
+        assert payload["protection_reasons"] == ["chat-root"]
+
+    async def test_f7_iii_marker_target_and_the_idempotent_refusal(self, fleet):
+        import json as _json
+
+        fleet.rows["marked"] = FakeRow(
+            "marked",
+            agent_id="worker",
+            metadata={
+                "instance_ops.protect": {"protected": True},
+            },
+        )
+        tools = _act_tools(fleet)
+        # The DYNAMIC refusal is byte-identical for the dynamic case — it
+        # fires on the protect path, preview included (it is not a
+        # preview-scoped refusal).
+        refused = await by_name(tools, "instance_mark").ainvoke(
+            {"id": "marked", "marker": "protect", "reason": "r"}
+        )
+        assert "reason=marker-already-set" in refused
+        assert "already carries a protect marker" in refused
+        # The preview echo (a non-protect marker does not trip the
+        # refusal) shows the MARKER layer as the reason.
+        out = await by_name(tools, "instance_mark").ainvoke(
+            {"id": "marked", "marker": "suspect", "reason": "r"}
+        )
+        payload = _json.loads(out.split("\nNO mutation happened")[0])
+        assert payload["already_protected"] is True
+        assert payload["protection_reasons"] == ["marker"]
+
+    async def test_f7_iv_static_plus_marker_apply_succeeds_with_disclosure(
+        self, fleet
+    ):
+        """F7-iv: protection is MONOTONE — the operator may record the
+        intent. The apply SUCCEEDS and DISCLOSES."""
+        import json as _json
+
+        fleet.rows["leader-row"] = FakeRow("leader-row", agent_id="leader")
+        tools = _act_tools(fleet)
+        out = await by_name(tools, "instance_mark").ainvoke(
+            {"id": "leader-row", "marker": "protect", "reason": "r", "dry_run": False}
+        )
+        payload = _json.loads(out)
+        assert payload["marked"] is True
+        assert payload["already_protected"] is True
+        assert payload["protection_reasons"] == ["leader"]
+        # The marker was written.
+        assert fleet.rows["leader-row"].metadata["instance_ops.protect"][
+            "protected"
+        ] is True
+        # The disclosure is in the ledger row too.
+        with Session(fleet.engine) as s:
+            rows = [
+                r
+                for r in s.exec(select(InstanceOpsAudit)).all()
+                if r.action == "instance_mark"
+            ]
+        assert rows[-1].outcome == "committed"
+        assert rows[-1].before_snapshot.get("protection_reasons") == ["leader"]
+
+
+class TestF10AuditRowId:
+    """F10 — the mark apply echoes the committed audit row id.
+
+    PLANNED MUTATION (T4.4, arch §11.3): drop the echoed row id (leave
+    the ``write_audit_and_act`` result unassigned) → ALL THREE pins
+    here RED.
+    """
+
+    async def test_f10_i_protect_echoes_the_row_id(self, fleet):
+        import json as _json
+
+        fleet.rows["target-1"] = FakeRow("target-1", agent_id="worker")
+        tools = _act_tools(fleet)
+        out = await by_name(tools, "instance_mark").ainvoke(
+            {"id": "target-1", "marker": "protect", "reason": "r", "dry_run": False}
+        )
+        payload = _json.loads(out)
+        row_id = payload["audit_row_id"]
+        assert row_id, "the apply must echo the committed row id"
+        with Session(fleet.engine) as s:
+            row = s.get(InstanceOpsAudit, row_id)
+        assert row is not None
+        assert row.outcome == "committed"
+        assert row.action == "instance_mark"
+        assert row.target == "target-1"
+
+    async def test_f10_ii_park_echoes_the_row_id(self, fleet):
+        import json as _json
+
+        fleet.rows["target-1"] = FakeRow("target-1", agent_id="worker")
+        tools = _act_tools(fleet)
+        out = await by_name(tools, "instance_mark").ainvoke(
+            {"id": "target-1", "marker": "park", "reason": "r", "dry_run": False}
+        )
+        payload = _json.loads(out)
+        row_id = payload["audit_row_id"]
+        assert row_id
+        with Session(fleet.engine) as s:
+            row = s.get(InstanceOpsAudit, row_id)
+        assert row is not None
+        assert row.outcome == "committed"
+
+    async def test_f10_iii_suspect_echoes_the_row_id(self, fleet):
+        import json as _json
+
+        fleet.rows["target-1"] = FakeRow("target-1", agent_id="worker")
+        tools = _act_tools(fleet)
+        out = await by_name(tools, "instance_mark").ainvoke(
+            {"id": "target-1", "marker": "suspect", "reason": "r", "dry_run": False}
+        )
+        payload = _json.loads(out)
+        row_id = payload["audit_row_id"]
+        assert row_id
+        with Session(fleet.engine) as s:
+            row = s.get(InstanceOpsAudit, row_id)
+        assert row is not None
+        assert row.action == "instance_mark"
+
+
+#: The canonical reclaim copy — ops-side §6.2 is the SINGLE source
+#: (iteration-003 remedy 2).
+_RECLAIM_COPY_PLAN = (
+    REPO_ROOT
+    / ".agents"
+    / "shared"
+    / "planning"
+    / "nest-ops-shakedown-defects"
+    / "technical-analysis-ops-side.md"
+)
+
+
+def _normalize_ws(text: str) -> str:
+    """Collapse every whitespace run to a single space.
+
+    The canonical block is laid out as one string literal per source
+    line, so the shipped copy (which wraps at different points) and the
+    plan's block differ in WHITESPACE only — unless a word changed.
+    """
+    return " ".join(text.split())
+
+
+def _canonical_reclaim_copy(target_id: str, status: str) -> str:
+    """The CANONICAL reclaim copy, READ from ops-side §6.2.
+
+    The plan block is the SINGLE source. The pin READS it instead of
+    re-spelling it: a re-spelled copy inside the test would be a
+    SECOND source, and the two would drift — which is exactly what
+    this pin exists to prevent.
+    """
+    text = _RECLAIM_COPY_PLAN.read_text(encoding="utf-8")
+    start = text.index("### 6.2 The corrected copy")
+    fenced = text[start:].split("```", 2)[1]
+    parts: list[str] = []
+    for line in fenced.strip().split("\n"):
+        stripped = line.strip()
+        if stripped.startswith('f"'):
+            parts.append(stripped[2:-1])
+        elif stripped.startswith('"') and stripped.endswith('"'):
+            parts.append(stripped[1:-1])
+    rendered = "".join(parts)
+    rendered = rendered.replace("{target_id!r}", repr(target_id))
+    rendered = rendered.replace("{status!r}", repr(status))
+    return _normalize_ws(rendered)
+
+
+class TestF9ReclaimCopy:
+    """F9 — the reclaim refusal must not recommend a dispatch.
+
+    S3 (the tidier fold): the copy pin is an EXACT-EQUALITY check
+    against the CANONICAL block (ops-side §6.2) after whitespace
+    normalisation — NOT a set of substring assertions. The substring
+    form could not see a REWORDED clause: every individual clause was
+    still present, so a changed word (or a reordered clause) passed.
+
+    PLANNED MUTATION (N-4): restore the old 'use instance_nudge'
+    refusal copy → RED; reword ONE clause of the shipped copy → RED.
+    """
+
+    async def test_f9_i_the_copy_is_the_canonical_text_verbatim(self, fleet):
+        """The refusal copy IS ops-side §6.2 — whitespace-normalised.
+
+        One changed word is RED. The expectation comes from the plan
+        (the SINGLE source), never from a copy re-spelled in the test.
+        """
+        if not _RECLAIM_COPY_PLAN.exists():
+            pytest.skip("the nest-ops planning record is not in this tree")
+        fleet.rows["idle-1"] = FakeRow("idle-1", agent_id="worker")
+        tools = _act_tools(fleet)
+        out = await by_name(tools, "instance_reclaim").ainvoke(
+            {"id": "idle-1", "message": "wake up", "reason": "r"}
+        )
+        assert "reason=target-not-terminal" in out
+        message = out.split("reason=target-not-terminal: ", 1)[1]
+        assert _normalize_ws(message) == _canonical_reclaim_copy("idle-1", "idle")
+        # The canonical copy names no nudge path (the exact-equality
+        # check subsumes the pre-fix "instance_nudge not in out"
+        # assertion; this states it explicitly).
+        assert "instance_nudge" not in message
+
+    def test_f9_ii_doc_mirrors_carry_the_warning(self):
+        tools = io.create_instance_ops_tools(
+            FakeManager({"x": FakeRow("x")}),
+            current_instance_id="maint-iid",
+            agent_id="maintenancer",
+        )
+        reclaim_doc = by_name(tools, "instance_reclaim")._full_doc_
+        nudge_doc = by_name(tools, "instance_nudge")._full_doc_
+        assert "TERMINAL-ONLY" in reclaim_doc or "terminal-only" in reclaim_doc
+        assert "not a diagnostic" in reclaim_doc or "NOT a diagnostic" in reclaim_doc
+        assert "context-free" in nudge_doc
+        assert "instance_health" in nudge_doc
+        assert "instance_terminate" in nudge_doc

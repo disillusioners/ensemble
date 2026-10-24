@@ -101,6 +101,11 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     "instance_get",
     "instance_health",
     "fleet_capacity_summary",
+    # F1 (nest-ops shakedown, 2026-10-24): the ratified rename's name —
+    # an ADDITIVE ALIAS of fleet_capacity_summary (a second literal
+    # @tool closure in create_instance_read_tools, same ONE builder, so
+    # the payloads cannot drift). The live name is unchanged.
+    "instance_fleet_summary",
     "instance_terminate",
     "instance_reclaim",
     "instance_nudge",
@@ -1219,6 +1224,11 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "instance_get",
     "instance_health",
     "fleet_capacity_summary",
+    # F1 (nest-ops shakedown, 2026-10-24): the alias — MUST land in the
+    # SAME commit as the closure, or the bidirectional drift pin
+    # (tests/unit/tools/test_frozen_tool_name_discovery.py) fails in one
+    # direction or the other.
+    "instance_fleet_summary",
     "instance_terminate",
     "instance_reclaim",
     "instance_nudge",

@@ -65,6 +65,11 @@ READ_TOOL_NAMES: frozenset[str] = frozenset({
     "instance_get",
     "instance_health",
     "fleet_capacity_summary",
+    # F1 (nest-ops shakedown, 2026-10-24): the ADDITIVE alias of
+    # fleet_capacity_summary — a second literal @tool closure in
+    # create_instance_read_tools, same ONE builder. Hand-maintained
+    # set used only in the subset checks below (no len(tools) pin).
+    "instance_fleet_summary",
 })
 ACT_TOOL_NAMES: frozenset[str] = frozenset({
     "instance_terminate",
@@ -117,7 +122,7 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
 
 
 class TestStaticRegistration:
-    def test_step1_ast_discovery_finds_all_ten(self) -> None:
+    def test_step1_ast_discovery_finds_all_eleven(self) -> None:
         """Step 1 — the AST walker finds the factory-created ``@tool``
         functions at any nesting depth, in BOTH modules."""
         discovered = discover_source_only_tool_names()
@@ -137,11 +142,11 @@ class TestStaticRegistration:
                 "AST scanner and the drift pin fails at boot"
             )
 
-    def test_step3_dynamic_tool_names_contains_all_ten(self) -> None:
+    def test_step3_dynamic_tool_names_contains_all_eleven(self) -> None:
         missing = ALL_TOOL_NAMES - set(DYNAMIC_TOOL_NAMES)
         assert missing == set(), f"DYNAMIC_TOOL_NAMES missing: {missing}"
 
-    def test_step3b_known_tool_names_contains_all_ten(self) -> None:
+    def test_step3b_known_tool_names_contains_all_eleven(self) -> None:
         missing = ALL_TOOL_NAMES - set(KNOWN_TOOL_NAMES)
         assert missing == set(), f"KNOWN_TOOL_NAMES missing: {missing}"
 
@@ -503,13 +508,142 @@ class TestProvenanceVocabulary:
             f"daemon/ or tests/: {offenders}"
         )
         # the surviving token is the SOLE provenance refusal inside the
-        # gate block
+        # gate block. The gate mints it from the CONSTANT (the tidier
+        # fold replaced the regex-recovered token with a structurally
+        # returned one), so the block never re-spells the literal, and
+        # EXACTLY ONE refusal branch carries the provenance token.
         gate = source[
             source.index("def _protected_gate(") : source.index(
                 "async def _resolve_target("
             )
         ]
-        assert gate.count('"no-user-provenance"') == 1
+        assert '"no-user-provenance"' not in gate
+        tree = ast.parse(source)
+        gate_fn = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_protected_gate"
+        )
+        refusal_calls = sorted(
+            (
+                call
+                for call in ast.walk(gate_fn)
+                if isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+                and call.func.id == "_refusal"
+            ),
+            key=lambda call: call.lineno,
+        )
+        # THREE refusal branches — one per gate condition — and each one
+        # mints its token from a DISTINCT constant. A fresh literal in
+        # any branch is RED.
+        assert len(refusal_calls) == 3
+        minted = [
+            arg.id
+            for call in refusal_calls
+            for arg in call.args
+            if isinstance(arg, ast.Name) and arg.id.startswith("GATE_TOKEN_")
+        ]
+        assert minted == [
+            "GATE_TOKEN_CONFIRMATION_REQUIRED",
+            "GATE_TOKEN_CONFIRMATION_MISMATCH",
+            "GATE_TOKEN_NO_USER_PROVENANCE",
+        ]
+
+    def test_the_preview_payload_derives_the_token_from_the_gate(self) -> None:
+        """``would_refuse_with`` is DERIVED from the gate's own token.
+
+        The pre-fix shape hardcoded the provenance token in the preview
+        payload. On the REACHABLE path the two forms coincide (only the
+        provenance refusal ever reaches the preview), so this is a
+        STRUCTURAL pin: the payload's value expression must read the
+        gate's ``gate_token`` and must NOT re-spell a constant.
+
+        Why it matters even though the values coincide today: a
+        hardcoded fallback is a SILENT-mislabel seam — the moment the
+        gate grows a second non-confirmation condition, the hardcoded
+        form reports the wrong token with no test going red.
+        """
+        source = (
+            REPO_ROOT / "daemon" / "tools" / "instance_ops.py"
+        ).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        payload_dicts = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Dict)
+            and any(
+                isinstance(key, ast.Constant) and key.value == "would_refuse_with"
+                for key in node.keys
+            )
+        ]
+        assert len(payload_dicts) == 1, (
+            "the preview payload must carry exactly one "
+            f"'would_refuse_with' key (found {len(payload_dicts)})"
+        )
+        payload_dict = payload_dicts[0]
+        index = next(
+            i
+            for i, key in enumerate(payload_dict.keys)
+            if isinstance(key, ast.Constant) and key.value == "would_refuse_with"
+        )
+        value_src = ast.unparse(payload_dict.values[index])
+        assert "gate_token" in value_src, (
+            "the preview's would_refuse_with must be derived from the "
+            f"gate's token, got: {value_src!r}"
+        )
+        assert "GATE_TOKEN_NO_USER_PROVENANCE" not in value_src, (
+            "the preview's would_refuse_with must not re-spell a "
+            f"hardcoded token, got: {value_src!r}"
+        )
+
+        # …and the preview's ``act_gate_would_pass.reason`` is the
+        # gate's token too. This is the SECOND half of the derivation:
+        # the old shape hardcoded the token in BOTH preview fields, so
+        # a token-recovery miss could report a CONFIRMATION refusal as
+        # provenance data in two places at once.
+        pass_dicts = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Dict)
+            and any(
+                isinstance(key, ast.Constant)
+                and key.value == "act_gate_would_pass"
+                for key in node.keys
+            )
+        ]
+        assert len(pass_dicts) == 1, (
+            "the preview payload must carry exactly one "
+            f"'act_gate_would_pass' key (found {len(pass_dicts)})"
+        )
+        pass_dict = pass_dicts[0]
+        # the OUTER payload dict carries the "act_gate_would_pass" KEY;
+        # its VALUE is the inner {ok, reason} dict.
+        outer_index = next(
+            i
+            for i, key in enumerate(pass_dict.keys)
+            if isinstance(key, ast.Constant)
+            and key.value == "act_gate_would_pass"
+        )
+        inner = pass_dict.values[outer_index]
+        assert isinstance(inner, ast.Dict), (
+            "act_gate_would_pass must be a dict literal, got "
+            f"{ast.unparse(inner)!r}"
+        )
+        reason_index = next(
+            i
+            for i, key in enumerate(inner.keys)
+            if isinstance(key, ast.Constant) and key.value == "reason"
+        )
+        reason_src = ast.unparse(inner.values[reason_index])
+        assert "gate_token" in reason_src, (
+            "the preview's act_gate_would_pass.reason must be the gate's "
+            f"own token, got: {reason_src!r}"
+        )
+        assert "GATE_TOKEN_" not in reason_src, (
+            "the preview's act_gate_would_pass.reason must not re-spell "
+            f"a hardcoded token, got: {reason_src!r}"
+        )
 
 
 # ── the kill-switch surface ──────────────────────────────────────────────

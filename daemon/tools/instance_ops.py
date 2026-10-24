@@ -41,10 +41,26 @@ explicitly NOT this category's business.
 THE GATES, IN ORDER (terminate)
 -------------------------------
 reason-required → instance-not-found → self-surgery-refused →
-target-too-young → [protected: protected-target-confirmation-required →
-confirmed-target-mismatch → no-user-provenance] →
-terminate-budget-exceeded → cascade-false-would-orphan-descendants →
+target-too-young → terminate-budget-exceeded →
+cascade-false-would-orphan-descendants →
+[protected: protected-target-confirmation-required →
+confirmed-target-mismatch → no-user-provenance [apply only — provenance]] →
 dry-run preview | apply.
+
+F6 / D-8 (the leader-adjudicated MINIMAL reading): the protected gate
+SPLITS at the dry-run fork. The CONFIRMATION conditions run on BOTH
+paths — a preview still names its target. ONLY the user-provenance
+condition is apply-only: a dry-run preview REPORTS what apply requires
+(``act_gate`` / ``act_gate_would_pass``) instead of demanding a live
+user-origin window the caller cannot self-satisfy. The destructive act
+keeps ALL gates exactly as-is.
+
+F6-iv (precedence inversion, disclosed): guards 8-9 (the budget and the
+cascade rails) now run BEFORE the protected gate, so an exhausted budget
+or a cascade=False refusal on a protected target yields THAT token
+instead of ``protected-target-confirmation-required``. Both are refusals
+— no authority is granted either way — but the precedence is a
+behaviour change outside the provenance-only claim.
 
 THE PROVENANCE GATE IS A SPEED BUMP, NOT A PROOF (D-18 → superseded by DF-4)
 -------------------------------------------------------------------------------
@@ -121,7 +137,10 @@ Every act is AUDITED: it writes a row to the audit ledger, and a
 destructive act that cannot be audited does not happen. Every act
 requires a `reason` (free text, stored verbatim). Every destructive
 act defaults to `dry_run=True` — the preview shows exactly what would
-happen and mutates nothing.
+happen, mutates nothing, and reports what apply will require (on a
+protected target: `act_gate` and `act_gate_would_pass` — the preview
+names the target and reports the apply-path requirements, it does not
+grant them).
 
 A PROTECTED target — a user-facing chat session, the leader, or an
 instance marked protected — additionally requires a named confirmation
@@ -166,6 +185,36 @@ SUSPECT_MARKER_KEY = "instance_ops.suspect"
 
 #: Valid marker values for ``instance_mark``.
 VALID_MARKERS = ("park", "protect", "suspect")
+
+#: The protected-gate refusal tokens, split by what they mean for the
+#: ``dry_run`` fork (F6, D-8).
+#:
+#: The CONFIRMATION tokens are agent-satisfiable (the caller can name
+#: the target) — they gate BOTH paths: an unconfirmed preview on a
+#: protected target still refuses.
+#:
+#: The PROVENANCE token is NOT agent-satisfiable — it needs a live
+#: user-origin window on this turn. On the preview path it renders as
+#: DATA (``act_gate_would_pass``) instead of a refusal; on the apply
+#: path it refuses exactly as before.
+GATE_TOKEN_CONFIRMATION_REQUIRED = "protected-target-confirmation-required"
+GATE_TOKEN_CONFIRMATION_MISMATCH = "confirmed-target-mismatch"
+GATE_TOKEN_NO_USER_PROVENANCE = "no-user-provenance"
+
+#: The confirmation tokens — the ones that gate BOTH paths.
+GATE_CONFIRMATION_TOKENS = frozenset({
+    GATE_TOKEN_CONFIRMATION_REQUIRED,
+    GATE_TOKEN_CONFIRMATION_MISMATCH,
+})
+
+#: The house refusal envelope's reason token is NO LONGER recovered by
+#: a regex. The gate returns its token STRUCTURALLY (see
+#: :func:`_protected_gate`), so the caller never parses a message body
+#: to learn which condition fired. The old ANCHORED regex
+#: (``^Error: .*? REFUSED — reason=([a-z0-9-]+):``) was a recovery
+#: seam, and a recovery seam is a silent-degradation seam: a non-match
+#: turned a CONFIRMATION refusal into preview data attributed to a
+#: hardcoded provenance token. There is nothing left to recover.
 
 
 def _is_instance_ops_authorized(agent_id: str) -> bool:
@@ -294,18 +343,29 @@ def _target_state(manager: Any, instance_id: str) -> dict[str, Any] | None:
     return info
 
 
-def _is_protected_target(manager: Any, info: dict[str, Any]) -> bool:
-    """The protected determination — an OR of three layers (D-4).
+def _protection_reasons(manager: Any, info: dict[str, Any]) -> list[str]:
+    """The protection layers that apply to a target (F7 — ONE home).
 
-    1. STATIC: a user-facing chat root (``_is_user_facing_root``,
-       fail-closed on both legs) — OR ``agent_id == "leader"``.
-    2. DYNAMIC: an ``instance_ops.protect`` marker in the metadata.
+    Three layers, three CLOSED reason values (D-19 discipline — no open
+    vocabulary):
 
-    A protect marker can only ADD protection; nothing in this category
-    can un-protect a statically protected target.
+    1. ``leader`` — STATIC: the target is the leader's session.
+    2. ``chat-root`` — STATIC: a user-facing chat root
+       (``_is_user_facing_root_target``, fail-closed on both legs).
+    3. ``marker`` — DYNAMIC: an ``instance_ops.protect`` marker in the
+       target's metadata.
+
+    The ORDER is the layer order, so the list is stable for a given
+    target. A protect marker can only ADD protection; nothing in this
+    category can un-protect a statically protected target.
+
+    ``manager`` is accepted for symmetry with :func:`_is_protected_target`
+    (the canonical call shape) — the determination itself reads only the
+    target's own row.
     """
+    reasons: list[str] = []
     if (info.get("agent_id") or "") == "leader":
-        return True
+        reasons.append("leader")
     metadata = info.get("metadata") or {}
     source_type = (
         metadata.get("source_type")
@@ -315,12 +375,29 @@ def _is_protected_target(manager: Any, info: dict[str, Any]) -> bool:
     if _is_user_facing_root_target(
         parent_id=info.get("parent_id"), source_type=source_type
     ):
-        return True
+        reasons.append("chat-root")
     if isinstance(metadata, dict):
         marker = metadata.get(PROTECT_MARKER_KEY)
         if isinstance(marker, dict) and marker.get("protected") is True:
-            return True
-    return False
+            reasons.append("marker")
+    return reasons
+
+
+def _is_protected_target(manager: Any, info: dict[str, Any]) -> bool:
+    """The protected determination — an OR of three layers (D-4).
+
+    F7: this is now a CONSEQUENCE of the single-home
+    :func:`_protection_reasons` — one implementation, no second
+    predicate that can drift.
+
+    1. STATIC: a user-facing chat root (``_is_user_facing_root``,
+       fail-closed on both legs) — OR ``agent_id == "leader"``.
+    2. DYNAMIC: an ``instance_ops.protect`` marker in the metadata.
+
+    A protect marker can only ADD protection; nothing in this category
+    can un-protect a statically protected target.
+    """
+    return bool(_protection_reasons(manager, info))
 
 
 def _audit_repo_for(manager: Any):
@@ -339,7 +416,7 @@ def _protected_gate(
     confirmed_target_id: str | None,
     verdict: ProvenanceVerdict,
     label: str,
-) -> str | None:
+) -> tuple[str | None, str | None]:
     """The protected-target gate (D-17 / D-18, re-scoped by DF-4).
 
     TWO conditions, in order: the confirmed-target check (D-17) and the
@@ -348,41 +425,137 @@ def _protected_gate(
     no trust signal, and it survives as observability in the audit
     ledger (DF-4).
 
-    Returns ``None`` when the gate PASSES, or the refusal string.
+    Returns ``(refusal, token)``:
+
+    * ``(None, None)`` — the gate PASSES.
+    * ``(refusal_string, token)`` — the gate REFUSES, and ``token`` is
+      the refusal's reason token, RETURNED STRUCTURALLY.
+
+    The token is the CONSTANT that minted the refusal (see
+    ``GATE_TOKEN_*``), never a re-parse of the message body. The old
+    shape recovered it with an anchored regex and fell back to a
+    hardcoded provenance token when the regex did not match — a
+    recovery seam that could silently mislabel a CONFIRMATION refusal
+    as provenance data. The refusal STRING is byte-identical to the
+    pre-fix shape (the constants hold the same spellings).
     """
     if confirmed_target_id is None:
-        return _refusal(
-            label,
-            "protected-target-confirmation-required",
-            (
-                f"{target_id!r} is a protected target. Pass "
-                f"confirmed_target_id='{target_id}' — the confirmation "
-                "NAMES the target it authorizes."
+        return (
+            _refusal(
+                label,
+                GATE_TOKEN_CONFIRMATION_REQUIRED,
+                (
+                    f"{target_id!r} is a protected target. Pass "
+                    f"confirmed_target_id='{target_id}' — the confirmation "
+                    "NAMES the target it authorizes."
+                ),
             ),
+            GATE_TOKEN_CONFIRMATION_REQUIRED,
         )
     if confirmed_target_id != target_id:
-        return _refusal(
-            label,
-            "confirmed-target-mismatch",
-            (
-                f"confirmed_target_id={confirmed_target_id!r} does not "
-                f"name the target {target_id!r}. The confirmation must "
-                "name the target the user consented to, verbatim."
+        return (
+            _refusal(
+                label,
+                GATE_TOKEN_CONFIRMATION_MISMATCH,
+                (
+                    f"confirmed_target_id={confirmed_target_id!r} does not "
+                    f"name the target {target_id!r}. The confirmation must "
+                    "name the target the user consented to, verbatim."
+                ),
             ),
+            GATE_TOKEN_CONFIRMATION_MISMATCH,
         )
     if not verdict.ok:
         hint = _user_origin_sources_hint()
         extra = f" What counts as user-origin: {hint}." if hint else ""
-        return _refusal(
-            label,
-            "no-user-provenance",
-            (
-                "no live user-origin provenance window on this turn. "
-                "The windows are in-memory and are wiped on a daemon "
-                f"restart.{extra}"
+        return (
+            _refusal(
+                label,
+                GATE_TOKEN_NO_USER_PROVENANCE,
+                (
+                    "no live user-origin provenance window on this turn. "
+                    "The windows are in-memory and are wiped on a daemon "
+                    f"restart.{extra}"
+                ),
             ),
+            GATE_TOKEN_NO_USER_PROVENANCE,
         )
-    return None
+    return None, None
+
+
+def _build_act_gate_payload(
+    *,
+    protected: bool,
+    gate_refusal: str | None,
+    gate_token: str | None,
+) -> dict[str, Any] | None:
+    """The F6 preview's ``act_gate`` block — what APPLY would require.
+
+    The gate verdict is rendered as DATA — TOKENS ONLY, never the raw
+    refusal string (it embeds the target id and the caller's own
+    confirmation value). A confirmed preview that cannot pass the
+    provenance leg reports ``act_gate_would_pass.ok == false`` with the
+    reason token: the operator cannot self-satisfy that without a
+    genuine user turn.
+
+    ``would_refuse_with`` is DERIVED from the token the gate actually
+    minted — never a hardcoded guess (the pre-fix shape hardcoded the
+    provenance token, and a token-recovery miss mislabelled a
+    confirmation refusal as provenance data).
+
+    Returns:
+        The block, or ``None`` when the target is not protected (the
+        preview then carries no gate at all).
+    """
+    if not protected:
+        return None
+    return {
+        "confirmation": "confirmed_target_id must equal target verbatim",
+        "provenance": (
+            "a LIVE user-origin provenance window on this turn; a "
+            "delegated chain (send_message OR job dispatch) is accepted; "
+            "apply refuses with no-user-provenance when absent"
+        ),
+        "would_refuse_with": ([gate_token] if gate_token else []),
+    }
+
+
+def _write_gate_refusal(
+    audit: Any,
+    *,
+    action: str,
+    target_id: str,
+    reason: str,
+    refusal: str,
+    caller_instance_id: str,
+    caller_agent_id: str,
+    confirmed_target_id: str | None,
+    verdict: ProvenanceVerdict,
+) -> None:
+    """Write the protected-gate refusal row to the audit ledger.
+
+    A no-op when there is no audit repository (the ledger is optional;
+    the refusal itself is still returned to the caller).
+
+    The provenance fields come from the VERDICT — the same object the
+    gate keyed on — so the row and the gate can never disagree about
+    what was observed.
+    """
+    if audit is None:
+        return
+    audit.write_refusal(
+        action=action,
+        target=target_id,
+        reason=reason,
+        error_message=refusal,
+        actor_instance_id=caller_instance_id,
+        actor_agent_id=caller_agent_id,
+        confirmed_target_id=confirmed_target_id,
+        provenance_class=verdict.pclass or None,
+        provenance_depth=verdict.depth or None,
+        root_source=verdict.root_source,
+        root_message_id=verdict.root_message_id,
+    )
 
 
 async def _resolve_target(manager: Any, instance_id: str) -> str:
@@ -554,33 +727,13 @@ def create_instance_ops_tools(
                 ),
             )
 
-        # ── the protected determination + the three-condition gate ──
+        # ── the protected determination (the gate CALL moves below) ──
+        # F6 (D-8): the DETERMINATION stays here (the budget rail and
+        # the preview payload both need it); the gate CALL moves down to
+        # guard 10, AFTER the budget/cascade rails and immediately before
+        # the ``dry_run`` fork.
         protected = _is_protected_target(manager, info)
         verdict = _provenance_for(manager, caller_instance_id)
-        gate_refusal = None
-        if protected:
-            gate_refusal = _protected_gate(
-                target_id=target_id,
-                confirmed_target_id=confirmed_target_id,
-                verdict=verdict,
-                label=label,
-            )
-            if gate_refusal is not None and audit is not None:
-                audit.write_refusal(
-                    action="instance_terminate",
-                    target=target_id,
-                    reason=reason,
-                    error_message=gate_refusal,
-                    actor_instance_id=caller_instance_id,
-                    actor_agent_id=caller_agent_id,
-                    confirmed_target_id=confirmed_target_id,
-                    provenance_class=verdict.pclass or None,
-                    provenance_depth=verdict.depth or None,
-                    root_source=verdict.root_source,
-                    root_message_id=verdict.root_message_id,
-                )
-            if gate_refusal is not None:
-                return gate_refusal
 
         # ── the budget rails (D-16) ─────────────────────────────────
         budget_state = {
@@ -678,6 +831,52 @@ def create_instance_ops_tools(
                 return refusal
             orphans = list(live_descendants)
 
+        # ── guard 10: the PROTECTED GATE — SPLIT at the dry_run fork ──
+        # F6 / D-8 (the leader-adjudicated MINIMAL reading):
+        #
+        #   * the CONFIRMATION conditions gate BOTH paths — an unconfirmed
+        #     preview on a protected target still refuses (the
+        #     confirmation is agent-satisfiable: the caller can name the
+        #     target);
+        #   * ONLY the user-provenance condition is APPLY-ONLY — it
+        #     needs a live user-origin window on this turn, which the
+        #     caller cannot self-satisfy; on the preview path it renders
+        #     as DATA (``act_gate_would_pass``) instead of a refusal.
+        #
+        # The gate is PURE — it returns a string and writes NOTHING. The
+        # refusal ROW is written here, at the caller, only on the real
+        # refusal path (compute/write separation).
+        gate_refusal = None
+        gate_token = None
+        if protected:
+            # The gate returns ``(refusal, token)`` STRUCTURALLY — the
+            # token is the constant that minted the refusal, never a
+            # re-parse of the message body.
+            gate_refusal, gate_token = _protected_gate(
+                target_id=target_id,
+                confirmed_target_id=confirmed_target_id,
+                verdict=verdict,
+                label=label,
+            )
+            is_confirmation_refusal = gate_token in GATE_CONFIRMATION_TOKENS
+            if gate_refusal is not None and (
+                not dry_run or is_confirmation_refusal
+            ):
+                # The real refusal path — a refusal row is written and
+                # the refusal is returned to the caller.
+                _write_gate_refusal(
+                    audit,
+                    action="instance_terminate",
+                    target_id=target_id,
+                    reason=reason,
+                    refusal=gate_refusal,
+                    caller_instance_id=caller_instance_id,
+                    caller_agent_id=caller_agent_id,
+                    confirmed_target_id=confirmed_target_id,
+                    verdict=verdict,
+                )
+                return gate_refusal
+
         before_snapshot = {
             "status": info.get("status"),
             "agent_id": info.get("agent_id"),
@@ -732,6 +931,23 @@ def create_instance_ops_tools(
                 "orphan_list": orphans,
                 "target_age_seconds": age,
                 "audit_preview_row": preview_row_id,
+                # F6: what APPLY would require. The gate verdict is
+                # rendered as DATA — TOKENS ONLY, never the raw refusal
+                # string (it embeds the target id and the caller's own
+                # confirmation value). A confirmed preview that cannot
+                # pass the provenance leg reports
+                # ``act_gate_would_pass.ok == false`` with the reason
+                # token — the operator cannot self-satisfy that without
+                # a genuine user turn.
+                "act_gate": _build_act_gate_payload(
+                    protected=protected,
+                    gate_refusal=gate_refusal,
+                    gate_token=gate_token,
+                ),
+                "act_gate_would_pass": {
+                    "ok": gate_refusal is None,
+                    "reason": gate_token,
+                },
                 "note": "NO mutation happened (dry-run)",
             }
             return json.dumps(payload, default=str) + "\nNO mutation happened (dry-run)"
@@ -805,18 +1021,35 @@ The gates, in order:
 2. The target must exist (short form accepted; fuzzy-matched).
 3. Never your own session (`self-surgery-refused`).
 4. A target younger than 600s refuses (`target-too-young`).
-5. A PROTECTED target — a user-facing chat session, the leader, or an
-   instance marked protected — additionally requires BOTH:
-   `confirmed_target_id == id` (verbatim) AND a live user-origin
-   provenance window. The window's shape (minted on this instance vs
-   inherited through a delegation chain) is recorded in the audit ledger
-   but is NOT a gate input — a live window of either shape is admitted.
-6. The budget: at most 3 committed terminates per 24h fleet-wide, and
+5. The budget: at most 3 committed terminates per 24h fleet-wide, and
    at most 1 per 24h for protected targets (`terminate-budget-exceeded`).
-7. `cascade=False` on a target with live descendants refuses
+6. `cascade=False` on a target with live descendants refuses
    (`cascade-false-would-orphan-descendants`) unless
    `allow_orphan_descendants=True` — and then the preview AND the audit
    row both NAME the orphans.
+7. A PROTECTED target — a user-facing chat session, the leader, or an
+   instance marked protected — additionally requires BOTH:
+   `confirmed_target_id == id` (verbatim) (BOTH paths — a preview still
+   names its target) AND a live user-origin provenance window (APPLY
+   ONLY — a dry-run preview reports `act_gate_would_pass` instead of
+   requiring user provenance). The window's shape (minted on this
+   instance vs inherited through a delegation chain) is recorded in the
+   audit ledger but is NOT a gate input — a live window of either shape
+   is admitted.
+
+F6-iv (precedence): the budget and cascade rails run BEFORE the
+protected gate, so an exhausted budget or a `cascade=False` refusal on
+a protected target yields THAT token instead of
+`protected-target-confirmation-required`. Both are refusals — no
+authority is granted either way.
+
+F6 x F11 (read this before treating a preview as "one more call from
+termination"): a confirmed preview on a protected target reports
+`act_gate_would_pass.reason == "no-user-provenance"` when this turn has
+no live user-origin window. The operator CANNOT self-satisfy that
+condition — it needs a genuine user turn (or a delegated chain from an
+instance that holds one). The preview REPORTS the requirement; it does
+not grant it.
 
 The audit row is written in the SAME transaction as the terminate
 (Tier-1): if the audit write fails, the terminate rolls back. A
@@ -915,13 +1148,33 @@ Examples:
             return _refusal(label, "instance-not-found", f"no instance row for {target_id!r}")
         terminal = {"completed", "terminated", "error", "failed"}
         if info.get("status") not in terminal:
+            # F9: the CANONICAL corrected copy (ops-side §6.2 — the single
+            # source). The old copy recommended ``instance_nudge`` — and a
+            # nudge on a graph-less target DISPATCHES a durable,
+            # context-free turn (with a source that POPS the target's
+            # provenance windows): exactly what an idle, evidence-free husk
+            # must never receive. The copy now names the real paths, keeps
+            # the D-20 provenance (reclaim is terminal-only BY DESIGN) and
+            # states the hazard in one clause.
             return _refusal(
                 label,
                 "target-not-terminal",
                 (
                     f"{target_id!r} is {info.get('status')!r}, not terminal. "
-                    "Reclaim revives a DEAD instance only — use "
-                    "instance_nudge to deliver to a live one."
+                    "instance_reclaim is TERMINAL-ONLY "
+                    "(D-20). For a non-terminal target: run instance_terminate "
+                    "with dry_run=True "
+                    "first if it is a genuine wedge (then apply with "
+                    "confirmed_target_id when the "
+                    "target is protected — WITHOUT a live user-origin chain, "
+                    "direct or delegated, "
+                    "apply refuses no-user-provenance); use instance_health / "
+                    "instance_get to read "
+                    "its state; use instance_mark(marker='park') only for a "
+                    "deliberate hold on a "
+                    "pausable target. Do NOT nudge an idle, evidence-free "
+                    "instance — a nudge "
+                    "DISPATCHES a context-free turn."
                 ),
             )
         if dry_run:
@@ -998,6 +1251,15 @@ revived and why — independent of the audit row.
 NON-terminal targets refuse with `target-not-terminal` (that is what
 distinguishes reclaim from `instance_nudge`, which delivers to any
 target). Your own session refuses (`self-surgery-refused`).
+
+F9: a nudge to an idle, evidence-free target dispatches a context-free
+turn — it is NOT a diagnostic. On a graph-less target the nudge falls
+through to a durable enqueue: a bare new turn, with no context and no
+evidence, whose dispatch source also clears the target's provenance
+windows. Use `instance_health` / `instance_get` to READ a target's
+state, and `instance_terminate` (dry-run first) to remediate a genuine
+wedge. The `target-not-terminal` refusal names those paths and states
+the hazard.
 
 Audit tier: 2 (write-ahead) — the intent row is written FIRST with
 `outcome="pending"`, the act runs, the row is settled. A crash mid-act
@@ -1142,6 +1404,14 @@ turn; anything else gets a durable enqueue. A send to a TERMINAL
 instance REVIVES it (revive-on-send) — the preview names that when the
 target is terminal.
 
+F9: for an idle, never-dispatched instance a nudge creates a NEW,
+context-free turn — no context, no evidence, and a dispatch source that
+clears the target's provenance windows. It is a DELIVERY primitive, not a
+diagnostic. To
+DIAGNOSE a target prefer `instance_health` (or `instance_get`); to
+REMEDIATE a genuine wedge prefer `instance_terminate` with
+`dry_run=True` first, then apply with `confirmed_target_id`.
+
 Args:
     id: Target instance id. Required.
     message: REQUIRED — the message to inject.
@@ -1227,18 +1497,34 @@ Examples:
             return _refusal(label, "instance-not-found", f"no instance row for {target_id!r}")
 
         metadata = info.get("metadata") or {}
-        already_protected = (
-            isinstance(metadata.get(PROTECT_MARKER_KEY), dict)
-            and metadata[PROTECT_MARKER_KEY].get("protected") is True
-        )
-        if marker == "protect" and already_protected:
+        # F7: ONE home for the protection determination. ``already_protected``
+        # now means PROTECTED (not "marked") — a leader target with no
+        # marker previews as protected, and the reasons are echoed so the
+        # operator can SEE why.
+        protection_reasons = _protection_reasons(manager, info)
+        already_protected = bool(protection_reasons)
+        has_protect_marker = "marker" in protection_reasons
+        if marker == "protect" and has_protect_marker:
+            # F7: the refusal is scoped to the DYNAMIC marker layer only.
+            # The token, the reason and the text are byte-identical for
+            # the dynamic case (the same marker already present — an
+            # idempotent no-op). A STATICALLY protected target with no
+            # marker is NOT this case: protection is monotone, so the
+            # operator is allowed to record the intent (see the
+            # succeed-with-disclosure path below).
             return _refusal(
                 label,
                 "marker-already-set",
                 f"{target_id!r} already carries a protect marker",
             )
 
-        before_snapshot = {"status": info.get("status"), "marker": marker}
+        before_snapshot = {
+            "status": info.get("status"),
+            "marker": marker,
+            # F7: the disclosure — the protection layers that apply are
+            # recorded in the ledger row, not just in the response.
+            "protection_reasons": protection_reasons,
+        }
         if dry_run:
             preview_row = None
             if audit is not None:
@@ -1259,6 +1545,11 @@ Examples:
                         "marker": marker,
                         "note": note,
                         "already_protected": already_protected,
+                        # F7: WHY the target is protected (the three
+                        # closed reasons). Preview-only by design — the
+                        # apply response carries the same echo when the
+                        # disclosure applies.
+                        "protection_reasons": protection_reasons,
                         "audit_preview_row": preview_row,
                         "note_line": "NO mutation happened (dry-run)",
                     },
@@ -1308,6 +1599,12 @@ Examples:
                     "target": target_id,
                     "marker": "park",
                     "audit": "committed (Tier-2 write-ahead)",
+                    # F10: the committed ledger row id — the join key
+                    # between the preview and the apply (``None`` only
+                    # when the ledger was unavailable).
+                    "audit_row_id": row_id,
+                    "already_protected": already_protected,
+                    "protection_reasons": protection_reasons,
                 },
                 default=str,
             )
@@ -1334,7 +1631,11 @@ Examples:
                 def _act(s):
                     repo.set_metadata(target_id, key, value, session=s)
 
-                audit.write_audit_and_act(
+                # F10: capture the committed row id. ``write_audit_and_act``
+                # returns the row (``repository.py``) — the id is a
+                # client-side default, so it is valid before the commit
+                # and safe to echo after it.
+                row_id = audit.write_audit_and_act(
                     session,
                     action="instance_mark",
                     target=target_id,
@@ -1359,6 +1660,14 @@ Examples:
                 "target": target_id,
                 "marker": marker,
                 "audit": "committed (Tier-1, same transaction as the act)",
+                # F10: the committed ledger row id. ``InstanceOpsAudit.id``
+                # is a client-side ``default_factory`` — the value exists
+                # before the commit, so it is safe to echo after it.
+                "audit_row_id": row_id,
+                # F7: the disclosure — a protect on a STATICALLY protected
+                # target SUCCEEDS (protection is monotone) and says so.
+                "already_protected": already_protected,
+                "protection_reasons": protection_reasons,
             },
             default=str,
         )

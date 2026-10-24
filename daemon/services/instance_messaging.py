@@ -2706,6 +2706,7 @@ class InstanceMessagingService:
         queue_id: str | None = None,
         image_refs: list[str] | None = None,
         idempotency_key: str | None = None,
+        dispatch_chain: dict[str, Any] | None = None,
     ) -> "AsyncMessageResult":
         """Submit a message to the queue as a JobItem (Option B).
 
@@ -3074,6 +3075,13 @@ class InstanceMessagingService:
             agent_tag=agent_tag_for_job,
             job_id=job_id,
             idempotency_key=idempotency_key,
+            # F11: the delegation chain rides a KEYWORD, NEVER via
+            # ``metadata`` — the service seam pops the reserved key out
+            # of any caller-supplied metadata map, so a metadata-borne
+            # chain would be erased before it reached the job row. This
+            # is the channel that makes ``job_continue``'s chain
+            # reachable at all (arch §7.3's hole).
+            dispatch_chain=dispatch_chain,
         )
 
         # D4 compensation: detect a dedup hit. A dedup is meaningful when

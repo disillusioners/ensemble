@@ -5070,8 +5070,12 @@ class InstanceLifecycleService:
                 filter applied in Python over a fetched page silently
                 returns an arbitrary pinned-ordered subset past the first
                 page — the SQL-side filter is the only honest shape
-                (GT-3 / AC-21). ``None`` (default) applies no status
-                filter.
+                (nest-ops-shakedown GT-8 / AC-21). ``None`` (default)
+                applies no status filter.
+                F12 (2026-10-24): this kwarg was DROPPED on the way to
+                the repository, so the SQL-side claim above was false —
+                a filtered call returned an arbitrary first page while
+                the count narrowed. It is now forwarded verbatim.
 
         Returns:
             Tuple of (list of instance info dicts, total count, truncated flag).
@@ -5092,6 +5096,12 @@ class InstanceLifecycleService:
             search=search,
             order=order,
             source=source,
+            # F12: the status filter MUST reach the repository — the
+            # docstring above claims SQL-side filtering, and the repo
+            # supports it on BOTH the count and the select. Dropping it
+            # here made the claim false: the rows came back unfiltered
+            # while ``total`` counted only the matching population.
+            status=status,
         )
         # Convert Instance objects to dicts for backward compatibility, then
         # populate ``children`` from the permanent ``instances.parent_id``

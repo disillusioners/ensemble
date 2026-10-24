@@ -63,6 +63,25 @@ TASK_MESSAGE_MAX_LEN: int = 1000
 TASK_MESSAGE_TRUNCATION_MARKER: str = "...[truncated]"
 
 
+# F11 — the reserved DELEGATION-CHAIN key.
+#
+# The chain is a POINTER to the delegating instance, never a credential:
+# it names the caller instance so the provenance mint can claim THAT
+# instance's live user-origin window through the existing arithmetic
+# (liveness at claim, depth+1, depth cap, monotonic decay). It is
+# DAEMON-WRITE-ONLY.
+#
+# The single choke point is :meth:`JobQueueService.enqueue`: the
+# caller-supplied metadata map is COPIED and this key is popped from it
+# UNCONDITIONALLY, then the daemon-minted value is re-added. A caller can
+# therefore never forge a chain — the REST ingress hands ``body.metadata``
+# straight through, and the pop is what stops it.
+#
+# The double-underscore namespace keeps it out of the agent-authored
+# metadata key space.
+DISPATCH_CHAIN_KEY = "__ens_dispatch_chain__"
+
+
 def _extract_task_message_from_messages(messages: list) -> str:
     """Return the first ``type='human'`` message's content (truncated).
 
@@ -1355,6 +1374,8 @@ class JobQueueService:
         instance_id: str | None = None,
         agent_tag: str | None = None,
         job_id: str | None = None,
+        *,
+        dispatch_chain: dict[str, Any] | None = None,
     ) -> JobItem:
         """Submit a job for processing.
 
@@ -1393,6 +1414,13 @@ class JobQueueService:
             job_id: Optional explicit JobItem UUID. When supplied, the
                     repository uses this exact ID; this is used by Option B
                     to link ``JobItem.job_id`` to ``Task.work_id``.
+            dispatch_chain: F11 — the daemon-minted DELEGATION CHAIN
+                    (KEYWORD-ONLY, never via ``metadata``). Names the
+                    delegating instance so the provenance mint can claim
+                    that instance's live user-origin window. The
+                    caller-supplied ``metadata`` map can NEVER set it:
+                    the reserved key is popped from the copy below and
+                    only the daemon value is re-added.
 
         Returns:
             JobItem with PENDING status (or existing non-terminal job if idempotent).
@@ -1400,6 +1428,26 @@ class JobQueueService:
         Raises:
             ValueError: If ``project_id`` cannot be normalized.
         """
+        # ── F11 — the delegation chain is DAEMON-WRITTEN ONLY ─────────────
+        # Normalize ONCE, at the TOP of ``enqueue`` — BEFORE both create
+        # sites (the idempotency branch and the plain create). A per-site
+        # pop leaves one path open.
+        #
+        #  * the caller's map is COPIED (the caller's dict is never
+        #    mutated),
+        #  * the reserved key is popped UNCONDITIONALLY — a REST caller
+        #    that smuggles the reserved key into ``body.metadata`` gets it
+        #    dropped here,
+        #  * the daemon value is re-added ONLY when present, so the
+        #    daemon value wins by construction.
+        #
+        # Absent chain ⇒ the stored metadata is byte-identical to the
+        # caller's map (default-off).
+        job_metadata = dict(metadata or {})
+        job_metadata.pop(DISPATCH_CHAIN_KEY, None)
+        if dispatch_chain:
+            job_metadata[DISPATCH_CHAIN_KEY] = dispatch_chain
+
         # Canonical normalization: ensures ALL callers get system_default_project for None/empty
         project_id = normalize_project_id(project_id)
         if project_id is None:
@@ -1478,7 +1526,7 @@ class JobQueueService:
                 source=source,
                 project_id=project_id,
                 priority=priority,
-                job_metadata=metadata,
+                job_metadata=job_metadata,
                 queue_id=resolved_queue_id,
                 idempotency_key=idempotency_key,
                 job_type=job_type,
@@ -1604,7 +1652,7 @@ class JobQueueService:
             source=source,
             project_id=project_id,
             priority=priority,
-            job_metadata=metadata,
+            job_metadata=job_metadata,
             queue_id=resolved_queue_id,
             idempotency_key=idempotency_key,
             job_type=job_type,
@@ -2829,6 +2877,15 @@ class JobQueueService:
             queue_id=job.queue_id,  # Carry over the original queue
             priority=job.priority,
             metadata=job.job_metadata,
+            # F11: re-pass the delegation chain as a KEYWORD. The
+            # unconditional pop in ``enqueue`` strips the reserved key
+            # from ``metadata`` — without this the chain would be
+            # SILENTLY DROPPED on a retry (the retry is still a
+            # delegation from the same caller). The chain is a pointer,
+            # not authority: the mint re-reads the caller's live window
+            # and re-checks expiry at claim time, so a stale chain buys
+            # nothing.
+            dispatch_chain=(job.job_metadata or {}).get(DISPATCH_CHAIN_KEY),
             agent_tag=job.agent_tag,  # F1: preserve version tag through retry
             job_type=job.job_type,  # M-2: preserve the job type
             idempotency_key=job.idempotency_key,  # M-2: preserve the dedup key

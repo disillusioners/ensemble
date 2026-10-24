@@ -1449,7 +1449,7 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "agents/approver/rule.md": "c09bfb29441e843bd87f8848b8b666c3b9fd4df8ada1b62f9ea5b57cf3d666ae",
     "agents/approver[v2]/rule.md": "c09bfb29441e843bd87f8848b8b666c3b9fd4df8ada1b62f9ea5b57cf3d666ae",
     "agents/architect/rule.md": "ce96896142f568c480a2f92b9b92fa0775be641d877fa386205d8438d55b21b4",
-    "agents/ari/rule.md": "bb784e8c41afc913bccf1873bfd5cb8943e5b1e17daacc6936efa08a31d26b68",
+    "agents/ari/rule.md": "7b056aedb1e9c4b7ff4071e48c64fe2771f7eb599c1b0ef5a91bf5b0ca4073fe",
     "agents/coder/soul.md": "6263b648cfee8eeb84bb90361687e45728bc8bdae60702e965a84a23a1b46968",
     "agents/developer/rule.md": "9b06c29c811e3636765f8ee09dd1a2b10901554e542723f3de6b851a85a97249",
     "agents/developer[v2]/tools_note.md": "62882063ca109e7829c097201e110a0edb872ade000415372ab7ca016bee5748",
