@@ -45,6 +45,14 @@ class ExecutionStatus(str, enum.Enum):
     FAILED = "failed"
     SKIPPED = "skipped"
     QUEUED = "queued"
+    # ``deferred`` — the scheduled fire produced a DURABLE PENDING delivery
+    # to the pinned caller instead of a direct dispatch (commission
+    # ``scheduler-deferred-alarm-delivery``; decisions.md DEC-9 / DEC-12).
+    #
+    # PURE PYTHON over the existing TEXT column: ``schedule_executions.status``
+    # is a String column, so the new member needs NO migration (plan §(d) D5
+    # — the migration file set stays byte-for-byte identical).
+    DEFERRED = "deferred"
 
     @classmethod
     def is_valid(cls, status: str) -> bool:

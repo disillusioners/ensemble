@@ -82,11 +82,25 @@ Manage external database connections and run queries.
 # ``INTO`` is included to block ``SELECT ... INTO`` which creates a table
 # (C1). The remaining keywords are DML/DDL/admin operations that an
 # agent-facing read tool must never execute.
+#
+# ``REPLACE`` is dual-natured and is NOT scanned by the generic loop below:
+# the ``REPLACE INTO`` *statement* (MySQL/SQLite DML) is forbidden, but
+# ``replace(string, from, to)`` is a standard read-only scalar function —
+# a valid ``SELECT replace(name, 'a', 'b') FROM t`` must not be rejected.
+# _REPLACE_STATEMENT_RE below matches only the statement form.
 _FORBIDDEN_KEYWORDS: frozenset[str] = frozenset({
     "INSERT", "INTO", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE",
     "TRUNCATE", "GRANT", "REVOKE", "MERGE", "REPLACE", "CALL",
     "EXEC", "EXECUTE", "VACUUM", "REINDEX", "REFRESH",
 })
+
+# Statement-form ``REPLACE``: the keyword NOT immediately followed by the
+# open paren of a function call. ``REPLACE INTO t ...`` and a bare trailing
+# ``REPLACE`` still match; ``replace(x, 'a', 'b')`` (optionally with
+# whitespace before the paren) does not. A bare ``REPLACE (`` is not valid
+# statement syntax, so allowing it through is safe — the trust boundary is
+# the database account, not this guard.
+_REPLACE_STATEMENT_RE = re.compile(r"\bREPLACE\b(?!\s*\()", re.IGNORECASE)
 
 
 # Pre-compiled regexes for the SELECT-only guard. Imported from
@@ -121,7 +135,10 @@ def _validate_select_only(query: str) -> None:
        rejecting legitimate queries is a worse outcome than the
        theoretical bypass.
     6. Scan the string-stripped query for forbidden DML/DDL keywords
-       using word-boundary, case-insensitive matching.
+       using word-boundary, case-insensitive matching. The dual-natured
+       ``REPLACE`` is matched only in its statement form (``REPLACE
+       INTO``) — the read-only ``replace(s, from, to)`` scalar function
+       is allowed.
 
     Args:
         query: The SQL query text to validate.
@@ -169,6 +186,16 @@ def _validate_select_only(query: str) -> None:
 
     # 6: Word-boundary scan for forbidden keywords.
     for keyword in _FORBIDDEN_KEYWORDS:
+        if keyword == "REPLACE":
+            # Special-cased: statement form only (see _REPLACE_STATEMENT_RE
+            # above) so the read-only ``replace(s, from, to)`` scalar
+            # function in a SELECT is not falsely rejected.
+            if _REPLACE_STATEMENT_RE.search(cleaned_no_strings):
+                raise ValueError(
+                    "Forbidden keyword 'REPLACE' detected. "
+                    "Only SELECT queries are allowed."
+                )
+            continue
         if re.search(rf"\b{keyword}\b", cleaned_no_strings, re.IGNORECASE):
             raise ValueError(
                 f"Forbidden keyword '{keyword}' detected. "

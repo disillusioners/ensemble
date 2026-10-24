@@ -119,17 +119,24 @@ class TestRealMaintenancerMetaShape:
     granted or denied must fail here first."""
 
     def test_real_meta_allow_is_exact_category_set(self) -> None:
-        """tools.allow = exactly the 8 categories: the privileged pair
+        """tools.allow = exactly the 9 categories: the privileged pair
         (system-log, ens-db), system_upgrade, system_restart, knowledge,
-        db (D19 — external user-registered connections only), and the two
-        nest-ops fleet categories (instance_read / instance_ops).
+        db (D19 — external user-registered connections only), the two
+        nest-ops fleet categories (instance_read / instance_ops) and the
+        wedge-capture read surface.
 
         nest-ops (2026-10-21): the inherited 3-red fold. ``system_restart``
         was added to the allow list by ``ff27305c4`` (which updated only
         ``tests/unit/test_maintenancer_agent.py`` and left THIS integration
         pin stale), and this commission appends the two fleet categories.
         The literal is stated in full so the fold lands at 0 in ONE shot —
-        otherwise the new assertions carry no usable green/red signal."""
+        otherwise the new assertions carry no usable green/red signal.
+
+        wedge-capture (2026-10-22): the ninth entry — the READ-ONLY
+        capture-evidence surface (``wedge_capture_list`` /
+        ``wedge_capture_get``). The category is PRIVILEGED, so an
+        explicit allow entry is the only access path; the tool bodies
+        ALSO carry their own agent_id gate."""
         assert MAINTAINER_META_ALLOW == [
             "system-log",
             "ens-db",
@@ -139,6 +146,7 @@ class TestRealMaintenancerMetaShape:
             "db",
             "instance_read",
             "instance_ops",
+            "wedge-capture",
         ]
 
     def test_real_meta_deny_is_exact_category_set(self) -> None:
@@ -296,11 +304,12 @@ class TestWorkerResolvesSystemLogOnly:
 
 
 class TestPrivilegedCategoryRegistryShape:
-    """PRIVILEGED_TOOL_CATEGORIES must be exactly fourteen categories
+    """PRIVILEGED_TOOL_CATEGORIES must be exactly fifteen categories
     (the daemon-internal authority trio ``system_upgrade``,
     ``system-log``, ``ens-db`` plus ``ens-env`` per the W4 leader
     decision 2026-10-02, ``view-views`` per the REWORK 2026-10-07
-    M1 user refinement, ``cu`` per the cu-mcp task 2026-10-16,
+    M1 user refinement, ``cu`` per the cu-mcp task 2026-10-16 —
+    REMOVED 2026-10-24 with the cu builtin,
     ``secrets`` per the agent-secrets P1 commission 2026-10-17,
     ``settings`` per the settings-worker-slots P2 commission
     2026-10-18, ``board`` per the ari-tools Phase 1 commission
@@ -318,7 +327,7 @@ class TestPrivilegedCategoryRegistryShape:
     (the fifth exact-set pin added by the iteration-002 council B2
     correction)."""
 
-    def test_privileged_categories_contains_twelve_entries(self) -> None:
+    def test_privileged_categories_contains_fifteen_entries(self) -> None:
         # W4 (leader decision 2026-10-02): the set was a quartet —
         # ``ens-env`` joined (key-returning tool, explicit opt-in
         # only). REWORK 2026-10-07 (M1) added ``view-views`` (the
@@ -328,7 +337,8 @@ class TestPrivilegedCategoryRegistryShape:
         # Use MCP built-in's prefix-overridden tools; full
         # local-control surface, explicit ``tools.allow: ["cu"]``
         # on ari + leader meta.json — empty-allow universe must
-        # NOT auto-grant it). agent-secrets P1 (2026-10-17, plan
+        # NOT auto-grant it) — it was REMOVED 2026-10-24 with the cu
+        # builtin MCP server. agent-secrets P1 (2026-10-17, plan
         # f11965039) added ``secrets`` (the encrypted-secret-store
         # category; opt-in-only via
         # ``tools.allow: ["secrets"]`` on the day-one allow-list
@@ -347,7 +357,8 @@ class TestPrivilegedCategoryRegistryShape:
         # name kept for grep-stability; the count moved
         # 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 with the same-PR pin
         # updates (D18/A14) — 4 = ens-env (2026-10-02), 5 =
-        # view-views (2026-10-07), 6 = cu (2026-10-16), 7 =
+        # view-views (2026-10-07), 6 = cu (2026-10-16 — REMOVED 2026-10-24
+        # with the cu builtin), 7 =
         # secrets (2026-10-17), 8 = settings (2026-10-18), 9 =
         # board (2026-10-20), 10 = self-alarm (2026-10-20). Every
         # step landed its pin update in the SAME COMMIT as the
@@ -361,7 +372,6 @@ class TestPrivilegedCategoryRegistryShape:
             "ens-db",
             "ens-env",
             "view-views",
-            "cu",
             # agent-secrets P1 (2026-10-17, plan f11965039):
             # the encrypted-secret-store category. opt-in-only;
             # worker / tester / leader / ari day-one allow-list.
@@ -403,7 +413,22 @@ class TestPrivilegedCategoryRegistryShape:
             "instance_read",
             "instance_ops",
             "board-link",
-        })
+            # wedge-capture (2026-10-22): the READ-ONLY capture-evidence
+            # surface — ``wedge_capture_list`` + ``wedge_capture_get``.
+            # PRIVILEGED (entry #12): the capture payload is a privileged
+            # diagnostic artifact (all-thread stack dumps, per-thread CPU
+            # maps, process RSS); the empty-allow inherit universe must
+            # NOT auto-grant it. The ari + leader + maintenancer allow
+            # entries are the only access path, and every tool body ALSO
+            # carries its own agent_id gate.
+            "wedge-capture",
+                # remote-hands center gateway (2026-10-22): the ``mcp_rpc``
+        # category — the agent-facing surface that drives an ENROLLED
+        # remote machine (SPEC.md v0.1). opt-in-only; the ari + leader
+        # allow entries are the only access path, and every tool body
+        # ALSO carries its own agent_id gate.
+        "mcp_rpc",
+})
 
     def test_ens_db_registered_in_category_modules(self) -> None:
         """CATEGORY_MODULES entry exists for the new category (binding

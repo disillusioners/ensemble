@@ -20,16 +20,105 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
+from collections import deque
 from typing import Any, Awaitable
 
 from daemon.checkpoint_metrics import (
     checkpoint_list_total,
-    reset_for_tests,
     saver_op_latency_seconds,
 )
 
 logger = logging.getLogger("daemon.checkpoint_perf")
+
+# ── the wedge-capture stall ledger (D18 / A7 / T16) ─────────────────────────
+#
+# A bounded deque of the SLOW saver ops, recorded at the SINGLE emit
+# choke (``log_saver_op``) — the only place that knows the op name and
+# the thread prefix, which is exactly the attribution the incident
+# forensics needed.
+#
+# WHY IT IS RECORDED OUTSIDE THE ``CHECKPOINT_PERF_LOGS`` GATE
+#   The ledger exists even when the log lines are suppressed: the
+#   operator's SLO surface is independent of log volume (the same
+#   reasoning as the histogram observe below).
+#
+# WHY THE LOCK IS ONLY HELD FOR THE APPEND
+#   The lock is NEVER held across the timed op. Today's call order
+#   already guarantees this: ``time_saver_op`` awaits the op and
+#   calls ``log_saver_op`` in its ``finally`` — so the append happens
+#   AFTER the op completed, and the lock is taken and released inside
+#   the append alone.
+#
+# THE FAST PATH IS ONE INT COMPARISON
+#   ``duration_ms < cut`` returns immediately. The 100k-call timeit
+#   in the evidence pack measures the delta.
+
+#: The default slow-op cut, in milliseconds. The incident's ledger used
+#: ≥50 s; 5 s captures more.
+DEFAULT_SLOW_SAVER_CUT_MS = 5000
+
+#: The ledger's bound (T16 / AC24).
+SLOW_SAVER_LEDGER_MAXLEN = 128
+
+#: The active cut — set by the watchdog at start (``ENSEMBLE_WEDGE_CAPTURE_SLOW_SAVER_MS``).
+_slow_saver_cut_ms: int = DEFAULT_SLOW_SAVER_CUT_MS
+
+#: The bounded ledger.
+_slow_saver_ledger: deque[dict[str, Any]] = deque(maxlen=SLOW_SAVER_LEDGER_MAXLEN)
+
+#: The ledger's lock — held for the APPEND ONLY.
+_slow_saver_ledger_lock = threading.Lock()
+
+
+def set_slow_saver_cut_ms(value: int) -> None:
+    """Set the slow-op cut (milliseconds) — a plain int assignment."""
+    global _slow_saver_cut_ms
+    try:
+        cut = int(value)
+    except (TypeError, ValueError):
+        return
+    if cut >= 0:
+        _slow_saver_cut_ms = cut
+
+
+def get_slow_saver_cut_ms() -> int:
+    """The active slow-op cut (milliseconds)."""
+    return _slow_saver_cut_ms
+
+
+def record_slow_saver_op(
+    op: str,
+    thread_id: str,
+    duration_ms: int,
+    *,
+    bytes_: int = 0,
+    deleted: int = 0,
+) -> None:
+    """Record a slow saver op in the bounded ledger.
+
+    The fast path is ONE int comparison. The append is the only
+    section under the lock — never the timed op (A7).
+    """
+    if duration_ms < _slow_saver_cut_ms:
+        return
+    entry = {
+        "op": op,
+        "thread": (thread_id[:8] if thread_id else "?"),
+        "latency_ms": int(duration_ms),
+        "bytes": int(bytes_),
+        "deleted": int(deleted),
+        "recorded_at": time.time(),
+    }
+    with _slow_saver_ledger_lock:
+        _slow_saver_ledger.append(entry)
+
+
+def read_slow_saver_ops() -> list[dict[str, Any]]:
+    """A copy of the ledger — the capture reads it under the SAME lock."""
+    with _slow_saver_ledger_lock:
+        return list(_slow_saver_ledger)
 
 
 def _logs_enabled() -> bool:
@@ -99,6 +188,7 @@ def log_saver_op(
         # surface is independent of log volume. Suppressing the log
         # line must not silently starve the histogram.
         saver_op_latency_seconds.labels(op=op).observe(duration_ms / 1000.0)
+        record_slow_saver_op(op, thread_id, duration_ms, bytes_=bytes_, deleted=deleted)
         return
     logger.info(
         f"[CheckpointPerf] op={op} "
@@ -106,6 +196,7 @@ def log_saver_op(
         f"latency_ms={duration_ms} bytes={bytes_} deleted={deleted}"
     )
     saver_op_latency_seconds.labels(op=op).observe(duration_ms / 1000.0)
+    record_slow_saver_op(op, thread_id, duration_ms, bytes_=bytes_, deleted=deleted)
 
 
 async def time_saver_op(op: str, thread_id: str, coro: Awaitable[Any]) -> Any:

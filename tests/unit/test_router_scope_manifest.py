@@ -17,10 +17,11 @@ column: every ``api_router.include_router(...)`` mount in
 
 The cage greps ``daemon/api.py`` for the SPECIFIC
 ``api_router.include_router(`` pattern (NOT the raw
-``include_router(`` textual set — the F3-pinned census: 30 textual
-matches at the current tree = 28 unconditional mounts + the 2
-auth-ON-gated families (mcp-kb keys, auth-self); the residual matches
-are the 2 app-level ``app.include_router(`` calls + prose comments,
+``include_router(`` textual set — the F3-pinned census: 36 textual
+matches at the current tree = 33 unconditional mounts + the 2
+auth-ON-gated families (mcp-kb keys, auth-self) + the 1
+gateway-flag-gated (WS) mount; the residual matches are the 2
+app-level ``app.include_router(`` calls + prose comments,
 documented in the P3 cage and NOT in this cage's match set). A NEW
 mount that adds routes under a family absent from the manifest (or a
 mount whose declaration drifted from the manifest) FAILS LOUDLY,
@@ -81,8 +82,15 @@ PINNED_SCOPE_MANIFEST: dict[str, frozenset[str] | str] = {
     "/api/sources": "sources:write",        # + mappings router; the
     #   family is write-class in the v1 taxonomy (D4.2 has no
     #   sources:read) — reads ride sources:write by declaration.
-    "/api/workspace": "workspace:read|*",
-    #   §5.4: reads workspace:read; PUT /{project_id}/file stays
+    # wedge-capture (2026-10-22): the /api/wedge-captures family
+    # mounts 4 routes (GET "" (list), GET /status, POST /capture,
+    # GET /{capture_id}). Every route carries an explicit
+    # ``maintenance:read`` scope — the EXISTING taxonomy entry for a
+    # maintenance/diagnostic read. The family therefore declares that
+    # scope (NOT a wildcard): the routes DO carry an explicit scope, so
+    # the wildcard would be less precise than reality.
+    "/api/wedge-captures": "maintenance:read",
+    "/api/workspace": "workspace:read|*",    #   §5.4: reads workspace:read; PUT /{project_id}/file stays
     #   undeclared (NO workspace:write exists in the v1 taxonomy —
     #   declared gap, not an omission).
     # ── explicitly wildcarded families (the D9 default-* posture) ───
@@ -131,6 +139,25 @@ PINNED_SCOPE_MANIFEST: dict[str, frozenset[str] | str] = {
     # = prompts:read (read-class). The cage's parsing leg
     # validates the named scopes against SCOPE_TAXONOMY below.
     "/api/custom-agents": "prompts:read|prompts:write",
+    # remote-hands center gateway (2026-10-22) — the WebSocket route the
+    # controlled machines dial OUT to (SPEC.md v0.1). The route is
+    # REGISTERED ONLY when MCPS_GATEWAY_ENABLED is ON, and it is
+    # MODULE-LANE: the credential is the module's own bearer enrollment
+    # token on the upgrade request (§3.1 / §4.1), never an OAuth2 token.
+    #
+    # Phase C added the OAUTH READ LANE to the family: the three
+    # read-only routes (GET /machines + GET /sessions + GET /audit)
+    # are ordinary /api routers on the OAuth2 lane and each one
+    # declares the ``mcp:read`` scope (the scope the MCP-servers
+    # family already uses — the deliberate scope-REUSE convention, the
+    # same shape as the F1 custom-agents → prompts:* reuse; NO new
+    # scope is minted).
+    #
+    # The wildcard member stays: the module-lane WebSocket route
+    # carries no OAuth2 scope decoration (it is a WebSocketRoute, not
+    # an APIRoute — it never enters this cage — and the OAuth2
+    # middleware must never own it).
+    "/api/mcps-gateway": "mcp:read|*",
 }
 
 #: The wildcard sentinel as stored in the manifest.
@@ -226,10 +253,10 @@ class TestSourceMatchTarget:
     """The F3-pinned cage match target: ``api_router.include_router(``."""
 
     def test_census_pinned(self):
-        """The textual census: 33 ``api_router.include_router(`` matches
-        at the current tree = 31 unconditional + 2 auth-ON-gated
-        (mcp-kb keys, auth-self). A drift here fails the cage and
-        forces a manifest review.
+        """The textual census: 36 ``api_router.include_router(`` matches
+        at the current tree = 33 unconditional + 2 auth-ON-gated
+        (mcp-kb keys, auth-self) + 1 gateway-flag-gated (WS). A drift
+        here fails the cage and forces a manifest review.
 
         Phase B / agent-prompt-immutability T6 added the prompts_router
         (29 unconditional; was 28 pre-T6) — the cage must reflect this
@@ -244,12 +271,26 @@ class TestSourceMatchTarget:
         resources_router (31 unconditional; was 30 pre-P1) — the
         cage reflects this with the /api/resources family pinned in
         the manifest above.
+
+        Phase C / remote-hands gateway FE added the
+        mcps_gateway_read_router (32 unconditional; was 31 pre-Phase-C)
+        — the cage reflects this with the /api/mcps-gateway family
+        pinned in the manifest above (the family already existed for
+        the module-lane WebSocket route — the 1 gateway-flag-gated (WS)
+        mount of the census; the READ routes joined it with an
+        ``mcp:read`` scope declaration).
+
+        wedge-capture (2026-10-22, merged atop Phase C) added the
+        wedge_capture_router (33 unconditional; was 32 pre-wedge-capture)
+        — the cage reflects this with the /api/wedge-captures family
+        pinned in the manifest above.
         """
         source = API_PY.read_text()
         matches = re.findall(r"api_router\.include_router\(", source)
-        assert len(matches) == 33, (
+        assert len(matches) == 36, (
             f"api_router.include_router( census drifted: {len(matches)} "
-            "(pinned 33 = 31 unconditional + 2 auth-ON-gated). New mount? "
+            "(pinned 36 = 33 unconditional + 2 auth-ON-gated + 1 "
+            "gateway-flag-gated (WS)). New mount? "
             "Declare its family in PINNED_SCOPE_MANIFEST above."
         )
 
@@ -274,9 +315,14 @@ class TestScopeManifestCage:
         T3.12 mcpkb:admin keys routes + the 12 Phase B T5 prompts
         routes + the 3 USER-DIRECTIVE-#2 (2026-10-14) prompts deltas
         (PATCH /versions/{id}, DELETE /versions/{id}, GET
-        /pending-count — every one @require_scope-decorated) = 97
-        declared routes. A drift is a decoration added/removed
-        without a manifest row change.
+        /pending-count — every one @require_scope-decorated) + the 3
+        Phase C remote-hands gateway READ routes (GET
+        /api/mcps-gateway/{machines,sessions,audit} — every one
+        @require_scope("mcp:read")-decorated) + the 4 wedge-capture
+        routes (GET "" (list), GET /status, POST /capture, GET
+        /{capture_id} — every one @require_scope decorated) = 107
+        declared routes. A drift is a decoration added/removed without
+        a manifest row change.
 
         Phase B / agent-prompt-immutability T5 added 12
         @require_scope-decorated routes under /api/prompts (the
@@ -295,6 +341,22 @@ class TestScopeManifestCage:
         declares ``prompts:read|prompts:write`` and the actual
         scope per route maps to it — see
         ``daemon/routers/custom_agents.py`` module docstring).
+
+        Phase C / remote-hands gateway FE added 3
+        @require_scope("mcp:read")-decorated routes under
+        /api/mcps-gateway (GET /machines + GET /sessions + GET
+        /audit — the OAuth READ lane; the module-lane WebSocket route
+        is NOT an APIRoute and never enters this census), growing the
+        cage count 100 → 103.
+
+        wedge-capture (2026-10-22, merged atop Phase C) added 4
+        @require_scope-decorated routes under /api/wedge-captures
+        (GET "" (list), GET /status, POST /capture, GET /{capture_id})
+        — every one carrying the existing ``maintenance:read``
+        taxonomy entry — growing the cage count 103 → 107. The
+        /api/wedge-captures family entry declares that scope (NOT a
+        wildcard): the routes DO carry an explicit scope, so the
+        wildcard would be less precise than reality.
         """
         declared = [
             r
@@ -303,8 +365,8 @@ class TestScopeManifestCage:
             and getattr(r, "path", "").startswith("/api/")
             and _route_required_scopes(r) is not None
         ]
-        assert len(declared) == 100, (
-            f"declared-route census drifted: {len(declared)} (pinned 100)"
+        assert len(declared) == 107, (
+            f"declared-route census drifted: {len(declared)} (pinned 107)"
         )
 
     def test_manifest_entries_valid(self):

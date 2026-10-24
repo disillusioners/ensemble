@@ -33,13 +33,14 @@
       "service",
       "scheduling",
       "view-views",
-      "cu",
       "secrets",
       "settings",
       "board",
       "self-alarm",
       "view-write",
-      "board-link"
+      "board-link",
+      "mcp_rpc",
+      "wedge-capture"
     ],
     "deny": ["edit_file", "write_file", "watch_job", "watch_jobs"]
   },

@@ -1,6 +1,6 @@
 """SQLModel-based MessageQueue Repository implementation.
 
-Size rationale (~1470 lines): every queue mutation path lives here so
+Size rationale (~1600 lines): every queue mutation path lives here so
 the capture/DELETE disjunction (C7, audit-after-soak split, decision
 (f)) cannot drift — capture_doomed_ids_and_audit() is the sync in-band
 capture (returns the doomed list + audit line), delete_doomed_ids()
@@ -630,6 +630,123 @@ class SQLModelMessageQueueRepository:
     # --------------------------------------------------------
     # UPDATE STATUS
     # --------------------------------------------------------
+
+    def update_ready_content(
+        self,
+        message_id: str,
+        content: str,
+        message_metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Guarded IN-PLACE update of a still-pending delivery's body.
+
+        Commission ``scheduler-deferred-alarm-delivery`` (plan §(c) C0 /
+        decisions.md DEC-15 + DEC-18 item 3): the coalescing path NEVER
+        tears a pending delivery down and re-enqueues it (that
+        check-then-act race can deliver TWICE — an at-most-once breach).
+        Instead it rewrites the body of the STILL-PENDING row with ONE
+        single-statement conditional UPDATE.
+
+        The guard is ``status IN ('ready','retrying')`` — the W9 widening:
+        a rollover against a ``retrying`` row would open a SECOND live
+        delivery while the first is still in flight.
+
+        ``message_metadata`` is OPTIONAL: ``None`` leaves the ``metadata``
+        column UNTOUCHED (never overwritten with NULL — decisions.md DEC-12
+        W4).  The metadata a coalescing update writes carries the
+        SUBSTITUTED ``deferred-`` execution id, never the busy fire's own
+        (never-INSERTed) ``execution_id``.
+
+        Returns:
+            ``True`` when the row was updated (the delivery is still live
+            and the body was rewritten), ``False`` when the guard matched
+            no row (the delivery was claimed / consumed / gone — the
+            caller must roll over to a fresh generation).
+        """
+        # Naive-UTC digits (DC-A fix) — the column is naive on PostgreSQL.
+        now = now_utc_naive()
+        params: dict[str, Any] = {
+            "message_id": message_id,
+            "content": content,
+            "now": now,
+            "status_ready": MessageStatus.READY.value,
+            "status_retrying": MessageStatus.RETRYING.value,
+        }
+        if message_metadata is None:
+            # OPTIONAL (W4): ``None`` leaves the ``metadata`` column
+            # UNTOUCHED (never overwritten with NULL).
+            metadata_set = ""
+        else:
+            # The raw SQL binds the COLUMN ``metadata`` (the model attr is
+            # ``message_metadata`` — binding the attr name would be an
+            # UndefinedColumn).  PostgreSQL stores JSONB and has no
+            # implicit text->jsonb ASSIGNMENT cast, so the value is cast
+            # explicitly there; SQLite stores the JSON as TEXT.
+            if self.engine.dialect.name == "postgresql":
+                metadata_set = ", metadata = CAST(:metadata AS JSONB)"
+            else:
+                metadata_set = ", metadata = :metadata"
+            params["metadata"] = json.dumps(message_metadata)
+
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    """
+                    UPDATE message_queue
+                    SET content = :content,
+                        last_activity_at = :now
+                        """
+                    + metadata_set
+                    + """
+                    WHERE message_id = :message_id
+                      AND status IN (:status_ready, :status_retrying)
+                    """
+                ),
+                params,
+            )
+            return result.rowcount == 1
+
+    def abandon_pending(self, message_id: str) -> bool:
+        """Guarded abandon of a still-pending delivery (the age-cap leg).
+
+        ONE guarded statement: ``WHERE status IN ('ready','retrying')`` →
+        the terminal ``failed`` state.  The guard is what makes the
+        24h non-delivery age cap safe (decisions.md DEC-9's ONE rule): a
+        delivery that was already CLAIMED (``processing``) or already
+        terminal is NOT touched — it will land, so it must not be
+        abandoned.
+
+        Returns:
+            ``True`` when a row was actually abandoned (the caller consumes
+            the occurrence + writes the terminal ``failed`` row), ``False``
+            when the guard matched no row (nothing pending — the caller
+            consumes NOTHING and writes NO failed row; ADJ-4: the episode
+            carrier is RETAINED).
+        """
+        now = now_utc_naive()
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    """
+                    UPDATE message_queue
+                    SET status = :status_failed,
+                        error_message = :error_message,
+                        completed_at = :completed_at,
+                        last_activity_at = :now
+                    WHERE message_id = :message_id
+                      AND status IN (:status_ready, :status_retrying)
+                    """
+                ),
+                {
+                    "message_id": message_id,
+                    "status_failed": MessageStatus.FAILED.value,
+                    "error_message": "nondelivery_age_cap",
+                    "completed_at": now,
+                    "now": now,
+                    "status_ready": MessageStatus.READY.value,
+                    "status_retrying": MessageStatus.RETRYING.value,
+                },
+            )
+            return result.rowcount == 1
 
     def complete(self, message_id: str) -> MessageQueue | None:
         """Atomically mark message as completed.

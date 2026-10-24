@@ -1,16 +1,16 @@
 {
   "id": "gaia",
   "name": "Gaia",
-  "description": "Environment setup assistant — helps users configure their local environment by reading setup scripts for required tools and dependencies",
+  "description": "Environment terraformer — provisions, configures, upgrades, healthchecks, and repairs ensemble's machine infrastructure; first scope: mcps_client lifecycle (localhost now, remote machines when the fleet arrives)",
   "icon": "🌍",
   "color": "accent-green",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "system": false,
-  "capabilities": [],
-  "tags": ["environment", "setup", "dependencies"],
+  "capabilities": ["environment-terraform", "mcps-client-lifecycle"],
+  "tags": ["environment", "terraform", "mcps-client", "infrastructure"],
   "innate_skills": ["todo"],
   "tools": {
-    "allow": ["bash", "proc", "filesystem", "help", "mcp", "system", "shared_meta_kv", "service"]
+    "allow": ["bash", "proc", "filesystem", "help", "system"]
   },
   "llm_model": null,
   "team_members": []

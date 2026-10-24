@@ -2810,6 +2810,17 @@ class JobQueueService:
         # versioned agent (e.g. agent_dir contains [v2]) re-enqueues
         # into the versioned directory instead of silently downgrading
         # to the base agent_dir.
+        # M-2 (2026-10-22): Carry over ``job_type`` and
+        # ``idempotency_key`` too. Without the job_type, a retried
+        # ``skill_evolution`` job silently became a generic ``task``
+        # job — the retry then executed WITHOUT the execution-time
+        # lane check (scope: skill_evolution rows only) and without
+        # the Tier-3 job semantics. Without the idempotency key, the
+        # retry minted a second row for the same (project, skill)
+        # admission instead of collapsing onto the original key.
+        # A FAILED predecessor is terminal, so ``enqueue`` synthesizes
+        # a unique ``<key>#<hex>`` suffix rather than colliding with
+        # the partial unique index.
         new_job = await self.enqueue(
             agent_id=job.agent_id,
             message=job.message,
@@ -2819,6 +2830,8 @@ class JobQueueService:
             priority=job.priority,
             metadata=job.job_metadata,
             agent_tag=job.agent_tag,  # F1: preserve version tag through retry
+            job_type=job.job_type,  # M-2: preserve the job type
+            idempotency_key=job.idempotency_key,  # M-2: preserve the dedup key
         )
         
         return new_job

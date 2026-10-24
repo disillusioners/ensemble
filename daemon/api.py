@@ -145,9 +145,14 @@ from daemon.routers import (
     tmp_images_router,        # /api/tmp_images (Phase 1: clipboard-image-chat upload+serve)
     prompts_router,           # /api/prompts (Phase B T5: agent-prompt-immutability approval REST)
     resources_router,         # /api/resources (resource-cost-control P1: live + history + self-cost)
+    mcps_gateway_read_router, # /api/mcps-gateway/{machines,sessions,audit} (Phase C: the OAuth read lane)
+    wedge_capture_router,    # /api/wedge-captures (wedge-capture: the capture evidence store)
 )
 from daemon.routers.workspace import router as workspace_router
 from daemon.routers.plane import router as plane_router  # /api/plane (Phase 3: plane-integration-revival — sync retry endpoint)
+# wedge-capture: ``wedge_capture_router`` is re-exported by
+# ``daemon.routers`` (see the import block above) — no second direct
+# import, so there is exactly ONE binding of the name.
 
 from daemon.mcp import (
     create_kb_mcp_server,
@@ -171,6 +176,10 @@ from daemon.services.live_event_hub import LiveEventHub
 from daemon.services.notification_broadcaster import get_notification_broadcaster
 from daemon.services.editor_utils import get_editor_preference
 from daemon.services.boot_epoch import get_boot_epoch
+# remote-hands center gateway (2026-10-22) — the configuration and the
+# kill switch of the gateway route. The route is registered ONLY when
+# ``MCPS_GATEWAY_ENABLED`` is ON.
+from daemon.services.mcps_gateway.config import load_gateway_config
 from daemon.services.readiness import (
     READINESS_FORCE_DEGRADED_ENV,
     ReadinessComposite,
@@ -987,6 +996,28 @@ async def lifespan(app: FastAPI):
     # ``_ensure_postgres_columns`` mirror needed.
     from daemon.repositories.instance_ops.models import InstanceOpsAudit
     InstanceOpsAudit.metadata.create_all(manager.engine)
+
+    # remote-hands center gateway (2026-10-22) — ``mcp_gateway_audit``
+    # is the append-only ledger of every remote command the center
+    # forwarded (SPEC.md §8.4: who / machine / tool / args-hash /
+    # outcome). Brand-new table — the same create_all precedent as the
+    # secrets pair and the instance_ops pair above; the .sql migration
+    # handles SQLite and the model handles PG. No
+    # ``_ensure_postgres_columns`` mirror needed.
+    from daemon.repositories.mcps_gateway.models import McpGatewayAudit
+    McpGatewayAudit.metadata.create_all(manager.engine)
+
+    # wedge-capture (2026-10-22) — ``wedge_captures`` is the ADDITIVE
+    # metadata table behind the wedge-capture instrument: ONE row per
+    # capture, holding a PATH REFERENCE plus a small metrics snapshot
+    # (the payload itself lives on disk — the incident's own lesson is
+    # that multi-MB blobs in the DB are how the checkpoint store
+    # reached ~13 GB). Brand-new table — the same create_all precedent
+    # as the secrets / instance_ops / mcps_gateway pairs above. The
+    # .sql migration handles SQLite and the model handles PG. No
+    # ``_ensure_postgres_columns`` mirror needed.
+    from daemon.repositories.wedge_captures.models import WedgeCapture
+    WedgeCapture.metadata.create_all(manager.engine)
 
     # agent-secrets P1 — ``SecretService`` is constructed in
     # ``InstanceManager.__init__`` alongside
@@ -2374,6 +2405,16 @@ async def lifespan(app: FastAPI):
     
     # Initialize LiveEventHub for live-only SSE streaming
     app.state.live_hub = manager._live_hub
+
+    # remote-hands center gateway (2026-10-22) — the CENTER service of
+    # the remote-hands protocol (SPEC.md v0.1). Wired on ``app.state``
+    # so the WebSocket route resolves the SAME instance the agent tools
+    # use (the roster and the live sessions are global state).
+    #
+    # The ROUTE is registered only when ``MCPS_GATEWAY_ENABLED`` is ON
+    # (see ``create_app``); the service is wired either way so the agent
+    # tools can refuse with a typed error while the transport is off.
+    app.state.mcps_gateway_service = manager.mcps_gateway_service
     
     # Initialize NotificationBroadcaster and wire into InstanceManager
     notification_broadcaster = get_notification_broadcaster()
@@ -2629,14 +2670,61 @@ async def lifespan(app: FastAPI):
                 continue_running_instances_after_restart,
                 sweep_orphaned_live_turns,
             )
+            # ── wedge-capture boot record (A8 / F-04 / RK-20) ──────────
+            # The import is LAZY and ISOLATED: a failure to import the
+            # diagnostics module must NEVER disable the auto-continue
+            # passes (this envelope's ``except`` only WARNs, so a
+            # top-level ImportError would silently skip BOTH passes —
+            # a settled-item violation). The INTENT record is written
+            # BEFORE the pass and carries ``mode="unknown"``; the pass
+            # result is the SOLE mode authority and overwrites it.
+            wedge_record = None
+            try:
+                from daemon.services.wedge_capture import boot_record as wedge_record
+                wedge_record.write_intent_record(
+                    wedge_record.resolve_capture_root(data_dir), get_boot_epoch(),
+                )
+            except Exception as wedge_intent_exc:  # noqa: BLE001
+                logger.warning(
+                    "Wedge-capture boot-record intent write failed "
+                    "(auto-continue unaffected): %s", wedge_intent_exc,
+                )
             continue_result = await continue_running_instances_after_restart(
                 manager=manager, boot_epoch=get_boot_epoch(),
             )
             logger.info("AutoContinue boot pass: %s", continue_result)
             # D13 follow-up (NG-8) — task-less orphan sweep; never raises.
-            await sweep_orphaned_live_turns(
+            sweep_result = await sweep_orphaned_live_turns(
                 manager=manager, boot_epoch=get_boot_epoch(),
             )
+            # The boot record — the effective-mode carrier (D16). The
+            # mode comes from the PASS RESULT; the recorder never
+            # re-reads the environment (A8's single-read rule).
+            if wedge_record is not None:
+                try:
+                    wedge_record.write_boot_record(
+                        wedge_record.resolve_capture_root(data_dir),
+                        get_boot_epoch(),
+                        effective_mode=getattr(
+                            continue_result, "auto_continue_mode", "unknown",
+                        ),
+                        raw_env_value=getattr(
+                            continue_result, "auto_continue_raw_env", None,
+                        ),
+                        passes={
+                            "autocontinue": wedge_record.result_to_dict(
+                                continue_result
+                            ),
+                            "orphan_sweep": wedge_record.result_to_dict(
+                                sweep_result
+                            ),
+                        },
+                    )
+                except Exception as wedge_record_exc:  # noqa: BLE001
+                    logger.warning(
+                        "Wedge-capture boot record write failed "
+                        "(never wedges): %s", wedge_record_exc,
+                    )
         except Exception as cont_boot_exc:  # noqa: BLE001
             logger.warning(
                 "AutoContinue boot pass failed (StaleTaskRecovery "
@@ -2685,6 +2773,53 @@ async def lifespan(app: FastAPI):
             boot_exc,
         )
     upgrade_journal_sweep.start()
+    # ── wedge-capture watchdog (T17 / A9 / F-02) ─────────────────────
+    # START anchor: immediately after ``upgrade_journal_sweep.start()``
+    # and before ``app.state.upgrade_journal_sweep = …`` — that is the
+    # one syntactically valid statement boundary (F-02: the earlier
+    # ``:2718`` anchor fell INSIDE the ``logger.info(`` opened a few
+    # lines below and was syntactically impossible).
+    #
+    # The start is OUTSIDE the upgrade-journal envelope's ``try`` and
+    # carries its OWN try/except + its OWN log line — a raising start
+    # is NOT misattributed to the upgrade-journal envelope, and it
+    # never aborts the boot (the three-layer never-wedge contract).
+    #
+    # START-SITE TRUTH (W4): this site sits AFTER the awaited
+    # AutoContinue boot pass above — the watchdog is NOT live during
+    # that pass, so a wedge DURING the boot pass itself is outside the
+    # instrument's reach. The F-02 anchor is plan-pinned and is NOT
+    # moved by the fix-forward lane; boot-pass observability would be
+    # a plan amendment and is out of scope here. From THIS point on,
+    # the tick loop observes wedge conditions.
+    try:
+        from daemon.services.wedge_capture.config import WedgeCaptureConfig
+        from daemon.services.wedge_capture.watchdog import WedgeCaptureWatchdog
+
+        _wedge_config = WedgeCaptureConfig.from_env(data_dir=data_dir)
+        if _wedge_config.enabled:
+            _wedge_watchdog = WedgeCaptureWatchdog(
+                config=_wedge_config,
+                manager=manager,
+                app_state=app.state,
+                loop=getattr(manager, "_loop", None),
+                boot_epoch=get_boot_epoch(),
+                release_version=__version__,
+            )
+            _wedge_watchdog.start()
+            app.state.wedge_capture_watchdog = _wedge_watchdog
+        else:
+            app.state.wedge_capture_watchdog = None
+            logger.info(
+                "Wedge-capture watchdog disabled "
+                "(ENSEMBLE_WEDGE_CAPTURE_ENABLED=0)"
+            )
+    except Exception as wedge_start_exc:  # noqa: BLE001
+        app.state.wedge_capture_watchdog = None
+        logger.warning(
+            "Wedge-capture watchdog failed to start (never wedges the "
+            "boot): %s", wedge_start_exc,
+        )
     app.state.upgrade_journal_sweep = upgrade_journal_sweep
     manager.set_upgrade_journal_sweep(upgrade_journal_sweep)
     logger.info(
@@ -3242,6 +3377,37 @@ async def lifespan(app: FastAPI):
                 resource_monitor_join_exc,
             )
     app.state.resource_monitor = None
+
+    # ── wedge-capture watchdog stop (T17 / A9 / W3) ───────────────────
+    # The same HOUSE detached-join form as the resource monitor above.
+    # OWNERSHIP (W3): ``stop()`` sets the Event and drops the pending
+    # manual capture requests and does NOT join — ALL joining is owned
+    # HERE, on the DETACHED thread with a 5.0 s timeout, so no event
+    # loop is ever blocked on the join. ``stop()`` is idempotent and
+    # never raises; a pending manual capture request is DROPPED (never
+    # captured after the stop event).
+    _wedge_watchdog = getattr(app.state, "wedge_capture_watchdog", None)
+    if _wedge_watchdog is not None:
+        try:
+            _wedge_watchdog.stop()
+        except Exception as wedge_stop_exc:  # noqa: BLE001
+            logger.warning(
+                "Wedge-capture watchdog stop-event set failed: %s",
+                wedge_stop_exc,
+            )
+        try:
+            threading.Thread(
+                target=_wedge_watchdog.join,
+                kwargs={"timeout": 5.0},
+                name="wedge-capture-shutdown",
+                daemon=True,
+            ).start()
+        except Exception as wedge_join_exc:  # noqa: BLE001
+            logger.warning(
+                "Wedge-capture watchdog detached join failed: %s",
+                wedge_join_exc,
+            )
+    app.state.wedge_capture_watchdog = None
 
     # Batch A — A3 (2026-09-11): stop the eligible-PENDING sweep.
     # The service exposes ``stop()`` which cancels + awaits the
@@ -4053,7 +4219,7 @@ def _tag_route_classes(app: FastAPI) -> None:
     see ``daemon/auth/route_meta.py``). Everything NOT tagged here is
     oauth2-protected by default (default-deny, AC-23).
     """
-    from daemon.auth.route_meta import tag_routes_by_path
+    from daemon.auth.route_meta import tag_module_lane, tag_routes_by_path
     from daemon.routers.mcp_kb_keys import tag_keys_router_protected
 
     # ── PUBLIC (public-probe tag) ───────────────────────────────────
@@ -4095,6 +4261,22 @@ def _tag_route_classes(app: FastAPI) -> None:
     # enforcement is the module's (T3.11 KbKeyGuardApp).
     tag_routes_by_path(app, exact_path="/api/mcp/kb", module_lane=True)
     tag_routes_by_path(app, exact_path="/api/mcp/kb/sse", module_lane=True)
+    # remote-hands center gateway (2026-10-22) — the WebSocket route the
+    # controlled machines dial OUT to (SPEC.md v0.1). MODULE-LANE: the
+    # credential is the module's OWN bearer enrollment token on the
+    # upgrade request (§3.1 / §4.1), NOT an OAuth2 token. Without this
+    # tag the OAuth2 middleware would own the request, see the
+    # enrollment bearer, and reject it with a 401 — and the machine
+    # would re-enroll forever.
+    #
+    # TAGGED BY ROUTE IDENTITY (the route NAME), NOT BY A PATH PREFIX:
+    # the path is configurable (``MCPS_GATEWAY_PATH``), and a prefix
+    # match with an empty prefix would match EVERY route in the app.
+    # The route is only REGISTERED when ``MCPS_GATEWAY_ENABLED`` is ON,
+    # so this loop is a no-op when the gateway is off.
+    for _ws_route in app.routes:
+        if getattr(_ws_route, "name", None) == "mcp_gateway_ws":
+            tag_module_lane(_ws_route)
 
     # ── PROTECTED (explicit tag) ────────────────────────────────────
     # /api/mcp/kb/keys — OAuth2 human lane (T3.12): the explicit tag
@@ -4434,6 +4616,12 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     # endpoints 2–5; ``/availability`` is exempt — see
     # ``daemon/routers/maintenance.py``.
     api_router.include_router(maintenance_router)        # /api/maintenance (Section 1)
+    # wedge-capture (2026-10-22) — the capture evidence store. The
+    # family is declared in BOTH router manifest cages (the class
+    # cage in tests/integration/test_router_class_manifest.py and the
+    # scope cage in tests/unit/test_router_scope_manifest.py) — an
+    # undeclared mount fails both loudly.
+    api_router.include_router(wedge_capture_router)      # /api/wedge-captures
     # Phase 3 / plane-integration-revival — POST /api/plane/sync/{project_id}.
     # The router is mounted BEFORE the SPA catch-all (the catch-all
     # only fires for unmatched paths; the prefix /api/plane is owned
@@ -4484,7 +4672,79 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
 
         api_router.include_router(auth_router)         # /api/auth/*
 
+    # remote-hands center gateway (2026-10-22) — the Phase C READ
+    # surface (the OAuth API lane): the machine roster, the live
+    # sessions and the remote-command audit tail.
+    #
+    # REGISTERED UNCONDITIONALLY — the read endpoints are ordinary
+    # /api read routers (the dominant convention: 32 of the 35
+    # api_router mounts are unconditional; the other 3 are 2
+    # auth-ON-gated families + 1 gateway-flag-gated WebSocket mount),
+    # and a browser page needs a STABLE contract: with the gateway OFF
+    # the payloads degrade to EMPTY lists and ``gateway_enabled: false``
+    # instead of a 404 the page cannot interpret. The kill switch
+    # (``MCPS_GATEWAY_ENABLED``) still governs the TRANSPORT — the
+    # WebSocket route below is not registered at all while it is off,
+    # and the agent tools refuse with a typed error. The read surface
+    # only REPORTS the state of the center; it never drives it.
+    #
+    # The OAuth2 middleware owns these routes (the same lane as every
+    # other /api family) and each one carries the ``mcp:read`` scope.
+    api_router.include_router(mcps_gateway_read_router)  # /api/mcps-gateway/{machines,sessions,audit}
+
+    # remote-hands center gateway (2026-10-22) — the WebSocket route the
+    # controlled machines dial OUT to (SPEC.md v0.1).
+    #
+    # THE KILL SWITCH IS DEFAULT OFF AND THE ROUTE IS NOT REGISTERED AT
+    # ALL WHEN IT IS OFF: with ``MCPS_GATEWAY_ENABLED`` unset the daemon
+    # answers 404 on the path — the route does not exist, it is not
+    # "registered but rejecting". This mirrors the conditional
+    # registration precedent of the auth router pair above (the
+    # ``if auth_enabled:`` include) — the same shape, a different
+    # switch.
+    #
+    # The path is configurable (``MCPS_GATEWAY_PATH``); the default
+    # ``/api/mcps-gateway/ws`` lives under the ``/api`` namespace, so the
+    # router is mounted inside ``api_router`` (whose prefix is ``/api``).
+    # A path outside ``/api`` is mounted at the app level instead.
+    gateway_config = load_gateway_config()
+    mcp_gateway_router = None
+    mcp_gateway_under_api = True
+    if gateway_config.enabled:
+        from daemon.routers.mcps_gateway import build_mcps_gateway_router
+
+        mcp_gateway_router, mcp_gateway_under_api = build_mcps_gateway_router(
+            path=gateway_config.path
+        )
+        if mcp_gateway_under_api:
+            api_router.include_router(mcp_gateway_router)  # /api/mcps-gateway/ws
+        logger.info(
+            "remote-hands gateway route registered at %s "
+            "(heartbeat interval=%dms, dead detect=%dms, tokens=%d, "
+            "allowed machines=%d)",
+            gateway_config.path,
+            gateway_config.heartbeat_interval_ms,
+            gateway_config.client_dead_detect_ms,
+            len(gateway_config.tokens),
+            len(gateway_config.allowed_machines),
+        )
+    else:
+        logger.info(
+            "remote-hands gateway is DISABLED (MCPS_GATEWAY_ENABLED) — the "
+            "route %s is not registered",
+            gateway_config.path,
+        )
+
     app.include_router(api_router)
+
+    # A gateway path OUTSIDE the /api namespace is mounted at the app
+    # level (the api_router owns the /api prefix). The mount happens
+    # HERE — after ``app.include_router(api_router)`` and BEFORE the SPA
+    # catch-all below — so Starlette first-match-wins resolves the
+    # WebSocket path to this router and never to the index.html
+    # fallback.
+    if mcp_gateway_router is not None and not mcp_gateway_under_api:
+        app.include_router(mcp_gateway_router)
 
     # --- MCP KB server mounts (MUST be before catch-all SPA route) ---
     # Initialize KB MCP server first (creates FastMCP and session manager)

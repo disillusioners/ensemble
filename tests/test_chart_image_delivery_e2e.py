@@ -1415,10 +1415,10 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "agents/charter/rule.md": "2cb6e01b3bdfd07865aed967d524b98d7bcd965f60ffd741e52a7ee71c44573c",
     "agents/charter/soul.md": "458f65a608b495df0cac8c565a83663595ea85c3d13a200295dc611189387aad",
     "agents/charter/meta.json": "e1034e1d92e7bb30f2d39ab0a625a661287251cf5ca961cbeba3e1893dcfd492",
-    "agents/charter/skills-template/install-mermaid-cli.md": "4082a47f9662da283746a6f7719e38d82b473dacc61d52bc8e021a362322dbe4",
+    "agents/charter/skills-template/install-mermaid-cli.md": "ee43576c9b9d746c8ce6563c85ed289567e9fcebadc75c0bd7ede417aaaa667e",
     "agents/charter/skills-template/install-mermaid-cli.lib.sh": "fcd6f4612d6077a81fe521341e6e2332d1f5da31880d3fc710decbc0579fedbf",
     "agents/_prompt_system/innate-skills/chart/skill.md": "fa29084d7dc0f86c87d667ef46dcfc060fa11e20e0b647295cdd75ff43353515",
-    "agents/ari/workflow.md": "4f07f32708ff97094752f3578a4169a92e07570ef73fff6f0d47017145b3c00f",
+    "agents/ari/workflow.md": "fd481d9473942a8828d5ff80a569574fc44be82d87b7e8e26597ecf6eaa840a9",
     # Phase B — 7 daemon files
     "daemon/sources/base.py": "ca2762ac8840bd8f7050955744af25f16325ed6806d09ba1fe3d020383581f3a",
     # registry.py re-pinned 2026-10-18 (resource-cost-control O4): the

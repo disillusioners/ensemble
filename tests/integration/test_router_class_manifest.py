@@ -35,7 +35,9 @@ pinned alongside (the G3.2-adjacent base).
 
 from __future__ import annotations
 
+import os
 import warnings
+from unittest.mock import patch
 
 import pytest
 from pydantic import SecretStr
@@ -92,6 +94,13 @@ PINNED_MANIFEST_AUTH_ON: dict[str, frozenset[str]] = {
     "/api/resources": frozenset({"pd"}),
     "/api/sources": frozenset({"pd"}),  # + mappings_router
     "/api/tmp_images": frozenset({"pd"}),
+    # wedge-capture (2026-10-22): the wedge_capture_router mounts at
+    # /api/wedge-captures (4 routes: GET "" (list), GET /status,
+    # POST /capture, GET /{capture_id}). Every route carries an
+    # explicit scope (``maintenance:read``), so the family classifies
+    # protected-default ("pd") — the D3.7 legacy posture, declared
+    # HERE. The POST additionally carries the trusted-Origin guard.
+    "/api/wedge-captures": frozenset({"pd"}),
     # Phase B / agent-prompt-immutability T6 — the prompts_router
     # mounts at /api/prompts (the 15-endpoint family: the canonical
     # 12 per phaseB-plan.md addendum S4 + the 3 USER-DIRECTIVE-#2
@@ -110,6 +119,21 @@ PINNED_MANIFEST_AUTH_ON: dict[str, frozenset[str]] = {
     # so the family classifies as protected-default ("pd") — the
     # D3 fail-closed posture is honored at every endpoint.
     "/api/custom-agents": frozenset({"pd"}),
+    # remote-hands center gateway (2026-10-22) — the WebSocket route the
+    # controlled machines dial OUT to (SPEC.md v0.1). MODULE-LANE: the
+    # credential is the module's OWN bearer enrollment token on the
+    # upgrade request (§3.1 / §4.1) — the OAuth2 middleware must never
+    # own this path, or every machine would be refused with a 401 and
+    # would re-enroll forever. The route is registered ONLY when
+    # MCPS_GATEWAY_ENABLED is ON; the AUTH_ON leg of this cage boots the
+    # app with the gateway ON so the family is observed.
+    #
+    # Phase C added the OAUTH READ LANE to the same family: the three
+    # read-only routes (GET /machines + GET /sessions + GET /audit)
+    # are ordinary /api routers — untagged, so they classify as
+    # protected-default ("pd"), exactly like the other read families.
+    # The family therefore carries BOTH classes.
+    "/api/mcps-gateway": frozenset({"module_lane", "pd"}),
     "/api/webhooks": frozenset({"module_lane"}),  # FR-40 module lane
     "/api/work": frozenset({"pd"}),
     "/api/workspace": frozenset({"pd"}),
@@ -127,8 +151,23 @@ PINNED_MANIFEST_AUTH_ON: dict[str, frozenset[str]] = {
 
 #: Auth-OFF: no auth-self family, no keys family (module/protected
 #: columns collapse to module_lane-only).
+#:
+#: The remote-hands gateway family IS part of the auth-OFF universe —
+#: but for a DIFFERENT reason than the auth-self family: the Phase C
+#: READ routes are registered UNCONDITIONALLY (the kill switch governs
+#: the TRANSPORT, not the read surface), so the family exists in the
+#: auth-OFF app with ONLY the read routes in it. The module-lane
+#: WebSocket route is absent there (the gateway is explicitly OFF in
+#: that leg), so the family classifies protected-default ("pd") — the
+#: same class it has for the read routes in the auth-ON universe.
 PINNED_MANIFEST_AUTH_OFF: dict[str, frozenset[str]] = {
-    k: (frozenset({"module_lane"}) if k == "/api/mcp" else v)
+    k: (
+        frozenset({"module_lane"})
+        if k == "/api/mcp"
+        else frozenset({"pd"})
+        if k == "/api/mcps-gateway"
+        else v
+    )
     for k, v in PINNED_MANIFEST_AUTH_ON.items()
     if k != "/api/auth"
 }
@@ -171,6 +210,15 @@ def _observe(app) -> dict[str, frozenset[str]]:
     return {k: frozenset(v) for k, v in observed.items()}
 
 
+#: The route path the contract fixes (SPEC.md v0.1, the daemon side).
+CONTRACT_GATEWAY_PATH = "/api/mcps-gateway/ws"
+
+#: The NAME of the gateway's WebSocket route — the identity the
+#: module-lane tag is applied to (the path is configurable, so the tag
+#: must NOT be a path prefix).
+GATEWAY_ROUTE_NAME = "mcp_gateway_ws"
+
+
 def _auth_on_config() -> AuthConfig:
     return AuthConfig(
         enabled=True,
@@ -186,8 +234,16 @@ def _auth_on_config() -> AuthConfig:
 class TestRouterClassManifest:
     """The cage — run these on EVERY route-universe change."""
 
-    def test_auth_on_universe_matches_manifest(self):
+    def test_auth_on_universe_matches_manifest(self, monkeypatch):
         warnings.filterwarnings("ignore")
+        # The remote-hands gateway route is registered ONLY when
+        # MCPS_GATEWAY_ENABLED is ON — the manifest declares its family,
+        # so the leg must boot the app with the gateway ON.
+        monkeypatch.setenv("MCPS_GATEWAY_ENABLED", "1")
+        # The PATH is configurable (MCPS_GATEWAY_PATH): pin it to the
+        # contract path so the family key of the manifest is
+        # deterministic and does not depend on the ambient environment.
+        monkeypatch.setenv("MCPS_GATEWAY_PATH", CONTRACT_GATEWAY_PATH)
         app = create_app(auth_config=_auth_on_config())
         observed = _observe(app)
         missing = sorted(set(PINNED_MANIFEST_AUTH_ON) - set(observed))
@@ -214,8 +270,12 @@ class TestRouterClassManifest:
             f"manifest DELIBERATELY (family: observed vs pinned): {drifted}"
         )
 
-    def test_auth_off_universe_matches_manifest(self):
+    def test_auth_off_universe_matches_manifest(self, monkeypatch):
         warnings.filterwarnings("ignore")
+        # The gateway is explicitly OFF here: its route is not registered
+        # and its family is not part of the AUTH-OFF universe.
+        monkeypatch.setenv("MCPS_GATEWAY_ENABLED", "0")
+        monkeypatch.setenv("MCPS_GATEWAY_PATH", CONTRACT_GATEWAY_PATH)
         app = create_app()  # default OFF config
         observed = _observe(app)
         undeclared = sorted(set(observed) - set(PINNED_MANIFEST_AUTH_OFF))
@@ -227,6 +287,36 @@ class TestRouterClassManifest:
         assert not missing, (
             f"Route families DISAPPEARED (auth-OFF manifest): {missing}"
         )
+
+    def test_a_custom_gateway_path_is_still_module_lane(self):
+        """R3: the module-lane tag follows the ROUTE, not the path.
+
+        The path is configurable (``MCPS_GATEWAY_PATH``), so the tag
+        must be applied by ROUTE IDENTITY (the route name) — a path
+        prefix would either miss a custom path or, with an empty
+        prefix, match EVERY route in the app.
+        """
+        warnings.filterwarnings("ignore")
+        custom_path = "/api/remote-hands/v1"
+        assert custom_path != CONTRACT_GATEWAY_PATH
+        with patch.dict(
+            os.environ,
+            {"MCPS_GATEWAY_ENABLED": "1", "MCPS_GATEWAY_PATH": custom_path},
+        ):
+            app = create_app(auth_config=_auth_on_config())
+        tagged = [
+            route
+            for route in app.routes
+            if getattr(route, "name", None) == GATEWAY_ROUTE_NAME
+        ]
+        assert tagged, "the gateway route was not registered at the custom path"
+        for route in tagged:
+            assert getattr(route, AUTH_MODULE_LANE_ATTR, False) is True, (
+                "the gateway route lost its module-lane tag at a custom path"
+            )
+        assert any(
+            getattr(route, "path", "") == custom_path for route in tagged
+        ), "the route was not mounted at the configured path"
 
     def test_undeclared_mount_makes_the_cage_fire(self):
         """THE cage property: include_router with NO explicit class
@@ -273,4 +363,9 @@ class TestRouterClassManifest:
         # resource-cost-control P1 (aa95fc438) added the
         # /api/resources family — the api_families count grew
         # from 29 to 30.
-        assert len(api_families) == 30, sorted(api_families)
+        # remote-hands center gateway (2026-10-22) added the
+        # /api/mcps-gateway family — the api_families count grew
+        # from 30 to 31.
+        # wedge-capture (2026-10-22) added the /api/wedge-captures
+        # family — the api_families count grew from 31 to 32.
+        assert len(api_families) == 32, sorted(api_families)

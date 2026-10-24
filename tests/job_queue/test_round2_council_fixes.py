@@ -935,7 +935,7 @@ class TestStaleTaskRecoveryWedgeHook:
                 "root-instance-1", "root-turn-1"
             )
             import asyncio
-            asyncio.get_event_loop().run_until_complete(await_run)
+            asyncio.run(await_run)
 
         # Wedge closed via dead-letter message: instance → COMPLETED, and the
         # terminal event carries the FAILED terminal's state ("failed", no

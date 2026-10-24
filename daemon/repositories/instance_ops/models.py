@@ -75,8 +75,12 @@ class InstanceOpsAudit(SQLModel, table=True):
             write-ahead), ``"committed"``, ``"refused"``, ``"error"``.
         confirmed_target_id: The named-target confirmation (D-17) —
             the target the caller asserted the user consented to.
-        provenance_class: ``"direct"`` | ``"inherited"`` | ``None``
-            (D-18).
+        provenance_class: ``"direct"`` | ``"inherited"`` | ``None`` —
+            **OBSERVABILITY ONLY — not a gate input** (D-18 superseded by
+            DF-4: the protected-target gate keys on the LIVENESS of the
+            user-origin window, not on the window's class). The field
+            answers "which window shape authorised this act?" on the
+            ledger.
         provenance_depth: The verdict's ``depth``.
         root_source: The window's ``root_source``.
         root_message_id: The user's ``root_message_id`` — what a

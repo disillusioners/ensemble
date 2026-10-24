@@ -137,7 +137,8 @@ def _privilege_stamp_category_for_prefix(
     """Map a tool-name-prefix override to the privilege stamp category.
 
     cu-mcp (2026-10-16) pre-existing hole fix: prefix-overridden MCP
-    tools (``plane_``, ``cu_``, ...) bypassed the privilege strip
+    tools (``plane_`` and any future prefix override) bypassed the
+    privilege strip
     (``_strip_privileged_category_tools``) because no StructuredTool
     ever carried ``_tool_category`` — only ``@register_tool_category``
     first-party tools did. This function lets ``create_lazy_mcp_tools``
@@ -172,8 +173,10 @@ def _privilege_stamp_category_for_prefix(
 
     Returns:
         The category string to stamp on every tool of this prefix
-        override (``"cu"`` for the cu-mcp built-in), or ``None`` when
-        the stamp should not apply.
+        override — the bare prefix name, when that name is a member
+        of BOTH ``DYNAMIC_TOOL_PREFIXES`` and
+        ``PRIVILEGED_TOOL_CATEGORIES`` — or ``None`` when the stamp
+        should not apply.
     """
     if tool_name_prefix is None:
         return None
@@ -431,9 +434,14 @@ def create_lazy_mcp_tools(
     that hasn't opted in.
 
     Privilege-stamp (cu-mcp, 2026-10-16): when ``tool_name_prefix``
-    names a PRIVILEGED category (configured via
-    ``DYNAMIC_TOOL_PREFIXES`` ∩ ``PRIVILEGED_TOOL_CATEGORIES`` —
-    today: ``cu_`` → ``"cu"``), each created tool receives
+    names a PRIVILEGED category (the implemented rule: a prefix
+    with its trailing underscore stripped must be present in BOTH
+    ``DYNAMIC_TOOL_PREFIXES`` AND ``PRIVILEGED_TOOL_CATEGORIES``
+    for its bare name to be stamped — the raw sets never
+    intersected, since ``"cu_"`` was never the category string
+    ``"cu"``; after the 2026-10-24 cu-builtin removal no dynamic
+    prefix qualifies today), each created tool
+    receives
     ``_tool_category`` matching the prefix's bare name. This is what
     enables ``_strip_privileged_category_tools``
     (``daemon/tools/instance.py``) to actually strip these tools

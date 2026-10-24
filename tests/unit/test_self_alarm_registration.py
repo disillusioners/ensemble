@@ -67,17 +67,18 @@ SELF_ALARM_CATEGORY = "self-alarm"
 SELF_ALARM_MODULE = "daemon.tools.self_alarm"
 SELF_ALARM_TOOL_NAME = "self_alarm"
 
-#: The TENTH entry of the privileged set (the set held exactly nine
-#: before this phase). Phase 3 (the live-views surface) added the
-#: ELEVENTH + TWELFTH (``view-write`` / ``board-link``) — the same-PR
-#: exact-set pin moves with them.
+#: The ``self-alarm`` entry of the privileged set (it joined the set
+#: 10th; the set held 9 entries before this phase). Phase 3 (the
+#: live-views surface) added the 11th + 12th (``view-write`` /
+#: ``board-link``) — the same-PR exact-set pin moves with them. The
+#: ``cu`` category was REMOVED 2026-10-24 together with the cu builtin
+#: MCP server (16 -> 15 members).
 EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "system_upgrade",
     "system-log",
     "ens-db",
     "ens-env",
     "view-views",
-    "cu",
     "secrets",
     "settings",
     "board",
@@ -88,6 +89,20 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "instance_read",
     "instance_ops",
     "board-link",
+    # wedge-capture (2026-10-22): the READ-ONLY capture-evidence
+    # surface — ``wedge_capture_list`` + ``wedge_capture_get``.
+    # PRIVILEGED (entry #12): the capture payload is a privileged
+    # diagnostic artifact; the empty-allow inherit universe must
+    # NOT auto-grant it. The ari + leader + maintenancer allow
+    # entries are the only access path, and every tool body ALSO
+    # carries its own agent_id gate.
+    "wedge-capture",
+# remote-hands center gateway (2026-10-22): the ``mcp_rpc``
+# category — the agent-facing surface that drives an ENROLLED
+# remote machine (SPEC.md v0.1). opt-in-only; the ari + leader
+# allow entries are the only access path, and every tool body
+# ALSO carries its own agent_id gate.
+"mcp_rpc",
 })
 
 #: The ONLY agent allowed to hold the self-alarm category.
@@ -184,11 +199,11 @@ class TestPrivilegedCategory:
     def test_self_alarm_is_in_the_privileged_set(self) -> None:
         assert SELF_ALARM_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_fourteen_entries(self) -> None:
+    def test_the_set_is_exactly_the_fifteen_entries(self) -> None:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
-    def test_the_set_has_fourteen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 14
+    def test_the_set_has_fifteen_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 15
 
 
 # ── the allow-lists ──────────────────────────────────────────────────────

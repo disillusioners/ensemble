@@ -1,20 +1,21 @@
 # mcps_client — CU Wrapper & Remote-Hands Architecture
 
-> **DESIGN PROPOSAL — status: proposed / not implemented.**
-> Nothing in this document exists in the codebase today: no
-> `mcps_client` project, no `.app` wrapper, no gateway, no
-> ensemble-side HTTP transport change. This is the agreed design
-> (2026-10-16) for the wrapper architecture plus the small future
-> ensemble-side change that consumes it. Treat every "proposed"
-> verb below as future work.
+> **STATUS — SHIPPED (v0.27.5); header current as of 2026-10-24.** The
+> `mcps_client` wrapper, gateway, and `mcp_rpc` transport all exist and
+> superseded the daemon-side `cu` builtin this design targeted (the `cu`
+> builtin was REMOVED 2026-10-24 in `feature/remove-cu-builtin`). The
+> diagrams and phase sections below are the 2026-10-16 design snapshots,
+> kept for reference. This document remains the architecture reference
+> for the shipped path — see the historical stub at
+> [`docs/mcp-computer-use-server.md`](./mcp-computer-use-server.md).
 
 | Field | Value |
 |---|---|
 | **Date** | 2026-10-16 |
-| **Status** | **Proposed / not implemented** — design proposal (docs-only deliverable) |
-| **Audience** | Daemon operators; future maintainers of the `cu` builtin and of the standalone `mcps_client` project |
-| **Applies to** | The `cu` builtin ONLY — see Scope below |
-| **Related** | [`docs/mcp-computer-use-server.md`](./mcp-computer-use-server.md) — the cu builtin as built today (npx-stdio wiring, TCC notes, pin policy) |
+| **Status** | **SHIPPED** (v0.27.5) — kept as the architecture reference; the `cu` builtin it targeted was removed 2026-10-24 |
+| **Audience** | Daemon operators; maintainers of the `mcps_client` wrapper, the MCP gateway, and the `mcp_rpc` tools |
+| **Applies to** | The `mcps_client` wrapper + MCP gateway + `mcp_rpc` tools — the `cu` builtin they replaced was removed 2026-10-24 |
+| **Related** | [`docs/mcp-computer-use-server.md`](./mcp-computer-use-server.md) — the retired cu builtin's historical stub (npx-stdio wiring, TCC notes, pin policy) |
 
 ---
 
@@ -129,7 +130,7 @@ flowchart TD
         T1 -.-> TA2
     end
 
-    subgraph PROP["Proposed Phase 1 — mcps_client local wrapper"]
+    subgraph PROP["Phase 1 (2026-10-16 proposal — since shipped) — mcps_client local wrapper"]
         P1["ensemble daemon — cu builtin, now a streamable-http client"]
         P2["McpsClient.app — Go supervisor; proper .app bundle with Info.plist + stable bundle ID; installed as LaunchAgent; its OWN TCC responsibility root; code-signed with one stable self-signed cert"]
         P3["node child — vendored pinned node runtime, immune to nvm upgrades, running @zavora-ai/computer-use-mcp@7.6.1 in streamable-http mode"]
@@ -184,15 +185,15 @@ must therefore sign with the same stable identity:
 | (a) Integrated into this repo's `make install` | the ensemble build pipeline |
 | (b) A standalone build script | inside the `mcps_client` project |
 
-### Ensemble side (small change, future PR)
+### Ensemble side (2026-10-16 design notes — the mcps_client path has since shipped; see STATUS above)
 
 The cu builtin switches from npx-stdio spawn to a
 **streamable-http client against `127.0.0.1`**. Implementer
 notes for that PR:
 
 - **Generalize the D7-style config-shape guard** — the exact-pin
-  match pattern the `/mcp-servers/test-connection` probe uses
-  today (see [`docs/mcp-computer-use-server.md`](./mcp-computer-use-server.md)
+  match pattern the `/mcp-servers/test-connection` probe used at
+  design time (D7 guard removed 2026-10-24; see [`docs/mcp-computer-use-server.md`](./mcp-computer-use-server.md)
   → *Version-pin policy*) needs an HTTP-config-shaped variant so
   the guard tracks the new transport shape atomically.
 - **Do not inherit the GATING GAP** — `preload_mcp_tools` today
@@ -228,8 +229,8 @@ JSONL) that the wrapper can model its layer on.
 
 ```mermaid
 flowchart LR
-    %% Phase-2 remote-hands fleet — DESIGN PROPOSAL (nothing exists today)
-    NOTE["DESIGN PROPOSAL — nothing in this diagram exists today"]
+    %% Phase-2 remote-hands fleet — 2026-10-16 design snapshot (kept for reference)
+    NOTE["2026-10-16 DESIGN PROPOSAL — the gateway + wrapper have since shipped (v0.27.5); this diagram is kept as the design snapshot"]
     TR["transport: mutual TLS — gateway verifies per-machine client certs; wrapper verifies gateway via pre-provisioned CA + cert pinning — trust established at enrollment, never via DNS — NO trust-on-first-use"]
     UN["optional underlay: WireGuard / Tailscale mesh — gateway listens on the tailnet, solving transport identity wholesale"]
 
@@ -326,9 +327,16 @@ projects** — a bespoke RPC vocabulary would kill that reuse.
 ### Operational notes
 
 - **Screenshot payloads are large** — quality/diff knobs are the
-  lever (the cu tools already have quality parameters).
-- **Per-command timeouts** — `CU_TOOL_CALL_TIMEOUT_SECONDS`
-  already exists on the ensemble side and is the precedent shape.
+  lever (the cu builtin's quality parameters went away with the
+  builtin on 2026-10-24, so the knob now lives in the controlled
+  machine's wrapper tool catalog — the gateway surfaces that catalog
+  verbatim).
+- **Per-command timeouts** — the cu builtin's
+  `CU_TOOL_CALL_TIMEOUT_SECONDS` went away with the builtin on
+  2026-10-24; the living precedent is the gateway's session
+  deadline (`MCPS_GATEWAY_SESSION_TTL_MS` /
+  `MCPS_GATEWAY_SESSION_IDLE_TIMEOUT_MS`) plus its per-command bound
+  (`MCPS_GATEWAY_COMMAND_TIMEOUT_MS`).
 - **One-time local admin grant per enrolled machine** — the TCC
   grant to the wrapper `.app` is a manual local-admin action per
   machine; MDM profiles are the at-scale answer.
@@ -360,12 +368,11 @@ On top of Phase 2's primitives:
 ## Linked documents
 
 * [`docs/mcp-computer-use-server.md`](./mcp-computer-use-server.md) —
-  the cu builtin as built today (npx-stdio wiring, TCC grants,
-  pin policy, kill-switches, D7 guard).
-* `daemon/mcp/builtin_servers/computer_use.py` — single source of
-  truth today for the package pin, profile, prefix, and
-  kill-switch that the Phase-1 ensemble-side PR will modify.
-* `daemon/routers/mcp_servers.py` — the D7-style config-shape
-  guard referenced by the Phase-1 implementer notes.
+  historical stub of the retired cu builtin; full pre-removal
+  version: `git show 0774f3fe1:docs/mcp-computer-use-server.md`.
+* `daemon/mcp/builtin_servers/computer_use.py` — DELETED 2026-10-24
+  (was the design-time single source of truth for pin/profile/prefix/kill-switch).
+* `daemon/routers/mcp_servers.py` — historically home of the
+  D7-style config-shape guard (removed 2026-10-24).
 * `daemon/services/mcp_service.py` — `preload_mcp_tools` and the
   availability-gate gap the HTTP mode must not inherit.

@@ -144,6 +144,16 @@ if TYPE_CHECKING:
 #: next daemon restart.
 AUTO_CONTINUE_KILL_SWITCH_ENV = "ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART"
 
+#: The VERBATIM env value read by the most recent
+#: :func:`_auto_continue_enabled` call (wedge-capture D16 / RK-29).
+#:
+#: The boot record needs the raw value as a transcript — an operator
+#: reading ``=false`` must see that the pass read ``"false"`` and
+#: therefore ran ON. The value is captured by the SINGLE env read the
+#: pass already performs, so the recorder NEVER re-reads the
+#: environment and NEVER re-derives the mode (A8's single-read rule).
+_last_auto_continue_raw: str | None = None
+
 
 def _auto_continue_enabled() -> bool:
     """Per-boot kill-switch read.
@@ -152,8 +162,21 @@ def _auto_continue_enabled() -> bool:
     ``ENSEMBLE_AUTO_CONTINUE_RUNNING_ON_RESTART=0``. The default is ON
     — the deliverable is zero-user-action; the kill-switch exists for
     operator opt-out, NOT default-off (D13 / ADR-044).
+
+    The verbatim raw value is recorded in
+    :data:`_last_auto_continue_raw` as a side effect of this SAME
+    read — the wedge-capture boot record transcribes it without a
+    second environment read.
     """
-    return os.environ.get(AUTO_CONTINUE_KILL_SWITCH_ENV, "1") != "0"
+    global _last_auto_continue_raw
+    raw = os.environ.get(AUTO_CONTINUE_KILL_SWITCH_ENV, "1")
+    _last_auto_continue_raw = raw
+    return raw != "0"
+
+
+def _last_auto_continue_raw_value() -> str | None:
+    """The verbatim env value read by the most recent kill-switch read."""
+    return _last_auto_continue_raw
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +221,18 @@ class ContinueResult:
       pass NEVER raises out.
     * ``duration_seconds`` — wall-clock duration of the per-candidate
       loop (the metric for the M22 / Δ5 acceptance).
+
+    CARRIER FIELDS (wedge-capture D16 / A8 / F-09):
+
+    * ``auto_continue_mode`` — the EFFECTIVE mode this pass read:
+      ``"on"``, ``"off"`` or ``"unknown"``. The pass reads the
+      kill-switch ONCE at its first line and carries the result HERE;
+      the wedge-capture boot record consumes this field and NEVER
+      re-reads the environment (A8's single-read rule).
+    * ``auto_continue_raw_env`` — the VERBATIM env value the pass
+      read, transcribed from the SAME read (RK-29: ``=false`` /
+      ``=off`` / ``=no`` all mean ON, and an operator must be able to
+      SEE that).
     """
 
     candidates: int = 0
@@ -209,6 +244,9 @@ class ContinueResult:
     skipped_multi_task_instance: int = 0
     errors: int = 0
     duration_seconds: float = 0.0
+    # ── wedge-capture carrier fields (additive; default "unknown") ──
+    auto_continue_mode: str = "unknown"
+    auto_continue_raw_env: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -318,12 +356,19 @@ async def continue_running_instances_after_restart(
     result = ContinueResult()
 
     # (1) Kill-switch (per-boot read; mirrors arm-notify).
-    if not _auto_continue_enabled():
+    #     The SINGLE environment read of this pass — the effective mode
+    #     and its verbatim value ride along in the result (wedge-capture
+    #     D16 / A8's single-read rule). The recorder NEVER re-reads.
+    enabled = _auto_continue_enabled()
+    result.auto_continue_mode = "on" if enabled else "off"
+    result.auto_continue_raw_env = _last_auto_continue_raw_value()
+    if not enabled:
         result.skipped_kill_switch = 1
         logger.info(
             "[BOOT_CONTINUE] OFF: %s=0 — pass skipped (StaleTaskRecovery "
-            "backstop continues to own orphans)",
+            "backstop continues to own orphans) mode=%s",
             AUTO_CONTINUE_KILL_SWITCH_ENV,
+            result.auto_continue_mode,
         )
         return result
 
@@ -460,8 +505,9 @@ async def continue_running_instances_after_restart(
 
                 result.scheduled += 1
                 logger.info(
-                    "[BOOT_CONTINUE] instance=%s work_id=%s epoch=%s",
+                    "[BOOT_CONTINUE] instance=%s work_id=%s epoch=%s mode=%s",
                     instance_id[:8], work_id[:8], boot_epoch.isoformat(),
+                    result.auto_continue_mode,
                 )
 
                 # (6) Stagger (Δ5 / D22) — after every Nth resume,
@@ -679,12 +725,19 @@ async def sweep_orphaned_live_turns(
 
     # (1) Kill-switch (shared with AutoContinue — operator toggle
     #     is the same logical action).
-    if not _auto_continue_enabled():
+    #     The SINGLE environment read of this sweep — the effective
+    #     mode and its verbatim value ride along in the result
+    #     (wedge-capture D16 / A8's single-read rule).
+    enabled = _auto_continue_enabled()
+    result.auto_continue_mode = "on" if enabled else "off"
+    result.auto_continue_raw_env = _last_auto_continue_raw_value()
+    if not enabled:
         result.skipped_kill_switch = 1
         logger.info(
             "[BOOT_CONTINUE] orphan-sweep OFF: %s=0 — pass skipped "
-            "(StaleTaskRecovery backstop continues to own orphans)",
+            "(StaleTaskRecovery backstop continues to own orphans) mode=%s",
             AUTO_CONTINUE_KILL_SWITCH_ENV,
+            result.auto_continue_mode,
         )
         return result
 
@@ -829,10 +882,11 @@ async def sweep_orphaned_live_turns(
                 result.scheduled += 1
                 logger.info(
                     "[BOOT_CONTINUE] orphan-sweep instance=%s "
-                    "epoch=%s ckpt_ts=%s",
+                    "epoch=%s ckpt_ts=%s mode=%s",
                     instance_id[:8],
                     boot_epoch.isoformat(),
                     ckpt_ts.isoformat(),
+                    result.auto_continue_mode,
                 )
 
                 # Stagger cadence (mirrors AutoContinue Δ5 / D22).
@@ -866,7 +920,7 @@ async def sweep_orphaned_live_turns(
         "[BOOT_CONTINUE] orphan-sweep summary: candidates=%d "
         "scheduled=%d skipped_no_checkpoint=%d skipped_resume_refused=%d "
         "skipped_kill_switch=%d skipped_no_boot_epoch=%d "
-        "errors=%d duration_s=%.3f boot_epoch=%s",
+        "errors=%d duration_s=%.3f boot_epoch=%s mode=%s",
         result.candidates,
         result.scheduled,
         result.skipped_no_checkpoint,
@@ -876,5 +930,6 @@ async def sweep_orphaned_live_turns(
         result.errors,
         result.duration_seconds,
         boot_epoch.isoformat(),
+        result.auto_continue_mode,
     )
     return result

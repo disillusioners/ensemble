@@ -1,0 +1,304 @@
+<!-- Remote Hands / MCP Gateway — the READ-ONLY operator page (Phase C).
+
+     ONE component, THREE sections: the machine roster, the live sessions
+     and the audit tail. There is deliberately NO kill / lock-release /
+     disconnect control anywhere in this template — v1 is read-only and
+     the gateway is driven by the agent tools (`mcp_rpc_*`), never by the
+     browser. The write controls arrive with the v0.2 per-tool ACL work. -->
+
+<main class="gateway-page" aria-label="Remote Hands / MCP Gateway">
+
+  <!-- ── Header ──────────────────────────────────────────────────────── -->
+  <header class="page-header">
+    <div class="title-block">
+      <h1 class="page-title">Remote Hands / MCP Gateway</h1>
+      <span
+        class="readonly-chip"
+        title="Read-only v1 — the page reports the gateway state; it never drives it."
+      >read-only v1</span>
+    </div>
+    <div class="header-actions">
+      <span class="last-refreshed" data-test="last-refreshed">
+        Last refreshed: {{ formatUtcDate(lastRefreshedAt()) }}
+      </span>
+      @if (loading()) {
+        <mat-spinner diameter="18" aria-label="Loading"></mat-spinner>
+      }
+      <button
+        type="button"
+        mat-icon-button
+        class="refresh-btn"
+        (click)="onRefresh()"
+        [disabled]="loading()"
+        aria-label="Refresh the gateway state now"
+        data-test="refresh-button"
+      >
+        <mat-icon>refresh</mat-icon>
+      </button>
+    </div>
+  </header>
+
+  <!-- ── Status region (announced politely) ──────────────────────────── -->
+  <div class="status-region" aria-live="polite">
+    @if (error(); as err) {
+      <div class="banner banner-error" role="alert" data-test="error-banner">
+        <strong class="banner-code">{{ err.code }}</strong>
+        <span class="banner-message">{{ err.message }}</span>
+        <span class="banner-source">({{ err.source }})</span>
+      </div>
+    }
+    @if (degraded()) {
+      <!-- DISTINCT from the error banner: a degraded lane is NOT a
+           failed request — the daemon answered 200, the other lanes
+           are healthy, and the last good page stays on screen. Only
+           the audit lane can set this today (the machines/sessions
+           lanes are in-memory and permanently healthy). -->
+      <div class="banner banner-degraded" role="status" data-test="degraded-banner">
+        <strong class="banner-code">degraded read</strong>
+        <span class="banner-message">
+          The {{ degradedSource() }} lane could not be read from the daemon's
+          database (the read was answered, not failed) — the last good data
+          stays on screen. This is not the page's error; see the daemon logs.
+        </span>
+      </div>
+    }
+    @if (!gatewayEnabled()) {
+      <div class="banner banner-disabled" role="status" data-test="gateway-disabled-banner">
+        <strong>The remote-hands gateway is disabled.</strong>
+        <p class="banner-message">
+          Set <code>MCPS_GATEWAY_ENABLED=1</code> and
+          <code>MCPS_GATEWAY_TOKENS=&lt;token&gt;</code> in the daemon environment, then
+          RESTART the daemon — the transport route is registered at boot, not hot-reloaded.
+          The read endpoints stay up while it is off, so this page keeps working.
+          See <code>docs/mcps-gateway.md</code> (§2 Enablement &amp; activation) for the
+          full enablement steps.
+        </p>
+      </div>
+    }
+  </div>
+
+  <!-- ── Machines ─────────────────────────────────────────────────────── -->
+  <section class="panel" aria-labelledby="machines-heading">
+    <div class="panel-header">
+      <h2 id="machines-heading">Machines</h2>
+      <span class="count-chip" data-test="machines-count">{{ machines().length }}</span>
+    </div>
+    <div class="table-wrap">
+      <table class="data-table" data-test="machines-table">
+        <caption class="visually-hidden">
+          Enrolled machines with their presence state, liveness, last heartbeat and
+          active session pointer.
+        </caption>
+        <thead>
+          <tr>
+            <th scope="col">Machine</th>
+            <th scope="col">Presence</th>
+            <th scope="col">Online</th>
+            <th scope="col">Connected</th>
+            <th scope="col">Last seen (UTC)</th>
+            <th scope="col">Active session</th>
+            <th scope="col">Busy</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (machine of machines(); track machine.machine_id) {
+            <tr [attr.data-machine-id]="machine.machine_id">
+              <td class="mono">{{ machine.machine_id }}</td>
+              <td>
+                <span [ngClass]="presenceBadgeClass(machine.presence)">
+                  {{ machine.presence }}
+                </span>
+              </td>
+              <td>{{ machine.online ? 'yes' : 'no' }}</td>
+              <td>{{ machine.connected ? 'yes' : 'no' }}</td>
+              <td class="mono">{{ formatUtc(machine.last_seen_at) }}</td>
+              <td class="mono">
+                @if (machine.session_id) {
+                  {{ machine.session_id }}
+                  @if (machine.agent_id) {
+                    <span class="muted">({{ machine.agent_id }})</span>
+                  }
+                } @else {
+                  <span class="muted">—</span>
+                }
+              </td>
+              <td>
+                @if (machine.busy) {
+                  <span
+                    class="badge badge-stale"
+                    matTooltip="MACHINE_BUSY — the machine's exclusive slot is taken"
+                  >busy</span>
+                } @else {
+                  <span class="muted">no</span>
+                }
+              </td>
+            </tr>
+          } @empty {
+            <tr>
+              <td colspan="7" class="empty-cell" data-test="machines-empty">
+                {{ emptyCopy('machines') }}
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── Sessions ─────────────────────────────────────────────────────── -->
+  <section class="panel" aria-labelledby="sessions-heading">
+    <div class="panel-header">
+      <h2 id="sessions-heading">Sessions</h2>
+      <span class="count-chip" data-test="sessions-count">{{ sessions().length }}</span>
+    </div>
+    <div class="table-wrap">
+      <table class="data-table" data-test="sessions-table">
+        <caption class="visually-hidden">
+          Live sessions with their agent, machine, instance, lock state, lifetime and
+          reported remote tools.
+        </caption>
+        <thead>
+          <tr>
+            <th scope="col">Session</th>
+            <th scope="col">Agent</th>
+            <th scope="col">Machine</th>
+            <th scope="col">Instance</th>
+            <th scope="col">State</th>
+            <th scope="col">Lock</th>
+            <th scope="col">Started (UTC)</th>
+            <th scope="col">Expires (UTC)</th>
+            <th scope="col">Tools</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (session of sessions(); track session.session_id) {
+            <tr [attr.data-session-id]="session.session_id">
+              <td class="mono">{{ session.session_id }}</td>
+              <td>{{ session.agent_id }}</td>
+              <td class="mono">{{ session.machine_id }}</td>
+              <td class="mono">{{ session.instance_id }}</td>
+              <td>
+                <span class="badge badge-online">{{ session.state }}</span>
+              </td>
+              <td>
+                @if (session.machine_locked) {
+                  <span
+                    class="badge badge-stale"
+                    matTooltip="MACHINE_BUSY — this session holds the machine's exclusive slot"
+                  >locked</span>
+                } @else {
+                  <span class="muted">—</span>
+                }
+              </td>
+              <td class="mono">{{ formatUtc(session.started_at) }}</td>
+              <td class="mono">{{ formatUtc(session.expires_at) }}</td>
+              <td class="tools-cell">
+                @for (tool of session.tools; track tool) {
+                  <span class="chip">{{ tool }}</span>
+                } @empty {
+                  <span class="muted">—</span>
+                }
+              </td>
+            </tr>
+          } @empty {
+            <tr>
+              <td colspan="9" class="empty-cell" data-test="sessions-empty">
+                {{ emptyCopy('sessions') }}
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── Audit ────────────────────────────────────────────────────────── -->
+  <section class="panel" aria-labelledby="audit-heading">
+    <div class="panel-header">
+      <h2 id="audit-heading">Audit</h2>
+      <span class="count-chip" data-test="audit-count">{{ audit().length }}</span>
+    </div>
+    <div class="table-wrap">
+      <table class="data-table" data-test="audit-table">
+        <caption class="visually-hidden">
+          The remote-command audit tail, newest first, with the agent, machine, tool,
+          outcome, session and error code of every command.
+        </caption>
+        <thead>
+          <tr>
+            <th scope="col">Time (UTC)</th>
+            <th scope="col">Agent</th>
+            <th scope="col">Machine</th>
+            <th scope="col">Tool</th>
+            <th scope="col">Outcome</th>
+            <th scope="col">Session</th>
+            <th scope="col">Error code</th>
+            <th scope="col">Args hash</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (entry of audit(); track $index) {
+            <tr>
+              <td class="mono">{{ formatUtc(entry.timestamp) }}</td>
+              <td>{{ entry.agent_id }}</td>
+              <td class="mono">{{ entry.machine_id }}</td>
+              <td class="mono">{{ entry.tool }}</td>
+              <td>
+                <span [ngClass]="outcomeBadgeClass(entry.outcome)">{{ entry.outcome }}</span>
+              </td>
+              <td class="mono">
+                @if (entry.session_id) {
+                  {{ entry.session_id }}
+                } @else {
+                  <span class="muted">—</span>
+                }
+              </td>
+              <td class="mono">
+                @if (entry.error_code) {
+                  {{ entry.error_code }}
+                } @else {
+                  <span class="muted">—</span>
+                }
+              </td>
+              <td class="mono" [attr.title]="entry.args_hash">
+                {{ truncateHash(entry.args_hash) }}
+              </td>
+            </tr>
+          } @empty {
+            <tr>
+              <td colspan="8" class="empty-cell" data-test="audit-empty">
+                {{ emptyCopy('audit') }}
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
+    <div class="pager" data-test="audit-pager">
+      <button
+        type="button"
+        mat-stroked-button
+        (click)="onPrevAuditPage()"
+        [disabled]="!canPrevAuditPage()"
+        aria-label="Previous audit page"
+        data-test="audit-prev"
+      >
+        Previous
+      </button>
+      <span class="page-label" data-test="audit-page-label">
+        page {{ auditPageNumber() }} · {{ auditLimit() }} per page
+      </span>
+      <button
+        type="button"
+        mat-stroked-button
+        (click)="onNextAuditPage()"
+        [disabled]="!canNextAuditPage()"
+        aria-label="Next audit page"
+        data-test="audit-next"
+      >
+        Next
+      </button>
+    </div>
+  </section>
+
+</main>

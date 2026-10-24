@@ -1352,11 +1352,17 @@ async def post_fix(
         dispatcher: Injected SkillJobDispatcher via Depends.
 
     Returns:
-        202 Accepted with ``{"job_id": str}``.
+        202 Accepted with ``{"job_id": str}`` when the job was
+        admitted. **503 Service Unavailable** when the
+        evolution-lane gate refused the admission (kill-switch
+        ``ENSEMBLE_SKILL_EVOLUTION_ENABLED`` off /
+        ``SkillEvolutionConfig.evolution_lane_enabled=False`` — the
+        default — or the per-skill FIX cooldown is active): no job
+        exists, so a 202 would be a lie.
 
     Raises:
-        HTTPException: 400 on ``ValueError``; 500 on unexpected
-        failure.
+        HTTPException: 400 on ``ValueError``; 503 when the lane is
+        gated off (``job_id is None``); 500 on unexpected failure.
     """
     try:
         job_id = await dispatcher.dispatch_fix(
@@ -1366,10 +1372,36 @@ async def post_fix(
             suggested_fix=body.suggested_fix or "",
             current_instance_id=instance_id or "",
         )
+        if not job_id:
+            # Gate refused (kill-switch OFF / cooldown). No job was
+            # created — surface 503 with the reason instead of a
+            # fake 202 carrying job_id=null (2026-10-22
+            # truthfulness fix).
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": (
+                        "Skill-evolution lane is not accepting jobs: the "
+                        "kill-switch (ENSEMBLE_SKILL_EVOLUTION_ENABLED / "
+                        "evolution_lane_enabled) is off or the per-skill "
+                        "FIX cooldown is active. No job was created. "
+                        "While the lane is off it governs BOTH "
+                        "admission (no new skill_evolution jobs) AND "
+                        "queued-execution (a queued skill_evolution row "
+                        "is terminally written by the job processor — "
+                        "admission_state='done', "
+                        "terminal_reason='lane_disabled' — never "
+                        "silently executed, never left blocking the "
+                        "queue head)."
+                    )
+                },
+            )
         return JSONResponse(
             status_code=202,
             content={"job_id": job_id},
         )
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail={"error": str(e)})
     except Exception as e:

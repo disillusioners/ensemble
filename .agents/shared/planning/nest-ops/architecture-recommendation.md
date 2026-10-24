@@ -178,6 +178,18 @@ The forge, verified: `upgrade_journal_sweep.py:1209` and `:1734` deliver promote
 
 Disclosed cost: one legitimate case is refused — an operator POSTing a user message *directly* to the maintenancer's instance id via the API. That is an unusual shape for a fleet-destructive act, the refusal message can name the workaround ("route via the leader"), and the stricter default is the correct direction of failure for this blast radius. Record it as an accepted limitation alongside L-8.
 
+> **[DF-4 CORRECTION — 2026-10-22]** The recommendation above ("require `pclass ==
+> "inherited"`") is **SUPERSEDED** by DF-4. The reasoning that justified it does not hold:
+> the delegated forge was **already admitted** by this rule (the inherited mint copies the
+> root WITHOUT inspecting the root's own provenance — `daemon/manager.py`), so the rule
+> never blocked the exploit it was meant to block, while it DID refuse the genuine
+> operator-direct path. DF-4 closed the delegated forge at its **ROOT** instead: the
+> sweep's no-user-origin fallback now rides a reserved internal literal
+> (`SWEEP_NO_USER_ORIGIN_WAKE_SOURCE`) and can no longer mint a forged DIRECT window; the
+> gate now keys on the **LIVENESS** of the window and `pclass` survives as observability.
+> The text above is historical analysis — it is **annotated, not deleted**. See
+> `.agents/shared/planning/df4-provenance-closure/plan-overview.md`.
+
 If the commission prefers not to tighten, the fallback mitigation is visibility only: stamp the audit row `provenance_suspect=true` when `pclass=="direct" and root_source=="api"` on a protected target, and surface a suspect-act counter in the fleet summary. That does not block the forge; it makes it countable.
 
 | Containment option set | Complexity | Scalability | Maintainability | Risk | Cost | Recommendation |
@@ -270,6 +282,16 @@ Net effect: the category ships with **8 tools** (3 reads + 5 acts, or 4+4 under 
 | Q3 | D-3 provenance | **AMEND** | Prefer a neutral home `daemon/tools/provenance.py` with `_restart_provenance` retained in `upgrade_tools.py` as a 3-line delegating alias (pins untouched; the T0a source-pin is scoped to the tool body — verified). Fallback: a thin public wrapper. Either way **AC-10 must be restated** — as specified it is a vacuous self-comparison; make it a wiring pin + a verdict→token vocabulary pin. |
 | Q4 | Audit transaction boundary | **AMEND** | Two-tier property, stated per tool: Tier 1 true same-transaction via an additive `audit_sink` hook in `_terminate_instance_db_sync` (terminate) and an optional `session=` on `repo.set_metadata` (mark); Tier 2 write-ahead audit (`outcome="pending"` → act → UPDATE) for nudge/answer/dismiss. AC-9 covers Tier 1 only; a new AC covers the Tier-2 pending row. The uniform claim as written is unsound for 3 of 6 acts — and the plan's own R11 rule already says what to do about that. |
 | Q5 | Blast radius | **AMEND** | Add a DB-side terminate budget over `instance_ops_audit` (N=3 committed/24h, N=1 for protected targets) + a target min-age rail (600s); replace `user_confirmed: bool` with `confirmed_target_id: str` (must equal target); **require `pclass=="inherited"` for protected-target acts** — this closes the R1 promote-wake forge completely without touching the upgrade lane (verified: `spawn_instance` enqueues `internal_agent:<caller>` → inherited mint; the forge mints `direct`). Record the one refused legitimate case (direct HTTP operator message to the maintenancer). |
+
+> **[DF-4 CORRECTION — 2026-10-22]** The Q5 amendment's "**require
+> `pclass=="inherited"` for protected-target acts** — this closes the R1 promote-wake
+> forge completely" clause is **RETRACTED**. It did NOT close the R1 forge: the delegated
+> shape of the same forge was **already admitted** by that rule (the inherited mint copies
+> the root without inspecting the root's own provenance), and it simultaneously refused the
+> genuine operator-direct path. DF-4 closed the forge at its **ROOT** (the sweep's
+> no-user-origin fallback now rides a reserved lane) and re-scoped the gate to **liveness**.
+> The row is kept verbatim as history; see
+> `.agents/shared/planning/df4-provenance-closure/plan-overview.md`.
 | Q6 | Wedge detectors | **REJECT** the third vocabulary; **AMEND** the composition | No third `alive\|stalled\|terminal` enum — it erases the park/wedge distinction the commission's own `park` marker exists to make. Use three orthogonal dimensions: raw `status` as the SQL filter; canonical `liveness` (`_STATUS_CANONICAL_MAP`) as a derived *field*; `stale`/`idle_seconds` (lineage-MAX, R4) + `pause_marker` as separate fields. Composition: write reporting predicates in the new module (there is nothing to compose — GT-4) and pin agreement with the sweeps' observable outputs where they exist; do not extract, do not import privates. |
 | — | DV-2 dismiss extraction | **AMEND** | `instance_answer` needs no extraction (`live_hub` is already a parameter — verified). Cut or defer `instance_dismiss`; if it ships now, scope the extraction honestly (live-hub injection, 4 typed error mappings, SSE-before-cascade preserved) — the route-table readback pin guards the wrong risk. |
 | — | `instance_reclaim` | **REJECT (cut the tool)** | Not implementable as a thin wrapper (GT-5), duplicates an automatic boot-time recovery, and is the least auditable act in the set. Ship 8 tools. |

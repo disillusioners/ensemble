@@ -43,7 +43,7 @@ The following agents are available:
 | `planner` | Planner | 📋 | Strategic planning dispatcher — researches codebase via explorer, delegates plan creation to skill-equipped workers | todo, chart, dynamic-skill | bash, filesystem, time, self, help, knowledge, mcp |
 | `giter` | Giter | 🔀 | Git operations — commits, branches, version control | — | bash, filesystem, time, self, help, knowledge, mcp |
 | `jober` | Job Orchestrator | 📋 | Creates and monitors jobs, never does tasks directly | job-orchestration | job, help, self, time, project, knowledge, mcp |
-| `gaia` | Gaia | 🌍 | Environment setup assistant | — | bash, filesystem, help, mcp |
+| `gaia` | Gaia | 🌍 | Environment terraformer — provisions, configures, upgrades, healthchecks, and repairs machine infrastructure; first scope: mcps_client lifecycle | — | bash, proc, filesystem, help, system |
 | `kb-importer` | KB Importer | 📥 | Prepares and imports documents into RAG knowledge base | — | rag, help, time, mcp |
 | `experiencer` | Experiencer | 🧠 | Extracts entities/relationships from text, records to RAG | — | rag, help, time, mcp |
 | `_mother` | Mother | 🧬 | Creates, modifies, and manages other agents (system agent) | — | instance, self, help, mother, knowledge, mcp |
@@ -400,7 +400,7 @@ Agents with limited tool access:
 
 | Agent | Tools |
 |-------|-------|
-| `gaia` | bash, filesystem, help, mcp |
+| `gaia` | bash, proc, filesystem, help, system |
 
 > **Note**: `_baby_template` is a template agent used for spawning new agents via the API, not a usable agent. See the [System Agents](#system-agents) section above.
 

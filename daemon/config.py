@@ -2758,6 +2758,30 @@ class SchedulingConfig(BaseSettings):
                     "min(60, host_local_tz_cache_seconds) applied. Architecture §4.4. "
                     "Env: ENSEMBLE_SCHEDULING_NEGATIVE_CACHE_SECONDS.",
     )
+    # ── scheduler deferred-delivery bounds (commission
+    #    ``scheduler-deferred-alarm-delivery``; decisions.md DEC-19) ─────
+    # Pydantic-settings, NOT DDL — the migration delta stays EMPTY (plan
+    # §(d) D5). Both bounds are checked at FIRE TICKS ONLY (no polling
+    # loop — the hard non-goal).
+    defer_max_count: int = Field(
+        default=16,
+        ge=1,
+        description="Max coalesced deferral occurrences per generation. "
+                    "At saturation the count PINS at this value and the delivered "
+                    "body carries the saturating '<cap>+ occurrences' display "
+                    "(never min(count+1, cap)). "
+                    "Env: ENSEMBLE_SCHEDULING_DEFER_MAX_COUNT.",
+    )
+    defer_max_age_seconds: int = Field(
+        default=86400,
+        ge=60,
+        description="Max age (seconds) of the non-delivery episode carrier "
+                    "('_defer_since'). On breach the episode terminates VISIBLY: "
+                    "the still-pending delivery is abandoned with ONE guarded "
+                    "statement and the occurrence is consumed with a terminal "
+                    "'failed' row (reason 'nondelivery_age_cap') + a WARNING. "
+                    "Env: ENSEMBLE_SCHEDULING_DEFER_MAX_AGE_SECONDS.",
+    )
 
 
 class McpPoolConfig(BaseSettings):
@@ -4081,6 +4105,78 @@ class SkillEvolutionConfig(EmbeddingConfig):
     # Capture
     capture_min_iterations: int = Field(default=5)
     capture_min_duration_seconds: int = Field(default=60)
+
+    # ── Evolution-lane gate (2026-10-22 confinement fix) ──────────
+    # Tier-3 mutation admission (FIX/DERIVED/CAPTURED via
+    # SkillJobDispatcher.enqueue_evolution). DEFAULT OFF: the
+    # 2026-10-21 incident showed this lane admitting agent-authored
+    # fix directions straight into an executor, with no switch, no
+    # dedup, and no cooldown. Opting in is a deliberate operator act.
+    #
+    # ADMISSION vs EXECUTION semantics (both governed by this switch):
+    #   * ADMISSION — ``SkillJobDispatcher.enqueue_evolution`` refuses
+    #     NEW Tier-3 jobs while the lane is off (returns ``None``;
+    #     the ``skill_fix`` tool and POST /api/skills/{id}/fix report
+    #     the refusal instead of pretending a job exists).
+    #   * EXECUTION — the job processor refuses to EXECUTE a queued
+    #     ``skill_evolution`` row while the lane is off (rows admitted
+    #     before the lane was turned off are failed loudly, never
+    #     silently executed). Scope: skill_evolution rows only.
+    #   * The inline ``skill_evolve`` tool path (a keeper instance
+    #     already running) is NOT covered by this switch — disclosed
+    #     residual, tracked for the master skill-system switch.
+    #
+    # The RUNTIME gate resolves PER-CALL: the dedicated
+    # ``ENSEMBLE_SKILL_EVOLUTION_ENABLED`` env is the CANONICAL switch
+    # and WINS whenever set; when unset/empty, THIS field is the
+    # default the dispatcher was constructed with. The env accepts
+    # EXACTLY the same tokens as the capture switch (1/true/yes/on vs
+    # 0/false/no/off); an invalid value raises at first use and logs an
+    # ERROR at load time.
+    #
+    # ALIAS SURFACE (review iteration 3 — DISCLOSED, not eliminated):
+    # pydantic's env_prefix ALSO exposes this field as
+    # ``SKILL_EVOLUTION_EVOLUTION_LANE_ENABLED``. Elimination was
+    # probed and is NOT mechanical: validation_alias pinning breaks the
+    # by-name yaml/test/wiring surface, and populate_by_name=True
+    # re-enables the field name for env lookup (the alias survives).
+    # Both surfaces therefore exist, with a strict precedence: the
+    # canonical var wins at every resolution (the resolver reads it
+    # per-call BEFORE this field is ever consulted); the alias var can
+    # only set the CONSTRUCTED DEFAULT, which is inert whenever the
+    # canonical var is set. Setting the alias var alone DOES enable the
+    # lane — that is the disclosed residual.
+    evolution_lane_enabled: bool = Field(
+        default=False,
+        description=(
+            "Tier-3 skill-evolution lane (default OFF — incident "
+            "2026-10-21). Governs BOTH admission (no new "
+            "skill_evolution jobs) and queued-execution (queued "
+            "skill_evolution rows are TERMINALLY refused by the job "
+            "processor — admission_state='done', "
+            "terminal_reason='lane_disabled' — never silently "
+            "executed, never left blocking the queue head). TWO env "
+            "surfaces exist (disclosed): the CANONICAL "
+            "ENSEMBLE_SKILL_EVOLUTION_ENABLED (wins at every "
+            "resolution) and the pydantic-prefix alias "
+            "SKILL_EVOLUTION_EVOLUTION_LANE_ENABLED (sets the "
+            "constructed default only; inert when the canonical var "
+            "is set)."
+        ),
+    )
+    # Minimum seconds between ACCEPTED FIX admissions for the same
+    # (project_id, skill_id). Refusals inside the window return None
+    # from the dispatcher (no job). RAM-only rate limiter; the DB-side
+    # idempotency_key dedup covers the non-terminal window.
+    fix_cooldown_seconds: int = Field(
+        default=1800,
+        description=(
+            "Min seconds between FIX admissions for the same "
+            "(project, skill); 0 disables the cooldown (not "
+            "recommended — the 2026-10-21 burst re-FIXed one skill "
+            "3x in 38 minutes)."
+        ),
+    )
 
 
 class LoopBreakerConfig(BaseSettings):

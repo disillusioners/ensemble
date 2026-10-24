@@ -453,6 +453,14 @@ typos — reuse it). `dry_run` defaults **TRUE** on every destructive act. `reas
 `unknown-status-value` · `terminate-budget-exceeded` · `target-too-young` ·
 `instance-ops-disabled` · `question-pack-lost` · `no-pending-question` ·
 `stale-question-pack` · `audit-write-failed` · `marker-already-set` · `invalid-marker` ·
+
+> **[DF-4 CORRECTION — 2026-10-22]** `direct-provenance-insufficient` is **RETIRED**
+> (DF-4 / P2). The class-keyed refusal is gone: the protected-target gate now keys on
+> the **LIVENESS** of the user-origin window, so `no-user-provenance` is the **only**
+> provenance refusal token. The token list above is kept verbatim as history — the
+> authoritative history is `decisions.md` D-18 and its 5-step retraction trace
+> (`decisions.md:666-684`). See
+> `.agents/shared/planning/df4-provenance-closure/plan-overview.md`.
 `target-not-terminal`.
 
 *(Amended by review A1/A8: superseded token `user-confirmation-missing` REMOVED — D-17
@@ -648,6 +656,14 @@ Terminating a protected target requires **ALL THREE**:
   (`daemon/tools/provenance.py` after D-14);
 * **(c)** **`pclass == "inherited"`** (D-18).
 
+> **[DF-4 CORRECTION — 2026-10-22]** Clause **(c) is RETIRED** (DF-4 / P2). The
+> protected-target gate now requires **TWO** conditions — (a) the named confirmation
+> and (b) a **live** user-origin window — and keys on **LIVENESS, not on the window's
+> class**. `pclass` is a read-time derivation that carried no trust signal; it survives
+> as **observability only** (the audit rows answer "which window shape authorised this
+> act?"). Superseded by `.agents/shared/planning/df4-provenance-closure/plan-overview.md`.
+> The original three-clause rule is kept verbatim above as history.
+
 **D-18 — what requiring `pclass == "inherited"` ACTUALLY closes (bounds corrected by review
 C1; the original "CLOSES R1" claim is RETRACTED — see `decisions.md` D-18 and
 `risk-register.md` R1).** The gate is retained as **defense-in-depth with honestly-stated
@@ -677,6 +693,15 @@ bounds**, not as a proof of user intent:
   genuine operator-direct path. The gate's polarity is inverted relative to its original
   justification.** The ROOT fix is **DF-4 / critical note `f4cf9c4f`** (the sweep's
   `or "api"` fallback) — a separate lane, **NOT fixed here**.
+
+> **[DF-4 CORRECTION — 2026-10-22]** The ROOT fix **IS DF-4** and it **HAS LANDED**
+> (commission DF-4, release line v0.27.2). The sweep's no-user-origin fallback now rides
+> the reserved internal literal `SWEEP_NO_USER_ORIGIN_WAKE_SOURCE`
+> (`"system:sweep_no_user_origin_wake"`) instead of the user-origin literal `"api"`, so
+> it can no longer mint a forged DIRECT root; and the class-keyed gate clause is retired
+> (the gate keys on liveness). The critical note `f4cf9c4f` is **superseded** by
+> `.agents/shared/planning/df4-provenance-closure/plan-overview.md`. See also
+> `decisions.md:666-684` (the authoritative 5-step retraction trace).
 * **Why the gate is still worth keeping (defense-in-depth, four layers):**
   (a) **D-17 attributable confirmation** — the act names its target and the audit records it;
   (b) **D-16 the N=1/24h protected-target budget**; (c) **the audit row records `root_source` +
@@ -691,6 +716,17 @@ is intended** — the maintenancer is a **delegated leaf, not user-facing**; a f
 act against a protected target should require a delegation chain from a user-facing turn. The
 refusal message names the workaround ("route via the leader"). Recorded as **L-9**.
 
+> **[DF-4 CORRECTION — 2026-10-22]** **L-9 is RETIRED** (DF-4 / P2). The
+> "direct window cannot authorize a protected terminate" property is **retired BY DESIGN**
+> — it refused the GENUINE operator-direct path (defect B) while never blocking the
+> delegated forge. A live user-origin window of **either** shape now admits the act; the
+> window's shape is recorded in the audit ledger but is NOT a gate input. The compensating
+> controls for the newly-admitted DIRECT shape are: scopes · acting-instance allow-list ·
+> named-target confirmation (`confirmed_target_id`) · the D-16 budget (protected 1/24h,
+> fleet 3/24h) · the two-tier audit ledger · the `ENSEMBLE_INSTANCE_OPS_ENABLED` kill
+> switch. The REST-ingress class stays OPEN (critical note `257488dc`). See
+> `.agents/shared/planning/df4-provenance-closure/plan-overview.md` §Honesty Clause.
+
 **Refusal doc-surface requirement (C1 point 4):** the refusal text for
 `direct-provenance-insufficient` must also state that **any non-`internal_agent:` dispatch
 clears the inherited window** (a delegated turn arriving on another lane — including
@@ -698,11 +734,24 @@ clears the inherited window** (a delegated turn arriving on another lane — inc
 fail-closed; `daemon/manager.py:4914+` docstring), so the agent understands which delegation
 lanes can and cannot authorize the act.
 
+> **[DF-4 CORRECTION — 2026-10-22]** The `direct-provenance-insufficient` refusal text is
+> **RETIRED** (DF-4 / P2) — the branch that carried it no longer exists, so this
+> doc-surface requirement has no surface left to apply to. The surviving refusal text
+> (`no-user-provenance`) describes the LIVENESS requirement only. The inherited-window
+> clearing semantics it referenced are unchanged and still documented at
+> `daemon/manager.py:4914+`.
+
 **Refusals:** `reason-required`, `self-surgery-refused`, `instance-not-found`,
 `cascade-false-would-orphan-descendants`, `protected-target-confirmation-required`,
 `confirmed-target-mismatch` (D-17), `no-user-provenance`, `direct-provenance-insufficient`
 (D-18), `terminate-budget-exceeded` (D-16), `target-too-young` (D-16),
 `instance-ops-disabled`, `audit-write-failed`, `not-permitted`.
+
+> **[DF-4 CORRECTION — 2026-10-22]** `direct-provenance-insufficient` (D-18) is
+> **RETIRED** — it no longer exists in the product code (DF-4 / P2). The live refusal
+> vocabulary for the protected-target gate is: `protected-target-confirmation-required`,
+> `confirmed-target-mismatch`, `no-user-provenance`. The list above is kept verbatim as
+> history.
 
 
 ---
@@ -953,6 +1002,16 @@ categories name the same agent. The kill-switch gates only the act category.
 * A protected target requires **ALL THREE**: (a) `confirmed_target_id == id` (D-17);
   (b) a live user-origin verdict from the shared provenance helper; (c) `pclass ==
   "inherited"` (D-18 — closes the R1 forge completely without touching the upgrade lane).
+
+> **[DF-4 CORRECTION — 2026-10-22]** Clause (c) — the `pclass == "inherited"`
+> requirement — is **RETRACTED** and superseded by DF-4's **liveness-only** gate: a
+> protected target requires (a) the named confirmation and (b) a **live** user-origin
+> window, whatever its shape. The class-keyed clause never closed the delegated forge
+> (the inherited mint copies the root without inspecting the root's own provenance) and
+> it DID refuse the genuine operator-direct path. DF-4 closed the delegated forge at its
+> ROOT (the sweep's no-user-origin fallback now rides a reserved lane). The clause above
+> is kept verbatim as history; see
+> `.agents/shared/planning/df4-provenance-closure/plan-overview.md`.
 * The refusal message discloses what counts as user-origin via
   `user_origin_sources_display()` (`daemon/tools/upgrade_journal.py:3363-3373`).
 * **No nonce.** The upgrade lane's 3-factor nonce regime is untouched, byte-for-byte.
@@ -1099,6 +1158,32 @@ into (a)/(b)).**
 | **AC-24** | **D-16**: the 4th committed terminate in 24h refuses `terminate-budget-exceeded`; a target younger than 600s refuses `target-too-young` | budget tests |
 | **AC-25** | **D-20**: `instance_reclaim` refuses a non-terminal target (`target-not-terminal`) and a terminal target revives with a documented message | reclaim tests |
 | **AC-26** | **The provenance T0a claim is independently re-verified by the reviewer AND the tester before merge** (D-14's named gate) | review gate, recorded in both reports |
+
+> **[DF-4 CORRECTION — 2026-10-22]** Applies to the **AC-10b** and **AC-11** rows above.
+>
+> * **AC-10b** — the refusal-token mapping is **RE-POINTED** by DF-4 / P2: there is now
+>   **exactly ONE** provenance refusal token (`no-user-provenance`); the class-keyed token
+>   is **RETIRED** and no longer appears anywhere in `daemon/` or `tests/`. The verdict
+>   tokens (`ok` / `pclass` / `depth` / `detail`) are **unchanged** — `pclass` survives as
+>   OBSERVABILITY.
+> * **AC-11** — the "with a **direct** window ⇒ `direct-provenance-insufficient`" clause is
+>   **RETRACTED**: a live **direct** window on the acting instance now **PROCEEDS** (the
+>   genuine operator path is admitted). The `confirmed-target-mismatch` and
+>   `no-user-provenance` clauses are unchanged.
+>
+> **[DF-4 CORRECTION — 2026-10-22]** Applies to the **AC-23a** and **AC-23b** rows above.
+>
+> * **AC-23a** — **RE-POINTED** (DF-4 / P2): the genuine direct window on the acting
+>   instance is **ADMITTED**, not refused. The test is now
+>   `test_genuine_direct_window_admits_protected_act`.
+> * **AC-23b** — **SPLIT** (DF-4 / P3): the **genuine** delegated chain is ADMITTED (the
+>   test is now `test_genuine_inherited_window_admits_protected_act`), and the **forged**
+>   chain's refusal leg moved to the REAL-chain e2e
+>   (`tests/postgres/test_df4_provenance_closure.py` — the sweep's no-user-origin wake can
+>   no longer mint a forged DIRECT root, so the delegated child inherits nothing and the
+>   gate refuses `no-user-provenance`). The row above is kept verbatim as history; the
+>   authoritative retraction trace is `decisions.md:666-684`. See
+>   `.agents/shared/planning/df4-provenance-closure/plan-overview.md`.
 
 ---
 

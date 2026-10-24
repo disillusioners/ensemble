@@ -30,6 +30,8 @@ from .maintenance import router as maintenance_router  # Section 1: checkpoint c
 from .prompts import router as prompts_router  # Phase B T5: agent-prompt-immutability approval REST
 from .custom_agents import router as custom_agents_router  # Phase C: User Directive #5A custom-agent lifecycle
 from .resources import router as resources_router  # resource-cost-control P1: /api/resources
+from .mcps_gateway_read import router as mcps_gateway_read_router  # Phase C: /api/mcps-gateway/{machines,sessions,audit} (OAuth read lane)
+from .wedge_capture import router as wedge_capture_router  # wedge-capture: /api/wedge-captures
 
 __all__ = [
     "agents_router",
@@ -62,4 +64,6 @@ __all__ = [
     "prompts_router",
     "custom_agents_router",
     "resources_router",
+    "mcps_gateway_read_router",
+    "wedge_capture_router",
 ]

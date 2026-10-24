@@ -241,3 +241,89 @@ class TestStringLiteralFalsePositives:
         _validate_select_only(
             "SELECT * FROM t WHERE v = 'it''s INTO'"
         )
+
+# =============================================================================
+# REPLACE: statement form vs scalar function (2026-10-23 rider fix)
+# =============================================================================
+#
+# ``REPLACE`` is dual-natured: the ``REPLACE INTO`` statement is DML, but
+# ``replace(string, from, to)`` is a standard read-only scalar function.
+# The generic word-boundary scan matched BOTH, so a valid
+# ``SELECT replace(name, 'a', 'b') FROM t`` was falsely rejected by
+# ``ens_db_postgres_select`` / ``db_postgres_dml_select``. The guard now
+# matches only the statement form (``REPLACE`` NOT immediately followed by
+# the function-call open paren).
+
+
+class TestReplaceFunctionVsStatement:
+    """The replace() scalar function is allowed; the REPLACE statement
+    form is still rejected (rider fix, 2026-10-23)."""
+
+    # ── Positive needles: legitimate function usage must PASS ──────────────
+
+    def test_replace_function_in_projection(self):
+        # The incident query shape: replace() in the SELECT list.
+        _validate_select_only("SELECT replace(name, 'a', 'b') FROM projects")
+
+    def test_replace_function_with_whitespace_before_paren(self):
+        # PG allows whitespace between a function name and its paren;
+        # the statement-form pattern must not fire on it either.
+        _validate_select_only("SELECT replace (name, 'a', 'b') FROM projects")
+
+    def test_replace_function_in_where(self):
+        _validate_select_only(
+            "SELECT id FROM tasks WHERE replace(status, ' ', '_') = 'in_progress'"
+        )
+
+    def test_replace_function_nested_with_subquery(self):
+        # A scalar subquery INSIDE a replace() call is still a read.
+        _validate_select_only(
+            "SELECT replace((SELECT note FROM t LIMIT 1), 'x', 'y')"
+        )
+
+    def test_replace_inside_string_literal_still_invisible(self):
+        # N4 layering: a string containing the whole call is stripped first.
+        _validate_select_only(
+            "SELECT * FROM t WHERE note = 'replace(a, b, c)'"
+        )
+
+    def test_replace_word_substring_in_identifier(self):
+        # Word-boundary layering: identifiers containing replace are
+        # not keyword matches at all (underscore is a word character).
+        _validate_select_only("SELECT * FROM replace_log")
+        _validate_select_only("SELECT replaced_at FROM events")
+
+    # ── Negative needles: statement-form REPLACE must STILL be REJECTED ────
+
+    def test_replace_statement_keyword_layer_rejected(self):
+        # Statement-form REPLACE (no function-call paren) must hit the
+        # keyword layer. The query deliberately contains NO other forbidden
+        # keyword, so the raised keyword is deterministically 'REPLACE'
+        # (the scan iterates the keyword frozenset in arbitrary order).
+        with pytest.raises(ValueError, match="Forbidden keyword 'REPLACE'"):
+            _validate_select_only("SELECT 1 WHERE REPLACE = 2")
+
+    def test_replace_into_statement_rejected(self):
+        # The realistic DML shape. Either 'REPLACE' or 'INTO' may fire
+        # first depending on keyword-set iteration order — the contract
+        # under test is that the statement form is REJECTED (never
+        # silently allowed by the paren lookahead), so the assertion is
+        # deliberately not keyword-pinned.
+        with pytest.raises(ValueError, match="Forbidden keyword"):
+            _validate_select_only("SELECT REPLACE INTO users SELECT 1")
+
+    def test_bare_trailing_replace_rejected(self):
+        # REPLACE not followed by any paren → statement-form pattern fires.
+        # Single forbidden token → deterministic keyword in the message.
+        with pytest.raises(ValueError, match="Forbidden keyword 'REPLACE'"):
+            _validate_select_only("SELECT * FROM t WHERE x = REPLACE")
+
+    # ── Other DML keywords keep the strict treatment (no function carve-out)
+    #    — only REPLACE is dual-natured. ─────────────────────────────────────
+
+    @pytest.mark.parametrize("keyword", ["INSERT", "UPDATE", "DELETE", "MERGE"])
+    def test_other_dml_keywords_rejected_even_before_paren(self, keyword):
+        # These have no read-only scalar namesake; the paren lookahead is
+        # deliberately NOT extended to them.
+        with pytest.raises(ValueError, match="Forbidden keyword"):
+            _validate_select_only(f"SELECT * FROM t WHERE {keyword}(x) = 1")

@@ -34,7 +34,14 @@ from daemon.plugin_subsystem.promote_staleness import (
     main,
 )
 
-NOW = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
+# Anchored to real wall-clock (UTC noon today), NOT a frozen date: the CLI
+# path (`main` -> `evaluate_staleness`) evaluates trail lines against the
+# REAL now, so a frozen NOW silently ages the fixtures past the 14-day
+# staleness threshold (observed time-bomb: froze 2026-10-07, red by
+# 2026-10-22 with "pin is 16 days old"). All assertions in this file are
+# relative to NOW (staleness-day deltas), so a dynamic anchor is
+# semantics-preserving.
+NOW = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
 
 
 def _write_manifest(plugin_dir: Path, **overrides) -> None:

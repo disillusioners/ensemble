@@ -166,19 +166,21 @@ class TestDevopsMetaJsonValidation:
             f"DevOps should have innate_skills == ['dynamic-skill', 'chart', 'todo'], got: {innate_skills}"
         )
 
-    def test_skill_injection_enabled(self) -> None:
-        """DevOps should have skill_injection == true.
+    def test_skill_injection_disabled(self) -> None:
+        """DevOps must have skill_injection == false.
 
-        With dynamic-skill in innate_skills, the skill_injection flag enables
-        the runtime to auto-inject relevant skills before each user message
-        (mirrors the worker agent).
+        DevOps deliberately opted OUT of runtime skill auto-injection
+        (commit e56070de6 "disable skill injection for devops", 2026-08-24).
+        The flag is owner-scoped per the fleet convention: the dynamic-skill
+        tool stays available via innate_skills, but the runtime must not
+        auto-inject skills before each user message.
         """
         meta_path = DEVOPS_AGENT_DIR / "meta.json"
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
-        assert meta.get("skill_injection") is True, (
-            f"DevOps should have skill_injection == true, got: {meta.get('skill_injection')!r}"
+        assert meta.get("skill_injection") is False, (
+            f"DevOps should have skill_injection == false, got: {meta.get('skill_injection')!r}"
         )
 
     def test_capabilities_field_exists(self) -> None:
@@ -337,8 +339,8 @@ class TestDevopsPromptComposition:
     def test_no_opencode_skill_content_in_system_prompt(self) -> None:
         """Verify no opencode skill files leak into the prompt.
 
-        DevOps declares innate_skills=['dynamic-skill', 'todo'] so both the
-        dynamic-skill and todo skills ARE loaded. What we must verify is that
+        DevOps declares innate_skills=['dynamic-skill', 'chart', 'todo'] so
+        all three skills ARE loaded. What we must verify is that
         no other innate-skill content (opencode) leaks in via the
         centralized registry.
         """
@@ -349,12 +351,14 @@ class TestDevopsPromptComposition:
         with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
-        # Only dynamic-skill and todo should be loaded (no opencode)
+        # Only the declared innate skills should be loaded (no opencode).
+        # 'chart' is a declared DevOps innate skill (commit f4d3be5db) and is
+        # asserted as such by test_innate_skills_is_dynamic_skill_and_todo.
         skills = load_agent_skills(DEVOPS_AGENT_DIR, meta)
         loaded = set(skills.keys())
-        forbidden = loaded - {"dynamic-skill", "todo"}
+        forbidden = loaded - {"dynamic-skill", "chart", "todo"}
         assert not forbidden, (
-            f"Only 'dynamic-skill' and 'todo' skills should be loaded for DevOps, got extras: {forbidden}"
+            f"Only 'dynamic-skill', 'chart' and 'todo' skills should be loaded for DevOps, got extras: {forbidden}"
         )
 
         # Also verify that the soul.md does not contain "OpenCode_Skill" tool

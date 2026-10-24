@@ -751,12 +751,16 @@ class McpService:
             for server in servers:
                 # S1 (cu-mcp commission, 2026-10-16): builtin
                 # availability gate. A post-boot kill-switch flip
-                # (e.g. ``COMPUTER_USE_MCP_ENABLED=0``) leaves the
-                # server's ``mcp_servers`` row ACTIVE from the prior
-                # ON boot — without this gate the preload loop
-                # would call ``get_schemas_for_server`` on the stale
-                # row and the cold-discovery path would cold-spawn
-                # the npx subprocess despite the operator opt-out.
+                # (HISTORICAL first case: the cu builtin's
+                # ``COMPUTER_USE_MCP_ENABLED=0`` — that builtin and
+                # its env var were removed 2026-10-24; live example
+                # of the GENERIC shape: ``PLANE_MCP_ENABLED``) leaves
+                # the server's
+                # ``mcp_servers`` row ACTIVE from the prior ON boot —
+                # without this gate the preload loop would call
+                # ``get_schemas_for_server`` on the stale row and the
+                # cold-discovery path would cold-spawn the server
+                # subprocess despite the operator opt-out.
                 # The bootstrap path already consults
                 # ``is_available()`` (skip DB row creation), so
                 # adding the gate here closes the post-boot flip
@@ -1083,8 +1087,8 @@ class McpService:
             no kill-switch opinion is imposed.
           * Server IS a builtin but ``is_available()`` returns
             ``True`` (e.g. ``plane`` / ``context7`` / ``webfetch``
-            always-on, or ``computer-use`` with kill-switch ON
-            AND npx resolvable AND no generic disable) → ``True``.
+            always-on, or a kill-switched builtin with its own
+            preconditions satisfied) → ``True``.
           * Server IS a builtin and ``is_available()`` returns
             ``False`` (kill-switch flipped OFF post-boot, npx
             unresolvable, or generic MCP disable on) → ``False``.
@@ -1093,8 +1097,8 @@ class McpService:
             the instance tool cache never sees its tools.
 
         The per-builtin ``is_available()`` carries its own one-shot
-        log (e.g. plane.py:88-89, computer_use.py:147-171) so the
-        operator sees the precise reason. We add a SECOND
+        log (e.g. plane.py:88-89) so the operator sees the precise
+        reason. We add a SECOND
         one-shot log here, at the gate site, that names the
         server SKIPPED FOR A LIVE PRELOAD — this is the
         diagnostics for exactly the post-boot flip state
