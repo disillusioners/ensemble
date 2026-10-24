@@ -25,7 +25,7 @@ Exactly **one surface**: the manager's stored unit `Environment=` list, re-serve
 
 - Access class closed: **local, non-`nea`, non-root users** — for whom this was the **only** reachable secret surface on the host (see 2.2).
 - Temporal boundary: **future generations only.** The live Sep-30 unit is a frozen write-once snapshot (clobber refusal `adopt-unit.sh:518-521` exit 78 post-strip; never re-rendered by promote/restart/rollback) — the live exposure persists until the user's morning remediation (D10.1).
-- Post-strip the unit's stored env = `Environment=MALLOC_ARENA_MAX=2` only (template :110) — no secret.
+- Post-strip the unit's stored env = `Environment=MALLOC_ARENA_MAX=2` only (template :121) — no secret.
 
 ### 2.2 What the strip does NOT close (each verified, with the honest access class)
 

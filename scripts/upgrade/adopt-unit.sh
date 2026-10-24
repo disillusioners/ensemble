@@ -19,7 +19,7 @@
 #   (d) generate the instance unit from the STATIC BASE template
 #       (scripts/systemd/ensemble-daemon.service — template + substitution)
 #       reading ONLY PORT from the staged INSTALL_DIR/.env (never ambient
-#       env — the stop-ensemble.sh :83-125 precedent); the generated unit
+#       env — the stop-ensemble.sh _resolve_wait_s :288 precedent); the generated unit
 #       carries ZERO .env-derived Environment= lines (zero-env contract —
 #       runtime env is supplied by launcher.sh), then: install unit
 #       (0600) → daemon-reload →
@@ -431,9 +431,11 @@ _stage_restart_unit_env() {
     fi
     printf '\n# staged by scripts/upgrade/adopt-unit.sh (P4 adoption — service mode)\nENSEMBLE_RESTART_UNIT=%s\n' \
         "$UNIT_NAME" >> "$tmp" || { rm -f "$tmp"; return 1; }
-    # cat > preserves the existing file's inode/owner/mode (.env is 0600-class;
-    # unit-secret-exposure P5: deploy.sh + stage.sh now pin/restore the 0600
-    # at every write site — this additive-staging path must never need its own chmod)
+    # cat > preserves the existing file's inode/owner/mode — the 0600 outcome
+    # is inherited, not enforced here: it assumes .env has already been
+    # through a post-P5 deploy/stage write site (those pin 0600); a legacy
+    # 0644 .env stays 0644. (Pinning the mode at this seam is a deferred
+    # option — out of tonight's quality-only scope.)
     cat "$tmp" > "$ENV_FILE" || { rm -f "$tmp"; return 1; }
     rm -f "$tmp"
     # verified write (W3 discipline — never report an unverified staging)

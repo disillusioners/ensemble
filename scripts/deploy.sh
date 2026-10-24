@@ -246,24 +246,25 @@ if [ "$TARGET" = "demo" ] && [ ! -f "$ENV_SOURCE" ]; then
         # unit-secret-exposure P5: chmod rides the SAME chain as the mv —
         # the mv re-creates the inode, so the 0600 pin must follow it.
         # unit-secret-exposure P5 (umask fence): the temp carries the FULL
-        # .env content (incl. POSTGRES_PASSWORD) — create it 0600, not the
-        # ambient 0644; the explicit chmod below stays the pinned posture.
+        # .env content (incl. POSTGRES_PASSWORD) — the fence makes it land
+        # 0600 (vs mode 0644 under a typical 022 umask); the explicit chmod
+        # below stays the pinned posture.
         _PREV_UMASK="$(umask)"
         umask 077
         if sed -e "s/^PORT=.*/PORT=$PORT/" \
                -e "s/^POSTGRES_DB=.*/POSTGRES_DB=$DB_NAME/" \
                "$ENV_BASE" > "$ENV_TMP" \
                && mv -f "$ENV_TMP" "$ENV_SOURCE"; then
-            # A4: the chmod failure gets its OWN message (stage.sh's explicit
-            # "failed to chmod 600" pattern) — it must not be mislabeled as a
-            # generation failure.
+            # A4: the chmod failure gets its OWN message, in this file's
+            # FAILED: style — it must not be mislabeled as a generation
+            # failure.
             if ! chmod 600 "$ENV_SOURCE"; then
-                _log "FAILED: chmod 600 $ENV_SOURCE"
+                _log "FAILED: chmod 600 $ENV_SOURCE (source ALREADY replaced; install dir NOT updated — re-run to converge)"
                 exit 1
             fi
         else
             rm -f "$ENV_TMP" 2>/dev/null
-            _log "FAILED: generating $ENV_SOURCE"
+            _log "FAILED: generating/installing $ENV_SOURCE (sed or mv)"
             exit 1
         fi
         umask "$_PREV_UMASK"

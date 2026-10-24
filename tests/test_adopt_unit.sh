@@ -102,10 +102,10 @@ section() { printf '\n== %s ==\n' "$1"; }
 # Strip pure-comment lines from a blob (lines whose first non-whitespace
 # character is '#'). Preserves byte content of every other line. Used by
 # the MALLOC_ARENA_MAX pins because the template header rationale comment
-# (scripts/systemd/ensemble-daemon.service:59) names the directive by the
+# (scripts/systemd/ensemble-daemon.service:64) names the directive by the
 # same literal string — without stripping, a substring match on the
 # directive would also match the comment and the pin would pass even when
-# the real [Service] directive (line 106) had been deleted.
+# the real [Service] directive (now line 121) had been deleted.
 _strip_comments() {
     printf '%s\n' "$1" | sed '/^[[:space:]]*#/d'
 }
@@ -349,7 +349,7 @@ assert_eq "DRY_RUN happy: exit 0" "0" "$H_RC"
 # every generated unit via the directive loop below.
 #
 # DIRECTIVE-SPECIFIC pin: the template's header rationale comment at
-# scripts/systemd/ensemble-daemon.service:59 also names the literal
+# scripts/systemd/ensemble-daemon.service:64 also names the literal
 # ``Environment=MALLOC_ARENA_MAX=2`` (it documents the directive). A raw
 # substring match would therefore pass via the comment alone, letting a
 # deleted real [Service] directive slip past. The matched haystack is
@@ -490,28 +490,39 @@ fi
 rm -rf "$MUT"
 
 # ===========================================================================
-section "MODE PINS — every .env/.env.prod.demo write site leaves mode 0600 (P5)"
-# Static byte-adjacency pins: a `chmod 600` must appear within 3 lines
-# AFTER each of the 5 write sites (deploy.sh ×2, stage.sh ×3). The
-# stage.sh chmod is LOAD-BEARING (the marker rewrite's `mv -f` re-creates
-# the inode at the default umask and would silently reset any prior 600).
+section "MODE PINS — every deploy/stage .env/.env.prod.demo write site leaves mode 0600 (P5)"
+# Static byte-adjacency pins: a `chmod 600` STATEMENT must appear within 5
+# lines AFTER each of the 5 write sites (deploy.sh ×2, stage.sh ×3);
+# comment lines cannot satisfy a pin (comment-stripped window + statement
+# match — the deploy demo-guard A4 comment carries the literal "chmod 600"
+# and would otherwise mask the real statement). The stage.sh chmod is
+# LOAD-BEARING (the marker rewrite's `mv -f` re-creates the inode — the
+# W2 umask fence covers the write window, and the explicit chmod pins the
+# post-mv mode). adopt-unit's additive .env staging is deliberately
+# EXEMPT (cat > preserves the inherited mode — see its P5 comment).
 # These pins run against the REPO files (read-only) — mutation coverage
 # comes from the W5 leg below on THROWAWAY copies.
 
 _pin_deploy="$REPO_ROOT/scripts/deploy.sh"
 _pin_stage="$REPO_ROOT/scripts/upgrade/stage.sh"
 
-adjacent_chmod() { # <file> <fixed-string anchor on the write line> → rc 0 iff chmod 600 within +1..+3
+adjacent_chmod() { # <file> <fixed-string anchor on the write line> → rc 0 iff a chmod 600 STATEMENT is within +1..+5
     local f="$1" anchor="$2" n
     n="$(grep -nF -- "$anchor" "$f" | head -1 | cut -d: -f1)"
     [ -n "$n" ] || return 1
-    sed -n "$((n + 1)),$((n + 3))p" "$f" | grep -q 'chmod 600'
+    # Comment-stripped window + statement match: a comment mentioning
+    # "chmod 600" must NOT satisfy the pin (mutation-dead-pin fix — the
+    # demo-guard A4 comment carried the literal at +2 while the real
+    # statement sat at +4, outside the old +3 window). Only actual
+    # statements count: `chmod 600 …`, `if ! chmod 600 …`, `run … -- chmod 600 …`.
+    _strip_comments "$(sed -n "$((n + 1)),$((n + 5))p" "$f")" \
+        | grep -qE '^[[:space:]]*(if ! )?(run .*-- )?chmod 600'
 }
 assert_adjacent_chmod() { # <name> <file> <anchor>
     if adjacent_chmod "$2" "$3"; then
         _pass "$1"
     else
-        _fail "$1" "chmod 600 within 3 lines after the write" "not found"
+        _fail "$1" "chmod 600 statement within 5 lines after the write" "not found"
     fi
 }
 
@@ -534,19 +545,19 @@ MUT_PIN="$WORK/mut-pin"
 mkdir -p "$MUT_PIN"
 cp "$_pin_stage" "$MUT_PIN/stage.sh"
 
-assert_adjacent_chmod "mode-pin mutation baseline (GREEN): stage copy create-site pinned" \
+assert_adjacent_chmod "mode pin: mutation baseline (GREEN): stage copy create-site pinned" \
     "$MUT_PIN/stage.sh" 'failed to create $ENV_FILE'
 
 sed -i '/^    chmod 600 "$ENV_FILE" || { _warn "failed to chmod 600 \$ENV_FILE"; exit 1; }/d' \
     "$MUT_PIN/stage.sh"
 if adjacent_chmod "$MUT_PIN/stage.sh" 'failed to create $ENV_FILE'; then
-    _fail "mode-pin mutation (RED)" "create-site pin RED after chmod removal" "pin stayed GREEN (mutation-dead)"
+    _fail "mode pin: mutation (RED)" "create-site pin RED after chmod removal" "pin stayed GREEN (mutation-dead)"
 else
-    _pass "mode-pin mutation (RED): create-site chmod removed → pin RED"
+    _pass "mode pin: mutation (RED): create-site chmod removed → pin RED"
 fi
 
 cp "$_pin_stage" "$MUT_PIN/stage.sh"
-assert_adjacent_chmod "mode-pin mutation restore (GREEN): create-site pin recovered" \
+assert_adjacent_chmod "mode pin: mutation restore (GREEN): create-site pin recovered" \
     "$MUT_PIN/stage.sh" 'failed to create $ENV_FILE'
 rm -rf "$MUT_PIN"
 
