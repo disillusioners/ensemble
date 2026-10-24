@@ -2,15 +2,18 @@
 # Test Pack: nest_ops_shakedown_unit_test — the nest-ops shakedown defect
 # patch: the REAL-PostgreSQL read-side husk fleet + the ops-side e2e pins.
 #
-# Scope: EXACTLY two files (38 tests):
+# Scope: EXACTLY two files (39 tests):
 #   - tests/integration/test_nestops_husk_fleet_real_pg.py (18 tests):
 #     the TWO-TIER >window fixture (2 real-spawn husks + 1,001 filler),
 #     the §3.5 leg table, the F3xF4 coupling, F2 census, F4a truncated,
 #     and the T4.8 scan-cost measurement (D-20 arbiter).
-#   - tests/integration/test_nestops_ops_real_pg.py (20 tests): F11 e2e
+#   - tests/integration/test_nestops_ops_real_pg.py (21 tests): F11 e2e
 #     both directions through the REAL order (job_create -> dispatch ->
 #     claim -> funnel -> protected act) and F6/F7/F10 on a real audit
-#     ledger.
+#     ledger, PLUS the scratch-database fence (the tidier fold added
+#     it: the manager's RESOLVED engine database must be the
+#     disposable scratch-shaped name and never the ambient
+#     POSTGRES_DB — 38 -> 39 tests).
 #
 # Branch pin: fix/nest-ops-shakedown-defects.
 # Base: b257842c9 (origin/latest at lane start); ladder M = cdf348057.
@@ -31,7 +34,7 @@
 # dual-layer rule; NOT the retired :16-20 citation):
 #   - Layer 1 (command-level): caller wraps with `timeout 330`
 #   - Layer 2 (script-internal): `timeout 300s` on the pytest process
-#     (38 real-PG tests; ~150 s observed in calibration on the local
+#     (39 real-PG tests; ~150 s observed in calibration on the local
 #     PG16 — the disposable-DB lifecycle + 8 real spawns dominate;
 #     300 s is a 2x margin, inside the 5-min pack cap).
 #   - Per-test: `--timeout=120` (the pyproject 30 s default kills the
@@ -63,7 +66,7 @@ if [ ! -x ".venv/bin/pytest" ]; then
   exit 1
 fi
 
-echo "=== Test Pack: nest_ops_shakedown_unit_test (real-PG, 38 tests, 2 files) ==="
+echo "=== Test Pack: nest_ops_shakedown_unit_test (real-PG, 39 tests, 2 files) ==="
 
 # Layer 2 (script-internal): 300s hard cap; ambient POSTGRES_* scrubbed
 # PER-VARIABLE (never the glob idiom).
