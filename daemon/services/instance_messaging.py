@@ -17,6 +17,13 @@ from sqlmodel import Session, func, select
 
 from ..cancellation import CancellationToken
 from ..compaction import ContextCompactor, CompactionContext, get_model_context_limit
+from ..constants import (
+    INTERNAL_AGENT_TYPED_EXACT_SOURCES,
+    INTERNAL_AGENT_TYPED_SOURCE_PREFIXES,
+    INTERNAL_STAMPED_SOURCE_PREFIXES as _CANONICAL_INTERNAL_STAMPED_SOURCE_PREFIXES,
+    INTERNAL_SYSTEM_TYPED_SOURCE_PREFIXES,
+    is_internal_stamped_source,
+)
 from ._checkpoint_utils import _is_terminal_checkpoint
 from ..language_detection import _normalize_content
 from ..loader import estimate_messages_tokens
@@ -383,28 +390,46 @@ async def _heal_poisoned_checkpoint_tail(
 
 
 #: Source-prefix namespaces that mark an enqueue-lane delivery as
-#: INTERNAL traffic (never user-authored). The four prefixes mirror the
+#: INTERNAL traffic (never user-authored). The set mirrors the
 #: dispatch-side checks in
 #: :meth:`InstanceMessagingService._process_message_with_tracking` and
 #: the enqueue sites that mint them (``child_reports`` report rows,
 #: waiting-children watchdog hang / wedge notices, agent-tool
 #: ``send_message`` dispatches).
-_INTERNAL_STAMPED_SOURCE_PREFIXES = (
-    "internal_report:",
-    "internal_error_report:",
-    "internal_agent:",
-    "system:",
-)
+#:
+#: D4(i) (completion-subsystem Phase 1) widened this set from 4 to 16
+#: members and moved its canonical home to
+#: :data:`daemon.constants.INTERNAL_STAMPED_SOURCE_PREFIXES` — the
+#: attestation scanner imports the SAME tuple, so the writer (this
+#: module) and the reader (the scanner's exclusion ladder, branch 4b)
+#: can no longer drift apart.
+#:
+#: The widened members are daemon-minted lanes that land on the
+#: LEADER'S OWN stream: while they stayed BARE, the scanner treated
+#: them as real user messages, which MOVED the SOURCE U anchor and
+#: erased the delegation window (``attestation_required`` collapsed to
+#: False). The highest-traffic bare re-anchorer was ``agent:{caller}``
+#: (the job_continue self-continuation lane).
+#:
+#: ``scheduler`` is deliberately NOT a member (product ruling — the
+#: scheduler is the de-facto requestor of a scheduled mission and
+#: anchors by design). Genuine user lanes (``api`` / chat sources /
+#: ``api_resume_fallback``) are pinned OUT by
+#: ``tests/unit/test_source_stamp_never_stamped_guards.py``.
+_INTERNAL_STAMPED_SOURCE_PREFIXES = _CANONICAL_INTERNAL_STAMPED_SOURCE_PREFIXES
 
 
 def _stamped_additional_kwargs(message_source: str | None) -> dict | None:
     """``additional_kwargs`` for an enqueue-lane HumanMessage, or ``None``.
 
     STAMPED-SHAPE CONTRACT (2026-09-07 review critical — the report
-    masquerade hole): when ``message_source`` starts with one of the
-    internal namespaces (``internal_report:`` / ``internal_error_report:`` /
-    ``internal_agent:`` / ``system:``), the constructed HumanMessage
-    carries ``additional_kwargs={"injected_message": True, "source":
+    masquerade hole): when ``message_source`` is one of the internal
+    namespaces (the canonical set in
+    :data:`daemon.constants.INTERNAL_STAMPED_SOURCE_PREFIXES` —
+    ``internal_report:`` / ``internal_error_report:`` /
+    ``internal_agent:`` / ``system:`` plus the D4(i) widening), the
+    constructed HumanMessage carries
+    ``additional_kwargs={"injected_message": True, "source":
     message_source}`` so the attestation scanner's exclusion ladder
     (``daemon/services/attestation_scanner.py``) can classify it as
     internal traffic. User / API / telegram sources stay BARE — no
@@ -416,11 +441,69 @@ def _stamped_additional_kwargs(message_source: str | None) -> dict | None:
     was indistinguishable from a real user message: a parked parent's
     report delivery reset the delegation window and allowed an
     un-attested delegated END.
+
+    D4(i) (completion-subsystem Phase 1) widened the set from 4 to 16
+    members. The match is delegated to
+    :func:`daemon.constants.is_internal_stamped_source`, which mirrors
+    :func:`daemon.constants.is_reserved_source`'s split semantics:
+    colon-terminated members match by ``str.startswith``, non-colon
+    members by EXACT equality. (The previous ``str.startswith(tuple)``
+    form would have let a non-colon member such as ``auto-scan``
+    swallow a hypothetical ``auto-scan-2``.)
     """
     if not message_source or not isinstance(message_source, str):
         return None
-    if message_source.startswith(_INTERNAL_STAMPED_SOURCE_PREFIXES):
+    if is_internal_stamped_source(message_source):
         return {"injected_message": True, "source": message_source}
+    return None
+
+
+def _derive_internal_message_type(source: str | None) -> str | None:
+    """The persisted ``MessageQueue.type`` for an INTERNAL source.
+
+    D4(i) (completion-subsystem Phase 1) — the enqueue lane's
+    ``msg_type`` derivation, extracted from the inline branch chain in
+    :meth:`InstanceMessagingService._prepare_enqueued_message` so the
+    classification is one named, testable function.
+
+    Returns the ``MessageType`` VALUE for the internal lanes, or
+    ``None`` when ``source`` is NOT internal (the caller then falls
+    back to ``MessageType.HUMAN`` — the genuine user lane).
+
+    The groups come from ``daemon.constants`` (the canonical home,
+    shared with the stamp set):
+
+      * ``internal_report:``      → ``COMPLETION_REPORT``
+      * ``internal_error_report:``→ ``ERROR_REPORT``
+      * ``system:``               → ``SYSTEM``   (D4(i): was HUMAN —
+        a system notice on a terminal instance used to fire the
+        fresh-episode attestation-ledger reset)
+      * ``instance_ops:`` /
+        ``agent:`` / ``explore:`` / ``experience:`` /
+        ``blueprint-sidecar:`` / ``internal_agent:`` / the exact
+        non-colon daemon lanes → ``AGENT``   (D4(i): ``agent:{caller}``
+        used to derive HUMAN while its anonymous fallback derived
+        AGENT — the named≡anonymous inversion)
+
+    Args:
+        source: The enqueue-lane message source.
+
+    Returns:
+        The ``MessageType`` value string, or ``None`` for the
+        non-internal (user) lane.
+    """
+    if not isinstance(source, str) or not source:
+        return None
+    if source.startswith("internal_report:"):
+        return MessageType.COMPLETION_REPORT.value
+    if source.startswith("internal_error_report:"):
+        return MessageType.ERROR_REPORT.value
+    if source.startswith(INTERNAL_SYSTEM_TYPED_SOURCE_PREFIXES):
+        return MessageType.SYSTEM.value
+    if source.startswith(INTERNAL_AGENT_TYPED_SOURCE_PREFIXES):
+        return MessageType.AGENT.value
+    if source in INTERNAL_AGENT_TYPED_EXACT_SOURCES:
+        return MessageType.AGENT.value
     return None
 
 
@@ -2086,23 +2169,25 @@ class InstanceMessagingService:
         if self._cancellation_service.is_shutting_down:
             raise RuntimeError("Manager is shutting down, cannot accept new messages")
 
-        # Determine message type based on source
-        if source.startswith("internal_report:"):
-            msg_type = MessageType.COMPLETION_REPORT.value
-            # System-generated reports use random IDs (not user messages)
-            message_id = str(uuid.uuid4())
-        elif source.startswith("internal_error_report:"):
-            msg_type = MessageType.ERROR_REPORT.value
-            # System-generated errors use random IDs (not user messages)
-            message_id = str(uuid.uuid4())
-        elif source.startswith("internal_agent:"):
-            msg_type = MessageType.AGENT.value
-            # Agent-to-agent messages use random IDs
-            message_id = str(uuid.uuid4())
-        else:
-            msg_type = MessageType.HUMAN.value
-            # User messages use UUID IDs
-            message_id = str(uuid.uuid4())
+        # Determine message type based on source.
+        #
+        # D4(i) (completion-subsystem Phase 1): the classification moved
+        # into :func:`_derive_internal_message_type`, which carries the
+        # canonical source groups from ``daemon.constants``. Before this
+        # move only three families existed (``internal_report:`` /
+        # ``internal_error_report:`` / ``internal_agent:``) and EVERY
+        # other daemon-minted lane fell into the HUMAN default —
+        # including ``system:`` (whose HUMAN derivation made a system
+        # notice on a terminal instance fire the fresh-episode
+        # attestation reset) and ``agent:{caller}`` (the named≡anonymous
+        # inversion against the ``internal_agent:unknown`` fallback).
+        #
+        # Every branch mints a random message id (no branch has ever
+        # used a user-shaped id), so the id mint stays below the
+        # classification.
+        msg_type = _derive_internal_message_type(source) or MessageType.HUMAN.value
+        # User messages use UUID IDs
+        message_id = str(uuid.uuid4())
 
         # Log image count if images are provided
         if images:

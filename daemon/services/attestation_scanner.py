@@ -41,6 +41,11 @@ from typing import Any, Iterator, NamedTuple
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
+from ..constants import (
+    INTERNAL_STAMPED_SOURCE_PREFIXES as _CANONICAL_INTERNAL_STAMPED_SOURCE_PREFIXES,
+    is_internal_stamped_source,
+)
+
 logger = logging.getLogger(__name__)
 
 #: Default tool name the scanner matches. The leader's prompt contract
@@ -304,12 +309,27 @@ _INTERNAL_AGENT_SOURCE_PREFIX = "internal_agent:"
 #: depth for that conjunction and is currently unreachable as an
 #: exclusion for constructor-produced shapes (it requires the same
 #: flag Step 3 has already excluded on).
-_INTERNAL_STAMPED_SOURCE_PREFIXES = (
-    _INTERNAL_REPORT_SOURCE_PREFIX,
-    "internal_error_report:",
-    _INTERNAL_AGENT_SOURCE_PREFIX,
-    "system:",
-)
+#:
+#: D4(i) (completion-subsystem Phase 1) widened the set from 4 to 16
+#: members and moved its canonical home to
+#: :data:`daemon.constants.INTERNAL_STAMPED_SOURCE_PREFIXES`. The
+#: scanner imports the SAME tuple the writer stamps from, so the
+#: reader (branch 4b) and the writer can no longer drift apart — the
+#: pre-D4(i) state carried two hand-maintained copies of a 4-tuple.
+#:
+#: The widened members are daemon-minted lanes that land on the
+#: LEADER'S OWN stream. While they stayed BARE, the ladder classified
+#: them as REAL USER messages, which MOVED the SOURCE U anchor and
+#: erased the delegation window (``attestation_required`` collapsed to
+#: False). The highest-traffic bare re-anchorer was ``agent:{caller}``
+#: (the job_continue self-continuation lane).
+#:
+#: The ladder's branch-4b check uses
+#: :func:`daemon.constants.is_internal_stamped_source`, which mirrors
+#: :func:`daemon.constants.is_reserved_source`'s split semantics
+#: (colon families by ``startswith``, non-colon members by EXACT
+#: equality).
+_INTERNAL_STAMPED_SOURCE_PREFIXES = _CANONICAL_INTERNAL_STAMPED_SOURCE_PREFIXES
 
 
 def is_real_user_message(message: BaseMessage) -> bool:
@@ -429,7 +449,7 @@ def is_real_user_message(message: BaseMessage) -> bool:
     if (
         additional_kwargs.get("injected_message") is True
         and isinstance(source, str)
-        and source.startswith(_INTERNAL_STAMPED_SOURCE_PREFIXES)
+        and is_internal_stamped_source(source)
     ):
         return False
 
