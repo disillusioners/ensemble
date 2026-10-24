@@ -1456,34 +1456,85 @@ class TestF10AuditRowId:
         assert row.action == "instance_mark"
 
 
+#: The canonical reclaim copy — ops-side §6.2 is the SINGLE source
+#: (iteration-003 remedy 2).
+_RECLAIM_COPY_PLAN = (
+    REPO_ROOT
+    / ".agents"
+    / "shared"
+    / "planning"
+    / "nest-ops-shakedown-defects"
+    / "technical-analysis-ops-side.md"
+)
+
+
+def _normalize_ws(text: str) -> str:
+    """Collapse every whitespace run to a single space.
+
+    The canonical block is laid out as one string literal per source
+    line, so the shipped copy (which wraps at different points) and the
+    plan's block differ in WHITESPACE only — unless a word changed.
+    """
+    return " ".join(text.split())
+
+
+def _canonical_reclaim_copy(target_id: str, status: str) -> str:
+    """The CANONICAL reclaim copy, READ from ops-side §6.2.
+
+    The plan block is the SINGLE source. The pin READS it instead of
+    re-spelling it: a re-spelled copy inside the test would be a
+    SECOND source, and the two would drift — which is exactly what
+    this pin exists to prevent.
+    """
+    text = _RECLAIM_COPY_PLAN.read_text(encoding="utf-8")
+    start = text.index("### 6.2 The corrected copy")
+    fenced = text[start:].split("```", 2)[1]
+    parts: list[str] = []
+    for line in fenced.strip().split("\n"):
+        stripped = line.strip()
+        if stripped.startswith('f"'):
+            parts.append(stripped[2:-1])
+        elif stripped.startswith('"') and stripped.endswith('"'):
+            parts.append(stripped[1:-1])
+    rendered = "".join(parts)
+    rendered = rendered.replace("{target_id!r}", repr(target_id))
+    rendered = rendered.replace("{status!r}", repr(status))
+    return _normalize_ws(rendered)
+
+
 class TestF9ReclaimCopy:
     """F9 — the reclaim refusal must not recommend a dispatch.
 
+    S3 (the tidier fold): the copy pin is an EXACT-EQUALITY check
+    against the CANONICAL block (ops-side §6.2) after whitespace
+    normalisation — NOT a set of substring assertions. The substring
+    form could not see a REWORDED clause: every individual clause was
+    still present, so a changed word (or a reordered clause) passed.
+
     PLANNED MUTATION (N-4): restore the old 'use instance_nudge'
-    refusal copy → F9-i RED (the refusal must not suggest a nudge for a
-    non-terminal evidence-free target — a nudge DISPATCHES a
-    context-free turn); revert either doc surface → F9-ii RED.
+    refusal copy → RED; reword ONE clause of the shipped copy → RED.
     """
 
-    async def test_f9_i_copy_names_the_real_paths(self, fleet):
+    async def test_f9_i_the_copy_is_the_canonical_text_verbatim(self, fleet):
+        """The refusal copy IS ops-side §6.2 — whitespace-normalised.
+
+        One changed word is RED. The expectation comes from the plan
+        (the SINGLE source), never from a copy re-spelled in the test.
+        """
+        if not _RECLAIM_COPY_PLAN.exists():
+            pytest.skip("the nest-ops planning record is not in this tree")
         fleet.rows["idle-1"] = FakeRow("idle-1", agent_id="worker")
         tools = _act_tools(fleet)
         out = await by_name(tools, "instance_reclaim").ainvoke(
             {"id": "idle-1", "message": "wake up", "reason": "r"}
         )
         assert "reason=target-not-terminal" in out
-        # The DANGEROUS recommendation is gone.
-        assert "instance_nudge" not in out
-        # The real paths are named.
-        assert "instance_terminate" in out
-        assert "instance_health" in out
-        assert "instance_get" in out
-        assert "instance_mark(marker='park')" in out
-        # The hazard clause.
-        assert "DISPATCHES a context-free turn" in out
-        # The D-20 provenance.
-        assert "TERMINAL-ONLY" in out
-        assert "D-20" in out
+        message = out.split("reason=target-not-terminal: ", 1)[1]
+        assert _normalize_ws(message) == _canonical_reclaim_copy("idle-1", "idle")
+        # The canonical copy names no nudge path (the exact-equality
+        # check subsumes the pre-fix "instance_nudge not in out"
+        # assertion; this states it explicitly).
+        assert "instance_nudge" not in message
 
     def test_f9_ii_doc_mirrors_carry_the_warning(self):
         tools = io.create_instance_ops_tools(
