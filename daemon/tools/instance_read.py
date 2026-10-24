@@ -109,6 +109,14 @@ field on the returned rows.
 
 ``instance_health`` NEVER repairs anything. It reports what looks
 sick so you can decide; the acts are separate tools.
+
+MEASURES — read them for what they count (F5): `dlq_depth` is the row
+count of the legacy `dead_letter_items` SNAPSHOT table (DLQ-service
+writes only, retention-pruned); `dead_jobs_total` is the canonical
+count of `job_queue_items` in the terminal `dead` admission state. A
+dead job can exist with NO snapshot row, so `dlq_depth <=
+dead_jobs_total` is expected — `dlq_depth = 0` with
+`dead_jobs_total > 0` is NOT an error.
 """
 
 #: The agents allowed to READ the instance fleet. The privileged
@@ -1172,6 +1180,9 @@ Two thirds of this payload is SYSTEM capacity (queue depth, worker
 pool, dead-letter depth), not instances — that is why the tool is named
 for the fleet's capacity rather than for an instance.
 
+`instance_fleet_summary` is an alias of this tool; both return the same
+payload.
+
 Args:
     (none)
 
@@ -1179,8 +1190,29 @@ Returns:
     One JSON string: `counts_by_agent`, `counts_by_status`,
     `counts_by_liveness`, `queue_depth` (one row per queue with
     `queue_name`, `pending`, `active`, `dead`), `worker_pool` (`size`,
-    `busy`, `idle`, `saturated`), `dlq_depth`, `audit_pending`
+    `busy`, `idle`, `saturated`), `dlq_depth`, `dead_jobs_total`,
+    `dlq_note`, `totals` (`total_rows`, `counted_rows`,
+    `scan_truncated`, `reconciled`, `note`), `audit_pending`
     (`count` + `oldest_age_seconds`), `generated_at`.
+
+    `dead_jobs_total` — the canonical count of jobs in the terminal
+    `dead` admission state (summed from the per-queue `dead` column).
+    `dlq_depth` is a **different** measure: the row count of the legacy
+    `dead_letter_items` snapshot table, written only when a job is moved
+    to the dead-letter queue through the DLQ service and pruned by the
+    retention sweep. A dead job can exist with **no** snapshot row (the
+    drift-recovery path finalizes to `dead` directly), so
+    `dlq_depth <= dead_jobs_total` is expected and `dlq_depth = 0` with
+    `dead_jobs_total > 0` is **not** an error. The same text rides the
+    payload as `dlq_note`.
+
+    `totals` is the reconciliation surface: `total_rows` is the
+    independent COUNT(*) over the census WHERE, `counted_rows` is the
+    sum of `counts_by_status`, and `reconciled` is their agreement flag.
+    The census covers the WHOLE fleet (one GROUP BY, no scan window), so
+    for an UNFILTERED `instance_list` call `totals.total_rows` equals
+    that tool's `total_matching`. A FILTERED page is a different
+    population — see the note in the payload.
 
     `audit_pending` is the reconciliation surface: a row stuck in
     `pending` means an ACT's intent was recorded but its outcome was
@@ -1921,6 +1953,18 @@ def _build_capacity_summary(manager: Any) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 — read-only probe
         logger.debug("instance_read: dlq depth read failed: %s", exc)
 
+    # F5: the CANONICAL dead-job measure, derived from data already in
+    # hand — zero extra queries. `dlq_depth` and the per-queue `dead`
+    # column are TWO TRUE FACTS ABOUT TWO DIFFERENT TABLES, not a
+    # contradiction: `dlq_depth` counts the legacy `dead_letter_items`
+    # SNAPSHOT rows (DLQ-service writes only, retention-pruned) while
+    # `dead` counts `job_queue_items` in the terminal `dead` admission
+    # state (canonical — a dead job can exist with no snapshot row, the
+    # drift-recovery path finalizes to `dead` directly). The payload
+    # carries both plus a one-line note so an operator reading raw JSON
+    # does not have to consult the docstring.
+    dead_jobs_total = sum(int(row.get("dead") or 0) for row in queue_depth)
+
     # The Tier-2 reconciliation surface (W4).
     audit_pending = {"count": 0, "oldest_age_seconds": None}
     try:
@@ -1943,6 +1987,13 @@ def _build_capacity_summary(manager: Any) -> dict[str, Any]:
         "queue_depth": queue_depth,
         "worker_pool": worker_pool,
         "dlq_depth": dlq_depth,
+        "dead_jobs_total": dead_jobs_total,
+        "dlq_note": (
+            "dlq_depth counts dead_letter_items snapshot rows "
+            "(DLQ-service writes only, retention-pruned); "
+            "dead_jobs_total counts job_queue_items in the 'dead' "
+            "admission state (canonical). They measure different tables."
+        ),
         "audit_pending": audit_pending,
         # F2: the reconciliation block. `counted_rows` and `total_rows`
         # are two INDEPENDENT computations of the same number over the

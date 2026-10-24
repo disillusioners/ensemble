@@ -1486,3 +1486,109 @@ class TestF8DocSurface:
 
     def test_module_doc_says_five_tools(self):
         assert "5 tools" in (ir.__doc__ or "")
+
+
+# ────────────────────────────────────────────────────────────────────────
+# F5 — the two dead-job measures
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestF5Measures:
+    """F5 — `dead_jobs_total` + `dlq_note`, `dlq_depth` untouched.
+
+    PLANNED MUTATION: redefine `dlq_depth` to the admission-state count
+    (the "unify" the design rejected) — the value pin goes RED whenever
+    the snapshot table and the canonical state disagree, and the
+    "different tables" doc assertion goes RED with it. Dropping the
+    `dlq_note` key or the doc paragraph goes RED on its own pin.
+    """
+
+    def _capacity(self, manager):
+        return _read_tools(manager)
+
+    async def test_both_keys_present_and_consistent(self, fleet_db):
+        now = datetime.now(timezone.utc)
+        _insert_instances(fleet_db, [_instance("m-1", created_at=now)])
+        with Session(fleet_db) as session:
+            for i in range(3):
+                session.add(
+                    JobItem(
+                        agent_id="worker",
+                        agent_dir="/tmp/agents/worker",
+                        message=f"job-{i}",
+                        instance_id="m-1",
+                        job_type="task",
+                        admission_state="dead",
+                    )
+                )
+            session.commit()
+
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await _call(
+            self._capacity(manager), "fleet_capacity_summary"
+        )
+
+        assert "dlq_depth" in payload
+        assert "dead_jobs_total" in payload
+        assert "dlq_note" in payload
+        assert payload["dead_jobs_total"] == 3
+        assert payload["dead_jobs_total"] == sum(
+            int(row["dead"]) for row in payload["queue_depth"]
+        )
+
+    async def test_dlq_depth_keeps_its_own_meaning(self, fleet_db):
+        """`dlq_depth` still counts the SNAPSHOT table — here it is 0
+        while three canonical dead jobs exist, and that is NOT an error
+        (the drift-recovery path finalizes to `dead` with no snapshot).
+        """
+        now = datetime.now(timezone.utc)
+        _insert_instances(fleet_db, [_instance("m-2", created_at=now)])
+        with Session(fleet_db) as session:
+            session.add(
+                JobItem(
+                    agent_id="worker",
+                    agent_dir="/tmp/agents/worker",
+                    message="no-snapshot",
+                    instance_id="m-2",
+                    job_type="task",
+                    admission_state="dead",
+                )
+            )
+            session.commit()
+
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await _call(
+            self._capacity(manager), "fleet_capacity_summary"
+        )
+
+        assert payload["dlq_depth"] == 0
+        assert payload["dead_jobs_total"] >= 1
+        assert payload["dlq_depth"] <= payload["dead_jobs_total"]
+
+    def test_doc_distinguishes_the_two_tables(self):
+        tools = ir.create_instance_read_tools(
+            FakeFleetManager(), current_instance_id="m", agent_id="maintenancer"
+        )
+        doc = _by_name(tools, "fleet_capacity_summary")._full_doc_ or ""
+
+        assert "dead_letter_items" in doc
+        assert "dead_jobs_total" in doc
+        assert "dlq_depth <= dead_jobs_total" in doc
+        assert "**not** an error" in doc
+        # the category doc carries the same distinction
+        assert "dead_letter_items" in ir.CATEGORY_DOC
+        assert "dead_jobs_total" in ir.CATEGORY_DOC
+
+    async def test_note_rides_the_payload(self, fleet_db):
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await _call(
+            self._capacity(manager), "fleet_capacity_summary"
+        )
+
+        note = payload["dlq_note"]
+        assert "dead_letter_items" in note
+        assert "job_queue_items" in note
+        assert "different tables" in note
