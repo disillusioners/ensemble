@@ -37,9 +37,32 @@ is byte-for-byte the old behaviour.
 The ``instance_ops_audit`` table is ASSUMED to exist (the DDL is at
 HEAD and the PG schema is ``create_all``-additive — the table is
 created at boot). If it is genuinely absent, the resolver falls back
-to the structural parent by design (proposal-a §8 assumption 5). On
-PostgreSQL such a read failure aborts the enclosing transaction, so the
-fail-back is loud in the log rather than silent.
+to the structural parent by design (proposal-a §8 assumption 5).
+
+SESSION ISOLATION — THE HAZARD THAT WAS REMOVED (F1)
+-----------------------------------------------------
+The resolver's audit read used to run on the CALLER's write session
+(``child_reports.py`` handed it the ``WriteGuardSession`` it was
+already holding). On PostgreSQL a statement-level error POISONS the
+enclosing transaction, so the fail-back was a NO-OP: the resolver
+returned the structural parent, but every SUBSEQUENT write on that
+transaction — the report ``MessageQueue`` row, the ``PROCESS_REPORT``
+Task, the ``ReportInjection`` row, the instance COMPLETED stamp —
+then failed with "current transaction is aborted". The completion
+write DIED instead of merely misrouting, which breaks
+proposal-a §2.1's "fail-back = old behaviour exactly".
+
+Every call site now resolves on the resolver's OWN session
+(``session=None``), so a failed read can never poison a caller's
+transaction: the fail-back is real and the completion is delivered to
+the structural parent exactly as it was before D1. The in-repo
+precedent is the Site-1 marker invocation in
+``message_processing_pipeline.py`` (own session) and the recovery-path
+invocation in ``report_delivery_recovery.py`` (own session).
+
+DO NOT hand the resolver a session that sits inside a caller's WRITE
+transaction — the hazard returns with it (see the ``session``
+parameter's contract below).
 
 CARRIER
 -------
@@ -188,7 +211,13 @@ def resolve_report_recipient(
             pre-D1 behaviour — the fail-back target).
         session: OPTIONAL caller-owned session. When given, the reads
             run on THAT session (inside the caller's transaction) and
-            the method does NOT commit. ``None`` opens its own session.
+            the method does NOT commit. ``None`` opens its own
+            session — this is the ONLY shape any daemon call site
+            uses, and it is REQUIRED for a caller whose session sits
+            inside a write transaction: on PostgreSQL a failed read on
+            the caller's session poisons that transaction and the
+            fail-back becomes a no-op (see the module docstring,
+            "SESSION ISOLATION — THE HAZARD THAT WAS REMOVED").
         completion_time: The completion instant (``T_completion``).
             ``None`` means "now" — the resolver's own clock.
 

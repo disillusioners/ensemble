@@ -3007,20 +3007,18 @@ Provide a concise summary:"""
             logger.info(f"Instance {instance_id[:8]}... parent_id={instance.parent_id}, status={instance.status}")
 
             # ─── D1 (completion-subsystem Phase 1): resolve the report
-            # recipient ONCE, right here — immediately after the
-            # instance fetch, before ANY write-path site runs.
+            # recipient ONCE, right here — right after the instance
+            # fetch, before ANY write-path site runs.
             #
             # The resolver reads the ``instance_ops_audit`` ledger for a
             # fresh COMMITTED ``instance_nudge`` against this child and
             # returns the COMMISSIONER (the nudger) instead of the
-            # structural parent. A miss — the normal case — returns the
-            # structural parent, so this is a byte-level no-op for every
-            # child that was never nudged.
+            # structural parent — the byte-level no-op for every child
+            # that was never nudged.
             #
             # POSTURE: fail-back to the structural parent on ANY read /
-            # parse / DB error. This is a delivery-path routing decision,
-            # not a heal-probe, and the subsystem's documented posture is
-            # at-least-once delivery.
+            # parse / DB error — a delivery-path routing decision, not a
+            # heal-probe; the documented posture is at-least-once.
             #
             # The resolved value is CARRIED on the result
             # (``report_recipient_id``) and threaded to every write-path
@@ -3029,7 +3027,9 @@ Provide a concise summary:"""
             # ``child_completed`` SSE stay structural.
             report_recipient_id = resolve_report_recipient(
                 engine=self._manager.engine,
-                session=session,
+                # NO ``session=`` — the resolver opens its OWN session
+                # (F1: a failed audit read must not poison this write
+                # transaction on PG — see report_recipient.py).
                 child_instance_id=instance_id,
                 structural_parent_id=instance.parent_id,
             )

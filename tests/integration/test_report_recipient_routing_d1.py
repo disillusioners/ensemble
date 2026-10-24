@@ -23,6 +23,9 @@ WHAT THIS FILE PINS
    and no second obligation is minted for the structural parent.
 5. A no-row child WITH a committed nudge mints exactly ONE obligation,
    and it is the COMMISSIONER's.
+6. F1 — the resolver's audit read does NOT ride the caller's write
+   session, so a failed read can never poison the caller's transaction
+   (the PostgreSQL fail-back compliance pin).
 
 The DB is REAL (file-backed SQLite); no mock on the write path.
 """
@@ -34,7 +37,7 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool
 from sqlmodel import Session, SQLModel, select as sm_select
@@ -47,6 +50,9 @@ import daemon.repositories.job_queue.models  # noqa: F401
 import daemon.repositories.message_queue.models  # noqa: F401
 import daemon.repositories.report_injection.models  # noqa: F401
 import daemon.repositories.task.models  # noqa: F401
+
+import daemon.services.child_reports as child_reports_module
+import daemon.services.report_recipient as report_recipient_module
 
 from daemon.repositories.dependency_bus.repository import (
     DependencyWatcherRepository,
@@ -215,6 +221,38 @@ def _report_tasks(engine: Engine) -> list[Task]:
 def _injection_rows(engine: Engine) -> list[ReportInjection]:
     with Session(engine) as session:
         return list(session.exec(sm_select(ReportInjection)).all())
+
+
+def _capture_resolver_sessions(monkeypatch) -> dict:
+    """Capture (a) the session the resolver's audit read executes on and
+    (b) the session the completion path writes on.
+
+    The audit read is replaced by a spy that RECORDS its session
+    argument and then RAISES — the simulated statement-level error. The
+    read therefore never reaches the database and the fail-back path is
+    the one under test.
+    """
+    captured: dict = {}
+
+    def _boom(session, child_instance_id, completion_time):
+        captured["read_session"] = session
+        raise RuntimeError(
+            "simulated statement-level error (PG poisons the txn)"
+        )
+
+    monkeypatch.setattr(
+        report_recipient_module, "_latest_committed_nudge", _boom
+    )
+
+    real_guard_session = child_reports_module.WriteGuardSession
+
+    def _spy(session, guard):
+        guarded = real_guard_session(session, guard)
+        captured["caller_session"] = guarded
+        return guarded
+
+    monkeypatch.setattr(child_reports_module, "WriteGuardSession", _spy)
+    return captured
 
 
 # ─── The natural write path ─────────────────────────────────────────────────
@@ -387,3 +425,97 @@ class TestDuplicationFirewall:
         assert not any(
             i.parent_instance_id == structural for i in injections
         )
+
+
+class TestResolverOwnSession:
+    """F1 — the resolver's audit read must NOT ride the caller's write
+    session (PostgreSQL fail-back compliance).
+
+    On PostgreSQL a statement-level error inside the caller's write
+    transaction POISONS that transaction: the resolver's fail-back
+    would still return the structural parent, but every SUBSEQUENT
+    write in the same transaction — the report ``MessageQueue`` row,
+    the ``PROCESS_REPORT`` Task, the ``ReportInjection`` row, the
+    instance COMPLETED stamp — would then die with "current
+    transaction is aborted". The fail-back was a NO-OP and the
+    completion write was LOST rather than misrouted, which breaks
+    proposal-a §2.1's "fail-back = old behaviour exactly".
+
+    SQLite does NOT reproduce that poisoning, so the two pins below
+    work together:
+
+    1. the MECHANISM pin — the audit read does not execute on the
+       session the caller handed over (own-session is observable);
+    2. the STRUCTURAL pin — the fail-back still returns the
+       structural parent AND the enclosing session stays usable (the
+       completion write path still commits).
+
+    MUTATION: re-adding ``session=session`` at the call site
+    (``daemon/services/child_reports.py``) turns pin (1) RED.
+    """
+
+    def test_the_audit_read_does_not_execute_on_the_callers_session(
+        self, engine, monkeypatch
+    ):
+        """THE MECHANISM PIN (F1) — the read runs on the resolver's OWN
+        session, never on the caller's write session."""
+        child = f"child-{uuid.uuid4().hex[:8]}"
+        structural = f"parent-{uuid.uuid4().hex[:8]}"
+        commissioner = f"comm-{uuid.uuid4().hex[:8]}"
+        _seed_instance(engine, instance_id=child, parent_id=structural)
+        _seed_instance(engine, instance_id=structural, parent_id=None)
+        _seed_instance(engine, instance_id=commissioner, parent_id=None)
+        _seed_nudge(engine, target=child, actor=commissioner)
+
+        captured = _capture_resolver_sessions(monkeypatch)
+
+        service = _build_child_reports_service(engine)
+        result = service._process_child_completion_db_sync(
+            instance_id=child,
+            completed_message_id="msg-child-1",
+            last_content="the commissioned report",
+        )
+
+        # THE FAIL-BACK — the structural parent. The read raised, so the
+        # nudge was never seen and the commissioner is NOT the recipient.
+        assert result.report_recipient_id == structural
+        # THE MECHANISM — the audit read did not execute on the
+        # caller's session; the resolver opened its own.
+        assert captured["read_session"] is not captured["caller_session"]
+        # THE ENCLOSING SESSION STAYED USABLE — every write after the
+        # resolver failure committed (the report row, the
+        # PROCESS_REPORT task, the durable fallback row).
+        rows = _report_rows(engine)
+        assert len(rows) == 1
+        assert rows[0].instance_id == structural
+        assert len(_report_tasks(engine)) == 1
+        assert len(_injection_rows(engine)) == 1
+
+    def test_a_real_audit_read_failure_still_completes_the_write_path(
+        self, engine
+    ):
+        """THE REAL FAILURE LEG (un-mocked) — the audit table is
+        DROPPED, so the resolver's read raises for real. The fail-back
+        is the structural parent and the completion write path still
+        commits: the enclosing session was never poisoned."""
+        child = f"child-{uuid.uuid4().hex[:8]}"
+        structural = f"parent-{uuid.uuid4().hex[:8]}"
+        _seed_instance(engine, instance_id=child, parent_id=structural)
+        _seed_instance(engine, instance_id=structural, parent_id=None)
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE instance_ops_audit"))
+
+        service = _build_child_reports_service(engine)
+        result = service._process_child_completion_db_sync(
+            instance_id=child,
+            completed_message_id="msg-child-1",
+            last_content="the ordinary report",
+        )
+
+        assert result.outcome == "regular_child_completed"
+        assert result.report_recipient_id == structural
+        rows = _report_rows(engine)
+        assert len(rows) == 1
+        assert rows[0].instance_id == structural
+        assert len(_report_tasks(engine)) == 1
+        assert len(_injection_rows(engine)) == 1
