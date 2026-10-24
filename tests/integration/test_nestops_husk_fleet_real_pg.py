@@ -71,6 +71,8 @@ from daemon.repositories.message_queue.models import MessageQueue
 from daemon.repositories.task.models import Task
 from tests.helpers.nestops_pg_fixtures import (
     AMBIENT_POSTGRES,
+    by_name,
+    call,
     FILLER_AGENT_ID,
     FILLER_ROWS,
     HUSK_A_AGE_DAYS,
@@ -254,20 +256,6 @@ def _read_tools(manager, *, agent: str = "maintenancer"):
     return ir.create_instance_read_tools(
         manager, current_instance_id="caller-iid", agent_id=agent
     )
-
-
-def _by_name(tools, name):
-    tool = next((t for t in tools if t.name == name), None)
-    assert tool is not None, (
-        f"tool {name!r} is not registered "
-        f"(registered: {sorted(t.name for t in tools)})"
-    )
-    return tool
-
-
-async def _call(tools, name, **kwargs):
-    out = await _by_name(tools, name).ainvoke(kwargs)
-    return json.loads(out)
 
 
 # ── AC4.1 — the fence ──────────────────────────────────────────────────────
@@ -628,8 +616,8 @@ class TestF2CensusRealFleet:
         self, shakedown_env, window_fleet
     ):
         tools = _read_tools(shakedown_env)
-        capacity = await _call(tools, "fleet_capacity_summary")
-        listing = await _call(tools, "instance_list", limit=5, offset=0)
+        capacity = await call(tools, "fleet_capacity_summary")
+        listing = await call(tools, "instance_list", limit=5, offset=0)
         totals = capacity["totals"]
         assert sum(capacity["counts_by_status"].values()) == totals["counted_rows"]
         assert totals["counted_rows"] == totals["total_rows"]
@@ -642,7 +630,7 @@ class TestF2CensusRealFleet:
 
     async def test_idle_bucket_present(self, shakedown_env, window_fleet):
         tools = _read_tools(shakedown_env)
-        capacity = await _call(tools, "fleet_capacity_summary")
+        capacity = await call(tools, "fleet_capacity_summary")
         assert capacity["counts_by_status"].get("idle") == 2 + FILLER_ROWS
         assert "idle" not in capacity["counts_by_liveness"]
 
@@ -659,7 +647,7 @@ class TestF4aTruncatedRealFleet:
 
     async def test_under_page_reports_truncated(self, shakedown_env, window_fleet):
         tools = _read_tools(shakedown_env)
-        payload = await _call(tools, "instance_list", limit=5, offset=0)
+        payload = await call(tools, "instance_list", limit=5, offset=0)
         assert payload["truncated"] is True
         assert payload["total_matching"] == 2 + FILLER_ROWS
 
@@ -675,7 +663,7 @@ class TestF4aTruncatedRealFleet:
         ``len(rows) < limit`` with nothing left reads ``false``).
         """
         tools = _read_tools(shakedown_env)
-        payload = await _call(tools, "instance_list", limit=200, offset=1000)
+        payload = await call(tools, "instance_list", limit=200, offset=1000)
         assert len(payload["rows"]) == 3
         assert payload["total_matching"] == 2 + FILLER_ROWS
         assert payload["truncated"] is False

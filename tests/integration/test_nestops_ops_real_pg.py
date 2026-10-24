@@ -79,8 +79,10 @@ from daemon.services.job_queue_service import (
 )
 from daemon.services.task_processor import TaskProcessor
 from tests.helpers.nestops_pg_fixtures import (
+    AMBIENT_POSTGRES,
     assert_scratch_db,
     build_real_manager,
+    by_name,
     disposable_db,
     pin_scratch_postgres_env,
     probe_admin_engine,
@@ -315,14 +317,6 @@ def _job_tools(manager, job_service, *, caller_iid: str, agent_id: str):
     )
 
 
-def _by_name(tools, name):
-    tool = next((t for t in tools if t.name == name), None)
-    assert tool is not None, (
-        f"tool {name!r} not registered (have: {sorted(t.name for t in tools)})"
-    )
-    return tool
-
-
 def _job_row(manager, job_id: str):
     from daemon.repositories.job_queue import JobRepository
 
@@ -405,6 +399,46 @@ async def _run_claimed_turn(tp, task) -> str:
     return "no exception"
 
 
+# ── the scratch-database fence, ASSERTED ───────────────────────────────────
+
+
+class TestScratchDatabaseFence:
+    """The fence RUNS here — an imported-but-never-called fence is a CLAIM.
+
+    This file drives the REAL act surface (``instance_terminate``)
+    against a REAL PostgreSQL database. The fence belongs HERE, and it
+    must RUN: the manager's RESOLVED engine database must be the
+    disposable scratch-shaped name, and must never be the ambient
+    ``POSTGRES_DB`` (the env-poison family guard — an ambient
+    ``POSTGRES_DB=ensemble_prod`` would otherwise aim the terminate
+    pins at the live database).
+
+    PLANNED MUTATION (fence pin): delete the per-variable
+    ``pin_scratch_postgres_env`` call from the ``manager`` fixture — on
+    a host whose shell exports ``POSTGRES_DB=ensemble_prod`` the
+    manager's engine would resolve to the AMBIENT database and this
+    assertion goes RED. On a scrubbed shell the ambient value is
+    absent and the pin still holds via the disposable-name equality.
+    """
+
+    def test_the_resolved_engine_is_the_disposable_scratch_database(
+        self, ops_db, manager
+    ):
+        resolved = manager.engine.url.database
+        assert_scratch_db(resolved, where="the resolved manager engine")
+        assert resolved == ops_db.db_name, (
+            "the manager's engine must resolve to the disposable "
+            f"database ({ops_db.db_name!r} != {resolved!r})"
+        )
+        ambient_db = AMBIENT_POSTGRES.get("POSTGRES_DB")
+        if ambient_db is not None:
+            assert resolved != ambient_db, (
+                "the resolved engine database must never be the AMBIENT "
+                f"POSTGRES_DB ({ambient_db!r}) — the per-variable scrub "
+                "failed"
+            )
+
+
 # ── T4.3 — F11 e2e, both directions ────────────────────────────────────────
 
 
@@ -443,7 +477,7 @@ class TestF11DelegationChainE2E:
         tools = _job_tools(
             manager, job_service, caller_iid=ari_iid, agent_id="ari"
         )
-        out = await _by_name(tools, "job_create").ainvoke(
+        out = await by_name(tools, "job_create").ainvoke(
             {
                 "agent_id": "maintenancer",
                 "message": "shakedown delegation probe",
@@ -481,7 +515,7 @@ class TestF11DelegationChainE2E:
         ops_tools = io.create_instance_ops_tools(
             manager, current_instance_id=child_iid, agent_id="maintenancer"
         )
-        out = await _by_name(ops_tools, "instance_terminate").ainvoke(
+        out = await by_name(ops_tools, "instance_terminate").ainvoke(
             {
                 "id": target_iid,
                 "reason": "f11-a genuine chain admits",
@@ -528,7 +562,7 @@ class TestF11DelegationChainE2E:
         tools = _job_tools(
             manager, job_service, caller_iid=caller_iid, agent_id="ari"
         )
-        out = await _by_name(tools, "job_create").ainvoke(
+        out = await by_name(tools, "job_create").ainvoke(
             {
                 "agent_id": "maintenancer",
                 "message": "shakedown b1 probe",
@@ -552,7 +586,7 @@ class TestF11DelegationChainE2E:
         ops_tools = io.create_instance_ops_tools(
             manager, current_instance_id=child_iid, agent_id="maintenancer"
         )
-        out = await _by_name(ops_tools, "instance_terminate").ainvoke(
+        out = await by_name(ops_tools, "instance_terminate").ainvoke(
             {
                 "id": target_iid,
                 "reason": "f11-b1 windowless caller",
@@ -587,7 +621,7 @@ class TestF11DelegationChainE2E:
         tools = _job_tools(
             manager, job_service, caller_iid=caller_iid, agent_id="ari"
         )
-        out = await _by_name(tools, "job_create").ainvoke(
+        out = await by_name(tools, "job_create").ainvoke(
             {
                 "agent_id": "maintenancer",
                 "message": "shakedown b2 probe",
@@ -606,7 +640,7 @@ class TestF11DelegationChainE2E:
         ops_tools = io.create_instance_ops_tools(
             manager, current_instance_id=child_iid, agent_id="maintenancer"
         )
-        out = await _by_name(ops_tools, "instance_terminate").ainvoke(
+        out = await by_name(ops_tools, "instance_terminate").ainvoke(
             {
                 "id": target_iid,
                 "reason": "f11-b2 expired window",
@@ -638,7 +672,7 @@ class TestF11DelegationChainE2E:
         tools = _job_tools(
             manager, job_service, caller_iid=caller_iid, agent_id="ari"
         )
-        out = await _by_name(tools, "job_create").ainvoke(
+        out = await by_name(tools, "job_create").ainvoke(
             {
                 "agent_id": "maintenancer",
                 "message": "shakedown b3 probe",
@@ -698,7 +732,7 @@ class TestF11DelegationChainE2E:
         ops_tools = io.create_instance_ops_tools(
             manager, current_instance_id=child_iid, agent_id="maintenancer"
         )
-        out = await _by_name(ops_tools, "instance_terminate").ainvoke(
+        out = await by_name(ops_tools, "instance_terminate").ainvoke(
             {
                 "id": target_iid,
                 "reason": "f11-b4 rest injection",
@@ -740,7 +774,7 @@ class TestF11DelegationChainE2E:
         ops_tools = io.create_instance_ops_tools(
             manager, current_instance_id=child_iid, agent_id="maintenancer"
         )
-        out = await _by_name(ops_tools, "instance_terminate").ainvoke(
+        out = await by_name(ops_tools, "instance_terminate").ainvoke(
             {
                 "id": target_iid,
                 "reason": "f11-b5 legacy row",
@@ -767,7 +801,7 @@ class TestF11DelegationChainE2E:
         tools = _job_tools(
             manager, job_service, caller_iid=ari_iid, agent_id="ari"
         )
-        out = await _by_name(tools, "job_create").ainvoke(
+        out = await by_name(tools, "job_create").ainvoke(
             {
                 "agent_id": "maintenancer",
                 "message": "shakedown c1 probe",
@@ -784,7 +818,7 @@ class TestF11DelegationChainE2E:
         ops_tools = io.create_instance_ops_tools(
             manager, current_instance_id=child_iid, agent_id="maintenancer"
         )
-        term = _by_name(ops_tools, "instance_terminate")
+        term = by_name(ops_tools, "instance_terminate")
         # the FIRST act commits (protected budget N=1/24h consumed)
         first = await term.ainvoke(
             {
@@ -825,7 +859,7 @@ class TestF11DelegationChainE2E:
         tools = _job_tools(
             manager, job_service, caller_iid=ari_iid, agent_id="ari"
         )
-        out = await _by_name(tools, "job_create").ainvoke(
+        out = await by_name(tools, "job_create").ainvoke(
             {
                 "agent_id": "maintenancer",
                 "message": "shakedown c2 probe",
@@ -842,7 +876,7 @@ class TestF11DelegationChainE2E:
         )
         # the SAME caller window serves a SECOND delegation — admitted
         # (the window is per-turn liveness, not a one-shot token)
-        act = await _by_name(ops_tools, "instance_mark").ainvoke(
+        act = await by_name(ops_tools, "instance_mark").ainvoke(
             {
                 "id": target_iid,
                 "marker": "protect",
@@ -881,7 +915,7 @@ class TestF6GateSplitRealLedger:
         tools = io.create_instance_ops_tools(
             manager, current_instance_id=str(uuid.uuid4()), agent_id="maintenancer"
         )
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "f6-i(a)"}
         )
         assert "reason=protected-target-confirmation-required" in out, out
@@ -894,7 +928,7 @@ class TestF6GateSplitRealLedger:
         tools = io.create_instance_ops_tools(
             manager, current_instance_id=str(uuid.uuid4()), agent_id="maintenancer"
         )
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "f6-i(b)", "confirmed_target_id": iid}
         )
         assert "NO mutation happened (dry-run)" in out, out
@@ -917,7 +951,7 @@ class TestF6GateSplitRealLedger:
         tools = io.create_instance_ops_tools(
             manager, current_instance_id=str(uuid.uuid4()), agent_id="maintenancer"
         )
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {
                 "id": iid,
                 "reason": "f6-ii",
@@ -941,7 +975,7 @@ class TestF6GateSplitRealLedger:
         tools = io.create_instance_ops_tools(
             manager, current_instance_id=str(uuid.uuid4()), agent_id="maintenancer"
         )
-        term = _by_name(tools, "instance_terminate")
+        term = by_name(tools, "instance_terminate")
         for _ in range(3):
             out = await term.ainvoke(
                 {"id": iid, "reason": "f6-iii", "confirmed_target_id": iid}
@@ -969,7 +1003,7 @@ class TestF6GateSplitRealLedger:
         tools = io.create_instance_ops_tools(
             manager, current_instance_id=str(uuid.uuid4()), agent_id="maintenancer"
         )
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "f6-iv"}
         )
         assert "reason=terminate-budget-exceeded" in out, out
@@ -994,7 +1028,7 @@ class TestF7ProtectionReflectionReal:
     async def test_f7_i_leader_static_layer(self, manager):
         iid = str(uuid.uuid4())
         _seed_row(manager.engine, iid, agent_id="leader")
-        out = await _by_name(self._tools(manager), "instance_mark").ainvoke(
+        out = await by_name(self._tools(manager), "instance_mark").ainvoke(
             {"id": iid, "marker": "protect", "reason": "f7-i"}
         )
         payload = json.loads(out.split("\nNO mutation happened")[0])
@@ -1007,7 +1041,7 @@ class TestF7ProtectionReflectionReal:
             manager.engine, iid, agent_id="worker",
             metadata={"source_type": "telegram"},
         )
-        out = await _by_name(self._tools(manager), "instance_mark").ainvoke(
+        out = await by_name(self._tools(manager), "instance_mark").ainvoke(
             {"id": iid, "marker": "protect", "reason": "f7-ii"}
         )
         payload = json.loads(out.split("\nNO mutation happened")[0])
@@ -1021,7 +1055,7 @@ class TestF7ProtectionReflectionReal:
         _seed_row(manager.engine, iid, agent_id="worker")
         tools = self._tools(manager)
         # first apply SETS the marker
-        first = await _by_name(tools, "instance_mark").ainvoke(
+        first = await by_name(tools, "instance_mark").ainvoke(
             {
                 "id": iid, "marker": "protect",
                 "reason": "f7-iii", "dry_run": False,
@@ -1030,13 +1064,13 @@ class TestF7ProtectionReflectionReal:
         assert "marked" in first and "true" in first.lower(), first
         # a repeat PROTECT trips the idempotent refusal (not a
         # preview-scoped refusal — it fires on the protect path)
-        refused = await _by_name(tools, "instance_mark").ainvoke(
+        refused = await by_name(tools, "instance_mark").ainvoke(
             {"id": iid, "marker": "protect", "reason": "f7-iii-r"}
         )
         assert "reason=marker-already-set" in refused, refused
         assert "already carries a protect marker" in refused
         # a NON-protect preview shows the MARKER layer as the reason
-        second = await _by_name(tools, "instance_mark").ainvoke(
+        second = await by_name(tools, "instance_mark").ainvoke(
             {"id": iid, "marker": "suspect", "reason": "f7-iii-2"}
         )
         payload = json.loads(second.split("\nNO mutation happened")[0])
@@ -1048,7 +1082,7 @@ class TestF7ProtectionReflectionReal:
     ):
         iid = str(uuid.uuid4())
         _seed_row(manager.engine, iid, agent_id="leader")
-        out = await _by_name(self._tools(manager), "instance_mark").ainvoke(
+        out = await by_name(self._tools(manager), "instance_mark").ainvoke(
             {
                 "id": iid, "marker": "protect",
                 "reason": "f7-iv", "dry_run": False,
@@ -1088,7 +1122,7 @@ class TestF10AuditRowIdRealLedger:
     async def test_f10_i_protect_echoes_committed_row_id(self, manager):
         iid = str(uuid.uuid4())
         _seed_row(manager.engine, iid, agent_id="worker")
-        out = await _by_name(self._tools(manager), "instance_mark").ainvoke(
+        out = await by_name(self._tools(manager), "instance_mark").ainvoke(
             {
                 "id": iid, "marker": "protect",
                 "reason": "f10-i", "dry_run": False,
@@ -1105,7 +1139,7 @@ class TestF10AuditRowIdRealLedger:
     async def test_f10_ii_park_echoes_committed_row_id(self, manager):
         iid = str(uuid.uuid4())
         _seed_row(manager.engine, iid, agent_id="worker")
-        out = await _by_name(self._tools(manager), "instance_mark").ainvoke(
+        out = await by_name(self._tools(manager), "instance_mark").ainvoke(
             {
                 "id": iid, "marker": "park",
                 "reason": "f10-ii", "dry_run": False,
@@ -1120,7 +1154,7 @@ class TestF10AuditRowIdRealLedger:
     async def test_f10_iii_suspect_echoes_committed_row_id(self, manager):
         iid = str(uuid.uuid4())
         _seed_row(manager.engine, iid, agent_id="worker")
-        out = await _by_name(self._tools(manager), "instance_mark").ainvoke(
+        out = await by_name(self._tools(manager), "instance_mark").ainvoke(
             {
                 "id": iid, "marker": "suspect",
                 "reason": "f10-iii", "dry_run": False,

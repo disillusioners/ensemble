@@ -50,6 +50,7 @@ SAFETY FENCES (binding)
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import uuid
@@ -141,6 +142,33 @@ def probe_admin_engine() -> Engine | None:
         return engine
     except Exception:  # noqa: BLE001 — any failure means "skip loudly"
         return None
+
+
+# ── the shared tool-lookup helpers (the tidier fold) ──────────────────────
+
+
+def by_name(tools, name):
+    """The tool named ``name`` — with the REGISTERED names on failure.
+
+    ONE helper for the four lane files that each carried their own
+    copy (the copies had already drifted: two asserted, one did not,
+    and the assertion messages differed).
+
+    Fail-closed: a missing tool is a hard assertion, never a silent
+    ``None`` and never a bare ``StopIteration``.
+    """
+    tool = next((t for t in tools if t.name == name), None)
+    assert tool is not None, (
+        f"tool {name!r} is not registered "
+        f"(registered: {sorted(t.name for t in tools)})"
+    )
+    return tool
+
+
+async def call(tools, name, **kwargs):
+    """Invoke one tool and JSON-decode its payload."""
+    out = await by_name(tools, name).ainvoke(kwargs)
+    return json.loads(out)
 
 
 # ── T4.1 — the disposable role + database lifecycle ───────────────────────

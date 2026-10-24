@@ -51,6 +51,7 @@ import daemon.tools.instance_ops as io
 from daemon.repositories.instance.repository import KB_AGENT_IDS
 from daemon.repositories.instance_ops.models import InstanceOpsAudit
 from daemon.repositories.instance_ops.repository import InstanceOpsAuditRepository
+from tests.helpers.nestops_pg_fixtures import by_name
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -229,10 +230,6 @@ def _act_tools(manager, instance_id="maint-iid", agent="maintenancer"):
     )
 
 
-def _by_name(tools, name):
-    return next(t for t in tools if t.name == name)
-
-
 def _z(dt: datetime) -> str:
     """The REAL window timestamp format: ``YYYY-MM-DDTHH:MM:SSZ`` —
     the stammer writes ``iso_plus``/``now_iso`` output, and
@@ -276,14 +273,14 @@ class TestProtectedGateLadder:
 
     async def test_reason_required(self, fleet):
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": "target-1", "reason": "  "}
         )
         assert "reason=reason-required" in out
 
     async def test_self_surgery_refused(self, fleet):
         tools = _act_tools(fleet, instance_id="target-1")
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": "target-1", "reason": "r"}
         )
         assert "reason=self-surgery-refused" in out
@@ -291,7 +288,7 @@ class TestProtectedGateLadder:
     async def test_target_too_young(self, fleet):
         fleet.rows["fresh"] = FakeRow("fresh", created_at=datetime.now(timezone.utc).isoformat())
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": "fresh", "reason": "r"}
         )
         assert "reason=target-too-young" in out
@@ -299,11 +296,11 @@ class TestProtectedGateLadder:
     async def test_confirmation_required_then_mismatch(self, fleet):
         iid = self._protected_target(fleet)
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "r"}
         )
         assert "reason=protected-target-confirmation-required" in out
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "r", "confirmed_target_id": "someone-else"}
         )
         assert "reason=confirmed-target-mismatch" in out
@@ -326,7 +323,7 @@ class TestProtectedGateLadder:
         tools = _act_tools(fleet)
 
         # The preview path: the requirement is REPORTED, not refused.
-        preview = await _by_name(tools, "instance_terminate").ainvoke(
+        preview = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "r", "confirmed_target_id": iid}
         )
         assert "NO mutation happened (dry-run)" in preview
@@ -339,7 +336,7 @@ class TestProtectedGateLadder:
         assert "confirmed_target_id=" not in preview
 
         # The apply path: the gate refuses exactly as before.
-        applied = await _by_name(tools, "instance_terminate").ainvoke(
+        applied = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "r", "confirmed_target_id": iid, "dry_run": False}
         )
         assert "reason=no-user-provenance" in applied
@@ -359,7 +356,7 @@ class TestProtectedGateLadder:
         iid = self._protected_target(fleet)
         fleet._user_origin_windows = _stamp_direct("maint-iid", source="api")
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "r", "confirmed_target_id": iid, "dry_run": False}
         )
         # ADMITTED — the act proceeds.
@@ -427,7 +424,7 @@ class TestProtectedGateLadder:
         # …and my inherited window was minted from it.
         fleet._inherited_provenance_windows = _stamp_inherited("maint-iid", depth=1, root_source="api")
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "r", "confirmed_target_id": iid, "dry_run": False}
         )
         # ADMITTED — the genuine delegated chain.
@@ -479,13 +476,13 @@ class TestProtectedGateLadder:
         fleet._inherited_provenance_windows = {}  # cleared by the dispatch
         tools = _act_tools(fleet)
 
-        preview = await _by_name(tools, "instance_terminate").ainvoke(
+        preview = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "r", "confirmed_target_id": iid}
         )
         payload = _json.loads(preview.split("\nNO mutation happened")[0])
         assert payload["act_gate_would_pass"]["reason"] == "no-user-provenance"
 
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "r", "confirmed_target_id": iid, "dry_run": False}
         )
         assert "reason=no-user-provenance" in out
@@ -497,7 +494,7 @@ class TestProtectedGateLadder:
 class TestBudgetRails:
     async def test_fourth_terminate_in_24h_refuses(self, fleet):
         tools = _act_tools(fleet)
-        term = _by_name(tools, "instance_terminate")
+        term = by_name(tools, "instance_terminate")
         for i in range(3):
             fleet.rows[f"t-{i}"] = FakeRow(f"t-{i}", created_at=(datetime.now(timezone.utc) - timedelta(hours=3)).isoformat())
             out = await term.ainvoke({"id": f"t-{i}", "reason": "r", "dry_run": False})
@@ -549,7 +546,7 @@ class TestBudgetRails:
             )
 
         tools = _act_tools(fleet)
-        term = _by_name(tools, "instance_terminate")
+        term = by_name(tools, "instance_terminate")
 
         # 1st protected terminate: ADMITTED — the pending/refused rows
         # consumed nothing — and it CONSUMES the N=1 protected budget.
@@ -587,7 +584,7 @@ class TestBudgetRails:
 class TestCascadeOrphans:
     async def test_cascade_false_with_live_descendants_refuses(self, fleet):
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": "target-1", "reason": "r", "cascade": False}
         )
         assert "reason=cascade-false-would-orphan-descendants" in out
@@ -595,7 +592,7 @@ class TestCascadeOrphans:
 
     async def test_allow_orphan_names_them_in_preview_and_row(self, fleet):
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": "target-1", "reason": "r", "cascade": False,
              "allow_orphan_descendants": True}
         )
@@ -639,7 +636,7 @@ class TestTier1FaultInjection:
             lambda self, session, **kw: (_ for _ in ()).throw(RuntimeError("audit INSERT failed"))
         )
         try:
-            out = await _by_name(tools, "instance_terminate").ainvoke(
+            out = await by_name(tools, "instance_terminate").ainvoke(
                 {"id": "target-1", "reason": "r", "dry_run": False}
             )
         finally:
@@ -669,7 +666,7 @@ class TestTier2WriteAhead:
         crash = CrashManager(fleet.rows)
         crash.rows["dead-1"] = FakeRow("dead-1", status="completed")
         tools = _act_tools(crash)
-        out = await _by_name(tools, "instance_reclaim").ainvoke(
+        out = await by_name(tools, "instance_reclaim").ainvoke(
             {"id": "dead-1", "message": "revive", "reason": "r", "dry_run": False}
         )
         assert "ERROR" in out
@@ -689,7 +686,7 @@ class TestKillSwitch:
     async def test_off_acts_refuse_reads_live(self, fleet, monkeypatch):
         monkeypatch.setenv("ENSEMBLE_INSTANCE_OPS_ENABLED", "0")
         act_tools = _act_tools(fleet)
-        out = await _by_name(act_tools, "instance_terminate").ainvoke(
+        out = await by_name(act_tools, "instance_terminate").ainvoke(
             {"id": "target-1", "reason": "r"}
         )
         assert out == io.KILL_SWITCH_REFUSAL
@@ -700,7 +697,7 @@ class TestKillSwitch:
         read_tools = ir.create_instance_read_tools(
             fleet, current_instance_id="maint-iid", agent_id="maintenancer"
         )
-        out = await _by_name(read_tools, "instance_list").ainvoke({})
+        out = await by_name(read_tools, "instance_list").ainvoke({})
         assert '"rows"' in out
 
 
@@ -736,7 +733,7 @@ class TestDocSurface:
 
     def test_terminate_doc_states_the_current_semantics(self):
         tools = self._tools()
-        term = _by_name(tools, "instance_terminate")._full_doc_
+        term = by_name(tools, "instance_terminate")._full_doc_
         assert "dry_run` defaults to TRUE" in term or "dry_run` defaults to `True" in term or "defaults to TRUE" in term
         assert "reason` is required" in term
         # DF-4 / P2 (AC-16, re-pointed): the CURRENT semantics are
@@ -765,23 +762,23 @@ class TestDocSurface:
         assert "(APPLY" in term
         assert "ONLY — a dry-run preview reports" in term
         assert "act_gate_would_pass" in term
-        fields = _by_name(tools, "instance_terminate").args_schema.model_json_schema()["properties"]
+        fields = by_name(tools, "instance_terminate").args_schema.model_json_schema()["properties"]
         assert "dry_run" in fields
         assert "confirmed_target_id" in fields  # D-17 (not user_confirmed)
         assert "user_confirmed" not in fields
 
     def test_reclaim_doc_states_terminal_only(self):
-        doc = _by_name(self._tools(), "instance_reclaim")._full_doc_
+        doc = by_name(self._tools(), "instance_reclaim")._full_doc_
         assert "TERMINAL" in doc and "target-not-terminal" in doc
 
     def test_mark_doc_states_the_tiers(self):
-        doc = _by_name(self._tools(), "instance_mark")._full_doc_
+        doc = by_name(self._tools(), "instance_mark")._full_doc_
         assert "Tier-1" in doc or "TIER-1" in doc
         assert "Tier-2" in doc or "TIER-2" in doc
         assert "There is NO `unprotect`" in doc or "NO `unprotect`" in doc
 
     def test_answer_doc_states_the_parity(self):
-        doc = _by_name(self._tools(), "instance_answer")._full_doc_
+        doc = by_name(self._tools(), "instance_answer")._full_doc_
         for token in ("no-pending-question", "question-pack-lost", "stale-question-pack"):
             assert token in doc
 
@@ -792,7 +789,7 @@ class TestDocSurface:
 class TestReclaim:
     async def test_non_terminal_refuses(self, fleet):
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_reclaim").ainvoke(
+        out = await by_name(tools, "instance_reclaim").ainvoke(
             {"id": "target-1", "message": "m", "reason": "r"}
         )
         assert "reason=target-not-terminal" in out
@@ -800,7 +797,7 @@ class TestReclaim:
     async def test_terminal_revives_with_message(self, fleet):
         fleet.rows["done-1"] = FakeRow("done-1", status="completed")
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_reclaim").ainvoke(
+        out = await by_name(tools, "instance_reclaim").ainvoke(
             {"id": "done-1", "message": "welcome back", "reason": "r", "dry_run": False}
         )
         assert "revived" in out
@@ -809,7 +806,7 @@ class TestReclaim:
     async def test_self_refuses(self, fleet):
         tools = _act_tools(fleet, instance_id="done-1")
         fleet.rows["done-1"] = FakeRow("done-1", status="completed")
-        out = await _by_name(tools, "instance_reclaim").ainvoke(
+        out = await by_name(tools, "instance_reclaim").ainvoke(
             {"id": "done-1", "message": "m", "reason": "r"}
         )
         assert "reason=self-surgery-refused" in out
@@ -827,13 +824,13 @@ class TestReadTools:
         )
 
     async def test_unknown_status_is_a_typed_refusal(self, fleet):
-        out = await _by_name(self._read(fleet), "instance_list").ainvoke(
+        out = await by_name(self._read(fleet), "instance_list").ainvoke(
             {"status": "zombie"}
         )
         assert "reason=unknown-status-value" in out
 
     async def test_invalid_limit_is_a_typed_refusal(self, fleet):
-        out = await _by_name(self._read(fleet), "instance_list").ainvoke({"limit": 0})
+        out = await by_name(self._read(fleet), "instance_list").ainvoke({"limit": 0})
         assert "reason=invalid-limit" in out
 
     async def test_sql_side_status_filter_paginates_correctly(self, fleet):
@@ -841,7 +838,7 @@ class TestReadTools:
         page 2 continues correctly (never a pinned-ordered subset)."""
         for i in range(5):
             fleet.rows[f"run-{i}"] = FakeRow(f"run-{i}", status="running")
-        out = await _by_name(self._read(fleet), "instance_list").ainvoke(
+        out = await by_name(self._read(fleet), "instance_list").ainvoke(
             {"status": "running", "limit": 2, "offset": 0}
         )
         import json as _json
@@ -849,7 +846,7 @@ class TestReadTools:
         page1 = _json.loads(out)
         assert page1["count"] == 2 and page1["total_matching"] == 5
         assert all(r["status"] == "running" for r in page1["rows"])
-        out2 = await _by_name(self._read(fleet), "instance_list").ainvoke(
+        out2 = await by_name(self._read(fleet), "instance_list").ainvoke(
             {"status": "running", "limit": 2, "offset": 4}
         )
         page3 = _json.loads(out2)
@@ -858,7 +855,7 @@ class TestReadTools:
     async def test_census_row_has_no_hydration(self, fleet):
         import json as _json
 
-        out = await _by_name(self._read(fleet), "instance_list").ainvoke({})
+        out = await by_name(self._read(fleet), "instance_list").ainvoke({})
         rows = _json.loads(out)["rows"]
         assert rows
         for r in rows:
@@ -883,7 +880,7 @@ class TestReadTools:
         )
         import json as _json
 
-        out = await _by_name(self._read(fleet), "instance_list").ainvoke({"status": "paused"})
+        out = await by_name(self._read(fleet), "instance_list").ainvoke({"status": "paused"})
         row = next(r for r in _json.loads(out)["rows"] if r["instance_id"] == "parked")
         assert row["pause_marker"] and row["pause_marker"].get("deliberate") is True
         assert row["stale"] is True
@@ -897,7 +894,7 @@ class TestReadTools:
         DETECTED CLASS, not by a reshuffle."""
         import json as _json
 
-        out = await _by_name(self._read(fleet), "instance_health").ainvoke({})
+        out = await by_name(self._read(fleet), "instance_health").ainvoke({})
         payload = _json.loads(out)
         names = [d["detector"] for d in payload["detectors"]]
         assert names == [
@@ -924,7 +921,7 @@ class TestReadTools:
         InstanceOpsAuditRepository(fleet.engine).write_audit_ahead(
             action="instance_nudge", target="t", reason="r"
         )
-        out = await _by_name(self._read(fleet), "fleet_capacity_summary").ainvoke({})
+        out = await by_name(self._read(fleet), "fleet_capacity_summary").ainvoke({})
         payload = _json.loads(out)
         assert payload["audit_pending"]["count"] >= 1
         assert "generated_at" in payload
@@ -933,7 +930,7 @@ class TestReadTools:
         import daemon.tools.instance_read as ir
 
         tools = ir.create_instance_read_tools(fleet, agent_id="leader")
-        out = await _by_name(tools, "instance_list").ainvoke({})
+        out = await by_name(tools, "instance_list").ainvoke({})
         assert "not permitted" in out
 
 
@@ -960,7 +957,7 @@ class TestGetHonestyReviewFixes:
         fleet.rows["kid-1"] = FakeRow(
             "kid-1", agent_id="worker", parent_id="parent-1"
         )
-        out = await _by_name(self._read(fleet), "instance_get").ainvoke(
+        out = await by_name(self._read(fleet), "instance_get").ainvoke(
             {"id": "kid-1"}
         )
         payload = _json.loads(out)
@@ -972,7 +969,7 @@ class TestGetHonestyReviewFixes:
     async def test_spawned_by_root_is_null_with_explicit_marker(self, fleet):
         import json as _json
 
-        out = await _by_name(self._read(fleet), "instance_get").ainvoke(
+        out = await by_name(self._read(fleet), "instance_get").ainvoke(
             {"id": "target-1"}
         )
         payload = _json.loads(out)
@@ -986,7 +983,7 @@ class TestGetHonestyReviewFixes:
 
         tools = _act_tools(fleet)
         for marker in ("protect", "suspect"):
-            out = await _by_name(tools, "instance_mark").ainvoke(
+            out = await by_name(tools, "instance_mark").ainvoke(
                 {
                     "id": "old-worker",
                     "marker": marker,
@@ -997,7 +994,7 @@ class TestGetHonestyReviewFixes:
             )
             assert "ERROR" not in out, out
             got = _json.loads(
-                await _by_name(self._read(fleet), "instance_get").ainvoke(
+                await by_name(self._read(fleet), "instance_get").ainvoke(
                     {"id": "old-worker"}
                 )
             )
@@ -1018,7 +1015,7 @@ class TestGetHonestyReviewFixes:
 
         monkeypatch.setattr(svc, "dismiss_question_pack", _boom)
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_dismiss").ainvoke(
+        out = await by_name(tools, "instance_dismiss").ainvoke(
             {"id": "target-1", "reason": "cascade retry demo", "dry_run": False}
         )
         assert "dismiss-cascade-failed" in out
@@ -1039,11 +1036,11 @@ class TestGetHonestyReviewFixes:
         import json as _json
 
         health = _json.loads(
-            await _by_name(self._read(fleet), "instance_health").ainvoke({})
+            await by_name(self._read(fleet), "instance_health").ainvoke({})
         )
         assert health["scan_truncated"] is False
         cap = _json.loads(
-            await _by_name(self._read(fleet), "fleet_capacity_summary").ainvoke({})
+            await by_name(self._read(fleet), "fleet_capacity_summary").ainvoke({})
         )
         assert cap["scan_truncated"] is False
 
@@ -1167,7 +1164,7 @@ class TestGateTokenStructure:
             iid, agent_id="leader", metadata={"source_type": "telegram"}
         )
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "r", "confirmed_target_id": iid}
         )
         payload = _json.loads(out.split("\nNO mutation happened")[0])
@@ -1201,7 +1198,7 @@ class TestF6GateSplit:
         """F6-i(a): the CONFIRMATION conditions gate BOTH paths."""
         iid = self._protected_target(fleet)
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "r"}
         )
         assert "reason=protected-target-confirmation-required" in out
@@ -1214,7 +1211,7 @@ class TestF6GateSplit:
 
         iid = self._protected_target(fleet)
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "r", "confirmed_target_id": iid}
         )
         assert "NO mutation happened (dry-run)" in out
@@ -1243,7 +1240,7 @@ class TestF6GateSplit:
         """F6-ii: the destructive act keeps ALL gates."""
         iid = self._protected_target(fleet)
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "r", "confirmed_target_id": iid, "dry_run": False}
         )
         assert "reason=no-user-provenance" in out
@@ -1260,7 +1257,7 @@ class TestF6GateSplit:
         """F6-iii: a preview does not consume the protected budget."""
         iid = self._protected_target(fleet)
         tools = _act_tools(fleet)
-        term = _by_name(tools, "instance_terminate")
+        term = by_name(tools, "instance_terminate")
         for _ in range(3):
             out = await term.ainvoke(
                 {"id": iid, "reason": "r", "confirmed_target_id": iid}
@@ -1296,7 +1293,7 @@ class TestF6GateSplit:
             session.commit()
 
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_terminate").ainvoke(
+        out = await by_name(tools, "instance_terminate").ainvoke(
             {"id": iid, "reason": "r"}
         )
         assert "reason=terminate-budget-exceeded" in out
@@ -1319,7 +1316,7 @@ class TestF7ProtectionReflection:
 
         fleet.rows["leader-row"] = FakeRow("leader-row", agent_id="leader")
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_mark").ainvoke(
+        out = await by_name(tools, "instance_mark").ainvoke(
             {"id": "leader-row", "marker": "protect", "reason": "r"}
         )
         payload = _json.loads(out.split("\nNO mutation happened")[0])
@@ -1334,7 +1331,7 @@ class TestF7ProtectionReflection:
             metadata={"source_type": "telegram"},
         )
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_mark").ainvoke(
+        out = await by_name(tools, "instance_mark").ainvoke(
             {"id": "chat-root", "marker": "protect", "reason": "r"}
         )
         payload = _json.loads(out.split("\nNO mutation happened")[0])
@@ -1355,14 +1352,14 @@ class TestF7ProtectionReflection:
         # The DYNAMIC refusal is byte-identical for the dynamic case — it
         # fires on the protect path, preview included (it is not a
         # preview-scoped refusal).
-        refused = await _by_name(tools, "instance_mark").ainvoke(
+        refused = await by_name(tools, "instance_mark").ainvoke(
             {"id": "marked", "marker": "protect", "reason": "r"}
         )
         assert "reason=marker-already-set" in refused
         assert "already carries a protect marker" in refused
         # The preview echo (a non-protect marker does not trip the
         # refusal) shows the MARKER layer as the reason.
-        out = await _by_name(tools, "instance_mark").ainvoke(
+        out = await by_name(tools, "instance_mark").ainvoke(
             {"id": "marked", "marker": "suspect", "reason": "r"}
         )
         payload = _json.loads(out.split("\nNO mutation happened")[0])
@@ -1378,7 +1375,7 @@ class TestF7ProtectionReflection:
 
         fleet.rows["leader-row"] = FakeRow("leader-row", agent_id="leader")
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_mark").ainvoke(
+        out = await by_name(tools, "instance_mark").ainvoke(
             {"id": "leader-row", "marker": "protect", "reason": "r", "dry_run": False}
         )
         payload = _json.loads(out)
@@ -1413,7 +1410,7 @@ class TestF10AuditRowId:
 
         fleet.rows["target-1"] = FakeRow("target-1", agent_id="worker")
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_mark").ainvoke(
+        out = await by_name(tools, "instance_mark").ainvoke(
             {"id": "target-1", "marker": "protect", "reason": "r", "dry_run": False}
         )
         payload = _json.loads(out)
@@ -1431,7 +1428,7 @@ class TestF10AuditRowId:
 
         fleet.rows["target-1"] = FakeRow("target-1", agent_id="worker")
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_mark").ainvoke(
+        out = await by_name(tools, "instance_mark").ainvoke(
             {"id": "target-1", "marker": "park", "reason": "r", "dry_run": False}
         )
         payload = _json.loads(out)
@@ -1447,7 +1444,7 @@ class TestF10AuditRowId:
 
         fleet.rows["target-1"] = FakeRow("target-1", agent_id="worker")
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_mark").ainvoke(
+        out = await by_name(tools, "instance_mark").ainvoke(
             {"id": "target-1", "marker": "suspect", "reason": "r", "dry_run": False}
         )
         payload = _json.loads(out)
@@ -1471,7 +1468,7 @@ class TestF9ReclaimCopy:
     async def test_f9_i_copy_names_the_real_paths(self, fleet):
         fleet.rows["idle-1"] = FakeRow("idle-1", agent_id="worker")
         tools = _act_tools(fleet)
-        out = await _by_name(tools, "instance_reclaim").ainvoke(
+        out = await by_name(tools, "instance_reclaim").ainvoke(
             {"id": "idle-1", "message": "wake up", "reason": "r"}
         )
         assert "reason=target-not-terminal" in out
@@ -1494,8 +1491,8 @@ class TestF9ReclaimCopy:
             current_instance_id="maint-iid",
             agent_id="maintenancer",
         )
-        reclaim_doc = _by_name(tools, "instance_reclaim")._full_doc_
-        nudge_doc = _by_name(tools, "instance_nudge")._full_doc_
+        reclaim_doc = by_name(tools, "instance_reclaim")._full_doc_
+        nudge_doc = by_name(tools, "instance_nudge")._full_doc_
         assert "TERMINAL-ONLY" in reclaim_doc or "terminal-only" in reclaim_doc
         assert "not a diagnostic" in reclaim_doc or "NOT a diagnostic" in reclaim_doc
         assert "context-free" in nudge_doc

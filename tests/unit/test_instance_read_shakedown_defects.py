@@ -38,6 +38,7 @@ from daemon.repositories.message_queue.models import MessageQueue
 from daemon.repositories.task.models import Task
 from daemon.services.instance_lifecycle import InstanceLifecycleService
 from daemon.tools import instance_read as ir
+from tests.helpers.nestops_pg_fixtures import by_name, call
 from daemon.tools._tool_registry import (
     DYNAMIC_TOOL_NAMES,
     KNOWN_TOOL_NAMES,
@@ -246,16 +247,6 @@ def _read_tools(manager, *, agent: str = "maintenancer"):
     )
 
 
-def _by_name(tools, name):
-    return next(t for t in tools if t.name == name)
-
-
-async def _call(tools, name, **kwargs):
-    """Invoke one tool and JSON-decode its payload."""
-    out = await _by_name(tools, name).ainvoke(kwargs)
-    return json.loads(out)
-
-
 # ────────────────────────────────────────────────────────────────────────
 # F4 — the pagination flags
 # ────────────────────────────────────────────────────────────────────────
@@ -281,7 +272,7 @@ class TestF4aHonestTruncated:
 
     async def test_under_page_reports_truncated(self):
         manager = self._fleet(10)
-        payload = await _call(_read_tools(manager), "instance_list", limit=5)
+        payload = await call(_read_tools(manager), "instance_list", limit=5)
 
         assert payload["count"] == 5
         assert payload["total_matching"] == 10
@@ -289,7 +280,7 @@ class TestF4aHonestTruncated:
 
     async def test_exact_page_reports_not_truncated(self):
         manager = self._fleet(5)
-        payload = await _call(_read_tools(manager), "instance_list", limit=5)
+        payload = await call(_read_tools(manager), "instance_list", limit=5)
 
         assert payload["count"] == 5
         assert payload["total_matching"] == 5
@@ -297,7 +288,7 @@ class TestF4aHonestTruncated:
 
     async def test_over_page_reports_not_truncated(self):
         manager = self._fleet(10)
-        payload = await _call(
+        payload = await call(
             _read_tools(manager), "instance_list", limit=5, offset=5
         )
 
@@ -309,7 +300,7 @@ class TestF4aHonestTruncated:
         """``len(rows) == 0`` and ``total <= offset`` ⇒ ``False`` —
         nothing matches past the caller's offset."""
         manager = self._fleet(10)
-        payload = await _call(
+        payload = await call(
             _read_tools(manager), "instance_list", limit=5, offset=10
         )
 
@@ -328,7 +319,7 @@ class TestF4aHonestTruncated:
         manager = self._fleet(10)
         manager.total_override = 10  # the COUNT saw 10 …
         manager.rows = manager.rows[:4]  # … then 6 rows were deleted
-        payload = await _call(
+        payload = await call(
             _read_tools(manager), "instance_list", limit=5, offset=6
         )
 
@@ -341,7 +332,7 @@ class TestF4aHonestTruncated:
         flag from ``total_matching``, ``filters_applied.offset`` and
         ``count``."""
         manager = self._fleet(10)
-        payload = await _call(
+        payload = await call(
             _read_tools(manager), "instance_list", limit=4, offset=2
         )
 
@@ -359,7 +350,7 @@ class TestF4aHonestTruncated:
         for i in range(4):
             manager.add(FakeRow(f"run-{i}", status="running"))
 
-        payload = await _call(
+        payload = await call(
             _read_tools(manager), "instance_list", status="running", limit=2
         )
 
@@ -447,7 +438,7 @@ class TestF4bFullAgeRangeScan:
     """
 
     async def _health(self, manager):
-        payload = await _call(_read_tools(manager), "instance_health")
+        payload = await call(_read_tools(manager), "instance_health")
         return payload
 
     async def test_fleet_larger_than_the_window_is_covered(self):
@@ -840,7 +831,7 @@ class TestF3HuskDetector:
     """
 
     async def _health(self, manager):
-        return await _call(_read_tools(manager), "instance_health")
+        return await call(_read_tools(manager), "instance_health")
 
     def _husk(self, payload):
         for detector in payload["detectors"]:
@@ -1176,7 +1167,7 @@ class TestF3xF4Coupling:
 
         manager = RepoBackedManager(fleet_db)
 
-        payload = asyncio.run(_call(_read_tools(manager), "instance_health"))
+        payload = asyncio.run(call(_read_tools(manager), "instance_health"))
 
         flagged = {
             row["instance_id"]
@@ -1233,8 +1224,8 @@ class TestF2Census:
         manager = RepoBackedManager(fleet_db)
         tools = _read_tools(manager)
 
-        capacity = await _call(tools, "fleet_capacity_summary")
-        listing = await _call(tools, "instance_list", limit=200, offset=0)
+        capacity = await call(tools, "fleet_capacity_summary")
+        listing = await call(tools, "instance_list", limit=200, offset=0)
 
         totals = capacity["totals"]
         assert (
@@ -1254,7 +1245,7 @@ class TestF2Census:
         self._fleet(fleet_db)
         manager = RepoBackedManager(fleet_db)
 
-        payload = await _call(_read_tools(manager), "fleet_capacity_summary")
+        payload = await call(_read_tools(manager), "fleet_capacity_summary")
 
         assert payload["counts_by_status"].get("idle") == 2
         assert "idle" not in payload["counts_by_liveness"]
@@ -1267,7 +1258,7 @@ class TestF2Census:
         self._fleet(fleet_db)
         manager = RepoBackedManager(fleet_db)
 
-        payload = await _call(_read_tools(manager), "fleet_capacity_summary")
+        payload = await call(_read_tools(manager), "fleet_capacity_summary")
 
         counted = payload["totals"]["counted_rows"]
         assert sum(payload["counts_by_status"].values()) == counted
@@ -1277,7 +1268,7 @@ class TestF2Census:
         self._fleet(fleet_db)
         manager = RepoBackedManager(fleet_db)
 
-        payload = await _call(_read_tools(manager), "fleet_capacity_summary")
+        payload = await call(_read_tools(manager), "fleet_capacity_summary")
 
         assert payload["totals"]["scan_truncated"] is False
         assert payload["scan_truncated"] is False
@@ -1288,7 +1279,7 @@ class TestF2Census:
         self._fleet(fleet_db)
         manager = RepoBackedManager(fleet_db)
 
-        payload = await _call(_read_tools(manager), "fleet_capacity_summary")
+        payload = await call(_read_tools(manager), "fleet_capacity_summary")
 
         note = payload["totals"]["note"]
         assert "status filter" in note
@@ -1421,7 +1412,7 @@ class TestF8ReadPurity:
     """
 
     async def _get(self, manager, instance_id="real-1"):
-        return await _call(_read_tools(manager), "instance_get", id=instance_id)
+        return await call(_read_tools(manager), "instance_get", id=instance_id)
 
     def _manager(self, fleet_db, **kw):
         now = datetime.now(timezone.utc)
@@ -1486,7 +1477,7 @@ class TestF8ReadPurity:
         manager = self._manager(fleet_db, near_matches=["real-1"])
         tools = _read_tools(manager)
 
-        out = await _by_name(tools, "instance_get").ainvoke({"id": "real-"})
+        out = await by_name(tools, "instance_get").ainvoke({"id": "real-"})
 
         assert out == (
             "Error: INSTANCE_GET REFUSED — reason=instance-not-found: "
@@ -1511,7 +1502,7 @@ class TestF8ReadPurity:
         manager = self._manager(fleet_db, near_matches=near_matches)
         tools = _read_tools(manager)
 
-        out = await _by_name(tools, "instance_get").ainvoke({"id": "nope-1"})
+        out = await by_name(tools, "instance_get").ainvoke({"id": "nope-1"})
 
         assert out == (
             f"Error: INSTANCE_GET REFUSED — reason=instance-not-found: {expected}"
@@ -1521,7 +1512,7 @@ class TestF8ReadPurity:
         manager = self._manager(fleet_db)
         tools = _read_tools(manager)
 
-        out = await _by_name(tools, "instance_get").ainvoke({"id": ""})
+        out = await by_name(tools, "instance_get").ainvoke({"id": ""})
 
         assert out == (
             f"Error: INSTANCE_GET REFUSED — reason=instance-not-found: {EMPTY_ID}"
@@ -1539,7 +1530,7 @@ class TestF8DocSurface:
         tools = ir.create_instance_read_tools(
             FakeFleetManager(), current_instance_id="m", agent_id="maintenancer"
         )
-        doc = _by_name(tools, "instance_get")._full_doc_ or ""
+        doc = by_name(tools, "instance_get")._full_doc_ or ""
 
         assert "never triggers MCP schema discovery" in doc
         assert "a cold instance stays cold" in doc
@@ -1553,7 +1544,7 @@ class TestF8DocSurface:
         tools = ir.create_instance_read_tools(
             FakeFleetManager(), current_instance_id="m", agent_id="maintenancer"
         )
-        doc = _by_name(tools, "instance_health")._full_doc_ or ""
+        doc = by_name(tools, "instance_health")._full_doc_ or ""
 
         assert "seven read-only detector classes" in doc
         assert "never-dispatched-husk" in doc
@@ -1564,7 +1555,7 @@ class TestF8DocSurface:
         tools = ir.create_instance_read_tools(
             FakeFleetManager(), current_instance_id="m", agent_id="maintenancer"
         )
-        doc = _by_name(tools, "instance_health")._full_doc_ or ""
+        doc = by_name(tools, "instance_health")._full_doc_ or ""
 
         assert "OFFSET WINDOW LOOP" in doc
         assert "scan_stop_reason" in doc
@@ -1576,7 +1567,7 @@ class TestF8DocSurface:
         tools = ir.create_instance_read_tools(
             FakeFleetManager(), current_instance_id="m", agent_id="maintenancer"
         )
-        doc = _by_name(tools, "instance_list")._full_doc_ or ""
+        doc = by_name(tools, "instance_list")._full_doc_ or ""
 
         assert "total_matching > filters_applied.offset + count" in doc
 
@@ -1584,7 +1575,7 @@ class TestF8DocSurface:
         tools = ir.create_instance_read_tools(
             FakeFleetManager(), current_instance_id="m", agent_id="maintenancer"
         )
-        doc = _by_name(tools, "instance_list")._full_doc_ or ""
+        doc = by_name(tools, "instance_list")._full_doc_ or ""
 
         # wrapped-safe: the sentence breaks across lines in the source
         assert "applied in" in doc and "SQL" in doc
@@ -1635,7 +1626,7 @@ class TestF5Measures:
 
         manager = RepoBackedManager(fleet_db)
 
-        payload = await _call(
+        payload = await call(
             self._capacity(manager), "fleet_capacity_summary"
         )
 
@@ -1669,7 +1660,7 @@ class TestF5Measures:
 
         manager = RepoBackedManager(fleet_db)
 
-        payload = await _call(
+        payload = await call(
             self._capacity(manager), "fleet_capacity_summary"
         )
 
@@ -1681,7 +1672,7 @@ class TestF5Measures:
         tools = ir.create_instance_read_tools(
             FakeFleetManager(), current_instance_id="m", agent_id="maintenancer"
         )
-        doc = _by_name(tools, "fleet_capacity_summary")._full_doc_ or ""
+        doc = by_name(tools, "fleet_capacity_summary")._full_doc_ or ""
 
         assert "dead_letter_items" in doc
         assert "dead_jobs_total" in doc
@@ -1694,7 +1685,7 @@ class TestF5Measures:
     async def test_note_rides_the_payload(self, fleet_db):
         manager = RepoBackedManager(fleet_db)
 
-        payload = await _call(
+        payload = await call(
             self._capacity(manager), "fleet_capacity_summary"
         )
 
@@ -1762,10 +1753,10 @@ class TestF1Alias:
         tools = self._tools(manager)
 
         live = json.loads(
-            await _by_name(tools, "fleet_capacity_summary").ainvoke({})
+            await by_name(tools, "fleet_capacity_summary").ainvoke({})
         )
         alias = json.loads(
-            await _by_name(tools, "instance_fleet_summary").ainvoke({})
+            await by_name(tools, "instance_fleet_summary").ainvoke({})
         )
 
         # ONE builder ⇒ identical payloads. `generated_at` is the only
@@ -1778,16 +1769,16 @@ class TestF1Alias:
         """Full docs are keyed by the tool NAME — an alias without its
         own ``_full_doc_`` would render an empty ``tool_help`` body."""
         for name in ("fleet_capacity_summary", "instance_fleet_summary"):
-            doc = _by_name(self._tools(), name)._full_doc_ or ""
+            doc = by_name(self._tools(), name)._full_doc_ or ""
             assert doc.strip(), f"{name} has an empty _full_doc_"
 
     def test_the_alias_doc_says_it_is_an_alias(self):
-        doc = _by_name(self._tools(), "instance_fleet_summary")._full_doc_ or ""
+        doc = by_name(self._tools(), "instance_fleet_summary")._full_doc_ or ""
         assert "Alias of" in doc
         assert "fleet_capacity_summary" in doc
 
     def test_the_live_doc_mentions_the_alias(self):
-        doc = _by_name(self._tools(), "fleet_capacity_summary")._full_doc_ or ""
+        doc = by_name(self._tools(), "fleet_capacity_summary")._full_doc_ or ""
         assert "instance_fleet_summary" in doc
 
     def test_the_category_doc_lists_the_alias(self):
@@ -1800,7 +1791,7 @@ class TestF1Alias:
         tools = ir.create_instance_read_tools(
             FakeFleetManager(), current_instance_id="m", agent_id="leader"
         )
-        out = await _by_name(tools, "instance_fleet_summary").ainvoke({})
+        out = await by_name(tools, "instance_fleet_summary").ainvoke({})
         assert "not permitted" in out
 
     def test_the_planning_rows_are_annotated_not_rewritten(self):
@@ -1953,7 +1944,7 @@ class TestParentStatusCache:
         manager = _UnlistedParentFleetManager(
             [self._child("child-1"), self._child("child-2")], repo
         )
-        payload = await _call(_read_tools(manager), "instance_health")
+        payload = await call(_read_tools(manager), "instance_health")
         detector = next(
             d
             for d in payload["detectors"]
@@ -1999,7 +1990,7 @@ class TestF8OffLoopReads:
 
         manager._instance_repository.get = recording_get  # type: ignore[method-assign]
 
-        out = await _by_name(_read_tools(manager), "instance_get").ainvoke(
+        out = await by_name(_read_tools(manager), "instance_get").ainvoke(
             {"id": "off-loop-1"}
         )
 
@@ -2023,7 +2014,7 @@ class TestF8OffLoopReads:
 
         manager.find_near_instance = recording  # type: ignore[method-assign]
 
-        out = await _by_name(_read_tools(manager), "instance_get").ainvoke(
+        out = await by_name(_read_tools(manager), "instance_get").ainvoke(
             {"id": "ghost-1"}
         )
 
@@ -2050,7 +2041,7 @@ class TestHuskEvidenceLegsDegradation:
     """
 
     async def _health(self, manager):
-        return await _call(_read_tools(manager), "instance_health")
+        return await call(_read_tools(manager), "instance_health")
 
     def _husk_row(self, payload):
         for detector in payload["detectors"]:
