@@ -756,6 +756,15 @@ class TestDocSurface:
         assert "(APPLY" in term
         assert "ONLY — a dry-run preview reports" in term
         assert "act_gate_would_pass" in term
+        # F6 (D-8) — the apply-only sentence. The gate SPLITS at the
+        # dry-run fork: the confirmation conditions run on BOTH paths and
+        # ONLY the user-provenance condition is apply-only. A preview
+        # reports what apply requires (``act_gate_would_pass``) instead
+        # of demanding a window the caller cannot self-satisfy.
+        assert "BOTH paths" in term
+        assert "(APPLY" in term
+        assert "ONLY — a dry-run preview reports" in term
+        assert "act_gate_would_pass" in term
         fields = _by_name(tools, "instance_terminate").args_schema.model_json_schema()["properties"]
         assert "dry_run" in fields
         assert "confirmed_target_id" in fields  # D-17 (not user_confirmed)
@@ -1166,3 +1175,182 @@ class TestF6GateSplit:
         assert "protected-target-confirmation-required" not in out
 
 
+class TestF7ProtectionReflection:
+    """F7 — one home for the protection determination."""
+
+    async def test_f7_i_leader_target_previews_as_protected(self, fleet):
+        import json as _json
+
+        fleet.rows["leader-row"] = FakeRow("leader-row", agent_id="leader")
+        tools = _act_tools(fleet)
+        out = await _by_name(tools, "instance_mark").ainvoke(
+            {"id": "leader-row", "marker": "protect", "reason": "r"}
+        )
+        payload = _json.loads(out.split("\nNO mutation happened")[0])
+        assert payload["already_protected"] is True
+        assert payload["protection_reasons"] == ["leader"]
+
+    async def test_f7_ii_chat_root_target_previews_as_protected(self, fleet):
+        import json as _json
+
+        fleet.rows["chat-root"] = FakeRow(
+            "chat-root", agent_id="worker", parent_id=None,
+            metadata={"source_type": "telegram"},
+        )
+        tools = _act_tools(fleet)
+        out = await _by_name(tools, "instance_mark").ainvoke(
+            {"id": "chat-root", "marker": "protect", "reason": "r"}
+        )
+        payload = _json.loads(out.split("\nNO mutation happened")[0])
+        assert payload["already_protected"] is True
+        assert payload["protection_reasons"] == ["chat-root"]
+
+    async def test_f7_iii_marker_target_and_the_idempotent_refusal(self, fleet):
+        import json as _json
+
+        fleet.rows["marked"] = FakeRow(
+            "marked",
+            agent_id="worker",
+            metadata={
+                "instance_ops.protect": {"protected": True},
+            },
+        )
+        tools = _act_tools(fleet)
+        # The DYNAMIC refusal is byte-identical for the dynamic case — it
+        # fires on the protect path, preview included (it is not a
+        # preview-scoped refusal).
+        refused = await _by_name(tools, "instance_mark").ainvoke(
+            {"id": "marked", "marker": "protect", "reason": "r"}
+        )
+        assert "reason=marker-already-set" in refused
+        assert "already carries a protect marker" in refused
+        # The preview echo (a non-protect marker does not trip the
+        # refusal) shows the MARKER layer as the reason.
+        out = await _by_name(tools, "instance_mark").ainvoke(
+            {"id": "marked", "marker": "suspect", "reason": "r"}
+        )
+        payload = _json.loads(out.split("\nNO mutation happened")[0])
+        assert payload["already_protected"] is True
+        assert payload["protection_reasons"] == ["marker"]
+
+    async def test_f7_iv_static_plus_marker_apply_succeeds_with_disclosure(
+        self, fleet
+    ):
+        """F7-iv: protection is MONOTONE — the operator may record the
+        intent. The apply SUCCEEDS and DISCLOSES."""
+        import json as _json
+
+        fleet.rows["leader-row"] = FakeRow("leader-row", agent_id="leader")
+        tools = _act_tools(fleet)
+        out = await _by_name(tools, "instance_mark").ainvoke(
+            {"id": "leader-row", "marker": "protect", "reason": "r", "dry_run": False}
+        )
+        payload = _json.loads(out)
+        assert payload["marked"] is True
+        assert payload["already_protected"] is True
+        assert payload["protection_reasons"] == ["leader"]
+        # The marker was written.
+        assert fleet.rows["leader-row"].metadata["instance_ops.protect"][
+            "protected"
+        ] is True
+        # The disclosure is in the ledger row too.
+        with Session(fleet.engine) as s:
+            rows = [
+                r
+                for r in s.exec(select(InstanceOpsAudit)).all()
+                if r.action == "instance_mark"
+            ]
+        assert rows[-1].outcome == "committed"
+        assert rows[-1].before_snapshot.get("protection_reasons") == ["leader"]
+
+
+class TestF10AuditRowId:
+    """F10 — the mark apply echoes the committed audit row id."""
+
+    async def test_f10_i_protect_echoes_the_row_id(self, fleet):
+        import json as _json
+
+        fleet.rows["target-1"] = FakeRow("target-1", agent_id="worker")
+        tools = _act_tools(fleet)
+        out = await _by_name(tools, "instance_mark").ainvoke(
+            {"id": "target-1", "marker": "protect", "reason": "r", "dry_run": False}
+        )
+        payload = _json.loads(out)
+        row_id = payload["audit_row_id"]
+        assert row_id, "the apply must echo the committed row id"
+        with Session(fleet.engine) as s:
+            row = s.get(InstanceOpsAudit, row_id)
+        assert row is not None
+        assert row.outcome == "committed"
+        assert row.action == "instance_mark"
+        assert row.target == "target-1"
+
+    async def test_f10_ii_park_echoes_the_row_id(self, fleet):
+        import json as _json
+
+        fleet.rows["target-1"] = FakeRow("target-1", agent_id="worker")
+        tools = _act_tools(fleet)
+        out = await _by_name(tools, "instance_mark").ainvoke(
+            {"id": "target-1", "marker": "park", "reason": "r", "dry_run": False}
+        )
+        payload = _json.loads(out)
+        row_id = payload["audit_row_id"]
+        assert row_id
+        with Session(fleet.engine) as s:
+            row = s.get(InstanceOpsAudit, row_id)
+        assert row is not None
+        assert row.outcome == "committed"
+
+    async def test_f10_iii_suspect_echoes_the_row_id(self, fleet):
+        import json as _json
+
+        fleet.rows["target-1"] = FakeRow("target-1", agent_id="worker")
+        tools = _act_tools(fleet)
+        out = await _by_name(tools, "instance_mark").ainvoke(
+            {"id": "target-1", "marker": "suspect", "reason": "r", "dry_run": False}
+        )
+        payload = _json.loads(out)
+        row_id = payload["audit_row_id"]
+        assert row_id
+        with Session(fleet.engine) as s:
+            row = s.get(InstanceOpsAudit, row_id)
+        assert row is not None
+        assert row.action == "instance_mark"
+
+
+class TestF9ReclaimCopy:
+    """F9 — the reclaim refusal must not recommend a dispatch."""
+
+    async def test_f9_i_copy_names_the_real_paths(self, fleet):
+        fleet.rows["idle-1"] = FakeRow("idle-1", agent_id="worker")
+        tools = _act_tools(fleet)
+        out = await _by_name(tools, "instance_reclaim").ainvoke(
+            {"id": "idle-1", "message": "wake up", "reason": "r"}
+        )
+        assert "reason=target-not-terminal" in out
+        # The DANGEROUS recommendation is gone.
+        assert "instance_nudge" not in out
+        # The real paths are named.
+        assert "instance_terminate" in out
+        assert "instance_health" in out
+        assert "instance_get" in out
+        assert "instance_mark(marker='park')" in out
+        # The hazard clause.
+        assert "DISPATCHES a context-free turn" in out
+        # The D-20 provenance.
+        assert "TERMINAL-ONLY" in out
+        assert "D-20" in out
+
+    def test_f9_ii_doc_mirrors_carry_the_warning(self):
+        tools = io.create_instance_ops_tools(
+            FakeManager({"x": FakeRow("x")}),
+            current_instance_id="maint-iid",
+            agent_id="maintenancer",
+        )
+        reclaim_doc = _by_name(tools, "instance_reclaim")._full_doc_
+        nudge_doc = _by_name(tools, "instance_nudge")._full_doc_
+        assert "TERMINAL-ONLY" in reclaim_doc or "terminal-only" in reclaim_doc
+        assert "not a diagnostic" in reclaim_doc or "NOT a diagnostic" in reclaim_doc
+        assert "context-free" in nudge_doc
+        assert "instance_health" in nudge_doc
+        assert "instance_terminate" in nudge_doc

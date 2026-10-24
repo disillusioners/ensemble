@@ -360,18 +360,29 @@ def _target_state(manager: Any, instance_id: str) -> dict[str, Any] | None:
     return info
 
 
-def _is_protected_target(manager: Any, info: dict[str, Any]) -> bool:
-    """The protected determination — an OR of three layers (D-4).
+def _protection_reasons(manager: Any, info: dict[str, Any]) -> list[str]:
+    """The protection layers that apply to a target (F7 — ONE home).
 
-    1. STATIC: a user-facing chat root (``_is_user_facing_root``,
-       fail-closed on both legs) — OR ``agent_id == "leader"``.
-    2. DYNAMIC: an ``instance_ops.protect`` marker in the metadata.
+    Three layers, three CLOSED reason values (D-19 discipline — no open
+    vocabulary):
 
-    A protect marker can only ADD protection; nothing in this category
-    can un-protect a statically protected target.
+    1. ``leader`` — STATIC: the target is the leader's session.
+    2. ``chat-root`` — STATIC: a user-facing chat root
+       (``_is_user_facing_root_target``, fail-closed on both legs).
+    3. ``marker`` — DYNAMIC: an ``instance_ops.protect`` marker in the
+       target's metadata.
+
+    The ORDER is the layer order, so the list is stable for a given
+    target. A protect marker can only ADD protection; nothing in this
+    category can un-protect a statically protected target.
+
+    ``manager`` is accepted for symmetry with :func:`_is_protected_target`
+    (the canonical call shape) — the determination itself reads only the
+    target's own row.
     """
+    reasons: list[str] = []
     if (info.get("agent_id") or "") == "leader":
-        return True
+        reasons.append("leader")
     metadata = info.get("metadata") or {}
     source_type = (
         metadata.get("source_type")
@@ -381,12 +392,29 @@ def _is_protected_target(manager: Any, info: dict[str, Any]) -> bool:
     if _is_user_facing_root_target(
         parent_id=info.get("parent_id"), source_type=source_type
     ):
-        return True
+        reasons.append("chat-root")
     if isinstance(metadata, dict):
         marker = metadata.get(PROTECT_MARKER_KEY)
         if isinstance(marker, dict) and marker.get("protected") is True:
-            return True
-    return False
+            reasons.append("marker")
+    return reasons
+
+
+def _is_protected_target(manager: Any, info: dict[str, Any]) -> bool:
+    """The protected determination — an OR of three layers (D-4).
+
+    F7: this is now a CONSEQUENCE of the single-home
+    :func:`_protection_reasons` — one implementation, no second
+    predicate that can drift.
+
+    1. STATIC: a user-facing chat root (``_is_user_facing_root``,
+       fail-closed on both legs) — OR ``agent_id == "leader"``.
+    2. DYNAMIC: an ``instance_ops.protect`` marker in the metadata.
+
+    A protect marker can only ADD protection; nothing in this category
+    can un-protect a statically protected target.
+    """
+    return bool(_protection_reasons(manager, info))
 
 
 def _audit_repo_for(manager: Any):
@@ -1057,13 +1085,33 @@ Examples:
             return _refusal(label, "instance-not-found", f"no instance row for {target_id!r}")
         terminal = {"completed", "terminated", "error", "failed"}
         if info.get("status") not in terminal:
+            # F9: the CANONICAL corrected copy (ops-side §6.2 — the single
+            # source). The old copy recommended ``instance_nudge`` — and a
+            # nudge on a graph-less target DISPATCHES a durable,
+            # context-free turn (with a source that POPS the target's
+            # provenance windows): exactly what an idle, evidence-free husk
+            # must never receive. The copy now names the real paths, keeps
+            # the D-20 provenance (reclaim is terminal-only BY DESIGN) and
+            # states the hazard in one clause.
             return _refusal(
                 label,
                 "target-not-terminal",
                 (
                     f"{target_id!r} is {info.get('status')!r}, not terminal. "
-                    "Reclaim revives a DEAD instance only — use "
-                    "instance_nudge to deliver to a live one."
+                    "instance_reclaim is TERMINAL-ONLY "
+                    "(D-20). For a non-terminal target: run instance_terminate "
+                    "with dry_run=True "
+                    "first if it is a genuine wedge (then apply with "
+                    "confirmed_target_id when the "
+                    "target is protected — WITHOUT a live user-origin chain, "
+                    "direct or delegated, "
+                    "apply refuses no-user-provenance); use instance_health / "
+                    "instance_get to read "
+                    "its state; use instance_mark(marker='park') only for a "
+                    "deliberate hold on a "
+                    "pausable target. Do NOT nudge an idle, evidence-free "
+                    "instance — a nudge "
+                    "DISPATCHES a context-free turn."
                 ),
             )
         if dry_run:
@@ -1140,6 +1188,15 @@ revived and why — independent of the audit row.
 NON-terminal targets refuse with `target-not-terminal` (that is what
 distinguishes reclaim from `instance_nudge`, which delivers to any
 target). Your own session refuses (`self-surgery-refused`).
+
+F9: a nudge to an idle, evidence-free target dispatches a context-free
+turn — it is NOT a diagnostic. On a graph-less target the nudge falls
+through to a durable enqueue: a bare new turn, with no context and no
+evidence, whose dispatch source also clears the target's provenance
+windows. Use `instance_health` / `instance_get` to READ a target's
+state, and `instance_terminate` (dry-run first) to remediate a genuine
+wedge. The `target-not-terminal` refusal names those paths and states
+the hazard.
 
 Audit tier: 2 (write-ahead) — the intent row is written FIRST with
 `outcome="pending"`, the act runs, the row is settled. A crash mid-act
@@ -1284,6 +1341,14 @@ turn; anything else gets a durable enqueue. A send to a TERMINAL
 instance REVIVES it (revive-on-send) — the preview names that when the
 target is terminal.
 
+F9: for an idle, never-dispatched instance a nudge creates a NEW,
+context-free turn — no context, no evidence, and a dispatch source that
+clears the target's provenance windows. It is a DELIVERY primitive, not a
+diagnostic. To
+DIAGNOSE a target prefer `instance_health` (or `instance_get`); to
+REMEDIATE a genuine wedge prefer `instance_terminate` with
+`dry_run=True` first, then apply with `confirmed_target_id`.
+
 Args:
     id: Target instance id. Required.
     message: REQUIRED — the message to inject.
@@ -1369,18 +1434,34 @@ Examples:
             return _refusal(label, "instance-not-found", f"no instance row for {target_id!r}")
 
         metadata = info.get("metadata") or {}
-        already_protected = (
-            isinstance(metadata.get(PROTECT_MARKER_KEY), dict)
-            and metadata[PROTECT_MARKER_KEY].get("protected") is True
-        )
-        if marker == "protect" and already_protected:
+        # F7: ONE home for the protection determination. ``already_protected``
+        # now means PROTECTED (not "marked") — a leader target with no
+        # marker previews as protected, and the reasons are echoed so the
+        # operator can SEE why.
+        protection_reasons = _protection_reasons(manager, info)
+        already_protected = bool(protection_reasons)
+        has_protect_marker = "marker" in protection_reasons
+        if marker == "protect" and has_protect_marker:
+            # F7: the refusal is scoped to the DYNAMIC marker layer only.
+            # The token, the reason and the text are byte-identical for
+            # the dynamic case (the same marker already present — an
+            # idempotent no-op). A STATICALLY protected target with no
+            # marker is NOT this case: protection is monotone, so the
+            # operator is allowed to record the intent (see the
+            # succeed-with-disclosure path below).
             return _refusal(
                 label,
                 "marker-already-set",
                 f"{target_id!r} already carries a protect marker",
             )
 
-        before_snapshot = {"status": info.get("status"), "marker": marker}
+        before_snapshot = {
+            "status": info.get("status"),
+            "marker": marker,
+            # F7: the disclosure — the protection layers that apply are
+            # recorded in the ledger row, not just in the response.
+            "protection_reasons": protection_reasons,
+        }
         if dry_run:
             preview_row = None
             if audit is not None:
@@ -1401,6 +1482,11 @@ Examples:
                         "marker": marker,
                         "note": note,
                         "already_protected": already_protected,
+                        # F7: WHY the target is protected (the three
+                        # closed reasons). Preview-only by design — the
+                        # apply response carries the same echo when the
+                        # disclosure applies.
+                        "protection_reasons": protection_reasons,
                         "audit_preview_row": preview_row,
                         "note_line": "NO mutation happened (dry-run)",
                     },
@@ -1450,6 +1536,12 @@ Examples:
                     "target": target_id,
                     "marker": "park",
                     "audit": "committed (Tier-2 write-ahead)",
+                    # F10: the committed ledger row id — the join key
+                    # between the preview and the apply (``None`` only
+                    # when the ledger was unavailable).
+                    "audit_row_id": row_id,
+                    "already_protected": already_protected,
+                    "protection_reasons": protection_reasons,
                 },
                 default=str,
             )
@@ -1476,7 +1568,11 @@ Examples:
                 def _act(s):
                     repo.set_metadata(target_id, key, value, session=s)
 
-                audit.write_audit_and_act(
+                # F10: capture the committed row id. ``write_audit_and_act``
+                # returns the row (``repository.py``) — the id is a
+                # client-side default, so it is valid before the commit
+                # and safe to echo after it.
+                row_id = audit.write_audit_and_act(
                     session,
                     action="instance_mark",
                     target=target_id,
@@ -1501,6 +1597,14 @@ Examples:
                 "target": target_id,
                 "marker": marker,
                 "audit": "committed (Tier-1, same transaction as the act)",
+                # F10: the committed ledger row id. ``InstanceOpsAudit.id``
+                # is a client-side ``default_factory`` — the value exists
+                # before the commit, so it is safe to echo after it.
+                "audit_row_id": row_id,
+                # F7: the disclosure — a protect on a STATICALLY protected
+                # target SUCCEEDS (protection is monotone) and says so.
+                "already_protected": already_protected,
+                "protection_reasons": protection_reasons,
             },
             default=str,
         )
