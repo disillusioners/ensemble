@@ -161,8 +161,13 @@ pipeline stage against this install (`scripts/upgrade/stage.sh`) must run as
 the INSTALL OWNER — the account named by the unit's `User=` — because the
 stage's `.env` marker rewrite replaces the file's inode and re-owns it to
 the staging uid, so a cross-uid stage leaves a 0600 `.env` the unit's
-`User=` cannot read (launcher WARN → no `POSTGRES_*` → boot-block) — a
-DOCUMENTED precondition, with no mechanical check enforcing it.
+`User=` cannot read — a DOCUMENTED precondition, with no mechanical check
+enforcing it. **The UNREADABLE case does NOT raise the launcher's "env file
+not found" WARN** — that WARN fires only for a MISSING file. The real
+signals of an existing-but-unreadable `.env` are the launcher's **"Permission
+denied"** while reading it + **zero exported keys** → the D4 boot-block
+family (exit-75 retry loop; the unit stays "active"; the journal is the
+only signal).
 
 5. **Confirm:**
    ```bash
@@ -494,14 +499,19 @@ only; partial-state failures leave it present).
 
 > **Status: DOCUMENTATION ONLY (unit-secret-exposure, 2026-10-23).** The
 > zero-env generator strip fixes FUTURE generations; the EXISTING live unit
-> (generated Sep-30) still carries six minted `Environment=` lines
-> (`PORT` + `POSTGRES_HOST` + `POSTGRES_PORT` + `POSTGRES_DB` +
+> (generated Sep-30) is **EXPECTED** to still carry six minted `Environment=`
+> lines (`PORT` + `POSTGRES_HOST` + `POSTGRES_PORT` + `POSTGRES_DB` +
 > `POSTGRES_USER` + `POSTGRES_PASSWORD`) that systemd re-serves — in
 > cleartext — to ANY local uid via D-Bus (`systemctl show -p Environment`;
 > man 5 systemd.exec: the unit environment is "exposed to unprivileged
 > clients via D-Bus IPC … not suitable for passing secrets"). Purging them
 > is a one-time operator action **the user decides on**; no lane performs
 > it tonight. Key NAMES only appear below — never values.
+>
+> **EXPECTED, NOT READ (A6):** the six-line set is an INFERENCE from the
+> template git history — NOT a read of the live 0600 unit. **Verify it with
+> the Remediation census (W6) below**, which enumerates every
+> `ensemble-*.service` and prints its `Environment` property.
 
 **Fix-delivery path (read first):** `scripts/` does **NOT** ship in the
 staged release payload — `adopt-unit.sh` runs from a repo checkout, and
@@ -620,7 +630,7 @@ order:
 - **HARD precondition:** §5 step 2 (unit file removed + `daemon-reload`)
   MUST have completed — `adopt-unit.sh` REFUSES (exit 78) when the
   destination unit already exists (one-time migration never clobbers,
-  `adopt-unit.sh:534-539`). No clobber-free shortcut exists by design.
+  `adopt-unit.sh:517-521`). No clobber-free shortcut exists by design.
 - **UNWRITTEN COMPOSITE STEP (spelled here):** §5 step 4 restarts the
   install in script-mode (nohup). **STOP that interim script-mode daemon
   BEFORE the adoption's `systemctl enable --now`** (step (d).4) — the

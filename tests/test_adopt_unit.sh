@@ -373,6 +373,25 @@ assert_not_contains "zero-env: no minted PORT env line" "Environment=PORT=" "$H_
 assert_not_contains "zero-env: no minted POSTGRES_* env lines" "Environment=POSTGRES_" "$H_OUT"
 assert_not_contains "zero-env: no __ENV_LINES__ token survived" "__ENV_LINES__" "$H_OUT"
 
+# D9 INVARIANT pins (A2): the generated unit must NEVER carry an
+# `EnvironmentFile=` / `PassEnvironment=` directive. The D9 no-EnvironmentFile
+# invariant is otherwise held only by one-time scan gates (the phase-2 AC2.4
+# repo-wide grep) — these pins make it CONTINUOUS, inside the same DRY_RUN
+# fence as the zero-env contract above.
+#
+# RAW-haystack scope (NOT the comment-stripped haystack used by the
+# MALLOC_ARENA_MAX positive control): verified at write time that the literal
+# strings `EnvironmentFile` and `PassEnvironment` appear NOWHERE in
+# scripts/systemd/ensemble-daemon.service (template, comments included) nor in
+# scripts/upgrade/adopt-unit.sh (generator + preview banners) — zero hits
+# each. No comment in the generated unit names either directive, so a raw
+# substring match cannot be satisfied by a comment line. (If a future edit
+# adds such a comment, this pin goes RED — deliberately loud, per D9.)
+assert_not_contains "D9: no EnvironmentFile= directive in the generated unit" \
+    "EnvironmentFile" "$H_OUT"
+assert_not_contains "D9: no PassEnvironment= directive in the generated unit" \
+    "PassEnvironment" "$H_OUT"
+
 # every template directive rides through. MALLOC_ARENA_MAX is checked
 # separately BELOW with a comment-stripped haystack — see that pin's note
 # for the rationale (the header also names it by string, which would let
