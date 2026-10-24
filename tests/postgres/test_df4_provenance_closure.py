@@ -63,6 +63,7 @@ MANDATORY INVOCATION (a deselected/skipped pin is a FAILED gate)::
 """
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -460,14 +461,42 @@ async def test_sweep_forged_wake_is_refused_real_chain(
     )
 
     # 7. the protected act on the child REFUSES.
+    #
+    # F6 / D-8 (nest-ops shakedown Phase 3): the protected gate SPLITS
+    # at the dry_run fork. The CONFIRMATION conditions run on both
+    # paths; ONLY the user-provenance condition is apply-only. So:
+    #
+    #   * the DEFAULT call (a preview) REPORTS the apply-path
+    #     requirement as data — it does not refuse, and it does not
+    #     write a refusal row;
+    #   * the DESTRUCTIVE act (dry_run=False) still REFUSES with
+    #     ``no-user-provenance`` and still writes the refusal row.
+    #
+    # The refusal leg — the point of this pin — is UNCHANGED: the forged
+    # wake arms nothing, so the act cannot pass the gate. Only the
+    # rendering of the preview moved.
     tools = io.create_instance_ops_tools(
         manager, current_instance_id=CHILD_IID, agent_id="maintenancer"
     )
+    preview = await _by_name(tools, "instance_terminate").ainvoke(
+        {
+            "id": TARGET_IID,
+            "reason": "df4 closure probe",
+            "confirmed_target_id": TARGET_IID,
+        }
+    )
+    assert "NO mutation happened (dry-run)" in preview, preview
+    preview_payload = json.loads(preview.split("\nNO mutation happened")[0])
+    assert preview_payload["act_gate_would_pass"] == {
+        "ok": False,
+        "reason": "no-user-provenance",
+    }, preview
     out = await _by_name(tools, "instance_terminate").ainvoke(
         {
             "id": TARGET_IID,
             "reason": "df4 closure probe",
             "confirmed_target_id": TARGET_IID,
+            "dry_run": False,
         }
     )
     assert "reason=no-user-provenance" in out, out
