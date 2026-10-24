@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -352,3 +353,187 @@ class TestF4aHonestTruncated:
         assert payload["count"] == 2
         assert payload["truncated"] is True
         assert {row["status"] for row in payload["rows"]} == {"running"}
+
+
+class SyntheticFleetManager(FakeFleetManager):
+    """A fleet of ``total`` rows, generated ON DEMAND per window.
+
+    The fleet is never materialized (that is the point of the F4b
+    streaming contract) — a window's rows are built when the window is
+    read. The rows are ordered ``created_at DESC`` (index 0 = newest),
+    exactly like the repository's flat path.
+    """
+
+    def __init__(self, total: int, *, base: datetime | None = None):
+        super().__init__([])
+        self.total = total
+        self.base = base or datetime.now(timezone.utc)
+        #: Every row id the manager actually SERVED to the scanner.
+        self.rows_served: list[str] = []
+        #: Rows injected at the FRONT of the order (the concurrent-insert
+        #: drift fixture).
+        self.front_rows: list[FakeRow] = []
+
+    def _row(self, index: int) -> FakeRow:
+        stamp = (self.base - timedelta(seconds=index)).isoformat()
+        return FakeRow(f"i-{index:06d}", created_at=stamp)
+
+    def list_instances(
+        self,
+        limit: int = 10,
+        offset: int = 0,
+        status: str | None = None,
+        **_kw,
+    ):
+        self.list_calls.append(
+            {"limit": limit, "offset": offset, "status": status}
+        )
+        effective_total = len(self.front_rows) + self.total
+        out: list[dict] = []
+        for position in range(offset, min(offset + limit, effective_total)):
+            if position < len(self.front_rows):
+                row = self.front_rows[position]
+            else:
+                row = self._row(position - len(self.front_rows))
+            info = row.to_dict()
+            info["children"] = []
+            out.append(info)
+            self.rows_served.append(row.instance_id)
+        return out, effective_total, False
+
+
+class TestF4bFullAgeRangeScan:
+    """F4b — the health scan covers the WHOLE fleet, in offset windows.
+
+    PLANNED MUTATION (one behaviour per run):
+      * restore the SINGLE-window scan (``limit=FLEET_SCAN_LIMIT``,
+        ``offset=0``) — the "old rows covered" pin goes RED (the tail is
+        never served) and the stop reason stops being ``end_of_set``;
+      * break the walk on ``len(read) >= total`` (the drift bug) — the
+        concurrent-write drift pin goes RED (the tail is skipped);
+      * re-assign ``total`` on every window — the drift pin goes RED;
+      * remove the window cap — the "cap fires" pin goes RED;
+      * remove the time budget — the "budget fires" pin goes RED.
+    """
+
+    async def _health(self, manager):
+        payload = await _call(_read_tools(manager), "instance_health")
+        return payload
+
+    async def test_fleet_larger_than_the_window_is_covered(self):
+        """More rows than one window ⇒ the OLD rows are read too."""
+        total = ir.FLEET_SCAN_LIMIT + 1
+        manager = SyntheticFleetManager(total)
+
+        payload = await self._health(manager)
+
+        assert payload["scan_truncated"] is False
+        assert payload["scan_stop_reason"] == "end_of_set"
+        # the OLDEST row (the last one served) was read
+        assert len(manager.rows_served) == total
+        assert f"i-{total - 1:06d}" in manager.rows_served
+
+    async def test_the_walk_asks_for_a_second_window(self):
+        """The walk is a LOOP: a second window is requested once the first
+        is full."""
+        manager = SyntheticFleetManager(ir.FLEET_SCAN_LIMIT + 1)
+
+        await self._health(manager)
+
+        offsets = [call["offset"] for call in manager.list_calls]
+        assert offsets[0] == 0
+        assert ir.FLEET_SCAN_LIMIT in offsets
+
+    async def test_small_fleet_stops_on_the_empty_window(self):
+        """A fleet smaller than one window ends at the empty window."""
+        manager = SyntheticFleetManager(3)
+
+        payload = await self._health(manager)
+
+        assert payload["scan_truncated"] is False
+        assert payload["scan_stop_reason"] == "end_of_set"
+        assert len(manager.list_calls) == 2  # the window + the empty one
+
+    async def test_window_cap_fires_loudly(self):
+        """A fleet past the window cap ⇒ ``scan_truncated`` is TRUE (never
+        silently false) and the stop reason says ``window_cap``."""
+        total = ir.FLEET_SCAN_LIMIT * ir.FLEET_SCAN_MAX_WINDOWS + 5
+        manager = SyntheticFleetManager(total)
+
+        payload = await self._health(manager)
+
+        assert payload["scan_truncated"] is True
+        assert payload["scan_stop_reason"] == "window_cap"
+        assert len(manager.list_calls) == ir.FLEET_SCAN_MAX_WINDOWS
+
+    async def test_time_budget_fires_loudly(self, monkeypatch):
+        """The wall-clock budget is checked BEFORE each window; on
+        exhaustion the walk breaks with ``scan_truncated=True`` and
+        ``scan_stop_reason="time_budget"``."""
+        monkeypatch.setattr(ir, "FLEET_SCAN_TIME_BUDGET_SECONDS", 0.05)
+
+        class SlowManager(SyntheticFleetManager):
+            def list_instances(self, limit=10, offset=0, status=None, **kw):
+                time.sleep(0.08)
+                return super().list_instances(limit, offset, status, **kw)
+
+        manager = SlowManager(ir.FLEET_SCAN_LIMIT * 10)
+
+        payload = await self._health(manager)
+
+        assert payload["scan_truncated"] is True
+        assert payload["scan_stop_reason"] == "time_budget"
+
+    async def test_concurrent_insert_at_the_front_cannot_skip_the_tail(self):
+        """The drift bug: a NEW row landing at the FRONT of the
+        ``created_at DESC`` order shifts every later row down. A walk
+        that stops on ``len(read) >= total`` skips the TAIL — the exact
+        rows the husks live in — and reports a clean scan.
+
+        The walk must read the tail anyway.
+        """
+        total = ir.FLEET_SCAN_LIMIT
+        manager = SyntheticFleetManager(total)
+        newest = FakeRow(
+            "i-front",
+            created_at=(
+                manager.base + timedelta(seconds=1)
+            ).isoformat(),
+        )
+
+        original_list = manager.list_instances
+
+        def list_with_front_insert(limit=10, offset=0, status=None, **kw):
+            if offset > 0 and not manager.front_rows:
+                # The concurrent insert lands between the two windows.
+                manager.front_rows.append(newest)
+            return original_list(limit, offset, status, **kw)
+
+        manager.list_instances = list_with_front_insert  # type: ignore[method-assign]
+
+        payload = await self._health(manager)
+
+        # The tail row (the oldest) was served to the scanner.
+        assert f"i-{total - 1:06d}" in manager.rows_served
+        # And the walk did not mistake the first full window for the end.
+        assert payload["scan_stop_reason"] == "end_of_set"
+        assert payload["scan_truncated"] is False
+
+    async def test_total_is_captured_from_the_first_window_only(self):
+        """``total`` is never reassigned: the COUNT the walk trusts is the
+        one the FIRST window reported."""
+        manager = SyntheticFleetManager(ir.FLEET_SCAN_LIMIT + 1)
+        seen_totals: list[int] = []
+        original_list = manager.list_instances
+
+        def recording_list(limit=10, offset=0, status=None, **kw):
+            rows, total, truncated = original_list(limit, offset, status, **kw)
+            seen_totals.append(total)
+            return rows, total, truncated
+
+        manager.list_instances = recording_list  # type: ignore[method-assign]
+
+        await self._health(manager)
+
+        assert seen_totals[0] == ir.FLEET_SCAN_LIMIT + 1
+        assert len(seen_totals) >= 2

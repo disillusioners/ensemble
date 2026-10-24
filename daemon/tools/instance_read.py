@@ -68,6 +68,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
@@ -131,6 +132,23 @@ MAX_LAST_MESSAGES = 20
 #: OLDEST rows are invisible to the scan — both payloads surface
 #: ``scan_truncated`` so the blind spot is VISIBLE, never silent.
 FLEET_SCAN_LIMIT = 1000
+
+#: The number of offset windows ``instance_health`` may walk before it
+#: gives up (F4b). ``FLEET_SCAN_LIMIT`` is the WINDOW SIZE; this is the
+#: window COUNT, so one report covers at most
+#: ``FLEET_SCAN_LIMIT * FLEET_SCAN_MAX_WINDOWS`` rows (20 000 at the
+#: shipped constants). The cap exists so a huge fleet cannot turn one
+#: tool call into an unbounded walk — and when it fires, the payload
+#: says so (``scan_truncated`` + ``scan_stop_reason``).
+FLEET_SCAN_MAX_WINDOWS = 20
+
+#: The wall-clock budget (seconds) for the ``instance_health`` fleet
+#: scan (D-20). Checked BEFORE each window; on exhaustion the walk
+#: breaks with ``scan_truncated=True`` and
+#: ``scan_stop_reason="time_budget"``. A 20-second tool call would eat
+#: a sixth of the LLM read window — the budget converts an unbounded
+#: cost into a loud bounded one.
+FLEET_SCAN_TIME_BUDGET_SECONDS = 10
 
 #: The metadata keys that ``instance_get`` is allowed to surface. The
 #: raw metadata blob is NEVER returned — the existing
@@ -921,7 +939,7 @@ Examples:
 
         threshold_seconds = stale_minutes * 60
         try:
-            report, scan_truncated = await asyncio.to_thread(
+            report, scan_truncated, scan_stop_reason = await asyncio.to_thread(
                 _build_health_report, manager, threshold_seconds
             )
         except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
@@ -932,9 +950,14 @@ Examples:
             "stale_minutes": stale_minutes,
             "detectors": report,
             "total_flagged": sum(d["count"] for d in report),
-            # M8: a VISIBLE blind spot — past FLEET_SCAN_LIMIT the
-            # oldest long-wedged instances are invisible to this scan.
+            # M8: a VISIBLE blind spot — the scan walks the whole fleet
+            # in offset windows, so the blind spot is now the WINDOW CAP
+            # (or the wall-clock budget), not "the newest 1000 rows".
             "scan_truncated": bool(scan_truncated),
+            # F4b: WHY the walk stopped — `end_of_set` (the whole fleet
+            # was covered), `window_cap` (too many windows) or
+            # `time_budget` (the walk ran out of wall-clock).
+            "scan_stop_reason": scan_stop_reason,
         }
         return json.dumps(payload, default=str)
 
@@ -962,6 +985,18 @@ Returns:
     The six classes: `stale-running`, `waiting-on-a-dead-parent`,
     `question-paused-without-task-row`, `zombie-pending`, `orphans`,
     `failed-with-unreported-result`.
+
+    `scan_truncated` says whether the fleet was covered COMPLETELY;
+    `scan_stop_reason` says WHY the walk stopped —
+    `end_of_set` (the whole fleet was read), `window_cap` (the walk hit
+    its window ceiling) or `time_budget` (the walk hit its wall-clock
+    budget).
+
+    THE SCAN IS AN OFFSET WINDOW LOOP over a LIVE fleet: rows created
+    or pinned mid-scan may be counted twice or missed, and
+    `scan_truncated=true` means the OLDEST rows may not be covered.
+    Read the flag as "this report may not see everything", never as
+    "the fleet is healthy".
 
     IMPORTANT — a deliberately parked instance is NOT wedged. The
     `pause_marker` on a flagged row tells you which one you are looking
@@ -1063,19 +1098,33 @@ def _flagged_row(
 
 
 def _parent_status_of(
-    repo: Any, by_id: dict[str, dict[str, Any]], parent_id: str | None
+    repo: Any,
+    status_by_id: dict[str, str],
+    parent_id: str | None,
+    cache: dict[str, str | None] | None = None,
 ) -> str | None:
-    """The parent's status, or ``None`` when the parent row is gone."""
+    """The parent's status, or ``None`` when the parent row is gone.
+
+    ``status_by_id`` is the COMPACT ``instance_id -> status`` map the
+    streaming scan keeps (the fleet's rows are never materialized, so
+    the map is the only cross-row state). A parent that is not in the
+    map is fetched from the repository — the cost is paid ONCE per
+    distinct parent because the resolved value is memoized in ``cache``.
+    """
     if not parent_id:
         return None
-    parent = by_id.get(parent_id)
-    if parent is not None:
-        return parent.get("status")
-    try:
-        prow = repo.get(parent_id)
-    except Exception:  # noqa: BLE001 — read-only probe
-        return None
-    return getattr(prow, "status", None) if prow is not None else None
+    if cache is not None and parent_id in cache:
+        return cache[parent_id]
+    status = status_by_id.get(parent_id)
+    if status is None:
+        try:
+            prow = repo.get(parent_id)
+        except Exception:  # noqa: BLE001 — read-only probe
+            prow = None
+        status = getattr(prow, "status", None) if prow is not None else None
+    if cache is not None:
+        cache[parent_id] = status
+    return status
 
 
 def _has_live_task(task_repo: Any, instance_id: str) -> bool:
@@ -1092,133 +1141,54 @@ def _has_live_task(task_repo: Any, instance_id: str) -> bool:
 
 def _build_health_report(
     manager: Any, threshold_seconds: int
-) -> tuple[list[dict[str, Any]], bool]:
-    """Build the six detector rows + the scan-truncated flag.
+) -> tuple[list[dict[str, Any]], bool, str]:
+    """Build the detector rows, the scan-truncated flag and the stop reason.
 
-    NEVER repairs anything. The flag (M8) tells the caller the scan hit
-    ``FLEET_SCAN_LIMIT`` — the OLDEST instances are invisible and the
-    payload must say so instead of failing silently."""
+    NEVER repairs anything.
+
+    THE SCAN IS AN OFFSET WINDOW LOOP (F4b)
+    ---------------------------------------
+    The old shape read ONE window (``limit=FLEET_SCAN_LIMIT``) of the
+    NEWEST rows and threw the rest away: the OLDEST rows — the day-scale
+    never-dispatched husks — were invisible, and the blind spot was
+    reported as a constant ``False``. The walk now covers the whole
+    fleet, window by window, and says WHY it stopped.
+
+    Invariants (each one is pinned):
+
+    * ``total`` is captured from the FIRST window ONLY and is never
+      reassigned. A concurrent INSERT at the front of the
+      ``created_at DESC`` order shifts every later row down, so a
+      recomputed total would make the walk stop early and silently skip
+      the tail — the exact rows the husks live in.
+    * The walk breaks ONLY on an EMPTY window (end of set) or a cap
+      (window count / wall-clock). It NEVER breaks on
+      ``len(read) >= total``.
+    * Rows are consumed PER WINDOW: only the FLAGGED rows, a compact
+      ``instance_id -> status`` map and the job-active rows survive the
+      loop. The whole fleet is never materialized.
+    * ``scan_stop_reason`` says why the walk stopped —
+      ``end_of_set`` / ``window_cap`` / ``time_budget``.
+
+    Returns:
+        ``(detectors, scan_truncated, scan_stop_reason)``.
+    """
     from ..constants import ALIVE_INSTANCE_STATUSES, TERMINAL_INSTANCE_STATUSES
 
     now = datetime.now(timezone.utc)
-    rows, _total, truncated = manager.list_instances(
-        limit=FLEET_SCAN_LIMIT, offset=0
-    )
-    by_id = {r.get("instance_id"): r for r in rows if r.get("instance_id")}
+    deadline = time.monotonic() + FLEET_SCAN_TIME_BUDGET_SECONDS
     repo = getattr(manager, "_instance_repository", None)
     task_repo = getattr(manager, "_task_repo", None)
-    detectors: list[dict[str, Any]] = []
 
-    # ── 1. stale-running ────────────────────────────────────────────
-    # The LINEAGE-MAX aggregate (R4, hard): `last_activity_at` FREEZES
-    # on a waiting_children parent while a descendant streams mid-LLM,
-    # so a per-row check false-positives on every live parent.
-    flagged: list[dict[str, Any]] = []
-    for info in rows:
-        if info.get("status") != "running":
-            continue
-        instance_id = info.get("instance_id") or ""
-        activity = _lineage_max_activity(manager, instance_id)
-        idle = _seconds_since(
-            activity if activity else info.get("last_activity_at"), now=now
-        )
-        if idle is not None and idle > threshold_seconds:
-            flagged.append(
-                _flagged_row(
-                    info,
-                    idle_seconds=idle,
-                    detail=(
-                        f"no activity in the lineage for {idle}s "
-                        f"(threshold {threshold_seconds}s)"
-                    ),
-                )
-            )
-    detectors.append(
-        {
-            "detector": "stale-running",
-            "instances": flagged,
-            "count": len(flagged),
-            # NO observable classify-only counterpart on the stale-task
-            # recovery sweep — an honest gap, declared.
-            "disagreement_pin": None,
-        }
-    )
-
-    # ── 2. waiting-on-a-dead-parent ────────────────────────────────
-    flagged = []
-    for info in rows:
-        if info.get("status") != "waiting_children":
-            continue
-        parent_id = info.get("parent_id") or None
-        if not parent_id:
-            continue
-        parent_status = _parent_status_of(repo, by_id, parent_id)
-        if parent_status in ALIVE_INSTANCE_STATUSES:
-            continue
-        idle = _seconds_since(info.get("last_activity_at"), now=now)
-        if idle is not None and idle <= threshold_seconds:
-            continue
-        flagged.append(
-            _flagged_row(
-                info,
-                idle_seconds=idle,
-                detail=(
-                    f"waiting on children; parent {parent_id} is "
-                    f"{parent_status or 'missing'}"
-                ),
-            )
-        )
-    detectors.append(
-        {
-            "detector": "waiting-on-a-dead-parent",
-            "instances": flagged,
-            "count": len(flagged),
-            # OBSERVABLE counterpart — the disagreement test runs two
-            # independent code paths over one labelled corpus.
-            "disagreement_pin": "WaitingChildrenWatchdog.wedge_episodes()",
-        }
-    )
-
-    # ── 3. question-paused-without-task-row ────────────────────────
-    flagged = []
-    for info in rows:
-        if info.get("status") != "paused":
-            continue
-        instance_id = info.get("instance_id") or ""
-        idle = _seconds_since(info.get("last_activity_at"), now=now)
-        if idle is None or idle <= threshold_seconds:
-            continue
-        if _question_pack_of(manager, instance_id) is not None:
-            continue
-        if _has_live_task(task_repo, instance_id):
-            continue
-        marker = _pause_marker_of(info.get("metadata"))
-        deliberate = bool(marker) and marker.get("deliberate") is True
-        flagged.append(
-            _flagged_row(
-                info,
-                idle_seconds=idle,
-                detail=(
-                    "paused, aged, no live turn and no pending question"
-                    + (" (DELIBERATE PARK — not a wedge)" if deliberate else "")
-                ),
-            )
-        )
-    detectors.append(
-        {
-            "detector": "question-paused-without-task-row",
-            "instances": flagged,
-            "count": len(flagged),
-            # The sweep's predicate is DOCUMENTED in its docstring but its
-            # selectors are private — the pin is fixture-labelled, which
-            # is materially weaker than an executable counterpart.
-            "disagreement_pin": "stale_pause_sweep (documented classification)",
-        }
-    )
-
-    # ── 4. zombie-pending ──────────────────────────────────────────
-    # admission_state='active', no Task row, instance not alive.
-    flagged = []
+    # ── the job-active instance ids (detector 4's global query) ──────
+    # Taken ONCE, before the walk: the detector needs the set of
+    # instances owning an ACTIVE job item — including ids that are NOT
+    # in the fleet at all (a deleted instance with a live job row is
+    # still a zombie). The rows that ARE in the fleet are picked up
+    # during the walk (the detail map below); the ids that are NOT are
+    # reported as "missing" — the pre-existing semantics.
+    job_active_ids: set[str] = set()
+    job_active_rows: dict[str, dict[str, Any]] = {}
     try:
         from sqlalchemy import text
 
@@ -1232,110 +1202,259 @@ def _build_health_report(
                         "AND instance_id IS NOT NULL"
                     )
                 ).all()
-            for (instance_id,) in active_rows:
-                info = by_id.get(instance_id)
-                status = info.get("status") if info else None
-                if status in ALIVE_INSTANCE_STATUSES:
-                    continue
-                if _has_live_task(task_repo, instance_id):
-                    continue
-                flagged.append(
-                    _flagged_row(
-                        info
-                        or {
-                            "instance_id": instance_id,
-                            "agent_id": None,
-                            "status": status,
-                            "metadata": {},
-                        },
-                        idle_seconds=None,
-                        detail=(
-                            "job item is ACTIVE but the instance is "
-                            f"{status or 'missing'} and owns no task row"
-                        ),
-                    )
-                )
+            job_active_ids = {str(r[0]) for r in active_rows if r[0]}
     except Exception as exc:  # noqa: BLE001 — read-only probe
         logger.debug("instance_read: zombie-pending scan failed: %s", exc)
-    detectors.append(
+
+    # ── the per-detector accumulators ───────────────────────────────
+    # Only FLAGGED rows are retained — the fleet itself is never kept.
+    stale_running: list[dict[str, Any]] = []
+    dead_parent: list[dict[str, Any]] = []
+    paused_no_task: list[dict[str, Any]] = []
+    zombie_pending: list[dict[str, Any]] = []
+    orphans: list[dict[str, Any]] = []
+    failed_unreported: list[dict[str, Any]] = []
+
+    # Compact cross-row state: the ONLY per-row field a detector needs
+    # from another row is the parent's STATUS.
+    status_by_id: dict[str, str] = {}
+    # A parent's status is resolved at most ONCE per report.
+    parent_status_cache: dict[str, str | None] = {}
+
+    total_first: int | None = None
+    reached_end_of_set = False
+    stop_reason = "end_of_set"
+    window_index = 0
+    while window_index < FLEET_SCAN_MAX_WINDOWS:
+        if time.monotonic() >= deadline:
+            stop_reason = "time_budget"
+            break
+        rows, total, _repo_truncated = manager.list_instances(
+            limit=FLEET_SCAN_LIMIT, offset=window_index * FLEET_SCAN_LIMIT
+        )
+        if total_first is None:
+            # FIRST window only — never reassigned (see the docstring).
+            total_first = total
+        if not rows:
+            reached_end_of_set = True
+            stop_reason = "end_of_set"
+            break
+
+        # Pass 1 — the window's statuses, so a child can resolve a
+        # parent that sits in the SAME window (the common case).
+        for info in rows:
+            instance_id = info.get("instance_id")
+            if instance_id:
+                status_by_id[instance_id] = info.get("status")
+
+        # Pass 2 — the detectors, per row, streaming.
+        for info in rows:
+            instance_id = info.get("instance_id") or ""
+            status = info.get("status")
+
+            # ── 1. stale-running ────────────────────────────────────
+            # The LINEAGE-MAX aggregate (R4, hard): `last_activity_at`
+            # FREEZES on a waiting_children parent while a descendant
+            # streams mid-LLM, so a per-row check false-positives on
+            # every live parent.
+            if status == "running":
+                activity = _lineage_max_activity(manager, instance_id)
+                idle = _seconds_since(
+                    activity if activity else info.get("last_activity_at"), now=now
+                )
+                if idle is not None and idle > threshold_seconds:
+                    stale_running.append(
+                        _flagged_row(
+                            info,
+                            idle_seconds=idle,
+                            detail=(
+                                f"no activity in the lineage for {idle}s "
+                                f"(threshold {threshold_seconds}s)"
+                            ),
+                        )
+                    )
+
+            # ── 2. waiting-on-a-dead-parent ──────────────────────────
+            if status == "waiting_children":
+                parent_id = info.get("parent_id") or None
+                if parent_id:
+                    parent_status = _parent_status_of(
+                        repo, status_by_id, parent_id, parent_status_cache
+                    )
+                    if parent_status not in ALIVE_INSTANCE_STATUSES:
+                        idle = _seconds_since(info.get("last_activity_at"), now=now)
+                        if idle is None or idle > threshold_seconds:
+                            dead_parent.append(
+                                _flagged_row(
+                                    info,
+                                    idle_seconds=idle,
+                                    detail=(
+                                        f"waiting on children; parent {parent_id} is "
+                                        f"{parent_status or 'missing'}"
+                                    ),
+                                )
+                            )
+
+            # ── 3. question-paused-without-task-row ──────────────────
+            if status == "paused":
+                idle = _seconds_since(info.get("last_activity_at"), now=now)
+                if idle is not None and idle > threshold_seconds:
+                    if _question_pack_of(manager, instance_id) is None:
+                        if not _has_live_task(task_repo, instance_id):
+                            marker = _pause_marker_of(info.get("metadata"))
+                            deliberate = bool(marker) and marker.get("deliberate") is True
+                            paused_no_task.append(
+                                _flagged_row(
+                                    info,
+                                    idle_seconds=idle,
+                                    detail=(
+                                        "paused, aged, no live turn and no pending question"
+                                        + (
+                                            " (DELIBERATE PARK — not a wedge)"
+                                            if deliberate
+                                            else ""
+                                        )
+                                    ),
+                                )
+                            )
+
+            # ── 4. zombie-pending (the row half) ─────────────────────
+            # The OTHER half — instances with an active job row that
+            # are NOT in the fleet at all — is settled after the walk.
+            if instance_id and instance_id in job_active_ids:
+                job_active_rows[instance_id] = info
+
+            # ── 5. orphans ───────────────────────────────────────────
+            if status != "waiting_children" and status not in TERMINAL_INSTANCE_STATUSES:
+                parent_id = info.get("parent_id") or None
+                if parent_id:
+                    parent_status = _parent_status_of(
+                        repo, status_by_id, parent_id, parent_status_cache
+                    )
+                    if parent_status not in ALIVE_INSTANCE_STATUSES:
+                        orphans.append(
+                            _flagged_row(
+                                info,
+                                idle_seconds=_seconds_since(
+                                    info.get("last_activity_at"), now=now
+                                ),
+                                detail=(
+                                    f"parent {parent_id} is {parent_status or 'missing'}; "
+                                    "this instance is still live"
+                                ),
+                            )
+                        )
+
+            # ── 6. failed-with-unreported-result ─────────────────────
+            if status in ("failed", "error"):
+                children = info.get("children") or []
+                if children:
+                    failed_unreported.append(
+                        _flagged_row(
+                            info,
+                            idle_seconds=_seconds_since(
+                                info.get("last_activity_at"), now=now
+                            ),
+                            detail=(
+                                f"failed with {len(children)} descendant(s); the child's "
+                                "report may never have been delivered"
+                            ),
+                        )
+                    )
+
+        window_index += 1
+    else:
+        # The window cap fired without ever seeing an empty window.
+        stop_reason = "window_cap"
+
+    # ── 4. zombie-pending (the missing-instance half) ───────────────
+    for instance_id in sorted(job_active_ids):
+        info = job_active_rows.get(instance_id)
+        status = info.get("status") if info else None
+        if status in ALIVE_INSTANCE_STATUSES:
+            continue
+        if _has_live_task(task_repo, instance_id):
+            continue
+        zombie_pending.append(
+            _flagged_row(
+                info
+                or {
+                    "instance_id": instance_id,
+                    "agent_id": None,
+                    "status": status,
+                    "metadata": {},
+                },
+                idle_seconds=None,
+                detail=(
+                    "job item is ACTIVE but the instance is "
+                    f"{status or 'missing'} and owns no task row"
+                ),
+            )
+        )
+
+    detectors: list[dict[str, Any]] = [
+        {
+            "detector": "stale-running",
+            "instances": stale_running,
+            "count": len(stale_running),
+            # NO observable classify-only counterpart on the stale-task
+            # recovery sweep — an honest gap, declared.
+            "disagreement_pin": None,
+        },
+        {
+            "detector": "waiting-on-a-dead-parent",
+            "instances": dead_parent,
+            "count": len(dead_parent),
+            # OBSERVABLE counterpart — the disagreement test runs two
+            # independent code paths over one labelled corpus.
+            "disagreement_pin": "WaitingChildrenWatchdog.wedge_episodes()",
+        },
+        {
+            "detector": "question-paused-without-task-row",
+            "instances": paused_no_task,
+            "count": len(paused_no_task),
+            # The sweep's predicate is DOCUMENTED in its docstring but its
+            # selectors are private — the pin is fixture-labelled, which
+            # is materially weaker than an executable counterpart.
+            "disagreement_pin": "stale_pause_sweep (documented classification)",
+        },
         {
             "detector": "zombie-pending",
-            "instances": flagged,
-            "count": len(flagged),
+            "instances": zombie_pending,
+            "count": len(zombie_pending),
             # The one public method is a RECONCILER (mutating); the
             # predicate is documented — the pin is fixture-labelled.
             "disagreement_pin": (
                 "job_recovery_service.reconcile_drift_states "
                 "(documented classification)"
             ),
-        }
-    )
-
-    # ── 5. orphans ─────────────────────────────────────────────────
-    # A non-terminal instance whose parent is gone or terminal — the
-    # shape the orphan sweep's selectors act on.
-    flagged = []
-    for info in rows:
-        if info.get("status") == "waiting_children":
-            continue  # detector 2 owns this class
-        if info.get("status") in TERMINAL_INSTANCE_STATUSES:
-            continue
-        parent_id = info.get("parent_id") or None
-        if not parent_id:
-            continue
-        parent_status = _parent_status_of(repo, by_id, parent_id)
-        if parent_status in ALIVE_INSTANCE_STATUSES:
-            continue
-        flagged.append(
-            _flagged_row(
-                info,
-                idle_seconds=_seconds_since(info.get("last_activity_at"), now=now),
-                detail=(
-                    f"parent {parent_id} is {parent_status or 'missing'}; "
-                    "this instance is still live"
-                ),
-            )
-        )
-    detectors.append(
+        },
         {
             "detector": "orphans",
-            "instances": flagged,
-            "count": len(flagged),
+            "instances": orphans,
+            "count": len(orphans),
             # OBSERVABLE counterpart.
             "disagreement_pin": "OrphanWatcherSweepService.counters()",
-        }
-    )
-
-    # ── 6. failed-with-unreported-result ───────────────────────────
-    flagged = []
-    for info in rows:
-        if info.get("status") not in ("failed", "error"):
-            continue
-        children = info.get("children") or []
-        if not children:
-            continue
-        idle = _seconds_since(info.get("last_activity_at"), now=now)
-        flagged.append(
-            _flagged_row(
-                info,
-                idle_seconds=idle,
-                detail=(
-                    f"failed with {len(children)} descendant(s); the child's "
-                    "report may never have been delivered"
-                ),
-            )
-        )
-    detectors.append(
+        },
         {
             "detector": "failed-with-unreported-result",
-            "instances": flagged,
-            "count": len(flagged),
+            "instances": failed_unreported,
+            "count": len(failed_unreported),
             # NO observable classify-only counterpart — an honest gap.
             "disagreement_pin": None,
-        }
+        },
+    ]
+
+    # F4b: the flag is TRUE when the walk did NOT cover the fleet —
+    # either fewer distinct rows than the count promised, or the walk
+    # stopped on a cap without ever seeing the end of the set.
+    distinct_read = len(status_by_id)
+    scan_truncated = bool(
+        (total_first is not None and distinct_read < total_first)
+        or (not reached_end_of_set)
     )
 
-    return detectors, bool(truncated)
+    return detectors, scan_truncated, stop_reason
 
 
 def _build_capacity_summary(manager: Any) -> dict[str, Any]:
