@@ -393,6 +393,176 @@ async def _resolve_target(manager: Any, instance_id: str) -> str:
 
 
 # ═════════════════════════════════════════════════════════════════════
+# D2(b) — the nudge completion watcher
+# ═════════════════════════════════════════════════════════════════════
+#
+# Defect D2 (premature settle): an ``instance_nudge`` wrote an audit
+# row and NOTHING ELSE. The commissioned work was invisible to the
+# system's single visibility chokepoint (``dependency_watchers``), so
+# the root gate (L3) and the attestation gate (R2) could not see that
+# the mission had out-of-tree work in flight — the leader settled
+# while the nudged worker was still running (the demonstrated fd302262
+# shape: the mission settled 5m06s early).
+#
+# This helper mints the missing ``dependency_watchers`` row. It is a
+# SIBLING of ``daemon/tools/instance.py::_register_child_completion_
+# watcher`` — NOT a reuse of it. The existing helper tree-guards its
+# target (``target.parent_id != sender`` → ``None``), which is
+# correct for the parent→child send path but wrong here: a nudge
+# targets ANY instance, INCLUDING out-of-tree workers. The nudge lane
+# is exactly the case the tree guard excludes.
+#
+# The watcher fires through the EXISTING bus machinery:
+#   * ``emit_terminal`` (task-keyed, exactly-once) fires it when the
+#     watched task reaches a terminal state;
+#   * ``emit_terminal_for_child_instance`` (the corrective path)
+#     matches ``metadata.child_id`` across EVERY target — it does not
+#     switch on ``kind``. The ``kind="nudge_complete"`` marker only
+#     improves forensics.
+#
+# FAIL-OPEN: a failed mint degrades to today's behaviour (no watcher).
+# The mint must never fail the nudge itself.
+
+
+async def _register_nudge_completion_watcher(
+    manager: Any,
+    *,
+    nudger_instance_id: str | None,
+    worker_instance_id: str,
+    message_id: str | None = None,
+    lane: str = "enqueue",
+) -> bool:
+    """Mint the ``dependency_watchers`` row for an ``instance_nudge``.
+
+    The watcher wakes the NUDGER when the nudged worker reaches a
+    terminal state. Without it the nudger is never told the work
+    finished — the commissioned work is invisible to the gate stack.
+
+    The watched SOURCE TASK must be a REAL task id: the bus's orphan
+    sweep cancels any PENDING watcher whose ``source_task_id`` is not
+    in the active task set (``running`` / ``pending`` / ``paused``),
+    after a 30s grace window (worst case ~120s with the 90s sweep
+    interval). A watcher minted on a made-up id is therefore cancelled
+    and the wake-up is LOST.
+
+    Two lanes, two real task ids:
+
+    * ``enqueue`` — the nudge went through the durable enqueue path.
+      The enqueue minted a real PENDING ``Task`` row synchronously in
+      the same transaction as the ``MessageQueue`` row, keyed by the
+      message id. Resolve it via ``_task_repo.get_by_message``.
+    * ``injection`` — the nudge landed mid-turn in a live graph task
+      (RAM FIFO — no MessageQueue row, no Task row). Key on the
+      worker's live RUNNING task via
+      ``_task_repo.find_running_by_instance``.
+
+    Args:
+        manager: The ``InstanceManager``.
+        nudger_instance_id: The instance that issued the nudge (the
+            revival target). ``None`` / empty → no mint (nobody to
+            wake).
+        worker_instance_id: The nudged instance (the watched child).
+        message_id: The enqueued message id (``enqueue`` lane only).
+        lane: ``"enqueue"`` or ``"injection"`` (forensics only).
+
+    Returns:
+        ``True`` when a watcher row was minted; ``False`` on any
+        failure (FAIL-OPEN — the nudge itself still succeeded).
+    """
+    if not nudger_instance_id:
+        logger.debug(
+            "nudge completion watcher skipped — no caller instance id "
+            "(worker=%s)",
+            worker_instance_id[:8],
+        )
+        return False
+    try:
+        _task_repo = getattr(manager, "_task_repo", None)
+        if _task_repo is None:
+            logger.warning(
+                "manager._task_repo is missing — cannot mint the nudge "
+                "completion watcher (nudger=%s, worker=%s)",
+                nudger_instance_id[:8],
+                worker_instance_id[:8],
+            )
+            return False
+
+        task = None
+        if lane == "injection":
+            # The injection lane has no MessageQueue row — key on the
+            # worker's live RUNNING task.
+            task = await asyncio.to_thread(
+                _task_repo.find_running_by_instance, worker_instance_id
+            )
+        elif message_id:
+            # The enqueue lane minted a real PENDING Task row
+            # synchronously, keyed by the message id.
+            task = await asyncio.to_thread(
+                _task_repo.get_by_message, message_id
+            )
+        if task is None:
+            logger.warning(
+                "no %s task for the nudged worker — cannot mint the "
+                "nudge completion watcher (nudger=%s, worker=%s)",
+                lane,
+                nudger_instance_id[:8],
+                worker_instance_id[:8],
+            )
+            return False
+
+        from ..services.dependency_bus import (
+            FollowUp,
+            get_dependency_bus,
+        )
+
+        _bus = get_dependency_bus()
+        if _bus is None:
+            logger.warning(
+                "Bus singleton is None — bus wiring failure (no fallback)"
+            )
+            return False
+
+        follow_up = FollowUp(
+            target_instance_id=nudger_instance_id,
+            message=(
+                f"[dependency_bus] nudged instance {worker_instance_id} "
+                f"completed for message {message_id}"
+            ),
+            source=f"internal_agent:{nudger_instance_id}",
+            metadata={
+                "kind": "nudge_complete",
+                "child_id": worker_instance_id,
+                "parent_id": nudger_instance_id,
+                "message_id": message_id,
+            },
+        )
+        await _bus.watch(
+            source_task_id=str(task.id),
+            follow_up=follow_up,
+        )
+        logger.debug(
+            "bus.watch registered (nudge): task=%s..., nudger=%s..., "
+            "worker=%s..., lane=%s",
+            str(task.id)[:8],
+            nudger_instance_id[:8],
+            worker_instance_id[:8],
+            lane,
+            extra={"completion_delivery_path": "bus"},
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — the mint is FAIL-OPEN
+        logger.warning(
+            "nudge completion watcher mint failed (nudger=%s, worker=%s, "
+            "lane=%s): %s",
+            (nudger_instance_id or "")[:8],
+            worker_instance_id[:8],
+            lane,
+            exc,
+        )
+        return False
+
+
+# ═════════════════════════════════════════════════════════════════════
 # The factory — six act tools
 # ═════════════════════════════════════════════════════════════════════
 def create_instance_ops_tools(
@@ -1105,6 +1275,10 @@ Examples:
             )
         try:
             injected = False
+            # D2(b) — the enqueue lane's message id, captured for the
+            # completion-watcher mint below. It was previously discarded
+            # (``enqueue_message``'s result was not read at all).
+            enqueued_message_id: str | None = None
             graph_task = getattr(manager, "_graph_tasks", {}).get(target_id) \
                 if isinstance(getattr(manager, "_graph_tasks", None), dict) else None
             if graph_task is not None and not graph_task.done():
@@ -1113,15 +1287,38 @@ Examples:
                 )
                 injected = True
             else:
-                await manager.enqueue_message(
+                enqueue_result = await manager.enqueue_message(
                     target_id, message, source=f"instance_ops:{caller_instance_id or 'unknown'}"
                 )
+                enqueued_message_id = getattr(enqueue_result, "message_id", None)
         except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
             # AC-9b: left at "pending" — unknown outcome (see reclaim).
             logger.exception("instance_nudge act failed (audit row left pending)")
             return _error(f"instance_nudge failed: {type(exc).__name__}")
         if audit is not None and row_id:
             audit.settle_audit(row_id, "committed", after={"lane": "injection" if injected else "enqueue"})
+        # D2(b) — mint the completion watcher AFTER the audit settle, so
+        # the committed audit row is durable before the watcher exists.
+        # FAIL-OPEN: a failed mint degrades to today's behaviour (no
+        # watcher) and never fails the nudge. The helper has its own
+        # guard; this call-site guard is the belt-and-braces half (a
+        # mint failure must NEVER surface as a tool error).
+        try:
+            await _register_nudge_completion_watcher(
+                manager,
+                nudger_instance_id=caller_instance_id,
+                worker_instance_id=target_id,
+                message_id=enqueued_message_id,
+                lane="injection" if injected else "enqueue",
+            )
+        except Exception as mint_exc:  # noqa: BLE001 — fail-open producer
+            logger.warning(
+                "nudge completion watcher mint failed (nudger=%s, "
+                "worker=%s): %s",
+                (caller_instance_id or "")[:8],
+                target_id[:8],
+                mint_exc,
+            )
         return json.dumps(
             {
                 "delivered": True,

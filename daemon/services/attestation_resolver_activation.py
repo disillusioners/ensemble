@@ -1442,6 +1442,30 @@ def make_tree_rows_provider(
     (counts-only C evidence) — the provider MUST NEVER raise into the
     shadow. Only invoked when the predicate FIRES (lazy), so the DB cost
     exists solely on would-fire evaluations.
+
+    D2(c) — THE TREE-SCOPED C-UNION (completion-subsystem Phase 1).
+    The provider ADDITIONALLY renders the PENDING ``dependency_watchers``
+    rows whose ``target_instance_id`` is IN the leader's tree as
+    "commissioned work in flight" status rows.
+
+    Why (the architect's addition over the worker recommendation): the
+    demonstrated fd302262 incident is SECOND-HOP — an agent in the
+    leader's tree (the maintenancer) nudges an OUT-OF-TREE worker. The
+    leader-targeted union and ``SourceCSignals.pending_children`` both
+    miss it: the watcher targets the maintenancer, not the leader, and
+    the maintenancer's own child is not in the leader's tree. Without
+    the union the judge's SOURCE C stays TREE-BLIND and can verdict
+    ``complete`` on an unquiet mission — the mission settles 5m06s early
+    while the nudged worker is still running.
+
+    The union is a READ-SIDE JOIN over the EXISTING ``dependency_watchers``
+    table — no new state, no new table, no new column. The minted
+    ``nudge_complete`` watchers (D2(b)) are what it renders.
+
+    FAIL-OPEN to EMPTY rows: a provider failure returns ``[]`` (the C
+    seam already treats a provider raise as a whole-eval fail-open), so
+    a broken read degrades to counts-only C evidence — never to a wrong
+    verdict.
     """
 
     def _provide() -> list[dict[str, Any]]:
@@ -1449,29 +1473,103 @@ def make_tree_rows_provider(
             if manager is None or not instance_id:
                 return []
             tree_ids = manager.get_tree_ids_permanent(instance_id)
-            descendant_ids = [iid for iid in (tree_ids or []) if iid != instance_id]
-            if not descendant_ids:
+            tree_ids = [str(i) for i in (tree_ids or []) if i]
+            if not tree_ids:
                 return []
-            repo = getattr(manager, "_instance_repository", None)
-            if repo is None:
-                return []
+            descendant_ids = [iid for iid in tree_ids if iid != instance_id]
             rows: list[dict[str, Any]] = []
-            for iid in descendant_ids[:C_TREE_ROW_FETCH_CAP]:
-                row = repo.get(iid)
-                if row is None:
-                    continue
-                rows.append(
-                    {
-                        "instance_id": str(getattr(row, "instance_id", iid)),
-                        "status": str(getattr(row, "status", "?")),
-                        "agent_id": str(getattr(row, "agent_id", "?")),
-                    }
-                )
+            # D2(c) — the tree-scoped C-union FIRST. The bundle renders
+            # only the first BUNDLE_C_TREE_ROWS_MAX rows, so the
+            # commissioned rows must lead: they are the DECISIVE
+            # evidence ("work still in flight"), the descendant status
+            # rows are context. Putting them last would let a wide tree
+            # clip them out and silently disarm the union.
+            rows.extend(_commissioned_rows_for_tree(manager, tree_ids))
+            remaining = max(0, C_TREE_ROW_FETCH_CAP - len(rows))
+            repo = getattr(manager, "_instance_repository", None)
+            if repo is not None and remaining:
+                for iid in descendant_ids[:remaining]:
+                    row = repo.get(iid)
+                    if row is None:
+                        continue
+                    rows.append(
+                        {
+                            "instance_id": str(
+                                getattr(row, "instance_id", iid)
+                            ),
+                            "status": str(getattr(row, "status", "?")),
+                            "agent_id": str(getattr(row, "agent_id", "?")),
+                        }
+                    )
             return rows
         except Exception:  # noqa: BLE001 — provider is best-effort only
             return []
 
     return _provide
+
+
+#: The status string a tree-scoped commissioned row carries.
+#:
+#: Deliberately NOT ``completed`` — the cross-resolution helper
+#: (:func:`_completed_child_ids`) treats a ``completed`` status as
+#: "this child's report was delivered" and suppresses the matching
+#: advisory. A commissioned row means the OPPOSITE (work still in
+#: flight), so it must not collide with that vocabulary.
+C_TREE_COMMISSIONED_STATUS = "commissioned_pending"
+
+
+def _commissioned_rows_for_tree(
+    manager: Any,
+    tree_ids: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Render the PENDING watchers of the leader tree as C rows.
+
+    D2(c) — the tree-scoped C-union. READ-ONLY: it reads the existing
+    ``dependency_watchers`` table and returns status rows. It never
+    writes and never raises (the caller wraps the whole provider in a
+    fail-open guard; this helper is defensive on its own too).
+
+    Args:
+        manager: The ``InstanceManager`` (the watcher repository is
+            read off it as ``_watcher_repo``).
+        tree_ids: The leader's tree ids (root + descendants).
+
+    Returns:
+        One row per PENDING watcher, shaped like the descendant rows
+        (``instance_id`` / ``status`` / ``agent_id``). Empty list when
+        the repository is unavailable or the read fails.
+    """
+    try:
+        watcher_repo = getattr(manager, "_watcher_repo", None)
+        if watcher_repo is None:
+            return []
+        fetch = getattr(watcher_repo, "fetch_pending_for_targets", None)
+        if fetch is None:
+            return []
+        watchers = fetch(tree_ids) or []
+        rows: list[dict[str, Any]] = []
+        for watcher in watchers[:C_TREE_ROW_FETCH_CAP]:
+            child_id = ""
+            payload = getattr(watcher, "follow_up_payload", None)
+            if isinstance(payload, dict):
+                meta = payload.get("metadata")
+                if isinstance(meta, dict):
+                    raw_child = meta.get("child_id")
+                    if isinstance(raw_child, str):
+                        child_id = raw_child
+            rows.append(
+                {
+                    "instance_id": child_id
+                    or str(
+                        getattr(watcher, "target_instance_id", "") or ""
+                    ),
+                    "status": C_TREE_COMMISSIONED_STATUS,
+                    "agent_id": "?",
+                }
+            )
+        return rows
+    except Exception:  # noqa: BLE001 — the union is FAIL-OPEN
+        return []
 
 
 # ─────────────────────────────────────────────────────────────────────────────

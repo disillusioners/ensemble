@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Sequence
 
 from sqlalchemy import func, update as sa_update
 from sqlalchemy.engine import Engine
@@ -196,6 +196,42 @@ class DependencyWatcherRepository:
             stmt = (
                 select(DependencyWatcher)
                 .where(DependencyWatcher.target_instance_id == target_instance_id)
+                .where(DependencyWatcher.state == _PENDING_STATE)
+            )
+            return list(session.exec(stmt))
+
+    def fetch_pending_for_targets(
+        self, target_instance_ids: Sequence[str]
+    ) -> list[DependencyWatcher]:
+        """Return the PENDING watchers whose target is ANY of the given ids.
+
+        READ-SIDE JOIN helper (completion-subsystem D2(c) — the tree-scoped
+        C-union): the attestation gate's tree-rows provider renders the
+        PENDING watchers of the whole leader tree as "commissioned work
+        in flight" rows, so the fused judge cannot verdict a mission
+        complete while a tree member is still waiting on commissioned
+        work.
+
+        Same composite index as :meth:`fetch_pending_for_target` — the
+        ``(target_instance_id, state)`` index serves the IN-list. No new
+        state is written by this read.
+
+        Args:
+            target_instance_ids: The target instance ids to inspect.
+                An empty iterable returns an empty list (no query).
+
+        Returns:
+            List of PENDING :class:`DependencyWatcher` rows whose
+            ``target_instance_id`` is in the given set. Empty list if
+            none match.
+        """
+        ids = [str(i) for i in (target_instance_ids or []) if i]
+        if not ids:
+            return []
+        with Session(self.engine) as session:
+            stmt = (
+                select(DependencyWatcher)
+                .where(DependencyWatcher.target_instance_id.in_(ids))
                 .where(DependencyWatcher.state == _PENDING_STATE)
             )
             return list(session.exec(stmt))
