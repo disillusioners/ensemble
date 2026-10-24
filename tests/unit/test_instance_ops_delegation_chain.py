@@ -34,6 +34,16 @@ SAFETY FENCE: no HOME-derived or live-shaped path is ever resolved; the
 audit-ledger scratch DB (where one is needed) is a ``tempfile`` SQLite
 file. The real-PG e2e (real spawn order, real ledger) is the TESTER's
 Phase-4 job — these pins are the per-seam unit layer.
+
+PLANNED MUTATION (T4.4 — one behaviour per run): drop the chain at the
+``job_create`` mint site (S2) → the e2e F11-a RED (child windowless);
+remove the unconditional S3 pop in ``enqueue`` → the b4 injection pin
+RED; mis-bind the factory's ``caller_instance_id`` → the
+mis-bound-factory pin RED; remove the ``exp >= now_dt`` compare in the
+shared claim body → the expired-window pin RED; raise/remove
+``_INHERITED_PROVENANCE_MAX_DEPTH`` → the depth-cap pin RED. The
+legacy-row pin is ANCHOR-NEUTRAL (declared — a regression pin, not
+mutation coverage).
 """
 
 from __future__ import annotations

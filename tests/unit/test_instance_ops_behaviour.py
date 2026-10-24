@@ -1060,7 +1060,18 @@ class TestGetHonestyReviewFixes:
 
 
 class TestF6GateSplit:
-    """F6 — the gate split (D-8 minimal reading)."""
+    """F6 — the gate split (D-8 minimal reading).
+
+    PLANNED MUTATION (one behaviour per run — T4.4, ops-side §7.2):
+      * move the CONFIRMATION conditions below the dry-run fork →
+        F6-i(a) RED;
+      * move the PROVENANCE condition back above the fork → F6-i(b) RED;
+      * delete the gate call on the apply path → F6-ii RED;
+      * make the preview write ``outcome="committed"`` → F6-iii RED;
+      * swap the guard order so the protected gate runs BEFORE the
+        budget/cascade rails → F6-iv RED (the budget token no longer
+        wins).
+    """
 
     def _protected_target(self, fleet):
         fleet.rows["user-chat"] = FakeRow(
@@ -1176,7 +1187,15 @@ class TestF6GateSplit:
 
 
 class TestF7ProtectionReflection:
-    """F7 — one home for the protection determination."""
+    """F7 — one home for the protection determination.
+
+    PLANNED MUTATION (T4.4, ops-side §7.2): revert
+    ``_protection_reasons`` to the marker-only expression → F7-i (the
+    leader static case) RED; drop the chat-root leg → F7-ii RED; scope
+    the marker-already-set refusal to reasons WITHOUT ``marker`` →
+    F7-iii RED; refuse instead of succeed-with-disclosure on the
+    static+marker apply → F7-iv RED.
+    """
 
     async def test_f7_i_leader_target_previews_as_protected(self, fleet):
         import json as _json
@@ -1265,7 +1284,12 @@ class TestF7ProtectionReflection:
 
 
 class TestF10AuditRowId:
-    """F10 — the mark apply echoes the committed audit row id."""
+    """F10 — the mark apply echoes the committed audit row id.
+
+    PLANNED MUTATION (T4.4, arch §11.3): drop the echoed row id (leave
+    the ``write_audit_and_act`` result unassigned) → ALL THREE pins
+    here RED.
+    """
 
     async def test_f10_i_protect_echoes_the_row_id(self, fleet):
         import json as _json
@@ -1319,7 +1343,13 @@ class TestF10AuditRowId:
 
 
 class TestF9ReclaimCopy:
-    """F9 — the reclaim refusal must not recommend a dispatch."""
+    """F9 — the reclaim refusal must not recommend a dispatch.
+
+    PLANNED MUTATION (N-4): restore the old 'use instance_nudge'
+    refusal copy → F9-i RED (the refusal must not suggest a nudge for a
+    non-terminal evidence-free target — a nudge DISPATCHES a
+    context-free turn); revert either doc surface → F9-ii RED.
+    """
 
     async def test_f9_i_copy_names_the_real_paths(self, fleet):
         fleet.rows["idle-1"] = FakeRow("idle-1", agent_id="worker")
