@@ -76,6 +76,7 @@ from typing import Annotated, Any
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from ..chunking import chunked
 from ..repositories.instance.models import InstanceStatus
 from ..services.work_status import _STATUS_CANONICAL_MAP
 from ._tool_registry import register_tool_category
@@ -1370,16 +1371,6 @@ def _has_live_task(task_repo: Any, instance_id: str) -> bool:
     return any(getattr(t, "status", None) not in terminal for t in tasks)
 
 
-def _chunked_ids(instance_ids: list[str], size: int) -> list[list[str]]:
-    """Split an id list into consecutive chunks (the bind-limit guard)."""
-    if size <= 0:
-        return [list(instance_ids)]
-    return [
-        instance_ids[i : i + size]
-        for i in range(0, len(instance_ids), size)
-    ]
-
-
 #: The bind-parameter chunk size for the husk detector's batched
 #: JobItem probe. SQLite's ``SQLITE_MAX_VARIABLE_NUMBER`` is 999; 500
 #: leaves headroom and matches the repository's evidence-probe chunk.
@@ -1419,7 +1410,7 @@ def _job_item_counts_by_instance(
             "WHERE instance_id IN :ids GROUP BY instance_id"
         ).bindparams(bindparam("ids", expanding=True))
         with engine.connect() as conn:
-            for chunk in _chunked_ids(list(instance_ids), _HUSK_PROBE_CHUNK):
+            for chunk in chunked(list(instance_ids), _HUSK_PROBE_CHUNK):
                 if not chunk:
                     continue
                 rows = conn.execute(stmt, {"ids": list(chunk)}).all()

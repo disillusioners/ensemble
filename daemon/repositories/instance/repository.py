@@ -17,6 +17,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.sql.elements import ColumnElement, TextClause
 from sqlmodel import Session as SQLModelSession, select, col
 
+from daemon.chunking import chunked
 from .models import Instance, InstanceHierarchy, InstanceStatus
 from daemon.repositories.task.models import Task
 from daemon.repositories.event.models import Event
@@ -136,13 +137,6 @@ def never_dispatched_evidence_expr() -> tuple[ColumnElement[bool], ColumnElement
         select(Task.id).where(Task.instance_id == Instance.instance_id)
     )
     return no_messages, no_tasks
-
-
-def _chunked(items: list[Any], size: int) -> list[list[Any]]:
-    """Split ``items`` into consecutive chunks of at most ``size``."""
-    if size <= 0:
-        return [list(items)]
-    return [items[i : i + size] for i in range(0, len(items), size)]
 
 
 # Safety cap on descendants loaded per page during root-based pagination.
@@ -907,7 +901,7 @@ class SQLModelInstanceRepository:
         no_messages, no_tasks = never_dispatched_evidence_expr()
         found: set[str] = set()
         with SQLModelSession(self.engine) as db_session:
-            for chunk in _chunked(list(instance_ids), _EVIDENCE_PROBE_CHUNK):
+            for chunk in chunked(list(instance_ids), _EVIDENCE_PROBE_CHUNK):
                 stmt = (
                     select(Instance.instance_id)
                     .where(Instance.instance_id.in_(chunk))
@@ -2557,7 +2551,7 @@ class SQLModelInstanceRepository:
                 if db_session.bind is not None
                 else "sqlite"
             )
-            for chunk in _chunked(list(instance_ids), _METADATA_LOOKUP_CHUNK):
+            for chunk in chunked(list(instance_ids), _METADATA_LOOKUP_CHUNK):
                 if dialect == "postgresql":
                     stmt = text(
                         "SELECT instance_id FROM instances "
