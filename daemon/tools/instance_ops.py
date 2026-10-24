@@ -109,7 +109,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
@@ -208,11 +207,14 @@ GATE_CONFIRMATION_TOKENS = frozenset({
     GATE_TOKEN_CONFIRMATION_MISMATCH,
 })
 
-#: The house refusal envelope's reason token, extracted with an
-#: ANCHORED regex. The gate's message embeds the caller's own
-#: confirmation value and the target id, so an UNANCHORED search would
-#: be a decoy risk (the message body could carry the token text).
-_REFUSAL_TOKEN_RE = re.compile(r"^Error: .*? REFUSED — reason=([a-z0-9-]+):")
+#: The house refusal envelope's reason token is NO LONGER recovered by
+#: a regex. The gate returns its token STRUCTURALLY (see
+#: :func:`_protected_gate`), so the caller never parses a message body
+#: to learn which condition fired. The old ANCHORED regex
+#: (``^Error: .*? REFUSED — reason=([a-z0-9-]+):``) was a recovery
+#: seam, and a recovery seam is a silent-degradation seam: a non-match
+#: turned a CONFIRMATION refusal into preview data attributed to a
+#: hardcoded provenance token. There is nothing left to recover.
 
 
 def _is_instance_ops_authorized(agent_id: str) -> bool:
@@ -246,25 +248,6 @@ def _resolve_instance_ops_enabled() -> bool:
 def _refusal(label: str, token: str, message: str) -> str:
     """The house refusal envelope (identical shape in both categories)."""
     return f"Error: {label} REFUSED — reason={token}: {message}"
-
-
-def _token_of(refusal: str | None) -> str | None:
-    """The refusal's REASON TOKEN — or ``None`` when the gate passes.
-
-    F6: the preview renders the gate's verdict as DATA
-    (``act_gate_would_pass``), and a preview carries TOKENS ONLY — never
-    the raw refusal string (it embeds the target id and the caller's own
-    confirmation value).
-
-    The extraction is ANCHORED to the house envelope prefix: the gate
-    message body embeds ``confirmed_target_id={…!r}`` and a source
-    hint, so an unanchored search for the token text would be a decoy
-    risk.
-    """
-    if not refusal:
-        return None
-    match = _REFUSAL_TOKEN_RE.match(refusal)
-    return match.group(1) if match else None
 
 
 def _error(msg: str) -> str:
@@ -433,7 +416,7 @@ def _protected_gate(
     confirmed_target_id: str | None,
     verdict: ProvenanceVerdict,
     label: str,
-) -> str | None:
+) -> tuple[str | None, str | None]:
     """The protected-target gate (D-17 / D-18, re-scoped by DF-4).
 
     TWO conditions, in order: the confirmed-target check (D-17) and the
@@ -442,41 +425,62 @@ def _protected_gate(
     no trust signal, and it survives as observability in the audit
     ledger (DF-4).
 
-    Returns ``None`` when the gate PASSES, or the refusal string.
+    Returns ``(refusal, token)``:
+
+    * ``(None, None)`` — the gate PASSES.
+    * ``(refusal_string, token)`` — the gate REFUSES, and ``token`` is
+      the refusal's reason token, RETURNED STRUCTURALLY.
+
+    The token is the CONSTANT that minted the refusal (see
+    ``GATE_TOKEN_*``), never a re-parse of the message body. The old
+    shape recovered it with an anchored regex and fell back to a
+    hardcoded provenance token when the regex did not match — a
+    recovery seam that could silently mislabel a CONFIRMATION refusal
+    as provenance data. The refusal STRING is byte-identical to the
+    pre-fix shape (the constants hold the same spellings).
     """
     if confirmed_target_id is None:
-        return _refusal(
-            label,
-            "protected-target-confirmation-required",
-            (
-                f"{target_id!r} is a protected target. Pass "
-                f"confirmed_target_id='{target_id}' — the confirmation "
-                "NAMES the target it authorizes."
+        return (
+            _refusal(
+                label,
+                GATE_TOKEN_CONFIRMATION_REQUIRED,
+                (
+                    f"{target_id!r} is a protected target. Pass "
+                    f"confirmed_target_id='{target_id}' — the confirmation "
+                    "NAMES the target it authorizes."
+                ),
             ),
+            GATE_TOKEN_CONFIRMATION_REQUIRED,
         )
     if confirmed_target_id != target_id:
-        return _refusal(
-            label,
-            "confirmed-target-mismatch",
-            (
-                f"confirmed_target_id={confirmed_target_id!r} does not "
-                f"name the target {target_id!r}. The confirmation must "
-                "name the target the user consented to, verbatim."
+        return (
+            _refusal(
+                label,
+                GATE_TOKEN_CONFIRMATION_MISMATCH,
+                (
+                    f"confirmed_target_id={confirmed_target_id!r} does not "
+                    f"name the target {target_id!r}. The confirmation must "
+                    "name the target the user consented to, verbatim."
+                ),
             ),
+            GATE_TOKEN_CONFIRMATION_MISMATCH,
         )
     if not verdict.ok:
         hint = _user_origin_sources_hint()
         extra = f" What counts as user-origin: {hint}." if hint else ""
-        return _refusal(
-            label,
-            "no-user-provenance",
-            (
-                "no live user-origin provenance window on this turn. "
-                "The windows are in-memory and are wiped on a daemon "
-                f"restart.{extra}"
+        return (
+            _refusal(
+                label,
+                GATE_TOKEN_NO_USER_PROVENANCE,
+                (
+                    "no live user-origin provenance window on this turn. "
+                    "The windows are in-memory and are wiped on a daemon "
+                    f"restart.{extra}"
+                ),
             ),
+            GATE_TOKEN_NO_USER_PROVENANCE,
         )
-    return None
+    return None, None
 
 
 async def _resolve_target(manager: Any, instance_id: str) -> str:
@@ -770,13 +774,15 @@ def create_instance_ops_tools(
         gate_refusal = None
         gate_token = None
         if protected:
-            gate_refusal = _protected_gate(
+            # The gate returns ``(refusal, token)`` STRUCTURALLY — the
+            # token is the constant that minted the refusal, never a
+            # re-parse of the message body.
+            gate_refusal, gate_token = _protected_gate(
                 target_id=target_id,
                 confirmed_target_id=confirmed_target_id,
                 verdict=verdict,
                 label=label,
             )
-            gate_token = _token_of(gate_refusal)
             is_confirmation_refusal = gate_token in GATE_CONFIRMATION_TOKENS
             if gate_refusal is not None and (
                 not dry_run or is_confirmation_refusal
@@ -873,9 +879,13 @@ def create_instance_ops_tools(
                             "no-user-provenance when absent"
                         ),
                         "would_refuse_with": (
-                            [GATE_TOKEN_NO_USER_PROVENANCE]
-                            if gate_refusal is not None
-                            else []
+                            # The ACTUAL token the gate minted — never a
+                            # hardcoded guess. (Pre-fix this was a
+                            # literal fallback: a regex non-match
+                            # degraded a CONFIRMATION refusal into
+                            # preview data attributed to the provenance
+                            # token.)
+                            [gate_token] if gate_token else []
                         ),
                     }
                     if protected

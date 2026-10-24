@@ -1059,6 +1059,123 @@ class TestGetHonestyReviewFixes:
 # F10 — the mark apply echoes the committed audit row id.
 
 
+class TestGateTokenStructure:
+    """The gate's refusal token is RETURNED STRUCTURALLY (tidier fold).
+
+    The pre-fix shape recovered the token by re-parsing the refusal
+    string with an ANCHORED regex, and the preview's
+    ``would_refuse_with`` carried a HARDCODED token. A regex non-match
+    therefore degraded a CONFIRMATION refusal into preview data
+    attributed to the provenance token — a silent mislabel.
+
+    This class pins the STRUCTURAL contract:
+
+      * the gate returns ``(refusal, token)``;
+      * the token IS the constant that minted the refusal;
+      * the token and the refusal string never drift apart (the token
+        is EXACTLY the one embedded in the envelope);
+      * a passing gate returns ``(None, None)`` — never a token;
+      * the preview's ``would_refuse_with`` is DERIVED from the token
+        the gate actually returned (it agrees with
+        ``act_gate_would_pass.reason``).
+
+    PLANNED MUTATION (one behaviour per run):
+      * make the gate return the refusal string only (the pre-fix
+        shape) → the structural-arity pin RED;
+      * mint the refusal with a DIFFERENT token than the one returned
+        → the no-drift pin RED;
+      * hardcode ``would_refuse_with`` back to the provenance token
+        → the derivation pin RED (on a gate whose token is not that
+        one).
+    """
+
+    @staticmethod
+    def _verdict(ok: bool):
+        from daemon.tools.provenance import ProvenanceVerdict
+
+        return ProvenanceVerdict(ok=ok, pclass="direct" if ok else "")
+
+    def _gate(self, *, confirmed, ok, target="target-1"):
+        return io._protected_gate(
+            target_id=target,
+            confirmed_target_id=confirmed,
+            verdict=self._verdict(ok),
+            label="INSTANCE_TERMINATE",
+        )
+
+    def test_a_passing_gate_returns_no_refusal_and_no_token(self):
+        refusal, token = self._gate(confirmed="target-1", ok=True)
+        assert refusal is None
+        assert token is None
+
+    def test_the_gate_returns_a_two_tuple(self):
+        """The arity is STRUCTURAL — a bare refusal string is RED."""
+        result = self._gate(confirmed=None, ok=True)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+
+    def test_the_confirmation_required_token_is_the_constant(self):
+        refusal, token = self._gate(confirmed=None, ok=True)
+        assert token == io.GATE_TOKEN_CONFIRMATION_REQUIRED
+        assert f"reason={io.GATE_TOKEN_CONFIRMATION_REQUIRED}:" in refusal
+
+    def test_the_confirmation_mismatch_token_is_the_constant(self):
+        refusal, token = self._gate(confirmed="other-id", ok=True)
+        assert token == io.GATE_TOKEN_CONFIRMATION_MISMATCH
+        assert f"reason={io.GATE_TOKEN_CONFIRMATION_MISMATCH}:" in refusal
+
+    def test_the_provenance_token_is_the_constant(self):
+        refusal, token = self._gate(confirmed="target-1", ok=False)
+        assert token == io.GATE_TOKEN_NO_USER_PROVENANCE
+        assert f"reason={io.GATE_TOKEN_NO_USER_PROVENANCE}:" in refusal
+
+    def test_the_refusal_strings_are_byte_identical_to_the_pre_fix_shape(self):
+        """The refusal STRING set is unchanged — only its derivation moved.
+
+        The pre-fix strings are reproduced VERBATIM here, so a reworded
+        envelope is RED. (The refusal envelope's shape is pinned by the
+        house format: ``Error: <label> REFUSED — reason=<token>: <msg>``.)
+        """
+        refusal, _token = self._gate(confirmed=None, ok=True)
+        assert refusal.startswith(
+            "Error: INSTANCE_TERMINATE REFUSED — reason="
+            f"{io.GATE_TOKEN_CONFIRMATION_REQUIRED}: "
+        )
+        assert "'target-1' is a protected target." in refusal
+        assert "confirmed_target_id='target-1'" in refusal
+
+        refusal, _token = self._gate(confirmed="other-id", ok=True)
+        assert refusal.startswith(
+            "Error: INSTANCE_TERMINATE REFUSED — reason="
+            f"{io.GATE_TOKEN_CONFIRMATION_MISMATCH}: "
+        )
+        assert "confirmed_target_id='other-id' does not name the target" in refusal
+
+    async def test_the_preview_derives_would_refuse_with_from_the_token(
+        self, fleet
+    ):
+        """``would_refuse_with`` AGREES with the gate's own token.
+
+        The pre-fix shape hardcoded the provenance token there. The
+        derivation is now structural, so the two payload fields can
+        never disagree.
+        """
+        import json as _json
+
+        iid = "user-chat"
+        fleet.rows[iid] = FakeRow(
+            iid, agent_id="leader", metadata={"source_type": "telegram"}
+        )
+        tools = _act_tools(fleet)
+        out = await _by_name(tools, "instance_terminate").ainvoke(
+            {"id": iid, "reason": "r", "confirmed_target_id": iid}
+        )
+        payload = _json.loads(out.split("\nNO mutation happened")[0])
+        reason = payload["act_gate_would_pass"]["reason"]
+        assert payload["act_gate"]["would_refuse_with"] == [reason]
+        assert reason == io.GATE_TOKEN_NO_USER_PROVENANCE
+
+
 class TestF6GateSplit:
     """F6 — the gate split (D-8 minimal reading).
 
