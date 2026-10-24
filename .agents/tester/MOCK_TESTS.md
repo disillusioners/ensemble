@@ -790,8 +790,10 @@ d. **Verbatim live shape — probe CLEAN, no removal**: the exact incident tuple
 > `frontend/scripts/boot-e2e-maintenance-daemon.sh`) is documented in
 > the surviving entries above and in `PACKS.md`; it stays reusable for
 > other boot smokes. The historical run evidence is preserved in
-> `RESULTS/2026-10-16-cu-mcp-computer-use-verification.md` (plus the
-> `LESSONS/` + `EVIDENCE/` rows) — untouched history.
+> `RESULTS/2026-10-16-cu-mcp-computer-use-verification.md` and the
+> matching `LESSONS/` row
+> (`LESSONS/2026-10-16-cu-mcp-tcc-wallpaper-signature.md`) — untouched
+> history.
 >
 > The remote-hands replacement surface (the `mcps_client` wrapper +
 > gateway + the `mcp_rpc` tools) is exercised by the

@@ -1,12 +1,8 @@
 # mcps_client — CU Wrapper & Remote-Hands Architecture
 
-> **DESIGN PROPOSAL — status: proposed / not implemented.**
-> Nothing in this document exists in the codebase today: no
-> `mcps_client` project, no `.app` wrapper, no gateway, no
-> ensemble-side HTTP transport change. This is the agreed design
-> (2026-10-16) for the wrapper architecture plus the small future
-> ensemble-side change that consumes it. Treat every "proposed"
-> verb below as future work.
+> **STATUS — SHIPPED (v0.27.5):** the `mcps_client` wrapper, gateway,
+> and `mcp_rpc` transport all exist; the `cu` builtin this design
+> targeted was REMOVED 2026-10-24. See the STATUS UPDATE below.
 
 > **STATUS UPDATE — 2026-10-24.** The daemon-side `cu` builtin described
 > below was REMOVED in `feature/remove-cu-builtin`; the `mcps_client`
@@ -17,10 +13,10 @@
 | Field | Value |
 |---|---|
 | **Date** | 2026-10-16 |
-| **Status** | **Proposed / not implemented** — design proposal (docs-only deliverable) |
+| **Status** | **SHIPPED** (v0.27.5) — kept as the architecture reference; the `cu` builtin it targeted was removed 2026-10-24 |
 | **Audience** | Daemon operators; future maintainers of the `cu` builtin and of the standalone `mcps_client` project |
 | **Applies to** | The `cu` builtin ONLY — see Scope below |
-| **Related** | [`docs/mcp-computer-use-server.md`](./mcp-computer-use-server.md) — the cu builtin as built today (npx-stdio wiring, TCC notes, pin policy) |
+| **Related** | [`docs/mcp-computer-use-server.md`](./mcp-computer-use-server.md) — the retired cu builtin's historical stub (npx-stdio wiring, TCC notes, pin policy) |
 
 ---
 
@@ -197,8 +193,8 @@ The cu builtin switches from npx-stdio spawn to a
 notes for that PR:
 
 - **Generalize the D7-style config-shape guard** — the exact-pin
-  match pattern the `/mcp-servers/test-connection` probe uses
-  today (see [`docs/mcp-computer-use-server.md`](./mcp-computer-use-server.md)
+  match pattern the `/mcp-servers/test-connection` probe used at
+  design time (D7 guard removed 2026-10-24; see [`docs/mcp-computer-use-server.md`](./mcp-computer-use-server.md)
   → *Version-pin policy*) needs an HTTP-config-shaped variant so
   the guard tracks the new transport shape atomically.
 - **Do not inherit the GATING GAP** — `preload_mcp_tools` today
@@ -373,12 +369,11 @@ On top of Phase 2's primitives:
 ## Linked documents
 
 * [`docs/mcp-computer-use-server.md`](./mcp-computer-use-server.md) —
-  the cu builtin as built today (npx-stdio wiring, TCC grants,
-  pin policy, kill-switches, D7 guard).
-* `daemon/mcp/builtin_servers/computer_use.py` — single source of
-  truth today for the package pin, profile, prefix, and
-  kill-switch that the Phase-1 ensemble-side PR will modify.
-* `daemon/routers/mcp_servers.py` — the D7-style config-shape
-  guard referenced by the Phase-1 implementer notes.
+  historical stub of the retired cu builtin; full pre-removal
+  version: `git show 0774f3fe1:docs/mcp-computer-use-server.md`.
+* `daemon/mcp/builtin_servers/computer_use.py` — DELETED 2026-10-24
+  (was the design-time single source of truth for pin/profile/prefix/kill-switch).
+* `daemon/routers/mcp_servers.py` — historically home of the
+  D7-style config-shape guard (removed 2026-10-24).
 * `daemon/services/mcp_service.py` — `preload_mcp_tools` and the
   availability-gate gap the HTTP mode must not inherit.

@@ -751,9 +751,11 @@ class McpService:
             for server in servers:
                 # S1 (cu-mcp commission, 2026-10-16): builtin
                 # availability gate. A post-boot kill-switch flip
-                # (the cu builtin's ``COMPUTER_USE_MCP_ENABLED=0``
-                # was the first case — the shape is GENERIC: ANY
-                # builtin's kill-switch) leaves the server's
+                # (HISTORICAL first case: the cu builtin's
+                # ``COMPUTER_USE_MCP_ENABLED=0`` — that builtin and
+                # its env var were removed 2026-10-24; live example
+                # of the GENERIC shape: ``PLANE_MCP_ENABLED``) leaves
+                # the server's
                 # ``mcp_servers`` row ACTIVE from the prior ON boot —
                 # without this gate the preload loop would call
                 # ``get_schemas_for_server`` on the stale row and the

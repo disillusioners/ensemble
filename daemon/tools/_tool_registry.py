@@ -317,7 +317,7 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # ``tests/unit/test_instance_ops_registration.py`` (the nest-ops pin —
 # added 2026-10-21; it pins BOTH categories plus the registration
 # wiring). The three phase-local pins ALSO carry a
-# ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count assertion (16 today).
+# ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count assertion (15 today).
 #
 # DERIVE THE PIN SET BY GREPPING THE TREE — do NOT trust this prose:
 #   grep -rn "PRIVILEGED_TOOL_CATEGORIES == frozenset" tests/ --include=*.py

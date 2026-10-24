@@ -67,7 +67,7 @@ EXPECTED_HOLDERS: list[str] = ["ari", "leader", "maintenancer"]
 #: The privileged universe — the 15 pre-existing entries plus the
 #: wedge-capture category (15 -> 16 at the time). The ``cu`` category
 #: was REMOVED 2026-10-24 together with the cu builtin MCP server, so
-#: the live set is 15 members (14 pre-existing + wedge-capture +
+#: the live set is 15 members (13 pre-existing + wedge-capture +
 #: mcp_rpc).
 EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "system_upgrade",

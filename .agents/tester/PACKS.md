@@ -2869,9 +2869,10 @@ Lane-keeper note: bump Last Run on the two registered rows above (`concurrency_a
 > cu pack rows below are deleted. `cu_new_suite_unit_test` invoked
 > `tests/unit/test_computer_use_mcp.py`, which no longer exists (its
 > generic half was ported to
-> `tests/unit/test_mcp_builtin_availability_gate.py`); the remaining
-> rows targeted the cu builtin's kill-switch / prefix / privilege-stamp
-> surface, which is gone with it. The full historical report stays in
+> `tests/unit/test_mcp_builtin_availability_gate.py`); the other seven
+> were the 2026-10-16 cu-mcp gate's own ad-hoc packs — retired with
+> that gate, though most invoked still-present, non-cu-specific files
+> (the sibling QUARANTINE 2026-10-16 row words this precisely). The full historical report stays in
 > `RESULTS/2026-10-16-cu-mcp-computer-use-verification.md` and the
 > evidence rows in `LESSONS/` / `EVIDENCE/` are untouched (history).
 
