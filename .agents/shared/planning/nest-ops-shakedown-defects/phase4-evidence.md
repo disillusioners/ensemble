@@ -34,14 +34,27 @@ reads. No DB proxy, no `pg_stat_statements`.
 | threshold (iii): `scan_truncated=false` only at true end-of-set | **PASS** (`end_of_set` + `truncated=false`; both husks covered) |
 
 Composition of window 1 (1,000 rows): 1 page read + 1,000 per-row child
-lookups = 1,002. This is EXACTLY the arch §4 arithmetic — the A2 N+1
-(one `list_child_ids_permanent` per row) is the disclosed cost; batched
-children (`list_child_ids_permanent_bulk`, ~20 lines / 2 files) remain the
-recorded first-class follow-up. The gate holds because the N+1 is
-**bounded at exactly one query per row** — a second per-row query of any
-kind would exceed the gate and FAIL threshold (i). The tail window (3 rows)
-carries 5 statements (1 read + 3 lookups) and the empty terminator carries
-3 (1 read + the 2 batched husk-evidence queries).
+lookups + the next window's COUNT = 1,002. This is EXACTLY the arch §4
+arithmetic — the A2 N+1 (one `list_child_ids_permanent` per row) is the
+disclosed cost; batched children (`list_child_ids_permanent_bulk`, ~20
+lines / 2 files) remain the recorded first-class follow-up. The gate holds
+because the N+1 is **bounded at exactly one query per row** — a second
+per-row query of any kind would exceed the gate and FAIL threshold (i).
+The tail window (3 rows) carries 5 statements (1 read + 3 lookups + its
+COUNT) and the empty terminator carries 3 (1 read + the 2 batched
+husk-evidence queries).
+
+(The COUNT is the term the original composition sentence omitted, and the
+reason it is easy to omit: the repository's list path issues
+`SELECT count(*) …` BEFORE its page read, and the attribution slice for
+window N runs FROM window N's page read UP TO window N+1's page read — so
+window N+1's COUNT lands INSIDE window N's slice. The FIRST COUNT is the
+one that lands before the first page read, which is why the pre-loop row
+above reads "2 (1 job-active global + 1 COUNT)". Re-measured against the
+live fixture on 2026-10-25: PRE-LOOP = [job-active, COUNT], window 1 = 1
+page read + 1,000 child lookups + COUNT, window 2 = 1 page read + 3 child
+lookups + COUNT, terminator = 1 page read + the 2 batched husk-evidence
+queries.)
 
 Re-run:
 
