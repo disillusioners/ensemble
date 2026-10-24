@@ -5,6 +5,26 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [<STAGED-VERSION>] — 2026-10-24
+
+### Fixed — the nest-ops shakedown defect patch (`fix/nest-ops-shakedown-defects`, base `b257842c9`, merge M `cdf348057`)
+
+> **Stage composition:** 12 read/act-surface defects on the live `instance_read`/`instance_ops` surface — seven read-side (F12 → F4 → F3 → F2 → F8 → F5 → F1) + five ops-side (F11 → F6 → F7 → F10 → F9) — with mutation-verified pinned regressions, the real-PG acceptance pack (`test/packs/nest_ops_shakedown_unit_test.sh`, 38 tests), the T4.8 scan-cost measurement (per-window [1002, 5, 3] vs the D-20 gate 1002; wall 3.2–3.6 s vs the 10 s budget), the C1/C2/C3 class findings (`design-decision.md`), and the maintenancer agent-surface doc (`tools_note.md`, same-commit baseline re-stamp). NO promote — the user's 3-factor nonce ceremony owns it.
+
+- **F12** — the `instance_list` `status` filter is forwarded to the repository at the lifecycle→repo seam (it was silently dropped, so filtered pages returned unfiltered rows while `total_matching` counted only the matching population); first-ever pin on that seam.
+- **F4a** — `instance_list.truncated` is honest: `bool(total_matching > applied_offset + len(rows))`, re-derivable from the payload alone; the exhausted empty page reads `false`.
+- **F4b** — the `instance_health` scan covers the whole fleet via an offset-window loop (`FLEET_SCAN_LIMIT`×`FLEET_SCAN_MAX_WINDOWS` cap + a 10 s time budget), with `scan_truncated` + `scan_stop_reason` saying WHY the walk stopped; the oldest rows are no longer invisible.
+- **F3** — the `never-dispatched-husk` detector (#7): a spawned-but-never-dispatched row (idle, no task/message/job/children/pack/marker, `last_activity_at` NULL, aged > 24 h) is REPORTED in the wedge report — never repaired; the evidence expression is single-homed (`never_dispatched_evidence_expr`) and containment-pinned to the canonical ghost signature.
+- **F2** — the census counts the WHOLE fleet (grouped SQL, not a windowed loop) and reconciles (`sum(counts_by_status) == counted_rows == total_rows == instance_list.total_matching`, `reconciled` flag); `idle` is a STATUS bucket (`counts_by_liveness` keeps the canonical mapping).
+- **F8** — `instance_get` is genuinely side-effect-free: no MCP schema discovery on a cold instance, no row write (`agent_tag`/`agent_dir` no longer re-elevated); the full payload and refusal texts are unchanged.
+- **F5** — `dead_jobs_total` (Σ per-queue dead, `job_queue_items`) and `dlq_depth` (dead-letter table) are both reported with a `dlq_note` stating they are DIFFERENT measures from different tables; no value unification.
+- **F1** — `instance_fleet_summary` resolves as an ADDITIVE alias of the live `fleet_capacity_summary` (one builder, byte-identical payload, both registry lists, both docs); the live name is unchanged.
+- **F11** — the daemon-minted DELEGATION CHAIN: a user-origin turn delegated via `job_create` (or `job_continue`) threads a reserved pointer (`__ens_dispatch_chain__`) job → message → claim → funnel, so the delegated child inherits the caller's live window and a protected act ADMITS with the full audit-row provenance snapshot (`inherited`/depth/root_source/root_message_id); forgery-controlled (daemon-only mint, unconditional metadata pop, `agent:`-lane-only honouring, expiry + depth cap, fail-closed).
+- **F6** — the protected gate splits at the dry-run fork: confirmation conditions run on BOTH paths; the user-provenance condition is APPLY ONLY (a confirmed preview reports `act_gate_would_pass` instead of dead-ending); the destructive act keeps ALL gates; the budget/cascade rails' precedence (F6-iv) is pinned.
+- **F7** — `already_protected` means PROTECTED, not merely marked: `_protection_reasons()` single-homes the three layers (`leader` / `chat-root` / `marker`); `protect` on a statically protected target succeeds-with-disclosure; the `marker-already-set` refusal stays byte-identical.
+- **F10** — every `instance_mark` apply path (park/protect/suspect) echoes the COMMITTED `audit_row_id`, verified in-DB.
+- **F9** — the `instance_reclaim` refusal on a non-terminal target names the real paths (`instance_terminate` dry-run-first, reads, `park`) and never recommends `instance_nudge` (a nudge dispatches a context-free turn); both doc mirrors carry the warning.
+
 ## [Unreleased] — 2026-10-24
 
 ### Removed — the daemon-side computer-use (cu) builtin MCP server (`feature/remove-cu-builtin`)
