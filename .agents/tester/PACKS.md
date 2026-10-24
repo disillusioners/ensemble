@@ -5,7 +5,7 @@
 
 | Pack | Invocation | Scope | Last Run | Status |
 |---|---|---|---|---|
-| `nest_ops_shakedown_unit_test` | `timeout 330 bash test/packs/nest_ops_shakedown_unit_test.sh` | `tests/integration/test_nestops_husk_fleet_real_pg.py` (18: two-tier >window fixture, §3.5 legs, F3×F4 coupling, F2 census, F4a truncated, T4.8 measurement) + `tests/integration/test_nestops_ops_real_pg.py` (20: F11 e2e a/b1–b5/c1/c2 through the real order, F6-i(a)/(b)/ii/iii/iv, F7-i..iv, F10-i..iii on the real ledger) | 2026-10-24 @ `d84518451` | ✅ PASS 38/38 (135.9s); spot-check mutations: F3×F4 single-window → 2 RED; F11 mint-site drop → F11-a RED; both restored green |
+| `nest_ops_shakedown_unit_test` | `timeout 330 bash test/packs/nest_ops_shakedown_unit_test.sh` | `tests/integration/test_nestops_husk_fleet_real_pg.py` (18: two-tier >window fixture, §3.5 legs, F3×F4 coupling, F2 census, F4a truncated, T4.8 measurement) + `tests/integration/test_nestops_ops_real_pg.py` (20: F11 e2e a/b1–b5/c1/c2 through the real order, F6-i(a)/(b)/ii/iii/iv, F7-i..iv, F10-i..iii on the real ledger) | 2026-10-24 @ 2da0a3e92 (tester gate) | ✅ PASS 39/39 (135.77s) — tester-gate formal run (fence 38→39 exercised; ambient-leg inert under house scrub, disclosed); independent 29-leg mutation matrix + 4-leg ladder net_new=∅ → RESULTS/2026-10-24-nestops-shakedown-verification.md |
 
 ---
 ## Commission STAGED-VERIFIED — `v0.27.6` (`unit-secret-exposure` lane) @ staged release `/home/nea/agents-ensemble/releases/v0.27.6` — ✅ **PASS-WITH-NOTES · CEREMONY-READY** (2026-10-24)
