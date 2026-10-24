@@ -26,6 +26,7 @@ from ..repositories.event.models import Event, EventKind
 from ..repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState
 from ..repositories.report_injection.models import ReportInjection, ReportInjectionState
 from ..registry import get_registry
+from .report_recipient import resolve_report_recipient
 from .completion_content import (
     event_created_at_as_utc,
     get_last_assistant_timestamp,
@@ -235,6 +236,22 @@ class _ChildCompletionDbResult(NamedTuple):
     # dormant behind the kill-switch — with the flag OFF this field is
     # dead weight (one object reference, zero notice work).
     b_violation_report: Any = None
+    # D1 (completion-subsystem Phase 1) — the RESOLVED report recipient.
+    #
+    # The instance that should receive this child's completion report.
+    # Normally the child's STRUCTURAL parent (``parent_id``); the
+    # resolver (``daemon/services/report_recipient.py``) overrides it
+    # with the COMMISSIONER when a fresh committed ``instance_nudge``
+    # exists.
+    #
+    # The STRUCTURAL parent is NEVER overloaded — ``parent_id`` above
+    # keeps its meaning (the bus corrective emit and the
+    # ``child_completed`` SSE express the WATCHER obligation, which is
+    # structural; they must NOT follow the report's destination).
+    #
+    # ``None`` means "no recipient was resolved" — the consumers fall
+    # back to ``parent_id``.
+    report_recipient_id: str | None = None
 
 
 class ChildReportsService:
@@ -2989,6 +3006,34 @@ Provide a concise summary:"""
 
             logger.info(f"Instance {instance_id[:8]}... parent_id={instance.parent_id}, status={instance.status}")
 
+            # ─── D1 (completion-subsystem Phase 1): resolve the report
+            # recipient ONCE, right here — immediately after the
+            # instance fetch, before ANY write-path site runs.
+            #
+            # The resolver reads the ``instance_ops_audit`` ledger for a
+            # fresh COMMITTED ``instance_nudge`` against this child and
+            # returns the COMMISSIONER (the nudger) instead of the
+            # structural parent. A miss — the normal case — returns the
+            # structural parent, so this is a byte-level no-op for every
+            # child that was never nudged.
+            #
+            # POSTURE: fail-back to the structural parent on ANY read /
+            # parse / DB error. This is a delivery-path routing decision,
+            # not a heal-probe, and the subsystem's documented posture is
+            # at-least-once delivery.
+            #
+            # The resolved value is CARRIED on the result
+            # (``report_recipient_id``) and threaded to every write-path
+            # site below. The STRUCTURAL parent (``instance.parent_id``)
+            # is NEVER overloaded — the bus corrective emit and the
+            # ``child_completed`` SSE stay structural.
+            report_recipient_id = resolve_report_recipient(
+                engine=self._manager.engine,
+                session=session,
+                child_instance_id=instance_id,
+                structural_parent_id=instance.parent_id,
+            )
+
             # ─── Fix 2 idempotency short-circuit ─────────────────────────
             # If the instance is already in a terminal state (COMPLETED
             # or ERROR), short-circuit immediately. Re-running this
@@ -3070,7 +3115,17 @@ Provide a concise summary:"""
                         ReportInjectionRepository(
                             self._manager.engine
                         ).ensure_deferred(
-                            parent_instance_id=instance.parent_id,
+                            # D1 — the RECIPIENT (the commissioner when a
+                            # fresh committed nudge exists), not the
+                            # structural parent. The marker carries the
+                            # delivery obligation, so it MUST name the
+                            # instance the report will be delivered to —
+                            # otherwise the obligation is stranded on the
+                            # structural parent while the report goes to
+                            # the commissioner (split-brain).
+                            parent_instance_id=(
+                                report_recipient_id or instance.parent_id
+                            ),
                             child_instance_id=instance_id,
                             child_message_id=(
                                 completed_message_id or ""
@@ -3740,7 +3795,14 @@ Provide a concise summary:"""
                             ReportInjectionRepository(
                                 self._manager.engine
                             ).ensure_deferred(
-                                parent_instance_id=inst_check.parent_id,
+                                # D1 — the RECIPIENT, not the structural
+                                # parent (the marker carries the delivery
+                                # obligation; it must name the instance the
+                                # report will be delivered to).
+                                parent_instance_id=(
+                                    report_recipient_id
+                                    or inst_check.parent_id
+                                ),
                                 child_instance_id=instance_id,
                                 child_message_id=completed_message_id,
                                 deferred_reason=DEFERRED_REASON_PENDING_MESSAGES,
@@ -3766,7 +3828,10 @@ Provide a concise summary:"""
                     else:
                         existing_report = session.exec(
                             select(MessageQueue)
-                            .where(MessageQueue.instance_id == inst_check.parent_id)
+                            .where(
+                                MessageQueue.instance_id
+                                == (report_recipient_id or inst_check.parent_id)
+                            )
                             .where(MessageQueue.source == f"internal_report:{instance_id}:{completed_message_id}")
                             .where(MessageQueue.status.in_([
                                 MessageStatus.READY.value,
@@ -4045,7 +4110,10 @@ Provide a concise summary:"""
             report_message_id = str(uuid.uuid4())
             report_message = MessageQueue(
                 message_id=report_message_id,
-                instance_id=instance.parent_id,
+                # D1 — the report goes to the RESOLVED RECIPIENT (the
+                # commissioner when a fresh committed nudge exists),
+                # NOT the structural parent.
+                instance_id=(report_recipient_id or instance.parent_id),
                 content=last_content,
                 source=f"internal_report:{instance.instance_id}:{completed_message_id}",
                 type=MessageType.COMPLETION_REPORT.value,
@@ -4090,12 +4158,42 @@ Provide a concise summary:"""
             # Phase 2 adds the companion guard in
             # instance_messaging.py:_prepare_enqueued_message.
             parent = session.get(Instance, instance.parent_id)
+            # D1 — the guard validates the RECIPIENT, not the structural
+            # parent. A TERMINATED recipient can never claim the
+            # PROCESS_REPORT task (the pause gate filters
+            # ``status IN (paused, terminated)`` for ALL task types),
+            # so routing the report at a dead commissioner would LOSE
+            # the report. One line: fall back to the structural parent
+            # when the recipient is gone/terminal.
+            recipient_for_report = report_recipient_id or instance.parent_id
+            recipient_row = parent
+            if (
+                recipient_for_report
+                and recipient_for_report != instance.parent_id
+            ):
+                candidate_row = session.get(Instance, recipient_for_report)
+                if (
+                    candidate_row is None
+                    or candidate_row.status == InstanceStatus.TERMINATED.value
+                ):
+                    logger.info(
+                        "child_reports: recipient %s... is terminal/missing "
+                        "— falling back to the structural parent %s...",
+                        recipient_for_report[:8],
+                        (instance.parent_id or "")[:8],
+                    )
+                    recipient_for_report = instance.parent_id
+                    report_recipient_id = instance.parent_id
+                    report_message.instance_id = recipient_for_report
+                    recipient_row = parent
+                else:
+                    recipient_row = candidate_row
             marker_paused = (
                 instance.parent_id in self._manager._deferred_question_pause
             )
             db_paused = (
-                parent is not None
-                and parent.status == InstanceStatus.PAUSED.value
+                recipient_row is not None
+                and recipient_row.status == InstanceStatus.PAUSED.value
             )
             # Phase 1 / T8 (a) dead-parent guard (plan
             # ``.agents/shared/planning/pause-resume-terminate-tree-fix/phase1-plan.md``
@@ -4116,8 +4214,8 @@ Provide a concise summary:"""
             # log line carries ``report_message_id`` so operators can
             # trace the dead-lettered delivery.
             db_dead_parent = (
-                parent is None
-                or parent.status == InstanceStatus.TERMINATED.value
+                recipient_row is None
+                or recipient_row.status == InstanceStatus.TERMINATED.value
             )
             if marker_paused or db_paused or db_dead_parent:
                 if marker_paused:
@@ -4151,7 +4249,10 @@ Provide a concise summary:"""
                 # Phase 1 (2026-06-24): PROCESS_REPORT — see TaskType docstring.
                 report_task = Task(
                     task_type=TaskType.PROCESS_REPORT.value,
-                    instance_id=instance.parent_id,
+                    # D1 — the PROCESS_REPORT task belongs to the
+                    # RECIPIENT (the instance that will consume the
+                    # report).
+                    instance_id=recipient_for_report,
                     message_id=report_message_id,
                     status=TaskStatus.PENDING.value,
                     # Naive-UTC digits (DC-A fix) — naive column bind.
@@ -4318,7 +4419,10 @@ Provide a concise summary:"""
                 nested_already_committed = False
                 try:
                     report_injection_row = ReportInjection(
-                        parent_instance_id=instance.parent_id,
+                        # D1 — the durable fallback row names the
+                        # RECIPIENT (the instance the report is delivered
+                        # to), not the structural parent.
+                        parent_instance_id=recipient_for_report,
                         child_instance_id=instance.instance_id,
                         child_message_id=completed_message_id,
                         report_message_id=report_message_id,
@@ -4718,6 +4822,11 @@ Provide a concise summary:"""
                 parent_agent_id=parent_agent_id,
                 parent_waiting_children_sse=parent_waiting_children_sse,
                 waiting_children_parent_agent_id=waiting_children_parent_agent_id,
+                # D1 — the resolved report recipient (the commissioner
+                # when a fresh committed nudge exists, else the
+                # structural parent). The async half uses it for the
+                # Lane-A fast-path hint.
+                report_recipient_id=report_recipient_id,
             )
 
     async def _dispatch_post_commit_side_effects(
@@ -5740,9 +5849,16 @@ Provide a concise summary:"""
             # event loop, serialized against the drain's set check, so
             # the worst case of a missed bump is a one-LLM-call delivery
             # delay, never a lost report.
+            #
+            # D1 — the hint names the RECIPIENT (the commissioner when a
+            # fresh committed nudge exists). Hinting the structural
+            # parent would never drain the report for the commissioner:
+            # Lane A would never fire for the instance the report was
+            # actually addressed to.
             pending_set = getattr(self._manager, "_report_injection_pending", None)
-            if pending_set is not None and parent_id:
-                pending_set.add(parent_id)
+            report_hint_target = result.report_recipient_id or parent_id
+            if pending_set is not None and report_hint_target:
+                pending_set.add(report_hint_target)
 
             # CompletionRegistry
             from .completion_registry import get_completion_registry

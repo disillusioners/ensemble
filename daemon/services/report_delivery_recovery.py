@@ -268,6 +268,7 @@ from daemon.constants import (
     DEFERRED_REASON_RESUME_ROUTER,
 )
 from daemon.repositories.instance.models import InstanceStatus
+from daemon.services.report_recipient import resolve_report_recipient
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -1457,6 +1458,25 @@ class ReportDeliveryRecoveryService:
            inline D2 comment). rowcount=0 → already_recovered.
         4. Hand off to the manager's reconcile + re-enter path.
         """
+        # D1 (completion-subsystem Phase 1) — resolve the report
+        # RECIPIENT ONCE, at the top of the per-row recovery. The four
+        # recipient-aware sites below (the queue PREFIX ledger, the
+        # parent-history PREFIX ledger, the busy-check and the
+        # ``ensure_deferred`` marker write) all read ``parent_id``, so
+        # resolving here teaches every one of them the SAME rule the
+        # natural write path uses.
+        #
+        # Without this the backstop re-addressed the structural parent:
+        # the commissioner-addressed report looked UNDELIVERED (the
+        # PREFIX ledger was queried for the structural parent) and the
+        # lane minted a SECOND obligation for the structural parent —
+        # the §7.4 duplication firewall.
+        parent_id = resolve_report_recipient(
+            engine=getattr(self._manager, "engine", None),
+            child_instance_id=child_id,
+            structural_parent_id=parent_id,
+        ) or parent_id
+
         # Step 0 (F-2 task 2.5): PREFIX-ledger cross-path dedup.
         # The two checks below are the operative cross-path dedup
         # per decisions.md §14a (W-1 LOCKED to fallback (ii)); the

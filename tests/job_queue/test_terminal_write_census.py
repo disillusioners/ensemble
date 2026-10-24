@@ -510,7 +510,7 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
         file="daemon/services/mission_strand_healer.py",
         site="_process_child_completion_and_notify_parent",
         anchor="heal_instance", classification="hooked",
-        hooked_at="daemon/services/child_reports.py:5348",
+        hooked_at="daemon/services/child_reports.py:5457",
         reason="strand healer's drive IS the sanctioned emission "
                "machinery: the notify rides inside "
                "_process_child_completion_db_sync (child_reports "
@@ -529,11 +529,11 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
         file="daemon/services/mission_strand_healer.py",
         site="_process_child_completion_and_notify_parent",
         anchor="_heal_running_zombie_locked", classification="hooked",
-        hooked_at="daemon/services/child_reports.py:5348",
+        hooked_at="daemon/services/child_reports.py:5457",
         reason="running-zombie strand's drive IS the sanctioned "
                "emission machinery: the notify rides inside "
                "_process_child_completion_db_sync (child_reports "
-               ":5348/:5364) on the drive path; the heal serializes "
+               ":5457/:5473) on the drive path; the heal serializes "
                "per root behind the SAME per-root asyncio.Lock map "
                "as the waiting_children strand (shared "
                "_acquire_root_lock/_release_root_lock), and NEVER "

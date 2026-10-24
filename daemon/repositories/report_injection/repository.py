@@ -1140,6 +1140,16 @@ class ReportInjectionRepository:
             # could never express (the true terminal anchor is the
             # child's checkpoint message, not a child message_queue
             # row).
+            #
+            # D1 (completion-subsystem Phase 1) — the predicate is
+            # CHILD-KEYED: the parent predicate is DROPPED. The question
+            # this evidence answers is "was THIS CHILD's report
+            # delivered ANYWHERE?", not "was it delivered to the
+            # structural parent?". With the parent predicate the
+            # commissioner-addressed report (delivered to the nudger,
+            # not the structural parent) read as UNDELIVERED, and the
+            # backstop minted a SECOND obligation for the structural
+            # parent — the §7.4 duplication firewall fired.
             delivered_report = aliased(MessageQueue, name="dr")
             source_prefix = (
                 literal("internal_report:")
@@ -1148,12 +1158,8 @@ class ReportInjectionRepository:
             )
             has_delivery_row = exists(
                 select(delivered_report.message_id)
-                .where(
-                    delivered_report.instance_id
-                    == parent_inst.instance_id
-                )
                 .where(delivered_report.source.like(source_prefix))
-            ).correlate(child_inst, parent_inst)
+            ).correlate(child_inst)
 
             # Per-child marker evidence: ANY injection row for
             # (parent, child) in ANY state. Non-terminal rows are
@@ -1162,16 +1168,18 @@ class ReportInjectionRepository:
             # dead-letter abandonment (FAILED). The old join keyed
             # this to the exact anchor AND to PENDING/DEFERRED only,
             # which is why a delivered child kept re-qualifying.
+            #
+            # D1 — CHILD-KEYED (the parent predicate is dropped) for
+            # the same reason as ``has_delivery_row``: a marker written
+            # against the RECIPIENT (the commissioner) is positive
+            # delivery evidence for this child.
             inj = aliased(ReportInjection, name="ri")
             has_injection_row = exists(
                 select(inj.injection_id)
                 .where(
-                    inj.parent_instance_id == parent_inst.instance_id
-                )
-                .where(
                     inj.child_instance_id == child_inst.instance_id
                 )
-            ).correlate(child_inst, parent_inst)
+            ).correlate(child_inst)
 
             # NOT EXISTS — driver-neutral FIRED-watcher exclusion
             # (unchanged from the C3 design). Join keys:
