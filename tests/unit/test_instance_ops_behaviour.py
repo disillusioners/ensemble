@@ -51,7 +51,7 @@ import daemon.tools.instance_ops as io
 from daemon.repositories.instance.repository import KB_AGENT_IDS
 from daemon.repositories.instance_ops.models import InstanceOpsAudit
 from daemon.repositories.instance_ops.repository import InstanceOpsAuditRepository
-from tests.helpers.nestops_pg_fixtures import by_name
+from tests.helpers.nestops_pg_fixtures import by_name, install_fake_home
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -92,6 +92,19 @@ class FakeRow:
             or self.created_at,
             "paused_at": None,
         }
+
+
+
+@pytest.fixture(autouse=True)
+def _fake_home_fence(monkeypatch, tmp_path):
+    """The S6 mechanical HOME fence (see ``install_fake_home``).
+
+    HOME is redirected at a throwaway directory for EVERY test in this
+    file, so a HOME-derived path resolution can never reach the live
+    install — and the redirect is verified in-process, so a broken
+    fence fails here rather than somewhere unrelated later.
+    """
+    install_fake_home(monkeypatch, tmp_path)
 
 
 class FakeRepo:

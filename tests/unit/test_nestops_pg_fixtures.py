@@ -24,7 +24,12 @@ from pathlib import Path
 
 import pytest
 
-from tests.helpers.nestops_pg_fixtures import by_name, call
+from tests.helpers.nestops_pg_fixtures import (
+    REAL_HOME,
+    by_name,
+    call,
+    install_fake_home,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES_PATH = REPO_ROOT / "tests" / "helpers" / "nestops_pg_fixtures.py"
@@ -64,6 +69,59 @@ class TestToolLookupHelpers:
     async def test_call_invokes_and_json_decodes(self):
         payload = await call([_Tool("alpha")], "alpha", x=1)
         assert payload == {"ok": True}
+
+
+class TestHomeFence:
+    """The S6 mechanical HOME fence.
+
+    The lane's test files DECLARED the fence in prose; this makes it a
+    MECHANISM: HOME is redirected at a throwaway directory for every
+    test, and the redirect is verified in-process — so a HOME-derived
+    path resolution can never reach the live install, and a broken
+    fence fails loudly at the fence.
+
+    PLANNED MUTATION:
+      * point the fake at the REAL home → the escape guard RED;
+      * shape the fake like a live install → the escape guard RED;
+      * remove the fixture from one lane file → the "armed in every
+        lane file" pin RED.
+    """
+
+    def test_the_redirect_takes_effect(self, monkeypatch, tmp_path):
+        fake = install_fake_home(monkeypatch, tmp_path)
+        assert Path.home().resolve() == fake
+        assert str(fake) == __import__("os").environ["HOME"]
+
+    def test_the_fake_is_not_the_real_home(self, monkeypatch, tmp_path):
+        fake = install_fake_home(monkeypatch, tmp_path)
+        assert fake != Path(REAL_HOME).resolve()
+        assert fake.is_dir()
+
+    def test_a_live_shaped_fake_is_refused(self, monkeypatch, tmp_path):
+        """The escape guard: the fake must never look like an install."""
+        base = tmp_path / "agents-ensemble"
+        base.mkdir()
+        with pytest.raises(AssertionError):
+            install_fake_home(monkeypatch, base)
+
+    def test_the_fence_is_armed_in_every_lane_file(self):
+        """Every lane test file installs the fence.
+
+        A file that drops the fixture loses the fence silently — this
+        pin is what makes the omission visible.
+        """
+        lane_files = (
+            "tests/unit/test_instance_ops_behaviour.py",
+            "tests/unit/test_instance_read_shakedown_defects.py",
+            "tests/unit/test_instance_ops_delegation_chain.py",
+            "tests/integration/test_nestops_ops_real_pg.py",
+            "tests/integration/test_nestops_husk_fleet_real_pg.py",
+        )
+        for rel in lane_files:
+            source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            assert "install_fake_home(monkeypatch, tmp_path)" in source, (
+                f"{rel} must install the mechanical HOME fence"
+            )
 
 
 class TestTeardownIsLoud:

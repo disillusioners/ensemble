@@ -68,6 +68,19 @@ from daemon.services.job_queue_service import DISPATCH_CHAIN_KEY, JobQueueServic
 from daemon.services.message_processing_pipeline import ProcessingContext
 from daemon.tools import upgrade_journal as _uj
 from daemon.tools.job_queue import create_job_tools
+from tests.helpers.nestops_pg_fixtures import install_fake_home
+
+
+@pytest.fixture(autouse=True)
+def _fake_home_fence(monkeypatch, tmp_path):
+    """The S6 mechanical HOME fence (see ``install_fake_home``).
+
+    HOME is redirected at a throwaway directory for EVERY test in this
+    file, so a HOME-derived path resolution can never reach the live
+    install — and the redirect is verified in-process, so a broken
+    fence fails here rather than somewhere unrelated later.
+    """
+    install_fake_home(monkeypatch, tmp_path)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 

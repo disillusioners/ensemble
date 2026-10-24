@@ -55,6 +55,7 @@ import logging
 import os
 import secrets
 import uuid
+from pathlib import Path
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
@@ -65,6 +66,66 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session
 
 logger = logging.getLogger(__name__)
+
+
+#: The REAL home, captured at MODULE IMPORT — before any fixture
+#: redirects it. The fence's own assertion compares against it.
+REAL_HOME = os.path.expanduser("~")
+
+
+def install_fake_home(monkeypatch: Any, base: Any) -> Path:
+    """Point ``HOME`` at a throwaway fake directory (the S6 fence).
+
+    WHY A MECHANICAL FENCE
+    -----------------------
+    The house critical note is explicit: a test must NEVER resolve a
+    live-shaped, HOME-derived path — two live installs were deleted
+    this way before the rule existed. Every lane file DECLARED the
+    fence in prose ("no HOME-derived or live-shaped path is ever
+    resolved"), but a declaration is not a mechanism: the next edit
+    could resolve one and nothing would go red.
+
+    This function is the mechanism. ``HOME`` is redirected at a
+    throwaway directory, so a HOME-derived resolution — ``Path.home()``,
+    ``os.path.expanduser("~")``, ``$HOME/...`` — lands in the fake and
+    NEVER in the live install. The redirect is VERIFIED in-process
+    (the caller's ``Path.home()`` must now resolve inside the fake),
+    so a broken redirect fails loudly instead of silently leaking.
+
+    Args:
+        monkeypatch: pytest's ``MonkeyPatch`` (the env write is undone
+            at teardown).
+        base: the throwaway base directory (usually ``tmp_path``).
+
+    Returns:
+        The resolved fake home directory.
+    """
+    fake = Path(base) / "fake-home"
+    fake.mkdir(parents=True, exist_ok=True)
+    resolved = fake.resolve()
+
+    # The escape guard: the fake must NEVER be the real home, and it
+    # must never be shaped like a live install directory.
+    assert resolved != Path(REAL_HOME).resolve(), (
+        "the fake HOME must not be the REAL home — the fence would be "
+        "a no-op"
+    )
+    assert "agents-ensemble" not in resolved.parts, (
+        "the fake HOME must not be shaped like a live install directory "
+        f"({resolved})"
+    )
+    assert resolved != Path("/").resolve(), "the fake HOME must not be /"
+
+    monkeypatch.setenv("HOME", str(resolved))
+
+    # The mechanical proof: a HOME-derived resolution NOW lands in the
+    # fake. If this ever stops holding, the fence is broken and the
+    # test fails HERE rather than at some later, unrelated moment.
+    assert Path.home().resolve() == resolved, (
+        "the HOME fence did not take effect — Path.home() still resolves "
+        f"to {Path.home()}"
+    )
+    return resolved
 
 
 # ── the environment fence ──────────────────────────────────────────────────

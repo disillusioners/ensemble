@@ -82,9 +82,22 @@ from tests.helpers.nestops_pg_fixtures import (
     build_real_manager,
     by_name,
     disposable_db,
+    install_fake_home,
     pin_scratch_postgres_env,
     probe_admin_engine,
 )
+
+
+@pytest.fixture(autouse=True)
+def _fake_home_fence(monkeypatch, tmp_path):
+    """The S6 mechanical HOME fence (see ``install_fake_home``).
+
+    HOME is redirected at a throwaway directory for EVERY test in this
+    file, so a HOME-derived path resolution can never reach the live
+    install — and the redirect is verified in-process, so a broken
+    fence fails here rather than somewhere unrelated later.
+    """
+    install_fake_home(monkeypatch, tmp_path)
 
 pytestmark = pytest.mark.integration
 

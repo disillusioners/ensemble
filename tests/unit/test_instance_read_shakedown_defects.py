@@ -38,7 +38,7 @@ from daemon.repositories.message_queue.models import MessageQueue
 from daemon.repositories.task.models import Task
 from daemon.services.instance_lifecycle import InstanceLifecycleService
 from daemon.tools import instance_read as ir
-from tests.helpers.nestops_pg_fixtures import by_name, call
+from tests.helpers.nestops_pg_fixtures import by_name, call, install_fake_home
 from daemon.tools._tool_registry import (
     DYNAMIC_TOOL_NAMES,
     KNOWN_TOOL_NAMES,
@@ -51,6 +51,19 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # ────────────────────────────────────────────────────────────────────────
 # F12 — the ``status`` filter must reach the repository
 # ────────────────────────────────────────────────────────────────────────
+
+
+
+@pytest.fixture(autouse=True)
+def _fake_home_fence(monkeypatch, tmp_path):
+    """The S6 mechanical HOME fence (see ``install_fake_home``).
+
+    HOME is redirected at a throwaway directory for EVERY test in this
+    file, so a HOME-derived path resolution can never reach the live
+    install — and the redirect is verified in-process, so a broken
+    fence fails here rather than somewhere unrelated later.
+    """
+    install_fake_home(monkeypatch, tmp_path)
 
 
 class _RecordingRepo:

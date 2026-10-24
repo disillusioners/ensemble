@@ -71,8 +71,6 @@ from daemon.repositories.message_queue.models import MessageQueue
 from daemon.repositories.task.models import Task
 from tests.helpers.nestops_pg_fixtures import (
     AMBIENT_POSTGRES,
-    by_name,
-    call,
     FILLER_AGENT_ID,
     FILLER_ROWS,
     HUSK_A_AGE_DAYS,
@@ -83,12 +81,27 @@ from tests.helpers.nestops_pg_fixtures import (
     assert_scratch_db,
     backdate_husk,
     build_real_manager,
+    by_name,
+    call,
     disposable_db,
     insert_filler_fleet,
+    install_fake_home,
     pin_scratch_postgres_env,
     probe_admin_engine,
     spawn_real_husk,
 )
+
+
+@pytest.fixture(autouse=True)
+def _fake_home_fence(monkeypatch, tmp_path):
+    """The S6 mechanical HOME fence (see ``install_fake_home``).
+
+    HOME is redirected at a throwaway directory for EVERY test in this
+    file, so a HOME-derived path resolution can never reach the live
+    install — and the redirect is verified in-process, so a broken
+    fence fails here rather than somewhere unrelated later.
+    """
+    install_fake_home(monkeypatch, tmp_path)
 
 pytestmark = pytest.mark.integration
 
