@@ -325,10 +325,12 @@ if [ -d "$REPO_ROOT/frontend/dist/frontend/browser" ]; then
 else
     _log "WARN: no frontend build at frontend/dist/frontend/browser — UI not staged (run 'cd frontend && npm run build')"
 fi
-run "stage env → $INSTALL_DIR/.env" -- cp "$ENV_SOURCE" "$INSTALL_DIR/.env"
-# mode-0600 (unit-secret-exposure P5); deploys run as the INSTALL OWNER
-# (A3') — a sudo-deploy would mint a root-owned 0600 the User= can't read.
-run "chmod env 0600" -- chmod 600 "$INSTALL_DIR/.env"
+run "stage env → $INSTALL_DIR/.env (0600)" -- install -m 600 "$ENV_SOURCE" "$INSTALL_DIR/.env"
+# mode-0600 (unit-secret-exposure P5): `install -m 600` creates the
+# destination AT 0600 — no write window (the plain cp landed the file at
+# the SOURCE's mode until a later chmod ran) and no post-hoc chmod to
+# lose. deploys run as the INSTALL OWNER (A3') — a sudo-deploy would
+# mint a root-owned 0600 the User= can't read.
 
 # ── Phase 3: stop (ownership-scoped, REUSED — never duplicated) ─────────────
 _log "phase 3/5 stop (ownership-scoped: only processes owned by $INSTALL_DIR)"

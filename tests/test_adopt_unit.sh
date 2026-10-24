@@ -116,7 +116,7 @@ make_install() {
     rm -rf "$1"; mkdir -p "$1"
     printf '#!/bin/bash\nsleep 300\n' > "$1/launcher.sh"
     chmod +x "$1/launcher.sh"
-    printf 'PORT=18095\nPOSTGRES_HOST=10.44.0.2\nPOSTGRES_PORT=5432\nPOSTGRES_DB=ensemble_adopt\nPOSTGRES_USER=ens\nPOSTGRES_PASSWORD=sekret-adopt-pw\n' \
+    printf 'PORT=18095\nPOSTGRES_HOST=192.0.2.10\nPOSTGRES_PORT=5432\nPOSTGRES_DB=ensemble_adopt\nPOSTGRES_USER=ens\nPOSTGRES_PASSWORD=sekret-adopt-pw\n' \
         > "$1/.env"
 }
 
@@ -491,17 +491,22 @@ rm -rf "$MUT"
 
 # ===========================================================================
 section "MODE PINS — every deploy/stage .env/.env.prod.demo write site leaves mode 0600 (P5)"
-# Static byte-adjacency pins: a `chmod 600` STATEMENT must appear within 5
-# lines AFTER each of the 5 write sites (deploy.sh ×2, stage.sh ×3);
+# Static byte-adjacency pins: a mode-enforcement STATEMENT must sit at
+# each of the 5 write sites (deploy.sh ×2, stage.sh ×3) — either a
+# `chmod 600` statement within 5 lines AFTER the write (deploy demo-guard,
+# stage.sh ×3) or, for the deploy live-target site, an `install -m 600`
+# statement ON the write itself (0600-AT-CREATION — the destination is
+# created at 0600, so there is no write window and no post-hoc chmod).
 # comment lines cannot satisfy a pin (comment-stripped window + statement
 # match — the deploy demo-guard A4 comment carries the literal "chmod 600"
 # and would otherwise mask the real statement). The stage.sh chmod is
 # LOAD-BEARING (the marker rewrite's `mv -f` re-creates the inode — the
 # W2 umask fence covers the write window, and the explicit chmod pins the
-# post-mv mode). adopt-unit's additive .env staging is deliberately
-# EXEMPT (cat > preserves the inherited mode — see its P5 comment).
+# post-mv mode). adopt-unit's additive .env staging is NOT exempt: the
+# final fold heals the mode to 0600 at the verified-write seam (see its
+# P5 comment).
 # These pins run against the REPO files (read-only) — mutation coverage
-# comes from the W5 leg below on THROWAWAY copies.
+# comes from the W5 legs below on THROWAWAY copies.
 
 _pin_deploy="$REPO_ROOT/scripts/deploy.sh"
 _pin_stage="$REPO_ROOT/scripts/upgrade/stage.sh"
@@ -526,8 +531,38 @@ assert_adjacent_chmod() { # <name> <file> <anchor>
     fi
 }
 
-assert_adjacent_chmod "mode pin: deploy.sh installed-copy cp → chmod 600" \
-    "$_pin_deploy" 'cp "$ENV_SOURCE" "$INSTALL_DIR/.env"'
+# The deploy live-target site enforces 0600 AT CREATION (`install -m 600
+# src dst` sets the mode on the write itself) instead of a post-write
+# chmod — so its needle sits ON the write line, not after it. The anchor
+# MUST be unique in the file: the helper resolves the FIRST match, so a
+# duplicated anchor would silently re-point this pin at another write
+# site (the deploy demo-guard coupling) — uniqueness is a hard
+# precondition here, not a nicety.
+adjacent_install_600() { # <file> <fixed-string anchor on the write line> → rc 0 iff an `install -m 600` STATEMENT is at the anchor line or within +1..+5
+    local f="$1" anchor="$2" n c
+    c="$(grep -cF -- "$anchor" "$f")"
+    [ "$c" -eq 1 ] || return 1
+    n="$(grep -nF -- "$anchor" "$f" | head -1 | cut -d: -f1)"
+    [ -n "$n" ] || return 1
+    # 0600-at-creation posture: the needle may sit ON the anchor line
+    # (offset 0) as well as in the bounded window after it.
+    _strip_comments "$(sed -n "$n,$((n + 5))p" "$f")" \
+        | grep -qE '^[[:space:]]*(if ! )?(run .*-- )?install -m 600'
+}
+assert_adjacent_install_600() { # <name> <file> <anchor>
+    if adjacent_install_600 "$2" "$3"; then
+        _pass "$1"
+    else
+        _fail "$1" "install -m 600 statement at the write line or within 5 lines after it" "not found"
+    fi
+}
+
+# deploy live-target site: `install -m 600` satisfies the 0600-at-creation
+# posture (the destination is created AT 0600 — no write window, no
+# post-hoc chmod to lose). The demo-guard site's pin below targets the
+# `mv -f` write and is untouched.
+assert_adjacent_install_600 "mode pin: deploy.sh installed-copy install -m 600 (0600-at-creation)" \
+    "$_pin_deploy" '"$ENV_SOURCE" "$INSTALL_DIR/.env"'
 assert_adjacent_chmod "mode pin: deploy.sh demo-guard generate-mv → chmod 600" \
     "$_pin_deploy" 'mv -f "$ENV_TMP" "$ENV_SOURCE"'
 assert_adjacent_chmod "mode pin: stage.sh marker rewrite-mv → chmod 600" \
@@ -560,6 +595,33 @@ cp "$_pin_stage" "$MUT_PIN/stage.sh"
 assert_adjacent_chmod "mode pin: mutation restore (GREEN): create-site pin recovered" \
     "$MUT_PIN/stage.sh" 'failed to create $ENV_FILE'
 rm -rf "$MUT_PIN"
+
+# W5 mutation leg — deploy site (house rule — pins MUST be mutation-verified):
+# in a THROWAWAY deploy.sh copy, neuter the demo-guard chmod (the remaining
+# deploy chmod after the live-target site moved to `install -m 600`) → the
+# demo-guard mode pin goes RED → restore → GREEN. The neutralisation
+# rewrites the MODE argument (600 → 644) rather than deleting the
+# if-block: the pin's needle is the `chmod 600` STATEMENT, so a non-0600
+# mode enforcement must not satisfy it, and the copy stays valid shell.
+MUT_DEPLOY="$WORK/mut-deploy"
+mkdir -p "$MUT_DEPLOY"
+cp "$_pin_deploy" "$MUT_DEPLOY/deploy.sh"
+
+assert_adjacent_chmod "mode pin: mutation baseline (GREEN): deploy copy demo-guard pinned" \
+    "$MUT_DEPLOY/deploy.sh" 'mv -f "$ENV_TMP" "$ENV_SOURCE"'
+
+sed -i 's|^            if ! chmod 600 "\$ENV_SOURCE"; then$|            if ! chmod 644 "\$ENV_SOURCE"; then|' \
+    "$MUT_DEPLOY/deploy.sh"
+if adjacent_chmod "$MUT_DEPLOY/deploy.sh" 'mv -f "$ENV_TMP" "$ENV_SOURCE"'; then
+    _fail "mode pin: mutation (RED): deploy" "demo-guard pin RED after chmod neuter" "pin stayed GREEN (mutation-dead)"
+else
+    _pass "mode pin: mutation (RED): deploy demo-guard chmod neutered → pin RED"
+fi
+
+cp "$_pin_deploy" "$MUT_DEPLOY/deploy.sh"
+assert_adjacent_chmod "mode pin: mutation restore (GREEN): deploy copy demo-guard recovered" \
+    "$MUT_DEPLOY/deploy.sh" 'mv -f "$ENV_TMP" "$ENV_SOURCE"'
+rm -rf "$MUT_DEPLOY"
 
 # BEHAVIORAL-PIN DISCLOSURE (D5b) — accurate wording: the existing
 # FAKE_REPO harness in tests/test_stage_freshness_guard.sh (real stage.sh

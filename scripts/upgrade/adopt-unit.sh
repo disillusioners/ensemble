@@ -431,15 +431,16 @@ _stage_restart_unit_env() {
     fi
     printf '\n# staged by scripts/upgrade/adopt-unit.sh (P4 adoption — service mode)\nENSEMBLE_RESTART_UNIT=%s\n' \
         "$UNIT_NAME" >> "$tmp" || { rm -f "$tmp"; return 1; }
-    # cat > preserves the existing file's inode/owner/mode — the 0600 outcome
-    # is inherited, not enforced here: it assumes .env has already been
-    # through a post-P5 deploy/stage write site (those pin 0600); a legacy
-    # 0644 .env stays 0644. (Pinning the mode at this seam is a deferred
-    # option — out of tonight's quality-only scope.)
+    # cat > preserves the existing file's inode/owner/mode — it does NOT
+    # enforce 0600 (a legacy 0644 .env stays 0644 through the cat). The
+    # explicit chmod below enforces 0600 AFTER the verified write —
+    # MODE ONLY, never chown (D5a).
     cat "$tmp" > "$ENV_FILE" || { rm -f "$tmp"; return 1; }
     rm -f "$tmp"
     # verified write (W3 discipline — never report an unverified staging)
     [ "$(_supervision_unit_from_dotenv)" = "$UNIT_NAME" ] || return 1
+    # adopt heals a legacy 0644 .env — P5 write-site clause; MODE ONLY, never chown (D5a)
+    chmod 600 "$ENV_FILE"
     return 0
 }
 

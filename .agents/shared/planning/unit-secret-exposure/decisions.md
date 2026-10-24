@@ -38,7 +38,7 @@ After the `__ENV_LINES__` splice case (:417-419) is removed, the guard stays ver
 | umask 077 + `install -m 0600` | adopt-unit.sh:551 / :556 | good hygiene regardless of content (post-strip: defense-in-depth only — the 0600 does not gate the D-Bus surface, arch §2.1) |
 | Provenance `__GENERATED_NOTE__` stamp splice | adopt-unit.sh:421 area | regeneration provenance |
 | Clobber refusal exit 78 | adopt-unit.sh:517-521 | one-time migration semantics; HARD precondition for the re-adoption composite (D10.1b, A2) |
-| `_stage_restart_unit_env` (additive .env staging; `cat >` preserves inode/mode — comment :453, cat at :454) | adopt-unit.sh:441-458 | untouched by this lane (P5 comment only) |
+| `_stage_restart_unit_env` (additive .env staging; `cat >` preserves inode/mode — comment :434, cat at :438; **chmod 600 added at the verified-write seam per the tidier ruling (final fold) — mode-only, never chown**) | adopt-unit.sh:422-445 | touched by this lane at the final fold: +1 `chmod 600` line at the verified-write seam (mode-only, never chown — D5a) + the mode comment above the cat; the rest is untouched |
 
 ## D4 — Missing-.env behavior change is INTENDED — *amended per A4, A5*
 
