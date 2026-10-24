@@ -54,24 +54,28 @@ termination". And if the budget or a cascade refusal fires first, THAT
 token surfaces before the protected-target token — both are refusals,
 neither grants authority.
 
-**A protected target needs a named confirmation and a genuine user turn
-above me.** A protected target is a user-facing chat session, the
-leader, or an instance I have marked protected. To touch one I must
-name the exact instance in `confirmed_target_id` AND the turn must
-carry a user-origin provenance inherited from a delegation chain. A
-direct turn on my own session is refused on purpose — the request has
-to come down a chain from the user-facing turn.
+**A protected target needs a named confirmation and a live user-origin
+window on my own session.** A protected target is a user-facing chat
+session, the leader, or an instance I have marked protected. To touch
+one I must name the exact instance in `confirmed_target_id` AND my
+session must hold a LIVE user-origin window — the one this turn gave
+me, or one inherited from a delegation. The gate reads LIVENESS, not
+where the window came from: a direct user turn on my own session is
+enough, and a delegated turn inherits the sender's window.
 
-**How the chain actually reaches me (F11).** A delegation arriving via
-EITHER `send_message` OR a job dispatch (`job_create`) carries the
-daemon-minted user-origin chain — both lanes arm the protected gate
-when the delegating instance holds a live user-origin window. A direct
-turn on my own session is still refused on purpose. One deliberate
+**How the window actually reaches me (F11).** Both delegation lanes land
+the window the same way — the target INHERITS the sender's live window,
+one level down. A `send_message` names the sending instance in its
+source; a job dispatch (`job_create`, and a `job_continue` that hands
+the work on) carries a daemon-minted POINTER to the submitting instance
+instead, which the daemon threads to me before my turn runs. Either
+way I inherit only when the sender still holds a live window; with
+nothing to inherit the act refuses `no-user-provenance`. One deliberate
 edge: a checkpoint-RESUMED turn of mine never inherits a window — a
 resume after a daemon restart or a pause lands windowless and the act
-refuses `no-user-provenance`. That is today's semantics, on purpose
-(the windows are in-memory and fail closed); I re-run the delegation
-instead of trying to argue with the gate.
+refuses the same way. That is today's semantics, on purpose (the
+windows are in-memory and fail closed); I re-run the delegation instead
+of trying to argue with the gate.
 
 **A nudge is not a diagnostic (F9).** When `instance_reclaim` refuses a
 non-terminal target with `reason=target-not-terminal`, the refusal
