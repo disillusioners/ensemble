@@ -55,6 +55,55 @@ _MAX_TRAVERSAL_DEPTH = 256
 # statement unreadable in the query log.
 _METADATA_LOOKUP_CHUNK = 500
 
+#: The bind-parameter chunk size for the EVIDENCE probes
+#: (``filter_without_any_evidence_ids`` and the grouped JobItem probe
+#: its caller runs). Keeps the rendered ``IN (...)`` inside the
+#: bind-parameter limits of both engines (SQLite's
+#: ``SQLITE_MAX_VARIABLE_NUMBER`` = 999, PostgreSQL's 65535). Same
+#: rationale as ``_METADATA_LOOKUP_CHUNK``; a separate constant so the
+#: two call sites can move independently.
+_EVIDENCE_PROBE_CHUNK = 500
+
+
+def never_dispatched_evidence_expr() -> tuple[ColumnElement[bool], ColumnElement[bool]]:
+    """The NEVER-DISPATCHED evidence expression — SINGLE-HOMED (D-19).
+
+    Returns the TWO ``~exists(...)`` clauses that mean "this instance
+    has never received any work": zero ``message_queue`` rows and zero
+    ``task`` rows.
+
+    This is the ONLY copy of that predicate in the repository module.
+    Both callers compose it:
+
+    * :meth:`SQLModelInstanceRepository.filter_never_dispatched_ids`
+      (``idle ∧ version == 1 ∧ ¬∃msg ∧ ¬∃task``) — the canonical ghost
+      signature, bound by the lockstep pin
+      ``tests/unit/test_pause_never_dispatched_ghosts.py``;
+    * :meth:`SQLModelInstanceRepository.filter_without_any_evidence_ids`
+      (evidence ONLY — no status/version conjuncts) — the husk
+      detector's probe.
+
+    The twin expression in ``ChildReportsService._ghost_child_filter``
+    (``daemon/services/child_reports.py``) is the OTHER canonical copy;
+    it is pinned in lockstep with
+    ``filter_never_dispatched_ids`` and is DELIBERATELY not re-pointed
+    at this factory in the nest-ops shakedown patch (the parent-completion
+    gate is out of that patch's blast radius) — the clean-up is routed,
+    not cancelled.
+
+    No import cycle: this module already imports the two models the
+    clauses reference.
+    """
+    no_messages = ~exists(
+        select(MessageQueue.message_id).where(
+            MessageQueue.instance_id == Instance.instance_id
+        )
+    )
+    no_tasks = ~exists(
+        select(Task.id).where(Task.instance_id == Instance.instance_id)
+    )
+    return no_messages, no_tasks
+
 
 def _chunked(items: list[Any], size: int) -> list[list[Any]]:
     """Split ``items`` into consecutive chunks of at most ``size``."""
@@ -770,14 +819,7 @@ class SQLModelInstanceRepository:
         """
         if not instance_ids:
             return set()
-        no_messages = ~exists(
-            select(MessageQueue.message_id).where(
-                MessageQueue.instance_id == Instance.instance_id
-            )
-        )
-        no_tasks = ~exists(
-            select(Task.id).where(Task.instance_id == Instance.instance_id)
-        )
+        no_messages, no_tasks = never_dispatched_evidence_expr()
         stmt = (
             select(Instance.instance_id)
             .where(Instance.instance_id.in_(instance_ids))
@@ -791,6 +833,55 @@ class SQLModelInstanceRepository:
         with SQLModelSession(self.engine) as db_session:
             rows = db_session.exec(stmt).all()
         return set(rows)
+
+    def filter_without_any_evidence_ids(self, instance_ids: list[str]) -> set[str]:
+        """Return the subset of ``instance_ids`` that carry NO evidence of
+        any dispatch attempt.
+
+        Evidence-only probe (nest-ops shakedown F3, D-1/D-19): the subset
+        with zero ``message_queue`` rows and zero ``task`` rows — and
+        NOTHING ELSE. No ``status`` conjunct, no ``version`` conjunct:
+        a row that is ``running`` or ``version > 1`` but evidence-free is
+        still evidence-free, and the caller decides what else matters.
+
+        This is deliberately NOT
+        :meth:`filter_never_dispatched_ids` — that method's
+        ``idle ∧ version == 1`` conjuncts are a STATE signature (they
+        describe the canonical pause-cascade ghost), not an EVIDENCE
+        signature, and using it as the husk probe would silently
+        false-negative any non-idle / version>1 evidence-free row. The
+        containment ``filter_never_dispatched_ids(ids) ⊆
+        filter_without_any_evidence_ids(ids)`` is pinned.
+
+        The evidence expression is the SINGLE-HOMED
+        :func:`never_dispatched_evidence_expr` factory — this method
+        introduces no second copy of the predicate.
+
+        ONE batched query (chunked — the rendered ``IN (...)`` must stay
+        inside the bind-parameter limits of both engines), so the husk
+        detector pays one round trip for the whole candidate set.
+
+        Args:
+            instance_ids: Candidate instance IDs.
+
+        Returns:
+            The subset of IDs with no ``message_queue`` and no ``task``
+            rows. Unknown IDs are simply not returned. Empty input
+            returns an empty set without touching the DB.
+        """
+        if not instance_ids:
+            return set()
+        no_messages, no_tasks = never_dispatched_evidence_expr()
+        found: set[str] = set()
+        with SQLModelSession(self.engine) as db_session:
+            for chunk in _chunked(list(instance_ids), _EVIDENCE_PROBE_CHUNK):
+                stmt = (
+                    select(Instance.instance_id)
+                    .where(Instance.instance_id.in_(chunk))
+                    .where(no_messages, no_tasks)
+                )
+                found.update(db_session.exec(stmt).all())
+        return found
 
     def get_statuses(self, instance_ids: list[str]) -> dict[str, str]:
         """Return ``{instance_id: status}`` for ``instance_ids``.

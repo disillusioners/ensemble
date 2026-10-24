@@ -728,7 +728,12 @@ class TestReadTools:
         assert row["stale"] is True
         assert row["liveness"] == "paused"  # unchanged by staleness
 
-    async def test_health_report_has_six_detectors_and_never_repairs(self, fleet):
+    async def test_health_report_has_seven_detectors_and_never_repairs(self, fleet):
+        """F3 (2026-10-24): the detector list gained the SEVENTH class,
+        ``never-dispatched-husk`` — appended LAST so the six existing
+        indices stay stable. This pin was ``..._has_six_detectors_...``
+        before the nest-ops shakedown patch; the list grew by one
+        DETECTED CLASS, not by a reshuffle."""
         import json as _json
 
         out = await _by_name(self._read(fleet), "instance_health").ainvoke({})
@@ -741,6 +746,7 @@ class TestReadTools:
             "zombie-pending",
             "orphans",
             "failed-with-unreported-result",
+            "never-dispatched-husk",
         ]
         # disagreement pins: 2 and 5 observable; 1 and 6 honest gaps
         by = {d["detector"]: d for d in payload["detectors"]}

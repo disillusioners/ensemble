@@ -27,8 +27,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine
-from sqlmodel import SQLModel
+from sqlmodel import Session, SQLModel
 
+from daemon.repositories.instance.models import Instance
+from daemon.repositories.instance.repository import SQLModelInstanceRepository
+from daemon.repositories.job_queue.models import JobItem
+from daemon.repositories.message_queue.models import MessageQueue
+from daemon.repositories.task.models import Task
 from daemon.services.instance_lifecycle import InstanceLifecycleService
 from daemon.tools import instance_read as ir
 
@@ -537,3 +542,521 @@ class TestF4bFullAgeRangeScan:
 
         assert seen_totals[0] == ir.FLEET_SCAN_LIMIT + 1
         assert len(seen_totals) >= 2
+
+
+# ────────────────────────────────────────────────────────────────────────
+# F3 — the never-dispatched husk detector
+# ────────────────────────────────────────────────────────────────────────
+
+HUSK_AGE = timedelta(days=12)
+
+
+class FakeTaskRepo:
+    """A task-repo double: the ids that own a task row."""
+
+    def __init__(self, tasks: dict[str, list] | None = None):
+        self._tasks = tasks or {}
+
+    def get_by_instance(self, instance_id):
+        return self._tasks.get(instance_id, [])
+
+
+class FakeQuestionManager:
+    """A question-manager double: the ids that own a pending pack."""
+
+    def __init__(self, packs: dict[str, object] | None = None):
+        self._packs = packs or {}
+
+    def get_question_pack(self, instance_id):
+        return self._packs.get(instance_id)
+
+
+class SpyRepo(SQLModelInstanceRepository):
+    """A repository that RECORDS which evidence probes were called.
+
+    The husk detector must call ``filter_without_any_evidence_ids``
+    ONLY — never ``filter_never_dispatched_ids`` (D-1/D-19: that
+    method's ``idle ∧ version==1`` conjuncts are a STATE signature, not
+    an evidence one).
+    """
+
+    def __init__(self, engine):
+        super().__init__(engine)
+        self.never_dispatched_calls: list[list[str]] = []
+        self.without_evidence_calls: list[list[str]] = []
+
+    def filter_never_dispatched_ids(self, instance_ids):
+        self.never_dispatched_calls.append(list(instance_ids))
+        return super().filter_never_dispatched_ids(instance_ids)
+
+    def filter_without_any_evidence_ids(self, instance_ids):
+        self.without_evidence_calls.append(list(instance_ids))
+        return super().filter_without_any_evidence_ids(instance_ids)
+
+
+class RepoBackedManager:
+    """The manager surface the read tools touch, over a REAL repository.
+
+    ``list_instances`` mirrors the lifecycle service's dict conversion +
+    the per-row ``children`` attach — so the pins run against the real
+    SQL, the real ``to_dict()`` shapes and the real evidence probes, on
+    a scratch SQLite file.
+    """
+
+    def __init__(self, engine, *, tasks=None, packs=None):
+        self.engine = engine
+        self._instance_repository = SpyRepo(engine)
+        self._task_repo = FakeTaskRepo(tasks)
+        self._question_manager = FakeQuestionManager(packs)
+        self.list_calls: list[dict] = []
+
+    def list_instances(
+        self,
+        limit: int = 10,
+        offset: int = 0,
+        status: str | None = None,
+        **kw,
+    ):
+        self.list_calls.append(
+            {"limit": limit, "offset": offset, "status": status}
+        )
+        instances, total, truncated = self._instance_repository.list(
+            limit=limit,
+            offset=offset,
+            status=status,
+            exclude_kb=kw.get("exclude_kb", True),
+        )
+        result: list[dict] = []
+        for inst in instances:
+            info = inst.to_dict()
+            info["children"] = self._instance_repository.list_child_ids_permanent(
+                inst.instance_id
+            )
+            result.append(info)
+        return result, total, truncated
+
+
+@pytest.fixture()
+def fleet_db():
+    """A scratch SQLite engine with the instance + evidence tables.
+
+    tempfile-based — never a HOME-derived or live-shaped path.
+    """
+    tmpdir = tempfile.mkdtemp(prefix="shakedown-fleet-")
+    engine = create_engine(f"sqlite:///{tmpdir}/fleet.db")
+    SQLModel.metadata.create_all(engine)
+    yield engine
+    engine.dispose()
+
+
+def _insert_instances(engine, rows: list[Instance]) -> list[str]:
+    """Insert instance rows; returns their ids (read BEFORE the commit
+    expires the objects)."""
+    ids = [row.instance_id for row in rows]
+    with Session(engine) as session:
+        for row in rows:
+            session.add(row)
+        session.commit()
+    return ids
+
+
+def _instance(
+    instance_id: str,
+    *,
+    agent_id: str = "worker",
+    status: str = "idle",
+    version: int = 1,
+    created_at: datetime | None = None,
+    last_activity_at: datetime | None = None,
+    metadata: dict | None = None,
+    parent_id: str | None = None,
+) -> Instance:
+    return Instance(
+        instance_id=instance_id,
+        agent_id=agent_id,
+        agent_dir=f"/tmp/agents/{agent_id}",
+        status=status,
+        version=version,
+        created_at=(created_at or datetime.now(timezone.utc)).isoformat(),
+        updated_at=(created_at or datetime.now(timezone.utc)).isoformat(),
+        last_activity_at=last_activity_at,
+        instance_metadata=metadata or {},
+        parent_id=parent_id,
+    )
+
+
+def _aged(**kw) -> datetime:
+    return datetime.now(timezone.utc) - HUSK_AGE
+
+
+class TestF3HuskDetector:
+    """F3 — detector #7 ``never-dispatched-husk``.
+
+    PLANNED MUTATION (one behaviour per run):
+      * delete the detector's AGE leg — the FRESH-spawn fixture fires
+        (it should not) → RED;
+      * drop the JobItem leg (E3) — the "husk-with-a-job" fixture fires
+        → RED;
+      * neuter the ``last_activity_at IS NULL`` leg — the "husk that
+        ran a turn" fixture fires → RED;
+      * drop the CHILDREN leg (E4) — the "husk with a child" fixture
+        fires → RED;
+      * drop the question-pack leg (E5) — the "husk with a pending
+        pack" fixture fires → RED;
+      * drop the pause-marker leg (E6) — the "deliberately parked husk"
+        fixture fires → RED;
+      * point the detector at ``filter_never_dispatched_ids`` — the
+        non-idle and version>1 evidence-free fixtures stop firing → RED;
+      * make the detector flag a TERMINAL row — the terminal fixture
+        fires → RED.
+    """
+
+    async def _health(self, manager):
+        return await _call(_read_tools(manager), "instance_health")
+
+    def _husk(self, payload):
+        for detector in payload["detectors"]:
+            if detector["detector"] == "never-dispatched-husk":
+                return detector
+        raise AssertionError("never-dispatched-husk detector is missing")
+
+    def _flagged_ids(self, payload) -> set[str]:
+        return {
+            row["instance_id"] for row in self._husk(payload)["instances"]
+        }
+
+    async def test_spawned_never_dispatched_row_is_flagged(self, fleet_db):
+        """The husk class itself: spawned, never dispatched, aged."""
+        _insert_instances(
+            fleet_db, [_instance("husk-1", created_at=_aged())]
+        )
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        assert self._flagged_ids(payload) == {"husk-1"}
+        row = self._husk(payload)["instances"][0]
+        assert row["idle_seconds"] is not None
+        assert row["idle_seconds"] > ir.DEFAULT_HUSK_MIN_AGE_SECONDS
+        assert "last_activity_at" in row["detail"]
+        assert "never dispatched" in row["detail"]
+
+    async def test_fresh_spawn_is_not_flagged(self, fleet_db):
+        """The legitimate spawn→dispatch ritual: never flagged."""
+        _insert_instances(fleet_db, [_instance("fresh-1")])
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        assert "fresh-1" not in self._flagged_ids(payload)
+
+    async def test_row_that_ran_a_turn_is_not_flagged(self, fleet_db):
+        """A non-NULL ``last_activity_at`` excludes the row — leg 2."""
+        _insert_instances(
+            fleet_db,
+            [
+                _instance(
+                    "worked-1",
+                    created_at=_aged(),
+                    last_activity_at=datetime.now(timezone.utc)
+                    - timedelta(hours=1),
+                )
+            ],
+        )
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        assert "worked-1" not in self._flagged_ids(payload)
+
+    async def test_terminal_row_is_not_flagged(self, fleet_db):
+        """A TERMINAL row is not a husk, however old and empty."""
+        _insert_instances(
+            fleet_db,
+            [_instance("done-1", status="completed", created_at=_aged())],
+        )
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        assert "done-1" not in self._flagged_ids(payload)
+
+    async def test_row_with_a_task_row_is_not_flagged(self, fleet_db):
+        """E1 — a task row is evidence of a dispatch."""
+        _insert_instances(
+            fleet_db, [_instance("tasked-1", created_at=_aged())]
+        )
+        with Session(fleet_db) as session:
+            session.add(Task(instance_id="tasked-1", task_type="PROCESS_MESSAGE"))
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        assert "tasked-1" not in self._flagged_ids(payload)
+
+    async def test_row_with_a_message_row_is_not_flagged(self, fleet_db):
+        """E2 — a message row is evidence of a dispatch."""
+        _insert_instances(
+            fleet_db, [_instance("messaged-1", created_at=_aged())]
+        )
+        with Session(fleet_db) as session:
+            session.add(
+                MessageQueue(
+                    message_id="m-1",
+                    instance_id="messaged-1",
+                    content="hello",
+                    role="user",
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                )
+            )
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        assert "messaged-1" not in self._flagged_ids(payload)
+
+    async def test_row_with_a_job_item_is_not_flagged(self, fleet_db):
+        """E3 — a ``job_queue_items`` row is evidence of a dispatch, in
+        ANY admission state (soft-deleted included)."""
+        _insert_instances(
+            fleet_db, [_instance("jobbed-1", created_at=_aged())]
+        )
+        with Session(fleet_db) as session:
+            session.add(
+                JobItem(
+                    agent_id="worker",
+                    agent_dir="/tmp/agents/worker",
+                    message="dispatch",
+                    instance_id="jobbed-1",
+                    job_type="task",
+                    admission_state="dead",
+                    deleted_at=datetime.now(timezone.utc).isoformat(),
+                )
+            )
+            session.commit()
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        assert "jobbed-1" not in self._flagged_ids(payload)
+
+    async def test_row_with_a_child_is_not_flagged(self, fleet_db):
+        """E4 — a husk that spawned children is not evidence-free. The
+        children come from the PERMANENT parent_id record."""
+        _insert_instances(
+            fleet_db,
+            [
+                _instance("parent-1", created_at=_aged()),
+                _instance(
+                    "child-1",
+                    created_at=_aged(),
+                    parent_id="parent-1",
+                ),
+            ],
+        )
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        flagged = self._flagged_ids(payload)
+        assert "parent-1" not in flagged
+
+    async def test_row_with_a_pending_pack_is_not_flagged(self, fleet_db):
+        """E5 — a pending question pack is evidence of a live turn."""
+        _insert_instances(
+            fleet_db, [_instance("asking-1", created_at=_aged())]
+        )
+        manager = RepoBackedManager(
+            fleet_db, packs={"asking-1": object()}
+        )
+
+        payload = await self._health(manager)
+
+        assert "asking-1" not in self._flagged_ids(payload)
+
+    async def test_row_with_a_pause_marker_is_not_flagged(self, fleet_db):
+        """E6 — the pause marker covers BOTH the question pause and the
+        deliberate park tombstone."""
+        _insert_instances(
+            fleet_db,
+            [
+                _instance(
+                    "parked-1",
+                    created_at=_aged(),
+                    metadata={
+                        "question_paused": {
+                            "deliberate": True,
+                            "cleared_at": datetime.now(timezone.utc)
+                            .isoformat(),
+                        }
+                    },
+                )
+            ],
+        )
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        assert "parked-1" not in self._flagged_ids(payload)
+
+    async def test_non_idle_evidence_free_row_is_still_flagged(self, fleet_db):
+        """THE D-1 AMENDMENT: a ``running`` evidence-free row IS a husk.
+
+        ``filter_never_dispatched_ids`` (``idle ∧ version==1``) would
+        silently miss it — which is exactly why the detector calls the
+        evidence-only method instead.
+        """
+        _insert_instances(
+            fleet_db,
+            [_instance("stuck-running-1", status="running", created_at=_aged())],
+        )
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        assert "stuck-running-1" in self._flagged_ids(payload)
+
+    async def test_version_gt_one_evidence_free_row_is_still_flagged(
+        self, fleet_db
+    ):
+        """THE D-1 AMENDMENT, version leg: ``version > 1`` does not
+        manufacture evidence."""
+        _insert_instances(
+            fleet_db,
+            [_instance("bumped-1", version=4, created_at=_aged())],
+        )
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        assert "bumped-1" in self._flagged_ids(payload)
+
+    async def test_detector_never_calls_the_state_signature(self, fleet_db):
+        """D-1/D-19: the husk detector calls the EVIDENCE-ONLY method and
+        NEVER ``filter_never_dispatched_ids``."""
+        _insert_instances(
+            fleet_db, [_instance("husk-spy-1", created_at=_aged())]
+        )
+        manager = RepoBackedManager(fleet_db)
+
+        await self._health(manager)
+
+        assert manager._instance_repository.never_dispatched_calls == []
+        assert manager._instance_repository.without_evidence_calls
+
+    async def test_disagreement_pin_states_evidence_conjunct_containment(
+        self, fleet_db
+    ):
+        """The pin NAMES the canonical twins and scopes the containment
+        to the evidence conjuncts (D-1 amendment) — never the old
+        "husk ⊆ canonical ghost set" phrasing, which is false once a
+        paused evidence-free row can be flagged."""
+        _insert_instances(
+            fleet_db, [_instance("husk-pin-1", created_at=_aged())]
+        )
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        pin = self._husk(payload)["disagreement_pin"]
+        assert "filter_never_dispatched_ids" in pin
+        assert "_ghost_child_filter" in pin
+        assert "never_dispatched_evidence_expr" in pin
+        assert "EVIDENCE-CONJUNCT CONTAINMENT ONLY" in pin
+        assert "NOT a subset" in pin
+
+
+class TestF3EvidenceContainment:
+    """The containment pin (D-1/D-19): ``filter_never_dispatched_ids``
+    ⊆ ``filter_without_any_evidence_ids``.
+
+    PLANNED MUTATION: make ``filter_without_any_evidence_ids`` carry a
+    status conjunct (any status) — the containment goes RED (the
+    evidence-free ``running`` row falls out of the superset).
+    """
+
+    def test_evidence_free_is_a_superset_of_the_canonical_ghost_set(
+        self, fleet_db
+    ):
+        rows = [
+            _instance("c-ghost", created_at=_aged()),  # idle/v1, no evidence
+            _instance("c-running", status="running", created_at=_aged()),
+            _instance("c-bumped", version=3, created_at=_aged()),
+            _instance("c-tasked", created_at=_aged()),
+            _instance("c-messaged", created_at=_aged()),
+            _instance("c-done", status="completed", created_at=_aged()),
+        ]
+        ids = _insert_instances(fleet_db, rows)
+        with Session(fleet_db) as session:
+            session.add(Task(instance_id="c-tasked", task_type="PROCESS_MESSAGE"))
+            session.add(
+                MessageQueue(
+                    message_id="m-2",
+                    instance_id="c-messaged",
+                    content="x",
+                    role="user",
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                )
+            )
+            session.commit()
+
+        repo = SQLModelInstanceRepository(fleet_db)
+
+        canonical = repo.filter_never_dispatched_ids(ids)
+        evidence_free = repo.filter_without_any_evidence_ids(ids)
+
+        assert canonical == {"c-ghost"}
+        # Evidence-only is STATUS-BLIND by design: the completed row has
+        # no evidence either, so it is in the superset (the caller's
+        # row-local non-terminal leg is what excludes it from the husk
+        # set — the probe itself does not).
+        assert evidence_free == {"c-ghost", "c-running", "c-bumped", "c-done"}
+        assert canonical.issubset(evidence_free)
+
+    def test_empty_input_touches_nothing(self, fleet_db):
+        repo = SQLModelInstanceRepository(fleet_db)
+        assert repo.filter_without_any_evidence_ids([]) == set()
+
+
+class TestF3xF4Coupling:
+    """F3 × F4 — the husk in the OLDEST rows must still be flagged.
+
+    The two known production husks sit in the oldest 730 of 1730 rows —
+    OUTSIDE the old 1000-row window. F3 without F4 is correct-but-blind.
+
+    PLANNED MUTATION: restore the single-window scan — the husk falls
+    out of the window and this pin goes RED.
+    """
+
+    def test_oldest_row_husk_is_flagged_across_windows(self, fleet_db):
+        total = ir.FLEET_SCAN_LIMIT + 1
+        now = datetime.now(timezone.utc)
+        rows = [
+            _instance(
+                f"filler-{i:06d}",
+                created_at=now - timedelta(seconds=i),
+                last_activity_at=now - timedelta(seconds=i),
+            )
+            for i in range(total)
+        ]
+        # The OLDEST row (the last one in ``created_at DESC`` order) is
+        # the husk.
+        rows[-1] = _instance("oldest-husk", created_at=now - timedelta(days=30))
+        _insert_instances(fleet_db, rows)
+
+        manager = RepoBackedManager(fleet_db)
+
+        payload = asyncio.run(_call(_read_tools(manager), "instance_health"))
+
+        flagged = {
+            row["instance_id"]
+            for detector in payload["detectors"]
+            if detector["detector"] == "never-dispatched-husk"
+            for row in detector["instances"]
+        }
+        assert "oldest-husk" in flagged
+        # and the scan covered the whole fleet
+        assert payload["scan_truncated"] is False
+        assert payload["scan_stop_reason"] == "end_of_set"

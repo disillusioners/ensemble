@@ -1,15 +1,16 @@
-"""Instance READ tools — the ``instance_read`` privileged category (4 tools).
+"""Instance READ tools — the ``instance_read`` privileged category (5 tools).
 
-The four tools answer the questions the maintenancer could not answer
+The five tools answer the questions the maintenancer could not answer
 before this category existed: *what is in the fleet*, *what is this one
 instance doing*, *what looks wedged*, and *how much capacity is left*.
 
-Four tools
+Five tools
 ----------
 ``instance_list``            — fleet census (cheap rows, SQL-side filters)
 ``instance_get``             — deep detail for ONE instance (hydration)
-``instance_health``          — wedge report (six reporting predicates)
+``instance_health``          — wedge report (seven reporting predicates)
 ``fleet_capacity_summary``   — "how's the nest?" (counts, queue, pool, DLQ)
+``instance_fleet_summary``   — ALIAS of ``fleet_capacity_summary`` (F1)
 
 CENSUS AND DETAIL ARE COMPLEMENTARY, NOT NESTED
 ------------------------------------------------
@@ -89,8 +90,9 @@ instance's deep detail, the wedge report, and the capacity summary.
 Tools in this category:
 - ``instance_list``           — fleet census (one cheap row per instance)
 - ``instance_get``            — deep detail for ONE instance
-- ``instance_health``         — wedge report (six detector classes)
+- ``instance_health``         — wedge report (seven detector classes)
 - ``fleet_capacity_summary``  — counts, queue depth, worker pool, DLQ
+- ``instance_fleet_summary``  — alias of fleet_capacity_summary
 
 These tools READ. They never change anything, never write an audit
 row, and never trigger a repair. They stay available even when the
@@ -124,6 +126,20 @@ DEFAULT_STALE_MINUTES = 30
 #: The default staleness threshold, in seconds — DERIVED from the one
 #: minute constant so the two tools can never disagree (L3 fix).
 DEFAULT_STALE_SECONDS = DEFAULT_STALE_MINUTES * 60
+
+#: The minimum age (seconds) of a NEVER-ACTIVATED instance before the
+#: husk detector reports it (nest-ops shakedown F3, D-1). 24h — four
+#: times the longest legitimate spawn→dispatch horizon in the tree and
+#: twelve times the age of the youngest known production husk, so
+#: fixture age jitter cannot flip a verdict.
+#:
+#: It is deliberately NOT derived from ``stale_minutes``: that argument
+#: answers "a RUNNING instance with no activity for N minutes" (a
+#: turn-in-flight judgement); this constant answers "this instance
+#: never had a turn AT ALL" (an evidence judgement). It is deliberately
+#: NOT a tool argument either — the threshold moves by editing this
+#: constant, never by widening the tool schema.
+DEFAULT_HUSK_MIN_AGE_SECONDS: int = 86_400
 #: The maximum number of checkpoint messages ``instance_get`` returns.
 MAX_LAST_MESSAGES = 20
 
@@ -922,7 +938,7 @@ Examples:
     @register_tool_category("instance_read")
     @tool(args_schema=InstanceHealthInput)
     async def instance_health(stale_minutes: int = DEFAULT_STALE_MINUTES) -> str:
-        """Wedge report — six read-only detectors. Use tool_help("instance_health") for details."""
+        """Wedge report — seven read-only detectors. Use tool_help("instance_health") for details."""
         if not _is_instance_read_authorized(caller_agent_id):
             return _error("instance_read operation not permitted for this agent")
 
@@ -961,7 +977,7 @@ Examples:
         }
         return json.dumps(payload, default=str)
 
-    instance_health._full_doc_ = """Wedge report — six read-only detector classes.
+    instance_health._full_doc_ = """Wedge report — seven read-only detector classes.
 
 This NEVER repairs anything. It reports what looks sick so you can
 decide what to do; the acts are separate tools.
@@ -982,9 +998,19 @@ Returns:
     is pinned against, or `null` where no observable counterpart
     exists (an honest gap, not a pretend one).
 
-    The six classes: `stale-running`, `waiting-on-a-dead-parent`,
+    The seven classes: `stale-running`, `waiting-on-a-dead-parent`,
     `question-paused-without-task-row`, `zombie-pending`, `orphans`,
-    `failed-with-unreported-result`.
+    `failed-with-unreported-result`, `never-dispatched-husk`.
+
+    `never-dispatched-husk` is the SEVENTH detector (added 2026-10-24,
+    F3): a row that was SPAWNED but never received any work at all —
+    no task, no job item, no message, no child, no pending question,
+    no pause marker, and no activity EVER (`last_activity_at` is null)
+    — aged past 24h (`DEFAULT_HUSK_MIN_AGE_SECONDS`). For a husk,
+    `idle_seconds` is the AGE since `created_at`, because "how long
+    since it last did anything" has no answer: it never did anything.
+    The `detail` string names the mechanism, so a husk row is never
+    mistaken for an activity-derived idle.
 
     `scan_truncated` says whether the fleet was covered COMPLETELY;
     `scan_stop_reason` says WHY the walk stopped —
@@ -1139,6 +1165,167 @@ def _has_live_task(task_repo: Any, instance_id: str) -> bool:
     return any(getattr(t, "status", None) not in terminal for t in tasks)
 
 
+def _chunked_ids(instance_ids: list[str], size: int) -> list[list[str]]:
+    """Split an id list into consecutive chunks (the bind-limit guard)."""
+    if size <= 0:
+        return [list(instance_ids)]
+    return [
+        instance_ids[i : i + size]
+        for i in range(0, len(instance_ids), size)
+    ]
+
+
+#: The bind-parameter chunk size for the husk detector's batched
+#: JobItem probe. SQLite's ``SQLITE_MAX_VARIABLE_NUMBER`` is 999; 500
+#: leaves headroom and matches the repository's evidence-probe chunk.
+_HUSK_PROBE_CHUNK = 500
+
+
+def _job_item_counts_by_instance(
+    manager: Any, instance_ids: list[str]
+) -> dict[str, int] | None:
+    """ONE batched grouped query: JobItem rows per instance, ANY state.
+
+    E3 of the husk predicate (nest-ops shakedown F3). A ``job_queue_items``
+    row is real evidence that a dispatch was attempted and mirrored —
+    in ANY admission state, soft-deleted included (a soft-deleted job
+    still proves a dispatch happened), so there is deliberately NO
+    ``deleted_at`` filter. The repository's own helpers cannot answer
+    "any row, any state" (``JobRepository.get_by_instance`` filters
+    ``deleted_at IS NULL`` and returns only the newest;
+    ``find_jobs_by_instance`` filters to the ACTIVE admission states).
+
+    Chunked so the rendered ``IN (...)`` stays inside SQLite's bind
+    limit.
+
+    Returns the ``{instance_id: count}`` mapping, or ``None`` when the
+    probe could not run — the caller must then NOT flag (a husk verdict
+    must not rest on an unavailable leg).
+    """
+    engine = getattr(manager, "engine", None)
+    if engine is None or not instance_ids:
+        return None
+    counts: dict[str, int] = {}
+    try:
+        from sqlalchemy import bindparam, text
+
+        stmt = text(
+            "SELECT instance_id, COUNT(*) FROM job_queue_items "
+            "WHERE instance_id IN :ids GROUP BY instance_id"
+        ).bindparams(bindparam("ids", expanding=True))
+        with engine.connect() as conn:
+            for chunk in _chunked_ids(list(instance_ids), _HUSK_PROBE_CHUNK):
+                if not chunk:
+                    continue
+                rows = conn.execute(stmt, {"ids": list(chunk)}).all()
+                for instance_id, count in rows:
+                    if instance_id:
+                        counts[str(instance_id)] = int(count or 0)
+    except Exception as exc:  # noqa: BLE001 — read-only probe
+        logger.debug("instance_read: job-item evidence read failed: %s", exc)
+        return None
+    return counts
+
+
+def _husk_row_local_candidate(
+    manager: Any,
+    info: dict[str, Any],
+    *,
+    now: datetime,
+    terminal_statuses: Any,
+    threshold: int,
+) -> int | None:
+    """The row-local legs of the husk predicate — the candidate's AGE.
+
+    Non-terminal ∧ ``last_activity_at is None`` ∧ no children (E4, the
+    per-row attach) ∧ no question pack (E5, RAM) ∧ no pause marker (E6)
+    ∧ age > threshold. ``None`` means "not a candidate". The BATCHED
+    evidence legs (E1/E2/E3) are resolved later, for the whole candidate
+    set at once — see :func:`_husk_flagged_rows`.
+    """
+    if info.get("status") in terminal_statuses:
+        return None
+    if info.get("last_activity_at") is not None:
+        return None
+    age = _seconds_since(info.get("created_at"), now=now)
+    if age is None or age <= threshold:
+        return None
+    if info.get("children"):
+        return None
+    if _question_pack_of(manager, info.get("instance_id") or "") is not None:
+        return None
+    if _pause_marker_of(info.get("metadata")) is not None:
+        return None
+    return age
+
+
+def _husk_flagged_rows(
+    manager: Any,
+    candidates: list[tuple[dict[str, Any], int]],
+    *,
+    threshold: int,
+) -> list[dict[str, Any]]:
+    """Resolve the BATCHED evidence legs over the husk candidates.
+
+    The candidate list is the output of the row-local filter, run
+    per-window while the fleet streamed past. Two batched round trips
+    settle it, independent of the candidate count:
+
+    1. ``repo.filter_without_any_evidence_ids`` — the SINGLE-HOMED
+       evidence expression (E1 no task rows, E2 no message rows). The
+       detector NEVER calls ``filter_never_dispatched_ids``: that
+       method's ``idle ∧ version == 1`` conjuncts are a STATE
+       signature, not an evidence signature, and would silently
+       false-negative a ``running``/``version>1`` evidence-free row
+       (D-1 amendment, arch §1.1-§1.2).
+    2. the grouped JobItem probe (E3) over the surviving ids.
+
+    Either leg being UNAVAILABLE (a probe failure) suppresses the
+    verdict for that run: a husk report must never rest on a leg the
+    scanner could not actually evaluate.
+    """
+    if not candidates:
+        return []
+    repo = getattr(manager, "_instance_repository", None)
+    if repo is None:
+        return []
+
+    candidate_ids = [
+        (info.get("instance_id") or "") for info, _age in candidates
+    ]
+    try:
+        evidence_free = repo.filter_without_any_evidence_ids(candidate_ids)
+    except Exception as exc:  # noqa: BLE001 — read-only probe
+        logger.debug("instance_read: husk evidence probe failed: %s", exc)
+        return []
+
+    surviving = [iid for iid in candidate_ids if iid in evidence_free]
+    job_counts = _job_item_counts_by_instance(manager, surviving)
+    if job_counts is None:
+        return []
+
+    flagged: list[dict[str, Any]] = []
+    for info, age in candidates:
+        instance_id = info.get("instance_id") or ""
+        if instance_id not in evidence_free:
+            continue
+        if job_counts.get(instance_id, 0):
+            continue
+        flagged.append(
+            _flagged_row(
+                info,
+                idle_seconds=age,
+                detail=(
+                    "never dispatched: no activity ever (last_activity_at is "
+                    "null), no task, no job item, no messages, no children, "
+                    "no question pack, no pause marker; "
+                    f"age {age}s (threshold {threshold}s)"
+                ),
+            )
+        )
+    return flagged
+
+
 def _build_health_report(
     manager: Any, threshold_seconds: int
 ) -> tuple[list[dict[str, Any]], bool, str]:
@@ -1214,6 +1401,10 @@ def _build_health_report(
     zombie_pending: list[dict[str, Any]] = []
     orphans: list[dict[str, Any]] = []
     failed_unreported: list[dict[str, Any]] = []
+    # The husk detector's row-local candidates: (row, age-since-created).
+    # The id list is the ONLY thing that survives the walk — the batched
+    # evidence legs are resolved once, after the loop.
+    husk_candidates: list[tuple[dict[str, Any], int]] = []
 
     # Compact cross-row state: the ONLY per-row field a detector needs
     # from another row is the parent's STATUS.
@@ -1362,6 +1553,23 @@ def _build_health_report(
                         )
                     )
 
+            # ── 7. never-dispatched-husk (the ROW-LOCAL legs) ────────
+            # Only the cheap legs run here (F3, D-1): non-terminal,
+            # never active, aged, no children, no pending question, no
+            # pause marker. The BATCHED evidence legs (E1/E2/E3) are
+            # settled once, after the walk, over the whole candidate
+            # set — two round trips for the whole report, independent
+            # of the fleet size.
+            candidate_age = _husk_row_local_candidate(
+                manager,
+                info,
+                now=now,
+                terminal_statuses=TERMINAL_INSTANCE_STATUSES,
+                threshold=DEFAULT_HUSK_MIN_AGE_SECONDS,
+            )
+            if candidate_age is not None:
+                husk_candidates.append((info, candidate_age))
+
         window_index += 1
     else:
         # The window cap fired without ever seeing an empty window.
@@ -1444,6 +1652,41 @@ def _build_health_report(
             "disagreement_pin": None,
         },
     ]
+
+    # ── 7. never-dispatched-husk (the BATCHED evidence legs) ────────
+    # Appended LAST: a pure addition, so the six existing detector
+    # indices stay stable for any consumer that reads them positionally.
+    husk_flagged = _husk_flagged_rows(
+        manager, husk_candidates, threshold=DEFAULT_HUSK_MIN_AGE_SECONDS
+    )
+    detectors.append(
+        {
+            "detector": "never-dispatched-husk",
+            "instances": husk_flagged,
+            "count": len(husk_flagged),
+            # D-1 amendment (arch §1.2 item 6): the containment holds on
+            # the EVIDENCE conjuncts only. The canonical twins carry a
+            # STATE signature (idle ∧ version==1) on top of the same
+            # evidence, so "husk ⊆ canonical ghost set" would be FALSE —
+            # a paused evidence-free row is a husk and not a canonical
+            # ghost.
+            "disagreement_pin": (
+                "ChildReportsService._ghost_child_filter / "
+                "InstanceRepository.filter_never_dispatched_ids "
+                "(the never-dispatched EVIDENCE signature — zero "
+                "message_queue rows, zero task rows, via the shared "
+                "expression never_dispatched_evidence_expr). "
+                "EVIDENCE-CONJUNCT CONTAINMENT ONLY: every husk-flagged "
+                "row satisfies no-message-rows AND no-task-rows (via "
+                "that shared expression) AND non-terminal AND "
+                "last_activity_at IS NULL AND age > "
+                "DEFAULT_HUSK_MIN_AGE_SECONDS. The husk set is NOT a "
+                "subset of the canonical ghost set — that set adds the "
+                "idle ∧ version==1 state conjuncts, which are not "
+                "evidence."
+            ),
+        }
+    )
 
     # F4b: the flag is TRUE when the walk did NOT cover the fleet —
     # either fewer distinct rows than the count promised, or the walk
