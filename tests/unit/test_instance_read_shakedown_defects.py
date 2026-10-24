@@ -24,6 +24,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
@@ -36,6 +37,13 @@ from daemon.repositories.message_queue.models import MessageQueue
 from daemon.repositories.task.models import Task
 from daemon.services.instance_lifecycle import InstanceLifecycleService
 from daemon.tools import instance_read as ir
+from daemon.tools._tool_registry import (
+    DYNAMIC_TOOL_NAMES,
+    KNOWN_TOOL_NAMES,
+    discover_source_only_tool_names,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -1592,3 +1600,118 @@ class TestF5Measures:
         assert "dead_letter_items" in note
         assert "job_queue_items" in note
         assert "different tables" in note
+
+
+# ────────────────────────────────────────────────────────────────────────
+# F1 — the instance_fleet_summary alias
+# ────────────────────────────────────────────────────────────────────────
+
+
+class TestF1Alias:
+    """F1 — BOTH names resolve, ONE builder, byte-identical payloads.
+
+    PLANNED MUTATION (one behaviour per run):
+      * delete the alias closure — the alias-resolution pin goes RED;
+      * remove ONE registry-list entry — the frozen-name drift pin
+        (tests/unit/tools/test_frozen_tool_name_discovery.py) goes RED;
+      * drop the alias ``_full_doc_`` — the tool_help-body pin goes RED;
+      * give the alias its OWN builder — the byte-identical pin goes RED
+        (the two payloads drift on ``generated_at`` ordering at best).
+    """
+
+    def _tools(self, manager=None):
+        return ir.create_instance_read_tools(
+            manager or FakeFleetManager(),
+            current_instance_id="m",
+            agent_id="maintenancer",
+        )
+
+    def test_both_names_are_in_the_factory(self):
+        names = {t.name for t in self._tools()}
+        assert names == {
+            "instance_list",
+            "instance_get",
+            "instance_health",
+            "fleet_capacity_summary",
+            "instance_fleet_summary",
+        }
+
+    def test_the_alias_is_a_literal_closure_not_generated(self):
+        """AST discovery must find it — a code-generated alias would NOT
+        be discovered (the hard constraint that forecloses
+        "alias via helper")."""
+        discovered = discover_source_only_tool_names()
+        assert "instance_fleet_summary" in discovered
+
+    def test_both_names_in_both_registry_lists(self):
+        assert "instance_fleet_summary" in set(DYNAMIC_TOOL_NAMES)
+        assert "instance_fleet_summary" in set(KNOWN_TOOL_NAMES)
+
+    async def test_payloads_are_byte_identical(self, fleet_db):
+        now = datetime.now(timezone.utc)
+        _insert_instances(
+            fleet_db,
+            [
+                _instance("alias-1", status="idle", created_at=now),
+                _instance("alias-2", status="running", created_at=now),
+            ],
+        )
+        manager = RepoBackedManager(fleet_db)
+        tools = self._tools(manager)
+
+        live = json.loads(
+            await _by_name(tools, "fleet_capacity_summary").ainvoke({})
+        )
+        alias = json.loads(
+            await _by_name(tools, "instance_fleet_summary").ainvoke({})
+        )
+
+        # ONE builder ⇒ identical payloads. `generated_at` is the only
+        # key that legitimately differs (two calls, two timestamps).
+        live.pop("generated_at")
+        alias.pop("generated_at")
+        assert alias == live
+
+    async def test_both_names_have_non_empty_help_bodies(self):
+        """Full docs are keyed by the tool NAME — an alias without its
+        own ``_full_doc_`` would render an empty ``tool_help`` body."""
+        for name in ("fleet_capacity_summary", "instance_fleet_summary"):
+            doc = _by_name(self._tools(), name)._full_doc_ or ""
+            assert doc.strip(), f"{name} has an empty _full_doc_"
+
+    def test_the_alias_doc_says_it_is_an_alias(self):
+        doc = _by_name(self._tools(), "instance_fleet_summary")._full_doc_ or ""
+        assert "Alias of" in doc
+        assert "fleet_capacity_summary" in doc
+
+    def test_the_live_doc_mentions_the_alias(self):
+        doc = _by_name(self._tools(), "fleet_capacity_summary")._full_doc_ or ""
+        assert "instance_fleet_summary" in doc
+
+    def test_the_category_doc_lists_the_alias(self):
+        assert "instance_fleet_summary" in ir.CATEGORY_DOC
+
+    async def test_the_alias_gates_authority_too(self):
+        """The body gate is not cosmetic: a literal tool name in an allow
+        list bypasses the category gate, so every body checks the same
+        shared helper."""
+        tools = ir.create_instance_read_tools(
+            FakeFleetManager(), current_instance_id="m", agent_id="leader"
+        )
+        out = await _by_name(tools, "instance_fleet_summary").ainvoke({})
+        assert "not permitted" in out
+
+    def test_the_planning_rows_are_annotated_not_rewritten(self):
+        """The stale pre-rename rows carry the pointer to the rename
+        verdict (annotation, not rewrite — they are the historical Q1
+        record)."""
+        rec = REPO_ROOT / ".agents" / "shared" / "planning" / "nest-ops" / (
+            "architecture-recommendation.md"
+        )
+        if not rec.exists():
+            pytest.skip("the nest-ops planning record is not in this tree")
+        text = rec.read_text(encoding="utf-8")
+        assert text.count("2026-10-24 ANNOTATION") == 2
+        assert "PRE-RENAME SPELLING" in text
+        # the rename verdict rows themselves are untouched
+        assert "Rename `instance_fleet_summary` → `fleet_capacity_summary`" in text

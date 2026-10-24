@@ -544,7 +544,7 @@ def create_instance_read_tools(
     agent_id: str = "",
     agent_tag: str | None = None,
 ) -> list:
-    """Build the four ``instance_read`` tools for one instance/agent.
+    """Build the five ``instance_read`` tools for one instance/agent.
 
     Args:
         manager: The ``InstanceManager`` — the tools read through its
@@ -559,7 +559,8 @@ def create_instance_read_tools(
         agent_tag: The caller's version tag (unused; signature parity).
 
     Returns:
-        A list of the four ``@tool``-decorated callables.
+        A list of the five ``@tool``-decorated callables (four reads +
+        the ``instance_fleet_summary`` alias, F1).
     """
     caller_agent_id = agent_id or ""
 
@@ -1229,11 +1230,67 @@ Examples:
     fleet_capacity_summary()
 """
 
+    # ── instance_fleet_summary (ALIAS of fleet_capacity_summary) ─────
+    # F1 (nest-ops shakedown): the ratified rename specified
+    # ``instance_fleet_summary``; the shipped surface is
+    # ``fleet_capacity_summary``. BOTH names resolve. This is a SECOND
+    # LITERAL ``@tool`` closure — a distinct named def, NOT
+    # code-generated: the registry's AST discovery scans ``@tool`` at
+    # any nesting depth (_tool_registry.py), so a loop/partial/helper
+    # generated alias would be SILENTLY INVISIBLE to registration and
+    # to the bidirectional name-drift pin.
+    #
+    # The LIVE name is untouched — same function, same decorator, same
+    # payload (ONE builder), same doc (bar the one-sentence alias
+    # mention). This is an ADDITIVE alias, never a rename. Its own
+    # ``_full_doc_`` is mandatory: full docs are keyed by the tool
+    # NAME, so without one the alias would show up in ``tool_help``
+    # with an empty body.
+    class InstanceFleetSummaryInput(BaseModel):
+        """Input schema for instance_fleet_summary (no arguments)."""
+
+    @register_tool_category("instance_read")
+    @tool(args_schema=InstanceFleetSummaryInput)
+    async def instance_fleet_summary() -> str:
+        """Alias of fleet_capacity_summary — same payload. Use tool_help("fleet_capacity_summary") for details."""
+        if not _is_instance_read_authorized(caller_agent_id):
+            return _error("instance_read operation not permitted for this agent")
+
+        try:
+            payload = await asyncio.to_thread(_build_capacity_summary, manager)
+        except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
+            logger.exception("instance_fleet_summary failed")
+            return _error(f"instance_fleet_summary failed: {type(exc).__name__}")
+        return json.dumps(payload, default=str)
+
+    instance_fleet_summary._full_doc_ = """Alias of `fleet_capacity_summary` — the SAME payload, ONE builder.
+
+The ratified rename (the nest-ops planning set specified
+`instance_fleet_summary`) shipped as `fleet_capacity_summary`; both
+names resolve to the same view and cannot drift, because both delegate
+to the same builder. Use whichever name you already know.
+
+Args:
+    (none)
+
+Returns:
+    Identical to `fleet_capacity_summary` — see
+    tool_help("fleet_capacity_summary") for the full field reference.
+
+Side effects:
+    NONE. Read-only; no audit row.
+
+Examples:
+    instance_fleet_summary()
+    fleet_capacity_summary()   # the same payload, the live name
+"""
+
     return [
         instance_list,
         instance_get,
         instance_health,
         fleet_capacity_summary,
+        instance_fleet_summary,
     ]
 
 

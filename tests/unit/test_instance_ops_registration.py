@@ -60,6 +60,11 @@ READ_TOOL_NAMES: frozenset[str] = frozenset({
     "instance_get",
     "instance_health",
     "fleet_capacity_summary",
+    # F1 (nest-ops shakedown, 2026-10-24): the ADDITIVE alias of
+    # fleet_capacity_summary — a second literal @tool closure in
+    # create_instance_read_tools, same ONE builder. Hand-maintained
+    # set used only in the subset checks below (no len(tools) pin).
+    "instance_fleet_summary",
 })
 ACT_TOOL_NAMES: frozenset[str] = frozenset({
     "instance_terminate",
@@ -97,7 +102,7 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
 
 
 class TestStaticRegistration:
-    def test_step1_ast_discovery_finds_all_ten(self) -> None:
+    def test_step1_ast_discovery_finds_all_eleven(self) -> None:
         """Step 1 — the AST walker finds the factory-created ``@tool``
         functions at any nesting depth, in BOTH modules."""
         discovered = discover_source_only_tool_names()
@@ -117,11 +122,11 @@ class TestStaticRegistration:
                 "AST scanner and the drift pin fails at boot"
             )
 
-    def test_step3_dynamic_tool_names_contains_all_ten(self) -> None:
+    def test_step3_dynamic_tool_names_contains_all_eleven(self) -> None:
         missing = ALL_TOOL_NAMES - set(DYNAMIC_TOOL_NAMES)
         assert missing == set(), f"DYNAMIC_TOOL_NAMES missing: {missing}"
 
-    def test_step3b_known_tool_names_contains_all_ten(self) -> None:
+    def test_step3b_known_tool_names_contains_all_eleven(self) -> None:
         missing = ALL_TOOL_NAMES - set(KNOWN_TOOL_NAMES)
         assert missing == set(), f"KNOWN_TOOL_NAMES missing: {missing}"
 
