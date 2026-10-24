@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -1966,6 +1967,71 @@ class TestParentStatusCache:
         )
         assert repo.calls == ["parent-1", "parent-1"], (
             "the second child must RE-PROBE, not read a poisoned entry"
+        )
+
+
+class TestF8OffLoopReads:
+    """The two blocking reads run OFF the event loop (RIDE-ALONG 1).
+
+    ``repo.get`` is a database round-trip and ``find_near_instance``
+    lists the fleet — both are SYNC. Called straight from the async
+    tool body they BLOCK the event loop for the duration of the query.
+    The module's own convention (``asyncio.to_thread`` — cf. the
+    ``repo.get`` calls further down the same module and
+    ``daemon/graph.py``) applies to both legs of the resolver.
+
+    The double records the THREAD each call ran on; the pin asserts
+    neither ran on the event-loop thread.
+
+    PLANNED MUTATION: call either leg directly (no ``to_thread``) → the
+    matching pin RED.
+    """
+
+    async def test_the_exact_read_runs_off_the_event_loop(self, fleet_db):
+        _insert_instances(fleet_db, [_instance("off-loop-1")])
+        manager = RepoBackedManager(fleet_db)
+        threads: list[int] = []
+        original_get = manager._instance_repository.get
+
+        def recording_get(iid):
+            threads.append(threading.get_ident())
+            return original_get(iid)
+
+        manager._instance_repository.get = recording_get  # type: ignore[method-assign]
+
+        out = await _by_name(_read_tools(manager), "instance_get").ainvoke(
+            {"id": "off-loop-1"}
+        )
+
+        assert "off-loop-1" in out
+        assert threads, "the exact read must have happened"
+        assert threads[0] != threading.get_ident(), (
+            "the repository read must run OFF the event loop "
+            "(asyncio.to_thread) — a sync round-trip on the loop blocks "
+            "every other task in the daemon"
+        )
+
+    async def test_the_fuzzy_leg_runs_off_the_event_loop(self, fleet_db):
+        """The exact read MISSES, so the fuzzy leg is the one that runs."""
+        manager = RepoBackedManager(fleet_db, near_matches=["near-1"])
+        threads: list[int] = []
+        original = manager.find_near_instance
+
+        def recording(instance_id, max_distance=7):
+            threads.append(threading.get_ident())
+            return original(instance_id, max_distance=max_distance)
+
+        manager.find_near_instance = recording  # type: ignore[method-assign]
+
+        out = await _by_name(_read_tools(manager), "instance_get").ainvoke(
+            {"id": "ghost-1"}
+        )
+
+        assert "near-1" in out, "the fuzzy leg must have run"
+        assert threads, "the fuzzy match must have happened"
+        assert threads[0] != threading.get_ident(), (
+            "the fuzzy match must run OFF the event loop "
+            "(asyncio.to_thread)"
         )
 
 

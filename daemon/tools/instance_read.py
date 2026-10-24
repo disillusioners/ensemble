@@ -373,31 +373,6 @@ def _lineage_max_activity(manager: Any, instance_id: str) -> str | None:
 # ─────────────────────────────────────────────────────────────────────
 # Internal plumbing shared by the tools
 # ─────────────────────────────────────────────────────────────────────
-async def _resolve_target(manager: Any, instance_id: str) -> str:
-    """Resolve an instance id with the existing fuzzy-match helper.
-
-    Deferred import: ``daemon/tools/instance.py`` imports THIS module's
-    factory (the third registration leg), so a module-level import here
-    would be circular. The deferred import resolves at call time, when
-    both modules are fully loaded.
-
-    .. deprecated:: 2026-10-24 (nest-ops shakedown F8)
-        The WRITE-path resolver hydrates the instance: it goes through
-        ``manager.get_instance``, whose cold path runs MCP schema
-        discovery AND ``_restore_instance`` — which WRITES the row.
-        A read must not do either. ``instance_get`` now uses
-        :func:`_resolve_target_readonly`; this helper remains for any
-        caller that genuinely wants the hydration side effect.
-
-    Raises:
-        ValueError: when the id is empty, unknown, or ambiguous — the
-            caller maps it to the ``instance-not-found`` refusal.
-    """
-    from .instance import _resolve_instance_id
-
-    return await _resolve_instance_id(manager, instance_id)
-
-
 async def _resolve_target_readonly(
     manager: Any, instance_id: str, *, repo: Any = None
 ) -> tuple[str, Any]:
@@ -445,8 +420,13 @@ async def _resolve_target_readonly(
         raise ValueError("ERROR: instance_id cannot be empty")
 
     # Exact match — repository read only. NO hydration, NO MCP, NO write.
+    #
+    # The read is a PostgreSQL round-trip (SQLAlchemy), so it runs off
+    # the event loop via ``asyncio.to_thread`` — the module's own
+    # convention (cf. the ``repo.get`` calls further down this file and
+    # ``daemon/graph.py``).
     try:
-        row = repo.get(instance_id)
+        row = await asyncio.to_thread(repo.get, instance_id)
     except Exception:
         logger.exception("instance_get exact read failed")
         raise
@@ -471,8 +451,10 @@ async def _resolve_target_readonly(
     # hydrates nothing either.
     from ..utils import DEFAULT_FUZZY_MATCH_DISTANCE
 
-    near_matches = manager.find_near_instance(
-        instance_id, max_distance=DEFAULT_FUZZY_MATCH_DISTANCE
+    near_matches = await asyncio.to_thread(
+        manager.find_near_instance,
+        instance_id,
+        max_distance=DEFAULT_FUZZY_MATCH_DISTANCE,
     )
     if near_matches:
         if len(near_matches) == 1:
@@ -825,13 +807,6 @@ Examples:
         except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
             logger.exception("instance_get resolve failed")
             return _error(f"instance_get failed: {type(exc).__name__}")
-        if row is None:
-            return _refusal(
-                "INSTANCE_GET",
-                "instance-not-found",
-                f"no instance row for {instance_id!r}",
-            )
-
         info = row.to_dict()
         now = datetime.now(timezone.utc)
 
