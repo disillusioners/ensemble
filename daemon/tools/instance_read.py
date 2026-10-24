@@ -502,7 +502,7 @@ def create_instance_read_tools(
             clamped_offset = True
 
         try:
-            rows, total, truncated = await asyncio.to_thread(
+            rows, total, _repo_truncated = await asyncio.to_thread(
                 manager.list_instances,
                 limit=limit,
                 offset=applied_offset,
@@ -536,11 +536,37 @@ def create_instance_read_tools(
                 )
             )
 
+        # F4a: an HONEST truncation flag.
+        #
+        # The repository's flat path returns a CONSTANT ``False``
+        # (``daemon/repositories/instance/repository.py`` — the flat path
+        # never runs the descendant BFS), so copying that flag verbatim
+        # made ``truncated`` dead: a census that stopped at the page
+        # boundary read as "complete". The tool computes the flag from the
+        # numbers it already has:
+        #
+        #   total_matching — the COUNT(*) over the SAME WHERE (all matching
+        #                   rows, NOT the remaining-after-offset count);
+        #   applied_offset — the clamped offset the page was taken at;
+        #   len(census)   — the rows actually returned in THIS page.
+        #
+        # ``offset + len(rows)`` is therefore the number of matching rows
+        # consumed so far, and the comparison is EXACT. The empty page
+        # case reads ``True`` ONLY when ``total > offset`` — the
+        # exhausted case (``len(rows) == 0 and total <= offset``) reads
+        # ``False``, because nothing exists past the caller's offset.
+        #
+        # ``_repo_truncated`` is the repository's descendant-cap flag; it
+        # is False on the flat path this tool always uses
+        # (``include_descendants`` is never set here), so it carries no
+        # signal the formula above does not already express.
+        truncated = bool(total > applied_offset + len(census))
+
         payload = {
             "rows": census,
             "count": len(census),
             "total_matching": total,
-            "truncated": bool(truncated),
+            "truncated": truncated,
             "filters_applied": {
                 "status": status,
                 "limit": limit,
@@ -583,6 +609,13 @@ Returns:
     One JSON string: `rows` (the census), `count` (rows in THIS page),
     `total_matching` (all rows matching the status filter), `truncated`,
     and `filters_applied`.
+
+    `truncated` is HONEST and re-derivable from this payload alone:
+    `truncated == (total_matching > filters_applied.offset + count)`.
+    It is `true` when more matching rows exist past this page, and
+    `false` on an exhausted page (nothing matches past your offset).
+    It was a constant `false` before 2026-10-24 (F4a) — a census that
+    stopped at the page boundary used to read as "complete".
 
     Each row: `instance_id`, `agent_id`, `agent_name`, `status` (the
     raw 10-value instance status), `liveness` (the canonical vocabulary,
