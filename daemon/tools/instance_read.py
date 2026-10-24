@@ -566,6 +566,11 @@ Args:
         completed, error, terminated, queued, waiting_children, failed.
         Omit for all statuses. Any other value is refused with
         `reason=unknown-status-value`.
+        F12 (2026-10-24): the filter used to be dropped on the way to
+        the repository, so this paragraph was FALSE — the rows came back
+        unfiltered while `total_matching` counted only the matching
+        population. The filter now reaches SQL, and `total_matching`
+        counts exactly the population the returned rows are drawn from.
     limit: Max rows to return (1-{MAX_LIST_LIMIT}, default
         {DEFAULT_LIST_LIMIT}). Out of range is refused with
         `reason=invalid-limit`.

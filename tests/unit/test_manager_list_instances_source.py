@@ -20,6 +20,14 @@ against a spied lifecycle service — deliberately NOT
      ``(instances, total, truncated)`` after the ``include_descendants``
      fix).
 
+``TestFacadeStatusForwarding`` (F12, nest-ops-shakedown defect patch)
+pins the SAME seam for the ``status`` kwarg: the facade forwards the
+caller's status verbatim, and the default forwards ``None``. The
+manager→lifecycle seam was already covered for ``source``; the
+lifecycle→REPOSITORY seam (where the status filter was actually
+DROPPED) carries its own first-ever pin in
+``tests/unit/test_instance_read_shakedown_defects.py``.
+
 Pattern parallels ``tests/unit/test_manager_list_instances_include_descendants.py``.
 """
 
@@ -144,3 +152,78 @@ class TestFacadeSourceForwarding:
         assert forwarded["search"] == "refactor"
         assert forwarded["order"] == "activity"
         assert forwarded["source"] == "chat"
+
+
+class TestFacadeStatusForwarding:
+    """F12 — the facade must accept ``status`` and forward it verbatim.
+
+    PLANNED MUTATION (executed by the tester's Phase-4 mutation cycle):
+    drop ``status=status`` from the facade's ``list_instances`` call into
+    the lifecycle service — this class goes RED (the forwarded kwarg is
+    missing / ``None``).
+
+    Why it matters: the ``status`` filter is the ONLY server-side filter
+    the ``instance_read`` census exposes. The facade already forwarded it;
+    the LIFECYCLE dropped it on the way to the repository (F12's real
+    defect). This class pins the half that was already true, so the two
+    halves cannot drift apart again — the lifecycle→repository half is
+    pinned in ``tests/unit/test_instance_read_shakedown_defects.py``.
+    """
+
+    def test_accepts_status_and_forwards(self):
+        """A real call with ``status="running"`` binds (no TypeError) and
+        the lifecycle service receives the caller's value."""
+        manager, spy = _facade_with_lifecycle_spy()
+
+        manager.list_instances(status="running")
+
+        forwarded = spy.call_args.kwargs
+        assert forwarded["status"] == "running"
+
+    def test_omitted_status_forwards_none_default(self):
+        """Omitting the kwarg forwards ``status=None`` — the existing
+        internal callers (manager cache cleanup, fuzzy match, project
+        delete, the census) MUST be unaffected by the facade contract."""
+        manager, spy = _facade_with_lifecycle_spy()
+
+        manager.list_instances(limit=5)
+
+        forwarded = spy.call_args.kwargs
+        assert forwarded["status"] is None
+
+    def test_explicit_none_forwards_none(self):
+        """Explicit ``status=None`` is the same as omitting."""
+        manager, spy = _facade_with_lifecycle_spy()
+
+        manager.list_instances(status=None)
+
+        forwarded = spy.call_args.kwargs
+        assert forwarded["status"] is None
+
+    def test_status_forwards_alongside_all_neighbours(self):
+        """Sanity: the status filter travels with the established keyword
+        neighbours and never replaces one of them."""
+        manager, spy = _facade_with_lifecycle_spy()
+
+        manager.list_instances(
+            limit=25,
+            offset=10,
+            project_id="proj-1",
+            exclude_kb=False,
+            include_descendants=True,
+            search="refactor",
+            order="activity",
+            source="chat",
+            status="paused",
+        )
+
+        forwarded = spy.call_args.kwargs
+        assert forwarded["limit"] == 25
+        assert forwarded["offset"] == 10
+        assert forwarded["project_id"] == "proj-1"
+        assert forwarded["exclude_kb"] is False
+        assert forwarded["include_descendants"] is True
+        assert forwarded["search"] == "refactor"
+        assert forwarded["order"] == "activity"
+        assert forwarded["source"] == "chat"
+        assert forwarded["status"] == "paused"
