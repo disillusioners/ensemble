@@ -949,6 +949,17 @@ class MessageProcessingPipeline:
                 # COMMISSIONER (a fresh committed ``instance_nudge``).
                 # The obligation would then sit on an instance that
                 # never receives the report.
+                #
+                # DIVERGENCE WINDOW (documented, not a defect): the
+                # marker resolves on its OWN session, independently of
+                # the natural write path's resolution — so a nudge
+                # COMMITTED between the two reads yields DIFFERENT
+                # recipients (the marker names the pre-nudge recipient,
+                # the report names the commissioner). The window is the
+                # gap between the two resolutions, not a failure mode:
+                # the marker is a best-effort obligation record (the
+                # Phase 2 no-row backstop is the net), and both paths
+                # agree whenever no commission lands in between.
                 recipient_id = await asyncio.to_thread(
                     resolve_report_recipient,
                     engine=getattr(self._manager, "engine", None),

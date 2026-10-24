@@ -59,6 +59,8 @@ import daemon.repositories.task.models  # noqa: F401
 from daemon.constants import (
     INTERNAL_AGENT_TYPED_EXACT_SOURCES,
     INTERNAL_AGENT_TYPED_SOURCE_PREFIXES,
+    INTERNAL_ERROR_REPORT_SOURCE_PREFIX,
+    INTERNAL_REPORT_SOURCE_PREFIX,
     INTERNAL_REPORT_TYPED_SOURCE_PREFIXES,
     INTERNAL_STAMPED_SOURCE_PREFIXES,
     INTERNAL_SYSTEM_TYPED_SOURCE_PREFIXES,
@@ -193,6 +195,55 @@ class TestCanonicalStampSet:
         never forge an internal origin."""
         for source in INTERNAL_STAMPED_SOURCE_PREFIXES:
             assert is_reserved_source(source), source
+
+
+class TestReportFamilyTuple:
+    """F2 — the report-family prefixes live in ``daemon.constants`` (the
+    canonical home). The enqueue lane must not hardcode them, and the
+    canonical tuple must stay in lock-step with the runtime
+    classification."""
+
+    #: The documented per-family msg type — the canonical mapping the
+    #: runtime must reproduce. A tuple member without an arm here goes
+    #: RED (never a silently mis-derived msg type).
+    _REPORT_TYPE_BY_PREFIX: dict[str, str] = {
+        INTERNAL_REPORT_SOURCE_PREFIX: MessageType.COMPLETION_REPORT.value,
+        INTERNAL_ERROR_REPORT_SOURCE_PREFIX: MessageType.ERROR_REPORT.value,
+    }
+
+    def test_the_tuple_is_built_from_the_canonical_literals(self):
+        """ONE canonical home — the tuple and its two members cannot
+        drift apart."""
+        assert INTERNAL_REPORT_TYPED_SOURCE_PREFIXES == (
+            INTERNAL_REPORT_SOURCE_PREFIX,
+            INTERNAL_ERROR_REPORT_SOURCE_PREFIX,
+        )
+
+    def test_the_tuple_and_the_documented_mapping_agree(self):
+        """A NEW tuple member REQUIRES a documented msg type (and a
+        runtime arm) — the set comparison is the fail-loud gate."""
+        assert set(INTERNAL_REPORT_TYPED_SOURCE_PREFIXES) == set(
+            self._REPORT_TYPE_BY_PREFIX
+        )
+
+    @pytest.mark.parametrize(
+        ("prefix", "expected_type"),
+        [
+            (INTERNAL_REPORT_SOURCE_PREFIX, MessageType.COMPLETION_REPORT.value),
+            (
+                INTERNAL_ERROR_REPORT_SOURCE_PREFIX,
+                MessageType.ERROR_REPORT.value,
+            ),
+        ],
+    )
+    def test_each_family_keeps_its_documented_msg_type(
+        self, prefix, expected_type
+    ):
+        """The runtime honours the canonical tuple."""
+        assert (
+            _derive_internal_message_type(f"{prefix}child-1")
+            == expected_type
+        )
 
 
 class TestPerLaneMatrix:

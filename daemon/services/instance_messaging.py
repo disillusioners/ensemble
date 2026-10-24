@@ -20,6 +20,8 @@ from ..compaction import ContextCompactor, CompactionContext, get_model_context_
 from ..constants import (
     INTERNAL_AGENT_TYPED_EXACT_SOURCES,
     INTERNAL_AGENT_TYPED_SOURCE_PREFIXES,
+    INTERNAL_ERROR_REPORT_SOURCE_PREFIX,
+    INTERNAL_REPORT_TYPED_SOURCE_PREFIXES,
     INTERNAL_STAMPED_SOURCE_PREFIXES as _CANONICAL_INTERNAL_STAMPED_SOURCE_PREFIXES,
     INTERNAL_SYSTEM_TYPED_SOURCE_PREFIXES,
     is_internal_stamped_source,
@@ -494,10 +496,15 @@ def _derive_internal_message_type(source: str | None) -> str | None:
     """
     if not isinstance(source, str) or not source:
         return None
-    if source.startswith("internal_report:"):
+    if source.startswith(INTERNAL_REPORT_TYPED_SOURCE_PREFIXES):
+        # The report families derive DIFFERENT msg types: the canonical
+        # tuple (daemon/constants.py) gates the family and the member
+        # disambiguates. The two prefixes are disjoint —
+        # ``internal_error_report:`` never starts with
+        # ``internal_report:``.
+        if source.startswith(INTERNAL_ERROR_REPORT_SOURCE_PREFIX):
+            return MessageType.ERROR_REPORT.value
         return MessageType.COMPLETION_REPORT.value
-    if source.startswith("internal_error_report:"):
-        return MessageType.ERROR_REPORT.value
     if source.startswith(INTERNAL_SYSTEM_TYPED_SOURCE_PREFIXES):
         return MessageType.SYSTEM.value
     if source.startswith(INTERNAL_AGENT_TYPED_SOURCE_PREFIXES):

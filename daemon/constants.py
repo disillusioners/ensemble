@@ -1178,12 +1178,23 @@ INTERNAL_AGENT_TYPED_EXACT_SOURCES: frozenset[str] = frozenset({
     "auto-scan",
 })
 
+#: The completion-report family prefix (``internal_report:{child}``) —
+#: it derives ``MessageType.COMPLETION_REPORT``.
+INTERNAL_REPORT_SOURCE_PREFIX: str = "internal_report:"
+
+#: The error-report family prefix (``internal_error_report:{child}``) —
+#: it derives ``MessageType.ERROR_REPORT``.
+INTERNAL_ERROR_REPORT_SOURCE_PREFIX: str = "internal_error_report:"
+
 #: Colon-terminated internal families that derive the REPORT msg types
 #: (``internal_report:`` → COMPLETION_REPORT, ``internal_error_report:``
-#: → ERROR_REPORT).
+#: → ERROR_REPORT). The canonical SET of report-family prefixes, built
+#: from the two canonical literals above — the enqueue lane imports
+#: this tuple (and the members it needs to disambiguate) so no report
+#: prefix is hardcoded outside this module.
 INTERNAL_REPORT_TYPED_SOURCE_PREFIXES: tuple[str, ...] = (
-    "internal_report:",
-    "internal_error_report:",
+    INTERNAL_REPORT_SOURCE_PREFIX,
+    INTERNAL_ERROR_REPORT_SOURCE_PREFIX,
 )
 
 

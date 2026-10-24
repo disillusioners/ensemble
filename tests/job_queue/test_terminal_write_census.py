@@ -514,7 +514,7 @@ TERMINAL_WRITE_CENSUS: list[CensusEntry] = [
         reason="strand healer's drive IS the sanctioned emission "
                "machinery: the notify rides inside "
                "_process_child_completion_db_sync (child_reports "
-               ":5348/:5364) on the drive path; the heal itself "
+               ":5457/:5473) on the drive path; the heal itself "
                "serializes per root behind the per-root asyncio.Lock "
                "(anchor matches the pre- and post-lock-wrapper "
                "enclosing names heal_instance/_heal_instance_locked)",
