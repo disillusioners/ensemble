@@ -415,6 +415,22 @@ class SyntheticFleetManager(FakeFleetManager):
         return out, effective_total, False
 
 
+class _OverlappingWindowManager(SyntheticFleetManager):
+    """A synthetic fleet whose BOUNDARY row is a detector match.
+
+    The concurrent-insert drift shape serves the last row of window 1
+    AGAIN at the head of window 2. This manager makes that boundary
+    row an ORPHAN (a live row whose parent is gone), so the
+    duplication is observable in the payload's counts.
+    """
+
+    def _row(self, index: int) -> FakeRow:
+        row = super()._row(index)
+        if index == self.total - 1:
+            row.parent_id = "gone-parent"
+        return row
+
+
 class TestF4bFullAgeRangeScan:
     """F4b — the health scan covers the WHOLE fleet, in offset windows.
 
@@ -531,6 +547,91 @@ class TestF4bFullAgeRangeScan:
         # And the walk did not mistake the first full window for the end.
         assert payload["scan_stop_reason"] == "end_of_set"
         assert payload["scan_truncated"] is False
+
+    async def test_a_row_served_in_two_windows_is_counted_once(self):
+        """The drift shape can serve the SAME row twice.
+
+        A concurrent INSERT at the front of the ``created_at DESC``
+        order shifts every later row down, so the LAST row of window 1
+        is served AGAIN at the head of window 2. The id-keyed maps
+        dedupe on their own; the LIST-backed detectors do NOT — before
+        the seen-set fix that row was appended TWICE and every count
+        in the payload was inflated by exactly the drift the F4b walk
+        exists to survive.
+
+        The overlapping row here is an ORPHAN (a live row whose parent
+        is gone), so the duplication is observable in the payload.
+        """
+        total = ir.FLEET_SCAN_LIMIT
+        manager = _OverlappingWindowManager(total)
+        newest = FakeRow(
+            "i-front",
+            created_at=(manager.base + timedelta(seconds=1)).isoformat(),
+        )
+
+        original_list = manager.list_instances
+
+        def list_with_front_insert(limit=10, offset=0, status=None, **kw):
+            if offset > 0 and not manager.front_rows:
+                manager.front_rows.append(newest)
+            return original_list(limit, offset, status, **kw)
+
+        manager.list_instances = list_with_front_insert  # type: ignore[method-assign]
+
+        payload = await self._health(manager)
+
+        # the overlapping row really WAS served twice ...
+        assert manager.rows_served.count("i-000999") == 2
+        # ... but it is COUNTED once
+        orphans = next(
+            d for d in payload["detectors"] if d["detector"] == "orphans"
+        )
+        assert [row["instance_id"] for row in orphans["instances"]] == ["i-000999"]
+        assert orphans["count"] == 1
+        assert payload["total_flagged"] == sum(
+            d["count"] for d in payload["detectors"]
+        )
+
+    async def test_a_husk_candidate_served_in_two_windows_is_counted_once(
+        self, fleet_db
+    ):
+        """The same duplication, on the HUSK accumulator.
+
+        The husk candidates are a LIST too, and the batched evidence
+        legs resolve the candidate SET — a duplicated candidate was
+        flagged TWICE, so the husk count was inflated by the drift.
+        """
+        _insert_instances(
+            fleet_db, [_instance("husk-dup", created_at=_aged())]
+        )
+        manager = RepoBackedManager(fleet_db)
+        calls: list[int] = []
+        original_list = manager.list_instances
+
+        def overlapping_list(limit=10, offset=0, status=None, **kw):
+            calls.append(offset)
+            if len(calls) == 1:
+                return original_list(limit=limit, offset=offset, status=status, **kw)
+            if len(calls) == 2:
+                # the SAME row is served again — the drift shape
+                rows, total, truncated = original_list(
+                    limit=limit, offset=0, status=status, **kw
+                )
+                return rows, total, truncated
+            return [], 0, False
+
+        manager.list_instances = overlapping_list  # type: ignore[method-assign]
+
+        payload = await self._health(manager)
+
+        assert len(calls) >= 2, "the fixture must serve the row twice"
+        husk = next(
+            d
+            for d in payload["detectors"]
+            if d["detector"] == "never-dispatched-husk"
+        )
+        assert [row["instance_id"] for row in husk["instances"]] == ["husk-dup"]
+        assert husk["count"] == 1
 
     async def test_total_is_captured_from_the_first_window_only(self):
         """``total`` is never reassigned: the COUNT the walk trusts is the

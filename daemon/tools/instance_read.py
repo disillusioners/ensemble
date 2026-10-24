@@ -1681,6 +1681,20 @@ def _build_health_report(
     status_by_id: dict[str, str] = {}
     # A parent's status is resolved at most ONCE per report.
     parent_status_cache: dict[str, str | None] = {}
+    # The rows the detectors have already PROCESSED (the tidier fold).
+    #
+    # A concurrent INSERT at the front of the ``created_at DESC`` order
+    # shifts every later row down, so the LAST row of window N is
+    # served AGAIN at the head of window N+1. The id-keyed maps
+    # (``status_by_id`` / ``job_active_rows`` / ``parent_status_cache``)
+    # dedupe on their own — they are keyed by id. The LIST-backed
+    # accumulators (``stale_running`` / ``dead_parent`` /
+    # ``paused_no_task`` / ``orphans`` / ``failed_unreported`` /
+    # ``husk_candidates``) do NOT: a row served twice was APPENDED
+    # twice, so the payload's counts and ``total_flagged`` were
+    # inflated by exactly the drift the F4b walk exists to survive.
+    # This set closes the gap for EVERY accumulator at once.
+    seen_ids: set[str] = set()
 
     total_first: int | None = None
     reached_end_of_set = False
@@ -1711,6 +1725,14 @@ def _build_health_report(
         # Pass 2 — the detectors, per row, streaming.
         for info in rows:
             instance_id = info.get("instance_id") or ""
+            if instance_id:
+                if instance_id in seen_ids:
+                    # This row was already processed in an EARLIER
+                    # window (the concurrent-insert drift shape). The
+                    # detectors below are all list-backed, so without
+                    # this guard the row would be counted TWICE.
+                    continue
+                seen_ids.add(instance_id)
             status = info.get("status")
 
             # ── 1. stale-running ────────────────────────────────────
