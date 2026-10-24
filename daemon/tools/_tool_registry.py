@@ -264,12 +264,6 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
 # these — the tool names are only known after the MCP server responds.
 DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
     "plane_",
-    # cu-mcp (computer-use, 2026-10-16): the ``@zavora-ai/computer-use-mcp``
-    # built-in registers its tools under the ``cu_`` prefix (see
-    # ``daemon/mcp/builtin_servers/computer_use.py``). The tools only exist
-    # after the bootstrap layer auto-provisions a DB row + the server starts,
-    # so they cannot be statically enumerated.
-    "cu_",
 })
 
 
@@ -361,28 +355,12 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # carries the tool name (inventory, not the gate); the gate
     # is the privileged-category strip + per-agent allow entry.
     "view-views",
-    # cu-mcp (computer-use, 2026-10-16): ``cu`` is the category for
-    # the ``@zavora-ai/computer-use-mcp`` built-in's prefix-overridden
-    # tools (``cu_click``, ``cu_screenshot``, ...). Computer-use is
-    # a FULL local-control surface when the host grants are present
-    # (Accessibility + Screen Recording on macOS); empty-allow
-    # agents (e.g. ``watcher``) MUST NOT auto-inherit it. Explicit
-    # ``tools.allow: ["cu"]`` is the only access path — currently
-    # granted to ``ari`` and ``leader`` only. Stamping the category
-    # on the MCP tools (see ``daemon/mcp/tool_adapter.py`` —
-    # ``create_lazy_mcp_tools``) is what makes
-    # ``_strip_privileged_category_tools`` actually catch them
-    # when a prefix is used; before the stamp landed, the same
-    # privilege strip was bypassed because ``_tool_category`` was
-    # unset on every MCP tool (``plane_`` tools escape by design
-    # because ``plane`` is NOT in this set; ``cu`` enters because
-    # it is in the privileged set).
-    "cu",
     # agent-secrets P1 (2026-10-17, plan f11965039): ``secrets`` is
     # the encrypted-secret-store tool category (#7 in
     # PRIVILEGED_TOOL_CATEGORIES — sextet → septet per the
     # Q1/Q2/Q3 user rulings 2026-10-17; ``cu`` joined 2026-10-16
-    # making the count 6 before this entry). The category owns
+    # making the count 6 before this entry — ``cu`` itself was
+    # REMOVED 2026-10-24 with the cu builtin). The category owns
     # six factory-built tools (``secret_generate_ssh_keypair`` /
     # ``secret_generate_api_token`` / ``secret_store`` /
     # ``secret_list`` / ``secret_read_public`` / ``secret_retire``)
@@ -1104,28 +1082,6 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "system-log": "daemon.tools.system_log_tools",
     "ens-db": "daemon.tools.ens_db_tools",  # W1-P2, task 2.3
     "plane": "daemon.tools.plane_tools",
-    # cu-mcp (Computer Use, 2026-10-16, reviewer should-fix 2026-10-16):
-    # Category metadata row for the cu_* prefix-overridden MCP toolset
-    # (the built-in Computer Use MCP server). Mirrors the plane_tools
-    # stub pattern: tools are created dynamically at runtime by
-    # ``create_lazy_mcp_tools`` and therefore carry no @tool-decorated
-    # function in any CATEGORY_MODULES source file. The row exists
-    # primarily so ``known_categories`` (registry.py:1368 —
-    # ``set(CATEGORY_MODULES.keys())``) includes ``"cu"`` and the
-    # boot-time ``is neither a known category nor a known tool``
-    # validator stops flagging ari + leader's explicit
-    # ``tools.allow: ["cu"]`` entries. The AST-walked source scanner
-    # (``_scan_category_module_sources``) finds the literal stub
-    # anchor at ``daemon/tools/cu_tools.py`` (a docstring-only module
-    # mirroring ``daemon/tools/plane_tools.py``); no @tool-decorated
-    # function is expected to live there — the row's value is the
-    # category-key registration, not the AST scan. Runtime gating is
-    # unchanged (the privilege strip on cu tools fires via
-    # ``_tool_category`` set in ``create_lazy_mcp_tools``, see
-    # ``daemon/mcp/tool_adapter.py``); this row is warning hygiene
-    # only. The cu entry is in PRIVILEGED_TOOL_CATEGORIES, so empty-
-    # allow universes (watcher, etc.) still do NOT auto-grant cu_*.
-    "cu": "daemon.tools.cu_tools",
     "plane_sync": "daemon.tools.plane_sync",
     "system_upgrade": "daemon.tools.upgrade_tools",
     # Leader completion attestation (Phase 1 of LCA feature, 2026-09-05) —

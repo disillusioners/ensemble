@@ -102,7 +102,7 @@ class TestStaticRegistrationChecklist:
     def test_privileged_categories_is_exactly_fifteen_entries(self) -> None:
         """The default-deny set is exactly fifteen entries —
         ``system_upgrade``, ``system-log``, ``ens-db``,
-        ``ens-env``, ``view-views``, ``cu``, ``secrets``,
+        ``ens-env``, ``view-views``, ``secrets``,
         ``settings``, ``board`` and ``self-alarm``.
 
         ``service`` was REMOVED from this set by user override
@@ -114,13 +114,10 @@ class TestStaticRegistrationChecklist:
         2026-10-02. ``view-views`` joined per the REWORK 2026-10-07
         (M1, user refinement #1) — the read-only ``view_link`` URL
         minter is RESTRICTED first-release (ari + leader + designer
-        only). ``cu`` joined per the cu-mcp task 2026-10-16 — the
-        Computer Use MCP built-in's prefix-overridden tools
-        (``cu_click``, ``cu_screenshot``, ...) gate the full
-        local-control surface and MUST NOT auto-grant to
-        empty-allow agents (e.g. ``watcher``); explicit
-        ``tools.allow: ["cu"]`` on ``agents/ari/meta.json`` and
-        ``agents/leader/meta.json`` is the only access path.
+        only). ``cu`` joined per the cu-mcp task 2026-10-16 and was
+        REMOVED 2026-10-24 together with the cu builtin MCP server
+        (the replacement surface is the ``mcps_client`` wrapper +
+        gateway + the ``mcp_rpc`` category).
         ``secrets`` joined per the agent-secrets P1 commission
         (2026-10-17, plan f11965039) — the encrypted-secret-store
         category (septet → octet) is opt-in-only via
@@ -157,9 +154,6 @@ class TestStaticRegistrationChecklist:
             # REWORK 2026-10-07 (M1): view_link is restricted first-release;
             # only ari / leader / designer opt in via tools.allow.
             "view-views",
-            # cu-mcp (2026-10-16): Computer Use MCP prefix-overridden
-            # tools; explicit allow-list on ari/leader only.
-            "cu",
             # agent-secrets P1 (2026-10-17, plan f11965039):
             # the encrypted-secret-store category. opt-in-only;
             # worker / tester / leader / ari day-one allow-list.

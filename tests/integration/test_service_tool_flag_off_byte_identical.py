@@ -838,15 +838,6 @@ def test_privileged_category_set_is_pinned() -> None:
             # REWORK 2026-10-07 (M1): view_link is restricted first-release;
             # only ari / leader / designer opt in via tools.allow.
             "view-views",
-            # cu-mcp (2026-10-16): Computer Use MCP prefix-overridden
-            # tools (cu_click, cu_screenshot, ...). Computer-use is
-            # a full local-control surface when the host OS grants
-            # are present; empty-allow agents (watcher, etc.) MUST
-            # NOT auto-inherit. Explicit ``tools.allow: ["cu"]`` on
-            # ari + leader only. Stamped via
-            # ``create_lazy_mcp_tools._tool_category`` from
-            # ``DYNAMIC_TOOL_PREFIXES`` (cu_).
-            "cu",
             # agent-secrets P1 (2026-10-17, plan f11965039):
             # the encrypted-secret-store category. opt-in-only;
             # worker / tester / leader / ari day-one allow-list.
@@ -910,7 +901,7 @@ def test_privileged_category_set_is_pinned() -> None:
 }
     ), (
         f"PRIVILEGED_TOOL_CATEGORIES drifted from the post-override "
-        f"trio + W4 ens-env + REWORK view-views + cu-mcp 'cu' + "
+        f"trio + W4 ens-env + REWORK view-views + "
         f"agent-secrets-P1 'secrets' + settings-worker-slots-P2 "
         f"'settings' + ari-tools-P1 'board' + ari-tools-P2 'self-alarm' + "
         f"ari-tools-P3 'view-write' + ari-tools-P3 'board-link'; "

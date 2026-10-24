@@ -5,6 +5,21 @@ All notable changes to the agents-ensemble project will be documented in this fi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — 2026-10-24
+
+### Removed — the daemon-side computer-use (cu) builtin MCP server (`feature/remove-cu-builtin`)
+
+> **CHANGELOG (removal):** *The daemon-side `computer-use` builtin MCP server is retired. Its replacement — the `mcps_client` wrapper (a macOS `.app` that runs the cu MCP server on the controlled machine) + the remote-hands gateway + the `mcp_rpc` tool category — is live and pilot-proven end-to-end (real Go client × real Python gateway over TLS) before this removal, so the redundant daemon-side builtin and its `cu_*` tool namespace go away.*
+
+- **Builtin definition** (`daemon/mcp/builtin_servers/computer_use.py`, 296 lines) — deleted together with its registry entry (`daemon/mcp/builtin_servers/__init__.py`). The `@zavora-ai/computer-use-mcp@7.6.1` npx pin, the `core` profile, the `cu` tool-name prefix and the `cu_*` tool namespace are gone. The three surviving builtins (`webfetch` / `context7` / `plane`) and the generic S1 built-in availability gate (`preload_mcp_tools` → `is_available()`) are untouched.
+- **Privileged-category set 16 → 15** (`daemon/tools/_tool_registry.py`) — the `cu` category leaves `PRIVILEGED_TOOL_CATEGORIES`; the daemon-internal authority trio (`system_upgrade` / `system-log` / `ens-db`) and every other member (including `mcp_rpc`) are unchanged. The `cu_` entry leaves `DYNAMIC_TOOL_PREFIXES` (now `{"plane_"}`) and the `cu` row leaves `CATEGORY_MODULES` (its `daemon/tools/cu_tools.py` stub is deleted). **No dynamic prefix stamps a category any more** — `plane` is deliberately not privileged.
+- **Agent allow-lists** (`agents/ari/meta.json`, `agents/leader/meta.json`) — the `cu` entry is removed from `tools.allow`; `mcp_rpc` stays on both. Remote-desktop control now runs through the `mcp_rpc` tools, so no agent loses an equivalent surface.
+- **D7 test-connection guard** (`daemon/routers/mcp_servers.py`) — the cu-specific `_block_test_connection_when_builtin_unavailable` helper and its single call site are removed; it detected the cu npx pin specifically and had no other consumer. The `/mcp-servers/test-connection` probe is otherwise unchanged.
+- **Dead env vars** — `COMPUTER_USE_MCP_ENABLED`, `MCP_DISABLE_BUILT_IN_COMPUTER_USE`, `CU_NPX_PATH` and `COMPUTER_USE_PROFILE` are no longer read by the daemon; leaving them set is inert.
+- **Docs** — `docs/mcp-computer-use-server.md` is replaced by a short historical stub (the file stays so `agents/gaia/workflow.md`'s link keeps resolving); the replacement architecture lives in `docs/mcps-client-remote-hands.md` + `docs/mcps-gateway.md`.
+- **DB note** — the `mcp_servers` row `computer-use` was soft-deactivated (`is_active=false`) out of band; the boot orphan sweep (`_deactivate_orphaned_builtin_servers`) deactivates any re-appearance.
+- **Tests** — `tests/unit/test_computer_use_mcp.py` (1726 lines) is deleted; its GENERIC half (the S1 built-in availability gate, the privilege-stamp helper's non-stamping contract, `is_mcp_tool`'s standard-shape detection and the empty-allow privileged-category strip) is ported to `tests/unit/test_mcp_builtin_availability_gate.py`. The nine `PRIVILEGED_TOOL_CATEGORIES` same-PR pins drop the `cu` member (16 → 15).
+
 ## [0.26.4] — 2026-10-21
 
 ### Fixed — running-zombie strand heal (`fix/running-zombie-sweep`, merge `9b1777b8`)

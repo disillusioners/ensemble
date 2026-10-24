@@ -8,6 +8,12 @@
 > ensemble-side change that consumes it. Treat every "proposed"
 > verb below as future work.
 
+> **STATUS UPDATE — 2026-10-24.** The daemon-side `cu` builtin described
+> below was REMOVED in `feature/remove-cu-builtin`; the `mcps_client`
+> wrapper + gateway + `mcp_rpc` path has since shipped and superseded it.
+> This document remains the architecture reference for that path — see the
+> historical stub at [`docs/mcp-computer-use-server.md`](./mcp-computer-use-server.md).
+
 | Field | Value |
 |---|---|
 | **Date** | 2026-10-16 |

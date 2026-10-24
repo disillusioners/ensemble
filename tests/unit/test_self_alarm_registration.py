@@ -67,17 +67,18 @@ SELF_ALARM_CATEGORY = "self-alarm"
 SELF_ALARM_MODULE = "daemon.tools.self_alarm"
 SELF_ALARM_TOOL_NAME = "self_alarm"
 
-#: The TENTH entry of the privileged set (the set held exactly nine
-#: before this phase). Phase 3 (the live-views surface) added the
-#: ELEVENTH + TWELFTH (``view-write`` / ``board-link``) — the same-PR
-#: exact-set pin moves with them.
+#: The ``self-alarm`` entry of the privileged set (it joined the set
+#: 10th; the set held 9 entries before this phase). Phase 3 (the
+#: live-views surface) added the 11th + 12th (``view-write`` /
+#: ``board-link``) — the same-PR exact-set pin moves with them. The
+#: ``cu`` category was REMOVED 2026-10-24 together with the cu builtin
+#: MCP server (16 -> 15 members).
 EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "system_upgrade",
     "system-log",
     "ens-db",
     "ens-env",
     "view-views",
-    "cu",
     "secrets",
     "settings",
     "board",
@@ -202,7 +203,7 @@ class TestPrivilegedCategory:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
     def test_the_set_has_fifteen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 16
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 15
 
 
 # ── the allow-lists ──────────────────────────────────────────────────────
