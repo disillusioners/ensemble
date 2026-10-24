@@ -18,6 +18,7 @@ from daemon.services.dependency_bus import get_dependency_bus
 from daemon.services.messaging_types import _assert_linkage_contract
 from daemon.services.pool_orchestrator import safe_notify_all_pools
 from daemon.services.job_queue_service import (
+    DISPATCH_CHAIN_KEY,
     DemandState,
     JobQueueService,
     TERMINAL_CANCEL_STATUSES,
@@ -1173,10 +1174,20 @@ class JobProcessor:
                                     instance_id=proc_job.instance_id,  # Reuse existing valid UUID
                                     project_id=proc_job.project_id,
                                 )
+                                # F11: the reserved delegation key, read off the job
+                                # row — forwarded ONLY when present.
+                                chain = (proc_job.job_metadata or {}).get(DISPATCH_CHAIN_KEY)
                                 result = await self._instance_manager.enqueue_message(
                                     instance_id=instance_id,
                                     message=proc_job.message,
                                     source=proc_job.source,
+                                    # F11: forward the RESERVED key ONLY (never the whole
+                                    # metadata map) — the chain rides on the message row's
+                                    # ``message_metadata``. Absent ⇒ ``None`` ⇒
+                                    # byte-identical to today (default-off).
+                                    metadata=(
+                                        {DISPATCH_CHAIN_KEY: chain} if chain else None
+                                    ),
                                     is_deferred=(queue.queue_type == "defer"),
                                     is_background=(queue.queue_type == "background"),
                                     # Stamp the JobItem's ``job_id``
@@ -1265,10 +1276,20 @@ class JobProcessor:
                             instance_id=proc_job.instance_id,
                             project_id=proc_job.project_id,
                         )
+                        # F11: the reserved delegation key, read off the job
+                        # row — forwarded ONLY when present.
+                        chain = (proc_job.job_metadata or {}).get(DISPATCH_CHAIN_KEY)
                         result = await self._instance_manager.enqueue_message(
                             instance_id=instance_id,
                             message=proc_job.message,
                             source=proc_job.source,
+                            # F11: forward the RESERVED key ONLY (never the whole
+                            # metadata map) — the chain rides on the message row's
+                            # ``message_metadata``. Absent ⇒ ``None`` ⇒
+                            # byte-identical to today (default-off).
+                            metadata=(
+                                {DISPATCH_CHAIN_KEY: chain} if chain else None
+                            ),
                             is_deferred=(queue.queue_type == "defer"),
                             is_background=(queue.queue_type == "background"),
                             # Stamp the JobItem's ``job_id`` onto the
@@ -1545,10 +1566,20 @@ class JobProcessor:
 
                 # Send the job message to the instance
                 try:
+                    # F11: the reserved delegation key, read off the job row —
+                    # forwarded ONLY when present.
+                    chain = (job.job_metadata or {}).get(DISPATCH_CHAIN_KEY)
                     result = await self._instance_manager.enqueue_message(
                         instance_id=instance_id,
                         message=job.message,
                         source=job.source,
+                        # F11: forward the RESERVED key ONLY (never the whole
+                        # metadata map) — the chain rides on the message row's
+                        # ``message_metadata``. Absent ⇒ ``None`` ⇒
+                        # byte-identical to today (default-off).
+                        metadata=(
+                            {DISPATCH_CHAIN_KEY: chain} if chain else None
+                        ),
                         is_deferred=(queue.queue_type == "defer"),
                         is_background=(queue.queue_type == "background"),
                         # Stamp the JobItem's ``job_id`` onto the

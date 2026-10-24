@@ -66,6 +66,7 @@ from daemon.models.common import ErrorCodes
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
 from daemon.services.project_normalizer import normalize_project_id
+from daemon.services.job_queue_service import DISPATCH_CHAIN_KEY
 from daemon.services.queue_ref import (
     QUEUE_ALIAS_TO_CANONICAL,
     describe_valid_queues,
@@ -1320,6 +1321,25 @@ def create_job_tools(
                 if caller_agent_id
                 else "internal_agent:unknown"
             )
+            # F11 — the DELEGATION CHAIN. ``current_instance_id`` is the
+            # daemon-bound factory closure value (the SUBMITTING
+            # instance), never a caller argument — so a caller cannot name
+            # someone else's instance. ``caller_agent_id`` is
+            # OBSERVABILITY ONLY; the mint never trusts it for
+            # authorization.
+            #
+            # The chain is a POINTER, not authority: the provenance mint
+            # re-reads the named instance's live window and re-checks
+            # expiry at claim time. Absent chain ⇒ byte-identical to
+            # today (default-off).
+            dispatch_chain = (
+                {
+                    "caller_instance_id": current_instance_id,
+                    "caller_agent_id": caller_agent_id,
+                }
+                if current_instance_id
+                else None
+            )
             normalized_project_id = normalize_project_id(project_id)
 
             # Queue reference resolution (tool-layer only — service
@@ -1426,6 +1446,11 @@ def create_job_tools(
                 project_id=normalized_project_id,
                 priority=priority,
                 metadata=metadata,
+                # F11: the chain rides a KEYWORD, never the metadata map
+                # (the service seam pops the reserved key from any
+                # caller-supplied metadata, so a metadata-borne chain
+                # would be erased before it reached the row).
+                dispatch_chain=dispatch_chain,
                 queue_id=resolved_queue_id,
                 idempotency_key=idempotency_key,
                 # F2: thread the caller's version tag so a versioned agent
@@ -2060,6 +2085,20 @@ def create_job_tools(
                 # empty-caller fallback — "api" arms the live gate via the
                 # exact-match path.
                 source=f"agent:{caller_agent_id}" if caller_agent_id else "internal_agent:unknown",
+                # F11: the chain rides a KEYWORD on the messaging
+                # facade — NEVER via ``metadata`` (the service seam pops
+                # the reserved key from any caller-supplied metadata, so
+                # a metadata-borne chain would be erased before it
+                # reached the job row). Same daemon-bound closure value
+                # as the ``job_create`` mint site.
+                dispatch_chain=(
+                    {
+                        "caller_instance_id": current_instance_id,
+                        "caller_agent_id": caller_agent_id,
+                    }
+                    if current_instance_id
+                    else None
+                ),
             )
 
             # 6b. Counter increment AFTER successful enqueue_message_job

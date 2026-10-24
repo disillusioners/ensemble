@@ -173,6 +173,17 @@ class ProcessingContext:
     # MessageQueue row (priority + type columns are already on the row
     # — no extra DB round-trip needed).
     is_fresh_episode_user_message: bool = False
+    # F11 — the DELEGATION CHAIN, threaded claim → context → funnel.
+    #
+    # Read off the persisted ``MessageQueue.message_metadata`` under the
+    # RESERVED key and carried here so the funnel can mint the child's
+    # inherited provenance window from the DELEGATING instance's live
+    # user-origin window.
+    #
+    # It is a POINTER, not authority: the mint re-reads that instance's
+    # window and re-checks expiry at claim time. Defaults to ``None``
+    # (every non-delegation lane) ⇒ byte-identical behaviour.
+    dispatch_chain: dict[str, Any] | None = None
 
 
 @dataclass
@@ -447,6 +458,10 @@ class MessageProcessingPipeline:
                 silent=context.silent,
                 task_context=context.task_context,
                 is_fresh_episode_user_message=context.is_fresh_episode_user_message,
+                # F11: the delegation chain (a POINTER to the delegating
+                # instance) rides into the funnel so the provenance mint
+                # can claim that instance's live user-origin window.
+                dispatch_chain=context.dispatch_chain,
             )
 
         # ---- Stage 1.5: claim the message (READY -> PROCESSING) ----

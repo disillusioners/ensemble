@@ -23,6 +23,7 @@ from daemon.repositories.task.models import SuspensionReason, TaskStatus, TaskTy
 from daemon.services.message_processing_errors import (
     handle_message_processing_error,
 )
+from daemon.services.job_queue_service import DISPATCH_CHAIN_KEY
 from daemon.services.usage_limit_schedule import clear_usage_limit_first_seen
 from daemon.services.work_notifier import notify_work_watchers
 
@@ -530,6 +531,16 @@ class ProcessMessageProcessor(BaseProcessor):
             message_metadata.get("silent", False)
             if message_metadata else False
         )
+        # F11 — the DELEGATION CHAIN, read off the persisted message
+        # row's ``message_metadata`` under the RESERVED key. It names
+        # the DELEGATING instance; the funnel's provenance mint re-reads
+        # that instance's live user-origin window and re-checks expiry
+        # before it mints anything. Absent ⇒ ``None`` ⇒ byte-identical
+        # to today.
+        dispatch_chain = (
+            message_metadata.get(DISPATCH_CHAIN_KEY)
+            if message_metadata else None
+        )
 
         # ---- Build pipeline input ----
         # P0 hotfix (review-2): compute the ledger-derived
@@ -573,6 +584,9 @@ class ProcessMessageProcessor(BaseProcessor):
             # re-derived from the persisted MessageQueue row using the
             # SAME identity as ``_prepare_enqueued_message``:2009-2013.
             is_fresh_episode_user_message=is_fresh_episode_user_message,
+            # F11: the delegation chain (a POINTER to the delegating
+            # instance) — claim → context → funnel.
+            dispatch_chain=dispatch_chain,
         )
         callbacks = self._build_callbacks(task)
 

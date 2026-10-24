@@ -4952,7 +4952,12 @@ class InstanceManager:
                 exc,
             )
 
-    def _inherit_provenance_window(self, instance_id: str, source: str | None) -> None:
+    def _inherit_provenance_window(
+        self,
+        instance_id: str,
+        source: str | None,
+        dispatch_chain: dict[str, Any] | None = None,
+    ) -> None:
         """Mint (or CLEAR) the per-instance inherited provenance window
         (agent-restart §2.4, mechanism B — system-minted inherited stamp).
 
@@ -4978,16 +4983,59 @@ class InstanceManager:
         expires_at}`` where ``expires_at = min(parent_expiry, now + 60min)``
         (monotonic decay) and depth caps at 4 (a depth-cap overflow refuses
         the mint — clears — rather than deepening an unbounded chain).
+
+        F11 — the JOB-DELEGATION lane (additive, default-off): an
+        ``agent:<caller>`` dispatch that carries the daemon-minted
+        DELEGATION CHAIN may claim the named caller's window through the
+        SAME arithmetic as the ``internal_agent:`` lane. The chain is a
+        POINTER, not trust: the claim re-reads the caller's window and
+        re-checks expiry below, and the protected gate re-checks
+        independently. A chain that names an instance with no live window
+        ⇒ POP (fail-closed), exactly like the legacy lane.
+
+        CONSUMPTION SEMANTICS (documented so the shakedown does not
+        re-open it): the chain is never a stored credential — every act
+        re-validates the live window at claim time; the expiry decays
+        monotonically (60-minute cap); the depth cap is 4; committed acts
+        stay bounded by the per-act budget rail; a replay after a
+        successful act is refused by the budget/window; a retry after a
+        transient failure while the window is still fresh is PERMITTED (a
+        literal burn would refuse legitimate retries with no security
+        gain).
+
+        SILENT-RESUME EDGE (today's semantics — documented so the
+        shakedown does not re-open it as a NEW bug): a checkpoint resume
+        (``silent=True``) never reaches this method at all — the funnel
+        skips the whole stamp/inherit block on a silent dispatch — so a
+        resumed child never mints an inherited window and the child's
+        protected act refuses with ``no-user-provenance``. That is the
+        pre-F11 behaviour and F11 does not change it.
         """
         try:
             prefix = "internal_agent:"
-            if not isinstance(source, str) or not source.startswith(prefix):
-                # Non-inheriting dispatch — per-turn clear (fail-closed).
-                self._inherited_provenance_windows.pop(instance_id, None)
-                return
-            caller_iid = source[len(prefix):].strip()
+            caller_iid: str | None = None
+            if isinstance(source, str) and source.startswith(prefix):
+                # Legacy lane — byte-identical to today.
+                caller_iid = source[len(prefix):].strip()
+            elif (
+                isinstance(source, str)
+                and source.startswith("agent:")
+                and isinstance(dispatch_chain, dict)
+            ):
+                # F11 job-dispatch lane: the daemon-minted chain names
+                # the DELEGATING instance. The chain is honoured ONLY on
+                # the ``agent:`` lane — the message lane can carry the
+                # reserved key on the row without ever having passed the
+                # job seam (the lane check is the second of the three
+                # forgery controls).
+                candidate = dispatch_chain.get("caller_instance_id")
+                if isinstance(candidate, str):
+                    caller_iid = candidate.strip()
             if not caller_iid:
-                # Malformed internal_agent source (empty caller) — clear.
+                # Non-inheriting dispatch — per-turn clear (fail-closed).
+                # ONE pop path covers both the non-matching source and
+                # the empty/malformed caller (the empty-``caller_iid``
+                # check is kept).
                 self._inherited_provenance_windows.pop(instance_id, None)
                 return
             from daemon.tools import upgrade_journal as _uj
@@ -9721,6 +9769,7 @@ class InstanceManager:
         queue_id: str | None = None,
         image_refs: list[str] | None = None,
         idempotency_key: str | None = None,
+        dispatch_chain: dict[str, Any] | None = None,
     ) -> AsyncMessageResult:
         """POC variant of :meth:`enqueue_message` that also creates a JobItem mirror.
 
@@ -9740,6 +9789,14 @@ class InstanceManager:
         the additive extension point per ADR-011 — existing positional
         callers (e.g. ``daemon/routers/messages.py``, ``daemon/tools/job_queue.py``)
         that pass everything before ``metadata`` are unaffected.
+
+        ``dispatch_chain`` (F11): keyword-only kwarg forwarded to
+        ``InstanceMessagingService.enqueue_message_job`` and ultimately
+        to ``_job_queue_service.enqueue(..., dispatch_chain=...)``. It
+        is the daemon-minted DELEGATION CHAIN — a pointer to the
+        delegating instance, never a credential. It rides a KEYWORD and
+        NEVER via ``metadata`` (the service seam pops the reserved key
+        out of any caller-supplied metadata map).
         """
         return await self._messaging_service.enqueue_message_job(
             instance_id=instance_id,
@@ -9753,6 +9810,7 @@ class InstanceManager:
             queue_id=queue_id,
             image_refs=image_refs,
             idempotency_key=idempotency_key,
+            dispatch_chain=dispatch_chain,
         )
 
     async def _process_message_with_tracking(
@@ -9770,6 +9828,7 @@ class InstanceManager:
         image_refs: list[str] | None = None,  # Phase 2: ref-based display channel
         *,
         is_fresh_episode_user_message: bool = False,  # P0 hotfix (review-2): threaded from ProcessingContext
+        dispatch_chain: dict[str, Any] | None = None,  # F11: the delegation chain (a POINTER to the delegating instance)
     ) -> MessageResult:
         """Process message with activity tracking and cancellation support.
         
@@ -9798,6 +9857,14 @@ class InstanceManager:
                 False; the cascade-resume direct-dispatch site passes False
                 explicitly because a PAUSED→RUNNING resume is NOT a fresh
                 episode (the prior checkpoint's channels must persist).
+            dispatch_chain: F11 — the DELEGATION CHAIN. A POINTER to the
+                delegating instance (``{"caller_instance_id": ...,
+                "caller_agent_id": ...}``), never a credential. It is
+                threaded claim → context → funnel and is consumed ONLY by
+                the inherited-provenance mint below. The mint re-reads the
+                named instance's live window and re-checks expiry at claim
+                time, so a stale chain buys nothing. Absent ⇒ the mint
+                behaves byte-identically to today (default-off).
 
         Returns:
             MessageResult with response data.
@@ -9829,7 +9896,11 @@ class InstanceManager:
             # its write-set are untouched); the inherited store is written
             # ONLY here (the funnel) — the wake-sweep re-stamp path never
             # touches it (§2.1 stamp-machinery call-site discipline).
-            self._inherit_provenance_window(instance_id, message_source)
+            self._inherit_provenance_window(
+                instance_id,
+                message_source,
+                dispatch_chain=dispatch_chain,
+            )
 
         return await self._messaging_service._process_message_with_tracking(
             instance_id=instance_id,
