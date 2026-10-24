@@ -1013,12 +1013,14 @@ async def _auto_dispatch_first_turn(
         # down…")``; the inner ``session.commit()`` /
         # ``session.refresh(task)`` block raises on DB faults).
         # There is NO non-raising non-queued outcome on this path;
-        # the ``queued`` field is hardcoded to the dataclass default
-        # (``False``) and ``status`` is hardcoded to the literal
-        # ``"queued"`` on the only return site, so a ``result.queued
-        # == False`` check would be dead code that mis-fires on every
-        # successful enqueue. Pin the invariants instead of branching
-        # on a signal that cannot discriminate — a regression here
+        # the ``status`` is hardcoded to the literal ``"queued"`` on the
+        # only return site. The ``queued`` flag mirrors whether the
+        # PROCESS_MESSAGE Task row was created (D4(iv), 2026-10-24): it
+        # is ``False`` ONLY when the deferred-pause marker guard skipped
+        # the Task, so a ``result.queued == False`` check now
+        # discriminates instead of mis-firing on every successful
+        # enqueue. Pin the invariants instead of branching on a signal
+        # that cannot discriminate — a regression here
         # (e.g. a future ``return AsyncMessageResult(…,
         # status='rejected')`` branch) MUST update this block, not
         # silently slip through.
@@ -1260,6 +1262,48 @@ async def _register_child_completion_watcher(
                 f"correlation (dependency_bus): {hook_err}"
             )
     return None
+
+
+def _format_enqueue_result_status(result: Any) -> str:
+    """D4(iv) — surface the enqueue outcome to the calling agent.
+
+    ONE shared formatter for every tool path that enqueues a message and
+    returns prose (``send_message`` and the two ``convene_*`` paths). It
+    renders the ``AsyncMessageResult.status`` value that used to be
+    swallowed entirely — the caller could not tell whether the message
+    was queued, only that the tool "succeeded".
+
+    Vocabulary: ``status`` is ``"queued"`` on every build site
+    (``daemon/services/instance_messaging.py`` — the plain enqueue, the
+    job-driven enqueue and the marker-guard job enqueue). No new status
+    values are invented here; this formatter only REPORTS the value the
+    service produced.
+
+    The marker-guard sentence is appended when ``result.queued is
+    False`` — that is the deferred-pause marker-guard outcome, where the
+    PROCESS_MESSAGE Task row is skipped and the message row survives as
+    an audit record only, so the target is NOT woken by it. The plain
+    enqueue path reports ``queued=False`` whenever no Task row was
+    created, which is exactly that condition.
+
+    Args:
+        result: The ``AsyncMessageResult`` returned by the enqueue call
+            (``None`` / a foreign object is tolerated — the formatter
+            must never raise on a tool-result path).
+
+    Returns:
+        A short prose fragment, e.g. ``"status=queued"``.
+    """
+    status = getattr(result, "status", None)
+    queued = getattr(result, "queued", None)
+    text = f"status={status}"
+    if queued is False:
+        text += (
+            " (queued=False — the deferred-pause marker_guard skipped the "
+            "dispatch Task, so the message row was kept as an audit record "
+            "only and the target was NOT woken by it)"
+        )
+    return text
 
 
 def _get_project_workdir(manager: "InstanceManager", instance_id: str) -> str | None:
@@ -3651,7 +3695,11 @@ def create_instance_tools(
             "governor_instance_id": gov_instance_id,
             "hint": (
                 "Council convened. The governor will process your request and "
-                "deliver a result. Watch for the completion report."
+                "deliver a result. Watch for the completion report. "
+                # D4(iv) — the same shared formatter the ``send_message``
+                # prose uses: the enqueue outcome is surfaced instead of
+                # being swallowed.
+                + _format_enqueue_result_status(convene_result)
             ),
         }
 
@@ -3859,7 +3907,11 @@ def create_instance_tools(
             "hint": (
                 "Council convened with skill injection. The governor will "
                 "process your request and deliver a result. Watch for the "
-                "completion report."
+                "completion report. "
+                # D4(iv) — the same shared formatter the ``send_message``
+                # prose uses: the enqueue outcome is surfaced instead of
+                # being swallowed.
+                + _format_enqueue_result_status(convene_result)
             ),
         }
 
@@ -4565,7 +4617,11 @@ def create_instance_tools(
             f"sleep waiting for it. You may continue other work (spawn more "
             f"children, send more messages, etc.) in the meantime; when you "
             f"have nothing left to do, end your turn and the report will arrive "
-            f"on its own."
+            f"on its own. "
+            # D4(iv) — the enqueue outcome is surfaced instead of being
+            # swallowed (the ``status`` value + the marker-guard sentence
+            # when the dispatch Task was skipped).
+            + _format_enqueue_result_status(result)
         )
 
     send_message._full_doc_ = """Send a message to another instance.

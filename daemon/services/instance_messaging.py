@@ -2160,6 +2160,37 @@ class InstanceMessagingService:
         work_id = _ensure_work_id_fail_closed(work_id, work_id_required)
 
         with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
+            # ── D4(ii/iii) READ-BACK GUARD (2026-10-24, Phase 0) ───────────
+            # The target instance MUST exist BEFORE any row is written.
+            #
+            # Before this guard the existence check lived AFTER
+            # ``session.add(db_message)`` and only LOGGED a warning: the
+            # enqueue proceeded and left an ORPHAN MessageQueue row (plus
+            # its Task row) for an instance that does not exist, and the
+            # SENDER never learned about it (D4(iii) masking). The
+            # mis-address was invisible at the tool boundary.
+            #
+            # The check is hoisted ABOVE the insert so a missing target
+            # aborts CLEANLY: the ValueError propagates out of this
+            # transaction (nothing was committed — the session is closed
+            # without a commit), ZERO MessageQueue rows are written, and
+            # there is nothing to compensate. The raise surfaces as
+            # ToolMessage prose at the tool boundary (the established
+            # ``_resolve_instance_id`` error pattern), so the SENDER SEES
+            # the mis-address.
+            #
+            # Guard legs: fail-CLOSED (a raise, never a fail-open
+            # continue). The check-vs-commit race backstop further down
+            # (the WARNING branch) is KEPT — it covers the narrow window
+            # where the instance row is deleted between this check and
+            # the commit.
+            target_instance = session.get(Instance, instance_id)
+            if target_instance is None:
+                raise ValueError(
+                    f"ERROR: instance '{instance_id}' not found. "
+                    f"Message not enqueued — no MessageQueue row was written."
+                )
+
             # 1. Insert the message
             # S3 — agent-secrets P2 defense-in-depth body scrub
             # (design §2.1 site 2 / §2.2, p2-architecture-
@@ -2362,7 +2393,17 @@ class InstanceMessagingService:
             #    path; enqueue itself must not flip PAUSED so the
             #    cooperative pause gate (claim_pending_task excludes paused
             #    instances) and the resume cascade stay in control.
-            instance = session.get(Instance, instance_id)
+            # D4(ii/iii) race backstop — a FRESH read, not the identity
+            # map. The hoisted pre-insert check already loaded this row
+            # into the session, so a plain ``session.get`` would hand
+            # back the CACHED object and the WARNING branch below could
+            # never fire. ``populate_existing=True`` re-reads the row,
+            # so an instance row deleted between the check and the
+            # commit is still detected here (check-vs-commit race
+            # backstop).
+            instance = session.get(
+                Instance, instance_id, populate_existing=True
+            )
             if instance:
                 instance_agent_id = instance.agent_id
                 previous_status = instance.status
@@ -2670,6 +2711,17 @@ class InstanceMessagingService:
             instance_id=instance_id,
             status="queued",
             job_id=job_id,
+            # D4(iv) — the ``queued`` flag now MIRRORS whether the
+            # PROCESS_MESSAGE Task row was actually created (the
+            # deferred-pause marker guard is the only branch that skips
+            # it; ``ctx.task_id`` is None exactly then). Before this the
+            # field fell through to the dataclass default (``False``)
+            # on EVERY plain enqueue, so a ``result.queued is False``
+            # check could not discriminate and mis-fired on every
+            # successful send. The ``status`` vocabulary is unchanged
+            # (``"queued"`` on every build site) — no new value is
+            # invented here.
+            queued=ctx.task_id is not None,
         )
 
     @property
