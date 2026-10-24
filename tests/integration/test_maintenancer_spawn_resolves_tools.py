@@ -308,7 +308,8 @@ class TestPrivilegedCategoryRegistryShape:
     (the daemon-internal authority trio ``system_upgrade``,
     ``system-log``, ``ens-db`` plus ``ens-env`` per the W4 leader
     decision 2026-10-02, ``view-views`` per the REWORK 2026-10-07
-    M1 user refinement, ``cu`` per the cu-mcp task 2026-10-16,
+    M1 user refinement, ``cu`` per the cu-mcp task 2026-10-16 —
+    REMOVED 2026-10-24 with the cu builtin,
     ``secrets`` per the agent-secrets P1 commission 2026-10-17,
     ``settings`` per the settings-worker-slots P2 commission
     2026-10-18, ``board`` per the ari-tools Phase 1 commission
@@ -336,7 +337,8 @@ class TestPrivilegedCategoryRegistryShape:
         # Use MCP built-in's prefix-overridden tools; full
         # local-control surface, explicit ``tools.allow: ["cu"]``
         # on ari + leader meta.json — empty-allow universe must
-        # NOT auto-grant it). agent-secrets P1 (2026-10-17, plan
+        # NOT auto-grant it) — it was REMOVED 2026-10-24 with the cu
+        # builtin MCP server. agent-secrets P1 (2026-10-17, plan
         # f11965039) added ``secrets`` (the encrypted-secret-store
         # category; opt-in-only via
         # ``tools.allow: ["secrets"]`` on the day-one allow-list
@@ -355,7 +357,8 @@ class TestPrivilegedCategoryRegistryShape:
         # name kept for grep-stability; the count moved
         # 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 with the same-PR pin
         # updates (D18/A14) — 4 = ens-env (2026-10-02), 5 =
-        # view-views (2026-10-07), 6 = cu (2026-10-16), 7 =
+        # view-views (2026-10-07), 6 = cu (2026-10-16 — REMOVED 2026-10-24
+        # with the cu builtin), 7 =
         # secrets (2026-10-17), 8 = settings (2026-10-18), 9 =
         # board (2026-10-20), 10 = self-alarm (2026-10-20). Every
         # step landed its pin update in the SAME COMMIT as the
@@ -369,7 +372,6 @@ class TestPrivilegedCategoryRegistryShape:
             "ens-db",
             "ens-env",
             "view-views",
-            "cu",
             # agent-secrets P1 (2026-10-17, plan f11965039):
             # the encrypted-secret-store category. opt-in-only;
             # worker / tester / leader / ari day-one allow-list.
@@ -413,7 +415,7 @@ class TestPrivilegedCategoryRegistryShape:
             "board-link",
             # wedge-capture (2026-10-22): the READ-ONLY capture-evidence
             # surface — ``wedge_capture_list`` + ``wedge_capture_get``.
-            # PRIVILEGED (entry #16): the capture payload is a privileged
+            # PRIVILEGED (entry #12): the capture payload is a privileged
             # diagnostic artifact (all-thread stack dumps, per-thread CPU
             # maps, process RSS); the empty-allow inherit universe must
             # NOT auto-grant it. The ari + leader + maintenancer allow

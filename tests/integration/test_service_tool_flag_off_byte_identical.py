@@ -792,7 +792,7 @@ def test_manager_logs_disabled_when_off(
 # Sanity — PRIVILEGED_TOOL_CATEGORIES is the post-override trio
 # (system_upgrade + system-log + ens-db) plus ``ens-env`` (W4 leader
 # decision 2026-10-02), ``view-views`` (REWORK 2026-10-07 M1),
-# ``cu`` (cu-mcp 2026-10-16), ``secrets`` (agent-secrets P1
+# ``secrets`` (agent-secrets P1
 # 2026-10-17), ``settings`` (settings-worker-slots P2 2026-10-18),
 # the ari-tools trio (``board`` / ``self-alarm`` / ``view-write`` /
 # ``board-link``), the nest-ops pair (``instance_read`` /
@@ -838,15 +838,6 @@ def test_privileged_category_set_is_pinned() -> None:
             # REWORK 2026-10-07 (M1): view_link is restricted first-release;
             # only ari / leader / designer opt in via tools.allow.
             "view-views",
-            # cu-mcp (2026-10-16): Computer Use MCP prefix-overridden
-            # tools (cu_click, cu_screenshot, ...). Computer-use is
-            # a full local-control surface when the host OS grants
-            # are present; empty-allow agents (watcher, etc.) MUST
-            # NOT auto-inherit. Explicit ``tools.allow: ["cu"]`` on
-            # ari + leader only. Stamped via
-            # ``create_lazy_mcp_tools._tool_category`` from
-            # ``DYNAMIC_TOOL_PREFIXES`` (cu_).
-            "cu",
             # agent-secrets P1 (2026-10-17, plan f11965039):
             # the encrypted-secret-store category. opt-in-only;
             # worker / tester / leader / ari day-one allow-list.
@@ -894,7 +885,7 @@ def test_privileged_category_set_is_pinned() -> None:
             "board-link",
             # wedge-capture (2026-10-22): the READ-ONLY capture-evidence
             # surface — ``wedge_capture_list`` + ``wedge_capture_get``.
-            # PRIVILEGED (entry #16): the capture payload is a privileged
+            # PRIVILEGED (entry #12): the capture payload is a privileged
             # diagnostic artifact (all-thread stack dumps, per-thread CPU
             # maps, process RSS); the empty-allow inherit universe must
             # NOT auto-grant it. The ari + leader + maintenancer allow
@@ -910,7 +901,7 @@ def test_privileged_category_set_is_pinned() -> None:
 }
     ), (
         f"PRIVILEGED_TOOL_CATEGORIES drifted from the post-override "
-        f"trio + W4 ens-env + REWORK view-views + cu-mcp 'cu' + "
+        f"trio + W4 ens-env + REWORK view-views + "
         f"agent-secrets-P1 'secrets' + settings-worker-slots-P2 "
         f"'settings' + ari-tools-P1 'board' + ari-tools-P2 'self-alarm' + "
         f"ari-tools-P3 'view-write' + ari-tools-P3 'board-link'; "

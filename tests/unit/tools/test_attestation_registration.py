@@ -144,8 +144,7 @@ class TestStaticRegistrationChecklist:
         (the daemon-internal authority trio ``system_upgrade``,
         ``system-log``, ``ens-db`` plus ``ens-env`` per the W4
         leader decision 2026-10-02, ``view-views`` per the
-        REWORK 2026-10-07 M1 user refinement, ``cu`` per
-        the cu-mcp task 2026-10-16, ``secrets`` per the
+        REWORK 2026-10-07 M1 user refinement, ``secrets`` per the
         agent-secrets P1 commission 2026-10-17, ``settings``
         per the settings-worker-slots P2 commission 2026-10-18,
         ``board`` per the ari-tools Phase 1 commission
@@ -168,9 +167,12 @@ class TestStaticRegistrationChecklist:
         override drops back to the trio. REWORK 2026-10-07 (M1) adds
         ``view-views`` (the read-only ``view_link`` URL minter;
         user decision: restricted first-release visibility to
-        ari + leader + designer). cu-mcp (2026-10-16) adds
+        ari + leader + designer). cu-mcp (2026-10-16) added
         ``cu`` (Computer Use MCP prefix-overridden tools; full
-        local-control surface, ari + leader allow-list only).
+        local-control surface, ari + leader allow-list only) — it
+        was REMOVED 2026-10-24 with the cu builtin MCP server (the
+        replacement surface is the ``mcps_client`` wrapper + gateway
+        + the ``mcp_rpc`` category).
         agent-secrets P1 (2026-10-17, plan f11965039) adds
         ``secrets`` (the encrypted-secret-store category;
         worker / tester / leader / ari day-one allow-list;
@@ -183,7 +185,8 @@ class TestStaticRegistrationChecklist:
         # category without bumping this pin would trip a regression
         # here. W4 (leader decision 2026-10-02) adds ``ens-env``;
         # REWORK 2026-10-07 (M1) adds ``view-views``; cu-mcp
-        # (2026-10-16) adds ``cu``; agent-secrets P1 (2026-10-17)
+        # (2026-10-16) added ``cu`` — REMOVED 2026-10-24 with the cu
+        # builtin; agent-secrets P1 (2026-10-17)
         # adds ``secrets``; settings-worker-slots P2 (2026-10-18)
         # adds ``settings``.
         assert PRIVILEGED_TOOL_CATEGORIES == frozenset({
@@ -192,9 +195,6 @@ class TestStaticRegistrationChecklist:
             "ens-db",
             "ens-env",
             "view-views",
-            # cu-mcp (2026-10-16): Computer Use MCP prefix tools;
-            # explicit allow-list on ari/leader only.
-            "cu",
             # agent-secrets P1 (2026-10-17, plan f11965039):
             # the encrypted-secret-store category. opt-in-only;
             # worker / tester / leader / ari day-one allow-list.
@@ -241,7 +241,7 @@ class TestStaticRegistrationChecklist:
             "board-link",
             # wedge-capture (2026-10-22): the READ-ONLY capture-evidence
             # surface — ``wedge_capture_list`` + ``wedge_capture_get``.
-            # PRIVILEGED (entry #16): the capture payload is a privileged
+            # PRIVILEGED (entry #12): the capture payload is a privileged
             # diagnostic artifact (all-thread stack dumps, per-thread CPU
             # maps, process RSS); the empty-allow inherit universe must
             # NOT auto-grant it. The ari + leader + maintenancer allow

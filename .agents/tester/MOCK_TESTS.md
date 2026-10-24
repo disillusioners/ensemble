@@ -775,80 +775,38 @@ d. **Verbatim live shape — probe CLEAN, no removal**: the exact incident tuple
 - Artifact round-trip: 200, correct content-type, nosniff, sha256-identical body
 - Uniform 404 at real boot (unknown root / traversal / unknown path)
 
-## Mock Test: cu_smoke_live_mock_test (computer-use MCP ON-path live benign smoke)
+## Mock Test: cu_smoke_live_mock_test — RETIRED 2026-10-24
 
-### Metadata
-- **Created**: 2026-10-16
-- **Script**: `/tmp/cu-mcp-smoke/driver_main.py` (ephemeral harness; pattern documented here for re-runs)
-- **Language**: Python (uv run from worktree root)
-- **Status**: ACTIVE (re-run pending TCC grants for capture-fidelity leg)
+Status: RETIRED — the daemon-side `computer-use` builtin MCP server this
+entry drove was REMOVED 2026-10-24 (branch `feature/remove-cu-builtin`);
+the entry is no longer re-runnable. Historical run evidence:
+`RESULTS/2026-10-16-cu-mcp-computer-use-verification.md` and the matching
+`LESSONS/` row (`LESSONS/2026-10-16-cu-mcp-tcc-wallpaper-signature.md`).
 
-### Configuration
-- **Timeout**: 300s external `timeout` + 280s internal watchdog (SIGTERMs boot script, exit 124)
-- **Service Port**: daemon 18099 (mock range); PG 15433
-- **Mock Ports**: 18099, 15433 (disposable PG cluster /tmp/pg_cu_smoke_main, DB ensemble_cu_smoke_main)
-- **Cleanup**: SIGTERM to boot-script pid → script traps kill daemon + stop PG + rm dirs; lsof port-free assertion
+## Mock Test: cu_smoke_killswitch_mock_test — RETIRED 2026-10-24
 
-### What It Tests
-- Worktree daemon boot bootstraps the computer-use builtin row with pin + core profile
-- Live MCP session from the DB-row config (create_test_session) initializes; tools/list = 38 core-profile tools
-- Read-only allowlisted calls only (STRUCTURAL allowlist in code): screenshot, doctor, read_window_text, cursor_position (rule-vetted)
-- macOS TCC denial signature capture (wallpaper-only capture detection)
+Status: RETIRED — the daemon-side `computer-use` builtin MCP server this
+entry drove was REMOVED 2026-10-24 (branch `feature/remove-cu-builtin`);
+the entry is no longer re-runnable. Historical run evidence:
+`RESULTS/2026-10-16-cu-mcp-computer-use-verification.md` and the matching
+`LESSONS/` row (`LESSONS/2026-10-16-cu-mcp-tcc-wallpaper-signature.md`).
 
-### Mock Services Required
-- None external; disposable PG + isolated uvicorn daemon via frontend/scripts/boot-e2e-maintenance-daemon.sh (env overrides PG_PORT/DAEMON_PORT/DATA_DIR/DISPOSABLE_DB/LOG_DIR; CU_NPX_PATH=absolute npx; OPENAI_API_KEY from fenced .env into subprocess env only)
-
-### Test Scenarios
-1. Boot → canary state=ready → mcp_servers row = pinned pkg + core profile + is_active → PASS
-2. Session init → 38 tools incl. primitives → PASS
-3. screenshot: non-trivial payload metrics; TCC verdict from doctor (authoritative) → PASS-with-caveat (TCC denied: wallpaper-only)
-4. doctor: permission state capture → PASS (10 pass / 2 fail: display_capture + accessibility)
-5. read_window_text: server refuses target_required (no side effects); cursor_position pure-read → PASS
-6. Teardown: ports freed, dirs removed, no orphan cu processes → PASS
-
-### Success Criteria
-- [x] All scenarios pass within safety line (zero input injection; 34/38 tools refused by allowlist)
-- [ ] Post-TCC-grant re-run: window-content capture fidelity + OCR (pending user grants)
-
-### Implementation Notes
-- zavora screenshot payload is JPEG (not PNG): magic-byte sniff + `sips` convert for metrics (PIL absent from worktree venv)
-- TCC partial-denial signature: metrics look non-trivial (wallpaper) — doctor is the authoritative grant signal
-- Evidence: /tmp/cu-mcp-smoke/main-evidence/ (20 files) + main-logs/
-
-### Last Run
-- **Date**: 2026-10-16T09:13Z
-- **Worker Instance**: 47f9003b-b5b3-4872-8e41-8baab135da66
-- **Result**: PASS (TCC caveat)
-- **Quick Fixes**: harness-only (sync/async timed decorator, JPEG sniff+sips, cursor vetting) — /tmp script, not repo
-- **Report**: RESULTS/2026-10-16-cu-mcp-computer-use-verification.md
-
-## Mock Test: cu_smoke_killswitch_mock_test (computer-use MCP kill-switch OFF-path)
-
-### Metadata
-- **Created**: 2026-10-16
-- **Script**: `/tmp/cu-mcp-smoke/driver_ks.py` (ephemeral harness)
-- **Language**: Python (uv run from worktree root)
-- **Status**: ACTIVE
-
-### Configuration
-- **Timeout**: 300s external + 280s internal watchdog
-- **Service Port**: daemon 18198; PG 15434 (disposable cluster /tmp/pg_cu_smoke_ks, DB ensemble_cu_smoke_ks)
-- **Cleanup**: same SIGTERM-trap pattern; lsof port-free assertion
-
-### What It Tests
-- COMPUTER_USE_MCP_ENABLED=0 → computer-use skipped at registration: 0 mcp_servers rows, other builtins (context7, plane) DO bootstrap, one-shot kill-switch log EXACTLY once, zero npx/@zavora-ai spawns (CU_NPX_PATH set absolute so skip reason is unambiguously the kill-switch)
-
-### Test Scenarios
-1. Boot with kill-switch off → canary ready → count(computer-use rows)=0 → PASS
-2. Active-builtin roster non-empty (bootstrap ran) → PASS
-3. Kill-switch log line count == 1 → PASS
-4. Hard counters npx=0/zavora=0/subprocess=0 (path-strip filter for worktree-path false positives) → PASS
-
-### Success Criteria
-- [x] 4/4 checks pass; NO MCP session, NO tool calls (observation-only leg)
-
-### Last Run
-- **Date**: 2026-10-16T08:58Z
-- **Worker Instance**: 182d3c13-6f95-49e7-9ea9-644d35a99b18
-- **Result**: PASS (4/4)
-- **Report**: RESULTS/2026-10-16-cu-mcp-computer-use-verification.md
+> Both entries drove the cu builtin's own surface (its `mcp_servers`
+> bootstrap row, its `core`-profile session with 38 tools, its TCC
+> signature capture, and — for the kill-switch entry — its
+> `COMPUTER_USE_MCP_ENABLED=0` kill-switch OFF-path) — none of that
+> surface exists any more, so the two entries are retired rather than
+> re-runnable.
+>
+> The harness PATTERN (ephemeral `/tmp` driver + disposable PG cluster +
+> isolated uvicorn daemon) stays reusable for other boot smokes. The
+> historical run evidence is preserved in
+> `RESULTS/2026-10-16-cu-mcp-computer-use-verification.md` and the
+> matching `LESSONS/` row
+> (`LESSONS/2026-10-16-cu-mcp-tcc-wallpaper-signature.md`) — untouched
+> history.
+>
+> The remote-hands replacement surface (the `mcps_client` wrapper +
+> gateway + the `mcp_rpc` tools) is exercised by the
+> `tests/integration/mcps_gateway/` family instead
+> (`docs/mcps-gateway.md`).

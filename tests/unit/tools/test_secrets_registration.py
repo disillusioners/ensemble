@@ -25,7 +25,7 @@ Plus the privileged-category pin (septet → octet → nonet → decet):
 
 * ``PRIVILEGED_TOOL_CATEGORIES`` is exactly fifteen entries
   (``system_upgrade``, ``system-log``, ``ens-db``, ``ens-env``,
-  ``view-views``, ``cu``, ``secrets``, ``settings``, ``board``,
+  ``view-views``, ``secrets``, ``settings``, ``board``,
   ``self-alarm``) — NEVER default-granted
   (R-SR16: opt-in-only via per-agent ``tools.allow``).
 * The default-deny seam applies: an EMPTY-allow agent
@@ -191,7 +191,7 @@ class TestStaticRegistrationChecklist:
         )
 
     def test_secrets_in_privileged_categories(self) -> None:
-        """The ``secrets`` category is entry #7 in
+        """The ``secrets`` category is entry #6 in
         ``PRIVILEGED_TOOL_CATEGORIES`` (sextet → septet → octet →
         nonet; the sextet→septet step per the Q2 ruling 2026-10-17
         promoted ``secrets`` to #7, the septet→octet step
@@ -206,7 +206,7 @@ class TestStaticRegistrationChecklist:
 
         The full set is exactly fifteen entries:
         ``system_upgrade``, ``system-log``, ``ens-db``,
-        ``ens-env``, ``view-views``, ``cu``,
+        ``ens-env``, ``view-views``,
         ``secrets``, ``settings`` (settings-worker-slots
         P2, 2026-10-18), ``board`` (ari-tools Phase 1,
         2026-10-20) and ``self-alarm`` (ari-tools Phase 2,
@@ -229,7 +229,6 @@ class TestStaticRegistrationChecklist:
             "ens-db",
             "ens-env",
             "view-views",
-            "cu",
             "secrets",
             # settings-worker-slots P2 (2026-10-18): the
             # daemon-runtime-settings category (settings_get /
@@ -270,7 +269,7 @@ class TestStaticRegistrationChecklist:
             "board-link",
             # wedge-capture (2026-10-22): the READ-ONLY capture-evidence
             # surface — ``wedge_capture_list`` + ``wedge_capture_get``.
-            # PRIVILEGED (entry #16): the capture payload is a privileged
+            # PRIVILEGED (entry #12): the capture payload is a privileged
             # diagnostic artifact (all-thread stack dumps, per-thread CPU
             # maps, process RSS); the empty-allow inherit universe must
             # NOT auto-grant it. The ari + leader + maintenancer allow

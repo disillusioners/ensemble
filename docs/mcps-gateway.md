@@ -369,8 +369,8 @@ Only agents whose `meta.json` explicitly lists `mcp_rpc` in `tools.allow`
 get the four tools — currently `agents/ari/meta.json` and
 `agents/leader/meta.json` **and nowhere else**. The posture is two layers:
 
-1. the `mcp_rpc` category is in `PRIVILEGED_TOOL_CATEGORIES` — the 15th
-   entry of **15 categories** — so the empty-allow inherit universe never
+1. the `mcp_rpc` category is in `PRIVILEGED_TOOL_CATEGORIES` — the
+   15th entry of 15 categories — so the empty-allow inherit universe never
    auto-grants the authority to drive a remote desktop;
 2. a **literal tool name** in an allow list bypasses the category gate
    entirely, so every tool body ALSO carries its own

@@ -582,7 +582,7 @@ async def boot_tls_gateway(
         # attempts, 20 s each, before the handshake succeeded).  The
         # gateway lane does not need the MCP servers, so they are
         # switched off and the window disappears.
-        for server in ("CONTEXT7", "COMPUTER_USE", "WEBFETCH", "PLANE"):
+        for server in ("CONTEXT7", "WEBFETCH", "PLANE"):
             env[f"MCP_DISABLE_BUILT_IN_{server}"] = "true"
     env.update(postgres_env(role))
     if extra_env:

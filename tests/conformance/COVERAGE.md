@@ -57,7 +57,7 @@ read while being written.
 | **WS-ping observability** | The `websockets` client answers pings below the protocol layer and exposes no received-ping callback; a ping-only center's liveness evidence is invisible to the application. Recorded as a warning, never failed. |
 | **Token issuance / enrollment flow** | Out of band in v0.1 by design (§10). The kit never mints credentials. |
 | **Notification relay** | Both implementations relay nothing in v0.1 (`notifications: false` advertised honestly); nothing to exercise. |
-| **Streaming/screenshot payload fidelity** | Requires a real computer-use server behind the machine; the kit's peer serves a synthetic catalog. Out of scope for a wire kit. |
+| **Streaming/screenshot payload fidelity** | Requires a real computer-use server behind the machine — post cu-builtin removal (2026-10-24) such a server attaches via the mcps_client wrapper + gateway/mcp_rpc path, not a daemon builtin; the kit's peer serves a synthetic catalog. Out of scope for a wire kit. |
 
 ## The deliberate pins (and the marker on each)
 

@@ -64,15 +64,15 @@ TOOL_NAMES: frozenset[str] = frozenset({
 #: SAME set as the tool bodies' runtime gate).
 EXPECTED_HOLDERS: list[str] = ["ari", "leader", "maintenancer"]
 
-#: The privileged universe — the 15 pre-existing entries plus the
-#: wedge-capture category (15 -> 16).
+#: The privileged universe — 14 pre-existing entries (base's 15 minus
+#: the ``cu`` category REMOVED 2026-10-24 with the cu builtin MCP
+#: server) plus the wedge-capture category = 15 members.
 EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "system_upgrade",
     "system-log",
     "ens-db",
     "ens-env",
     "view-views",
-    "cu",
     "secrets",
     "settings",
     "board",
@@ -159,11 +159,11 @@ class TestPrivilegedCategory:
     def test_the_category_is_privileged(self) -> None:
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_sixteen_entries(self) -> None:
+    def test_the_set_is_exactly_the_fifteen_entries(self) -> None:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
-    def test_the_set_has_sixteen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 16
+    def test_the_set_has_fifteen_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 15
 
 
 # ── A13: the attribute pin + the default-deny behavioral leg ───────────────

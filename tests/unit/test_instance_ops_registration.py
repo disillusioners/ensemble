@@ -77,14 +77,15 @@ ACT_TOOL_NAMES: frozenset[str] = frozenset({
 ALL_TOOL_NAMES: frozenset[str] = READ_TOOL_NAMES | ACT_TOOL_NAMES
 
 #: The nest-ops pin's expected privileged universe — the 12 pre-existing
-#: entries plus the two nest-ops categories (12 -> 14, D-13).
+#: entries plus the two nest-ops categories (12 -> 14, D-13). The ``cu``
+#: category was REMOVED 2026-10-24 together with the cu builtin MCP
+#: server, taking the base from 12 to 11 (16 -> 15 members).
 EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "system_upgrade",
     "system-log",
     "ens-db",
     "ens-env",
     "view-views",
-    "cu",
     "secrets",
     "settings",
     "board",
@@ -93,7 +94,7 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "board-link",
     # wedge-capture (2026-10-22): the READ-ONLY capture-evidence
     # surface — ``wedge_capture_list`` + ``wedge_capture_get``.
-    # PRIVILEGED (entry #16): the capture payload is a privileged
+    # PRIVILEGED (entry #12): the capture payload is a privileged
     # diagnostic artifact; the empty-allow inherit universe must
     # NOT auto-grant it. The ari + leader + maintenancer allow
     # entries are the only access path, and every tool body ALSO
@@ -188,7 +189,7 @@ class TestPrivilegedCategory:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
     def test_the_set_has_fifteen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 16
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 15
 
 
 class TestAllowLists:
