@@ -1867,3 +1867,85 @@ class TestParentStatusCache:
             "the second child must RE-PROBE, not read a poisoned entry"
         )
 
+
+class TestHuskEvidenceLegsDegradation:
+    """A DEGRADED evidence-leg scan is visible in the payload.
+
+    The pre-fix shape swallowed a probe failure into an empty husk
+    list, so the operator read a clean ``count: 0`` on a scan that
+    never actually looked — indistinguishable from "there are no
+    husks".
+
+    PLANNED MUTATION (one behaviour per run):
+      * drop the ``evidence_legs`` field from the payload → RED;
+      * report "ok" on a failed probe → RED;
+      * report "degraded" on a HEALTHY scan → RED.
+    """
+
+    async def _health(self, manager):
+        return await _call(_read_tools(manager), "instance_health")
+
+    def _husk_row(self, payload):
+        for detector in payload["detectors"]:
+            if detector["detector"] == "never-dispatched-husk":
+                return detector
+        raise AssertionError("never-dispatched-husk detector is missing")
+
+    async def test_a_healthy_scan_reports_ok(self, fleet_db):
+        _insert_instances(
+            fleet_db, [_instance("husk-1", created_at=_aged())]
+        )
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        assert payload["evidence_legs"] == "ok"
+        assert self._husk_row(payload)["evidence_legs"] == "ok"
+
+    async def test_a_failed_evidence_probe_reports_degraded(self, fleet_db):
+        """The E1/E2 evidence probe fails → the scan says so."""
+        _insert_instances(
+            fleet_db, [_instance("husk-1", created_at=_aged())]
+        )
+        manager = RepoBackedManager(fleet_db)
+
+        def _boom(_ids):
+            raise RuntimeError("evidence probe unavailable")
+
+        manager._instance_repository.filter_without_any_evidence_ids = _boom
+
+        payload = await self._health(manager)
+
+        assert payload["evidence_legs"] == "degraded"
+        row = self._husk_row(payload)
+        assert row["evidence_legs"] == "degraded"
+        assert row["count"] == 0
+
+    async def test_a_failed_job_item_probe_reports_degraded(self, fleet_db):
+        """The E3 JobItem probe cannot run → the scan says so."""
+        _insert_instances(
+            fleet_db, [_instance("husk-1", created_at=_aged())]
+        )
+        manager = RepoBackedManager(fleet_db)
+
+        def _no_engine(_manager, _ids):
+            return None
+
+        original = ir._job_item_counts_by_instance
+        ir._job_item_counts_by_instance = _no_engine
+        try:
+            payload = await self._health(manager)
+        finally:
+            ir._job_item_counts_by_instance = original
+
+        assert payload["evidence_legs"] == "degraded"
+        assert self._husk_row(payload)["evidence_legs"] == "degraded"
+
+    async def test_no_candidates_is_not_degraded(self, fleet_db):
+        """No candidates at all — "0 husks" is TRUE, not degraded."""
+        _insert_instances(fleet_db, [_instance("fresh-1")])
+        manager = RepoBackedManager(fleet_db)
+
+        payload = await self._health(manager)
+
+        assert payload["evidence_legs"] == "ok"

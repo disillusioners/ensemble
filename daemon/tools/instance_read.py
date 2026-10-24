@@ -1072,7 +1072,12 @@ Examples:
 
         threshold_seconds = stale_minutes * 60
         try:
-            report, scan_truncated, scan_stop_reason = await asyncio.to_thread(
+            (
+                report,
+                scan_truncated,
+                scan_stop_reason,
+                evidence_legs,
+            ) = await asyncio.to_thread(
                 _build_health_report, manager, threshold_seconds
             )
         except Exception as exc:  # noqa: BLE001 — tool boundary swallows all
@@ -1091,6 +1096,12 @@ Examples:
             # was covered), `window_cap` (too many windows) or
             # `time_budget` (the walk ran out of wall-clock).
             "scan_stop_reason": scan_stop_reason,
+            # The husk detector's evidence-leg state — "ok" or
+            # "degraded". "degraded" means an evidence leg COULD NOT
+            # RUN, so the husk count is a LOWER BOUND, not the truth.
+            # Without this field a failed probe and a genuinely empty
+            # husk set are indistinguishable (both read "count: 0").
+            "evidence_legs": evidence_legs,
         }
         return json.dumps(payload, default=str)
 
@@ -1441,7 +1452,15 @@ def _job_item_counts_by_instance(
                     if instance_id:
                         counts[str(instance_id)] = int(count or 0)
     except Exception as exc:  # noqa: BLE001 — read-only probe
-        logger.debug("instance_read: job-item evidence read failed: %s", exc)
+        # WARNING, not DEBUG: this leg's failure DEGRADES the husk
+        # detector's verdict (it cannot clear a candidate), and the
+        # operator must be able to see that in the payload (see
+        # ``_husk_flagged_rows`` and the ``evidence_legs`` field).
+        logger.warning(
+            "instance_read: job-item evidence read failed — the husk "
+            "detector's evidence legs are DEGRADED: %s",
+            exc,
+        )
         return None
     return counts
 
@@ -1502,12 +1521,27 @@ def _husk_flagged_rows(
     Either leg being UNAVAILABLE (a probe failure) suppresses the
     verdict for that run: a husk report must never rest on a leg the
     scanner could not actually evaluate.
+
+    Returns ``(flagged, degraded)``:
+
+    * ``flagged`` — the husk rows (unchanged semantics).
+    * ``degraded`` — ``True`` when an evidence leg COULD NOT RUN, so
+      the reported count is a LOWER BOUND, not the truth. The
+      pre-fix shape swallowed the failure into an empty list, and an
+      empty husk list is indistinguishable from "there are no husks"
+      — a clean ``count: 0`` on a scan that never actually looked.
+      The caller surfaces this as the additive ``evidence_legs`` field.
     """
     if not candidates:
-        return []
+        # Nothing to probe — "0 husks" is TRUE, not degraded.
+        return [], False
     repo = getattr(manager, "_instance_repository", None)
     if repo is None:
-        return []
+        logger.warning(
+            "instance_read: husk evidence legs are DEGRADED — no instance "
+            "repository is available, so the evidence legs could not run"
+        )
+        return [], True
 
     candidate_ids = [
         (info.get("instance_id") or "") for info, _age in candidates
@@ -1515,13 +1549,22 @@ def _husk_flagged_rows(
     try:
         evidence_free = repo.filter_without_any_evidence_ids(candidate_ids)
     except Exception as exc:  # noqa: BLE001 — read-only probe
-        logger.debug("instance_read: husk evidence probe failed: %s", exc)
-        return []
+        logger.warning(
+            "instance_read: husk evidence probe failed — the husk "
+            "detector's evidence legs are DEGRADED: %s",
+            exc,
+        )
+        return [], True
 
     surviving = [iid for iid in candidate_ids if iid in evidence_free]
+    if not surviving:
+        # E1/E2 cleared EVERY candidate — there is nothing left for the
+        # E3 probe to check. "0 husks" is TRUE, not degraded.
+        return [], False
     job_counts = _job_item_counts_by_instance(manager, surviving)
     if job_counts is None:
-        return []
+        # The E3 leg could not run — the count is a LOWER BOUND.
+        return [], True
 
     flagged: list[dict[str, Any]] = []
     for info, age in candidates:
@@ -1542,12 +1585,12 @@ def _husk_flagged_rows(
                 ),
             )
         )
-    return flagged
+    return flagged, False
 
 
 def _build_health_report(
     manager: Any, threshold_seconds: int
-) -> tuple[list[dict[str, Any]], bool, str]:
+) -> tuple[list[dict[str, Any]], bool, str, str]:
     """Build the detector rows, the scan-truncated flag and the stop reason.
 
     NEVER repairs anything.
@@ -1577,7 +1620,15 @@ def _build_health_report(
       ``end_of_set`` / ``window_cap`` / ``time_budget``.
 
     Returns:
-        ``(detectors, scan_truncated, scan_stop_reason)``.
+        ``(detectors, scan_truncated, scan_stop_reason, evidence_legs)``.
+
+        ``evidence_legs`` is ``"ok"`` or ``"degraded"`` — the state of
+        the husk detector's batched EVIDENCE legs (the E1/E2 message +
+        task probe and the E3 JobItem probe). ``"degraded"`` means a
+        leg COULD NOT RUN, so the husk count is a LOWER BOUND rather
+        than the truth; the pre-fix shape swallowed the failure into
+        an empty list and the operator could not tell "0 husks" from
+        "the scan never looked".
     """
     from ..constants import ALIVE_INSTANCE_STATUSES, TERMINAL_INSTANCE_STATUSES
 
@@ -1875,14 +1926,22 @@ def _build_health_report(
     # ── 7. never-dispatched-husk (the BATCHED evidence legs) ────────
     # Appended LAST: a pure addition, so the six existing detector
     # indices stay stable for any consumer that reads them positionally.
-    husk_flagged = _husk_flagged_rows(
+    husk_flagged, evidence_degraded = _husk_flagged_rows(
         manager, husk_candidates, threshold=DEFAULT_HUSK_MIN_AGE_SECONDS
     )
+    # The payload speaks the STRING vocabulary; the helper speaks
+    # booleans. One conversion, one seam.
+    evidence_legs = "degraded" if evidence_degraded else "ok"
     detectors.append(
         {
             "detector": "never-dispatched-husk",
             "instances": husk_flagged,
             "count": len(husk_flagged),
+            # The evidence-leg state, ON THE ROW THAT CARRIES THE COUNT:
+            # "degraded" means an evidence leg could not run, so this
+            # count is a LOWER BOUND. Without it, a failed probe and a
+            # genuinely empty husk set look identical.
+            "evidence_legs": evidence_legs,
             # D-1 amendment (arch §1.2 item 6): the containment holds on
             # the EVIDENCE conjuncts only. The canonical twins carry a
             # STATE signature (idle ∧ version==1) on top of the same
@@ -1916,7 +1975,7 @@ def _build_health_report(
         or (not reached_end_of_set)
     )
 
-    return detectors, scan_truncated, stop_reason
+    return detectors, scan_truncated, stop_reason, evidence_legs
 
 
 def _build_capacity_summary(manager: Any) -> dict[str, Any]:

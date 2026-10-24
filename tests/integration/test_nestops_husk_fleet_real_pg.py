@@ -537,8 +537,10 @@ class TestF3xF4CouplingRealFleet:
         self, shakedown_env, window_fleet
     ):
         manager = shakedown_env
-        detectors, scan_truncated, stop_reason = ir._build_health_report(
-            manager, ir.DEFAULT_HUSK_MIN_AGE_SECONDS
+        detectors, scan_truncated, stop_reason, evidence_legs = (
+            ir._build_health_report(
+                manager, ir.DEFAULT_HUSK_MIN_AGE_SECONDS
+            )
         )
         husk = next(
             (
@@ -571,8 +573,10 @@ class TestF3xF4CouplingRealFleet:
         self, shakedown_env, window_fleet
     ):
         """The walk stops at ``end_of_set`` — never the window cap."""
-        _detectors, scan_truncated, stop_reason = ir._build_health_report(
-            shakedown_env, ir.DEFAULT_HUSK_MIN_AGE_SECONDS
+        _detectors, scan_truncated, stop_reason, _legs = (
+            ir._build_health_report(
+                shakedown_env, ir.DEFAULT_HUSK_MIN_AGE_SECONDS
+            )
         )
         assert stop_reason == "end_of_set", (
             f"expected end_of_set, got {stop_reason!r}"
@@ -592,7 +596,7 @@ class TestF3xF4CouplingRealFleet:
             SQLModelInstanceRepository,
         )
 
-        detectors, _trunc, _reason = ir._build_health_report(
+        detectors, _trunc, _reason, _legs = ir._build_health_report(
             shakedown_env, ir.DEFAULT_HUSK_MIN_AGE_SECONDS
         )
         husk = next(
@@ -711,8 +715,10 @@ class TestT48ScanCostMeasurement:
         event.listen(engine, "before_cursor_execute", _count)
         try:
             start = time.monotonic()
-            detectors, scan_truncated, stop_reason = ir._build_health_report(
-                shakedown_env, ir.DEFAULT_HUSK_MIN_AGE_SECONDS
+            detectors, scan_truncated, stop_reason, _legs = (
+                ir._build_health_report(
+                    shakedown_env, ir.DEFAULT_HUSK_MIN_AGE_SECONDS
+                )
             )
             wall = time.monotonic() - start
         finally:
