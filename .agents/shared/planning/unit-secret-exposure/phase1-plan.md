@@ -9,8 +9,8 @@
 | ID | Decision | Rationale (verified @9fc95176b8) | Rejected alternatives |
 |----|----------|----------------------------------|------------------------|
 | D1 | Strip at the generation seam — zero-env units | D-Bus exposure (man 5 systemd.exec:2703-2708; live census returns POSTGRES_PASSWORD to plain users); full runtime redundancy (launcher re-exports .env last, launcher.sh:1649); live unit frozen write-once (:535-539) never re-rendered (promote.sh:418-428/:652-656, restart.sh:234-239) | EnvironmentFile= (second secret file + rotation coupling + layer1-arm doc amendment); LoadCredential= (app-side changes, no precedent) — see decisions.md D1 |
-| D2 | KEEP torn-token guard :431-435 verbatim | Now defends against stale/hand-edited template tokens; test :372 keeps passing | Removing it with the splice (loses a defensive refusal for hand-edited templates) |
-| D3 | KEEP-list preserved (PORT+ADR-014 :297-301, `_dotenv_value` :273-285, `_splice_line` + 5 tokens, MALLOC :110, umask 077 :568, install -m 0600 :573, provenance stamp, clobber :535-539, `_stage_restart_unit_env` :441-458) | livez verify :467 needs $PORT; hygiene independent of content; decisions.md D3 table | — |
+| D2 | KEEP torn-token guard :412-415 verbatim *(re-anchored post-strip)* | Now defends against stale/hand-edited template tokens; the torn-token assert keeps passing (base pack :372 → reworked pack :413) | Removing it with the splice (loses a defensive refusal for hand-edited templates) |
+| D3 | KEEP-list preserved (PORT+ADR-014 :304-307, `_dotenv_value` :281-293, `_splice_line` :371-384 + 5 splice calls :405-409, MALLOC template :110, umask 077 :551, install -m 0600 :556, provenance stamp, clobber :518-521, `_stage_restart_unit_env` :422-442 — *anchors re-pointed to post-strip positions @eb90a600c; plan-time anchors were verified @9fc95176b8*) | livez verify :450-457 needs $PORT; hygiene independent of content; decisions.md D3 table | — |
 
 ## 3. Tasks
 
@@ -32,7 +32,7 @@ Dev rule (R1, **standing doctrine per W1/D6**): locate every edit by the exact c
 |----|-----------|
 | AC1.1 | DRY_RUN generation from a fixture `.env` (PORT + all 5 POSTGRES_* keys) emits a unit containing ZERO of: `Environment=PORT=`, `Environment=POSTGRES_`, `__ENV_LINES__`; and containing `Environment=MALLOC_ARENA_MAX=2` in the comment-stripped haystack |
 | AC1.2 | `grep -n 'ENV_LINES' scripts/upgrade/adopt-unit.sh` → zero hits; `grep -n 'POSTGRES_' scripts/upgrade/adopt-unit.sh` → zero functional hits (comments/prose rewritten per T1.6) |
-| AC1.3 | Torn-token guard :431-435 present verbatim; a hand-planted `__TOKEN__` in a throwaway template copy still triggers the refusal |
+| AC1.3 | Torn-token guard :412-415 present verbatim; a hand-planted `__TOKEN__` in a throwaway template copy still triggers the refusal |
 | AC1.4 | `grep -rn '_systemd_env_quote' scripts/` → zero hits |
 | AC1.5 | Template byte-diff vs parent shows exactly: token line removed, two comment blocks rewritten, nothing else; `Environment=MALLOC_ARENA_MAX=2` byte-identical |
 | AC1.6 | Live-surface grep (`carries secret env`, `secret env value masked`, `SECRET HYDROMETRY`, `minimal secret surface`) → zero hits in scripts/ + scripts/systemd/ |

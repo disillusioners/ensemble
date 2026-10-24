@@ -40,7 +40,7 @@ Generated systemd units carry ZERO `.env`-derived `Environment=` lines (convergi
 | 2 | Launcher Seam | phase2-plan.md | Verify zero functional change; pin the 4-rung precedence contract (.env > unit > set-environment > code default) in docs | P1 (comment coherence) |
 | 3 | Docs + Remediation Runbook | phase3-plan.md | Amend every site premised on inline unit secrets; add the one-time live-remediation runbook (drop-in vs re-adoption, user decides) | P1, P2 |
 | 4 | Tests | phase4-plan.md | Replace 8 asserts + remove 2 sections in test_adopt_unit.sh; add mutation-verified zero-env pins; spec the scratch boot-smoke fixture | P1, P5 |
-| 5 | Bounded .env mode-0600 | phase5-plan.md | INCLUDE (≤10 lines): chmod 600 after every `.env` write site (deploy.sh, stage.sh ×3) — load-bearing because stage.sh's `mv -f` silently resets mode | — (before P4) |
+| 5 | Bounded .env mode-0600 | phase5-plan.md | INCLUDE (≤10 lines): chmod 600 after every `.env` write site (deploy.sh, stage.sh ×3) — load-bearing because stage.sh's `mv -f` re-derives the mode from the temp's creation mode (post-W2-fold: `umask 077` fence + explicit chmod together enforce 0600) | — (before P4) |
 
 ## 5. Coupling Map
 
@@ -77,7 +77,7 @@ Shared files: `adopt-unit.sh` (P1 edits; P3 cross-ref only; P5 1-line comment), 
 - **SC4:** `tests/test_adopt_unit.sh` green; all census-surviving pins untouched and green (full census in T4.5).
 - **SC5:** No live-surface prose (script headers/comments, systemd-adoption.md, install-dir-protection-layer1-arm.md) still asserts the unit carries secret env; historical archives untouched.
 - **SC6:** Remediation runbook section exists with BOTH options in mechanically-correct form — (a) drop-in with the **LONE `Environment=` full-list reset** (A1; per-variable empty-string form absent) and gate `systemctl show -p Environment` → NO `KEY=VALUE` entries (an emptied list still prints the bare `Environment=` line — that bare line is NOT a failure; do not re-apply anything over it); (b) the corrected **§5-teardown → §3(d)-adoption composite** (A2) with clobber precondition, interim-daemon stop step, backup hazard; honest citations, recommendation, explicit "user decides / no live action tonight".
-- **SC7 (P5 — hygiene framing per A6):** every `.env` write site (`deploy.sh:311`, the `deploy.sh:236-254` demo-guard `.env.prod.demo` generation (mv :249 — W1/W8-corrected), `stage.sh` rewrite ×2 + create paths) followed by `chmod 600`; static byte-adjacency pins green + W5 mutation leg; behavioral pin green or documented-deferred; the ∅ exclusion delta disclosed (hygiene, not threat closure).
+- **SC7 (P5 — hygiene framing per A6):** every `.env` write site (deploy.sh install-copy cp :327 + chmod :330, the deploy.sh demo-guard `.env.prod.demo` generation (fence :251-252, mv :256, chmod :260 — post-fold anchors), `stage.sh` rewrite ×2 + create paths) followed by `chmod 600`; static byte-adjacency pins green + W5 mutation leg; behavioral pin green or documented-deferred; the ∅ exclusion delta disclosed (hygiene, not threat closure).
 - **SC8:** Zero live contact (verifiable: no systemctl mutations, no boots against live, scratch-only fixtures with FAKE_HOME/mktemp fences, per-variable env scrub — never `env -u POSTGRES_*`).
 - **SC9:** Lane contract honored: merge --no-ff → bump → tag → STAGE-ONLY above v0.27.5 (**re-derived from `releases/` dirs + LOCAL tags at stage time — never the remote tag**, W9) → NO PROMOTE.
 
