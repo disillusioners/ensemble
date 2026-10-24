@@ -512,12 +512,65 @@ class TestMessagingKeywordChannel:
 class TestDispatchSeam:
     """``job_processor`` forwards the RESERVED key only."""
 
+    def test_the_shared_chain_reader_reads_the_reserved_key(self):
+        """ONE reader for the chain (the tidier fold).
+
+        The three forward sites used to carry their own copy of
+        ``(job.job_metadata or {}).get(DISPATCH_CHAIN_KEY)`` — and the
+        copies had drifted (``proc_job`` vs ``job``) even though all
+        three objects are the same ``JobItem``. This pins the helper's
+        contract:
+
+          * the chain rides under the RESERVED key;
+          * an ABSENT chain reads as ``None`` (never an empty dict —
+            the forward is byte-identical to the pre-chain shape);
+          * a job row with NO metadata at all reads as ``None``.
+        """
+        from daemon.services import job_processor
+
+        class _Job:
+            def __init__(self, metadata):
+                self.job_metadata = metadata
+
+        assert (
+            job_processor._chain_metadata(_Job({RESERVED_CHAIN_KEY: {"c": 1}}))
+            == {"c": 1}
+        )
+        assert job_processor._chain_metadata(_Job({})) is None
+        assert job_processor._chain_metadata(_Job(None)) is None
+        # the RESERVED key is the ONLY key that is read.
+        assert job_processor._chain_metadata(_Job({"other": "x"})) is None
+
     def test_three_dispatch_sites_forward_the_reserved_key(self):
         from daemon.services import job_processor
 
         src = Path(job_processor.__file__).read_text()
-        assert src.count(".get(DISPATCH_CHAIN_KEY)") == 3
+        import ast
+
+        tree = ast.parse(src)
+        helper_calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_chain_metadata"
+        ]
+        # THREE dispatch sites read the chain — through the ONE shared
+        # helper. (The tidier fold replaced three near-verbatim copies
+        # that had already drifted: two read ``proc_job.job_metadata``
+        # and one read ``job.job_metadata``, although all three objects
+        # are the same ``JobItem`` model.)
+        assert len(helper_calls) == 3, (
+            "the three dispatch sites must read the chain through the "
+            f"shared helper (found {len(helper_calls)})"
+        )
+        # ... and each forwards it under the RESERVED key, CONDITIONALLY.
         assert src.count("{DISPATCH_CHAIN_KEY: chain} if chain else None") == 3
+        # the reserved key is READ in exactly ONE place — the helper.
+        assert src.count(".get(DISPATCH_CHAIN_KEY)") == 1, (
+            "the reserved key must be read in ONE place (the shared "
+            f"helper); found {src.count('.get(DISPATCH_CHAIN_KEY)')} reads"
+        )
 
     def test_absent_chain_forwards_no_metadata(self):
         """Absent ⇒ ``metadata=None`` ⇒ byte-identical to today."""

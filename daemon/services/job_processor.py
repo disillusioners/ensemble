@@ -30,6 +30,33 @@ from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 logger = logging.getLogger(__name__)
 
 
+def _chain_metadata(job: object) -> object | None:
+    """The delegation chain carried on a job row — or ``None``.
+
+    ONE reader for the F11 delegation chain (the tidier fold). The
+    three forward sites (the orphan-TASK recovery, the orphan-PENDING
+    resume and the normal send) each re-read the chain off the job
+    row's JSON ``job_metadata`` column — and the copies had already
+    drifted: two of them read ``proc_job.job_metadata`` and one read
+    ``job.job_metadata``, although every one of the three objects is
+    the same ``JobItem`` model, so the source is IDENTICAL and the
+    difference was cosmetic.
+
+    The chain rides under the RESERVED key; the value is the chain
+    dict itself (or ``None`` when the job carries no chain). Absent ⇒
+    ``None`` ⇒ the forward is byte-identical to the pre-chain shape
+    (default-off).
+
+    Args:
+        job: the ``JobItem`` row (any object exposing ``job_metadata``).
+
+    Returns:
+        The chain value, or ``None``.
+    """
+    metadata = getattr(job, "job_metadata", None) or {}
+    return metadata.get(DISPATCH_CHAIN_KEY)
+
+
 class JobProcessor:
     """Background worker that processes queued jobs.
 
@@ -1176,7 +1203,7 @@ class JobProcessor:
                                 )
                                 # F11: the reserved delegation key, read off the job
                                 # row — forwarded ONLY when present.
-                                chain = (proc_job.job_metadata or {}).get(DISPATCH_CHAIN_KEY)
+                                chain = _chain_metadata(proc_job)
                                 result = await self._instance_manager.enqueue_message(
                                     instance_id=instance_id,
                                     message=proc_job.message,
@@ -1278,7 +1305,7 @@ class JobProcessor:
                         )
                         # F11: the reserved delegation key, read off the job
                         # row — forwarded ONLY when present.
-                        chain = (proc_job.job_metadata or {}).get(DISPATCH_CHAIN_KEY)
+                        chain = _chain_metadata(proc_job)
                         result = await self._instance_manager.enqueue_message(
                             instance_id=instance_id,
                             message=proc_job.message,
@@ -1568,7 +1595,7 @@ class JobProcessor:
                 try:
                     # F11: the reserved delegation key, read off the job row —
                     # forwarded ONLY when present.
-                    chain = (job.job_metadata or {}).get(DISPATCH_CHAIN_KEY)
+                    chain = _chain_metadata(job)
                     result = await self._instance_manager.enqueue_message(
                         instance_id=instance_id,
                         message=job.message,
