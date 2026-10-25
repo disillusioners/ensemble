@@ -3225,6 +3225,22 @@ class InstanceMessagingService:
                 status="queued",
                 job_id=job_id,
                 queued=False,
+                # W1 (job-lane half) — carry WHY the JobItem was NOT
+                # created. This branch covers BOTH not-queued cases: the
+                # deferred-pause marker guard (``deferred_pause_marker`` —
+                # the Task was SKIPPED, so the target was NOT woken) and
+                # the post-commit id read-back failure
+                # (``task_id_refresh_failed`` — the Task row EXISTS, so
+                # the target WILL be woken). Both leave ``ctx.task_id``
+                # None, so this is the single job-lane site where the
+                # reason can be non-None.
+                #
+                # Before this the job lane returned ``queued=False`` with
+                # ``not_queued_reason=None`` — the public HTTP lane
+                # (``daemon/routers/messages.py``) surfaces ``queued`` to
+                # the caller, so a reason-less result forced every
+                # consumer to GUESS which of the two cases it was.
+                not_queued_reason=ctx.not_queued_reason,
             )
 
         # --- Step 3: Enqueue the JobItem using the exact same UUID. ---
@@ -3538,6 +3554,15 @@ class InstanceMessagingService:
             status="queued",
             job_id=job_id,
             queued=queued,
+            # W1 (job-lane half) — thread the reason here too, so the job
+            # lane NEVER returns a result without the reason attached. On
+            # this (normal) path the Task row WAS created, so the reason
+            # is None — but the kwarg is passed UNCONDITIONALLY so the
+            # result object's shape is identical on every job-lane exit.
+            # (``queued`` on this path reflects QUEUE CAPACITY, a
+            # different axis from the not-queued REASON; the two are
+            # independent and must not be conflated.)
+            not_queued_reason=ctx.not_queued_reason,
         )
 
     async def _process_message_with_tracking(

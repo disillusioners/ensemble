@@ -1,4 +1,4 @@
-"""T2 / T1 / T4 — the Phase-1 test pins (completion-subsystem Phase 1).
+"""T2 / T1 / T4 / W1 — the Phase-1 test pins (completion-subsystem Phase 1).
 
 Three small pins from the Phase-0 gate ledger:
 
@@ -20,6 +20,9 @@ Three small pins from the Phase-0 gate ledger:
   accepts 8..35 chars (a full uuid is 36 — the EXACT path owns that).
   The boundary is pinned at both ends so a widening/narrowing is
   caught.
+
+Plus the **W1 job-lane** pin — the PRODUCER half of the not-queued-reason
+split (see ``TestW1JobLaneNotQueuedReason`` below).
 """
 
 from __future__ import annotations
@@ -219,3 +222,115 @@ class TestT1QueuedEnabler:
             "injected_message": True,
             "source": "internal_agent:x",
         }
+
+
+class TestW1JobLaneNotQueuedReason:
+    """W1 — the JOB-LANE half of the not-queued-reason split.
+
+    The renderer pins (``tests/unit/tools/test_send_message_status_prose.py``)
+    construct an ``AsyncMessageResult`` BY HAND and therefore prove only
+    that the FORMATTER honours a reason — they prove NOTHING about the
+    PRODUCER. A producer that never attached a reason would leave every
+    renderer pin GREEN. That was the reviewer-council's W1 finding: the
+    job lane returned ``queued=False`` with ``not_queued_reason=None``,
+    so the public HTTP lane (``daemon/routers/messages.py`` calls
+    ``manager.enqueue_message_job``) surfaced a not-queued result with no
+    way to tell the marker-skip case (``deferred_pause_marker`` — the
+    Task was SKIPPED, the target was NOT woken) from the refresh-fail
+    case (``task_id_refresh_failed`` — the Task row EXISTS, the target
+    WILL be woken).
+
+    This pin drives the REAL job lane through the REAL deferred-pause
+    marker branch and asserts the reason REACHED the result OBJECT.
+    """
+
+    async def test_the_job_lane_attaches_the_reason_to_the_result_object(
+        self, engine, repo
+    ):
+        """ONE pin, two legs.
+
+        1. **PRODUCER (behavioural)** — the marker branch produces
+           ``deferred_pause_marker`` and it must land on
+           ``AsyncMessageResult.not_queued_reason``. Dropping the
+           threading at the marker exit turns this RED.
+        2. **COVERAGE (structural)** — EVERY ``AsyncMessageResult`` the
+           job lane builds must thread the reason. The job lane has TWO
+           exits and only the marker exit can currently carry a non-None
+           reason (both producers of a reason leave ``ctx.task_id`` None,
+           so the second exit is defence-in-depth), which is why the
+           "threaded at BOTH exits" invariant cannot be observed
+           behaviourally and is pinned structurally.
+        """
+        import inspect
+        from unittest.mock import AsyncMock, MagicMock
+
+        from daemon.services.instance_messaging import InstanceMessagingService
+
+        iid = "inst-w1-job-lane"
+        _seed(engine, iid)
+
+        def _service(*, marker: bool) -> InstanceMessagingService:
+            manager = MagicMock()
+            manager.engine = engine
+            manager.write_guard = MagicMock()
+            manager._live_hub = MagicMock()
+            manager._live_hub.stream_status_change = AsyncMock()
+            manager._worker_pool = MagicMock()
+            # A REAL set — the marker guard does
+            # ``instance_id in self._manager._deferred_question_pause``.
+            manager._deferred_question_pause = {iid} if marker else set()
+            # The REAL repository — the instance row is READ from the
+            # live SQLite engine, not fabricated.
+            manager._instance_repository = repo
+            manager._job_queue_service = MagicMock()
+            # No queue repository → the job lane takes its documented
+            # "defaulting queued=False" capacity branch. That is the
+            # QUEUE-CAPACITY axis, NOT the not-queued REASON axis.
+            manager._job_queue_service._queue_repo = None
+            manager._job_queue_service.enqueue = AsyncMock(return_value=None)
+            manager._job_queue_service._repository = MagicMock()
+            manager._job_queue_service._repository.stamp_message_id = MagicMock()
+            return InstanceMessagingService(
+                manager=manager,
+                cancellation_service=MagicMock(is_shutting_down=False),
+            )
+
+        # ── Leg 1: PRODUCER — the marker branch ───────────────────────
+        marked = _service(marker=True)
+        result = await marked.enqueue_message_job(
+            instance_id=iid,
+            message="hello",
+            source="api",
+        )
+
+        assert isinstance(result, AsyncMessageResult)
+        # The marker guard SKIPPED the Task row → the target was NOT woken.
+        assert result.queued is False
+        # THE PRODUCER CONTRACT — the reason must be ON THE OBJECT.
+        assert result.not_queued_reason == "deferred_pause_marker"
+
+        # ── Leg 2: the normal exit still returns a well-formed result ─
+        plain = _service(marker=False)
+        ok = await plain.enqueue_message_job(
+            instance_id=iid,
+            message="hello",
+            source="api",
+        )
+
+        assert isinstance(ok, AsyncMessageResult)
+        assert ok.message_id
+        # No marker → the Task row WAS created → there is NO reason.
+        assert ok.not_queued_reason is None
+
+        # ── Leg 3: COVERAGE — every job-lane exit threads the reason ──
+        source = inspect.getsource(InstanceMessagingService.enqueue_message_job)
+        result_builds = source.count("return AsyncMessageResult(")
+        threadings = source.count("not_queued_reason=ctx.not_queued_reason")
+        assert result_builds == 2, (
+            "the job lane is expected to build the result object at two "
+            f"exits, found {result_builds}"
+        )
+        assert threadings == result_builds, (
+            "every job-lane result build must thread the not-queued reason "
+            f"(builds={result_builds}, threadings={threadings})"
+        )
