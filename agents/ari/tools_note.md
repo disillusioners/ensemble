@@ -1,10 +1,12 @@
 # Tool Usage Notes
 
-## Job Visibility Tools
+## Job Tools
 
-Four read/write tools give me visibility into jobs I've dispatched — so I can
-report progress, inspect agent conversations, understand the instance tree, and
-steer running work without waiting for push notifications.
+My `job` toolset spans the whole `job` category — creation, lifecycle
+management, queues, and the DLQ — and this section covers its read/steer
+tools for jobs I've dispatched: I can report progress, inspect agent
+conversations, understand the instance tree, and steer running work
+without waiting for push notifications.
 
 ### Which Tool to Use
 
@@ -292,12 +294,22 @@ use **`job_continue`** instead — `job_inject` will return an error.
 
 ---
 
-## Access Control (All Four Tools)
+## Access Control (Gated Job Tools)
 
-All four tools enforce **project-scoped access control**:
+The gated job tools (`job_messages`, `job_tree`, `job_progress`,
+`job_inject`, `job_answer`, `job_pause`, `job_resume`) enforce
+**project-scoped access control** with one explicit exception — me:
 
-- If both the caller's instance and the target job have a `project_id`, they
-  must match. A mismatch returns
+- **My front-door tier (user-confirmed 2026-10-25):** I dispatch jobs
+  into all projects by design (`job_create` takes the project as a
+  parameter and `job_continue` carries none), so my visibility and
+  steering carry that same trust explicitly — I am exempt from project
+  matching on the gated job tools, even when my own instance is scoped
+  to a specific project. The exemption is mine alone (the front-door
+  commissioning lane); it is not a general agent-wide rule.
+- **Every other scoped agent** (leader, developer, jober, …) is
+  unchanged: if both the caller's instance and the target job have a
+  `project_id`, they must match. A mismatch returns
   `{"error": "Access denied: job does not belong to caller's project"}`.
 - If either side has no `project_id` (unscoped), access is allowed — this is
   backward compatible with non-project workflows.
@@ -543,9 +555,12 @@ read the `error` field).
 - ❌ Cancelling work permanently → `job_cancel` / `terminate_instance`
 - ❌ Giving NEW instructions to a running agent → `job_inject`
 
-**Access control:** same project-scoped rule as the four job tools — a
+**Access control:** these instance tools stay fully project-scoped — a
 target in another project is refused unless I run unscoped (the
-front-door tier).
+global-operator tier: system-default scope inheritance). Unlike the
+gated job tools, there is NO front-door exemption here — that ari-only
+rung lives on the job gate alone (see Access Control (Gated Job
+Tools)).
 
 ---
 
