@@ -108,3 +108,37 @@ Reviewer-gate nodes under mutation (a): both still PASSED — the pin is the dis
 1. 🔴1 fix: `session.commit()` at scope (A2-proven) or `session=None` at `instance.py:1267/:1277`; durability log post-commit; NEW PG-backed regression test (SQLite green proves nothing).
 2. 🔴2 fix: widen the 6 unpacks (`*_rest`); re-run root-a/root-b + unit-services shards on both legs.
 3. Delta verify: focused pack (112) + the two re-run shards + `mrpr1_e2e_spawn` send-message commission-row check (`mission_commissions ≥ 1` persisted) + the new PG regression test green.
+
+---
+
+# DELTA PASS — 2026-10-25 @ tip `58465832d` (4 dev commits on evidence commit `eb0e2e284`)
+
+- **Scope:** §Re-verification plan only — no full gate. Worktree premise corrected upstream (never deleted; reused).
+- **Dev commits:** `dc41c7dfa` Fix-1 commit-at-scope · `a1a00f19f` widened-unpacks + H1 caller pin · `188b99a35` docstrings (2 files; the 3rd docstring was fixed by `dc41c7dfa` — attribution corrected via git blame) · `58465832d` loud PG teardown.
+- **Workers:** d1-pg=a9362ba2 · d2a-mergegate=4fd80595 (1 junk-report re-dispatch, then clean) · d2b-rednodes=83e416e3 · d2c-focused=52cc00e3 · d3-e2e=72965c0b · commit=<this commit's worker>.
+
+## Verdict
+
+**ALL DELTA ITEMS PASS — both full-gate FAILs are RESOLVED. Release gate CLEAR from the test side at `58465832d`.**
+
+| Item | Verdict | Evidence |
+|---|---|---|
+| 1 Fix-1 independent PG verify | ✅ PASS | Dev regression `tests/unit/test_mission_record_commission_persistence_pg.py` **2/2** (drives the REAL `_register_child_completion_watcher`; fresh-session asserts exactly 1 commission (lane=send_message, state=outstanding) + 1 mission, ids linked; 2nd node documents the SQLite-masking artifact). **Independent A/B, same DB + same helpers, one variable:** leg A (pre-fix shape: mint with `session=`, no commit) → **0 commissions / 0 missions**; leg B (real tip path) → **1/1 persisted** ⇒ the commit is load-bearing. Log ordering PROVEN: `mission_records COMMISSION COMMITTED` fires strictly AFTER `Session.commit()` returns (`after_commit` root-commit-only probe; staged DEBUG lines fire pre-commit). Fix scope: `session.commit()` at `instance.py:1310-1311` after the commission try/except, BEFORE bus watch (deliberate — the watch-failure path returns inside the block); fail-open WARNING on commit failure; INFO only in the `else:` success branch. |
+| 2 Six previously-red nodes | ✅ PASS | All green BY NAME (123P/1S across the 3 files; the 1 skip is pre-existing environmental langgraph-import); zero `too many values to unpack` occurrences in the whole pack log. Unpack census: **11/11 widened sites confirmed** (`test_injection_graph.py` ×7 @949/956/1010/1012/1117/1122/1198 · `test_w5_claim_order_wc_wake.py` ×2 @950/956 · `test_context_messages.py` ×2 @961/966); zero residual stale 3-tuple sites. |
+| 3 New H1 caller pin | ✅ PASS | `test_chat_source_live_injection.py::TestRunningLiveGraphInjection::test_chat_epoch_mint_forwards_echo_id_as_founding_message_id` (`:325`, +65 lines by `a1a00f19f`) — GREEN. Collect drift 38→39 = exactly the new node. The full-gate Important gap #1 (real chat-lane call site unpinned) is CLOSED. |
+| 4 Reviewer merge-gate set @ tip | ✅ PASS | **44/44** (39 file nodes incl. both reviewer-gate nodes + all 5 `TestResolveOrMintFailOpenSignatureDriftPin` pins + the new caller pin). 2s. |
+| 5 Focused short-pack @ tip | ✅ PASS | **112/112**, per-file baseline==actual for all 8 files, zero drift (fix commits added no nodes inside the pack — the new PG regression test and caller pin live outside it, covered by items 1/3). 5.49s. |
+| 6 E2E send_message commission-row (per §Re-verification) | ✅ PASS | Self-hosted daemon 8091 (uvicorn dev.sh:155 shape; E2E_PG_* belt-and-braces additions documented), scratch `mission_pr1_e2e_delta`. `test_terminate_after_spawn_then_revive` GREEN (98s). DB: `mission_commissions`=**1** (`lane=send_message, state=outstanding, advisory_backfill=f, mission_row_exists=t`), `mission_records`=1 (user_api founding). Log↔DB reconciliation: exactly 1 `COMMISSION COMMITTED` line, ids match the DB row byte-for-byte ⇒ **logged=1, rows=1, logged-but-lost=0**. Loud teardown verified (port-verified SIGTERM, DB dropped+absent, ports clean, prod 9797 untouched). |
+
+## Delta findings (new/updated gaps; none blocking)
+
+1. **Residual ON CONFLICT drift, 1 site** — `daemon/migrations/versions/20261025_122700_create_mission_commissions.sql:26` header comment still asserts the `INSERT … ON CONFLICT DO NOTHING` mechanism (contradicts `models.py:348`; the migration's own header claims it mirrors models.py). Doc-only ~2-line finalize-lane fix; NOT a gate blocker.
+2. **Fix-1 deliberate trade-off (documented in code):** the commit (`:1311`) precedes the bus watch (`:1356`) — a failed watcher registration can leave an `outstanding` commission with no watcher. Consistent with the fail-open design and the comment block at `:1291-1309`; matters for PR2/PR3 routing flips that read commission state.
+3. **Invocation gotcha:** the PG regression test carries NO postgres marker (it lives in `tests/unit/`, not `tests/postgres/`) — `-m postgres` deselects it to an EMPTY rc=5 run. Correct invocation: `timeout 300 bash scripts/run_tests_scrubbed.sh tests/unit/test_mission_record_commission_persistence_pg.py --override-ini='addopts=' -q --tb=short -rs` (env `PG_TEST_*` only; the fixture hard-aborts if MAINT_DB ∈ {ensemble_prod, ensemble_dev}).
+4. **Scrub-runner correction:** `run_tests_scrubbed.sh` does NOT exit-78 on `PG_TEST_*` names (they pass through; exit-78 fires only on surviving `POSTGRES_*`/libpq) — refines the full-gate deviation note.
+5. Cosmetic pre-existing: checkpointer boot log formats `config.postgres.db` default ("ensemble") while the real DSN is env-first (`daemon/persistence.py:153`).
+6. Delta skip list: `test_three_level_cascade_reports` (ran green at the full gate; not a delta item), the 2 quarantined `settled`-vocabulary E2E nodes (standing base-attributed rows), and the 8 `-k`-deselected E2E nodes — out of delta scope.
+
+## Delta cleanup receipts
+
+`mission_pr1_delta_maint` + `mission_pr1_delta_repro` dropped (fenced, verified absent; dev's loud teardown left zero `ensemble_mrpr1_commission_*`); `mission_pr1_e2e_delta` dropped by D3 (verified absent at its teardown; re-verified at evidence-commit time — see commit worker receipt); `/tmp/mrpr1_delta_d1/` + `/tmp/mrpr1_delta_d3/` logs retained; no daemon left running; worktree HEAD `58465832d` with only the 2 known foreign-dirt files (untouched by all delta workers, mtimes proven pre-task).
