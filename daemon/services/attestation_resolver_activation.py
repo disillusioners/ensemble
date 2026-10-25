@@ -360,6 +360,20 @@ class SourceCSignals:
     live_descendants: int
     busy_descendants: int
     user_answer_pending: bool = False
+    #: Proposal B PR2 — the FIFTH R2 input (MISSION-scoped): the count
+    #: of OUTSTANDING commission rows on the leader's open mission
+    #: epoch. The three tree counters above are TREE-scoped and cannot
+    #: see an OUT-OF-TREE commissioned worker (the D2 premature-settle
+    #: class); this input is mission-scoped.
+    #:
+    #: The DEFAULT is ``0`` — the input is INACTIVE (the mission ladder
+    #: is not in ``enforce`` mode, or the caller does not consult the
+    #: records). ``0`` is the LEGACY posture: the pre-PR2 quiet
+    #: predicate (``pending=0 ∧ wakeups=0 ∧ live=0``) is preserved
+    #: exactly. The fail-open ``-1`` "unknown" sentinel is CONSTRUCTED by
+    #: the READ (never defaulted here) and short-circuits the gate to the
+    #: whole-evaluation fail-open allow BEFORE this value is used.
+    outstanding_commissions: int = 0
 
 
 @dataclass(frozen=True)
@@ -1049,6 +1063,14 @@ def activation_predicate(
         c_signals.pending_children == 0
         and c_signals.queued_or_expected_wakeups == 0
         and c_signals.live_descendants == 0
+        # Proposal B PR2 — the FIFTH input (mission-scoped). The quiet
+        # predicate requires ``outstanding_commissions == 0``: a mission
+        # with an OUT-OF-TREE commissioned worker still running is NOT
+        # quiet, so the deny band does not fire (the judge lane takes it
+        # instead, with the commission rows visible in SOURCE C). The
+        # four tree counters are untouched — additive blindness closure,
+        # not a BFS rewrite.
+        and c_signals.outstanding_commissions == 0
     )
     b_fires = bool(
         (b_signals.marker_hit or b_signals.length_trigger)
@@ -1268,7 +1290,9 @@ def _build_c_section(
             f"queued_or_expected_wakeups={c_signals.queued_or_expected_wakeups} "
             f"live_descendants={c_signals.live_descendants} "
             f"busy_descendants={c_signals.busy_descendants} "
-            f"user_answer_pending={c_signals.user_answer_pending}"
+            f"user_answer_pending={c_signals.user_answer_pending} "
+            # Proposal B PR2 — the FIFTH input (mission-scoped).
+            f"outstanding_commissions={c_signals.outstanding_commissions}"
         )
     rendered = 0
     for row in c_tree_rows:
@@ -1484,6 +1508,12 @@ def make_tree_rows_provider(
             # evidence ("work still in flight"), the descendant status
             # rows are context. Putting them last would let a wide tree
             # clip them out and silently disarm the union.
+            #
+            # Proposal B PR2 — the MISSION-scoped union leads too: the
+            # out-of-tree commissioned worker (the nudge lane) is
+            # invisible to the tree walk, and it is the very evidence
+            # the D2 premature-settle shape needs.
+            rows.extend(_commission_rows_for_mission(manager, instance_id))
             rows.extend(_commissioned_rows_for_tree(manager, tree_ids))
             remaining = max(0, C_TREE_ROW_FETCH_CAP - len(rows))
             repo = getattr(manager, "_instance_repository", None)
@@ -1516,6 +1546,57 @@ def make_tree_rows_provider(
 #: advisory. A commissioned row means the OPPOSITE (work still in
 #: flight), so it must not collide with that vocabulary.
 C_TREE_COMMISSIONED_STATUS = "commissioned_pending"
+
+
+def _commission_rows_for_mission(
+    manager: Any,
+    instance_id: str | None,
+) -> list[dict[str, Any]]:
+    """Render the open mission's OUTSTANDING commissions as C rows.
+
+    Proposal B PR2 — the SOURCE C membership union (proposal-b §3
+    NEW(v)): "C's membership = tree ∪ commissions". The
+    tree-scoped union above (:func:`_commissioned_rows_for_tree`) can
+    only see the watchers whose target is IN the leader's tree; the
+    commission rows are the MISSION-scoped half — the OUT-OF-TREE
+    commissioned worker (the nudge lane) the tree walk can never see.
+
+    Why it matters (the D2 shape): the leader's mission is judged
+    against SOURCE C. Without the commission half, an out-of-tree
+    commissioned worker is invisible to the judge and it can verdict
+    ``complete`` on an unquiet mission — the mission settles while the
+    work is still running.
+
+    Fail-open: ANY failure returns ``[]`` (the C seam degrades to
+    counts-only evidence, never to a wrong verdict).
+
+    The ``commissioned_pending`` status vocabulary is owned HERE (this
+    module) — the manager facade returns the raw commission data.
+    """
+    if manager is None or not instance_id:
+        return []
+    try:
+        reader = getattr(manager, "list_mission_outstanding_commissions", None)
+        if not callable(reader):
+            return []
+        raw_rows = reader(instance_id) or []
+        rows: list[dict[str, Any]] = []
+        for raw in raw_rows[:C_TREE_ROW_FETCH_CAP]:
+            if not isinstance(raw, dict):
+                continue
+            worker_id = str(raw.get("instance_id") or "")
+            if not worker_id:
+                continue
+            rows.append(
+                {
+                    "instance_id": worker_id,
+                    "status": C_TREE_COMMISSIONED_STATUS,
+                    "agent_id": "?",
+                }
+            )
+        return rows
+    except Exception:  # noqa: BLE001 — the union is FAIL-OPEN
+        return []
 
 
 def _commissioned_rows_for_tree(

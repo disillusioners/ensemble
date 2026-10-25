@@ -345,9 +345,49 @@ def get_agent_name(agent_dir: str) -> str:
     return Path(agent_dir).name.title()
 
 
+def _epoch_entry_seen(
+    entries: list[Any],
+    denial_epoch: str,
+    mission_id: str | None,
+) -> bool:
+    """Has this ``(fingerprint, mission)`` deny already been counted?
+
+    Proposal B PR2 — the EPOCH-TAGGED O4 dedup key.
+
+    * A TAGGED entry (``{"epoch": ..., "mission_id": ...}``) matches
+      when the fingerprint matches AND the mission matches. The same
+      fingerprint under a DIFFERENT mission is a NEW deny (the epoch
+      boundary is a real boundary — the "previous mission's deny ledger
+      rides forward" lane dies here).
+    * A LEGACY untagged entry (a plain fingerprint string, written
+      before the tagging shipped) matches ONLY for an epoch-unaware
+      caller (``mission_id is None``) — the pre-tagging semantics,
+      byte-for-byte. An epoch-aware caller ignores the untagged
+      entries: they predate the tagging and belong to a closed epoch;
+      swallowing the new epoch's deny would re-open the very carryover
+      lane the tagging closes.
+    """
+    for entry in entries:
+        if isinstance(entry, dict):
+            if entry.get("epoch") != denial_epoch:
+                continue
+            if mission_id is None:
+                # The caller does not know the epoch — the deny was
+                # already counted for SOME epoch.
+                return True
+            if entry.get("mission_id") == mission_id:
+                return True
+            continue
+        if mission_id is None and entry == denial_epoch:
+            # A legacy untagged entry with the SAME fingerprint and an
+            # epoch-unaware caller — the pre-tagging dedup semantics.
+            return True
+    return False
+
+
 class SQLModelInstanceRepository:
     """SQLModel-based Instance repository with hierarchy support."""
-    
+
     def __init__(self, engine: Engine):
         """Initialize repository with a database engine."""
         self.engine = engine
@@ -1848,6 +1888,7 @@ class SQLModelInstanceRepository:
         self,
         instance_id: str,
         denial_epoch: str,
+        mission_id: str | None = None,
     ) -> int:
         """O4 idempotent per-denial-epoch increment (Phase 3 task 3.3).
 
@@ -1855,6 +1896,23 @@ class SQLModelInstanceRepository:
         instance, keyed by ``(instance_id, denial_epoch)`` — replaying
         the SAME deny (checkpoint re-run / pause-mid-gate resume) MUST
         NOT double-increment.
+
+        Proposal B PR2 — the EPOCH-TAGGED ledger (proposal-b §2.4): the
+        O4 dedup entries now carry the OWNING MISSION. A tagged entry
+        is ``{"epoch": <fingerprint>, "mission_id": <mission>}``; the
+        legacy untagged entry (a plain fingerprint string) is still
+        honored for rows written before the tagging shipped.
+
+        The dedup key becomes ``(fingerprint, mission)``: a replay of
+        the same fingerprint WITHIN the same epoch is swallowed (the
+        O4 contract, untouched), while the SAME fingerprint under a
+        DIFFERENT epoch COUNTS again — the "the previous mission's deny
+        ledger rides forward" lane (D5-latent) dies by construction.
+
+        ``mission_id=None`` (the default) keeps the LEGACY plain-string
+        entry shape byte-for-byte — the callers that do not consult the
+        mission record (dry mode, the standalone unit tests) are
+        unaffected.
 
         Single-transaction guarantee (review must-fix 2): the ENTIRE
         operation — row lock, O4 dedup decision, epochs-array append,
@@ -1884,6 +1942,9 @@ class SQLModelInstanceRepository:
                 (the gate node derives it deterministically from
                 checkpoint-stable state material). Replays of the same
                 key are no-ops.
+            mission_id: The owning mission epoch (Proposal B PR2). When
+                supplied, the entry is epoch-TAGGED and the dedup key
+                becomes ``(denial_epoch, mission_id)``.
 
         Returns:
             The post-increment counter value (the unchanged current
@@ -1915,9 +1976,9 @@ class SQLModelInstanceRepository:
                 "attestation:denial_epochs"
             ) if instance.instance_metadata else None
             if existing is None:
-                seen_epochs: list[str] = []
+                seen_epochs: list[Any] = []
             elif isinstance(existing, list):
-                seen_epochs = [str(e) for e in existing]
+                seen_epochs = list(existing)
             else:
                 # Corrupt legacy payload — reset (defensive; treat as
                 # empty list to keep O4 semantics bounded). LOUD: a
@@ -1931,10 +1992,16 @@ class SQLModelInstanceRepository:
                     instance_id,
                 )
                 seen_epochs = []
-            if denial_epoch in seen_epochs:
-                # O4 replay — same deny, no double-increment.
+            if _epoch_entry_seen(seen_epochs, denial_epoch, mission_id):
+                # O4 replay — same deny in the same epoch, no
+                # double-increment.
                 return current_count
-            seen_epochs.append(denial_epoch)
+            if mission_id:
+                seen_epochs.append(
+                    {"epoch": denial_epoch, "mission_id": mission_id}
+                )
+            else:
+                seen_epochs.append(denial_epoch)
             # ORM write of BOTH columns in the SAME transaction. The
             # metadata dict must be REASSIGNED (not mutated in place):
             # ``instance_metadata`` is a plain ``JSONBType`` column
@@ -1947,6 +2014,57 @@ class SQLModelInstanceRepository:
             instance.updated_at = datetime.now(timezone.utc).isoformat()
             db_session.commit()
             return current_count + 1
+
+    def reset_attestation_denied_count_on_session(
+        self,
+        db_session,
+        instance_id: str,
+    ) -> bool:
+        """The epoch-boundary ledger clear on a CALLER-OWNED session.
+
+        Proposal B PR2 — the mint-driven boundary clear (proposal-b
+        §2.4): "epoch mint clears ``attestation_denied_count`` +
+        ``completion_gate_escalated`` … and ``denial_epochs`` becomes
+        epoch-tagged … entries from closed epochs are pruned at
+        boundary".
+
+        This is the session-aware twin of
+        :meth:`reset_attestation_denied_count`: it clears the SAME three
+        pieces of state (the counter, the escalation flag, the O4 dedup
+        array) but does NOT commit — the caller owns the transaction.
+        That matters because the boundary clear rides the MINT's
+        transaction (the delegation lane's ``WriteGuardSession``): a
+        second connection's write would contend with the lane's open
+        write transaction (SQLite single-writer lock).
+
+        The clear is the PRUNE of the closed-epoch entries: every entry
+        in the array belongs to a closed epoch at the boundary (the
+        boundary is where the epoch closed), so the array is emptied
+        and the deny bound starts counting the NEW epoch only.
+
+        Returns:
+            ``True`` when the row was found and the clear was applied;
+            ``False`` when the instance is missing.
+        """
+        instance = db_session.get(Instance, instance_id)
+        if instance is None:
+            return False
+        from sqlmodel import update as sqlmodel_update
+
+        self._set_metadata_on_session(
+            db_session, instance_id, "attestation:denial_epochs", []
+        )
+        stmt = (
+            sqlmodel_update(Instance)
+            .where(Instance.instance_id == instance_id)
+            .values(
+                attestation_denied_count=0,
+                completion_gate_escalated=False,
+                updated_at=datetime.now(timezone.utc).isoformat(),
+            )
+        )
+        db_session.exec(stmt)
+        return True
 
     def _update_attestation_columns(
         self, instance_id: str, *, clear_denial_epochs: bool = False, **values: Any

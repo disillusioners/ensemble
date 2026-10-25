@@ -109,6 +109,30 @@ Best-effort advisory backfill, rules per proposal §5.2
 
 ## PR2/PR3 flip-list preview (per comparison §5 / proposal §7)
 
+> **AMENDED 2026-10-25 (Proposal B PR2) — user rulings ①②③.** The PR2
+> list below is the list PR2 ACTUALLY shipped. Three items were amended
+> by binding user rulings; the amendment markers are IN the list so the
+> git diff shows the rulings honored:
+>
+> * **① REMOVED — the Term-1 bypass-recording item.** The item is
+>   struck through below and was NOT implemented in PR2. The attested
+>   arm stays a no-op/bypass by design: NO bypass-recording, NO
+>   blocking rule. The proposal-b §3 NEW(ii) bypass-recording text and
+>   the quiet-mission blocking POLICY are SUPERSEDED by this ruling.
+> * **② UNCHANGED — the scheduler anchoring stays inert.** The
+>   scheduler mint hook is untouched; ``ENSEMBLE_MISSION_RECORDS_
+>   SCHEDULER_MINT`` stays default-OFF.
+> * **③ AMENDED — the amendment fires at DELIVERY.** The re-founding
+>   amendment fires from the message-tap site (the DELIVERY of a
+>   p1-HUMAN user-lane message), NOT when the window is scanned. This
+>   kills the ~14-minute mid-turn correction lag seam (the amendment is
+>   a durable row, visible to the gate at would-be END, even while the
+>   window's CONTENT is still being drained).
+>
+> The sibling PR2 notes document
+> (``.agents/shared/planning/completion-subsystem-mission-records-pr2/``)
+> restates the shipped PR2 list with the same markers.
+
 PR2 (read flip, behind `enforce`):
 - Census: `attestation_required` consults open commission rows (legacy
   scan = fallback leg).
@@ -118,9 +142,14 @@ PR2 (read flip, behind `enforce`):
   ladder = declared legacy fallback.
 - L3 root gate mission-scoped leg (publish requires no outstanding
   commissions on the open epoch).
-- Term-1: bypass RECORDING (already record-shaped via `record_attestation`
-  seam) + the quiet-mission blocking POLICY — default OFF until the
-  user rules (the three non-binding rulings stay non-binding).
+- ~~Term-1: bypass RECORDING (already record-shaped via
+  `record_attestation` seam) + the quiet-mission blocking POLICY —
+  default OFF until the user rules (the three non-binding rulings stay
+  non-binding).~~ **[REMOVED 2026-10-25 — USER RULING ①. The attested
+  arm stays a no-op/bypass BY DESIGN: no bypass-recording, no blocking
+  rule. The proposal-b §3 NEW(ii) bypass-recording text and the
+  quiet-mission blocking POLICY are superseded by this ruling. NOT
+  implemented in PR2.]**
 - Epoch-boundary ledger clears generalize from "fresh-episode revive
   only" to "every recorded boundary"; `denial_epochs` goes
   epoch-tagged.
@@ -128,6 +157,11 @@ PR2 (read flip, behind `enforce`):
   sites (agent_node_return + 3 compaction taps; PR1 lands the entry
   site + the mechanism).
 - amend-at-delivery: fire `amend_anchor` from the tap site.
+  **[AMENDED 2026-10-25 — USER RULING ③: the amendment fires AT
+  DELIVERY (the message-tap site), NOT when the delegation window is
+  scanned — the ~14-minute mid-turn correction lag seam dies because the
+  amendment is a durable row visible to the gate at would-be END while
+  the window's content is still draining.]**
 
 PR3 (routing + reconciliation):
 - D1 flip: routing resolves the child's outstanding commission row →

@@ -53,6 +53,7 @@ from .message_tap import (  # Phase 1 C2 — langgraph-checkpoint-perf
     MessageTapSlot,
     SOURCE_USER_MESSAGE_ENTRY,
     SOURCE_COMPACTION_MESSAGING,
+    resolve_turn_mission_id,
 )
 from .project_normalizer import normalize_project_id
 from .skill_meta_parser import extract_load_skill, parse_meta_tag
@@ -1659,6 +1660,11 @@ class InstanceMessagingService:
                 await _compaction_tap.tap_node_return(
                     result.replacement_messages,
                     instance_id,
+                    # Proposal B PR2 — the mission stamp rides the CARRIED
+                    # value (the producer stamped it on the delivered
+                    # user message's kwargs; the tap READS it — never
+                    # re-derives it from message shapes).
+                    mission_id=resolve_turn_mission_id(messages),
                 )
 
             # Log compaction result (only when there was an actual
@@ -3652,6 +3658,78 @@ class InstanceMessagingService:
             not_queued_reason=ctx.not_queued_reason,
         )
 
+    async def _amend_mission_anchor_at_delivery(
+        self,
+        *,
+        instance_id: str,
+        message_id: str,
+        is_p1_human: bool,
+        mission_id: str | None,
+    ) -> None:
+        """Re-found the mission anchor at DELIVERY (Proposal B PR2, ruling ③).
+
+        The re-founding amendment seam (proposal-b §2.2): "a new p1-HUMAN
+        user-lane message landing on an instance whose epoch is open
+        updates ``founding_message_id``". The amendment fires AT
+        DELIVERY — the message tap site — not at enqueue time and not
+        when the delegation window is scanned. That is what kills the
+        ~14-minute mid-turn correction lag seam: the anchor is a DURABLE
+        row, visible to the gate at would-be END, even while the
+        window's content is still being drained.
+
+        PRECONDITIONS (all must hold):
+        * the delivered message is p1-HUMAN (the ledger's
+          ``priority == 1 AND type == HUMAN`` — the carried
+          ``is_fresh_episode_user_message`` flag, computed ONCE at the
+          producer and threaded here; never re-derived here);
+        * a mission epoch is OPEN for this instance.
+
+        The write is the GUARDED amend path (F2: ``UPDATE ... WHERE
+        status='open'``), so a closed epoch is never rewritten and a
+        stale carrier is a safe no-op.
+
+        FAIL-OPEN: the amendment is a RECORD write — it must never break
+        the delivery. Any failure is logged at WARNING and swallowed.
+        """
+        if not is_p1_human or not message_id or not instance_id:
+            return
+        try:
+            service = getattr(self._manager, "mission_record_service", None)
+            if service is None:
+                return
+            target_mission_id = mission_id
+            if not target_mission_id:
+                # No carrier (the lane did not resolve a mission — e.g.
+                # the record was off when the message was enqueued).
+                # Resolve the OPEN epoch directly; the read is fail-open
+                # and returns ``None`` when there is no epoch.
+                from .mission_record_reads import read_open_mission
+
+                record = await asyncio.to_thread(
+                    read_open_mission,
+                    self._manager._engine,
+                    instance_id,
+                )
+                if record is None:
+                    return
+                target_mission_id = record.mission_id
+            from .mission_record_service import amend_anchor_fail_open
+
+            await asyncio.to_thread(
+                amend_anchor_fail_open,
+                service,
+                target_mission_id,
+                message_id,
+            )
+        except Exception as amend_exc:  # noqa: BLE001 — never break delivery
+            logger.warning(
+                "mission_records: amend-at-delivery failed for %s…: %s: %s "
+                "— the delivery continues without the amendment",
+                instance_id[:8],
+                type(amend_exc).__name__,
+                amend_exc,
+            )
+
     async def _process_message_with_tracking(
         self,
         instance_id: str,
@@ -5115,6 +5193,28 @@ class InstanceMessagingService:
                 # carrier threaded claim → ProcessingContext → here.
                 # Record-side only (the tap is non-load-bearing; the
                 # stamp is consumed by PR2 reads, never PR1).
+                mission_id=mission_id,
+            )
+
+            # ── Proposal B PR2 — the RE-FOUNDING AMENDMENT (ruling ③) ──
+            # The amendment fires AT DELIVERY (here, at the tap site) —
+            # NOT at enqueue time and NOT when the window is scanned.
+            # A delivered p1-HUMAN user-lane message during an OPEN
+            # epoch re-anchors the epoch: the mission's
+            # ``founding_message_id`` becomes the delivered correction,
+            # so the delegation window re-bounds on the correction and
+            # the anchor is visible to the gate at would-be END even
+            # though the window's CONTENT is still being drained (the
+            # ~14-minute mid-turn lag seam).
+            #
+            # The amendment is RECORD-ONLY: in ``dry`` mode it moves the
+            # anchor row while every read site stays legacy (zero
+            # behavior change). The guarded amend path touches only an
+            # OPEN epoch (F2), so a stale carrier is a safe no-op.
+            await self._amend_mission_anchor_at_delivery(
+                instance_id=instance_id,
+                message_id=message_id,
+                is_p1_human=is_fresh_episode_user_message,
                 mission_id=mission_id,
             )
 

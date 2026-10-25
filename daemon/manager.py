@@ -40,6 +40,14 @@ from .services.mission_record_service import (
     mint_cascade_resume_epoch_if_stranded_fail_open,
     resolve_mission_records_mode,
 )
+from .services.mission_record_reads import (
+    count_outstanding_commissions as _read_outstanding_commissions,
+    list_outstanding_commissions,
+    mission_records_enforce_enabled,
+    read_founding_message_id as _read_founding_message_id,
+    read_mission_census as _read_mission_census,
+    read_mission_id as _read_mission_id,
+)
 from .repositories import (
         SQLModelInstanceRepository,
         SQLModelProjectRepository,
@@ -8352,6 +8360,37 @@ class InstanceManager:
             "ALTER TABLE report_injections ADD COLUMN IF NOT EXISTS mission_id TEXT",
             "ALTER TABLE report_injections ADD COLUMN IF NOT EXISTS commissioner_instance_id TEXT",
             "ALTER TABLE message_metadata ADD COLUMN IF NOT EXISTS mission_id TEXT",
+            # ── Proposal B PR2 — F1 carry: the OPEN-EPOCH partial unique
+            # index (2026-10-25). At most ONE ``open`` mission_records row
+            # may exist per anchor — the resolution ladder's rung-1
+            # lookup returns a single row BY CONSTRUCTION once this
+            # index exists. The statement order matters: the idempotent
+            # normalization UPDATE runs FIRST (it closes the crash
+            # window in which the job_continue lane had inserted a new
+            # epoch but not yet superseded the prior one), then the
+            # index is created. Both statements run in the SAME
+            # transaction (the statements loop below), so the index can
+            # never be created against un-normalized rows.
+            # The index name + predicate MUST stay byte-identical with
+            # the SQLite counterpart
+            # (``daemon/migrations/versions/20261025_140000_add_mission_open_epoch_unique_index.sql``)
+            # and with the SQLModel ``__table_args__`` declaration in
+            # ``daemon/repositories/mission_record/models.py`` (3-site pin).
+            (
+                "UPDATE mission_records SET status = 'superseded' "
+                "WHERE status = 'open' AND EXISTS ("
+                "SELECT 1 FROM mission_records newer "
+                "WHERE newer.anchor_instance_id = mission_records.anchor_instance_id "
+                "AND newer.status = 'open' AND ("
+                "newer.created_at > mission_records.created_at OR ("
+                "newer.created_at = mission_records.created_at "
+                "AND newer.mission_id > mission_records.mission_id)))"
+            ),
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_mission_records_anchor_open "
+                "ON mission_records (anchor_instance_id) "
+                "WHERE status = 'open'"
+            ),
             # ── Critical-notes lifecycle columns (Phase 1, 2026-09-15) ──
             # Additive columns on ``critical_notes`` per
             # architecture-recommendation §5.1. The SQLite companion is
@@ -11805,6 +11844,131 @@ class InstanceManager:
         return self._messaging_service.get_queued_or_expected_wakeups(
             instance_id
         )
+
+    # ------------------------------------------------------------------
+    # Proposal B PR2 — the mission-record READ facades.
+    #
+    # These are the R2-region siblings of the four tree counters above.
+    # They read the ``mission_records`` / ``mission_commissions`` tables
+    # (the PR1 substrate) so the gate's census, its SOURCE U anchor and
+    # its 5th R2 input can consume the RECORD instead of re-deriving
+    # "what is this mission?" from message shapes.
+    #
+    # MODE-AWARE (the single gate): the reads are consulted ONLY when
+    # the mission-record mode ladder is ``enforce``
+    # (``ENSEMBLE_MISSION_RECORDS=enforce``). In ``dry`` (the ship
+    # default) and ``off`` the facades return the INACTIVE value — the
+    # legacy posture, byte-identical to pre-PR2. The gate itself never
+    # consults the mode: the decision lives here, in ONE place.
+    #
+    # FAIL-OPEN (convention #3): a read failure NEVER degrades to a
+    # ``0`` default. The count facade returns ``-1`` ("unknown") and
+    # the census facade returns ``None`` ("no answer") — the callers
+    # fall back to the legacy leg in both cases.
+    # ------------------------------------------------------------------
+
+    def count_outstanding_commissions(self, instance_id: str) -> int:
+        """The FIFTH R2 input — the mission-scoped outstanding count.
+
+        The four tree counters above are TREE-scoped: they cannot see an
+        OUT-OF-TREE commissioned worker (the nudge lane's blind spot —
+        the D2 premature-settle class). This input is MISSION-scoped:
+        it counts the open mission's outstanding commission rows, so a
+        running out-of-tree worker holds the mission instead of letting
+        it settle.
+
+        Returns:
+            ``0``  — inactive (mode ``dry``/``off``) OR the mission is
+                      quiet (no open epoch, or no outstanding rows).
+            ``N>0``— the open mission has N outstanding commissions.
+            ``-1`` — UNKNOWN (the read failed). The fail-open sentinel:
+                      the caller treats it as "behave as before the
+                      records existed", NEVER as "0 outstanding".
+        """
+        if not mission_records_enforce_enabled():
+            # Inactive input — the legacy quiet predicate is preserved
+            # exactly (a real 0, not the unknown sentinel: the feature
+            # is OFF, not unknown).
+            return 0
+        return _read_outstanding_commissions(self._engine, instance_id)
+
+    def mission_has_commissions(self, instance_id: str) -> bool | None:
+        """The delegation-census read: "does the open mission have any
+        commission rows?"
+
+        Replaces the tool-name-literal walk (``attestation_scanner``)
+        when the record answers. The census is no longer reset by a new
+        user message re-anchoring the window — the commission rows
+        belong to the EPOCH.
+
+        Returns:
+            ``True``/``False`` — the record's answer (an open mission
+                      with / without commission rows).
+            ``None``   — no answer (no open epoch, or the read failed)
+                      → the caller uses the LEGACY delegation scan
+                      (the declared fallback leg).
+        """
+        if not mission_records_enforce_enabled():
+            return None
+        return _read_mission_census(self._engine, instance_id)
+
+    def get_mission_founding_message_id(self, instance_id: str) -> str | None:
+        """The SOURCE U anchor read: the open epoch's founding message id.
+
+        ``None`` → the caller falls back to the LEGACY six-step exclusion
+        ladder (today's behavior, exactly).
+        """
+        if not mission_records_enforce_enabled():
+            return None
+        return _read_founding_message_id(self._engine, instance_id)
+
+    def get_mission_id(self, instance_id: str) -> str | None:
+        """The open epoch's ``mission_id`` (``None`` when there is none).
+
+        The epoch tag for the deny ledger (proposal-b §2.4): a deny entry
+        records the owning mission so the boundary prune can drop the
+        closed-epoch entries.
+        """
+        if not mission_records_enforce_enabled():
+            return None
+        return _read_mission_id(self._engine, instance_id)
+
+    def list_mission_outstanding_commissions(
+        self, instance_id: str
+    ) -> list[dict[str, Any]]:
+        """The open mission's OUTSTANDING commission rows.
+
+        The judge's SOURCE C membership half (proposal-b §3 NEW(v)):
+        "C's membership = tree ∪ commissions". The tree walk can only
+        see the STRUCTURAL descendants; the commission rows are the
+        OUT-OF-TREE commissioned workers (the nudge lane) the tree
+        walk can never see.
+
+        Returns:
+            One raw row per outstanding commission:
+            ``{"instance_id": <worker>, "lane": <commission lane>,
+            "state": <commission state>}``. Empty list when the mode is
+            not ``enforce``, when there is no open mission, or when the
+            read fails (the union is fail-open — counts-only C evidence,
+            never a wrong verdict).
+
+            The C-row SHAPE (the ``commissioned_pending`` status
+            vocabulary) is owned by
+            :mod:`daemon.services.attestation_resolver_activation` — this
+            facade returns the raw record data, never the vocabulary.
+        """
+        if not mission_records_enforce_enabled():
+            return []
+        rows: list[dict[str, Any]] = []
+        for commission in list_outstanding_commissions(self._engine, instance_id):
+            rows.append(
+                {
+                    "instance_id": str(commission.worker_instance_id or ""),
+                    "lane": str(commission.lane or ""),
+                    "state": str(commission.state or ""),
+                }
+            )
+        return rows
 
     # Live-descendants count cap (R2 third-input, 2026-09-06). The cap
     # bounds the BFS tree walk on the gate hot path; production trees are

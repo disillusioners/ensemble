@@ -2493,6 +2493,35 @@ Provide a concise summary:"""
                 instance_id[:8], _loop_exc,
             )
 
+    def _count_outstanding_mission_commissions(self, instance_id: str) -> int:
+        """The open mission's outstanding-commission count (L3 leg read).
+
+        Proposal B PR2 — the mission-scoped liveness leg's read. The
+        count comes from the manager facade
+        (``InstanceManager.count_outstanding_commissions``), which is
+        MODE-AWARE (the mission-record ladder must be in ``enforce``
+        mode for the leg to be armed) and FAIL-OPEN (a read failure
+        constructs the ``-1`` "unknown" sentinel).
+
+        Returns:
+            ``0``  — inactive / quiet / no open mission.
+            ``N>0``— the mission has N outstanding commissions.
+            ``-1`` — UNKNOWN (the read failed) → the caller proceeds
+                      (the gate's fail-open posture).
+        """
+        try:
+            reader = getattr(
+                self._manager, "count_outstanding_commissions", None
+            )
+            if not callable(reader):
+                return 0
+            value = reader(instance_id)
+            if not isinstance(value, int):
+                return 0
+            return value
+        except Exception:  # noqa: BLE001 — fail-open (never hold on a read fault)
+            return -1
+
     async def _root_completion_gate(
         self,
         session,
@@ -2558,6 +2587,39 @@ Provide a concise summary:"""
             bus_pending = self._bus_count_pending_for_target_sync(instance_id)
             if bus_pending > 0:
                 return False, f"bus_pending={bus_pending}", False
+
+            # ── Proposal B PR2 — the MISSION-SCOPED commission leg ──
+            # The bus-pending leg above is TREE-scoped: it counts the
+            # PENDING ``dependency_watchers`` rows targeting THIS
+            # instance. An OUT-OF-TREE commissioned worker (the
+            # ``instance_nudge`` lane — the demonstrated D2 premature
+            # -settle shape) mints NO watcher and is therefore invisible
+            # to it: the gate sees a fake quiescence and publishes the
+            # terminal "completed" event while the commissioned work is
+            # still running.
+            #
+            # The mission-scoped leg closes that hole: the open mission
+            # epoch's OUTSTANDING commission rows are the record-side
+            # truth ("this mission commissioned work that has not
+            # reported yet"). While any commission is outstanding, the
+            # publish is HELD.
+            #
+            # FAIL-OPEN (the gate's posture — a missing terminal is
+            # worse than an extra premature one): the read returns the
+            # ``-1`` "unknown" sentinel on failure and ``0`` when the
+            # mission is quiet (or the mission ladder is not in
+            # ``enforce`` mode — the input is INACTIVE, the legacy
+            # publish path is preserved exactly). Only a POSITIVE count
+            # holds the publish.
+            #
+            # WATCHERS STAY AS THEY ARE: this leg is ADDITIVE — the
+            # bus-pending leg, the tree-liveness leg and the freshness
+            # leg are untouched.
+            mission_commissions = self._count_outstanding_mission_commissions(
+                instance_id
+            )
+            if mission_commissions > 0:
+                return False, f"mission_commissions={mission_commissions}", False
 
             # ── FP4 (2026-10-03) — L2: tree-liveness leg.
             # ── The bus-pending leg above is FAIL-OPEN (a missing bus

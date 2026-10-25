@@ -112,10 +112,22 @@ class AttestationLedger(Protocol):
     the three writes are the entire side-effect surface (the bare
     ``set_escalated`` flag-only write was folded away; see the module
     docstring's side-effect surface block).
+
+    Proposal B PR2 — the epoch tag: ``increment`` accepts an OPTIONAL
+    third argument (the owning ``mission_id``). The
+    ``SQLModelInstanceRepository`` implementation takes
+    ``mission_id: str | None = None``; a ledger implementation that
+    predates the tagging keeps its two-argument signature and is
+    called with two arguments (the wrapper forwards the tag ONLY when
+    it is known).
     """
 
-    def increment(self, instance_id: str, denial_epoch: str) -> int: ...
-
+    def increment(
+        self,
+        instance_id: str,
+        denial_epoch: str,
+        mission_id: str | None = None,
+    ) -> int: ...
     def reset(self, instance_id: str) -> bool: ...
 
     def set_escalated_and_reset(self, instance_id: str) -> bool: ...
@@ -193,9 +205,22 @@ def safe_increment(
     instance_id: str | None,
     denial_epoch: str,
     *,
+    mission_id: str | None = None,
     log_context: dict[str, Any] | None = None,
 ) -> int | None:
     """C3 fail-open wrapper around ``ledger.increment``.
+
+    Proposal B PR2 — the EPOCH-TAGGED ledger (proposal-b §2.4). When the
+    owning ``mission_id`` is known, it is forwarded to the ledger so
+    the O4 dedup entry is tagged with its epoch: a replay of the same
+    fingerprint WITHIN the epoch is swallowed (the O4 contract,
+    untouched) while the same fingerprint under a DIFFERENT epoch counts
+    again (the "previous mission's deny ledger rides forward" lane dies
+    by construction).
+
+    The mission id is forwarded ONLY when it is known: a ledger
+    implementation that predates the tagging keeps its two-argument
+    signature and the legacy plain-string entry shape, byte-for-byte.
 
     Returns:
         The post-increment counter value, or ``None`` on DB error
@@ -207,9 +232,16 @@ def safe_increment(
             the canonical ``leader_completion_gate_db_error`` event,
             and surfaced as the ``None`` return (never re-raised).
     """
+    if mission_id is None:
+        return _safe_ledger_call(
+            "increment",
+            lambda: ledger.increment(instance_id, denial_epoch),
+            instance_id,
+            log_context,
+        )
     return _safe_ledger_call(
         "increment",
-        lambda: ledger.increment(instance_id, denial_epoch),
+        lambda: ledger.increment(instance_id, denial_epoch, mission_id),
         instance_id,
         log_context,
     )
