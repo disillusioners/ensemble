@@ -11,7 +11,7 @@ This pack pins:
   discovered by the AST scanner and the exact-equality drift pin
   fails at boot);
 * (b) the category is in ``PRIVILEGED_TOOL_CATEGORIES``;
-* (c) the frozenset LENGTH is 16;
+* (c) the frozenset LENGTH is 16 (ari-voice joined 2026-10-25);
 * (d) both tool names are in ``DYNAMIC_TOOL_NAMES`` and
   ``KNOWN_TOOL_NAMES``;
 * (e) the AST scanner finds both ``@tool`` functions (decorator-only
@@ -83,6 +83,12 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
     "instance_read",
     "instance_ops",
     "mcp_rpc",
+# ari-voice (2026-10-25): the ``notify-user`` category — ONE
+# deliberate message from a non-user-originated turn to the
+# SESSION'S OWN registered chat source. opt-in-only; the ari
+# allow entry is the only access path, and the tool body ALSO
+# carries its own agent_id gate.
+"notify-user",
 })
 
 
@@ -159,11 +165,11 @@ class TestPrivilegedCategory:
     def test_the_category_is_privileged(self) -> None:
         assert CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_fifteen_entries(self) -> None:
+    def test_the_set_is_exactly_the_sixteen_entries(self) -> None:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
-    def test_the_set_has_fifteen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 15
+    def test_the_set_has_sixteen_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 16
 
 
 # ── A13: the attribute pin + the default-deny behavioral leg ───────────────

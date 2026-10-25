@@ -9,7 +9,7 @@ AC-10a, AC-10b):
   discovered by the AST scanner and the exact-equality drift pin
   fails at boot);
 * (b) BOTH categories are in ``PRIVILEGED_TOOL_CATEGORIES``;
-* (c) the frozenset LENGTH is 14;
+* (c) the frozenset LENGTH is 16 (ari-voice joined 2026-10-25);
 * (d) all 10 tool names are in ``DYNAMIC_TOOL_NAMES`` and
   ``KNOWN_TOOL_NAMES``;
 * (e) the AST scanner finds all 10 ``@tool`` functions at any nesting
@@ -115,6 +115,12 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
 # allow entries are the only access path, and every tool body
 # ALSO carries its own agent_id gate.
 "mcp_rpc",
+# ari-voice (2026-10-25): the ``notify-user`` category — ONE
+# deliberate message from a non-user-originated turn to the
+# SESSION'S OWN registered chat source. opt-in-only; the ari
+# allow entry is the only access path, and the tool body ALSO
+# carries its own agent_id gate.
+"notify-user",
 })
 
 
@@ -190,11 +196,11 @@ class TestPrivilegedCategory:
         assert READ_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
         assert ACT_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_fifteen_entries(self) -> None:
+    def test_the_set_is_exactly_the_sixteen_entries(self) -> None:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
-    def test_the_set_has_fifteen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 15
+    def test_the_set_has_sixteen_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 16
 
 
 class TestAllowLists:

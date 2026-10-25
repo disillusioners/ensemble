@@ -23,7 +23,7 @@ category:
 
 Plus the privileged-category pin (septet → octet → nonet → decet):
 
-* ``PRIVILEGED_TOOL_CATEGORIES`` is exactly fifteen entries
+* ``PRIVILEGED_TOOL_CATEGORIES`` is exactly sixteen entries
   (``system_upgrade``, ``system-log``, ``ens-db``, ``ens-env``,
   ``view-views``, ``secrets``, ``settings``, ``board``,
   ``self-alarm``) — NEVER default-granted
@@ -204,7 +204,7 @@ class TestStaticRegistrationChecklist:
         default-granted (R-SR16: opt-in-only via
         per-agent ``tools.allow``).
 
-        The full set is exactly fifteen entries:
+        The full set is exactly sixteen entries:
         ``system_upgrade``, ``system-log``, ``ens-db``,
         ``ens-env``, ``view-views``,
         ``secrets``, ``settings`` (settings-worker-slots
@@ -216,7 +216,7 @@ class TestStaticRegistrationChecklist:
         D18/A14).
         """
         assert SECRETS_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
-        # The full set is exactly fifteen entries — the
+        # The full set is exactly sixteen entries — the
         # same-PR pin (the SEVEN-file rule; the fifth
         # exact-set pin was added by the iteration-002
         # council B2 correction, the sixth + seventh by
@@ -282,6 +282,12 @@ class TestStaticRegistrationChecklist:
         # allow entries are the only access path, and every tool body
         # ALSO carries its own agent_id gate.
         "mcp_rpc",
+        # ari-voice (2026-10-25): the ``notify-user`` category — ONE
+        # deliberate message from a non-user-originated turn to the
+        # SESSION'S OWN registered chat source. opt-in-only; the ari
+        # allow entry is the only access path, and the tool body ALSO
+        # carries its own agent_id gate.
+        "notify-user",
 })
 
 

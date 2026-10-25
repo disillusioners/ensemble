@@ -428,6 +428,12 @@ class TestPrivilegedCategoryRegistryShape:
         # allow entries are the only access path, and every tool body
         # ALSO carries its own agent_id gate.
         "mcp_rpc",
+        # ari-voice (2026-10-25): the ``notify-user`` category — ONE
+        # deliberate message from a non-user-originated turn to the
+        # SESSION'S OWN registered chat source. opt-in-only; the ari
+        # allow entry is the only access path, and the tool body ALSO
+        # carries its own agent_id gate.
+        "notify-user",
 })
 
     def test_ens_db_registered_in_category_modules(self) -> None:
