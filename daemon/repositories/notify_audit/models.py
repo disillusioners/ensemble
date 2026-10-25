@@ -68,10 +68,14 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-#: The pre-dispatch INSERT outcome — also the ONLY budget-consuming
-#: outcome (N3). A row stands as ``accepted`` between the write-ahead
-#: INSERT and its terminal UPDATE; a crash orphan keeps standing as
-#: ``accepted`` until the N4 sweep re-marks it.
+#: The pre-dispatch INSERT outcome — the LEADING member of the
+#: budget-consuming accepted CLASS (N3), NOT the only one. A row stands
+#: as ``accepted`` between the write-ahead INSERT and its terminal
+#: UPDATE; a crash orphan keeps standing as ``accepted`` until the N4
+#: sweep re-marks it. The authority is ``ACCEPTED_CLASS_OUTCOMES``
+#: (``accepted`` / ``dispatched`` / ``delivery_failed`` /
+#: ``delivery_unknown`` consume; only refusal outcomes never do) — the
+#: tuple the repository's budget predicate counts.
 OUTCOME_ACCEPTED = "accepted"
 
 #: Terminal outcomes.

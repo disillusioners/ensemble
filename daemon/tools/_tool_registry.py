@@ -315,7 +315,10 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # NINE sites — five inline ``frozenset({...})`` literals + four
 # ``EXPECTED_PRIVILEGED_SET`` constants — plus a
 # ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count assertion at FOUR
-# phase-local pins — THIRTEEN assertion sites across NINE files
+# phase-local pins — plus ONE allow-array TRAILING-ENTRY pin (the
+# ``tools.allow`` ARRAY-ORDER discipline: only the categories appended
+# after the board may follow it — the board registration pin) —
+# FOURTEEN assertion sites across NINE files
 # (re-grepped on tip 7af1d2632d; ari-voice lane, fold-able 2). Adding or
 # removing a category REQUIRES updating ALL of them in the same commit:
 # ``tests/unit/tools/test_upgrade_registration.py``,

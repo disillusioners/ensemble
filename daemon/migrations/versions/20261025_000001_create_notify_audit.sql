@@ -71,7 +71,10 @@
 --   Full-line ``--`` comments are stripped by the runner before the
 --   statement split, and inline (trailing) comments are left alone —
 --   a semicolon inside an inline comment corrupts the statement
---   boundaries. This file uses no semicolon in any comment.
+--   boundaries. THE INVARIANT THIS FILE UPHOLDS: no INLINE (trailing)
+--   comment carries a semicolon. Semicolons appear ONLY inside full-line
+--   ``--`` comments, which the runner strips before splitting the
+--   remainder on ``;`` (``daemon/migrations/runner.py``:670-673).
 
 -- UP
 
