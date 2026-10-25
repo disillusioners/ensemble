@@ -689,8 +689,11 @@ class MissionRecordService:
         decision). Routing authority stays with the A-resolver in PR1.
 
         ``commission_id`` may be pinned (deterministic UUID5) by the
-        BACKFILL so its ``ON CONFLICT DO NOTHING`` idempotency keys on
-        the PK; live mints leave it None (random UUID4).
+        BACKFILL so its idempotency PRE-CHECK (``get_commission``) keys
+        on the PK; there is NO ``ON CONFLICT`` clause in this layer — a
+        re-run is a no-op because the pre-check finds the row, not
+        because the insert swallows a conflict. Live mints leave it None
+        (random UUID4).
         """
         self._require_instance_row(
             worker_instance_id, role="commission worker", session=session
@@ -948,15 +951,42 @@ class MissionRecordService:
 # ---------------------------------------------------------------------------
 
 
-def _log_mint(rung: int, created: bool, actor: str, lane: str, mission_id: str) -> None:
+def _log_mint(
+    rung: int,
+    created: bool,
+    actor: str,
+    lane: str,
+    mission_id: str,
+    *,
+    deferred: bool = False,
+) -> None:
+    """Log the resolve-or-mint outcome.
+
+    ``deferred=True`` marks a mint that rides a CALLER-owned transaction
+    (the ``session=`` lanes): the row is STAGED, not durable, when this
+    fires — the caller owns the COMMIT and announces the durable success
+    afterwards. A staged mint is therefore logged at DEBUG, so the INFO
+    "MINT" line always means "durable" (a success log that precedes a
+    rollback is a false success record).
+    """
     if created:
-        logger.info(
-            "mission_records MINT lane=%s actor=%s… mission=%s… (rung %d)",
-            lane,
-            actor[:8],
-            mission_id[:8],
-            rung,
-        )
+        if deferred:
+            logger.debug(
+                "mission_records MINT (staged — caller owns the commit) "
+                "lane=%s actor=%s… mission=%s… (rung %d)",
+                lane,
+                actor[:8],
+                mission_id[:8],
+                rung,
+            )
+        else:
+            logger.info(
+                "mission_records MINT lane=%s actor=%s… mission=%s… (rung %d)",
+                lane,
+                actor[:8],
+                mission_id[:8],
+                rung,
+            )
     else:
         logger.debug(
             "mission_records resolve lane=%s actor=%s… mission=%s… (rung %d)",
@@ -987,7 +1017,10 @@ def resolve_or_mint_fail_open(
     mint rides the CALLER's transaction inside a SAVEPOINT
     (``begin_nested``) — the send_message delegation lane's
     same-transaction-as-the-watcher contract — and a mint failure rolls
-    back the savepoint only, never the caller's own writes.
+    back the savepoint only, never the caller's own writes. In that mode
+    the mint is logged at DEBUG (STAGED, not durable): the CALLER owns
+    the COMMIT and announces the durable success after it, so a success
+    log never precedes a rollback.
 
     ``founding_message_id`` is forwarded verbatim into
     :meth:`MissionRecordService.resolve_or_mint` so lanes that know the
@@ -1022,7 +1055,14 @@ def resolve_or_mint_fail_open(
                 commissioner_instance_id=commissioner_instance_id,
                 work_id=work_id,
             )
-        _log_mint(resolution.rung, resolution.created, actor_instance_id, lane, resolution.mission_id)
+        _log_mint(
+            resolution.rung,
+            resolution.created,
+            actor_instance_id,
+            lane,
+            resolution.mission_id,
+            deferred=session is not None,
+        )
         return resolution.mission_id
     except Exception as exc:  # noqa: BLE001 — fail-open producer
         logger.warning(
@@ -1204,6 +1244,14 @@ def mint_commission_fail_open(
     lane posture — the commissioning act itself still succeeds and the
     validation failure is LOUD in the logs, never a silent mis-record.
     Returns the commission id, or None (mode off / no mission / failure).
+
+    When ``session`` is provided the mint rides the CALLER's transaction
+    (SAVEPOINT) — the commission is STAGED, not durable, when this
+    returns, so it is logged at DEBUG and the CALLER announces the
+    durable success after its COMMIT (a success log that precedes a
+    rollback is a false success record). With ``session=None`` the
+    repository owns the transaction, the row is already durable and the
+    INFO line is a true success record.
     """
     if service is None or not mission_id:
         return None
@@ -1228,15 +1276,34 @@ def mint_commission_fail_open(
                 lane=lane,
                 work_id=work_id,
             )
-        logger.info(
-            "mission_records COMMISSION lane=%s mission=%s… "
-            "commissioner=%s… worker=%s… commission=%s…",
-            lane,
-            mission_id[:8],
-            commissioner_instance_id[:8],
-            worker_instance_id[:8],
-            commission.commission_id[:8],
-        )
+        if session is None:
+            # Repo-owned transaction: the service committed before this
+            # line, so the row IS durable — the INFO line is a true
+            # success record.
+            logger.info(
+                "mission_records COMMISSION lane=%s mission=%s… "
+                "commissioner=%s… worker=%s… commission=%s…",
+                lane,
+                mission_id[:8],
+                commissioner_instance_id[:8],
+                worker_instance_id[:8],
+                commission.commission_id[:8],
+            )
+        else:
+            # Caller-owned transaction: the row is STAGED, not durable —
+            # the caller commits and announces the durable success.
+            # A success log that precedes a rollback is a false success
+            # record.
+            logger.debug(
+                "mission_records COMMISSION (staged — caller owns the "
+                "commit) lane=%s mission=%s… commissioner=%s… worker=%s… "
+                "commission=%s…",
+                lane,
+                mission_id[:8],
+                commissioner_instance_id[:8],
+                worker_instance_id[:8],
+                commission.commission_id[:8],
+            )
         return commission.commission_id
     except Exception as exc:  # noqa: BLE001 — fail-open producer
         logger.warning(

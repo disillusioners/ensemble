@@ -1255,6 +1255,7 @@ async def _register_child_completion_watcher(
         # enqueue time (threading it would mean reordering the
         # resolution — an architecture decision, not a tidy fix).
         _mission_id_for_commission: str | None = None
+        _commission_id_for_commission: str | None = None
         try:
             _mission_record_service = getattr(
                 manager, "mission_record_service", None
@@ -1268,7 +1269,7 @@ async def _register_child_completion_watcher(
                 )
                 if _resolution:
                     _mission_id_for_commission = _resolution
-                    mint_commission_fail_open(
+                    _commission_id_for_commission = mint_commission_fail_open(
                         _mission_record_service,
                         _mission_id_for_commission,
                         commissioner_instance_id=parent_instance_id,
@@ -1286,6 +1287,48 @@ async def _register_child_completion_watcher(
                 type(commission_exc).__name__,
                 commission_exc,
             )
+
+        # ── DURABILITY BOUNDARY (commission persistence) ──────────────────
+        # The mission row and the commission row were written into THIS
+        # session's transaction (the "commission rides the watcher's SAME
+        # transaction" contract). ``WriteGuardSession.__exit__`` closes
+        # the session — which ROLLS BACK the still-open transaction — so
+        # without an explicit commit the rows never become durable. That
+        # is the production defect the 2026-10-25 release gate repro'd
+        # on PostgreSQL: a logged ``COMMISSION lane=send_message`` with
+        # ``mission_commissions = 0`` rows behind it. Commit HERE so the
+        # rows survive the block, and announce the success AFTER the
+        # commit — a success log that precedes a rollback is a false
+        # success record.
+        #
+        # The commit sits BEFORE the bus watch on purpose: the watch
+        # failure path RETURNS from inside this block, so a commit
+        # placed after it would be skipped on exactly that path (the
+        # commission would be rolled back again). The commissioning act
+        # (spawn + enqueue) already happened, so the commission stays
+        # durable even when the watcher could not be registered.
+        try:
+            session.commit()
+        except Exception as commit_exc:  # noqa: BLE001 — fail-open
+            logger.warning(
+                "mission_records: send_message commission COMMIT failed "
+                "(parent=%s… child=%s…): %s: %s — the commission rows are "
+                "NOT durable (the watcher mint continues unaffected)",
+                (parent_instance_id or "")[:8],
+                (child_instance_id or "")[:8],
+                type(commit_exc).__name__,
+                commit_exc,
+            )
+        else:
+            if _commission_id_for_commission:
+                logger.info(
+                    "mission_records COMMISSION COMMITTED lane=send_message "
+                    "mission=%s… commissioner=%s… worker=%s… commission=%s…",
+                    (_mission_id_for_commission or "")[:8],
+                    (parent_instance_id or "")[:8],
+                    (child_instance_id or "")[:8],
+                    _commission_id_for_commission[:8],
+                )
 
         try:
             _follow_up = FollowUp(
