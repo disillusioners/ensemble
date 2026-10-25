@@ -294,7 +294,7 @@ class TestSendMessage:
                      patch('daemon.services.instance_messaging.Task'), \
                      patch('daemon.services.instance_messaging.Event'):
 
-                    def _get_side_effect(instance_id, instance_cls):
+                    def _get_side_effect(instance_id, instance_cls, **kwargs):
                         mock_instance = MagicMock()
                         mock_instance.status = InstanceStatus.IDLE.value
                         mock_instance.agent_id = "developer"
@@ -1543,7 +1543,7 @@ class TestTitleGenerationTrigger:
              patch('daemon.services.instance_messaging.Event') as mock_event:
 
             # Create a fresh mock instance for each call
-            def get_instance_side_effect(instance_id, instance_cls):
+            def get_instance_side_effect(instance_id, instance_cls, **kwargs):
                 mock_instance = MagicMock()
                 mock_instance.status = InstanceStatus.IDLE.value  # Start as IDLE
                 mock_instance.agent_id = "test-agent"
@@ -1596,7 +1596,7 @@ class TestTitleGenerationTrigger:
              patch('daemon.services.instance_messaging.Task') as mock_task, \
              patch('daemon.services.instance_messaging.Event') as mock_event:
 
-            def get_instance_side_effect(instance_id, instance_cls):
+            def get_instance_side_effect(instance_id, instance_cls, **kwargs):
                 mock_instance = MagicMock()
                 mock_instance.status = InstanceStatus.IDLE.value
                 mock_instance.agent_id = "test-agent"
@@ -1645,7 +1645,7 @@ class TestTitleGenerationTrigger:
              patch('daemon.services.instance_messaging.Task') as mock_task, \
              patch('daemon.services.instance_messaging.Event') as mock_event:
 
-            def get_instance_side_effect(instance_id, instance_cls):
+            def get_instance_side_effect(instance_id, instance_cls, **kwargs):
                 mock_instance = MagicMock()
                 mock_instance.status = InstanceStatus.RUNNING.value  # Already RUNNING
                 mock_instance.agent_id = "test-agent"
@@ -1700,7 +1700,7 @@ class TestTitleGenerationTrigger:
              patch('daemon.services.instance_messaging.MessageQueue') as mock_message_queue, \
              patch('daemon.services.instance_messaging.Event') as mock_event:
 
-            def get_instance_side_effect(instance_id, instance_cls):
+            def get_instance_side_effect(instance_id, instance_cls, **kwargs):
                 mock_instance = MagicMock()
                 mock_instance.status = InstanceStatus.IDLE.value
                 mock_instance.agent_id = "test-agent"
@@ -1756,7 +1756,7 @@ class TestTitleGenerationTrigger:
              patch('daemon.services.instance_messaging.MessageQueue') as mock_message_queue, \
              patch('daemon.services.instance_messaging.Event') as mock_event:
 
-            def get_instance_side_effect(instance_id, instance_cls):
+            def get_instance_side_effect(instance_id, instance_cls, **kwargs):
                 mock_instance = MagicMock()
                 mock_instance.status = InstanceStatus.RUNNING.value  # Already RUNNING
                 mock_instance.agent_id = "test-agent"
