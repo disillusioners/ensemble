@@ -23,8 +23,12 @@
 --   EXCLUDED from routing authority forever (the "if dropped, the
 --   ledger is worse than no ledger" rule, comparison.md §4c). Backfill
 --   rows carry DETERMINISTIC UUID5 ``commission_id`` values so the
---   backfill's INSERT ... ON CONFLICT DO NOTHING idempotency keys on
---   the PK; live mints use random UUID4s.
+--   backfill's idempotency PRE-CHECK (``get_commission``) keys on the
+--   PK without constraining live mints. There is NO ``ON CONFLICT``
+--   clause on this table — a re-run is a no-op because the pre-check
+--   finds the row, not because the insert swallows a conflict; inside
+--   the boot-time pre-check → insert TOCTOU window a PK conflict
+--   would RAISE, not no-op. Live mints use random UUID4s.
 --
 --   Additive-only and rollback-safe. On PostgreSQL the table is created
 --   by ``SQLModel.metadata.create_all()`` (model registered before
