@@ -1,4 +1,22 @@
 # Test Packs
+
+## mission-records PR1 release gate (`feature/mission-records-pr1` @ `0428c936e`, base `7af1d2632` = origin/latest) — ❌ **FAIL → back to dev** (2026-10-25)
+
+> Full record: `.agents/tester/RESULTS/2026-10-25-mission-records-pr1-verification.md`. Ad-hoc pack set (registered ad-hoc per the v0.27.6 precedent; script materialization deferred to the post-fix delta pass). **Verdict: FAIL — 1 production defect** (send_message commission rows minted-then-rolled-back: caller-owned `WriteGuardSession` never commits; PG-proven repro A/B/A2; SQLite masks the class) **+ 6 deterministic test-side reds** (stale 3-tuple unpacks vs the branch's widened 4-tuple `upsert_batch` items; production correct via `*rest`). All migration (fresh+existing PG), focused-pack, facade-guard, mutation, and SQLite-integration gates PASS; 2 E2E reds base-attributed (M3 `settled` vocabulary drift, `05618c55c`) → 2 QUARANTINE.md rows added.
+
+| Pack | Invocation (ad-hoc) | Scope | Last Run | Status |
+|---|---|---|---|---|
+| `mrpr1_reviewer_merge_gate` | `timeout 300 ./scripts/run_tests_scrubbed.sh -p no:cacheprovider -q --tb=short tests/unit/test_chat_source_live_injection.py tests/unit/test_mission_record_service.py::TestResolveOrMintFailOpenSignatureDriftPin` | 43 nodes (H1 wrapper pin ×5 + chat-injection ×38) | 2026-10-25 @ 0428c936e | ✅ PASS 43/43 (6s) |
+| `mrpr1_focused_unit` | scrubbed runner × 8 files (5 new `test_mission_record_*` + tap-slot + message-metadata-repo + phase1-facade) | 112 nodes | same | ✅ PASS 112/112 (6.67s) |
+| `mrpr1_sqlite_integration` | scrubbed runner × 3 files (D2c settle-hold real-SQL + migration mirrors + revive-enqueue) | 16 nodes | same | ✅ PASS 16/16 |
+| `mrpr1_facade_guards` | scrubbed runner × 4 files (phase1 pinned-tuple + mission-record facade forwarding + work_id unit + work_id real-dispatch) | 18 nodes | same | ✅ PASS 18/18 |
+| `mrpr1_pg_fresh` / `mrpr1_pg_existing` | fenced python boot-path drivers (create_all → runner → `_ensure_postgres_columns`) on scratch DBs `mission_pr1_fresh` / `mission_pr1_exist` (both dropped after) | schema/columns/indexes/ledger + idempotency; mechanism-attributed (tables←create_all, 3 cols←`_ensure` mirror manager.py:8352-8354; ledger empty on PG = by-design, runner.py:837-842) | same | ✅ PASS both (incl. 2nd-pass no-op) |
+| `mrpr1_e2e_spawn` | self-hosted worktree daemon 127.0.0.1:8091 (uvicorn, dev.sh:155 shape; documented deviations: port/host/no-reload) + `E2E_BASE_URL` one-by-one (`PYTEST_TIMEOUT=280 --override-ini timeout=280 -m integration -k …`) + revive-mint file | 4 real-LLM nodes + 5 revive-mint; queue-hygiene before each; port-verified SIGTERM teardown; scratch `mission_pr1_e2e` (dropped) | same | ❌ FAIL — **commission-persistence defect** (logged mint → `mission_commissions=0`; repro `/tmp/mrpr1_commission_repro_logs/`); pause-resume + happy-path red = base-attributed (quarantined); terminate-revive + 3-level cascade + revive-mint 5/5 green; `mission_records` 5 live rows prove lanes fire |
+| `mrpr1_mutations` | isolated detached-HEAD worktree; 6 line-neutral edits / 5 mandated categories; red→green each; sha256 restores; final status EMPTY + HEAD unmoved | H1 wrapper ×2 branches, rung-2 ladder, outstanding-state guard, UUID5 determinism, mode default | same | ✅ PASS 5/5 (finding: real H1 call site `registry.py:1164` unpinned) |
+| `mrpr1_fullpool_ab` | 27 pool + 1 isolated + 3 attestation shards × 2 legs (base detached worktree, dropped after), `timeout 1750`/shard, hand-scrubbed fence env (`POSTGRES_DB=ensemble_dev_test_only`), symmetric deselects (967 marker + 39 row-145 containment + 1 `[1x10k]`), Python-only set adjudication, solo-3×-both-legs per diff node | whole-pool A/B: base 27,690 exec / failing-set 423 · head 27,768 / 424; diff 13 = 417 common + 6 base-only + 7 head-only | same | ❌ FAIL (test-side) — 6 branch-caused stale-unpack reds (`test_injection_graph.py` ×4, `test_w5_claim_order_wc_wake.py:950`, `test_context_messages.py:961`); prior-train 6 green both legs; upgrade_executor isolated shard byte-identical; evidence `/tmp/mrpr1_gate7/` |
+
+---
+
 ## Commission Phase 4 — nest-ops shakedown defect patch (`fix/nest-ops-shakedown-defects`, base `b257842c9`) — NEW PACK REGISTERED (2026-10-24)
 
 > First `instance_read`/`instance_ops` real-PG pack (arch §11.5: none existed). Disposable LOGIN role + DB on the local PG16, dropped per module; per-variable `POSTGRES_*` scrub in-pack + in-fixture; `.venv` in-worktree asserted (the arch §11.5 conventions gap); dual-layer timeout per `ensure.md:6` + `:45`.
