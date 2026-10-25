@@ -553,9 +553,11 @@ read the `error` field).
 - ❌ Cancelling work permanently → `job_cancel` / `terminate_instance`
 - ❌ Giving NEW instructions to a running agent → `job_inject`
 
-**Access control:** same project-scoped rule as the four job tools — a
+**Access control:** same project-scoped rule as the gated job tools — a
 target in another project is refused unless I run unscoped (the
-front-door tier).
+global-operator tier: system-default scope inheritance, the legacy
+instance-level tier — NOT my front-door exemption, which is the
+explicit ari-only rung on the gated job tools).
 
 ---
 

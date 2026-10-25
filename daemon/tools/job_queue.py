@@ -3526,8 +3526,9 @@ def create_job_tools(
         #   2. ``work_resolver.resolve_work(work_id)`` → ``WorkRecord``
         #      (404 when record is None or ``record.instance_id`` is None)
         #   3. project-scoped access via the SAME ``_check_job_access``
-        #      helper the four visibility tools (``job_messages`` /
-        #      ``job_tree`` / ``job_progress`` / ``job_inject``) use.
+        #      helper the gated job tools use (the canonical list of
+        #      gated call sites lives on the ``_check_job_access``
+        #      docstring).
         #      The check stays on the MISSION-SCOPED record.
         #   4. ASKER RESOLUTION from the mission subtree (the work unit
         #      resolves to the mission-scoped instance — usually the
@@ -3646,7 +3647,7 @@ def create_job_tools(
                 }
 
             # 2. Access control — REUSE the SAME ``_check_job_access``
-            #    helper the four visibility tools use. The check is
+            #    helper the gated job tools use. The check is
             #    applied AFTER work resolution (so the caller pays
             #    the resolve cost first) but BEFORE the helper call
             #    (so a denied caller never reaches the answer flow).
@@ -3850,7 +3851,7 @@ def create_job_tools(
             }
 
         # 4. Access control — REUSE the SAME ``_check_job_access`` helper
-        #    the four visibility tools use. Same project-scoped rule.
+        #    the gated job tools use. Same project-scoped rule.
         deny = _check_job_access(manager, current_instance_id, record)
         if deny is not None:
             return {**deny, "paused": False}
