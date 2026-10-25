@@ -2818,7 +2818,7 @@ class NotifyUserConfig(BaseSettings):
     )
     min_interval_seconds: int = Field(
         default=60,
-        ge=1,
+        ge=0,
         description="The >=60s per-instance interval proxy for N=1/turn "
                     "(strict turn identity is not tool-visible; turns are "
                     "serialized per instance). Baseline = the instance's "

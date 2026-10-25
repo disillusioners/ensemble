@@ -190,21 +190,31 @@ class NotifyAuditRepository:
     def count_accepted_for_target(
         self, *, target_hash: str, since_iso: str
     ) -> int:
-        """Rows currently standing as ``accepted`` for THIS resolved
-        destination within the window, INCLUDING crash orphans (N4)
-        and EXCLUDING NULL ``target_hash`` rows explicitly (fold-able
-        9 — pre-resolution refusals can never pool into a cap).
+        """Rows that CONSUMED a budget slot for THIS resolved
+        destination within the window, INCLUDING crash orphans (N4) and
+        EXCLUDING NULL ``target_hash`` rows explicitly (fold-able 9 —
+        pre-resolution refusals can never pool into a cap).
 
-        The predicate carries ``outcome == "accepted"`` ONLY (N3): a
-        ``rate_limited``-flipped row does not consume budget, so a
-        refused burst cannot self-DoS the hour (C3).
+        The predicate is the ACCEPTED-CLASS set (C3 + N3 + N4):
+        ``accepted`` (the write-ahead row, still standing), plus the
+        terminal states a settled accepted row reaches
+        (``dispatched`` / ``delivery_failed`` / ``delivery_unknown``).
+        ``rate_limited`` and ``refused`` rows are EXCLUDED — a refused
+        burst must never self-DoS the hour, and a rate-limited flip
+        means the slot was never spent.
+
+        (Reading only ``outcome == "accepted"`` would be WRONG: a
+        settled row leaves the accepted class, so the cap would never
+        accrue — the budget would reset on every successful send.)
         """
         stmt = (
             select(func.count())
             .select_from(NotifyAudit)
             .where(NotifyAudit.target_hash == target_hash)
             .where(NotifyAudit.target_hash.is_not(None))  # fold-able 9
-            .where(NotifyAudit.outcome == OUTCOME_ACCEPTED)
+            .where(
+                NotifyAudit.outcome.in_(list(ACCEPTED_CLASS_OUTCOMES))
+            )
             .where(NotifyAudit.created_at > since_iso)
         )
         with Session(self._engine) as session:

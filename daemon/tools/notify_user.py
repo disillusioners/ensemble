@@ -104,6 +104,7 @@ import logging
 import os
 import re
 import time
+import weakref
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
@@ -239,20 +240,43 @@ _UNBOUND_SOURCE_IDS: frozenset[str] = frozenset({"api", "scheduler"})
 NOTIFY_ORPHAN_SWEEP_SECONDS = 120
 
 #: B2 — the per-destination-key lock table. Key = resolved target_hash.
-#: Single-process daemon (daemon/__main__.py) — one event loop, one
-#: table. Guard-protected creation so two concurrent first calls cannot
-#: both mint a lock for the same key.
-_DESTINATION_LOCKS: dict[str, asyncio.Lock] = {}
-_LOCK_TABLE_GUARD = asyncio.Lock()
+#: The daemon is single-process (daemon/__main__.py) — one event loop,
+#: one table. The table is kept PER EVENT LOOP (a WeakKeyDictionary
+#: keyed by the running loop): an ``asyncio.Lock`` binds itself to the
+#: first loop that awaits it, and awaiting it from a SECOND loop
+#: raises "is bound to a different event loop". The daemon has one
+#: loop, but a tool body may be driven from a worker-thread loop in
+#: some deployments, and a bound-to-another-loop lock would turn a
+#: legal notify into a typed internal error. Per-loop tables make the
+#: primitive loop-correct by construction.
+_LOOP_LOCK_TABLES: "weakref.WeakKeyDictionary[Any, tuple[dict[str, asyncio.Lock], asyncio.Lock]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _lock_table() -> tuple[dict[str, asyncio.Lock], asyncio.Lock]:
+    """The (locks, guard) pair for the RUNNING loop.
+
+    The creation is safe without an outer lock: between the lookup and
+    the insert there is no await, so two coroutines on one loop cannot
+    interleave here (the event loop is single-threaded).
+    """
+    loop = asyncio.get_running_loop()
+    entry = _LOOP_LOCK_TABLES.get(loop)
+    if entry is None:
+        entry = ({}, asyncio.Lock())
+        _LOOP_LOCK_TABLES[loop] = entry
+    return entry
 
 
 async def _destination_lock(target_hash: str) -> asyncio.Lock:
     """The B2 primitive — the per-destination-key asyncio.Lock."""
-    async with _LOCK_TABLE_GUARD:
-        lock = _DESTINATION_LOCKS.get(target_hash)
+    table, guard = _lock_table()
+    async with guard:
+        lock = table.get(target_hash)
         if lock is None:
             lock = asyncio.Lock()
-            _DESTINATION_LOCKS[target_hash] = lock
+            table[target_hash] = lock
         return lock
 
 
@@ -336,6 +360,10 @@ def _target_hash(source_id: str, external_user_id: str) -> str:
     ).hexdigest()
 
 
+#: Public alias (tests / ops tooling recompute the W1 hash).
+NOTIFY_TARGET_HASH = _target_hash
+
+
 def _body_digest(message: str) -> tuple[int, str]:
     """The D8 body record — length + sha256, never cleartext."""
     return len(message), hashlib.sha256(message.encode("utf-8")).hexdigest()
@@ -410,11 +438,14 @@ def create_notify_user_tools(
             )
         except Exception as exc:  # noqa: BLE001 — house pattern: error string, never raise
             logger.exception("notify_user failed")
-            detail = "notify_user failed"
-            if isinstance(exc, ValueError):
-                # Authored by our own validation — safe to surface.
-                detail = str(exc)
-            return _error(detail)
+            # D9 edge 13 — the typed internal-error envelope; the
+            # exception detail never reaches the payload (PB-F1 class).
+            return _failure(
+                NOTIFY_CODE_INTERNAL_ERROR,
+                "an unexpected error occurred (logged server-side); "
+                "nothing was sent and no delivery is in flight. Retry "
+                "later or use the board.",
+            )
 
     notify_user._full_doc_ = _build_full_doc()
 
