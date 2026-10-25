@@ -502,10 +502,14 @@ class MissionRecordRepository:
     ) -> str:
         """UUID5 identity for BACKFILL commission rows.
 
-        The backfill's ``INSERT ... ON CONFLICT DO NOTHING`` idempotency
-        key: re-running the backfill re-derives the SAME id for the same
-        (mission, worker, lane, audit-row) quadruple and conflicts
-        harmlessly. Live mints use random UUID4s and are unaffected.
+        The backfill's idempotency key: re-running the backfill
+        re-derives the SAME id for the same (mission, worker, lane,
+        audit-row) quadruple, and the backfill PRE-CHECKS that id
+        (``get_commission``) before inserting. There is NO
+        ``ON CONFLICT`` clause anywhere in this layer — the pre-check
+        is what makes a re-run a no-op (a PK conflict inside the narrow
+        pre-check → insert window would RAISE, not no-op). Live mints
+        use random UUID4s and are unaffected.
         """
         return str(
             uuid.uuid5(

@@ -344,8 +344,11 @@ class MissionCommission(SQLModel, table=True):
     Attributes:
         commission_id: PK. UUID4 for live mints; DETERMINISTIC UUID5 for
             backfill rows (adoption-delta (b)) so the backfill's
-            ``INSERT ... ON CONFLICT DO NOTHING`` idempotency keys on
-            the PK without constraining live mints.
+            idempotency PRE-CHECK (``get_commission``) keys on the PK
+            without constraining live mints. There is NO ``ON CONFLICT``
+            clause on this table — a re-run is a no-op because the
+            pre-check finds the row, not because the insert swallows a
+            conflict.
         mission_id: The mission this work belongs to (indexed with
             ``state``; no enforced FK — the bus precedent: application
             code is the only writer).
