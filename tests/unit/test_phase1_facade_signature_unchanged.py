@@ -42,6 +42,11 @@ from daemon.manager import InstanceManager
 
 #: The facade signatures at the Phase-0 base leg (dabe1f04d). Any
 #: change here is a Phase-1 deviation that must be reported.
+# Proposal B PR1 (2026-10-25): ``mission_id`` is the train's ONE
+# sanctioned facade growth — keyword-only on both enqueue methods,
+# forwarded to the service (the Facade-Forwarding Discipline; the
+# mission_id half is pinned in
+# ``tests/unit/test_mission_record_facade_forwarding.py``).
 _EXPECTED_ENQUEUE_MESSAGE_PARAMS = (
     "self",
     "instance_id",
@@ -55,8 +60,14 @@ _EXPECTED_ENQUEUE_MESSAGE_PARAMS = (
     "work_id",
     "work_id_required",
     "image_refs",
+    "mission_id",
 )
 
+# NOTE (PR1 audit): the F11 ``dispatch_chain`` kwarg crossed the facade
+# WITHOUT this pin ever being updated — the job-half of this guard was
+# silently RED at base 7af1d2632 (pre-existing drift, A/B-proven). PR1
+# repairs the pin to the TRUE current signature (dispatch_chain) AND
+# adds ``mission_id``.
 _EXPECTED_ENQUEUE_MESSAGE_JOB_PARAMS = (
     "self",
     "instance_id",
@@ -70,6 +81,8 @@ _EXPECTED_ENQUEUE_MESSAGE_JOB_PARAMS = (
     "queue_id",
     "image_refs",
     "idempotency_key",
+    "dispatch_chain",
+    "mission_id",
 )
 
 

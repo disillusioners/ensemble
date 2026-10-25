@@ -292,15 +292,27 @@ class TestDualDriverShape:
         defines:
           ``thread_id TEXT NOT NULL, message_id TEXT NOT NULL,
           created_at TEXT NOT NULL, seq INTEGER, PRIMARY KEY (thread_id, message_id)``
+        Proposal B PR1 (2026-10-25) adds the nullable ``mission_id``
+        provenance column (20261025_122730_add_mission_provenance_columns.sql
+        + the _ensure_postgres_columns mirror) — the composite PK and the
+        four original columns are UNCHANGED.
         """
         cols = {c.name: c for c in MessageMetadata.__table__.columns}
-        # Required columns
-        assert set(cols.keys()) == {"thread_id", "message_id", "created_at", "seq"}
+        # Required columns (composite PK unchanged) + the PR1 additive
+        # provenance column.
+        assert set(cols.keys()) == {
+            "thread_id",
+            "message_id",
+            "created_at",
+            "seq",
+            "mission_id",
+        }
         # Nullability matches the migration
         assert cols["thread_id"].nullable is False
         assert cols["message_id"].nullable is False
         assert cols["created_at"].nullable is False
         assert cols["seq"].nullable is True  # Phase 2 PERF-2 (D5)
+        assert cols["mission_id"].nullable is True  # Proposal B PR1
 
     def test_index_name_matches_migration(self):
         """Index name ``ix_message_metadata_thread`` matches the migration."""

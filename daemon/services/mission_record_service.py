@@ -745,7 +745,7 @@ class MissionRecordService:
         PR3 flip must keep the exclusion.
 
         Returns counters: ``{'scanned', 'minted_epochs', 'minted_commissions',
-        'skipped_terminal', 'skipped_no_actor', 'skipped_missing_target_row'}``.
+        'skipped_terminal', 'skipped_no_actor', 'skipped_missing_instance_row'}``.
         """
         from ..repositories.mission_record.models import MissionProvenance
 
@@ -755,7 +755,7 @@ class MissionRecordService:
             "minted_commissions": 0,
             "skipped_terminal": 0,
             "skipped_no_actor": 0,
-            "skipped_missing_target_row": 0,
+            "skipped_missing_instance_row": 0,
         }
         terminal = {
             InstanceStatus.COMPLETED.value,
@@ -789,7 +789,7 @@ class MissionRecordService:
                 target_row = own.get(Instance, target_instance_id)
                 actor_row = own.get(Instance, actor_instance_id)
             if target_row is None or actor_row is None:
-                counters["skipped_missing_target_row"] += 1
+                counters["skipped_missing_instance_row"] += 1
                 continue
             if target_row.status in terminal:
                 # The nudge's outcome is unrecoverable from the audit
@@ -816,6 +816,7 @@ class MissionRecordService:
                 counters["minted_epochs"] += 1
             else:
                 counters["minted_epochs"] += 1  # dry-run projection
+                mission_id = "dry-run-projected"  # plan-only marker
 
             if mission_id is None:
                 continue
@@ -853,7 +854,7 @@ class MissionRecordService:
             "mission_records backfill: done scanned=%(scanned)d "
             "minted_epochs=%(minted_epochs)d minted_commissions=%(minted_commissions)d "
             "skipped_terminal=%(skipped_terminal)d skipped_no_actor=%(skipped_no_actor)d "
-            "skipped_missing_target_row=%(skipped_missing_target_row)d (dry_run=%(dryrun)s)",
+            "skipped_missing_instance_row=%(skipped_missing_instance_row)d (dry_run=%(dryrun)s)",
             {**counters, "dryrun": dry_run},
         )
         return counters
