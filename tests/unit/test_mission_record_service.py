@@ -31,8 +31,10 @@ columns; the mission tables are the ONLY tables written.
 
 from __future__ import annotations
 
+import inspect
 import uuid
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import create_engine, event
@@ -57,6 +59,7 @@ from daemon.services.mission_record_service import (
     MISSION_RECORDS_MODE_ENV,
     MissionRecordMode,
     MissionRecordService,
+    MissionResolution,
     _reset_mission_records_mode_for_tests,
     attach_founding_message_fail_open,
     mint_commission_fail_open,
@@ -547,6 +550,146 @@ class TestModeLadder:
         with Session(engine) as session:
             rows = list(session.exec(select(MissionRecord)))
         assert len(rows) == 1
+
+
+# ---------------------------------------------------------------------------
+# H1 drift pin — wrapper must accept AND forward ``founding_message_id``
+# ---------------------------------------------------------------------------
+
+
+def _stub_service_with_seam_spy(
+    mission_id: str = "m-h1-pin",
+) -> tuple[MagicMock, MagicMock]:
+    """A stub ``MissionRecordService`` whose ``resolve_or_mint`` seam is
+    spied with a plain ``MagicMock`` returning a real ``MissionResolution``
+    — the WRAPPER is invoked for real end-to-end (binding → mode gate →
+    branch → forward → log → return); only the service seam is a stub.
+    """
+    service = MagicMock(name="MissionRecordService")
+    seam = MagicMock(
+        return_value=MissionResolution(
+            mission_id=mission_id, rung=3, created=True
+        )
+    )
+    service.resolve_or_mint = seam
+    return service, seam
+
+
+class TestResolveOrMintFailOpenSignatureDriftPin:
+    """H1 (2026-10-25): the chat inject sub-lane
+    (``daemon/sources/registry.py``) passes ``founding_message_id=echo_id``
+    to :func:`resolve_or_mint_fail_open`; the wrapper's signature lacked
+    the kwarg, so the binding TypeError fired BEFORE the wrapper's
+    internal try — the fail-open catch never engaged, the sole
+    ``_handle_message`` handler swallowed it, and BOTH the RAM-FIFO
+    ``set_injection`` AND the durable-enqueue fallback were skipped (the
+    chat user message was dropped). Fires under off/dry/enforce alike —
+    no config escape.
+
+    This pin follows the house style of
+    ``tests/unit/test_manager_enqueue_message_work_id_required.py``:
+    REAL calls against the wrapper with the service SEAM spied.
+    Deliberately NOT a lambda/``*a, **kw`` spy wrapped around the
+    wrapper — that shape binds any signature and masks exactly this
+    defect class (it is how the suite stayed green through the H1
+    regression).
+    """
+
+    def test_signature_has_keyword_only_founding_message_id(self):
+        """The parameter exists and sits after the ``*`` marker — a
+        signature drift (rename/removal) fails here without any call."""
+        params = inspect.signature(resolve_or_mint_fail_open).parameters
+        assert "founding_message_id" in params
+        assert (
+            params["founding_message_id"].kind
+            is inspect.Parameter.KEYWORD_ONLY
+        )
+        assert params["founding_message_id"].default is None
+
+    def test_positional_founding_message_id_raises(self):
+        """``founding_message_id`` has no positional slot — passing it
+        positionally must raise ``TypeError`` (the kwarg is
+        keyword-only, matching the service signature it forwards to)."""
+        service, seam = _stub_service_with_seam_spy()
+
+        with pytest.raises(TypeError):
+            resolve_or_mint_fail_open(
+                service,
+                "actor-1",
+                "chat",
+                "chat",  # 4th positional — no slot for it
+                "echo-1",
+            )
+
+        seam.assert_not_called()
+
+    def test_plain_branch_forwards_founding_message_id(self, monkeypatch):
+        """Real invocation, no session: the chat lane's kwarg binds (no
+        TypeError — the pre-fix H1 behavior) and is forwarded verbatim
+        into ``service.resolve_or_mint``; the wrapper returns the
+        resolution's mission id."""
+        monkeypatch.setenv(MISSION_RECORDS_MODE_ENV, "dry")
+        service, seam = _stub_service_with_seam_spy()
+
+        mission_id = resolve_or_mint_fail_open(
+            service,
+            "actor-1",
+            "chat",
+            founding_source="chat",
+            founding_message_id="echo-1",
+        )
+
+        seam.assert_called_once()
+        forwarded = seam.call_args.kwargs
+        assert forwarded["founding_message_id"] == "echo-1"
+        assert forwarded["founding_source"] == "chat"
+        assert mission_id == "m-h1-pin"
+
+    def test_savepoint_branch_forwards_founding_message_id(
+        self, monkeypatch
+    ):
+        """Real invocation WITH a session: the ``begin_nested`` branch
+        forwards the kwarg too — both internal branches must carry it
+        (the session branch is the send_message delegation lane's
+        same-transaction contract; a one-branch fix would re-open H1
+        through that lane the moment a caller there knows the id)."""
+        monkeypatch.setenv(MISSION_RECORDS_MODE_ENV, "dry")
+        service, seam = _stub_service_with_seam_spy()
+        savepoint = MagicMock(name="savepoint")
+        savepoint.__enter__ = MagicMock(return_value=savepoint)
+        savepoint.__exit__ = MagicMock(return_value=False)
+        session = MagicMock(name="Session")
+        session.begin_nested = MagicMock(return_value=savepoint)
+
+        mission_id = resolve_or_mint_fail_open(
+            service,
+            "actor-1",
+            "send_message",
+            founding_message_id="echo-2",
+            session=session,
+        )
+
+        session.begin_nested.assert_called_once()
+        seam.assert_called_once()
+        forwarded = seam.call_args.kwargs
+        assert forwarded["founding_message_id"] == "echo-2"
+        assert forwarded["session"] is session
+        assert mission_id == "m-h1-pin"
+
+    def test_omitted_kwarg_forwards_none_default(self, monkeypatch):
+        """Omitting the kwarg forwards ``founding_message_id=None`` —
+        the established lanes (user_api router, chat durable sub-lane,
+        instance_nudge, scheduler) mint without a founding id (the
+        mint-then-attach order) and must be byte-identical."""
+        monkeypatch.setenv(MISSION_RECORDS_MODE_ENV, "dry")
+        service, seam = _stub_service_with_seam_spy()
+
+        resolve_or_mint_fail_open(
+            service, "actor-1", "user_api", founding_source="user_api"
+        )
+
+        seam.assert_called_once()
+        assert seam.call_args.kwargs["founding_message_id"] is None
 
 
 # ---------------------------------------------------------------------------

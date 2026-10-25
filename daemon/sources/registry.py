@@ -1148,8 +1148,13 @@ class SourceRegistry:
                 # ── Proposal B PR1 — chat epoch mint (lane 2, inject
                 # sub-lane) ── RESOLVE-OR-MINT before the injection; the
                 # echo id IS the founding message id (the drain stamps
-                # it as the HumanMessage id), so the record is COMPLETE
-                # at mint time. FAIL-OPEN, record-side only.
+                # it as the HumanMessage id) and is FORWARDED to the
+                # mint (``founding_message_id``) so the record is
+                # COMPLETE at mint time — no mint-then-attach needed on
+                # this sub-lane (H1, 2026-10-25: the wrapper signature
+                # must keep accepting this kwarg — a binding TypeError
+                # here escapes the fail-open try and DROPS the message).
+                # FAIL-OPEN, record-side only.
                 await asyncio.to_thread(
                     resolve_or_mint_fail_open,
                     getattr(self._manager, "mission_record_service", None),

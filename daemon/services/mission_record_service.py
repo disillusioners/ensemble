@@ -948,6 +948,7 @@ def resolve_or_mint_fail_open(
     lane: str,
     *,
     founding_source: Optional[str] = None,
+    founding_message_id: Optional[str] = None,
     commissioner_instance_id: Optional[str] = None,
     work_id: Optional[str] = None,
     session: Optional[Session] = None,
@@ -962,6 +963,14 @@ def resolve_or_mint_fail_open(
     (``begin_nested``) — the send_message delegation lane's
     same-transaction-as-the-watcher contract — and a mint failure rolls
     back the savepoint only, never the caller's own writes.
+
+    ``founding_message_id`` is forwarded verbatim into
+    :meth:`MissionRecordService.resolve_or_mint` so lanes that know the
+    founding id BEFORE the mint (the chat inject sub-lane, whose echo
+    id is minted ahead of the call) mint a COMPLETE record at mint
+    time — the signature must accept it even though every caller is
+    keyword-only (H1, 2026-10-25: the chat lane's kwarg failed to bind
+    at call time, BEFORE the fail-open try, dropping the message).
     """
     if service is None:
         return None
@@ -974,6 +983,7 @@ def resolve_or_mint_fail_open(
                     actor_instance_id,
                     lane,
                     founding_source=founding_source,
+                    founding_message_id=founding_message_id,
                     commissioner_instance_id=commissioner_instance_id,
                     work_id=work_id,
                     session=session,
@@ -983,6 +993,7 @@ def resolve_or_mint_fail_open(
                 actor_instance_id,
                 lane,
                 founding_source=founding_source,
+                founding_message_id=founding_message_id,
                 commissioner_instance_id=commissioner_instance_id,
                 work_id=work_id,
             )
