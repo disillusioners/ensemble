@@ -117,6 +117,13 @@ class TestReservedSourcePrefixesConstant:
             "experience:",
             "agent:",
             "blueprint-sidecar:",
+            # completion-subsystem D4(i): the audited ``instance_nudge``
+            # tool lane (``daemon/tools/instance_ops.py``) mints
+            # ``instance_ops:<caller>``. It was in NEITHER set before —
+            # which is why the nudge lane re-anchored the delegation
+            # window (D4(i)). Added to RESERVED so the HTTP boundary
+            # can never forge it.
+            "instance_ops:",
             # Non-colon exact values (daemon-minted, exact-matched).
             "cascade_resume",
             "api_resume_fallback",
@@ -161,6 +168,9 @@ class TestReservedSourcePrefixesConstant:
         assert is_reserved_source("experience:inst-1") is True
         assert is_reserved_source("agent:developer") is True
         assert is_reserved_source("blueprint-sidecar:inst-1") is True
+
+        # completion-subsystem D4(i) — the audited instance_nudge lane.
+        assert is_reserved_source("instance_ops:inst-1") is True
 
         # 2026-08-30 additions — non-colon exacts.
         assert is_reserved_source("watchover_next_command") is True

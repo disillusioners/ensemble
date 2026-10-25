@@ -37,9 +37,14 @@ only) so it stays unit-testable in isolation and importable from
 from __future__ import annotations
 
 import logging
-from typing import Any, Iterator, NamedTuple
+from typing import Any, Iterable, Iterator, NamedTuple
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+
+from ..constants import (
+    INTERNAL_STAMPED_SOURCE_PREFIXES as _CANONICAL_INTERNAL_STAMPED_SOURCE_PREFIXES,
+    is_internal_stamped_source,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -264,13 +269,39 @@ def scan_for_attestation(
 # ════════════════════════════════════════════════════════════════════════════════
 
 
-#: Tool name that constitutes leader delegation to a child. Any send_message
-#: tool call after the last real user message flips the conditional
-#: requirement ON — instantiations (``spawn_instance``) are inert by
-#: design (the child does nothing until messaged), so spawn alone does
-#: NOT count as delegation; the user spec pins this. The constant is
-#: local (not imported) so the module stays dependency-light; the value
-#: is pinned by ``tests/unit/test_attestation_conditional_scanner.py``.
+#: Tool names that constitute leader delegation to a child. Any of
+#: these tool calls after the last real user message flips the
+#: conditional requirement ON.
+#:
+#: D2 (completion-subsystem Phase 1) widened this from a single name
+#: to a SET. The rationale: ``instance_nudge`` is a REAL commissioning
+#: act — the leader (or an agent acting for it) hands work to another
+#: instance and the mission's completion is now conditional on that
+#: work. With the census blind to it, the leader could nudge an
+#: out-of-tree worker and STILL settle the mission (``attestation_
+#: required`` collapsed to False) — the demonstrated fd302262 shape.
+#:
+#: Instantiations (``spawn_instance``) are INERT by design (the child
+#: does nothing until messaged), so spawn alone does NOT count as
+#: delegation; the user spec pins this. ``spawn_instance`` is
+#: deliberately ABSENT from this set and the ``scan_delegation_after_
+#: last_user`` docstring pins the exclusion.
+#:
+#: The constant is local (not imported) so the module stays
+#: dependency-light; the value is pinned by
+#: ``tests/unit/test_attestation_conditional_scanner.py``.
+DEFAULT_DELEGATION_TOOL_NAMES: frozenset[str] = frozenset({
+    "send_message",
+    "instance_nudge",
+})
+
+#: LEGACY ALIAS — the single canonical delegation tool name.
+#:
+#: Kept as an alias for ``"send_message"`` (the primary member of
+#: :data:`DEFAULT_DELEGATION_TOOL_NAMES`) so every existing consumer
+#: (the gate's import, the test pins, external callers) keeps working
+#: unchanged. Do NOT use it as the scanner's effective default — the
+#: default is the WIDENED SET above.
 DEFAULT_DELEGATION_TOOL_NAME = "send_message"
 
 #: Prefix that marks ``additional_kwargs["source"]`` values for child-report
@@ -304,12 +335,27 @@ _INTERNAL_AGENT_SOURCE_PREFIX = "internal_agent:"
 #: depth for that conjunction and is currently unreachable as an
 #: exclusion for constructor-produced shapes (it requires the same
 #: flag Step 3 has already excluded on).
-_INTERNAL_STAMPED_SOURCE_PREFIXES = (
-    _INTERNAL_REPORT_SOURCE_PREFIX,
-    "internal_error_report:",
-    _INTERNAL_AGENT_SOURCE_PREFIX,
-    "system:",
-)
+#:
+#: D4(i) (completion-subsystem Phase 1) widened the set from 4 to 16
+#: members and moved its canonical home to
+#: :data:`daemon.constants.INTERNAL_STAMPED_SOURCE_PREFIXES`. The
+#: scanner imports the SAME tuple the writer stamps from, so the
+#: reader (branch 4b) and the writer can no longer drift apart — the
+#: pre-D4(i) state carried two hand-maintained copies of a 4-tuple.
+#:
+#: The widened members are daemon-minted lanes that land on the
+#: LEADER'S OWN stream. While they stayed BARE, the ladder classified
+#: them as REAL USER messages, which MOVED the SOURCE U anchor and
+#: erased the delegation window (``attestation_required`` collapsed to
+#: False). The highest-traffic bare re-anchorer was ``agent:{caller}``
+#: (the job_continue self-continuation lane).
+#:
+#: The ladder's branch-4b check uses
+#: :func:`daemon.constants.is_internal_stamped_source`, which mirrors
+#: :func:`daemon.constants.is_reserved_source`'s split semantics
+#: (colon families by ``startswith``, non-colon members by EXACT
+#: equality).
+_INTERNAL_STAMPED_SOURCE_PREFIXES = _CANONICAL_INTERNAL_STAMPED_SOURCE_PREFIXES
 
 
 def is_real_user_message(message: BaseMessage) -> bool:
@@ -429,7 +475,7 @@ def is_real_user_message(message: BaseMessage) -> bool:
     if (
         additional_kwargs.get("injected_message") is True
         and isinstance(source, str)
-        and source.startswith(_INTERNAL_STAMPED_SOURCE_PREFIXES)
+        and is_internal_stamped_source(source)
     ):
         return False
 
@@ -472,10 +518,11 @@ class DelegationScanResult(NamedTuple):
     """Conditional-attestation delegation scan output.
 
     Attributes:
-        delegation_since_last_user: ``True`` when a ``send_message`` tool
-            call exists in any AIMessage AFTER the last real user
-            message (the canonical "deliver an attestation-required"
-            signal for the gate).
+        delegation_since_last_user: ``True`` when a delegation tool call
+            (any member of :data:`DEFAULT_DELEGATION_TOOL_NAMES` —
+            ``send_message`` / ``instance_nudge``) exists in any
+            AIMessage AFTER the last real user message (the canonical
+            "deliver an attestation-required" signal for the gate).
         last_real_user_index: Position in the original list of the last
             real user message, or ``-1`` when none exists (the gate's
             delegation-anywhere fallback predicate).
@@ -483,11 +530,11 @@ class DelegationScanResult(NamedTuple):
             (the gate reads this to decide whether to enter the
             conservative fallback branch).
         first_delegation_after_last_user_index: Position of the FIRST
-            ``send_message`` AIMessage at-or-after ``last_real_user_index``,
+            delegation AIMessage at-or-after ``last_real_user_index``,
             or ``-1`` when none exists. Logged for dry-mode soak
             diagnostics and the FR-3 conditionality audit log.
-        delegation_tool_call_total: Total number of ``send_message`` tool
-            calls at-or-after ``last_real_user_index`` (across the whole
+        delegation_tool_call_total: Total number of delegation tool calls
+            at-or-after ``last_real_user_index`` (across the whole
             tail). Normalized log shape; ``0`` when none.
     """
 
@@ -501,16 +548,16 @@ class DelegationScanResult(NamedTuple):
 def scan_delegation_after_last_user(
     messages: list[BaseMessage],
     *,
-    delegation_tool_name: str = DEFAULT_DELEGATION_TOOL_NAME,
+    delegation_tool_name: str | Iterable[str] | None = None,
 ) -> DelegationScanResult:
-    """Scan AIMessages after the last real user message for a send_message tool call.
+    """Scan AIMessages after the last real user message for a delegation tool call.
 
     The conditional-attestation gate's R0 input. Walks the message list
     once BACKWARD to locate :func:`find_last_real_user_index`, then walks
     the AIMessages strictly AFTER that index for any tool call whose
-    ``name == delegation_tool_name`` (default ``send_message``). The
-    walk stops at the FIRST found delegation — the index is reported,
-    but the boolean is what gates the decision.
+    ``name`` is one of the delegation tool names. The walk stops at the
+    FIRST found delegation — the index is reported, but the boolean is
+    what gates the decision.
 
     The walk is NOT bounded by the attestation window ``N`` — the
     delegation check covers the entire tail of the conversation since
@@ -520,16 +567,38 @@ def scan_delegation_after_last_user(
     proactive-compaction summary boundary (one final SystemMessage per
     compaction fold — the walk skips it because it is not an AIMessage).
 
+    D2 (completion-subsystem Phase 1) widened the matching from name
+    EQUALITY to MEMBERSHIP over a SET of names. The default set is
+    :data:`DEFAULT_DELEGATION_TOOL_NAMES` — ``send_message`` AND
+    ``instance_nudge``. Both are real commissioning acts: a leader that
+    nudges an out-of-tree worker HAS delegated, so its mission is
+    completion-conditional on that work. With the census blind to
+    ``instance_nudge`` the leader settled while the nudged worker was
+    still running (the demonstrated fd302262 shape).
+
+    ``spawn_instance`` is DELIBERATELY NOT a delegation tool name and
+    is NOT in the default set: an instantiation is inert by design (the
+    child does nothing until it is messaged), so spawn alone does NOT
+    make the mission completion-conditional. The user spec pins this.
+
     Args:
         messages: The in-node message list (``state["messages"]``).
-        delegation_tool_name: Tool name that constitutes delegation.
-            Default ``send_message`` — the user's contract pin. ANY
-            ``spawn_instance`` before/without a corresponding
-            ``send_message`` does NOT count (spawn is inert by design).
+        delegation_tool_name: Tool name(s) that constitute delegation.
+            ``None`` (the default) uses :data:`DEFAULT_DELEGATION_TOOL_NAMES`.
+            A bare string is a SINGLE-name override (the legacy seam —
+            only that name counts, the default set is NOT consulted).
+            Any other iterable is used as the membership set.
 
     Returns:
         :class:`DelegationScanResult` — see the NamedTuple docs.
     """
+    if delegation_tool_name is None:
+        delegation_tool_names = DEFAULT_DELEGATION_TOOL_NAMES
+    elif isinstance(delegation_tool_name, str):
+        delegation_tool_names = frozenset({delegation_tool_name})
+    else:
+        delegation_tool_names = frozenset(delegation_tool_name)
+
     last_real_user_index = find_last_real_user_index(messages)
     last_real_user_found = last_real_user_index >= 0
 
@@ -548,7 +617,7 @@ def scan_delegation_after_last_user(
         if not isinstance(message, AIMessage):
             continue
         names = _tool_call_names(message)
-        if delegation_tool_name in names:
+        if delegation_tool_names & set(names):
             absolute_index = tail_start + offset
             delegation_tool_call_total += 1
             if first_delegation_after_last_user_index == -1:

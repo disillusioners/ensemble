@@ -86,6 +86,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 from .attestation_scanner import (
     DEFAULT_ATTESTATION_TOOL_NAME,
     DEFAULT_DELEGATION_TOOL_NAME,
+    DEFAULT_DELEGATION_TOOL_NAMES,
     scan_delegation_after_last_user,
     scan_for_attestation_detailed,
 )

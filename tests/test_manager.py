@@ -294,7 +294,7 @@ class TestSendMessage:
                      patch('daemon.services.instance_messaging.Task'), \
                      patch('daemon.services.instance_messaging.Event'):
 
-                    def _get_side_effect(instance_id, instance_cls):
+                    def _get_side_effect(instance_id, instance_cls, **kwargs):
                         mock_instance = MagicMock()
                         mock_instance.status = InstanceStatus.IDLE.value
                         mock_instance.agent_id = "developer"
@@ -324,13 +324,33 @@ class TestSendMessage:
 
     @pytest.mark.asyncio
     async def test_send_message_instance_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_instance_repository):
-        """Test enqueue to a non-existent instance.
+        """Enqueue to a non-existent instance is FAIL-CLOSED.
 
-        Contract CHANGED by T6b (C1-D7): the deleted ``Manager.send_message``
-        raised ``KeyError("Instance not found")``; ``enqueue_message``
-        writes the durable rows anyway and logs a not-found WARNING (the
-        claim gate simply never matches an unknown instance id). This test
-        pins the NEW behavior — no raise, result still returned.
+        Contract CHANGED by D4(ii/iii) (Phase 0, commit ``a31615cc4``):
+        the existence check was HOISTED ABOVE the insert inside
+        ``_prepare_enqueued_message``, so a missing target aborts
+        CLEANLY — the enqueue lane raises ``ValueError`` BEFORE any row
+        is written and the exception propagates to the caller (surfaced
+        as ToolMessage prose at the tool boundary, the established
+        ``_resolve_instance_id`` error pattern, so the SENDER SEES the
+        mis-address).
+
+        This SUPERSEDES the T6b (C1-D7) contract this test used to pin.
+        The old contract said the deleted ``Manager.send_message`` raised
+        ``KeyError("Instance not found")``, and that ``enqueue_message``
+        instead "writes the durable rows anyway and logs a not-found
+        WARNING ... no raise, result still returned". That fail-open
+        posture is GONE, and rightly so: under it a mis-addressed enqueue
+        left an ORPHAN MessageQueue row (plus its Task row) for an
+        instance that does not exist, and the SENDER never learned about
+        it (the D4(iii) masking defect). Do NOT re-pin the no-raise
+        behavior here.
+
+        The no-orphan guarantee is asserted at the session boundary: the
+        raise fires BEFORE ``MessageQueue`` / ``Task`` / ``Event`` are
+        constructed, before ``session.add``, and before
+        ``session.commit`` — so the ``WriteGuardSession`` closes without
+        a commit and ZERO rows of any kind are written.
         """
         with patch(
             "daemon.migrations.runner.MigrationRunner.run_pending_migrations",
@@ -347,10 +367,10 @@ class TestSendMessage:
                 with patch('daemon.services.instance_messaging.Session') as mock_session_cls, \
                      patch('daemon.services.instance_messaging.MainLoopBridge'), \
                      patch('daemon.services.instance_messaging.Instance'), \
-                     patch('daemon.services.instance_messaging.MessageQueue'), \
-                     patch('daemon.services.instance_messaging.Task'), \
-                     patch('daemon.services.instance_messaging.Event'), \
-                     patch("daemon.services.instance_messaging.logger") as mock_logger:
+                     patch('daemon.services.instance_messaging.MessageQueue') as mock_message_queue, \
+                     patch('daemon.services.instance_messaging.Task') as mock_task_cls, \
+                     patch('daemon.services.instance_messaging.Event') as mock_event_cls, \
+                     patch("daemon.services.instance_messaging.logger"):
 
                     mock_session = MagicMock()
                     mock_session.get.return_value = None  # instance not found
@@ -361,17 +381,27 @@ class TestSendMessage:
 
                     mock_session_cls.return_value = mock_session_ctx()
 
-                    result = await manager.enqueue_message(
-                        "non-existent-instance", "Hello!", source="api"
-                    )
+                    # D4(ii/iii) — the hoisted existence check raises; the
+                    # ValueError names the mis-addressed instance id.
+                    with pytest.raises(
+                        ValueError,
+                        match="instance 'non-existent-instance' not found",
+                    ):
+                        await manager.enqueue_message(
+                            "non-existent-instance", "Hello!", source="api"
+                        )
 
-        assert result is not None
-        assert result.message_id
-        assert result.instance_id == "non-existent-instance"
-        warning_calls = mock_logger.warning.call_args_list
-        assert any(
-            "not found in database" in str(c.args[0]) for c in warning_calls
-        ), f"expected a not-found WARNING, got: {warning_calls}"
+        # ── D4(ii/iii) no-orphan guarantee ─────────────────────────────
+        # The raise fired BEFORE any row was constructed, added, or
+        # committed: ZERO MessageQueue rows, ZERO Task rows, zero rows of
+        # any kind. (A mock ``session`` accepts anything, so the class
+        # construction + ``add`` + ``commit`` assertions are what make
+        # "nothing was written" load-bearing here rather than vacuous.)
+        mock_message_queue.assert_not_called()
+        mock_task_cls.assert_not_called()
+        mock_event_cls.assert_not_called()
+        mock_session.add.assert_not_called()
+        mock_session.commit.assert_not_called()
 
 
 @_QM
@@ -1543,7 +1573,7 @@ class TestTitleGenerationTrigger:
              patch('daemon.services.instance_messaging.Event') as mock_event:
 
             # Create a fresh mock instance for each call
-            def get_instance_side_effect(instance_id, instance_cls):
+            def get_instance_side_effect(instance_id, instance_cls, **kwargs):
                 mock_instance = MagicMock()
                 mock_instance.status = InstanceStatus.IDLE.value  # Start as IDLE
                 mock_instance.agent_id = "test-agent"
@@ -1596,7 +1626,7 @@ class TestTitleGenerationTrigger:
              patch('daemon.services.instance_messaging.Task') as mock_task, \
              patch('daemon.services.instance_messaging.Event') as mock_event:
 
-            def get_instance_side_effect(instance_id, instance_cls):
+            def get_instance_side_effect(instance_id, instance_cls, **kwargs):
                 mock_instance = MagicMock()
                 mock_instance.status = InstanceStatus.IDLE.value
                 mock_instance.agent_id = "test-agent"
@@ -1645,7 +1675,7 @@ class TestTitleGenerationTrigger:
              patch('daemon.services.instance_messaging.Task') as mock_task, \
              patch('daemon.services.instance_messaging.Event') as mock_event:
 
-            def get_instance_side_effect(instance_id, instance_cls):
+            def get_instance_side_effect(instance_id, instance_cls, **kwargs):
                 mock_instance = MagicMock()
                 mock_instance.status = InstanceStatus.RUNNING.value  # Already RUNNING
                 mock_instance.agent_id = "test-agent"
@@ -1700,7 +1730,7 @@ class TestTitleGenerationTrigger:
              patch('daemon.services.instance_messaging.MessageQueue') as mock_message_queue, \
              patch('daemon.services.instance_messaging.Event') as mock_event:
 
-            def get_instance_side_effect(instance_id, instance_cls):
+            def get_instance_side_effect(instance_id, instance_cls, **kwargs):
                 mock_instance = MagicMock()
                 mock_instance.status = InstanceStatus.IDLE.value
                 mock_instance.agent_id = "test-agent"
@@ -1756,7 +1786,7 @@ class TestTitleGenerationTrigger:
              patch('daemon.services.instance_messaging.MessageQueue') as mock_message_queue, \
              patch('daemon.services.instance_messaging.Event') as mock_event:
 
-            def get_instance_side_effect(instance_id, instance_cls):
+            def get_instance_side_effect(instance_id, instance_cls, **kwargs):
                 mock_instance = MagicMock()
                 mock_instance.status = InstanceStatus.RUNNING.value  # Already RUNNING
                 mock_instance.agent_id = "test-agent"

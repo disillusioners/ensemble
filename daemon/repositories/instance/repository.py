@@ -56,6 +56,40 @@ _MAX_TRAVERSAL_DEPTH = 256
 # statement unreadable in the query log.
 _METADATA_LOOKUP_CHUNK = 500
 
+#: The ESCAPE character used by the LIKE-wildcard hardening in
+#: :meth:`SQLModelInstanceRepository.find_by_instance_id_prefix` (T2,
+#: 2026-10-24 — defense in depth). Dialect-neutral: SQLite and
+#: PostgreSQL both honour ``ESCAPE '\\'``.
+_LIKE_ESCAPE_CHAR = "\\"
+
+
+def _escape_like_pattern(value: str) -> str:
+    """Escape the LIKE wildcards in ``value`` so it matches LITERALLY.
+
+    ``%`` (any sequence) and ``_`` (any single character) are the two
+    LIKE wildcards; the escape character itself must be escaped first
+    or the escape would be applied to its own output.
+
+    A caller-supplied prefix that reaches a LIKE pattern unescaped can
+    match unintended rows — e.g. ``%`` alone matches EVERY row. The
+    repository method that builds the pattern escapes here rather than
+    relying on a single upstream shape gate.
+
+    Args:
+        value: The raw pattern fragment.
+
+    Returns:
+        The escaped fragment (safe to embed in a LIKE pattern with
+        ``escape=_LIKE_ESCAPE_CHAR``).
+    """
+    if not isinstance(value, str) or not value:
+        return ""
+    return (
+        value.replace(_LIKE_ESCAPE_CHAR, _LIKE_ESCAPE_CHAR * 2)
+        .replace("%", _LIKE_ESCAPE_CHAR + "%")
+        .replace("_", _LIKE_ESCAPE_CHAR + "_")
+    )
+
 
 class FleetCounts(NamedTuple):
     """The fleet census result (nest-ops shakedown F2).
@@ -547,6 +581,60 @@ class SQLModelInstanceRepository:
         with SQLModelSession(self.engine) as db_session:
             instance = db_session.get(Instance, instance_id)
             return self._enrich_instance(db_session, instance)
+
+    def find_by_instance_id_prefix(self, prefix: str, limit: int = 2) -> list[str]:
+        """Find instance ids that START with ``prefix`` (D3 prefix lane).
+
+        Bounded, status-agnostic prefix lookup backing the agent-tool id
+        resolver (``daemon/tools/instance.py::_resolve_instance_id``) so a
+        TRUNCATED uuid resolves deterministically instead of always
+        failing:
+
+        * 0 hits  → the caller falls through to its fuzzy path.
+        * 1 hit   → the id is resolved.
+        * >= 2    → the caller raises with the candidate list.
+
+        The universe is EVERY instance row — NO status filter — because
+        agents legitimately address terminal / just-completed instances
+        (same posture as ``InstanceManager.find_near_instance``, which
+        also searches across statuses).
+
+        LIKE-WILDCARD HARDENING (T2, 2026-10-24 — defense in depth):
+        the LIKE pattern is built from a caller-supplied string, so
+        ``%`` and ``_`` inside ``prefix`` would be interpreted as
+        WILDCARDS and could match unintended rows. The caller
+        (``_resolve_instance_id``) pre-validates the shape (hex digits
+        + dashes, 8-35 chars), but the repository does NOT rely on that
+        single gate: it ESCAPES the wildcards itself, so a
+        wildcard-bearing prefix matches LITERALLY. The escape is
+        dialect-neutral (``ESCAPE '\\'`` is supported by SQLite and
+        PostgreSQL alike).
+
+        Args:
+            prefix: The id prefix to match. Callers SHOULD pre-validate
+                the shape (hex digits + dashes only); the LIKE wildcards
+                are escaped here regardless.
+            limit: Maximum number of ids to return. The resolver needs at
+                most 2 (one hit resolves; two hits disambiguate).
+
+        Returns:
+            The matching instance ids, ordered by id, at most ``limit``.
+        """
+        if not prefix:
+            return []
+        escaped = _escape_like_pattern(prefix)
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(Instance.instance_id)
+                .where(
+                    Instance.instance_id.like(
+                        f"{escaped}%", escape=_LIKE_ESCAPE_CHAR
+                    )
+                )
+                .order_by(Instance.instance_id)
+                .limit(limit)
+            )
+            return [str(row) for row in db_session.exec(stmt).all()]
 
     def get_by_agent_id(self, agent_id: str) -> list[Instance]:
         """Get all instances for a given agent ID.
@@ -1861,7 +1949,7 @@ class SQLModelInstanceRepository:
             return current_count + 1
 
     def _update_attestation_columns(
-        self, instance_id: str, **values: Any
+        self, instance_id: str, *, clear_denial_epochs: bool = False, **values: Any
     ) -> bool:
         """Shared UPDATE skeleton for the attestation ledger writes.
 
@@ -1894,9 +1982,23 @@ class SQLModelInstanceRepository:
         from sqlmodel import update as sqlmodel_update
 
         with SQLModelSession(self.engine) as db_session:
-            instance = db_session.get(Instance, instance_id)
+            instance = db_session.get(
+                Instance, instance_id, with_for_update=clear_denial_epochs
+            )
             if instance is None:
                 return False
+            if clear_denial_epochs:
+                # D5(i) — clear the deny-epoch ledger in the SAME
+                # transaction. The dialect-aware single-key UPDATE
+                # rides THIS session (it does NOT commit — the caller
+                # owns the transaction), so the epoch clear and the
+                # counter reset commit together or neither commits.
+                # The row lock above is the SAME lock the append path
+                # takes (``with_for_update=True``), so the two
+                # serialize against each other.
+                self._set_metadata_on_session(
+                    db_session, instance_id, "attestation:denial_epochs", []
+                )
             stmt = (
                 sqlmodel_update(Instance)
                 .where(Instance.instance_id == instance_id)
@@ -1928,6 +2030,17 @@ class SQLModelInstanceRepository:
           HUMAN.value`` AND ``priority == 1`` — internal reports and
           agent-to-agent revives are NOT new episodes).
 
+        D5(i) — the reset ALSO clears the O4 deny-epoch ledger
+        (``instance_metadata["attestation:denial_epochs"]`` → ``[]``)
+        in the SAME transaction. The epoch array is the O4 dedup key
+        set: without the clear it grows without bound across episodes
+        (KG-3) and a deny replayed under a pre-reset epoch key would
+        be silently swallowed instead of re-counting.
+
+        REPLAY HAZARD (accepted): a shrink-replayed pre-reset deny
+        re-counts ONCE toward bound 3. The failure direction is LOUD
+        escalation, never a silent allow.
+
         Returns:
             ``True`` when the row was found and reset; ``False`` when
             the instance is missing (caller treats as DB error →
@@ -1942,6 +2055,8 @@ class SQLModelInstanceRepository:
             attestation_denied_count=0,
             completion_gate_escalated=False,
             updated_at=datetime.now(timezone.utc).isoformat(),
+            # D5(i) — the deny-epoch ledger clears with the counter.
+            clear_denial_epochs=True,
         )
 
     def reset_attestation_ledger_with_escalation(
@@ -1959,6 +2074,10 @@ class SQLModelInstanceRepository:
         the attested-allow and trigger-3 paths (where the flag is
         already False).
 
+        D5(i) — the deny-epoch ledger is cleared in the SAME
+        transaction here too (the escalation is a FINAL state; the
+        episode's deny memory ends with it).
+
         Returns:
             ``True`` when the row was found and the atomic write
             landed; ``False`` when the instance is missing.
@@ -1972,6 +2091,9 @@ class SQLModelInstanceRepository:
             attestation_denied_count=0,
             completion_gate_escalated=True,
             updated_at=datetime.now(timezone.utc).isoformat(),
+            # D5(i) — the escalation is a FINAL state; the episode's
+            # deny memory (the epoch ledger) ends with it.
+            clear_denial_epochs=True,
         )
 
     def set_completion_gate_escalated(self, instance_id: str) -> bool:

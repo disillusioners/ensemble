@@ -100,6 +100,7 @@ from daemon.cancellation import OperationCancelledError
 from daemon.constants import DEFERRED_REASON_PAUSE_TOCTOU
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.dependency_bus import get_dependency_bus
+from daemon.services.report_recipient import resolve_report_recipient
 from daemon.services.message_processing_errors import (
     handle_message_processing_error,
 )
@@ -956,12 +957,36 @@ class MessageProcessingPipeline:
                         f"{instance_id[:8]}... (no parent_id)"
                     )
                     return
-                # ID orientation: parent = fetched parent_id,
+                # D1 (completion-subsystem Phase 1) — the Site-1 marker
+                # must JOIN the report-recipient rule, else it
+                # split-brains: the marker would name the structural
+                # parent while the report itself is delivered to the
+                # COMMISSIONER (a fresh committed ``instance_nudge``).
+                # The obligation would then sit on an instance that
+                # never receives the report.
+                #
+                # DIVERGENCE WINDOW (documented, not a defect): the
+                # marker resolves on its OWN session, independently of
+                # the natural write path's resolution — so a nudge
+                # COMMITTED between the two reads yields DIFFERENT
+                # recipients (the marker names the pre-nudge recipient,
+                # the report names the commissioner). The window is the
+                # gap between the two resolutions, not a failure mode:
+                # the marker is a best-effort obligation record (the
+                # Phase 2 no-row backstop is the net), and both paths
+                # agree whenever no commission lands in between.
+                recipient_id = await asyncio.to_thread(
+                    resolve_report_recipient,
+                    engine=getattr(self._manager, "engine", None),
+                    child_instance_id=instance_id,
+                    structural_parent_id=parent_id,
+                ) or parent_id
+                # ID orientation: parent = the RESOLVED RECIPIENT,
                 # child = instance_id, message = child_message_id,
                 # reason = DEFERRED_REASON_PAUSE_TOCTOU.
                 await asyncio.to_thread(
                     repo.ensure_deferred,
-                    parent_instance_id=parent_id,
+                    parent_instance_id=recipient_id,
                     child_instance_id=instance_id,
                     child_message_id=child_message_id or "",
                     deferred_reason=reason,

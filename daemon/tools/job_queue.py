@@ -589,14 +589,36 @@ the agent-tool send_message uses.
 Return shape (m2 fix, LOCKED C1-D3 Option A, 2026-08-30): the
 ``queued`` flag on the WC branch (B1: the only branch; was flag-ON WC
 pre-B1) is a LITERAL ``True``, meaning "message was enqueued as a
-first-class turn" — NOT the ``AsyncMessageResult.queued`` capacity
-flag (a spec collision: ``AsyncMessageResult.queued`` means "blocked
-at capacity" and defaults to ``False``). Mirror the HTTP lane's
-200-enqueue ``MessageResponse.queued=True`` on success. The
-``getattr(result, "queued", True)`` propagation that pre-m2 carried
+first-class turn" — NOT the ``AsyncMessageResult.queued`` field. Mirror
+the HTTP lane's 200-enqueue ``MessageResponse.queued=True`` on success.
+The ``getattr(result, "queued", True)`` propagation that pre-m2 carried
 the AsyncMessageResult field through to the tool response was a
 silent-spec-collision defect; the literal ``True`` matches the
 LOCKED decisions.md C1-D3 contract.
+
+PER-LANE ``queued`` POLARITY (W2, 2026-10-24) — the doc drift this
+parenthetical carried is CORRECTED. ``queued`` means DIFFERENT things
+on different lanes; read the right one before consuming it:
+
+* THIS lane (``job_inject``'s WC branch) — ``True`` is the LITERAL
+  "enqueued as a first-class turn". It is NOT the
+  ``AsyncMessageResult.queued`` field.
+* messaging-service lanes (``InstanceMessagingService.enqueue_message``
+  / ``enqueue_message_job``) — ``AsyncMessageResult.queued`` is ``True``
+  when the PROCESS_MESSAGE dispatch Task row was CREATED (so the target
+  WILL be woken) and ``False`` when no dispatch Task was confirmed.
+  Since D4(iv) the field MIRRORS the Task creation; before that it fell
+  through to the dataclass default ``False`` on EVERY plain enqueue,
+  which made it unreadable. W1 split the two ``False`` reasons:
+  ``not_queued_reason="deferred_pause_marker"`` (the Task was skipped —
+  the target was NOT woken) vs ``"task_id_refresh_failed"`` (the Task
+  row EXISTS — the target WILL be woken).
+* HTTP lane (``POST /messages`` → ``MessageResponse.queued``) —
+  ``True`` means "enqueued as a first-class turn" (the same meaning,
+  surfaced on the wire).
+
+``queued`` is NEVER "blocked at capacity" — that reading was a doc
+drift, corrected here.
 
 Access control: the caller's project_id must match the job's
 project_id (when both are set); system-default (unscoped-or-root) callers
@@ -3392,11 +3414,14 @@ def create_job_tools(
                     # contract (``decisions.md`` C1-D3 Option A, leader-
                     # locked 2026-08-30) — the flag means "message was
                     # enqueued as a first-class turn" on the job_inject
-                    # lane, NOT the ``AsyncMessageResult.queued``
-                    # capacity flag (a spec collision: that field is
-                    # "blocked at capacity" and defaults to ``False``).
+                    # lane, NOT the ``AsyncMessageResult.queued`` field.
                     # Mirror the HTTP lane's 200-enqueue ``MessageResponse.
                     # queued=True`` on success.
+                    #
+                    # W2 (2026-10-24): the "capacity flag / blocked at
+                    # capacity" parenthetical was DOC DRIFT — it never
+                    # described the real field. See the PER-LANE
+                    # ``queued`` POLARITY note in this tool's docstring.
                     "queued": True,
                 }
 

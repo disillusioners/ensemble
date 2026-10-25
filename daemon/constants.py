@@ -866,6 +866,16 @@ NON_TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({
 #                                          ``daemon/tools/upgrade_journal.py:1070``).
 #   * ``"internal_chart_reuse:"``         — generate_chart charter-reuse
 #                                          enqueue (``daemon/tools/chart_tools.py``).
+#   * ``"instance_ops:"``                  — the audited ``instance_nudge``
+#                                          tool lane
+#                                          (``daemon/tools/instance_ops.py:966``,
+#                                          ``:1112``, ``:1117`` — the
+#                                          enqueue lane and the live
+#                                          injection lane). Added by the
+#                                          completion-subsystem D4(i)
+#                                          stamp widening: the nudge is
+#                                          daemon-authored traffic, never
+#                                          a user message.
 #   * ``"cascade_resume"``                — answer-gate cascade resume
 #                                          (``daemon/manager.py:9285``,
 #                                          ``daemon/services/watchover_service.py:676,722``).
@@ -955,6 +965,7 @@ RESERVED_SOURCE_PREFIXES: frozenset[str] = frozenset({
     "experience:",
     "agent:",
     "blueprint-sidecar:",
+    "instance_ops:",
     # Non-colon exact values (matched by exact equality).
     "cascade_resume",
     "api_resume_fallback",
@@ -1002,6 +1013,189 @@ def is_reserved_source(source: str | None) -> bool:
     if source in RESERVED_SOURCE_PREFIXES:
         return True
     return False
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# INTERNAL STAMP SET — completion-subsystem D4(i)
+# ════════════════════════════════════════════════════════════════════════════════
+#
+# Source-prefix namespaces whose enqueue-lane delivery is INTERNAL
+# traffic (never user-authored). The enqueue lane stamps every
+# HumanMessage built from one of these sources with
+# ``additional_kwargs={"injected_message": True, "source": <source>}``
+# so the attestation scanner's exclusion ladder classifies it as
+# internal and the SOURCE U anchor (the "last real user message")
+# never moves onto it.
+#
+# This constant is the CANONICAL home of the set. Two consumers import
+# it:
+#
+#   * ``daemon/services/instance_messaging.py``
+#     (``_INTERNAL_STAMPED_SOURCE_PREFIXES`` — the writer that stamps
+#     the HumanMessage).
+#   * ``daemon/services/attestation_scanner.py``
+#     (``_INTERNAL_STAMPED_SOURCE_PREFIXES`` — the reader that
+#     recognizes the stamped shape in the exclusion ladder, branch 4b).
+#
+# The writer and the reader MUST agree exactly: branch 4b is a
+# fail-closed defense-in-depth check that requires the source to be in
+# the same set the writer stamps from. Keeping ONE canonical tuple
+# here makes the divergence impossible (the pre-D4(i) state had two
+# hand-maintained copies of a 4-tuple).
+#
+# D4(i) widened the set from 4 to 16 members. The four original
+# members (``internal_report:`` / ``internal_error_report:`` /
+# ``internal_agent:`` / ``system:``) are unchanged.
+#
+# WHY the widening matters (completion-subsystem defect D4(i)):
+# every member below is a daemon-minted lane that lands on the
+# LEADER'S OWN stream. While such a message stayed BARE, the
+# attestation scanner classified it as a REAL USER message, which
+# MOVED the SOURCE U anchor and ERASED the delegation window — the
+# leader's own ``send_message`` delegation fell out of the window and
+# ``attestation_required`` collapsed to False. The highest-traffic
+# bare re-anchorer was ``agent:{caller}`` (the job_continue
+# self-continuation lane, x111 in the all-time job-source census).
+#
+# Match semantics mirror :func:`is_reserved_source`: colon-terminated
+# members match by ``str.startswith``; non-colon members match by
+# EXACT equality (so ``auto-scan`` does not swallow a hypothetical
+# ``auto-scan-2``). The helper
+# :func:`daemon.services.instance_messaging._stamped_additional_kwargs`
+# implements that split.
+#
+# NEVER add a genuine user lane here. ``api`` / the chat source types
+# (``telegram:`` / ``slack:`` / ``discord:`` / ``whatsapp:``) /
+# ``api_resume_fallback`` are pinned OUT by
+# ``tests/unit/test_source_stamp_never_stamped_guards.py``.
+#
+# ``scheduler`` is DELIBERATELY absent (product ruling): the scheduler
+# is the de-facto requestor of a scheduled mission, so its message
+# anchors by design — stamping it would push the anchor to a prior
+# real user or to the scanner's -1 whole-list fallback (noisy).
+INTERNAL_STAMPED_SOURCE_PREFIXES: tuple[str, ...] = (
+    # ── Colon-terminated families (prefix-matched) ──────────────────
+    "internal_report:",
+    "internal_error_report:",
+    "internal_agent:",
+    "system:",
+    "instance_ops:",
+    "agent:",
+    "explore:",
+    "experience:",
+    "blueprint-sidecar:",
+    # ── Non-colon exact values (exact-matched) ──────────────────────
+    "cascade_resume",
+    "auto_dispatch_fallback",
+    "watchover_next_command",
+    "skill_metric_scan",
+    "skill_evolution",
+    "admin-endpoint",
+    "auto-scan",
+)
+
+
+def is_internal_stamped_source(source: str | None) -> bool:
+    """Return True when ``source`` is an internal (non-user) source.
+
+    The single source of truth for "is this enqueue-lane delivery
+    daemon-authored traffic?". Consumers:
+
+      * ``daemon/services/instance_messaging.py`` — decides whether to
+        stamp ``injected_message=True`` onto the constructed
+        HumanMessage.
+      * ``daemon/services/attestation_scanner.py`` — the exclusion
+        ladder's branch 4b (fail-closed defense in depth).
+      * ``daemon/services/instance_messaging.py`` — the ``msg_type``
+        derivation (AGENT / SYSTEM vs HUMAN).
+
+    Match semantics mirror :func:`is_reserved_source`: colon-terminated
+    members match by ``str.startswith``; non-colon members match by
+    exact equality.
+
+    ``None`` and the empty string return False — an absent source is
+    the plain user lane (the HTTP boundary fills in ``"api"`` before
+    the enqueue).
+    """
+    if not isinstance(source, str) or not source:
+        return False
+    for prefix in INTERNAL_STAMPED_SOURCE_PREFIXES:
+        if prefix.endswith(":"):
+            if source.startswith(prefix):
+                return True
+        elif source == prefix:
+            return True
+    return False
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# INTERNAL msg_type CLASSIFICATION — completion-subsystem D4(i)
+# ════════════════════════════════════════════════════════════════════════════════
+#
+# The enqueue lane derives the persisted ``MessageQueue.type`` from the
+# message source. Before D4(i) only three families existed
+# (``internal_report:`` → COMPLETION_REPORT, ``internal_error_report:``
+# → ERROR_REPORT, ``internal_agent:`` → AGENT); everything else fell
+# into the HUMAN default — INCLUDING the daemon-minted lanes. Two
+# consequences were load-bearing defects:
+#
+#   * ``system:`` on a TERMINAL instance derived HUMAN, so the
+#     fresh-episode discriminator (``priority == 1 AND msg_type ==
+#     HUMAN``) fired the attestation-ledger reset for a system
+#     notice — an internal message wiping the leader's deny memory
+#     (acknowledged defect, ``instance_messaging.py`` :2411-2426).
+#   * ``agent:{caller}`` (the job_continue self-continuation lane,
+#     x111 in the all-time job-source census) derived HUMAN while the
+#     ANONYMOUS fallback (``internal_agent:unknown``) derived AGENT —
+#     a named≡anonymous INVERSION.
+#
+# D4(i) adds the missing arms. The groups below are the single source
+# of truth for the classification; the union of the four groups is
+# exactly :data:`INTERNAL_STAMPED_SOURCE_PREFIXES` (pinned by
+# ``tests/unit/test_source_stamp_matrix_d4i.py``).
+
+#: Colon-terminated internal families that derive ``MessageType.AGENT``.
+INTERNAL_AGENT_TYPED_SOURCE_PREFIXES: tuple[str, ...] = (
+    "internal_agent:",
+    "instance_ops:",
+    "agent:",
+    "explore:",
+    "experience:",
+    "blueprint-sidecar:",
+)
+
+#: Colon-terminated internal families that derive ``MessageType.SYSTEM``.
+INTERNAL_SYSTEM_TYPED_SOURCE_PREFIXES: tuple[str, ...] = ("system:",)
+
+#: Exact-match internal sources that derive ``MessageType.AGENT``.
+INTERNAL_AGENT_TYPED_EXACT_SOURCES: frozenset[str] = frozenset({
+    "cascade_resume",
+    "auto_dispatch_fallback",
+    "watchover_next_command",
+    "skill_metric_scan",
+    "skill_evolution",
+    "admin-endpoint",
+    "auto-scan",
+})
+
+#: The completion-report family prefix (``internal_report:{child}``) —
+#: it derives ``MessageType.COMPLETION_REPORT``.
+INTERNAL_REPORT_SOURCE_PREFIX: str = "internal_report:"
+
+#: The error-report family prefix (``internal_error_report:{child}``) —
+#: it derives ``MessageType.ERROR_REPORT``.
+INTERNAL_ERROR_REPORT_SOURCE_PREFIX: str = "internal_error_report:"
+
+#: Colon-terminated internal families that derive the REPORT msg types
+#: (``internal_report:`` → COMPLETION_REPORT, ``internal_error_report:``
+#: → ERROR_REPORT). The canonical SET of report-family prefixes, built
+#: from the two canonical literals above — the enqueue lane imports
+#: this tuple (and the members it needs to disambiguate) so no report
+#: prefix is hardcoded outside this module.
+INTERNAL_REPORT_TYPED_SOURCE_PREFIXES: tuple[str, ...] = (
+    INTERNAL_REPORT_SOURCE_PREFIX,
+    INTERNAL_ERROR_REPORT_SOURCE_PREFIX,
+)
 
 
 # Case-sensitivity invariant (deliberate — do NOT casefold this helper).
