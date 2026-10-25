@@ -252,6 +252,18 @@ Add the double-send steering clause for already-delivering wake shapes (if the w
 
 ---
 
+**Supersession (fold-able 3, recorded at implementation time, 2026-10-25):**
+`architecture-recommendation.md` §0/§7/§8 PRE-FOLD specifics are **SUPERSEDED by
+decisions §6** (as amended by C3/W1–W11 and the fold-2 B1/B2/N1–N12 rulings):
+the kill-switch env name → **`ENSEMBLE_NOTIFY_USER_ENABLED`** (N8/N9, not the
+pre-fold `ENSEMBLE_NOTIFY_` family); the 10s-bound composition → **ONE
+`wait_for(preflight + send + retry, 10.0)`** (W4); the category arithmetic →
+**15→16 post-rebase** (W5/W6, not 16→17); the rate-gate mechanism →
+**commit-before-count serialized by the B2 per-destination-key lock** (C3/B2,
+not bare insert-then-count); and **`source_id`/`target_hash` are NULLABLE**
+(W3, pinned by N3's every-refusal-ledgered rule — not `source_id NOT NULL`).
+Its §4 edge census and §8 item details REMAIN the implementation reference.
+
 ## 7. Advisories (green — implementer checklist)
 
 - **rule.md re-pin precondition:** the 35-file `SEALED_SHA_BASELINES` tripwire covers BOTH `ari/workflow.md` AND `ari/rule.md` — check both rows before the D12 ceremony; re-pin every tripwire-covered file the amendment set touches, in the same commit.
