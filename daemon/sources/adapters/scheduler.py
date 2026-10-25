@@ -77,6 +77,11 @@ from daemon.repositories.source.models import ExecutionStatus
 from daemon.repositories.task.models import TaskStatus
 from daemon.registry import get_registry
 from daemon.sources.mapper import BoundCallerRefusal
+from daemon.services.mission_record_service import (
+    resolve_mission_records_mode,
+    resolve_or_mint_fail_open,
+    scheduler_mint_extension_enabled,
+)
 from daemon.constants import (
     SCHEDULER_SEMAPHORE_TIMEOUT_S,
     SCHEDULER_MANUAL_SEMAPHORE_TIMEOUT_S,
@@ -175,6 +180,20 @@ def _episode_key_from_reason(message: str | None) -> str | None:
     if idx < 0:
         return None
     return message[idx + len(_AGE_CAP_EPISODE_KEY_SEP):].strip() or None
+
+
+def _scheduler_mint_armed() -> bool:
+    """The INERT scheduler-lane mint gate (Proposal B PR1, lane 9).
+
+    STANDING PRODUCT RULING: the scheduler lane stays BARE. The mint is
+    armed ONLY when BOTH gates open — the mission-records mode ladder is
+    not ``off`` AND the dedicated extension flag
+    (``ENSEMBLE_MISSION_RECORDS_SCHEDULER_MINT``) is explicitly set.
+    Default configuration → ``False`` → byte-identical pre-PR1 behavior.
+    """
+    if not scheduler_mint_extension_enabled():
+        return False
+    return resolve_mission_records_mode() != "off"
 
 
 class SchedulerAdapter(MessageSourceAdapter):

@@ -133,6 +133,10 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
 
+from daemon.services.mission_record_service import (
+    mint_boot_epoch_if_none_fail_open,
+)
+
 
 # ---------------------------------------------------------------------------
 # Kill-switch
@@ -509,6 +513,31 @@ async def continue_running_instances_after_restart(
                     instance_id[:8], work_id[:8], boot_epoch.isoformat(),
                     result.auto_continue_mode,
                 )
+
+                # ── Proposal B PR1 — boot-sweep epoch mint (lane 14) ──
+                # MINT-IF-NONE: the silent checkpoint resume founds the
+                # epoch boundary that "no message, no clear at all" left
+                # missing (map §5 gap 5) — ``founding_source='boot'``,
+                # ``founding_message_id=NULL`` (the HONEST null: no
+                # message exists). An OPEN epoch continues untouched
+                # (resume is delivery, not founding); only a stranded
+                # instance gets the boundary row. RECORD-SIDE ONLY,
+                # FAIL-OPEN (the pass never wedges — the mint failure is
+                # a log line and the boot proceeds unchanged).
+                try:
+                    await asyncio.to_thread(
+                        mint_boot_epoch_if_none_fail_open,
+                        getattr(manager, "_mission_record_service", None),
+                        instance_id,
+                    )
+                except Exception as mint_exc:  # noqa: BLE001 — never wedge
+                    logger.warning(
+                        "[BOOT_CONTINUE] mission-record mint failed for "
+                        "instance=%s: %s: %s (boot proceeds)",
+                        instance_id[:8],
+                        type(mint_exc).__name__,
+                        mint_exc,
+                    )
 
                 # (6) Stagger (Δ5 / D22) — after every Nth resume,
                 # sleep STAGGER_SLEEP_SECONDS to bound LLM-stampede.
@@ -888,6 +917,31 @@ async def sweep_orphaned_live_turns(
                     ckpt_ts.isoformat(),
                     result.auto_continue_mode,
                 )
+
+                # ── Proposal B PR1 — boot-sweep epoch mint (lane 14) ──
+                # MINT-IF-NONE: the silent checkpoint resume founds the
+                # epoch boundary that "no message, no clear at all" left
+                # missing (map §5 gap 5) — ``founding_source='boot'``,
+                # ``founding_message_id=NULL`` (the HONEST null: no
+                # message exists). An OPEN epoch continues untouched
+                # (resume is delivery, not founding); only a stranded
+                # instance gets the boundary row. RECORD-SIDE ONLY,
+                # FAIL-OPEN (the pass never wedges — the mint failure is
+                # a log line and the boot proceeds unchanged).
+                try:
+                    await asyncio.to_thread(
+                        mint_boot_epoch_if_none_fail_open,
+                        getattr(manager, "_mission_record_service", None),
+                        instance_id,
+                    )
+                except Exception as mint_exc:  # noqa: BLE001 — never wedge
+                    logger.warning(
+                        "[BOOT_CONTINUE] mission-record mint failed for "
+                        "instance=%s: %s: %s (boot proceeds)",
+                        instance_id[:8],
+                        type(mint_exc).__name__,
+                        mint_exc,
+                    )
 
                 # Stagger cadence (mirrors AutoContinue Δ5 / D22).
                 if result.scheduled % STAGGER_EVERY == 0:

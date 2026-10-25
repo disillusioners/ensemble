@@ -57,6 +57,9 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from daemon.repositories.task.models import SuspensionReason
+from daemon.services.mission_record_service import (
+    mint_cascade_resume_epoch_if_stranded_fail_open,
+)
 from daemon.repositories.message_queue.models import (
     MessageStatus,
     MessageType,
@@ -680,6 +683,14 @@ class WatchoverService:
                             rid,
                         )
                         if not self._has_pending_resume_message(rid, resume_msg):
+                            # ── Proposal B PR1 — cascade_resume (lane 10,
+                            # enqueue-fallback sub-lane): mint-if-stranded
+                            # (record-side only, fail-open).
+                            await asyncio.to_thread(
+                                mint_cascade_resume_epoch_if_stranded_fail_open,
+                                getattr(manager, "_mission_record_service", None),
+                                rid,
+                            )
                             try:
                                 await manager.enqueue_message(
                                     instance_id=rid,
@@ -727,6 +738,14 @@ class WatchoverService:
                     )
                     try:
                         if not self._has_pending_resume_message(rid, resume_msg):
+                            # ── Proposal B PR1 — cascade_resume (lane 10,
+                            # enqueue-fallback sub-lane): mint-if-stranded
+                            # (record-side only, fail-open).
+                            await asyncio.to_thread(
+                                mint_cascade_resume_epoch_if_stranded_fail_open,
+                                getattr(manager, "_mission_record_service", None),
+                                rid,
+                            )
                             await manager.enqueue_message(
                                 instance_id=rid,
                                 message=resume_msg,

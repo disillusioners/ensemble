@@ -35,6 +35,9 @@ from .persistence import (
     get_checkpointer,
 )
 from .services.mission_record_service import MissionRecordService
+from .services.mission_record_service import (
+    mint_cascade_resume_epoch_if_stranded_fail_open,
+)
 from .repositories import (
         SQLModelInstanceRepository,
         SQLModelProjectRepository,
@@ -829,6 +832,49 @@ class InstanceManager:
         applied = migration_runner.run_pending_migrations()
         if applied:
             logger.info(f"Applied {len(applied)} migrations: {applied}")
+
+        # ── Proposal B PR1 — adoption-delta (b): advisory nudge-commission
+        # backfill (dry-run-loggable) ──────────────────────────────────
+        # Best-effort historical coverage of the existing
+        # ``instance_ops_audit`` nudge rows (the tiny surface: 6 rows / 1
+        # committed nudge all-time): committed non-dry nudges whose
+        # target is STILL NON-TERMINAL mint ADVISORY commission rows
+        # (``provenance='backfill'``, deterministic ids, EXCLUDED from
+        # routing authority forever). IDEMPOTENT (deterministic UUID5
+        # commission ids + epoch-0 resolve-if-none). Runs DRY-RUN ONLY at
+        # boot in PR1 (the loggable plan; the committing run is an
+        # operator action — ``backfill_advisory_nudge_commissions(
+        # dry_run=False)`` — matching proposal-b §5.2's "runs
+        # dry-run-loggable before commit"). NEVER breaks boot: the
+        # envelope swallows everything but logs loudly. Skipped entirely
+        # when the mode ladder is ``off``.
+        try:
+            from .services.mission_record_service import (
+                MissionRecordMode,
+                resolve_mission_records_mode,
+            )
+
+            if resolve_mission_records_mode() != MissionRecordMode.OFF:
+                # SYNC context (manager __init__ — the migration block
+                # above is sync too): call the backfill directly.
+                _backfill = (
+                    self._mission_record_service.backfill_advisory_nudge_commissions(
+                        dry_run=True,
+                    )
+                )
+                if _backfill.get("scanned"):
+                    logger.info(
+                        "mission_records: advisory nudge-commission backfill "
+                        "dry-run plan: %s",
+                        _backfill,
+                    )
+        except Exception as _backfill_exc:  # noqa: BLE001 — never break boot
+            logger.warning(
+                "mission_records: backfill dry-run failed at boot (ignored): "
+                "%s: %s",
+                type(_backfill_exc).__name__,
+                _backfill_exc,
+            )
 
         # Postgres-specific schema evolution. create_all() only creates
         # tables that don't exist — it does NOT add columns to existing
@@ -13395,6 +13441,29 @@ class InstanceManager:
             #    WorkerPool / JobQueue dispatch) would race on the langgraph
             #    checkpoint and corrupt it.
             async def _do_process():
+                # ── Proposal B PR1 — cascade_resume epoch boundary
+                # (lane 10, direct sub-lane) ── NO mint unless the
+                # instance is stranded (no OPEN epoch): an in-mission
+                # resume continues its open epoch (resume is delivery,
+                # not founding); a stranded root gets an honest
+                # ``founding_source='revive'`` boundary row.
+                # RECORD-SIDE ONLY, FAIL-OPEN (the resume must never
+                # wedge on a record failure).
+                try:
+                    await asyncio.to_thread(
+                        mint_cascade_resume_epoch_if_stranded_fail_open,
+                        self._mission_record_service,
+                        instance_id,
+                    )
+                except Exception as _mint_exc:  # noqa: BLE001 — never wedge
+                    logger.warning(
+                        "cascade_resume: mission-record mint failed for "
+                        "instance=%s…: %s: %s (resume proceeds)",
+                        instance_id[:8],
+                        type(_mint_exc).__name__,
+                        _mint_exc,
+                    )
+
                 # P0 hotfix (review-2): cascade_resume bypasses enqueue
                 # (this call goes directly to
                 # ``_process_message_with_tracking``, not through

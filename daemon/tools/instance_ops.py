@@ -116,6 +116,11 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from .provenance import ProvenanceVerdict, restart_provenance
+from daemon.services.mission_record_service import (
+    mint_commission_fail_open,
+    mint_revive_epoch_fail_open,
+    resolve_or_mint_fail_open,
+)
 from ._tool_registry import register_tool_category
 
 logger = logging.getLogger(__name__)
@@ -604,6 +609,7 @@ async def _register_nudge_completion_watcher(
     worker_instance_id: str,
     message_id: str | None = None,
     lane: str = "enqueue",
+    mission_id: str | None = None,
 ) -> bool:
     """Mint the ``dependency_watchers`` row for an ``instance_nudge``.
 
@@ -707,6 +713,13 @@ async def _register_nudge_completion_watcher(
                 "child_id": worker_instance_id,
                 "parent_id": nudger_instance_id,
                 "message_id": message_id,
+                # Proposal B PR1: the commission's mission rides the
+                # free-form JSONB (NO schema change — proposal-b §2.1).
+                # ``None`` absent-when-None keeps pre-PR1 payloads
+                # byte-identical... the key IS present with a None value
+                # here only when a mission exists upstream; keep the
+                # payload literally unchanged when there is no mission.
+                **({"mission_id": mission_id} if mission_id else {}),
             },
         )
         await _bus.watch(
@@ -1559,6 +1572,62 @@ Examples:
             return _error(f"instance_nudge failed: {type(exc).__name__}")
         if audit is not None and row_id:
             audit.settle_audit(row_id, "committed", after={"lane": "injection" if injected else "enqueue"})
+
+        # ── Proposal B PR1 — instance_nudge mission records (lane 4) ──
+        # Minted ADJACENT to the committed audit row (record-side only;
+        # FAIL-OPEN — a record failure never fails the nudge).
+        # NOTE (documented deviation from proposal-b §2.1's "same
+        # transaction as the audit row"): the nudge's audit is Tier-2
+        # WRITE-AHEAD — ``write_audit_ahead`` and ``settle_audit`` are
+        # TWO transactions today, so "the audit transaction" is not a
+        # single unit to ride. The commission is minted here instead:
+        # after the act is KNOWN-committed, so the commission never
+        # records an act that failed, and dry-run previews mint NOTHING
+        # (preview rows are not real acts). Preview/preview-run rows
+        # are excluded upstream by the ``dry_run`` early return.
+        _mission_record_service = getattr(
+            manager, "mission_record_service", None
+        )
+        _nudge_mission_id: str | None = None
+        if caller_instance_id:
+            # The nudger's mission (resolve-or-mint ladder — a bare
+            # maintenance-context nudger mints its OWN epoch here,
+            # ``founding_source='instance_nudge'``: no commissioning act
+            # is ever unattributed).
+            _nudge_mission_id = await asyncio.to_thread(
+                resolve_or_mint_fail_open,
+                _mission_record_service,
+                caller_instance_id,
+                "instance_nudge",
+                founding_source="instance_nudge",
+            )
+            # The COMMISSION row: mission = the nudger's mission,
+            # commissioner = the nudger, worker = the target. D4(ii)
+            # mint-path validation: a missing worker row RAISES inside
+            # the service; the wrapper catches + logs (the nudge still
+            # succeeded — a commission that cannot be validated is not
+            # recorded, and the miss is LOUD in the logs).
+            await asyncio.to_thread(
+                mint_commission_fail_open,
+                _mission_record_service,
+                _nudge_mission_id,
+                commissioner_instance_id=caller_instance_id,
+                worker_instance_id=target_id,
+                lane="instance_nudge",
+            )
+        if would_revive:
+            # The target is TERMINAL: additionally MINT the revive epoch
+            # ON THE TARGET (parent chain; the nudge is what commissioned
+            # the revived work, so the nudger is the epoch's
+            # commissioner).
+            await asyncio.to_thread(
+                mint_revive_epoch_fail_open,
+                _mission_record_service,
+                target_id,
+                commissioner_instance_id=caller_instance_id,
+                context_label="instance_nudge_terminal",
+            )
+
         # D2(b) — mint the completion watcher AFTER the audit settle, so
         # the committed audit row is durable before the watcher exists.
         # FAIL-OPEN: a failed mint degrades to today's behaviour (no
@@ -1572,6 +1641,10 @@ Examples:
                 worker_instance_id=target_id,
                 message_id=enqueued_message_id,
                 lane="injection" if injected else "enqueue",
+                # Proposal B PR1: the commission's mission rides the
+                # watcher metadata (free-form JSONB key — no schema
+                # change).
+                mission_id=_nudge_mission_id,
             )
         except Exception as mint_exc:  # noqa: BLE001 — fail-open producer
             logger.warning(

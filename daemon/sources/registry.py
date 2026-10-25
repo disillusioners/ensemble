@@ -28,6 +28,10 @@ from .base import (
     SourceStatus,
 )
 from .mapper import InstanceMapper
+from daemon.services.mission_record_service import (
+    attach_founding_message_fail_open,
+    resolve_or_mint_fail_open,
+)
 
 if TYPE_CHECKING:
     from daemon.services.job_queue_service import JobQueueService
@@ -1141,6 +1145,19 @@ class SourceRegistry:
                 # (S scope) added ``source``, message-display-latency
                 # Phase 1 added ``echo_id``; we use both.
                 echo_id = str(uuid.uuid4())
+                # ── Proposal B PR1 — chat epoch mint (lane 2, inject
+                # sub-lane) ── RESOLVE-OR-MINT before the injection; the
+                # echo id IS the founding message id (the drain stamps
+                # it as the HumanMessage id), so the record is COMPLETE
+                # at mint time. FAIL-OPEN, record-side only.
+                await asyncio.to_thread(
+                    resolve_or_mint_fail_open,
+                    getattr(self._manager, "mission_record_service", None),
+                    instance_id,
+                    "chat",
+                    founding_source="chat",
+                    founding_message_id=echo_id,
+                )
                 self._manager.set_injection(
                     instance_id,
                     msg.content,
@@ -1189,14 +1206,36 @@ class SourceRegistry:
             # ``enqueue_message_job`` so the JobItem mirror is created
             # alongside the Task row. The legacy Task-only path is gone
             # — every public/external entry point now creates a JobItem.
-            await self._manager.enqueue_message_job(
+            # ── Proposal B PR1 — chat epoch mint (lane 2, enqueue
+            # sub-lane) ── RESOLVE-OR-MINT before the dispatch; the
+            # founding message id is attached after (mint-then-attach).
+            # FAIL-OPEN, record-side only.
+            _mission_record_service = getattr(
+                self._manager, "mission_record_service", None
+            )
+            _mission_id = await asyncio.to_thread(
+                resolve_or_mint_fail_open,
+                _mission_record_service,
+                instance_id,
+                "chat",
+                founding_source="chat",
+            )
+            _enqueue_result = await self._manager.enqueue_message_job(
                 instance_id=instance_id,
                 message=msg.content,
                 source=source,
                 priority=priority,
                 images=msg.images,
                 metadata=msg.metadata,
+                mission_id=_mission_id,
             )
+            if _mission_id:
+                await asyncio.to_thread(
+                    attach_founding_message_fail_open,
+                    _mission_record_service,
+                    _mission_id,
+                    _enqueue_result.message_id,
+                )
             logger.info(
                 f"✅ Queued message: source_id={source_id}, "
                 f"user={msg.external_user_id}, instance={instance_id}, "

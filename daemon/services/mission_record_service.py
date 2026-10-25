@@ -891,26 +891,42 @@ def resolve_or_mint_fail_open(
     founding_source: Optional[str] = None,
     commissioner_instance_id: Optional[str] = None,
     work_id: Optional[str] = None,
+    session: Optional[Session] = None,
 ) -> Optional[str]:
     """Commissioning-lane wrapper: resolve-or-mint, never raise.
 
     Mode gate: ``off`` → ``None`` (no mints, no reads — the lane
     proceeds record-blind, byte-identical to pre-PR1). Any failure →
     logged + ``None`` (the D2(b) watcher-mint fail-open posture: the
-    record must never break the lane).
+    record must never break the lane). When ``session`` is provided the
+    mint rides the CALLER's transaction inside a SAVEPOINT
+    (``begin_nested``) — the send_message delegation lane's
+    same-transaction-as-the-watcher contract — and a mint failure rolls
+    back the savepoint only, never the caller's own writes.
     """
     if service is None:
         return None
     if resolve_mission_records_mode() == MissionRecordMode.OFF:
         return None
     try:
-        resolution = service.resolve_or_mint(
-            actor_instance_id,
-            lane,
-            founding_source=founding_source,
-            commissioner_instance_id=commissioner_instance_id,
-            work_id=work_id,
-        )
+        if session is not None:
+            with session.begin_nested():
+                resolution = service.resolve_or_mint(
+                    actor_instance_id,
+                    lane,
+                    founding_source=founding_source,
+                    commissioner_instance_id=commissioner_instance_id,
+                    work_id=work_id,
+                    session=session,
+                )
+        else:
+            resolution = service.resolve_or_mint(
+                actor_instance_id,
+                lane,
+                founding_source=founding_source,
+                commissioner_instance_id=commissioner_instance_id,
+                work_id=work_id,
+            )
         _log_mint(resolution.rung, resolution.created, actor_instance_id, lane, resolution.mission_id)
         return resolution.mission_id
     except Exception as exc:  # noqa: BLE001 — fail-open producer
@@ -1084,6 +1100,7 @@ def mint_commission_fail_open(
     worker_instance_id: str,
     lane: str,
     work_id: Optional[str] = None,
+    session: Optional[Session] = None,
 ) -> Optional[str]:
     """Commission-mint wrapper (never raise).
 
@@ -1098,13 +1115,24 @@ def mint_commission_fail_open(
     if resolve_mission_records_mode() == MissionRecordMode.OFF:
         return None
     try:
-        commission = service.mint_commission(
-            mission_id,
-            commissioner_instance_id=commissioner_instance_id,
-            worker_instance_id=worker_instance_id,
-            lane=lane,
-            work_id=work_id,
-        )
+        if session is not None:
+            with session.begin_nested():
+                commission = service.mint_commission(
+                    mission_id,
+                    commissioner_instance_id=commissioner_instance_id,
+                    worker_instance_id=worker_instance_id,
+                    lane=lane,
+                    work_id=work_id,
+                    session=session,
+                )
+        else:
+            commission = service.mint_commission(
+                mission_id,
+                commissioner_instance_id=commissioner_instance_id,
+                worker_instance_id=worker_instance_id,
+                lane=lane,
+                work_id=work_id,
+            )
         logger.info(
             "mission_records COMMISSION lane=%s mission=%s… "
             "commissioner=%s… worker=%s… commission=%s…",
@@ -1127,6 +1155,35 @@ def mint_commission_fail_open(
             exc,
         )
         return None
+
+
+def attach_work_id_fail_open(
+    service: Optional["MissionRecordService"],
+    mission_id: Optional[str],
+    work_id: Optional[str],
+) -> bool:
+    """Post-enqueue job-linkage attach wrapper (never raise; miss = logged)."""
+    if service is None or not mission_id or not work_id:
+        return False
+    if resolve_mission_records_mode() == MissionRecordMode.OFF:
+        return False
+    try:
+        attached = service.attach_work_id(mission_id, work_id)
+        if not attached:
+            logger.debug(
+                "mission_records: work_id attach skipped (mission=%s… "
+                "already carries a work_id)",
+                mission_id[:8],
+            )
+        return attached
+    except Exception as exc:  # noqa: BLE001 — fail-open producer
+        logger.warning(
+            "mission_records: attach_work_id failed (mission=%s…): %s: %s",
+            mission_id[:8],
+            type(exc).__name__,
+            exc,
+        )
+        return False
 
 
 def attach_founding_message_fail_open(
@@ -1176,4 +1233,5 @@ __all__ = [
     "mint_cascade_resume_epoch_if_stranded_fail_open",
     "mint_commission_fail_open",
     "attach_founding_message_fail_open",
+    "attach_work_id_fail_open",
 ]

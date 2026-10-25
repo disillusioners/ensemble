@@ -76,6 +76,24 @@ report's destination).
 REJECTED (proposal-a §2.1): the dual-recipient + mission-tag candidate.
 It keeps the demonstrated harm (the structural parent still consumes the
 foreign report) and needs two recipient sets taught to the backstop.
+
+ADOPTION DELTA (a) — TIE-BREAK PRECEDENCE vs THE MISSION-COMMISSION
+ROWS (completion-subsystem Proposal B PR1)
+----------------------------------------------------------
+Proposal B PR1 now mints ``mission_commissions`` rows on the nudge and
+send_message lanes (multiple OUTSTANDING rows per worker allowed; the
+guarded-state lifecycle is the discriminator; the rung-2 lookup takes
+the OLDEST outstanding row). THIS RESOLVER'S AUTHORITY IS UNCHANGED:
+report routing still keys on the audit-ledger latest-committed-nudge
+tie-break, NOT on commission rows. The commission ledger is
+PR1-write-only (``ENSEMBLE_MISSION_RECORDS`` mode ladder, default
+``dry``); the routing flip (commission-row lookup, with whatever
+multi-commissioner tie-break is decided for the flip) is the PR2/PR3
+boundary. Advisory backfill commission rows
+(``advisory_backfill=True``, ``provenance='backfill'``) are EXCLUDED
+from routing authority FOREVER — if a future flip ever consults
+commission rows, it must filter them out (the "if dropped, the ledger
+is worse than no ledger" rule).
 """
 
 from __future__ import annotations

@@ -35,6 +35,10 @@ from pydantic import BaseModel, Field, model_validator
 from sqlmodel import Session
 
 from daemon.constants import INJECTION_ELIGIBLE_STATUSES, TERMINAL_INSTANCE_STATUSES
+from daemon.services.mission_record_service import (
+    mint_commission_fail_open,
+    resolve_or_mint_fail_open,
+)
 # M5 — single-source the documented default for the
 # ``spawn_intelligence_tier_high_model`` boot snapshot. The constant
 # lives in ``daemon.config`` (canonical home); the tool layer imports
@@ -1226,6 +1230,56 @@ async def _register_child_completion_watcher(
                 "Bus singleton is None — bus wiring failure (no fallback)"
             )
             return None
+
+        # ── Proposal B PR1 — send_message commission (lane 5) ────────
+        # The COMMISSION row is minted HERE — the watcher region, in the
+        # SAME WriteGuardSession as the watcher mint (the
+        # same-transaction contract, proposal-b §2.2 lane 5), and the
+        # FollowUp metadata gains the mission id (free-form JSONB key —
+        # NO schema change). WATCHERS STAY EXACTLY AS THEY ARE — the
+        # commission row is the generalization, not a replacement.
+        #
+        # Boundary honesty (documented): this helper is the parent→child
+        # watcher region — the tree-guard above means a send to a
+        # NON-child target mints NO watcher and therefore NO commission
+        # either (the commission mint rides the watcher's boundary, per
+        # the docs' "written alongside the existing watcher mint").
+        # ADOPTION DELTA (a): a second commission of the same worker
+        # mints a SECOND OUTSTANDING row; routing authority stays with
+        # the A-resolver (report_recipient) until the PR2/PR3 flip.
+        _mission_id_for_commission: str | None = None
+        try:
+            _mission_record_service = getattr(
+                manager, "_mission_record_service", None
+            )
+            if _mission_record_service is not None:
+                _resolution = resolve_or_mint_fail_open(
+                    _mission_record_service,
+                    parent_instance_id,
+                    "send_message",
+                    session=session,
+                )
+                if _resolution:
+                    _mission_id_for_commission = _resolution
+                    mint_commission_fail_open(
+                        _mission_record_service,
+                        _mission_id_for_commission,
+                        commissioner_instance_id=parent_instance_id,
+                        worker_instance_id=child_instance_id,
+                        lane="send_message",
+                        session=session,
+                    )
+        except Exception as commission_exc:  # noqa: BLE001 — fail-open
+            logger.warning(
+                "mission_records: send_message commission region failed "
+                "(parent=%s… child=%s…): %s: %s — the watcher mint "
+                "continues unaffected",
+                parent_instance_id[:8],
+                child_instance_id[:8],
+                type(commission_exc).__name__,
+                commission_exc,
+            )
+
         try:
             _follow_up = FollowUp(
                 target_instance_id=parent_instance_id,
@@ -1239,6 +1293,14 @@ async def _register_child_completion_watcher(
                     "child_id": child_instance_id,
                     "parent_id": parent_instance_id,
                     "message_id": message_id,
+                    # Proposal B PR1: the commission's mission rides the
+                    # free-form JSONB (absent when no mission — the
+                    # pre-PR1 payload shape is preserved).
+                    **(
+                        {"mission_id": _mission_id_for_commission}
+                        if _mission_id_for_commission
+                        else {}
+                    ),
                 },
             )
             await _bus.watch(
