@@ -946,14 +946,14 @@ class TestDrainEchoId:
         assert args[0] == "iid-tap-echo"
         items = args[1]
         assert isinstance(items, list) and len(items) >= 1
-        ids = [mid for mid, _ts, _seq in items]
+        ids = [mid for mid, _ts, _seq, *_rest in items]
         # Identity contract: the tap records the drain's HumanMessage.id,
         # which is the FIFO entry's echo_id (NOT a fresh uuid).
         assert echo_id in ids
         # Truthful first-seen ts: a non-empty ISO string from
         # ``datetime.now(UTC).isoformat()`` inside MessageTapSlot —
         # not the empty-string sentinel and not None.
-        for _mid, ts, seq in items:
+        for _mid, ts, seq, *_rest in items:
             assert isinstance(ts, str) and len(ts) > 0
             assert seq is None
 
@@ -1007,9 +1007,9 @@ class TestDrainEchoId:
         assert args[0] == "iid-tap-mint"
         items = args[1]
         assert isinstance(items, list) and len(items) >= 1
-        ids = [mid for mid, _ts, _seq in items]
+        ids = [mid for mid, _ts, _seq, *_rest in items]
         assert drained_hm.id in ids
-        for _mid, ts, seq in items:
+        for _mid, ts, seq, *_rest in items:
             assert isinstance(ts, str) and len(ts) > 0
             assert seq is None
 
@@ -1114,12 +1114,12 @@ class TestChildReportTapFires:
         assert args[0] == "iid-parent"
         items = args[1]
         assert isinstance(items, list) and len(items) >= 1
-        ids = [mid for mid, _ts, _seq in items]
+        ids = [mid for mid, _ts, _seq, *_rest in items]
         # The stamped id (NOT a fresh uuid4) is the row the side-table
         # records — this is the LLM/SSE/side-table alignment the
         # report-injection id-stamp at graph.py:3703 closed.
         assert report_hm.id in ids
-        for _mid, ts, seq in items:
+        for _mid, ts, seq, *_rest in items:
             assert isinstance(ts, str) and len(ts) > 0
             assert seq is None
 
@@ -1195,5 +1195,5 @@ class TestChildReportSseIdentity:
         # across the SSE bubble, the checkpoint row, and the metadata row.
         args, _ = metadata_repo.upsert_batch.call_args
         assert args[0] == "iid-parent"
-        recorded_ids = {mid for mid, _ts, _seq in args[1]}
+        recorded_ids = {mid for mid, _ts, _seq, *_rest in args[1]}
         assert checkpoint_id in recorded_ids
