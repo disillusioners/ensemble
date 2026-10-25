@@ -528,6 +528,25 @@ scheduling:
   # Cache duration (seconds) for NEGATIVE host-local tz results. min(60, host_local_tz_cache_seconds) applied.
   negative_cache_seconds: 60
 
+# Notify-User Settings (ari-voice, 2026-10-25).
+# Field names mirror daemon/config.py:NotifyUserConfig exactly.
+# Env vars override these via the ENSEMBLE_NOTIFY_USER_* prefix (auto-covered
+# by tests/conftest.py::_TRACKED_ENV_PREFIXES = ("OPENAI_", "ENSEMBLE_")).
+notify_user:
+  # Kill-switch (N9). false disables the notify_user tool entirely
+  # (typed refusal notify_disabled).
+  enabled: true
+  # M — rolling-hour cap PER RESOLVED DESTINATION (target_hash), from
+  # the notify_audit ledger. ONLY accepted rows consume budget (N3).
+  max_per_hour: 6
+  # The >=60s per-instance interval proxy for N=1/turn (fold-able 4:
+  # baseline = the last ACCEPTED-class row; refusals never extend it).
+  min_interval_seconds: 60
+  # The ONE never-block bound (W4): wait_for(preflight + send + retry).
+  timeout_seconds: 10.0
+  # D6 size cap — rejected BEFORE resolution/dispatch (single-chunk).
+  max_chars: 2000
+
 # Skill Evolution System Settings
 # Field names mirror daemon/config.py:SkillEvolutionConfig exactly.
 # Any env var listed in .env.example (SKILL_EVOLUTION_*) overrides these.

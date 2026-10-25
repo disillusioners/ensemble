@@ -113,6 +113,7 @@ class NotifyAuditRepository:
         outcome: str,
         *,
         error_code: str | None = None,
+        refusal_reason: str | None = None,
         detail: str | None = None,
     ) -> None:
         """Terminal UPDATE of the own write-ahead row. Raises on
@@ -125,6 +126,8 @@ class NotifyAuditRepository:
             row.outcome = outcome
             if error_code is not None:
                 row.error_code = error_code[:256]
+            if refusal_reason is not None:
+                row.refusal_reason = refusal_reason[:128]
             if detail is not None:
                 row.detail = detail[:512]
             session.add(row)

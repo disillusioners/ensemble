@@ -2784,6 +2784,67 @@ class SchedulingConfig(BaseSettings):
     )
 
 
+class NotifyUserConfig(BaseSettings):
+    """Configuration for the ``notify_user`` tool (ari-voice, 2026-10-25).
+
+    Class name + env prefix per the N8 fold-2 ruling: ``NotifyUserConfig``
+    with prefix ``ENSEMBLE_NOTIFY_USER_`` (consistent with tool
+    ``notify_user`` / category ``notify-user``). Auto-covered by the
+    tests' ``_TRACKED_ENV_PREFIXES = ("OPENAI_", "ENSEMBLE_")`` prefix
+    match in ``tests/conftest.py`` (no conftest edits required).
+
+    The kill-switch (N9) is ``enabled`` — ``false`` disables the tool
+    with the typed refusal ``notify_disabled``.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ENSEMBLE_NOTIFY_USER_")
+
+    enabled: bool = Field(
+        default=True,
+        description="Kill-switch (N9). false disables the notify_user tool "
+                    "with the typed refusal notify_disabled. Cheap insurance "
+                    "against the disclosed prompt-injection exfil residual. "
+                    "Env: ENSEMBLE_NOTIFY_USER_ENABLED.",
+    )
+    max_per_hour: int = Field(
+        default=6,
+        ge=1,
+        description="M — the rolling-hour cap PER RESOLVED DESTINATION "
+                    "(target_hash = sha256(source_id + ':' + external_user_id), "
+                    "W1), counted from the notify_audit ledger (C3 "
+                    "commit-before-count; ONLY accepted rows consume budget, "
+                    "N3). Calibrated to the 1800s self-alarm floor. "
+                    "Env: ENSEMBLE_NOTIFY_USER_MAX_PER_HOUR.",
+    )
+    min_interval_seconds: int = Field(
+        default=60,
+        ge=1,
+        description="The >=60s per-instance interval proxy for N=1/turn "
+                    "(strict turn identity is not tool-visible; turns are "
+                    "serialized per instance). Baseline = the instance's "
+                    "last ACCEPTED-class ledger row (fold-able 4 pin) — "
+                    "refusals never extend the cooldown. "
+                    "Env: ENSEMBLE_NOTIFY_USER_MIN_INTERVAL_SECONDS.",
+    )
+    timeout_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        description="The ONE never-block bound (W4): wait_for(preflight + "
+                    "send + retry, timeout). Every path returns within this "
+                    "budget; backoff is computed from the remaining budget. "
+                    "Env: ENSEMBLE_NOTIFY_USER_TIMEOUT_SECONDS.",
+    )
+    max_chars: int = Field(
+        default=2000,
+        ge=1,
+        description="D6 size cap — the tool-side rejection bound BEFORE any "
+                    "resolution or dispatch (single-chunk policy: one notify "
+                    "= one chat message). 2000 reuses DISCORD_MAX_MESSAGE_"
+                    "LENGTH; the adapter's post-format split residual is "
+                    "disclosed. Env: ENSEMBLE_NOTIFY_USER_MAX_CHARS.",
+    )
+
+
 class McpPoolConfig(BaseSettings):
     """MCP warm-up connection pool configuration."""
 
@@ -4738,6 +4799,10 @@ class Config(BaseSettings):
     services: ServicesConfig = Field(default_factory=ServicesConfig)
     job_system: JobSystemConfig = Field(default_factory=JobSystemConfig)
     scheduling: SchedulingConfig = Field(default_factory=SchedulingConfig)
+    # ari-voice (2026-10-25): the notify_user knob section (N8 — class
+    # NotifyUserConfig, env prefix ENSEMBLE_NOTIFY_USER_). Peers with
+    # `scheduling:` — the yaml block mirrors the field names exactly.
+    notify_user: NotifyUserConfig = Field(default_factory=NotifyUserConfig)
     mcp_pool: McpPoolConfig = Field(default_factory=McpPoolConfig)
     live_views: LiveViewsConfig = Field(default_factory=LiveViewsConfig)
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig)
