@@ -128,14 +128,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from daemon.services.mission_record_service import (
+    mint_boot_epoch_if_none_fail_open,
+)
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
-
-from daemon.services.mission_record_service import (
-    mint_boot_epoch_if_none_fail_open,
-)
 
 
 # ---------------------------------------------------------------------------
@@ -527,7 +527,7 @@ async def continue_running_instances_after_restart(
                 try:
                     await asyncio.to_thread(
                         mint_boot_epoch_if_none_fail_open,
-                        getattr(manager, "_mission_record_service", None),
+                        getattr(manager, "mission_record_service", None),
                         instance_id,
                     )
                 except Exception as mint_exc:  # noqa: BLE001 — never wedge
@@ -931,7 +931,7 @@ async def sweep_orphaned_live_turns(
                 try:
                     await asyncio.to_thread(
                         mint_boot_epoch_if_none_fail_open,
-                        getattr(manager, "_mission_record_service", None),
+                        getattr(manager, "mission_record_service", None),
                         instance_id,
                     )
                 except Exception as mint_exc:  # noqa: BLE001 — never wedge

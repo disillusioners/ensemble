@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any, Optional
+from typing import TYPE_CHECKING
 
 from sqlalchemy import update
 from sqlmodel import Session, select
@@ -31,7 +31,11 @@ from .models import (
     MissionProvenance,
     MissionRecord,
     MissionStatus,
+    _utc_now_iso,
 )
+
+if TYPE_CHECKING:
+    from sqlalchemy import Engine
 
 logger = logging.getLogger(__name__)
 
@@ -46,14 +50,6 @@ class MissionRecordError(RuntimeError):
     """
 
 
-def _utc_now_iso() -> str:
-    """TEXT ISO-8601 UTC stamp — the sanctioned ``now_utc_iso()`` helper
-    (``daemon/services/timestamps.py``; byte-identical output)."""
-    from ...services.timestamps import now_utc_iso
-
-    return now_utc_iso()
-
-
 class MissionRecordRepository:
     """SYNC data access for ``mission_records`` + ``mission_commissions``.
 
@@ -65,7 +61,7 @@ class MissionRecordRepository:
     ``None``, a fresh session is opened and committed.
     """
 
-    def __init__(self, engine: Any) -> None:
+    def __init__(self, engine: Engine) -> None:
         self._engine = engine
 
     # ── Reads (the service's own ladder lookups; NOT decision inputs in PR1) ──
@@ -74,7 +70,7 @@ class MissionRecordRepository:
         self,
         anchor_instance_id: str,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> MissionRecord | None:
         """Rung 1: the anchor's OPEN epoch, if any (newest first)."""
         if session is not None:
@@ -100,7 +96,7 @@ class MissionRecordRepository:
         self,
         anchor_instance_id: str,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> MissionRecord | None:
         """The anchor's most recent epoch of ANY status (parent-chain
         resolution for continuation / revive mints)."""
@@ -119,7 +115,7 @@ class MissionRecordRepository:
         self,
         worker_instance_id: str,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> MissionCommission | None:
         """Rung 2: the worker's OLDEST outstanding commission row.
 
@@ -144,7 +140,7 @@ class MissionRecordRepository:
         anchor_instance_id: str,
         founding_message_id: str,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> MissionRecord | None:
         """Mint idempotency probe: the ``(anchor, founding_message_id)`` key."""
         stmt = (
@@ -161,7 +157,7 @@ class MissionRecordRepository:
         self,
         anchor_instance_id: str,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> MissionRecord | None:
         """Backfill idempotency probe: the anchor's synthetic epoch-0 row."""
         stmt = (
@@ -180,7 +176,7 @@ class MissionRecordRepository:
         self,
         mission_id: str,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> MissionRecord | None:
         if session is not None:
             return session.get(MissionRecord, mission_id)
@@ -191,7 +187,7 @@ class MissionRecordRepository:
         self,
         commission_id: str,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> MissionCommission | None:
         if session is not None:
             return session.get(MissionCommission, commission_id)
@@ -202,7 +198,7 @@ class MissionRecordRepository:
         self,
         anchor_instance_id: str,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> int:
         """Epoch counter for ``epoch_seq`` (``1 + count``)."""
         stmt = (
@@ -220,8 +216,8 @@ class MissionRecordRepository:
         outcome: str,
         dry_run: bool,
         *,
-        session: Optional[Session] = None,
-    ) -> list[Any]:
+        session: Session | None = None,
+    ) -> list[tuple[str, str, str, str]]:
         """Adoption-delta (b) source scan: committed non-dry audit rows.
 
         Returns raw ``(id, created_by_instance_id, target, created_at)``
@@ -255,7 +251,7 @@ class MissionRecordRepository:
         self,
         record: MissionRecord,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> MissionRecord:
         """INSERT one epoch row. The partial unique index is the
         concurrent-mint race backstop; the service re-resolves on
@@ -273,7 +269,7 @@ class MissionRecordRepository:
         self,
         commission: MissionCommission,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> MissionCommission:
         if session is not None:
             session.add(commission)
@@ -291,7 +287,7 @@ class MissionRecordRepository:
         *,
         from_statuses: tuple[str, ...] = (MissionStatus.OPEN.value,),
         settled_at: str | None = None,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> bool:
         """Guarded epoch transition (the ``dependency_watchers`` shape).
 
@@ -300,7 +296,7 @@ class MissionRecordRepository:
         Exactly-once: a second concurrent transition of the same kind is
         a no-op (rowcount 0).
         """
-        values: dict[str, Any] = {"status": to_status}
+        values: dict[str, object] = {"status": to_status}
         if settled_at is not None:
             values["settled_at"] = settled_at
         stmt = (
@@ -323,7 +319,7 @@ class MissionRecordRepository:
         to_state: str,
         *,
         abandon_reason: str | None = None,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> bool:
         """Guarded commission transition — ONLY from ``outstanding``.
 
@@ -332,7 +328,7 @@ class MissionRecordRepository:
         ``dependency_watchers`` PENDING→FIRED exactly-once contract: a
         satisfied commission can never be abandoned (and vice versa).
         """
-        values: dict[str, Any] = {"state": to_state}
+        values: dict[str, object] = {"state": to_state}
         if to_state == CommissionState.SATISFIED.value:
             values["satisfied_at"] = _utc_now_iso()
         if abandon_reason is not None:
@@ -356,7 +352,7 @@ class MissionRecordRepository:
         mission_id: str,
         founding_message_id: str,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> bool:
         """Guarded founding-message attach / amendment (records only).
 
@@ -386,7 +382,7 @@ class MissionRecordRepository:
         mission_id: str,
         founding_message_id: str,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> bool:
         """Re-founding amendment (mid-mission user correction) — RECORDS
         ONLY in PR1. The DELIVERY-TIME firing and the gate read are PR2;
@@ -410,7 +406,7 @@ class MissionRecordRepository:
         mission_id: str,
         work_id: str,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> bool:
         """Guarded job-linkage attach (mint-then-attach order for
         ``job_continue`` — the new ``work_id`` is only known after the
@@ -435,14 +431,14 @@ class MissionRecordRepository:
         *,
         attest_method: str,
         attestation_bypassed: bool = False,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> bool:
         """Write the attestation block on the OPEN epoch (record-only).
 
         PR1 lands the FIELDS + this seam; the Term-1 blocking POLICY
         stays default-OFF (the ruling). The write is guarded on the
         epoch being OPEN — attestation events on closed epochs are
-        contract violations (return False, logged by the service).
+        contract violations (return False, logged by the caller).
         """
         stmt = (
             update(MissionRecord)
@@ -467,7 +463,7 @@ class MissionRecordRepository:
         anchor_instance_id: str,
         *,
         except_mission_id: str | None = None,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> int:
         """Record-side ``open → superseded`` sweep (job_continue lane).
 

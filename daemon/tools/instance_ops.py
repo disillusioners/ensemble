@@ -115,12 +115,13 @@ from typing import Annotated, Any
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from .provenance import ProvenanceVerdict, restart_provenance
 from daemon.services.mission_record_service import (
     mint_commission_fail_open,
     mint_revive_epoch_fail_open,
     resolve_or_mint_fail_open,
 )
+
+from .provenance import ProvenanceVerdict, restart_provenance
 from ._tool_registry import register_tool_category
 
 logger = logging.getLogger(__name__)

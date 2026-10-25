@@ -57,12 +57,12 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from daemon.repositories.task.models import SuspensionReason
-from daemon.services.mission_record_service import (
-    mint_cascade_resume_epoch_if_stranded_fail_open,
-)
 from daemon.repositories.message_queue.models import (
     MessageStatus,
     MessageType,
+)
+from daemon.services.mission_record_service import (
+    mint_cascade_resume_epoch_if_stranded_fail_open,
 )
 
 if TYPE_CHECKING:
@@ -688,7 +688,7 @@ class WatchoverService:
                             # (record-side only, fail-open).
                             await asyncio.to_thread(
                                 mint_cascade_resume_epoch_if_stranded_fail_open,
-                                getattr(manager, "_mission_record_service", None),
+                                getattr(manager, "mission_record_service", None),
                                 rid,
                             )
                             try:
@@ -743,7 +743,7 @@ class WatchoverService:
                             # (record-side only, fail-open).
                             await asyncio.to_thread(
                                 mint_cascade_resume_epoch_if_stranded_fail_open,
-                                getattr(manager, "_mission_record_service", None),
+                                getattr(manager, "mission_record_service", None),
                                 rid,
                             )
                             await manager.enqueue_message(

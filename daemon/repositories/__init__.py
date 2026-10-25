@@ -92,6 +92,20 @@ from .message_metadata.repository import MessageMetadataRepository
 from .report_injection.models import ReportInjection, ReportInjectionState
 from .report_injection.repository import ReportInjectionRepository
 
+# Mission-record anchor tables (completion-subsystem Proposal B PR1).
+# Imported here so ``SQLModel.metadata.create_all()`` (called from
+# ``daemon/manager.py``) registers the ``mission_records`` /
+# ``mission_commissions`` tables. Brand-new tables — no
+# ``_ensure_postgres_columns`` entry is needed. The SQLite-side
+# canonical DDL ships in the migration runner
+# (``20261025_122631_create_mission_records.sql`` +
+# ``20261025_122700_create_mission_commissions.sql``).
+# NAME COLLISION (read-only note): the legacy mission READ-MODEL is the
+# ``MissionRecord`` dataclass at ``daemon/services/mission_resolver.py:241``
+# — a DIFFERENT symbol from the ``mission_records`` table below. No
+# module imports both, so no import alias is needed.
+from .mission_record.models import MissionCommission, MissionRecord
+
 # Instance UI preferences (pin + color tag).
 # Imported here so ``SQLModel.metadata.create_all()`` registers the
 # ``instance_ui_prefs`` table. This is a brand-new table (not an
@@ -275,6 +289,9 @@ __all__ = [
     "ReportInjection",
     "ReportInjectionState",
     "ReportInjectionRepository",
+    # Mission-record anchor (completion-subsystem Proposal B PR1)
+    "MissionRecord",
+    "MissionCommission",
     # Instance UI preferences (pin + color tag)
     "InstanceUiPrefs",
     "InstanceUiPrefsRepository",

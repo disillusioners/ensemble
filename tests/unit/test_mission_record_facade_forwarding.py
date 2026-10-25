@@ -129,11 +129,22 @@ class TestFacadeMissionIdForwarding:
     def test_the_extended_signature_pins_carry_mission_id(self):
         """The signature-unchanged guard was EXTENDED for PR1 (not
         bypassed): both expected tuples must now carry ``mission_id`` —
-        a future removal of the kwarg must fail here too."""
+        a future removal of the kwarg must fail here too.
+
+        The LIVE facade signatures are asserted too: pinning only the
+        constants would test the literal, not the gate (the repo's
+        documented CONSTANT-PIN TAUTOLOGY anti-pattern).
+        """
         from tests.unit.test_phase1_facade_signature_unchanged import (
             _EXPECTED_ENQUEUE_MESSAGE_JOB_PARAMS,
             _EXPECTED_ENQUEUE_MESSAGE_PARAMS,
         )
+
+        for method in (
+            InstanceManager.enqueue_message,
+            InstanceManager.enqueue_message_job,
+        ):
+            assert "mission_id" in inspect.signature(method).parameters, method
 
         assert "mission_id" in _EXPECTED_ENQUEUE_MESSAGE_PARAMS
         assert "mission_id" in _EXPECTED_ENQUEUE_MESSAGE_JOB_PARAMS

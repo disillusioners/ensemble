@@ -148,7 +148,7 @@ flagged by the 2026-10-24 end-of-train verification — it predates PR1),
 **NOT** a PR1 deliverable: it covers the LEGACY dependency-watchers /
 C-union path and intentionally contains NO `mission_records` /
 `mission_commissions` references. It rides in the train because that is
-where the real-DB harness work landed. PR1's own coverage is the four
+where the real-DB harness work landed. PR1's own coverage is the five
 `tests/unit/test_mission_record_*` files.
 
 *(Independent-review F7 — framing correction. The commit that added

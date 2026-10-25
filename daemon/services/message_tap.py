@@ -135,7 +135,10 @@ class MessageTapSlot:
     Args:
         repo: A :class:`MessageMetadataRepository` (or any object
             exposing ``upsert_batch(thread_id: str,
-            items: list[tuple[str, str, int|None]]) -> int``).
+            items: list[tuple[str, str, int|None] |
+            tuple[str, str, int|None, str|None]]) -> int`` — the
+            4-tuple form carries the optional Proposal-B mission
+            stamp).
         source: One of the source-label constants above
             (``SOURCE_*``). The label appears in the failure-path
             WARNING so per-site observability is preserved.

@@ -20,6 +20,10 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from daemon.constants import INJECTION_ELIGIBLE_STATUSES, ROUTING_ENVELOPE_KEYS
+from daemon.services.mission_record_service import (
+    attach_founding_message_fail_open,
+    resolve_or_mint_fail_open,
+)
 
 from .base import (
     IncomingMessage,
@@ -28,10 +32,6 @@ from .base import (
     SourceStatus,
 )
 from .mapper import InstanceMapper
-from daemon.services.mission_record_service import (
-    attach_founding_message_fail_open,
-    resolve_or_mint_fail_open,
-)
 
 if TYPE_CHECKING:
     from daemon.services.job_queue_service import JobQueueService

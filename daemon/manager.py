@@ -34,9 +34,9 @@ from .persistence import (
     get_instance_messages,
     get_checkpointer,
 )
-from .services.mission_record_service import MissionRecordService
 from .services.mission_record_service import (
     MissionRecordMode,
+    MissionRecordService,
     mint_cascade_resume_epoch_if_stranded_fail_open,
     resolve_mission_records_mode,
 )
@@ -786,20 +786,25 @@ class InstanceManager:
         )
 
         # Completion-subsystem Proposal B PR1 (mission-record anchor):
-        # register the two mission-record tables with
+        # the two mission-record tables are registered with
         # ``SQLModel.metadata`` BEFORE ``create_all`` so they are created
         # on BOTH drivers at manager boot (snapshot/maintenance_runs
         # precedent for brand-new tables — no _ensure_postgres_columns
-        # mirror for the tables themselves). The SQLite-side canonical
-        # DDL auto-applies via the migration runner
+        # mirror for the tables themselves). The registration import now
+        # lives in ``daemon/repositories/__init__.py`` (the 8/8 sibling
+        # new-table convention) — this module imports that package, so
+        # the models are registered before ``create_all`` runs. The
+        # SQLite-side canonical DDL auto-applies via the migration runner
         # (20261025_122631_create_mission_records.sql +
         # 20261025_122700_create_mission_commissions.sql). PR1 contract:
         # mints write, NOTHING reads these tables for decisions (the
         # ENSEMBLE_MISSION_RECORDS mode ladder ships default ``dry``).
-        from .repositories.mission_record.models import (  # noqa: F401
-            MissionCommission,
-            MissionRecord,
-        )
+        # NAME COLLISION (read-only note): the legacy mission READ-MODEL
+        # is the ``MissionRecord`` dataclass at
+        # ``daemon/services/mission_resolver.py:241`` (wired at
+        # ``api.py:3132``) — a DIFFERENT symbol from the
+        # ``mission_records`` table registered here. No module imports
+        # both, so no import alias is needed.
         from .models.app_settings import AppSetting  # noqa: F401  # db-backed-settings P1: register app_settings before create_all
         # resource-cost-control Phase 1: register the 4 observability
         # tables BEFORE create_all so the PG boot path lands them on
@@ -1009,7 +1014,10 @@ class InstanceManager:
         # (exactly like the other kill-switches) instead of silently
         # degrading a live lane. The resolver CACHES the value
         # (restart-read): a mid-run env mutation can no longer flip it.
-        resolve_mission_records_mode()
+        # Bound ONCE here — the backfill block below reuses the local
+        # instead of re-resolving (the resolver is cached, so the two
+        # are equivalent; binding keeps the boot read explicit).
+        _mission_records_mode = resolve_mission_records_mode()
 
         # ── Proposal B PR1 — adoption-delta (b): advisory nudge-commission
         # backfill (dry-run-loggable) ──────────────────────────────────
@@ -1035,7 +1043,7 @@ class InstanceManager:
         # below, so the documented dry-run plan NEVER ran and never
         # logged on the default ``dry`` path.
         try:
-            if resolve_mission_records_mode() != MissionRecordMode.OFF:
+            if _mission_records_mode != MissionRecordMode.OFF:
                 # SYNC context (manager __init__ — the migration block
                 # above is sync too): call the backfill directly.
                 _backfill = (
@@ -3155,7 +3163,7 @@ class InstanceManager:
         return self._message_metadata_repo
 
     @property
-    def mission_record_service(self):
+    def mission_record_service(self) -> MissionRecordService:
         """Public read-only access to the :class:`MissionRecordService`.
 
         Completion-subsystem Proposal B PR1 — the SINGLE WRITER for the

@@ -46,6 +46,7 @@ from .resource_monitor.charge import (
 )
 from .messaging_types import AsyncMessageResult, LinkageContractError
 from .mission_record_service import (  # Proposal B PR1 — mission-record anchor
+    MISSION_ID_KEY,
     mint_revive_epoch_fail_open,
 )
 from .message_tap import (  # Phase 1 C2 — langgraph-checkpoint-perf
@@ -888,9 +889,9 @@ class _PreparedEnqueueContext(NamedTuple):
     # through the facade into this prelude (the Carrier-Threading
     # producer site). Carried here AND persisted on the MessageQueue
     # row's ``message_metadata`` JSONB under the reserved
-    # ``__ens_mission_id__`` key so the CLAIM path can re-read it into
-    # ``ProcessingContext.mission_id`` and the entry tap can stamp
-    # ``message_metadata.mission_id`` at delivery. ``None`` = every
+    # ``__ens_mission_id__`` key (the CLAIM path re-reads it into
+    # ``ProcessingContext.mission_id``; the entry tap stamps
+    # ``message_metadata.mission_id`` at delivery). ``None`` = every
     # pre-PR1 caller (byte-identical).
     mission_id: str | None = None
 
@@ -2292,8 +2293,6 @@ class InstanceMessagingService:
         # claim path can carry it to delivery (the F11 dispatch_chain
         # reserved-key precedent). The caller's metadata dict is NEVER
         # mutated — a copy carries the key.
-        from .mission_record_service import MISSION_ID_KEY
-
         if mission_id:
             if metadata:
                 metadata = {**metadata, MISSION_ID_KEY: mission_id}
@@ -2692,7 +2691,7 @@ class InstanceMessagingService:
                             # the enqueue proceeds unchanged).
                             mint_revive_epoch_fail_open(
                                 getattr(
-                                    self._manager, "_mission_record_service", None
+                                    self._manager, "mission_record_service", None
                                 ),
                                 instance_id,
                                 session=session,
@@ -2769,6 +2768,10 @@ class InstanceMessagingService:
             is_fresh_episode_user_message=is_fresh_episode_user_message,
             # W1 — the not-queued reason travels with the context.
             not_queued_reason=not_queued_reason,
+            # Proposal B PR1 — the mission carrier travels with the
+            # context (the producer computed it; the claim path
+            # re-reads it off the persisted MessageQueue row).
+            mission_id=mission_id,
         )
 
     async def enqueue_message(
@@ -3663,8 +3666,8 @@ class InstanceMessagingService:
         task_context: str | None = None,
         image_refs: list[str] | None = None,
         *,
-        mission_id: str | None = None,
         is_fresh_episode_user_message: bool = False,
+        mission_id: str | None = None,
     ) -> "MessageResult":
         """Process message with activity tracking and cancellation support.
 

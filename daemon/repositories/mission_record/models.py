@@ -10,8 +10,11 @@ Two new tables, both purely ADDITIVE:
   guarded-transition precedent. The record is the WRITE-SIDE truth for
   "what is this mission": the epoch ``mission_id`` is a fresh UUID4 per
   epoch (a deliberate break from the read-model's
-  ``mission_id == instance_id`` lean — ``MissionResolver`` later joins
-  it; that read model is NOT touched by PR1).
+  ``mission_id == instance_id`` lean — the legacy read-model
+  ``MissionRecord`` dataclass (``daemon/services/mission_resolver.py:241``)
+  later joins it; that read model is NOT touched by PR1, and it is a
+  DIFFERENT symbol from the ``mission_records`` table below — no import
+  alias is needed, no module imports both).
 
 * :class:`MissionCommission` — one row per commissioned worker / work
   item (``mission_commissions``). The census substrate (D2) and the
@@ -39,7 +42,6 @@ from __future__ import annotations
 
 import enum
 import uuid
-from typing import Any
 
 from sqlalchemy import Column, Index, String, Text, text
 from sqlmodel import Field, SQLModel
@@ -198,7 +200,7 @@ def _utc_now_iso() -> str:
 FOUNDING_MSG_NOT_NULL_SQL = "founding_message_id IS NOT NULL"
 
 
-def _string_column(nullable: bool = False) -> Any:
+def _string_column(nullable: bool = False) -> Column:
     """Indexed-friendly String column (the dependency_bus precedent:
     String indexes more cheaply than Text on PG; SQLite has no
     TEXT-vs-VARCHAR distinction)."""
@@ -222,9 +224,9 @@ class MissionRecord(SQLModel, table=True):
             Indexed with ``status`` — the resolution ladder's rung-1
             lookup ("does the actor have an OPEN epoch as anchor?").
         epoch_seq: Monotonic per anchor (1, 2, 3…). The field
-            ``mission_resolver`` cannot compute today (its epoch is
-            "always 1" — the map's NEW(iii)). Computed by the service at
-            mint: ``1 + count(existing rows for anchor)``.
+            ``daemon/services/mission_resolver.py`` cannot compute today
+            (its epoch is "always 1" — the map's NEW(iii)). Computed by
+            the service at mint: ``1 + count(existing rows for anchor)``.
         founding_message_id: The SOURCE U anchor, made durable. NULL
             only for message-less foundings (boot sweep, backfill) — an
             HONEST null, not a heuristic miss. The mint is idempotent

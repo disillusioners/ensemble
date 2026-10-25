@@ -55,8 +55,7 @@ logger = logging.getLogger(__name__)
 # when the tap carries a mission stamp. 3-tuples remain valid
 # (backward-compatible); a ``None`` mission_id is identical to its
 # absence (NULL column).
-Items = list[tuple[str, str, int | None]]
-ItemsStamped = list[tuple[str, str, "int | None", "str | None"]]
+Items = list[tuple[str, str, int | None] | tuple[str, str, int | None, str | None]]
 
 
 class MessageMetadataRepository:
@@ -69,7 +68,7 @@ class MessageMetadataRepository:
     layer (D3).
     """
 
-    def __init__(self, engine: "Engine") -> None:
+    def __init__(self, engine: Engine) -> None:
         # Engine is a sync ``sqlalchemy.Engine`` from the shared
         # ``daemon/repositories/factory.py`` engine factory. See
         # decisions.md D14 — repo is SYNC, not async.
@@ -98,11 +97,8 @@ class MessageMetadataRepository:
 
         rows = []
         for item in items:
-            if len(item) == 4:
-                mid, ts, seq, mission_id = item  # type: ignore[misc]
-            else:
-                mid, ts, seq = item  # type: ignore[misc]
-                mission_id = None
+            mid, ts, seq, *rest = item
+            mission_id = rest[0] if rest else None
             rows.append(
                 {
                     "thread_id": thread_id,

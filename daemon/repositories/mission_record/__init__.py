@@ -12,6 +12,7 @@ PR1 contract: mints write, NOTHING reads these tables for decisions.
 from .models import (
     CommissionLane,
     CommissionState,
+    FOUNDING_MSG_NOT_NULL_SQL,
     MissionAttestMethod,
     MissionCommission,
     MissionFoundingSource,
@@ -32,4 +33,5 @@ __all__ = [
     "MissionAttestMethod",
     "CommissionLane",
     "CommissionState",
+    "FOUNDING_MSG_NOT_NULL_SQL",
 ]

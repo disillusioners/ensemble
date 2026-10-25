@@ -1,8 +1,13 @@
 """Focused regression tests — the independent-review fix pass (F1–F7, F10).
 
 Each test asserts the BEHAVIOUR the fix restored — a real call wherever a
-real call is possible (no source-string pin substitutes a behavioural
-assertion):
+real call is possible. TWO INTENTIONAL source-string pins remain (each
+asserts a LITERAL contract with no behavioural seam):
+``test_migration_sql_and_pg_mirror_name_the_same_columns`` (the SQLite
+DDL and the PG mirror must name the same columns) and
+``test_the_inline_datetime_call_is_gone_from_the_three_sites`` (the
+retired inline timestamp call must not come back). Every other test is a
+real call:
 
 * **F1** — the boot DRY-RUN backfill is REACHABLE. The block runs AFTER
   ``self._mission_record_service`` is assigned, so the documented
@@ -52,7 +57,6 @@ from daemon.services.mission_record_service import (
     MissionRecordMode,
     MissionRecordService,
     _reset_mission_records_mode_for_tests,
-    resolve_mission_records_mode,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -230,11 +234,15 @@ class TestF1BootBackfillOrdering:
         monkeypatch.setenv(MISSION_RECORDS_MODE_ENV, MissionRecordMode.OFF)
 
         calls: list[bool] = []
+
+        def _spy(self, *, dry_run: bool = True, session=None):
+            calls.append(dry_run)
+            return {"scanned": 0}
+
         monkeypatch.setattr(
             MissionRecordService,
             "backfill_advisory_nudge_commissions",
-            lambda self, *, dry_run=True, session=None: calls.append(dry_run)
-            or {"scanned": 0},
+            _spy,
         )
 
         _build_manager(sqlite_engine)
@@ -291,7 +299,7 @@ def _build_scheduler_adapter(manager):
     return adapter
 
 
-def _install_scheduler_patches(monkeypatch, spy_calls: list):
+def _install_scheduler_patches(monkeypatch):
     """Patch the two externals ``_route_via_job_queue`` reaches for."""
     import daemon.sources.adapters.scheduler as scheduler_module
 
@@ -319,7 +327,7 @@ class TestF2F3SchedulerMintSite:
 
         manager = _FakeManager(mission_record_service=object())
         adapter = _build_scheduler_adapter(manager)
-        _install_scheduler_patches(monkeypatch, [])
+        _install_scheduler_patches(monkeypatch)
 
         await _drive_scheduler(adapter)
 
@@ -350,7 +358,7 @@ class TestF2F3SchedulerMintSite:
 
         manager = _FakeManager(mission_record_service="svc")
         adapter = _build_scheduler_adapter(manager)
-        _install_scheduler_patches(monkeypatch, spy_calls)
+        _install_scheduler_patches(monkeypatch)
 
         await _drive_scheduler(adapter)
 
@@ -376,15 +384,20 @@ class TestF2F3SchedulerMintSite:
         import daemon.sources.adapters.scheduler as scheduler_module
 
         spy_calls: list[tuple] = []
+
+        def _spy(service, actor_instance_id, lane, **kwargs):
+            spy_calls.append((service, actor_instance_id, lane, kwargs))
+            return "mission-x"
+
         monkeypatch.setattr(
             scheduler_module,
             "resolve_or_mint_fail_open",
-            lambda *a, **kw: spy_calls.append((a, kw)) or "mission-x",
+            _spy,
         )
 
         manager = _FakeManager(mission_record_service="svc")
         adapter = _build_scheduler_adapter(manager)
-        _install_scheduler_patches(monkeypatch, spy_calls)
+        _install_scheduler_patches(monkeypatch)
 
         await _drive_scheduler(adapter)
 
@@ -401,15 +414,20 @@ class TestF2F3SchedulerMintSite:
         import daemon.sources.adapters.scheduler as scheduler_module
 
         spy_calls: list[tuple] = []
+
+        def _spy(service, actor_instance_id, lane, **kwargs):
+            spy_calls.append((service, actor_instance_id, lane, kwargs))
+            return "mission-x"
+
         monkeypatch.setattr(
             scheduler_module,
             "resolve_or_mint_fail_open",
-            lambda *a, **kw: spy_calls.append((a, kw)) or "mission-x",
+            _spy,
         )
 
         manager = _FakeManager(mission_record_service="svc")
         adapter = _build_scheduler_adapter(manager)
-        _install_scheduler_patches(monkeypatch, spy_calls)
+        _install_scheduler_patches(monkeypatch)
 
         await _drive_scheduler(adapter)
 

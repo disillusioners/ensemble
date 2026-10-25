@@ -126,8 +126,11 @@ def messaging_service(engine):
     manager._job_queue_service._repository = MagicMock()
     manager._job_queue_service._repository.stamp_message_id = MagicMock()
     # The REAL service against the SAME engine — this is the wiring the
-    # manager performs at boot (``self._mission_record_service``).
-    manager._mission_record_service = MissionRecordService(engine)
+    # manager performs at boot (``self._mission_record_service`` plus
+    # the public ``mission_record_service`` property the lanes read).
+    _mission_service = MissionRecordService(engine)
+    manager._mission_record_service = _mission_service
+    manager.mission_record_service = _mission_service
     return InstanceMessagingService(
         manager=manager,
         cancellation_service=MagicMock(is_shutting_down=False),

@@ -35,10 +35,6 @@ from pydantic import BaseModel, Field, model_validator
 from sqlmodel import Session
 
 from daemon.constants import INJECTION_ELIGIBLE_STATUSES, TERMINAL_INSTANCE_STATUSES
-from daemon.services.mission_record_service import (
-    mint_commission_fail_open,
-    resolve_or_mint_fail_open,
-)
 # M5 — single-source the documented default for the
 # ``spawn_intelligence_tier_high_model`` boot snapshot. The constant
 # lives in ``daemon.config`` (canonical home); the tool layer imports
@@ -59,6 +55,10 @@ from daemon.config import _SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT
 # ``daemon.repositories.instance.repository``); the reverse direction
 # does not exist, so there is no circular-import risk.
 from daemon.repositories.instance import CHAT_SOURCE_TYPES
+from daemon.services.mission_record_service import (
+    mint_commission_fail_open,
+    resolve_or_mint_fail_open,
+)
 
 # Phase-3 ``set_instance_tunable`` was moved to
 # ``daemon/tools/tunables.py`` (2026-09-13, H2 + M6). The
@@ -1247,10 +1247,17 @@ async def _register_child_completion_watcher(
         # ADOPTION DELTA (a): a second commission of the same worker
         # mints a SECOND OUTSTANDING row; routing authority stays with
         # the A-resolver (report_recipient) until the PR2/PR3 flip.
+        #
+        # CARRIER (intentional, do not "fix"): this is the ONLY
+        # commissioning lane that does NOT thread the resolved mission
+        # into the child's enqueue — the mission is resolved HERE, in
+        # the POST-enqueue watcher region, so no carrier exists yet at
+        # enqueue time (threading it would mean reordering the
+        # resolution — an architecture decision, not a tidy fix).
         _mission_id_for_commission: str | None = None
         try:
             _mission_record_service = getattr(
-                manager, "_mission_record_service", None
+                manager, "mission_record_service", None
             )
             if _mission_record_service is not None:
                 _resolution = resolve_or_mint_fail_open(
@@ -1274,8 +1281,8 @@ async def _register_child_completion_watcher(
                 "mission_records: send_message commission region failed "
                 "(parent=%s… child=%s…): %s: %s — the watcher mint "
                 "continues unaffected",
-                parent_instance_id[:8],
-                child_instance_id[:8],
+                (parent_instance_id or "")[:8],
+                (child_instance_id or "")[:8],
                 type(commission_exc).__name__,
                 commission_exc,
             )

@@ -32,7 +32,6 @@ columns; the mission tables are the ONLY tables written.
 from __future__ import annotations
 
 import inspect
-import uuid
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -46,7 +45,7 @@ import daemon.repositories.instance_ops.models  # noqa: F401
 import daemon.repositories.mission_record.models  # noqa: F401
 import daemon.repositories.message_queue.models  # noqa: F401
 import daemon.repositories.task.models  # noqa: F401
-from daemon.repositories.instance.models import Instance, InstanceStatus
+from daemon.repositories.instance.models import Instance
 from daemon.repositories.instance_ops.models import InstanceOpsAudit
 from daemon.repositories.mission_record.models import (
     CommissionState,

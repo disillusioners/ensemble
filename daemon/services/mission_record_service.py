@@ -32,6 +32,12 @@ per semantic act, exactly as proposal-b §2.2 prescribes:
   guarded (every transition is ``UPDATE ... WHERE state/status=<pre>``,
   the ``dependency_watchers`` exactly-once shape).
 
+SIBLING (name collision — NOT an alias): the legacy mission READ-MODEL
+is ``daemon/services/mission_resolver.py:241`` (``MissionRecord`` — a
+dataclass whose ``mission_id == instance_id``). It is a DIFFERENT
+symbol from the ``mission_records`` TABLE this module owns; PR1 does
+not touch it, and no import alias is needed (no module imports both).
+
 MODE LADDER (restart-read, ship default ``dry``)
 ------------------------------------------------
 ``ENSEMBLE_MISSION_RECORDS = off | dry | enforce``:
@@ -113,8 +119,9 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import TYPE_CHECKING
 
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
@@ -136,12 +143,13 @@ from ..repositories.mission_record.repository import (
 )
 from .timestamps import now_utc_iso
 
+if TYPE_CHECKING:
+    from sqlalchemy import Engine
+
 logger = logging.getLogger(__name__)
 
 
 def _new_uuid4() -> str:
-    import uuid
-
     return str(uuid.uuid4())
 
 
@@ -185,7 +193,7 @@ _VALID_MODES = (MissionRecordMode.OFF, MissionRecordMode.DRY, MissionRecordMode.
 #: resolved yet. The cache is what makes the knob restart-read: a
 #: mid-run env mutation can no longer flip a live lane (the bug the
 #: independent review flagged). Cleared only by the test-reset hook.
-_MISSION_RECORDS_MODE: Optional[str] = None
+_MISSION_RECORDS_MODE: str | None = None
 
 
 def resolve_mission_records_mode() -> str:
@@ -256,6 +264,17 @@ def scheduler_mint_extension_enabled() -> bool:
     gate is explicitly set to ``1``/``true``. The gate exists only so
     the eventual flip is a one-line env change with the wiring already
     in place.
+
+    DELIBERATE DIVERGENCE from the mode ladder above: this gate
+    re-reads ``os.environ`` PER CALL (it is NOT cached), so the
+    standing ruling can be flipped on a LIVE daemon without a restart.
+    The named per-call precedents are
+    ``auto_continue_boot_pass.py:176``,
+    ``job_recovery_service.py:144``/``:283``,
+    ``report_integrity_guard.py:449`` and ``plane_sync_service.py:157``.
+    Do NOT cache it — caching would remove the only way to arm the
+    gate on a live daemon (the mode ladder's own cache is the house
+    switch pattern, but this gate is deliberately NOT one of them).
     """
     raw = (os.environ.get(SCHEDULER_MINT_EXTENSION_ENV) or "").strip().lower()
     return raw in ("1", "true", "yes", "on")
@@ -303,7 +322,8 @@ class MissionRecordService:
     semantic contract) and the wrapper catches + logs.
     """
 
-    def __init__(self, engine: Any) -> None:
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
         self._repo = MissionRecordRepository(engine)
 
     # ── internal validation ──
@@ -313,7 +333,7 @@ class MissionRecordService:
         instance_id: str,
         *,
         role: str,
-        session: Optional[Session],
+        session: Session | None,
     ) -> None:
         """The mint-path existence contract (D4(ii) scope).
 
@@ -330,7 +350,7 @@ class MissionRecordService:
         if session is not None:
             row = session.exec(stmt).first()
         else:
-            with Session(self._repo._engine) as own:
+            with Session(self._engine) as own:
                 row = own.exec(stmt).first()
         if row is None:
             raise MissionRecordError(
@@ -343,11 +363,11 @@ class MissionRecordService:
         *,
         actor_instance_id: str,
         founding_source: str,
-        session: Optional[Session],
-        founding_message_id: Optional[str] = None,
-        commissioner_instance_id: Optional[str] = None,
-        work_id: Optional[str] = None,
-        parent_mission_id: Optional[str] = None,
+        session: Session | None,
+        founding_message_id: str | None = None,
+        commissioner_instance_id: str | None = None,
+        work_id: str | None = None,
+        parent_mission_id: str | None = None,
         provenance: str = MissionProvenance.LIVE.value,
     ) -> MissionRecord:
         """The actual epoch INSERT (caller resolved already).
@@ -394,11 +414,18 @@ class MissionRecordService:
                 # is a same-tick double boundary, which is not a real
                 # shape.)
                 raise
-            existing = self._repo.find_epoch_by_anchor_and_founding_message(
-                actor_instance_id, founding_message_id or "", session=None
-            )
-            if existing is not None:
-                return existing
+            # The re-resolve probe is keyed on ``founding_message_id``;
+            # a NULL-founding epoch (the boot / backfill / job_continue
+            # shape) can NEVER be found by that probe, so the sentinel
+            # ``or ""`` it used to carry could only ever miss. Guard the
+            # probe on the value being present instead of substituting
+            # an empty-string key.
+            if founding_message_id is not None:
+                existing = self._repo.find_epoch_by_anchor_and_founding_message(
+                    actor_instance_id, founding_message_id, session=None
+                )
+                if existing is not None:
+                    return existing
             raise
 
     # ── the resolution ladder (commissioning lanes) ──
@@ -408,11 +435,11 @@ class MissionRecordService:
         actor_instance_id: str,
         lane: str,
         *,
-        founding_source: Optional[str] = None,
-        founding_message_id: Optional[str] = None,
-        commissioner_instance_id: Optional[str] = None,
-        work_id: Optional[str] = None,
-        session: Optional[Session] = None,
+        founding_source: str | None = None,
+        founding_message_id: str | None = None,
+        commissioner_instance_id: str | None = None,
+        work_id: str | None = None,
+        session: Session | None = None,
         provenance: str = MissionProvenance.LIVE.value,
     ) -> MissionResolution:
         """The 3-rung resolution ladder — every commissioning act resolves
@@ -472,9 +499,9 @@ class MissionRecordService:
         actor_instance_id: str,
         *,
         founding_source: str,
-        commissioner_instance_id: Optional[str] = None,
-        founding_message_id: Optional[str] = None,
-        session: Optional[Session] = None,
+        commissioner_instance_id: str | None = None,
+        founding_message_id: str | None = None,
+        session: Session | None = None,
         provenance: str = MissionProvenance.LIVE.value,
     ) -> MissionResolution:
         """The delivery/resume shape: an OPEN epoch continues (resume is
@@ -505,7 +532,7 @@ class MissionRecordService:
         self,
         actor_instance_id: str,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> MissionResolution:
         """Boot-sweep boundary (lane 14): ``founding_source='boot'``,
         ``founding_message_id=NULL`` — the honest null (no message exists;
@@ -520,7 +547,7 @@ class MissionRecordService:
         self,
         actor_instance_id: str,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> MissionResolution:
         """Cascade-resume boundary (lane 10): no mint unless the instance
         is stranded (no open epoch) → ``founding_source='revive'``."""
@@ -534,9 +561,9 @@ class MissionRecordService:
         self,
         actor_instance_id: str,
         *,
-        commissioner_instance_id: Optional[str] = None,
-        founding_message_id: Optional[str] = None,
-        session: Optional[Session] = None,
+        commissioner_instance_id: str | None = None,
+        founding_message_id: str | None = None,
+        session: Session | None = None,
     ) -> MissionResolution:
         """The revive boundary (lanes 4-terminal / 13): ``founding_source=
         'revive'`` with a parent chain to the anchor's latest epoch.
@@ -562,9 +589,9 @@ class MissionRecordService:
         self,
         actor_instance_id: str,
         *,
-        work_id: Optional[str] = None,
-        founding_message_id: Optional[str] = None,
-        session: Optional[Session] = None,
+        work_id: str | None = None,
+        founding_message_id: str | None = None,
+        session: Session | None = None,
     ) -> MissionResolution:
         """job_continue's force-NEW-epoch mint (lane 3).
 
@@ -601,7 +628,7 @@ class MissionRecordService:
         mission_id: str,
         founding_message_id: str,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> bool:
         """Attach the enqueue-minted message id to its epoch (the
         mint-then-attach order). First attach wins (guarded on NULL)."""
@@ -614,7 +641,7 @@ class MissionRecordService:
         mission_id: str,
         founding_message_id: str,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> bool:
         """Re-founding amendment seam (mid-mission user correction) —
         RECORDS ONLY in PR1. The delivery-time firing (tap site) and the
@@ -628,7 +655,7 @@ class MissionRecordService:
         mission_id: str,
         work_id: str,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> bool:
         """Attach the post-enqueue ``work_id`` (job_continue linkage)."""
         return self._repo.attach_work_id(mission_id, work_id, session=session)
@@ -642,10 +669,10 @@ class MissionRecordService:
         commissioner_instance_id: str,
         worker_instance_id: str,
         lane: str,
-        work_id: Optional[str] = None,
-        session: Optional[Session] = None,
+        work_id: str | None = None,
+        session: Session | None = None,
         advisory_backfill: bool = False,
-        commission_id: Optional[str] = None,
+        commission_id: str | None = None,
         provenance: str = MissionProvenance.LIVE.value,
     ) -> MissionCommission:
         """Record one commissioned worker / work item.
@@ -686,7 +713,7 @@ class MissionRecordService:
         self,
         commission_id: str,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> bool:
         """``outstanding → satisfied`` (guarded). PR1 has no production
         caller (the satisfy flip is PR2/PR3 — the commission-lookup
@@ -701,7 +728,7 @@ class MissionRecordService:
         commission_id: str,
         *,
         reason: str,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> bool:
         """``outstanding → abandoned`` (guarded). The reconciliation
         sweep's outcome write (the eternal-mission escape hatch,
@@ -718,7 +745,7 @@ class MissionRecordService:
         self,
         commission_id: str,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> bool:
         """``outstanding → superseded`` (guarded)."""
         return self._repo.transition_commission_state(
@@ -733,7 +760,7 @@ class MissionRecordService:
         *,
         attest_method: str = MissionAttestMethod.LEADER_ATTEST.value,
         attestation_bypassed: bool = False,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> bool:
         """Write the attestation block on the OPEN epoch.
 
@@ -754,7 +781,7 @@ class MissionRecordService:
         self,
         mission_id: str,
         *,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> bool:
         """``open → settled`` (guarded, records only).
 
@@ -776,7 +803,7 @@ class MissionRecordService:
         self,
         *,
         dry_run: bool = True,
-        session: Optional[Session] = None,
+        session: Session | None = None,
     ) -> dict[str, int]:
         """Best-effort historical coverage of the existing nudge audit rows.
 
@@ -805,8 +832,6 @@ class MissionRecordService:
         Returns counters: ``{'scanned', 'minted_epochs', 'minted_commissions',
         'skipped_terminal', 'skipped_no_actor', 'skipped_missing_instance_row'}``.
         """
-        from ..repositories.mission_record.models import MissionProvenance
-
         counters = {
             "scanned": 0,
             "minted_epochs": 0,
@@ -843,7 +868,7 @@ class MissionRecordService:
             if not actor_instance_id:
                 counters["skipped_no_actor"] += 1
                 continue
-            with Session(self._repo._engine) as own:
+            with Session(self._engine) as own:
                 target_row = own.get(Instance, target_instance_id)
                 actor_row = own.get(Instance, actor_instance_id)
             if target_row is None or actor_row is None:
@@ -928,7 +953,7 @@ def _log_mint(rung: int, created: bool, actor: str, lane: str, mission_id: str) 
         logger.info(
             "mission_records MINT lane=%s actor=%s… mission=%s… (rung %d)",
             lane,
-            (actor or "")[:8],
+            actor[:8],
             mission_id[:8],
             rung,
         )
@@ -936,23 +961,23 @@ def _log_mint(rung: int, created: bool, actor: str, lane: str, mission_id: str) 
         logger.debug(
             "mission_records resolve lane=%s actor=%s… mission=%s… (rung %d)",
             lane,
-            (actor or "")[:8],
+            actor[:8],
             mission_id[:8],
             rung,
         )
 
 
 def resolve_or_mint_fail_open(
-    service: Optional["MissionRecordService"],
+    service: MissionRecordService | None,
     actor_instance_id: str,
     lane: str,
     *,
-    founding_source: Optional[str] = None,
-    founding_message_id: Optional[str] = None,
-    commissioner_instance_id: Optional[str] = None,
-    work_id: Optional[str] = None,
-    session: Optional[Session] = None,
-) -> Optional[str]:
+    founding_source: str | None = None,
+    founding_message_id: str | None = None,
+    commissioner_instance_id: str | None = None,
+    work_id: str | None = None,
+    session: Session | None = None,
+) -> str | None:
     """Commissioning-lane wrapper: resolve-or-mint, never raise.
 
     Mode gate: ``off`` → ``None`` (no mints, no reads — the lane
@@ -1004,7 +1029,7 @@ def resolve_or_mint_fail_open(
             "mission_records: resolve_or_mint failed (lane=%s actor=%s…): "
             "%s: %s — lane proceeds without a record",
             lane,
-            (actor_instance_id or "")[:8],
+            actor_instance_id[:8],
             type(exc).__name__,
             exc,
         )
@@ -1012,11 +1037,11 @@ def resolve_or_mint_fail_open(
 
 
 def mint_continuation_epoch_fail_open(
-    service: Optional["MissionRecordService"],
+    service: MissionRecordService | None,
     actor_instance_id: str,
     *,
-    work_id: Optional[str] = None,
-) -> Optional[str]:
+    work_id: str | None = None,
+) -> str | None:
     """job_continue wrapper (force-new epoch; never raise)."""
     if service is None:
         return None
@@ -1038,7 +1063,7 @@ def mint_continuation_epoch_fail_open(
         logger.warning(
             "mission_records: mint_continuation_epoch failed (actor=%s…): "
             "%s: %s — lane proceeds without a record",
-            (actor_instance_id or "")[:8],
+            actor_instance_id[:8],
             type(exc).__name__,
             exc,
         )
@@ -1046,14 +1071,14 @@ def mint_continuation_epoch_fail_open(
 
 
 def mint_revive_epoch_fail_open(
-    service: Optional["MissionRecordService"],
+    service: MissionRecordService | None,
     actor_instance_id: str,
     *,
-    commissioner_instance_id: Optional[str] = None,
-    founding_message_id: Optional[str] = None,
-    session: Optional[Session] = None,
+    commissioner_instance_id: str | None = None,
+    founding_message_id: str | None = None,
+    session: Session | None = None,
     context_label: str = "revive",
-) -> Optional[str]:
+) -> str | None:
     """Revive-boundary wrapper (nudge-on-terminal + the
     ``_prepare_enqueued_message`` fresh-episode revive). When
     ``session`` is provided the mint rides the CALLER's transaction
@@ -1092,7 +1117,7 @@ def mint_revive_epoch_fail_open(
         logger.warning(
             "mission_records: mint_revive_epoch failed (actor=%s… "
             "context=%s): %s: %s — lane proceeds without a record",
-            (actor_instance_id or "")[:8],
+            actor_instance_id[:8],
             context_label,
             type(exc).__name__,
             exc,
@@ -1101,9 +1126,9 @@ def mint_revive_epoch_fail_open(
 
 
 def mint_boot_epoch_if_none_fail_open(
-    service: Optional["MissionRecordService"],
+    service: MissionRecordService | None,
     actor_instance_id: str,
-) -> Optional[str]:
+) -> str | None:
     """Boot-sweep wrapper (never raise; boot must never wedge)."""
     if service is None:
         return None
@@ -1123,7 +1148,7 @@ def mint_boot_epoch_if_none_fail_open(
         logger.warning(
             "mission_records: mint_boot_epoch_if_none failed (actor=%s…): "
             "%s: %s — boot proceeds without a record",
-            (actor_instance_id or "")[:8],
+            actor_instance_id[:8],
             type(exc).__name__,
             exc,
         )
@@ -1131,9 +1156,9 @@ def mint_boot_epoch_if_none_fail_open(
 
 
 def mint_cascade_resume_epoch_if_stranded_fail_open(
-    service: Optional["MissionRecordService"],
+    service: MissionRecordService | None,
     actor_instance_id: str,
-) -> Optional[str]:
+) -> str | None:
     """Cascade-resume wrapper (never raise; the resume must never wedge)."""
     if service is None:
         return None
@@ -1155,7 +1180,7 @@ def mint_cascade_resume_epoch_if_stranded_fail_open(
         logger.warning(
             "mission_records: cascade_resume mint failed (actor=%s…): "
             "%s: %s — resume proceeds without a record",
-            (actor_instance_id or "")[:8],
+            actor_instance_id[:8],
             type(exc).__name__,
             exc,
         )
@@ -1163,15 +1188,15 @@ def mint_cascade_resume_epoch_if_stranded_fail_open(
 
 
 def mint_commission_fail_open(
-    service: Optional["MissionRecordService"],
-    mission_id: Optional[str],
+    service: MissionRecordService | None,
+    mission_id: str | None,
     *,
     commissioner_instance_id: str,
     worker_instance_id: str,
     lane: str,
-    work_id: Optional[str] = None,
-    session: Optional[Session] = None,
-) -> Optional[str]:
+    work_id: str | None = None,
+    session: Session | None = None,
+) -> str | None:
     """Commission-mint wrapper (never raise).
 
     D4(ii) note: the SERVICE raises ``MissionRecordError`` on a missing
@@ -1219,8 +1244,8 @@ def mint_commission_fail_open(
             "commissioner=%s… worker=%s…): %s: %s — act proceeds "
             "without a commission record",
             lane,
-            (commissioner_instance_id or "")[:8],
-            (worker_instance_id or "")[:8],
+            commissioner_instance_id[:8],
+            worker_instance_id[:8],
             type(exc).__name__,
             exc,
         )
@@ -1228,9 +1253,9 @@ def mint_commission_fail_open(
 
 
 def attach_work_id_fail_open(
-    service: Optional["MissionRecordService"],
-    mission_id: Optional[str],
-    work_id: Optional[str],
+    service: MissionRecordService | None,
+    mission_id: str | None,
+    work_id: str | None,
 ) -> bool:
     """Post-enqueue job-linkage attach wrapper (never raise; miss = logged)."""
     if service is None or not mission_id or not work_id:
@@ -1242,7 +1267,7 @@ def attach_work_id_fail_open(
         if not attached:
             logger.debug(
                 "mission_records: work_id attach skipped (mission=%s… "
-                "already carries a work_id)",
+                "already set or row missing)",
                 mission_id[:8],
             )
         return attached
@@ -1257,9 +1282,9 @@ def attach_work_id_fail_open(
 
 
 def attach_founding_message_fail_open(
-    service: Optional["MissionRecordService"],
-    mission_id: Optional[str],
-    founding_message_id: Optional[str],
+    service: MissionRecordService | None,
+    mission_id: str | None,
+    founding_message_id: str | None,
 ) -> bool:
     """Post-enqueue attach wrapper (never raise; miss = logged)."""
     if service is None or not mission_id or not founding_message_id:
@@ -1271,7 +1296,7 @@ def attach_founding_message_fail_open(
         if not attached:
             logger.debug(
                 "mission_records: founding message attach skipped "
-                "(mission=%s… already carries a founding message)",
+                "(mission=%s… already set or row missing)",
                 mission_id[:8],
             )
         return attached

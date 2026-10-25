@@ -70,18 +70,6 @@ from ..base import (
     SourceConfig,
     SourceStatus,
 )
-from daemon.models import SchedulerInstanceMode
-from daemon.repositories.instance.models import InstanceStatus
-from daemon.repositories.message_queue.models import MessageStatus
-from daemon.repositories.source.models import ExecutionStatus
-from daemon.repositories.task.models import TaskStatus
-from daemon.registry import get_registry
-from daemon.sources.mapper import BoundCallerRefusal
-from daemon.services.mission_record_service import (
-    resolve_mission_records_mode,
-    resolve_or_mint_fail_open,
-    scheduler_mint_extension_enabled,
-)
 from daemon.constants import (
     SCHEDULER_SEMAPHORE_TIMEOUT_S,
     SCHEDULER_MANUAL_SEMAPHORE_TIMEOUT_S,
@@ -90,6 +78,18 @@ from daemon.constants import (
     SCHEDULER_DRAIN_CHECK_S,
     SCHEDULER_DEFAULT_MAX_CONCURRENT,
     SCHEDULER_DEFAULT_PRIORITY,
+)
+from daemon.models import SchedulerInstanceMode
+from daemon.repositories.instance.models import InstanceStatus
+from daemon.repositories.message_queue.models import MessageStatus
+from daemon.repositories.source.models import ExecutionStatus
+from daemon.repositories.task.models import TaskStatus
+from daemon.registry import get_registry
+from daemon.sources.mapper import BoundCallerRefusal
+from daemon.services.mission_record_service import (
+    _mode_is_off,
+    resolve_or_mint_fail_open,
+    scheduler_mint_extension_enabled,
 )
 
 if TYPE_CHECKING:
@@ -200,7 +200,11 @@ def _scheduler_mint_armed() -> bool:
     """
     if not scheduler_mint_extension_enabled():
         return False
-    return resolve_mission_records_mode() != "off"
+    # The never-raising mode check (``_mode_is_off``) — NOT the raising
+    # ``resolve_mission_records_mode()`` resolver: this is a lane-facing
+    # path, and a lane must never break on a records-side problem (the
+    # module's documented never-raise invariant).
+    return not _mode_is_off()
 
 
 class SchedulerAdapter(MessageSourceAdapter):

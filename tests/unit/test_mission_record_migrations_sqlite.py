@@ -21,7 +21,6 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.pool import NullPool
-from sqlmodel import SQLModel
 
 
 @pytest.fixture
@@ -53,6 +52,12 @@ MISSION_MIGRATIONS = (
     "20261025_122730_add_mission_provenance_columns.sql",
 )
 
+#: The canonical migrations directory (hoisted — the three sites below
+#: used to recompute the same path expression).
+VERSIONS_DIR = (
+    Path(__file__).resolve().parents[2] / "daemon" / "migrations" / "versions"
+)
+
 
 def _apply_mission_migrations(engine) -> list[str]:
     """Apply ONLY the three PR1 migrations (the runner's real code path).
@@ -66,10 +71,7 @@ def _apply_mission_migrations(engine) -> list[str]:
     """
     from daemon.migrations.runner import MigrationFile, MigrationRunner
 
-    versions_dir = (
-        Path(__file__).resolve().parents[2]
-        / "daemon" / "migrations" / "versions"
-    )
+    versions_dir = VERSIONS_DIR
     runner = MigrationRunner(engine)
     runner.ensure_migrations_table()  # the ledger (run_pending normally does this)
     applied = []
@@ -88,8 +90,6 @@ def _ensure_host_tables(engine) -> None:
     neither, so recreate their minimal pre-PR1 shape here — the exact
     column set the migration's ALTER TABLE statements target.
     """
-    from sqlmodel import Session
-
     # Use the REAL models minus the new column: create via raw DDL so
     # the migration's ADD COLUMN is genuinely exercised (create_all
     # would already include mission_id and make the ALTER a no-op).
@@ -198,10 +198,7 @@ def test_mission_migrations_are_idempotent_on_reapply(bare_sqlite):
     # gracefully-skipped duplicate).
     from daemon.migrations.runner import MigrationFile, MigrationRunner
 
-    versions_dir = (
-        Path(__file__).resolve().parents[2]
-        / "daemon" / "migrations" / "versions"
-    )
+    versions_dir = VERSIONS_DIR
     runner = MigrationRunner(bare_sqlite)
     status = runner.get_migration_status()
     applied = set(status["applied"])
@@ -287,15 +284,8 @@ def test_rollback_safety_no_destructive_ddl():
     """Rollback-safety derivation (full-history DROP-scan): the three
     PR1 migrations' UP sections contain NO DROP TABLE / DROP COLUMN —
     the release stays rollback_safe without an author override."""
-    versions_dir = (
-        Path(__file__).resolve().parents[2]
-        / "daemon" / "migrations" / "versions"
-    )
-    for name in (
-        "20261025_122631_create_mission_records.sql",
-        "20261025_122700_create_mission_commissions.sql",
-        "20261025_122730_add_mission_provenance_columns.sql",
-    ):
+    versions_dir = VERSIONS_DIR
+    for name in MISSION_MIGRATIONS:
         up = (
             versions_dir.joinpath(name)
             .read_text()
