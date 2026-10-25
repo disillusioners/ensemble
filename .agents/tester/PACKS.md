@@ -17,6 +17,20 @@
 
 ---
 
+## mission-records PR2 — the enforce reads (`feature/mission-records-pr2` @ `0f75f7bb6`, base `022de4622` = the PR1 merge tip) — NEW PACK REGISTERED (2026-10-25)
+
+> The PR2 read flip: the census, the SOURCE U anchor, the 5th R2 input (`outstanding_commissions`), the L3 root-gate mission leg and the judge's SOURCE C membership now consume the mission record. The mode ladder's SHIP DEFAULT stays `dry` (the reads stay legacy until the operator promotes to `enforce`). Ruling ① removed the Term-1 bypass-recording item (the flip-list amendment is in the PR1 adoption notes + the sibling PR2 notes). Ad-hoc pack set (the v0.27.6 precedent — script materialization deferred).
+
+| Pack | Invocation (ad-hoc) | Scope | Last Run | Status |
+|---|---|---|---|---|
+| `mrpr2_focused_unit` | scrubbed runner × 11 files (5 new `test_mission_record_pr2_*` + `test_mission_record_reads` + the 5 PR1 mission-record files + the attestation gate/scanner/resolver trio) | the census/anchor/R2-input flips, the F1/F2 carries, the L3 leg, the tap stamps + amend-at-delivery, the epoch-boundary ledger clear + the epoch-tagged deny ledger | 2026-10-25 @ 0f75f7bb6 | ✅ PASS 157/157 (22.73s) |
+| `mrpr2_pg_enforce_reads` | scrubbed runner × `tests/integration/test_mission_records_pr2_enforce_reads_pg.py` (PG_TEST_* scratch DB, `ensemble_mrpr2_reads_<rand>`, dropped + verified absent) | the REAL boot path (create_all → migration runner → `_ensure_postgres_columns`): the F1 index lands on PG with the byte-identical name + partial predicate, the mirror is idempotent, the open-epoch uniqueness is enforced, the census/anchor/count/amend reads over PG | same | ✅ PASS 8/8 (3.34s) |
+| `mrpr2_mutations` | `python3 tools/pr2_mutation_check.py` (14 targeted line-neutral edits; each reverted; the pinned test must go RED) | the census union + the record-arm fallback, the SOURCE U anchor, the ``-1`` unknown sentinel, the R2 pending arm, the quiet predicate, the L3 leg, the F1 uniqueness + index name, the F2 amend guard, the amend-at-delivery, the epoch-boundary clear, the epoch tag (shape + scope) | same | ✅ PASS 14/14 killed |
+| `mrpr2_gates` | scrubbed runner × `tests/integration/test_message_metadata_hook_placement.py` + `tests/job_queue/test_terminal_write_census.py` + `tests/unit/test_self_alarm_deferred_visibility_pin.py` | the 5-site/5-label AST tap gate (the 4 new mission stamps stay inside the approved sites), the terminal-write census (ZERO new instance-status writers), the migration-attribution pin (the new `.sql` lands as the "incoming side") | same | ✅ PASS (the census's 2 failures are base-attributed — A/B-proven at 022de4622) |
+| `mrpr2_fullpool_ab` | the whole `tests/unit` pool, base leg = a git-enabled clone at 022de4622 (so the git-dependent pins run on both legs) | the branch adds ZERO new unit reds vs the base (the only delta — the migration-attribution pin — resolves once the branch is committed) | same | ✅ PASS — branch 18908 passed / 110 failed (all base-attributed); base 18825 passed / 114 failed; the delta is the environment-dependent set only |
+
+---
+
 ## Commission Phase 4 — nest-ops shakedown defect patch (`fix/nest-ops-shakedown-defects`, base `b257842c9`) — NEW PACK REGISTERED (2026-10-24)
 
 > First `instance_read`/`instance_ops` real-PG pack (arch §11.5: none existed). Disposable LOGIN role + DB on the local PG16, dropped per module; per-variable `POSTGRES_*` scrub in-pack + in-fixture; `.venv` in-worktree asserted (the arch §11.5 conventions gap); dual-layer timeout per `ensure.md:6` + `:45`.

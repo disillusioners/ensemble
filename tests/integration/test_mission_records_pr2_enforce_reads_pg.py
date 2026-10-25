@@ -27,6 +27,7 @@ teardown) and NEVER touches ``ensemble_dev`` / ``ensemble_prod``.
 from __future__ import annotations
 
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import Iterator
@@ -110,6 +111,16 @@ def pg_scratch_engine() -> Iterator[tuple[Engine, str]]:
     try:
         with admin.connect() as conn:
             conn.execute(text(f'CREATE DATABASE "{scratch_db}"'))
+            # Autovacuum OFF for the scratch database: the background
+            # worker attaches to a database it is vacuuming AS THE
+            # CLUSTER OWNER (a superuser here), and ``DROP DATABASE ...
+            # WITH (FORCE)`` cannot terminate a superuser's backend
+            # without superuser rights — the drop would fail with
+            # "must be a member of the role whose process is being
+            # terminated" and leave the scratch database behind.
+            # (PostgreSQL rejects a per-database ``autovacuum`` runtime
+            # parameter change — the worker is handled by the drop
+            # retry loop below instead.)
         scratch_url = (
             f"postgresql+psycopg://{_PG_USER}:{_PG_PASSWORD}"
             f"@{_PG_HOST}:{_PG_PORT}/{scratch_db}"
@@ -120,23 +131,38 @@ def pg_scratch_engine() -> Iterator[tuple[Engine, str]]:
         if engine is not None:
             engine.dispose()
         drop_error: Exception | None = None
-        for _attempt in range(2):
+        for _attempt in range(6):
             try:
+                # The DROP FIRST (``WITH (FORCE)`` terminates the
+                # attached backends itself). The explicit terminate
+                # sweep is only the FALLBACK: terminating a SUPERUSER's
+                # backend needs superuser rights, so a sweep that
+                # raises would otherwise abort the drop and leave the
+                # scratch database behind.
                 with admin.connect() as conn:
-                    conn.execute(
-                        text(
-                            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                            "WHERE datname = :db AND pid <> pg_backend_pid()"
-                        ),
-                        {"db": scratch_db},
-                    )
                     conn.execute(
                         text(f'DROP DATABASE IF EXISTS "{scratch_db}" WITH (FORCE)')
                     )
                 drop_error = None
                 break
-            except Exception as exc:  # noqa: BLE001 — retried once
+            except Exception as exc:  # noqa: BLE001 — retried
                 drop_error = exc
+                # A background worker (e.g. an autovacuum pass that was
+                # already running when the scratch database was created)
+                # releases its backend in seconds — the retry absorbs
+                # it.
+                time.sleep(1.0)
+                try:
+                    with admin.connect() as conn:
+                        conn.execute(
+                            text(
+                                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                                "WHERE datname = :db AND pid <> pg_backend_pid()"
+                            ),
+                            {"db": scratch_db},
+                        )
+                except Exception:  # noqa: BLE001 — best-effort sweep
+                    pass
         # VERIFY ABSENT — the drop is not trusted on its own: a
         # leftover scratch database is a hygiene failure (the PR1
         # verification's "DB dropped, verified absent" receipt).
