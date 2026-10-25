@@ -50,6 +50,8 @@ import daemon.manager  # noqa: F401
 import daemon.plugin_subsystem.drift_event_publisher  # noqa: F401
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.mission_record.models import MissionRecord
+from daemon.repositories.instance.repository import SQLModelInstanceRepository
+from daemon.services.attestation_ledger import safe_increment
 from daemon.services.mission_record_reads import (
     count_outstanding_commissions,
     read_founding_message_id,
@@ -373,6 +375,59 @@ class TestTheReadsOnPostgres:
             resolution.mission_id, "settled"
         )
         assert service.amend_anchor(resolution.mission_id, "m-2") is False
+
+
+class TestTheLedgerForwardingOnPostgres:
+    """The production-dialect proof of the ledger alias forwarding.
+
+    The unit guard (``tests/unit/test_mission_record_pr2_ledger_forwarding.py``)
+    pins the SAME seam on SQLite. This leg re-drives it over the real
+    PostgreSQL driver — the dialect production actually uses — because
+    the defect class (a protocol alias that does not forward the epoch
+    tag) silently DEGRADES THE DENY in production: the TypeError is
+    swallowed by the C3 fail-open wrapper, the graph returns
+    ``{"attestation_route": None}`` and the deny ledger is never
+    written.
+    """
+
+    def test_safe_increment_writes_the_epoch_tagged_entry(self, booted_pg):
+        engine, _scratch = booted_pg
+        iid = _seed_instance(engine, str(uuid.uuid4()))
+        repo = SQLModelInstanceRepository(engine)
+
+        result = safe_increment(
+            repo, iid, "fingerprint-1", mission_id="mission-a"
+        )
+
+        assert result == 1
+        assert repo.get_attestation_denied_count(iid) == 1
+        with Session(engine) as session:
+            row = session.get(Instance, iid)
+            entries = list(
+                (row.instance_metadata or {}).get(
+                    "attestation:denial_epochs"
+                )
+                or []
+            )
+        assert entries == [
+            {"epoch": "fingerprint-1", "mission_id": "mission-a"}
+        ]
+
+    def test_the_untagged_call_shape_still_works(self, booted_pg):
+        engine, _scratch = booted_pg
+        iid = _seed_instance(engine, str(uuid.uuid4()))
+        repo = SQLModelInstanceRepository(engine)
+
+        assert safe_increment(repo, iid, "fingerprint-1") == 1
+        with Session(engine) as session:
+            row = session.get(Instance, iid)
+            entries = list(
+                (row.instance_metadata or {}).get(
+                    "attestation:denial_epochs"
+                )
+                or []
+            )
+        assert entries == ["fingerprint-1"]
 
 
 class TestScratchHygiene:

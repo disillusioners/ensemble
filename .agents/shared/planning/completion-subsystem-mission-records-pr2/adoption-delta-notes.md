@@ -94,6 +94,11 @@ sentinel consumption keyed by message id stays as the in-graph half.
 dispatch) and the run-deny cap (per run) — already scoped tighter than
 the epoch.
 
+**Promotion note:** the ledger clear is not the only enforce-gated
+behavior — the L3 mission leg's HOLD has no terminator until PR3 (§(f)
+below). Both ride the same promotion, so the enforce promotion is
+gated on PR3 as a whole.
+
 ---
 
 ## (d) The F1/F2 carries (from PR1's report)
@@ -128,4 +133,53 @@ cached house-switch pattern):
   clear is armed HERE (see (c)).
 
 The ``enforce`` promotion is an operator action: set the env var and
-RESTART (the knob is restart-read by design).
+RESTART (the knob is restart-read by design) — **but it is GATED on
+PR3's commission terminator: see §(f) above. Do not promote to
+``enforce`` before the reconciliation sweep lands, or missions with
+commission rows hold until their epoch closes.**
+
+## (f) ENFORCE-PROMOTION PRECONDITION — the commission TERMINATOR (PR3)
+
+**DO NOT PROMOTE TO `enforce` BEFORE THE PR3 TERMINATOR LANDS.**
+
+The PR2 read flip makes the mission record LOUD: the L3 root-completion
+gate's mission leg (`child_reports.py::_root_completion_gate`) HOLDS the
+terminal publish while the open mission has an OUTSTANDING commission
+row, and the 5th R2 input keeps ``c_quiet`` False for the same mission
+(the deny band does not fire either).
+
+**PR2 ships NO writer that retires a commission row.** The terminators
+exist as record-side seams only:
+
+* `MissionRecordService.satisfy_commission` (``outstanding → satisfied``)
+* `MissionRecordService.abandon_commission` (``outstanding → abandoned``)
+
+…and **neither has a production caller** (PR1 shipped them as
+record-shape-complete seams; the sweep that calls them is the PR3
+reconciliation sweep). So in enforce mode today:
+
+* a minted commission row stays ``outstanding`` for the life of the
+  epoch;
+* the root publish is HELD for that epoch (the L3 leg), and
+* the mission cannot reach its quiet state (the 5th R2 input).
+
+**Consequence:** promoting to `enforce` before PR3's terminator lands
+means **every mission with a commission row holds until its epoch
+closes** — the "eternal mission" class (proposal-b §8) with no escape
+valve. PR2's default is ``dry`` precisely so this cannot happen by
+accident.
+
+**Promotion checklist (the operator's order):**
+
+1. Land PR3's commission reconciliation sweep (the terminator: the
+   ``satisfied`` write on delivery evidence + the ``abandoned`` write on
+   worker-terminal / TTL, with the fail-MISS probes).
+2. THEN flip ``ENSEMBLE_MISSION_RECORDS=enforce`` + restart.
+
+The PR3 sweep is NOT part of PR2 and was NOT implemented here — the
+PR3 fence (the D1 routing flip, the C3 backstop, the reconciliation
+sweep, the committing backfill, the multi-commissioner tie-break) is
+intact. This section only records that the enforce promotion is
+**gated on PR3**, not merely "accompanied by" it.
+
+---

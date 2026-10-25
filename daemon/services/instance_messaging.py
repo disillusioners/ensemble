@@ -5196,27 +5196,34 @@ class InstanceMessagingService:
                 mission_id=mission_id,
             )
 
-            # ── Proposal B PR2 — the RE-FOUNDING AMENDMENT (ruling ③) ──
-            # The amendment fires AT DELIVERY (here, at the tap site) —
-            # NOT at enqueue time and NOT when the window is scanned.
-            # A delivered p1-HUMAN user-lane message during an OPEN
-            # epoch re-anchors the epoch: the mission's
-            # ``founding_message_id`` becomes the delivered correction,
-            # so the delegation window re-bounds on the correction and
-            # the anchor is visible to the gate at would-be END even
-            # though the window's CONTENT is still being drained (the
-            # ~14-minute mid-turn lag seam).
-            #
-            # The amendment is RECORD-ONLY: in ``dry`` mode it moves the
-            # anchor row while every read site stays legacy (zero
-            # behavior change). The guarded amend path touches only an
-            # OPEN epoch (F2), so a stale carrier is a safe no-op.
-            await self._amend_mission_anchor_at_delivery(
-                instance_id=instance_id,
-                message_id=message_id,
-                is_p1_human=is_fresh_episode_user_message,
-                mission_id=mission_id,
-            )
+        # ── Proposal B PR2 — the RE-FOUNDING AMENDMENT (ruling ③) ──
+        # The amendment fires AT DELIVERY (here, at the delivery site) —
+        # NOT at enqueue time and NOT when the window is scanned.
+        # A delivered p1-HUMAN user-lane message during an OPEN epoch
+        # re-anchors the epoch: the mission's ``founding_message_id``
+        # becomes the delivered correction, so the delegation window
+        # re-bounds on the correction and the anchor is visible to the
+        # gate at would-be END even though the window's CONTENT is still
+        # being drained (the ~14-minute mid-turn lag seam).
+        #
+        # The amendment is RECORD-ONLY: in ``dry`` mode it moves the
+        # anchor row while every read site stays legacy (zero behavior
+        # change). The guarded amend path touches only an OPEN epoch
+        # (F2), so a stale carrier is a safe no-op.
+        #
+        # DECOUPLED FROM THE TAP (review finding): the amendment does
+        # NOT depend on the ``message_metadata`` side table — it needs
+        # the mission service + the carried mission id, nothing else.
+        # It therefore fires on EVERY delivery, even when the metadata
+        # repo is absent (or ``graph_input`` is None on a checkpoint
+        # resume) — nesting it under the tap's guard would silently
+        # disable the anchor amendment for those deliveries.
+        await self._amend_mission_anchor_at_delivery(
+            instance_id=instance_id,
+            message_id=message_id,
+            is_p1_human=is_fresh_episode_user_message,
+            mission_id=mission_id,
+        )
 
         # Persistent context HumanMessages are graph inputs rather than normal
         # user turns, so they are not seen by the streaming loop's HumanMessage

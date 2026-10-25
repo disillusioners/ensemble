@@ -48,6 +48,7 @@ from .services.mission_record_reads import (
     read_mission_census as _read_mission_census,
     read_mission_id as _read_mission_id,
 )
+from .repositories.mission_record.models import OPEN_EPOCH_STATUS_SQL
 from .repositories import (
         SQLModelInstanceRepository,
         SQLModelProjectRepository,
@@ -8378,10 +8379,10 @@ class InstanceManager:
             # ``daemon/repositories/mission_record/models.py`` (3-site pin).
             (
                 "UPDATE mission_records SET status = 'superseded' "
-                "WHERE status = 'open' AND EXISTS ("
+                f"WHERE {OPEN_EPOCH_STATUS_SQL} AND EXISTS ("
                 "SELECT 1 FROM mission_records newer "
                 "WHERE newer.anchor_instance_id = mission_records.anchor_instance_id "
-                "AND newer.status = 'open' AND ("
+                f"AND newer.{OPEN_EPOCH_STATUS_SQL} AND ("
                 "newer.created_at > mission_records.created_at OR ("
                 "newer.created_at = mission_records.created_at "
                 "AND newer.mission_id > mission_records.mission_id)))"
@@ -8389,7 +8390,7 @@ class InstanceManager:
             (
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_mission_records_anchor_open "
                 "ON mission_records (anchor_instance_id) "
-                "WHERE status = 'open'"
+                f"WHERE {OPEN_EPOCH_STATUS_SQL}"
             ),
             # ── Critical-notes lifecycle columns (Phase 1, 2026-09-15) ──
             # Additive columns on ``critical_notes`` per
@@ -11884,6 +11885,12 @@ class InstanceManager:
             ``-1`` — UNKNOWN (the read failed). The fail-open sentinel:
                       the caller treats it as "behave as before the
                       records existed", NEVER as "0 outstanding".
+
+        TERMINATOR (PR3): PR2 ships no writer that retires a
+        commission row, so an outstanding commission holds the L3
+        publish until the epoch closes — the enforce promotion is
+        GATED on PR3's reconciliation sweep (the PR2 adoption notes
+        §(f)).
         """
         if not mission_records_enforce_enabled():
             # Inactive input — the legacy quiet predicate is preserved

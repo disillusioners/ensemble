@@ -2271,8 +2271,28 @@ class SQLModelInstanceRepository:
     # repository methods above are intentionally descriptive; these aliases
     # keep the graph's small AttestationLedger protocol honest when it is
     # given the real SQLModelInstanceRepository.
-    def increment(self, instance_id: str, denial_epoch: str) -> int:
-        return self.increment_attestation_denied_count(instance_id, denial_epoch)
+    def increment(
+        self,
+        instance_id: str,
+        denial_epoch: str,
+        mission_id: str | None = None,
+    ) -> int:
+        """Protocol alias → the descriptive public method.
+
+        Proposal B PR2 — the EPOCH TAG forwarding. The in-graph gate
+        calls ``safe_increment(ledger, instance_id, denial_epoch,
+        mission_id=…)`` when the epoch tag is known; this alias MUST
+        forward the third argument, otherwise the call raises a
+        ``TypeError`` inside the C3 fail-open wrapper → ``None`` → the
+        graph degrades the would-be DENY to an allow
+        (``{"attestation_route": None}``) and the deny ledger is never
+        written in production. This is the manual-forwarding seam bug
+        class the repo pins (the ``InstanceManager`` facade-forwarding
+        discipline's sibling at the ledger seam).
+        """
+        return self.increment_attestation_denied_count(
+            instance_id, denial_epoch, mission_id
+        )
 
     def reset(self, instance_id: str) -> bool:
         return self.reset_attestation_denied_count(instance_id)

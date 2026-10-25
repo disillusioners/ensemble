@@ -857,10 +857,17 @@ class MissionRecordService:
         *,
         session: Session | None = None,
     ) -> bool:
-        """``outstanding → satisfied`` (guarded). PR1 has no production
-        caller (the satisfy flip is PR2/PR3 — the commission-lookup
-        settle post-condition); the seam ships with the census
-        substrate."""
+        """``outstanding → satisfied`` (guarded).
+
+        **NO production caller in PR1 or PR2** — the terminator is the
+        PR3 reconciliation sweep (the delivery-evidence probe). This is
+        why the enforce promotion is GATED on PR3: until the sweep
+        lands, a minted commission row stays ``outstanding`` for the
+        life of the epoch, the L3 root-completion gate holds the
+        terminal publish, and the mission can never reach its quiet
+        state (the 5th R2 input). See the PR2 adoption notes §(f) —
+        "ENFORCE-PROMOTION PRECONDITION".
+        """
         return self._repo.transition_commission_state(
             commission_id, CommissionState.SATISFIED.value, session=session
         )
@@ -872,10 +879,14 @@ class MissionRecordService:
         reason: str,
         session: Session | None = None,
     ) -> bool:
-        """``outstanding → abandoned`` (guarded). The reconciliation
-        sweep's outcome write (the eternal-mission escape hatch,
-        proposal-b §8); the sweep itself is the PR3 deliverable — the
-        seam ships record-side complete."""
+        """``outstanding → abandoned`` (guarded).
+
+        The reconciliation sweep's outcome write (the eternal-mission
+        escape hatch, proposal-b §8). **NO production caller in PR1 or
+        PR2** — the sweep itself is the PR3 deliverable, and the enforce
+        promotion is GATED on it (the PR2 adoption notes §(f)). The seam
+        ships record-side complete.
+        """
         return self._repo.transition_commission_state(
             commission_id,
             CommissionState.ABANDONED.value,

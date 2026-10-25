@@ -2615,6 +2615,15 @@ Provide a concise summary:"""
             # WATCHERS STAY AS THEY ARE: this leg is ADDITIVE — the
             # bus-pending leg, the tree-liveness leg and the freshness
             # leg are untouched.
+            #
+            # TERMINATOR (PR3): PR2 ships NO writer that retires a
+            # commission row — ``satisfy_commission`` /
+            # ``abandon_commission`` have no production caller (the
+            # reconciliation sweep is the PR3 deliverable). So in
+            # enforce mode this hold has no escape valve until PR3: a
+            # mission with an outstanding commission holds until its
+            # epoch closes. That is why the enforce promotion is GATED
+            # on PR3 (the PR2 adoption notes §(f)).
             mission_commissions = self._count_outstanding_mission_commissions(
                 instance_id
             )

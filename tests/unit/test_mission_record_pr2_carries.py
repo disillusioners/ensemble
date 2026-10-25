@@ -107,14 +107,25 @@ class TestF1ThreeSitePin:
         assert OPEN_EPOCH_STATUS_SQL == "status = 'open'"
 
     def test_the_postgres_mirror_declares_the_same_index(self):
-        source = (
-            REPO_ROOT / "daemon/manager.py"
-        ).read_text()
+        """The PG mirror cites the SHARED predicate constant.
+
+        The 3-site pin is name + predicate. The predicate TEXT lives in
+        ONE place (``OPEN_EPOCH_STATUS_SQL`` in the models module) and
+        the PostgreSQL mirror interpolates it — so the mirror cannot
+        drift from the model's index declaration. The rendered SQL is
+        proven on the real driver by the PG integration leg
+        (``test_the_ensure_mirror_lands_the_index``).
+        """
+        source = (REPO_ROOT / "daemon/manager.py").read_text()
         assert (
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_mission_records_anchor_open"
             in source
         )
-        assert "WHERE status = 'open'" in source
+        # The mirror cites the shared constant (no hardcoded predicate).
+        assert "OPEN_EPOCH_STATUS_SQL" in source
+        assert f"WHERE {{OPEN_EPOCH_STATUS_SQL}}" in source
+        # The constant is the model's declared predicate.
+        assert OPEN_EPOCH_STATUS_SQL == "status = 'open'"
 
     def test_the_index_exists_on_a_fresh_database(self, engine):
         inspector = inspect(engine)

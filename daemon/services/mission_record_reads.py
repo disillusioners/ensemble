@@ -44,8 +44,9 @@ MODE LADDER (restart-read; ship default ``dry``)
 * ``enforce`` — the read sites consult the records, with the legacy
   behavior as the declared fallback leg.
 
-:func:`mission_records_enforce_enabled` is the ONE gate the read sites
-consult. It NEVER raises (an unrecognized mode token degrades to
+:func:`daemon.services.mission_record_service.mission_records_enforce_enabled`
+is the ONE gate the read sites consult (the mode ladder's single owner —
+this module IMPORTS it, it never redefines it). It NEVER raises (an unrecognized mode token degrades to
 "not enforcing" — a records-side problem must never break a gate) and
 it reuses the service's CACHED, restart-read resolution so a mid-run
 env mutation cannot flip a live knob.
@@ -69,6 +70,11 @@ from ..repositories.mission_record.models import (
     MissionRecord,
 )
 from ..repositories.mission_record.repository import MissionRecordRepository
+# The mode ladder has ONE owner: ``mission_record_service``. The gate
+# helper (``mission_records_enforce_enabled``) is IMPORTED here, never
+# redefined — a second definition here would be a shadowed copy (two
+# sources of truth for one knob) and the service docstring's
+# "ONE definition" contract would be a lie.
 from .mission_record_service import (
     MissionRecordMode,
     mission_records_enforce_enabled,
@@ -84,20 +90,6 @@ logger = logging.getLogger(__name__)
 #: The "unknown" sentinel for COUNT reads (convention #3). NEVER a
 #: ``0`` default — ``0`` is a real answer ("nothing outstanding").
 MISSION_READ_UNKNOWN = -1
-
-
-def mission_records_enforce_enabled() -> bool:
-    """``True`` when the mode ladder is ``enforce`` — NEVER raises.
-
-    The single gate every read site consults before it looks at the
-    record. An unrecognized ``ENSEMBLE_MISSION_RECORDS`` token degrades
-    to "not enforcing" (the resolver itself raises loudly at the boot
-    site; this helper must not raise on the gate hot path).
-    """
-    try:
-        return resolve_mission_records_mode() == MissionRecordMode.ENFORCE
-    except Exception:  # noqa: BLE001 — never break a gate on a knob fault
-        return False
 
 
 def _repo(engine: "Engine") -> MissionRecordRepository:

@@ -167,6 +167,49 @@ MUTATIONS = [
         "TestEpochTaggedDenyLedger::test_a_replay_within_the_epoch_is_swallowed",
     ),
     (
+        "ledger-alias-forwarding",
+        "daemon/repositories/instance/repository.py",
+        """        return self.increment_attestation_denied_count(
+            instance_id, denial_epoch, mission_id
+        )""",
+        """        return self.increment_attestation_denied_count(
+            instance_id, denial_epoch
+        )""",
+        "tests/unit/test_mission_record_pr2_ledger_forwarding.py",
+        "TestTheAliasForwardsTheEpochTag::test_safe_increment_with_a_mission_tag_writes_the_tagged_entry",
+    ),
+    (
+        "mode-gate-single-definition",
+        "daemon/services/mission_record_reads.py",
+        """# The mode ladder has ONE owner: ``mission_record_service``. The gate""",
+        """def mission_records_enforce_enabled() -> bool:
+    return False
+
+
+# The mode ladder has ONE owner: ``mission_record_service``. The gate""",
+        "tests/unit/test_mission_record_pr2_ledger_forwarding.py",
+        "TestTheModeGateHasOneDefinition::test_the_reads_module_does_not_shadow_the_gate",
+    ),
+    (
+        "amend-not-nested-in-the-tap-guard",
+        "daemon/services/instance_messaging.py",
+        """        await self._amend_mission_anchor_at_delivery(
+            instance_id=instance_id,
+            message_id=message_id,
+            is_p1_human=is_fresh_episode_user_message,
+            mission_id=mission_id,
+        )""",
+        """        if self._manager.message_metadata_repo is not None:
+            await self._amend_mission_anchor_at_delivery(
+                instance_id=instance_id,
+                message_id=message_id,
+                is_p1_human=is_fresh_episode_user_message,
+                mission_id=mission_id,
+            )""",
+        "tests/unit/test_mission_record_pr2_tap_amend.py",
+        "TestTheAmendmentIsNotNestedInTheTapGuard::test_the_amend_call_is_not_under_the_metadata_repo_guard",
+    ),
+    (
         "epoch-tag-scope",
         "daemon/repositories/instance/repository.py",
         """            if entry.get("mission_id") == mission_id:

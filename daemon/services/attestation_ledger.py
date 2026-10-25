@@ -239,9 +239,18 @@ def safe_increment(
             instance_id,
             log_context,
         )
+    # The epoch tag is forwarded as a KEYWORD (the parameter name is
+    # part of the protocol contract): a ledger implementation that does
+    # not accept it raises a TypeError inside the C3 fail-open wrapper →
+    # None → the graph degrades the would-be DENY to an allow and the
+    # deny ledger is never written. The facade-forwarding guard test
+    # (``test_mission_record_pr2_ledger_forwarding.py``) drives the REAL
+    # repository through this seam, so the wiring cannot rot silently.
     return _safe_ledger_call(
         "increment",
-        lambda: ledger.increment(instance_id, denial_epoch, mission_id),
+        lambda: ledger.increment(
+            instance_id, denial_epoch, mission_id=mission_id
+        ),
         instance_id,
         log_context,
     )

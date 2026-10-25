@@ -177,6 +177,55 @@ class TestTapSitesCarryTheMission:
             assert "mission_id=" in call, call
 
 
+class TestTheAmendmentIsNotNestedInTheTapGuard:
+    """The amendment must NOT be gated on the message-metadata repo.
+
+    The re-founding amendment (ruling ③) needs the mission service +
+    the carried mission id — NOT the ``message_metadata`` side table.
+    Nesting it under the tap's ``if graph_input is not None and
+    ...message_metadata_repo is not None`` guard silently DISABLED the
+    anchor amendment for every delivery that has no metadata repo (and
+    for every checkpoint resume, where ``graph_input`` is None).
+
+    The guard is an AST scan (the house pattern — the same shape as
+    ``test_message_metadata_hook_placement.py``): the call must not sit
+    inside an ``if`` whose test mentions the metadata repo.
+    """
+
+    def test_the_amend_call_is_not_under_the_metadata_repo_guard(self):
+        import ast
+        from pathlib import Path as _Path
+
+        source_path = (
+            _Path(__file__).resolve().parents[2]
+            / "daemon/services/instance_messaging.py"
+        )
+        tree = ast.parse(source_path.read_text())
+
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_amend_mission_anchor_at_delivery"
+        ]
+        assert calls, "the amend-at-delivery call site must exist"
+
+        for call in calls:
+            for parent in ast.walk(tree):
+                if not isinstance(parent, ast.If):
+                    continue
+                if not any(child is call for child in ast.walk(parent)):
+                    continue
+                test_source = ast.unparse(parent.test)
+                assert "message_metadata_repo" not in test_source, (
+                    "the amend-at-delivery call is nested under the "
+                    f"metadata-repo guard ({test_source}) — the amendment "
+                    "does not need the metadata repo and must not be "
+                    "disabled by its absence"
+                )
+
+
 class TestAmendAtDelivery:
     async def test_a_p1_human_delivery_amends_the_anchor(
         self, engine, messaging_service, monkeypatch
