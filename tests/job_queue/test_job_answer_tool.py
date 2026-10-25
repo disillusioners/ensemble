@@ -535,7 +535,7 @@ class TestJobAnswerNoPendingPack:
 
 class TestJobAnswerAccessDenied:
     """(d) Access-control mismatch — caller project ≠ job project →
-    access denied (same ``_check_job_access`` helper the four visibility
+    access denied (same ``_check_job_access`` helper the gated job
     tools enforce)."""
 
     @pytest.mark.asyncio
@@ -568,7 +568,7 @@ class TestJobAnswerAccessDenied:
             }
         )
 
-        # The SAME error string the four visibility tools emit on
+        # The SAME error string the gated job tools emit on
         # project mismatch — _check_job_access returns the canonical
         # wording, and the tool passes it through verbatim.
         assert result == {
@@ -674,7 +674,7 @@ class TestJobAnswerAccessDenied:
     async def test_system_default_caller_allowed_across_projects(self, harness):
         """System-default (global-operator) caller may answer packs in
         any project — mirrors the ``_check_job_access`` carve-out the
-        four visibility tools inherit (chat-facing agents run in the
+        gated job tools inherit (chat-facing agents run in the
         system-default project)."""
         asker, work_id, pack = _seed_paused_asker_with_pending_pack(
             harness, project_id="proj-X"

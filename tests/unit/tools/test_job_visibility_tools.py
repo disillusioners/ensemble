@@ -24,6 +24,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from daemon.tools.job_queue import create_job_tools
+from daemon.tools import job_queue
 from daemon.tools._tool_registry import CATEGORY_MODULES
 from daemon import constants
 from daemon.services import project_normalizer
@@ -2205,3 +2206,43 @@ class TestJobToolsUnchangedTrustPins:
         assert "error" not in result
         assert result["job_id"] == "fd-get-1"
         assert result["project_id"] == "proj-B"
+
+
+class TestFrontDoorScopePin:
+    """Security pin (review F1, mutation-verified): the front-door
+    exemption is ARI-ONLY. Widening ``FRONT_DOOR_JOB_ACCESS_AGENTS``
+    (e.g. to include ``jober``) must fail these tests loudly rather
+    than silently widen the cross-project trust."""
+
+    def test_front_door_agents_exactly_ari(self):
+        """Membership pin at the definition site — the exemption is
+        comment-enforced nowhere: this test is the enforcement."""
+        assert job_queue.FRONT_DOOR_JOB_ACCESS_AGENTS == frozenset({"ari"})
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool_name", FRONT_DOOR_VISIBILITY_TOOLS)
+    async def test_scoped_jober_cross_project_denied(
+        self, mock_services, mock_manager, tool_name,
+    ):
+        """Scoped jober caller (real project_id) + cross-project job →
+        exact-dict denial. ``jober`` deliberately holds NO front-door
+        exemption — any future widening of the frozenset flips these to
+        red (the A/B mutation probe on 2026-10-25 proved they catch
+        exactly that widening)."""
+        job_service, _, _ = mock_services
+
+        record = _make_work_record(
+            f"fd-jober-{tool_name}", instance_id="jober-root",
+            project_id="proj-A", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        caller = _make_instance("caller-id", agent_id="jober", project_id="proj-B")
+        tools = _build_tools_for_caller(mock_services, mock_manager, caller)
+
+        tool = _get_job_tool(tools, tool_name)
+        result = await tool.ainvoke(
+            _visibility_tool_args(tool_name, f"fd-jober-{tool_name}")
+        )
+
+        assert result == {"error": "Access denied: job does not belong to caller's project"}

@@ -2,9 +2,11 @@
 
 ## Job Visibility Tools
 
-Four read/write tools give me visibility into jobs I've dispatched — so I can
-report progress, inspect agent conversations, understand the instance tree, and
-steer running work without waiting for push notifications.
+My `job` toolset spans the whole `job` category — creation, lifecycle
+management, queues, and the DLQ — and this section covers its read/steer
+tools for jobs I've dispatched: I can report progress, inspect agent
+conversations, understand the instance tree, and steer running work
+without waiting for push notifications.
 
 ### Which Tool to Use
 

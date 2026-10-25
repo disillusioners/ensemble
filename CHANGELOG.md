@@ -20,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **DB note** — the `mcp_servers` row `computer-use` was soft-deactivated (`is_active=false`) out of band; the boot orphan sweep (`_deactivate_orphaned_builtin_servers`) deactivates any re-appearance.
 - **Tests** — `tests/unit/test_computer_use_mcp.py` (1726 lines) is deleted; its GENERIC half (the S1 built-in availability gate, the privilege-stamp helper's non-stamping contract, `is_mcp_tool`'s standard-shape detection and the empty-allow privileged-category strip) is ported to `tests/unit/test_mcp_builtin_availability_gate.py`. The nine `PRIVILEGED_TOOL_CATEGORIES` same-PR pins drop the `cu` member (16 → 15).
 
+### Changed — explicit front-door (ari) exemption in the gated job tools' project gate (`feature/ari-frontdoor-job-scope`)
+
+> **CHANGELOG (access-control):** *`_check_job_access` gains a NARROW, user-ratified (2026-10-25) front-door rung: the `FRONT_DOOR_JOB_ACCESS_AGENTS` frozenset — `{"ari"}` only — lets the commissioning agent read/steer jobs in ANY project, matching the cross-project trust `job_create`/`job_continue` already carry by design. This is NOT a general per-agent allow-list; `jober` is explicitly excluded.*
+
+- **New rung** (`daemon/tools/job_queue.py::_check_job_access`) — inserted AFTER the system-default "global-operator" rung and BEFORE the strict-match comparison: a caller whose Instance row's `agent_id` is in `FRONT_DOOR_JOB_ACCESS_AGENTS` is allowed. The agent_id is read off the caller row the helper already fetches (no extra queries); every existing rung, the SYSTEM_DEFAULT tier semantics and the exact denial string are unchanged.
+- **Scope — the seven gated call sites** — `job_messages` / `job_tree` / `job_progress` / `job_inject` / `job_answer` / `job_pause` / `job_resume` all enforce through the same helper, so the exemption covers exactly those seven. `job_create` and `job_continue` remain structurally ungated (cross-project creation is the feature) and `job_get` remains ungated (pinned by test).
+- **ari-only, test-enforced** — the membership is pinned at the definition site (`FRONT_DOOR_JOB_ACCESS_AGENTS == frozenset({"ari"})`) plus a jober-scoped cross-project denial case, so any future widening of the set fails tests instead of silently passing.
+- **Docs** — `agents/ari/tools_note.md` (front-door vs global-operator tiers; whole-`job`-category holdings) and `agents/leader/tools_note.md` (orchestrator-lane job toolset decision: `job_pause`/`job_resume` only, still project-gated).
+
 ## [0.27.7] — 2026-10-24
 
 ### Fixed — the nest-ops shakedown defect patch (`fix/nest-ops-shakedown-defects`, base `b257842c9`, merge M `cdf348057`)
