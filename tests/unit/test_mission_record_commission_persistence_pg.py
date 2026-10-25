@@ -139,19 +139,35 @@ def pg_scratch_engine() -> Iterator[tuple[Engine, str]]:
     finally:
         if engine is not None:
             engine.dispose()
-        try:
-            with admin.connect() as conn:
-                conn.execute(
-                    text(
-                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                        "WHERE datname = :db AND pid <> pg_backend_pid()"
-                    ),
-                    {"db": scratch_db},
-                )
-                conn.execute(text(f'DROP DATABASE IF EXISTS "{scratch_db}"'))
-        except Exception:  # pragma: no cover — best-effort cleanup
-            pass
+        # Drop the scratch database — LOUD on failure: a leftover
+        # scratch DB is a hygiene failure, not a silent cleanup
+        # casualty. Terminate stragglers first, then retry the drop
+        # once (a pooled connection can still hold the database open
+        # for a moment after ``dispose``).
+        drop_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                with admin.connect() as conn:
+                    conn.execute(
+                        text(
+                            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                            "WHERE datname = :db AND pid <> pg_backend_pid()"
+                        ),
+                        {"db": scratch_db},
+                    )
+                    conn.execute(
+                        text(f'DROP DATABASE IF EXISTS "{scratch_db}" WITH (FORCE)')
+                    )
+                drop_error = None
+                break
+            except Exception as exc:  # noqa: BLE001 — retried once
+                drop_error = exc
         admin.dispose()
+        if drop_error is not None:
+            raise RuntimeError(
+                f"failed to drop the scratch PostgreSQL database "
+                f"{scratch_db!r}: {drop_error}"
+            )
 
 
 class _StubManager:
