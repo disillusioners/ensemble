@@ -190,6 +190,13 @@ def _scheduler_mint_armed() -> bool:
     not ``off`` AND the dedicated extension flag
     (``ENSEMBLE_MISSION_RECORDS_SCHEDULER_MINT``) is explicitly set.
     Default configuration → ``False`` → byte-identical pre-PR1 behavior.
+
+    The mint SITE is WIRED — :meth:`SchedulerAdapter._route_via_job_queue`
+    calls :func:`daemon.services.mission_record_service.resolve_or_mint_fail_open`
+    behind this gate (the scheduler's own durable-enqueue point). The
+    gate is what keeps that site inert until the standing ruling flips;
+    the cheap extension-flag check runs FIRST so the default path never
+    touches the mode ladder.
     """
     if not scheduler_mint_extension_enabled():
         return False
@@ -2678,6 +2685,36 @@ Original scheduled task:
                 enqueue_kwargs["idempotency_key"] = (
                     f"scheduler:{self.source_id}:{self._run_at.isoformat()}"
                 )
+
+            # ── Proposal B PR1 — scheduler lane mint (lane 9) ──────────────
+            # The mint SITE is wired HERE — the scheduler's own
+            # dispatch/enqueue point (``_route_via_job_queue`` is the
+            # path that produces the durable delivery: MessageQueue +
+            # Task + JobItem). The wiring exists so the eventual
+            # product ruling flip is a ONE-ENV change with the site
+            # already in place (proposal-b §2.2 lane 9:
+            # ``founding_source=scheduler``, commissioner NULL —
+            # the daemon identity stops "anchoring like a human" by
+            # becoming an honest recorded founder).
+            #
+            # INERT BY DEFAULT (standing product ruling: lane 9 stays
+            # BARE): BOTH gates must open — the mode ladder must not
+            # be ``off`` AND ``ENSEMBLE_MISSION_RECORDS_SCHEDULER_MINT``
+            # must be explicitly set. With the default configuration
+            # the site is skipped ENTIRELY (no env read, no service
+            # call, no kwarg added → byte-identical pre-PR1 behavior).
+            # Fail-OPEN wrapper: a records-side failure never breaks
+            # the schedule.
+            if _scheduler_mint_armed():
+                _mission_id = await asyncio.to_thread(
+                    resolve_or_mint_fail_open,
+                    getattr(self._manager, "mission_record_service", None),
+                    instance_id,
+                    "scheduler",
+                    founding_source="scheduler",
+                )
+                if _mission_id:
+                    enqueue_kwargs["mission_id"] = _mission_id
 
             result = await self._manager.enqueue_message_job(
                 instance_id=instance_id,

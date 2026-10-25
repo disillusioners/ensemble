@@ -36,7 +36,9 @@ from .persistence import (
 )
 from .services.mission_record_service import MissionRecordService
 from .services.mission_record_service import (
+    MissionRecordMode,
     mint_cascade_resume_epoch_if_stranded_fail_open,
+    resolve_mission_records_mode,
 )
 from .repositories import (
         SQLModelInstanceRepository,
@@ -833,49 +835,6 @@ class InstanceManager:
         if applied:
             logger.info(f"Applied {len(applied)} migrations: {applied}")
 
-        # ── Proposal B PR1 — adoption-delta (b): advisory nudge-commission
-        # backfill (dry-run-loggable) ──────────────────────────────────
-        # Best-effort historical coverage of the existing
-        # ``instance_ops_audit`` nudge rows (the tiny surface: 6 rows / 1
-        # committed nudge all-time): committed non-dry nudges whose
-        # target is STILL NON-TERMINAL mint ADVISORY commission rows
-        # (``provenance='backfill'``, deterministic ids, EXCLUDED from
-        # routing authority forever). IDEMPOTENT (deterministic UUID5
-        # commission ids + epoch-0 resolve-if-none). Runs DRY-RUN ONLY at
-        # boot in PR1 (the loggable plan; the committing run is an
-        # operator action — ``backfill_advisory_nudge_commissions(
-        # dry_run=False)`` — matching proposal-b §5.2's "runs
-        # dry-run-loggable before commit"). NEVER breaks boot: the
-        # envelope swallows everything but logs loudly. Skipped entirely
-        # when the mode ladder is ``off``.
-        try:
-            from .services.mission_record_service import (
-                MissionRecordMode,
-                resolve_mission_records_mode,
-            )
-
-            if resolve_mission_records_mode() != MissionRecordMode.OFF:
-                # SYNC context (manager __init__ — the migration block
-                # above is sync too): call the backfill directly.
-                _backfill = (
-                    self._mission_record_service.backfill_advisory_nudge_commissions(
-                        dry_run=True,
-                    )
-                )
-                if _backfill.get("scanned"):
-                    logger.info(
-                        "mission_records: advisory nudge-commission backfill "
-                        "dry-run plan: %s",
-                        _backfill,
-                    )
-        except Exception as _backfill_exc:  # noqa: BLE001 — never break boot
-            logger.warning(
-                "mission_records: backfill dry-run failed at boot (ignored): "
-                "%s: %s",
-                type(_backfill_exc).__name__,
-                _backfill_exc,
-            )
-
         # Postgres-specific schema evolution. create_all() only creates
         # tables that don't exist — it does NOT add columns to existing
         # tables, and the migration runner skips non-SQLite engines. So
@@ -1038,10 +997,65 @@ class InstanceManager:
         # ``mission_commissions`` — the commissioning lanes call it
         # through the fail-open wrappers in
         # :mod:`daemon.services.mission_record_service`. The mode ladder
-        # (``ENSEMBLE_MISSION_RECORDS=off|dry|enforce``) is read
-        # per-call by the wrappers (restart-read; ship default ``dry`` =
+        # (``ENSEMBLE_MISSION_RECORDS=off|dry|enforce``) is resolved
+        # ONCE at boot and cached (restart-read; ship default ``dry`` =
         # mints write, NOTHING reads — zero behavior change).
         self._mission_record_service = MissionRecordService(self._engine)
+
+        # F5 (house switch pattern): resolve the mission-records mode
+        # ladder ONCE, at boot, OUTSIDE any swallow-envelope — an
+        # unrecognized ``ENSEMBLE_MISSION_RECORDS`` token raises a LOUD
+        # ValueError here, so an operator typo fails the daemon start
+        # (exactly like the other kill-switches) instead of silently
+        # degrading a live lane. The resolver CACHES the value
+        # (restart-read): a mid-run env mutation can no longer flip it.
+        resolve_mission_records_mode()
+
+        # ── Proposal B PR1 — adoption-delta (b): advisory nudge-commission
+        # backfill (dry-run-loggable) ──────────────────────────────────
+        # Best-effort historical coverage of the existing
+        # ``instance_ops_audit`` nudge rows (the tiny surface: 6 rows / 1
+        # committed nudge all-time): committed non-dry nudges whose
+        # target is STILL NON-TERMINAL mint ADVISORY commission rows
+        # (``provenance='backfill'``, deterministic ids, EXCLUDED from
+        # routing authority forever). IDEMPOTENT (deterministic UUID5
+        # commission ids + epoch-0 resolve-if-none). Runs DRY-RUN ONLY at
+        # boot in PR1 (the loggable plan; the committing run is an
+        # operator action — ``backfill_advisory_nudge_commissions(
+        # dry_run=False)`` — matching proposal-b §5.2's "runs
+        # dry-run-loggable before commit"). NEVER breaks boot: the
+        # envelope swallows everything but logs loudly. Skipped entirely
+        # when the mode ladder is ``off``.
+        #
+        # ORDERING (independent-review F1): this block runs AFTER the
+        # ``self._mission_record_service`` assignment above. It used to
+        # sit next to the migration block (≈200 lines EARLIER), where
+        # ``self._mission_record_service`` did not exist yet — the
+        # resulting AttributeError was swallowed by the boot envelope
+        # below, so the documented dry-run plan NEVER ran and never
+        # logged on the default ``dry`` path.
+        try:
+            if resolve_mission_records_mode() != MissionRecordMode.OFF:
+                # SYNC context (manager __init__ — the migration block
+                # above is sync too): call the backfill directly.
+                _backfill = (
+                    self._mission_record_service.backfill_advisory_nudge_commissions(
+                        dry_run=True,
+                    )
+                )
+                if _backfill.get("scanned"):
+                    logger.info(
+                        "mission_records: advisory nudge-commission backfill "
+                        "dry-run plan: %s",
+                        _backfill,
+                    )
+        except Exception as _backfill_exc:  # noqa: BLE001 — never break boot
+            logger.warning(
+                "mission_records: backfill dry-run failed at boot (ignored): "
+                "%s: %s",
+                type(_backfill_exc).__name__,
+                _backfill_exc,
+            )
 
         # Instance UI preferences (pin + color tag). Global-scope table
         # keyed by instance_id; merge happens at the API router layer so

@@ -1,5 +1,20 @@
 """D2(c) real-DB settle-hold — the flagged coverage gap, CLOSED.
 
+SCOPE NOTE (independent-review F7) — THIS FILE IS A PRE-EXISTING
+DEPENDENCY-WATCHERS COVERAGE-GAP CLOSURE, **NOT** A PR1 DELIVERABLE.
+The gap was flagged by the 2026-10-24 end-of-train verification (the
+verification of the PRE-PR1 completion work), i.e. it predates
+Proposal B PR1 entirely. The file rides in the PR1 branch's test
+train because that is where the real-DB harness work landed, but it
+covers the LEGACY dependency-watchers path ONLY: it intentionally
+contains NO ``mission_records`` / ``mission_commissions`` references
+and asserts nothing about the mission-record anchor. Do NOT read it
+as PR1 coverage — PR1's own coverage is
+``tests/unit/test_mission_record_service.py``,
+``tests/unit/test_mission_record_facade_forwarding.py``,
+``tests/unit/test_mission_record_migrations_sqlite.py`` and
+``tests/unit/test_mission_record_revive_enqueue_integration.py``.
+
 The end-of-train verification (2026-10-24, gap list item 1) flagged:
 ``fetch_pending_for_targets`` (``dependency_bus/repository.py``) had
 ZERO real-DB coverage anywhere in the repo (all 5 union tests mock the

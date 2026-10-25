@@ -47,9 +47,11 @@ class MissionRecordError(RuntimeError):
 
 
 def _utc_now_iso() -> str:
-    from datetime import datetime, timezone
+    """TEXT ISO-8601 UTC stamp — the sanctioned ``now_utc_iso()`` helper
+    (``daemon/services/timestamps.py``; byte-identical output)."""
+    from ...services.timestamps import now_utc_iso
 
-    return datetime.now(timezone.utc).isoformat()
+    return now_utc_iso()
 
 
 class MissionRecordRepository:

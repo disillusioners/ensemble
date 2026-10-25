@@ -46,7 +46,20 @@ from daemon.services.mission_record_service import (
     MISSION_ID_KEY,
     MISSION_RECORDS_MODE_ENV,
     MissionRecordService,
+    _reset_mission_records_mode_for_tests,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_mode_cache():
+    """The mode ladder is CACHED (F5 — the house switch pattern).
+
+    Every test starts from a clean cache so the env it sets is the env
+    that actually gets resolved (the ladder is restart-read).
+    """
+    _reset_mission_records_mode_for_tests()
+    yield
+    _reset_mission_records_mode_for_tests()
 
 
 @pytest.fixture

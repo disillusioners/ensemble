@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import Column, Index, String, Text, text
@@ -55,10 +54,12 @@ class MissionFoundingSource(str, enum.Enum):
     """Which commissioning lane founded the epoch (``founding_source``).
 
     The exact vocabulary from proposal-b §2.1. ``scheduler`` exists in
-    the vocabulary for schema completeness but its MINT SITE ships as an
-    INERT flag-gated-OFF extension point only (standing product ruling —
-    lane 9 stays bare); ``backfill`` marks synthetic epoch-0 rows written
-    by the migration/backfill story (provenance auditability).
+    the vocabulary for schema completeness; its MINT SITE is WIRED but
+    INERT — flag-gated OFF by default (standing product ruling — lane 9
+    stays bare: ``ENSEMBLE_MISSION_RECORDS_SCHEDULER_MINT`` must be set
+    explicitly AND the mode ladder must not be ``off``);
+    ``backfill`` marks synthetic epoch-0 rows written by the
+    migration/backfill story (provenance auditability).
     """
 
     USER_API = "user_api"
@@ -179,8 +180,14 @@ def _new_uuid4() -> str:
 
 def _utc_now_iso() -> str:
     """TEXT ISO-8601 UTC stamp — the TEXT-timestamp convention
-    (``now_utc_iso()`` family: TEXT columns carry UTC ISO digits)."""
-    return datetime.now(timezone.utc).isoformat()
+    (``now_utc_iso()`` family: TEXT columns carry UTC ISO digits).
+
+    Delegates to the sanctioned helper (``daemon/services/timestamps.py``)
+    so the stamp is byte-identical to every other TEXT timestamp column.
+    """
+    from ...services.timestamps import now_utc_iso
+
+    return now_utc_iso()
 
 
 # The mint-idempotency predicate: the partial unique index covers only

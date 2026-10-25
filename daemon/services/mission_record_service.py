@@ -47,12 +47,18 @@ MODE LADDER (restart-read, ship default ``dry``)
                 reserves the vocabulary; minting behaves identically to
                 ``dry``).
 
-The mode is read from the environment per call (kill-switch
-convention: the typed config is for intervals, not switch flips —
-``daemon/config.py`` note; the operator flips the env and restarts).
-Unknown values fail CLOSED to ``dry``?? — no: unknown values fail to
-``off`` (the conservative reading: an unrecognized token must never
-TURN ON writes the operator did not ask for).
+The mode is resolved ONCE from the environment and CACHED (the house
+switch pattern — ``daemon/config.py``'s kill-switch family: the typed
+config is for intervals, not switch flips; the operator flips the env
+and RESTARTS, and a mid-run env mutation can no longer change a
+resolved knob). An UNRECOGNIZED token raises a LOUD ``ValueError``
+naming ``ENSEMBLE_MISSION_RECORDS`` — the daemon's boot resolution
+site (the manager's mission-record service construction) turns that
+into a failed start, exactly like the other kill-switches do. The
+lane-facing ``*_fail_open`` wrappers never propagate that error: a
+records-side problem must NEVER break a commissioning lane, so they
+resolve through the never-raising :func:`_mode_is_off` helper and
+proceed record-blind.
 
 ADOPTION DELTA (a) — TIE-BREAK PRECEDENCE (routing authority)
 -------------------------------------------------------------
@@ -95,7 +101,11 @@ ZERO-BEHAVIOR-CHANGE CONTRACT (the PR1 hard gate)
   RECORDS the boundary; the legacy clear keeps its current behavior).
 * The terminal-write census (``tests/job_queue/test_terminal_write_census.py``)
   and the admission-writer census (``daemon/job_state/constitution.py``)
-  are untouched and stay green.
+  are UNTOUCHED by PR1 — PR1 adds no writer to either census's surface.
+  They are NOT both green on this branch: the terminal-write census
+  currently carries the SAME 2 pre-existing base-red failures that were
+  A/B-proven at the base commit ``7af1d2632`` (i.e. they are NOT caused
+  by PR1 and are not PR1's to fix).
 * All gate/census/anchor/routing reads stay legacy.
 """
 
@@ -124,6 +134,7 @@ from ..repositories.mission_record.repository import (
     MissionRecordError,
     MissionRecordRepository,
 )
+from .timestamps import now_utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -151,8 +162,11 @@ MISSION_ID_KEY = "__ens_mission_id__"
 #: The inert extension-point gate for the SCHEDULER lane (lane 9).
 #: STANDING PRODUCT RULING: the scheduler lane stays BARE (it must not
 #: anchor like a human, and it must not mint like one either — yet).
-#: This gate exists so the mint SITE is already wired when the ruling
-#: flips; it defaults OFF and there is no plan to flip it in PR1-PR3.
+#: The mint SITE is WIRED — ``SchedulerAdapter._route_via_job_queue``
+#: (the scheduler's own durable-enqueue point) calls the fail-open
+#: resolve-or-mint behind this gate. The gate is what keeps that site
+#: inert until the standing ruling flips; it defaults OFF and there is
+#: no plan to flip it in PR1-PR3.
 SCHEDULER_MINT_EXTENSION_ENV = "ENSEMBLE_MISSION_RECORDS_SCHEDULER_MINT"
 
 
@@ -167,25 +181,71 @@ class MissionRecordMode(str):
 _VALID_MODES = (MissionRecordMode.OFF, MissionRecordMode.DRY, MissionRecordMode.ENFORCE)
 
 
-def resolve_mission_records_mode() -> str:
-    """Read the mode ladder from the environment (restart-read).
+#: The CACHED resolved mode ladder value (restart-read). ``None`` = not
+#: resolved yet. The cache is what makes the knob restart-read: a
+#: mid-run env mutation can no longer flip a live lane (the bug the
+#: independent review flagged). Cleared only by the test-reset hook.
+_MISSION_RECORDS_MODE: Optional[str] = None
 
-    Default ``dry`` (mints write; reads stay legacy). Unknown values
-    fail to ``off`` — an unrecognized token must never turn ON writes
-    the operator did not ask for. Blank/unset = the default.
+
+def resolve_mission_records_mode() -> str:
+    """Resolve the mode ladder from the environment ONCE and CACHE it.
+
+    House switch pattern (``daemon/config.py``'s kill-switch family,
+    e.g. ``get_symptom_repair_ladder_enabled``): the value is resolved
+    once (restart-read) and served from the cache afterwards — the
+    operator flips the env and restarts; a mid-run env mutation cannot
+    change a resolved knob.
+
+    Default ``dry`` (mints write; reads stay legacy). An UNRECOGNIZED
+    token raises a LOUD :class:`ValueError` naming the env var — the
+    operator-typo convention (a misconfigured knob must fail the boot
+    loudly, not silently degrade). The lane-facing ``*_fail_open``
+    wrappers never propagate it (they use :func:`_mode_is_off`), so a
+    lane can never break on a records-side problem.
     """
-    raw = (os.environ.get(MISSION_RECORDS_MODE_ENV) or "").strip().lower()
-    if not raw:
-        return MissionRecordMode.DRY
-    if raw in _VALID_MODES:
-        return raw
-    logger.warning(
-        "mission_records: unrecognized %s=%r — failing to 'off' "
-        "(valid: off|dry|enforce)",
-        MISSION_RECORDS_MODE_ENV,
-        raw,
-    )
-    return MissionRecordMode.OFF
+    global _MISSION_RECORDS_MODE
+    if _MISSION_RECORDS_MODE is None:
+        raw = (os.environ.get(MISSION_RECORDS_MODE_ENV) or "").strip().lower()
+        if not raw:
+            _MISSION_RECORDS_MODE = MissionRecordMode.DRY
+        elif raw in _VALID_MODES:
+            _MISSION_RECORDS_MODE = raw
+        else:
+            raise ValueError(
+                f"Invalid {MISSION_RECORDS_MODE_ENV} value {raw!r} — "
+                f"expected one of {'|'.join(_VALID_MODES)}"
+            )
+    return _MISSION_RECORDS_MODE
+
+
+def _reset_mission_records_mode_for_tests() -> None:
+    """Clear the cached mode ladder value (unit-test isolation only)."""
+    global _MISSION_RECORDS_MODE
+    _MISSION_RECORDS_MODE = None
+
+
+def _mode_is_off() -> bool:
+    """``True`` when the mode ladder is ``off`` — NEVER raises.
+
+    The lane-facing ``*_fail_open`` wrappers use this instead of
+    calling :func:`resolve_mission_records_mode` directly: the
+    resolver raises LOUDLY on an unrecognized token (house switch
+    pattern) and a commissioning lane must NEVER break on a
+    records-side problem (the fail-open producer posture). The loud
+    failure lives at the BOOT resolution site (the manager's
+    mission-record service construction), where an operator typo fails
+    the daemon start rather than a lane mid-flight.
+    """
+    try:
+        return resolve_mission_records_mode() == MissionRecordMode.OFF
+    except ValueError as exc:
+        logger.warning(
+            "mission_records: mode ladder unresolved (%s) — this lane "
+            "proceeds record-blind",
+            exc,
+        )
+        return True
 
 
 def scheduler_mint_extension_enabled() -> bool:
@@ -703,12 +763,10 @@ class MissionRecordService:
         stamp site / emission dispatch). No new terminal instance-status
         writer exists — this writes ONLY ``mission_records.status``.
         """
-        from datetime import datetime, timezone
-
         return self._repo.transition_epoch_status(
             mission_id,
             MissionStatus.SETTLED.value,
-            settled_at=datetime.now(timezone.utc).isoformat(),
+            settled_at=now_utc_iso(),
             session=session,
         )
 
@@ -907,7 +965,7 @@ def resolve_or_mint_fail_open(
     """
     if service is None:
         return None
-    if resolve_mission_records_mode() == MissionRecordMode.OFF:
+    if _mode_is_off():
         return None
     try:
         if session is not None:
@@ -951,7 +1009,7 @@ def mint_continuation_epoch_fail_open(
     """job_continue wrapper (force-new epoch; never raise)."""
     if service is None:
         return None
-    if resolve_mission_records_mode() == MissionRecordMode.OFF:
+    if _mode_is_off():
         return None
     try:
         resolution = service.mint_continuation_epoch(
@@ -994,7 +1052,7 @@ def mint_revive_epoch_fail_open(
     caller's own writes commit unchanged."""
     if service is None:
         return None
-    if resolve_mission_records_mode() == MissionRecordMode.OFF:
+    if _mode_is_off():
         return None
     try:
         if session is not None:
@@ -1038,7 +1096,7 @@ def mint_boot_epoch_if_none_fail_open(
     """Boot-sweep wrapper (never raise; boot must never wedge)."""
     if service is None:
         return None
-    if resolve_mission_records_mode() == MissionRecordMode.OFF:
+    if _mode_is_off():
         return None
     try:
         resolution = service.mint_boot_epoch_if_none(actor_instance_id)
@@ -1068,7 +1126,7 @@ def mint_cascade_resume_epoch_if_stranded_fail_open(
     """Cascade-resume wrapper (never raise; the resume must never wedge)."""
     if service is None:
         return None
-    if resolve_mission_records_mode() == MissionRecordMode.OFF:
+    if _mode_is_off():
         return None
     try:
         resolution = service.mint_cascade_resume_epoch_if_stranded(
@@ -1113,7 +1171,7 @@ def mint_commission_fail_open(
     """
     if service is None or not mission_id:
         return None
-    if resolve_mission_records_mode() == MissionRecordMode.OFF:
+    if _mode_is_off():
         return None
     try:
         if session is not None:
@@ -1166,7 +1224,7 @@ def attach_work_id_fail_open(
     """Post-enqueue job-linkage attach wrapper (never raise; miss = logged)."""
     if service is None or not mission_id or not work_id:
         return False
-    if resolve_mission_records_mode() == MissionRecordMode.OFF:
+    if _mode_is_off():
         return False
     try:
         attached = service.attach_work_id(mission_id, work_id)
@@ -1195,7 +1253,7 @@ def attach_founding_message_fail_open(
     """Post-enqueue attach wrapper (never raise; miss = logged)."""
     if service is None or not mission_id or not founding_message_id:
         return False
-    if resolve_mission_records_mode() == MissionRecordMode.OFF:
+    if _mode_is_off():
         return False
     try:
         attached = service.attach_founding_message(mission_id, founding_message_id)

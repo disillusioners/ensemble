@@ -17,7 +17,8 @@ Covers:
   revive) — rung 2 deliberately not consulted;
 * the continuation mint (job_continue): force-NEW epoch, prior open
   epoch → superseded RECORD-SIDE ONLY, parent chain;
-* the mode ladder (off/dry/enforce, unknown → off, restart-read);
+* the mode ladder (off/dry/enforce, unknown → LOUD ValueError,
+  resolve-once + cached — the house switch pattern);
 * adoption delta (a): second commission of the same worker = SECOND
   outstanding row, rung 2 resolves oldest-first;
 * adoption delta (b): the advisory backfill rules (committed non-dry
@@ -56,6 +57,7 @@ from daemon.services.mission_record_service import (
     MISSION_RECORDS_MODE_ENV,
     MissionRecordMode,
     MissionRecordService,
+    _reset_mission_records_mode_for_tests,
     attach_founding_message_fail_open,
     mint_commission_fail_open,
     mint_continuation_epoch_fail_open,
@@ -475,20 +477,60 @@ class TestContinuationEpoch:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _reset_mode_cache():
+    """The mode ladder is CACHED (F5 — the house switch pattern).
+
+    Every test starts from a clean cache so the env it sets is the env
+    that actually gets resolved, and leaves the cache clean for the
+    next test.
+    """
+    _reset_mission_records_mode_for_tests()
+    yield
+    _reset_mission_records_mode_for_tests()
+
+
 class TestModeLadder:
     def test_default_is_dry(self, monkeypatch):
         monkeypatch.delenv(MISSION_RECORDS_MODE_ENV, raising=False)
         assert resolve_mission_records_mode() == MissionRecordMode.DRY
 
-    def test_unknown_value_fails_to_off(self, monkeypatch):
+    def test_unknown_value_raises_loud_value_error(self, monkeypatch):
+        """F5 — an unrecognized token fails LOUD (house switch pattern).
+
+        The daemon's boot resolution site turns this into a failed
+        start; the lane wrappers never propagate it (see the
+        fail-open test below).
+        """
         monkeypatch.setenv(MISSION_RECORDS_MODE_ENV, "shipped-yesterday")
-        assert resolve_mission_records_mode() == MissionRecordMode.OFF
+        with pytest.raises(ValueError) as excinfo:
+            resolve_mission_records_mode()
+        assert MISSION_RECORDS_MODE_ENV in str(excinfo.value)
 
     def test_explicit_off_and_enforce(self, monkeypatch):
         monkeypatch.setenv(MISSION_RECORDS_MODE_ENV, "off")
         assert resolve_mission_records_mode() == "off"
+        _reset_mission_records_mode_for_tests()
         monkeypatch.setenv(MISSION_RECORDS_MODE_ENV, "enforce")
         assert resolve_mission_records_mode() == "enforce"
+
+    def test_mode_is_resolved_once_and_cached(self, monkeypatch):
+        """F5 — restart-read: a mid-run env mutation cannot flip a
+        resolved knob (the resolver caches the value)."""
+        monkeypatch.setenv(MISSION_RECORDS_MODE_ENV, "dry")
+        assert resolve_mission_records_mode() == MissionRecordMode.DRY
+        # mid-run mutation — IGNORED (the knob is restart-read)
+        monkeypatch.setenv(MISSION_RECORDS_MODE_ENV, "off")
+        assert resolve_mission_records_mode() == MissionRecordMode.DRY
+
+    def test_lane_wrapper_never_raises_on_unrecognized_token(
+        self, service, engine, two_instances, monkeypatch
+    ):
+        """F5 — the fail-open producer posture survives the loud
+        resolver: a lane never breaks on a records-side problem."""
+        monkeypatch.setenv(MISSION_RECORDS_MODE_ENV, "shipped-yesterday")
+        actor, _ = two_instances
+        assert resolve_or_mint_fail_open(service, actor, "user_api") is None
 
     def test_off_means_no_mints(self, service, engine, two_instances, monkeypatch):
         monkeypatch.setenv(MISSION_RECORDS_MODE_ENV, "off")

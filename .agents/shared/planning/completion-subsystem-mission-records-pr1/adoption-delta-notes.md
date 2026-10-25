@@ -93,10 +93,15 @@ Best-effort advisory backfill, rules per proposal §5.2
    resolves to it (rung 1) and attaches — bounded, honest, and
    read-invisible until PR2.
 6. **Scheduler (lane 9) is INERT by standing product ruling.** The
-   mint site is wired behind
-   `ENSEMBLE_MISSION_RECORDS_SCHEDULER_MINT` (default OFF); the mode
-   ladder alone (`dry`) does NOT arm it — both gates must open. Lane 9
-   stays bare.
+   mint SITE is wired — `SchedulerAdapter._route_via_job_queue` (the
+   scheduler's own durable-enqueue point) calls the fail-open
+   resolve-or-mint behind `ENSEMBLE_MISSION_RECORDS_SCHEDULER_MINT`
+   (default OFF); the mode ladder alone (`dry`) does NOT arm it — both
+   gates must open. Lane 9 stays bare.
+   *(F2/F3 correction: the site is wired in the code — it was a dead
+   extension point with a false claim until the independent-review fix
+   pass. The wiring is INERT in every default configuration, so the
+   zero-behavior-change contract is unchanged.)*
 7. **Epoch-boundary ledger clears are NOT generalized in PR1** (the
    §2.4 policy): mints write records only; the revive lane's existing
    fresh-episode clear keeps its exact current behavior. The
@@ -133,3 +138,20 @@ PR3 (routing + reconciliation):
   terminal + no report row → `abandoned` with reason; TTL backstop).
 - The committing backfill run + retention story.
 - Multi-commissioner routing tie-break: USER decision (see (a)).
+
+## PR1 train scope note — the D2(c) real-DB test is a PRE-EXISTING gap closure
+
+The PR1 branch's test train carries
+`tests/integration/test_d2c_settle_hold_real_db.py`. That file is a
+**PRE-EXISTING dependency-watchers coverage-gap closure** (the gap was
+flagged by the 2026-10-24 end-of-train verification — it predates PR1),
+**NOT** a PR1 deliverable: it covers the LEGACY dependency-watchers /
+C-union path and intentionally contains NO `mission_records` /
+`mission_commissions` references. It rides in the train because that is
+where the real-DB harness work landed. PR1's own coverage is the four
+`tests/unit/test_mission_record_*` files.
+
+*(Independent-review F7 — framing correction. The commit that added
+the file described it as part of the "PR1 test train"; commit bodies
+are immutable history, so the correction is recorded here and in the
+test module's own docstring.)*
