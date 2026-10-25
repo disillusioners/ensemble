@@ -607,11 +607,11 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # list bypasses the category gate, so the tool body ALSO carries
     # an ``agent_id == "ari"`` runtime gate. Both gates are required;
     # neither substitutes for the other.
-    # SAME-PR pin updates at the NINE files carrying the THIRTEEN
-    # assertion sites (9 exact-set + 4 count — re-grepped on tip
-    # 7af1d2632d, fold-able 2) are mandatory (this entry ships in the
-    # SAME commit as those bumps — the set must never be red between
-    # two commits).
+    # SAME-PR pin updates at the NINE files carrying the FOURTEEN
+    # assertion sites (9 exact-set + 4 count + 1 allow-array
+    # trailing-entry pin — re-grepped on tip 7af1d2632d, fold-able 2)
+    # are mandatory (this entry ships in the SAME commit as those bumps
+    # — the set must never be red between two commits).
     "notify-user",
 })
 

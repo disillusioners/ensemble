@@ -75,11 +75,15 @@ Rate gates (D5 as corrected by C3, serialized by B2)
   (``target_hash = sha256(source_id + ":" + external_user_id)`` — W1,
   source-qualified), counted from the ``notify_audit`` ledger:
   commit-before-count (C3) under a per-destination-key asyncio.Lock
-  held across the ENTIRE gate decision (B2). ONLY rows currently
-  standing as ``accepted`` consume budget (N3); every refusal class is
-  ledgered and NEVER consumes budget; crash-orphaned accepted rows
-  count conservatively until the N4 sweep re-marks them
-  ``delivery_unknown``.
+  held across the ENTIRE gate decision (B2). ONLY rows in the ACCEPTED
+  CLASS consume budget (N3) — ``accepted`` (still standing) plus the
+  settled terminal forms ``dispatched`` / ``delivery_failed`` /
+  ``delivery_unknown`` (a row that DID spend a slot stays in the class;
+  the authoritative predicate is ``ACCEPTED_CLASS_OUTCOMES`` in
+  ``daemon/repositories/notify_audit/models.py``). ``refused`` and
+  ``rate_limited`` rows NEVER do. Every refusal class is ledgered and
+  NEVER consumes budget; crash-orphaned accepted rows count
+  conservatively until the N4 sweep re-marks them ``delivery_unknown``.
 * The ledger is the budget source, so the send path is FAIL-CLOSED
   (N2): a ledger-write failure yields the typed refusal
   ``notify_audit_unavailable`` — no ledger row, no send.
@@ -101,6 +105,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import math
 import os
 import re
 import time
@@ -235,9 +240,19 @@ _EXTERNAL_USER_ID_MAX = 256
 #: would succeed (the reserved internal sources — never chat targets).
 _UNBOUND_SOURCE_IDS: frozenset[str] = frozenset({"api", "scheduler"})
 
-#: N4 — accepted rows older than this are crash orphans (12x the whole
-#: 10s dispatch bound; a live dispatch can never be swept).
+#: N4 — the orphan-sweep threshold FLOOR (seconds): accepted rows
+#: older than the sweep threshold are crash orphans. The EFFECTIVE
+#: threshold is DERIVED at the point of use as
+#: ``max(this floor, 12 * timeout_seconds)`` — see
+#: ``_orphan_sweep_seconds`` — so the "a live dispatch can never be
+#: swept" invariant stays STRUCTURAL when the (tunable) dispatch bound
+#: is raised above its 10s default (120s == 12x the default bound).
 NOTIFY_ORPHAN_SWEEP_SECONDS = 120
+
+#: The safety multiplier applied to the dispatch bound when deriving the
+#: orphan-sweep threshold (12x the whole pipeline bound — a write-ahead
+#: row can only live as long as the ONE ``asyncio.wait_for`` bound).
+NOTIFY_ORPHAN_SWEEP_MULTIPLIER = 12
 
 #: B2 — the per-destination-key lock table. Key = resolved target_hash.
 #: The daemon is single-process (daemon/__main__.py) — one event loop,
@@ -342,6 +357,31 @@ def _resolve_bounds(config: Any) -> dict[str, Any]:
             _pick("ENSEMBLE_NOTIFY_USER_MAX_CHARS", "max_chars", NOTIFY_SIZE_LIMIT)
         ),
     }
+
+
+def _orphan_sweep_seconds(bounds: dict[str, Any]) -> int:
+    """The N4 orphan-sweep threshold — DERIVED from the dispatch bound.
+
+    The invariant is "a live dispatch can never be swept": the
+    write-ahead row lives at most ``timeout_seconds`` (the whole
+    pipeline — resolution + gates + send + the single retry — runs
+    under ONE ``asyncio.wait_for`` bound), so the sweep threshold must
+    exceed it. The threshold is therefore
+    ``max(NOTIFY_ORPHAN_SWEEP_SECONDS, NOTIFY_ORPHAN_SWEEP_MULTIPLIER *
+    timeout_seconds)`` — the 12x multiplier with the 120s floor (120s
+    == 12x the DEFAULT 10s bound). Deriving it HERE keeps the
+    coupling STRUCTURAL: raising the (tunable) ``timeout_seconds`` knob
+    raises the sweep threshold with it, instead of silently making the
+    sweep able to catch a live dispatch.
+    """
+    timeout = float(
+        bounds.get("timeout_seconds", NOTIFY_SEND_TIMEOUT_SECONDS)
+    )
+    derived = NOTIFY_ORPHAN_SWEEP_MULTIPLIER * timeout
+    return max(
+        NOTIFY_ORPHAN_SWEEP_SECONDS,
+        int(math.ceil(derived)),
+    )
 
 
 def _audit_repo_for(manager: Any) -> NotifyAuditRepository | None:
@@ -817,12 +857,15 @@ async def _resolve_gate_and_send(
     loop = asyncio.get_running_loop()
 
     # ── N4 sweep: cheap, defensive, BEFORE the gates (crash orphans
-    # read as unknown, and only currently-accepted rows consume budget).
+    # read as unknown, and only rows STILL STANDING as ``accepted`` are
+    # swept — the settled terminal forms are already terminal). The
+    # threshold is DERIVED from the (tunable) dispatch bound — see
+    # ``_orphan_sweep_seconds``.
     if audit_repo is not None:
         try:
             await asyncio.to_thread(
                 audit_repo.sweep_stale_accepted,
-                older_than_seconds=NOTIFY_ORPHAN_SWEEP_SECONDS,
+                older_than_seconds=_orphan_sweep_seconds(bounds),
             )
         except Exception as exc:  # noqa: BLE001 — the sweep is a backstop
             logger.warning("notify_user: orphan sweep failed: %s", exc)
@@ -988,6 +1031,15 @@ async def _resolve_gate_and_send(
 
     breaker = getattr(adapter, "_circuit_breaker", None)
     if breaker is not None:
+        # A5 — this pre-check is NOT side-effect free: under a HALF_OPEN
+        # breaker, ``can_execute()`` CLAIMS the single probe slot (the
+        # adapter's own send path then finds the slot already taken). A
+        # notify that races the recovery window can therefore surface a
+        # TRANSIENT ``notify_dispatch_failed`` instead of
+        # ``notify_source_circuit_open``. That is fail-safe and
+        # self-healing (the breaker records the failure and recovers on
+        # its own) — but it is NOT a circuit-open signal, so the failure
+        # must never be read as "the source is down".
         try:
             breaker_ok = await breaker.can_execute()
         except Exception as exc:  # noqa: BLE001 — a broken breaker reads
@@ -1046,8 +1098,42 @@ async def _resolve_gate_and_send(
                 elapsed = (
                     now - datetime.fromisoformat(last_iso)
                 ).total_seconds()
-            except (TypeError, ValueError):
-                elapsed = bounds["min_interval_seconds"]
+            except (TypeError, ValueError) as exc:
+                # A4 — FAIL-CLOSED (the safe direction for outbound-to-
+                # user traffic): an UNPARSEABLE baseline stamp means the
+                # interval is NOT satisfiable. The old branch fell back
+                # to ``elapsed = min_interval_seconds`` (=> wait_s = 0
+                # => the send went through on a garbage stamp) — the
+                # fail-OPEN direction. Refuse with the rate-limited
+                # path instead: typed refusal + a ledgered row (N3
+                # discipline — every refusal is ledgered).
+                logger.warning(
+                    "notify_user: unparseable interval baseline %r: %s",
+                    last_iso,
+                    exc,
+                )
+                unavailable = await _ledger_or_audit_unavailable(
+                    audit_repo,
+                    agent_id=agent_id,
+                    instance_id=instance_id,
+                    source_id=source_id,
+                    target_hash=target_hash,
+                    refusal_reason=NOTIFY_CODE_RATE_LIMITED,
+                    body_length=body_length,
+                    body_sha256=body_sha256,
+                    detail="interval gate: the baseline stamp is "
+                    "unparseable (%s) — the minimum interval cannot be "
+                    "verified, so it is not satisfiable"
+                    % (last_iso,),
+                )
+                if unavailable is not None:
+                    return unavailable
+                return _refusal(
+                    NOTIFY_CODE_RATE_LIMITED,
+                    "interval gate: this session's last-notification "
+                    "stamp is unparseable, so the minimum interval "
+                    "cannot be verified. The notification was NOT sent.",
+                )
             wait_s = float(bounds["min_interval_seconds"]) - elapsed
             if wait_s > 0:
                 unavailable = await _ledger_or_audit_unavailable(

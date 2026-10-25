@@ -9,7 +9,8 @@ WHAT THIS FILE PROVES (the frozen plan's §4 test strategy)
   oversize body, rate refusals, timeout, definite failure, internal
   error);
 * the rate gates — the C3 commit-before-count under the B2
-  per-destination-key lock, the N3 budget predicate (ONLY accepted rows
+  per-destination-key lock, the N3 budget predicate (ONLY rows in the
+  ACCEPTED CLASS — ``accepted`` plus the settled terminal forms —
   consume budget; EVERY refusal class is ledgered and NONE consumes),
   the N4 crash-orphan sweep, and the restart-durability sim (the ledger
   is the only budget state — a fresh "process" sees the old rows);
@@ -552,6 +553,86 @@ class TestRateGates:
         assert "legal in" in second
         assert len(bound_manager.adapter.sent) == 1
 
+    async def test_an_unparseable_interval_baseline_refuses_fail_closed(
+        self, bound_manager
+    ) -> None:
+        """A4 — an UNPARSEABLE baseline stamp fails CLOSED (the safe
+        direction for outbound-to-user traffic): the minimum interval
+        cannot be verified, so the interval is NOT satisfiable. The
+        send is REFUSED (typed, ledgered) and NOTHING reaches the
+        adapter.
+
+        The old branch fell back to ``elapsed = min_interval_seconds``
+        (=> wait_s = 0 => the send went through on a garbage stamp) —
+        the fail-OPEN direction this test pins shut.
+        """
+        from sqlmodel import Session
+
+        # Plant a baseline row whose created_at cannot be parsed. It
+        # sorts AFTER any ISO stamp ("n" > "2"), so the MAX() baseline
+        # read returns IT — the gate sees an unparseable baseline.
+        with Session(bound_manager.engine) as session:
+            session.add(
+                NotifyAudit(
+                    id="garbage-baseline",
+                    created_at="not-a-timestamp",
+                    agent_id="ari",
+                    instance_id="i-ari",
+                    source_id=CHAT_SOURCE,
+                    target_hash=NOTIFY_TARGET_HASH(CHAT_SOURCE, CHAT_USER),
+                    outcome="accepted",
+                    body_length=3,
+                    body_sha256="deadbeef",
+                )
+            )
+            session.commit()
+
+        tool = _tool(bound_manager)
+        result = await tool.ainvoke({"message": "one"})
+        assert NOTIFY_CODE_RATE_LIMITED in result, result
+        assert bound_manager.adapter.sent == [], (
+            "an unparseable baseline must NEVER let a send through"
+        )
+        # The refusal is LEDGERED (N3 discipline — every refusal is a
+        # row, and it names the unparseable baseline).
+        refusals = [
+            row
+            for row in _rows(bound_manager.engine)
+            if row.outcome == "refused"
+        ]
+        assert len(refusals) == 1, refusals
+        assert refusals[0].refusal_reason == NOTIFY_CODE_RATE_LIMITED
+        assert "unparseable" in (refusals[0].detail or "")
+
+    async def test_the_orphan_sweep_threshold_scales_with_the_bound(
+        self, bound_manager, monkeypatch
+    ) -> None:
+        """A2 — the N4 sweep threshold is DERIVED from the (tunable)
+        dispatch bound — ``max(120s, 12 x timeout_seconds)`` — so
+        raising the bound raises the threshold with it and a live
+        dispatch can never be swept. The 120s FLOOR still holds below
+        the default bound."""
+        seen: list[int] = []
+
+        def _capture(self, *, older_than_seconds: int) -> int:
+            seen.append(older_than_seconds)
+            return 0
+
+        monkeypatch.setattr(
+            NotifyAuditRepository, "sweep_stale_accepted", _capture
+        )
+        tool = _tool(bound_manager)
+
+        monkeypatch.setenv("ENSEMBLE_NOTIFY_USER_TIMEOUT_SECONDS", "30")
+        await tool.ainvoke({"message": "one"})
+        assert seen == [360], seen  # 12 x the 30s bound
+
+        # The FLOOR: a SMALLER bound keeps the 120s threshold.
+        seen.clear()
+        monkeypatch.setenv("ENSEMBLE_NOTIFY_USER_TIMEOUT_SECONDS", "5")
+        await tool.ainvoke({"message": "two"})
+        assert seen == [120], seen  # max(120, 12 x 5) == 120
+
     async def test_the_hourly_cap_is_per_resolved_destination(
         self, bound_manager, monkeypatch
     ) -> None:
@@ -576,7 +657,9 @@ class TestRateGates:
         self, bound_manager, monkeypatch
     ) -> None:
         """N3 — refusal rows are ledgered but NEVER consume budget; only
-        rows standing as ``accepted`` count."""
+        rows in the ACCEPTED CLASS count (``accepted`` plus the settled
+        terminal forms ``dispatched`` / ``delivery_failed`` /
+        ``delivery_unknown``)."""
         monkeypatch.setenv("ENSEMBLE_NOTIFY_USER_MIN_INTERVAL_SECONDS", "0")
         repo = NotifyAuditRepository(bound_manager.engine)
         target = NOTIFY_TARGET_HASH(CHAT_SOURCE, CHAT_USER)

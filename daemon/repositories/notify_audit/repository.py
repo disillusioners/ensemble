@@ -17,8 +17,12 @@ Method                        Semantics
 ``insert_accepted``           The write-ahead INSERT (own transaction).
                               Returns the row id — the budget row.
 ``count_accepted_for_target`` The rolling-hour COUNT (fresh statement).
-                              ONLY rows currently standing as
-                              ``accepted`` consume budget (N3); NULL
+                              ONLY rows in the ACCEPTED CLASS consume
+                              budget (N3) — ``accepted`` (still
+                              standing) plus the settled terminal
+                              forms ``dispatched`` / ``delivery_failed``
+                              / ``delivery_unknown`` (the predicate is
+                              ``ACCEPTED_CLASS_OUTCOMES``); NULL
                               ``target_hash`` rows are excluded
                               explicitly (fold-able 9).
 ``update_outcome``            Terminal UPDATE of the own row.
@@ -26,7 +30,7 @@ Method                        Semantics
                               "refused"`` + ``refusal_reason``). The
                               refusal is the security signal (N3) —
                               refusal rows NEVER consume budget.
-``last_accepted_class_for_instance``  The ≥60s interval baseline
+``last_accepted_class_created_at``  The ≥60s interval baseline
                               (read-before-insert; the pinned
                               "last-accepted class" reading —
                               refused/rate_limited rows do not
@@ -227,8 +231,9 @@ class NotifyAuditRepository:
         terminal transition as terminal ``delivery_unknown``.
 
         "Stale" = the write-ahead INSERT is older than
-        ``older_than_seconds`` (the tool uses 120s — 12× the entire
-        10s dispatch bound, so a live dispatch can never be swept).
+        ``older_than_seconds`` (the tool DERIVES that threshold as
+        ``max(120s, 12 x the dispatch bound)`` — so a live dispatch can
+        never be swept, whatever the (tunable) bound is set to).
         Returns the number of rows re-marked. Best-effort by contract:
         the TOOL calls this defensively before its gates; a sweep
         failure is logged, never raised here beyond propagating — the

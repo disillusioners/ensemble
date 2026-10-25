@@ -7,7 +7,15 @@
 --   * ``notify_audit`` — one row per notify_user attempt: who / which
 --     resolved destination (hashed) / outcome / body hash + length.
 --     Refusals ARE ledgered (the refusal is the security signal);
---     ONLY rows standing as `accepted` consume the rate budget.
+--     ONLY rows in the ACCEPTED CLASS consume the rate budget --
+--     `accepted` (still standing) plus the settled terminal forms
+--     `dispatched` / `delivery_failed` / `delivery_unknown` (a row that
+--     DID spend a slot stays in the class). The authoritative predicate
+--     is ACCEPTED_CLASS_OUTCOMES in
+--     daemon/repositories/notify_audit/models.py. `refused` and
+--     `rate_limited` rows NEVER consume budget. Reading ONLY
+--     outcome='accepted' would be WRONG -- a settled row leaves the
+--     accepted class, so the cap would never accrue.
 --
 -- WHY A DEDICATED TABLE (the frozen ruling D8):
 --   No table to reuse. ``instance_ops_audit`` is the ledger of LOCAL
