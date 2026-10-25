@@ -50,10 +50,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Items tuple shape: ``(message_id, created_at, seq)``. Thread id is
-# passed separately because every call in the tap site is single-thread
-# (the tap fires for ONE ``configurable.thread_id`` at a time).
-Items = list[tuple[str, str, int | None]]
+# Items tuple shape: ``(message_id, created_at, seq)`` — or the
+# Proposal-B PR1 4-tuple ``(message_id, created_at, seq, mission_id)``
+# when the tap carries a mission stamp. 3-tuples remain valid
+# (backward-compatible); a ``None`` mission_id is identical to its
+# absence (NULL column).
+Items = list[tuple[str, str, int | None] | tuple[str, str, int | None, str | None]]
 
 
 class MessageMetadataRepository:
@@ -66,7 +68,7 @@ class MessageMetadataRepository:
     layer (D3).
     """
 
-    def __init__(self, engine: "Engine") -> None:
+    def __init__(self, engine: Engine) -> None:
         # Engine is a sync ``sqlalchemy.Engine`` from the shared
         # ``daemon/repositories/factory.py`` engine factory. See
         # decisions.md D14 — repo is SYNC, not async.
@@ -93,15 +95,19 @@ class MessageMetadataRepository:
         if not items:
             return 0
 
-        rows = [
-            {
-                "thread_id": thread_id,
-                "message_id": mid,
-                "created_at": ts,
-                "seq": seq,
-            }
-            for (mid, ts, seq) in items
-        ]
+        rows = []
+        for item in items:
+            mid, ts, seq, *rest = item
+            mission_id = rest[0] if rest else None
+            rows.append(
+                {
+                    "thread_id": thread_id,
+                    "message_id": mid,
+                    "created_at": ts,
+                    "seq": seq,
+                    "mission_id": mission_id,
+                }
+            )
 
         with self._engine.begin() as conn:  # SYNC transaction
             dialect = conn.dialect.name  # "postgresql" | "sqlite"

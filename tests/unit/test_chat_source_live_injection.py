@@ -322,6 +322,71 @@ class TestRunningLiveGraphInjection:
         assert str(parsed) == echo_id, "echo_id not a valid uuid4 string"
 
     @pytest.mark.asyncio
+    async def test_chat_epoch_mint_forwards_echo_id_as_founding_message_id(
+        self,
+    ):
+        """The chat inject sub-lane's epoch mint MUST carry the echo id
+        as ``founding_message_id`` (the drain stamps the echo id as the
+        HumanMessage id, so the minted record is COMPLETE at mint time —
+        no mint-then-attach needed on this sub-lane).
+
+        CALLER PIN (2026-10-25 release-gate gap H1): the real call site
+        (``daemon/sources/registry.py`` — the ``founding_message_id=
+        echo_id`` kwarg on the chat inject sub-lane) was UNPINNED —
+        deleting the kwarg left the whole suite green. This is the
+        BEHAVIORAL pin: a sync ``MagicMock`` spy on
+        ``daemon.sources.registry.resolve_or_mint_fail_open`` (the call
+        rides ``asyncio.to_thread``, so the wrapper stays SYNC) asserting
+        the forwarded kwarg equals the echo id the SAME turn handed to
+        ``set_injection``.
+        """
+        manager = _stub_manager(status="running", has_live_graph=True)
+        registry = _build_registry_with_manager(
+            manager, source_types={"telegram": "telegram"}
+        )
+        mock_mapper_instance = _stub_mapper()
+        mock_agent_registry = MagicMock()
+        mock_agent_registry.resolve_to_id = MagicMock(return_value=None)
+        mock_agent_registry.get = MagicMock(
+            return_value=MagicMock(path="/default/agents")
+        )
+
+        msg = IncomingMessage(
+            external_user_id="user-alice",
+            content="hello from telegram",
+            source_id="telegram",
+        )
+
+        mint_spy = MagicMock(return_value="mission-abc12345")
+        with patch(
+            "daemon.sources.registry.InstanceMapper",
+            return_value=mock_mapper_instance,
+        ), patch(
+            "daemon.sources.mapper.get_registry",
+            return_value=mock_agent_registry,
+        ), patch(
+            "daemon.sources.registry.resolve_or_mint_fail_open",
+            mint_spy,
+        ):
+            await registry._handle_message("telegram", msg)
+
+        mint_spy.assert_called_once()
+        manager.set_injection.assert_called_once()
+        mint_kwargs = mint_spy.call_args.kwargs
+        injection_kwargs = manager.set_injection.call_args.kwargs
+        assert mint_kwargs.get("founding_message_id") == injection_kwargs.get(
+            "echo_id"
+        ), (
+            "the chat epoch mint must forward the echo id as the "
+            "founding_message_id (the drain stamps the echo id as the "
+            f"HumanMessage id): mint_kwargs={mint_kwargs!r} "
+            f"injection_kwargs={injection_kwargs!r}"
+        )
+        # The lane + founding source stay pinned alongside the kwarg.
+        assert mint_kwargs.get("founding_source") == "chat"
+        assert mint_spy.call_args.args[2] == "chat"
+
+    @pytest.mark.asyncio
     async def test_distinct_messages_get_distinct_echo_ids(self):
         """Two consecutive injections on the same instance MUST mint
         distinct ``echo_id`` values (message-display-latency Phase 1

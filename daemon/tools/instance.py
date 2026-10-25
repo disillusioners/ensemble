@@ -55,6 +55,10 @@ from daemon.config import _SPAWN_INTELLIGENCE_TIER_HIGH_DEFAULT
 # ``daemon.repositories.instance.repository``); the reverse direction
 # does not exist, so there is no circular-import risk.
 from daemon.repositories.instance import CHAT_SOURCE_TYPES
+from daemon.services.mission_record_service import (
+    mint_commission_fail_open,
+    resolve_or_mint_fail_open,
+)
 
 # Phase-3 ``set_instance_tunable`` was moved to
 # ``daemon/tools/tunables.py`` (2026-09-13, H2 + M6). The
@@ -1226,6 +1230,106 @@ async def _register_child_completion_watcher(
                 "Bus singleton is None — bus wiring failure (no fallback)"
             )
             return None
+
+        # ── Proposal B PR1 — send_message commission (lane 5) ────────
+        # The COMMISSION row is minted HERE — the watcher region, in the
+        # SAME WriteGuardSession as the watcher mint (the
+        # same-transaction contract, proposal-b §2.2 lane 5), and the
+        # FollowUp metadata gains the mission id (free-form JSONB key —
+        # NO schema change). WATCHERS STAY EXACTLY AS THEY ARE — the
+        # commission row is the generalization, not a replacement.
+        #
+        # Boundary honesty (documented): this helper is the parent→child
+        # watcher region — the tree-guard above means a send to a
+        # NON-child target mints NO watcher and therefore NO commission
+        # either (the commission mint rides the watcher's boundary, per
+        # the docs' "written alongside the existing watcher mint").
+        # ADOPTION DELTA (a): a second commission of the same worker
+        # mints a SECOND OUTSTANDING row; routing authority stays with
+        # the A-resolver (report_recipient) until the PR2/PR3 flip.
+        #
+        # CARRIER (intentional, do not "fix"): this is the ONLY
+        # commissioning lane that does NOT thread the resolved mission
+        # into the child's enqueue — the mission is resolved HERE, in
+        # the POST-enqueue watcher region, so no carrier exists yet at
+        # enqueue time (threading it would mean reordering the
+        # resolution — an architecture decision, not a tidy fix).
+        _mission_id_for_commission: str | None = None
+        _commission_id_for_commission: str | None = None
+        try:
+            _mission_record_service = getattr(
+                manager, "mission_record_service", None
+            )
+            if _mission_record_service is not None:
+                _resolution = resolve_or_mint_fail_open(
+                    _mission_record_service,
+                    parent_instance_id,
+                    "send_message",
+                    session=session,
+                )
+                if _resolution:
+                    _mission_id_for_commission = _resolution
+                    _commission_id_for_commission = mint_commission_fail_open(
+                        _mission_record_service,
+                        _mission_id_for_commission,
+                        commissioner_instance_id=parent_instance_id,
+                        worker_instance_id=child_instance_id,
+                        lane="send_message",
+                        session=session,
+                    )
+        except Exception as commission_exc:  # noqa: BLE001 — fail-open
+            logger.warning(
+                "mission_records: send_message commission region failed "
+                "(parent=%s… child=%s…): %s: %s — the watcher mint "
+                "continues unaffected",
+                (parent_instance_id or "")[:8],
+                (child_instance_id or "")[:8],
+                type(commission_exc).__name__,
+                commission_exc,
+            )
+
+        # ── DURABILITY BOUNDARY (commission persistence) ──────────────────
+        # The mission row and the commission row were written into THIS
+        # session's transaction (the "commission rides the watcher's SAME
+        # transaction" contract). ``WriteGuardSession.__exit__`` closes
+        # the session — which ROLLS BACK the still-open transaction — so
+        # without an explicit commit the rows never become durable. That
+        # is the production defect the 2026-10-25 release gate repro'd
+        # on PostgreSQL: a logged ``COMMISSION lane=send_message`` with
+        # ``mission_commissions = 0`` rows behind it. Commit HERE so the
+        # rows survive the block, and announce the success AFTER the
+        # commit — a success log that precedes a rollback is a false
+        # success record.
+        #
+        # The commit sits BEFORE the bus watch on purpose: the watch
+        # failure path RETURNS from inside this block, so a commit
+        # placed after it would be skipped on exactly that path (the
+        # commission would be rolled back again). The commissioning act
+        # (spawn + enqueue) already happened, so the commission stays
+        # durable even when the watcher could not be registered.
+        try:
+            session.commit()
+        except Exception as commit_exc:  # noqa: BLE001 — fail-open
+            logger.warning(
+                "mission_records: send_message commission COMMIT failed "
+                "(parent=%s… child=%s…): %s: %s — the commission rows are "
+                "NOT durable (the watcher mint continues unaffected)",
+                (parent_instance_id or "")[:8],
+                (child_instance_id or "")[:8],
+                type(commit_exc).__name__,
+                commit_exc,
+            )
+        else:
+            if _commission_id_for_commission:
+                logger.info(
+                    "mission_records COMMISSION COMMITTED lane=send_message "
+                    "mission=%s… commissioner=%s… worker=%s… commission=%s…",
+                    (_mission_id_for_commission or "")[:8],
+                    (parent_instance_id or "")[:8],
+                    (child_instance_id or "")[:8],
+                    _commission_id_for_commission[:8],
+                )
+
         try:
             _follow_up = FollowUp(
                 target_instance_id=parent_instance_id,
@@ -1239,6 +1343,14 @@ async def _register_child_completion_watcher(
                     "child_id": child_instance_id,
                     "parent_id": parent_instance_id,
                     "message_id": message_id,
+                    # Proposal B PR1: the commission's mission rides the
+                    # free-form JSONB (absent when no mission — the
+                    # pre-PR1 payload shape is preserved).
+                    **(
+                        {"mission_id": _mission_id_for_commission}
+                        if _mission_id_for_commission
+                        else {}
+                    ),
                 },
             )
             await _bus.watch(

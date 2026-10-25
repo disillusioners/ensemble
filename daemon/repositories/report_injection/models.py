@@ -316,3 +316,25 @@ class ReportInjection(SQLModel, table=True):
     # Phase 1: ISO-8601 stamp on ``DEFERRED → PENDING`` recovery
     # transition. Partial-indexed for the Phase 2 recovery sweep.
     recovery_attempted_at: str | None = Field(default=None)
+
+    # ── Proposal B PR1 — mission-provenance columns (2026-10-25) ──────
+    # The migration ``20261025_122730_add_mission_provenance_columns.sql``
+    # (SQLite) and the ``_ensure_postgres_columns`` mirror in
+    # ``daemon/manager.py`` BOTH add these two columns to
+    # ``report_injections`` as nullable ``TEXT``. The ORM fields are
+    # declared here so ``SQLModel.metadata.create_all()`` agrees with the
+    # DDL (the independent review flagged the drift: fresh databases
+    # created by ``create_all`` were missing the columns the migration
+    # and the PG mirror add). Types + nullability mirror the DDL
+    # EXACTLY (TEXT / NULL / default NULL).
+    #
+    # PR1 lands the columns ONLY — no writer yet (``mission_id`` is
+    # written by the PR3 routing flip; ``commissioner_instance_id`` is
+    # the report's true destination under the same flip). Nullable +
+    # additive → old binaries ignore them.
+    mission_id: str | None = Field(
+        sa_column=Column(Text, nullable=True), default=None
+    )
+    commissioner_instance_id: str | None = Field(
+        sa_column=Column(Text, nullable=True), default=None
+    )

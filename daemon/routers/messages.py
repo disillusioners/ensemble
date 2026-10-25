@@ -20,6 +20,10 @@ from daemon.constants import (
 from daemon.models import ErrorCodes, ErrorResponse, MessageCreate, MessageResponse
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.live_event_hub import LiveEventHub
+from daemon.services.mission_record_service import (
+    attach_founding_message_fail_open,
+    resolve_or_mint_fail_open,
+)
 from daemon.services.tmp_image_message_hook import pre_dispatch_image_hook
 from daemon.services.work_status import canonicalize_status
 from daemon.utils import serialize_message
@@ -684,6 +688,26 @@ async def send_message(
     # alongside the Task row so the WorkResolver facade can read both
     # sides of the union. The legacy flag-checked helper and the
     # Task-only fallback were removed.
+    #
+    # ── Proposal B PR1 — user_api epoch mint (lane 1) ──────────────
+    # Every enqueue on the user lane RESOLVES-OR-MINTS the target's
+    # mission epoch BEFORE the dispatch (``founding_source='user_api'``,
+    # commissioner NULL = the user) and threads the carrier into the
+    # enqueue so the founding message is stamped at delivery. The
+    # founding message id is minted INSIDE the enqueue, so the record is
+    # COMPLETED after it returns (mint-then-attach; the attach is
+    # guarded on NULL — first founding wins). FAIL-OPEN: a record
+    # failure never fails the user's message (mode ``off`` → no-op;
+    # the wrapper swallows + logs). ZERO behavior change: nothing reads
+    # the record yet.
+    _mission_record_service = getattr(manager, "mission_record_service", None)
+    _mission_id = await asyncio.to_thread(
+        resolve_or_mint_fail_open,
+        _mission_record_service,
+        instance_id,
+        "user_api",
+        founding_source="user_api",
+    )
     try:
         result = await manager.enqueue_message_job(
             instance_id=instance_id,
@@ -702,7 +726,19 @@ async def send_message(
             # layer guarantees at most one non-empty.
             image_refs=message.image_refs,
             queue_id=message.queue_id,
+            # Proposal B PR1: the mission carrier rides the enqueue so
+            # the founding message is stamped at delivery.
+            mission_id=_mission_id,
         )
+        # Mint-then-attach: the founding message id only exists now.
+        # Record-side only; never fails the response.
+        if _mission_id:
+            await asyncio.to_thread(
+                attach_founding_message_fail_open,
+                _mission_record_service,
+                _mission_id,
+                result.message_id,
+            )
     except Exception as e:
         raise HTTPException(
             status_code=500,

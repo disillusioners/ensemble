@@ -164,12 +164,16 @@ class TestTapNodeReturnHappyPath:
         assert len(captured) == 1
         thread_id, items = captured[0]
         assert thread_id == "t-1"
-        # 3 items, each shaped ``(message_id, iso_timestamp, None)``.
+        # 3 items, each shaped ``(message_id, iso_timestamp, None,
+        # mission_id)`` — the Proposal B PR1 mission stamp rides as the
+        # 4th element (None when the tap was called without a mission).
         assert len(items) == 3
-        for (mid, ts, seq) in items:
+        for item in items:
+            mid, ts, seq, mission_id = item
             assert mid in {"h-1", "ai-1", "h-2"}
             assert isinstance(ts, str)  # ISO-8601 from datetime.now(...)
             assert seq is None
+            assert mission_id is None  # no mission carrier on this tap
 
     @pytest.mark.asyncio
     async def test_empty_persisted_list_is_noop(self):

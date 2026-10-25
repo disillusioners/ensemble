@@ -185,6 +185,14 @@ class ProcessingContext:
     # window and re-checks expiry at claim time. Defaults to ``None``
     # (every non-delegation lane) ⇒ byte-identical behaviour.
     dispatch_chain: dict[str, Any] | None = None
+    # Proposal B PR1 — the MISSION carrier, threaded claim → context →
+    # funnel → the ``user_message_entry`` tap. Read off the persisted
+    # ``MessageQueue.message_metadata`` under the RESERVED
+    # ``__ens_mission_id__`` key (stamped once at the producer,
+    # ``_prepare_enqueued_message``). Record-side only in PR1: consumed
+    # by the delivery-time ``message_metadata.mission_id`` stamp; NO
+    # gate/census/anchor read. Defaults to ``None`` ⇒ byte-identical.
+    mission_id: str | None = None
 
 
 @dataclass
@@ -463,6 +471,9 @@ class MessageProcessingPipeline:
                 # instance) rides into the funnel so the provenance mint
                 # can claim that instance's live user-origin window.
                 dispatch_chain=context.dispatch_chain,
+                # Proposal B PR1: the mission carrier rides to the
+                # delivery-side stamp (record-side only).
+                mission_id=context.mission_id,
             )
 
         # ---- Stage 1.5: claim the message (READY -> PROCESSING) ----

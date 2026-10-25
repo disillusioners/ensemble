@@ -76,6 +76,14 @@ class MessageMetadata(SQLModel, table=True):
     message_id: str = Field(primary_key=True, max_length=128)
     created_at: str = Field(nullable=False, max_length=64)
     seq: int | None = Field(default=None, nullable=True)
+    # Proposal B PR1 — the delivery-time mission stamp (nullable).
+    # Written by the MessageTapSlot sites when the threaded
+    # ``mission_id`` carrier is present; NULL for every pre-PR1 row and
+    # every non-mission message. NOT a decision input in PR1 (mints
+    # write, NOTHING reads). The composite PK (thread_id, message_id)
+    # is UNCHANGED — first-write-wins means the FIRST tap's mission
+    # stamp persists across revive/compaction re-taps.
+    mission_id: str | None = Field(default=None, nullable=True, max_length=64)
 
 
 __all__ = ["MessageMetadata"]
