@@ -11,6 +11,13 @@ Test coverage:
   * Content snippet truncation (200 chars)
   * Tool-call redaction (``arguments_snippet`` only, no ``output``)
   * Project-scoped access control (mismatch + None backward-compat)
+  * ``TestFrontDoorAriJobAccess`` — the explicit front-door rung:
+    ari cross-project allows ×4, scoped non-ari denials, the
+    unscoped-caller backward-compat pin
+  * ``TestJobToolsUnchangedTrustPins`` — job_create / job_continue /
+    job_get stay ungated (structural-trust pins)
+  * ``TestFrontDoorScopePin`` — the ari-only membership pin + the
+    jober-scoped cross-project denial case (mutation-verified)
   * Tree building (nested children, MAX_TREE_NODES=200 truncation,
     empty tree)
   * Cycle detection in tree (self-referencing parent_id)
@@ -18,6 +25,14 @@ Test coverage:
 
 The fixture / mock style mirrors ``tests/test_job_queue_tools.py`` so
 the patterns stay consistent across the two files.
+
+File-size rationale (band obligation: 1000-3000):
+    This pack currently runs ~2245 lines (post front-door-rider
+    polish, ``feature/ari-frontdoor-job-scope``). We are inside the
+    1000-3000 band. Concrete trigger that would push the pack past
+    the 3000 ceiling and require an extraction PR: adding per-tool
+    pagination/redaction classes beyond the current four-tool shape —
+    extract a dedicated ``test_job_visibility_pagination.py`` instead.
 """
 
 import pytest
@@ -1804,7 +1819,7 @@ def json_dumps(obj) -> str:
 # design (``job_create`` takes a caller-chosen ``project_id`` and
 # ``job_continue`` carries no project references), so its visibility and
 # steering reads carry that trust EXPLICITLY via
-# ``FRONT_DOOR_JOB_ACCESS_AGENTS`` instead of emerging from
+# ``FRONT_DOOR_AUTHORIZED_AGENTS`` instead of emerging from
 # system-default scope-absence. ARI-ONLY — jober deliberately excluded.
 # Scoped non-ari agents keep strict project matching with the exact-dict
 # denial unchanged.
@@ -1821,18 +1836,26 @@ def _get_job_tool(tools: list, name: str):
     return tool_obj
 
 
-def _build_tools_for_caller(mock_services, mock_manager, caller):
-    """Rebuild the tool list bound to ``caller``'s instance id, wiring the
-    repo ``get`` side_effect so the caller row is returned for
-    ``"caller-id"`` (the access-control lookup)."""
+def _install_instance_resolver(mock_manager, rows: dict):
+    """Wire ``manager._instance_repository.get`` with an explicit
+    instance-id → row map — the ONE resolver stub for every lookup the
+    access check and the tool bodies make (unknown ids → None, matching
+    the repo's not-found semantics). Replaces the former per-test
+    ``base_get.side_effect`` reach-through re-wiring."""
+    mock_manager._instance_repository.get = MagicMock(
+        side_effect=lambda iid: rows.get(iid)
+    )
+
+
+def _build_tools_for_caller(mock_services, mock_manager, caller, extra_rows=None):
+    """Rebuild the tool list bound to ``caller``'s instance id, wiring all
+    instance lookups through ``_install_instance_resolver`` (the caller
+    row under ``"caller-id"`` plus any ``extra_rows`` the tool body
+    reads, e.g. the job's root instance)."""
     job_service, queue_mgmt, dlq = mock_services
 
-    def get_side_effect(iid):
-        if iid == "caller-id":
-            return caller
-        return None
+    _install_instance_resolver(mock_manager, {"caller-id": caller, **(extra_rows or {})})
 
-    mock_manager._instance_repository.get = MagicMock(side_effect=get_side_effect)
     return create_job_tools(
         job_service, queue_mgmt, dlq,
         manager=mock_manager,
@@ -1841,7 +1864,8 @@ def _build_tools_for_caller(mock_services, mock_manager, caller):
 
 
 def _visibility_tool_args(tool_name: str, job_id: str) -> dict:
-    """Per-tool invocation args for the four visibility tools."""
+    """Per-tool invocation args for the four read/steer tools
+    (``job_messages`` / ``job_tree`` / ``job_progress`` / ``job_inject``)."""
     if tool_name == "job_inject":
         return {"job_id": job_id, "message": "Hello from the front door"}
     return {"job_id": job_id}
@@ -1867,16 +1891,9 @@ class TestFrontDoorAriJobAccess:
 
         caller = _make_instance("caller-id", agent_id="ari", project_id="proj-B")
         root = _make_instance(root_id)
-        tools = _build_tools_for_caller(mock_services, mock_manager, caller)
-        # Re-wire the root lookup on top of the caller wiring.
-        base_get = mock_manager._instance_repository.get
-
-        def get_with_root(iid):
-            if iid == root_id:
-                return root
-            return base_get.side_effect(iid)
-
-        mock_manager._instance_repository.get = MagicMock(side_effect=get_with_root)
+        tools = _build_tools_for_caller(
+            mock_services, mock_manager, caller, extra_rows={root_id: root}
+        )
         mock_manager._instance_repository.get_tree_ids = MagicMock(return_value=[root_id])
         mock_manager.get_messages = AsyncMock(return_value=[
             _make_msg("user", "hi"),
@@ -1905,15 +1922,9 @@ class TestFrontDoorAriJobAccess:
 
         caller = _make_instance("caller-id", agent_id="ari", project_id="proj-B")
         root = _make_instance(root_id)
-        tools = _build_tools_for_caller(mock_services, mock_manager, caller)
-        base_get = mock_manager._instance_repository.get
-
-        def get_with_root(iid):
-            if iid == root_id:
-                return root
-            return base_get.side_effect(iid)
-
-        mock_manager._instance_repository.get = MagicMock(side_effect=get_with_root)
+        tools = _build_tools_for_caller(
+            mock_services, mock_manager, caller, extra_rows={root_id: root}
+        )
         mock_manager._instance_repository.get_tree_ids = MagicMock(return_value=[root_id])
 
         job_tree_tool = _get_job_tool(tools, "job_tree")
@@ -1938,15 +1949,9 @@ class TestFrontDoorAriJobAccess:
 
         caller = _make_instance("caller-id", agent_id="ari", project_id="proj-B")
         root = _make_instance(root_id, status="running")
-        tools = _build_tools_for_caller(mock_services, mock_manager, caller)
-        base_get = mock_manager._instance_repository.get
-
-        def get_with_root(iid):
-            if iid == root_id:
-                return root
-            return base_get.side_effect(iid)
-
-        mock_manager._instance_repository.get = MagicMock(side_effect=get_with_root)
+        tools = _build_tools_for_caller(
+            mock_services, mock_manager, caller, extra_rows={root_id: root}
+        )
         mock_manager._instance_repository.get_tree_ids = MagicMock(return_value=[root_id])
         mock_manager.get_messages = AsyncMock(return_value=[
             _make_msg("user", "Do something"),
@@ -1977,15 +1982,9 @@ class TestFrontDoorAriJobAccess:
 
         caller = _make_instance("caller-id", agent_id="ari", project_id="proj-B")
         root = _make_instance(root_id, status="running")
-        tools = _build_tools_for_caller(mock_services, mock_manager, caller)
-        base_get = mock_manager._instance_repository.get
-
-        def get_with_root(iid):
-            if iid == root_id:
-                return root
-            return base_get.side_effect(iid)
-
-        mock_manager._instance_repository.get = MagicMock(side_effect=get_with_root)
+        tools = _build_tools_for_caller(
+            mock_services, mock_manager, caller, extra_rows={root_id: root}
+        )
         expected_entry = {"content": "Hello", "timestamp": "2025-01-01T00:00:00+00:00"}
         mock_manager.set_injection = MagicMock(return_value=expected_entry)
         mock_manager.get_injection_count = MagicMock(return_value=1)
@@ -2042,15 +2041,9 @@ class TestFrontDoorAriJobAccess:
 
         caller = _make_instance("caller-id", agent_id="developer", project_id=None)
         root = _make_instance(root_id)
-        tools = _build_tools_for_caller(mock_services, mock_manager, caller)
-        base_get = mock_manager._instance_repository.get
-
-        def get_with_root(iid):
-            if iid == root_id:
-                return root
-            return base_get.side_effect(iid)
-
-        mock_manager._instance_repository.get = MagicMock(side_effect=get_with_root)
+        tools = _build_tools_for_caller(
+            mock_services, mock_manager, caller, extra_rows={root_id: root}
+        )
         mock_manager._instance_repository.get_tree_ids = MagicMock(return_value=[root_id])
         mock_manager.get_messages = AsyncMock(return_value=[_make_msg("user", "hi")])
 
@@ -2064,9 +2057,8 @@ class TestFrontDoorAriJobAccess:
 class TestJobToolsUnchangedTrustPins:
     """Pins that the rung did NOT tighten the structurally-ungated tools:
     ``job_create`` (project is a caller-chosen param), ``job_continue``
-    (zero project references) and ``job_get`` (no access check at all —
-    the live-reported job_get denial is NOT reproducible from this code;
-    transcript likely mislabeled)."""
+    (zero project references) and ``job_get`` (no access check — see the
+    job_get pin below for the actionable caveat)."""
 
     @pytest.mark.asyncio
     async def test_job_create_cross_project_allowed_for_scoped_ari(
@@ -2143,9 +2135,16 @@ class TestJobToolsUnchangedTrustPins:
         mock_manager._instance_repository.get = MagicMock(side_effect=get_side_effect)
         mock_manager._task_repo = MagicMock()
         mock_manager._task_repo.has_instance_busy = MagicMock(return_value=False)
-        mock_manager.enqueue_message_job = AsyncMock(
-            return_value={"message_id": "msg-new", "job_id": "job-new"}
-        )
+        # The real facade returns an AsyncMessageResult — the tool reads
+        # ``result.message_id`` / ``result.job_id`` / ``result.status`` as
+        # ATTRIBUTES when shaping its success payload (a plain dict here
+        # would crash the response shaping into the tool's error branch —
+        # exactly what the strengthened assertion below now catches).
+        enqueue_result = MagicMock(name="AsyncMessageResult")
+        enqueue_result.message_id = "msg-new"
+        enqueue_result.job_id = "job-new"
+        enqueue_result.status = "queued"
+        mock_manager.enqueue_message_job = AsyncMock(return_value=enqueue_result)
 
         tools = create_job_tools(
             job_service, AsyncMock(), MagicMock(),
@@ -2162,9 +2161,7 @@ class TestJobToolsUnchangedTrustPins:
 
         # No access-denied anywhere (there is no access check on this
         # tool) — the continuation dispatched into the other project.
-        assert not (
-            isinstance(result, dict) and "Access denied" in str(result.get("error", ""))
-        ), result
+        assert "error" not in result, result
         mock_manager.enqueue_message_job.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -2172,10 +2169,11 @@ class TestJobToolsUnchangedTrustPins:
         self, mock_manager,
     ):
         """job_get is UNGATED — a scoped ari caller reading a job in a
-        different project succeeds. Pins the ungated status so a future
-        gate on job_get is a DELIBERATE, test-visible change (the
-        live-reported job_get denial at HEAD is not reproducible from
-        this code — transcript likely mislabeled)."""
+        different project succeeds. The live-reported job_get denial at
+        HEAD is not reproducible from this code (transcript likely
+        mislabeled). ACTION for anyone gating job_get: that is a real
+        access-control decision — flip this pin deliberately with the
+        ruling cited, never as a drive-by."""
         job_service = AsyncMock()
         job_service.use_virtual_job_resolver = False
         record = MagicMock(name="WorkRecord[get]")
@@ -2210,14 +2208,14 @@ class TestJobToolsUnchangedTrustPins:
 
 class TestFrontDoorScopePin:
     """Security pin (review F1, mutation-verified): the front-door
-    exemption is ARI-ONLY. Widening ``FRONT_DOOR_JOB_ACCESS_AGENTS``
+    exemption is ARI-ONLY. Widening ``FRONT_DOOR_AUTHORIZED_AGENTS``
     (e.g. to include ``jober``) must fail these tests loudly rather
     than silently widen the cross-project trust."""
 
     def test_front_door_agents_exactly_ari(self):
         """Membership pin at the definition site — the exemption is
         comment-enforced nowhere: this test is the enforcement."""
-        assert job_queue.FRONT_DOOR_JOB_ACCESS_AGENTS == frozenset({"ari"})
+        assert job_queue.FRONT_DOOR_AUTHORIZED_AGENTS == frozenset({"ari"})
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("tool_name", FRONT_DOOR_VISIBILITY_TOOLS)

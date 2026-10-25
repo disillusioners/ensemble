@@ -559,15 +559,18 @@ def _check_instance_project_access(
 ) -> dict | None:
     """Project-scoped access check for the pause/resume instance tools.
 
-    Mirrors ``_check_job_access`` (daemon/tools/job_queue.py:884) with the
+    Mirrors ``_check_job_access`` (daemon/tools/job_queue.py:1141) with the
     target being an INSTANCE row instead of a WorkRecord — same pattern the
     sibling ``job_messages`` / ``job_inject`` tools enforce at their call
-    sites (job_queue.py:2657).
+    sites (job_queue.py:2969).
 
     Returns ``None`` when access is allowed, or a ``{"error": ...}`` dict
     the caller returns verbatim when denied.
 
-    Semantics (identical to ``_check_job_access``):
+    Semantics (identical to ``_check_job_access`` EXCEPT one rung: the
+    job gate gained an ari-only front-door exemption
+    (``FRONT_DOOR_AUTHORIZED_AGENTS``) — THIS instance gate has none;
+    instance pause/resume stay strictly project-scoped):
       * No ``current_instance_id`` (anonymous caller) → allowed.
       * Caller instance not found in the repo → allowed (fail-open).
       * Caller's ``project_id`` is None (unscoped) → allowed.
@@ -607,7 +610,7 @@ def _check_instance_project_access(
     # exception is NOT legitimate: a transient repository failure
     # must NOT silently flip to ALLOW. We therefore call the
     # repository DIRECTLY (mirroring ``_check_job_access``'s shape at
-    # job_queue.py:951 — bare ``manager._instance_repository.get(...)``
+    # job_queue.py:1236 — bare ``manager._instance_repository.get(...)``
     # with no swallow) so any raised exception propagates and the
     # try/except below can convert it into a DENY with a message
     # distinct from the project-mismatch denial.

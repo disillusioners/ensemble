@@ -95,7 +95,7 @@ def _make_instance_row(
 ) -> MagicMock:
     """Instance-shaped mock for ``manager._instance_repository.get`` —
     matches the row shape ``_check_job_access`` reads (the helper at
-    ``daemon/tools/job_queue.py:910`` inspects ``caller.project_id``;
+    ``daemon/tools/job_queue.py:1141`` inspects ``caller.project_id``;
     the front-door rung also reads ``caller.agent_id`` — explicit
     non-ari default keeps the historical deny behavior pinned)."""
     row = MagicMock(name=f"InstanceRow[{instance_id}]")
@@ -717,7 +717,7 @@ class TestJobPauseAccessControl:
     async def test_pause_repo_error_propagates(
         self, manager, job_service, pause_tool,
     ):
-        """``_check_job_access`` (job_queue.py:910) does NOT wrap the
+        """``_check_job_access`` (job_queue.py:1141) does NOT wrap the
         caller-row lookup in a defensive try/except — unlike
         ``_check_instance_project_access`` (instance.py:431) which
         returns a distinct DENY on repo errors. The job-tool pattern

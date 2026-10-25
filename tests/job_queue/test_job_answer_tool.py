@@ -26,8 +26,8 @@ Coverage (brief mandate):
   (c) Wrong state — no pending pack → friendly error string carrying
       ``NO_PENDING_QUESTION`` + the ``job_continue`` hint.
   (d) Access-control mismatch — caller project ≠ job project →
-      access denied (the same ``_check_job_access`` helper the four
-      visibility tools use).
+      access denied (the same ``_check_job_access`` helper the gated
+      job tools use).
 
 Plus supplementary smoke tests:
   * Tool registration — ``create_job_tools_if_available`` returns the
@@ -35,6 +35,15 @@ Plus supplementary smoke tests:
   * Write-paused posture — 503 surfaced in the error string.
   * Frozen tool-name discovery — ``discover_source_only_tool_names()``
     picks up the new tool (drift pin against ``KNOWN_TOOL_NAMES``).
+
+File-size rationale (band obligation: 1000-3000):
+    This pack currently runs ~1240 lines (post front-door-rider
+    polish, ``feature/ari-frontdoor-job-scope``). We are inside the
+    1000-3000 band. Concrete trigger that would push the pack past
+    the 3000 ceiling and require an extraction PR: pinning the full
+    answer-flow state machine (per-error-outcome classes beyond the
+    current supplement set) — extract a dedicated
+    ``test_job_answer_flow_states.py`` instead.
 """
 
 from __future__ import annotations
@@ -535,8 +544,8 @@ class TestJobAnswerNoPendingPack:
 
 class TestJobAnswerAccessDenied:
     """(d) Access-control mismatch — caller project ≠ job project →
-    access denied (same ``_check_job_access`` helper the gated job
-    tools enforce)."""
+    access denied (same ``_check_job_access`` helper the gated job tools
+    enforce)."""
 
     @pytest.mark.asyncio
     async def test_project_mismatch_returns_access_denied(self, harness):
@@ -612,7 +621,7 @@ class TestJobAnswerAccessDenied:
         """The front-door rung: an ari caller scoped to a real project
         (proj-CALLER) may answer packs on jobs in a DIFFERENT project
         (proj-JOB) — visibility+steering trust made explicit
-        (user-confirmed 2026-10-25, FRONT_DOOR_JOB_ACCESS_AGENTS)."""
+        (user-confirmed 2026-10-25, FRONT_DOOR_AUTHORIZED_AGENTS)."""
         asker, work_id, pack = _seed_paused_asker_with_pending_pack(
             harness, project_id="proj-JOB"
         )

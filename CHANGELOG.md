@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — 2026-10-24
 
+### Changed — explicit front-door (ari) exemption in the gated job tools' project gate (`feature/ari-frontdoor-job-scope`)
+
+> **CHANGELOG (access-control):** *`_check_job_access` gains a NARROW, user-ratified (2026-10-25) front-door rung: the `FRONT_DOOR_AUTHORIZED_AGENTS` frozenset — `{"ari"}` only — lets the commissioning agent read/steer jobs in ANY project, matching the cross-project trust `job_create`/`job_continue` already carry by design. This is NOT a general per-agent allow-list; `jober` is explicitly excluded.*
+
+- **New rung** (`daemon/tools/job_queue.py::_check_job_access`) — inserted AFTER the system-default "global-operator" rung and BEFORE the strict-match comparison: a caller whose Instance row's `agent_id` is in `FRONT_DOOR_AUTHORIZED_AGENTS` is allowed. The agent_id is read off the caller row the helper already fetches (no extra queries); every existing rung, the SYSTEM_DEFAULT tier semantics and the exact denial string are unchanged.
+- **Scope — the seven gated call sites** — `job_messages` / `job_tree` / `job_progress` / `job_inject` / `job_answer` / `job_pause` / `job_resume` all enforce through the same helper, so the exemption covers exactly those seven. `job_create` and `job_continue` remain structurally ungated (cross-project creation is the feature) and `job_get` remains ungated (pinned by test); remaining job-category tools are not caller-scoped either.
+- **ari-only, test-enforced** — the membership is pinned at the definition site (`FRONT_DOOR_AUTHORIZED_AGENTS == frozenset({"ari"})`) plus a jober-scoped cross-project denial case, so any future widening of the set fails tests instead of silently passing.
+- **Docs** — `agents/ari/tools_note.md` (front-door vs global-operator tiers; whole-`job`-category holdings) and `agents/leader/tools_note.md` (orchestrator-lane job toolset decision: `job_pause`/`job_resume` only, still project-gated).
+
 ### Removed — the daemon-side computer-use (cu) builtin MCP server (`feature/remove-cu-builtin`)
 
 > **CHANGELOG (removal):** *The daemon-side `computer-use` builtin MCP server is retired. Its replacement — the `mcps_client` wrapper (a macOS `.app` that runs the cu MCP server on the controlled machine) + the remote-hands gateway + the `mcp_rpc` tool category — is live and pilot-proven end-to-end (real Go client × real Python gateway over TLS) before this removal, so the redundant daemon-side builtin and its `cu_*` tool namespace go away.*
@@ -19,15 +28,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Docs** — `docs/mcp-computer-use-server.md` is replaced by a short historical stub (the file stays so `agents/gaia/workflow.md`'s link keeps resolving); the replacement architecture lives in `docs/mcps-client-remote-hands.md` + `docs/mcps-gateway.md`.
 - **DB note** — the `mcp_servers` row `computer-use` was soft-deactivated (`is_active=false`) out of band; the boot orphan sweep (`_deactivate_orphaned_builtin_servers`) deactivates any re-appearance.
 - **Tests** — `tests/unit/test_computer_use_mcp.py` (1726 lines) is deleted; its GENERIC half (the S1 built-in availability gate, the privilege-stamp helper's non-stamping contract, `is_mcp_tool`'s standard-shape detection and the empty-allow privileged-category strip) is ported to `tests/unit/test_mcp_builtin_availability_gate.py`. The nine `PRIVILEGED_TOOL_CATEGORIES` same-PR pins drop the `cu` member (16 → 15).
-
-### Changed — explicit front-door (ari) exemption in the gated job tools' project gate (`feature/ari-frontdoor-job-scope`)
-
-> **CHANGELOG (access-control):** *`_check_job_access` gains a NARROW, user-ratified (2026-10-25) front-door rung: the `FRONT_DOOR_JOB_ACCESS_AGENTS` frozenset — `{"ari"}` only — lets the commissioning agent read/steer jobs in ANY project, matching the cross-project trust `job_create`/`job_continue` already carry by design. This is NOT a general per-agent allow-list; `jober` is explicitly excluded.*
-
-- **New rung** (`daemon/tools/job_queue.py::_check_job_access`) — inserted AFTER the system-default "global-operator" rung and BEFORE the strict-match comparison: a caller whose Instance row's `agent_id` is in `FRONT_DOOR_JOB_ACCESS_AGENTS` is allowed. The agent_id is read off the caller row the helper already fetches (no extra queries); every existing rung, the SYSTEM_DEFAULT tier semantics and the exact denial string are unchanged.
-- **Scope — the seven gated call sites** — `job_messages` / `job_tree` / `job_progress` / `job_inject` / `job_answer` / `job_pause` / `job_resume` all enforce through the same helper, so the exemption covers exactly those seven. `job_create` and `job_continue` remain structurally ungated (cross-project creation is the feature) and `job_get` remains ungated (pinned by test).
-- **ari-only, test-enforced** — the membership is pinned at the definition site (`FRONT_DOOR_JOB_ACCESS_AGENTS == frozenset({"ari"})`) plus a jober-scoped cross-project denial case, so any future widening of the set fails tests instead of silently passing.
-- **Docs** — `agents/ari/tools_note.md` (front-door vs global-operator tiers; whole-`job`-category holdings) and `agents/leader/tools_note.md` (orchestrator-lane job toolset decision: `job_pause`/`job_resume` only, still project-gated).
 
 ## [0.27.7] — 2026-10-24
 
@@ -634,7 +634,7 @@ First-class answer submission for orchestrator agents (Ari / jober). The tool su
 
 - **Signature** — `job_answer(work_id: str, answers: dict[str, str], question_pack_id: str)` → `dict`. `JobAnswerInput` (args_schema) is the single source of truth for both description and field-level constraints; the wrapper carries plain types so the two copies cannot drift. Registered via `@register_tool_category("job")` and added to `KNOWN_TOOL_NAMES` — `ari` / `jober` inherit the `"job"` category automatically.
 - **Stricter tool-layer contract than HTTP** — non-empty `answers` and non-empty `question_pack_id` are required at the tool boundary (the HTTP route accepts optional fields; the tool refuses to call the helper when either is missing and returns an agent-readable error string). Duplicate-pack / stale-pack / terminal-target / write-pause / 503 outcomes are converted to clear error STRINGS so the tool never raises mid-tool-call (LangGraph `@tool` exceptions bubble up the graph task). The same error vocabulary (`QUESTION_PACK_MISMATCH` / `ANSWER_TARGET_TERMINAL` / `WRITE_PAUSED` / etc.) survives end-to-end.
-- **Access control + write-pause guard** — `_check_job_access` runs before any mutation (same seam as the four visibility tools: `job_messages` / `job_tree` / `job_progress` / `job_inject`); the write-pause 503 migration posture is enforced both at the tool boundary and inside the helper (fail-closed end-to-end).
+- **Access control + write-pause guard** — `_check_job_access` runs before any mutation (same seam as the visibility tools of that release: `job_messages` / `job_tree` / `job_progress` / `job_inject` — the gate covered exactly those four at the time); the write-pause 503 migration posture is enforced both at the tool boundary and inside the helper (fail-closed end-to-end).
 - **Routing** — `work_id → instance_id` via the SAME `work_resolver.resolve_work(work_id)` the HTTP route uses; project scoping rides on `_check_job_access`. The helper does not know whether it was called from HTTP or from a tool.
 - **Tests** — `tests/job_queue/test_job_answer_tool.py` (NEW, 899 lines): happy-path, stale-pack rejection, no-pending-pack rejection, access denied, plus the tidier M-round pins (count bumps, imports cleanup, `live_hub=None`, 503 race-window, order-pin, tightened pin). Pre-existing 13 `tests/job_queue` failures re-proven base-identical — re-confirmed not attributable to this merge.
 

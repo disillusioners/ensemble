@@ -2,8 +2,10 @@
 
 Size/seam note (M3 fix round, 2026-09-03, ``feature/mission-class``;
 size refresh 2026-09-22, ``feature/job-answer-tool`` M-tidier pass;
-size refresh 2026-09-25, ``job-pause-resume-tools``):
-this module is 4,008 lines (was 3,321 at the 2026-09-22 refresh)
+size refresh 2026-09-25, ``job-pause-resume-tools``;
+size refresh 2026-10-25, ``feature/ari-frontdoor-job-scope``):
+this module is 4,452 lines (was 4,391 at the 2026-09-25 refresh —
+the 4,008 noted then was already stale against the shipped file)
 and hosts BOTH the LangGraph ``@tool`` wrappers AND significant
 non-tool logic (the legacy ``list_jobs`` fallback, the watch-job
 immediate-notify branch, the mission-tool opt-in helper, the WC-wake
@@ -1129,9 +1131,11 @@ def _format_answer_http_error(
 #: ARI-ONLY — user-confirmed 2026-10-25. ``jober`` is deliberately NOT
 #: included; widening this set is a separate decision requiring explicit
 #: ratification. This is a NARROW front-door carve-out, NOT a general
-#: per-agent allow-list (see the ``_check_job_access`` docstring for the
-#: superseded ruling and its rationale).
-FRONT_DOOR_JOB_ACCESS_AGENTS: frozenset[str] = frozenset({"ari"})
+#: per-agent allow-list. THIS `#:` BLOCK IS THE SINGLE CANONICAL HOME of
+#: the ruling's rationale — the ``_check_job_access`` docstring keeps
+#: only the original-vs-superseding archival pair, and the rung comment
+#: below is a pointer.
+FRONT_DOOR_AUTHORIZED_AGENTS: frozenset[str] = frozenset({"ari"})
 
 
 def _check_job_access(
@@ -1147,6 +1151,8 @@ def _check_job_access(
     Semantics (evaluated in order):
       * No ``current_instance_id`` (caller is anonymous) → allowed.
       * ``record.project_id`` is None (legacy/unscoped job) → allowed.
+      * ``manager`` is None → allowed (defense-in-depth; every current
+        call site guards before invoking, so this is unreachable today).
       * Caller instance not found in the repo → allowed (fail-open,
         matches the pre-extraction behaviour).
       * Caller's ``project_id`` is None → allowed (fail-open).
@@ -1154,7 +1160,7 @@ def _check_job_access(
         → allowed (the "global operator" tier — chat-facing agents
         such as Ari/Jober run in the system-default project and need
         cross-project visibility to manage jobs in any project).
-      * Caller's ``agent_id in FRONT_DOOR_JOB_ACCESS_AGENTS`` →
+      * Caller's ``agent_id in FRONT_DOOR_AUTHORIZED_AGENTS`` →
         allowed (the explicit front-door tier — see the superseding
         ruling below).
       * Otherwise: caller and job must share the same project_id;
@@ -1209,12 +1215,13 @@ def _check_job_access(
       ``job_create``/``job_continue`` exist to let it make. Creation and
       continuation trust ALREADY crosses projects for the front door,
       so visibility + steering must match it EXPLICITLY. A NARROW
-      exception was ratified: the ``FRONT_DOOR_JOB_ACCESS_AGENTS``
+      exception was ratified: the ``FRONT_DOOR_AUTHORIZED_AGENTS``
       rung (ari ONLY; ``jober`` deliberately excluded — a separate
       decision if ever ratified). This is explicitly NOT the general
       per-agent allow-list the original ruling rejected: one named
       constant encoding one front-door lane; every other scoped agent
-      keeps strict project matching.
+      keeps strict project matching. (The full rationale lives ONCE,
+      on the constant's ``#:` block.)
     """
     if not (current_instance_id and record.project_id):
         return None
@@ -1235,16 +1242,9 @@ def _check_job_access(
     if system_default is not None and caller.project_id == system_default:
         return None
 
-    # Front-door tier (2026-10-25, user-confirmed): the commissioning
-    # agents in FRONT_DOOR_JOB_ACCESS_AGENTS dispatch jobs into ALL
-    # projects by design (``job_create`` is ungated on project;
-    # ``job_continue`` carries no project references), so their
-    # visibility/steering reads carry that trust EXPLICITLY here rather
-    # than emerging from system-default scope-absence. Read off the
-    # caller row already fetched above — no extra queries. ARI-ONLY
-    # (jober deliberately excluded); see the docstring's superseding
-    # ruling — this is NOT a general per-agent allow-list.
-    if caller.agent_id in FRONT_DOOR_JOB_ACCESS_AGENTS:
+    # Front-door tier — ARI-ONLY, user-confirmed 2026-10-25. Full
+    # ruling: FRONT_DOOR_AUTHORIZED_AGENTS above; this is its rung.
+    if caller.agent_id in FRONT_DOOR_AUTHORIZED_AGENTS:
         return None
 
     if caller.project_id != record.project_id:
@@ -4444,4 +4444,9 @@ def create_mission_watch_tools(
     return [watch_mission]
 
 
-__all__ = ["create_job_tools", "create_mission_watch_tools", "TERMINAL_STATES"]
+__all__ = [
+    "create_job_tools",
+    "create_mission_watch_tools",
+    "TERMINAL_STATES",
+    "FRONT_DOOR_AUTHORIZED_AGENTS",
+]

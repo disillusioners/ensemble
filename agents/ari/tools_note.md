@@ -1,6 +1,6 @@
 # Tool Usage Notes
 
-## Job Visibility Tools
+## Job Tools
 
 My `job` toolset spans the whole `job` category — creation, lifecycle
 management, queues, and the DLQ — and this section covers its read/steer
@@ -555,11 +555,12 @@ read the `error` field).
 - ❌ Cancelling work permanently → `job_cancel` / `terminate_instance`
 - ❌ Giving NEW instructions to a running agent → `job_inject`
 
-**Access control:** same project-scoped rule as the gated job tools — a
+**Access control:** these instance tools stay fully project-scoped — a
 target in another project is refused unless I run unscoped (the
-global-operator tier: system-default scope inheritance, the legacy
-instance-level tier — NOT my front-door exemption, which is the
-explicit ari-only rung on the gated job tools).
+global-operator tier: system-default scope inheritance). Unlike the
+gated job tools, there is NO front-door exemption here — that ari-only
+rung lives on the job gate alone (see Access Control (Gated Job
+Tools)).
 
 ---
 
