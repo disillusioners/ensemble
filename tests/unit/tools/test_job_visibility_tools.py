@@ -1793,3 +1793,415 @@ def json_dumps(obj) -> str:
     """Minimal JSON serializer for a one-off assertion that no secret leaks."""
     import json
     return json.dumps(obj)
+
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# Front-door (ari) job access — the explicit exemption rung
+# ─────────────────────────────────────────────────────────────────────────────────
+#
+# 2026-10-25, user-confirmed: ari dispatches jobs into ALL projects by
+# design (``job_create`` takes a caller-chosen ``project_id`` and
+# ``job_continue`` carries no project references), so its visibility and
+# steering reads carry that trust EXPLICITLY via
+# ``FRONT_DOOR_JOB_ACCESS_AGENTS`` instead of emerging from
+# system-default scope-absence. ARI-ONLY — jober deliberately excluded.
+# Scoped non-ari agents keep strict project matching with the exact-dict
+# denial unchanged.
+
+
+FRONT_DOOR_VISIBILITY_TOOLS = ("job_messages", "job_tree", "job_progress", "job_inject")
+
+
+def _get_job_tool(tools: list, name: str):
+    """Name-based lookup — the only stable contract (the positional-index
+    trap is pinned separately by the registration tests)."""
+    tool_obj = next((t for t in tools if getattr(t, "name", None) == name), None)
+    assert tool_obj is not None, f"{name} not found; got {[t.name for t in tools]}"
+    return tool_obj
+
+
+def _build_tools_for_caller(mock_services, mock_manager, caller):
+    """Rebuild the tool list bound to ``caller``'s instance id, wiring the
+    repo ``get`` side_effect so the caller row is returned for
+    ``"caller-id"`` (the access-control lookup)."""
+    job_service, queue_mgmt, dlq = mock_services
+
+    def get_side_effect(iid):
+        if iid == "caller-id":
+            return caller
+        return None
+
+    mock_manager._instance_repository.get = MagicMock(side_effect=get_side_effect)
+    return create_job_tools(
+        job_service, queue_mgmt, dlq,
+        manager=mock_manager,
+        current_instance_id="caller-id",
+    )
+
+
+def _visibility_tool_args(tool_name: str, job_id: str) -> dict:
+    """Per-tool invocation args for the four visibility tools."""
+    if tool_name == "job_inject":
+        return {"job_id": job_id, "message": "Hello from the front door"}
+    return {"job_id": job_id}
+
+
+class TestFrontDoorAriJobAccess:
+    """The explicit front-door rung: ari + real project_id + job in a
+    DIFFERENT project → allowed on every gated tool; scoped non-ari
+    agents → exact-dict denial unchanged."""
+
+    @pytest.mark.asyncio
+    async def test_job_messages_ari_front_door_cross_project_allowed(
+        self, mock_services, mock_manager,
+    ):
+        """ari caller scoped to proj-B + job in proj-A → allowed."""
+        job_service, _, _ = mock_services
+
+        root_id = "fd-root-1"
+        record = _make_work_record(
+            "fd-job-1", instance_id=root_id, project_id="proj-A", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        caller = _make_instance("caller-id", agent_id="ari", project_id="proj-B")
+        root = _make_instance(root_id)
+        tools = _build_tools_for_caller(mock_services, mock_manager, caller)
+        # Re-wire the root lookup on top of the caller wiring.
+        base_get = mock_manager._instance_repository.get
+
+        def get_with_root(iid):
+            if iid == root_id:
+                return root
+            return base_get.side_effect(iid)
+
+        mock_manager._instance_repository.get = MagicMock(side_effect=get_with_root)
+        mock_manager._instance_repository.get_tree_ids = MagicMock(return_value=[root_id])
+        mock_manager.get_messages = AsyncMock(return_value=[
+            _make_msg("user", "hi"),
+            _make_msg("assistant", "hello back"),
+        ])
+
+        job_messages_tool = _get_job_tool(tools, "job_messages")
+        result = await job_messages_tool.ainvoke({"job_id": "fd-job-1"})
+
+        assert "error" not in result
+        assert result["job_id"] == "fd-job-1"
+        assert result["total_messages"] == 2
+
+    @pytest.mark.asyncio
+    async def test_job_tree_ari_front_door_cross_project_allowed(
+        self, mock_services, mock_manager,
+    ):
+        """ari caller scoped to proj-B + job in proj-A → allowed."""
+        job_service, _, _ = mock_services
+
+        root_id = "fd-root-2"
+        record = _make_work_record(
+            "fd-job-2", instance_id=root_id, project_id="proj-A", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        caller = _make_instance("caller-id", agent_id="ari", project_id="proj-B")
+        root = _make_instance(root_id)
+        tools = _build_tools_for_caller(mock_services, mock_manager, caller)
+        base_get = mock_manager._instance_repository.get
+
+        def get_with_root(iid):
+            if iid == root_id:
+                return root
+            return base_get.side_effect(iid)
+
+        mock_manager._instance_repository.get = MagicMock(side_effect=get_with_root)
+        mock_manager._instance_repository.get_tree_ids = MagicMock(return_value=[root_id])
+
+        job_tree_tool = _get_job_tool(tools, "job_tree")
+        result = await job_tree_tool.ainvoke({"job_id": "fd-job-2"})
+
+        assert "error" not in result
+        assert result["job_id"] == "fd-job-2"
+        assert result["total_instances"] == 1
+
+    @pytest.mark.asyncio
+    async def test_job_progress_ari_front_door_cross_project_allowed(
+        self, mock_services, mock_manager,
+    ):
+        """ari caller scoped to proj-B + job in proj-A → allowed."""
+        job_service, _, _ = mock_services
+
+        root_id = "fd-root-3"
+        record = _make_work_record(
+            "fd-job-3", instance_id=root_id, project_id="proj-A", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        caller = _make_instance("caller-id", agent_id="ari", project_id="proj-B")
+        root = _make_instance(root_id, status="running")
+        tools = _build_tools_for_caller(mock_services, mock_manager, caller)
+        base_get = mock_manager._instance_repository.get
+
+        def get_with_root(iid):
+            if iid == root_id:
+                return root
+            return base_get.side_effect(iid)
+
+        mock_manager._instance_repository.get = MagicMock(side_effect=get_with_root)
+        mock_manager._instance_repository.get_tree_ids = MagicMock(return_value=[root_id])
+        mock_manager.get_messages = AsyncMock(return_value=[
+            _make_msg("user", "Do something"),
+            _make_msg("assistant", "Working on it"),
+        ])
+
+        job_progress_tool = _get_job_tool(tools, "job_progress")
+        result = await job_progress_tool.ainvoke({"job_id": "fd-job-3"})
+
+        assert "error" not in result
+        assert result["job_id"] == "fd-job-3"
+        assert result["status"] == "running"
+
+    @pytest.mark.asyncio
+    async def test_job_inject_ari_front_door_cross_project_allowed(
+        self, mock_services, mock_manager,
+    ):
+        """ari caller scoped to proj-B + job in proj-A → the WRITE
+        primitive is allowed too (the front-door tier carries steering,
+        not just visibility)."""
+        job_service, _, _ = mock_services
+
+        root_id = "fd-root-4"
+        record = _make_work_record(
+            "fd-job-4", instance_id=root_id, project_id="proj-A", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        caller = _make_instance("caller-id", agent_id="ari", project_id="proj-B")
+        root = _make_instance(root_id, status="running")
+        tools = _build_tools_for_caller(mock_services, mock_manager, caller)
+        base_get = mock_manager._instance_repository.get
+
+        def get_with_root(iid):
+            if iid == root_id:
+                return root
+            return base_get.side_effect(iid)
+
+        mock_manager._instance_repository.get = MagicMock(side_effect=get_with_root)
+        expected_entry = {"content": "Hello", "timestamp": "2025-01-01T00:00:00+00:00"}
+        mock_manager.set_injection = MagicMock(return_value=expected_entry)
+        mock_manager.get_injection_count = MagicMock(return_value=1)
+
+        job_inject_tool = _get_job_tool(tools, "job_inject")
+        result = await job_inject_tool.ainvoke({"job_id": "fd-job-4", "message": "Hello"})
+
+        assert "error" not in result
+        assert result["job_id"] == "fd-job-4"
+        assert result["status"] == "injected"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("caller_agent", ["leader", "developer"])
+    @pytest.mark.parametrize("tool_name", FRONT_DOOR_VISIBILITY_TOOLS)
+    async def test_scoped_non_ari_callers_still_denied(
+        self, mock_services, mock_manager, caller_agent, tool_name,
+    ):
+        """Scoped NON-ari agents + cross-project job → the exact-dict
+        denial is UNCHANGED (the front-door rung must not widen)."""
+        job_service, _, _ = mock_services
+
+        root_id = f"fd-denied-{caller_agent}"
+        record = _make_work_record(
+            f"fd-job-denied-{caller_agent}", instance_id=root_id,
+            project_id="proj-A", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        caller = _make_instance("caller-id", agent_id=caller_agent, project_id="proj-B")
+        tools = _build_tools_for_caller(mock_services, mock_manager, caller)
+
+        tool = _get_job_tool(tools, tool_name)
+        result = await tool.ainvoke(
+            _visibility_tool_args(tool_name, f"fd-job-denied-{caller_agent}")
+        )
+
+        assert result == {"error": "Access denied: job does not belong to caller's project"}
+
+    @pytest.mark.asyncio
+    async def test_unscoped_caller_allowed_independent_of_front_door_rung(
+        self, mock_services, mock_manager,
+    ):
+        """Backward-compat pin: a caller row with ``project_id=None`` is
+        allowed cross-project via the legacy fail-open rung — proven here
+        with a NON-ari agent so the allow cannot be attributed to the
+        front-door rung."""
+        job_service, _, _ = mock_services
+
+        root_id = "fd-root-unscoped"
+        record = _make_work_record(
+            "fd-job-unscoped", instance_id=root_id, project_id="proj-A", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        caller = _make_instance("caller-id", agent_id="developer", project_id=None)
+        root = _make_instance(root_id)
+        tools = _build_tools_for_caller(mock_services, mock_manager, caller)
+        base_get = mock_manager._instance_repository.get
+
+        def get_with_root(iid):
+            if iid == root_id:
+                return root
+            return base_get.side_effect(iid)
+
+        mock_manager._instance_repository.get = MagicMock(side_effect=get_with_root)
+        mock_manager._instance_repository.get_tree_ids = MagicMock(return_value=[root_id])
+        mock_manager.get_messages = AsyncMock(return_value=[_make_msg("user", "hi")])
+
+        job_messages_tool = _get_job_tool(tools, "job_messages")
+        result = await job_messages_tool.ainvoke({"job_id": "fd-job-unscoped"})
+
+        assert "error" not in result
+        assert result["job_id"] == "fd-job-unscoped"
+
+
+class TestJobToolsUnchangedTrustPins:
+    """Pins that the rung did NOT tighten the structurally-ungated tools:
+    ``job_create`` (project is a caller-chosen param), ``job_continue``
+    (zero project references) and ``job_get`` (no access check at all —
+    the live-reported job_get denial is NOT reproducible from this code;
+    transcript likely mislabeled)."""
+
+    @pytest.mark.asyncio
+    async def test_job_create_cross_project_allowed_for_scoped_ari(
+        self, mock_manager,
+    ):
+        """ari scoped to proj-A creates a job targeting proj-B → allowed
+        (cross-project creation IS the feature)."""
+        job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
+        job_service._queue_repo = None  # skip queue-ref resolution plumbing
+        job_item = MagicMock(name="JobItem")
+        job_item.job_id = "fd-create-1"
+        job_item.instance_id = None
+        job_item.to_dict.return_value = {"job_id": "fd-create-1", "status": "pending"}
+        job_service.enqueue = AsyncMock(return_value=job_item)
+
+        caller = _make_instance("ari-inst-1", agent_id="ari", project_id="proj-A")
+
+        def get_side_effect(iid):
+            if iid == "ari-inst-1":
+                return caller
+            return None
+
+        mock_manager._instance_repository.get = MagicMock(side_effect=get_side_effect)
+
+        tools = create_job_tools(
+            job_service, AsyncMock(), MagicMock(),
+            current_instance_id="ari-inst-1",
+            agent_id="ari",
+            manager=mock_manager,
+        )
+        job_create_tool = _get_job_tool(tools, "job_create")
+
+        result = await job_create_tool.ainvoke({
+            "agent_id": "developer",
+            "message": "Work proj-B",
+            "project_id": "proj-B",
+            "queue_id": "q-explicit-1",  # non-alias → passes through verbatim
+        })
+
+        assert "error" not in result, result
+        assert result["job_id"] == "fd-create-1"
+        job_service.enqueue.assert_awaited_once()
+        enqueue_kwargs = job_service.enqueue.await_args.kwargs
+        assert enqueue_kwargs["project_id"] == "proj-B"
+        assert enqueue_kwargs["source"] == "agent:ari"
+
+    @pytest.mark.asyncio
+    async def test_job_continue_cross_project_allowed_for_scoped_ari(
+        self, mock_manager,
+    ):
+        """ari scoped to proj-A continues a terminal job whose instance
+        lives in proj-B → allowed (job_continue carries no project
+        references; the flow proceeds to dispatch)."""
+        job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
+        record = MagicMock(name="WorkRecord[task]")
+        type(record).kind = property(lambda self: "task")
+        type(record).status = property(lambda self: "completed")
+        type(record).job_type = property(lambda self: None)
+        record.instance_id = "inst-B"
+        job_service.get_work = AsyncMock(return_value=record)
+
+        ari_caller = _make_instance("ari-inst-1", agent_id="ari", project_id="proj-A")
+        target = _make_instance("inst-B", agent_id="developer", status="running")
+
+        def get_side_effect(iid):
+            if iid == "ari-inst-1":
+                return ari_caller
+            if iid == "inst-B":
+                return target
+            return None
+
+        mock_manager._instance_repository.get = MagicMock(side_effect=get_side_effect)
+        mock_manager._task_repo = MagicMock()
+        mock_manager._task_repo.has_instance_busy = MagicMock(return_value=False)
+        mock_manager.enqueue_message_job = AsyncMock(
+            return_value={"message_id": "msg-new", "job_id": "job-new"}
+        )
+
+        tools = create_job_tools(
+            job_service, AsyncMock(), MagicMock(),
+            current_instance_id="ari-inst-1",
+            agent_id="ari",
+            manager=mock_manager,
+        )
+        job_continue_tool = _get_job_tool(tools, "job_continue")
+
+        result = await job_continue_tool.ainvoke({
+            "old_job_id": "job-B-1",
+            "message": "Continue with a follow-up instruction",
+        })
+
+        # No access-denied anywhere (there is no access check on this
+        # tool) — the continuation dispatched into the other project.
+        assert not (
+            isinstance(result, dict) and "Access denied" in str(result.get("error", ""))
+        ), result
+        mock_manager.enqueue_message_job.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_job_get_cross_project_allowed_for_scoped_ari(
+        self, mock_manager,
+    ):
+        """job_get is UNGATED — a scoped ari caller reading a job in a
+        different project succeeds. Pins the ungated status so a future
+        gate on job_get is a DELIBERATE, test-visible change (the
+        live-reported job_get denial at HEAD is not reproducible from
+        this code — transcript likely mislabeled)."""
+        job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
+        record = MagicMock(name="WorkRecord[get]")
+        record.to_dict.return_value = {
+            "job_id": "fd-get-1", "project_id": "proj-B", "status": "processing",
+        }
+        job_service.get_work = AsyncMock(return_value=record)
+
+        caller = _make_instance("ari-inst-1", agent_id="ari", project_id="proj-A")
+
+        def get_side_effect(iid):
+            if iid == "ari-inst-1":
+                return caller
+            return None
+
+        mock_manager._instance_repository.get = MagicMock(side_effect=get_side_effect)
+
+        tools = create_job_tools(
+            job_service, AsyncMock(), MagicMock(),
+            current_instance_id="ari-inst-1",
+            agent_id="ari",
+            manager=mock_manager,
+        )
+        job_get_tool = _get_job_tool(tools, "job_get")
+
+        result = await job_get_tool.ainvoke({"job_id": "fd-get-1"})
+
+        assert "error" not in result
+        assert result["job_id"] == "fd-get-1"
+        assert result["project_id"] == "proj-B"

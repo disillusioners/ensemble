@@ -1116,17 +1116,35 @@ def _format_answer_http_error(
     }
 
 
+#: Front-door job access — the commissioning agents that dispatch jobs
+#: into ALL projects by design: ``job_create`` takes a caller-chosen
+#: ``project_id`` (cross-project creation IS the feature) and
+#: ``job_continue`` carries no project references at all. Visibility and
+#: steering over those jobs must therefore carry the same trust
+#: EXPLICITLY (this constant + the ``_check_job_access`` rung below)
+#: rather than emerging incidentally from system-default scope-absence
+#: — which evaporates the moment the agent's instance carries a real
+#: ``project_id``.
+#:
+#: ARI-ONLY — user-confirmed 2026-10-25. ``jober`` is deliberately NOT
+#: included; widening this set is a separate decision requiring explicit
+#: ratification. This is a NARROW front-door carve-out, NOT a general
+#: per-agent allow-list (see the ``_check_job_access`` docstring for the
+#: superseded ruling and its rationale).
+FRONT_DOOR_JOB_ACCESS_AGENTS: frozenset[str] = frozenset({"ari"})
+
+
 def _check_job_access(
     manager: "InstanceManager | None",
     current_instance_id: str,
     record: "WorkRecord",
 ) -> Optional[dict]:
-    """Project-scoped C2 access check for job-visibility tools.
+    """Project-scoped C2 access check for the gated job tools.
 
     Returns ``None`` when access is allowed, or a ``{"error": ...}`` dict
     that the caller should return verbatim when access is denied.
 
-    Semantics:
+    Semantics (evaluated in order):
       * No ``current_instance_id`` (caller is anonymous) → allowed.
       * ``record.project_id`` is None (legacy/unscoped job) → allowed.
       * Caller instance not found in the repo → allowed (fail-open,
@@ -1136,6 +1154,9 @@ def _check_job_access(
         → allowed (the "global operator" tier — chat-facing agents
         such as Ari/Jober run in the system-default project and need
         cross-project visibility to manage jobs in any project).
+      * Caller's ``agent_id in FRONT_DOOR_JOB_ACCESS_AGENTS`` →
+        allowed (the explicit front-door tier — see the superseding
+        ruling below).
       * Otherwise: caller and job must share the same project_id;
         mismatch → access denied.
 
@@ -1161,23 +1182,45 @@ def _check_job_access(
     ``"none"`` are normalized via ``project_normalizer.normalize_project_id``
     to the system-default UUID at spawn time) AND (2) ALL legacy
     ``project_id IS NULL`` instance rows backfilled to the system-default
-    project at API lifespan startup (``daemon/api.py:512-528`` runs an
+    project at API lifespan startup (``daemon/api.py:2334`` backfills
+    instance rows; ``:2356`` backfills legacy job rows — each runs an
     idempotent ``backfill_system_default_project_id`` sweep on every
     boot). Consequence: system-default membership is the global-operator
-    tier — it grants cross-project access to all four visibility tools
-    (``job_messages``, ``job_tree``, ``job_progress``, ``job_inject``),
-    including the ``job_inject`` write primitive. This is intentional
-    and user-approved design: project-based gating, not agent-based — the
-    four visibility tools are chat-facing primitives that Ari/Jober and
-    other ops-tier agents use to manage jobs in any project, and the
-    alternative (per-agent allow-list) was rejected as a scaling hazard
-    for the orchestrator fleet.
+    tier — it grants cross-project access to all seven gated call sites
+    (``job_messages``, ``job_tree``, ``job_progress``, ``job_inject``,
+    ``job_answer``, ``job_pause``, ``job_resume``), including the
+    ``job_inject`` write primitive.
+
+    Trust-lane history (superseded 2026-10-25; original rationale
+    preserved for the record):
+
+    * ORIGINAL ruling: this check was project-based, NOT agent-based —
+      the visibility tools are chat-facing primitives that Ari/Jober and
+      other ops-tier agents use to manage jobs in any project, and the
+      alternative (per-agent allow-list) was rejected as a scaling hazard
+      for the orchestrator fleet. That ruling rested on an EMERGENT
+      property: chat-facing instances spawned unscoped and were
+      normalized into the system-default project, so the global-operator
+      tier covered them implicitly.
+    * SUPERSEDING ruling (2026-10-25, user-confirmed): emergent trust is
+      fragile — the moment an ari instance carries a real ``project_id``
+      (session↔project link), the system-default tier evaporates and
+      strict-match denial fires on the very cross-project dispatches
+      ``job_create``/``job_continue`` exist to let it make. Creation and
+      continuation trust ALREADY crosses projects for the front door,
+      so visibility + steering must match it EXPLICITLY. A NARROW
+      exception was ratified: the ``FRONT_DOOR_JOB_ACCESS_AGENTS``
+      rung (ari ONLY; ``jober`` deliberately excluded — a separate
+      decision if ever ratified). This is explicitly NOT the general
+      per-agent allow-list the original ruling rejected: one named
+      constant encoding one front-door lane; every other scoped agent
+      keeps strict project matching.
     """
     if not (current_instance_id and record.project_id):
         return None
 
     if manager is None:
-        # Defense-in-depth: unreachable at all 4 current call sites
+        # Defense-in-depth: unreachable at all 7 current call sites
         # (each performs ``if manager is None: return None`` before
         # invoking this helper). Kept so a future unguarded call site
         # can't accidentally reintroduce the pre-helper C2 regression.
@@ -1190,6 +1233,18 @@ def _check_job_access(
     # Read at call time so test monkeypatching of the module attribute wins.
     system_default = constants.SYSTEM_DEFAULT_PROJECT_ID
     if system_default is not None and caller.project_id == system_default:
+        return None
+
+    # Front-door tier (2026-10-25, user-confirmed): the commissioning
+    # agents in FRONT_DOOR_JOB_ACCESS_AGENTS dispatch jobs into ALL
+    # projects by design (``job_create`` is ungated on project;
+    # ``job_continue`` carries no project references), so their
+    # visibility/steering reads carry that trust EXPLICITLY here rather
+    # than emerging from system-default scope-absence. Read off the
+    # caller row already fetched above — no extra queries. ARI-ONLY
+    # (jober deliberately excluded); see the docstring's superseding
+    # ruling — this is NOT a general per-agent allow-list.
+    if caller.agent_id in FRONT_DOOR_JOB_ACCESS_AGENTS:
         return None
 
     if caller.project_id != record.project_id:

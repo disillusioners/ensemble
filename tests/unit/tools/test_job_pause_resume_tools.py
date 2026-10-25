@@ -90,21 +90,31 @@ def _make_work_record(
     return record
 
 
-def _make_instance_row(instance_id: str, *, project_id: str | None) -> MagicMock:
+def _make_instance_row(
+    instance_id: str, *, project_id: str | None, agent_id: str = "leader"
+) -> MagicMock:
     """Instance-shaped mock for ``manager._instance_repository.get`` —
     matches the row shape ``_check_job_access`` reads (the helper at
-    ``daemon/tools/job_queue.py:910`` inspects ``caller.project_id``)."""
+    ``daemon/tools/job_queue.py:910`` inspects ``caller.project_id``;
+    the front-door rung also reads ``caller.agent_id`` — explicit
+    non-ari default keeps the historical deny behavior pinned)."""
     row = MagicMock(name=f"InstanceRow[{instance_id}]")
     row.instance_id = instance_id
     row.project_id = project_id
+    row.agent_id = agent_id
     return row
 
 
-def _wire_caller_project(manager: MagicMock, *, caller_project: str | None) -> None:
+def _wire_caller_project(
+    manager: MagicMock, *, caller_project: str | None, agent_id: str = "leader"
+) -> None:
     """Wire ``manager._instance_repository.get`` with a caller row only —
     ``_check_job_access`` looks up the caller instance to read its
-    project_id; the job's project_id comes off the WorkRecord directly."""
-    caller_row = _make_instance_row(CALLER_ID, project_id=caller_project)
+    project_id (and, on the front-door rung, its agent_id); the job's
+    project_id comes off the WorkRecord directly."""
+    caller_row = _make_instance_row(
+        CALLER_ID, project_id=caller_project, agent_id=agent_id
+    )
     manager._instance_repository.get = MagicMock(
         side_effect=lambda iid: caller_row if iid == CALLER_ID else None
     )
@@ -662,6 +672,48 @@ class TestJobPauseAccessControl:
         manager.pause_instance_cascade.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_pause_ari_front_door_cross_project_allowed(
+        self, manager, job_service, pause_tool,
+    ):
+        """Front-door tier (ari-only, user-confirmed 2026-10-25): ari
+        scoped to proj-B pauses a job in proj-A — steering trust made
+        explicit, not emergent from system-default scope-absence."""
+        job_service.get_work.return_value = _make_work_record(
+            status="processing", project_id="proj-A",
+        )
+        _wire_caller_project(
+            manager, caller_project="proj-B", agent_id="ari"
+        )
+
+        result = await pause_tool.coroutine(JOB_ID)
+
+        assert "error" not in result
+        assert result["paused"] is True
+        manager.pause_instance_cascade.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("caller_agent", ["leader", "developer"])
+    async def test_pause_scoped_non_ari_callers_denied(
+        self, manager, job_service, pause_tool, caller_agent,
+    ):
+        """Scoped NON-ari agents + cross-project job → exact-dict denial
+        UNCHANGED (the front-door rung must not widen)."""
+        job_service.get_work.return_value = _make_work_record(
+            status="processing", project_id="proj-A",
+        )
+        _wire_caller_project(
+            manager, caller_project="proj-B", agent_id=caller_agent
+        )
+
+        result = await pause_tool.coroutine(JOB_ID)
+
+        assert result == {
+            "error": "Access denied: job does not belong to caller's project",
+            "paused": False,
+        }
+        manager.pause_instance_cascade.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_pause_repo_error_propagates(
         self, manager, job_service, pause_tool,
     ):
@@ -726,6 +778,49 @@ class TestJobResumeAccessControl:
         assert result["resumed"] is True
         manager.resume_instance_cascade.assert_awaited_once()
         manager.resume_processing_job.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_resume_ari_front_door_cross_project_allowed(
+        self, manager, job_service, resume_tool,
+    ):
+        """Front-door tier (ari-only): ari scoped to proj-B resumes a job
+        in proj-A — mirrors the pause-side front-door pin."""
+        job_service.get_work.return_value = _make_work_record(
+            status="processing", project_id="proj-A",
+        )
+        _wire_caller_project(
+            manager, caller_project="proj-B", agent_id="ari"
+        )
+
+        result = await resume_tool.coroutine(JOB_ID)
+
+        assert "error" not in result
+        assert result["resumed"] is True
+        manager.resume_instance_cascade.assert_awaited_once()
+        manager.resume_processing_job.assert_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("caller_agent", ["leader", "developer"])
+    async def test_resume_scoped_non_ari_callers_denied(
+        self, manager, job_service, resume_tool, caller_agent,
+    ):
+        """Scoped NON-ari agents + cross-project job → exact-dict denial
+        UNCHANGED (the front-door rung must not widen)."""
+        job_service.get_work.return_value = _make_work_record(
+            status="processing", project_id="proj-A",
+        )
+        _wire_caller_project(
+            manager, caller_project="proj-B", agent_id=caller_agent
+        )
+
+        result = await resume_tool.coroutine(JOB_ID)
+
+        assert result == {
+            "error": "Access denied: job does not belong to caller's project",
+            "resumed": False,
+        }
+        manager.resume_instance_cascade.assert_not_awaited()
+        manager.resume_processing_job.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_resume_question_pack_guard_runs_before_access_check(

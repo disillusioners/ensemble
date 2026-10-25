@@ -608,6 +608,69 @@ class TestJobAnswerAccessDenied:
         assert result["status"] == "answered"
 
     @pytest.mark.asyncio
+    async def test_ari_front_door_cross_project_allowed(self, harness):
+        """The front-door rung: an ari caller scoped to a real project
+        (proj-CALLER) may answer packs on jobs in a DIFFERENT project
+        (proj-JOB) — visibility+steering trust made explicit
+        (user-confirmed 2026-10-25, FRONT_DOOR_JOB_ACCESS_AGENTS)."""
+        asker, work_id, pack = _seed_paused_asker_with_pending_pack(
+            harness, project_id="proj-JOB"
+        )
+        caller = _seed_instance(
+            harness.engine,
+            instance_id="caller-ari",
+            status=InstanceStatus.RUNNING.value,
+            project_id="proj-CALLER",
+            agent_id="ari",
+        )
+
+        tool = _make_job_answer_tool(harness, current_instance_id=caller)
+
+        result = await tool.ainvoke(
+            {
+                "work_id": work_id,
+                "answers": {"q1": "yes"},
+                "question_pack_id": pack.id,
+            }
+        )
+
+        assert "error" not in result
+        assert result["status"] == "answered"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("caller_agent", ["leader", "developer"])
+    async def test_scoped_non_ari_callers_denied(self, harness, caller_agent):
+        """Scoped NON-ari agents + cross-project job → the exact-dict
+        denial is UNCHANGED (the front-door rung is ari-only)."""
+        asker, work_id, pack = _seed_paused_asker_with_pending_pack(
+            harness, project_id="proj-JOB"
+        )
+        caller = _seed_instance(
+            harness.engine,
+            instance_id=f"caller-{caller_agent}",
+            status=InstanceStatus.RUNNING.value,
+            project_id="proj-CALLER",
+            agent_id=caller_agent,
+        )
+
+        tool = _make_job_answer_tool(harness, current_instance_id=caller)
+
+        result = await tool.ainvoke(
+            {
+                "work_id": work_id,
+                "answers": {"q1": "yes"},
+                "question_pack_id": pack.id,
+            }
+        )
+
+        assert result == {
+            "error": "Access denied: job does not belong to caller's project"
+        }
+        # The pack was NOT stamped (the answer flow never ran).
+        assert harness.qm.get_question_pack(asker).status == "pending"
+        harness.manager.resume_instance_cascade.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_system_default_caller_allowed_across_projects(self, harness):
         """System-default (global-operator) caller may answer packs in
         any project — mirrors the ``_check_job_access`` carve-out the
