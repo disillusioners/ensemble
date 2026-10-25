@@ -43,8 +43,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import tempfile
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -141,6 +144,7 @@ class FakeAdapter:
         send_delay: float = 0.0,
         breaker_ok: bool = True,
         raises: bool = False,
+        raise_timeout: bool = False,
     ) -> None:
         self.source_id = source_id
         self.source_type = "discord"
@@ -148,6 +152,7 @@ class FakeAdapter:
         self._send_result = send_result
         self._send_delay = send_delay
         self._raises = raises
+        self._raise_timeout = raise_timeout
         self._circuit_breaker = FakeBreaker(breaker_ok)
         self.sent: list[OutgoingMessage] = []
 
@@ -159,6 +164,10 @@ class FakeAdapter:
         self.sent.append(message)
         if self._send_delay:
             await asyncio.sleep(self._send_delay)
+        if self._raise_timeout:
+            # An ADAPTER-INTERNAL timeout (the adapter's own client
+            # timing out) — NOT the tool's bound expiry.
+            raise asyncio.TimeoutError("adapter-internal timeout")
         if self._raises:
             raise RuntimeError("transport exploded")
         return self._send_result
@@ -531,6 +540,154 @@ class TestFailurePaths:
             "the layer-3 gate is PRE-AUDIT — a caller that never had the "
             "tool legitimately leaves no ledger noise"
         )
+
+    async def test_an_adapter_internal_timeout_is_a_transient_failure(
+        self, bound_manager, monkeypatch
+    ) -> None:
+        """D10 disambiguation — an adapter-INTERNAL TimeoutError is a
+        TRANSIENT adapter failure (delivery-failed class, retry-eligible
+        per the D10 design), NOT the tool-bound expiry.
+
+        The old code conflated the two causes (``wait_for`` cannot tell
+        "the tool bound expired" from "the adapter raised its own
+        TimeoutError"), so the adapter's own timeout produced a FALSE
+        ``notify_dispatch_timeout`` in the ledger AND lost the designed
+        transient retry. Now: the retry happens, the row settles as
+        ``delivery_failed`` with the TRUE cause, and the envelope is
+        ``notify_dispatch_failed`` — never ``notify_dispatch_timeout``.
+        """
+        monkeypatch.setenv("ENSEMBLE_NOTIFY_USER_TIMEOUT_SECONDS", "10")
+        bound_manager.adapter._raise_timeout = True
+        tool = _tool(bound_manager)
+        result = await tool.ainvoke({"message": "hello"})
+        assert NOTIFY_CODE_DISPATCH_FAILED in result
+        assert NOTIFY_CODE_DISPATCH_TIMEOUT not in result, (
+            "an adapter-INTERNAL timeout is not the tool-bound expiry"
+        )
+        assert len(bound_manager.adapter.sent) == 2, (
+            "D10 — the transient retry must still happen (2 attempts)"
+        )
+        rows = _rows(bound_manager.engine)
+        assert len(rows) == 1
+        assert rows[0].outcome == "delivery_failed"
+        assert rows[0].error_code == NOTIFY_CODE_DISPATCH_FAILED
+
+    async def test_a_hung_ledger_write_never_holds_the_turn(
+        self, bound_manager, monkeypatch
+    ) -> None:
+        """Item 1 (W4) — the pre-flight refusal ledgering is BOUNDED: a
+        hung database must not hold the turn. The write times out, the
+        N2 degrade fires (the refusal becomes notify_audit_unavailable)
+        and the call returns inside the bound.
+        """
+        monkeypatch.setenv("ENSEMBLE_NOTIFY_USER_TIMEOUT_SECONDS", "1")
+        release = threading.Event()
+
+        def _hang(self, **_kwargs):
+            # The hang is bounded (6s) so the leg that removes the bound
+            # goes RED on the elapsed assertion instead of hanging the
+            # pytest-timeout.
+            release.wait(timeout=6)
+
+        monkeypatch.setattr(NotifyAuditRepository, "write_refusal", _hang)
+        tool = _tool(bound_manager)
+        started = time.monotonic()
+        try:
+            result = await tool.ainvoke({"message": "x" * 5000})
+        finally:
+            release.set()
+        elapsed = time.monotonic() - started
+        assert elapsed < 4, f"the turn was held for {elapsed:.1f}s"
+        assert NOTIFY_CODE_AUDIT_UNAVAILABLE in result
+        assert bound_manager.adapter.sent == []
+
+    async def test_a_hung_ledger_write_never_masks_the_kill_switch(
+        self, bound_manager, monkeypatch
+    ) -> None:
+        """Item 1 (W4) — the kill-switch seam is bounded too, but a
+        safety refusal is never maskable by a ledger problem: the
+        ``notify_disabled`` refusal stands even when the ledger write
+        times out.
+        """
+        monkeypatch.setenv("ENSEMBLE_NOTIFY_USER_TIMEOUT_SECONDS", "1")
+        monkeypatch.setenv("ENSEMBLE_NOTIFY_USER_ENABLED", "false")
+        release = threading.Event()
+
+        def _hang(self, **_kwargs):
+            # The hang is bounded (6s) so the leg that removes the bound
+            # goes RED on the elapsed assertion instead of hanging the
+            # pytest-timeout.
+            release.wait(timeout=6)
+
+        monkeypatch.setattr(NotifyAuditRepository, "write_refusal", _hang)
+        tool = _tool(bound_manager)
+        started = time.monotonic()
+        try:
+            result = await tool.ainvoke({"message": "hello"})
+        finally:
+            release.set()
+        elapsed = time.monotonic() - started
+        assert elapsed < 4, f"the turn was held for {elapsed:.1f}s"
+        assert NOTIFY_CODE_DISABLED in result
+        assert bound_manager.adapter.sent == []
+
+
+class TestKnobAuthority:
+    async def test_an_invalid_env_knob_is_rejected_loudly(
+        self, bound_manager, monkeypatch, caplog
+    ) -> None:
+        """Item 3 — ``NotifyUserConfig`` (Pydantic) is the SINGLE
+        authority for the env knobs: an invalid value never silently
+        takes effect. A NEGATIVE interval (which would DEFEAT the rate
+        gate) is rejected loudly — the warning names the knob, the
+        rejected value and the fallback — and the validated fallback is
+        what runs.
+        """
+        monkeypatch.setenv(
+            "ENSEMBLE_NOTIFY_USER_MIN_INTERVAL_SECONDS", "-1"
+        )
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.tools.notify_user"
+        ):
+            tool = _tool(bound_manager)
+            first = await tool.ainvoke({"message": "one"})
+        assert first["ok"] is True, first
+        # The rate gate still HOLDS: the second send inside the window
+        # is refused (a negative interval would have let it through).
+        second = await tool.ainvoke({"message": "two"})
+        assert NOTIFY_CODE_RATE_LIMITED in second, (
+            "the negative interval must NOT defeat the rate gate"
+        )
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(
+            "ENSEMBLE_NOTIFY_USER_MIN_INTERVAL_SECONDS" in message
+            and "-1" in message
+            and "fallback" in message
+            for message in messages
+        ), messages
+
+    async def test_a_zero_timeout_knob_is_rejected_loudly(
+        self, bound_manager, monkeypatch, caplog
+    ) -> None:
+        """Item 3 — ``ENSEMBLE_NOTIFY_USER_TIMEOUT_SECONDS=0`` used to
+        kill the tool SILENTLY (the hand-rolled parser ignored the
+        model's ``gt=0``): every call hit the zero bound and returned
+        ``notify_dispatch_timeout``. The model rejects it now, loudly,
+        and the validated fallback keeps the tool alive.
+        """
+        monkeypatch.setenv("ENSEMBLE_NOTIFY_USER_TIMEOUT_SECONDS", "0")
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.tools.notify_user"
+        ):
+            tool = _tool(bound_manager)
+            result = await tool.ainvoke({"message": "hello"})
+        assert result["ok"] is True, result
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(
+            "ENSEMBLE_NOTIFY_USER_TIMEOUT_SECONDS" in message
+            and "fallback" in message
+            for message in messages
+        ), messages
 
 
 # ── the rate gates ──────────────────────────────────────────────────────

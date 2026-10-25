@@ -45,7 +45,6 @@ Method                        Semantics
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import Engine, func
@@ -59,8 +58,6 @@ from .models import (
     OUTCOME_REFUSED,
 )
 
-logger = logging.getLogger(__name__)
-
 
 class NotifyAuditRepository:
     """Writer + readers for the ``notify_audit`` ledger.
@@ -69,6 +66,12 @@ class NotifyAuditRepository:
     repository uses). Unlike the instance_ops writer, methods here raise
     on failure by design — the caller (the tool) owns the fail-closed
     conversion, because ONLY the tool knows whether a send is at stake.
+
+    There is deliberately NO logger in this module: every raise is
+    logged by the ONE caller (``daemon/tools/notify_user.py`` — the
+    write-ahead insert failure, the sweep failure and every refusal
+    write all log there), so a failure is reported once, in one place,
+    with the tool's own context.
     """
 
     def __init__(self, engine: Engine) -> None:

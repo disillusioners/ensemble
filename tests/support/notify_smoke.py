@@ -52,7 +52,8 @@ snapshotted before and asserted unchanged after.
 
 from __future__ import annotations
 
-import socket
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -63,17 +64,44 @@ from tests.support.wedge_smoke import (  # noqa: F401  (re-exported)
     assert_cgroup_isolated,
     assert_live_fence_unchanged,
     cgroup_path,
+    free_port as wedge_free_port,
     live_daemon_fence,
     transient_unit_argv,
+    unit_exists as wedge_unit_exists,
 )
 
 
 def free_port() -> int:
-    """Grab an ephemeral port (bind-and-close — TOCTOU is acceptable
-    inside an isolated unit)."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+    """Grab an ephemeral port — the WEDGE-SMOKE helper (single source, no
+    drift). Its re-roll guard keeps the port off 9797/7979 (the live and
+    demo daemon ports), so a smoke can never collide with a live
+    listener (the fence-adjacent risk the local copy had)."""
+    return wedge_free_port()
+
+
+def stop_transient_unit(unit: str, *, timeout: float = 30.0) -> bool:
+    """DELEGATE the stop of a transient unit to systemd (the
+    wedge-capture precedent — systemd owns the unit's lifecycle).
+
+    A wedged smoke must never orphan its transient daemon/sink with
+    their ports bound: ``systemd-run --wait`` is only the CLIENT, so
+    killing it (a test timeout) leaves the unit RUNNING. The stop is
+    delegated HERE; the caller asserts the unit-gone state afterwards.
+    Returns True when the unit is gone.
+    """
+    if shutil.which("systemctl") is None:
+        return False
+    try:
+        subprocess.run(
+            ["systemctl", "stop", unit],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return not wedge_unit_exists(unit)
 
 
 #: The scratch Telegram source id + chat id (deterministic; the sink

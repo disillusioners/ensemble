@@ -63,6 +63,14 @@ own timeout could report definitively. The bound is deliberately tight
 (a tool must never hold the turn); it is NOT "compatible" with the 15s
 window — it is stricter, and the unknown-tail is the honest cost.
 
+THE LEDGER WRITES ARE INSIDE THE CONTRACT TOO: the pre-flight refusal
+ledgering and the timeout settle path sit OUTSIDE the pipeline's own
+bound, so each is written under the SAME never-block discipline (a
+bounded await). A hung database can never hold the turn; a bounded
+write that times out is treated exactly like any other ledger-write
+failure (the N2 degrade at the send-capable seams, the kill-switch
+refusal still standing at the safety seam).
+
 Rate gates (D5 as corrected by C3, serialized by B2)
 ----------------------------------------------------
 * N = 1 per turn, enforced as a **>=60s minimum interval per calling
@@ -98,6 +106,14 @@ same code (the vocabulary is frozen at 12 codes).
 Kill-switch (N9): ``ENSEMBLE_NOTIFY_USER_ENABLED=false`` (or
 ``notify_user.enabled: false`` in config.yaml) disables the tool with
 the typed refusal ``notify_disabled``.
+
+Knob resolution (one authority): the ``ENSEMBLE_NOTIFY_USER_*`` env
+knobs are parsed THROUGH the ``NotifyUserConfig`` model (Pydantic) —
+never by hand. An invalid value (a zero timeout, a zero hourly cap, a
+negative interval) is REJECTED LOUDLY: a warning names the knob, the
+rejected value and the validated fallback, and the fallback is what the
+tool runs with. An invalid knob can never silently kill the tool, refuse
+everything, or defeat the rate gate.
 """
 
 from __future__ import annotations
@@ -114,8 +130,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 from langchain_core.tools import tool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
+from ..config import NotifyUserConfig
 from ..repositories.notify_audit.models import (
     OUTCOME_DELIVERY_FAILED,
     OUTCOME_DELIVERY_UNKNOWN,
@@ -309,53 +326,85 @@ def _error(msg: str) -> str:
     return f"ERROR: {msg}"
 
 
+#: The env prefix the ``NotifyUserConfig`` model owns (N8) — the tool
+#: reads the SAME knob names the model does (one vocabulary, one
+#: authority).
+NOTIFY_ENV_PREFIX = "ENSEMBLE_NOTIFY_USER_"
+
+
+def _notify_knob_fallbacks(config: Any) -> dict[str, Any]:
+    """The per-knob FALLBACK values: the config object's (boot-resolved)
+    value when it carries one, else the model's own field default."""
+    base = getattr(config, "notify_user", None)
+    if base is None and isinstance(config, NotifyUserConfig):
+        base = config
+    fallbacks: dict[str, Any] = {}
+    for name, field in NotifyUserConfig.model_fields.items():
+        value = getattr(base, name, None)
+        if value is None:
+            value = field.get_default(call_default_factory=True)
+        fallbacks[name] = value
+    return fallbacks
+
+
 def _resolve_bounds(config: Any) -> dict[str, Any]:
-    """Resolve the NotifyUserConfig knobs: explicit env > config object
-    > module defaults. Read at CALL time so tests and operators can
-    flip knobs without a restart of the tool module."""
-    cfg = getattr(config, "notify_user", None)
+    """Resolve the knobs — ``NotifyUserConfig`` (Pydantic) is the SINGLE
+    authority.
 
-    def _pick(env_key: str, attr: str, default: Any) -> Any:
-        raw = os.environ.get(env_key)
-        if raw is not None and raw != "":
-            if isinstance(default, bool):
-                return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
-            if isinstance(default, float):
-                try:
-                    return float(raw)
-                except ValueError:
-                    return default
-            try:
-                return int(raw)
-            except ValueError:
-                return default
-        if cfg is not None:
-            return getattr(cfg, attr, default)
-        return default
+    The env values are parsed THROUGH the model's own validators — never
+    by hand. The hand-rolled parser this replaces IGNORED the model's
+    bounds, so ``ENSEMBLE_NOTIFY_USER_TIMEOUT_SECONDS=0`` silently
+    killed the tool, ``MAX_PER_HOUR=0`` refused everything, and a
+    NEGATIVE interval DEFEATED the rate gate — all silently. Now an
+    invalid value is LOUD: a warning naming the knob, the rejected
+    value and the fallback used, and the VALIDATED fallback is what the
+    tool runs with.
 
-    return {
-        "enabled": _pick("ENSEMBLE_NOTIFY_USER_ENABLED", "enabled", True),
-        "max_per_hour": int(
-            _pick("ENSEMBLE_NOTIFY_USER_MAX_PER_HOUR", "max_per_hour", 6)
-        ),
-        "min_interval_seconds": int(
-            _pick(
-                "ENSEMBLE_NOTIFY_USER_MIN_INTERVAL_SECONDS",
-                "min_interval_seconds",
-                60,
+    Read at CALL time so tests and operators can flip knobs without a
+    restart of the tool module.
+    """
+    fallbacks = _notify_knob_fallbacks(config)
+    raw: dict[str, Any] = {}
+    for name in fallbacks:
+        value = os.environ.get(f"{NOTIFY_ENV_PREFIX}{name.upper()}")
+        if value is not None and value != "":
+            raw[name] = value
+    try:
+        validated = NotifyUserConfig(**{**fallbacks, **raw})
+    except ValidationError as exc:
+        # One invalid knob must not blind the others: pydantic reports
+        # EVERY failing field, so each is repaired with its own
+        # validated fallback (and named in a warning).
+        reasons: dict[str, str] = {}
+        for err in exc.errors():
+            loc = err.get("loc") or ()
+            if loc:
+                reasons[str(loc[0])] = str(err.get("msg", "invalid value"))
+        repaired: dict[str, Any] = {}
+        for name, value in raw.items():
+            if name in reasons:
+                logger.warning(
+                    "notify_user: the %s%s=%r is INVALID (%s) — using the "
+                    "validated fallback %r",
+                    NOTIFY_ENV_PREFIX,
+                    name.upper(),
+                    value,
+                    reasons[name],
+                    fallbacks[name],
+                )
+                repaired[name] = fallbacks[name]
+            else:
+                repaired[name] = value
+        try:
+            validated = NotifyUserConfig(**{**fallbacks, **repaired})
+        except ValidationError as exc2:  # pragma: no cover — defensive
+            logger.warning(
+                "notify_user: the notify_user knobs are unresolvable even "
+                "after the per-knob fallback (%s) — using the defaults",
+                exc2,
             )
-        ),
-        "timeout_seconds": float(
-            _pick(
-                "ENSEMBLE_NOTIFY_USER_TIMEOUT_SECONDS",
-                "timeout_seconds",
-                NOTIFY_SEND_TIMEOUT_SECONDS,
-            )
-        ),
-        "max_chars": int(
-            _pick("ENSEMBLE_NOTIFY_USER_MAX_CHARS", "max_chars", NOTIFY_SIZE_LIMIT)
-        ),
-    }
+            return dict(fallbacks)
+    return {name: getattr(validated, name) for name in fallbacks}
 
 
 def _orphan_sweep_seconds(bounds: dict[str, Any]) -> int:
@@ -537,7 +586,10 @@ def _build_full_doc() -> str:
         "re-send blindly. (Disclosure: this 10s bound pre-empts "
         "Discord's own 15s REST pre-flight — it is stricter, not "
         "compatible.) A definite failure after the single retry returns "
-        "reason=notify_dispatch_failed.\n\n"
+        "reason=notify_dispatch_failed. Only the tool's OWN bound expiry "
+        "returns notify_dispatch_timeout: a timeout raised INSIDE the "
+        "chat adapter is a transient adapter failure, so it is retried "
+        "once and then settles as notify_dispatch_failed.\n\n"
         "No legal target is normal\n"
         "--------------------------\n"
         "Sessions never contacted via chat (API-created, scheduler-only) "
@@ -656,7 +708,10 @@ async def _notify_user_impl(
 
     # ── N9 kill-switch: the outermost gate. Its refusal never depends
     # on ledger health (a safety refusal must not be maskable); the
-    # refusal row is attempted best-effort.
+    # refusal row is attempted best-effort — and BOUNDED (W4): a hung
+    # ledger must not hold the turn. A ledger-write failure (including
+    # a timeout) is logged and the kill-switch refusal STILL stands —
+    # the N2 degrade applies only at the send-capable seams.
     if not bounds["enabled"]:
         await _try_ledger_refusal(
             audit_repo,
@@ -668,6 +723,7 @@ async def _notify_user_impl(
             body_length=body_length,
             body_sha256=body_sha256,
             detail="the ENSEMBLE_NOTIFY_USER_ENABLED kill-switch is off",
+            timeout_seconds=bounds["timeout_seconds"],
         )
         return _refusal(
             NOTIFY_CODE_DISABLED,
@@ -682,44 +738,36 @@ async def _notify_user_impl(
     # (the uniform N2 conversion — no attempt is ever unauditable),
     # with the earlier condition carried in the detail.
     if not isinstance(message, str) or len(message) == 0:
-        unavailable = await _ledger_or_audit_unavailable(
+        return await _refuse(
             audit_repo,
+            code=NOTIFY_CODE_SIZE_EXCEEDED,
+            message="message must be 1..%d chars (one notify = one chat message)."
+            % bounds["max_chars"],
+            detail="message must be 1..%d chars" % bounds["max_chars"],
             agent_id=agent_id,
             instance_id=current_instance_id,
             source_id=None,
             target_hash=None,
-            refusal_reason=NOTIFY_CODE_SIZE_EXCEEDED,
             body_length=0,
             body_sha256=body_sha256,
-            detail="message must be 1..%d chars" % bounds["max_chars"],
-        )
-        if unavailable is not None:
-            return unavailable
-        return _refusal(
-            NOTIFY_CODE_SIZE_EXCEEDED,
-            "message must be 1..%d chars (one notify = one chat message)."
-            % bounds["max_chars"],
+            timeout_seconds=bounds["timeout_seconds"],
         )
     if len(message) > bounds["max_chars"]:
-        unavailable = await _ledger_or_audit_unavailable(
+        return await _refuse(
             audit_repo,
+            code=NOTIFY_CODE_SIZE_EXCEEDED,
+            message="message is %d chars; the cap is %d (one notify = one chat "
+            "message; split or shorten before retrying)."
+            % (len(message), bounds["max_chars"]),
+            detail="message is %d chars; cap is %d"
+            % (len(message), bounds["max_chars"]),
             agent_id=agent_id,
             instance_id=current_instance_id,
             source_id=None,
             target_hash=None,
-            refusal_reason=NOTIFY_CODE_SIZE_EXCEEDED,
             body_length=body_length,
             body_sha256=body_sha256,
-            detail="message is %d chars; cap is %d"
-            % (len(message), bounds["max_chars"]),
-        )
-        if unavailable is not None:
-            return unavailable
-        return _refusal(
-            NOTIFY_CODE_SIZE_EXCEEDED,
-            "message is %d chars; the cap is %d (one notify = one chat "
-            "message; split or shorten before retrying)."
-            % (len(message), bounds["max_chars"]),
+            timeout_seconds=bounds["timeout_seconds"],
         )
 
     # ── the W4 ONE bound starts here: resolution + gates + send + the
@@ -750,16 +798,26 @@ async def _notify_user_impl(
     except asyncio.TimeoutError:
         # D4/D11 — the POST may have landed: delivery UNKNOWN, never
         # retried. Settle the write-ahead row honestly (best-effort;
-        # the N4 sweep is the backstop).
+        # the N4 sweep is the backstop). The settle is BOUNDED (W4):
+        # it sits OUTSIDE the pipeline's own bound, so a hung database
+        # here would hold the turn forever.
         row_id = row_holder.get("row_id")
         if row_id and audit_repo is not None:
             try:
-                await asyncio.to_thread(
+                await _ledger_write(
+                    timeout,
                     audit_repo.update_outcome,
                     row_id,
                     OUTCOME_DELIVERY_UNKNOWN,
                     error_code=NOTIFY_CODE_DISPATCH_TIMEOUT,
                     detail="dispatch exceeded the %ss tool bound" % timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "notify_user: timeout-path settle TIMED OUT after %ss "
+                    "for row %s (the N4 sweep will re-mark it)",
+                    timeout,
+                    row_id,
                 )
             except Exception:  # noqa: BLE001 — the sweep re-marks it
                 logger.warning(
@@ -774,6 +832,32 @@ async def _notify_user_impl(
         )
 
 
+async def _ledger_write(
+    timeout_seconds: float,
+    func: Any,
+    /,
+    *args: Any,
+    **kwargs: Any,
+) -> None:
+    """Run ONE ledger write under the never-block bound (W4).
+
+    The write is bridged off the loop (``asyncio.to_thread``) and the
+    AWAIT is bounded, so a hung database can never hold the turn — the
+    tool's whole contract is "every path returns within the bound". The
+    underlying thread is NOT cancellable: a timed-out write may still
+    land late (harmless — the ledger is the audit trail of what the tool
+    did, not a gate on the send).
+
+    The floor is 0.25s (the house floor, the same one the send path
+    uses) so a sub-quarter-second bound cannot turn every write into an
+    instant timeout.
+    """
+    await asyncio.wait_for(
+        asyncio.to_thread(func, *args, **kwargs),
+        timeout=max(0.25, float(timeout_seconds)),
+    )
+
+
 async def _try_ledger_refusal(
     audit_repo: NotifyAuditRepository | None,
     *,
@@ -785,10 +869,17 @@ async def _try_ledger_refusal(
     body_length: int,
     body_sha256: str,
     detail: str | None = None,
+    timeout_seconds: float = NOTIFY_SEND_TIMEOUT_SECONDS,
 ) -> bool:
-    """Best-effort refusal ledger write. Returns True when written.
-    Failures are logged loudly (the refusal itself never depends on
-    ledger health — no send is at stake on a refusal path)."""
+    """Best-effort refusal ledger write, BOUNDED (W4). Returns True when
+    written.
+
+    A ledger-write FAILURE — including a BOUNDED write that TIMES OUT
+    (a hung database) — returns False, so the N2 degrade fires at the
+    send-capable seams (through ``_refuse``). The kill-switch seam
+    ignores the return value on purpose: a safety refusal must never be
+    maskable by a ledger problem.
+    """
     if audit_repo is None:
         logger.warning(
             "notify_user: refusal %s not ledgered (no audit repository)",
@@ -796,7 +887,8 @@ async def _try_ledger_refusal(
         )
         return False
     try:
-        await asyncio.to_thread(
+        await _ledger_write(
+            timeout_seconds,
             audit_repo.write_refusal,
             agent_id=agent_id,
             instance_id=instance_id,
@@ -808,6 +900,14 @@ async def _try_ledger_refusal(
             detail=detail,
         )
         return True
+    except asyncio.TimeoutError:
+        logger.error(
+            "notify_user: refusal ledger write TIMED OUT after %ss (%s) — "
+            "the write did not complete in time",
+            timeout_seconds,
+            refusal_reason,
+        )
+        return False
     except Exception as exc:  # noqa: BLE001 — refusal rows are best-effort
         logger.error(
             "notify_user: refusal ledger write failed (%s): %s: %s",
@@ -820,12 +920,16 @@ async def _try_ledger_refusal(
 
 async def _ledger_or_audit_unavailable(
     audit_repo: NotifyAuditRepository | None,
+    *,
+    timeout_seconds: float = NOTIFY_SEND_TIMEOUT_SECONDS,
     **kwargs: Any,
 ) -> str | None:
     """Ledger a refusal and CONVERT to the N2 envelope when the write
     fails (the send path is at stake downstream). Returns the
     notify_audit_unavailable refusal string on failure, else None."""
-    written = await _try_ledger_refusal(audit_repo, **kwargs)
+    written = await _try_ledger_refusal(
+        audit_repo, timeout_seconds=timeout_seconds, **kwargs
+    )
     if not written:
         return _refusal(
             NOTIFY_CODE_AUDIT_UNAVAILABLE,
@@ -835,6 +939,47 @@ async def _ledger_or_audit_unavailable(
             % kwargs.get("refusal_reason", "unknown"),
         )
     return None
+
+
+async def _refuse(
+    audit_repo: NotifyAuditRepository | None,
+    *,
+    code: str,
+    message: str,
+    agent_id: str,
+    instance_id: str,
+    source_id: str | None,
+    target_hash: str | None,
+    body_length: int,
+    body_sha256: str,
+    detail: str | None = None,
+    timeout_seconds: float = NOTIFY_SEND_TIMEOUT_SECONDS,
+) -> str:
+    """The ONE refusal seam — the N2 ledger-first discipline, enforced
+    STRUCTURALLY (not by copy-paste).
+
+    The refusal is LEDGERED first; the envelope is then the refusal
+    code's envelope, or — when the ledger write fails (including a
+    bounded write that TIMES OUT on a hung database) — the N2
+    ``notify_audit_unavailable`` envelope with the earlier condition
+    carried in the detail. Every refusal site in the tool goes through
+    here, so "ledger first, then refuse" cannot drift per site.
+    """
+    unavailable = await _ledger_or_audit_unavailable(
+        audit_repo,
+        agent_id=agent_id,
+        instance_id=instance_id,
+        source_id=source_id,
+        target_hash=target_hash,
+        refusal_reason=code,
+        body_length=body_length,
+        body_sha256=body_sha256,
+        detail=detail,
+        timeout_seconds=timeout_seconds,
+    )
+    if unavailable is not None:
+        return unavailable
+    return _refusal(code, message)
 
 
 async def _resolve_gate_and_send(
@@ -879,26 +1024,22 @@ async def _resolve_gate_and_send(
         logger.warning("notify_user: resolution read failed: %s", exc)
         resolved = None
     if resolved is None:
-        unavailable = await _ledger_or_audit_unavailable(
+        return await _refuse(
             audit_repo,
+            code=NOTIFY_CODE_NO_BOUND_CHAT_SOURCE,
+            message="this session has no bound chat source (it was never "
+            "contacted via chat), so there is nothing to notify. The "
+            "board remains the user-visible surface; leave evidence "
+            "there.",
+            detail="the session carries no chat binding (original_source "
+            "absent or colon-less) — the board is the fallback surface",
             agent_id=agent_id,
             instance_id=instance_id,
             source_id=None,
             target_hash=None,
-            refusal_reason=NOTIFY_CODE_NO_BOUND_CHAT_SOURCE,
             body_length=body_length,
             body_sha256=body_sha256,
-            detail="the session carries no chat binding (original_source "
-            "absent or colon-less) — the board is the fallback surface",
-        )
-        if unavailable is not None:
-            return unavailable
-        return _refusal(
-            NOTIFY_CODE_NO_BOUND_CHAT_SOURCE,
-            "this session has no bound chat source (it was never "
-            "contacted via chat), so there is nothing to notify. The "
-            "board remains the user-visible surface; leave evidence "
-            "there.",
+            timeout_seconds=bounds["timeout_seconds"],
         )
     source_id, external_user_id = resolved
     target_hash = _target_hash(source_id, external_user_id)
@@ -915,69 +1056,57 @@ async def _resolve_gate_and_send(
             logger.warning("notify_user: source row read failed: %s", exc)
             source_row = None
     if source_row is None:
-        unavailable = await _ledger_or_audit_unavailable(
+        return await _refuse(
             audit_repo,
+            code=NOTIFY_CODE_SOURCE_NOT_REGISTERED,
+            message="the resolved source %r is not registered (deleted or "
+            "unknown) — nothing was sent." % source_id,
+            detail="no source_configs row for %r" % source_id,
             agent_id=agent_id,
             instance_id=instance_id,
             source_id=source_id,
             target_hash=target_hash,
-            refusal_reason=NOTIFY_CODE_SOURCE_NOT_REGISTERED,
             body_length=body_length,
             body_sha256=body_sha256,
-            detail="no source_configs row for %r" % source_id,
-        )
-        if unavailable is not None:
-            return unavailable
-        return _refusal(
-            NOTIFY_CODE_SOURCE_NOT_REGISTERED,
-            "the resolved source %r is not registered (deleted or "
-            "unknown) — nothing was sent." % source_id,
+            timeout_seconds=bounds["timeout_seconds"],
         )
 
     source_type = str(getattr(source_row, "source_type", "") or "")
     if source_type not in USER_ORIGIN_CHAT_SOURCE_TYPES:
-        unavailable = await _ledger_or_audit_unavailable(
+        return await _refuse(
             audit_repo,
-            agent_id=agent_id,
-            instance_id=instance_id,
-            source_id=source_id,
-            target_hash=target_hash,
-            refusal_reason=NOTIFY_CODE_SOURCE_NOT_CHAT_TYPE,
-            body_length=body_length,
-            body_sha256=body_sha256,
-            detail="source_type=%r is not a human chat channel" % source_type,
-        )
-        if unavailable is not None:
-            return unavailable
-        return _refusal(
-            NOTIFY_CODE_SOURCE_NOT_CHAT_TYPE,
-            "the resolved source %r has type %r — not a human chat "
+            code=NOTIFY_CODE_SOURCE_NOT_CHAT_TYPE,
+            message="the resolved source %r has type %r — not a human chat "
             "channel (expected one of: %s). Nothing was sent."
             % (
                 source_id,
                 source_type,
                 ", ".join(sorted(USER_ORIGIN_CHAT_SOURCE_TYPES)),
             ),
-        )
-
-    if getattr(source_row, "enabled", True) is False:
-        unavailable = await _ledger_or_audit_unavailable(
-            audit_repo,
+            detail="source_type=%r is not a human chat channel" % source_type,
             agent_id=agent_id,
             instance_id=instance_id,
             source_id=source_id,
             target_hash=target_hash,
-            refusal_reason=NOTIFY_CODE_SOURCE_DISABLED,
             body_length=body_length,
             body_sha256=body_sha256,
-            detail="source_configs.enabled=False",
+            timeout_seconds=bounds["timeout_seconds"],
         )
-        if unavailable is not None:
-            return unavailable
-        return _refusal(
-            NOTIFY_CODE_SOURCE_DISABLED,
-            "the resolved source %r is disabled (enabled=False) — "
+
+    if getattr(source_row, "enabled", True) is False:
+        return await _refuse(
+            audit_repo,
+            code=NOTIFY_CODE_SOURCE_DISABLED,
+            message="the resolved source %r is disabled (enabled=False) — "
             "nothing was sent." % source_id,
+            detail="source_configs.enabled=False",
+            agent_id=agent_id,
+            instance_id=instance_id,
+            source_id=source_id,
+            target_hash=target_hash,
+            body_length=body_length,
+            body_sha256=body_sha256,
+            timeout_seconds=bounds["timeout_seconds"],
         )
 
     registry = getattr(manager, "source_registry", None)
@@ -986,46 +1115,38 @@ async def _resolve_gate_and_send(
         # The whatsapp class: semantically a chat type, but the registry
         # factory builds no adapter (leader adjudication 3) — the
         # refusal is correct behavior, not a bug.
-        unavailable = await _ledger_or_audit_unavailable(
+        return await _refuse(
             audit_repo,
+            code=NOTIFY_CODE_SOURCE_NOT_REGISTERED,
+            message="the resolved source %r has no live adapter (not "
+            "registered or its type is not buildable) — nothing was sent."
+            % source_id,
+            detail="no live adapter for %r" % source_id,
             agent_id=agent_id,
             instance_id=instance_id,
             source_id=source_id,
             target_hash=target_hash,
-            refusal_reason=NOTIFY_CODE_SOURCE_NOT_REGISTERED,
             body_length=body_length,
             body_sha256=body_sha256,
-            detail="no live adapter for %r" % source_id,
-        )
-        if unavailable is not None:
-            return unavailable
-        return _refusal(
-            NOTIFY_CODE_SOURCE_NOT_REGISTERED,
-            "the resolved source %r has no live adapter (not registered "
-            "or its type is not buildable) — nothing was sent."
-            % source_id,
+            timeout_seconds=bounds["timeout_seconds"],
         )
 
     adapter_status = getattr(adapter, "status", None)
     if adapter_status != SourceStatus.RUNNING:
-        unavailable = await _ledger_or_audit_unavailable(
+        return await _refuse(
             audit_repo,
+            code=NOTIFY_CODE_SOURCE_DISABLED,
+            message="the resolved source %r is not RUNNING (status=%s) — start "
+            "the source first; nothing was sent."
+            % (source_id, getattr(adapter_status, "value", adapter_status)),
+            detail="adapter status=%s (not RUNNING)" % adapter_status,
             agent_id=agent_id,
             instance_id=instance_id,
             source_id=source_id,
             target_hash=target_hash,
-            refusal_reason=NOTIFY_CODE_SOURCE_DISABLED,
             body_length=body_length,
             body_sha256=body_sha256,
-            detail="adapter status=%s (not RUNNING)" % adapter_status,
-        )
-        if unavailable is not None:
-            return unavailable
-        return _refusal(
-            NOTIFY_CODE_SOURCE_DISABLED,
-            "the resolved source %r is not RUNNING (status=%s) — start "
-            "the source first; nothing was sent."
-            % (source_id, getattr(adapter_status, "value", adapter_status)),
+            timeout_seconds=bounds["timeout_seconds"],
         )
 
     breaker = getattr(adapter, "_circuit_breaker", None)
@@ -1047,24 +1168,20 @@ async def _resolve_gate_and_send(
             )
             breaker_ok = False
         if not breaker_ok:
-            unavailable = await _ledger_or_audit_unavailable(
+            return await _refuse(
                 audit_repo,
+                code=NOTIFY_CODE_SOURCE_CIRCUIT_OPEN,
+                message="the source %r circuit breaker is OPEN after repeated "
+                "send failures (recovers in ~60s) — nothing was sent; "
+                "retry later or use the board." % source_id,
+                detail="circuit breaker OPEN (60s recovery window)",
                 agent_id=agent_id,
                 instance_id=instance_id,
                 source_id=source_id,
                 target_hash=target_hash,
-                refusal_reason=NOTIFY_CODE_SOURCE_CIRCUIT_OPEN,
                 body_length=body_length,
                 body_sha256=body_sha256,
-                detail="circuit breaker OPEN (60s recovery window)",
-            )
-            if unavailable is not None:
-                return unavailable
-            return _refusal(
-                NOTIFY_CODE_SOURCE_CIRCUIT_OPEN,
-                "the source %r circuit breaker is OPEN after repeated "
-                "send failures (recovers in ~60s) — nothing was sent; "
-                "retry later or use the board." % source_id,
+                timeout_seconds=bounds["timeout_seconds"],
             )
 
     # ── the B2-serialized ledger gates (C3 commit-before-count) ──────
@@ -1111,47 +1228,30 @@ async def _resolve_gate_and_send(
                     last_iso,
                     exc,
                 )
-                unavailable = await _ledger_or_audit_unavailable(
+                return await _refuse(
                     audit_repo,
-                    agent_id=agent_id,
-                    instance_id=instance_id,
-                    source_id=source_id,
-                    target_hash=target_hash,
-                    refusal_reason=NOTIFY_CODE_RATE_LIMITED,
-                    body_length=body_length,
-                    body_sha256=body_sha256,
+                    code=NOTIFY_CODE_RATE_LIMITED,
+                    message="interval gate: this session's last-notification "
+                    "stamp is unparseable, so the minimum interval "
+                    "cannot be verified. The notification was NOT sent.",
                     detail="interval gate: the baseline stamp is "
                     "unparseable (%s) — the minimum interval cannot be "
                     "verified, so it is not satisfiable"
                     % (last_iso,),
-                )
-                if unavailable is not None:
-                    return unavailable
-                return _refusal(
-                    NOTIFY_CODE_RATE_LIMITED,
-                    "interval gate: this session's last-notification "
-                    "stamp is unparseable, so the minimum interval "
-                    "cannot be verified. The notification was NOT sent.",
-                )
-            wait_s = float(bounds["min_interval_seconds"]) - elapsed
-            if wait_s > 0:
-                unavailable = await _ledger_or_audit_unavailable(
-                    audit_repo,
                     agent_id=agent_id,
                     instance_id=instance_id,
                     source_id=source_id,
                     target_hash=target_hash,
-                    refusal_reason=NOTIFY_CODE_RATE_LIMITED,
                     body_length=body_length,
                     body_sha256=body_sha256,
-                    detail="interval gate: %.0fs until the next send"
-                    % wait_s,
+                    timeout_seconds=bounds["timeout_seconds"],
                 )
-                if unavailable is not None:
-                    return unavailable
-                return _refusal(
-                    NOTIFY_CODE_RATE_LIMITED,
-                    "interval gate: this session sent a notification "
+            wait_s = float(bounds["min_interval_seconds"]) - elapsed
+            if wait_s > 0:
+                return await _refuse(
+                    audit_repo,
+                    code=NOTIFY_CODE_RATE_LIMITED,
+                    message="interval gate: this session sent a notification "
                     "%.0fs ago (minimum %ds). The next send becomes "
                     "legal in %.0fs."
                     % (
@@ -1159,6 +1259,15 @@ async def _resolve_gate_and_send(
                         bounds["min_interval_seconds"],
                         wait_s,
                     ),
+                    detail="interval gate: %.0fs until the next send"
+                    % wait_s,
+                    agent_id=agent_id,
+                    instance_id=instance_id,
+                    source_id=source_id,
+                    target_hash=target_hash,
+                    body_length=body_length,
+                    body_sha256=body_sha256,
+                    timeout_seconds=bounds["timeout_seconds"],
                 )
 
         # C3 commit-before-count: the accepted INSERT commits FIRST,
@@ -1236,22 +1345,56 @@ async def _resolve_gate_and_send(
     started = time.monotonic()
     ok = False
     attempts = 0
+    last_cause = "the adapter reported the send as failed"
     while True:
         attempts += 1
         try:
-            ok = bool(
-                await asyncio.wait_for(
-                    adapter.send(outgoing),
-                    timeout=max(0.25, deadline - loop.time()),
-                )
+            # D10 disambiguation — the adapter send is driven as a TASK
+            # and awaited with ``asyncio.wait`` (NOT ``wait_for``):
+            # ``wait_for`` cannot tell "the TOOL bound expired" from
+            # "the adapter raised its OWN TimeoutError" — both surface
+            # as the same exception, and the old code read the
+            # adapter's internal timeout as the tool-bound expiry
+            # (a FALSE cause in the ledger, and the designed transient
+            # retry was LOST). With a task, the two causes are
+            # disjoint: the task not finishing inside the remaining
+            # budget IS the tool-bound expiry; a finished task that
+            # carries an exception (ANY exception, including the
+            # adapter's own TimeoutError) is a TRANSIENT adapter
+            # failure — delivery-failed class, retry-eligible.
+            task = asyncio.ensure_future(adapter.send(outgoing))
+            done, _pending = await asyncio.wait(
+                {task}, timeout=max(0.25, deadline - loop.time())
             )
-        except asyncio.TimeoutError:
-            raise  # the outer W4 handler owns the unknown-tail envelope
         except Exception as exc:  # noqa: BLE001 — a raising adapter is a
             logger.warning(  # definite failure for this attempt
                 "notify_user: adapter.send raised: %s", exc
             )
+            last_cause = "the adapter raised %s" % type(exc).__name__
             ok = False
+        else:
+            if not done:
+                # The TOOL bound expired — the ONLY cause of the
+                # unknown-tail envelope. The in-flight send is
+                # cancelled and the outer W4 handler owns the tail.
+                task.cancel()
+                raise asyncio.TimeoutError
+            if task.cancelled():
+                # The adapter cancelled itself — the outcome is unknown.
+                raise asyncio.TimeoutError
+            exc = task.exception()
+            if exc is None:
+                ok = bool(task.result())
+            else:
+                # An adapter-INTERNAL failure (including its own
+                # TimeoutError) — TRANSIENT, retry-eligible (D10).
+                logger.warning(
+                    "notify_user: adapter.send raised: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+                last_cause = "the adapter raised %s" % type(exc).__name__
+                ok = False
         if ok:
             break
         remaining = deadline - loop.time()
@@ -1293,7 +1436,8 @@ async def _resolve_gate_and_send(
             row_id,
             OUTCOME_DELIVERY_FAILED,
             error_code=NOTIFY_CODE_DISPATCH_FAILED,
-            detail="adapter returned not-ok on %d attempts" % attempts,
+            detail="adapter failed on %d attempt(s) (%s)"
+            % (attempts, last_cause),
         )
     except Exception as exc:  # noqa: BLE001 — the sweep re-marks it
         logger.error(
@@ -1314,17 +1458,26 @@ async def _settle_quietly(
     outcome: str,
     *,
     refusal_reason: str | None = None,
+    error_code: str | None = None,
     detail: str | None = None,
 ) -> None:
     """Best-effort terminal update of the OWN write-ahead row. A failure
     here leaves the row standing as accepted — the conservative
-    direction (it counts toward the cap until the N4 sweep)."""
+    direction (it counts toward the cap until the N4 sweep).
+
+    The two codes are SEPARATE columns and mean different things: a
+    ``refusal_reason`` is the refusal CLASS (the row was refused — it
+    never spent a slot), while ``error_code`` is the honest CAUSE of a
+    non-refusal failure (e.g. the tool-bound expiry). A refusal code
+    is NEVER written into ``error_code`` — the ledger records what
+    happened, not a restated class.
+    """
     try:
         await asyncio.to_thread(
             audit_repo.update_outcome,
             row_id,
             outcome,
-            error_code=refusal_reason,
+            error_code=error_code,
             refusal_reason=refusal_reason,
             detail=detail,
         )

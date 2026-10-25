@@ -4,7 +4,7 @@
 # Timeout: 3 minutes (180s) — target < 2 min runtime
 #
 # Runs the tool + registration suites added by this lane:
-#   1. tests/unit/test_notify_user_tool.py (36 tests)
+#   1. tests/unit/test_notify_user_tool.py (41 tests)
 #      - the D1 resolution chain: the 13-edge census (architecture §4)
 #      - the rate gates: C3 commit-before-count under the B2 lock, the
 #        N3 budget predicate (accepted-class only; refusals never
@@ -12,7 +12,13 @@
 #        sweep, the restart-durability sim
 #      - failure paths: timeout (delivery UNKNOWN, never retried),
 #        definite failure after the single retry (D10), N2 fail-closed,
-#        N9 kill-switch, the ari-only literal-name bypass control
+#        N9 kill-switch, the ari-only literal-name bypass control, the
+#        adapter-INTERNAL TimeoutError (transient, retry-eligible — NOT
+#        the tool-bound expiry), the never-block ledger writes (a hung
+#        DB never holds the turn)
+#      - knob authority: an invalid env knob is rejected LOUDLY and the
+#        validated fallback runs (the Pydantic model is the single
+#        authority)
 #      - W10 security properties: gate concurrency (structural
 #        barrier), cross-instance shared-cap, ledger completeness +
 #        body-never-cleartext
@@ -24,7 +30,7 @@
 #
 # NOT included here: the W10 MUTATION legs — they mutate production
 # sources and live in their own pack:
-#   test/packs/notify_user_mutation_legs.sh (5 legs, RED→GREEN each).
+#   test/packs/notify_user_mutation_legs.sh (8 legs, RED→GREEN each).
 #
 # Fences: temp-file SQLite only (no PG, no live DB); the notify env
 # knobs are scrubbed per-variable by an autouse fixture; no live

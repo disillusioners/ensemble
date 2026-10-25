@@ -227,8 +227,27 @@ class TestBootSmokeUnit:
             completed = subprocess.run(
                 argv, capture_output=True, text=True, check=False, timeout=600
             )
+        except subprocess.TimeoutExpired as exc:
+            # The transient unit may STILL BE RUNNING: ``systemd-run
+            # --wait`` is only the CLIENT, so killing it (this timeout)
+            # leaves the unit (and its daemon + sink children, with
+            # their ports bound) alive. DELEGATE the stop to systemd
+            # (the wedge-capture precedent) so a wedged smoke never
+            # orphans them, then fail loudly.
+            smoke.stop_transient_unit(unit)
+            pytest.fail(
+                f"the notify boot smoke timed out after 600s: {exc}\n"
+                f"(the transient unit {unit} was stopped through systemd)"
+            )
         finally:
             fence_after = wsmoke.live_daemon_fence()
+        # The house unit-gone assert (the wedge A16(4) precedent): the
+        # transient unit must NOT survive the run — a leftover unit
+        # means an orphaned daemon/sink with ports bound.
+        assert not wsmoke.unit_exists(unit), (
+            f"the transient unit {unit} survived the run — the unit-gone "
+            "check failed (the A16(4) wedge precedent)"
+        )
         unit_log.write_text(
             completed.stdout + "\n=== STDERR ===\n" + completed.stderr,
             encoding="utf-8",

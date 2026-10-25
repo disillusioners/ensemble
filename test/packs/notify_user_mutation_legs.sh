@@ -30,6 +30,15 @@
 #   leg 5  doctrine phrase-pin   -> the falsified absolute ("there is NO
 #                                   ping") planted back into the
 #                                   self_alarm _full_doc_
+#   leg 6  raw-env knob bypass   -> the invalid env knob ACCEPTED
+#                                   (a negative interval defeats the
+#                                   rate gate) — item 3
+#   leg 7  D10 timeout conflation-> the adapter-internal TimeoutError
+#                                   re-raised as the tool-bound expiry
+#                                   (the retry is lost) — item 2
+#   leg 8  ledger never-block    -> the bounded ledger write made
+#                                   unbounded (a hung DB holds the
+#                                   turn) — item 1
 #
 # EVERY mutation is applied to a BACKUP-AND-RESTORE copy of the target
 # file; the trap restores the original even on an abnormal exit, and
@@ -115,7 +124,7 @@ sha_of() {
 # uncommitted work; the pack must prove it restored ITS OWN mutations,
 # not that the tree was clean).
 PRE_HASHES="$(mktemp)"
-git ls-files -- daemon/tools/notify_user.py daemon/tools/self_alarm.py daemon/repositories/notify_audit/repository.py | \
+git ls-files -- daemon/tools/notify_user.py daemon/tools/self_alarm.py daemon/repositories/notify_audit/repository.py daemon/config.py | \
   while read -r _f; do echo "$(sha_of "$_f")  $_f"; done > "$PRE_HASHES"
 
 backup_file() {
@@ -277,6 +286,60 @@ run_leg "doctrine-phrase-pin" \
 old = "The board is the user-visible surface — no AUTOMATIC ping"
 new = "The board is the user-visible surface — there is NO ping"
 assert src.count(old) == 1, "leg-5 anchor not found"
+src = src.replace(old, new)
+'
+
+# ── leg 6 — the raw-env knob bypass (the model's bound removed) ─────────
+# The Pydantic model is the SINGLE authority: an invalid knob must be
+# rejected loudly and the validated fallback used. The mutant removes
+# the model's OWN bound (ge=0) on the interval → the negative value
+# validates → it flows through the tool → the rate gate is defeated.
+run_leg "raw-env-knob-bypass" \
+  "daemon/config.py" \
+  "tests/unit/test_notify_user_tool.py::TestKnobAuthority::test_an_invalid_env_knob_is_rejected_loudly" \
+  '
+old = """    min_interval_seconds: int = Field(
+        default=60,
+        ge=0,"""
+new = """    min_interval_seconds: int = Field(
+        default=60,
+        ge=-1000,  # MUTANT — the bound is gone"""
+assert src.count(old) == 1, "leg-6 anchor not found"
+src = src.replace(old, new)
+'
+
+# ── leg 7 — the D10 timeout conflation planted back ─────────────────────
+# An adapter-INTERNAL TimeoutError must be a TRANSIENT adapter failure
+# (delivery-failed class, retry-eligible). The mutant re-raises it as
+# the tool-bound expiry → the retry is lost and the cause is false.
+run_leg "d10-timeout-conflation" \
+  "daemon/tools/notify_user.py" \
+  "tests/unit/test_notify_user_tool.py::TestFailurePaths::test_an_adapter_internal_timeout_is_a_transient_failure" \
+  '
+old = """                last_cause = \"the adapter raised %s\" % type(exc).__name__
+                ok = False"""
+new = """                if isinstance(exc, asyncio.TimeoutError):
+                    raise asyncio.TimeoutError  # MUTANT — the conflation
+                last_cause = \"the adapter raised %s\" % type(exc).__name__
+                ok = False"""
+assert src.count(old) == 1, "leg-7 anchor not found"
+src = src.replace(old, new)
+'
+
+# ── leg 8 — the never-block bound on the ledger writes removed ──────────
+# The pre-flight refusal ledgering is BOUNDED (W4): a hung database must
+# not hold the turn. The mutant makes the write unbounded → the turn is
+# held for the whole hang.
+run_leg "ledger-write-never-block" \
+  "daemon/tools/notify_user.py" \
+  "tests/unit/test_notify_user_tool.py::TestFailurePaths::test_a_hung_ledger_write_never_holds_the_turn" \
+  '
+old = """    await asyncio.wait_for(
+        asyncio.to_thread(func, *args, **kwargs),
+        timeout=max(0.25, float(timeout_seconds)),
+    )"""
+new = """    await asyncio.to_thread(func, *args, **kwargs)  # MUTANT — unbounded"""
+assert src.count(old) == 1, "leg-8 anchor not found"
 src = src.replace(old, new)
 '
 
