@@ -124,6 +124,48 @@ SOURCE_COMPACTION_MESSAGING = "compaction_aupdate_messaging"
 SOURCE_COMPACTION_PRECALL_95 = "compaction_precall_95"
 
 
+def resolve_turn_mission_id(messages: Any) -> str | None:
+    """The CARRIED mission id of the current turn (``None`` when absent).
+
+    Proposal B PR2 — the mission carrier's delivery-side reader.
+
+    The canonical producer (``_prepare_enqueued_message`` → the
+    ``ProcessingContext`` carrier → ``_build_graph_input``) stamps the
+    mission id ONCE onto the delivered user message's
+    ``additional_kwargs``. This helper READS that stamp — it never
+    re-derives the mission from message shapes (the Carrier-Threading
+    discipline: the value is computed once at the producer and travels
+    verbatim; a consumer that re-derives it from partial signals drifts
+    from the producer's full gate).
+
+    The scan walks BACKWARD and returns the FIRST message carrying a
+    mission id — the most recent carrier wins within a turn.
+
+    Args:
+        messages: Any iterable of message-like objects (duck-typed:
+            ``additional_kwargs`` is read when present).
+
+    Returns:
+        The carried mission id, or ``None`` when no message carries one
+        (e.g. the stamped user message was folded into a compaction
+        summary — the stamp is then simply absent and the tap writes no
+        mission id; the tap stays advisory and non-load-bearing).
+    """
+    if not messages:
+        return None
+    try:
+        for message in reversed(list(messages)):
+            kwargs = getattr(message, "additional_kwargs", None) or {}
+            if not isinstance(kwargs, dict):
+                continue
+            mission_id = kwargs.get("mission_id")
+            if isinstance(mission_id, str) and mission_id:
+                return mission_id
+    except Exception:  # noqa: BLE001 — the carrier read is advisory
+        return None
+    return None
+
+
 class MessageTapSlot:
     """Non-load-bearing post-node hook for ``message_metadata`` upserts.
 

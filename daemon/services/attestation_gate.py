@@ -87,6 +87,7 @@ from .attestation_scanner import (
     DEFAULT_ATTESTATION_TOOL_NAME,
     DEFAULT_DELEGATION_TOOL_NAME,
     DEFAULT_DELEGATION_TOOL_NAMES,
+    find_message_index_by_id,
     scan_delegation_after_last_user,
     scan_for_attestation_detailed,
 )
@@ -102,6 +103,7 @@ from .attestation_scanner import (
 # LAST AIMessage. Orthogonal to the marker scan: markers catch phrasing,
 # length catches brevity. The two are composed via ``OR`` on the gate's
 # ALLOW paths (``marker_hit OR length_trigger`` → judge fires).
+from .mission_record_reads import MISSION_READ_UNKNOWN
 from .attestation_marker_scanner import (
     MID_WORK_MARKERS,
     MARKER_TERMS_LIST_CAP,
@@ -440,6 +442,19 @@ class GateDecision:
     #: hint, no counter movement. Logged as the 18th canonical
     #: schema field.
     user_answer_pending: bool = False
+    #: Proposal B PR2 — the FIFTH R2 input (mission-scoped): the count
+    #: of OUTSTANDING commission rows on the leader's open mission
+    #: epoch. Additive diagnostic (NOT in the canonical log-schema
+    #: tuple — the same additive shape as ``busy_descendants``): the
+    #: count is surfaced for forensics and consumed by the predicate's
+    #: ``c_quiet`` term.
+    #:
+    #: ``0`` = the mission is quiet (or the input is INACTIVE — the
+    #: mission ladder is not in ``enforce`` mode). ``-1`` = UNKNOWN
+    #: (the fail-open sentinel) — the gate's ``evaluate`` short-circuits
+    #: to the whole-evaluation fail-open allow when it sees ``-1``, so
+    #: this field never reaches the decision with ``-1``.
+    outstanding_commissions: int = 0
     #: 2026-09-16 LCA resolver Stage-2 flip — the unified resolver's
     #: evaluation snapshot (``ResolverEvalSnapshot``: activation
     #: result with the fused bundle, would-be outcome, agreement, row
@@ -617,6 +632,7 @@ def decide(
     is_bundled_call: bool = False,
     reminder_text_clean: str = "",
     reminder_text_bundled: str = "",
+    outstanding_commissions: int = 0,
 ) -> GateDecision:
     """Pure ENFORCE-tree decision over the R2 inputs (Stage 3 shape).
 
@@ -636,9 +652,9 @@ def decide(
        other branch deliberately: the plain-allow contract is ZERO
        counter movement — an attested-allow reset (trigger 1) does not
        run while an answer is pending.
-    2. any pending wakeup input > 0 (THREE-input R2 —
+    2. any pending wakeup input > 0 (FOUR-input R2 —
        ``pending_children``, ``queued_or_expected_wakeups``, OR
-       ``live_descendants``) →
+       ``live_descendants``, OR ``outstanding_commissions``) →
        :attr:`Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP` with the
        counter UNCHANGED (ruling 1: the R2 non-reset IS the loop
        protection). Fires BEFORE the attested-split step (3)
@@ -750,6 +766,27 @@ def decide(
             the bundled-shape HOLD (final AI carried text + tool
             call). Canonical home:
             ``daemon/graph.py:ATTESTATION_BUNDLED_REMINDER``.
+        outstanding_commissions: Proposal B PR2 — the FIFTH R2 input
+            (mission-scoped). The count of OUTSTANDING commission rows
+            on the leader's open mission epoch — the OUT-OF-TREE
+            commissioned workers the three tree counters cannot see (the
+            D2 premature-settle class).
+
+            Semantics: ``> 0`` arms the same legitimate-pending allow as
+            the three tree counters (the mission has work en route; the
+            leader's turn may end; the L3 root gate holds the SETTLE
+            until the commission is satisfied). ``0`` = the mission is
+            quiet. ``-1`` = UNKNOWN (the fail-open sentinel) — the
+            caller (the gate's ``evaluate``) never passes ``-1`` here:
+            an unknown input short-circuits to the whole-evaluation
+            fail-open allow BEFORE this function is reached.
+
+            The DEFAULT is ``0`` (the input is INACTIVE — the mission
+            ladder is not in ``enforce`` mode, or the caller does not
+            consult the records). ``0`` is the legacy posture: the
+            pre-PR2 three-counter predicate is preserved exactly. The
+            fail-open ``-1`` sentinel is CONSTRUCTED by the READ, never
+            defaulted here.
 
     Returns:
         :class:`GateDecision` — the decision core.
@@ -773,8 +810,9 @@ def decide(
             attestation_required=attestation_required,
         )
 
-    # (2) R2 allow — legitimate pending wakeup (THREE-input predicate:
-    # pending_children OR queued_or_expected_wakeups OR live_descendants).
+    # (2) R2 allow — legitimate pending wakeup (FOUR-input predicate:
+    # pending_children OR queued_or_expected_wakeups OR live_descendants
+    # OR outstanding_commissions).
     # Fires BEFORE the attested-split step (3) deliberately
     # (2026-09-20, N1 ratification): a premature attest during an
     # active mission would otherwise fight the R2 legit-pending
@@ -792,10 +830,20 @@ def decide(
     # drops to 0) while a deeper grandchild still runs, AND
     # deferral emits no report/task row (so
     # ``queued_or_expected_wakeups`` stays 0).
+    #
+    # Proposal B PR2 — the ``outstanding_commissions`` arm: the
+    # MISSION-scoped sibling of the three tree counters. An
+    # OUT-OF-TREE commissioned worker (the nudge lane) is invisible
+    # to the tree BFS, so the three counters read "quiet" while the
+    # mission's work is still running (the D2 premature-settle
+    # class). The commission count arms the SAME legitimate-pending
+    # allow: the work is en route, the leader's turn may end, and the
+    # L3 root gate holds the SETTLE until the commission is satisfied.
     if (
         pending_children > 0
         or queued_or_expected_wakeups > 0
         or live_descendants > 0
+        or outstanding_commissions > 0
     ):
         return GateDecision(
             decision=Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP,
@@ -1313,7 +1361,42 @@ def evaluate(
         # or-after the last real user message (no N-window bound),
         # because the delegation check answers "did this mission
         # dispatch children", not "did the LLM attest recently".
-        delegation_scan = scan_delegation_after_last_user(messages)
+        #
+        # ── Proposal B PR2 — the RECORD ANCHOR ─────────────────────────
+        # SOURCE U becomes a LOOKUP (proposal-b §2.5): the anchor is the
+        # mission record's ``founding_message_id`` (amended at DELIVERY
+        # when a user correction lands), NOT a message-shape heuristic.
+        # The six-step exclusion ladder survives as the DECLARED LEGACY
+        # FALLBACK: a record miss (no open epoch / no founding message /
+        # the message is not in the list) reproduces today's behavior,
+        # exactly.
+        #
+        # The anchor read is duck-typed against the manager facade (the
+        # same seam discipline as the FIX-2 answer-gate input): a
+        # missing facade reads as "no anchor" (the legacy ladder), never
+        # as an error.
+        mission_anchor_index: int | None = None
+        mission_census: bool | None = None
+        _anchor_reader = getattr(manager, "get_mission_founding_message_id", None)
+        if callable(_anchor_reader):
+            try:
+                _founding_message_id = _anchor_reader(instance_id)
+            except Exception:  # noqa: BLE001 — never break the gate
+                _founding_message_id = None
+            if _founding_message_id:
+                mission_anchor_index = find_message_index_by_id(
+                    messages, _founding_message_id
+                )
+                if mission_anchor_index < 0:
+                    # The founding message is not in the list (folded into
+                    # a compaction summary, or a partial view) — the
+                    # LEGACY ladder takes over.
+                    mission_anchor_index = None
+
+        delegation_scan = scan_delegation_after_last_user(
+            messages,
+            anchor_index=mission_anchor_index,
+        )
 
         # Conditional gate ON iff delegation happened since the last
         # real user message. When no real user message exists at all
@@ -1325,7 +1408,56 @@ def evaluate(
         # True on the first send_message anywhere in the whole list
         # when no real user message anchors the tail — the tail_start
         # fallback is 0).
-        attestation_required = delegation_scan.delegation_since_last_user
+        #
+        # ── Proposal B PR2 — the RECORD CENSUS ─────────────────────────
+        # The census reads ``mission_commissions``: "does the open
+        # mission have commission rows?" (any lane). The legacy scan is
+        # the declared FALLBACK LEG (record miss / read failure ⇒ the
+        # legacy answer).
+        #
+        # UNION (not replacement) — deliberate, and the two legs see
+        # DIFFERENT gaps (the earlier comment had them inverted):
+        #
+        # * The LEGACY scan sees a delegation the RECORD cannot: a
+        #   ``send_message`` to a NON-CHILD target mints NO commission
+        #   row (the watcher tree-guard). A replacing census would
+        #   UN-arm the gate for that mission — a regression in the exact
+        #   defect class (D2 premature settle) PR2 exists to close.
+        # * The RECORD sees a delegation the LEGACY scan cannot: a
+        #   delegation whose tool call was folded away by a COMPACTION
+        #   is invisible to the list walk (the window content is
+        #   drained), while the epoch's commission rows remember it.
+        #
+        # So each leg's contribution is ADDITIVE: the record's rows
+        # survive the re-anchoring blindness (a new user message moves
+        # the legacy window; it does NOT move the epoch's commission
+        # rows), and the legacy walk keeps covering the lanes the
+        # record cannot see. The union is therefore the only shape
+        # that arms the gate for BOTH gaps.
+        #
+        # (The record-anchored window also means the legacy leg's own
+        # coverage is bounded by the epoch — see the PR2 adoption notes
+        # §(b) + the MAJOR-1 lane in §(f): the job_continue lane's
+        # supersession orphans the prior epoch's commissions, so on that
+        # lane neither leg sees the orphaned work.)
+        _census_reader = getattr(manager, "mission_has_commissions", None)
+        if callable(_census_reader):
+            try:
+                mission_census = _census_reader(instance_id)
+            except Exception:  # noqa: BLE001 — never break the gate
+                mission_census = None
+            if not isinstance(mission_census, bool):
+                # A duck-typed / mocked facade that returned a non-bool
+                # reads as "no answer" (the legacy leg) — it must never
+                # fake a census answer.
+                mission_census = None
+
+        if mission_census is None:
+            attestation_required = delegation_scan.delegation_since_last_user
+        else:
+            attestation_required = bool(
+                mission_census or delegation_scan.delegation_since_last_user
+            )
 
         # (ii) R2 inputs — the THREE NEW manager facades (SYNC reads; the
         # graph node bridges this whole function via asyncio.to_thread).
@@ -1364,6 +1496,35 @@ def evaluate(
                 if callable(_answer_reader)
                 else False
             )
+            # ── Proposal B PR2 — the FIFTH R2 input (mission-scoped) ──
+            # The count of OUTSTANDING commission rows on the leader's
+            # open mission epoch — the OUT-OF-TREE commissioned workers
+            # the three tree counters cannot see (the D2
+            # premature-settle class).
+            #
+            # Duck-typing guard (the FIX-2 discipline): a missing facade
+            # or a non-int return reads as INACTIVE (``0``) — the legacy
+            # three-counter predicate is preserved exactly, and a mocked
+            # facade can NEVER fake a "quiet mission" answer in a way
+            # that arms a deny.
+            #
+            # FAIL-OPEN SENTINEL: the read CONSTRUCTS ``-1`` for
+            # "unknown" (the read failed). ``-1`` is NOT ``0``: ``0`` is
+            # a real answer ("the mission is quiet"). The unknown value
+            # short-circuits to the whole-evaluation fail-open allow
+            # BELOW (mirroring the DB-seam fail-open) — a records-side
+            # problem must never deny a leader mission.
+            _commission_reader = getattr(
+                manager, "count_outstanding_commissions", None
+            )
+            if callable(_commission_reader):
+                outstanding_commissions = _commission_reader(instance_id)
+                if not isinstance(outstanding_commissions, int):
+                    outstanding_commissions = 0
+                elif outstanding_commissions < 0:
+                    outstanding_commissions = MISSION_READ_UNKNOWN
+            else:
+                outstanding_commissions = 0
         except Exception as db_exc:  # noqa: BLE001 — fail-open at the DB seam (whole-eval C-read failure ⇒ plain allow; the predicate's §4.2 C-read branch mirrors this)
             error_class = type(db_exc).__name__
             logger.error(
@@ -1452,6 +1613,70 @@ def evaluate(
                 gate_exception_seen=True,
             )
 
+        # ── Proposal B PR2 — the UNKNOWN sentinel short-circuit ────────
+        # The FIFTH R2 input (``outstanding_commissions``) read FAILED
+        # (the facade constructed the ``-1`` "unknown" sentinel). The
+        # whole evaluation fails OPEN to a plain allow — the same
+        # direction as the DB-seam fail-open above (a records-side
+        # problem must never deny a leader mission, and it must never
+        # be read as "the mission is quiet").
+        #
+        # The fail-open happens HERE (per-input), not at the DB seam:
+        # the four tree counters were read successfully and their values
+        # are reported on the decision row for forensics — the
+        # difference from the DB-seam branch is that a single unknown
+        # input no longer discards the other four.
+        if outstanding_commissions == MISSION_READ_UNKNOWN:
+            logger.warning(
+                "event=leader_completion_gate_db_error "
+                "error_class=MissionRecordReadUnknown "
+                "instance_id=%s "
+                "gate_location=%s "
+                "mode=%s "
+                "leader_prompt_version=%s "
+                "attestation_present=%s "
+                "denied_count=%s "
+                "pending_children=%s "
+                "queued_or_expected_wakeups=%s "
+                "live_descendants=%s "
+                "busy_descendants=%s "
+                "outstanding_commissions=-1 "
+                "messages_scanned=%s "
+                "scanned_window_size=%s "
+                "decision=fail_open_allowed "
+                "detail=mission-record outstanding-commission read unknown",
+                instance_id,
+                gate_location,
+                mode_resolver.mode,
+                leader_prompt_version,
+                scan.attested,
+                denied_count,
+                pending_children,
+                queued_or_expected_wakeups,
+                live_descendants,
+                busy_descendants,
+                scan.messages_scanned,
+                mode_resolver.window,
+            )
+            return GateDecision(
+                decision=Decision.ALLOWED,
+                next_denied_count=denied_count,
+                should_inject_nudge=False,
+                scanner_window_truncated=scan.window_truncated,
+                scanner_summary_seen=scan.summary_seen,
+                attestation_present=scan.attested,
+                messages_scanned=scan.messages_scanned,
+                scanned_window_size=mode_resolver.window,
+                pending_children=pending_children,
+                queued_or_expected_wakeups=queued_or_expected_wakeups,
+                live_descendants=live_descendants,
+                busy_descendants=busy_descendants,
+                outstanding_commissions=MISSION_READ_UNKNOWN,
+                user_answer_pending=user_answer_pending,
+                denied_count=denied_count,
+                gate_exception_seen=True,
+            )
+
         # (iii) the decision — Stage 3 composition (2026-09-17,
         # resolver-unification R2/R3/R4). decide() is the PURE enforce
         # tree; the retired meta branches live HERE, at the layer that
@@ -1518,6 +1743,8 @@ def evaluate(
                 is_bundled_call=is_bundled_call,
                 reminder_text_clean=ATTESTATION_FINAL_REPORT_REMINDER,
                 reminder_text_bundled=ATTESTATION_BUNDLED_REMINDER,
+                # Proposal B PR2 — the FIFTH R2 input (mission-scoped).
+                outstanding_commissions=outstanding_commissions,
             )
         if mode_resolver.mode == "dry":
             # R3 fold: dry is a property of the resolver/mode layer —
@@ -1591,6 +1818,8 @@ def evaluate(
             live_descendants=live_descendants,
             busy_descendants=busy_descendants,
             user_answer_pending=user_answer_pending,
+            # Proposal B PR2 — the FIFTH R2 input (mission-scoped).
+            outstanding_commissions=outstanding_commissions,
             denied_count=denied_count,
             delegation_since_last_user=delegation_scan.delegation_since_last_user,
             last_real_user_found=delegation_scan.last_real_user_found,
@@ -1701,6 +1930,7 @@ def evaluate(
             "attestation_present=%s denied_count=%s next_denied_count=%s "
             "pending_children=%s queued_or_expected_wakeups=%s "
             "live_descendants=%s busy_descendants=%s "
+            "outstanding_commissions=%s "
             "attestation_required=%s "
             "last_real_user_found=%s last_real_user_index=%s "
             "first_delegation_after_last_user_index=%s "
@@ -1723,6 +1953,7 @@ def evaluate(
             result.queued_or_expected_wakeups,
             result.live_descendants,
             result.busy_descendants,
+            result.outstanding_commissions,
             result.attestation_required,
             result.last_real_user_found,
             result.last_real_user_index,
@@ -1823,6 +2054,8 @@ def evaluate(
                     live_descendants=live_descendants,
                     busy_descendants=busy_descendants,
                     user_answer_pending=user_answer_pending,
+                    # Proposal B PR2 — the FIFTH R2 input (mission-scoped).
+                    outstanding_commissions=outstanding_commissions,
                 ),
                 b_values=SourceBSignals(
                     marker_hit=result.marker_hit,

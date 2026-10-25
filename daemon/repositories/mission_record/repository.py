@@ -210,6 +210,107 @@ class MissionRecordRepository:
         with Session(self._engine) as own:
             return len(list(own.exec(stmt)))
 
+    # ── PR2 read-side: the mission-scoped commission reads ──
+    #
+    # Proposal B PR2 flips the READ sites onto the record (the census,
+    # the SOURCE U anchor, the 5th R2 input, the L3 mission leg, the
+    # judge's SOURCE C membership). These are the three primitives those
+    # sites need — a census count, an outstanding count, and a row list.
+    #
+    # ADVISORY ROWS ARE EXCLUDED BY DEFAULT: adoption-delta (b) backfill
+    # rows are historical noise (a nudge whose target was still
+    # non-terminal at boot). Counting them would (a) arm the census for
+    # missions that never delegated in this epoch and (b) hold missions
+    # open forever on rows nothing will ever satisfy. The exclusion
+    # mirrors the routing-authority rule ("advisory rows are EXCLUDED
+    # from routing authority FOREVER" — the "if dropped, the ledger is
+    # worse than no ledger" rule).
+
+    def count_commissions_for_mission(
+        self,
+        mission_id: str,
+        *,
+        states: tuple[str, ...] | None = None,
+        include_advisory: bool = False,
+        session: Session | None = None,
+    ) -> int:
+        """Count the commission rows on one mission (the census read).
+
+        Args:
+            mission_id: The mission whose rows are counted.
+            states: Optional state filter (e.g. ``("outstanding",)``).
+                ``None`` = every state (the census's "has commission
+                rows" shape — a mission that delegated stays delegated
+                for the whole epoch).
+            include_advisory: Include adoption-delta (b) backfill rows.
+                Default ``False`` (see the class-level note).
+
+        Returns:
+            The row count (0 when the mission has no commission rows).
+        """
+        stmt = select(MissionCommission).where(
+            MissionCommission.mission_id == mission_id
+        )
+        if states:
+            stmt = stmt.where(MissionCommission.state.in_(states))
+        if not include_advisory:
+            stmt = stmt.where(
+                MissionCommission.advisory_backfill.is_(False)  # type: ignore[union-attr]
+            )
+        if session is not None:
+            return len(list(session.exec(stmt)))
+        with Session(self._engine) as own:
+            return len(list(own.exec(stmt)))
+
+    def count_outstanding_commissions_for_mission(
+        self,
+        mission_id: str,
+        *,
+        include_advisory: bool = False,
+        session: Session | None = None,
+    ) -> int:
+        """Count the OUTSTANDING commission rows on one mission.
+
+        The 5th R2 input's mission-scoped read (``outstanding_commissions``)
+        and the L3 root gate's mission leg both consume this.
+        """
+        return self.count_commissions_for_mission(
+            mission_id,
+            states=(CommissionState.OUTSTANDING.value,),
+            include_advisory=include_advisory,
+            session=session,
+        )
+
+    def list_commissions_for_mission(
+        self,
+        mission_id: str,
+        *,
+        states: tuple[str, ...] | None = None,
+        include_advisory: bool = False,
+        session: Session | None = None,
+    ) -> list[MissionCommission]:
+        """List the commission rows on one mission (the SOURCE C union).
+
+        The judge's SOURCE C membership is ``structural tree ∪ commission
+        membership`` (proposal-b §3 NEW(v)) — this is the commission half
+        of that union: the OUT-OF-TREE commissioned workers the tree walk
+        can never see.
+        """
+        stmt = select(MissionCommission).where(
+            MissionCommission.mission_id == mission_id
+        )
+        if states:
+            stmt = stmt.where(MissionCommission.state.in_(states))
+        if not include_advisory:
+            stmt = stmt.where(
+                MissionCommission.advisory_backfill.is_(False)  # type: ignore[union-attr]
+            )
+        stmt = stmt.order_by(MissionCommission.created_at.asc())  # type: ignore[attr-defined]
+        if session is not None:
+            return list(session.exec(stmt))
+        with Session(self._engine) as own:
+            return list(own.exec(stmt))
+
     def list_committed_nudge_audits(
         self,
         action: str,
@@ -357,16 +458,23 @@ class MissionRecordRepository:
         """Guarded founding-message attach / amendment (records only).
 
         ``UPDATE ... WHERE mission_id=:id AND founding_message_id IS
-        NULL`` — the mint-then-attach order (the enqueue's message id is
-        only known after the enqueue returns) and the re-founding
-        amendment seam share this guarded write: the FIRST attach wins;
-        a later amendment REPLACES it only via
+        NULL AND status='open'`` — the mint-then-attach order (the
+        enqueue's message id is only known after the enqueue returns) and
+        the re-founding amendment seam share this guarded write: the
+        FIRST attach wins; a later amendment REPLACES it only via
         :meth:`amend_founding_message` (an explicit, auditable act).
+
+        F2 (Proposal B PR2 carry) — the ``status='open'`` GUARD: only an
+        OPEN epoch's anchor may be attached. A closed epoch (settled /
+        superseded) is immutable — attaching to it would rewrite history
+        on a row the settle machinery already closed. Mirrors the
+        ``dependency_watchers`` PENDING→FIRED guarded-transition shape.
         """
         stmt = (
             update(MissionRecord)
             .where(MissionRecord.mission_id == mission_id)
             .where(MissionRecord.founding_message_id.is_(None))  # type: ignore[union-attr]
+            .where(MissionRecord.status == MissionStatus.OPEN.value)
             .values(founding_message_id=founding_message_id)
         )
         if session is not None:
@@ -384,13 +492,23 @@ class MissionRecordRepository:
         *,
         session: Session | None = None,
     ) -> bool:
-        """Re-founding amendment (mid-mission user correction) — RECORDS
-        ONLY in PR1. The DELIVERY-TIME firing and the gate read are PR2;
-        this seam exists so the record shape is complete.
+        """Re-founding amendment (mid-mission user correction).
+
+        Proposal B PR2: the amendment fires AT DELIVERY (the message tap
+        site) — the delivered correction becomes the mission's anchor,
+        so the delegation window re-bounds on the correction rather than
+        on the stale founding message. The amendment row is the durable
+        fact the gate reads (SOURCE U anchor lookup).
+
+        F2 (Proposal B PR2 carry) — the ``status='open'`` GUARD: the
+        amendment touches ONLY an OPEN epoch. A closed epoch's anchor is
+        immutable (the settle machinery closed it). Same guarded-UPDATE
+        shape as the ``dependency_watchers`` PENDING→FIRED transition.
         """
         stmt = (
             update(MissionRecord)
             .where(MissionRecord.mission_id == mission_id)
+            .where(MissionRecord.status == MissionStatus.OPEN.value)
             .values(founding_message_id=founding_message_id)
         )
         if session is not None:

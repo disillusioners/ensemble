@@ -1,0 +1,30 @@
+# mrpr2_scoped_wide — the focused pack + the existing seam files + the PG integration + the AST gate (the WIDE pack)
+#
+# one repo-relative path per line; the pack invocation is:
+#   pytest -q $(grep -v '^#' <this file>)
+#
+tests/unit/test_mission_record_reads.py
+tests/unit/test_mission_record_pr2_gate_reads.py
+tests/unit/test_mission_record_pr2_carries.py
+tests/unit/test_mission_record_pr2_tap_amend.py
+tests/unit/test_mission_record_pr2_l3_ledger.py
+tests/unit/test_mission_record_pr2_ledger_forwarding.py
+tests/unit/test_mission_record_pr2_amend_guard.py
+tests/unit/test_mission_record_service.py
+tests/unit/test_mission_record_facade_forwarding.py
+tests/unit/test_mission_record_migrations_sqlite.py
+tests/unit/test_mission_record_review_fixes.py
+tests/unit/test_mission_record_revive_enqueue_integration.py
+tests/unit/test_nudge_completion_watcher_d2.py
+tests/unit/test_attestation_resolver_activation.py
+tests/unit/test_attestation_gate.py
+tests/unit/test_attestation_scanner.py
+tests/unit/test_attestation_ledger.py
+tests/unit/test_attestation_ledger_failopen.py
+tests/unit/test_attestation_epoch_clears_d5i.py
+tests/unit/test_attestation_epoch_replay.py
+tests/unit/test_attestation_fail_open.py
+tests/unit/services/test_message_tap_slot.py
+tests/integration/test_mission_records_pr2_enforce_reads_pg.py
+tests/integration/test_attestation_hold_semantics_independent.py
+tests/integration/test_message_metadata_hook_placement.py

@@ -227,6 +227,24 @@ def resolve_mission_records_mode() -> str:
     return _MISSION_RECORDS_MODE
 
 
+def mission_records_enforce_enabled() -> bool:
+    """``True`` when the mode ladder is ``enforce`` — NEVER raises.
+
+    The single gate every read site (and the epoch-boundary ledger
+    clear) consults before it looks at the record. An unrecognized
+    ``ENSEMBLE_MISSION_RECORDS`` token degrades to "not enforcing" (the
+    resolver itself raises loudly at the boot site; this helper must not
+    raise on the gate hot path).
+
+    Lives HERE (the mode ladder's owner) so the reader module and the
+    writer module share ONE definition — no import cycle, no drift.
+    """
+    try:
+        return resolve_mission_records_mode() == MissionRecordMode.ENFORCE
+    except Exception:  # noqa: BLE001 — never break a gate on a knob fault
+        return False
+
+
 def _reset_mission_records_mode_for_tests() -> None:
     """Clear the cached mode ladder value (unit-test isolation only)."""
     global _MISSION_RECORDS_MODE
@@ -490,6 +508,12 @@ class MissionRecordService:
             work_id=work_id,
             provenance=provenance,
         )
+        # ── Proposal B PR2 — the EPOCH-BOUNDARY ledger clear ──
+        # A NEW epoch is a REAL boundary: the deny ledger, the escalation
+        # flag and the O4 dedup array are cleared (proposal-b §2.4).
+        # The clear rides the mint's transaction when the mint rode the
+        # caller's (the delegation lane's WriteGuardSession).
+        self.clear_epoch_ledger(actor_instance_id, session=session)
         return MissionResolution(record.mission_id, 3, True)
 
     # ── delivery/resume lanes (mint-if-no-open-epoch) ──
@@ -526,6 +550,10 @@ class MissionRecordService:
             parent_mission_id=parent.mission_id if parent else None,
             provenance=provenance,
         )
+        # ── Proposal B PR2 — the EPOCH-BOUNDARY ledger clear (see the
+        # resolve_or_mint site). A stranded instance's honest boundary
+        # row IS a boundary: the ledger resets with it.
+        self.clear_epoch_ledger(actor_instance_id, session=session)
         return MissionResolution(record.mission_id, 3, True)
 
     def mint_boot_epoch_if_none(
@@ -601,10 +629,56 @@ class MissionRecordService:
         gate channel, no ledger — the §2.4 ledger-clear policy is PR2+;
         PR1 writes records only). ``parent_mission_id`` chains to the
         superseded epoch.
+
+        F1 (Proposal B PR2 carry) — ORDER: the prior open epoch is
+        superseded BEFORE the new one is inserted. The open-epoch
+        partial unique index (``ux_mission_records_anchor_open``) makes
+        "two open epochs for one anchor" a CONSTRAINT violation, so the
+        old insert-then-supersede order would raise. When the caller
+        supplies no session, both statements run in ONE transaction
+        (this method opens it) so the anchor is never observed with
+        zero open epochs.
+        """
+        if session is not None:
+            return self._mint_continuation_epoch_locked(
+                actor_instance_id,
+                work_id=work_id,
+                founding_message_id=founding_message_id,
+                session=session,
+            )
+        with Session(self._engine) as own:
+            resolution = self._mint_continuation_epoch_locked(
+                actor_instance_id,
+                work_id=work_id,
+                founding_message_id=founding_message_id,
+                session=own,
+            )
+            own.commit()
+            return resolution
+
+    def _mint_continuation_epoch_locked(
+        self,
+        actor_instance_id: str,
+        *,
+        work_id: str | None,
+        founding_message_id: str | None,
+        session: Session,
+    ) -> MissionResolution:
+        """The continuation mint body — assumes the caller's transaction.
+
+        The prior open epoch is superseded FIRST (F1's ordering
+        constraint), then the new epoch is inserted, then the parent's
+        mission id is attached.
         """
         prior_open = self._repo.find_open_epoch_by_anchor(
             actor_instance_id, session=session
         )
+        if prior_open is not None:
+            self._repo.supersede_open_epochs_for_anchor(
+                actor_instance_id,
+                except_mission_id=None,
+                session=session,
+            )
         record = self._mint_epoch_locked(
             actor_instance_id=actor_instance_id,
             founding_source=MissionFoundingSource.JOB_CONTINUE.value,
@@ -613,15 +687,80 @@ class MissionRecordService:
             work_id=work_id,
             parent_mission_id=prior_open.mission_id if prior_open else None,
         )
-        if prior_open is not None:
-            self._repo.supersede_open_epochs_for_anchor(
-                actor_instance_id,
-                except_mission_id=record.mission_id,
-                session=session,
-            )
+        # ── Proposal B PR2 — the EPOCH-BOUNDARY ledger clear (see the
+        # resolve_or_mint site). A job_continue follow-on is a NEW
+        # epoch: the boundary resets the ledger.
+        self.clear_epoch_ledger(actor_instance_id, session=session)
         return MissionResolution(record.mission_id, 3, True)
 
     # ── record amendments (guarded, records only) ──
+
+    def clear_epoch_ledger(
+        self,
+        anchor_instance_id: str,
+        *,
+        session: Session | None = None,
+    ) -> bool:
+        """The EPOCH-BOUNDARY ledger clear (proposal-b §2.4).
+
+        "Ledger reset at every boundary, deliberately: epoch mint clears
+        ``attestation_denied_count`` + ``completion_gate_escalated``
+        (generalizing the fresh-episode revive clear from 'terminal
+        revive only' to 'every recorded boundary'), and
+        ``denial_epochs`` becomes epoch-tagged: entries carry the owning
+        ``mission_id``; the deny bound counts only current-epoch
+        entries; entries from closed epochs are pruned at boundary."
+
+        WHAT DELIBERATELY DOES NOT RESET: the withhold budget (per
+        dispatch) and the run-deny cap (per run) — already scoped
+        tighter than the epoch.
+
+        MODE GATE: the clear is armed ONLY in ``enforce`` mode. The
+        mode ladder's ``dry`` contract is "mint + stamp + log
+        everything" with the gate on legacy behavior — and the clear IS
+        a gate-visible behavior change (it resets the deny bound). The
+        operator promotes it with the same env flip that promotes the
+        reads (``ENSEMBLE_MISSION_RECORDS=enforce`` + restart).
+
+        ATOMICITY: when ``session`` is supplied, the clear rides the
+        CALLER's transaction — the delegation lane's
+        ``WriteGuardSession``. A second connection's write would
+        contend with the lane's open write transaction (the SQLite
+        single-writer lock), so the clear MUST ride the mint's own
+        transaction.
+
+        Fail-open: the caller (the mint path) wraps this; a ledger
+        fault must never break a mint.
+        """
+        if not mission_records_enforce_enabled():
+            return False
+        if not anchor_instance_id:
+            return False
+        try:
+            from ..repositories.instance.repository import (
+                SQLModelInstanceRepository,
+            )
+
+            repo = SQLModelInstanceRepository(self._engine)
+            if session is not None:
+                return repo.reset_attestation_denied_count_on_session(
+                    session, anchor_instance_id
+                )
+            with Session(self._engine) as own:
+                cleared = repo.reset_attestation_denied_count_on_session(
+                    own, anchor_instance_id
+                )
+                own.commit()
+                return cleared
+        except Exception as exc:  # noqa: BLE001 — fail-open (never break a mint)
+            logger.warning(
+                "mission_records: epoch-boundary ledger clear failed "
+                "(anchor=%s…): %s: %s — the mint continues",
+                anchor_instance_id[:8],
+                type(exc).__name__,
+                exc,
+            )
+            return False
 
     def attach_founding_message(
         self,
@@ -718,10 +857,17 @@ class MissionRecordService:
         *,
         session: Session | None = None,
     ) -> bool:
-        """``outstanding → satisfied`` (guarded). PR1 has no production
-        caller (the satisfy flip is PR2/PR3 — the commission-lookup
-        settle post-condition); the seam ships with the census
-        substrate."""
+        """``outstanding → satisfied`` (guarded).
+
+        **NO production caller in PR1 or PR2** — the terminator is the
+        PR3 reconciliation sweep (the delivery-evidence probe). This is
+        why the enforce promotion is GATED on PR3: until the sweep
+        lands, a minted commission row stays ``outstanding`` for the
+        life of the epoch, the L3 root-completion gate holds the
+        terminal publish, and the mission can never reach its quiet
+        state (the 5th R2 input). See the PR2 adoption notes §(f) —
+        "ENFORCE-PROMOTION PRECONDITION".
+        """
         return self._repo.transition_commission_state(
             commission_id, CommissionState.SATISFIED.value, session=session
         )
@@ -733,10 +879,14 @@ class MissionRecordService:
         reason: str,
         session: Session | None = None,
     ) -> bool:
-        """``outstanding → abandoned`` (guarded). The reconciliation
-        sweep's outcome write (the eternal-mission escape hatch,
-        proposal-b §8); the sweep itself is the PR3 deliverable — the
-        seam ships record-side complete."""
+        """``outstanding → abandoned`` (guarded).
+
+        The reconciliation sweep's outcome write (the eternal-mission
+        escape hatch, proposal-b §8). **NO production caller in PR1 or
+        PR2** — the sweep itself is the PR3 deliverable, and the enforce
+        promotion is GATED on it (the PR2 adoption notes §(f)). The seam
+        ships record-side complete.
+        """
         return self._repo.transition_commission_state(
             commission_id,
             CommissionState.ABANDONED.value,
@@ -892,14 +1042,28 @@ class MissionRecordService:
             if existing_epoch0 is not None:
                 mission_id = existing_epoch0.mission_id
             elif not dry_run:
-                record = self._mint_epoch_locked(
-                    actor_instance_id=actor_instance_id,
-                    founding_source=MissionFoundingSource.BACKFILL.value,
-                    session=session,
-                    provenance=MissionProvenance.BACKFILL.value,
+                # F1 (Proposal B PR2 carry): the open-epoch partial
+                # unique index makes "two open epochs for one anchor" a
+                # CONSTRAINT violation. A live anchor that already owns
+                # an OPEN epoch therefore REUSES it (the mission the
+                # nudge belonged to) instead of minting a synthetic
+                # epoch-0 row that would violate the index. The
+                # synthetic epoch-0 row remains for anchors with no
+                # live epoch (the historical-coverage case).
+                live_epoch = self._repo.find_open_epoch_by_anchor(
+                    actor_instance_id, session=session
                 )
-                mission_id = record.mission_id
-                counters["minted_epochs"] += 1
+                if live_epoch is not None:
+                    mission_id = live_epoch.mission_id
+                else:
+                    record = self._mint_epoch_locked(
+                        actor_instance_id=actor_instance_id,
+                        founding_source=MissionFoundingSource.BACKFILL.value,
+                        session=session,
+                        provenance=MissionProvenance.BACKFILL.value,
+                    )
+                    mission_id = record.mission_id
+                    counters["minted_epochs"] += 1
             else:
                 counters["minted_epochs"] += 1  # dry-run projection
                 mission_id = "dry-run-projected"  # plan-only marker
@@ -1378,6 +1542,44 @@ def attach_founding_message_fail_open(
         return False
 
 
+def amend_anchor_fail_open(
+    service: MissionRecordService | None,
+    mission_id: str | None,
+    founding_message_id: str | None,
+) -> bool:
+    """Re-founding amendment wrapper (never raise; miss = logged).
+
+    Proposal B PR2 — the DELIVERY-TIME amendment seam (ruling ③). The
+    guarded write touches only an OPEN epoch (F2), so a closed epoch is
+    never rewritten and a stale mission id is a safe no-op.
+
+    Mode gate: ``off`` → ``False`` (no records, no amendment). Any
+    failure → logged + ``False``: the amendment is a RECORD write and
+    must never break the delivery lane it rides.
+    """
+    if service is None or not mission_id or not founding_message_id:
+        return False
+    if _mode_is_off():
+        return False
+    try:
+        amended = service.amend_anchor(mission_id, founding_message_id)
+        if not amended:
+            logger.debug(
+                "mission_records: anchor amendment skipped (mission=%s… "
+                "not open or row missing)",
+                mission_id[:8],
+            )
+        return amended
+    except Exception as exc:  # noqa: BLE001 — fail-open producer
+        logger.warning(
+            "mission_records: amend_anchor failed (mission=%s…): %s: %s",
+            mission_id[:8],
+            type(exc).__name__,
+            exc,
+        )
+        return False
+
+
 __all__ = [
     "MissionRecordService",
     "MissionRecordError",
@@ -1387,6 +1589,7 @@ __all__ = [
     "MISSION_ID_KEY",
     "SCHEDULER_MINT_EXTENSION_ENV",
     "resolve_mission_records_mode",
+    "mission_records_enforce_enabled",
     "scheduler_mint_extension_enabled",
     "resolve_or_mint_fail_open",
     "mint_continuation_epoch_fail_open",
@@ -1395,5 +1598,6 @@ __all__ = [
     "mint_cascade_resume_epoch_if_stranded_fail_open",
     "mint_commission_fail_open",
     "attach_founding_message_fail_open",
+    "amend_anchor_fail_open",
     "attach_work_id_fail_open",
 ]

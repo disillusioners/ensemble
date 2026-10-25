@@ -47,12 +47,14 @@ from .resource_monitor.charge import (
 from .messaging_types import AsyncMessageResult, LinkageContractError
 from .mission_record_service import (  # Proposal B PR1 — mission-record anchor
     MISSION_ID_KEY,
+    _mode_is_off as _mission_records_mode_is_off,
     mint_revive_epoch_fail_open,
 )
 from .message_tap import (  # Phase 1 C2 — langgraph-checkpoint-perf
     MessageTapSlot,
     SOURCE_USER_MESSAGE_ENTRY,
     SOURCE_COMPACTION_MESSAGING,
+    resolve_turn_mission_id,
 )
 from .project_normalizer import normalize_project_id
 from .skill_meta_parser import extract_load_skill, parse_meta_tag
@@ -1659,6 +1661,11 @@ class InstanceMessagingService:
                 await _compaction_tap.tap_node_return(
                     result.replacement_messages,
                     instance_id,
+                    # Proposal B PR2 — the mission stamp rides the CARRIED
+                    # value (the producer stamped it on the delivered
+                    # user message's kwargs; the tap READS it — never
+                    # re-derives it from message shapes).
+                    mission_id=resolve_turn_mission_id(messages),
                 )
 
             # Log compaction result (only when there was an actual
@@ -3652,6 +3659,132 @@ class InstanceMessagingService:
             not_queued_reason=ctx.not_queued_reason,
         )
 
+    async def _amend_mission_anchor_at_delivery(
+        self,
+        *,
+        instance_id: str,
+        message_id: str,
+        is_p1_human: bool,
+        mission_id: str | None,
+    ) -> None:
+        """Re-found the mission anchor at DELIVERY (Proposal B PR2, ruling ③).
+
+        The re-founding amendment seam (proposal-b §2.2): "a new p1-HUMAN
+        user-lane message landing on an instance whose epoch is open
+        updates ``founding_message_id``". The amendment fires AT
+        DELIVERY — the message tap site — not at enqueue time and not
+        when the delegation window is scanned. That is what kills the
+        ~14-minute mid-turn correction lag seam: the anchor is a DURABLE
+        row, visible to the gate at would-be END, even while the
+        window's content is still being drained.
+
+        PRECONDITIONS (all must hold):
+        * the delivered message is p1-HUMAN (the ledger's
+          ``priority == 1 AND type == HUMAN`` — the carried
+          ``is_fresh_episode_user_message`` flag, computed ONCE at the
+          producer and threaded here; never re-derived here);
+        * a mission epoch is OPEN for this instance.
+
+        THE ANCHOR-INSTANCE GUARD (the targeting guard): the
+        amendment may only re-found the epoch whose ANCHOR is the
+        DELIVERING instance. The carrier names the mission the delivery
+        belongs to; if it names a FOREIGN mission (another instance's
+        epoch — e.g. a commissioner epoch carried onto a worker's
+        delivery), the amendment is REFUSED and the delivery DEGRADES TO
+        THE LEGACY LADDER (the gate keeps deriving the anchor from the
+        message ladder — today's behavior, exactly). Without the guard,
+        a worker's delivery would re-found the COMMISSIONER's epoch
+        (moving the commissioner's anchor to a worker's message id).
+
+        The guard is F2-bounded: the amend write itself is guarded on
+        the epoch being OPEN (``UPDATE ... WHERE status='open'``), so a
+        closed epoch is never rewritten and a stale carrier is a safe
+        no-op.
+
+        MODE ``off`` SHORT-CIRCUIT: the whole subsystem is off (no
+        mints, no records) — the amendment would be a no-op anyway, so
+        the guard short-circuits BEFORE the two DB reads and pays no
+        per-delivery read cost. The mode is read through the CACHED
+        resolver (the house switch pattern — restart-read, no env
+        re-read per call).
+
+        FAIL-OPEN: the amendment is a RECORD write — it must never break
+        the delivery. Any failure is logged at WARNING and swallowed.
+        """
+        if not is_p1_human or not message_id or not instance_id:
+            return
+        if _mission_records_mode_is_off():
+            # The subsystem is off — nothing to amend (and no reads to
+            # pay for). The cached resolver never raises.
+            return
+        try:
+            service = getattr(self._manager, "mission_record_service", None)
+            if service is None:
+                return
+            target_mission_id = mission_id
+            if not target_mission_id:
+                # No carrier (the lane did not resolve a mission — e.g.
+                # the record was off when the message was enqueued).
+                # Resolve the OPEN epoch of THIS instance through the
+                # manager's public facade (no private-attribute reach).
+                target_mission_id = await asyncio.to_thread(
+                    self._manager.get_open_mission_id,
+                    instance_id,
+                )
+                if not target_mission_id:
+                    return
+            # ── The anchor-instance guard (see the docstring) ─────────
+            anchor_instance_id = await asyncio.to_thread(
+                self._manager.get_mission_anchor_instance_id,
+                target_mission_id,
+            )
+            if anchor_instance_id is None:
+                # READ FAULT (or a vanished row) — NOT a foreign
+                # mission. The causes are DIFFERENT and must not be
+                # reported as one: a missing anchor is an UNKNOWN
+                # (fail-open → refuse the amendment; the legacy ladder
+                # stays in charge), while a foreign anchor is a
+                # DECISION (the carrier names another instance's epoch).
+                logger.info(
+                    "mission_records: amend-at-delivery skipped for %s… — "
+                    "the anchor of the target mission (%s…) is unknown "
+                    "(read fault or a vanished row) — the anchor stays "
+                    "as-is (legacy ladder)",
+                    instance_id[:8],
+                    target_mission_id[:8],
+                )
+                return
+            if anchor_instance_id != instance_id:
+                # FOREIGN mission — refuse the amendment and degrade to
+                # the legacy ladder. Logged at INFO: the degradation is
+                # expected and benign (the carrier names another
+                # instance's epoch), but it must not be SILENT.
+                logger.info(
+                    "mission_records: amend-at-delivery refused for %s… — "
+                    "the carrier names a foreign mission (%s…, anchor=%s…) "
+                    "— the anchor stays as-is (legacy ladder)",
+                    instance_id[:8],
+                    target_mission_id[:8],
+                    anchor_instance_id[:8],
+                )
+                return
+            from .mission_record_service import amend_anchor_fail_open
+
+            await asyncio.to_thread(
+                amend_anchor_fail_open,
+                service,
+                target_mission_id,
+                message_id,
+            )
+        except Exception as amend_exc:  # noqa: BLE001 — never break delivery
+            logger.warning(
+                "mission_records: amend-at-delivery failed for %s…: %s: %s "
+                "— the delivery continues without the amendment",
+                instance_id[:8],
+                type(amend_exc).__name__,
+                amend_exc,
+            )
+
     async def _process_message_with_tracking(
         self,
         instance_id: str,
@@ -5117,6 +5250,35 @@ class InstanceMessagingService:
                 # stamp is consumed by PR2 reads, never PR1).
                 mission_id=mission_id,
             )
+
+        # ── Proposal B PR2 — the RE-FOUNDING AMENDMENT (ruling ③) ──
+        # The amendment fires AT DELIVERY (here, at the delivery site) —
+        # NOT at enqueue time and NOT when the window is scanned.
+        # A delivered p1-HUMAN user-lane message during an OPEN epoch
+        # re-anchors the epoch: the mission's ``founding_message_id``
+        # becomes the delivered correction, so the delegation window
+        # re-bounds on the correction and the anchor is visible to the
+        # gate at would-be END even though the window's CONTENT is still
+        # being drained (the ~14-minute mid-turn lag seam).
+        #
+        # The amendment is RECORD-ONLY: in ``dry`` mode it moves the
+        # anchor row while every read site stays legacy (zero behavior
+        # change). The guarded amend path touches only an OPEN epoch
+        # (F2), so a stale carrier is a safe no-op.
+        #
+        # DECOUPLED FROM THE TAP (review finding): the amendment does
+        # NOT depend on the ``message_metadata`` side table — it needs
+        # the mission service + the carried mission id, nothing else.
+        # It therefore fires on EVERY delivery, even when the metadata
+        # repo is absent (or ``graph_input`` is None on a checkpoint
+        # resume) — nesting it under the tap's guard would silently
+        # disable the anchor amendment for those deliveries.
+        await self._amend_mission_anchor_at_delivery(
+            instance_id=instance_id,
+            message_id=message_id,
+            is_p1_human=is_fresh_episode_user_message,
+            mission_id=mission_id,
+        )
 
         # Persistent context HumanMessages are graph inputs rather than normal
         # user turns, so they are not seen by the streaming loop's HumanMessage

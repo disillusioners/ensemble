@@ -199,6 +199,14 @@ def _utc_now_iso() -> str:
 # (``WHERE founding_message_id IS NOT NULL``).
 FOUNDING_MSG_NOT_NULL_SQL = "founding_message_id IS NOT NULL"
 
+# Proposal B PR2 — F1 carry: the OPEN-EPOCH partial unique predicate.
+# At most ONE ``open`` epoch may exist per anchor at any time — the
+# "one mission = one open epoch" invariant. Declared once so the model
+# (``__table_args__``), the raw-SQL migration, and the PostgreSQL
+# ``_ensure_postgres_columns`` mirror all cite the SAME predicate text
+# (byte-identical index names across the three sites).
+OPEN_EPOCH_STATUS_SQL = "status = 'open'"
+
 
 def _string_column(nullable: bool = False) -> Column:
     """Indexed-friendly String column (the dependency_bus precedent:
@@ -279,6 +287,28 @@ class MissionRecord(SQLModel, table=True):
             unique=True,
             sqlite_where=text(FOUNDING_MSG_NOT_NULL_SQL),
             postgresql_where=text(FOUNDING_MSG_NOT_NULL_SQL),
+        ),
+        # F1 (Proposal B PR2 carry) — the OPEN-EPOCH partial unique
+        # index: at most ONE ``open`` epoch may exist per anchor. The
+        # resolution ladder's rung-1 lookup ("does the actor have an
+        # OPEN epoch as anchor?") returns a SINGLE row by construction
+        # once this index exists — a second concurrent mint of an open
+        # epoch for the same anchor is a constraint violation, not a
+        # silent "newest wins" ambiguity.
+        #
+        # PARTIAL on ``status = 'open'``: closed epochs (settled /
+        # closed / superseded) accumulate per anchor and MUST NOT be
+        # constrained — the index only constrains the LIVE state. The
+        # raw-SQL migration and the PostgreSQL ``_ensure_postgres_columns``
+        # mirror cite the byte-identical predicate
+        # (:data:`OPEN_EPOCH_STATUS_SQL`) and the byte-identical index
+        # name ``ux_mission_records_anchor_open``.
+        Index(
+            "ux_mission_records_anchor_open",
+            "anchor_instance_id",
+            unique=True,
+            sqlite_where=text(OPEN_EPOCH_STATUS_SQL),
+            postgresql_where=text(OPEN_EPOCH_STATUS_SQL),
         ),
     )
 
@@ -438,4 +468,5 @@ __all__ = [
     "CommissionLane",
     "CommissionState",
     "FOUNDING_MSG_NOT_NULL_SQL",
+    "OPEN_EPOCH_STATUS_SQL",
 ]

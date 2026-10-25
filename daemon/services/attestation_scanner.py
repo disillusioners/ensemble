@@ -514,6 +514,33 @@ def find_last_real_user_index(messages: list[BaseMessage]) -> int:
     return -1
 
 
+def find_message_index_by_id(messages: list[BaseMessage], message_id: str) -> int:
+    """Index of the message whose ``id`` equals ``message_id`` (-1 if none).
+
+    Proposal B PR2 — the SOURCE U lookup helper. The mission record's
+    ``founding_message_id`` is a MESSAGE ID (the queue row id, which
+    becomes the LangGraph ``HumanMessage.id``); the anchor lookup
+    resolves it to a POSITION in the in-node message list so the
+    delegation window can start there ("messages at-or-after the
+    founding / amendment message id" — proposal-b §2.5).
+
+    The FIRST match wins (the message ids are unique in a checkpoint;
+    a duplicate id means a re-delivered message, and the earliest
+    occurrence is the anchor).
+
+    Returns ``-1`` when the message is not in the list — e.g. it was
+    folded into a compaction summary, or the list is a partial view.
+    The caller then falls back to the LEGACY ladder (today's behavior,
+    exactly).
+    """
+    if not message_id:
+        return -1
+    for index, message in enumerate(messages):
+        if getattr(message, "id", None) == message_id:
+            return index
+    return -1
+
+
 class DelegationScanResult(NamedTuple):
     """Conditional-attestation delegation scan output.
 
@@ -549,6 +576,7 @@ def scan_delegation_after_last_user(
     messages: list[BaseMessage],
     *,
     delegation_tool_name: str | Iterable[str] | None = None,
+    anchor_index: int | None = None,
 ) -> DelegationScanResult:
     """Scan AIMessages after the last real user message for a delegation tool call.
 
@@ -588,6 +616,16 @@ def scan_delegation_after_last_user(
             A bare string is a SINGLE-name override (the legacy seam —
             only that name counts, the default set is NOT consulted).
             Any other iterable is used as the membership set.
+        anchor_index: Proposal B PR2 — the RECORD anchor override. When
+            an index ``>= 0`` is supplied, it REPLACES the legacy
+            ``find_last_real_user_index`` anchor: the delegation window
+            becomes "messages at-or-after the mission record's founding
+            / amendment message" (proposal-b §2.5 — SOURCE U becomes a
+            lookup instead of a message-shape heuristic).
+
+            ``None`` (the default) or a negative index = the LEGACY
+            six-step exclusion ladder, unchanged (the declared fallback
+            leg — a record miss reproduces today's behavior, exactly).
 
     Returns:
         :class:`DelegationScanResult` — see the NamedTuple docs.
@@ -599,8 +637,13 @@ def scan_delegation_after_last_user(
     else:
         delegation_tool_names = frozenset(delegation_tool_name)
 
-    last_real_user_index = find_last_real_user_index(messages)
-    last_real_user_found = last_real_user_index >= 0
+    if anchor_index is not None and anchor_index >= 0:
+        # Proposal B PR2 — the record anchor wins over the heuristic.
+        last_real_user_index = anchor_index
+        last_real_user_found = True
+    else:
+        last_real_user_index = find_last_real_user_index(messages)
+        last_real_user_found = last_real_user_index >= 0
 
     first_delegation_after_last_user_index = -1
     delegation_tool_call_total = 0
