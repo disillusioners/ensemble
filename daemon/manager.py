@@ -47,8 +47,10 @@ from .services.mission_record_reads import (
     count_outstanding_commissions as _read_outstanding_commissions,
     list_outstanding_commissions,
     read_founding_message_id as _read_founding_message_id,
+    read_mission_anchor_instance_id as _read_mission_anchor_instance_id,
     read_mission_census as _read_mission_census,
     read_mission_id as _read_mission_id,
+    read_open_mission_id as _read_open_mission_id,
 )
 from .repositories.mission_record.models import OPEN_EPOCH_STATUS_SQL
 from .repositories import (
@@ -11930,6 +11932,38 @@ class InstanceManager:
         if not mission_records_enforce_enabled():
             return None
         return _read_founding_message_id(self._engine, instance_id)
+
+    def get_open_mission_id(self, instance_id: str) -> str | None:
+        """The open epoch's ``mission_id`` for this instance.
+
+        A WRITER-side read (the re-founding amendment's no-carrier
+        fallback). NOT mode-gated: the amendment is a record-side WRITE
+        that runs in every mode where mints happen (``dry`` included) —
+        the mode ladder gates the GATE-side reads (the census, the
+        anchor lookup, the 5th R2 input), never the record-side writes.
+
+        It is a FACADE GETTER rather than a private-attribute reach: the
+        messaging service reads the record through the manager's public
+        surface instead of ``manager._engine`` (the Facade-Forwarding
+        Discipline's "no private reach across the facade" half).
+
+        Fail-open: ``None`` on any failure (the caller then skips the
+        amendment — the safe direction).
+        """
+        return _read_open_mission_id(self._engine, instance_id)
+
+    def get_mission_anchor_instance_id(self, mission_id: str) -> str | None:
+        """The ANCHOR INSTANCE of a mission row (``None`` on a miss).
+
+        The re-founding amendment's TARGETING GUARD read: the
+        amendment may only re-found the epoch whose anchor is the
+        DELIVERING instance — a delivery whose carrier names a foreign
+        mission must not move that mission's anchor.
+
+        Fail-open: ``None`` on any failure (the caller then refuses the
+        amendment).
+        """
+        return _read_mission_anchor_instance_id(self._engine, mission_id)
 
     def get_mission_id(self, instance_id: str) -> str | None:
         """The open epoch's ``mission_id`` (``None`` when there is none).

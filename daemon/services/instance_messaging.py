@@ -3684,9 +3684,21 @@ class InstanceMessagingService:
           producer and threaded here; never re-derived here);
         * a mission epoch is OPEN for this instance.
 
-        The write is the GUARDED amend path (F2: ``UPDATE ... WHERE
-        status='open'``), so a closed epoch is never rewritten and a
-        stale carrier is a safe no-op.
+        THE ANCHOR-INSTANCE GUARD (the targeting guard): the
+        amendment may only re-found the epoch whose ANCHOR is the
+        DELIVERING instance. The carrier names the mission the delivery
+        belongs to; if it names a FOREIGN mission (another instance's
+        epoch — e.g. a commissioner epoch carried onto a worker's
+        delivery), the amendment is REFUSED and the delivery DEGRADES TO
+        THE LEGACY LADDER (the gate keeps deriving the anchor from the
+        message ladder — today's behavior, exactly). Without the guard,
+        a worker's delivery would re-found the COMMISSIONER's epoch
+        (moving the commissioner's anchor to a worker's message id).
+
+        The guard is F2-bounded: the amend write itself is guarded on
+        the epoch being OPEN (``UPDATE ... WHERE status='open'``), so a
+        closed epoch is never rewritten and a stale carrier is a safe
+        no-op.
 
         FAIL-OPEN: the amendment is a RECORD write — it must never break
         the delivery. Any failure is logged at WARNING and swallowed.
@@ -3701,18 +3713,33 @@ class InstanceMessagingService:
             if not target_mission_id:
                 # No carrier (the lane did not resolve a mission — e.g.
                 # the record was off when the message was enqueued).
-                # Resolve the OPEN epoch directly; the read is fail-open
-                # and returns ``None`` when there is no epoch.
-                from .mission_record_reads import read_open_mission
-
-                record = await asyncio.to_thread(
-                    read_open_mission,
-                    self._manager._engine,
+                # Resolve the OPEN epoch of THIS instance through the
+                # manager's public facade (no private-attribute reach).
+                target_mission_id = await asyncio.to_thread(
+                    self._manager.get_open_mission_id,
                     instance_id,
                 )
-                if record is None:
+                if not target_mission_id:
                     return
-                target_mission_id = record.mission_id
+            # ── The anchor-instance guard (see the docstring) ─────────
+            anchor_instance_id = await asyncio.to_thread(
+                self._manager.get_mission_anchor_instance_id,
+                target_mission_id,
+            )
+            if anchor_instance_id != instance_id:
+                # FOREIGN mission — refuse the amendment and degrade to
+                # the legacy ladder. Logged at INFO: the degradation is
+                # expected and benign (the carrier names another
+                # instance's epoch), but it must not be SILENT.
+                logger.info(
+                    "mission_records: amend-at-delivery refused for %s… — "
+                    "the carrier names a foreign mission (%s…, anchor=%s…) "
+                    "— the anchor stays as-is (legacy ladder)",
+                    instance_id[:8],
+                    target_mission_id[:8],
+                    (anchor_instance_id or "?")[:8],
+                )
+                return
             from .mission_record_service import amend_anchor_fail_open
 
             await asyncio.to_thread(

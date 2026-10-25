@@ -1496,25 +1496,26 @@ def make_tree_rows_provider(
         try:
             if manager is None or not instance_id:
                 return []
+            rows: list[dict[str, Any]] = []
+            # Proposal B PR2 — the MISSION-scoped union FIRST, and
+            # INDEPENDENT of the tree walk. The out-of-tree commissioned
+            # worker (the nudge lane) is invisible to the tree walk, and
+            # a leader with NO descendants at all (the very shape the
+            # nudge lane produces) would otherwise lose the union
+            # entirely — the tree's empty-list early return must NOT
+            # gate the mission half.
+            rows.extend(_commission_rows_for_mission(manager, instance_id))
             tree_ids = manager.get_tree_ids_permanent(instance_id)
             tree_ids = [str(i) for i in (tree_ids or []) if i]
             if not tree_ids:
-                return []
+                return rows
             descendant_ids = [iid for iid in tree_ids if iid != instance_id]
-            rows: list[dict[str, Any]] = []
-            # D2(c) — the tree-scoped C-union FIRST. The bundle renders
-            # only the first BUNDLE_C_TREE_ROWS_MAX rows, so the
-            # commissioned rows must lead: they are the DECISIVE
-            # evidence ("work still in flight"), the descendant status
-            # rows are context. Putting them last would let a wide tree
-            # clip them out and silently disarm the union.
-            #
-            # Proposal B PR2 — the MISSION-scoped union leads too: the
-            # out-of-tree commissioned worker (the nudge lane) is
-            # invisible to the tree walk, and it is the very evidence
-            # the D2 premature-settle shape needs.
-            rows.extend(_commission_rows_for_mission(manager, instance_id))
-            rows.extend(_commissioned_rows_for_tree(manager, tree_ids))
+            # D2(c) — the tree-scoped C-union. The bundle renders only
+            # the first BUNDLE_C_TREE_ROWS_MAX rows, so the commissioned
+            # rows must lead: they are the DECISIVE evidence ("work still
+            # in flight"), the descendant status rows are context. Putting
+            # them last would let a wide tree clip them out and silently
+            # disarm the union.
             remaining = max(0, C_TREE_ROW_FETCH_CAP - len(rows))
             repo = getattr(manager, "_instance_repository", None)
             if repo is not None and remaining:
@@ -1595,7 +1596,17 @@ def _commission_rows_for_mission(
                 }
             )
         return rows
-    except Exception:  # noqa: BLE001 — the union is FAIL-OPEN
+    except Exception as union_exc:  # noqa: BLE001 — the union is FAIL-OPEN
+        # The fail-open is LOGGED (the union degrades to counts-only C
+        # evidence — never to a wrong verdict, but never SILENTLY
+        # either: the operator has to be able to see that the
+        # out-of-tree commissioned work was invisible to the judge).
+        logger.warning(
+            "attestation resolver: SOURCE C commission union failed for "
+            "%s… (%s) — fail-OPEN (counts-only C evidence)",
+            (instance_id or "?")[:8],
+            type(union_exc).__name__,
+        )
         return []
 
 

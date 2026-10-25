@@ -210,6 +210,65 @@ MUTATIONS = [
         "TestTheAmendmentIsNotNestedInTheTapGuard::test_the_amend_call_is_not_under_the_metadata_repo_guard",
     ),
     (
+        "amend-anchor-instance-guard",
+        "daemon/services/instance_messaging.py",
+        """            if anchor_instance_id != instance_id:""",
+        """            if False:""",
+        "tests/unit/test_mission_record_pr2_amend_guard.py",
+        "TestTheAnchorInstanceGuard::test_a_foreign_mission_does_not_re_found_the_epoch",
+    ),
+    (
+        "c-union-commission-leg",
+        "daemon/services/attestation_resolver_activation.py",
+        """            tree_ids = manager.get_tree_ids_permanent(instance_id)
+            tree_ids = [str(i) for i in (tree_ids or []) if i]
+            if not tree_ids:
+                return rows""",
+        """            tree_ids = manager.get_tree_ids_permanent(instance_id)
+            tree_ids = [str(i) for i in (tree_ids or []) if i]
+            if not tree_ids:
+                return []""",
+        "tests/unit/test_mission_record_pr2_gate_reads.py",
+        "TestSourceCCommissionUnion::test_the_out_of_tree_commission_is_visible_in_c",
+    ),
+    (
+        "c-union-fail-open-log",
+        "daemon/services/attestation_resolver_activation.py",
+        """        logger.warning(
+            "attestation resolver: SOURCE C commission union failed for "
+            "%s… (%s) — fail-OPEN (counts-only C evidence)",
+            (instance_id or "?")[:8],
+            type(union_exc).__name__,
+        )
+        return []""",
+        """        return []""",
+        "tests/unit/test_mission_record_pr2_gate_reads.py",
+        "TestSourceCCommissionUnion::test_a_union_read_failure_is_logged_and_fails_open",
+    ),
+    (
+        "l3-fail-open-log",
+        "daemon/services/child_reports.py",
+        """            logger.warning(
+                "root_completion_gate: mission-commission count failed for "
+                "%s… (%s) — fail-OPEN, the publish proceeds (the leg "
+                "cannot hold on an unknown count)",
+                instance_id[:8],
+                type(count_exc).__name__,
+            )
+            return -1""",
+        """            return -1""",
+        "tests/unit/test_mission_record_pr2_l3_ledger.py",
+        "TestL3MissionLeg::test_the_fail_open_is_logged",
+    ),
+    (
+        "facade-getter-forwarding",
+        "daemon/manager.py",
+        """        return _read_mission_anchor_instance_id(self._engine, mission_id)""",
+        """        return _read_mission_anchor_instance_id(self._engine, "other")""",
+        "tests/unit/test_mission_record_pr2_amend_guard.py",
+        "TestTheManagerFacadeGetters::test_get_mission_anchor_instance_id_forwards_its_argument",
+    ),
+    (
         "epoch-tag-scope",
         "daemon/repositories/instance/repository.py",
         """            if entry.get("mission_id") == mission_id:

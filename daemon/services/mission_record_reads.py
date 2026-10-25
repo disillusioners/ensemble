@@ -120,6 +120,57 @@ def read_open_mission(
         return None
 
 
+def read_open_mission_id(
+    engine: "Engine",
+    anchor_instance_id: str,
+) -> str | None:
+    """The open epoch's ``mission_id`` for an anchor (``None`` on a miss).
+
+    The WRITER-side read (the re-founding amendment's no-carrier
+    fallback). NOT mode-gated by the caller: the amendment is a
+    record-side WRITE that runs in every mode where mints happen
+    (``dry`` included) — the mode ladder gates the GATE-side reads,
+    never the record-side writes.
+    """
+    record = read_open_mission(engine, anchor_instance_id)
+    if record is None:
+        return None
+    return record.mission_id
+
+
+def read_mission_anchor_instance_id(
+    engine: "Engine",
+    mission_id: str,
+) -> str | None:
+    """The ANCHOR INSTANCE of a mission row (``None`` on a miss).
+
+    The re-founding amendment's TARGETING GUARD: an amendment may
+    only re-found the epoch whose anchor is the DELIVERING instance. A
+    delivery whose carrier names a FOREIGN mission (another instance's
+    epoch) must not re-found it — that would move a commissioner's
+    anchor to a worker's message id.
+
+    Fail-open: ``None`` on any failure (the caller then refuses the
+    amendment — the safe direction).
+    """
+    if not mission_id:
+        return None
+    try:
+        record = _repo(engine).get_mission(mission_id)
+        if record is None:
+            return None
+        return record.anchor_instance_id
+    except Exception as exc:  # noqa: BLE001 — fail-open read
+        logger.warning(
+            "mission_records: mission-anchor read failed for %s…: %s: %s "
+            "— unknown (-1 semantics: the amendment is refused)",
+            mission_id[:8],
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
 def read_mission_census(
     engine: "Engine",
     anchor_instance_id: str,
@@ -271,6 +322,8 @@ __all__ = [
     "MISSION_READ_UNKNOWN",
     "mission_records_enforce_enabled",
     "read_open_mission",
+    "read_open_mission_id",
+    "read_mission_anchor_instance_id",
     "read_mission_census",
     "read_founding_message_id",
     "count_outstanding_commissions",

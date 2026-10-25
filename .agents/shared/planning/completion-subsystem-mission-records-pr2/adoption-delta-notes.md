@@ -40,7 +40,29 @@ The PR1 note's "PR2/PR3 flip-list preview" section is amended in place
   map §7.4);
 * the commission reconciliation sweep (the eternal-mission escape);
 * the committing backfill run + the retention story;
-* the multi-commissioner routing tie-break (a USER decision).
+* the multi-commissioner routing tie-break (a USER decision);
+* **the COMMISSION CARRY-FORWARD ON EPOCH SUPERSESSION (MAJOR-1) —
+  a DESIGN DECISION, see §(f).** The supersession currently ORPHANS the
+  prior epoch's commission rows: the job_continue lane supersedes the
+  anchor's OPEN epoch, and the prior epoch's commission rows keep
+  pointing at the superseded epoch with ``state='outstanding'``
+  (nothing transitions them — the only commission UPDATE is the
+  guarded ``transition_commission_state``,
+  ``repository.py:437-441``; ``supersede_commission`` has ZERO callers,
+  ``service:903-905``). PR3 must decide the semantics — the three
+  candidates, each with a different user-visible shape:
+  1. **RE-POINT** — the orphaned rows move to the continuation epoch
+     (the work carries forward; the census/quiet/L3 reads keep seeing
+     it);
+  2. **SUPERSEDED STATE** — the rows transition to ``superseded``
+     (the work is explicitly abandoned by the epoch change; the L3 leg
+     stops holding, and the "lost work" is operator-visible);
+  3. **CROSS-EPOCH HOLD** — the reads count the superseded epoch's
+     rows too (the mission stays held until the orphans are retired —
+     the eternal-mission class, deliberately).
+
+  **This is a USER-visible semantics decision and it belongs to PR3
+  (with the user), not to PR2.** PR2 only PINS the lane (§(f)).
 
 ---
 
@@ -61,7 +83,21 @@ compaction (the list walk cannot see it; the record remembers).
 
 **The cost.** The record's contribution is ADDITIVE — it can only arm
 the gate, never disarm it. That is the safe direction for a
-premature-settle fix, and it preserves the legacy detection exactly.
+premature-settle fix.
+
+**CORRECTION (council Minor 8) — the legacy detection is NOT preserved
+"exactly".** Under PR2 the legacy leg's window is **record-anchored**
+(the delegation scan starts at the epoch's founding/amendment message),
+so the legacy leg covers only what falls INSIDE the epoch. Two
+consequences, both real:
+* a delegation that happened BEFORE the epoch's anchor (e.g. before
+  the epoch's founding message) is outside the legacy window — the
+  record's commission rows are then the ONLY leg that can see it;
+* on the **job_continue** lane the anchor MOVES to the continuation
+  epoch, and the prior epoch's commission rows are ORPHANED by the
+  supersession (MAJOR-1, §(f)) — so on that lane NEITHER leg sees the
+  orphaned work. That is the cross-lane hole the MAJOR-1 precondition
+  closes, and it is why the union is a mitigation, not a proof.
 
 **What the record buys.** The legacy scan is re-anchored by a new user
 message (the window moves); the record's commission rows belong to the
@@ -174,7 +210,32 @@ accident.
 1. Land PR3's commission reconciliation sweep (the terminator: the
    ``satisfied`` write on delivery evidence + the ``abandoned`` write on
    worker-terminal / TTL, with the fail-MISS probes).
-2. THEN flip ``ENSEMBLE_MISSION_RECORDS=enforce`` + restart.
+2. **Close MAJOR-1 — the epoch-supersession orphan commissions (the
+   job_continue lane).** MUST be closed before enforce. The chain:
+
+   ``daemon/tools/job_queue.py:1958-1961`` (the ``job_continue`` tool)
+   → ``:2202-2206`` (``mint_continuation_epoch_fail_open``) →
+   ``MissionRecordService.mint_continuation_epoch`` →
+   ``MissionRecordRepository.supersede_open_epochs_for_anchor``
+   (``repository.py:580-615``) supersedes the anchor's prior OPEN epoch
+   → the prior epoch's commission rows are ORPHANED: they keep
+   ``mission_id = <the superseded epoch>`` and ``state='outstanding'``
+   (the only commission UPDATE is the guarded
+   ``transition_commission_state`` — ``repository.py:437-441``;
+   ``supersede_commission`` has ZERO callers — ``service:903-905``) →
+   the **census record leg reads the NEW (open) epoch's rows → False**
+   → and the **legacy leg is defused** (the record-anchored window
+   starts at the continuation epoch's founding message, so the prior
+   epoch's delegation falls OUTSIDE it) → ``attestation_required =
+   False`` → the gate is OFF → **R2 quiet** → the **L3 leg holds
+   nothing** (the open epoch has no outstanding commissions; the
+   orphans live on the superseded epoch) → the mission can settle while
+   the orphaned commissioned work is still running.
+
+   The semantics decision (re-point vs superseded-state vs cross-epoch
+   hold) is a PR3 + USER decision — see §(a)'s PR3 scope list. PR2
+   only PINS the lane; it does NOT redesign the carry-forward.
+3. THEN flip ``ENSEMBLE_MISSION_RECORDS=enforce`` + restart.
 
 The PR3 sweep is NOT part of PR2 and was NOT implemented here — the
 PR3 fence (the D1 routing flip, the C3 backstop, the reconciliation

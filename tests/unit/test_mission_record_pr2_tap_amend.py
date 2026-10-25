@@ -41,7 +41,11 @@ from daemon.repositories.mission_record.models import MissionRecord
 from daemon.services.attestation_gate import DEFAULT_GATE_SETTINGS, evaluate
 from daemon.services.instance_messaging import InstanceMessagingService
 from daemon.services.message_tap import resolve_turn_mission_id
-from daemon.services.mission_record_reads import read_founding_message_id
+from daemon.services.mission_record_reads import (
+    read_founding_message_id,
+    read_mission_anchor_instance_id,
+    read_open_mission_id,
+)
 from daemon.services.mission_record_service import (
     MISSION_RECORDS_MODE_ENV,
     MissionRecordService,
@@ -112,6 +116,14 @@ def messaging_service(engine):
     mission_service = MissionRecordService(engine)
     manager._mission_record_service = mission_service
     manager.mission_record_service = mission_service
+    # The PR2 facade getters the amend path uses (the real reads — the
+    # manager's own facade shape).
+    manager.get_open_mission_id = lambda iid: read_open_mission_id(
+        engine, iid
+    )
+    manager.get_mission_anchor_instance_id = (
+        lambda mid: read_mission_anchor_instance_id(engine, mid)
+    )
     return InstanceMessagingService(
         manager=manager,
         cancellation_service=MagicMock(is_shutting_down=False),

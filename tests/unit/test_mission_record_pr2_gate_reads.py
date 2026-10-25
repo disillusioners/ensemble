@@ -117,6 +117,10 @@ class _Manager:
         )
         self.get_mission_id = lambda iid: None
         self.list_mission_outstanding_commissions = lambda iid: []
+        # The tree walk — the leader has NO descendants in this suite
+        # (the out-of-tree shape the commission union exists for).
+        self.get_tree_ids_permanent = lambda _iid: []
+        self._instance_repository = None
 
 
 def _ai(text: str, tool_calls=None) -> AIMessage:
@@ -410,6 +414,87 @@ class TestFifthR2Input:
         )
         assert result.outstanding_commissions == 0
         assert result.decision is Decision.DENIED
+
+
+class TestSourceCCommissionUnion:
+    """The judge's SOURCE C membership = structural tree ∪ commissions.
+
+    The union's COMMISSION leg must be NON-EMPTY for an OUT-OF-TREE
+    commissioned worker (the nudge lane) — the tree walk can never see
+    that worker, and it is the decisive evidence the D2 premature-settle
+    shape needs.
+    """
+
+    def _manager_with_commissions(self, engine):
+        manager = _Manager(engine)
+
+        def _rows(iid):
+            from daemon.services.mission_record_reads import (
+                list_outstanding_commissions,
+            )
+
+            return [
+                {
+                    "instance_id": str(c.worker_instance_id or ""),
+                    "lane": str(c.lane or ""),
+                    "state": str(c.state or ""),
+                }
+                for c in list_outstanding_commissions(engine, iid)
+            ]
+
+        manager.list_mission_outstanding_commissions = _rows
+        return manager
+
+    def test_the_out_of_tree_commission_is_visible_in_c(
+        self, seeded, engine, enforce_mode
+    ):
+        from daemon.services.attestation_resolver_activation import (
+            C_TREE_COMMISSIONED_STATUS,
+            make_tree_rows_provider,
+        )
+
+        resolution = seeded.resolve_or_mint(ANCHOR, "user_api")
+        seeded.mint_commission(
+            resolution.mission_id,
+            commissioner_instance_id=ANCHOR,
+            worker_instance_id=WORKER,
+            lane="instance_nudge",
+        )
+        manager = self._manager_with_commissions(engine)
+
+        rows = make_tree_rows_provider(manager, ANCHOR)()
+
+        commissioned = [
+            row for row in rows if row["status"] == C_TREE_COMMISSIONED_STATUS
+        ]
+        assert commissioned, rows
+        assert commissioned[0]["instance_id"] == WORKER
+
+    def test_a_union_read_failure_is_logged_and_fails_open(
+        self, seeded, engine, enforce_mode, caplog
+    ):
+        """The union's fail-open is NOT silent: the read failure is
+        logged (the operator has to be able to see that the out-of-tree
+        commissioned work was invisible to the judge)."""
+        from daemon.services.attestation_resolver_activation import (
+            make_tree_rows_provider,
+        )
+
+        manager = self._manager_with_commissions(engine)
+
+        def _boom(_iid):
+            raise RuntimeError("commission read is down")
+
+        manager.list_mission_outstanding_commissions = _boom
+
+        with caplog.at_level("WARNING"):
+            rows = make_tree_rows_provider(manager, ANCHOR)()
+
+        assert rows == []
+        assert any(
+            "SOURCE C commission union failed" in record.message
+            for record in caplog.records
+        ), [record.message for record in caplog.records]
 
 
 class TestQuietPredicate:

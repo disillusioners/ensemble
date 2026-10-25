@@ -1415,16 +1415,31 @@ def evaluate(
         # the declared FALLBACK LEG (record miss / read failure ⇒ the
         # legacy answer).
         #
-        # UNION (not replacement) — deliberate: the legacy scan can see a
-        # delegation the record CANNOT (a ``send_message`` to a NON-CHILD
-        # target mints NO commission row — the watcher tree-guard — and a
-        # delegation whose tool call was folded away by a compaction is
-        # invisible to the list walk). A replacing census would UN-arm
-        # the gate for those missions — a regression in the exact defect
-        # class (D2 premature settle) PR2 exists to close. The record's
-        # contribution is ADDITIVE: it survives the re-anchoring
-        # blindness (a new user message moves the legacy window; it does
-        # NOT move the epoch's commission rows).
+        # UNION (not replacement) — deliberate, and the two legs see
+        # DIFFERENT gaps (the earlier comment had them inverted):
+        #
+        # * The LEGACY scan sees a delegation the RECORD cannot: a
+        #   ``send_message`` to a NON-CHILD target mints NO commission
+        #   row (the watcher tree-guard). A replacing census would
+        #   UN-arm the gate for that mission — a regression in the exact
+        #   defect class (D2 premature settle) PR2 exists to close.
+        # * The RECORD sees a delegation the LEGACY scan cannot: a
+        #   delegation whose tool call was folded away by a COMPACTION
+        #   is invisible to the list walk (the window content is
+        #   drained), while the epoch's commission rows remember it.
+        #
+        # So each leg's contribution is ADDITIVE: the record's rows
+        # survive the re-anchoring blindness (a new user message moves
+        # the legacy window; it does NOT move the epoch's commission
+        # rows), and the legacy walk keeps covering the lanes the
+        # record cannot see. The union is therefore the only shape
+        # that arms the gate for BOTH gaps.
+        #
+        # (The record-anchored window also means the legacy leg's own
+        # coverage is bounded by the epoch — see the PR2 adoption notes
+        # §(b) + the MAJOR-1 lane in §(f): the job_continue lane's
+        # supersession orphans the prior epoch's commissions, so on that
+        # lane neither leg sees the orphaned work.)
         _census_reader = getattr(manager, "mission_has_commissions", None)
         if callable(_census_reader):
             try:

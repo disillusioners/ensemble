@@ -177,6 +177,30 @@ class TestL3MissionLeg:
         )
         assert allowed is True
 
+    async def test_the_fail_open_is_logged(self, engine, caplog):
+        """The −1 fail-open is NOT silent: the read fault is logged
+        (parity with the attestation gate's own short-circuit log) so
+        the operator can see that the L3 mission leg degraded to
+        "proceed" on an unknown count."""
+        iid = _seed_instance(engine, str(uuid.uuid4()))
+        reports, manager = _child_reports(engine)
+
+        def _boom(_iid):
+            raise RuntimeError("commission read is down")
+
+        manager.count_outstanding_commissions = _boom
+
+        with caplog.at_level("WARNING"):
+            allowed, _reason, _wait = await reports._root_completion_gate(
+                None, iid
+            )
+
+        assert allowed is True
+        assert any(
+            "mission-commission count failed" in record.message
+            for record in caplog.records
+        ), [record.message for record in caplog.records]
+
     async def test_a_missing_facade_is_inactive(self, engine):
         iid = _seed_instance(engine, str(uuid.uuid4()))
         reports, manager = _child_reports(engine)

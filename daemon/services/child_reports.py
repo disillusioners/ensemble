@@ -2519,7 +2519,18 @@ Provide a concise summary:"""
             if not isinstance(value, int):
                 return 0
             return value
-        except Exception:  # noqa: BLE001 — fail-open (never hold on a read fault)
+        except Exception as count_exc:  # noqa: BLE001 — fail-open (never hold on a read fault)
+            # The fail-open is LOGGED (parity with the attestation gate's
+            # own short-circuit log): an unknown count must never be
+            # silent — the operator has to be able to see that the L3
+            # mission leg degraded to "proceed" on a read fault.
+            logger.warning(
+                "root_completion_gate: mission-commission count failed for "
+                "%s… (%s) — fail-OPEN, the publish proceeds (the leg "
+                "cannot hold on an unknown count)",
+                instance_id[:8],
+                type(count_exc).__name__,
+            )
             return -1
 
     async def _root_completion_gate(
