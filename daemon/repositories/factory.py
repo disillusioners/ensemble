@@ -76,6 +76,17 @@ from .custom_agent_configs import (
 # versions precedent).
 from .instance_ops.models import InstanceOpsAudit
 
+# Notify audit ledger (ari-voice, 2026-10-25). Imported here so
+# ``SQLModel.metadata.create_all()`` (called from daemon/manager.py)
+# registers the ``notify_audit`` table on fresh PostgreSQL databases —
+# the N1 REQUIRED seam: the table is the notify_user rate-limit budget
+# source, so a missed import means no table on PG, which means every
+# budget INSERT fails (fail-closed refusals, a dead tool). Fresh SQLite
+# databases pick the table up from the MigrationRunner via the
+# 20261025_000001 migration. Brand-new table — no
+# _ensure_postgres_columns needed (same instance_ops_audit precedent).
+from .notify_audit.models import NotifyAudit
+
 if TYPE_CHECKING:
     from daemon.ensemble_config import EnsembleConfig
 

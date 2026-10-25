@@ -997,6 +997,17 @@ async def lifespan(app: FastAPI):
     from daemon.repositories.instance_ops.models import InstanceOpsAudit
     InstanceOpsAudit.metadata.create_all(manager.engine)
 
+    # ari-voice (2026-10-25) — ``notify_audit`` is the single new table
+    # that backs the ``notify-user`` privileged tool category (the
+    # ``notify_user`` tool's audit ledger AND its rate-limit budget
+    # source). Brand-new table — the same create_all precedent as the
+    # secrets pair and the instance_ops pair above; the .sql migration
+    # (20261025_000001) handles SQLite and the model handles PG. No
+    # ``_ensure_postgres_columns`` mirror needed. (N1 REQUIRED seam —
+    # a missed import = no table on PG = every budget INSERT fails.)
+    from daemon.repositories.notify_audit.models import NotifyAudit
+    NotifyAudit.metadata.create_all(manager.engine)
+
     # remote-hands center gateway (2026-10-22) — ``mcp_gateway_audit``
     # is the append-only ledger of every remote command the center
     # forwarded (SPEC.md §8.4: who / machine / tool / args-hash /
