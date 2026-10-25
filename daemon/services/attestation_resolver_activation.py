@@ -1497,25 +1497,47 @@ def make_tree_rows_provider(
             if manager is None or not instance_id:
                 return []
             rows: list[dict[str, Any]] = []
-            # Proposal B PR2 — the MISSION-scoped union FIRST, and
-            # INDEPENDENT of the tree walk. The out-of-tree commissioned
-            # worker (the nudge lane) is invisible to the tree walk, and
-            # a leader with NO descendants at all (the very shape the
-            # nudge lane produces) would otherwise lose the union
-            # entirely — the tree's empty-list early return must NOT
-            # gate the mission half.
+            # ── HALF 1 (Proposal B PR2) — the MISSION-scoped union, and
+            # INDEPENDENT of the tree walk.
+            #
+            # It covers the commissions on THIS instance's own open
+            # mission — the out-of-tree work the leader itself
+            # commissioned (the direct nudge lane).
+            #
+            # It must render even when the leader has NO descendants:
+            # the tree's empty-list early return must NOT gate this half
+            # (a leader with no tree at all is exactly the shape the
+            # out-of-tree nudge produces).
             rows.extend(_commission_rows_for_mission(manager, instance_id))
             tree_ids = manager.get_tree_ids_permanent(instance_id)
             tree_ids = [str(i) for i in (tree_ids or []) if i]
             if not tree_ids:
+                # No descendants — the MISSION half still stands.
                 return rows
             descendant_ids = [iid for iid in tree_ids if iid != instance_id]
-            # D2(c) — the tree-scoped C-union. The bundle renders only
-            # the first BUNDLE_C_TREE_ROWS_MAX rows, so the commissioned
-            # rows must lead: they are the DECISIVE evidence ("work still
-            # in flight"), the descendant status rows are context. Putting
-            # them last would let a wide tree clip them out and silently
-            # disarm the union.
+            # ── HALF 2 (D2(c)) — the TREE-scoped C-union. THE SIBLING
+            # HALF, NOT A REPLACEMENT.
+            #
+            # It covers the PENDING ``dependency_watchers`` rows whose
+            # TARGET is inside the leader's tree — and that is how the
+            # SECOND-HOP out-of-tree work becomes visible to the leader:
+            # the nudge lane mints the commission on the NUDGER's mission
+            # (``instance_ops.py:1598-1617``) while the completion
+            # watcher targets the IN-TREE NUDGER
+            # (``instance_ops.py:1639-1649``) — so the worker's id rides
+            # the watcher row's ``child_id`` metadata, not the leader's
+            # mission. The mission half (HALF 1) alone can NEVER surface
+            # that second-hop work, and this half alone cannot surface
+            # the leader's own out-of-tree commissions. Both are needed;
+            # removing either re-arms the fd302262 premature-settle shape
+            # (D2).
+            #
+            # The bundle renders only the first BUNDLE_C_TREE_ROWS_MAX
+            # rows, so the commissioned rows must lead: they are the
+            # DECISIVE evidence ("work still in flight"), the descendant
+            # status rows are context. Putting them last would let a
+            # wide tree clip them out and silently disarm the union.
+            rows.extend(_commissioned_rows_for_tree(manager, tree_ids))
             remaining = max(0, C_TREE_ROW_FETCH_CAP - len(rows))
             repo = getattr(manager, "_instance_repository", None)
             if repo is not None and remaining:
@@ -1556,11 +1578,16 @@ def _commission_rows_for_mission(
     """Render the open mission's OUTSTANDING commissions as C rows.
 
     Proposal B PR2 — the SOURCE C membership union (proposal-b §3
-    NEW(v)): "C's membership = tree ∪ commissions". The
-    tree-scoped union above (:func:`_commissioned_rows_for_tree`) can
-    only see the watchers whose target is IN the leader's tree; the
-    commission rows are the MISSION-scoped half — the OUT-OF-TREE
-    commissioned worker (the nudge lane) the tree walk can never see.
+    NEW(v)): "C's membership = tree ∪ commissions". This is the
+    MISSION-scoped HALF (HALF 1 in
+    :func:`make_tree_rows_provider`); the sibling HALF 2 is
+    :func:`_commissioned_rows_for_tree` (defined BELOW this function),
+    which sees the PENDING watchers whose target is IN the leader's
+    tree — the second-hop channel (the nudge lane mints the commission
+    on the NUDGER's mission while the watcher targets the in-tree
+    nudger, so the out-of-tree worker rides the watcher row, not the
+    leader's mission). Neither half subsumes the other; both are
+    rendered.
 
     Why it matters (the D2 shape): the leader's mission is judged
     against SOURCE C. Without the commission half, an out-of-tree
@@ -1603,9 +1630,10 @@ def _commission_rows_for_mission(
         # out-of-tree commissioned work was invisible to the judge).
         logger.warning(
             "attestation resolver: SOURCE C commission union failed for "
-            "%s… (%s) — fail-OPEN (counts-only C evidence)",
+            "%s… (%s: %s) — fail-OPEN (counts-only C evidence)",
             (instance_id or "?")[:8],
             type(union_exc).__name__,
+            union_exc,
         )
         return []
 

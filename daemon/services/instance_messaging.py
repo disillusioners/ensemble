@@ -47,6 +47,7 @@ from .resource_monitor.charge import (
 from .messaging_types import AsyncMessageResult, LinkageContractError
 from .mission_record_service import (  # Proposal B PR1 — mission-record anchor
     MISSION_ID_KEY,
+    _mode_is_off as _mission_records_mode_is_off,
     mint_revive_epoch_fail_open,
 )
 from .message_tap import (  # Phase 1 C2 — langgraph-checkpoint-perf
@@ -3700,10 +3701,21 @@ class InstanceMessagingService:
         closed epoch is never rewritten and a stale carrier is a safe
         no-op.
 
+        MODE ``off`` SHORT-CIRCUIT: the whole subsystem is off (no
+        mints, no records) — the amendment would be a no-op anyway, so
+        the guard short-circuits BEFORE the two DB reads and pays no
+        per-delivery read cost. The mode is read through the CACHED
+        resolver (the house switch pattern — restart-read, no env
+        re-read per call).
+
         FAIL-OPEN: the amendment is a RECORD write — it must never break
         the delivery. Any failure is logged at WARNING and swallowed.
         """
         if not is_p1_human or not message_id or not instance_id:
+            return
+        if _mission_records_mode_is_off():
+            # The subsystem is off — nothing to amend (and no reads to
+            # pay for). The cached resolver never raises.
             return
         try:
             service = getattr(self._manager, "mission_record_service", None)
@@ -3726,6 +3738,22 @@ class InstanceMessagingService:
                 self._manager.get_mission_anchor_instance_id,
                 target_mission_id,
             )
+            if anchor_instance_id is None:
+                # READ FAULT (or a vanished row) — NOT a foreign
+                # mission. The causes are DIFFERENT and must not be
+                # reported as one: a missing anchor is an UNKNOWN
+                # (fail-open → refuse the amendment; the legacy ladder
+                # stays in charge), while a foreign anchor is a
+                # DECISION (the carrier names another instance's epoch).
+                logger.info(
+                    "mission_records: amend-at-delivery skipped for %s… — "
+                    "the anchor of the target mission (%s…) is unknown "
+                    "(read fault or a vanished row) — the anchor stays "
+                    "as-is (legacy ladder)",
+                    instance_id[:8],
+                    target_mission_id[:8],
+                )
+                return
             if anchor_instance_id != instance_id:
                 # FOREIGN mission — refuse the amendment and degrade to
                 # the legacy ladder. Logged at INFO: the degradation is
@@ -3737,7 +3765,7 @@ class InstanceMessagingService:
                     "— the anchor stays as-is (legacy ladder)",
                     instance_id[:8],
                     target_mission_id[:8],
-                    (anchor_instance_id or "?")[:8],
+                    anchor_instance_id[:8],
                 )
                 return
             from .mission_record_service import amend_anchor_fail_open

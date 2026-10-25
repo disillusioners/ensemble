@@ -652,9 +652,9 @@ def decide(
        other branch deliberately: the plain-allow contract is ZERO
        counter movement — an attested-allow reset (trigger 1) does not
        run while an answer is pending.
-    2. any pending wakeup input > 0 (THREE-input R2 —
+    2. any pending wakeup input > 0 (FOUR-input R2 —
        ``pending_children``, ``queued_or_expected_wakeups``, OR
-       ``live_descendants``) →
+       ``live_descendants``, OR ``outstanding_commissions``) →
        :attr:`Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP` with the
        counter UNCHANGED (ruling 1: the R2 non-reset IS the loop
        protection). Fires BEFORE the attested-split step (3)

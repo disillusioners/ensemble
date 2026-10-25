@@ -33,7 +33,6 @@ from sqlmodel import SQLModel, Session
 import daemon.repositories.instance.models  # noqa: F401
 import daemon.repositories.mission_record.models  # noqa: F401
 from daemon.repositories.instance.models import Instance
-from daemon.services import attestation_gate as gate_module
 from daemon.services.attestation_gate import (
     DEFAULT_GATE_SETTINGS,
     Decision,

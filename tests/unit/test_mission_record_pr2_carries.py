@@ -19,7 +19,6 @@ open-epoch unique constraint).
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -34,7 +33,6 @@ from daemon.repositories.mission_record.models import (
     OPEN_EPOCH_STATUS_SQL,
     MissionStatus,
 )
-from daemon.repositories.mission_record.repository import MissionRecordError
 from daemon.services.mission_record_service import MissionRecordService
 
 ANCHOR = "11111111-1111-4111-8111-111111111111"

@@ -2526,10 +2526,11 @@ Provide a concise summary:"""
             # mission leg degraded to "proceed" on a read fault.
             logger.warning(
                 "root_completion_gate: mission-commission count failed for "
-                "%s… (%s) — fail-OPEN, the publish proceeds (the leg "
+                "%s… (%s: %s) — fail-OPEN, the publish proceeds (the leg "
                 "cannot hold on an unknown count)",
                 instance_id[:8],
                 type(count_exc).__name__,
+                count_exc,
             )
             return -1
 

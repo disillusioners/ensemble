@@ -220,13 +220,10 @@ MUTATIONS = [
     (
         "c-union-commission-leg",
         "daemon/services/attestation_resolver_activation.py",
-        """            tree_ids = manager.get_tree_ids_permanent(instance_id)
-            tree_ids = [str(i) for i in (tree_ids or []) if i]
-            if not tree_ids:
+        """            if not tree_ids:
+                # No descendants — the MISSION half still stands.
                 return rows""",
-        """            tree_ids = manager.get_tree_ids_permanent(instance_id)
-            tree_ids = [str(i) for i in (tree_ids or []) if i]
-            if not tree_ids:
+        """            if not tree_ids:
                 return []""",
         "tests/unit/test_mission_record_pr2_gate_reads.py",
         "TestSourceCCommissionUnion::test_the_out_of_tree_commission_is_visible_in_c",
@@ -236,9 +233,10 @@ MUTATIONS = [
         "daemon/services/attestation_resolver_activation.py",
         """        logger.warning(
             "attestation resolver: SOURCE C commission union failed for "
-            "%s… (%s) — fail-OPEN (counts-only C evidence)",
+            "%s… (%s: %s) — fail-OPEN (counts-only C evidence)",
             (instance_id or "?")[:8],
             type(union_exc).__name__,
+            union_exc,
         )
         return []""",
         """        return []""",
@@ -250,10 +248,11 @@ MUTATIONS = [
         "daemon/services/child_reports.py",
         """            logger.warning(
                 "root_completion_gate: mission-commission count failed for "
-                "%s… (%s) — fail-OPEN, the publish proceeds (the leg "
+                "%s… (%s: %s) — fail-OPEN, the publish proceeds (the leg "
                 "cannot hold on an unknown count)",
                 instance_id[:8],
                 type(count_exc).__name__,
+                count_exc,
             )
             return -1""",
         """            return -1""",
@@ -267,6 +266,14 @@ MUTATIONS = [
         """        return _read_mission_anchor_instance_id(self._engine, "other")""",
         "tests/unit/test_mission_record_pr2_amend_guard.py",
         "TestTheManagerFacadeGetters::test_get_mission_anchor_instance_id_forwards_its_argument",
+    ),
+    (
+        "c-union-tree-half-deleted",
+        "daemon/services/attestation_resolver_activation.py",
+        """            rows.extend(_commissioned_rows_for_tree(manager, tree_ids))""",
+        """            pass  # MUTATION: the tree-scoped C-union half deleted""",
+        "tests/unit/test_nudge_completion_watcher_d2.py",
+        "TestTreeScopedCUnion::test_a_pending_watcher_in_the_tree_is_rendered",
     ),
     (
         "epoch-tag-scope",
@@ -319,14 +326,34 @@ def main() -> int:
             )
         finally:
             path.write_text(original)
-        if code == 0:
+        # The kill criterion is STRICT: a mutation is "killed" ONLY when
+        # the pinned test FAILS (pytest exit code 1 — the "tests failed"
+        # code). Any other exit code is NOT a kill:
+        #   0 → the mutation SURVIVED (the pinned test still passed);
+        #   2/3/4/5 → the mutation broke the HARNESS (an interrupted
+        #   run, an internal error, a usage error, or "no tests
+        #   collected" — e.g. the mutation's anchor no longer matches
+        #   and the node id collected NOTHING). Scoring those as kills
+        #   is a FALSE PASS (the tidier's round-3 finding): the matrix
+        #   would report N/N while the guard was never exercised.
+        if code == 1:
+            print(f"  ✓ {name}: killed by {test_file}::{node}")
+        elif code == 0:
             failures.append(
                 f"{name}: the mutation SURVIVED — {test_file}::{node} "
                 f"still passed"
             )
-            print(f"  ✗ {name}: NOT KILLED")
+            print(f"  ✗ {name}: NOT KILLED (the pinned test still passed)")
         else:
-            print(f"  ✓ {name}: killed by {test_file}::{node}")
+            failures.append(
+                f"{name}: HARNESS FAULT (pytest exit {code}) — not a kill. "
+                f"The mutation broke the run (collection error / no tests "
+                f"ran / interrupted): {test_file}::{node}"
+            )
+            print(
+                f"  ✗ {name}: HARNESS FAULT (pytest exit {code}) — "
+                f"not counted as a kill"
+            )
     print()
     if failures:
         print("MUTATION CHECK FAILED:")

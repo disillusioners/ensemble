@@ -222,6 +222,104 @@ class TestTheAnchorInstanceGuard:
         )
 
 
+class TestTheRefusalLoggingIsBranched:
+    """The refusal log must distinguish the CAUSES.
+
+    A read fault (or a vanished row) is UNKNOWN — fail-open, refuse the
+    amendment. A foreign anchor is a DECISION — the carrier names
+    another instance's epoch. Logging both as "foreign mission" would
+    send the operator after a non-existent defect.
+    """
+
+    async def test_an_unknown_anchor_is_not_logged_as_foreign(
+        self, engine, messaging_service, monkeypatch, caplog
+    ):
+        monkeypatch.setenv(MISSION_RECORDS_MODE_ENV, "dry")
+        _reset_mission_records_mode_for_tests()
+
+        anchor_instance = _seed_instance(engine, str(uuid.uuid4()))
+        service = messaging_service._manager.mission_record_service
+        resolution = service.resolve_or_mint(
+            anchor_instance, "user_api", founding_message_id="m-founding"
+        ).mission_id
+
+        # The anchor read FAULTS (the facade returns None).
+        messaging_service._manager.get_mission_anchor_instance_id = (
+            lambda _mid: None
+        )
+
+        with caplog.at_level("INFO"):
+            await messaging_service._amend_mission_anchor_at_delivery(
+                instance_id=anchor_instance,
+                message_id="m-correction",
+                is_p1_human=True,
+                mission_id=resolution,
+            )
+
+        messages = [record.message for record in caplog.records]
+        assert any("the anchor of the target mission" in m for m in messages), messages
+        assert not any("foreign mission" in m for m in messages), messages
+
+    async def test_a_foreign_anchor_is_logged_as_foreign(
+        self, engine, messaging_service, monkeypatch, caplog
+    ):
+        monkeypatch.setenv(MISSION_RECORDS_MODE_ENV, "dry")
+        _reset_mission_records_mode_for_tests()
+
+        anchor_instance = _seed_instance(engine, str(uuid.uuid4()))
+        service = messaging_service._manager.mission_record_service
+        resolution = service.resolve_or_mint(
+            anchor_instance, "user_api", founding_message_id="m-founding"
+        ).mission_id
+
+        messaging_service._manager.get_mission_anchor_instance_id = (
+            lambda _mid: "some-other-instance"
+        )
+
+        with caplog.at_level("INFO"):
+            await messaging_service._amend_mission_anchor_at_delivery(
+                instance_id=anchor_instance,
+                message_id="m-correction",
+                is_p1_human=True,
+                mission_id=resolution,
+            )
+
+        messages = [record.message for record in caplog.records]
+        assert any("foreign mission" in m for m in messages), messages
+
+
+class TestTheModeOffShortCircuit:
+    async def test_mode_off_pays_no_reads(self, engine, messaging_service, monkeypatch):
+        """The subsystem is OFF — the amendment is a no-op, so the guard
+        short-circuits BEFORE the two DB reads (no per-delivery read
+        cost)."""
+        monkeypatch.setenv(MISSION_RECORDS_MODE_ENV, "off")
+        _reset_mission_records_mode_for_tests()
+
+        anchor_instance = _seed_instance(engine, str(uuid.uuid4()))
+        service = messaging_service._manager.mission_record_service
+        resolution = service.resolve_or_mint(
+            anchor_instance, "user_api", founding_message_id="m-founding"
+        ).mission_id
+
+        reads: list[str] = []
+        messaging_service._manager.get_mission_anchor_instance_id = (
+            lambda mid: reads.append(mid)
+        )
+        messaging_service._manager.get_open_mission_id = (
+            lambda iid: reads.append(iid)
+        )
+
+        await messaging_service._amend_mission_anchor_at_delivery(
+            instance_id=anchor_instance,
+            message_id="m-correction",
+            is_p1_human=True,
+            mission_id=resolution,
+        )
+
+        assert reads == [], reads
+
+
 class TestTheManagerFacadeGetters:
     """Facade-forwarding guard (the council's Minor 7).
 

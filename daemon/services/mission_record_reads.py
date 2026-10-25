@@ -75,11 +75,7 @@ from ..repositories.mission_record.repository import MissionRecordRepository
 # redefined — a second definition here would be a shadowed copy (two
 # sources of truth for one knob) and the service docstring's
 # "ONE definition" contract would be a lie.
-from .mission_record_service import (
-    MissionRecordMode,
-    mission_records_enforce_enabled,
-    resolve_mission_records_mode,
-)
+from .mission_record_service import mission_records_enforce_enabled
 
 if TYPE_CHECKING:
     from sqlalchemy import Engine
