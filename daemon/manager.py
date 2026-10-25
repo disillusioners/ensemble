@@ -38,12 +38,14 @@ from .services.mission_record_service import (
     MissionRecordMode,
     MissionRecordService,
     mint_cascade_resume_epoch_if_stranded_fail_open,
+    # The mode ladder's OWNER — the single definition of the enforce
+    # gate (the reads module imports it; it never redefines it).
+    mission_records_enforce_enabled,
     resolve_mission_records_mode,
 )
 from .services.mission_record_reads import (
     count_outstanding_commissions as _read_outstanding_commissions,
     list_outstanding_commissions,
-    mission_records_enforce_enabled,
     read_founding_message_id as _read_founding_message_id,
     read_mission_census as _read_mission_census,
     read_mission_id as _read_mission_id,
