@@ -1,0 +1,1179 @@
+"""MissionRecordService — the single writer for the mission-record anchor.
+
+Completion-subsystem Proposal B — PR1 of 3 (dry mints). One entry point
+per semantic act, exactly as proposal-b §2.2 prescribes:
+
+* :meth:`MissionRecordService.resolve_or_mint` — the 3-rung RESOLUTION
+  LADDER behind every commissioning act (commissioning lanes):
+  (1) the actor has an OPEN epoch as anchor → that mission;
+  (2) the actor has an OUTSTANDING commission row → that commission's
+  mission ("work commissioned of you belongs to your commissioner's
+  mission");
+  (3) else MINT a new epoch anchored on the actor.
+  Every commissioning act resolves to exactly one mission — that
+  invariant is the semantic core.
+
+* Delivery/resume lanes (boot-sweep, cascade-revive) use the
+  mint-if-no-open-epoch shape instead (``_mint_if_no_open_epoch``):
+  resume is DELIVERY, not founding — an open epoch continues; only a
+  stranded instance (no open epoch) gets an honest boundary row. Rung 2
+  is deliberately NOT consulted there (a resumed worker's epoch
+  boundary is its own, not its commissioner's).
+
+* :meth:`MissionRecordService.mint_continuation_epoch` — job_continue's
+  force-NEW-epoch mint (follow-on job ⇒ new epoch, parent chain, the
+  prior OPEN epoch → ``superseded`` RECORD-SIDE ONLY).
+
+* :meth:`MissionRecordService.mint_revive_epoch` — the revive boundary
+  (terminal target + p1-HUMAN message; nudge-on-terminal), parent
+  chain.
+
+* commission / attestation / settle / amend seams — guarded, guarded,
+  guarded (every transition is ``UPDATE ... WHERE state/status=<pre>``,
+  the ``dependency_watchers`` exactly-once shape).
+
+MODE LADDER (restart-read, ship default ``dry``)
+------------------------------------------------
+``ENSEMBLE_MISSION_RECORDS = off | dry | enforce``:
+
+* ``off``     — no mints, no reads. The tables stay untouched.
+* ``dry``     — mint + stamp + log everything; ALL read sites (gate,
+                census, anchor, routing, backstop) stay on legacy
+                behavior. **This is the ship default** — records
+                accumulate, zero behavior change (the attestation C2
+                soak precedent).
+* ``enforce`` — the PR2 read flip: gate/census/routing consult records
+                with legacy fallback. NOT IMPLEMENTED IN PR1 (PR1 only
+                reserves the vocabulary; minting behaves identically to
+                ``dry``).
+
+The mode is read from the environment per call (kill-switch
+convention: the typed config is for intervals, not switch flips —
+``daemon/config.py`` note; the operator flips the env and restarts).
+Unknown values fail CLOSED to ``dry``?? — no: unknown values fail to
+``off`` (the conservative reading: an unrecognized token must never
+TURN ON writes the operator did not ask for).
+
+ADOPTION DELTA (a) — TIE-BREAK PRECEDENCE (routing authority)
+-------------------------------------------------------------
+Proposal A's live D1 resolver (:mod:`daemon.services.report_recipient`)
+tie-breaks multi-nudge delivery by LATEST-COMMITTED-NUDGE; Proposal C
+would use OLDEST-OPEN-FIRST with ``routed_elsewhere`` recording;
+Proposal B's commission table nominally assumes a SINGLE outstanding
+row (multi-commissioner undefined). PR1 decision: when a worker is
+commissioned twice, the second commission MINTS A SECOND OUTSTANDING
+ROW — the guarded-state lifecycle (``outstanding`` →
+``satisfied``/``abandoned``/``superseded``) is the discriminator, and
+the rung-2 lookup takes the OLDEST outstanding row (deterministic).
+ROUTING AUTHORITY STAYS WITH THE A-RESOLVER until the PR2/PR3 flip:
+nothing in PR1 routes reports by commission rows. A-resolver (latest
+committed nudge) vs B (multiple outstanding rows, oldest-first rung-2)
+is a PR3-flip decision, not a PR1 behavior.
+
+ADOPTION DELTA (b) — HISTORICAL COVERAGE (advisory backfill)
+------------------------------------------------------------
+:meth:`MissionRecordService.backfill_advisory_nudge_commissions`
+covers the existing ``instance_ops_audit`` rows (the tiny historical
+surface: 6 rows / 1 committed nudge all-time): committed non-dry
+nudges whose target is STILL NON-TERMINAL mint ADVISORY nudge
+commission rows with ``provenance='backfill'`` +
+``advisory_backfill=True`` + deterministic UUID5 ids — idempotent
+(re-run = PK conflict = no-op), dry-run-loggable. Unrecoverable targets
+(nudge already completed — the audit row records the actor, not the
+outcome linkage) are an ACCEPTED ONE-TIME GAP. **Advisory backfill rows
+are EXCLUDED from routing authority FOREVER** — if dropped, the ledger
+would be worse than no ledger (the comparison.md §4c rule).
+
+ZERO-BEHAVIOR-CHANGE CONTRACT (the PR1 hard gate)
+-------------------------------------------------
+* Mints write ONLY the two mission-record tables (+ the
+  ``message_metadata.mission_id`` delivery stamp through the existing
+  non-load-bearing tap). No instance-status writes, no admission-state
+  writes, no attestation-column clears, no ``denial_epochs`` writes —
+  the §2.4 epoch-boundary LEDGER-CLEAR POLICY is PR2+; the revive
+  lane's EXISTING fresh-episode clear stays exactly as it is (the mint
+  RECORDS the boundary; the legacy clear keeps its current behavior).
+* The terminal-write census (``tests/job_queue/test_terminal_write_census.py``)
+  and the admission-writer census (``daemon/job_state/constitution.py``)
+  are untouched and stay green.
+* All gate/census/anchor/routing reads stay legacy.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import dataclass
+from typing import Any, Optional
+
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import Session, select
+
+from ..repositories.instance.models import Instance, InstanceStatus
+from ..repositories.mission_record.models import (
+    CommissionLane,
+    CommissionState,
+    MissionAttestMethod,
+    MissionCommission,
+    MissionFoundingSource,
+    MissionProvenance,
+    MissionRecord,
+    MissionStatus,
+)
+from ..repositories.mission_record.repository import (
+    MissionRecordError,
+    MissionRecordRepository,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _new_uuid4() -> str:
+    import uuid
+
+    return str(uuid.uuid4())
+
+
+# ---------------------------------------------------------------------------
+# Mode ladder
+# ---------------------------------------------------------------------------
+
+#: Operator mode env (restart-read; ship default ``dry``).
+MISSION_RECORDS_MODE_ENV = "ENSEMBLE_MISSION_RECORDS"
+
+#: The RESERVED ``message_metadata`` key carrying the mission carrier on
+#: the persisted MessageQueue row (the F11 ``__ens_dispatch_chain__``
+#: precedent): the producer (``_prepare_enqueued_message``) stamps it
+#: once; the claim path reads it into ``ProcessingContext.mission_id``.
+#: Daemon-internal only — never caller-supplied.
+MISSION_ID_KEY = "__ens_mission_id__"
+
+#: The inert extension-point gate for the SCHEDULER lane (lane 9).
+#: STANDING PRODUCT RULING: the scheduler lane stays BARE (it must not
+#: anchor like a human, and it must not mint like one either — yet).
+#: This gate exists so the mint SITE is already wired when the ruling
+#: flips; it defaults OFF and there is no plan to flip it in PR1-PR3.
+SCHEDULER_MINT_EXTENSION_ENV = "ENSEMBLE_MISSION_RECORDS_SCHEDULER_MINT"
+
+
+class MissionRecordMode(str):
+    """Vocabulary for :data:`MISSION_RECORDS_MODE_ENV` (see module docstring)."""
+
+    OFF = "off"
+    DRY = "dry"
+    ENFORCE = "enforce"
+
+
+_VALID_MODES = (MissionRecordMode.OFF, MissionRecordMode.DRY, MissionRecordMode.ENFORCE)
+
+
+def resolve_mission_records_mode() -> str:
+    """Read the mode ladder from the environment (restart-read).
+
+    Default ``dry`` (mints write; reads stay legacy). Unknown values
+    fail to ``off`` — an unrecognized token must never turn ON writes
+    the operator did not ask for. Blank/unset = the default.
+    """
+    raw = (os.environ.get(MISSION_RECORDS_MODE_ENV) or "").strip().lower()
+    if not raw:
+        return MissionRecordMode.DRY
+    if raw in _VALID_MODES:
+        return raw
+    logger.warning(
+        "mission_records: unrecognized %s=%r — failing to 'off' "
+        "(valid: off|dry|enforce)",
+        MISSION_RECORDS_MODE_ENV,
+        raw,
+    )
+    return MissionRecordMode.OFF
+
+
+def scheduler_mint_extension_enabled() -> bool:
+    """The INERT scheduler extension-point gate (default OFF).
+
+    Standing product ruling — lane 9 stays bare. Even when the mode
+    ladder is ``dry``, the scheduler lane mints NOTHING unless this
+    gate is explicitly set to ``1``/``true``. The gate exists only so
+    the eventual flip is a one-line env change with the wiring already
+    in place.
+    """
+    raw = (os.environ.get(SCHEDULER_MINT_EXTENSION_ENV) or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+# ---------------------------------------------------------------------------
+# Resolution result
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MissionResolution:
+    """The exactly-one-mission outcome of the resolution ladder.
+
+    ``rung``: 1 = open-epoch-as-anchor hit; 2 = outstanding-commission
+    hit; 3 = minted new epoch. ``created`` is True only on rung 3 (the
+    caller can log mint vs reuse — the dry-mode observability channel).
+    """
+
+    mission_id: str
+    rung: int
+    created: bool
+
+
+# ---------------------------------------------------------------------------
+# The service
+# ---------------------------------------------------------------------------
+
+
+class MissionRecordService:
+    """Single writer for ``mission_records`` + ``mission_commissions``.
+
+    Every public write method takes an optional ``session``: when
+    provided, the CALLER's transaction is used and NOT committed (the
+    revive mint rides ``_prepare_enqueued_message``'s
+    ``WriteGuardSession`` so the epoch boundary is atomic with the
+    revive); when ``None``, the repository opens + commits its own
+    session.
+
+    The lane-facing ``*_fail_open`` wrappers enforce the lane posture:
+    a mission-record failure must NEVER fail the commissioning lane
+    (the D2(b) watcher-mint posture verbatim). Contract violations
+    RAISE out of the non-wrapper methods (D4(ii): a commission whose
+    worker row is missing at mint time raises — the mint is the
+    semantic contract) and the wrapper catches + logs.
+    """
+
+    def __init__(self, engine: Any) -> None:
+        self._repo = MissionRecordRepository(engine)
+
+    # ── internal validation ──
+
+    def _require_instance_row(
+        self,
+        instance_id: str,
+        *,
+        role: str,
+        session: Optional[Session],
+    ) -> None:
+        """The mint-path existence contract (D4(ii) scope).
+
+        An epoch anchor or a commission worker that does not exist must
+        not be recorded — a mission/commission that can never advance
+        or be satisfied must not be written as if real. Raises
+        :class:`MissionRecordError`.
+        """
+        if not instance_id:
+            raise MissionRecordError(
+                f"mission_records: {role} instance id is empty — refusing to mint"
+            )
+        stmt = select(Instance.instance_id).where(Instance.instance_id == instance_id)
+        if session is not None:
+            row = session.exec(stmt).first()
+        else:
+            with Session(self._repo._engine) as own:
+                row = own.exec(stmt).first()
+        if row is None:
+            raise MissionRecordError(
+                f"mission_records: {role} instance '{instance_id}' has no "
+                f"instance row — refusing to mint (D4(ii) mint-path validation)"
+            )
+
+    def _mint_epoch_locked(
+        self,
+        *,
+        actor_instance_id: str,
+        founding_source: str,
+        session: Optional[Session],
+        founding_message_id: Optional[str] = None,
+        commissioner_instance_id: Optional[str] = None,
+        work_id: Optional[str] = None,
+        parent_mission_id: Optional[str] = None,
+        provenance: str = MissionProvenance.LIVE.value,
+    ) -> MissionRecord:
+        """The actual epoch INSERT (caller resolved already).
+
+        Idempotency: when ``founding_message_id`` is set, the
+        ``(anchor, founding_message_id)`` probe + partial unique index
+        make the mint idempotent — a concurrent duplicate insert
+        surfaces as ``IntegrityError`` and is re-resolved to the winning
+        row.
+        """
+        self._require_instance_row(
+            actor_instance_id, role="anchor", session=session
+        )
+        if founding_message_id:
+            existing = self._repo.find_epoch_by_anchor_and_founding_message(
+                actor_instance_id, founding_message_id, session=session
+            )
+            if existing is not None:
+                return existing
+        epoch_seq = 1 + self._repo.count_epochs_for_anchor(
+            actor_instance_id, session=session
+        )
+        record = MissionRecord(
+            anchor_instance_id=actor_instance_id,
+            epoch_seq=epoch_seq,
+            founding_message_id=founding_message_id,
+            founding_source=founding_source,
+            commissioner_instance_id=commissioner_instance_id,
+            work_id=work_id,
+            parent_mission_id=parent_mission_id,
+            status=MissionStatus.OPEN.value,
+            provenance=provenance,
+        )
+        try:
+            return self._repo.insert_mission(record, session=session)
+        except IntegrityError:
+            # Lost the partial-unique race — the concurrent mint won.
+            # Re-resolve (never mint twice for the same founding act).
+            if session is not None:
+                # The caller's transaction is poisoned on PG after a
+                # statement-level IntegrityError — fail the mint and
+                # let the caller's fail-open wrapper skip it. (The
+                # revive path re-runs on the next boundary; the window
+                # is a same-tick double boundary, which is not a real
+                # shape.)
+                raise
+            existing = self._repo.find_epoch_by_anchor_and_founding_message(
+                actor_instance_id, founding_message_id or "", session=None
+            )
+            if existing is not None:
+                return existing
+            raise
+
+    # ── the resolution ladder (commissioning lanes) ──
+
+    def resolve_or_mint(
+        self,
+        actor_instance_id: str,
+        lane: str,
+        *,
+        founding_source: Optional[str] = None,
+        founding_message_id: Optional[str] = None,
+        commissioner_instance_id: Optional[str] = None,
+        work_id: Optional[str] = None,
+        session: Optional[Session] = None,
+        provenance: str = MissionProvenance.LIVE.value,
+    ) -> MissionResolution:
+        """The 3-rung resolution ladder — every commissioning act resolves
+        to exactly one mission (the semantic core).
+
+        Rung 1: the actor has an OPEN epoch as anchor → that mission.
+        Rung 2: the actor has an OUTSTANDING commission row → that
+        commission's mission (oldest outstanding row wins — the
+        deterministic tie-break under adoption-delta (a)'s
+        multiple-outstanding-rows rule).
+        Rung 3: mint a new epoch anchored on the actor.
+
+        Args:
+            actor_instance_id: The instance the act lands on (the
+                enqueue target / the nudge target / the continued
+                instance).
+            lane: Free-form lane label for the log line (the
+                ``founding_source`` vocabulary is carried separately).
+            founding_source: The epoch's ``founding_source`` when rung 3
+                mints. Defaults to the lane label when None.
+            founding_message_id: The founding message id when known at
+                resolve time. The user_api/chat lanes mint BEFORE the
+                enqueue (the id is minted inside it) and attach the id
+                afterwards via :meth:`attach_founding_message` — the
+                honest mint-then-attach order.
+        """
+        # Rung 1 — open epoch as anchor.
+        open_epoch = self._repo.find_open_epoch_by_anchor(
+            actor_instance_id, session=session
+        )
+        if open_epoch is not None:
+            return MissionResolution(open_epoch.mission_id, 1, False)
+
+        # Rung 2 — outstanding commission on the actor.
+        commission = self._repo.find_outstanding_commission_for_worker(
+            actor_instance_id, session=session
+        )
+        if commission is not None:
+            return MissionResolution(commission.mission_id, 2, False)
+
+        # Rung 3 — mint a new epoch anchored on the actor.
+        record = self._mint_epoch_locked(
+            actor_instance_id=actor_instance_id,
+            founding_source=founding_source or lane,
+            session=session,
+            founding_message_id=founding_message_id,
+            commissioner_instance_id=commissioner_instance_id,
+            work_id=work_id,
+            provenance=provenance,
+        )
+        return MissionResolution(record.mission_id, 3, True)
+
+    # ── delivery/resume lanes (mint-if-no-open-epoch) ──
+
+    def _mint_if_no_open_epoch(
+        self,
+        actor_instance_id: str,
+        *,
+        founding_source: str,
+        commissioner_instance_id: Optional[str] = None,
+        founding_message_id: Optional[str] = None,
+        session: Optional[Session] = None,
+        provenance: str = MissionProvenance.LIVE.value,
+    ) -> MissionResolution:
+        """The delivery/resume shape: an OPEN epoch continues (resume is
+        delivery, not founding); a stranded instance (no open epoch)
+        gets an honest boundary row. Rung 2 is deliberately not
+        consulted — see the module docstring.
+        """
+        open_epoch = self._repo.find_open_epoch_by_anchor(
+            actor_instance_id, session=session
+        )
+        if open_epoch is not None:
+            return MissionResolution(open_epoch.mission_id, 1, False)
+        parent = self._repo.find_latest_epoch_by_anchor(
+            actor_instance_id, session=session
+        )
+        record = self._mint_epoch_locked(
+            actor_instance_id=actor_instance_id,
+            founding_source=founding_source,
+            session=session,
+            founding_message_id=founding_message_id,
+            commissioner_instance_id=commissioner_instance_id,
+            parent_mission_id=parent.mission_id if parent else None,
+            provenance=provenance,
+        )
+        return MissionResolution(record.mission_id, 3, True)
+
+    def mint_boot_epoch_if_none(
+        self,
+        actor_instance_id: str,
+        *,
+        session: Optional[Session] = None,
+    ) -> MissionResolution:
+        """Boot-sweep boundary (lane 14): ``founding_source='boot'``,
+        ``founding_message_id=NULL`` — the honest null (no message exists;
+        closes the "no message, no clear at all" gap)."""
+        return self._mint_if_no_open_epoch(
+            actor_instance_id,
+            founding_source=MissionFoundingSource.BOOT.value,
+            session=session,
+        )
+
+    def mint_cascade_resume_epoch_if_stranded(
+        self,
+        actor_instance_id: str,
+        *,
+        session: Optional[Session] = None,
+    ) -> MissionResolution:
+        """Cascade-resume boundary (lane 10): no mint unless the instance
+        is stranded (no open epoch) → ``founding_source='revive'``."""
+        return self._mint_if_no_open_epoch(
+            actor_instance_id,
+            founding_source=MissionFoundingSource.REVIVE.value,
+            session=session,
+        )
+
+    def mint_revive_epoch(
+        self,
+        actor_instance_id: str,
+        *,
+        commissioner_instance_id: Optional[str] = None,
+        founding_message_id: Optional[str] = None,
+        session: Optional[Session] = None,
+    ) -> MissionResolution:
+        """The revive boundary (lanes 4-terminal / 13): ``founding_source=
+        'revive'`` with a parent chain to the anchor's latest epoch.
+
+        If the anchor somehow still has an OPEN epoch, it is returned
+        (never two open epochs per anchor — the revive is a continuation
+        of it). The nudge-triggered variant records the nudger as the
+        epoch's commissioner (the nudge IS what commissioned the revived
+        work); the pure-message-shape revive passes ``None``.
+        ``founding_message_id`` attaches the triggering message when the
+        caller holds it (the enqueue-lane revive: the message id is
+        known inside ``_prepare_enqueued_message``).
+        """
+        return self._mint_if_no_open_epoch(
+            actor_instance_id,
+            founding_source=MissionFoundingSource.REVIVE.value,
+            commissioner_instance_id=commissioner_instance_id,
+            founding_message_id=founding_message_id,
+            session=session,
+        )
+
+    def mint_continuation_epoch(
+        self,
+        actor_instance_id: str,
+        *,
+        work_id: Optional[str] = None,
+        founding_message_id: Optional[str] = None,
+        session: Optional[Session] = None,
+    ) -> MissionResolution:
+        """job_continue's force-NEW-epoch mint (lane 3).
+
+        A follow-on job is a NEW mission epoch on the same instance —
+        NOT rung-1 reuse. The prior OPEN epoch transitions
+        ``open → superseded`` RECORD-SIDE ONLY (no instance status, no
+        gate channel, no ledger — the §2.4 ledger-clear policy is PR2+;
+        PR1 writes records only). ``parent_mission_id`` chains to the
+        superseded epoch.
+        """
+        prior_open = self._repo.find_open_epoch_by_anchor(
+            actor_instance_id, session=session
+        )
+        record = self._mint_epoch_locked(
+            actor_instance_id=actor_instance_id,
+            founding_source=MissionFoundingSource.JOB_CONTINUE.value,
+            session=session,
+            founding_message_id=founding_message_id,
+            work_id=work_id,
+            parent_mission_id=prior_open.mission_id if prior_open else None,
+        )
+        if prior_open is not None:
+            self._repo.supersede_open_epochs_for_anchor(
+                actor_instance_id,
+                except_mission_id=record.mission_id,
+                session=session,
+            )
+        return MissionResolution(record.mission_id, 3, True)
+
+    # ── record amendments (guarded, records only) ──
+
+    def attach_founding_message(
+        self,
+        mission_id: str,
+        founding_message_id: str,
+        *,
+        session: Optional[Session] = None,
+    ) -> bool:
+        """Attach the enqueue-minted message id to its epoch (the
+        mint-then-attach order). First attach wins (guarded on NULL)."""
+        return self._repo.attach_founding_message(
+            mission_id, founding_message_id, session=session
+        )
+
+    def amend_anchor(
+        self,
+        mission_id: str,
+        founding_message_id: str,
+        *,
+        session: Optional[Session] = None,
+    ) -> bool:
+        """Re-founding amendment seam (mid-mission user correction) —
+        RECORDS ONLY in PR1. The delivery-time firing (tap site) and the
+        gate read flip are PR2; the record shape ships complete."""
+        return self._repo.amend_founding_message(
+            mission_id, founding_message_id, session=session
+        )
+
+    def attach_work_id(
+        self,
+        mission_id: str,
+        work_id: str,
+        *,
+        session: Optional[Session] = None,
+    ) -> bool:
+        """Attach the post-enqueue ``work_id`` (job_continue linkage)."""
+        return self._repo.attach_work_id(mission_id, work_id, session=session)
+
+    # ── commissions ──
+
+    def mint_commission(
+        self,
+        mission_id: str,
+        *,
+        commissioner_instance_id: str,
+        worker_instance_id: str,
+        lane: str,
+        work_id: Optional[str] = None,
+        session: Optional[Session] = None,
+        advisory_backfill: bool = False,
+        commission_id: Optional[str] = None,
+        provenance: str = MissionProvenance.LIVE.value,
+    ) -> MissionCommission:
+        """Record one commissioned worker / work item.
+
+        D4(ii) mint-path validation: a commission whose WORKER row is
+        missing at mint time RAISES
+        :class:`MissionRecordError` — "a commission that can never be
+        satisfied must not be recorded as outstanding" (proposal-b §3).
+        Lane-side fail-open wrappers catch + log.
+
+        ADOPTION DELTA (a): a second commission of the same worker
+        mints a SECOND OUTSTANDING row — the guarded-state lifecycle is
+        the discriminator (see the module docstring for the precedence
+        decision). Routing authority stays with the A-resolver in PR1.
+
+        ``commission_id`` may be pinned (deterministic UUID5) by the
+        BACKFILL so its ``ON CONFLICT DO NOTHING`` idempotency keys on
+        the PK; live mints leave it None (random UUID4).
+        """
+        self._require_instance_row(
+            worker_instance_id, role="commission worker", session=session
+        )
+        commission = MissionCommission(
+            commission_id=commission_id if commission_id is not None else _new_uuid4(),
+            mission_id=mission_id,
+            commissioner_instance_id=commissioner_instance_id,
+            worker_instance_id=worker_instance_id,
+            work_id=work_id,
+            lane=lane,
+            state=CommissionState.OUTSTANDING.value,
+            advisory_backfill=advisory_backfill,
+        )
+        if provenance == MissionProvenance.BACKFILL.value and not advisory_backfill:
+            commission.advisory_backfill = True
+        return self._repo.insert_commission(commission, session=session)
+
+    def satisfy_commission(
+        self,
+        commission_id: str,
+        *,
+        session: Optional[Session] = None,
+    ) -> bool:
+        """``outstanding → satisfied`` (guarded). PR1 has no production
+        caller (the satisfy flip is PR2/PR3 — the commission-lookup
+        settle post-condition); the seam ships with the census
+        substrate."""
+        return self._repo.transition_commission_state(
+            commission_id, CommissionState.SATISFIED.value, session=session
+        )
+
+    def abandon_commission(
+        self,
+        commission_id: str,
+        *,
+        reason: str,
+        session: Optional[Session] = None,
+    ) -> bool:
+        """``outstanding → abandoned`` (guarded). The reconciliation
+        sweep's outcome write (the eternal-mission escape hatch,
+        proposal-b §8); the sweep itself is the PR3 deliverable — the
+        seam ships record-side complete."""
+        return self._repo.transition_commission_state(
+            commission_id,
+            CommissionState.ABANDONED.value,
+            abandon_reason=reason,
+            session=session,
+        )
+
+    def supersede_commission(
+        self,
+        commission_id: str,
+        *,
+        session: Optional[Session] = None,
+    ) -> bool:
+        """``outstanding → superseded`` (guarded)."""
+        return self._repo.transition_commission_state(
+            commission_id, CommissionState.SUPERSEDED.value, session=session
+        )
+
+    # ── attestation + settle (record-only in PR1) ──
+
+    def record_attestation(
+        self,
+        mission_id: str,
+        *,
+        attest_method: str = MissionAttestMethod.LEADER_ATTEST.value,
+        attestation_bypassed: bool = False,
+        session: Optional[Session] = None,
+    ) -> bool:
+        """Write the attestation block on the OPEN epoch.
+
+        PR1 lands the FIELDS + this seam (record-only). The Term-1
+        BLOCKING policy stays default-OFF per the ruling — the blocking
+        read is PR2 policy, gated separately. ``attest_completion``'s
+        one-row write is expected to call this in PR2's wiring; PR1
+        keeps the seam tested and unused by production callers.
+        """
+        return self._repo.record_attestation(
+            mission_id,
+            attest_method=attest_method,
+            attestation_bypassed=attestation_bypassed,
+            session=session,
+        )
+
+    def settle(
+        self,
+        mission_id: str,
+        *,
+        session: Optional[Session] = None,
+    ) -> bool:
+        """``open → settled`` (guarded, records only).
+
+        PR1 has NO production caller: settle is written by the EXISTING
+        settle machinery as a post-condition in PR2/PR3 (the L2 root-lane
+        stamp site / emission dispatch). No new terminal instance-status
+        writer exists — this writes ONLY ``mission_records.status``.
+        """
+        from datetime import datetime, timezone
+
+        return self._repo.transition_epoch_status(
+            mission_id,
+            MissionStatus.SETTLED.value,
+            settled_at=datetime.now(timezone.utc).isoformat(),
+            session=session,
+        )
+
+    # ── adoption delta (b): advisory nudge-commission backfill ──
+
+    def backfill_advisory_nudge_commissions(
+        self,
+        *,
+        dry_run: bool = True,
+        session: Optional[Session] = None,
+    ) -> dict[str, int]:
+        """Best-effort historical coverage of the existing nudge audit rows.
+
+        Rules (proposal-b §5.2 + comparison.md §4c, verbatim intent):
+
+        * Source: ``instance_ops_audit`` rows with
+          ``action='instance_nudge'`` AND ``outcome='committed'`` AND
+          ``dry_run=false`` (the audit's default row is a PREVIEW —
+          committed non-dry rows are the REAL acts; erratum 7).
+        * Target still NON-TERMINAL → mint an ADVISORY nudge commission
+          row (``lane='instance_nudge'``, ``provenance='backfill'``,
+          ``advisory_backfill=True``, deterministic UUID5 id).
+        * Target TERMINAL (or actor missing, or the mission epoch-0
+          row cannot be minted) → SKIPPED — the unrecoverable
+          one-time gap, counted in the result.
+        * IDEMPOTENT: the deterministic commission id + the epoch-0
+          resolve-if-none probe make re-runs no-ops.
+        * ``dry_run=True`` (the default) runs the scan + rules and logs
+          the plan WITHOUT writing — the dry-run-loggable contract.
+
+        **Advisory backfill rows are EXCLUDED from routing authority
+        FOREVER** (comparison.md §4c: "if dropped, the ledger is worse
+        than no ledger"). Nothing in PR1 reads them for decisions; the
+        PR3 flip must keep the exclusion.
+
+        Returns counters: ``{'scanned', 'minted_epochs', 'minted_commissions',
+        'skipped_terminal', 'skipped_no_actor', 'skipped_missing_target_row'}``.
+        """
+        from ..repositories.mission_record.models import MissionProvenance
+
+        counters = {
+            "scanned": 0,
+            "minted_epochs": 0,
+            "minted_commissions": 0,
+            "skipped_terminal": 0,
+            "skipped_no_actor": 0,
+            "skipped_missing_target_row": 0,
+        }
+        terminal = {
+            InstanceStatus.COMPLETED.value,
+            InstanceStatus.TERMINATED.value,
+            InstanceStatus.ERROR.value,
+            InstanceStatus.FAILED.value,
+        }
+
+        audits = self._repo.list_committed_nudge_audits(
+            action="instance_nudge",
+            outcome="committed",
+            dry_run=False,
+            session=session,
+        )
+        counters["scanned"] = len(audits)
+        logger.info(
+            "mission_records backfill: scanning %d committed non-dry "
+            "instance_nudge audit rows (dry_run=%s)",
+            len(audits),
+            dry_run,
+        )
+
+        for audit_id, actor_instance_id, target_instance_id, _created_at in audits:
+            # The audit row records the ACTOR (nudger); a committed
+            # non-dry nudge without an actor id cannot be attributed —
+            # the accepted one-time gap.
+            if not actor_instance_id:
+                counters["skipped_no_actor"] += 1
+                continue
+            with Session(self._repo._engine) as own:
+                target_row = own.get(Instance, target_instance_id)
+                actor_row = own.get(Instance, actor_instance_id)
+            if target_row is None or actor_row is None:
+                counters["skipped_missing_target_row"] += 1
+                continue
+            if target_row.status in terminal:
+                # The nudge's outcome is unrecoverable from the audit
+                # row (it records the act, not the completion linkage).
+                counters["skipped_terminal"] += 1
+                continue
+
+            # Epoch coverage: the epoch-0 synthetic row for the ACTOR
+            # (the mission the nudge belonged to), honest-NULL founding.
+            existing_epoch0 = self._repo.find_backfill_row_for_anchor(
+                actor_instance_id, session=session
+            )
+            mission_id: str | None = None
+            if existing_epoch0 is not None:
+                mission_id = existing_epoch0.mission_id
+            elif not dry_run:
+                record = self._mint_epoch_locked(
+                    actor_instance_id=actor_instance_id,
+                    founding_source=MissionFoundingSource.BACKFILL.value,
+                    session=session,
+                    provenance=MissionProvenance.BACKFILL.value,
+                )
+                mission_id = record.mission_id
+                counters["minted_epochs"] += 1
+            else:
+                counters["minted_epochs"] += 1  # dry-run projection
+
+            if mission_id is None:
+                continue
+
+            deterministic_id = self._repo.deterministic_commission_id(
+                mission_id, target_instance_id, CommissionLane.INSTANCE_NUDGE.value, audit_id
+            )
+            if not dry_run:
+                existing = self._repo.get_commission(
+                    deterministic_id, session=session
+                )
+                if existing is not None:
+                    continue  # idempotent re-run — conflict = no-op
+                self.mint_commission(
+                    mission_id,
+                    commissioner_instance_id=actor_instance_id,
+                    worker_instance_id=target_instance_id,
+                    lane=CommissionLane.INSTANCE_NUDGE.value,
+                    session=session,
+                    advisory_backfill=True,
+                    commission_id=deterministic_id,
+                    provenance=MissionProvenance.BACKFILL.value,
+                )
+            counters["minted_commissions"] += 1
+            logger.info(
+                "mission_records backfill: advisory nudge commission "
+                "actor=%s… target=%s… mission=%s… (dry_run=%s)",
+                actor_instance_id[:8],
+                target_instance_id[:8],
+                mission_id[:8],
+                dry_run,
+            )
+
+        logger.info(
+            "mission_records backfill: done scanned=%(scanned)d "
+            "minted_epochs=%(minted_epochs)d minted_commissions=%(minted_commissions)d "
+            "skipped_terminal=%(skipped_terminal)d skipped_no_actor=%(skipped_no_actor)d "
+            "skipped_missing_target_row=%(skipped_missing_target_row)d (dry_run=%(dryrun)s)",
+            {**counters, "dryrun": dry_run},
+        )
+        return counters
+
+
+# ---------------------------------------------------------------------------
+# Lane-facing fail-open wrappers
+# ---------------------------------------------------------------------------
+
+
+def _log_mint(rung: int, created: bool, actor: str, lane: str, mission_id: str) -> None:
+    if created:
+        logger.info(
+            "mission_records MINT lane=%s actor=%s… mission=%s… (rung %d)",
+            lane,
+            (actor or "")[:8],
+            mission_id[:8],
+            rung,
+        )
+    else:
+        logger.debug(
+            "mission_records resolve lane=%s actor=%s… mission=%s… (rung %d)",
+            lane,
+            (actor or "")[:8],
+            mission_id[:8],
+            rung,
+        )
+
+
+def resolve_or_mint_fail_open(
+    service: Optional["MissionRecordService"],
+    actor_instance_id: str,
+    lane: str,
+    *,
+    founding_source: Optional[str] = None,
+    commissioner_instance_id: Optional[str] = None,
+    work_id: Optional[str] = None,
+) -> Optional[str]:
+    """Commissioning-lane wrapper: resolve-or-mint, never raise.
+
+    Mode gate: ``off`` → ``None`` (no mints, no reads — the lane
+    proceeds record-blind, byte-identical to pre-PR1). Any failure →
+    logged + ``None`` (the D2(b) watcher-mint fail-open posture: the
+    record must never break the lane).
+    """
+    if service is None:
+        return None
+    if resolve_mission_records_mode() == MissionRecordMode.OFF:
+        return None
+    try:
+        resolution = service.resolve_or_mint(
+            actor_instance_id,
+            lane,
+            founding_source=founding_source,
+            commissioner_instance_id=commissioner_instance_id,
+            work_id=work_id,
+        )
+        _log_mint(resolution.rung, resolution.created, actor_instance_id, lane, resolution.mission_id)
+        return resolution.mission_id
+    except Exception as exc:  # noqa: BLE001 — fail-open producer
+        logger.warning(
+            "mission_records: resolve_or_mint failed (lane=%s actor=%s…): "
+            "%s: %s — lane proceeds without a record",
+            lane,
+            (actor_instance_id or "")[:8],
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
+def mint_continuation_epoch_fail_open(
+    service: Optional["MissionRecordService"],
+    actor_instance_id: str,
+    *,
+    work_id: Optional[str] = None,
+) -> Optional[str]:
+    """job_continue wrapper (force-new epoch; never raise)."""
+    if service is None:
+        return None
+    if resolve_mission_records_mode() == MissionRecordMode.OFF:
+        return None
+    try:
+        resolution = service.mint_continuation_epoch(
+            actor_instance_id, work_id=work_id
+        )
+        _log_mint(
+            resolution.rung,
+            resolution.created,
+            actor_instance_id,
+            "job_continue",
+            resolution.mission_id,
+        )
+        return resolution.mission_id
+    except Exception as exc:  # noqa: BLE001 — fail-open producer
+        logger.warning(
+            "mission_records: mint_continuation_epoch failed (actor=%s…): "
+            "%s: %s — lane proceeds without a record",
+            (actor_instance_id or "")[:8],
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
+def mint_revive_epoch_fail_open(
+    service: Optional["MissionRecordService"],
+    actor_instance_id: str,
+    *,
+    commissioner_instance_id: Optional[str] = None,
+    founding_message_id: Optional[str] = None,
+    session: Optional[Session] = None,
+    context_label: str = "revive",
+) -> Optional[str]:
+    """Revive-boundary wrapper (nudge-on-terminal + the
+    ``_prepare_enqueued_message`` fresh-episode revive). When
+    ``session`` is provided the mint rides the CALLER's transaction
+    (atomic with the revive) inside a SAVEPOINT (``begin_nested``) so a
+    mint failure can never poison the caller's transaction — the
+    savepoint rolls back, the wrapper degrades to no-record, and the
+    caller's own writes commit unchanged."""
+    if service is None:
+        return None
+    if resolve_mission_records_mode() == MissionRecordMode.OFF:
+        return None
+    try:
+        if session is not None:
+            with session.begin_nested():
+                resolution = service.mint_revive_epoch(
+                    actor_instance_id,
+                    commissioner_instance_id=commissioner_instance_id,
+                    founding_message_id=founding_message_id,
+                    session=session,
+                )
+        else:
+            resolution = service.mint_revive_epoch(
+                actor_instance_id,
+                commissioner_instance_id=commissioner_instance_id,
+                founding_message_id=founding_message_id,
+            )
+        _log_mint(
+            resolution.rung,
+            resolution.created,
+            actor_instance_id,
+            context_label,
+            resolution.mission_id,
+        )
+        return resolution.mission_id
+    except Exception as exc:  # noqa: BLE001 — fail-open producer
+        logger.warning(
+            "mission_records: mint_revive_epoch failed (actor=%s… "
+            "context=%s): %s: %s — lane proceeds without a record",
+            (actor_instance_id or "")[:8],
+            context_label,
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
+def mint_boot_epoch_if_none_fail_open(
+    service: Optional["MissionRecordService"],
+    actor_instance_id: str,
+) -> Optional[str]:
+    """Boot-sweep wrapper (never raise; boot must never wedge)."""
+    if service is None:
+        return None
+    if resolve_mission_records_mode() == MissionRecordMode.OFF:
+        return None
+    try:
+        resolution = service.mint_boot_epoch_if_none(actor_instance_id)
+        _log_mint(
+            resolution.rung,
+            resolution.created,
+            actor_instance_id,
+            "boot",
+            resolution.mission_id,
+        )
+        return resolution.mission_id
+    except Exception as exc:  # noqa: BLE001 — fail-open producer
+        logger.warning(
+            "mission_records: mint_boot_epoch_if_none failed (actor=%s…): "
+            "%s: %s — boot proceeds without a record",
+            (actor_instance_id or "")[:8],
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
+def mint_cascade_resume_epoch_if_stranded_fail_open(
+    service: Optional["MissionRecordService"],
+    actor_instance_id: str,
+) -> Optional[str]:
+    """Cascade-resume wrapper (never raise; the resume must never wedge)."""
+    if service is None:
+        return None
+    if resolve_mission_records_mode() == MissionRecordMode.OFF:
+        return None
+    try:
+        resolution = service.mint_cascade_resume_epoch_if_stranded(
+            actor_instance_id
+        )
+        _log_mint(
+            resolution.rung,
+            resolution.created,
+            actor_instance_id,
+            "cascade_resume",
+            resolution.mission_id,
+        )
+        return resolution.mission_id
+    except Exception as exc:  # noqa: BLE001 — fail-open producer
+        logger.warning(
+            "mission_records: cascade_resume mint failed (actor=%s…): "
+            "%s: %s — resume proceeds without a record",
+            (actor_instance_id or "")[:8],
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
+def mint_commission_fail_open(
+    service: Optional["MissionRecordService"],
+    mission_id: Optional[str],
+    *,
+    commissioner_instance_id: str,
+    worker_instance_id: str,
+    lane: str,
+    work_id: Optional[str] = None,
+) -> Optional[str]:
+    """Commission-mint wrapper (never raise).
+
+    D4(ii) note: the SERVICE raises ``MissionRecordError`` on a missing
+    worker row (the mint is the semantic contract); this WRAPPER is the
+    lane posture — the commissioning act itself still succeeds and the
+    validation failure is LOUD in the logs, never a silent mis-record.
+    Returns the commission id, or None (mode off / no mission / failure).
+    """
+    if service is None or not mission_id:
+        return None
+    if resolve_mission_records_mode() == MissionRecordMode.OFF:
+        return None
+    try:
+        commission = service.mint_commission(
+            mission_id,
+            commissioner_instance_id=commissioner_instance_id,
+            worker_instance_id=worker_instance_id,
+            lane=lane,
+            work_id=work_id,
+        )
+        logger.info(
+            "mission_records COMMISSION lane=%s mission=%s… "
+            "commissioner=%s… worker=%s… commission=%s…",
+            lane,
+            mission_id[:8],
+            commissioner_instance_id[:8],
+            worker_instance_id[:8],
+            commission.commission_id[:8],
+        )
+        return commission.commission_id
+    except Exception as exc:  # noqa: BLE001 — fail-open producer
+        logger.warning(
+            "mission_records: mint_commission failed (lane=%s "
+            "commissioner=%s… worker=%s…): %s: %s — act proceeds "
+            "without a commission record",
+            lane,
+            (commissioner_instance_id or "")[:8],
+            (worker_instance_id or "")[:8],
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
+def attach_founding_message_fail_open(
+    service: Optional["MissionRecordService"],
+    mission_id: Optional[str],
+    founding_message_id: Optional[str],
+) -> bool:
+    """Post-enqueue attach wrapper (never raise; miss = logged)."""
+    if service is None or not mission_id or not founding_message_id:
+        return False
+    if resolve_mission_records_mode() == MissionRecordMode.OFF:
+        return False
+    try:
+        attached = service.attach_founding_message(mission_id, founding_message_id)
+        if not attached:
+            logger.debug(
+                "mission_records: founding message attach skipped "
+                "(mission=%s… already carries a founding message)",
+                mission_id[:8],
+            )
+        return attached
+    except Exception as exc:  # noqa: BLE001 — fail-open producer
+        logger.warning(
+            "mission_records: attach_founding_message failed (mission=%s…): "
+            "%s: %s",
+            mission_id[:8],
+            type(exc).__name__,
+            exc,
+        )
+        return False
+
+
+__all__ = [
+    "MissionRecordService",
+    "MissionRecordError",
+    "MissionResolution",
+    "MissionRecordMode",
+    "MISSION_RECORDS_MODE_ENV",
+    "MISSION_ID_KEY",
+    "SCHEDULER_MINT_EXTENSION_ENV",
+    "resolve_mission_records_mode",
+    "scheduler_mint_extension_enabled",
+    "resolve_or_mint_fail_open",
+    "mint_continuation_epoch_fail_open",
+    "mint_revive_epoch_fail_open",
+    "mint_boot_epoch_if_none_fail_open",
+    "mint_cascade_resume_epoch_if_stranded_fail_open",
+    "mint_commission_fail_open",
+    "attach_founding_message_fail_open",
+]

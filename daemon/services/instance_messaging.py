@@ -45,6 +45,9 @@ from .resource_monitor.charge import (
     note_message_replace as _charge_note_message_replace,
 )
 from .messaging_types import AsyncMessageResult, LinkageContractError
+from .mission_record_service import (  # Proposal B PR1 — mission-record anchor
+    mint_revive_epoch_fail_open,
+)
 from .message_tap import (  # Phase 1 C2 — langgraph-checkpoint-perf
     MessageTapSlot,
     SOURCE_USER_MESSAGE_ENTRY,
@@ -541,6 +544,7 @@ def _build_graph_input(
     message_source: str | None = None,
     image_refs: list[str] | None = None,
     fresh_episode_attestation_reset: bool = False,
+    mission_id: str | None = None,
 ) -> dict[str, list[HumanMessage]]:
     """Build the LangGraph ``graph_input`` dict, prepending the persistent context block.
 
@@ -679,6 +683,13 @@ def _build_graph_input(
     extra_kwargs: dict[str, Any] = {}
     if fresh_episode_attestation_reset:
         extra_kwargs["fresh_episode_attestation_reset"] = True
+    # Proposal B PR1: the mission carrier rides the user message's
+    # ``additional_kwargs`` (the fresh-episode-sentinel shape) so the
+    # delivery-time mission stamp is visible to anything holding the
+    # HumanMessage. ADDITIVE and absent when ``mission_id`` is None —
+    # byte-identical wire shape for every pre-PR1 caller.
+    if mission_id:
+        extra_kwargs["mission_id"] = mission_id
     if stamped_kwargs is not None:
         user_message = HumanMessage(
             content=content,
@@ -872,6 +883,16 @@ class _PreparedEnqueueContext(NamedTuple):
     # EXISTS but its id could not be read back — the target WILL be
     # woken). Threaded onto ``AsyncMessageResult.not_queued_reason``.
     not_queued_reason: str | None = None
+    # Proposal B PR1 (mission-record anchor): the mission carrier —
+    # keyword-only ``mission_id`` threaded from the commissioning lane
+    # through the facade into this prelude (the Carrier-Threading
+    # producer site). Carried here AND persisted on the MessageQueue
+    # row's ``message_metadata`` JSONB under the reserved
+    # ``__ens_mission_id__`` key so the CLAIM path can re-read it into
+    # ``ProcessingContext.mission_id`` and the entry tap can stamp
+    # ``message_metadata.mission_id`` at delivery. ``None`` = every
+    # pre-PR1 caller (byte-identical).
+    mission_id: str | None = None
 
 
 class ActivityCallbackHandler(BaseCallbackHandler):
@@ -2110,6 +2131,7 @@ class InstanceMessagingService:
         work_id: str | None = None,
         work_id_required: bool = False,
         image_refs: list[str] | None = None,
+        mission_id: str | None = None,
     ) -> _PreparedEnqueueContext:
         """Shared prelude for ``enqueue_message``.
 
@@ -2263,6 +2285,20 @@ class InstanceMessagingService:
         # module-level pure helper ``_ensure_work_id_fail_closed`` —
         # directly unit-testable without a DB session.
         work_id = _ensure_work_id_fail_closed(work_id, work_id_required)
+
+        # Proposal B PR1 — the mission carrier is COMPUTED ONCE at this
+        # producer (the lane resolved-or-minted before calling the
+        # facade) and persisted under the RESERVED metadata key so the
+        # claim path can carry it to delivery (the F11 dispatch_chain
+        # reserved-key precedent). The caller's metadata dict is NEVER
+        # mutated — a copy carries the key.
+        from .mission_record_service import MISSION_ID_KEY
+
+        if mission_id:
+            if metadata:
+                metadata = {**metadata, MISSION_ID_KEY: mission_id}
+            else:
+                metadata = {MISSION_ID_KEY: mission_id}
 
         with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
             # ── D4(ii/iii) READ-BACK GUARD (2026-10-24, Phase 0) ───────────
@@ -2630,6 +2666,39 @@ class InstanceMessagingService:
                                 f"completion_gate_escalated and the "
                                 f"attestation:denial_epochs ledger"
                             )
+                            # ─── Proposal B PR1 (mission-record anchor):
+                            # the revive epoch MINT — the existing clears
+                            # above become the RECORDED CONSEQUENCE of
+                            # this mint (lane 13: "the existing
+                            # fresh-episode counter clear becomes the
+                            # recorded consequence of this mint, not an
+                            # accident of message shape"). RECORD-SIDE
+                            # ONLY: this writes mission_records (new
+                            # epoch, parent chain, founding_source=
+                            # 'revive', founding_message_id=<this
+                            # message>) and touches NOTHING else — no
+                            # additional counter/flag/ledger write, no
+                            # new terminal-status writer (the §2.4
+                            # "generalize the clear to every boundary"
+                            # policy is PR2+; the legacy clears above
+                            # keep their exact current behavior).
+                            #
+                            # SAME-TRANSACTION: rides THIS
+                            # WriteGuardSession so the epoch boundary is
+                            # atomic with the revive (the mint's
+                            # begin_nested savepoint keeps a mint failure
+                            # from poisoning the enqueue's transaction —
+                            # the wrapper then degrades to no-record and
+                            # the enqueue proceeds unchanged).
+                            mint_revive_epoch_fail_open(
+                                getattr(
+                                    self._manager, "_mission_record_service", None
+                                ),
+                                instance_id,
+                                session=session,
+                                context_label="enqueue_fresh_episode_revive",
+                                founding_message_id=message_id,
+                            )
                 # Naive-UTC digits (DC-A fix): last_activity_at is a
                 # tz-naive column on PostgreSQL.
                 instance.last_activity_at = now_utc_naive()
@@ -2716,6 +2785,7 @@ class InstanceMessagingService:
         work_id: str | None = None,
         work_id_required: bool = False,
         image_refs: list[str] | None = None,
+        mission_id: str | None = None,
     ) -> "AsyncMessageResult":
         """Enqueue a message via the unified dispatcher.
 
@@ -2775,6 +2845,7 @@ class InstanceMessagingService:
             work_id=work_id,
             work_id_required=work_id_required,
             image_refs=image_refs,
+            mission_id=mission_id,
         )
 
         # Phase 5 (Option B): when this message is being delivered via
@@ -2908,6 +2979,7 @@ class InstanceMessagingService:
         image_refs: list[str] | None = None,
         idempotency_key: str | None = None,
         dispatch_chain: dict[str, Any] | None = None,
+        mission_id: str | None = None,
     ) -> "AsyncMessageResult":
         """Submit a message to the queue as a JobItem (Option B).
 
@@ -3176,6 +3248,10 @@ class InstanceMessagingService:
             is_background=is_background,
             work_id=job_id,
             work_id_required=True,
+            # Proposal B PR1: the mission carrier rides through to the
+            # MessageQueue row (reserved metadata key) exactly as on the
+            # plain-enqueue path.
+            mission_id=mission_id,
             # Phase 2 / clipboard-image-chat (round-2 amendment #27,
             # #28): forward image_refs to the prelude so the row
             # audit column carries refs and the checkpoint kwargs
@@ -3587,6 +3663,7 @@ class InstanceMessagingService:
         task_context: str | None = None,
         image_refs: list[str] | None = None,
         *,
+        mission_id: str | None = None,
         is_fresh_episode_user_message: bool = False,
     ) -> "MessageResult":
         """Process message with activity tracking and cancellation support.
@@ -3618,6 +3695,16 @@ class InstanceMessagingService:
                 ``False`` is the safe default for the cascade-resume
                 direct-dispatch site (which bypasses enqueue) and any other
                 non-enqueued dispatch.
+            mission_id: Proposal B PR1 — the mission carrier. Threaded
+                from the persisted MessageQueue row's reserved
+                ``__ens_mission_id__`` metadata key via
+                ``ProcessingContext.mission_id`` (``task_processor._process``
+                reads it at claim). Consumed ONLY by the
+                ``user_message_entry`` tap (stamps
+                ``message_metadata.mission_id`` at delivery) and the
+                HumanMessage ``mission_id`` kwargs stamp — record-side
+                writes; NO gate/census/anchor read consumes it in PR1.
+                ``None`` (default) is byte-identical pre-PR1 behavior.
 
         Returns:
             MessageResult with response data.
@@ -4909,6 +4996,10 @@ class InstanceMessagingService:
                         # the user message always carries the
                         # sentinel when this is a fresh episode.
                         fresh_episode_attestation_reset=is_fresh_episode_user_message,
+                        # Proposal B PR1: the founding/amendment carrier
+                        # rides to the HumanMessage kwargs stamp (record
+                        # side; the entry tap stamps message_metadata).
+                        mission_id=mission_id,
                     )
                 else:
                     # Pure checkpoint resume (silent mode or no content)
@@ -4922,6 +5013,7 @@ class InstanceMessagingService:
                     message_source=message_source,
                     image_refs=image_refs,
                     fresh_episode_attestation_reset=is_fresh_episode_user_message,
+                    mission_id=mission_id,
                 )
         else:
             # First attempt - add message to conversation, with the
@@ -4950,6 +5042,7 @@ class InstanceMessagingService:
                 message_source=message_source,
                 image_refs=image_refs,
                 fresh_episode_attestation_reset=is_fresh_episode_user_message,
+                mission_id=mission_id,
             )
 
         # ── D2 seam drain — post-build phase ─────────────────────────────
@@ -5015,6 +5108,11 @@ class InstanceMessagingService:
             await _entry_tap.tap_node_return(
                 graph_input.get("messages", []),
                 instance_id,
+                # Proposal B PR1: the delivery-time mission stamp — the
+                # carrier threaded claim → ProcessingContext → here.
+                # Record-side only (the tap is non-load-bearing; the
+                # stamp is consumed by PR2 reads, never PR1).
+                mission_id=mission_id,
             )
 
         # Persistent context HumanMessages are graph inputs rather than normal

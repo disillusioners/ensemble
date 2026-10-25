@@ -50,10 +50,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Items tuple shape: ``(message_id, created_at, seq)``. Thread id is
-# passed separately because every call in the tap site is single-thread
-# (the tap fires for ONE ``configurable.thread_id`` at a time).
+# Items tuple shape: ``(message_id, created_at, seq)`` — or the
+# Proposal-B PR1 4-tuple ``(message_id, created_at, seq, mission_id)``
+# when the tap carries a mission stamp. 3-tuples remain valid
+# (backward-compatible); a ``None`` mission_id is identical to its
+# absence (NULL column).
 Items = list[tuple[str, str, int | None]]
+ItemsStamped = list[tuple[str, str, "int | None", "str | None"]]
 
 
 class MessageMetadataRepository:
@@ -93,15 +96,22 @@ class MessageMetadataRepository:
         if not items:
             return 0
 
-        rows = [
-            {
-                "thread_id": thread_id,
-                "message_id": mid,
-                "created_at": ts,
-                "seq": seq,
-            }
-            for (mid, ts, seq) in items
-        ]
+        rows = []
+        for item in items:
+            if len(item) == 4:
+                mid, ts, seq, mission_id = item  # type: ignore[misc]
+            else:
+                mid, ts, seq = item  # type: ignore[misc]
+                mission_id = None
+            rows.append(
+                {
+                    "thread_id": thread_id,
+                    "message_id": mid,
+                    "created_at": ts,
+                    "seq": seq,
+                    "mission_id": mission_id,
+                }
+            )
 
         with self._engine.begin() as conn:  # SYNC transaction
             dialect = conn.dialect.name  # "postgresql" | "sqlite"
