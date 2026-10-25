@@ -56,6 +56,7 @@ from .models import (
     NotifyAudit,
     OUTCOME_ACCEPTED,
     OUTCOME_DELIVERY_UNKNOWN,
+    OUTCOME_REFUSED,
 )
 
 logger = logging.getLogger(__name__)
@@ -157,7 +158,7 @@ class NotifyAuditRepository:
             action="notify_user",
             source_id=source_id,
             target_hash=target_hash,
-            outcome="refused",
+            outcome=OUTCOME_REFUSED,
             refusal_reason=refusal_reason,
             body_length=int(body_length),
             body_sha256=body_sha256,

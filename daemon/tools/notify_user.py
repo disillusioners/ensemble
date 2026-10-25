@@ -117,7 +117,6 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from ..repositories.notify_audit.models import (
-    OUTCOME_ACCEPTED,
     OUTCOME_DELIVERY_FAILED,
     OUTCOME_DELIVERY_UNKNOWN,
     OUTCOME_DISPATCHED,
@@ -125,8 +124,8 @@ from ..repositories.notify_audit.models import (
 )
 from ..repositories.notify_audit.repository import NotifyAuditRepository
 from ..sources.base import OutgoingMessage, SourceStatus
-from .upgrade_journal import USER_ORIGIN_CHAT_SOURCE_TYPES
 from ._tool_registry import register_tool_category
+from .upgrade_journal import USER_ORIGIN_CHAT_SOURCE_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -476,7 +475,7 @@ def create_notify_user_tools(
                 agent_id=caller_agent_id,
                 message=message,
             )
-        except Exception as exc:  # noqa: BLE001 — house pattern: error string, never raise
+        except Exception:  # noqa: BLE001 — house pattern: error string, never raise
             logger.exception("notify_user failed")
             # D9 edge 13 — the typed internal-error envelope; the
             # exception detail never reaches the payload (PB-F1 class).

@@ -4,7 +4,7 @@
 # Timeout: 3 minutes (180s) — target < 2 min runtime
 #
 # Runs the tool + registration suites added by this lane:
-#   1. tests/unit/test_notify_user_tool.py (34 tests)
+#   1. tests/unit/test_notify_user_tool.py (36 tests)
 #      - the D1 resolution chain: the 13-edge census (architecture §4)
 #      - the rate gates: C3 commit-before-count under the B2 lock, the
 #        N3 budget predicate (accepted-class only; refusals never

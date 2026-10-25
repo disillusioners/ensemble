@@ -312,14 +312,14 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # the W4 leader decision, reviewer council 2026-10-02).
 #
 # SAME-PR RULE (D18/A14): the set is pinned by exact-equality asserts at
-# NINE sites — five inline ``frozenset({...})`` literals + four
+# TEN sites — five inline ``frozenset({...})`` literals + five
 # ``EXPECTED_PRIVILEGED_SET`` constants — plus a
-# ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count assertion at FOUR
+# ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count assertion at FIVE
 # phase-local pins — plus ONE allow-array TRAILING-ENTRY pin (the
 # ``tools.allow`` ARRAY-ORDER discipline: only the categories appended
 # after the board may follow it — the board registration pin) —
-# FOURTEEN assertion sites across NINE files
-# (re-grepped on tip 7af1d2632d; ari-voice lane, fold-able 2). Adding or
+# SIXTEEN assertion sites across TEN files
+# (re-grepped on tip 9098df432; ari-voice lane). Adding or
 # removing a category REQUIRES updating ALL of them in the same commit:
 # ``tests/unit/tools/test_upgrade_registration.py``,
 # ``tests/unit/tools/test_attestation_registration.py``,
@@ -338,7 +338,9 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # added 2026-10-21; it pins BOTH categories plus the registration
 # wiring) and
 # ``tests/unit/test_wedge_capture_registration.py`` (the wedge-capture
-# pin — added 2026-10-22; exact-set AND count). The four phase-local
+# pin — added 2026-10-22; exact-set AND count) and
+# ``tests/unit/test_notify_user_registration.py`` (the ari-voice pin —
+# added 2026-10-25; exact-set AND count). The five phase-local
 # pins ALSO carry a ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count
 # assertion (16 as of the notify-user entry).
 #
@@ -607,9 +609,9 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # list bypasses the category gate, so the tool body ALSO carries
     # an ``agent_id == "ari"`` runtime gate. Both gates are required;
     # neither substitutes for the other.
-    # SAME-PR pin updates at the NINE files carrying the FOURTEEN
-    # assertion sites (9 exact-set + 4 count + 1 allow-array
-    # trailing-entry pin — re-grepped on tip 7af1d2632d, fold-able 2)
+    # SAME-PR pin updates at the TEN files carrying the SIXTEEN
+    # assertion sites (10 exact-set + 5 count + 1 allow-array
+    # trailing-entry pin — re-grepped on tip 9098df432, ari-voice lane)
     # are mandatory (this entry ships in the SAME commit as those bumps
     # — the set must never be red between two commits).
     "notify-user",

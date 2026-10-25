@@ -52,7 +52,6 @@ snapshotted before and asserted unchanged after.
 
 from __future__ import annotations
 
-import json
 import socket
 from pathlib import Path
 from typing import Any
