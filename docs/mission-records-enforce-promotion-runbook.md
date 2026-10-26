@@ -31,9 +31,13 @@ only.
 and verify). It does NOT cover the install/upgrade pipeline — see
 `docs/runbooks/upgrade-drills.md` for staging/promote/rollback mechanics.
 
-**Verified against:** the branch's last CONTENT commit `2453e271c`
-(`feature/mission-records-pr3`) — every `file:line` anchor in this runbook was
-read at that sha. The HISTORICAL commit shas quoted below (`13aa51e1a`,
+**Verified against:** the branch's final pre-merge HEAD (tip of
+`feature/mission-records-pr3`) — every `file:line` anchor in this runbook was
+read at the last content commit `2453e271c`, and the anchor set is
+equivalent at the final HEAD: `git diff 2453e271c..HEAD -- daemon/` is EMPTY
+(`daemon/` code anchors stay pinned at `2453e271c`; every commit after it is
+tests/docs/tooling only). The HISTORICAL commit shas quoted below
+(`13aa51e1a`,
 `3bd21ecbb`, `a3e033984`, `be8806ff5`, `d97132cff`) record WHICH COMMIT landed
 a feature — they are immutable history, NOT tree anchors, and are not
 re-anchored when the tree moves.
@@ -562,6 +566,11 @@ TTL ruling was deliberately left open; the `dry` counters are the evidence).
 
 * `probe_errors` climbing at a sustained rate — the sweep cannot prove its
   questions, so rows accumulate as holds rather than resolving.
+  **NOISY WHEN YOUNG — do NOT trip the rollback on `probe_errors` ALONE.** It
+  has a documented below-TTL FALSE-POSITIVE population: a young-row probe
+  fault (the probe ran before the TTL gate) increments the same counter, so a
+  climb driven by young rows is the expected transient, not the tripwire —
+  read it together with row age and with a hold that does not release.
 * **NOISY — do NOT trip the rollback on `masked_suspected` ALONE.** It has a
   documented FALSE-POSITIVE population: the signal fires when the commissioned
   worker has NO queue row at all since the mint, and a legitimate worker path

@@ -5,10 +5,12 @@ IMPLEMENTATION TRUTH; this file is the CLOSURE VERDICT per defect, per the
 design's own §3 per-defect table (proposal-b) and the architecture map. It
 does not restate implementation prose beyond what a verdict row needs.
 
-**Branch:** `feature/mission-records-pr3` — range `013895287..2453e271c`
-(base `013895287`). The counts below are measured **as of the last
-CONTENT commit `2453e271c`** (`test(mission-records): pin the F5 boot
-mode line's INFO level`): 37 commits, 43 files, +8768/−241. (Later commits
+**Branch:** `feature/mission-records-pr3` — range `013895287..` the branch's final pre-merge HEAD
+(base `013895287`). The counts below are measured **at the branch's final
+pre-merge HEAD**: 45 commits, 50 files, +10273/−241. The `daemon/` code
+anchors remain pinned at `2453e271c` — `git diff 2453e271c..HEAD -- daemon/`
+is EMPTY (the last `daemon/`-touching commit in the range is `7c9dfb47d`);
+every commit after `2453e271c` is tests/docs/tooling only. (Later commits
 on the branch change the totals — cite the range, not a self-referential
 count.)
 
