@@ -28,6 +28,11 @@
 #   creates a uniquely-named database and DROPS it at teardown (verified:
 #   zero notify_smoke_% databases remain after the run).
 #
+#   The smoke flags are the CALLER's contract: the pack FAILS LOUD
+#   (exit 1, the fence message below) when they are missing, because the
+#   flags are forced inside the pytest subprocess — a bare run would
+#   otherwise SKIP with exit 0, a false-PASS shape (the smoke never ran).
+#
 # FENCES (binding):
 #   * per-var env scrub of POSTGRES_* before launch (the env -u POSTGRES_*
 #     glob is a SILENT NO-OP — never trusted as a fence);
@@ -61,11 +66,19 @@ if [ ! -x ".venv/bin/pytest" ]; then
   exit 1
 fi
 
+# The caller MUST provision the smoke flags. They are forced INSIDE the
+# pytest subprocess below, so without this gate a caller that simply ran
+# the pack would get "SKIP" + exit 0 — a FALSE-PASS shape (the smoke
+# never ran, but the pack looked green). Missing flags are a FENCE
+# breach: fail loud, naming exactly what this gate requires.
 for gate in ENSEMBLE_NOTIFY_SMOKE ENSEMBLE_NOTIFY_SMOKE_UNIT; do
   if [ "${!gate:-}" != "1" ]; then
-    echo "SKIP: $gate is not set — the boot smoke is opt-in by design"
-    echo "RESULT: SKIP"
-    exit 0
+    echo "FENCE: $gate is not '1' (value: '${!gate:-<unset>}') — the notify_user boot smoke is opt-in and the CALLER must provision the smoke flags:"
+    echo "  ENSEMBLE_NOTIFY_SMOKE=1        (the module gate)"
+    echo "  ENSEMBLE_NOTIFY_SMOKE_UNIT=1   (the transient-unit gate)"
+    echo "  plus the scratch PG16 server: PG_TEST_HOST / PG_TEST_PORT / PG_TEST_DB / PG_TEST_USER / PG_TEST_PASSWORD"
+    echo "RESULT: FAIL"
+    exit 1
   fi
 done
 
