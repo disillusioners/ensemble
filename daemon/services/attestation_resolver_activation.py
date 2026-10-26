@@ -362,7 +362,7 @@ class SourceCSignals:
     user_answer_pending: bool = False
     #: Proposal B PR2 — the FIFTH R2 input (MISSION-scoped): the count
     #: of OUTSTANDING commission rows on the leader's open mission
-    #: epoch. The three tree counters above are TREE-scoped and cannot
+    #: epoch. The four tree counters above are TREE-scoped and cannot
     #: see an OUT-OF-TREE commissioned worker (the D2 premature-settle
     #: class); this input is mission-scoped.
     #:
@@ -1555,7 +1555,22 @@ def make_tree_rows_provider(
                         }
                     )
             return rows
-        except Exception:  # noqa: BLE001 — provider is best-effort only
+        except Exception as provider_exc:  # noqa: BLE001 — provider is best-effort only
+            # The fail-open is LOGGED (never a silent blanket swallow).
+            # The empty list STAYS the contract — the provider's own
+            # docstring says a provider failure degrades to counts-only
+            # C evidence — and the except is NOT narrowed on purpose:
+            # letting an unexpected exception escape would reach the C
+            # seam, whose whole-eval fail-open ALLOWS the leader
+            # mission (a LOOSER posture than the counts-only
+            # degradation). The empty list is the conservative one;
+            # the operator still has to SEE that the read degraded.
+            logger.warning(
+                "attestation resolver: the SOURCE C tree-rows provider "
+                "failed (%s: %s) — fail-OPEN to counts-only C evidence",
+                type(provider_exc).__name__,
+                provider_exc,
+            )
             return []
 
     return _provide
@@ -1688,7 +1703,17 @@ def _commissioned_rows_for_tree(
                 }
             )
         return rows
-    except Exception:  # noqa: BLE001 — the union is FAIL-OPEN
+    except Exception as union_exc:  # noqa: BLE001 — the union is FAIL-OPEN
+        # The fail-open is LOGGED (parity with the MISSION half's
+        # sibling): the tree half going invisible is the D2 shape the
+        # union exists to close, so the operator must be able to see it.
+        logger.warning(
+            "attestation resolver: the SOURCE C TREE union failed for "
+            "%s… (%s: %s) — fail-OPEN (counts-only C evidence)",
+            (",".join(str(t)[:8] for t in tree_ids[:3]) or "?"),
+            type(union_exc).__name__,
+            union_exc,
+        )
         return []
 
 
