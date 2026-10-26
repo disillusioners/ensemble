@@ -50,6 +50,8 @@ MISSION_MIGRATIONS = (
     "20261025_122631_create_mission_records.sql",
     "20261025_122700_create_mission_commissions.sql",
     "20261025_122730_add_mission_provenance_columns.sql",
+    # PR3 (OQ-3(b)) — the commission RESOLUTION stamp.
+    "20261026_060000_add_mission_commission_resolved_at.sql",
 )
 
 #: The canonical migrations directory (hoisted — the three sites below
@@ -129,6 +131,7 @@ def test_mission_migrations_apply_and_land_schema(bare_sqlite):
         "20261025_122631",
         "20261025_122700",
         "20261025_122730",
+        "20261026_060000",
     ]
 
     inspector = inspect(bare_sqlite)
@@ -173,6 +176,8 @@ def test_mission_migrations_apply_and_land_schema(bare_sqlite):
         "satisfied_at",
         "abandon_reason",
         "advisory_backfill",
+        # PR3 (OQ-3(b)) — the resolution stamp.
+        "resolved_at",
     } <= mc_cols
     mc_indexes = {i["name"] for i in inspector.get_indexes("mission_commissions")}
     assert "ix_mission_commissions_mission_state" in mc_indexes
@@ -206,6 +211,7 @@ def test_mission_migrations_are_idempotent_on_reapply(bare_sqlite):
         "20261025_122631",
         "20261025_122700",
         "20261025_122730",
+        "20261026_060000",
     } <= applied
 
     # Raw-SQL idempotency: replay the UP sections directly — every
@@ -234,6 +240,60 @@ def test_mission_migrations_are_idempotent_on_reapply(bare_sqlite):
     inspector = inspect(bare_sqlite)
     assert inspector.has_table("mission_records")
     assert inspector.has_table("mission_commissions")
+
+
+def test_the_boolean_columns_match_the_model_spelling(bare_sqlite):
+    """TASK C (PR3 carry-over) — the .sql DDL matches the MODELS.
+
+    The models are the truth: ``advisory_backfill`` /
+    ``attestation_bypassed`` are ``bool`` (SQLModel ``Boolean``), so
+    the SQLite migrations must spell them ``BOOLEAN`` (they said
+    ``INTEGER`` — the PR1-era drift). The VALUES are identical (0/1);
+    this is a declaration pin.
+    """
+    _ensure_host_tables(bare_sqlite)
+    _apply_mission_migrations(bare_sqlite)
+    inspector = inspect(bare_sqlite)
+    mc_types = {
+        c["name"]: str(c["type"]).upper()
+        for c in inspector.get_columns("mission_commissions")
+    }
+    mr_types = {
+        c["name"]: str(c["type"]).upper()
+        for c in inspector.get_columns("mission_records")
+    }
+    assert mc_types["advisory_backfill"] == "BOOLEAN"
+    assert mr_types["attestation_bypassed"] == "BOOLEAN"
+
+
+def test_the_resolution_stamp_migration_matches_the_model(bare_sqlite):
+    """The 3-site pin for the PR3 ``resolved_at`` column.
+
+    The SQLite migration (this file), the SQLModel field
+    (``MissionCommission.resolved_at``) and the PostgreSQL
+    ``_ensure_postgres_columns`` mirror must all carry the column.
+    """
+    _ensure_host_tables(bare_sqlite)
+    _apply_mission_migrations(bare_sqlite)
+    inspector = inspect(bare_sqlite)
+    mc_cols = {
+        c["name"] for c in inspector.get_columns("mission_commissions")
+    }
+    assert "resolved_at" in mc_cols
+
+    from daemon.repositories.mission_record.models import MissionCommission
+
+    assert "resolved_at" in MissionCommission.model_fields
+
+    manager_source = (
+        Path(__file__).resolve().parents[2]
+        / "daemon"
+        / "manager.py"
+    ).read_text(encoding="utf-8")
+    assert (
+        "ALTER TABLE mission_commissions ADD COLUMN IF NOT EXISTS resolved_at TEXT"
+        in manager_source
+    )
 
 
 def test_partial_unique_index_enforces_mint_idempotency(bare_sqlite):
