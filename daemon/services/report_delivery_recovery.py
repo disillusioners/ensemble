@@ -2,10 +2,11 @@
 
 Phase 2 (pause-report-recovery, tasks 2.4 + 2.5 + 2.6). The recovery
 sweep is a periodic background thread that drains every recoverable
-report-delivery obligation across the system. Five lanes run in a
+report-delivery obligation across the system. SEVEN lanes run in a
 single sweep pass; each lane is independently kill-switchable via
 config (``lane_deferred``, ``lane_no_row_backstop``,
-``lane_pending_age``, ``lane_recovery_retry``, ``lane_orphan``).
+``lane_pending_age``, ``lane_recovery_retry``, ``lane_orphan``,
+``lane_stuck_wake``, ``lane_mission_reconciliation``).
 
 ════════════════════════════════════════════════════════════════════
 W-2 DO NOT CALL (durability-f1-f2 / phase2 task 2.9)
@@ -163,8 +164,9 @@ Service shape (matches the ``StaleTaskRecovery`` precedent):
   ``recover_report_delivery`` crash-recovery endpoint calls this and
   returns structured per-row results.
 
-Five lanes (v3, no one-time-only lanes — W9, no-row backstop
-designed-in — C3, terminal-parent ORPHAN — W1):
+Seven lanes (v3, no one-time-only lanes — W9, no-row backstop
+designed-in — C3, terminal-parent ORPHAN — W1 — the G4 stuck-wake
+heal — and the Proposal B PR3 mission-commission reconciliation):
 
 1. **DEFERRED lane** — ``find_deferred_for_parent_all(parent_not_terminal=True)``
    transitions each row to PENDING, reconciles artifacts, and re-enters
@@ -195,6 +197,21 @@ designed-in — C3, terminal-parent ORPHAN — W1):
    filtered to terminal parents. Per row: try revival (instance_messaging
    precedent at line 1486) first; on revival failure, log + structured
    metric disposition (never silent — observed by test 3.6).
+
+6. **STUCK-WAKE lane (G4)** — the destructive heal: a dead worker's
+   preserved wake row is force-cancelled and the parent is woken
+   through the sanctioned manager-loop ping seam.
+
+7. **MISSION-RECONCILIATION lane (Proposal B PR3)** — the ESCAPE VALVE
+   for the eternal-mission class: an outstanding
+   ``mission_commissions`` row whose commissioned work will never
+   produce a report holds its mission open forever (the D2(c)
+   settle-hold refuses to settle while ``outstanding_commissions >
+   0``). This lane resolves the provably-dead rows to ``abandoned``
+   (and the provably-delivered ones to ``satisfied``) under a
+   FAIL-MISS posture: every probe error HOLDS the row, and the TTL is
+   the one time-bounded exception. It writes ONLY
+   ``mission_commissions``.
 
 Per-row invariants (every lane):
 
@@ -261,7 +278,7 @@ import asyncio
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from daemon.constants import (
@@ -557,7 +574,9 @@ class SweepResult:
 
 
 class ReportDeliveryRecoveryService:
-    """Periodic recovery sweep with five lanes (pause-report-recovery Phase 2).
+    """Periodic recovery sweep with SEVEN lanes (pause-report-recovery
+    Phase 2 + the G4 stuck-wake heal + the Proposal B PR3
+    mission-commission reconciliation).
 
     Mirrors :class:`daemon.services.stale_task_recovery.StaleTaskRecovery`
     (thread + ``_stop_event`` pattern; ``start`` / ``stop``; ``recover_on_startup``
@@ -858,7 +877,7 @@ class ReportDeliveryRecoveryService:
         return self._run_all_lanes_sync()
 
     # --------------------------------------------------------
-    # Lane runner — five lanes, sequential, bounded
+    # Lane runner — seven lanes, sequential, bounded
     # --------------------------------------------------------
 
     def _run_all_lanes_sync(self) -> SweepResult:
