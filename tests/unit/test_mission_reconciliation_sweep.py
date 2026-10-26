@@ -307,6 +307,43 @@ def _row(engine, commission_id: str) -> MissionCommission | None:
         return session.get(MissionCommission, commission_id)
 
 
+def _iso_seconds_ago(seconds: float) -> str:
+    """An aware UTC ISO stamp ``seconds`` in the past."""
+    from datetime import datetime, timedelta, timezone
+
+    return (
+        datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    ).isoformat()
+
+
+def _seed_injection(
+    engine,
+    *,
+    state: str,
+    created_at: str,
+    parent: str = "commissioner-1",
+    child: str = "worker-1",
+    child_message_id: str = "m-1",
+) -> str:
+    """Insert one ``report_injections`` row for the (parent, child) pair."""
+    from daemon.repositories.report_injection.models import ReportInjection
+
+    injection_id = str(uuid.uuid4())
+    with Session(engine) as session:
+        session.add(
+            ReportInjection(
+                injection_id=injection_id,
+                parent_instance_id=parent,
+                child_instance_id=child,
+                child_message_id=child_message_id,
+                created_at=created_at,
+                state=state,
+            )
+        )
+        session.commit()
+    return injection_id
+
+
 @pytest.fixture(autouse=True)
 def _no_parent_history(monkeypatch):
     """The parent-history PREFIX ledger reads NO evidence by default."""
@@ -595,24 +632,21 @@ class TestTheWorkerTerminalRule:
         assert row.resolved_at is not None
 
     def test_an_injection_row_is_delivery_evidence(self, engine, manager_loop):
+        """MAJ-1: a DELIVERED injection row IS evidence — for the
+        commission that was minted BEFORE it."""
         from daemon.repositories.report_injection.models import (
             ReportInjection,
             ReportInjectionState,
         )
 
-        commission_id = _mint_commission(engine)
-        with Session(engine) as session:
-            session.add(
-                ReportInjection(
-                    injection_id=str(uuid.uuid4()),
-                    parent_instance_id="commissioner-1",
-                    child_instance_id="worker-1",
-                    child_message_id="m-1",
-                    created_at="2026-10-26T00:00:00+00:00",
-                    state=ReportInjectionState.PENDING.value,
-                )
-            )
-            session.commit()
+        commission_id = _mint_commission(
+            engine, created_at=_iso_seconds_ago(7200)
+        )
+        _seed_injection(
+            engine,
+            state=ReportInjectionState.INJECTED.value,
+            created_at=_iso_seconds_ago(3600),
+        )
         service, _ = _build_service(
             engine,
             manager_loop=manager_loop,
@@ -642,6 +676,192 @@ class TestTheWorkerTerminalRule:
         assert lane.abandoned_ttl == 0
         assert _row(engine, commission_id).state == (
             CommissionState.OUTSTANDING.value
+        )
+
+
+# ---------------------------------------------------------------------------
+# MAJ-1 — the delivery-evidence probe is DELIVERED-states-only and
+#          bounded to THIS commission
+# ---------------------------------------------------------------------------
+
+
+class TestTheDeliveryEvidenceBound:
+    """MAJ-1 (the binding ruling): the evidence read is narrowed.
+
+    The probe was doubly coarse:
+
+    * (a) NO STATE FILTER — a PENDING / DEFERRED obligation row (the
+      delivery has NOT happened) or a FAILED row (the delivery path
+      gave up) counted as delivery proof;
+    * (b) NO COMMISSION LINKAGE — a PRIOR commission's injection row
+      satisfied a FRESH commission on the same (commissioner, worker)
+      pair.
+
+    Both produced the same harm: a premature ``satisfied`` ⇒ a premature
+    publish (the D2 class, re-created from the far side).
+    """
+
+    def test_a_prior_commissions_delivery_does_not_satisfy_the_new_commission(
+        self, engine, manager_loop
+    ):
+        """The PIN: two commissions on one pair; the FIRST has a
+        delivered injection row; the SECOND stays OUTSTANDING."""
+        from daemon.repositories.report_injection.models import (
+            ReportInjectionState,
+        )
+
+        # Commission A (older) — minted 2 h ago.
+        first_id = _mint_commission(
+            engine, created_at=_iso_seconds_ago(7200)
+        )
+        # The delivery evidence — written 1 h ago: AFTER A's mint, BEFORE
+        # B's mint. It is A's evidence, not B's.
+        _seed_injection(
+            engine,
+            state=ReportInjectionState.INJECTED.value,
+            created_at=_iso_seconds_ago(3600),
+        )
+        # Commission B (newer) — minted 60 s ago (below the TTL, so the
+        # OTHER legs hold it rather than abandoning it).
+        second_id = _mint_commission(
+            engine, created_at=_iso_seconds_ago(60)
+        )
+        service, _ = _build_service(
+            engine,
+            manager_loop=manager_loop,
+            instance_repo=FakeInstanceRepo(statuses={"worker-1": "running"}),
+        )
+
+        lane = service.recover_now().lanes["mission_reconciliation"]
+
+        # A is satisfied by ITS delivery …
+        assert lane.satisfied_on_evidence == 1
+        assert _row(engine, first_id).state == CommissionState.SATISFIED.value
+        # … and B is NOT: the prior commission's delivery is not B's
+        # evidence, so B stays outstanding (held below the TTL).
+        assert _row(engine, second_id).state == (
+            CommissionState.OUTSTANDING.value
+        )
+        assert lane.abandoned_ttl == 0
+        assert lane.abandoned_worker_terminal == 0
+
+    def test_an_undelivered_injection_row_is_not_delivery_evidence(
+        self, engine, manager_loop
+    ):
+        """A PENDING obligation row is NOT a delivery (the state filter)."""
+        from daemon.repositories.report_injection.models import (
+            ReportInjectionState,
+        )
+
+        commission_id = _mint_commission(
+            engine, created_at=_iso_seconds_ago(7200)
+        )
+        _seed_injection(
+            engine,
+            state=ReportInjectionState.PENDING.value,
+            created_at=_iso_seconds_ago(3600),
+        )
+        service, _ = _build_service(
+            engine,
+            manager_loop=manager_loop,
+            instance_repo=FakeInstanceRepo(statuses={"worker-1": "completed"}),
+        )
+
+        lane = service.recover_now().lanes["mission_reconciliation"]
+
+        assert lane.satisfied_on_evidence == 0
+        # No evidence ⇒ the terminal-worker leg abandons it (the row is
+        # NOT satisfied by an undelivered obligation).
+        assert lane.abandoned_worker_terminal == 1
+        assert _row(engine, commission_id).state == (
+            CommissionState.ABANDONED.value
+        )
+
+    def test_a_failed_injection_row_is_not_delivery_evidence(
+        self, engine, manager_loop
+    ):
+        """A FAILED row is a delivery FAILURE — not a delivery."""
+        from daemon.repositories.report_injection.models import (
+            ReportInjectionState,
+        )
+
+        commission_id = _mint_commission(
+            engine, created_at=_iso_seconds_ago(7200)
+        )
+        _seed_injection(
+            engine,
+            state=ReportInjectionState.FAILED.value,
+            created_at=_iso_seconds_ago(3600),
+        )
+        service, _ = _build_service(
+            engine,
+            manager_loop=manager_loop,
+            instance_repo=FakeInstanceRepo(statuses={"worker-1": "completed"}),
+        )
+
+        lane = service.recover_now().lanes["mission_reconciliation"]
+
+        assert lane.satisfied_on_evidence == 0
+        assert lane.abandoned_worker_terminal == 1
+        assert _row(engine, commission_id).state == (
+            CommissionState.ABANDONED.value
+        )
+
+    def test_the_repository_read_returns_the_delivered_states_only(
+        self, engine
+    ):
+        """The repository read itself is state-filtered (the pin on the
+        data plane, not only on the sweep's verdict)."""
+        from daemon.repositories.report_injection.models import (
+            ReportInjectionState,
+        )
+        from daemon.repositories.report_injection.repository import (
+            ReportInjectionRepository,
+        )
+
+        _seed_injection(
+            engine,
+            state=ReportInjectionState.PENDING.value,
+            created_at=_iso_seconds_ago(100),
+            child_message_id="m-pending",
+        )
+        _seed_injection(
+            engine,
+            state=ReportInjectionState.DEFERRED.value,
+            created_at=_iso_seconds_ago(90),
+            child_message_id="m-deferred",
+        )
+        _seed_injection(
+            engine,
+            state=ReportInjectionState.FAILED.value,
+            created_at=_iso_seconds_ago(80),
+            child_message_id="m-failed",
+        )
+        _seed_injection(
+            engine,
+            state=ReportInjectionState.INJECTED.value,
+            created_at=_iso_seconds_ago(70),
+            child_message_id="m-injected",
+        )
+        _seed_injection(
+            engine,
+            state=ReportInjectionState.TASK_DELIVERED.value,
+            created_at=_iso_seconds_ago(60),
+            child_message_id="m-task-delivered",
+        )
+
+        rows = ReportInjectionRepository(engine=engine).find_delivered_for_pair(
+            "commissioner-1", "worker-1"
+        )
+
+        assert {row.state for row in rows} == {
+            ReportInjectionState.INJECTED.value,
+            ReportInjectionState.TASK_DELIVERED.value,
+        }
+        assert len(rows) == 2
+        # The former state-AGNOSTIC read is GONE (one spelling only).
+        assert not hasattr(
+            ReportInjectionRepository, "find_any_for_pair"
         )
 
 

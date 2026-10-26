@@ -2272,9 +2272,12 @@ class ReportDeliveryRecoveryService:
 
         # ── (5) the delivery-evidence TRILET (R1/R1b) — the lane-2
         # evidence helpers, read on the COMMISSIONER as the recipient.
+        # MAJ-1: the injection-row leg is DELIVERED-states-only AND
+        # bounded to THIS commission (a row strictly older than the
+        # mint belongs to an earlier commission on the same pair).
         try:
             has_evidence = self._delivery_evidence_exists(
-                commissioner_id, worker_id
+                commissioner_id, worker_id, commission
             )
         except Exception as exc:
             out.probe_errors += 1
@@ -2494,32 +2497,46 @@ class ReportDeliveryRecoveryService:
         return getattr(service, "repository", None)
 
     def _delivery_evidence_exists(
-        self, commissioner_id: str, worker_id: str
+        self, commissioner_id: str, worker_id: str, commission: Any
     ) -> bool:
         """R1/R1b — the delivery-evidence TRILET, read on the COMMISSIONER.
 
         The lane-2 evidence helpers, reused on the COMMISSIONER as the
         recipient (the commissioner's report is the obligation):
 
-        1. an injection row in ANY state for the (commissioner, worker)
-           pair;
+        1. an injection row in a DELIVERED state (``INJECTED`` /
+           ``TASK_DELIVERED``) for the (commissioner, worker) pair,
+           **bounded to THIS commission** (MAJ-1: a row strictly older
+           than the commission's mint is an EARLIER commission's
+           evidence, not this one's);
         2. the queue-side PREFIX ledger (``internal_report:{worker}:%``);
         3. the parent-history PREFIX ledger (loop-bound → bridged onto
            the manager's loop via ``_run_async_on_manager_loop``).
+
+        **MAJ-1 SCOPE, stated honestly:** the commission bound applies to
+        leg 1 (the injection-row read — the one the ruling names). Legs
+        2 and 3 are PAIR-keyed PREFIX ledgers (they carry no commission
+        id), so a delivery they record for an EARLIER commission on the
+        same pair still reads as evidence. Narrowing them is NOT in this
+        PR's ruling scope; the residual is recorded in the B-arc closure
+        table's deferral list.
 
         Raises:
             MissionReconciliationProbeError: a probe could not run — the
                 caller HOLDS (P1).
         """
         find_pair = getattr(
-            self._report_injection_repo, "find_any_for_pair", None
+            self._report_injection_repo, "find_delivered_for_pair", None
         )
         if not callable(find_pair):
             raise MissionReconciliationProbeError(
-                "report_injection_repo lacks find_any_for_pair — the "
+                "report_injection_repo lacks find_delivered_for_pair — the "
                 "injection-row probe cannot run"
             )
-        if find_pair(commissioner_id, worker_id) is not None:
+        delivered_rows = list(find_pair(commissioner_id, worker_id))
+        if delivered_rows and self._delivered_row_is_this_commission(
+            commission, delivered_rows
+        ):
             return True
 
         queue_evidence = getattr(
@@ -2555,6 +2572,44 @@ class ReportDeliveryRecoveryService:
                 None,
             )
         )
+
+    def _delivered_row_is_this_commission(
+        self, commission: Any, delivered_rows: list[Any]
+    ) -> bool:
+        """Is one of the DELIVERED injection rows THIS commission's evidence?
+
+        **MAJ-1 — the commission linkage.** A delivered injection row
+        that is STRICTLY OLDER than the commission's mint belongs to an
+        EARLIER commission on the same (commissioner, worker) pair: it
+        proves that the EARLIER obligation was delivered, not this one.
+        Without the bound, a prior commission's delivery SATISFIED a
+        fresh commission (premature publish — the D2 harm re-created
+        from the far side).
+
+        **PYTHON-SIDE by ruling.** The two columns carry different ISO
+        shapes — the commission's ``now_utc_iso()`` vs the injection
+        row's ``datetime.now(timezone.utc).isoformat()`` — so a TEXT
+        comparison across shapes is not safe, and the TEXT-ISO
+        convention forbids a string comparison in SQL anyway. The
+        comparison is therefore made on PARSED, tz-aware UTC instants
+        (``parse_iso_utc`` — the sweep's own stamp parser).
+
+        **Fail-MISS on an undateable stamp.** An unparsable commission
+        mint or an unparsable row stamp cannot PROVE the row is not
+        older than the mint ⇒ it is not evidence (the row is held, not
+        satisfied). A row whose stamp EQUALS the mint counts as
+        evidence (only a STRICTLY older row is excluded).
+        """
+        minted_at = parse_iso_utc(getattr(commission, "created_at", None))
+        if minted_at is None:
+            return False
+        for row in delivered_rows:
+            delivered_at = parse_iso_utc(getattr(row, "created_at", None))
+            if delivered_at is None:
+                continue
+            if delivered_at >= minted_at:
+                return True
+        return False
 
     def _note_masked_enqueue(
         self,

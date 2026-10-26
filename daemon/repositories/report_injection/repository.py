@@ -876,21 +876,41 @@ class ReportInjectionRepository:
             )
         ).first()
 
-    def find_any_for_pair(
+    def find_delivered_for_pair(
         self,
         parent_instance_id: str,
         child_instance_id: str,
-    ) -> ReportInjection | None:
-        """ANY row for the (parent, child) pair, in ANY state.
+    ) -> list[ReportInjection]:
+        """The DELIVERED injection rows for the (parent, child) pair.
 
         The reconciliation sweep's DELIVERY-EVIDENCE probe
-        (Proposal B PR3 — RDRS lane 7, the design's R1/R1b): "has ANY
-        report-injection row been written for this
-        (commissioner, worker) pair?". The read is deliberately
-        state-AGNOSTIC — a row in ANY state (PENDING / DEFERRED /
-        INJECTED / TASK_DELIVERED / FAILED) is positive delivery
-        evidence, and the sweep must not abandon a commission whose
-        obligation row exists.
+        (Proposal B PR3 — RDRS lane 7, the design's R1/R1b): "has a
+        report-injection row been DELIVERED for this
+        (commissioner, worker) pair?".
+
+        **STATE FILTER (MAJ-1, the binding ruling).** DELIVERED states
+        ONLY — ``INJECTED`` + ``TASK_DELIVERED``. The previous read
+        (:meth:`find_any_for_pair`, now removed) was deliberately
+        state-AGNOSTIC — "ANY state is positive delivery evidence".
+        That rationale is **OVERTURNED by ruling**: a ``PENDING`` or
+        ``DEFERRED`` row is an UNFULFILLED obligation (the delivery has
+        NOT happened) and a ``FAILED`` row is a DELIVERY FAILURE —
+        neither is delivery evidence. Treating them as evidence let the
+        sweep SATISFY a commission whose report was never delivered (the
+        D2 premature-publish harm, re-created from the far side), and
+        the FAILURE state in particular was the worst offender: a row
+        the delivery path explicitly gave up on read as a delivery.
+
+        **COMMISSION LINKAGE (MAJ-1, the binding ruling).** The rows
+        are returned for the CALLER's Python-side bound: a row STRICTLY
+        OLDER than the commission's mint belongs to an EARLIER
+        commission on the same pair, so it cannot be THIS commission's
+        evidence. The bound is applied by the CALLER (the sweep),
+        PYTHON-side, because the two columns carry different ISO
+        shapes — the commission's ``now_utc_iso()`` vs the injection
+        row's ``datetime.now(timezone.utc).isoformat()`` — and a TEXT
+        comparison across shapes is not safe (the TEXT-ISO convention
+        forbids a string comparison in SQL).
 
         NOT keyed on ``child_message_id``: the commission row does NOT
         carry the child's message id, so the pair read is the coarsest
@@ -898,20 +918,33 @@ class ReportInjectionRepository:
         lane-2 PREFIX ledger uses — the commissioner/worker PAIR, not a
         message triple).
 
+        Ordered newest-first (``created_at DESC``): the newest delivered
+        row is the strongest candidate, so a caller that short-circuits
+        on the first qualifying row reads at most one row.
+
         Read-only; writes nothing.
         """
         if not parent_instance_id or not child_instance_id:
-            return None
+            return []
         with Session(self.engine) as session:
-            return session.exec(
-                select(ReportInjection)
-                .where(
-                    ReportInjection.parent_instance_id == parent_instance_id
-                )
-                .where(
-                    ReportInjection.child_instance_id == child_instance_id
-                )
-            ).first()
+            return list(
+                session.exec(
+                    select(ReportInjection)
+                    .where(
+                        ReportInjection.parent_instance_id == parent_instance_id
+                    )
+                    .where(
+                        ReportInjection.child_instance_id == child_instance_id
+                    )
+                    .where(
+                        ReportInjection.state.in_([
+                            _INJECTED_STATE,
+                            _TASK_DELIVERED_STATE,
+                        ])
+                    )
+                    .order_by(ReportInjection.created_at.desc())
+                ).all()
+            )
 
     def find_row_by_report_message_id(
         self, report_message_id: str | None
