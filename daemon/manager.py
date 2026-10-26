@@ -1033,20 +1033,33 @@ class InstanceManager:
         _mission_records_mode = resolve_mission_records_mode()
 
         # ── Proposal B PR1 — adoption-delta (b): advisory nudge-commission
-        # backfill (dry-run-loggable) ──────────────────────────────────
+        # backfill (mode-gated: PR3 makes it COMMITTING in enforce) ────
         # Best-effort historical coverage of the existing
         # ``instance_ops_audit`` nudge rows (the tiny surface: 6 rows / 1
         # committed nudge all-time): committed non-dry nudges whose
         # target is STILL NON-TERMINAL mint ADVISORY commission rows
         # (``provenance='backfill'``, deterministic ids, EXCLUDED from
         # routing authority forever). IDEMPOTENT (deterministic UUID5
-        # commission ids + epoch-0 resolve-if-none). Runs DRY-RUN ONLY at
-        # boot in PR1 (the loggable plan; the committing run is an
-        # operator action — ``backfill_advisory_nudge_commissions(
-        # dry_run=False)`` — matching proposal-b §5.2's "runs
-        # dry-run-loggable before commit"). NEVER breaks boot: the
-        # envelope swallows everything but logs loudly. Skipped entirely
-        # when the mode ladder is ``off``.
+        # commission ids + epoch-0 resolve-if-none). NEVER breaks boot:
+        # the envelope swallows everything but logs loudly.
+        #
+        # MODE LADDER (PR3 — proposal-b §5.2 + the PR1 notes §(b)):
+        # * ``off``     — skipped entirely (no mints, no reads, no
+        #                 backfill).
+        # * ``dry``     — the ship default: DRY-RUN ONLY (the loggable
+        #                 plan; zero writes).
+        # * ``enforce`` — the COMMITTING run (``dry_run=False``): the
+        #                 advisory rows are minted at boot. IDEMPOTENT:
+        #                 a re-boot re-derives the SAME UUID5 ids and
+        #                 pre-checks them (conflict = no-op), so every
+        #                 subsequent boot is a no-op scan.
+        # RETENTION STORY: advisory rows are DURABLE by design — they
+        # are the historical ledger ("if dropped, the ledger is worse
+        # than no ledger"); there is NO pruning/TTL. They are excluded
+        # from EVERY read that consults commissions (routing, census
+        # record-leg, quiet, L3 hold — and the to-come sweep) by the ONE
+        # consistent ``advisory_backfill = False`` predicate, so their
+        # persistence is audit-only and can never arm a gate.
         #
         # ORDERING (independent-review F1): this block runs AFTER the
         # ``self._mission_record_service`` assignment above. It used to
@@ -1056,9 +1069,25 @@ class InstanceManager:
         # below, so the documented dry-run plan NEVER ran and never
         # logged on the default ``dry`` path.
         try:
-            if _mission_records_mode != MissionRecordMode.OFF:
+            if _mission_records_mode == MissionRecordMode.ENFORCE:
                 # SYNC context (manager __init__ — the migration block
-                # above is sync too): call the backfill directly.
+                # above is sync too): call the backfill directly. The
+                # COMMITTING run (writes; idempotent on re-boot).
+                _backfill = (
+                    self._mission_record_service.backfill_advisory_nudge_commissions(
+                        dry_run=False,
+                    )
+                )
+                if _backfill.get("scanned"):
+                    logger.info(
+                        "mission_records: advisory nudge-commission "
+                        "backfill COMMITTED run (enforce boot): %s",
+                        _backfill,
+                    )
+            elif _mission_records_mode == MissionRecordMode.DRY:
+                # SYNC context (manager __init__ — the migration block
+                # above is sync too): call the backfill directly. The
+                # DRY-RUN preview (the PR1/PR2 boot posture).
                 _backfill = (
                     self._mission_record_service.backfill_advisory_nudge_commissions(
                         dry_run=True,
@@ -1070,9 +1099,10 @@ class InstanceManager:
                         "dry-run plan: %s",
                         _backfill,
                     )
+            # ``off`` — skipped entirely.
         except Exception as _backfill_exc:  # noqa: BLE001 — never break boot
             logger.warning(
-                "mission_records: backfill dry-run failed at boot (ignored): "
+                "mission_records: backfill failed at boot (ignored): "
                 "%s: %s",
                 type(_backfill_exc).__name__,
                 _backfill_exc,
