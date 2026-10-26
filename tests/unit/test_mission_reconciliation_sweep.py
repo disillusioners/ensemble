@@ -205,6 +205,7 @@ def _build_service(
     mission_record_repo="default",
     lane_enabled: bool = True,
     ttl_seconds: int = TTL_SECONDS,
+    enabled: bool = True,
 ):
     """Build the sweep service with the fakes wired."""
     import os
@@ -234,7 +235,7 @@ def _build_service(
         interval_seconds=300,
         age_bound_minutes=10,
         batch_cap=50,
-        enabled=True,
+        enabled=enabled,
         lane_deferred=False,
         lane_no_row_backstop=False,
         lane_pending_age=False,
@@ -1044,6 +1045,51 @@ class TestTheWriteBoundary:
         assert record is not None
         assert record.status == "open"
         assert record.settled_at is None
+
+
+# ---------------------------------------------------------------------------
+# MAJ-2 — the MASTER kill-switch is honoured by the on-demand entry point
+# ---------------------------------------------------------------------------
+
+
+class TestTheMasterKillSwitch:
+    """MAJ-2: the crash-recovery endpoint must not run the sweep with the
+    master kill-switch OFF.
+
+    The service is CONSTRUCTED even when ``enabled=False`` (the wiring
+    passes the knob through), so "wired" was never "enabled" — and
+    ``recover_now()`` never looked at the switch at all. In ``enforce``
+    that let the operator-facing endpoint WRITE ``mission_commissions``
+    rows while the master kill-switch was OFF.
+    """
+
+    def test_a_disabled_service_runs_no_lane(self, engine, manager_loop):
+        """THE PIN: master off + recover_now() ⇒ lane 7 is ABSENT from
+        the returned result's lanes (an empty SweepResult)."""
+        _mint_commission(engine, age_seconds=99_999)
+        service, _ = _build_service(
+            engine, manager_loop=manager_loop, enabled=False
+        )
+
+        result = service.recover_now()
+
+        assert result.lanes == {}
+        assert result.total_recovered == 0
+
+    def test_a_disabled_service_writes_no_commission_row(
+        self, engine, manager_loop
+    ):
+        """The switch gates the WRITES too — not just the counters."""
+        commission_id = _mint_commission(engine, age_seconds=99_999)
+        service, _ = _build_service(
+            engine, manager_loop=manager_loop, enabled=False
+        )
+
+        service.recover_now()
+
+        row = _row(engine, commission_id)
+        assert row.state == CommissionState.OUTSTANDING.value
+        assert row.resolved_at is None
 
 
 # ---------------------------------------------------------------------------

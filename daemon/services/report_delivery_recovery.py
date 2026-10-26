@@ -728,6 +728,24 @@ class ReportDeliveryRecoveryService:
     # Lifecycle
     # --------------------------------------------------------
 
+    @property
+    def enabled(self) -> bool:
+        """The MASTER kill-switch state (read-only).
+
+        The public read of the same fact the sweep's own gate uses
+        (``self._enabled``). The crash-recovery endpoint reads it to
+        honour its documented 503 contract ("the recovery service is
+        disabled by config") WITHOUT a second copy of the switch: the
+        service stays the single source of truth, the router only
+        READS it.
+
+        The service is CONSTRUCTED even when the switch is off (the
+        wiring passes ``enabled=`` through), so "wired" and "enabled"
+        are two different facts — a caller that only checks for
+        ``None`` sees a disabled service as a healthy one.
+        """
+        return self._enabled
+
     def start(self) -> None:
         """Start the periodic background thread.
 
@@ -868,7 +886,26 @@ class ReportDeliveryRecoveryService:
         via ``asyncio.to_thread`` so the DB queries do not block
         the loop. The sweep itself is sync (mirrors
         ``StaleTaskRecovery.recover_stale_tasks``).
+
+        **MAJ-2 — the MASTER kill-switch is honoured here.** The
+        service is CONSTRUCTED even when the switch is off (the wiring
+        passes ``enabled=`` through), so the on-demand endpoint used to
+        run the whole sweep — lane 7 included — with the switch off. In
+        ``enforce`` that meant the endpoint could WRITE
+        ``mission_commissions`` rows while the operator had the master
+        kill-switch OFF. This method is the SINGLE choke point: a
+        disabled service returns an EMPTY :class:`SweepResult` (no
+        lane ran) and the endpoint's own contract (503, "the service
+        is disabled by config") is honoured by the router, which READS
+        the same :attr:`enabled` flag — the switch itself is NOT
+        duplicated in a second place.
         """
+        if not self._enabled:
+            logger.info(
+                "ReportDeliveryRecoveryService disabled by config; "
+                "recover_now is a no-op (no lane ran)"
+            )
+            return SweepResult()
         return self._run_all_lanes_sync()
 
     # --------------------------------------------------------

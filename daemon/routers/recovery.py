@@ -86,6 +86,19 @@ async def recover_report_delivery(request: Request) -> dict[str, Any]:
                 "(disabled by config or partial init)"
             ),
         )
+    # MAJ-2: the service is CONSTRUCTED even when the master
+    # kill-switch is off, so "wired" is NOT "enabled". The endpoint's
+    # documented 503 promise covers BOTH shapes; the switch itself
+    # lives in ONE place (the service) — the router only READS the
+    # public ``enabled`` flag, it does not re-implement the check.
+    if not getattr(service, "enabled", True):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "ReportDeliveryRecoveryService is disabled by config "
+                "(report_delivery_recovery_enabled=False)"
+            ),
+        )
     try:
         result = await asyncio.to_thread(service.recover_now)
     except Exception as exc:
