@@ -4,12 +4,23 @@
 > failure was a HARNESS defect, not a daemon defect — see the mismatch
 > ledger and the correction note in §0).
 >
-> Branch `feature/mcps-gateway-interop` (base `latest` @ `9632badd4`).
+> **Provenance of the log's APPENDED runs.** The historical body
+> below was recorded on branch `feature/mcps-gateway-interop` (base
+> `latest` @ `9632badd4`) — that is where the nine green runs and the
+> four labelled FAIL attempts come from, and the mismatch ledger and the
+> correction note in §0 describe THAT work.
+>
+> The runs APPENDED to this log from 2026-10-26 onward belong to branch
+> **`feature/mcps-gateway-session-expiry-hardening`** (base `latest` @
+> `0138952876bb456f63417e040884ab28761c9835`) — the session-expiry
+> hardening. On that branch `daemon/` source IS modified (the expiry
+> sweep, the end envelope and the session-lifecycle audit rows), so the
+> "daemon/ source was NOT modified" line above applies to the historical
+> body ONLY.
+>
 > The peer is the **shipped Go client** (`mcps_client`, built from the
 > READ-ONLY repository into `/tmp`), the centre is the **shipped Python
 > gateway** (the real `create_app()`, real lifespan, real PostgreSQL).
-> `daemon/` source was NOT modified — the centre-side frame transcript is a
-> tap installed by the harness.
 
 ### The four FAIL attempts, labelled (approver iteration-002, item 6a)
 

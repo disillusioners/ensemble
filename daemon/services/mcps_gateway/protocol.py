@@ -153,6 +153,25 @@ RELAYED_CODES: frozenset[str] = frozenset(
 AUDIT_TOOL_SESSION_END = "session.end"
 AUDIT_TOOL_SESSION_EXPIRE = "session.expire"
 
+#: The audit ``tool`` values the CENTRE RESERVES for the session-lifecycle
+#: surfaces.
+#:
+#: The remote tool names come from the MACHINE's catalog — verbatim
+#: (§6.4: the centre MUST NOT rewrite, rename or drop schemas) — so a
+#: remote tool could carry the name ``session.end``. That would make one
+#: ledger value carry two meanings (a forwarded command and a lifecycle
+#: event) and the rows indistinguishable for an operator filtering on
+#: ``tool``. The CENTRE therefore owns this namespace and RESERVES the two
+#: names: a command whose requested tool collides is refused before it
+#: reaches the machine.
+#:
+#: The refusal changes neither the wire contract (the frame is unchanged
+#: for every other tool) nor the tool input contract (the schema is
+#: unchanged) — it only keeps the ledger's namespace honest.
+RESERVED_AUDIT_TOOL_NAMES: frozenset[str] = frozenset(
+    {AUDIT_TOOL_SESSION_END, AUDIT_TOOL_SESSION_EXPIRE}
+)
+
 #: The protocol limit of a single frame (§6.7) and the hard ceiling above
 #: it — the same shape the shipped client uses.
 DEFAULT_MAX_FRAME_BYTES = 8 << 20
@@ -321,6 +340,7 @@ __all__ = [
     "METHOD_TOOLS_LIST",
     "PROTOCOL_VERSION",
     "RELAYED_CODES",
+    "RESERVED_AUDIT_TOOL_NAMES",
     "REQUIRED_CLIENT_CAPABILITIES",
     "SERVER_CAPABILITIES",
     "SERVER_NAME",

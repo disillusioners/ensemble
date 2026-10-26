@@ -280,6 +280,12 @@ The call is forwarded verbatim: the arguments go to the machine as they
 are and the result comes back as the machine produced it. The catalog of
 ``mcp_rpc_connect`` lists the remote tool names.
 
+Two names are RESERVED by the center's audit vocabulary —
+``session.end`` and ``session.expire``. A remote tool carrying one of
+them cannot be called: the ledger would give one value two meanings (a
+forwarded command and a session-lifecycle event). Such a call is
+refused with a typed error before it reaches the machine.
+
 Args:
     tool: The name of the remote tool, exactly as the catalog lists it.
         Required.

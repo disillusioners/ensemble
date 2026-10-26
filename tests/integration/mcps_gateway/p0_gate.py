@@ -630,6 +630,20 @@ async def run_gate(
                 len(session_end_rows) == 1,
                 f"rows={len(session_end_rows)}",
             )
+            # B-1: the five command-row proofs below are REGISTERED only
+            # when a command row exists — and a check that is never
+            # ADDED cannot fail (``GateResult.ok`` is ``all(check.ok)``
+            # over the checks that exist). Without this line, a
+            # regression that stops the command-audit path from writing
+            # rows at all would leave the gate GREEN: the session.end
+            # row would satisfy ``audit-flow-row-exists`` and every
+            # command-row proof would silently skip. The command row is
+            # therefore REGISTERED as a check of its own.
+            result.add(
+                "audit-command-row-exists",
+                len(command_rows) >= 1,
+                f"command_rows={len(command_rows)} of rows={len(flow_rows)}",
+            )
             if command_rows:
                 row = command_rows[0]
                 session_id = (session or {}).get("session_id")

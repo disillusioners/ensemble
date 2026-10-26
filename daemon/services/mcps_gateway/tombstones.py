@@ -76,7 +76,6 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Iterable
 
 # ── the RESPONSE-borne reasons (the value of ``why_not_ended``) ─────────────
 
@@ -232,23 +231,13 @@ class TombstoneStore:
         self._entries = [entry for entry in self._entries if entry.at >= cutoff]
 
 
-def tombstone_reason_is_response_bearing(reason: str) -> bool:
-    """Is this reason one a RESPONSE may carry?
+def all_reasons() -> frozenset[str]:
+    """Every token of the vocabulary — the two DISJOINT sets together.
 
-    The single place the "a response carrying anything else is a bug"
-    invariant is checked at runtime.
+    The test seam for the disjointness invariant: the response-borne
+    reasons and the ledger-only reasons must never overlap.
     """
-    return reason in RESPONSE_REASONS
-
-
-def tombstone_reason_is_ledger_only(reason: str) -> bool:
-    """Is this reason one that may appear ONLY in an audit row?"""
-    return reason in LEDGER_ONLY_REASONS
-
-
-def all_reasons() -> Iterable[str]:
-    """Every token of the vocabulary (the test seam)."""
-    return sorted(RESPONSE_REASONS | LEDGER_ONLY_REASONS)
+    return frozenset(RESPONSE_REASONS | LEDGER_ONLY_REASONS)
 
 
 __all__ = [
@@ -266,6 +255,4 @@ __all__ = [
     "SessionTombstone",
     "TombstoneStore",
     "all_reasons",
-    "tombstone_reason_is_ledger_only",
-    "tombstone_reason_is_response_bearing",
 ]

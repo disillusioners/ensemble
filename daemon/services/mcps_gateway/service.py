@@ -61,6 +61,7 @@ from .protocol import (
     METHOD_TOOLS_CALL,
     PROTOCOL_VERSION,
     RELAYED_CODES,
+    RESERVED_AUDIT_TOOL_NAMES,
     REQUIRED_CLIENT_CAPABILITIES,
     SERVER_CAPABILITIES,
     SERVER_NAME,
@@ -108,29 +109,46 @@ AUDIT_DETAIL_UNRECOGNIZED_CODE = (
     "the machine answered with an unrecognized error code"
 )
 
-#: The error codes the audit is allowed to record verbatim. Everything
-#: else (a peer's free text that happens to sit in the code slot) is
-#: replaced by :data:`AUDIT_DETAIL_UNRECOGNIZED_CODE`.
+#: The neutral marker recorded (and reported) when a code arrives from
+#: the peer and is outside the vocabulary it is validated against.
+UNRECOGNIZED_ERROR_CODE = "UNRECOGNIZED_ERROR_CODE"
+
+#: The error codes a COMMAND row is allowed to record verbatim.
 #:
-#: The vocabulary is the protocol codes (centre-emitted + relayed) PLUS
-#: the tokens of the SESSION-LIFECYCLE ledger: the two LEDGER-ONLY
-#: reasons (a release the machine did not confirm) and the two EXPIRY
-#: CAUSES (why the sweep reaped a session). The peer-text guard is
-#: untouched: a code that arrives from the peer and is outside this set
-#: is still rewritten to ``UNRECOGNIZED_ERROR_CODE``.
+#: Everything else (a peer's free text that happens to sit in the code
+#: slot) is replaced by :data:`UNRECOGNIZED_ERROR_CODE`. The set is the
+#: PROTOCOL vocabulary only — the centre-emitted codes plus the relayed
+#: ones. It is deliberately NOT widened with the centre-only tokens of
+#: the session-lifecycle vocabulary: a hostile machine could otherwise
+#: forge ``machine_timeout`` / ``idle`` / ``expired`` into a COMMAND row
+#: and make the ledger lie about a command it never refused.
 AUDIT_ALLOWED_ERROR_CODES: frozenset[str] = frozenset(
     CENTER_EMITTED_CODES | RELAYED_CODES
-) | {
-    "UNRECOGNIZED_ERROR_CODE",
-    LEDGER_MACHINE_UNREACHABLE,
-    LEDGER_MACHINE_TIMEOUT,
-    CAUSE_IDLE,
-    CAUSE_TTL,
-    REASON_EXPIRED,
-    REASON_ALREADY_ENDED,
-    REASON_UNKNOWN_SESSION,
-    REASON_MACHINE_REFUSED,
-}
+) | {UNRECOGNIZED_ERROR_CODE}
+
+#: The error codes a SESSION-LIFECYCLE row is allowed to record.
+#:
+#: The session surfaces speak the SAME protocol vocabulary (a machine
+#: may answer ``SESSION_NOT_FOUND``) PLUS the centre-only tokens: the
+#: two LEDGER-ONLY reasons (a release the machine did not confirm), the
+#: two EXPIRY CAUSES (why the sweep reaped a session) and the
+#: RESPONSE-borne reasons (why an end did not end). Those tokens are
+#: MINTED BY THE CENTRE — they can never arrive from the peer, so they
+#: cannot be forged into a command row (the command rows keep the
+#: protocol-only set above).
+AUDIT_ALLOWED_SESSION_ERROR_CODES: frozenset[str] = (
+    AUDIT_ALLOWED_ERROR_CODES
+    | {
+        LEDGER_MACHINE_UNREACHABLE,
+        LEDGER_MACHINE_TIMEOUT,
+        CAUSE_IDLE,
+        CAUSE_TTL,
+        REASON_EXPIRED,
+        REASON_ALREADY_ENDED,
+        REASON_UNKNOWN_SESSION,
+        REASON_MACHINE_REFUSED,
+    }
+)
 
 #: The audit detail CLASSIFICATIONS of the SESSION-LIFECYCLE rows.
 #:
@@ -973,21 +991,6 @@ class McpGatewayService:
             )
         )
 
-    async def _forward_session_end(self, session: GatewaySession) -> bool:
-        """Forward the ``session.end`` of a session to its machine.
-
-        Best-effort and NEVER raises: the sweep must survive a wedged
-        machine, and the sweep is the only owner of the expiry reap.
-
-        Returns whether the MACHINE was notified: it answered (an
-        acknowledgement, or ``SESSION_NOT_FOUND`` — the machine holds no
-        such session, so its local lock is already gone). No connection,
-        a closed connection, a refusal and a missing acknowledgement all
-        answer ``False``.
-        """
-        outcome = await self._forward_session_end_outcome(session)
-        return outcome in (FORWARD_ACK, FORWARD_ALREADY_GONE)
-
     async def _forward_session_end_outcome(self, session: GatewaySession) -> str:
         """The one forward, classified.
 
@@ -1030,6 +1033,25 @@ class McpGatewayService:
                 # The machine does not know the session: its local lock
                 # is already gone, so there is nothing left to release.
                 return FORWARD_ALREADY_GONE
+            # B-4 (the sweep twin of the explicit end): the connection
+            # may have died DURING the ack window — ``close_connection``
+            # fails the pending futures with a synthetic INTERNAL refusal
+            # and closes the socket. The machine answered NOTHING, so the
+            # sweep must not record a false REFUSAL: the ledger says
+            # ``machine_unreachable``.
+            #
+            # ONLY the socket is the signal here: in the sweep the
+            # session was ALREADY released centre-side (PASS 1), so
+            # "the session is gone" would be true for EVERY forward and
+            # would swallow the genuine refusals.
+            if connection.closed:
+                logger.warning(
+                    "the machine %r went away while the session end of %s "
+                    "was in flight",
+                    session.machine_id,
+                    session.session_id,
+                )
+                return FORWARD_UNREACHABLE
             logger.warning(
                 "the machine %r refused the session end of %s (%s)",
                 session.machine_id,
@@ -1283,8 +1305,24 @@ class McpGatewayService:
         (``{"name": ..., "arguments": ...}``) and the result is the RAW
         MCP result — the center adds no wrapping layer in either
         direction (§7: MCP travels unchanged through the middle).
+
+        The remote tool names come from the machine's catalog — verbatim
+        (§6.4) — so one of them could carry a name the CENTRE reserves
+        for its own audit vocabulary (``session.end`` /
+        ``session.expire``). Such a call is refused BEFORE it reaches
+        the machine: otherwise the ledger would carry one ``tool`` value
+        with two meanings and the rows would be indistinguishable for an
+        operator filtering on ``tool``.
         """
         self._assert_enabled()
+
+        if tool in RESERVED_AUDIT_TOOL_NAMES:
+            raise GatewayProtocolError(
+                CODE_INTERNAL,
+                f"the remote tool name {tool!r} is reserved by the center's "
+                "audit vocabulary and cannot be called",
+                {"tool": tool, "reserved": sorted(RESERVED_AUDIT_TOOL_NAMES)},
+            )
 
         session = self._sessions.for_agent(agent_id)
         if session is None:
@@ -1497,10 +1535,40 @@ class McpGatewayService:
                     ),
                     audit_detail=AUDIT_DETAIL_SESSION_ENDED_ALREADY_GONE,
                 )
+            # B-4: the connection may have died DURING the ack window.
+            # ``close_connection`` fails the pending futures with a
+            # synthetic INTERNAL refusal and kills the session with the
+            # connection — so the machine answered NOTHING. This is NOT
+            # a refusal (whose documented meaning is "the session
+            # SURVIVES"): it is an unreachable machine, and the session
+            # is already gone.
+            if self._sessions.get(session.session_id) is None:
+                # The session died with the connection — the tombstone
+                # (``already_ended``) answers.
+                return await self._end_without_session(agent_id, instance_id)
+            if connection.closed:
+                return await self._end_without_machine(
+                    session,
+                    agent_id=agent_id,
+                    instance_id=instance_id,
+                    error_code=LEDGER_MACHINE_UNREACHABLE,
+                    detail=(
+                        "the machine is unreachable; the center released the "
+                        "session authoritatively"
+                    ),
+                    audit_detail=AUDIT_DETAIL_SESSION_UNREACHABLE,
+                )
             # (c) Any other refusal — including a RELAYED TOOL_TIMEOUT.
             # The machine WAS notified and it REFUSED: the session
             # SURVIVES, and the centre does not invent a local release
             # the peer did not acknowledge.
+            #
+            # B-3: the peer's code slot is PEER-CONTROLLED, so it is
+            # sanitised before it reaches the response — only the
+            # PROTOCOL vocabulary is echoed. Otherwise a hostile machine
+            # could park a LEDGER-ONLY token (or any free text) in the
+            # response, which the disjointness contract calls a bug.
+            safe_code = self._safe_peer_code(exc.code)
             await self._audit_session(
                 agent_id=agent_id,
                 instance_id=instance_id,
@@ -1516,9 +1584,32 @@ class McpGatewayService:
                 "machine_id": session.machine_id,
                 "ended": False,
                 "why_not_ended": REASON_MACHINE_REFUSED,
-                "detail": f"the machine refused the session end ({exc.code})",
+                "detail": f"the machine refused the session end ({safe_code})",
                 "machine_notified": True,
             }
+        except Exception as exc:  # noqa: BLE001 — a dead socket is not a crash
+            # B-2: the socket died BETWEEN the liveness check above and
+            # the send (the transport raised). The machine answered
+            # NOTHING, so the bare-error failure mode this branch exists
+            # to remove must not happen: the centre releases the session
+            # AUTHORITATIVELY and says so.
+            logger.warning(
+                "the session end of %s could not be sent to the machine %r: %s",
+                session.session_id,
+                session.machine_id,
+                exc,
+            )
+            return await self._end_without_machine(
+                session,
+                agent_id=agent_id,
+                instance_id=instance_id,
+                error_code=LEDGER_MACHINE_UNREACHABLE,
+                detail=(
+                    "the machine is unreachable; the center released the "
+                    "session authoritatively"
+                ),
+                audit_detail=AUDIT_DETAIL_SESSION_UNREACHABLE,
+            )
 
         # (a) The machine acknowledged the end.
         return await self._end_acknowledged(
@@ -1671,6 +1762,24 @@ class McpGatewayService:
         return envelope
 
     @staticmethod
+    def _safe_peer_code(code: str) -> str:
+        """The peer's error code, sanitised for an agent-facing detail.
+
+        The code slot of the machine's error frame is PEER-CONTROLLED:
+        echoing it verbatim would let a hostile machine put ANY string
+        into the response — including a LEDGER-ONLY token
+        (``machine_timeout`` / ``machine_unreachable``), which the
+        disjointness contract says is a bug by construction, and
+        including free text that would end up in an agent-facing string.
+
+        So only the PROTOCOL vocabulary is echoed; everything else
+        becomes the neutral :data:`UNRECOGNIZED_ERROR_CODE`.
+        """
+        if code in CENTER_EMITTED_CODES or code in RELAYED_CODES:
+            return code
+        return UNRECOGNIZED_ERROR_CODE
+
+    @staticmethod
     def _response_reason(reason: str) -> str:
         """Guard the DISJOINT reason sets at runtime.
 
@@ -1751,12 +1860,12 @@ class McpGatewayService:
         if error_code and error_code not in AUDIT_ALLOWED_ERROR_CODES:
             # The code came from the PEER. Anything outside the protocol
             # vocabulary is not recorded verbatim.
-            error_code = "UNRECOGNIZED_ERROR_CODE"
+            error_code = UNRECOGNIZED_ERROR_CODE
         if outcome == OUTCOME_OK:
             detail = AUDIT_DETAIL_OK
         elif outcome == OUTCOME_TIMEOUT:
             detail = AUDIT_DETAIL_TIMEOUT
-        elif error_code == "UNRECOGNIZED_ERROR_CODE":
+        elif error_code == UNRECOGNIZED_ERROR_CODE:
             detail = AUDIT_DETAIL_UNRECOGNIZED_CODE
         else:
             detail = AUDIT_DETAIL_ERROR
@@ -1806,13 +1915,18 @@ class McpGatewayService:
         causes (``idle``, ``ttl``). It NEVER carries the peer's free
         text — the ``detail`` is a FIXED classification.
 
+        The vocabulary is :data:`AUDIT_ALLOWED_SESSION_ERROR_CODES` — the
+        protocol codes PLUS the centre-only tokens. The COMMAND rows keep
+        the protocol-only :data:`AUDIT_ALLOWED_ERROR_CODES`, so a hostile
+        machine cannot forge a centre token into a command row.
+
         The write inherits the command path's discipline: it is off the
         event loop, it is bounded, and it NEVER aborts the operation.
         """
         if not self.config.audit_enabled:
             return
-        if error_code and error_code not in AUDIT_ALLOWED_ERROR_CODES:
-            error_code = "UNRECOGNIZED_ERROR_CODE"
+        if error_code and error_code not in AUDIT_ALLOWED_SESSION_ERROR_CODES:
+            error_code = UNRECOGNIZED_ERROR_CODE
         if error_code:
             detail = f"{detail} [{error_code}]" if detail else f"[{error_code}]"
         record = AuditRecord(
@@ -1868,7 +1982,7 @@ class McpGatewayService:
         except asyncio.TimeoutError:
             self._audit_failures += 1
             logger.error(
-                "the remote-hands audit write timed out after %.1fs (%d "
+                "the remote-command audit write timed out after %.1fs (%d "
                 "failures so far); the operation result stands",
                 self._audit_write_timeout_seconds,
                 self._audit_failures,
@@ -1876,7 +1990,7 @@ class McpGatewayService:
         except Exception as exc:  # noqa: BLE001 — the audit must not wedge the gateway
             self._audit_failures += 1
             logger.error(
-                "the remote-hands audit row could not be written (%d failures so far): %s",
+                "the remote-command audit row could not be written (%d failures so far): %s",
                 self._audit_failures,
                 exc,
             )

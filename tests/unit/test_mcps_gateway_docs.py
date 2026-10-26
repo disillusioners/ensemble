@@ -1041,15 +1041,21 @@ def test_doc_states_the_expiry_tells_the_machine_and_keeps_the_socket() -> None:
     )
     assert "socket **STAYS OPEN** on expiry" in text, (
         "the doc must state the machine's socket stays open on expiry — "
-        "the only socket closure in the gateway is the heartbeat kill."
+        "the only socket closure ON THE SESSION PATH is the heartbeat kill."
     )
     assert "returns to `ready` **on the same connection**" in text, (
         "the doc must state the machine returns to ready ON THE SAME "
         "connection after the expiry notification."
     )
-    assert "the only socket closure in the gateway" in text.lower(), (
-        "the doc must name the heartbeat-kill path as the only socket "
-        "closure."
+    assert "the only socket closure **on the session path**" in text.lower(), (
+        "the doc must scope the heartbeat-kill closure to the SESSION "
+        "PATH — the teardown paths (a socket that dies, the pre-hello "
+        "deadline, the daemon shutdown) close sockets too."
+    )
+    assert "the only socket closure in the gateway" not in text.lower(), (
+        "the unscoped 'the only socket closure in the gateway' claim is "
+        "FALSE — several other paths close a socket. The doc must not "
+        "enshrine it."
     )
 
 

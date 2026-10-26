@@ -55,6 +55,7 @@ from daemon.services.mcps_gateway.tombstones import (
     REASON_UNKNOWN_SESSION,
     RESPONSE_REASONS,
     SessionTombstone,
+    all_reasons,
 )
 
 #: The canonical ids of the fixtures — LETTER-BEARING on purpose.
@@ -91,8 +92,16 @@ class FakeMachine:
     method in ``hold``.
     """
 
-    def __init__(self, service: McpGatewayService) -> None:
+    def __init__(
+        self,
+        service: McpGatewayService,
+        *,
+        machine_id: str = MACHINE_ID,
+        session_id: str = SESSION_ID,
+    ) -> None:
         self.service = service
+        self.machine_id = machine_id
+        self.session_id = session_id
         self.connection = None
         self.sent: list[dict[str, Any]] = []
         self.closed = False
@@ -103,6 +112,12 @@ class FakeMachine:
         self.errors: dict[str, tuple[str, str]] = {}
         #: methods the machine does NOT answer at all.
         self.hold: set[str] = set()
+        #: methods whose SEND raises — the socket dies mid-flight.
+        self.raise_on: set[str] = set()
+        #: methods whose send CLOSES the connection first — the socket
+        #: dies DURING the ack window (the centre's pending future is
+        #: failed with a synthetic refusal).
+        self.close_on_send: set[str] = set()
         #: the session.end frames the machine received (the sweep's forward).
         self.session_ends: list[dict[str, Any]] = []
 
@@ -113,6 +128,11 @@ class FakeMachine:
         method = str(payload.get("method") or "")
         if method == "session.end":
             self.session_ends.append(payload)
+        if method in self.raise_on:
+            raise ConnectionResetError("the socket died")
+        if method in self.close_on_send:
+            await self.service.close_connection(self.connection, "the socket died")
+            return
         if method in self.hold:
             return
         if method in self.errors:
@@ -157,7 +177,7 @@ class FakeMachine:
                     "params": {
                         "protocol_version": PROTOCOL_VERSION,
                         "client": {"name": "mcps-client", "version": "0.1.0"},
-                        "machine_id": MACHINE_ID,
+                        "machine_id": self.machine_id,
                         "capabilities": {
                             "session": True,
                             "tools": True,
@@ -219,17 +239,20 @@ async def open_machine(
 
 
 async def open_session(
-    service: McpGatewayService, machine: FakeMachine
+    service: McpGatewayService,
+    machine: FakeMachine,
+    *,
+    agent_id: str = AGENT_ID,
 ) -> dict[str, Any]:
     """Open a session and return the connect answer."""
     machine.answers["session.begin"] = {
-        "session_id": SESSION_ID,
-        "machine_id": MACHINE_ID,
+        "session_id": machine.session_id,
+        "machine_id": machine.machine_id,
         "expires_at_ms": 1792576800000,
         "tools": [{"name": "screenshot", "inputSchema": {"type": "object"}}],
     }
     return await service.connect(
-        machine_id=MACHINE_ID, agent_id=AGENT_ID, reason="test"
+        machine_id=machine.machine_id, agent_id=agent_id, reason="test"
     )
 
 
@@ -386,8 +409,15 @@ class _RecordingTombstones:
 class _RecordingMachine(FakeMachine):
     """FakeMachine that records the session.end it receives."""
 
-    def __init__(self, service: McpGatewayService, events: list[str]) -> None:
-        super().__init__(service)
+    def __init__(
+        self,
+        service: McpGatewayService,
+        events: list[str],
+        *,
+        machine_id: str = MACHINE_ID,
+        session_id: str = SESSION_ID,
+    ) -> None:
+        super().__init__(service, machine_id=machine_id, session_id=session_id)
         self._events = events
 
     async def send_json(self, payload: dict[str, Any]) -> None:
@@ -781,6 +811,31 @@ class TestTheSessionAuditRows:
         # The detail is a FIXED classification — never the peer's text.
         assert "unreachable" in record.detail
 
+    async def test_a_machine_that_refuses_the_expiry_keeps_the_refusal_in_the_ledger(
+        self,
+    ):
+        """The sweep's REFUSAL must not be swallowed by the B-4 re-check.
+
+        In the sweep the session was ALREADY released centre-side (PASS
+        1), so a "the session is gone" test would be true for EVERY
+        forward and would turn a genuine refusal into a false
+        ``machine_unreachable``.
+        """
+        audit = MemoryAuditSink()
+        clock = Clock()
+        service = make_service(audit_sink=audit, clock=clock)
+        machine = await open_machine(service, FakeMachine(service))
+        await expired_session(service, machine, clock)
+        machine.errors["session.end"] = ("TOOL_ERROR", "the machine said no")
+
+        await service.expire_sessions()
+
+        assert len(audit.records) == 1
+        record = audit.records[0]
+        assert record.tool == "session.expire"
+        assert record.error_code == REASON_MACHINE_REFUSED
+        assert record.outcome == "error"
+
     async def test_a_wedged_machine_leaves_the_machine_timeout_ledger_row(self):
         audit = MemoryAuditSink()
         clock = Clock()
@@ -951,6 +1006,10 @@ class TestTheReasonVocabulary:
             {"expired", "already_ended", "unknown_session", "machine_refused"}
         )
 
+    def test_the_vocabulary_is_exactly_the_two_sets(self):
+        """The whole vocabulary — nothing outside the two disjoint sets."""
+        assert all_reasons() == RESPONSE_REASONS | LEDGER_ONLY_REASONS
+
     async def test_the_runtime_guard_keeps_a_ledger_only_token_out_of_a_response(
         self,
     ):
@@ -989,3 +1048,255 @@ class TestTheReasonVocabulary:
         assert result["why_not_ended"] == REASON_UNKNOWN_SESSION
         assert result["why_not_ended"] not in LEDGER_ONLY_REASONS
         assert LEDGER_MACHINE_UNREACHABLE not in json.dumps(result, default=str)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The EXPLICIT-END arms — the same hardening the sweep twin carries
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTheExplicitEndArms:
+    """The explicit end must be as hardened as the sweep's forward.
+
+    The sweep twin (``_forward_session_end_outcome``) catches a broad
+    exception and records the machine as UNREACHABLE. The explicit end
+    did not: a socket that died between the liveness check and the send
+    escaped as an untyped transport exception, the TOOL raised, and the
+    agent got a bare ``{"error": {...}}`` while the session stayed live
+    centre-side — verbatim the bare-error failure mode this branch
+    exists to remove.
+    """
+
+    async def test_a_socket_that_dies_during_the_end_answers_the_unreachable_envelope(
+        self,
+    ):
+        audit = MemoryAuditSink()
+        service = make_service(audit_sink=audit)
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+        machine.raise_on.add("session.end")
+
+        result = await service.disconnect(agent_id=AGENT_ID)
+
+        assert result["ended"] is True
+        assert result["machine_notified"] is False
+        assert result["detail"]
+        # The centre released the session AUTHORITATIVELY — it is gone.
+        assert service.sessions.for_agent(AGENT_ID) is None
+        assert service.store.get(MACHINE_ID).session_id is None
+        # The ledger records WHY (the ledger-only token).
+        assert len(audit.records) == 1
+        assert audit.records[0].error_code == LEDGER_MACHINE_UNREACHABLE
+        assert audit.records[0].tool == "session.end"
+
+    async def test_a_connection_that_dies_in_the_ack_window_is_not_a_refusal(self):
+        """B-4: the machine answered NOTHING — that is not a refusal.
+
+        ``close_connection`` fails the pending futures with a synthetic
+        INTERNAL refusal, so the refusal arm would claim
+        ``machine_refused`` (whose documented meaning is "the session
+        SURVIVES") — but the session died WITH the connection. The
+        tombstone answers instead.
+        """
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+        machine.close_on_send.add("session.end")
+
+        result = await service.disconnect(agent_id=AGENT_ID)
+
+        assert result["why_not_ended"] != REASON_MACHINE_REFUSED
+        assert result["why_not_ended"] == REASON_ALREADY_ENDED
+        assert result["machine_notified"] is False
+        # The session is gone (it died with the connection).
+        assert service.sessions.for_agent(AGENT_ID) is None
+
+    async def test_the_sweep_records_an_unreachable_machine_when_the_socket_dies(
+        self,
+    ):
+        """B-4's sweep twin: the ledger must not record a false refusal."""
+        audit = MemoryAuditSink()
+        clock = Clock()
+        service = make_service(audit_sink=audit, clock=clock)
+        machine = await open_machine(service, FakeMachine(service))
+        await expired_session(service, machine, clock)
+        machine.close_on_send.add("session.end")
+
+        await service.expire_sessions()
+
+        assert len(audit.records) == 1
+        record = audit.records[0]
+        assert record.tool == "session.expire"
+        assert record.error_code == LEDGER_MACHINE_UNREACHABLE
+        assert record.outcome == "error"
+
+    async def test_a_peer_cannot_smuggle_a_ledger_only_token_into_the_response(self):
+        """B-3: the code slot of the peer's frame is PEER-CONTROLLED."""
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        # The machine poisons the code slot with a LEDGER-ONLY token.
+        machine.errors["session.end"] = (LEDGER_MACHINE_TIMEOUT, "the tool timed out")
+        await open_session(service, machine)
+
+        result = await service.disconnect(agent_id=AGENT_ID)
+
+        assert result["ended"] is False
+        assert result["why_not_ended"] == REASON_MACHINE_REFUSED
+        # The poisoned token is NOT echoed anywhere in the response.
+        assert LEDGER_MACHINE_TIMEOUT not in json.dumps(result, default=str)
+        assert "machine_timeout" not in result["detail"]
+        # The neutral marker replaces it.
+        assert "UNRECOGNIZED_ERROR_CODE" in result["detail"]
+
+    async def test_a_protocol_code_is_still_echoed_in_the_detail(self):
+        """The sanitiser must not swallow the PROTOCOL vocabulary."""
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        machine.errors["session.end"] = ("TOOL_ERROR", "the machine said no")
+        await open_session(service, machine)
+
+        result = await service.disconnect(agent_id=AGENT_ID)
+
+        assert "TOOL_ERROR" in result["detail"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The audit vocabulary — the COMMAND rows keep the PROTOCOL vocabulary
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTheAuditVocabularySplit:
+    async def test_a_peer_cannot_forge_a_centre_token_into_a_command_row(self):
+        """Item 5: the command rows keep the protocol-only vocabulary."""
+        audit = MemoryAuditSink()
+        service = make_service(audit_sink=audit)
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+        # The machine answers with a CENTRE token in the code slot.
+        machine.errors["tools/call"] = ("idle", "the machine said no")
+
+        with pytest.raises(Exception):
+            await service.command(agent_id=AGENT_ID, tool="screenshot")
+
+        assert len(audit.records) == 1
+        record = audit.records[0]
+        assert record.tool == "screenshot"
+        # The centre token did not survive: it is not in the command
+        # vocabulary any more.
+        assert record.error_code == "UNRECOGNIZED_ERROR_CODE"
+
+    async def test_the_session_rows_keep_the_centre_tokens(self):
+        """The session rows are where the centre tokens belong."""
+        audit = MemoryAuditSink()
+        clock = Clock()
+        service = make_service(audit_sink=audit, clock=clock)
+        machine = await open_machine(service, FakeMachine(service))
+        await expired_session(service, machine, clock)
+
+        await service.expire_sessions()
+
+        assert len(audit.records) == 1
+        assert audit.records[0].error_code == "ttl"
+        assert audit.records[0].tool == "session.expire"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The reserved audit tool names (item 6)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTheReservedAuditToolNames:
+    async def test_a_command_with_a_reserved_tool_name_is_refused(self):
+        """The ledger's namespace: one ``tool`` value, one meaning."""
+        audit = MemoryAuditSink()
+        service = make_service(audit_sink=audit)
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+
+        with pytest.raises(Exception) as excinfo:
+            await service.command(agent_id=AGENT_ID, tool="session.end")
+
+        assert excinfo.value.code == "INTERNAL"
+        assert "reserved" in excinfo.value.message
+        # Nothing reached the machine.
+        assert not [f for f in machine.sent if f.get("method") == "tools/call"]
+        # And no COMMAND row carries the reserved name.
+        assert audit.records == []
+
+    async def test_a_normal_command_is_unaffected(self):
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+
+        result = await service.command(agent_id=AGENT_ID, tool="screenshot")
+
+        assert "content" in result or result == {}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The TWO-PASS sweep at N=2 (item 11 — the batch property)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTheTwoPassSweepAtN2:
+    async def test_the_whole_batch_is_released_before_any_machine_is_told(self):
+        """N=2: the property the two-pass design exists for.
+
+        The sibling's D1 defect was about session B being popped-but-
+        unreleased while session A's forward was awaited: the roster
+        reported ``busy: true`` with a DEAD session id and B had no
+        tombstone, so a late end for B answered ``unknown_session``
+        instead of ``expired``. N=1 cannot prove that — the batch IS
+        the property.
+        """
+        clock = Clock()
+        service = make_service(clock=clock)
+        events: list[str] = []
+        machine_alpha = _RecordingMachine(
+            service, events, machine_id="machine-alpha", session_id="sess-alpha"
+        )
+        machine_bravo = _RecordingMachine(
+            service, events, machine_id="machine-bravo", session_id="sess-bravo"
+        )
+        await open_machine(service, machine_alpha)
+        await open_machine(service, machine_bravo)
+        # Two AGENTS: one agent may hold only one session (§8.2).
+        await open_session(service, machine_alpha, agent_id="ari")
+        await open_session(service, machine_bravo, agent_id="leader")
+        service._store = _RecordingStore(service._store, events)
+        service._tombstones = _RecordingTombstones(service._tombstones, events)
+        clock.advance(2.0)
+
+        expired = await service.expire_sessions()
+
+        assert len(expired) == 2
+        # BOTH machines were told.
+        assert events.count("machine.session.end") == 2
+        first_forward = events.index("machine.session.end")
+        # BOTH roster pointers cleared and BOTH tombstones written
+        # BEFORE the first machine frame.
+        assert events[:first_forward].count("store.clear_session") == 2
+        assert events[:first_forward].count("tombstone.record") == 2
+        # And the roster really is free for BOTH machines.
+        assert service.store.get("machine-alpha").session_id is None
+        assert service.store.get("machine-bravo").session_id is None
+
+    async def test_both_expired_sessions_answer_expired_after_the_sweep(self):
+        """The tombstone of BOTH sessions answers the late end."""
+        clock = Clock()
+        service = make_service(clock=clock)
+        machine_alpha = FakeMachine(service, machine_id="machine-alpha", session_id="sess-alpha")
+        machine_bravo = FakeMachine(service, machine_id="machine-bravo", session_id="sess-bravo")
+        await open_machine(service, machine_alpha)
+        await open_machine(service, machine_bravo)
+        await open_session(service, machine_alpha, agent_id="ari")
+        await open_session(service, machine_bravo, agent_id="leader")
+        clock.advance(2.0)
+
+        await service.expire_sessions()
+
+        for agent_id, session_id in (("ari", "sess-alpha"), ("leader", "sess-bravo")):
+            result = await service.disconnect(agent_id=agent_id)
+            assert result["ended"] is False
+            assert result["why_not_ended"] == REASON_EXPIRED
+            assert result["session_id"] == session_id

@@ -110,8 +110,10 @@ service (see §6).
   (SPEC §6.8 — a `session.end` frame is the only thing that frees the
   machine's local lock). The machine's socket **STAYS OPEN** on expiry
   (SPEC §6.2 — "Ending a session returns the connection to `ready`; the
-  socket stays open"); the only socket closure in the gateway remains
-  the heartbeat-kill path (§4.1).
+  socket stays open"); the only socket closure **on the session path**
+  remains the heartbeat-kill path (§4.1) — the teardown paths (a socket
+  that dies, a pre-hello deadline, the daemon shutting down) close
+  sockets too, and they are not session-end closures.
 * The **catalog travels with `session.begin`**: the machine's answer carries
   the `session_id` **and** the remote tool catalog, verbatim (§6.4 — the
   center MUST NOT rewrite, rename or drop schemas). The center issues no
@@ -510,14 +512,18 @@ flowchart TD
 
 The tools **never raise** — every refusal is the typed payload
 `{"error": {"code": ..., "message": ...}}` with a §6.5 code the agent can
-branch on.
+branch on. (A refusal is a RETURN VALUE, not an exception: the tool
+boundary catches the typed protocol errors itself. `mcp_rpc_disconnect`
+returns its reason-coded envelope for the session-state outcomes —
+§4.5 — and only its pre-flight refusals (the authorization gate, the
+kill switch) come back in the `{"error": {...}}` shape.)
 
 | Tool | Args | Returns | Notes |
 |---|---|---|---|
 | `mcp_rpc_list_machine` | none | `{"machines": [{machine_id, presence, connected, last_seen_epoch_ms, session_id, agent_id}], "count"}` | a roster read; needs no session; refuses with a typed error while the transport is disabled (as all four tools do) |
 | `mcp_rpc_connect` | `machine_id`, `reason?` | `{"session_id", "machine_id", "tools": [...catalog...], "expires_at_epoch_ms"}` | **holds the machine's single session slot**; the machine mints the `session_id` and returns the catalog verbatim |
 | `mcp_rpc_command` | `tool`, `arguments?` | the **raw** MCP result of the remote call, or a typed error | forwards **ONE** `tools/call` into the caller's open session; arguments travel verbatim, results come back as the machine produced them (§7 — MCP travels unchanged through the middle); audited per call |
-| `mcp_rpc_disconnect` | none | the **reason-coded end envelope** — `{session_id?, machine_id?, ended: bool, detail: str, machine_notified: bool}`, plus `why_not_ended` when `ended` is false and `result` on the acknowledged path | ends the session and **releases the slot**; the machine keeps its socket and returns to `ready`. It **never raises** for a session-state reason (only the kill-switch/disabled case raises). The four response-borne reasons are `expired`, `already_ended`, `unknown_session`, `machine_refused` (§4.5) |
+| `mcp_rpc_disconnect` | none | the **reason-coded end envelope** — `{session_id?, machine_id?, ended: bool, detail: str, machine_notified: bool}`, plus `why_not_ended` when `ended` is false and `result` on the acknowledged path | ends the session and **releases the slot**; the machine keeps its socket and returns to `ready`. A **session-state** outcome never raises — it comes back as the envelope. Only the pre-flight refusals still raise as typed errors: the tool's **authorization** gate and the **kill switch** (a disabled gateway). The four response-borne reasons are `expired`, `already_ended`, `unknown_session`, `machine_refused` (§4.5) |
 
 Operational caveats:
 
@@ -629,10 +635,31 @@ surface** — `session.end` for the explicit end and `session.expire` for
 the sweep's reap. The rows carry the command row's shape: the **args are
 hashed** (never stored verbatim), `machine_id` is **non-null**, and
 `detail` is a **fixed center-authored classification** — never peer free
-text. The `error_code` vocabulary is **extended** with the two
-ledger-only reasons (`machine_unreachable`, `machine_timeout`) and with
-the expiry causes (`idle`, `ttl`). The write stays **off the event loop**
-and an audit failure still **never aborts** the operation it describes.
+text. The write stays **off the event loop** and an audit failure still
+**never aborts** the operation it describes.
+
+**The `error_code` vocabulary is SPLIT.** The COMMAND rows keep the
+**protocol-only** set (`AUDIT_ALLOWED_ERROR_CODES` = the centre-emitted
+codes + the relayed ones); the SESSION rows use the **centre-set**
+(`AUDIT_ALLOWED_SESSION_ERROR_CODES` = the protocol set + the two
+ledger-only reasons `machine_unreachable` / `machine_timeout` + the
+expiry causes `idle` / `ttl` + the response-borne reasons). The split
+is a security property, not cosmetics: the centre-only tokens are
+**minted by the center** and can never arrive from the peer, so keeping
+them OUT of the command set means a hostile machine cannot forge
+`machine_timeout` or `idle` into a command row and make the ledger lie
+about a command it never refused. A code outside the row's own set is
+recorded as `UNRECOGNIZED_ERROR_CODE`.
+
+**The two lifecycle `tool` names are RESERVED by the center.** The remote
+tool names come from the machine's catalog — verbatim (§6.4) — so a
+remote tool could carry the name `session.end`. That would give one
+ledger value two meanings (a forwarded command and a lifecycle event)
+and make the rows indistinguishable for an operator filtering on `tool`.
+A `tools/call` whose requested tool collides with a reserved name is
+therefore **refused before it reaches the machine** (a typed `INTERNAL`
+refusal naming the reservation). The wire contract and the tool input
+contract are both unchanged — only the ledger's namespace is protected.
 
 **What SPEC §8 is, precisely.** SPEC §8 says every forwarded command
 "*should* be logged by the center with who / machine / tool / args-hash",
@@ -693,8 +720,10 @@ capability. The machine releases its own session lock, answers the ack
 and **returns to `ready` on the SAME connection** (SPEC §6.8: the client
 ends the session locally, releasing the local lock, returns an
 acknowledgement, and the connection returns to `ready`). The machine's
-socket **STAYS OPEN** on expiry — the only socket closure in the gateway
-remains the heartbeat-kill path (§4.1).
+socket **STAYS OPEN** on expiry — the only socket closure **on the
+session path** remains the heartbeat-kill path (§4.1); the teardown
+paths (a socket that dies, a pre-hello deadline, the daemon shutting
+down) close sockets too, and none of them is a session-end closure.
 
 **The ack deadline.** The `session.end` forward has its **own bounded
 ack deadline — 5000 ms** — separate from the 30 s `command_timeout_ms`
@@ -722,8 +751,13 @@ session. Answering them would tell the agent something it cannot act on
 and would leak the machine's liveness.
 
 **The end envelope.** `mcp_rpc_disconnect` answers a **reason-coded
-envelope** for EVERY session-state outcome — it **never raises** for a
-session-state reason (it raises only for the kill-switch/disabled case):
+envelope** for EVERY session-state outcome — a session-state reason
+never raises: it comes back as the envelope below. What can still
+raise is the **pre-flight** refusals that happen BEFORE any session
+state is looked at: the tool's own **authorization** gate (an agent
+outside `ari` / `leader`) and the **kill switch** (a disabled
+gateway) — both of them are typed errors the tool renders as
+`{"error": {"code", "message"}}`:
 
 ```
 {session_id?, machine_id?, ended: bool, detail: str, machine_notified: bool}
@@ -740,12 +774,29 @@ session-state reason (it raises only for the kill-switch/disabled case):
 |---|---|
 | live session, the machine acks | `ended: true`, `machine_notified: true`, `result` = the ack verbatim; the center releases; the tombstone reason is `already_ended` |
 | live session, the machine answers `SESSION_NOT_FOUND` | `ended: true`, `machine_notified: true`, `detail` says the machine no longer held the session; the center releases |
-| live session, the machine answers any OTHER error envelope (including a relayed `TOOL_TIMEOUT`) | `ended: false`, `why_not_ended: machine_refused`, `detail` carries the machine's code, `machine_notified: true` — **the session SURVIVES** |
+| live session, the machine answers any OTHER error envelope (including a relayed `TOOL_TIMEOUT`) | `ended: false`, `why_not_ended: machine_refused`, `detail` carries the machine's code (PROTOCOL vocabulary only — anything else becomes `UNRECOGNIZED_ERROR_CODE`), `machine_notified: true` — **the session SURVIVES** |
 | live session, the connection is gone / unreachable | `ended: true`, `machine_notified: false`, `detail` says the center released authoritatively; the ledger reason is `machine_unreachable`; the center releases; the tombstone reason is `already_ended` |
 | live session, the center's own ack deadline fired | `ended: true`, `machine_notified: false`, `detail` states the deadline in ms; the ledger reason is `machine_timeout`; the center releases; the tombstone reason is `already_ended` |
-| no live session, an `expired` tombstone matched | `ended: false`, `why_not_ended: expired`, `detail`, `machine_id` (if known) |
-| no live session, an `already_ended` tombstone matched | `ended: false`, `why_not_ended: already_ended`, `detail`, `machine_id` (if known) |
+| no live session, an `expired` tombstone matched | `ended: false`, `why_not_ended: expired`, `detail`, `session_id` (the reaped session — always known here) and `machine_id` (if the tombstone knows it) |
+| no live session, an `already_ended` tombstone matched | `ended: false`, `why_not_ended: already_ended`, `detail`, `session_id` (the ended session — always known here) and `machine_id` (if the tombstone knows it) |
 | no live session, no tombstone | `ended: false`, `why_not_ended: unknown_session`, ONE neutral detail text for "never existed" and "not yours" (it must not become an existence oracle), **no** `machine_id` |
+
+**The explicit end is hardened like the sweep.** The end's forward
+carries the same arms as the sweep's, so no machine-state outcome can
+escape as a bare error:
+
+* a socket that dies **between the liveness check and the send** is an
+  **unreachable machine** — the center releases the session
+  authoritatively and answers `ended: true`, `machine_notified: false`
+  (the ledger reason is `machine_unreachable`);
+* a connection that dies **during the ack window** is NOT a refusal:
+  the machine answered nothing, so the refusal arm's meaning ("the
+  session SURVIVES") would be false — the tombstone answers instead
+  (`already_ended`);
+* the machine's **error code** is **sanitised** before it reaches the
+  response: only the protocol vocabulary is echoed, everything else
+  becomes `UNRECOGNIZED_ERROR_CODE`. A peer therefore cannot park a
+  ledger-only token — or free text — in an agent-facing `detail`.
 
 **The tombstone.** A **new, IN-MEMORY, BOUNDED, AGENT-SCOPED** record of
 a session that is gone. A record carries: `session_id`, `reason`
