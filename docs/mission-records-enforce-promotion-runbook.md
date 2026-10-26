@@ -143,6 +143,22 @@ TTL horizon."
 * The **reconciliation sweep** (`13aa51e1a`): the escape valve that retires the
   rows the delivery path cannot (a worker that died, a report that was never
   produced, a delivery that was lost in a crash).
+* **The sweep's own stall horizon (MAJ-4).** A commissioned worker whose newest
+  NON-TERMINAL task stamp is OLDER than the commission TTL is **not live** for
+  sweep purposes: the sweep abandons the commission under its OWN horizon
+  instead of waiting forever for a permanently-stalled `RUNNING` task to clear.
+  The horizon predicate is the mission-live guard's own task-stamp probe
+  (`mission_live_guard.member_live_task_attempt_at` — reused, not re-derived).
+
+  **PRECONDITION — `StaleTaskRecovery` must be running.** The sweep's horizon
+  decides whether a commission may be ABANDONED; it does NOT reclaim the
+  stalled task itself. `StaleTaskRecovery` is the boot-time reaper that
+  actually retires the stalled `RUNNING` task rows and lets the worker make
+  progress — so a promotion on a daemon where that service is disabled
+  converts "stalled worker" into "abandoned commission" (the mission releases,
+  the work is lost). Before MAJ-4 the sweep's only escape from a stalled task
+  was `StaleTaskRecovery` — an unnamed cross-subsystem dependency; the horizon
+  makes the sweep self-sufficient for the DECISION, not for the RECLAIM.
 
 ### 1.5 Be aware: promoting also COMMITS the boot backfill
 
@@ -475,6 +491,20 @@ liveness probe, the unprovable state resolves LOUDLY; a liveness-probe ERROR
 still holds at any age. The sweep writes ONLY `mission_commissions` — no
 instance status, no `mission_records`, no `report_injections`, no
 `dependency_watchers`.
+
+**The masked-enqueue probe is the one exception to the counter rule
+(MAJ-3).** It is an OBSERVABILITY probe (the signal never authorises an
+action by itself), so its faults are counted in their OWN counter
+(`masked_probe_errors`), not in `probe_errors` — whose contract is "a DECISION
+probe could not prove its predicate ⇒ the row was HELD". A masked-probe fault
+still HOLDS the row for that pass: the abandon and the satisfy are both
+skipped, and the row is retried on the next cycle.
+
+**The liveness probe has a horizon (MAJ-4).** "Live" is not a bare
+`has_live_work()`: a member whose newest non-terminal task stamp is older than
+the commission TTL is NOT live (the sweep abandons it under the TTL backstop).
+A task-stamp probe that CANNOT RUN keeps the member live (fail-safe — the row
+is held). See §1.4 for the `StaleTaskRecovery` precondition this sits next to.
 
 An UNWIRED `mission_record_repo` degrades to ZERO with ONE INFO log (the
 `force_cancel_and_schedule_retry` precedent) — so an unwired sweep looks like

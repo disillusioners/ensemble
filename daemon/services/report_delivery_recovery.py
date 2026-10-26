@@ -291,7 +291,7 @@ from daemon.services.report_recipient import (
     parse_iso_utc,
     resolve_report_recipient,
 )
-from daemon.services.timestamps import now_utc
+from daemon.services.timestamps import now_utc, now_utc_naive
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -2444,9 +2444,19 @@ class ReportDeliveryRecoveryService:
         Two legs, both from the SAME repository method families the
         mission-live guard reads (no consumer-side re-derivation):
 
-        * the guard's member-alive leg (``instance_repo.has_live_work``);
+        * the guard's member-alive leg (``instance_repo.has_live_work``),
+          now with the guard's TASK-STAMP HORIZON attached (MAJ-4);
         * the JobItem-live check (OQ-7): a commission whose ``work_id``
           resolves to a NON-TERMINAL JobItem is live.
+
+        **MAJ-4 — the horizon.** The member-alive leg used to be a
+        bare ``bool(has_live_work(worker_id))`` — NO horizon — so a
+        permanently-stalled RUNNING task read as live FOREVER: the
+        commission was never abandoned, the L3 hold never released, and
+        the only escape was StaleTaskRecovery (an unnamed
+        cross-subsystem dependency). The horizon predicate is the
+        guard's OWN (:func:`mission_live_guard.member_live_task_attempt_at`
+        — reused, NOT re-derived: two spellings of one rule drift).
 
         WIRING TRUTH (PR3 review, 2026-10-26) — the second leg is
         IMPLEMENTED and WIRED, but currently UNREACHABLE in production:
@@ -2472,7 +2482,14 @@ class ReportDeliveryRecoveryService:
         """
         live = bool(self._instance_repo.has_live_work(worker_id))
         if live:
-            return True
+            # MAJ-4: the horizon leg — a member whose newest
+            # non-terminal task stamp is OLDER than the horizon is NOT
+            # live for sweep purposes (a permanently-stalled RUNNING
+            # task would otherwise read live forever). A stalled member
+            # falls THROUGH to the JobItem leg, which may still find
+            # live work under a different linkage.
+            if self._member_is_within_the_liveness_horizon(worker_id):
+                return True
         work_id = getattr(commission, "work_id", None)
         if not work_id:
             # No job linkage → the JobItem leg does not apply (NOT an
@@ -2494,6 +2511,65 @@ class ReportDeliveryRecoveryService:
         # filter routes through; a local copy would be a second
         # spelling of the same set).
         return admission_state in ACTIVE_ADMISSION_STATES
+
+    def _member_is_within_the_liveness_horizon(self, worker_id: str) -> bool:
+        """MAJ-4 — is the member's live work WITHIN the stall horizon?
+
+        The predicate is the mission-live guard's OWN task-stamp probe
+        (:func:`mission_live_guard.member_live_task_attempt_at`) —
+        REUSED, not re-derived: the guard and the sweep must not hold
+        two spellings of one rule.
+
+        **THE HORIZON: the sweep's OWN TTL**
+        (``self._mission_commission_ttl_seconds``), NOT the guard's
+        ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS``. Rationale: the TTL is
+        the horizon the sweep's abandon backstop is measured against,
+        so a member's stall is judged on the SAME clock that will
+        release the row — one horizon family inside the sweep. (The
+        guard's orphan timeout belongs to the mission-finalisation
+        backstop: a different subsystem with a different lifecycle.
+        The two happen to share the 6 h default.)
+
+        **Fail-safe on a probe fault.** A probe that cannot run (no
+        ``engine`` on the repository, a DB error) cannot prove that
+        the member is stalled, so the member is treated as LIVE and
+        the row is HELD. Only a SUCCESSFUL "the stamp is older than
+        the horizon" reading makes the member not-live.
+
+        A member with NO dateable non-terminal task row (no task row at
+        all, or an undateable one) keeps the live verdict — there is no
+        evidence of a stalled turn, and the sweep must not abandon a
+        member whose live work is simply not task-row-backed (the
+        guard's own H2/C2 posture).
+
+        Returns:
+            ``True`` when the member is (still) within the horizon —
+            i.e. live for sweep purposes.
+        """
+        from daemon.services.mission_live_guard import (
+            member_live_task_attempt_at,
+        )
+
+        try:
+            attempt_at = member_live_task_attempt_at(
+                self._instance_repo, worker_id
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-safe: HOLD
+            logger.warning(
+                "sweep mission_reconciliation task-stamp probe failed "
+                "worker=%s: %s: %s — treating the member as LIVE "
+                "(fail-safe: the row is held)",
+                worker_id,
+                type(exc).__name__,
+                exc,
+            )
+            return True
+        if attempt_at is None:
+            return True
+        # NAIVE-UTC age math (the naive-timestamp convention: never mix
+        # an aware stamp with a naive ``now``).
+        age_seconds = (now_utc_naive() - attempt_at).total_seconds()
+        return age_seconds < self._mission_commission_ttl_seconds
 
     def _pending_bus_watchers(
         self, commissioner_id: str, worker_id: str

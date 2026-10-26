@@ -128,9 +128,20 @@ def manager_loop():
 class FakeInstanceRepo:
     """The instance reads the sweep needs: the worker row + liveness."""
 
-    def __init__(self, *, statuses: dict[str, str] | None = None, live: bool = False):
+    def __init__(
+        self,
+        *,
+        statuses: dict[str, str] | None = None,
+        live: bool = False,
+        engine=None,
+    ):
         self.statuses = statuses or {}
         self.live = live
+        # The task-stamp probe (MAJ-4) reads the TASK table through the
+        # repository's ``engine`` — the same attribute the mission-live
+        # guard uses. ``None`` (the default) makes the probe fault,
+        # which the sweep treats fail-safe (the member stays live).
+        self.engine = engine
         self.get_error: Exception | None = None
         self.live_error: Exception | None = None
 
@@ -1458,6 +1469,110 @@ class TestTheAdvisoryExclusion:
 
         assert lane.abandoned_ttl == 0
         assert lane.below_ttl_hold == 0
+
+
+# ---------------------------------------------------------------------------
+# MAJ-4 — the liveness leg carries the guard's task-stamp HORIZON
+# ---------------------------------------------------------------------------
+
+
+class TestTheLivenessHorizon:
+    """MAJ-4: a live-work member with a STALLED task row is not live.
+
+    The member-alive leg used to be a bare ``bool(has_live_work(...))``
+    — NO horizon — so a permanently-stalled RUNNING task read as live
+    FOREVER: the commission was never abandoned, the L3 hold never
+    released, and the only escape was StaleTaskRecovery (an unnamed
+    cross-subsystem dependency).
+
+    The horizon predicate is the mission-live guard's OWN
+    ``member_live_task_attempt_at`` (reused, not re-derived) and the
+    horizon is the sweep's TTL (the clock its own abandon backstop is
+    measured against).
+    """
+
+    def _seed_stalled_task(self, engine, *, age_hours: int) -> None:
+        """A non-terminal (RUNNING) task row with an ANCIENT stamp."""
+        from datetime import datetime, timedelta, timezone
+
+        from daemon.repositories.task.models import Task, TaskStatus
+
+        stamp = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+            hours=age_hours
+        )
+        with Session(engine) as session:
+            session.add(
+                Task(
+                    work_id=str(uuid.uuid4()),
+                    instance_id="worker-1",
+                    status=TaskStatus.RUNNING.value,
+                    created_at=stamp,
+                    started_at=stamp,
+                )
+            )
+            session.commit()
+
+    def test_a_stalled_running_task_is_not_live(self, engine, manager_loop):
+        """THE PIN: has_live_work True + an ancient stamp ⇒ NOT live ⇒
+        the abandon path is reachable."""
+        self._seed_stalled_task(engine, age_hours=26)
+        commission_id = _mint_commission(engine, age_seconds=99_999)
+        instance_repo = FakeInstanceRepo(
+            statuses={"worker-1": "running"}, live=True, engine=engine
+        )
+        service, _ = _build_service(
+            engine, manager_loop=manager_loop, instance_repo=instance_repo
+        )
+
+        lane = service.recover_now().lanes["mission_reconciliation"]
+
+        assert lane.skipped_live == 0
+        assert lane.abandoned_ttl == 1
+        row = _row(engine, commission_id)
+        assert row.state == CommissionState.ABANDONED.value
+        assert row.abandon_reason == "ttl_expired_not_live"
+
+    def test_a_young_running_task_is_still_live(self, engine, manager_loop):
+        """The fail-safe direction: a FRESH task stamp keeps the live
+        verdict (the row is held, never abandoned)."""
+        self._seed_stalled_task(engine, age_hours=0)
+        commission_id = _mint_commission(engine, age_seconds=99_999)
+        instance_repo = FakeInstanceRepo(
+            statuses={"worker-1": "running"}, live=True, engine=engine
+        )
+        service, _ = _build_service(
+            engine, manager_loop=manager_loop, instance_repo=instance_repo
+        )
+
+        lane = service.recover_now().lanes["mission_reconciliation"]
+
+        assert lane.skipped_live == 1
+        assert lane.abandoned_ttl == 0
+        assert _row(engine, commission_id).state == (
+            CommissionState.OUTSTANDING.value
+        )
+
+    def test_an_unprobeable_task_stamp_keeps_the_member_live(
+        self, engine, manager_loop
+    ):
+        """Fail-safe: a task-stamp probe that CANNOT RUN holds the row."""
+        commission_id = _mint_commission(engine, age_seconds=99_999)
+        # No ``engine`` on the fake repository ⇒ the probe faults.
+        instance_repo = FakeInstanceRepo(
+            statuses={"worker-1": "running"}, live=True
+        )
+        service, _ = _build_service(
+            engine, manager_loop=manager_loop, instance_repo=instance_repo
+        )
+
+        lane = service.recover_now().lanes["mission_reconciliation"]
+
+        assert lane.skipped_live == 1
+        assert lane.abandoned_ttl == 0
+        assert lane.probe_errors == 0
+        assert _row(engine, commission_id).state == (
+            CommissionState.OUTSTANDING.value
+        )
 
 
 # ---------------------------------------------------------------------------
