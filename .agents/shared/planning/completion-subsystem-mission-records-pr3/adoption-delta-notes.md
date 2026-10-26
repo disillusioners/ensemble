@@ -107,7 +107,7 @@ TERMINATOR CALL-SITE LIST (production terminal paths → terminator):
 
 The SWEEP abandons commissions: ``ReportDeliveryRecoveryService.
 _abandon_commission`` (three call sites — ``report_delivery_recovery.
-py:2217`` / ``:2321`` / ``:2332``) resolves each row through the
+py:2331`` / ``:2453`` / ``:2464``) resolves each row through the
 mission-record SERVICE's guarded transition
 (``MissionRecordService.abandon_commission(..., reason=...)`` → the
 repository's ONE guarded single-statement UPDATE,

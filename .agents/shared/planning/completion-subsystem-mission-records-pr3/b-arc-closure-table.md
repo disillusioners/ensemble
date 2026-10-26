@@ -207,10 +207,10 @@ The PR3 adoption notes §(e) (the terminator call-site table) was authored at
 "`abandon_commission` still has ZERO production callers" lines are now
 **STALE**. At HEAD the grep-verified caller census is:
 
-| Function | Production callers at HEAD |
+| Function | Production callers (anchors at HEAD b5812c1ddf) |
 |---|---|
-| `satisfy_commission` | `daemon/services/child_reports.py:4742` (via `satisfy_commission_fail_open`) + `daemon/services/report_delivery_recovery.py:2314` (`_satisfy_commission_on_evidence`) |
-| `abandon_commission` | `daemon/services/report_delivery_recovery.py:2217`, `:2321`, `:2332` — **three callers, all in RDRS lane 7** |
+| `satisfy_commission` | `daemon/services/child_reports.py:4753` (via `satisfy_commission_fail_open`) + `daemon/services/report_delivery_recovery.py:2446` (`_satisfy_commission_on_evidence`) |
+| `abandon_commission` | `daemon/services/report_delivery_recovery.py:2331`, `:2453`, `:2464` — **three callers, all in RDRS lane 7** |
 | `supersede_commission` | **ZERO** (no call site anywhere in `daemon/`) |
 
 **Action for the next editor of the PR3 notes:** §(e)'s table and its
