@@ -328,10 +328,16 @@ class ReportInjection(SQLModel, table=True):
     # and the PG mirror add). Types + nullability mirror the DDL
     # EXACTLY (TEXT / NULL / default NULL).
     #
-    # PR1 lands the columns ONLY — no writer yet (``mission_id`` is
-    # written by the PR3 routing flip; ``commissioner_instance_id`` is
-    # the report's true destination under the same flip). Nullable +
-    # additive → old binaries ignore them.
+    # PR1 landed the columns ONLY — no writer yet; PR3's routing flip
+    # gives them their writers. ``mission_id`` is the deciding LEG-1
+    # commission row's mission (leg-1-only). ``commissioner_instance_id``
+    # is COMMISSION-SCOPED: the deciding LEG-1 commission row's
+    # commissioner id, written ONLY when the commission leg decided the
+    # routing. A legacy-leg delivery (the audit-recency heuristic / the
+    # structural parent) is an honest NULL — the report's ACTUAL
+    # destination is ``parent_instance_id``; this column never carries a
+    # non-commissioner id. Nullable + additive → old binaries ignore
+    # them.
     mission_id: str | None = Field(
         sa_column=Column(Text, nullable=True), default=None
     )

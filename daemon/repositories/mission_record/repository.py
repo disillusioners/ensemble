@@ -611,10 +611,22 @@ class MissionRecordRepository:
         commission_id=:id AND state='outstanding'`` — the
         ``dependency_watchers`` PENDING→FIRED exactly-once contract: a
         satisfied commission can never be abandoned (and vice versa).
+
+        OQ-3(b): the ``resolved_at`` resolution stamp rides EVERY
+        guarded transition that leaves ``outstanding`` — the satisfied
+        write (the delivery terminator), the abandoned write and the
+        superseded write alike. It is the SAME single-statement UPDATE
+        the sweep's :meth:`resolve_commission` writes, so the two
+        writers can never double-stamp (each is its own guarded
+        statement) and the column never promises a stamp it did not
+        write. ``resolved_at`` is DISTINCT from ``satisfied_at`` on
+        purpose: dual-purposing ``satisfied_at`` for abandoned rows
+        would make the column name lie.
         """
-        values: dict[str, object] = {"state": to_state}
+        stamp = _utc_now_iso()
+        values: dict[str, object] = {"state": to_state, "resolved_at": stamp}
         if to_state == CommissionState.SATISFIED.value:
-            values["satisfied_at"] = _utc_now_iso()
+            values["satisfied_at"] = stamp
         if abandon_reason is not None:
             values["abandon_reason"] = abandon_reason
         stmt = (

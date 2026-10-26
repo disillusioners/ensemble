@@ -399,10 +399,14 @@ class MissionCommission(SQLModel, table=True):
             EXCLUDED from routing authority forever (the
             "if dropped, the ledger is worse than no ledger" rule,
             comparison.md §4c).
-        resolved_at: TEXT ISO stamp written by the RECONCILIATION SWEEP
-        (Proposal B PR3, OQ-3(b)) when the row leaves ``outstanding``
-        for ANY reason (``abandoned`` OR ``satisfied``). It is
-        DISTINCT from ``satisfied_at`` on purpose: dual-purposing
+        resolved_at: TEXT ISO stamp written when the row leaves
+        ``outstanding`` for ANY reason (``abandoned`` OR ``satisfied``
+        OR ``superseded``). It is written by BOTH guarded writers:
+        the RECONCILIATION SWEEP (Proposal B PR3, OQ-3(b), via
+        ``resolve_commission``) AND the delivery terminator's guarded
+        transition (``transition_commission_state``) — each is its own
+        single-statement guarded UPDATE, so there is no double-stamp.
+        It is DISTINCT from ``satisfied_at`` on purpose: dual-purposing
         ``satisfied_at`` for abandoned rows would make the column name
         lie (an abandoned commission was never satisfied). NULL while
         the row is outstanding, which is the honest default.

@@ -286,7 +286,7 @@ from daemon.constants import (
     MISSION_COMMISSION_ABANDON_REASONS,
 )
 from daemon.repositories.instance.models import InstanceStatus
-from daemon.repositories.job_queue.models import AdmissionState
+from daemon.repositories.job_queue.models import ACTIVE_ADMISSION_STATES
 from daemon.services.report_recipient import (
     parse_iso_utc,
     resolve_report_recipient,
@@ -421,11 +421,6 @@ MISSION_COMMISSION_STATE_ABANDONED = "abandoned"
 MISSION_ABANDON_REASON_WORKER_TERMINAL = "worker_terminal_no_report"
 MISSION_ABANDON_REASON_TTL = "ttl_expired_not_live"
 MISSION_ABANDON_REASON_WORKER_MISSING = "worker_row_missing"
-
-# The JobItem admission states that mean "LIVE work" (the OQ-7
-# JobItem-live check).
-JOB_ADMISSION_QUEUED = AdmissionState.QUEUED.value
-JOB_ADMISSION_ACTIVE = AdmissionState.ACTIVE.value
 
 # The worker-terminal set for R1 — the host's OWN parent-terminal
 # family (``_PARENT_TERMINAL_STATUSES``: COMPLETED / ERROR /
@@ -2141,11 +2136,11 @@ class ReportDeliveryRecoveryService:
                 out.errors += 1
                 logger.warning(
                     "sweep mission_reconciliation row error "
-                    "commission=%s..., mission=%s..., worker=%s...: "
+                    "mission_id=%s, commission_id=%s, worker=%s: "
                     "%s: %s",
-                    str(getattr(row, "commission_id", ""))[:8],
-                    str(getattr(row, "mission_id", ""))[:8],
-                    str(getattr(row, "worker_instance_id", ""))[:8],
+                    getattr(row, "mission_id", None),
+                    getattr(row, "commission_id", None),
+                    getattr(row, "worker_instance_id", None),
                     type(exc).__name__,
                     exc,
                 )
@@ -2395,9 +2390,25 @@ class ReportDeliveryRecoveryService:
 
         * the guard's member-alive leg (``instance_repo.has_live_work``);
         * the JobItem-live check (OQ-7): a commission whose ``work_id``
-          resolves to a NON-TERMINAL JobItem is live — the commission
-          row CARRIES the work linkage, which is a strict improvement
-          over the guard's named residual.
+          resolves to a NON-TERMINAL JobItem is live.
+
+        WIRING TRUTH (PR3 review, 2026-10-26) — the second leg is
+        IMPLEMENTED and WIRED, but currently UNREACHABLE in production:
+        NO mint lane stamps ``work_id`` on the commission row. The
+        ``send_message`` lane (``daemon/tools/instance.py``) and the
+        ``instance_nudge`` lane (``daemon/tools/instance_ops.py``) mint
+        commissions WITHOUT a work id; the only job-driven lane
+        (``job_continue``, ``daemon/tools/job_queue.py``) attaches the
+        work id to the EPOCH row (``mission_records.work_id``) and mints
+        NO commission row. So every production commission takes the
+        "no linkage → not live" branch below.
+
+        The sweep stays FAIL-SAFE: the worker-side
+        ``instance_repo.has_live_work`` leg covers the JobItem-queued-
+        on-the-worker case, so a live worker is never abandoned at any
+        age. The wiring gap is recorded as an explicit OPEN item (the
+        B-arc closure table §(d.2)) — stamping the linkage at a mint
+        lane is the follow-up, deliberately NOT invented here.
 
         Raises:
             MissionReconciliationProbeError: the probe could not run
@@ -2422,10 +2433,11 @@ class ReportDeliveryRecoveryService:
             # not exist — the T2 shape is handled by the WORKER read).
             return False
         admission_state = getattr(job, "admission_state", None)
-        return admission_state in (
-            JOB_ADMISSION_QUEUED,
-            JOB_ADMISSION_ACTIVE,
-        )
+        # The "LIVE work" membership set comes from the SINGLE SOURCE
+        # (``ACTIVE_ADMISSION_STATES`` — the set every membership
+        # filter routes through; a local copy would be a second
+        # spelling of the same set).
+        return admission_state in ACTIVE_ADMISSION_STATES
 
     def _pending_bus_watchers(
         self, commissioner_id: str, worker_id: str
@@ -2468,13 +2480,15 @@ class ReportDeliveryRecoveryService:
         """The job repository (the injected one, else the manager's).
 
         LAZY resolution on purpose: the JobQueueService is wired AFTER
-        the recovery service (the boot order). The public
-        ``JobQueueService.repository`` accessor is used — no private
-        ``_repository`` reach-through.
+        the recovery service (the boot order). The PUBLIC accessors are
+        used on both hops — ``InstanceManager.job_queue_service`` then
+        ``JobQueueService.repository`` — so there is NO private
+        ``_job_queue_service`` / ``_repository`` reach-through. An
+        absent service degrades to ``None`` (the caller HOLDS the row).
         """
         if self._job_repo is not None:
             return self._job_repo
-        service = getattr(self._manager, "_job_queue_service", None)
+        service = getattr(self._manager, "job_queue_service", None)
         if service is None:
             return None
         return getattr(service, "repository", None)

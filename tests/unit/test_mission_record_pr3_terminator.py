@@ -187,6 +187,10 @@ class TestTheDeliveryTerminator:
         row = _commission_row(engine, commission.commission_id)
         assert row.state == "satisfied"
         assert row.satisfied_at is not None
+        # OQ-3(b): the terminator's guarded transition stamps the
+        # resolution stamp too — the row left ``outstanding``, so
+        # ``resolved_at`` must not stay NULL.
+        assert row.resolved_at is not None
 
         # The delivery landed on the commissioner + carries provenance.
         rows = _injection_rows(engine, child)
@@ -216,6 +220,11 @@ class TestTheDeliveryTerminator:
         rows = _injection_rows(engine, child)
         assert rows[0].parent_instance_id == PARENT
         assert rows[0].mission_id is None
+        # A LEGACY-leg delivery carries NO record-based attribution:
+        # ``commissioner_instance_id`` is COMMISSION-SCOPED (leg 1 only),
+        # so it is an honest NULL here — the destination lives in
+        # ``parent_instance_id``.
+        assert rows[0].commissioner_instance_id is None
 
     def test_a_dead_commissioner_keeps_the_commission_outstanding(
         self, engine, enforce_mode
@@ -242,10 +251,13 @@ class TestTheDeliveryTerminator:
         row = _commission_row(engine, commission.commission_id)
         assert row.state == "outstanding"
         rows = _injection_rows(engine, child)
-        # The report went to the structural parent; the provenance
-        # records the actual destination.
+        # The report went to the structural parent — the DESTINATION is
+        # recorded in ``parent_instance_id``. The provenance columns stay
+        # COMMISSION-SCOPED: ``commissioner_instance_id`` names the
+        # commission's commissioner (the dead one), NOT the structural
+        # parent the report actually fell back to.
         assert rows[0].parent_instance_id == PARENT
-        assert rows[0].commissioner_instance_id == PARENT
+        assert rows[0].commissioner_instance_id == COMMISSIONER
         assert rows[0].mission_id == commission.mission_id
 
 

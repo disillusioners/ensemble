@@ -4550,12 +4550,18 @@ Provide a concise summary:"""
                         # ── PR3 D1 — the mission-provenance WRITERS ──
                         # (the PR1 columns finally gain them). The
                         # semantics, each with ONE meaning:
-                        # * ``commissioner_instance_id`` = the row's
-                        #   ACTUAL destination (== parent_instance_id
-                        #   here; after the dead-recipient guard's
-                        #   fallback it is the structural parent — the
-                        #   honest record of where the report really
-                        #   went).
+                        # * ``commissioner_instance_id`` = the
+                        #   COMMISSION-SCOPED attribution: the
+                        #   deciding LEG-1 commission row's
+                        #   commissioner id, written ONLY when the
+                        #   commission leg decided the routing. A
+                        #   legacy-leg delivery (the audit-recency
+                        #   heuristic / the structural parent) is an
+                        #   honest NULL — the report's actual
+                        #   destination is ``parent_instance_id``, and
+                        #   this column never carries a
+                        #   non-commissioner id (the dead-recipient
+                        #   fallback is exactly that case).
                         # * ``mission_id`` = the deciding LEG-1
                         #   commission row's mission — set ONLY when the
                         #   mission-record leg decided the routing
@@ -4566,7 +4572,11 @@ Provide a concise summary:"""
                             if _routing_commission is not None
                             else None
                         ),
-                        commissioner_instance_id=recipient_for_report,
+                        commissioner_instance_id=(
+                            _routing_commission.commissioner_instance_id
+                            if _routing_commission is not None
+                            else None
+                        ),
                     )
                     session.add(report_injection_row)
                     # Flush to surface the IntegrityError early. Only

@@ -1101,7 +1101,27 @@ class TestTheAdvisoryExclusion:
 
 
 class TestTheJobItemLiveCheck:
+    """The OQ-7 JobItem-live leg — the CODE PATH, not production wiring.
+
+    HONEST SCOPE (PR3 review, 2026-10-26): the rows below are
+    HAND-BUILT by ``_mint_commission`` — the helper inserts the
+    commission row directly with ``work_id="job-1"``. NO production
+    mint lane stamps ``work_id`` on a commission row (the
+    ``send_message`` + ``instance_nudge`` lanes mint without it; the
+    ``job_continue`` lane attaches the work id to the EPOCH row and
+    mints no commission row), so this leg is INERT in production and
+    these tests prove the PROBE + the branch logic, NOT the wiring.
+
+    The sweep stays fail-safe meanwhile: the worker-side
+    ``has_live_work`` leg covers the JobItem-queued-on-the-worker
+    case. The wiring gap is an explicit OPEN item (the B-arc closure
+    table §(d.2)), not a defect this test suite hides.
+    """
+
     def test_a_non_terminal_job_item_holds_the_row(self, engine, manager_loop):
+        # A HAND-BUILT commission row carrying a work id — the shape no
+        # production mint lane currently produces (see the class
+        # docstring). Proves the leg's HOLD branch, not its wiring.
         commission_id = _mint_commission(
             engine, age_seconds=99_999, work_id="job-1"
         )

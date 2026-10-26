@@ -6938,6 +6938,23 @@ class InstanceManager:
             except Exception as e:
                 logger.warning(f"Cached instance cleanup failed: {e}")
 
+    @property
+    def job_queue_service(self) -> Any:
+        """Public read access to the late-bound JobQueueService.
+
+        Proposal B PR3 — the reconciliation sweep's JOBITEM-LIVE probe
+        (RDRS lane 7) resolves the job repository through the PUBLIC
+        accessors: this property, then ``JobQueueService.repository``.
+        The private ``_job_queue_service`` attribute is an
+        implementation detail, not a contract — the sweep reads the
+        public hop instead of reaching through it (the same
+        discipline that retired the ``_instance_repository`` family).
+
+        ``None`` before ``set_job_queue_service`` runs (the boot
+        order) — callers degrade, never assume presence.
+        """
+        return self._job_queue_service
+
     def set_job_queue_service(self, service: Any) -> None:
         """Set the JobQueueService reference.
 
@@ -11939,8 +11956,13 @@ class InstanceManager:
         TERMINATOR: PR3 wires ``satisfy_commission`` into the natural
         completion write path (the report-delivery terminator); the
         ``abandoned`` write + the TTL backstop remain the
-        reconciliation sweep's (RDRS lane 7, a separate cycle) —
-        ``abandon_commission`` still has no production caller.
+        reconciliation sweep's (RDRS lane 7, a separate cycle).
+        The abandonment IS live in production — the sweep abandons
+        through the repository's guarded transition (RDRS lane 7 →
+        ``MissionRecordRepository.resolve_commission``). What has no
+        production caller is the ``MissionRecordService
+        .abandon_commission`` SERVICE METHOD (the sweep does not go
+        through the service facade for that write).
         """
         if not mission_records_enforce_enabled():
             # Inactive input — the legacy quiet predicate is preserved
