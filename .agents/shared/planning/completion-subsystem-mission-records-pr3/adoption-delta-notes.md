@@ -35,7 +35,7 @@ Shipped shape:
   0 default); "anchor has no epochs at all" stays a real ``0``;
 * the deliberate cost is the eternal-mission class (proposal-b §8) —
   the escape valve is the reconciliation sweep + its TTL backstop
-  (lane 7, next cycle).
+  (lane 7 — LANDED in this branch; see section (j)).
 
 Mandatory pin:
 ``tests/unit/test_mission_record_pr3_cross_epoch_hold.py`` — the
@@ -101,12 +101,19 @@ TERMINATOR CALL-SITE LIST (production terminal paths → terminator):
 | Path | Terminator | Owner |
 |---|---|---|
 | Natural completion write path (report written + addressed to the commissioner) | ``satisfied`` | **PR3 (this train)** |
-| Deferred-marker / recovered-marker deliveries (lanes 1/3/4 + drain claims) | ``satisfied`` on delivery evidence | RDRS lane 7 (next cycle) |
-| Worker-terminal / TTL / no-report-ever | ``abandoned`` (fail-MISS probes) | RDRS lane 7 (next cycle) |
+| Deferred-marker / recovered-marker deliveries (lanes 1/3/4 + drain claims) | ``satisfied`` on delivery evidence | RDRS lane 7 (LANDED — section (j)) |
+| Worker-terminal / TTL / no-report-ever | ``abandoned`` (fail-MISS probes) | RDRS lane 7 (LANDED — section (j)) |
 | Epoch supersession | NOTHING (ruling (c) — rows keep pointing at their epoch) | — |
 
-``abandon_commission`` still has ZERO production callers; ``superseded``
-stays mint-lane-only (zero callers — ruling (c)).
+The SWEEP abandons commissions: ``ReportDeliveryRecoveryService.
+_abandon_commission`` (three call sites — ``report_delivery_recovery.
+py:2217`` / ``:2321`` / ``:2332``) resolves each row through the
+repository's guarded single-statement transition
+(``MissionRecordRepository.resolve_commission(..., 'abandoned',
+abandon_reason=...)``). The ``MissionRecordService.abandon_commission``
+METHOD still has ZERO production callers — the sweep resolves through the
+repository, not the service seam. ``superseded`` stays mint-lane-only
+(zero callers — ruling (c)).
 
 ## (f) The committing backfill (mode-gated) + retention story
 
