@@ -81,6 +81,13 @@ def engine(tmp_path):
 def service(engine):
     manager = MagicMock()
     manager._engine = engine
+    # The branch reads the PUBLIC accessor (``self._manager.engine``) while
+    # the base reads the private ``_engine``. A bare MagicMock auto-creates
+    # ANY attribute, so ``manager.engine`` would otherwise hand the helper a
+    # DIFFERENT mock -> every ``session.scalar()`` returns a mock ->
+    # ``int(MagicMock()) == 1`` -> the helper returns a constant 1.
+    # Stub BOTH names so the fake follows whichever accessor the code reads.
+    manager.engine = engine
     return InstanceMessagingService(
         manager=manager,
         cancellation_service=MagicMock(),
