@@ -46,6 +46,7 @@ from daemon.repositories.mission_record.repository import (
 )
 from daemon.services.mission_record_reads import (
     count_outstanding_commissions,
+    list_outstanding_commissions,
     read_mission_census,
 )
 from daemon.services.mission_record_service import (
@@ -264,8 +265,8 @@ class TestAdvisoryExclusionEverywhere:
         """THE one-consistent-predicate pin, end-to-end from a COMMITTED
         backfill run: the minted advisory row is invisible to (a) the
         routing lookup, (b) the census record-leg, (c) the quiet/L3
-        anchor-scoped count — while the underlying row EXISTS and is
-        durable (the retention story)."""
+        anchor-scoped count, (d) the SOURCE C LIST read — while the
+        underlying row EXISTS and is durable (the retention story)."""
         _seed_instance(engine, ACTOR)
         _seed_instance(engine, TARGET)
         _seed_nudge_audit(engine)
@@ -307,6 +308,39 @@ class TestAdvisoryExclusionEverywhere:
         # (c) QUIET / L3 HOLD: the anchor-scoped count reads 0 — the
         # advisory row can never hold the mission.
         assert count_outstanding_commissions(engine, ACTOR) == 0
+
+        # (d) SOURCE C LIST READ: the judge's SOURCE C union (the
+        # commission half) LISTS the mission's commission rows — the
+        # advisory row must be invisible there too. The exclusion is
+        # ONE consistent predicate across EVERY read that consults
+        # commissions, and the LIST read is a read: a LIST read that
+        # kept the advisory rows would leak the historical nudge ledger
+        # straight into the judge's C membership (the count reads are
+        # pinned above — the list read is the hole they leave open).
+        #
+        # The production seam is
+        # ``MissionRecordRepository.list_commissions_for_mission``
+        # (daemon/repositories/mission_record/repository.py:431) —
+        # consumed by ``mission_record_reads.list_outstanding_commissions``
+        # (the SOURCE C union read, daemon/services/mission_record_reads.py:307)
+        # — which ``daemon/manager.py:12101`` consumes in production.
+        assert list_outstanding_commissions(engine, ACTOR) == []
+        # The same read at the repository seam, so the pin dies on the
+        # repository's own predicate and not only on the service's use
+        # of it.
+        epoch = MissionRecordRepository(engine).find_open_epoch_by_anchor(
+            ACTOR
+        )
+        assert epoch is not None, (
+            "the COMMITTED backfill MUST have minted the actor's epoch-0 "
+            "mission row — the SOURCE C list read is scoped to it"
+        )
+        assert (
+            MissionRecordRepository(engine).list_commissions_for_mission(
+                epoch.mission_id
+            )
+            == []
+        )
 
     def test_a_live_commission_is_still_visible_next_to_advisory_rows(
         self, engine
