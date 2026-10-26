@@ -147,6 +147,7 @@ from ..repositories.mission_record.repository import (
 )
 from ..constants import (
     DEFAULT_MISSION_COMMISSION_TTL_SECONDS,
+    MISSION_COMMISSION_ABANDON_REASONS,
     MISSION_COMMISSION_TTL_ENV,
 )
 from .timestamps import now_utc_iso
@@ -246,10 +247,25 @@ def mission_records_enforce_enabled() -> bool:
 
     Lives HERE (the mode ladder's owner) so the reader module and the
     writer module share ONE definition — no import cycle, no drift.
+
+    **THE SWALLOW IS NOT SILENT.** An unresolved mode token used to be
+    swallowed with NO log, so an operator could not tell "the ladder is
+    not in enforce" from "the ladder is BROKEN". The two sibling
+    swallow sites (``_mode_is_off`` and the reconciliation sweep's mode
+    resolver) already log a WARNING for the same failure class; this
+    gate now matches them. **OBSERVABILITY ONLY** — the daemon still
+    fails LOUDLY at boot (the manager resolves the ladder OUTSIDE any
+    swallow envelope), so this is NOT a boot-contract change.
     """
     try:
         return resolve_mission_records_mode() == MissionRecordMode.ENFORCE
-    except Exception:  # noqa: BLE001 — never break a gate on a knob fault
+    except Exception as exc:  # noqa: BLE001 — never break a gate on a knob fault
+        logger.warning(
+            "mission_records: %s unresolved (%s) — the mode gate "
+            "degrades to not-enforcing",
+            MISSION_RECORDS_MODE_ENV,
+            exc,
+        )
         return False
 
 
@@ -312,6 +328,14 @@ def resolve_mission_commission_ttl_seconds(
     not break the sweep thread (the fail-MISS producer posture — a
     raised knob fault would strand every commission forever, which is
     the exact failure the sweep exists to prevent).
+
+    **THE CACHE HOLDS THE ENV VALUE ONLY.** Two constructions with
+    different configured defaults do not poison each other: the
+    caller's ``default`` is returned PER CALL and is NEVER written to
+    the process-global cache. An INVALID env value therefore resolves
+    to NOTHING and leaves the cache untouched (caching the default
+    there would freeze the FIRST caller's default for every later
+    caller).
     """
     global _MISSION_COMMISSION_TTL_SECONDS
     raw = (os.environ.get(MISSION_COMMISSION_TTL_ENV) or "").strip()
@@ -336,7 +360,14 @@ def resolve_mission_commission_ttl_seconds(
                 raw,
                 default,
             )
-            _MISSION_COMMISSION_TTL_SECONDS = int(default)
+            # The cache holds the ENV value ONLY (the function's own
+            # contract — two constructions with different configured
+            # defaults do not poison each other). An INVALID env value
+            # resolves to NOTHING, so the caller's default is returned
+            # PER CALL and the process-global cache stays untouched —
+            # caching the default here would freeze the FIRST caller's
+            # default for every later caller.
+            return int(default)
     return _MISSION_COMMISSION_TTL_SECONDS
 
 
@@ -988,7 +1019,22 @@ class MissionRecordService:
         the sweep goes through the SERVICE, so there is ONE guarded
         UPDATE owning the ``resolved_at`` stamp; the repository's own
         duplicate implementation was removed).
+
+        **THE FROZEN VOCABULARY IS VALIDATED HERE — AT THE WRITER.**
+        The abandon-reason set (``MISSION_COMMISSION_ABANDON_REASONS``
+        — the design's R9 / OQ-4) used to be checked ONLY at the CALLER
+        (the sweep's ``_abandon_commission``), so this writer took the
+        ``abandon_reason`` VERBATIM: any other caller could write a
+        token outside the frozen set and the operator-facing vocabulary
+        would silently grow a second spelling. An unknown reason now
+        raises ``ValueError`` HERE (the same shape and message as the
+        caller's own check — the caller keeps its guard, the writer
+        gains its own).
         """
+        if reason not in MISSION_COMMISSION_ABANDON_REASONS:
+            raise ValueError(
+                f"unknown mission-commission abandon reason: {reason!r}"
+            )
         return self._repo.transition_commission_state(
             commission_id,
             CommissionState.ABANDONED.value,

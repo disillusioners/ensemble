@@ -890,7 +890,7 @@ class ReportInjectionRepository:
 
         **STATE FILTER (MAJ-1, the binding ruling).** DELIVERED states
         ONLY — ``INJECTED`` + ``TASK_DELIVERED``. The previous read
-        (:meth:`find_any_for_pair`, now removed) was deliberately
+        (``find_any_for_pair``, now removed) was deliberately
         state-AGNOSTIC — "ANY state is positive delivery evidence".
         That rationale is **OVERTURNED by ruling**: a ``PENDING`` or
         ``DEFERRED`` row is an UNFULFILLED obligation (the delivery has

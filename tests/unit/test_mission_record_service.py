@@ -260,8 +260,10 @@ class TestGuardedTransitions:
         assert service.satisfy_commission(commission.commission_id) is True
         # a satisfied commission can never be abandoned (the
         # dependency_watchers exactly-once contract)
+        # (the reason is a FROZEN vocabulary token — the writer
+        # validates the vocabulary itself since PR3)
         assert service.abandon_commission(
-            commission.commission_id, reason="late sweep"
+            commission.commission_id, reason="ttl_expired_not_live"
         ) is False
 
     async def test_abandon_records_reason(self, service, engine, two_instances):
@@ -275,13 +277,13 @@ class TestGuardedTransitions:
         )
         assert (
             service.abandon_commission(
-                commission.commission_id, reason="worker terminal, no report"
+                commission.commission_id, reason="worker_terminal_no_report"
             )
             is True
         )
         row = service._repo.get_commission(commission.commission_id)
         assert row.state == CommissionState.ABANDONED.value
-        assert row.abandon_reason == "worker terminal, no report"
+        assert row.abandon_reason == "worker_terminal_no_report"
 
     async def test_attestation_record_only_and_guarded_on_open(
         self, service, engine, two_instances

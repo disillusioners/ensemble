@@ -7,6 +7,30 @@ settle-hold refuses to settle while ``outstanding_commissions > 0``).
 Lane 7 resolves the provably-dead rows to ``abandoned`` (and the
 provably-delivered ones to ``satisfied``).
 
+PROBE-FAMILY LAYOUT (this file is split BY PROBE, not by layer):
+
+* **the MASKED-ENQUEUE probe** — the D4(iii) observability signal (a
+  commission with NO queue row past the grace window) and its OWN
+  fault counter (``masked_probe_errors`` — MAJ-3);
+* **the LIVENESS HORIZON** — the member-alive leg, the MAJ-4 task-stamp
+  horizon, and the OQ-7 JobItem-live check;
+* **the DELIVERY EVIDENCE** — leg 1 (the AUTHORITY) plus legs 2/3 (the
+  DIAGNOSTIC pair);
+* **the TTL** — the time-bounded fail-MISS backstop and its
+  env-tunable horizon.
+
+WHY THE FILE IS SPLIT BY PROBE: each probe family has its OWN failure
+semantics — the authority leg may HOLD a row on a fault, the
+diagnostic legs may NOT, the masked probe has its OWN counter, and the
+TTL is the ONE time-bounded exception. Pinning them in ONE file would
+blur exactly those semantics (a reader could no longer tell which
+probe's counter a given assertion was about); splitting BY PROBE keeps
+each family's contract, its counters and its hold/resolve posture
+adjacent, so a change to one probe's posture is reviewed against that
+probe's own pins. The file is ~2.4k lines (2430 at this commit) —
+inside the 1000-3000 band the house observes — so NO top-level split
+is required.
+
 THE CONTRACT THIS FILE PINS (the design's §2 posture table):
 
 * **P1 — fail-MISS.** EVERY probe error HOLDS the row: the commission
@@ -1651,9 +1675,16 @@ class TestTheEndpointShape:
             engine, manager_loop=manager_loop, instance_repo=instance_repo
         )
         # The live worker: has_live_work returns True for it only.
-        original_has_live_work = instance_repo.has_live_work
+        # The CALL COUNTER is what the old capture was reaching for:
+        # the capture it replaced asserted
+        # ``original_has_live_work is not None`` — a bound method is
+        # NEVER None, so that assertion could not fail (it proved
+        # nothing). The counter proves the monkeypatched probe ACTUALLY
+        # RAN, for BOTH rows.
+        liveness_calls: list[str] = []
 
         def _has_live_work(instance_id: str) -> bool:
+            liveness_calls.append(instance_id)
             return instance_id == "live-worker"
 
         instance_repo.has_live_work = _has_live_work  # type: ignore[method-assign]
@@ -1664,7 +1695,19 @@ class TestTheEndpointShape:
         assert lane["skipped_live"] == 1
         assert lane["abandoned_ttl"] == 1
         assert lane["probe_errors"] == 0
-        assert original_has_live_work is not None
+        assert liveness_calls, (
+            "the liveness probe was NEVER consulted — the monkeypatched "
+            "has_live_work did not run, so the skipped_live / "
+            "abandoned_ttl split above was not produced by it"
+        )
+        assert "live-worker" in liveness_calls, (
+            "the LIVE row's liveness probe never ran; calls="
+            f"{liveness_calls!r}"
+        )
+        assert "dead-worker" in liveness_calls, (
+            "the DEAD row's liveness probe never ran; calls="
+            f"{liveness_calls!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1739,6 +1782,41 @@ class TestTheTtlKnob:
         _reset_mission_commission_ttl_for_tests()
         try:
             assert resolve_mission_commission_ttl_seconds(default=3600) == 3600
+        finally:
+            _reset_mission_commission_ttl_for_tests()
+
+    def test_an_invalid_env_knob_does_not_poison_the_other_defaults(
+        self, monkeypatch
+    ):
+        """L1: the cache holds the ENV value ONLY — the default is
+        returned PER CALL.
+
+        The invalid-env branch used to cache the CALLER'S ``default``
+        into the process-global cache, so the FIRST caller's default
+        was frozen for every later caller — contradicting the
+        function's own contract ("two constructions with different
+        configured defaults do not poison each other").
+
+        The pin: two calls with DIFFERENT defaults each get their own
+        default back, and the process-global cache is left UNTOUCHED.
+        (Under the old shape the second call returned 3600, so this
+        assertion fails there.)
+        """
+        from daemon.constants import MISSION_COMMISSION_TTL_ENV
+        from daemon.services import mission_record_service as mrs
+        from daemon.services.mission_record_service import (
+            _reset_mission_commission_ttl_for_tests,
+            resolve_mission_commission_ttl_seconds,
+        )
+
+        monkeypatch.setenv(MISSION_COMMISSION_TTL_ENV, "not-a-number")
+        _reset_mission_commission_ttl_for_tests()
+        try:
+            assert resolve_mission_commission_ttl_seconds(default=3600) == 3600
+            assert resolve_mission_commission_ttl_seconds(default=99) == 99
+            # The cache holds the ENV value ONLY — an invalid env value
+            # resolves to NOTHING, so the cache stays empty.
+            assert mrs._MISSION_COMMISSION_TTL_SECONDS is None
         finally:
             _reset_mission_commission_ttl_for_tests()
 
@@ -2129,4 +2207,224 @@ class TestTheJobItemLiveCheck:
         assert lane.abandoned_ttl == 1
         assert _row(engine, commission_id).state == (
             CommissionState.ABANDONED.value
+        )
+
+
+# ---------------------------------------------------------------------------
+# M11 — the dependency-bus lookup swallow is LOGGED (behaviour unchanged)
+# ---------------------------------------------------------------------------
+
+
+class TestTheBusLookupSwallowLog:
+    """M11: "the bus is not wired" vs "the bus lookup blew up".
+
+    The dependency-bus resolver swallowed its exception with NO log, so
+    the upstream HOLD reported the misleading "dependency_bus is not
+    wired" — the operator could not tell the two apart (the same
+    operator-blindness class as the prior flusher-counter finding).
+
+    **LOG ONLY.** The resolver still returns ``None`` and the row still
+    HOLDs (a degraded bus resolution must NOT become a resolution), so
+    the pin asserts BOTH halves: the DEBUG line fires, and the posture
+    is UNCHANGED.
+    """
+
+    def test_the_bus_lookup_fault_is_logged_and_the_row_still_holds(
+        self, engine, manager_loop, caplog, monkeypatch
+    ):
+        import daemon.services.dependency_bus as dependency_bus
+
+        def _boom():
+            raise RuntimeError("the bus singleton exploded")
+
+        monkeypatch.setattr(dependency_bus, "get_dependency_bus", _boom)
+
+        commission_id = _mint_commission(engine, age_seconds=99_999)
+        service, _ = _build_service(
+            engine,
+            manager_loop=manager_loop,
+            instance_repo=FakeInstanceRepo(statuses={"worker-1": "running"}),
+        )
+        # The service is built WITH a bus — the singleton path (the one
+        # that can blow up) is only taken when NO bus was injected.
+        service._dependency_bus = None
+
+        with caplog.at_level(
+            logging.DEBUG, logger="daemon.services.report_delivery_recovery"
+        ):
+            lane = service.recover_now().lanes["mission_reconciliation"]
+
+        # (a) THE BEHAVIOUR IS UNCHANGED: the row still HOLDs (no
+        # abandon, no satisfy) — the swallow is not a resolution.
+        assert lane.probe_errors == 1
+        assert lane.abandoned_ttl == 0
+        assert lane.abandoned_worker_terminal == 0
+        row = _row(engine, commission_id)
+        assert row.state == CommissionState.OUTSTANDING.value
+        assert row.abandon_reason is None
+
+        # (b) THE SWALLOW IS NO LONGER SILENT: the exception TYPE and
+        # MESSAGE are logged at DEBUG.
+        debug_lines = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.DEBUG
+            and "dependency-bus lookup failed" in record.getMessage()
+        ]
+        assert debug_lines, (
+            "the dependency-bus lookup fault MUST be LOGGED — the "
+            "operator must be able to tell 'the bus is not wired' from "
+            "'the bus lookup blew up'; no DEBUG line was emitted"
+        )
+        assert "RuntimeError" in debug_lines[0], (
+            "the DEBUG line MUST carry the exception TYPE; got "
+            f"{debug_lines[0]!r}"
+        )
+        assert "the bus singleton exploded" in debug_lines[0], (
+            "the DEBUG line MUST carry the exception MESSAGE; got "
+            f"{debug_lines[0]!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# L4 — the FROZEN abandon-reason vocabulary is validated AT THE WRITER
+# ---------------------------------------------------------------------------
+
+
+class TestTheFrozenAbandonVocabulary:
+    """L4: the frozen vocabulary is checked at the WRITER, not only at
+    the caller.
+
+    ``MISSION_COMMISSION_ABANDON_REASONS`` used to be validated ONLY
+    at the CALLER (the sweep's ``_abandon_commission``), while the
+    single WRITER (``MissionRecordService.abandon_commission``) wrote
+    ``abandon_reason`` VERBATIM — so any other caller could write a
+    token outside the frozen set and the operator-facing vocabulary
+    would silently grow a second spelling.
+    """
+
+    def test_the_writer_rejects_an_unknown_abandon_reason(self, engine):
+        """THE PIN: the WRITER raises on an unknown reason."""
+        commission_id = _mint_commission(engine, age_seconds=99_999)
+        service = MissionRecordService(engine)
+
+        with pytest.raises(
+            ValueError,
+            match="unknown mission-commission abandon reason",
+        ):
+            service.abandon_commission(
+                commission_id, reason="not_a_frozen_reason"
+            )
+
+        # The rejected write left NO trace on the row.
+        row = _row(engine, commission_id)
+        assert row.state == CommissionState.OUTSTANDING.value
+        assert row.abandon_reason is None
+        assert row.resolved_at is None
+
+    def test_a_frozen_reason_still_writes(self, engine):
+        """The guard does not break the legitimate write."""
+        commission_id = _mint_commission(engine, age_seconds=99_999)
+        service = MissionRecordService(engine)
+
+        assert service.abandon_commission(
+            commission_id, reason="ttl_expired_not_live"
+        )
+
+        row = _row(engine, commission_id)
+        assert row.state == CommissionState.ABANDONED.value
+        assert row.abandon_reason == "ttl_expired_not_live"
+
+    def test_the_callers_own_check_still_holds(self, engine, manager_loop):
+        """The CALLER's guard is NOT removed — the writer's check is
+        ADDITIVE.
+
+        The caller's check fires BEFORE the writer is reached, so the
+        mission-record service's ``abandon_commission`` is NEVER called
+        for an unknown reason (the spy proves the CALLER's own guard is
+        the one that fired).
+        """
+        from daemon.services.report_delivery_recovery import (
+            MissionReconciliationLaneResult,
+        )
+
+        commission_id = _mint_commission(engine, age_seconds=99_999)
+        mission_service = MagicMock(wraps=MissionRecordService(engine))
+        service, _ = _build_service(
+            engine,
+            manager_loop=manager_loop,
+            mission_record_service=mission_service,
+            instance_repo=FakeInstanceRepo(statuses={"worker-1": "running"}),
+        )
+        row = _row(engine, commission_id)
+
+        with pytest.raises(
+            ValueError,
+            match="unknown mission-commission abandon reason",
+        ):
+            service._abandon_commission(
+                row,
+                MissionReconciliationLaneResult(),
+                mode="enforce",
+                reason="not_a_frozen_reason",
+                age_seconds=99_999,
+            )
+
+        mission_service.abandon_commission.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# L19 — the mode gate's swallow is NOT silent
+# ---------------------------------------------------------------------------
+
+
+class TestTheModeGateWarning:
+    """L19: ``mission_records_enforce_enabled`` logs a WARNING.
+
+    The gate swallowed the unresolved-mode ``ValueError`` SILENTLY,
+    while ``_mode_is_off()`` and the sweep's mode resolver both log a
+    WARNING for the same failure class. **OBSERVABILITY ONLY** — the
+    daemon still fails LOUDLY at boot (the manager resolves the ladder
+    OUTSIDE any swallow envelope), so this is NOT a boot-contract
+    change: the gate still degrades to "not enforcing" and never
+    raises.
+    """
+
+    def test_the_mode_gate_warns_when_the_resolver_raises(
+        self, caplog, monkeypatch
+    ):
+        import daemon.services.mission_record_service as mission_record_service
+
+        def _boom():
+            raise ValueError("Invalid ENSEMBLE_MISSION_RECORDS value 'nope'")
+
+        monkeypatch.setattr(
+            mission_record_service, "resolve_mission_records_mode", _boom
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.mission_record_service"
+        ):
+            gate = mission_record_service.mission_records_enforce_enabled()
+
+        # The gate still NEVER raises — it degrades to "not enforcing".
+        assert gate is False
+
+        warning_lines = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+            and "unresolved" in record.getMessage()
+        ]
+        assert warning_lines, (
+            "the mode gate's swallow MUST log a WARNING — the operator "
+            "must be able to tell 'the ladder is not in enforce' from "
+            "'the ladder is BROKEN'; no WARNING line was emitted"
+        )
+        assert "ENSEMBLE_MISSION_RECORDS" in warning_lines[0], (
+            "the WARNING MUST name the knob; got " f"{warning_lines[0]!r}"
+        )
+        assert "nope" in warning_lines[0], (
+            "the WARNING MUST carry the resolver's message; got "
+            f"{warning_lines[0]!r}"
         )

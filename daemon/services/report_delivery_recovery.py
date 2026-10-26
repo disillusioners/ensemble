@@ -1,5 +1,57 @@
 """Periodic report-delivery recovery service.
 
+Module size: 3299 lines (measured at this commit; +1478 since the base
+``013895287``, which was 1821 lines). Originally aimed for the
+1000-3000 line band; we are now OVER the band, so the >3000 band
+obligation applies — THIS NOTE IS THE OBLIGATION.
+
+Module size rationale (M8): this module is ``concentrated by design``.
+It owns the whole periodic report-delivery recovery sweep: the SEVEN
+lanes, the per-row fail-MISS probes, the guarded transition writes, and
+the W-2 DO-NOT-CALL guardrail that keeps every lane on the sanctioned
+RDRS chain. The rationale is the breadth of the recovery CONTRACT, not
+a missing abstraction: all seven lanes share ONE per-row invariant set
+(the busy gate, the TOCTOU re-check, the rowcount-guarded transition,
+the per-row error posture) and ONE set of cross-lane helpers
+(``_check_parent_busy``, ``_run_async_on_manager_loop``,
+``_process_deferred_rows``), and each lane's read path sits next to its
+own write path. That co-location IS the diff-review locality argument:
+a change to a lane's contract is reviewed against the whole contract in
+one file, not across seven modules that each hold a piece of it.
+
+LANE INVENTORY (the seven lanes ONE sweep pass runs):
+
+1. DEFERRED — ``find_deferred_for_parent_all(parent_not_terminal=True)``.
+2. NO-ROW BACKSTOP (C3) — ``find_completed_children_without_delivery``.
+3. AGE-BOUNDED PENDING (W9) — ``find_pending_past_age``.
+4. ``recovery_attempted_at`` RETRY (W9/FM-13) — the same read with the
+   retry predicate active.
+5. ORPHAN (W1) — the terminal-parent rows.
+6. STUCK-WAKE (G4) — the destructive heal (the sanctioned ping seam).
+7. MISSION-RECONCILIATION (Proposal B PR3) — the escape valve for the
+   eternal-mission class.
+
+Candidate splits (NOT taken — would re-fragment the recovery seam):
+
+  * one module per LANE (``daemon/services/recovery/lane_deferred.py``
+    and six siblings) — the seven lanes share ONE per-row invariant
+    contract and the cross-lane helpers above; a per-lane split either
+    duplicates that contract seven times or re-introduces a shared
+    helper module the lanes import back — the same re-fragmentation
+    the lifecycle-seam split would cause.
+  * the lane-7 (mission-reconciliation) probes → their own module —
+    lane 7's probes sit next to the guarded writers they must agree
+    with (``_abandon_commission`` / ``_satisfy_commission_on_evidence``
+    and the ONE mission-record-service write they land on); a split
+    separates a probe from the writer it constrains, and lane 7 is the
+    lane still under active change.
+  * the W-2 guardrail → its own module — the guardrail IS this
+    module's contract; moving it out of the module it constrains makes
+    it the first thing a reader misses.
+
+THE SPLIT IS LEDGER-ONLY: this note is the COMMENT half of the tidier
+M8 finding; the split itself stays OPEN (not taken, not scheduled here).
+
 Phase 2 (pause-report-recovery, tasks 2.4 + 2.5 + 2.6). The recovery
 sweep is a periodic background thread that drains every recoverable
 report-delivery obligation across the system. SEVEN lanes run in a
@@ -278,7 +330,7 @@ import asyncio
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from daemon.constants import (
@@ -295,6 +347,7 @@ from daemon.services.timestamps import now_utc, now_utc_naive
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
+    from daemon.repositories.mission_record.models import MissionCommission
     from daemon.repositories.report_injection.repository import (
         ReportInjectionRepository,
     )
@@ -411,11 +464,6 @@ _PARENT_TERMINAL_STATUSES: frozenset[str] = frozenset(
 MISSION_RECORDS_MODE_OFF = "off"
 MISSION_RECORDS_MODE_DRY = "dry"
 MISSION_RECORDS_MODE_ENFORCE = "enforce"
-
-# The commission-state tokens the sweep writes (``superseded`` is
-# RESERVED to the mint lanes and is never written by the sweep).
-MISSION_COMMISSION_STATE_SATISFIED = "satisfied"
-MISSION_COMMISSION_STATE_ABANDONED = "abandoned"
 
 # The FROZEN abandon-reason vocabulary (the design's R9 / OQ-4).
 MISSION_ABANDON_REASON_WORKER_TERMINAL = "worker_terminal_no_report"
@@ -2245,7 +2293,7 @@ class ReportDeliveryRecoveryService:
 
     def _reconcile_one_commission(
         self,
-        commission: Any,
+        commission: MissionCommission,
         out: MissionReconciliationLaneResult,
         *,
         mode: str,
@@ -2541,7 +2589,9 @@ class ReportDeliveryRecoveryService:
             )
             return MissionRecordMode.OFF
 
-    def _commission_age_seconds(self, commission: Any) -> float | None:
+    def _commission_age_seconds(
+        self, commission: MissionCommission
+    ) -> float | None:
         """The commission's age in seconds — parsed in PYTHON.
 
         ``None`` when ``created_at`` is missing or unparsable (the
@@ -2556,7 +2606,7 @@ class ReportDeliveryRecoveryService:
         return max(0.0, (now_utc() - parsed).total_seconds())
 
     def _commission_worker_is_live(
-        self, worker_id: str, commission: Any
+        self, worker_id: str, commission: MissionCommission
     ) -> bool:
         """R3 — is the commissioned worker LIVE?
 
@@ -2756,7 +2806,19 @@ class ReportDeliveryRecoveryService:
             from daemon.services.dependency_bus import get_dependency_bus
 
             return get_dependency_bus()
-        except Exception:  # noqa: BLE001 — the probe HOLDs on a miss
+        except Exception as exc:  # noqa: BLE001 — the probe HOLDs on a miss
+            # LOG ONLY — the BEHAVIOUR is unchanged (still ``None``, so
+            # the caller HOLDs the row). The swallow used to be SILENT:
+            # the upstream HOLD then reported the misleading "dependency
+            # bus is not wired", so the operator could NOT tell "the bus
+            # is not wired" from "the bus lookup blew up" (the same
+            # operator-blindness class as the flusher-counter finding).
+            logger.debug(
+                "sweep mission_reconciliation dependency-bus lookup failed "
+                "(%s: %s) — the bus-watcher probe will HOLD the row",
+                type(exc).__name__,
+                exc,
+            )
             return None
 
     def _resolve_job_repo(self) -> Any:
@@ -2777,7 +2839,10 @@ class ReportDeliveryRecoveryService:
         return getattr(service, "repository", None)
 
     def _commission_bound_delivery_evidence(
-        self, commissioner_id: str, worker_id: str, commission: Any
+        self,
+        commissioner_id: str,
+        worker_id: str,
+        commission: MissionCommission,
     ) -> bool:
         """LEG 1 — the delivery-evidence AUTHORITY (R1/R1b, MAJ-1).
 
@@ -2834,7 +2899,7 @@ class ReportDeliveryRecoveryService:
         self,
         commissioner_id: str,
         worker_id: str,
-        commission: Any,
+        commission: MissionCommission,
         out: MissionReconciliationLaneResult,
     ) -> bool:
         """LEGS 2 + 3 — the delivery-evidence DIAGNOSTICS (F2 ruling).
@@ -2955,7 +3020,7 @@ class ReportDeliveryRecoveryService:
         return evidence
 
     def _delivered_row_is_this_commission(
-        self, commission: Any, delivered_rows: list[Any]
+        self, commission: MissionCommission, delivered_rows: list[Any]
     ) -> bool:
         """Is one of the DELIVERED injection rows THIS commission's evidence?
 
@@ -2995,7 +3060,7 @@ class ReportDeliveryRecoveryService:
 
     def _note_masked_enqueue(
         self,
-        commission: Any,
+        commission: MissionCommission,
         out: MissionReconciliationLaneResult,
         *,
         age_seconds: float,
@@ -3068,7 +3133,9 @@ class ReportDeliveryRecoveryService:
         )
         return False
 
-    def _commission_created_at_naive(self, commission: Any):
+    def _commission_created_at_naive(
+        self, commission: MissionCommission
+    ) -> datetime:
         """The commission's mint time as a NAIVE UTC datetime.
 
         The ``message_queue.enqueued_at`` column is a
@@ -3089,7 +3156,7 @@ class ReportDeliveryRecoveryService:
 
     def _abandon_commission(
         self,
-        commission: Any,
+        commission: MissionCommission,
         out: MissionReconciliationLaneResult,
         *,
         mode: str,
@@ -3173,7 +3240,7 @@ class ReportDeliveryRecoveryService:
 
     def _satisfy_commission_on_evidence(
         self,
-        commission: Any,
+        commission: MissionCommission,
         out: MissionReconciliationLaneResult,
         *,
         mode: str,
