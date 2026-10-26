@@ -120,11 +120,18 @@ MUTATIONS = [
     (
         "f2-amend-guard",
         "daemon/repositories/mission_record/repository.py",
-        """            .where(MissionRecord.mission_id == mission_id)
-            .where(MissionRecord.status == MissionStatus.OPEN.value)
-            .values(founding_message_id=founding_message_id)""",
-        """            .where(MissionRecord.mission_id == mission_id)
-            .values(founding_message_id=founding_message_id)""",
+        """        return self._guarded_epoch_update(
+            mission_id=mission_id,
+            values={"founding_message_id": founding_message_id},
+            from_statuses=(MissionStatus.OPEN.value,),
+            session=session,
+        )""",
+        """        return self._guarded_epoch_update(
+            mission_id=mission_id,
+            values={"founding_message_id": founding_message_id},
+            from_statuses=(MissionStatus.OPEN.value, MissionStatus.SETTLED.value),
+            session=session,
+        )""",
         "tests/unit/test_mission_record_pr2_carries.py",
         "TestF2AmendGuard::test_the_amendment_only_touches_an_open_epoch",
     ),
@@ -254,8 +261,8 @@ MUTATIONS = [
                 type(count_exc).__name__,
                 count_exc,
             )
-            return -1""",
-        """            return -1""",
+            return MISSION_READ_UNKNOWN""",
+        """            return MISSION_READ_UNKNOWN""",
         "tests/unit/test_mission_record_pr2_l3_ledger.py",
         "TestL3MissionLeg::test_the_fail_open_is_logged",
     ),
