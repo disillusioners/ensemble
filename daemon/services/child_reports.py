@@ -30,6 +30,7 @@ from .mission_record_service import (
     MissionRecordService,
     satisfy_commission_fail_open,
 )
+from .mission_record_reads import MISSION_READ_UNKNOWN
 from .report_recipient import resolve_report_recipient_with_commission
 from .completion_content import (
     event_created_at_as_utc,
@@ -2505,13 +2506,14 @@ Provide a concise summary:"""
         (``InstanceManager.count_outstanding_commissions``), which is
         MODE-AWARE (the mission-record ladder must be in ``enforce``
         mode for the leg to be armed) and FAIL-OPEN (a read failure
-        constructs the ``-1`` "unknown" sentinel).
+        constructs the ``MISSION_READ_UNKNOWN`` "unknown" sentinel).
 
         Returns:
             ``0``  — inactive / quiet / no open mission.
             ``N>0``— the mission has N outstanding commissions.
-            ``-1`` — UNKNOWN (the read failed) → the caller proceeds
-                      (the gate's fail-open posture).
+            ``MISSION_READ_UNKNOWN`` (``-1``) — UNKNOWN (the read
+                      failed) → the caller proceeds (the gate's
+                      fail-open posture).
         """
         try:
             reader = getattr(
@@ -2536,7 +2538,7 @@ Provide a concise summary:"""
                 type(count_exc).__name__,
                 count_exc,
             )
-            return -1
+            return MISSION_READ_UNKNOWN
 
     async def _root_completion_gate(
         self,
@@ -2633,11 +2635,11 @@ Provide a concise summary:"""
             #
             # FAIL-OPEN (the gate's posture — a missing terminal is
             # worse than an extra premature one): the read returns the
-            # ``-1`` "unknown" sentinel on failure and ``0`` when the
-            # mission is quiet (or the mission ladder is not in
-            # ``enforce`` mode — the input is INACTIVE, the legacy
-            # publish path is preserved exactly). Only a POSITIVE count
-            # holds the publish.
+            # ``MISSION_READ_UNKNOWN`` ("unknown") sentinel on failure
+            # and ``0`` when the mission is quiet (or the mission ladder
+            # is not in ``enforce`` mode — the input is INACTIVE, the
+            # legacy publish path is preserved exactly). Only a POSITIVE
+            # count holds the publish.
             #
             # WATCHERS STAY AS THEY ARE: this leg is ADDITIVE — the
             # bus-pending leg, the tree-liveness leg and the freshness
