@@ -397,8 +397,9 @@ class MissionRecordRepository:
 
         The deliberate cost is the eternal-mission class (proposal-b
         §8): an orphan that nothing will ever satisfy holds forever —
-        the reconciliation sweep (RDRS lane 7, a separate cycle) plus
-        its TTL backstop is the escape valve.
+        the reconciliation sweep (RDRS lane 7) plus its TTL backstop is
+        the escape valve (the sweep is LIVE: it resolves the rows
+        through the mission-record service).
 
         ADVISORY ROWS EXCLUDED by default (adoption-delta (b) — the
         exclusion predicate is ONE consistent shape across every read
@@ -615,13 +616,16 @@ class MissionRecordRepository:
         OQ-3(b): the ``resolved_at`` resolution stamp rides EVERY
         guarded transition that leaves ``outstanding`` — the satisfied
         write (the delivery terminator), the abandoned write and the
-        superseded write alike. It is the SAME single-statement UPDATE
-        the sweep's :meth:`resolve_commission` writes, so the two
-        writers can never double-stamp (each is its own guarded
-        statement) and the column never promises a stamp it did not
-        write. ``resolved_at`` is DISTINCT from ``satisfied_at`` on
-        purpose: dual-purposing ``satisfied_at`` for abandoned rows
-        would make the column name lie.
+        superseded write alike. It is the ONE guarded UPDATE the
+        commission resolution goes through: the sweep (RDRS lane 7)
+        resolves through the SERVICE
+        (:meth:`daemon.services.mission_record_service.MissionRecordService.abandon_commission`
+        / ``.satisfy_commission``), which lands here — so there is one
+        implementation that owns the stamps and the column never
+        promises a stamp it did not write. ``resolved_at`` is DISTINCT
+        from ``satisfied_at`` on purpose: dual-purposing
+        ``satisfied_at`` for abandoned rows would make the column name
+        lie.
         """
         stamp = _utc_now_iso()
         values: dict[str, object] = {"state": to_state, "resolved_at": stamp}
@@ -633,58 +637,6 @@ class MissionRecordRepository:
             update(MissionCommission)
             .where(MissionCommission.commission_id == commission_id)
             .where(MissionCommission.state == CommissionState.OUTSTANDING.value)
-            .values(**values)
-        )
-        if session is not None:
-            result = session.exec(stmt)
-            return (result.rowcount or 0) == 1
-        with Session(self._engine) as own:
-            result = own.exec(stmt)
-            own.commit()
-            return (result.rowcount or 0) == 1
-
-    def resolve_commission(
-        self,
-        commission_id: str,
-        to_state: str,
-        *,
-        abandon_reason: str | None = None,
-        resolved_at: str | None = None,
-        session: Session | None = None,
-    ) -> bool:
-        """R5 — the SWEEP's guarded resolution (ONE statement, rowcount).
-
-        ``UPDATE mission_commissions SET state=:to, resolved_at=:ts
-        [, abandon_reason=:reason] [, satisfied_at=:ts]
-        WHERE commission_id=:id AND state='outstanding'``
-
-        The exactly-once contract (``dependency_watchers``
-        ``transition_state`` precedent): ``True`` iff exactly one row
-        moved. ``False`` means ANOTHER ACTOR won the race (the
-        delivery-side satisfy path, the mint-lane supersede path, or a
-        concurrent sweep pass) — the caller counts ``already_resolved``
-        and NEVER retries in place (a retry would be a second
-        resolution attempt on a row that is already resolved).
-
-        ``resolved_at`` is the OQ-3(b) resolution stamp: written for
-        EVERY resolution (abandoned OR satisfied), distinct from
-        ``satisfied_at`` (an abandoned commission was never satisfied).
-        """
-        stamp = resolved_at or _utc_now_iso()
-        values: dict[str, object] = {
-            "state": to_state,
-            "resolved_at": stamp,
-        }
-        if to_state == CommissionState.SATISFIED.value:
-            values["satisfied_at"] = stamp
-        if abandon_reason is not None:
-            values["abandon_reason"] = abandon_reason
-        stmt = (
-            update(MissionCommission)
-            .where(MissionCommission.commission_id == commission_id)
-            .where(
-                MissionCommission.state == CommissionState.OUTSTANDING.value
-            )
             .values(**values)
         )
         if session is not None:

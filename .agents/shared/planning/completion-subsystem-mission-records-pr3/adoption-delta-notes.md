@@ -108,12 +108,14 @@ TERMINATOR CALL-SITE LIST (production terminal paths → terminator):
 The SWEEP abandons commissions: ``ReportDeliveryRecoveryService.
 _abandon_commission`` (three call sites — ``report_delivery_recovery.
 py:2217`` / ``:2321`` / ``:2332``) resolves each row through the
-repository's guarded single-statement transition
-(``MissionRecordRepository.resolve_commission(..., 'abandoned',
-abandon_reason=...)``). The ``MissionRecordService.abandon_commission``
-METHOD still has ZERO production callers — the sweep resolves through the
-repository, not the service seam. ``superseded`` stays mint-lane-only
-(zero callers — ruling (c)).
+mission-record SERVICE's guarded transition
+(``MissionRecordService.abandon_commission(..., reason=...)`` → the
+repository's ONE guarded single-statement UPDATE,
+``MissionRecordRepository.transition_commission_state``). MAJ-6
+collapsed the sweep's duplicate repository implementation
+(``resolve_commission`` — REMOVED) onto that one writer, so the
+``resolved_at`` / ``satisfied_at`` stamps have ONE owner.
+``superseded`` stays mint-lane-only (zero callers — ruling (c)).
 
 ## (f) The committing backfill (mode-gated) + retention story
 
@@ -194,11 +196,11 @@ dry-run evidence that tunes the TTL default); ``recovered`` stays 0
   ``ttl_expired_not_live`` · ``worker_row_missing``.
 * The resolution stamp: ``mission_commissions.resolved_at`` (TEXT ISO;
   written for EVERY resolution — abandoned OR satisfied; NULL while the
-  row is outstanding). It is written by BOTH guarded writers — the
-  reconciliation sweep (``resolve_commission``) and the delivery
-  terminator's guarded transition (``transition_commission_state``) —
-  each its own single-statement guarded UPDATE, so there is no
-  double-stamp.
+  row is outstanding). It is written by the ONE guarded UPDATE that owns
+  it — the mission-record service's ``transition_commission_state``,
+  which the delivery terminator's satisfy, the reconciliation sweep's
+  abandon / satisfy-on-evidence and the mint lanes' supersede all land
+  on (MAJ-6).
 
 ### Posture (the binding contract)
 

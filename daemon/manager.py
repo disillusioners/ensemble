@@ -8413,9 +8413,12 @@ class InstanceManager:
             "ALTER TABLE report_injections ADD COLUMN IF NOT EXISTS commissioner_instance_id TEXT",
             "ALTER TABLE message_metadata ADD COLUMN IF NOT EXISTS mission_id TEXT",
             # ── Proposal B PR3 (OQ-3(b)) — the commission RESOLUTION stamp.
-            # Written by the reconciliation sweep's guarded transition
-            # (``MissionRecordRepository.resolve_commission``) for EVERY
-            # resolution (abandoned OR satisfied). Nullable, default NULL
+            # Written by the guarded transition that leaves
+            # ``outstanding`` (``MissionRecordRepository
+            # .transition_commission_state`` — the ONE guarded UPDATE
+            # the service's satisfy / abandon / supersede writes all
+            # land on) for EVERY resolution (abandoned OR satisfied).
+            # Nullable, default NULL
             # — "unresolved" is the honest default for an outstanding row.
             # The SQLite counterpart is
             # ``daemon/migrations/versions/20261026_060000_add_mission_commission_resolved_at.sql``;
@@ -11955,14 +11958,13 @@ class InstanceManager:
 
         TERMINATOR: PR3 wires ``satisfy_commission`` into the natural
         completion write path (the report-delivery terminator); the
-        ``abandoned`` write + the TTL backstop remain the
-        reconciliation sweep's (RDRS lane 7, a separate cycle).
+        ``abandoned`` write + the TTL backstop are the
+        reconciliation sweep's (RDRS lane 7).
         The abandonment IS live in production — the sweep abandons
-        through the repository's guarded transition (RDRS lane 7 →
-        ``MissionRecordRepository.resolve_commission``). What has no
-        production caller is the ``MissionRecordService
-        .abandon_commission`` SERVICE METHOD (the sweep does not go
-        through the service facade for that write).
+        through the mission-record SERVICE
+        (``MissionRecordService.abandon_commission`` → the repository's
+        ONE guarded transition,
+        ``MissionRecordRepository.transition_commission_state``).
         """
         if not mission_records_enforce_enabled():
             # Inactive input — the legacy quiet predicate is preserved

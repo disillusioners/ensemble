@@ -393,16 +393,22 @@ class PoolOrchestrator:
                 ),
                 # ── Lane 7 (Proposal B PR3): the mission-commission
                 # reconciliation sweep. The mission-record repository is
-                # the DUCK-TYPED admission + guarded-transition surface
-                # (the public accessor — no private reach-through); an
-                # unwired repository degrades the lane to ONE INFO log
-                # + ZERO (the lane never reads and never writes).
+                # the DUCK-TYPED admission surface (the public accessor
+                # — no private reach-through); an unwired repository
+                # degrades the lane to ONE INFO log + ZERO (the lane
+                # never reads and never writes). The mission-record
+                # SERVICE is the lane's WRITER (MAJ-6: the sweep
+                # resolves commissions through the service, so ONE
+                # guarded UPDATE owns the resolved_at / satisfied_at
+                # stamps); an unwired service degrades the lane to
+                # inert in enforce.
                 lane_mission_reconciliation=(
                     svc.report_delivery_recovery_lane_mission_reconciliation
                 ),
                 mission_record_repo=(
                     manager.mission_record_service.commission_repository()
                 ),
+                mission_record_service=manager.mission_record_service,
                 # The TTL horizon: the config-family knob is the
                 # DEFAULT; the ENSEMBLE_MISSION_COMMISSION_TTL_SECONDS
                 # env knob overrides it (the operator lever) — the

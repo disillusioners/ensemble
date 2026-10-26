@@ -418,11 +418,12 @@ class MissionRecordService:
     def commission_repository(self) -> MissionRecordRepository:
         """Public access to the underlying commission/record repository.
 
-        Proposal B PR3 — the RECONCILIATION SWEEP (RDRS lane 7) is a
-        READER + the single GUARDED RESOLVER of commission rows; it
-        needs the repository's guarded transition primitives
-        (``find_outstanding_commissions`` / ``resolve_commission``)
-        without reaching into a private attribute.
+        Proposal B PR3 — the RECONCILIATION SWEEP (RDRS lane 7) READS
+        the outstanding commissions through the repository
+        (:meth:`MissionRecordRepository.find_outstanding_commissions`).
+        Its WRITES go through THIS service (``satisfy_commission`` /
+        ``abandon_commission``) — one guarded UPDATE, one owner of the
+        ``resolved_at`` / ``satisfied_at`` stamps.
 
         The accessors this replaces: ``service._repo`` reach-throughs
         (the reviewer follow-up on the ``_instance_manager._instance_repository``
@@ -958,12 +959,13 @@ class MissionRecordService:
         Rowcount 0 = another actor won the guarded transition; the
         loser counts it and never retries in place.
 
-        NOT covered here (deliberate): the reconciliation sweep's
-        delivery-evidence probes and the ``abandoned``/
-        worker-terminal/TTL writes — that is RDRS lane 7, a separate
-        cycle. Until it lands, a commission whose report is never
-        delivered still holds the mission (the eternal-mission class,
-        MAJOR-1 ruling (c) keeps it deliberately).
+        **THE SECOND CALLER (MAJ-6): the RECONCILIATION SWEEP** (RDRS
+        lane 7) resolves a commission on DELIVERY EVIDENCE through this
+        same method — the sweep's ``_satisfy_commission_on_evidence``.
+        Both callers land on ONE guarded UPDATE
+        (:meth:`MissionRecordRepository.transition_commission_state`),
+        so the ``resolved_at`` / ``satisfied_at`` stamps have ONE
+        owner.
         """
         return self._repo.transition_commission_state(
             commission_id, CommissionState.SATISFIED.value, session=session
@@ -979,10 +981,12 @@ class MissionRecordService:
         """``outstanding → abandoned`` (guarded).
 
         The reconciliation sweep's outcome write (the eternal-mission
-        escape hatch, proposal-b §8). **STILL no production caller in
-        PR3** — the sweep is RDRS lane 7, a separate cycle (the PR3
-        terminator covers ONLY the delivery-side ``satisfied`` write).
-        The seam ships record-side complete.
+        escape hatch, proposal-b §8). **LIVE**: the sweep (RDRS lane 7)
+        calls this method — its ``_abandon_commission`` resolves the
+        worker-terminal / TTL / missing-row rows through here (MAJ-6:
+        the sweep goes through the SERVICE, so there is ONE guarded
+        UPDATE owning the ``resolved_at`` stamp; the repository's own
+        duplicate implementation was removed).
         """
         return self._repo.transition_commission_state(
             commission_id,

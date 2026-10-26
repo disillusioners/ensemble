@@ -68,6 +68,7 @@ from daemon.repositories.report_injection.repository import (
 )
 from daemon.services.mission_record_service import (
     MISSION_RECORDS_MODE_ENV,
+    MissionRecordService,
     _reset_mission_records_mode_for_tests,
 )
 from daemon.services.report_delivery_recovery import (
@@ -220,6 +221,7 @@ def _build_service(
     lane_enabled: bool = True,
     ttl_seconds: int = TTL_SECONDS,
     enabled: bool = True,
+    mission_record_service=None,
 ):
     """Build the sweep service with the fakes wired."""
     import os
@@ -258,6 +260,13 @@ def _build_service(
         lane_stuck_wake=False,
         lane_mission_reconciliation=lane_enabled,
         mission_record_repo=repo,
+        # MAJ-6: the sweep's WRITER is the mission-record SERVICE (the
+        # ONE guarded UPDATE that owns the resolution stamps).
+        mission_record_service=(
+            mission_record_service
+            if mission_record_service is not None
+            else MissionRecordService(engine)
+        ),
         dependency_bus=bus if bus is not None else FakeBus(),
         job_repo=job_repo if job_repo is not None else FakeJobRepo(),
         mission_commission_ttl_seconds=ttl_seconds,
@@ -650,7 +659,6 @@ class TestTheWorkerTerminalRule:
         """MAJ-1: a DELIVERED injection row IS evidence — for the
         commission that was minted BEFORE it."""
         from daemon.repositories.report_injection.models import (
-            ReportInjection,
             ReportInjectionState,
         )
 
@@ -898,12 +906,16 @@ class TestTheGuardedTransition:
         """
         commission_id = _mint_commission(engine)
         repo = MagicMock(wraps=MissionRecordRepository(engine))
-        # The race: the guarded transition moves NOTHING.
-        repo.resolve_commission = MagicMock(return_value=False)
+        # The race: the guarded transition moves NOTHING. MAJ-6: the
+        # write goes through the SERVICE (the one writer), so the race
+        # is simulated on the service seam.
+        mission_service = MissionRecordService(engine)
+        mission_service.abandon_commission = MagicMock(return_value=False)
         service, _ = _build_service(
             engine,
             manager_loop=manager_loop,
             mission_record_repo=repo,
+            mission_record_service=mission_service,
             instance_repo=FakeInstanceRepo(statuses={"worker-1": "completed"}),
         )
 
@@ -1550,6 +1562,91 @@ class TestTheWorkerMissingBusWatcher:
         assert _row(engine, commission_id).state == (
             CommissionState.ABANDONED.value
         )
+
+
+# ---------------------------------------------------------------------------
+# MAJ-6 — ONE guarded-UPDATE writer for the commission resolution
+# ---------------------------------------------------------------------------
+
+
+class TestTheSingleResolutionWriter:
+    """MAJ-6: the commission resolution has ONE implementation.
+
+    Two guarded-UPDATE implementations of the same transition (the
+    service path's ``transition_commission_state`` vs the sweep path's
+    ``resolve_commission``) can drift on the ``resolved_at`` /
+    ``satisfied_at`` stamps. The sweep now resolves through the
+    SERVICE and the repository's duplicate is gone.
+    """
+
+    def test_the_sweep_resolves_through_the_service_seam(
+        self, engine, manager_loop
+    ):
+        """THE PIN: the sweep's write INVOKES the service."""
+        commission_id = _mint_commission(engine, age_seconds=99_999)
+        mission_service = MagicMock(wraps=MissionRecordService(engine))
+        service, _ = _build_service(
+            engine,
+            manager_loop=manager_loop,
+            mission_record_service=mission_service,
+            instance_repo=FakeInstanceRepo(statuses={"worker-1": "running"}),
+        )
+
+        lane = service.recover_now().lanes["mission_reconciliation"]
+
+        assert lane.abandoned_ttl == 1
+        mission_service.abandon_commission.assert_called_once()
+        args, kwargs = mission_service.abandon_commission.call_args
+        assert args[0] == commission_id
+        assert kwargs["reason"] == "ttl_expired_not_live"
+
+    def test_the_satisfy_on_evidence_goes_through_the_service_seam(
+        self, engine, manager_loop
+    ):
+        commission_id = _mint_commission(engine)
+        mission_service = MagicMock(wraps=MissionRecordService(engine))
+        service, _ = _build_service(
+            engine,
+            manager_loop=manager_loop,
+            mission_record_service=mission_service,
+            instance_repo=FakeInstanceRepo(statuses={"worker-1": "completed"}),
+            queue_repo=FakeQueueRepo(delivered=True),
+        )
+
+        lane = service.recover_now().lanes["mission_reconciliation"]
+
+        assert lane.satisfied_on_evidence == 1
+        mission_service.satisfy_commission.assert_called_once_with(
+            commission_id
+        )
+
+    def test_the_repository_has_no_second_guarded_update(self):
+        """The duplicate repository method is GONE — one spelling."""
+        assert not hasattr(MissionRecordRepository, "resolve_commission")
+        assert hasattr(
+            MissionRecordRepository, "transition_commission_state"
+        )
+
+    def test_the_resolution_stamps_survive_the_collapse(
+        self, engine, manager_loop
+    ):
+        """The ONE writer still owns both stamps."""
+        commission_id = _mint_commission(engine, age_seconds=99_999)
+        service, _ = _build_service(
+            engine,
+            manager_loop=manager_loop,
+            instance_repo=FakeInstanceRepo(statuses={"worker-1": "running"}),
+        )
+
+        service.recover_now()
+
+        row = _row(engine, commission_id)
+        assert row.state == CommissionState.ABANDONED.value
+        assert row.resolved_at is not None
+        assert row.abandon_reason == "ttl_expired_not_live"
+        # An abandoned row was never SATISFIED — the two stamps stay
+        # distinct.
+        assert row.satisfied_at is None
 
 
 # ---------------------------------------------------------------------------

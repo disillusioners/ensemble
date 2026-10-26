@@ -401,11 +401,13 @@ class MissionCommission(SQLModel, table=True):
             comparison.md §4c).
         resolved_at: TEXT ISO stamp written when the row leaves
         ``outstanding`` for ANY reason (``abandoned`` OR ``satisfied``
-        OR ``superseded``). It is written by BOTH guarded writers:
-        the RECONCILIATION SWEEP (Proposal B PR3, OQ-3(b), via
-        ``resolve_commission``) AND the delivery terminator's guarded
-        transition (``transition_commission_state``) — each is its own
-        single-statement guarded UPDATE, so there is no double-stamp.
+        OR ``superseded``). It is written by the ONE guarded UPDATE
+        that owns it — ``MissionRecordRepository
+        .transition_commission_state`` — which every writer lands on
+        (the delivery terminator's satisfy, the RECONCILIATION SWEEP's
+        abandon / satisfy-on-evidence (Proposal B PR3, OQ-3(b)), and
+        the mint lanes' supersede), so there is no double-stamp and no
+        second implementation that can forget the stamp.
         It is DISTINCT from ``satisfied_at`` on purpose: dual-purposing
         ``satisfied_at`` for abandoned rows would make the column name
         lie (an abandoned commission was never satisfied). NULL while

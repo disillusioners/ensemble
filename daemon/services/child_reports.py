@@ -2651,10 +2651,11 @@ Provide a concise summary:"""
             # ``_process_child_completion_db_sync``, the ReportInjection
             # writer region — guarded ``UPDATE ... WHERE
             # state='outstanding'``, in-transaction, fail-open). The
-            # ``abandoned`` write + the TTL backstop remain the
-            # reconciliation sweep's (RDRS lane 7, a separate cycle): a
-            # commission whose report is NEVER delivered still holds
-            # until that sweep lands.
+            # ``abandoned`` write + the TTL backstop are the
+            # reconciliation sweep's (RDRS lane 7): a commission whose
+            # report is NEVER delivered still holds until the sweep
+            # retires it (the sweep resolves it through the
+            # mission-record service).
             mission_commissions = self._count_outstanding_mission_commissions(
                 instance_id
             )
@@ -4731,7 +4732,7 @@ Provide a concise summary:"""
             # commission behind — and a satisfy failure rolls back ONLY
             # the savepoint (fail-OPEN: delivery proceeds with the
             # commission outstanding; the reconciliation sweep's probes
-            # — RDRS lane 7, a separate cycle — are the net).
+            # — RDRS lane 7 — are the net).
             #
             # Deliberately NOT satisfied here (each stays the sweep's /
             # another path's):

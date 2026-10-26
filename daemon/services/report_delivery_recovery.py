@@ -611,6 +611,7 @@ class ReportDeliveryRecoveryService:
         lane_stuck_wake: bool = True,
         lane_mission_reconciliation: bool = True,
         mission_record_repo: Any = None,
+        mission_record_service: Any = None,
         dependency_bus: Any = None,
         job_repo: Any = None,
         mission_commission_ttl_seconds: int | None = None,
@@ -652,12 +653,20 @@ class ReportDeliveryRecoveryService:
                 ``True``) — the mission-commission reconciliation sweep
                 (Proposal B PR3).
             mission_record_repo: The duck-typed PR1 mission-record
-                repository. Lane 7's ADMISSION + GUARDED TRANSITION
-                live there. ``None`` (or a repository without
+                repository. Lane 7's ADMISSION read lives there.
+                ``None`` (or a repository without
                 ``find_outstanding_commissions``) → the lane logs ONE
                 INFO line and returns ZERO (the unwired-degrade
                 contract, the ``force_cancel_and_schedule_retry``
                 precedent) — it never reads and never writes.
+            mission_record_service: The mission-record SERVICE — lane
+                7's WRITER (MAJ-6: the sweep resolves commissions
+                through ``MissionRecordService.satisfy_commission`` /
+                ``abandon_commission``, the ONE guarded UPDATE that
+                owns the ``resolved_at`` / ``satisfied_at`` stamps).
+                Unwired → the lane is inert in ``enforce`` (it cannot
+                write, and a lane that detects but cannot write would
+                report abandonments that never happened).
             dependency_bus: The duck-typed dependency bus (lane 7's
                 PENDING-watcher probe). Unwired → the probe HOLDS the
                 row (fail-MISS), it never assumes absence.
@@ -687,6 +696,7 @@ class ReportDeliveryRecoveryService:
         self._lane_stuck_wake = bool(lane_stuck_wake)
         self._lane_mission_reconciliation = bool(lane_mission_reconciliation)
         self._mission_record_repo = mission_record_repo
+        self._mission_record_service = mission_record_service
         self._dependency_bus = dependency_bus
         self._job_repo = job_repo
         self._mission_commission_ttl_seconds = (
@@ -2157,6 +2167,28 @@ class ReportDeliveryRecoveryService:
             )
             return out
 
+        if (
+            mode == MISSION_RECORDS_MODE_ENFORCE
+            and self._resolve_mission_record_service() is None
+        ):
+            # MAJ-6: the WRITER is the mission-record SERVICE (the one
+            # guarded UPDATE that owns the ``resolved_at`` /
+            # ``satisfied_at`` stamps). Without it the lane cannot
+            # resolve anything, and a lane that DETECTS but cannot WRITE
+            # would report abandonments that never happened — so the
+            # lane is inert in ``enforce`` (the same posture as the
+            # unwired-repository degrade). In ``dry`` the lane still
+            # runs: it writes nothing anyway, and the counters are the
+            # tuning dataset.
+            if not self._mission_lane_degrade_logged:
+                self._mission_lane_degrade_logged = True
+                logger.warning(
+                    "RDRS lane 7: the mission-record SERVICE is not wired "
+                    "— the mission-commission reconciliation lane is "
+                    "inert in enforce (no reads, no writes)"
+                )
+            return out
+
         rows = list(find_outstanding(limit=self._batch_cap))
         logger.info(
             "RDRS lane 7: mission_reconciliation admitted %d outstanding "
@@ -2620,6 +2652,36 @@ class ReportDeliveryRecoveryService:
         age_seconds = (now_utc_naive() - attempt_at).total_seconds()
         return age_seconds < self._mission_commission_ttl_seconds
 
+    def _resolve_mission_record_service(self) -> Any:
+        """The mission-record SERVICE — lane 7's ONE resolution writer.
+
+        **MAJ-6 — single writer.** The sweep's resolution writes go
+        through the SERVICE (``satisfy_commission`` /
+        ``abandon_commission``), NOT through a second repository-level
+        guarded UPDATE. The service owns the ``resolved_at`` /
+        ``satisfied_at`` stamps; two implementations of one guarded
+        UPDATE are exactly how those stamps drift (one writer stamped
+        ``resolved_at``, the other did not).
+
+        The service is wired EXPLICITLY at construction (the pool
+        orchestrator passes it). The manager's PUBLIC accessor is the
+        fallback — and it accepts the REAL service type only: a
+        duck-typed stand-in would "win" every guarded transition
+        without touching a row.
+
+        Returns:
+            The service, or ``None`` when it is not wired (the lane
+            degrades to inert in ``enforce``).
+        """
+        if self._mission_record_service is not None:
+            return self._mission_record_service
+        from daemon.services.mission_record_service import MissionRecordService
+
+        service = getattr(self._manager, "mission_record_service", None)
+        if isinstance(service, MissionRecordService):
+            return service
+        return None
+
     def _pending_bus_watchers(
         self, commissioner_id: str, worker_id: str
     ) -> list[Any]:
@@ -2909,10 +2971,22 @@ class ReportDeliveryRecoveryService:
             )
         enforcing = mode == MISSION_RECORDS_MODE_ENFORCE
         if enforcing:
-            resolved = self._mission_record_repo.resolve_commission(
+            service = self._resolve_mission_record_service()
+            if service is None:
+                # No writer wired → the lane is inert in enforce (the
+                # lane-level degrade already returned ZERO); this is the
+                # belt-and-braces guard.
+                logger.warning(
+                    "sweep mission_reconciliation ABANDON skipped "
+                    "(mission_id=%s, commission_id=%s) — the "
+                    "mission-record service is not wired",
+                    commission.mission_id,
+                    commission.commission_id,
+                )
+                return
+            resolved = service.abandon_commission(
                 commission.commission_id,
-                MISSION_COMMISSION_STATE_ABANDONED,
-                abandon_reason=reason,
+                reason=reason,
             )
             if not resolved:
                 out.already_resolved += 1
@@ -2937,7 +3011,11 @@ class ReportDeliveryRecoveryService:
             out.abandoned_ttl += 1
         else:
             out.abandoned_worker_missing += 1
-        logger.warning(
+        # WARNING is for sweep ACTIONS only (a REAL ledger write); the
+        # dry-run preview is INFO (a dry preview is not an action, and a
+        # WARNING that fires on every dry pass drowns the real signal).
+        log = logger.warning if enforcing else logger.info
+        log(
             "sweep mission_reconciliation %s mission_id=%s, "
             "commission_id=%s, commissioner=%s, worker=%s, lane=%s, "
             "abandon_reason=%s, age_seconds=%d",
@@ -2969,10 +3047,17 @@ class ReportDeliveryRecoveryService:
         """
         enforcing = mode == MISSION_RECORDS_MODE_ENFORCE
         if enforcing:
-            resolved = self._mission_record_repo.resolve_commission(
-                commission.commission_id,
-                MISSION_COMMISSION_STATE_SATISFIED,
-            )
+            service = self._resolve_mission_record_service()
+            if service is None:
+                logger.warning(
+                    "sweep mission_reconciliation SATISFY skipped "
+                    "(mission_id=%s, commission_id=%s) — the "
+                    "mission-record service is not wired",
+                    commission.mission_id,
+                    commission.commission_id,
+                )
+                return
+            resolved = service.satisfy_commission(commission.commission_id)
             if not resolved:
                 out.already_resolved += 1
                 logger.info(
@@ -2988,7 +3073,10 @@ class ReportDeliveryRecoveryService:
                 return
             out.recovered += 1
         out.satisfied_on_evidence += 1
-        logger.warning(
+        # WARNING is for sweep ACTIONS only (a REAL ledger write); the
+        # dry-run preview is INFO.
+        log = logger.warning if enforcing else logger.info
+        log(
             "sweep mission_reconciliation %s mission_id=%s, "
             "commission_id=%s, commissioner=%s, worker=%s, lane=%s, "
             "satisfy_reason=delivery_evidence, age_seconds=%d",
