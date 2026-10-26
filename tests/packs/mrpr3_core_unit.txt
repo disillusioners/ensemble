@@ -1,0 +1,20 @@
+# mrpr3_core_unit — the mission-records PR3 core unit pack (the FAST pack)
+#
+# one repo-relative path per line; the pack invocation is:
+#   pytest -q $(grep -v '^#' <this file>)
+# gate form (scrubbed):
+#   timeout 300 ./scripts/run_tests_scrubbed.sh -p no:cacheprovider -q --tb=short $(grep -v '^#' <this file>)
+#
+# the 6 new PR3 unit files + migrations-sqlite + recovery-wiring.
+# gate-3 measured @ 35df7171e: 125/125 PASS (14.34s)
+#   (sweep 72 · terminator 10 · backfill 10 · routing_flip 9 · cross_epoch 7
+#    · migrations_sqlite 6 · f2_concurrency 6 · recovery_wiring 5)
+#
+tests/unit/test_mission_reconciliation_sweep.py
+tests/unit/test_mission_record_pr3_terminator.py
+tests/unit/test_mission_record_pr3_backfill_commit.py
+tests/unit/test_mission_record_pr3_routing_flip.py
+tests/unit/test_mission_record_pr3_cross_epoch_hold.py
+tests/unit/test_mission_record_f2_concurrency.py
+tests/unit/test_mission_record_migrations_sqlite.py
+tests/unit/test_recovery_wiring_failure.py

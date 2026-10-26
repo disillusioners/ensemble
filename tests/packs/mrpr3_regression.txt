@@ -1,0 +1,45 @@
+# mrpr3_regression — the PR1/PR2 regression floor refreshed for the PR3 gate
+# (= tests/packs/mrpr2_focused_unit.txt ∪ mrpr2_scoped_wide.txt + the gates files)
+#
+# one repo-relative path per line; the pack invocation is:
+#   pytest -q $(grep -v '^#' <this file>)
+# gate form (scrubbed):
+#   timeout 300 ./scripts/run_tests_scrubbed.sh -p no:cacheprovider -q --tb=short $(grep -v '^#' <this file>)
+#
+# gate-3 measured @ 35df7171e, as TWO invocations:
+#   * the 25-file union below (minus the census line): 457/457 PASS (31.5s)
+#   * the gates trio (census + pr2_gate_reads + pr2_carries): 17 nodes —
+#     15/15 PASS + exactly the 2 STANDING LEDGERED census reds
+#     (QUARANTINE consolidated row; census file never edited)
+# This pack materializes union ∪ gates as ONE invocation: the gate_reads /
+# carries files are already union members, so the single run = the union +
+# the census file (461 nodes; the 2 census reds are the known standing rows).
+#
+# --- the union (focused_unit ∪ scoped_wide) ---
+tests/integration/test_attestation_hold_semantics_independent.py
+tests/integration/test_message_metadata_hook_placement.py
+tests/integration/test_mission_records_pr2_enforce_reads_pg.py
+tests/unit/services/test_message_tap_slot.py
+tests/unit/test_attestation_epoch_clears_d5i.py
+tests/unit/test_attestation_epoch_replay.py
+tests/unit/test_attestation_fail_open.py
+tests/unit/test_attestation_gate.py
+tests/unit/test_attestation_ledger.py
+tests/unit/test_attestation_ledger_failopen.py
+tests/unit/test_attestation_resolver_activation.py
+tests/unit/test_attestation_scanner.py
+tests/unit/test_mission_record_facade_forwarding.py
+tests/unit/test_mission_record_migrations_sqlite.py
+tests/unit/test_mission_record_pr2_amend_guard.py
+tests/unit/test_mission_record_pr2_carries.py
+tests/unit/test_mission_record_pr2_gate_reads.py
+tests/unit/test_mission_record_pr2_l3_ledger.py
+tests/unit/test_mission_record_pr2_ledger_forwarding.py
+tests/unit/test_mission_record_pr2_tap_amend.py
+tests/unit/test_mission_record_reads.py
+tests/unit/test_mission_record_review_fixes.py
+tests/unit/test_mission_record_revive_enqueue_integration.py
+tests/unit/test_mission_record_service.py
+tests/unit/test_nudge_completion_watcher_d2.py
+# --- the gates trio addition (pr2_gate_reads / pr2_carries are union members above) ---
+tests/job_queue/test_terminal_write_census.py
