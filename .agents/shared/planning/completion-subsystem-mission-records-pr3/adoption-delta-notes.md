@@ -181,6 +181,7 @@ misconfigured knob must not strand every commission).
 ``abandoned_worker_missing`` · ``satisfied_on_evidence`` ·
 ``skipped_live`` · ``skipped_watcher_pending`` · ``below_ttl_hold`` ·
 ``already_resolved`` · ``masked_suspected`` · ``probe_errors`` ·
+``masked_probe_errors`` · ``diagnostic_probe_errors`` ·
 ``errors`` (+ the inherited ``recovered`` / ``skipped_*`` /
 ``already_recovered`` / ``orphan_disposition`` / ``skipped_already_reported``).
 
@@ -213,6 +214,23 @@ still holds at any age. The sweep writes ONLY ``mission_commissions``
 (no instance status, no mission_records, no report_injections, no
 dependency_watchers).
 
+**F2 (the leader ruling) — the delivery-evidence legs 2/3 are
+DIAGNOSTIC ONLY.** The delivery-evidence read has ONE authority (leg 1
+— the commission-bound, state-filtered injection-row read) and TWO
+diagnostics (leg 2 — the queue-side PREFIX ledger; leg 3 — the
+parent-history PREFIX ledger). Legs 2/3 are PAIR-keyed and
+TIME-unbounded (no commission id): an EARLIER commission's delivery —
+or a mere ENQUEUE — used to satisfy a FRESH commission and release the
+publish hold early (the premature-publish harm class). They now KEEP
+RUNNING for observability, but they may NEVER authorise a ``satisfied``
+and may NEVER authorise a hold-against-abandon. Their faults are
+counted in their OWN counter (``diagnostic_probe_errors`` — the
+``masked_probe_errors`` precedent) and the row is NOT held, so the TTL
+backstop stays reachable: the publish hold releases NO EARLIER than the
+TTL horizon (fail-closed, bounded, safe). A commission whose delivery
+is visible ONLY through the diagnostic legs resolves via the terminator
+on the real delivery path, or via the TTL-bounded abandon.
+
 ### The rulings applied
 
 * **R1b (satisfy on evidence)** — INCLUDED: positive delivery evidence
@@ -241,6 +259,15 @@ dependency_watchers).
 * **Advisory rows** — EXCLUDED from the sweep admission (one
   consistent predicate with the routing / census / quiet reads); they
   are audit-only by design.
+* **F2 (the leader ruling — the delivery-evidence authority split)** —
+  APPLIED: leg 1 (the commission-bound, state-filtered injection-row
+  read) is the ONLY resolution authority; legs 2/3 are DIAGNOSTIC
+  ONLY (they keep running, but they never authorise a ``satisfied``
+  and never authorise a hold-against-abandon). A diagnostic leg's
+  fault is counted in ``diagnostic_probe_errors`` and the row is NOT
+  held. The consequence is deliberate and documented: a commission
+  whose delivery is visible ONLY through the diagnostic legs resolves
+  no earlier than the TTL horizon (fail-closed, bounded, safe).
 
 ### Pins
 
@@ -251,7 +278,14 @@ the write boundary, T7 the lane order / kill-switch / unwired
 degrade, T8 the masked signal, T9 the endpoint shape) + the
 escape-valve CHAIN at the service level (abandon → the outstanding
 count reads 0 → the hold releases). T10's real-boot E2E stays the
-TESTER's lane.
+TESTER's lane. **F2 adds** ``TestTheDiagnosticEvidenceLegs`` (the
+ruling's four pins: the earlier-commission queue enqueue does not
+satisfy a fresh commission; the leg-1-delivered commission still
+satisfies; a fresh commission with no leg-1 evidence is not satisfied;
+a diagnostic-leg fault does not hold the row) and RE-ANCHORS the
+probe-error HOLD pin onto the authority leg (leg 1) — the old anchor
+forced the fault in the queue-side ledger (leg 2), which the ruling
+demoted to diagnostic.
 
 ---
 

@@ -352,6 +352,7 @@ inherited lane counters `recovered` / `errors` / `skipped_busy` /
 | `masked_suspected` | The D4(iii) masked-enqueue signal (see below). |
 | `probe_errors` | A probe could not prove its question ⇒ the row is HELD (fail-MISS). |
 | `masked_probe_errors` | The MASKED-ENQUEUE probe's own fault (MAJ-3). It has its own counter because it is an OBSERVABILITY probe; a fault HOLDS the row for that pass (no abandon, no satisfy) and is retried next cycle. |
+| `diagnostic_probe_errors` | A DIAGNOSTIC delivery-evidence leg's own fault (F2 — the leader ruling). Legs 2/3 (the queue-side + parent-history PREFIX ledgers) are DIAGNOSTIC ONLY: they never authorise a `satisfied` and never authorise a hold-against-abandon. Their fault is counted here (its own counter, the `masked_probe_errors` precedent) and the row is NOT held — the TTL backstop stays reachable. |
 | `errors` | A crashed row — logged + counted + untouched. |
 
 **Log lines to recognise:**
@@ -438,6 +439,12 @@ TTL ruling was deliberately left open; the `dry` counters are the evidence).
 * `already_resolved` climbing — another actor is winning the guarded
   transitions; check that the delivery-side terminator and the sweep are not
   racing each other.
+* **`diagnostic_probe_errors` is NOT a rollback tripwire (F2).** It counts the
+  faults of the DIAGNOSTIC delivery-evidence legs, whose faults do NOT hold a
+  row and do NOT block the abandon path — a climb there degrades the
+  observability signal, not the resolution. Investigate the cause (a queue
+  ledger read error, a missing checkpointer), but do NOT flip back to `dry`
+  on this counter alone; the TTL backstop still resolves those rows.
 
 ---
 
@@ -549,6 +556,21 @@ action by itself), so its faults are counted in their OWN counter
 probe could not prove its predicate ⇒ the row was HELD". A masked-probe fault
 still HOLDS the row for that pass: the abandon and the satisfy are both
 skipped, and the row is retried on the next cycle.
+
+**The diagnostic delivery-evidence legs are the other exception (F2 — the
+leader ruling).** The delivery-evidence read has ONE authority (leg 1 — the
+commission-bound, state-filtered injection-row read) and TWO diagnostics (leg 2
+— the queue-side PREFIX ledger; leg 3 — the parent-history PREFIX ledger).
+The two diagnostic legs are PAIR-keyed and TIME-unbounded: they carry no
+commission id, so an EARLIER commission's delivery (or a mere ENQUEUE) used to
+satisfy a FRESH one and release the publish hold early. They now KEEP RUNNING
+for observability, but they may NEVER authorise a `satisfied` and may NEVER
+authorise a hold-against-abandon. Their faults are counted in their OWN
+counter (`diagnostic_probe_errors`) and the row is NOT held — the TTL backstop
+stays reachable, which is what keeps the publish hold BOUNDED ("it releases
+NO EARLIER than the TTL horizon — fail-closed, bounded, safe"). A commission
+whose delivery is visible ONLY through the diagnostic legs therefore resolves
+via the terminator on the real delivery path, or via the TTL-bounded abandon.
 
 **The liveness probe has a horizon (MAJ-4).** "Live" is not a bare
 `has_live_work()`: a member whose newest non-terminal task stamp is older than

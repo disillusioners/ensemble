@@ -525,6 +525,15 @@ class MissionReconciliationLaneResult(LaneResult):
       contract says "the row was HELD"). A masked-probe fault HOLDS
       the row for that pass (the masked signal never authorises an
       abandon or a satisfy).
+    * ``diagnostic_probe_errors`` — a DIAGNOSTIC leg's own fault (F2,
+      the leader ruling): the delivery-evidence legs 2/3 (the
+      queue-side PREFIX ledger + the parent-history PREFIX ledger) are
+      DIAGNOSTIC ONLY — they NEVER authorise a ``satisfied`` and they
+      NEVER authorise a hold-against-abandon. Their fault therefore
+      does NOT hold the row and does NOT block the abandon path; it has
+      its OWN counter, exactly like ``masked_probe_errors`` (the same
+      house precedent: an OBSERVABILITY probe's fault must not borrow
+      ``probe_errors``, whose contract says "the row was HELD").
     """
 
     abandoned_worker_terminal: int = 0
@@ -538,6 +547,7 @@ class MissionReconciliationLaneResult(LaneResult):
     masked_suspected: int = 0
     probe_errors: int = 0
     masked_probe_errors: int = 0
+    diagnostic_probe_errors: int = 0
 
     def to_dict(self) -> dict[str, int]:
         base = super().to_dict()
@@ -554,6 +564,7 @@ class MissionReconciliationLaneResult(LaneResult):
                 "masked_suspected": self.masked_suspected,
                 "probe_errors": self.probe_errors,
                 "masked_probe_errors": self.masked_probe_errors,
+                "diagnostic_probe_errors": self.diagnostic_probe_errors,
             }
         )
         return base
@@ -2400,13 +2411,32 @@ class ReportDeliveryRecoveryService:
             out.skipped_watcher_pending += 1
             return
 
-        # ── (5) the delivery-evidence TRILET (R1/R1b) — the lane-2
+        # ── (5) the delivery-evidence read (R1/R1b) — the lane-2
         # evidence helpers, read on the COMMISSIONER as the recipient.
+        #
+        # F2 (the leader ruling): the read is SPLIT into an AUTHORITY
+        # leg (MAJ-1's commission-bound, state-filtered injection-row
+        # read — the ONLY leg that may authorise a ``satisfied``) and a
+        # DIAGNOSTIC pair (leg 2 = the queue-side PREFIX ledger, leg 3 =
+        # the parent-history PREFIX ledger). The diagnostic pair KEEPS
+        # RUNNING (its result is logged + counted) but it may NEVER
+        # authorise a transition — not a ``satisfied``, and not a
+        # hold-against-abandon. The trace that forced the split: legs
+        # 2/3 are PAIR-keyed AND time-unbounded, so an EARLIER
+        # commission's delivery (or a mere ENQUEUE) satisfied a FRESH
+        # commission — the premature-publish harm class.
+        #
+        # The DIAGNOSTIC legs run FIRST so their signal is collected
+        # even in the pass where the authority leg faults (and then
+        # HOLDS the row).
+        self._note_diagnostic_delivery_evidence(
+            commissioner_id, worker_id, commission, out
+        )
         # MAJ-1: the injection-row leg is DELIVERED-states-only AND
         # bounded to THIS commission (a row strictly older than the
         # mint belongs to an earlier commission on the same pair).
         try:
-            has_evidence = self._delivery_evidence_exists(
+            has_evidence = self._commission_bound_delivery_evidence(
                 commissioner_id, worker_id, commission
             )
         except Exception as exc:
@@ -2736,34 +2766,44 @@ class ReportDeliveryRecoveryService:
             return None
         return getattr(service, "repository", None)
 
-    def _delivery_evidence_exists(
+    def _commission_bound_delivery_evidence(
         self, commissioner_id: str, worker_id: str, commission: Any
     ) -> bool:
-        """R1/R1b — the delivery-evidence TRILET, read on the COMMISSIONER.
+        """LEG 1 — the delivery-evidence AUTHORITY (R1/R1b, MAJ-1).
 
-        The lane-2 evidence helpers, reused on the COMMISSIONER as the
-        recipient (the commissioner's report is the obligation):
+        Read on the COMMISSIONER as the recipient (the commissioner's
+        report is the obligation): an injection row in a DELIVERED state
+        (``INJECTED`` / ``TASK_DELIVERED``) for the (commissioner,
+        worker) pair, **bounded to THIS commission** (MAJ-1: a row
+        strictly older than the commission's mint is an EARLIER
+        commission's evidence, not this one's).
 
-        1. an injection row in a DELIVERED state (``INJECTED`` /
-           ``TASK_DELIVERED``) for the (commissioner, worker) pair,
-           **bounded to THIS commission** (MAJ-1: a row strictly older
-           than the commission's mint is an EARLIER commission's
-           evidence, not this one's);
-        2. the queue-side PREFIX ledger (``internal_report:{worker}:%``);
-        3. the parent-history PREFIX ledger (loop-bound → bridged onto
-           the manager's loop via ``_run_async_on_manager_loop``).
+        **This leg is the ONLY resolution authority.** By the F2 leader
+        ruling the other two legs of the former triplet (the queue-side
+        PREFIX ledger and the parent-history PREFIX ledger) are
+        DIAGNOSTIC ONLY — they may never authorise a ``satisfied`` and
+        may never authorise a hold-against-abandon. See
+        :meth:`_note_diagnostic_delivery_evidence` and the B-arc
+        closure table §(d.2)'s **F2** row (CLOSED, not deferred).
 
-        **MAJ-1 SCOPE, stated honestly:** the commission bound applies to
-        leg 1 (the injection-row read — the one the ruling names). Legs
-        2 and 3 are PAIR-keyed PREFIX ledgers (they carry no commission
-        id), so a delivery they record for an EARLIER commission on the
-        same pair still reads as evidence. Narrowing them is NOT in this
-        PR's ruling scope; the residual is recorded in the B-arc closure
-        table's deferral list.
+        **F2 trace (why the split happened).** Legs 2 and 3 are
+        PAIR-keyed AND time-unbounded: leg 2 matches the source
+        ``internal_report:{worker}:%`` with no commission id and no
+        time bound, and it counts a ``ready`` (ENQUEUED, never
+        processed) row as evidence; leg 3 scans the commissioner's
+        WHOLE history. So an EARLIER commission's delivery — or a mere
+        ENQUEUE — satisfied a FRESH commission, which released the L3
+        publish hold EARLY (the premature-publish harm class this arc
+        exists to kill). The live trace was:
+        ``_delivery_evidence_exists`` → ``_reconcile_one_commission``
+        (the ``has_evidence`` branch) → ``_satisfy_commission_on_evidence``
+        → the guarded UPDATE → ``transition_commission_state`` — under
+        ``dry`` it was counter-only, under ``enforce`` a LIVE write.
 
         Raises:
-            MissionReconciliationProbeError: a probe could not run — the
-                caller HOLDS (P1).
+            MissionReconciliationProbeError: the probe could not run —
+                the caller HOLDS (P1). This is the ONLY leg whose fault
+                may hold the row.
         """
         find_pair = getattr(
             self._report_injection_repo, "find_delivered_for_pair", None
@@ -2778,40 +2818,130 @@ class ReportDeliveryRecoveryService:
             commission, delivered_rows
         ):
             return True
+        return False
 
-        queue_evidence = getattr(
-            self._queue_repo, "find_wake_already_delivered_evidence", None
-        )
-        if not callable(queue_evidence):
-            raise MissionReconciliationProbeError(
-                "queue_repo lacks find_wake_already_delivered_evidence — "
-                "the queue-side PREFIX probe cannot run"
+    def _note_diagnostic_delivery_evidence(
+        self,
+        commissioner_id: str,
+        worker_id: str,
+        commission: Any,
+        out: MissionReconciliationLaneResult,
+    ) -> bool:
+        """LEGS 2 + 3 — the delivery-evidence DIAGNOSTICS (F2 ruling).
+
+        **DIAGNOSTIC ONLY — NEVER a resolution authority.** The two
+        PREFIX ledgers keep running (the ruling says "keep running
+        them"), and their result is logged and counted, but NO
+        transition may depend on them:
+
+        * leg 2 — the queue-side PREFIX ledger
+          (``find_wake_already_delivered_evidence``);
+        * leg 3 — the parent-history PREFIX ledger
+          (``parent_history_has_internal_report``, bridged onto the
+          manager's loop via ``_run_async_on_manager_loop``).
+
+        They are PAIR-keyed and TIME-unbounded (no commission id), so
+        they cannot tell THIS commission's delivery from an EARLIER
+        one's on the same pair — that is the F2 defect the leader
+        ruling closes (see :meth:`_commission_bound_delivery_evidence`
+        and the B-arc closure table §(d.2)'s **F2** row).
+
+        **A DIAGNOSTIC FAULT DOES NOT HOLD THE ROW.** A leg-2 / leg-3
+        fault is logged (type + message) and counted in its OWN
+        counter (``diagnostic_probe_errors`` — the same house precedent
+        as ``masked_probe_errors``: an OBSERVABILITY probe's fault must
+        not borrow ``probe_errors``, whose contract says "the row was
+        HELD"). The row is NOT held and NOT blocked from the abandon
+        path: the ruling's promise is that the publish hold "releases
+        NO EARLIER than the TTL horizon — fail-closed, bounded, safe",
+        and a diagnostic leg that kept failing would make that hold
+        UNBOUNDED. Only the authority leg (leg 1) may HOLD.
+
+        Returns:
+            ``True`` when a diagnostic leg reported positive evidence.
+            PURELY INFORMATIONAL — the caller MUST NOT branch on it.
+        """
+        evidence = False
+        # LEG 2 — the queue-side PREFIX ledger.
+        try:
+            queue_evidence = getattr(
+                self._queue_repo, "find_wake_already_delivered_evidence", None
             )
-        if queue_evidence(commissioner_id, worker_id):
-            return True
-
-        checkpointer = getattr(self._manager, "_checkpointer", None)
-        if checkpointer is None:
-            # Without the parent-history ledger we cannot PROVE absence
-            # → HOLD (P1). The lane-2 delivery path degrades to
-            # "no evidence" because a MISS there is the normal case;
-            # here a miss authorizes a DESTRUCTIVE transition.
-            raise MissionReconciliationProbeError(
-                "no checkpointer — the parent-history PREFIX probe cannot run"
+            if not callable(queue_evidence):
+                raise MissionReconciliationProbeError(
+                    "queue_repo lacks find_wake_already_delivered_evidence — "
+                    "the queue-side PREFIX probe cannot run"
+                )
+            if queue_evidence(commissioner_id, worker_id):
+                evidence = True
+        except Exception as exc:
+            out.diagnostic_probe_errors += 1
+            logger.warning(
+                "sweep mission_reconciliation DIAGNOSTIC evidence probe "
+                "failed (queue PREFIX ledger) mission_id=%s, "
+                "commission_id=%s, commissioner=%s, worker=%s, lane=%s: "
+                "%s: %s — DIAGNOSTIC ONLY: the row is NOT held and the "
+                "abandon path is NOT blocked",
+                getattr(commission, "mission_id", None),
+                getattr(commission, "commission_id", None),
+                commissioner_id,
+                worker_id,
+                getattr(commission, "lane", ""),
+                type(exc).__name__,
+                exc,
             )
-        from daemon.services.report_delivery_ledger import (
-            parent_history_has_internal_report,
-        )
+        # LEG 3 — the parent-history PREFIX ledger.
+        try:
+            checkpointer = getattr(self._manager, "_checkpointer", None)
+            if checkpointer is None:
+                # Without the parent-history ledger the leg cannot RUN.
+                # It is a DIAGNOSTIC leg, so a miss is NOT a hold: it is
+                # counted and the row proceeds (the TTL backstop stays
+                # reachable).
+                raise MissionReconciliationProbeError(
+                    "no checkpointer — the parent-history PREFIX probe "
+                    "cannot run"
+                )
+            from daemon.services.report_delivery_ledger import (
+                parent_history_has_internal_report,
+            )
 
-        return bool(
-            self._run_async_on_manager_loop(
+            if self._run_async_on_manager_loop(
                 parent_history_has_internal_report,
                 checkpointer,
                 commissioner_id,
                 worker_id,
                 None,
+            ):
+                evidence = True
+        except Exception as exc:
+            out.diagnostic_probe_errors += 1
+            logger.warning(
+                "sweep mission_reconciliation DIAGNOSTIC evidence probe "
+                "failed (parent-history PREFIX ledger) mission_id=%s, "
+                "commission_id=%s, commissioner=%s, worker=%s, lane=%s: "
+                "%s: %s — DIAGNOSTIC ONLY: the row is NOT held and the "
+                "abandon path is NOT blocked",
+                getattr(commission, "mission_id", None),
+                getattr(commission, "commission_id", None),
+                commissioner_id,
+                worker_id,
+                getattr(commission, "lane", ""),
+                type(exc).__name__,
+                exc,
             )
-        )
+        if evidence:
+            logger.info(
+                "sweep mission_reconciliation DIAGNOSTIC delivery evidence "
+                "(NOT a resolution authority — F2) mission_id=%s, "
+                "commission_id=%s, commissioner=%s, worker=%s, lane=%s",
+                getattr(commission, "mission_id", None),
+                getattr(commission, "commission_id", None),
+                commissioner_id,
+                worker_id,
+                getattr(commission, "lane", ""),
+            )
+        return evidence
 
     def _delivered_row_is_this_commission(
         self, commission: Any, delivered_rows: list[Any]

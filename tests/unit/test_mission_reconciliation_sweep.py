@@ -14,6 +14,14 @@ THE CONTRACT THIS FILE PINS (the design's §2 posture table):
   sweep NEVER resolves a commission on a failed probe — abandoning a
   commission is a wrong-side terminal transition in the same moral
   category as finalizing a live mission.
+* **F2 — the DIAGNOSTIC legs are the ONE exception to P1.** The
+  delivery-evidence legs 2/3 (the queue-side + parent-history PREFIX
+  ledgers) are DIAGNOSTIC ONLY: they may never authorise a
+  ``satisfied`` and may never authorise a hold-against-abandon. Their
+  fault is counted in ``diagnostic_probe_errors`` (its OWN counter, the
+  ``masked_probe_errors`` precedent) and the row proceeds. ONLY the
+  AUTHORITY leg (leg 1 — the commission-bound, state-filtered
+  injection-row read) may HOLD on a fault.
 * **P2 — loop-crash inherits the host's per-row posture.** A crashed
   row is logged + counted in ``errors`` + left untouched.
 * **P3 — the TTL is a TIME-BOUNDED fail-MISS.** Past the horizon AND
@@ -180,6 +188,25 @@ class FakeQueueRepo:
         return self.has_rows
 
 
+class FakeInjectionRepo:
+    """The report-injection repository: LEG 1 (the evidence AUTHORITY).
+
+    ``find_delivered_for_pair`` is the only method the mission-
+    reconciliation lane reads from it. ``error`` forces the leg to
+    FAULT — the authority-fault pin (F2 re-anchor): only leg 1 may HOLD
+    the row on a probe error.
+    """
+
+    def __init__(self, *, rows=None, error: Exception | None = None):
+        self.rows = rows or []
+        self.error = error
+
+    def find_delivered_for_pair(self, parent_id, child_id):
+        if self.error is not None:
+            raise self.error
+        return list(self.rows)
+
+
 class FakeBus:
     """The dependency bus: the PENDING-watcher probe (R4)."""
 
@@ -222,6 +249,7 @@ def _build_service(
     ttl_seconds: int = TTL_SECONDS,
     enabled: bool = True,
     mission_record_service=None,
+    report_injection_repo=None,
 ):
     """Build the sweep service with the fakes wired."""
     import os
@@ -242,7 +270,11 @@ def _build_service(
 
     service = ReportDeliveryRecoveryService(
         task_repo=MagicMock(),
-        report_injection_repo=ReportInjectionRepository(engine=engine),
+        report_injection_repo=(
+            report_injection_repo
+            if report_injection_repo is not None
+            else ReportInjectionRepository(engine=engine)
+        ),
         queue_repo=queue_repo if queue_repo is not None else FakeQueueRepo(),
         instance_repo=(
             instance_repo if instance_repo is not None else FakeInstanceRepo()
@@ -446,23 +478,44 @@ class TestTheProbeErrorsHold:
     def test_the_delivery_evidence_probe_error_holds_the_row(
         self, engine, manager_loop
     ):
+        """F2 RE-ANCHOR: the fault is forced in the AUTHORITY leg.
+
+        **The MECHANISM changed because the leader ruling changed the
+        contract.** The old pin forced the fault in the QUEUE repo
+        (``FakeQueueRepo.evidence_error``) — that is LEG 2, which the
+        ruling demoted to a DIAGNOSTIC leg. A diagnostic leg's fault
+        does NOT hold the row (the family's own contract now says the
+        diagnostic fault is counted in its own counter and the row
+        proceeds); ONLY the AUTHORITY leg (leg 1 — the commission-bound,
+        state-filtered injection-row read) may HOLD.
+
+        So the family's contract ("a probe error holds the row") is
+        re-anchored onto leg 1: the report-injection repository's
+        ``find_delivered_for_pair`` raises. The assertion shape is
+        unchanged (probe error ⇒ HELD, zero writes, no resolution).
+        """
         commission_id = _mint_commission(engine, age_seconds=99_999)
-        queue_repo = FakeQueueRepo()
-        queue_repo.evidence_error = RuntimeError("queue down")
+        injection_repo = FakeInjectionRepo(
+            error=RuntimeError("injection repo down")
+        )
         service, _ = _build_service(
             engine,
             manager_loop=manager_loop,
             instance_repo=FakeInstanceRepo(statuses={"worker-1": "running"}),
-            queue_repo=queue_repo,
+            report_injection_repo=injection_repo,
         )
 
         lane = service.recover_now().lanes["mission_reconciliation"]
 
         assert lane.probe_errors == 1
+        # The diagnostic legs did not fault ⇒ their own counter stays 0.
+        assert lane.diagnostic_probe_errors == 0
         assert lane.abandoned_worker_terminal == 0
-        assert _row(engine, commission_id).state == (
-            CommissionState.OUTSTANDING.value
-        )
+        assert lane.abandoned_ttl == 0
+        row = _row(engine, commission_id)
+        assert row.state == CommissionState.OUTSTANDING.value
+        assert row.abandon_reason is None
+        assert row.resolved_at is None
 
     def test_the_unparsable_created_at_holds_the_row(self, engine, manager_loop):
         commission_id = _mint_commission(engine, created_at="not-a-timestamp")
@@ -638,13 +691,30 @@ class TestTheWorkerTerminalRule:
     def test_delivery_evidence_satisfies_the_commission(
         self, engine, manager_loop
     ):
-        """R1b: the delivery happened; the natural satisfy write was lost."""
-        commission_id = _mint_commission(engine)
+        """R1b: the delivery happened; the natural satisfy write was lost.
+
+        F2 RE-ANCHOR: the evidence is now the AUTHORITY leg's — a
+        DELIVERED injection row bound to THIS commission. The old pin
+        drove the satisfy from the queue-side PREFIX ledger (leg 2),
+        which the leader ruling demoted to DIAGNOSTIC ONLY (it may
+        never authorise a ``satisfied``).
+        """
+        from daemon.repositories.report_injection.models import (
+            ReportInjectionState,
+        )
+
+        commission_id = _mint_commission(
+            engine, created_at=_iso_seconds_ago(60)
+        )
+        _seed_injection(
+            engine,
+            state=ReportInjectionState.INJECTED.value,
+            created_at=_iso_seconds_ago(30),
+        )
         service, _ = _build_service(
             engine,
             manager_loop=manager_loop,
             instance_repo=FakeInstanceRepo(statuses={"worker-1": "completed"}),
-            queue_repo=FakeQueueRepo(delivered=True),
         )
 
         lane = service.recover_now().lanes["mission_reconciliation"]
@@ -886,6 +956,174 @@ class TestTheDeliveryEvidenceBound:
         assert not hasattr(
             ReportInjectionRepository, "find_any_for_pair"
         )
+
+
+# ---------------------------------------------------------------------------
+# F2 — the LEADER RULING: the delivery-evidence legs 2/3 are DIAGNOSTIC
+#       ONLY (they never authorise a transition)
+# ---------------------------------------------------------------------------
+
+
+class TestTheDiagnosticEvidenceLegs:
+    """F2 (the leader ruling): ONE authority, TWO diagnostics.
+
+    The delivery-evidence read used to be a TRILET whose three legs
+    were interchangeable: any of them could authorise the ``satisfied``
+    transition. Legs 2 (the queue-side PREFIX ledger) and 3 (the
+    parent-history PREFIX ledger) are PAIR-keyed and TIME-unbounded —
+    they carry no commission id — so an EARLIER commission's delivery
+    (or a mere ENQUEUE, which leg 2 counts as evidence) satisfied a
+    FRESH commission and released the publish hold EARLY (the
+    premature-publish harm class).
+
+    The ruling: legs 2/3 may NEVER authorise a ``satisfied`` and may
+    NEVER authorise a hold-against-abandon. Leg 1 (the commission-bound,
+    state-filtered injection-row read) is the ONLY authority. The
+    diagnostic legs KEEP RUNNING (their result is logged + counted).
+    """
+
+    def test_an_earlier_commissions_queue_enqueue_does_not_satisfy_a_fresh_commission(
+        self, engine, manager_loop
+    ):
+        """(a) THE F2 TRACE: leg 2 says "delivered", leg 1 says nothing.
+
+        The queue-side PREFIX ledger reports a delivery on the pair
+        (here: an EARLIER commission's enqueue — the ledger carries no
+        commission id, so it cannot tell), and there is NO leg-1
+        injection row for THIS commission. The fresh commission must
+        NOT be satisfied.
+        """
+        commission_id = _mint_commission(
+            engine, created_at=_iso_seconds_ago(60)
+        )
+        service, _ = _build_service(
+            engine,
+            manager_loop=manager_loop,
+            instance_repo=FakeInstanceRepo(statuses={"worker-1": "running"}),
+            queue_repo=FakeQueueRepo(delivered=True),
+        )
+
+        lane = service.recover_now().lanes["mission_reconciliation"]
+
+        assert lane.satisfied_on_evidence == 0
+        assert lane.recovered == 0
+        row = _row(engine, commission_id)
+        assert row.state == CommissionState.OUTSTANDING.value
+        assert row.satisfied_at is None
+        assert row.resolved_at is None
+        assert row.abandon_reason is None
+
+    def test_a_leg_one_delivered_commission_still_satisfies(
+        self, engine, manager_loop
+    ):
+        """(b) The AUTHORITY leg still authorises the satisfy."""
+        from daemon.repositories.report_injection.models import (
+            ReportInjectionState,
+        )
+
+        commission_id = _mint_commission(
+            engine, created_at=_iso_seconds_ago(60)
+        )
+        _seed_injection(
+            engine,
+            state=ReportInjectionState.TASK_DELIVERED.value,
+            created_at=_iso_seconds_ago(30),
+        )
+        service, _ = _build_service(
+            engine,
+            manager_loop=manager_loop,
+            instance_repo=FakeInstanceRepo(statuses={"worker-1": "completed"}),
+        )
+
+        lane = service.recover_now().lanes["mission_reconciliation"]
+
+        assert lane.satisfied_on_evidence == 1
+        row = _row(engine, commission_id)
+        assert row.state == CommissionState.SATISFIED.value
+        assert row.resolved_at is not None
+
+    def test_a_fresh_commission_without_leg_one_evidence_is_not_satisfied(
+        self, engine, manager_loop
+    ):
+        """(c) NO leg-1 evidence ⇒ NOT satisfied (and not yet abandoned).
+
+        The row is YOUNG and its worker is non-terminal ⇒ the TTL
+        backstop has not fired ⇒ the row is HELD (``below_ttl_hold``).
+        The assertion proves "not satisfied", not "abandoned".
+
+        The DIAGNOSTIC legs are deliberately POSITIVE here (the queue
+        ledger reports a delivery on the pair) so the pin proves the
+        AUTHORITY — the absence of a leg-1 row is the ONLY reason the
+        row is not satisfied, not the absence of any signal at all.
+        """
+        commission_id = _mint_commission(
+            engine, created_at=_iso_seconds_ago(60)
+        )
+        service, _ = _build_service(
+            engine,
+            manager_loop=manager_loop,
+            instance_repo=FakeInstanceRepo(statuses={"worker-1": "running"}),
+            queue_repo=FakeQueueRepo(delivered=True),
+        )
+
+        lane = service.recover_now().lanes["mission_reconciliation"]
+
+        assert lane.satisfied_on_evidence == 0
+        assert lane.below_ttl_hold == 1
+        assert lane.abandoned_ttl == 0
+        row = _row(engine, commission_id)
+        assert row.state == CommissionState.OUTSTANDING.value
+        assert row.satisfied_at is None
+        assert row.resolved_at is None
+
+    def test_a_diagnostic_probe_fault_does_not_hold_the_row(
+        self, engine, manager_loop
+    ):
+        """(d) A DIAGNOSTIC leg's fault does NOT hold the row.
+
+        The ruling's promise is that the publish hold "releases NO
+        EARLIER than the TTL horizon — fail-closed, bounded, safe". A
+        diagnostic leg that kept faulting would HOLD the row on every
+        pass ⇒ an UNBOUNDED hold ⇒ the promise broken. So the fault is
+        logged + counted in its OWN counter (``diagnostic_probe_errors``)
+        and the row proceeds to the TTL backstop. ``probe_errors`` stays
+        0 — its contract ("a DECISION probe could not prove its
+        predicate ⇒ the row was HELD") is untouched.
+        """
+        commission_id = _mint_commission(engine, age_seconds=99_999)
+        queue_repo = FakeQueueRepo()
+        queue_repo.evidence_error = RuntimeError("queue down")
+        service, _ = _build_service(
+            engine,
+            manager_loop=manager_loop,
+            instance_repo=FakeInstanceRepo(statuses={"worker-1": "running"}),
+            queue_repo=queue_repo,
+        )
+
+        lane = service.recover_now().lanes["mission_reconciliation"]
+
+        # The fault is counted in the DIAGNOSTIC counter, NOT in
+        # ``probe_errors``.
+        assert lane.diagnostic_probe_errors == 1
+        assert lane.probe_errors == 0
+        # The row is NOT held by the diagnostic fault — the TTL backstop
+        # is still reachable.
+        assert lane.abandoned_ttl == 1
+        assert lane.recovered == 1
+        row = _row(engine, commission_id)
+        assert row.state == CommissionState.ABANDONED.value
+        assert row.abandon_reason == "ttl_expired_not_live"
+
+    def test_the_lane_dict_carries_the_diagnostic_counter(self):
+        """The counter is SURFACED (the endpoint returns the lane dict)."""
+        from daemon.services.report_delivery_recovery import (
+            MissionReconciliationLaneResult,
+        )
+
+        payload = MissionReconciliationLaneResult().to_dict()
+        assert payload["diagnostic_probe_errors"] == 0
+        assert payload["probe_errors"] == 0
+        assert payload["masked_probe_errors"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1337,6 +1575,7 @@ class TestTheEndpointShape:
         assert lane["skipped_live"] == 0
         assert lane["probe_errors"] == 0
         assert lane["masked_probe_errors"] == 0
+        assert lane["diagnostic_probe_errors"] == 0
         assert lane["masked_suspected"] == 0
         assert lane["already_resolved"] == 0
         assert lane["below_ttl_hold"] == 0
@@ -1603,14 +1842,31 @@ class TestTheSingleResolutionWriter:
     def test_the_satisfy_on_evidence_goes_through_the_service_seam(
         self, engine, manager_loop
     ):
-        commission_id = _mint_commission(engine)
+        """F2 RE-ANCHOR: the satisfy is driven by the AUTHORITY leg.
+
+        The old pin drove it from the queue-side PREFIX ledger (leg 2),
+        which the leader ruling demoted to DIAGNOSTIC ONLY. The seam
+        being pinned here (the ONE guarded writer) is unchanged; only
+        the evidence source moved to leg 1.
+        """
+        from daemon.repositories.report_injection.models import (
+            ReportInjectionState,
+        )
+
+        commission_id = _mint_commission(
+            engine, created_at=_iso_seconds_ago(60)
+        )
+        _seed_injection(
+            engine,
+            state=ReportInjectionState.INJECTED.value,
+            created_at=_iso_seconds_ago(30),
+        )
         mission_service = MagicMock(wraps=MissionRecordService(engine))
         service, _ = _build_service(
             engine,
             manager_loop=manager_loop,
             mission_record_service=mission_service,
             instance_repo=FakeInstanceRepo(statuses={"worker-1": "completed"}),
-            queue_repo=FakeQueueRepo(delivered=True),
         )
 
         lane = service.recover_now().lanes["mission_reconciliation"]
