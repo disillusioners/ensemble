@@ -85,6 +85,22 @@ def _doc_prose() -> str:
     return " ".join(_doc_text().split())
 
 
+def _doc_plain(text: str) -> str:
+    """The doc's text with the MARKDOWN markup stripped.
+
+    A negative needle must not be defeated by the EMPHASIS: the doc
+    writes ``the only socket closure **in the gateway**``, so the raw
+    text does NOT contain the needle — the emphasis-stripped text DOES.
+    A pin that greps the raw text would therefore stay GREEN with the
+    defect live (the doc test's own negative arm is the witness).
+
+    The emphasis markers are the doc's style: ``*``/``_`` for emphasis,
+    ``**`` for strong emphasis and ``` `` ``` for inline code. All three
+    are stripped, so a needle matches the SENTENCE, not its markup.
+    """
+    return re.sub(r"[*_`]", "", text)
+
+
 # ── positive needles ────────────────────────────────────────────────────
 
 
@@ -1047,12 +1063,16 @@ def test_doc_states_the_expiry_tells_the_machine_and_keeps_the_socket() -> None:
         "the doc must state the machine returns to ready ON THE SAME "
         "connection after the expiry notification."
     )
-    assert "the only socket closure **on the session path**" in text.lower(), (
+    # The MARKDOWN-STripped view: a needle must match the SENTENCE, not
+    # its emphasis. The negative arm is defeated by the raw text (the
+    # doc writes "**in the gateway**"), so it MUST be matched here.
+    plain = _doc_plain(text).lower()
+    assert "the only socket closure on the session path" in plain, (
         "the doc must scope the heartbeat-kill closure to the SESSION "
         "PATH — the teardown paths (a socket that dies, the pre-hello "
         "deadline, the daemon shutdown) close sockets too."
     )
-    assert "the only socket closure in the gateway" not in text.lower(), (
+    assert "the only socket closure in the gateway" not in plain, (
         "the unscoped 'the only socket closure in the gateway' claim is "
         "FALSE — several other paths close a socket. The doc must not "
         "enshrine it."

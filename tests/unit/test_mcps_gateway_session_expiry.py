@@ -43,7 +43,11 @@ from daemon.services.mcps_gateway.protocol import (
     CODE_TOOL_TIMEOUT,
     PROTOCOL_VERSION,
 )
-from daemon.services.mcps_gateway.service import McpGatewayService
+from daemon.services.mcps_gateway.service import (
+    AUDIT_ALLOWED_ERROR_CODES,
+    AUDIT_ALLOWED_SESSION_ERROR_CODES,
+    McpGatewayService,
+)
 from daemon.services.mcps_gateway.store import InMemoryMachineStore
 from daemon.services.mcps_gateway.tombstones import (
     LEDGER_MACHINE_TIMEOUT,
@@ -55,7 +59,6 @@ from daemon.services.mcps_gateway.tombstones import (
     REASON_UNKNOWN_SESSION,
     RESPONSE_REASONS,
     SessionTombstone,
-    all_reasons,
 )
 
 #: The canonical ids of the fixtures — LETTER-BEARING on purpose.
@@ -461,6 +464,42 @@ class TestTheTombstone:
         assert second["why_not_ended"] == REASON_ALREADY_ENDED
         assert second["session_id"] == SESSION_ID
 
+    async def test_the_late_end_says_whether_the_machine_was_notified(self):
+        """H-8: the flag is TRUTHFUL, not a hard-coded ``False``.
+
+        The session was ended and the machine ACKNOWLEDGED it, so the
+        machine WAS notified — the late end says so.
+        """
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+
+        first = await service.disconnect(agent_id=AGENT_ID)
+        assert first["machine_notified"] is True
+
+        second = await service.disconnect(agent_id=AGENT_ID)
+
+        assert second["ended"] is False
+        assert second["why_not_ended"] == REASON_ALREADY_ENDED
+        assert second["machine_notified"] is True
+
+    async def test_the_late_end_says_the_machine_was_not_notified(self):
+        """The converse: a centre-side release notified NOBODY."""
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+        # The socket is gone while the session is still live.
+        machine.connection.closed = True
+        service._connections.pop(machine.connection.connection_id)
+
+        first = await service.disconnect(agent_id=AGENT_ID)
+        assert first["machine_notified"] is False
+
+        second = await service.disconnect(agent_id=AGENT_ID)
+
+        assert second["why_not_ended"] == REASON_ALREADY_ENDED
+        assert second["machine_notified"] is False
+
     async def test_an_unknown_session_answers_unknown_session_without_a_machine_id(
         self,
     ):
@@ -663,7 +702,15 @@ class TestTheEndContract:
             assert result.get("why_not_ended"), scenario
             assert result.get("detail"), scenario
             assert result["why_not_ended"] in RESPONSE_REASONS, scenario
-            assert result["machine_notified"] is False or scenario == "refused"
+            # Whether the machine was told WHEN THE SESSION ENDED — the
+            # tombstone knows it (the explicit end records the ack, the
+            # sweep records the forward's outcome).
+            expected_notified = {
+                "unknown": False,  # no session ever existed
+                "expired": True,  # the sweep forwarded the end; it acked
+                "refused": True,  # the machine answered (with a refusal)
+            }[scenario]
+            assert result["machine_notified"] is expected_notified, scenario
 
     async def test_a_response_never_carries_a_ledger_only_token(self):
         """The two DISJOINT reason sets — the invariant, end to end."""
@@ -1006,9 +1053,31 @@ class TestTheReasonVocabulary:
             {"expired", "already_ended", "unknown_session", "machine_refused"}
         )
 
-    def test_the_vocabulary_is_exactly_the_two_sets(self):
-        """The whole vocabulary — nothing outside the two disjoint sets."""
-        assert all_reasons() == RESPONSE_REASONS | LEDGER_ONLY_REASONS
+    def test_the_command_audit_set_carries_none_of_the_centre_only_tokens(self):
+        """The COMMAND rows' vocabulary must not carry a centre token.
+
+        Direct constant-to-constant assertions — the centre-only tokens
+        are spelled out as literals here, so the assertion does not
+        restate the definition of either set (a helper that rebuilt
+        the sets would prove nothing).
+        """
+        centre_only = {
+            "machine_unreachable",
+            "machine_timeout",
+            "idle",
+            "ttl",
+            "expired",
+            "already_ended",
+            "unknown_session",
+            "machine_refused",
+        }
+        # The command set: NONE of the centre-only tokens — a hostile
+        # machine must not be able to forge one into a command row.
+        assert AUDIT_ALLOWED_ERROR_CODES.isdisjoint(centre_only)
+        # The session set: a SUPERSET of the command set, and it carries
+        # the centre-only tokens (they are the session ledger's own).
+        assert AUDIT_ALLOWED_SESSION_ERROR_CODES >= AUDIT_ALLOWED_ERROR_CODES
+        assert centre_only <= AUDIT_ALLOWED_SESSION_ERROR_CODES
 
     async def test_the_runtime_guard_keeps_a_ledger_only_token_out_of_a_response(
         self,
@@ -1148,6 +1217,20 @@ class TestTheExplicitEndArms:
         # The neutral marker replaces it.
         assert "UNRECOGNIZED_ERROR_CODE" in result["detail"]
 
+    def test_a_non_string_peer_code_is_neutralised_without_raising(self):
+        """H-2: the TYPE guard — an unhashable code must not raise HERE.
+
+        A raise in the sanitiser would land in the broad transport arm
+        of the end — i.e. it would resurrect the bare-error failure mode
+        the sanitiser exists to prevent. The input is unreachable from a
+        peer (the code slot is coerced to ``str`` when the frame is
+        delivered), but the guard costs one line and is pinned here.
+        """
+        for code in ({"code": "x"}, ["x"], None, 42, ("x",)):
+            assert (
+                McpGatewayService._safe_peer_code(code) == "UNRECOGNIZED_ERROR_CODE"
+            )
+
     async def test_a_protocol_code_is_still_echoed_in_the_detail(self):
         """The sanitiser must not swallow the PROTOCOL vocabulary."""
         service = make_service()
@@ -1223,14 +1306,52 @@ class TestTheReservedAuditToolNames:
         # And no COMMAND row carries the reserved name.
         assert audit.records == []
 
+    async def test_the_advertised_catalogue_omits_the_reserved_names(self):
+        """The centre never advertises a tool it would refuse.
+
+        The remote catalogue travels verbatim from the machine — but the
+        two RESERVED names are the centre's own audit vocabulary, so
+        they are filtered OUT of the catalogue the agent sees. Only the
+        NAME is dropped; every other tool's schema is untouched.
+        """
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        machine.answers["session.begin"] = {
+            "session_id": SESSION_ID,
+            "machine_id": MACHINE_ID,
+            "expires_at_ms": 1792576800000,
+            "tools": [
+                {"name": "session.end", "inputSchema": {"type": "object"}},
+                {"name": "session.expire", "inputSchema": {"type": "object"}},
+                {"name": "screenshot", "inputSchema": {"type": "object"}},
+            ],
+        }
+
+        result = await service.connect(
+            machine_id=MACHINE_ID, agent_id=AGENT_ID, reason="test"
+        )
+
+        advertised = [tool.get("name") for tool in result["tools"]]
+        assert advertised == ["screenshot"]
+        # The session's own catalogue is filtered the same way.
+        assert [
+            tool.get("name") for tool in service.sessions.for_agent(AGENT_ID).catalog
+        ] == ["screenshot"]
+
     async def test_a_normal_command_is_unaffected(self):
         service = make_service()
         machine = await open_machine(service, FakeMachine(service))
         await open_session(service, machine)
+        machine.answers["tools/call"] = {"content": [{"type": "text", "text": "ok"}]}
 
         result = await service.command(agent_id=AGENT_ID, tool="screenshot")
 
-        assert "content" in result or result == {}
+        # The machine's result comes back VERBATIM.
+        assert result == {"content": [{"type": "text", "text": "ok"}]}
+        # And the call really was forwarded, with the tool name intact.
+        calls = [f for f in machine.sent if f.get("method") == "tools/call"]
+        assert len(calls) == 1
+        assert calls[0]["params"]["name"] == "screenshot"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

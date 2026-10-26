@@ -510,13 +510,16 @@ flowchart TD
     SweepReady -.->|"same socket, next session"| ConnectCall
 ```
 
-The tools **never raise** — every refusal is the typed payload
-`{"error": {"code": ..., "message": ...}}` with a §6.5 code the agent can
-branch on. (A refusal is a RETURN VALUE, not an exception: the tool
-boundary catches the typed protocol errors itself. `mcp_rpc_disconnect`
-returns its reason-coded envelope for the session-state outcomes —
-§4.5 — and only its pre-flight refusals (the authorization gate, the
-kill switch) come back in the `{"error": {...}}` shape.)
+The tools **never leak an exception to the agent** — every refusal is
+the typed payload `{"error": {"code": ..., "message": ...}}` with a §6.5
+code the agent can branch on. (A refusal is a RETURN VALUE, not an
+exception: the tool boundary catches the typed protocol errors itself.
+`mcp_rpc_disconnect` returns its reason-coded envelope for the
+session-state outcomes — §4.5 — and only its **pre-flight** refusals
+(the tool's authorization gate and the kill switch) come back in the
+`{"error": {...}}` shape. Those two are the ONLY things that raise
+anywhere on this surface: a session-state reason never raises, it comes
+back as the envelope.)
 
 | Tool | Args | Returns | Notes |
 |---|---|---|---|
@@ -558,9 +561,9 @@ Operational caveats:
 
 | Path | What happens |
 |---|---|
-| `mcp_rpc_disconnect` (explicit) | the center sends `session.end` to the machine and releases the slot **only after the machine acked** — a machine REFUSAL leaves the session **ALIVE** and the answer carries `why_not_ended: machine_refused` (§4.5) |
+| `mcp_rpc_disconnect` (explicit) | the center sends `session.end` to the machine. A machine REFUSAL leaves the session **ALIVE** and the answer carries `why_not_ended: machine_refused` (§4.5). The slot is released when the machine **acks** — or **authoritatively** by the center when the machine is **unreachable** (the connection is gone, or the socket died mid-flight) or does not answer inside the ack deadline; those answers carry `machine_notified: false` and the ledger reason `machine_unreachable` / `machine_timeout` (§4.5) |
 | TTL (1 h) / idle (5 min) expiry | the **sweep** reaps it (the sole owner of the reap): the center sends `session.end` to the machine, the machine releases its lock and returns to `ready`, and the slot is released — **the machine keeps its socket**. If the machine is **unreachable** (connection gone) or does not answer inside the ack deadline, the center **still releases the slot** and records `machine_notified: false` (the ledger reason is `machine_unreachable` / `machine_timeout`) |
-| heartbeat loss (> `heartbeat_timeout_ms`) | session killed + in-band `HEARTBEAT_TIMEOUT` error + socket closed — the **only** socket closure in the gateway; the machine is expected to reconnect and start over |
+| heartbeat loss (> `heartbeat_timeout_ms`) | session killed + in-band `HEARTBEAT_TIMEOUT` error + socket closed — the only socket closure **on the session path** (the teardown paths close sockets too); the machine is expected to reconnect and start over |
 | socket loss (either side) | session killed; roster flips to `offline`; the machine re-appears on its next upgrade |
 
 **One expiry, one error code.** The expiry is enforced by the center
@@ -752,12 +755,12 @@ and would leak the machine's liveness.
 
 **The end envelope.** `mcp_rpc_disconnect` answers a **reason-coded
 envelope** for EVERY session-state outcome — a session-state reason
-never raises: it comes back as the envelope below. What can still
-raise is the **pre-flight** refusals that happen BEFORE any session
-state is looked at: the tool's own **authorization** gate (an agent
-outside `ari` / `leader`) and the **kill switch** (a disabled
-gateway) — both of them are typed errors the tool renders as
-`{"error": {"code", "message"}}`:
+never raises: it comes back as the envelope below. The ONLY things that
+raise anywhere on this surface are the **pre-flight** refusals that
+happen BEFORE any session state is looked at: the tool's own
+**authorization** gate (an agent outside `ari` / `leader`) and the
+**kill switch** (a disabled gateway) — both of them are typed errors the
+tool renders as `{"error": {"code", "message"}}`:
 
 ```
 {session_id?, machine_id?, ended: bool, detail: str, machine_notified: bool}
@@ -769,6 +772,12 @@ gateway) — both of them are typed errors the tool renders as
 * `session_id` / `machine_id` are included **only when known** — the
   answer never leaks the existence of a session belonging to another
   agent.
+* `machine_notified` says whether the MACHINE was told. For a LATE end
+  of a session that already ended it is what the tombstone recorded
+  (the machine acknowledged the end — or refused it — or the centre
+  released the session on its own); it is `false` while the sweep's
+  forward is still in flight, because the tombstone is written before
+  the forward.
 
 | Situation | Answer |
 |---|---|
@@ -801,7 +810,9 @@ escape as a bare error:
 **The tombstone.** A **new, IN-MEMORY, BOUNDED, AGENT-SCOPED** record of
 a session that is gone. A record carries: `session_id`, `reason`
 (`expired` | `already_ended`), `at`, `agent_id`, `instance_id`,
-`machine_id` and `cause` (`idle` | `ttl`).
+`machine_id`, `cause` (`idle` | `ttl`) and `machine_notified` (whether
+the machine was told about the end — the sweep records the forward's
+outcome after it happened, the explicit end records the ack).
 
 * **Bounded twice**: by the number of entries (512 — the oldest is
   evicted first) and by an age horizon (3600 s — pruned on write). Past

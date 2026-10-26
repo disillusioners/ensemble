@@ -431,7 +431,10 @@ class McpGatewayService:
             # The session died WITH its connection: it leaves an
             # ``already_ended`` tombstone, so a LATE end answers
             # ``already_ended`` instead of a bare ``unknown_session``.
-            self._record_tombstone(session, reason=REASON_ALREADY_ENDED)
+            # The machine was NOT notified (its socket is gone).
+            self._record_tombstone(
+                session, reason=REASON_ALREADY_ENDED, machine_notified=False
+            )
             logger.warning(
                 "the session %s was killed: the connection of the machine %s is gone (%s)",
                 session.session_id,
@@ -876,7 +879,10 @@ class McpGatewayService:
                 # The session died with the machine: it leaves an
                 # ``already_ended`` tombstone, so a LATE end answers
                 # ``already_ended`` instead of a bare ``unknown_session``.
-                self._record_tombstone(session, reason=REASON_ALREADY_ENDED)
+                # The machine was NOT notified (it is gone).
+                self._record_tombstone(
+                    session, reason=REASON_ALREADY_ENDED, machine_notified=False
+                )
             await self._send(
                 connection,
                 make_error_envelope(
@@ -971,6 +977,7 @@ class McpGatewayService:
         reason: str,
         cause: str = "",
         at: float | None = None,
+        machine_notified: bool = False,
     ) -> None:
         """Remember an ended session in the bounded tombstone store.
 
@@ -978,6 +985,10 @@ class McpGatewayService:
         or ``already_ended`` instead of a bare ``unknown_session`` — and
         it is bounded in BOTH count and age, so it cannot grow into a
         memory leak (see ``daemon/services/mcps_gateway/tombstones.py``).
+
+        ``machine_notified`` records whether the MACHINE was told about
+        the end, so the late end's envelope can answer it truthfully
+        instead of hard-coding a value.
         """
         self._tombstones.record(
             SessionTombstone(
@@ -988,6 +999,7 @@ class McpGatewayService:
                 instance_id=session.instance_id,
                 machine_id=session.machine_id,
                 cause=cause,
+                machine_notified=machine_notified,
             )
         )
 
@@ -1076,8 +1088,17 @@ class McpGatewayService:
         The audit row is what answers the operator question "why did this
         session not end?" — the sweep's own release leaves no other
         trace in the ledger.
+
+        The tombstone was written BEFORE the forward (the two-pass
+        invariant), so the forward's outcome is recorded on it AFTER the
+        fact — that is what lets a LATE end answer truthfully whether
+        the machine was notified.
         """
         outcome = await self._forward_session_end_outcome(session)
+        self._tombstones.mark_notified(
+            session.session_id,
+            outcome in (FORWARD_ACK, FORWARD_ALREADY_GONE, FORWARD_REFUSED),
+        )
         if outcome == FORWARD_ACK:
             audit_outcome = OUTCOME_OK
             error_code = cause
@@ -1263,6 +1284,19 @@ class McpGatewayService:
 
         catalog = result.get("tools")
         catalog = list(catalog) if isinstance(catalog, list) else []
+        # The center RESERVES two names for its own audit vocabulary
+        # (RESERVED_AUDIT_TOOL_NAMES). Advertising a tool the center
+        # would then refuse is a lie, so the reserved names never reach
+        # the catalogue the agent sees. Only the NAME is dropped: every
+        # other tool's schema travels verbatim (§6.4).
+        catalog = [
+            tool
+            for tool in catalog
+            if not (
+                isinstance(tool, dict)
+                and str(tool.get("name") or "") in RESERVED_AUDIT_TOOL_NAMES
+            )
+        ]
         try:
             session = self._sessions.begin(
                 session_id=session_id,
@@ -1639,7 +1673,9 @@ class McpGatewayService:
         ``already_ended`` tombstone, so a LATE end answers
         ``already_ended`` instead of a bare ``unknown_session``.
         """
-        self._release_centre_side(session)
+        # The machine ANSWERED (it acknowledged the end, or it held no
+        # such session) — so it WAS notified.
+        self._release_centre_side(session, machine_notified=True)
         envelope: dict[str, Any] = {
             "session_id": session.session_id,
             "machine_id": session.machine_id,
@@ -1680,7 +1716,9 @@ class McpGatewayService:
         ledger-only token (``machine_unreachable`` / ``machine_timeout``),
         never a response reason.
         """
-        self._release_centre_side(session)
+        # The machine was not there (or did not answer) — it was NOT
+        # notified of the end.
+        self._release_centre_side(session, machine_notified=False)
         await self._audit_session(
             agent_id=agent_id,
             instance_id=instance_id,
@@ -1753,7 +1791,13 @@ class McpGatewayService:
             "ended": False,
             "why_not_ended": response_reason,
             "detail": detail,
-            "machine_notified": False,
+            # Whether the MACHINE was told when the session ended — the
+            # tombstone knows it (the explicit end records the ack, the
+            # sweep records the forward's outcome). It is FALSE while
+            # the sweep's forward is still in flight (the tombstone is
+            # written before it) and for a session that died with the
+            # socket.
+            "machine_notified": tombstone.machine_notified,
         }
         if tombstone.session_id:
             envelope["session_id"] = tombstone.session_id
@@ -1774,7 +1818,17 @@ class McpGatewayService:
 
         So only the PROTOCOL vocabulary is echoed; everything else
         becomes the neutral :data:`UNRECOGNIZED_ERROR_CODE`.
+
+        The TYPE is checked first: a code that is not a string (or is
+        unhashable) would make the membership test raise, and a raise
+        HERE would land in the broad transport arm of the end — i.e. it
+        would resurrect the bare-error failure mode this sanitiser
+        exists to prevent. It is unreachable from a peer (the code slot
+        is coerced to ``str`` when the frame is delivered), but the
+        guard costs one line.
         """
+        if not isinstance(code, str):
+            return UNRECOGNIZED_ERROR_CODE
         if code in CENTER_EMITTED_CODES or code in RELAYED_CODES:
             return code
         return UNRECOGNIZED_ERROR_CODE
@@ -1799,16 +1853,26 @@ class McpGatewayService:
         )
         return REASON_UNKNOWN_SESSION
 
-    def _release_centre_side(self, session: GatewaySession) -> None:
+    def _release_centre_side(
+        self, session: GatewaySession, *, machine_notified: bool = False
+    ) -> None:
         """Release the centre-side state of a session and remember it.
 
         The roster release is session-id-guarded (``store.clear_session``
        ): a machine that re-helloed and bound a NEW session keeps that
         new session.
+
+        ``machine_notified`` is what the caller KNOWS: ``True`` when the
+        machine answered (it acknowledged the end, refused it, or held no
+        such session), ``False`` when the centre released the session on
+        its own (unreachable / deadline) or the session died with the
+        socket. The late end's envelope reads it back.
         """
         self._sessions.end(session.session_id)
         self._store.clear_session(session.machine_id, session.session_id)
-        self._record_tombstone(session, reason=REASON_ALREADY_ENDED)
+        self._record_tombstone(
+            session, reason=REASON_ALREADY_ENDED, machine_notified=machine_notified
+        )
 
     # ── the audit ────────────────────────────────────────────────────────
 

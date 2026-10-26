@@ -330,8 +330,11 @@ The machine keeps its socket open and returns to ``ready``: the next
 session is opened on the same connection.
 
 The answer is a REASON-CODED ENVELOPE and it is returned for EVERY
-session-state outcome — the tool never raises for one (only the
-kill-switch, i.e. a disabled gateway, answers ``{"error": {...}}``)::
+session-state outcome — the tool never raises for one. The only two
+things that raise anywhere on this surface are its PRE-FLIGHT refusals:
+the tool's own AUTHORIZATION gate (an agent outside ``ari`` / ``leader``)
+and the KILL SWITCH (a disabled gateway) — both come back as
+``{"error": {"code", "message"}}``::
 
     {session_id?, machine_id?, ended: bool, detail: str,
      machine_notified: bool, why_not_ended?, result?}

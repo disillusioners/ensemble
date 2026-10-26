@@ -75,7 +75,7 @@ the agent's most recent tombstone within the horizon.
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 # ── the RESPONSE-borne reasons (the value of ``why_not_ended``) ─────────────
 
@@ -152,6 +152,17 @@ class SessionTombstone:
             centre never learned it).
         cause: Why the session ended — ``idle`` / ``ttl`` for an
             expiry, empty for an explicit end.
+        machine_notified: Whether the MACHINE was told about the end.
+            ``True`` when it acknowledged it (or refused it, or already
+            held no such session) — the machine answered. ``False``
+            when the centre released the session on its own (the
+            machine was unreachable, or the centre's deadline fired) or
+            when the session died with the socket.
+
+            It is FALSE until the sweep's forward completes (the
+            tombstone is written BEFORE the forward — that is the
+            two-pass invariant), so a late end that races the sweep
+            sees the pre-forward value.
     """
 
     session_id: str
@@ -161,6 +172,7 @@ class SessionTombstone:
     instance_id: str = ""
     machine_id: str = ""
     cause: str = ""
+    machine_notified: bool = False
 
 
 class TombstoneStore:
@@ -193,6 +205,22 @@ class TombstoneStore:
             self._entries.append(tombstone)
             while len(self._entries) > self._max_entries:
                 self._entries.pop(0)
+
+    def mark_notified(self, session_id: str, notified: bool) -> None:
+        """Record whether the MACHINE was told about an ended session.
+
+        The sweep writes its tombstone BEFORE the forward (that is the
+        two-pass invariant — the tombstone must exist before any await),
+        so the outcome of the forward is known only afterwards. This
+        records it, so a LATE end can answer truthfully whether the
+        machine was notified.
+        """
+        with self._lock:
+            for index, entry in enumerate(self._entries):
+                if entry.session_id != session_id:
+                    continue
+                self._entries[index] = replace(entry, machine_notified=notified)
+                return
 
     def latest_for_agent(
         self, agent_id: str, now: float
@@ -231,15 +259,6 @@ class TombstoneStore:
         self._entries = [entry for entry in self._entries if entry.at >= cutoff]
 
 
-def all_reasons() -> frozenset[str]:
-    """Every token of the vocabulary — the two DISJOINT sets together.
-
-    The test seam for the disjointness invariant: the response-borne
-    reasons and the ledger-only reasons must never overlap.
-    """
-    return frozenset(RESPONSE_REASONS | LEDGER_ONLY_REASONS)
-
-
 __all__ = [
     "CAUSE_IDLE",
     "CAUSE_TTL",
@@ -254,5 +273,4 @@ __all__ = [
     "RESPONSE_REASONS",
     "SessionTombstone",
     "TombstoneStore",
-    "all_reasons",
 ]
