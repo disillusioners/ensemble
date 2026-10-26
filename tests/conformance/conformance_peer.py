@@ -460,7 +460,20 @@ class ConformancePeer:
         self.sent_catalog: list[dict[str, Any]] = []
         self.calls_received: list[dict[str, Any]] = []
         self.ended_sessions: list[str] = []
+        #: The raw ``session.end`` REQUEST envelopes the center sent — the
+        #: wire-level evidence that the machine was TOLD (and of the exact
+        #: params it was told with: the wire contract does not change).
+        self.session_end_frames: list[dict[str, Any]] = []
         self.machine_audit: list[dict[str, Any]] = []
+        #: The machine's OWN session lock (SPEC §6.8/§8.3).  The shipped
+        #: client refuses a concurrent ``session.begin`` with
+        #: ``MACHINE_BUSY`` (``internal/remote/client.go:987-991``) and
+        #: releases the lock ONLY on a ``session.end`` frame
+        #: (``client.go:1040`` — ``clearSession``).  Modelling the lock
+        #: here is what makes the machine's RELEASE observable: a centre
+        #: that reaps a session silently leaves the machine locked, and
+        #: the next begin is refused.
+        self._live_session_id: str = ""
 
     # ── TLS / pinning ────────────────────────────────────────────────────
 
@@ -709,6 +722,22 @@ class ConformancePeer:
         if envelope.get("session_id"):
             base["session_id"] = envelope["session_id"]
         if method == "session.begin":
+            if self._live_session_id:
+                # §8.3 — the machine's OWN lock.  The shipped client
+                # refuses a concurrent session.begin with MACHINE_BUSY
+                # (``internal/remote/client.go:987-991``); modelling it
+                # here is what makes the lock's RELEASE observable.
+                await self._send_frame(
+                    {
+                        **base,
+                        "type": "error",
+                        "error": {
+                            "code": "MACHINE_BUSY",
+                            "message": "a session is already open on this machine",
+                        },
+                    }
+                )
+                return
             session_id = f"sess_{uuid.uuid4().hex[:12]}"
             result = {
                 "session_id": session_id,
@@ -722,6 +751,7 @@ class ConformancePeer:
                     result.update(override)
             self.session_ids.append(str(result.get("session_id") or session_id))
             self.sent_catalog = list(result.get("tools") or [])
+            self._live_session_id = str(result.get("session_id") or session_id)
             await self._send_frame({**base, "result": result})
         elif method == "tools/call":
             params = dict(envelope.get("params") or {})
@@ -767,6 +797,14 @@ class ConformancePeer:
         elif method == "session.end":
             sid = str((envelope.get("params") or {}).get("session_id") or "")
             self.ended_sessions.append(sid)
+            self.session_end_frames.append(dict(envelope))
+            # §6.8 — the machine releases its LOCAL lock on a session.end
+            # frame (``internal/remote/client.go:1040`` — ``clearSession``)
+            # and the connection returns to ``ready``.  This is the ONLY
+            # thing that frees the lock, which is why a centre that reaps
+            # a session WITHOUT telling the machine strands it.
+            if not self._live_session_id or sid == self._live_session_id:
+                self._live_session_id = ""
             result = {"session_id": sid}
             if on_session_end is not None:
                 override = on_session_end(envelope)
@@ -1123,6 +1161,10 @@ class InKitCenter:
     CLIENT_DEAD_DETECT_MS = 1500
     COMMAND_TIMEOUT_MS = 4000
     SESSION_IDLE_TIMEOUT_MS = 2000
+    #: The cadence of the housekeeping sweep (the heartbeat check + the
+    #: expiry reap).  The sweep is the centre's SOLE owner of the expiry
+    #: reap — the call path refuses a late call but never releases.
+    SESSION_SWEEP_INTERVAL_S = 0.1
 
     def __init__(
         self,
@@ -1158,6 +1200,12 @@ class InKitCenter:
         self._hello_done: dict[str, bool] = {}
         self._last_heartbeat: dict[str, float] = {}
         self._machine_session: dict[str, str] = {}
+        #: The session the SWEEP reaped per connection — the centre's own
+        #: memory of an expiry, so a call that arrives after the reap is
+        #: still answered SESSION_EXPIRED (the §6.5 code for "the session
+        #: passed its TTL or idle timeout") instead of a bare
+        #: SESSION_NOT_FOUND.
+        self._expired_sessions: dict[str, str] = {}
         self.agent_catalog: list[dict[str, Any]] | None = None
         self.agent_audit: list[dict[str, Any]] = []
         self.agent_results: list[Any] = []
@@ -1404,7 +1452,7 @@ class InKitCenter:
 
     async def _monitor(self) -> None:
         while True:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(self.SESSION_SWEEP_INTERVAL_S)
             now = time.monotonic()
             for conn_id, last in list(self._last_heartbeat.items()):
                 ws = self._conns.get(conn_id)
@@ -1431,6 +1479,92 @@ class InKitCenter:
                     )
                     await ws.close(code=self.mutations.close_code, reason="heartbeat timeout")
                     self._last_heartbeat.pop(conn_id, None)
+            await self._expire_due_sessions()
+
+    # ── the expiry sweep (the centre's SOLE owner of the reap) ───────────
+
+    async def _expire_due_sessions(self) -> None:
+        """Reap the sessions that passed the centre's idle window.
+
+        The expiry window is the SERVER's policy (SPEC §3.3: "A session
+        with no traffic for this long is ended by the server"), and the
+        SWEEP is the centre's only owner of the reap.
+
+        TWO PASSES, in this order:
+
+        * **PASS 1** (no awaits) releases the centre-side slot for the
+          WHOLE expired batch;
+        * **PASS 2** (serial, awaiting, bounded) forwards ``session.end``
+          to each machine — the machine releases its own local lock and
+          the connection returns to ``ready`` (SPEC §6.8).
+
+        The centre-side release of the batch therefore completes BEFORE
+        any machine forward starts; the machine-side forward is the
+        bounded part.  The forwarded frame carries EXACTLY the
+        ``{"session_id": ...}`` params — the wire contract does not change
+        (no reason/cause member rides along).
+        """
+
+        now = time.monotonic()
+        idle_limit = self.SESSION_IDLE_TIMEOUT_MS / 1000.0
+        last_activity = getattr(self, "_session_last_activity", now)
+        due: list[tuple[str, str]] = [
+            (conn_key, session_id)
+            for conn_key, session_id in list(self._machine_session.items())
+            if (now - last_activity) > idle_limit
+        ]
+        if not due:
+            return
+        # PASS 1 — no awaits: the centre-side release of the WHOLE batch.
+        for conn_key, session_id in due:
+            self._machine_session.pop(conn_key, None)
+            self._expired_sessions[conn_key] = session_id
+        # PASS 2 — serial, awaiting, bounded: tell the machine.
+        for conn_key, session_id in due:
+            ws = self._conns.get(conn_key)
+            if ws is None:
+                self.agent_audit.append(
+                    {
+                        "tool": "session.end",
+                        "outcome": "error",
+                        "code": "machine_unreachable",
+                        "session_id": session_id,
+                    }
+                )
+                continue
+            try:
+                await self._request(
+                    ws,
+                    "session.end",
+                    {"session_id": session_id},
+                    session_id=session_id,
+                )
+            except CenterRefused as exc:
+                self.agent_audit.append(
+                    {
+                        "tool": "session.end",
+                        "outcome": "error",
+                        "code": str(exc),
+                        "session_id": session_id,
+                    }
+                )
+            except Exception:  # noqa: BLE001 — the sweep never dies
+                self.agent_audit.append(
+                    {
+                        "tool": "session.end",
+                        "outcome": "error",
+                        "code": "machine_unreachable",
+                        "session_id": session_id,
+                    }
+                )
+            else:
+                self.agent_audit.append(
+                    {
+                        "tool": "session.end",
+                        "outcome": "ok",
+                        "session_id": session_id,
+                    }
+                )
 
     # ── the agent-side driver (what the self-host begin hook calls) ─────
 
@@ -1444,7 +1578,8 @@ class InKitCenter:
 
     async def agent_begin(self, agent_id: str | None = None, reason: str = "conformance") -> dict[str, Any]:
         ws = self._live_ws()
-        if self._machine_session.get(_conn_key(self._conns, ws)):
+        key = _conn_key(self._conns, ws)
+        if self._machine_session.get(key):
             raise CenterRefused("MACHINE_BUSY")
         result = await self._request(
             ws,
@@ -1455,7 +1590,9 @@ class InKitCenter:
             },
         )
         session_id = str(result.get("session_id") or "")
-        self._machine_session[_conn_key(self._conns, ws)] = session_id
+        self._machine_session[key] = session_id
+        # A fresh session supersedes the expiry record of this connection.
+        self._expired_sessions.pop(key, None)
         self.agent_catalog = list(result.get("tools") or [])
         self._session_last_activity = time.monotonic()
         return {
@@ -1466,13 +1603,24 @@ class InKitCenter:
 
     async def agent_call(self, tool: str, arguments: dict[str, Any]) -> Any:
         ws = self._live_ws()
-        session_id = self._machine_session.get(_conn_key(self._conns, ws), "")
+        key = _conn_key(self._conns, ws)
+        session_id = self._machine_session.get(key, "")
+        if not session_id:
+            # The session is gone.  If the SWEEP reaped it, the answer is
+            # SESSION_EXPIRED (the §6.5 code for a session that passed
+            # its TTL / idle window); an explicitly ended session leaves
+            # SESSION_NOT_FOUND.
+            expired = key in self._expired_sessions
+            code = "SESSION_EXPIRED" if expired else "SESSION_NOT_FOUND"
+            self.agent_audit.append({"tool": tool, "outcome": "error", "code": code})
+            raise CenterRefused(code)
         # §3.3 — the center owns the TTL/idle window and refuses past it
         # (the machine's own TTL is advisory).  The in-kit center's window
-        # is compressed so a run can observe the refusal.
+        # is compressed so a run can observe the refusal.  The refusal
+        # does NOT release the slot: the SWEEP owns the reap (it is the
+        # one that tells the machine and frees the machine-side lock).
         idle_s = time.monotonic() - getattr(self, "_session_last_activity", time.monotonic())
-        if session_id and idle_s > (self.SESSION_IDLE_TIMEOUT_MS / 1000.0):
-            self._machine_session.pop(_conn_key(self._conns, ws), None)
+        if idle_s > (self.SESSION_IDLE_TIMEOUT_MS / 1000.0):
             self.agent_audit.append({"tool": tool, "outcome": "error", "code": "SESSION_EXPIRED"})
             raise CenterRefused("SESSION_EXPIRED")
         try:

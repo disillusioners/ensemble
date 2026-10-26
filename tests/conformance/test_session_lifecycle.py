@@ -124,18 +124,25 @@ async def test_begin_to_end_and_back_to_ready(target, serving, begin) -> None:
 async def test_session_expiry_center_owned(target, serving, begin) -> None:
     """§3.3 — a session past the center's idle window is refused center-side.
 
-    The TTL/idle window is CENTER-owned and NOT advertised on the wire;
-    a foreign center's window cannot be compressed from the machine
-    side, and §6.8 sends the machine no expiry frame.  This check runs
-    in the self-consistency lane (the in-kit center's window is
-    compressed to 2 s); pointed mode names the gap in COVERAGE.md.
+    The TTL/idle window is CENTER-owned and NOT advertised on the wire
+    (the ``hello`` result advertises only the three ``heartbeat_*``
+    parameters), and the expiry is the SERVER's to take (SPEC §3.3: "A
+    session with no traffic for this long is ended by the server").  A
+    foreign center's window therefore cannot be compressed from the
+    machine side, so this check runs in the self-consistency lane (the
+    in-kit center's window is compressed to 2 s); pointed mode names the
+    gap in COVERAGE.md.
+
+    The wire-level half of the expiry contract — the machine is TOLD with
+    a ``session.end`` frame — is ``test_session_expiry_notifies_the_machine``.
     """
 
     if target.mode != "self-host":
         pytest.skip(
             "SESSION-EXPIRY-GAP: the TTL/idle window is center-owned and "
-            "not advertised on the wire — the kit cannot compress a foreign "
-            "center's window, and §6.8 sends the machine no expiry frame "
+            "not advertised on the wire (the hello result carries only the "
+            "three heartbeat_* parameters) — the kit cannot compress a "
+            "foreign center's window, so the expiry lane is SELF-HOST ONLY "
             "(COVERAGE.md names this gap)"
         )
     peer = _peer(target)
@@ -158,6 +165,112 @@ async def test_session_expiry_center_owned(target, serving, begin) -> None:
                     "§3.3",
                     f"a call past the idle window was answered {refused or 'successfully'!r}, "
                     "want a SESSION_EXPIRED refusal",
+                    peer.transcript.excerpt(),
+                )
+    finally:
+        await peer.close()
+
+
+@pytest.mark.asyncio
+async def test_session_expiry_notifies_the_machine(target, serving, begin) -> None:
+    """§3.3/§6.8 — a centre-owned expiry TELLS the machine.
+
+    The idle window is the server's policy, so the server owns the reap
+    — and a reap that does NOT tell the machine strands the machine's
+    own session lock (SPEC §6.8: the client releases its local lock on a
+    ``session.end`` frame and the connection returns to ``ready``).  The
+    contract this check pins, at the WIRE level only:
+
+    1. the machine RECEIVES a ``session.end`` frame for the expired
+       session (the notification IS the reap);
+    2. the frame carries EXACTLY the ``{"session_id": ...}`` params — the
+       wire contract does not change (no reason/cause member rides
+       along);
+    3. the machine's socket STAYS OPEN (expiry is not a close);
+    4. the machine released its lock and the connection returned to
+       ``ready`` — a NEW session opens on the SAME connection (a machine
+       that still held its lock would answer ``MACHINE_BUSY``).
+
+    The agent-facing end envelope (``ended`` / ``why_not_ended`` /
+    ``machine_notified``) is a CENTRE-TOOL convention, not wire — it is
+    out of the kit's scope (COVERAGE.md).
+    """
+
+    if target.mode != "self-host":
+        pytest.skip(
+            "SESSION-EXPIRY-GAP: the TTL/idle window is center-owned and "
+            "not advertised on the wire — the kit cannot compress a "
+            "foreign center's window, so the expiry lane is SELF-HOST ONLY "
+            "(COVERAGE.md names this gap)"
+        )
+    peer = _peer(target)
+    try:
+        await _ready(target, peer)
+        async with serving(peer, budget_s=25):
+            await open_session(peer, target)
+            expired_id = peer.session_ids[0]
+            # The in-kit center's sweep owns the reap; it forwards the
+            # session.end within its idle window.
+            await wait_until(lambda: expired_id in peer.ended_sessions, timeout=10)
+            if expired_id not in peer.ended_sessions:
+                raise ConformanceFinding(
+                    "session",
+                    "expiry-notifies-machine",
+                    "§6.8",
+                    "no session.end reached the machine when the center's idle "
+                    "window passed — the machine's own lock would stay held",
+                    peer.transcript.excerpt(),
+                )
+            # The wire contract does not change: the params are exactly
+            # {"session_id": ...} — no reason/cause member rides along.
+            frame = next(
+                (
+                    f
+                    for f in peer.session_end_frames
+                    if str((f.get("params") or {}).get("session_id") or "") == expired_id
+                ),
+                None,
+            )
+            params = dict((frame or {}).get("params") or {})
+            if params != {"session_id": expired_id}:
+                raise ConformanceFinding(
+                    "session",
+                    "expiry-end-params",
+                    "§6.1",
+                    f"the session.end frame carried {params!r} — the wire params "
+                    f"are exactly {{'session_id': {expired_id!r}}}",
+                    peer.transcript.excerpt(),
+                )
+            # §6.8 — the socket stays open; expiry is not a close.
+            if peer._ws is None or peer._ws.state.name != "OPEN":
+                raise ConformanceFinding(
+                    "session",
+                    "expiry-socket-survives",
+                    "§6.8",
+                    "the socket closed on expiry (the machine must return to ready "
+                    "on the SAME connection)",
+                    peer.transcript.excerpt(),
+                )
+            # The machine released its lock → a new session opens on the
+            # same connection (a locked machine answers MACHINE_BUSY).
+            try:
+                await target.center.agent_begin()
+            except Exception as exc:  # noqa: BLE001 — the refusal IS the finding
+                raise ConformanceFinding(
+                    "session",
+                    "expiry-returns-to-ready",
+                    "§6.8",
+                    f"the machine did not return to ready after the expiry: {exc}",
+                    peer.transcript.excerpt(),
+                ) from exc
+            await wait_until(lambda: len(peer.session_ids) >= 2, timeout=5)
+            if len(peer.session_ids) < 2:
+                raise ConformanceFinding(
+                    "session",
+                    "expiry-ready-for-next",
+                    "§6.8",
+                    "a second session could not open on the same connection after "
+                    "the expiry — the machine still holds its lock",
                     peer.transcript.excerpt(),
                 )
     finally:

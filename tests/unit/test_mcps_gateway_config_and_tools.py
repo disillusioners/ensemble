@@ -22,6 +22,7 @@ from daemon.services.mcps_gateway.config import (
     DEFAULT_HEARTBEAT_TIMEOUT_MS,
     DEFAULT_PATH,
     DEFAULT_PING_INTERVAL_MS,
+    DEFAULT_SESSION_END_ACK_TIMEOUT_MS,
     DEFAULT_SESSION_IDLE_TIMEOUT_MS,
     DEFAULT_SESSION_TTL_MS,
     ENV_PREFIX,
@@ -367,6 +368,21 @@ class TestDefaultConstantsArePinned:
         assert DEFAULT_COMMAND_TIMEOUT_MS == 30000
         assert DEFAULT_SESSION_TTL_MS == 3600000
         assert DEFAULT_SESSION_IDLE_TIMEOUT_MS == 300000
+
+    def test_the_session_end_ack_deadline_default(self):
+        """T-5(a): the ack deadline's literal default is pinned.
+
+        It is a CONFIG FIELD with a default, NOT an env knob — the
+        runbook pins the number and the knob-table census proves no
+        env var carries it.
+        """
+        assert DEFAULT_SESSION_END_ACK_TIMEOUT_MS == 5_000
+
+    def test_the_session_end_ack_deadline_is_clamped_to_the_default(self):
+        """T-5(b): a non-positive bound falls back to the default."""
+        config = GatewayConfig(session_end_ack_timeout_ms=0)
+        assert config.session_end_ack_timeout_ms == DEFAULT_SESSION_END_ACK_TIMEOUT_MS
+        assert config.warnings, "the clamp must say so in the warnings"
 
     def test_the_ping_default_is_the_reference_cadence(self):
         assert DEFAULT_PING_INTERVAL_MS == 200

@@ -73,6 +73,13 @@ COMMAND_ARGS: dict[str, Any] = {"command": "uptime", "timeout_ms": 5000}
 #: The tool the stub child serves successfully.
 SUCCESS_TOOL = "secret_tool"
 
+#: The audit ``tool`` values of the SESSION-LIFECYCLE surfaces (the
+#: expiry hardening): the explicit end writes a ``session.end`` row and
+#: the expiry sweep writes a ``session.expire`` row. They are NOT
+#: command rows — the command-row proofs of this gate must pick a
+#: COMMAND row, and the ledger delta must count the session rows.
+SESSION_LIFECYCLE_TOOLS = ("session.end", "session.expire")
+
 
 @dataclass
 class Check:
@@ -606,8 +613,39 @@ async def run_gate(
                 len(flow_rows) >= 1,
                 f"rows={len(flow_rows)}",
             )
-            if flow_rows:
-                row = flow_rows[0]
+            # The ledger carries the SESSION-LIFECYCLE rows too (the
+            # expiry hardening): the explicit end writes a ``session.end``
+            # row. The COMMAND-row proofs below must pick a COMMAND row,
+            # not the session row that follows it.
+            command_rows = [
+                row
+                for row in flow_rows
+                if row.get("tool") not in SESSION_LIFECYCLE_TOOLS
+            ]
+            session_end_rows = [
+                row for row in flow_rows if row.get("tool") == "session.end"
+            ]
+            result.add(
+                "audit-session-end-row-exists",
+                len(session_end_rows) == 1,
+                f"rows={len(session_end_rows)}",
+            )
+            # B-1: the five command-row proofs below are REGISTERED only
+            # when a command row exists — and a check that is never
+            # ADDED cannot fail (``GateResult.ok`` is ``all(check.ok)``
+            # over the checks that exist). Without this line, a
+            # regression that stops the command-audit path from writing
+            # rows at all would leave the gate GREEN: the session.end
+            # row would satisfy ``audit-flow-row-exists`` and every
+            # command-row proof would silently skip. The command row is
+            # therefore REGISTERED as a check of its own.
+            result.add(
+                "audit-command-row-exists",
+                len(command_rows) >= 1,
+                f"command_rows={len(command_rows)} of rows={len(flow_rows)}",
+            )
+            if command_rows:
+                row = command_rows[0]
                 session_id = (session or {}).get("session_id")
                 result.add(
                     "audit-row-session-id-matches",

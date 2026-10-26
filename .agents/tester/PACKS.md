@@ -2993,3 +2993,21 @@ Pytest-path packs (no shell wrapper); run one-at-a-time with the house scrubbed 
 - G6 regression slice: 6 items HEAD-vs-base, identical invocation, NET-NEW = ∅ everywhere; 1 BASE-only red RESOLVED (legitimate seal re-pin); api_unit_test carries 6 pre-existing base-identical reds (mock-seam debt — its row baseline 213P/8S is STALE, current 269P both trees).
 - G7 residual register: 4/4 hold-as-described (W2 measured ≤~1.0s vs stated ≤~2s).
 - Evidence: .agents/tester/RESULTS/2026-10-23-wedge-capture-independent-verification.md · branch tester/wedge-capture-verification (docs-only).
+
+
+## Gate packs 2026-10-26 — mcps-gateway session-expiry final gate (`feature/mcps-gateway-session-expiry-hardening` @ `6e63f3482`, base `0138952876`)
+
+Ad-hoc A/B gate packs, both legs executed (full evidence: `RESULTS/2026-10-26-mcps-gateway-session-expiry-hardening-verification.md`):
+
+| Pack | Invocation essence | Result (HEAD / BASE) | Runtime |
+|---|---|---|---|
+| d2_gateway_unit (L1) | `timeout 300 env -u MCPS_GATEWAY_ENABLED -u MCPS_GATEWAY_TOKENS ./scripts/run_tests_scrubbed.sh <9 gateway unit files> -q --tb=short -p no:randomly` | PASS 304/304 @ HEAD; BASE 8-file subset 232/232 (exact 9-file list exits 4 — `test_mcps_gateway_session_expiry.py` is HEAD-only; record, don't hide) | 25s / 30s |
+| d2_l2_match_set_unit (L2) | scrub wrapper, 12 unit files (grep set `mcps_gateway\|mcp_rpc\|MCPS_GATEWAY` minus L1/L3/L4 scope) | PASS 253/254 both legs; 1 red byte-identical both legs (router-list pin — QUARANTINE 2026-10-26 row) | 8–46s per chunk |
+| d2_l2_match_set_integration (L2) | fence env + `--override-ini='addopts=' -m integration`, 4 integration files | PASS 9/9 both legs (48 collected / 39 deselected by marker) | 13s / 12s |
+| d2_conformance (L3) | `CONFORMANCE_RUN_TIMEOUT=280 timeout 300 bash scripts/conformance/run.sh` | PASS 42/42 @ HEAD / 41/41 @ BASE (+1 branch test green) | 15–18s |
+| d2_mcps_gateway_integration (L4) | fence env + `--override-ini='addopts=' -m integration` over `tests/integration/mcps_gateway` (registered d1 shape) | PASS 38/38 solo @ HEAD; `test_p3` flake quantified + ledgered (QUARANTINE 2026-10-26 row) — never adjudicate a single P3 run | 101–113s |
+| d2_docs_and_registration_pins (L5) | scrub wrapper, docs pin file + 12 `mcp_rpc` registration-pin files | PASS 371/371 @ HEAD / 299/299 @ BASE | 34s / 31s |
+| d2_p3_attempts (M4) | single-nodeid fence-env runs ×3+ per leg (`test_real_pair.py::test_p3_audit_db_proof_and_read_parity`) | HEAD 3/6, BASE 2/5 green — flake ledgered; relaxation ruled strictly-correct-not-weaker | 16–28s each |
+| d2_incident_repro (M1) | in-process pinned-clock cross-tree scenario (`/tmp/mcps-gate/m1/scenario.py`, scratch + worktree legs) | PASS both legs — 4/4 symptoms reproduced on BASE, 4/4 gone on HEAD with positive counterparts | 5–6s each |
+
+Lane-keeper notes: (1) ALWAYS prefix unit lanes with `env -u MCPS_GATEWAY_ENABLED -u MCPS_GATEWAY_TOKENS` — this host exports both; without the prefix `TestDefaultConstantsArePinned::{test_the_enabled_default_is_off, test_the_token_and_machine_defaults_are_empty}` report 2 false reds. (2) NEVER run d2_l2_match_set_integration / d2_mcps_gateway_integration / d2_p3_attempts concurrently against one fence DB — `reset_audit_table` wipes the shared audit ledger mid-lane (observed). (3) BASE legs run the file list that exists at BASE; HEAD-only files make the exact list exit 4 with zero collected — record as a structural finding. (4) The worktree is shared: `tests/integration/mcps_gateway/p0_gate.py` APPENDS to the tracked `.agents/shared/planning/mcps-gateway-interop/p0-gate-evidence.md` by design — every P0-gate run dirties the tree; restore from the HEAD blob before status-sensitive checks.

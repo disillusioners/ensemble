@@ -101,6 +101,19 @@ service (see §6).
   1 h) and an **idle timeout** (`MCPS_GATEWAY_SESSION_IDLE_TIMEOUT_MS`,
   default 5 min); the center enforces both (§3.3) and answers
   `SESSION_EXPIRED` past them.
+* **The expiry reap belongs to the SWEEP alone** (§4.5). The window is
+  SERVER-side policy (SPEC §3.3 — "A session with no traffic for this
+  long is ended by the server"), and the housekeeping sweep is the only
+  thing that reaps a session for it. On expiry the center **TELLS THE
+  MACHINE**: it forwards a `session.end` frame, so the machine releases
+  its own session lock and returns to `ready` **on the same connection**
+  (SPEC §6.8 — a `session.end` frame is the only thing that frees the
+  machine's local lock). The machine's socket **STAYS OPEN** on expiry
+  (SPEC §6.2 — "Ending a session returns the connection to `ready`; the
+  socket stays open"); the only socket closure **on the session path**
+  remains the heartbeat-kill path (§4.1) — the teardown paths (a socket
+  that dies, a pre-hello deadline, the daemon shutting down) close
+  sockets too, and they are not session-end closures.
 * The **catalog travels with `session.begin`**: the machine's answer carries
   the `session_id` **and** the remote tool catalog, verbatim (§6.4 — the
   center MUST NOT rewrite, rename or drop schemas). The center issues no
@@ -122,7 +135,13 @@ agent that already holds a session on a *different* machine is also
 refused with `MACHINE_BUSY` (`reason: agent_already_holds_session`).
 `mcp_rpc_disconnect` (or expiry, heartbeat loss, or socket loss) ends the
 session and **releases the slot**; the machine keeps its socket and
-returns to `ready`, so the next session opens on the same connection. On
+returns to `ready`, so the next session opens on the same connection. The
+**expiry** path is not a silent center-side drop: the sweep **notifies
+the machine** with a `session.end` frame (§4.5), so the machine releases
+its OWN lock too — and if the machine is **unreachable** (its connection
+is gone) or does not answer inside the ack deadline, the center **still
+releases the slot** and records `machine_notified: false` — the center's
+release is authoritative, the machine's release is best-effort. On
 reconnect, the center ends the old connection's session **immediately** —
 there is no heartbeat-timeout window during which the machine answers
 `MACHINE_BUSY` for a session whose connection is already gone.
@@ -246,10 +265,10 @@ fresh service afterwards.
 | `MCPS_GATEWAY_HEARTBEAT_INTERVAL_MS` | `15000` | ms | §3.3 heartbeat interval the center advertises — the CLIENT sends a heartbeat on this cadence (it adopts the center's value; the shipped client validates the triplet — `heartbeat_timeout_ms >= 3 x interval`, `client_dead_detect_ms >= 3 x interval` — the same rule the reference client enforces at `internal/remote/protocol.go:266-278`) |
 | `MCPS_GATEWAY_HEARTBEAT_TIMEOUT_MS` | `45000` | ms | §3.3 the SERVER-side client-silence kill threshold — after this much heartbeat silence from the machine, the center kills the session and closes the socket; presence also flips to `stale` past it |
 | `MCPS_GATEWAY_CLIENT_DEAD_DETECT_MS` | `45000` | ms | §3.3 how long the CLIENT waits for evidence the server is alive — **advisory to the client and enforced client-side**; the center advertises it, the client's own death detector uses it |
-| `MCPS_GATEWAY_COMMAND_TIMEOUT_MS` | `30000` | ms | the center's own bound on ONE `tools/call` / `session.begin` / `session.end` wait — past it the answer is `TOOL_TIMEOUT` |
+| `MCPS_GATEWAY_COMMAND_TIMEOUT_MS` | `30000` | ms | the center's own bound on ONE `tools/call` / `session.begin` wait — past it the answer is `TOOL_TIMEOUT`. The `session.end` wait has its OWN, tighter bound (the ack deadline — §4.5) |
 | `MCPS_GATEWAY_READ_TIMEOUT_MS` | `5000` | ms | the OPERATOR READ SURFACE's bound on one DB read (§8.5) — a read that exceeds it answers the degraded body (200 + `degraded:true`), never a hung request |
-| `MCPS_GATEWAY_SESSION_TTL_MS` | `3600000` | ms | §3.3 session TTL ceiling (the center enforces it) |
-| `MCPS_GATEWAY_SESSION_IDLE_TIMEOUT_MS` | `300000` | ms | §3.3 session idle timeout (the center enforces it) |
+| `MCPS_GATEWAY_SESSION_TTL_MS` | `3600000` | ms | §3.3 session TTL ceiling (the center enforces it) — the expiry is the SWEEP's to reap, and the sweep notifies the machine (§4.5) |
+| `MCPS_GATEWAY_SESSION_IDLE_TIMEOUT_MS` | `300000` | ms | §3.3 session idle timeout (the center enforces it) — the same sweep, the same machine notification (§4.5) |
 | `MCPS_GATEWAY_PING_INTERVAL_MS` | `200` | ms | the WebSocket liveness-ping cadence — the default matches the protocol authority's reference center (it pings at 200 ms); the knob exists so operators can lengthen it |
 | `MCPS_GATEWAY_AUDIT_ENABLED` | `true` | boolean | the remote-command audit (§8.4) — `false` skips the audit write entirely |
 
@@ -276,6 +295,24 @@ per WebSocket text message" — a ping is not a text message). If the ASGI
 protocol object is unreachable the transport cannot ping; the daemon logs
 one WARNING per connection saying so (an in-process test client has no
 protocol object by construction and is not warned).
+
+The same sweep is the **SOLE owner of the expiry reap** (§4.5): nothing
+else releases a session for a TTL/idle reason. It runs in **TWO PASSES** —
+**PASS 1** (no awaits) clears the center-side roster pointer for the
+**WHOLE expired batch** and writes an `expired` tombstone for each;
+**PASS 2** (serial, awaiting, bounded) forwards `session.end` to each
+machine and writes one audit row per reaped session. The center-side
+release of the whole batch therefore completes **BEFORE any machine
+forward starts** — the machine-side forward is the **bounded** part
+(N × the ack deadline in the worst case), and a slow or dead machine
+never delays the center's own release.
+
+The `session.end` forward has its **own bounded ack deadline — 5000 ms**
+— and that bound is a **gateway-internal CONFIG FIELD with a default, NOT
+an env knob**: it bounds a protocol round-trip inside the gateway, it is
+not an operator knob, and there is deliberately nothing to restart. It
+is separate from the 30 s `command_timeout_ms` above: the sweep reaps a
+whole batch and must not spend half a minute per machine.
 
 ### 2.3 Enrollment tokens
 
@@ -426,7 +463,7 @@ flowchart TD
         FailCheck{"Failure or timeout?"}
         TypedErr["TOOL_TIMEOUT or machine's typed error, relayed verbatim"]
         RawResult["Raw MCP result returned to agent"]
-        KillCheck{"Heartbeat lost OR TTL/idle expired?"}
+        KillCheck{"Heartbeat lost?"}
         KilledSession("Session killed - not resumable, per the spec 6.8 rule")
         MoreCmds{"More commands?"}
     end
@@ -435,6 +472,13 @@ flowchart TD
         SendEnd["Center sends session.end to the machine"]
         Release["Session slot released, machine keeps its socket and returns to ready"]
         Ready("Next session opens on the same connection")
+    end
+
+    subgraph Sweep["5. Expiry - the housekeeping sweep is the SOLE owner of the reap"]
+        SweepTick["Sweep tick - the TTL or the idle window passed"]
+        SweepRelease["PASS 1, no awaits - the center-side roster pointer is cleared for the WHOLE batch"]
+        SweepForward["PASS 2, serial and bounded - session.end forwarded to each machine"]
+        SweepReady["The machine released its lock and returned to ready - the socket stays open"]
     end
 
     ConnectCall --> EnabledCheck
@@ -461,18 +505,28 @@ flowchart TD
 
     SendEnd --> Release --> Ready
     Ready -.->|"next session, same socket"| ConnectCall
+
+    SweepTick --> SweepRelease --> SweepForward --> SweepReady
+    SweepReady -.->|"same socket, next session"| ConnectCall
 ```
 
-The tools **never raise** — every refusal is the typed payload
-`{"error": {"code": ..., "message": ...}}` with a §6.5 code the agent can
-branch on.
+The tools **never leak an exception to the agent** — every refusal is
+the typed payload `{"error": {"code": ..., "message": ...}}` with a §6.5
+code the agent can branch on. (A refusal is a RETURN VALUE, not an
+exception: the tool boundary catches the typed protocol errors itself.
+`mcp_rpc_disconnect` returns its reason-coded envelope for the
+session-state outcomes — §4.5 — and only its **pre-flight** refusals
+(the tool's authorization gate and the kill switch) come back in the
+`{"error": {...}}` shape. Those two are the ONLY things that raise
+anywhere on this surface: a session-state reason never raises, it comes
+back as the envelope.)
 
 | Tool | Args | Returns | Notes |
 |---|---|---|---|
 | `mcp_rpc_list_machine` | none | `{"machines": [{machine_id, presence, connected, last_seen_epoch_ms, session_id, agent_id}], "count"}` | a roster read; needs no session; refuses with a typed error while the transport is disabled (as all four tools do) |
 | `mcp_rpc_connect` | `machine_id`, `reason?` | `{"session_id", "machine_id", "tools": [...catalog...], "expires_at_epoch_ms"}` | **holds the machine's single session slot**; the machine mints the `session_id` and returns the catalog verbatim |
 | `mcp_rpc_command` | `tool`, `arguments?` | the **raw** MCP result of the remote call, or a typed error | forwards **ONE** `tools/call` into the caller's open session; arguments travel verbatim, results come back as the machine produced them (§7 — MCP travels unchanged through the middle); audited per call |
-| `mcp_rpc_disconnect` | none | `{"session_id", "machine_id", "ended": true, "result"}` | ends the session and **releases the slot**; the machine keeps its socket and returns to `ready` |
+| `mcp_rpc_disconnect` | none | the **reason-coded end envelope** — `{session_id?, machine_id?, ended: bool, detail: str, machine_notified: bool}`, plus `why_not_ended` when `ended` is false and `result` on the acknowledged path | ends the session and **releases the slot**; the machine keeps its socket and returns to `ready`. A **session-state** outcome never raises — it comes back as the envelope. Only the pre-flight refusals still raise as typed errors: the tool's **authorization** gate and the **kill switch** (a disabled gateway). The four response-borne reasons are `expired`, `already_ended`, `unknown_session`, `machine_refused` (§4.5) |
 
 Operational caveats:
 
@@ -507,10 +561,21 @@ Operational caveats:
 
 | Path | What happens |
 |---|---|
-| `mcp_rpc_disconnect` | `session.end` sent, slot released, machine stays connected |
-| TTL (1 h) / idle (5 min) expiry | center drops the session; the next command answers `SESSION_EXPIRED` |
-| heartbeat loss (> `heartbeat_timeout_ms`) | session killed + in-band `HEARTBEAT_TIMEOUT` error + socket closed; the machine is expected to reconnect and start over |
+| `mcp_rpc_disconnect` (explicit) | the center sends `session.end` to the machine. A machine REFUSAL leaves the session **ALIVE** and the answer carries `why_not_ended: machine_refused` (§4.5). The slot is released when the machine **acks** — or **authoritatively** by the center when the machine is **unreachable** (the connection is gone, or the socket died mid-flight) or does not answer inside the ack deadline; those answers carry `machine_notified: false` and the ledger reason `machine_unreachable` / `machine_timeout` (§4.5) |
+| TTL (1 h) / idle (5 min) expiry | the **sweep** reaps it (the sole owner of the reap): the center sends `session.end` to the machine, the machine releases its lock and returns to `ready`, and the slot is released — **the machine keeps its socket**. If the machine is **unreachable** (connection gone) or does not answer inside the ack deadline, the center **still releases the slot** and records `machine_notified: false` (the ledger reason is `machine_unreachable` / `machine_timeout`) |
+| heartbeat loss (> `heartbeat_timeout_ms`) | session killed + in-band `HEARTBEAT_TIMEOUT` error + socket closed — the only socket closure **on the session path** (the teardown paths close sockets too); the machine is expected to reconnect and start over |
 | socket loss (either side) | session killed; roster flips to `offline`; the machine re-appears on its next upgrade |
+
+**One expiry, one error code.** The expiry is enforced by the center
+(SPEC §3.3 — the window is server policy) and the answer is
+`SESSION_EXPIRED` **whichever path notices it**: the command path
+refuses a call that arrives past the window, and — after the sweep has
+reaped the session — the same call is still refused `SESSION_EXPIRED`,
+because the sweep left an `expired` **tombstone** behind and the command
+path reads it (§4.5). The two paths cannot disagree: one expiry, one
+code, and the same real session id in `data.session_id`. A session that
+was never opened (or was explicitly ended) is `SESSION_NOT_FOUND` — the
+agent's own `data.agent_id`, no session id.
 
 ### 4.2 The route
 
@@ -567,6 +632,46 @@ args-hash / outcome** into the append-only `mcp_gateway_audit` table
 * `MCPS_GATEWAY_AUDIT_ENABLED=false` skips the write entirely (no row, no
   attempt).
 
+**The session-lifecycle rows.** The ledger also records the session
+LIFECYCLE, not only the forwarded commands: a **stable `tool` value per
+surface** — `session.end` for the explicit end and `session.expire` for
+the sweep's reap. The rows carry the command row's shape: the **args are
+hashed** (never stored verbatim), `machine_id` is **non-null**, and
+`detail` is a **fixed center-authored classification** — never peer free
+text. The write stays **off the event loop** and an audit failure still
+**never aborts** the operation it describes.
+
+**The `error_code` vocabulary is SPLIT.** The COMMAND rows keep the
+**protocol-only** set (`AUDIT_ALLOWED_ERROR_CODES` = the centre-emitted
+codes + the relayed ones); the SESSION rows use the **centre-set**
+(`AUDIT_ALLOWED_SESSION_ERROR_CODES` = the protocol set + the two
+ledger-only reasons `machine_unreachable` / `machine_timeout` + the
+expiry causes `idle` / `ttl` + the response-borne reasons). The split
+is a security property, not cosmetics: the centre-only tokens are
+**minted by the center** and can never arrive from the peer, so keeping
+them OUT of the command set means a hostile machine cannot forge
+`machine_timeout` or `idle` into a command row and make the ledger lie
+about a command it never refused. A code outside the row's own set is
+recorded as `UNRECOGNIZED_ERROR_CODE`.
+
+**The two lifecycle `tool` names are RESERVED by the center.** The remote
+tool names come from the machine's catalog — verbatim (§6.4) — so a
+remote tool could carry the name `session.end`. That would give one
+ledger value two meanings (a forwarded command and a lifecycle event)
+and make the rows indistinguishable for an operator filtering on `tool`.
+A `tools/call` whose requested tool collides with a reserved name is
+therefore **refused before it reaches the machine** (a typed `INTERNAL`
+refusal naming the reservation). The wire contract and the tool input
+contract are both unchanged — only the ledger's namespace is protected.
+
+**What SPEC §8 is, precisely.** SPEC §8 says every forwarded command
+"*should* be logged by the center with who / machine / tool / args-hash",
+and it opens the section by saying a center that ignores §8 entirely
+"*still speaks a conformant wire protocol*" — §8 is **RECOMMENDED, not
+wire protocol**. The audit ledger (the command rows and the session rows
+alike) is therefore a center-side obligation this center keeps
+voluntarily, not a protocol MUST.
+
 ### 4.4 The audit ledger's limits (the §8.4 argparse divergence)
 
 SPEC §8.4 says the arguments are "**hashed**, not stored verbatim" — and
@@ -593,10 +698,165 @@ implementations chose differently, and the consequences are real:
   shortest-roundtrip numbers* — so an args hash is comparable across
   implementations.
 
+### 4.5 The expiry reap, the end reasons and the tombstone
+
+**The single-owner reap invariant.** Exactly ONE thing reaps a session
+for a TTL/idle reason: the housekeeping **sweep** (§2.2). The command
+path refuses a late call but **never releases**; the read surface never
+releases; the heartbeat kill is a different path (§4.1). One owner means
+one place where the machine's lock is released, one place where the
+ledger row is written and one place where the tombstone is minted — so
+the three can never disagree.
+
+**The sweep is TWO-PASS.** PASS 1 does **no awaits**: it clears the
+center-side roster pointer for the **WHOLE expired batch** and writes an
+`expired` tombstone for each. PASS 2 is **serial, awaiting and
+bounded**: it forwards `session.end` to each machine and writes one audit
+row per reaped session. The center-side release of the batch therefore
+**completes before any machine forward starts** — the machine-side
+forward is the **bounded** part (N × the ack deadline in the worst case),
+and a slow or dead machine never delays the center's own release.
+
+**The center TELLS the machine.** On expiry the sweep forwards a
+`session.end` frame — SPEC §6.3's own method, no new verb and no new
+capability. The machine releases its own session lock, answers the ack
+and **returns to `ready` on the SAME connection** (SPEC §6.8: the client
+ends the session locally, releasing the local lock, returns an
+acknowledgement, and the connection returns to `ready`). The machine's
+socket **STAYS OPEN** on expiry — the only socket closure **on the
+session path** remains the heartbeat-kill path (§4.1); the teardown
+paths (a socket that dies, a pre-hello deadline, the daemon shutting
+down) close sockets too, and none of them is a session-end closure.
+
+**The ack deadline.** The `session.end` forward has its **own bounded
+ack deadline — 5000 ms** (the `session.end` ack deadline; it is NOT the
+read timeout, which is also 5000 ms) — separate from the 30 s
+`command_timeout_ms`
+(§2.2). It is a **gateway-internal config field with a default, NOT an
+env knob** (`GatewayConfig.session_end_ack_timeout_ms`,
+`daemon/services/mcps_gateway/config.py`): it bounds a protocol
+round-trip inside the gateway, it is not an operator knob, and there is
+deliberately nothing to restart. An expired batch must not spend half a
+minute per machine.
+
+**The reason taxonomy — two DISJOINT sets.** A reason is either
+*response-borne* (the agent sees it in the tool answer) or *ledger-only*
+(it appears in the audit row's `error_code` and **NEVER** in a
+response):
+
+| Set | Tokens | Where they appear |
+|---|---|---|
+| response-borne | `expired`, `already_ended`, `unknown_session`, `machine_refused` | the `why_not_ended` member of the `mcp_rpc_disconnect` answer |
+| ledger-only | `machine_unreachable`, `machine_timeout` | the audit row's `error_code` — **NEVER** in a response |
+
+The split is deliberate: `machine_unreachable` and `machine_timeout`
+describe the center's own failure to reach the machine — an
+infrastructure fact about the sweep, not a statement about the agent's
+session. Answering them would tell the agent something it cannot act on
+and would leak the machine's liveness.
+
+**The end envelope.** `mcp_rpc_disconnect` answers a **reason-coded
+envelope** for EVERY session-state outcome — a session-state reason
+never raises: it comes back as the envelope below. The ONLY things that
+raise anywhere on this surface are the **pre-flight** refusals that
+happen BEFORE any session state is looked at: the tool's own
+**authorization** gate (an agent outside `ari` / `leader`) and the
+**kill switch** (a disabled gateway) — both of them are typed errors the
+tool renders as `{"error": {"code", "message"}}`:
+
+```
+{session_id?, machine_id?, ended: bool, detail: str, machine_notified: bool}
+```
+
+* `why_not_ended` is present **IFF** `ended` is false.
+* `result` (the machine's verbatim ack) is present **only** on the
+  acknowledged path.
+* `session_id` / `machine_id` are included **only when known** — the
+  answer never leaks the existence of a session belonging to another
+  agent.
+* `machine_notified` says whether the machine **ACKNOWLEDGED** the
+  session end — NOT merely whether a frame was written. `false` means
+  the centre released the session **AUTHORITATIVELY**: the machine was
+  never reached, or it was reached and did not answer in time. **The
+  machine's LOCAL LOCK may then persist** until it processes the frame
+  or the connection dies — an agent must read `machine_notified: false`
+  as *"do NOT assume the machine is free"*. For a LATE end of a session
+  that already ended it is what the tombstone recorded (the machine
+  acknowledged the end — or refused it — or the centre released the
+  session on its own); it is `false` while the sweep's forward is still
+  in flight, because the tombstone is written before the forward.
+
+| Situation | Answer |
+|---|---|
+| live session, the machine acks | `ended: true`, `machine_notified: true`, `result` = the ack verbatim; the center releases; the tombstone reason is `already_ended` |
+| live session, the machine answers `SESSION_NOT_FOUND` | `ended: true`, `machine_notified: true`, `detail` says the machine no longer held the session; the center releases |
+| live session, the machine answers any OTHER error envelope (including a relayed `TOOL_TIMEOUT`) | `ended: false`, `why_not_ended: machine_refused`, `detail` carries the machine's code (PROTOCOL vocabulary only — anything else becomes `UNRECOGNIZED_ERROR_CODE`), `machine_notified: true` — **the session SURVIVES** |
+| live session, the connection is gone / unreachable | `ended: true`, `machine_notified: false` (the machine did not ACKNOWLEDGE), `detail` says the center released authoritatively; the ledger reason is `machine_unreachable`; the center releases; the tombstone reason is `already_ended` |
+| live session, the center's own ack deadline fired | `ended: true`, `machine_notified: false` (the machine did not ACKNOWLEDGE — the frame may have been written, but nothing answered), `detail` states the deadline in ms; the ledger reason is `machine_timeout`; the center releases; the tombstone reason is `already_ended` |
+| no live session, an `expired` tombstone matched | `ended: false`, `why_not_ended: expired`, `detail`, `session_id` (the reaped session — always known here) and `machine_id` (if the tombstone knows it) |
+| no live session, an `already_ended` tombstone matched | `ended: false`, `why_not_ended: already_ended`, `detail`, `session_id` (the ended session — always known here) and `machine_id` (if the tombstone knows it) |
+| no live session, no tombstone | `ended: false`, `why_not_ended: unknown_session`, ONE neutral detail text for "never existed" and "not yours" (it must not become an existence oracle), **no** `machine_id` |
+
+**The explicit end is hardened like the sweep.** The end's forward
+carries the same arms as the sweep's, so no machine-state outcome can
+escape as a bare error:
+
+* a socket that dies **between the liveness check and the send** is an
+  **unreachable machine** — the center releases the session
+  authoritatively and answers `ended: true`, `machine_notified: false`
+  (the ledger reason is `machine_unreachable`);
+* a connection that dies **during the ack window** is NOT a refusal:
+  the machine answered nothing, so the refusal arm's meaning ("the
+  session SURVIVES") would be false — the tombstone answers instead
+  (`already_ended`);
+* the machine's **error code** is **sanitised** before it reaches the
+  response: only the protocol vocabulary is echoed, everything else
+  becomes `UNRECOGNIZED_ERROR_CODE`. A peer therefore cannot park a
+  ledger-only token — or free text — in an agent-facing `detail`.
+
+**The tombstone.** A **new, IN-MEMORY, BOUNDED, AGENT-SCOPED** record of
+a session that is gone. A record carries: `session_id`, `reason`
+(`expired` | `already_ended`), `at`, `agent_id`, `instance_id`,
+`machine_id`, `cause` (`idle` | `ttl`) and `machine_notified` (whether
+the machine was told about the end — the sweep records the forward's
+outcome after it happened, the explicit end records the ack).
+
+* **Bounded twice**: by the number of entries (512 — the oldest is
+  evicted first) and by an age horizon (3600 s — pruned on write). Past
+  the cap or the horizon the honest answer reverts to
+  `unknown_session`.
+* **NO migration, NO new table**: the v0.1 roster is in-memory by
+  design, so a daemon restart legitimately empties the tombstones — and
+  the honest answer reverts to `unknown_session` with them.
+* **Agent-scoped**: the ensemble has NO workspace id, so ownership is
+  scoped to the **owning agent_id**. Disconnect is AGENT-ADDRESSED (the
+  agent asks for ITS session), so the lookup resolves the **most recent**
+  tombstone for the requesting agent within the horizon.
+* **NOT exposed on the read surface**: `GET /api/mcps-gateway/sessions`
+  still shows **LIVE sessions only** — a tombstone is not a session and
+  never appears in the operator's table.
+* **TWO consumers.** The END path reads it (`why_not_ended: expired`) and
+  the COMMAND path reads it (an expired session is refused
+  `SESSION_EXPIRED`, carrying the tombstone's real session id — §4.1).
+  Both read the same store, so the two answers cannot drift apart.
+
+**Where this contract comes from (provenance).** The WIRE protocol is
+unchanged by this work: the sweep reuses the existing `session.end`
+request and the machine's ack is the existing one. The expiry itself is
+**SPEC v0.1-mandated** (SPEC §3.3 — the idle/TTL window is server
+policy; SPEC §6.8 — `session.end` releases the machine's local lock and
+returns the connection to `ready`). The **reason taxonomy and the
+end envelope** (`ended` / `why_not_ended` / `detail` /
+`machine_notified`) are **center-side agent-tool conventions** — they
+are ported from the sibling fleet center for parity and are **NOT SPEC
+text** (SPEC v0.1 mandates none of them; `machine_notified` has no SPEC
+provenance at all). A SPEC amendment request for them is an **owner
+follow-up in the `mcps_client` repo** — not this repo's job. The audit
+rows follow SPEC §8, which is explicitly **RECOMMENDED** (§4.3).
+
 ---
 
 ## 5. Protocol conformance summary
-
 Reference: `mcps_client/SPEC.md` v0.1. The shipped reference client
 (`mcps_client/internal/remote`) is the interop ground truth.
 
@@ -612,10 +872,21 @@ Reference: `mcps_client/SPEC.md` v0.1. The shipped reference client
 | §6.4 machine-minted `session_id`, catalog verbatim | implemented — the center adopts the machine's id and stores the catalog unmodified |
 | §6.5 typed errors | implemented — center-originated: `PROTOCOL_VERSION_UNSUPPORTED`, `CAPABILITY_MISSING`, `MACHINE_NOT_ENROLLED`, `MACHINE_BUSY`, `SESSION_NOT_FOUND`, `SESSION_EXPIRED`, `HEARTBEAT_TIMEOUT`, `TOOL_TIMEOUT`, `INTERNAL`; machine codes relayed verbatim: `TOOL_NOT_FOUND`, `TOOL_TIMEOUT`, `TOOL_ERROR`, `PAYLOAD_TOO_LARGE`, `RATE_LIMITED`. `TOOL_DENIED` is reserved for v0.2+ and never emitted |
 | §6.7 frame-size limit | constant defined (8 MiB protocol default / 32 MiB hard ceiling); not actively enforced by the center in v0.1 |
-| §6.8 no resumption / heartbeat loss kills | implemented — a session belongs to its connection; reconnect = new session |
+| §6.8 no resumption / heartbeat loss kills | implemented — a session belongs to its connection; reconnect = new session. The expiry reap uses that SAME `session.end` request (no new verb): the machine is told, releases its own lock and returns to `ready` on the same connection (§4.5) |
 | §7 MCP fidelity | implemented for `tools/call` — the params object is forwarded unwrapped and the result returned raw |
 | §8 center obligations (roster/presence/exclusivity/audit) | **RECOMMENDED, not wire-protocol conformance** — SPEC §8 says so itself. This center implements all four anyway: roster + presence (§8.1), one-agent-one-remote (§8.2), one-session-per-machine with `MACHINE_BUSY` reject (§8.3), and the who/machine/tool/args-hash audit (§8.4) |
 | §10 conformance kit | **EXISTS (Phase D1)** — `scripts/conformance/run.sh` + `tests/conformance/` in THIS repo: an independent, center-agnostic pack mapped 1:1 onto the §10 areas, pointable at any center with a URL + a machine (five pointing keys, §10 below) |
+
+**The expiry hardening did not change the WIRE.** The sweep reuses the
+existing `session.end` request and the machine's existing ack — no
+method, no capability and no frame shape changed. What the hardening
+adds is center-side: the machine is now **TOLD** when a session is
+reaped (so its own lock is freed — SPEC §6.8), and the center's
+agent-facing end answer and its audit ledger carry the reason (§4.5).
+The reason envelope is a **center-side convention** ported from the
+sibling fleet center for parity — it is **NOT SPEC text**, and the SPEC
+amendment request for it is an owner follow-up in the `mcps_client`
+repo (§4.5's provenance note).
 
 **Deliberately NOT implemented in v0.1:** the MCP notification relay. The
 `notifications/*` server→client relay is NOT implemented in v0.1 — the
@@ -696,7 +967,8 @@ Phase-A interpretations document.
 | `MACHINE_BUSY` on connect | the slot is taken | another agent holds the machine's single session, OR this agent already drives a different machine (`agent_already_holds_session`). `mcp_rpc_list_machine` shows the holder (`session_id`, `agent_id`). Wait for the session to end, ask the holder to disconnect, or pick another machine |
 | `SESSION_NOT_FOUND` on command | no open session for this agent | the session expired (TTL/idle), was killed by heartbeat loss, or was never opened. Re-`connect` — there is nothing to resume |
 | `MACHINE_NOT_ENROLLED` on connect — which case? | same code, two meanings | read the `enrolled` detail: `enrolled: true` + *"is enrolled but currently offline — reconnect pending"* → WAIT for the machine to reconnect (§8.1), do not re-enroll; `enrolled: false` + *"is not in the enrolled roster — re-enrollment is required"* → the roster never knew it (fresh machine, roster wiped by a restart, or `MCPS_GATEWAY_ALLOWED_MACHINES` excludes it) |
-| `SESSION_EXPIRED` on command | TTL (1 h) or idle (5 min) passed | re-`connect`; raise `MCPS_GATEWAY_SESSION_TTL_MS` / `MCPS_GATEWAY_SESSION_IDLE_TIMEOUT_MS` if the workload needs longer |
+| `SESSION_EXPIRED` on command | TTL (1 h) or idle (5 min) passed | re-`connect`; raise `MCPS_GATEWAY_SESSION_TTL_MS` / `MCPS_GATEWAY_SESSION_IDLE_TIMEOUT_MS` if the workload needs longer. The code is the same whichever path noticed the expiry (§4.1) — the sweep's reap leaves an `expired` tombstone behind, so a late call is still `SESSION_EXPIRED` and carries the real session id |
+| `mcp_rpc_disconnect` answers `ended: false` | the session-state reason | read `why_not_ended`: `expired` (the SWEEP already reaped it — re-`connect`), `already_ended` (the session was already ended — by an explicit end, or by the sweep; re-`connect`), `unknown_session` (this agent held no session — nothing to end), `machine_refused` (the machine refused the end — **the session is still alive**: retry, or check the machine). A `machine_notified: false` on top of that means the machine did not ACKNOWLEDGE — do not assume its local lock is gone |
 | `TOOL_TIMEOUT` on command | the machine did not answer in time | the center waits `MCPS_GATEWAY_COMMAND_TIMEOUT_MS` (default 30 s). A wedged remote tool or a sleepy machine surfaces here — the bound exists so a wedged machine cannot hang an agent tool forever |
 | Client dials the wrong path | `CenterURL` configured without a path | the client appends `/remote-hands/v1` only when the URL has NO path — configure the full URL **including** `/api/mcps-gateway/ws` (§2.4) |
 | **503** on the route | the service is not wired on `app.state` | a boot-order defect, not an ops condition — report it; the route answered instead of crashing |
@@ -842,9 +1114,19 @@ Field notes:
   face and `connected` says whether the socket is open.
 * `busy` on a machine and `machine_locked` on a session are the SAME
   fact seen from the two sides: the §8.3 exclusive slot is taken, so a
-  second `session.begin` would be refused with `MACHINE_BUSY`.
+  second `session.begin` would be refused with `MACHINE_BUSY`. The
+  expiry reap used to BREAK that equivalence — the session was dropped
+  while the machine's roster pointer still named it, so the machine kept
+  reporting `busy: true` with no session behind it and the slot was
+  never released (a later connect to that machine was refused
+  `MACHINE_BUSY` for a session that no longer existed). The sweep now
+  clears the **center-side roster pointer** for the whole expired batch
+  (§4.5), so the two sides agree again: a reaped session leaves the
+  machine **not busy** and the slot **free**.
 * `state` is `live` — the center keeps only live sessions (a session
-  dies with its connection, §6.8; there is no resumption).
+  dies with its connection, §6.8; there is no resumption). A reaped
+  session leaves **no row at all**: the tombstones (§4.5) are NOT
+  exposed on this surface.
 * `args_hash` is the SHA-256 of the canonicalised arguments; the
   arguments themselves are never stored (§8.4).
 * `count` is the length of THIS PAGE — the number of rows in this

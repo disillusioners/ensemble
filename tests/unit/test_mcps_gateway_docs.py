@@ -32,6 +32,7 @@ Run with (bare pytest is a broken PATH in this repo — use uv)::
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 # Project-root-relative docs file (tests/unit/ → repo root).
@@ -82,6 +83,22 @@ def _doc_prose() -> str:
     view; single-line table rows match identically in either view.
     """
     return " ".join(_doc_text().split())
+
+
+def _doc_plain(text: str) -> str:
+    """The doc's text with the MARKDOWN markup stripped.
+
+    A negative needle must not be defeated by the EMPHASIS: the doc
+    writes ``the only socket closure **in the gateway**``, so the raw
+    text does NOT contain the needle — the emphasis-stripped text DOES.
+    A pin that greps the raw text would therefore stay GREEN with the
+    defect live (the doc test's own negative arm is the witness).
+
+    The emphasis markers are the doc's style: ``*``/``_`` for emphasis,
+    ``**`` for strong emphasis and ``` `` ``` for inline code. All three
+    are stripped, so a needle matches the SENTENCE, not its markup.
+    """
+    return re.sub(r"[*_`]", "", text)
 
 
 # ── positive needles ────────────────────────────────────────────────────
@@ -960,5 +977,302 @@ def test_doc_does_not_claim_knobs_are_reread_at_call_time() -> None:
         assert phrase not in text, (
             f"the runbook must not claim {phrase!r} — the running service "
             "holds a boot-time config snapshot; env changes need a restart."
+        )
+
+
+# ── the session-expiry hardening: the sweep owns the reap ────────────────
+#
+# The expiry hardening changed WHAT the center does when a session passes
+# its TTL/idle window: the sweep now TELLS THE MACHINE (a `session.end`
+# frame) instead of dropping the session silently, the machine's socket
+# stays open, and `mcp_rpc_disconnect` answers a reason-coded envelope.
+#
+# These pins hold the NEW truth (the contract, not the phrasing).  The
+# wire vocabulary did NOT change: the sweep reuses the existing
+# `session.end` request — see §4.5's provenance note.
+#
+# CONVENTION (unchanged): positive and negative needles NEVER share a
+# test function.
+
+
+def _knob_table_section() -> str:
+    """The §2.2 knob section (its heading up to the next ``###``)."""
+
+    text = _doc_text()
+    marker = "### 2.2 The knobs"
+    start = text.index(marker) + len(marker)
+    rest = text[start:]
+    end = rest.find("\n### ")
+    return rest[:end] if end != -1 else rest
+
+
+def test_doc_knob_table_carries_no_env_knob_beyond_the_pinned_set() -> None:
+    """The knob table lists EXACTLY the pinned env knobs — no more.
+
+    The ``session.end`` ack deadline is a gateway-internal CONFIG FIELD
+    with a default, deliberately NOT an env knob: it bounds a protocol
+    round-trip inside the gateway, it is not an operator knob.  If a
+    future change adds an env var for it, this pin goes red on purpose.
+    """
+
+    section = _knob_table_section()
+    names = set(re.findall(r"`(MCPS_GATEWAY_[A-Z_]+)`", section))
+    assert names == set(ENV_DEFAULTS), (
+        "the §2.2 knob section must name EXACTLY the pinned env knobs "
+        f"(extra: {sorted(names - set(ENV_DEFAULTS))}; "
+        f"missing: {sorted(set(ENV_DEFAULTS) - names)}) — the session.end "
+        "ack deadline is a config field with a default, not an env knob."
+    )
+
+
+def test_doc_states_the_sweep_is_the_sole_owner_of_the_expiry_reap() -> None:
+    """The single-owner reap invariant and the two-pass sweep are pinned."""
+
+    text = _doc_prose()
+    assert "SOLE owner of the expiry reap" in text, (
+        "the doc must state the sweep is the SOLE owner of the expiry reap "
+        "— one owner means the machine release, the ledger row and the "
+        "tombstone can never disagree."
+    )
+    assert "TWO PASSES" in text, "the doc must state the sweep is TWO-PASS."
+    assert "PASS 1" in text and "PASS 2" in text, (
+        "the doc must name both passes (PASS 1 = the center-side release, "
+        "PASS 2 = the machine forward)."
+    )
+    assert "BEFORE any machine forward starts" in text, (
+        "the doc must state the center-side release of the whole batch "
+        "completes BEFORE any machine forward starts — the machine-side "
+        "forward is the bounded part."
+    )
+
+
+def test_doc_states_the_expiry_tells_the_machine_and_keeps_the_socket() -> None:
+    """The expiry notification and the open socket are pinned."""
+
+    text = _doc_prose()
+    assert "TELLS THE MACHINE" in text, (
+        "the doc must state the center TELLS THE MACHINE on expiry — a "
+        "silent centre-side drop strands the machine's own session lock "
+        "(SPEC §6.8)."
+    )
+    assert "socket **STAYS OPEN** on expiry" in text, (
+        "the doc must state the machine's socket stays open on expiry — "
+        "the only socket closure ON THE SESSION PATH is the heartbeat kill."
+    )
+    assert "returns to `ready` **on the same connection**" in text, (
+        "the doc must state the machine returns to ready ON THE SAME "
+        "connection after the expiry notification."
+    )
+    # The MARKDOWN-STripped view: a needle must match the SENTENCE, not
+    # its emphasis. The negative arm is defeated by the raw text (the
+    # doc writes "**in the gateway**"), so it MUST be matched here.
+    plain = _doc_plain(text).lower()
+    assert "the only socket closure on the session path" in plain, (
+        "the doc must scope the heartbeat-kill closure to the SESSION "
+        "PATH — the teardown paths (a socket that dies, the pre-hello "
+        "deadline, the daemon shutdown) close sockets too."
+    )
+    assert "the only socket closure in the gateway" not in plain, (
+        "the unscoped 'the only socket closure in the gateway' claim is "
+        "FALSE — several other paths close a socket. The doc must not "
+        "enshrine it."
+    )
+
+
+def test_doc_pins_the_disconnect_end_envelope() -> None:
+    """The reason-coded end envelope is pinned (shape + the raise rule)."""
+
+    text = _doc_prose()
+    for member in (
+        "ended: bool",
+        "detail: str",
+        "machine_notified: bool",
+        "session_id?",
+        "machine_id?",
+    ):
+        assert member in text, (
+            f"the doc must carry the {member!r} member of the end envelope — "
+            "the agent-facing answer contract (SPEC is silent on it; it is "
+            "a centre-side convention, §4.5)."
+        )
+    assert "`why_not_ended` is present **IFF** `ended` is false" in text, (
+        "the doc must state why_not_ended appears IFF ended is false."
+    )
+    assert "on the acknowledged path" in text, (
+        "the doc must state `result` (the machine's verbatim ack) is "
+        "present ONLY on the acknowledged path."
+    )
+    assert "verbatim ack" in text, (
+        "the doc must say `result` carries the machine's VERBATIM ack."
+    )
+    assert "never raises" in text, (
+        "the doc must state mcp_rpc_disconnect never raises for a "
+        "session-state reason (only the kill-switch/disabled case raises)."
+    )
+
+
+def test_doc_pins_the_two_disjoint_reason_sets() -> None:
+    """The response-borne set and the ledger-only set are DISJOINT."""
+
+    text = _doc_prose()
+    response_row = next(
+        (ln for ln in _doc_text().splitlines() if ln.startswith("| response-borne |")),
+        "",
+    )
+    ledger_row = next(
+        (ln for ln in _doc_text().splitlines() if ln.startswith("| ledger-only |")),
+        "",
+    )
+    assert response_row, "the doc must carry the response-borne reason row."
+    assert ledger_row, "the doc must carry the ledger-only reason row."
+    for token in ("expired", "already_ended", "unknown_session", "machine_refused"):
+        assert token in response_row, (
+            f"the response-borne reason row must carry {token!r} — the four "
+            "tokens the agent may see."
+        )
+    for token in ("machine_unreachable", "machine_timeout"):
+        assert token in ledger_row, (
+            f"the ledger-only reason row must carry {token!r}."
+        )
+        assert token not in response_row, (
+            f"{token!r} is LEDGER-ONLY — it must never appear in a "
+            "response-borne reason."
+        )
+    assert "NEVER** in a response" in text, (
+        "the doc must state the ledger-only tokens never appear in a "
+        "response."
+    )
+
+
+def test_doc_states_the_tombstone_is_bounded_in_memory_and_agent_scoped() -> None:
+    """The tombstone's bounds and its invisibility on the read surface."""
+
+    text = _doc_prose()
+    assert "IN-MEMORY, BOUNDED, AGENT-SCOPED" in text, (
+        "the doc must describe the tombstone as in-memory, bounded and "
+        "agent-scoped."
+    )
+    assert "512" in text and "3600 s" in text, (
+        "the doc must pin the tombstone's two bounds (512 entries, a 3600 s "
+        "horizon) — past them the honest answer reverts to "
+        "unknown_session."
+    )
+    assert "NO migration, NO new table" in text, (
+        "the doc must state the tombstone adds no migration and no table."
+    )
+    assert "owning agent_id" in text, (
+        "the doc must state the tombstone is scoped to the owning agent_id "
+        "(the ensemble has no workspace id)."
+    )
+    assert "NOT exposed on the read surface" in text, (
+        "the doc must state the tombstone is NOT exposed on the read "
+        "surface — GET /sessions still shows LIVE sessions only."
+    )
+    assert "TWO consumers" in text, (
+        "the doc must state the tombstone store has TWO consumers (the end "
+        "path and the command path)."
+    )
+
+
+def test_doc_states_the_ack_deadline_is_a_config_field_not_an_env_knob() -> None:
+    """The session.end ack bound: 5000 ms, a config field, NOT a knob."""
+
+    text = _doc_prose()
+    assert "ack deadline" in text, (
+        "the doc must name the session.end ack deadline."
+    )
+    # The needle is ANCHORED to the ack-deadline SENTENCE: the bare
+    # number "5000 ms" is also the READ timeout's default, so a doc that
+    # mentioned only the read timeout would satisfy the bare needle. The
+    # anchor carries the bound INLINE, and it is matched against the
+    # whitespace-collapsed prose so the doc's hard wrapping cannot break
+    # it.
+    assert (
+        "The `session.end` forward has its **own bounded ack deadline — 5000 ms**"
+        in _doc_prose()
+    ), (
+        "the doc must pin the ack deadline's own sentence with its 5000 ms "
+        "bound — the bare number (the read timeout is 5000 ms too) does not "
+        "pin it."
+    )
+    assert "gateway-internal CONFIG FIELD with a default, NOT" in text, (
+        "the doc must state the ack deadline is a gateway-internal config "
+        "field with a default and deliberately NOT an env knob."
+    )
+
+
+def test_doc_states_busy_and_machine_locked_are_the_same_fact_again() -> None:
+    """The roster fix restored the two sides' agreement (it was FALSE)."""
+
+    text = _doc_prose()
+    assert "the two sides agree again" in text, (
+        "the doc must state that `busy` and `machine_locked` agree again — "
+        "the expiry reap used to leave the roster pointer dangling."
+    )
+    assert "center-side roster pointer" in text, (
+        "the doc must name the centre-side roster pointer as the thing the "
+        "sweep clears."
+    )
+
+
+def test_doc_states_the_spec_provenance_of_the_end_contract() -> None:
+    """The wire is unchanged; the envelope is a centre-side convention."""
+
+    text = _doc_prose()
+    assert "NOT SPEC text" in text, (
+        "the doc must state the reason taxonomy / end envelope are NOT "
+        "SPEC text — they are centre-side conventions ported for parity."
+    )
+    assert "owner follow-up in the `mcps_client` repo" in text, (
+        "the doc must name the SPEC amendment request as an owner "
+        "follow-up in the mcps_client repo — not this repo's job."
+    )
+    assert "RECOMMENDED, not wire protocol" in text, (
+        "the doc must state SPEC §8 (the audit ledger) is RECOMMENDED, not "
+        "wire protocol."
+    )
+    assert "The expiry hardening did not change the WIRE" in text, (
+        "the doc must state the expiry hardening did not change the wire "
+        "vocabulary — the sweep reuses the existing session.end request."
+    )
+
+
+def test_doc_does_not_claim_the_expiry_drops_the_session_silently() -> None:
+    """NEGATIVE arm — the silent-drop wording is gone for good.
+
+    (The positive counterpart — the expiry TELLS THE MACHINE — lives in
+    ``test_doc_states_the_expiry_tells_the_machine_and_keeps_the_socket``.)
+    """
+
+    text = _doc_prose()
+    for phrase in (
+        "center drops the session",
+        "sends the machine no expiry frame",
+        "the session is dropped without telling the machine",
+    ):
+        assert phrase not in text, (
+            f"the runbook must not claim {phrase!r} — the expiry sweep "
+            "TELLS the machine with a session.end frame (§4.5); a silent "
+            "drop strands the machine's own lock."
+        )
+
+
+def test_doc_does_not_claim_the_tombstone_is_a_read_surface_row() -> None:
+    """NEGATIVE arm — the tombstone is NOT on the read surface.
+
+    (The positive counterpart lives in
+    ``test_doc_states_the_tombstone_is_bounded_in_memory_and_agent_scoped``.)
+    """
+
+    text = _doc_prose().lower()
+    for phrase in (
+        "the sessions endpoint shows the tombstones",
+        "get /sessions shows the tombstones",
+        "the tombstone is exposed on the read surface",
+    ):
+        assert phrase not in text, (
+            f"the runbook must not claim {phrase!r} — the tombstones are "
+            "in-memory bookkeeping; GET /sessions still shows LIVE sessions "
+            "only (§4.5)."
         )
 

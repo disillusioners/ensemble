@@ -83,6 +83,22 @@ DEFAULT_SESSION_TTL_MS = 3_600_000
 #: The default session idle timeout (§3.3).
 DEFAULT_SESSION_IDLE_TIMEOUT_MS = 300_000
 
+#: The default bound of the CENTRE's own wait for a ``session.end``
+#: acknowledgement.
+#:
+#: This is NOT an operator knob: it is a gateway-internal bound, not a
+#: policy. The command timeout (§ ``DEFAULT_COMMAND_TIMEOUT_MS``) is the
+#: bound for a whole remote TOOL CALL — 30 s of a user's desktop waiting
+#: is already a lot. A ``session.end`` acknowledgement is a much cheaper
+#: exchange, and it must never hold an agent for the full command
+#: timeout: a wedged machine has to be survivable. So the end carries its
+#: OWN, much tighter deadline.
+#:
+#: Deliberately NOT read from the environment — an operator knob would
+#: make an internal bound look like a policy, and the knob table of
+#: ``docs/mcps-gateway.md`` (and its pin) stays untouched by it.
+DEFAULT_SESSION_END_ACK_TIMEOUT_MS = 5_000
+
 #: The default cadence of the WebSocket-level liveness ping.
 #:
 #: The reference center of the protocol pings every 200 ms (§3.3: the
@@ -182,6 +198,7 @@ class GatewayConfig:
     allowed_machines: tuple[str, ...] = ()
     session_ttl_ms: int = DEFAULT_SESSION_TTL_MS
     session_idle_timeout_ms: int = DEFAULT_SESSION_IDLE_TIMEOUT_MS
+    session_end_ack_timeout_ms: int = DEFAULT_SESSION_END_ACK_TIMEOUT_MS
     ping_interval_ms: int = DEFAULT_PING_INTERVAL_MS
     warnings: tuple[str, ...] = field(default=(), repr=False)
 
@@ -208,6 +225,24 @@ class GatewayConfig:
                 + (
                     f"read_timeout_ms={bad} is not positive; the default "
                     f"({DEFAULT_READ_TIMEOUT_MS}) is used",
+                ),
+            )
+        if self.session_end_ack_timeout_ms <= 0:
+            # The same hazard as ``read_timeout_ms``: a zero bound turns
+            # ``asyncio.wait_for(..., 0)`` into an instant timeout, and
+            # every session.end would "time out" before it left the
+            # centre. Clamp to the default and say so.
+            bad = self.session_end_ack_timeout_ms
+            object.__setattr__(
+                self, "session_end_ack_timeout_ms", DEFAULT_SESSION_END_ACK_TIMEOUT_MS
+            )
+            object.__setattr__(
+                self,
+                "warnings",
+                self.warnings
+                + (
+                    f"session_end_ack_timeout_ms={bad} is not positive; the "
+                    f"default ({DEFAULT_SESSION_END_ACK_TIMEOUT_MS}) is used",
                 ),
             )
 
@@ -361,6 +396,7 @@ __all__ = [
     "DEFAULT_PATH",
     "DEFAULT_PING_INTERVAL_MS",
     "DEFAULT_READ_TIMEOUT_MS",
+    "DEFAULT_SESSION_END_ACK_TIMEOUT_MS",
     "DEFAULT_SESSION_IDLE_TIMEOUT_MS",
     "DEFAULT_SESSION_TTL_MS",
     "ENV_PREFIX",

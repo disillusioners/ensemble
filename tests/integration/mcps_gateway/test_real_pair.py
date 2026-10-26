@@ -2294,13 +2294,37 @@ async def _phase_p3(
         )
     finally:
         await asyncio.to_thread(independent.dispose)
-    expected_rows = 2 + len(DIVERGENCE_MARKERS) + 1  # ok + error + markers + timeout
+    expected_rows = 2 + len(DIVERGENCE_MARKERS) + 1 + 1
+    # ok + error + markers + timeout + the ``session.end`` row of the
+    # explicit end. The ledger carries the SESSION-LIFECYCLE rows too —
+    # the expiry hardening added them, because the ledger is where the
+    # operator asks "why did this session not end?".
     result.add(
         17,
-        "the-ledger-grew-by-exactly-the-six-commands-of-the-flow",
+        "the-ledger-grew-by-exactly-the-six-commands-of-the-flow-plus-the-session-end-row",
         len(rows) == expected_rows,
         f"delta={len(rows)} (pre-flow 0 is gated by the runner's "
-        f"audit-pre-flow-count-zero; expected={expected_rows})",
+        f"audit-pre-flow-count-zero; expected={expected_rows} = six command "
+        f"rows + the session.end row of the explicit end)",
+    )
+
+    # The SESSION-END surface wrote a row about THIS session. The
+    # args_hash is the discriminator (it hashes {"session_id": ...}), and
+    # the OUTCOME is deliberately NOT asserted: which end path ran
+    # (the explicit end, or the late end over a tombstone when the
+    # session died first) is the subject of the "p3-session-closed" gate
+    # above — this row only proves the ledger carries the surface.
+    session_end_rows = _pick_row(rows, tool="session.end")
+    result.add(
+        17,
+        "the-session-end-row-is-in-the-ledger-with-the-hash-of-its-own-params",
+        len(session_end_rows) == 1
+        and session_end_rows[0].get("args_hash")
+        == canonical_args_hash({"session_id": session_id})
+        and session_end_rows[0].get("session_id") == session_id,
+        f"rows={len(session_end_rows)} "
+        f"row={json.dumps(session_end_rows[0], sort_keys=True, default=str)[:300] if session_end_rows else None} "
+        f"recomputed={canonical_args_hash({'session_id': session_id})}",
     )
 
     failing_hash = canonical_args_hash(FAILING_ARGS)
