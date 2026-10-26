@@ -464,6 +464,26 @@ counterpart (`DIAGNOSTIC delivery evidence`) stays `INFO`: a positive
 diagnostic fires on every delivery seen on a pair, so a WARNING there would
 drown the real signal exactly like the dry-run previews do.
 
+**The BOOT-TIME sweep pass is a KNOWN-INVALID observation window.** The
+boot-time lane-7 pass is fired from the worker-pool setup
+(`daemon/api.py:785`) — before the dependency bus is registered
+(`daemon/api.py:2328`) — and it reaches the bus-watcher probe about two
+seconds BEFORE the bus comes up, so the probe has no bus to ask. The bus's
+`bus start: warmed=… pending watchers, …` INFO line
+(`daemon/services/dependency_bus.py:1755`) is the marker that the bus has
+come up. In that window every row that reaches the probe HOLDs with
+`sweep mission_reconciliation HOLD (bus-watcher probe failed)`
+(`daemon/services/report_delivery_recovery.py:2375`) and the reason
+`dependency_bus is not wired — the bus-watcher probe cannot run`
+(`daemon/services/report_delivery_recovery.py:2789`). Those holds are
+EXPECTED — the bus is not registered yet, so the probe could not run. They
+are NOT a defect signal, and they are NOT §3.6's tripwire `Holds that do not
+release and no sweep counter explains why`; the same pass ticks `probe_errors`
+once per held row, which is a ONE-SHOT transient, not §3.6's first tripwire
+(`probe_errors` climbing at a sustained rate). **Meaningful observation starts
+from the SECOND run onward** — the first 300 s periodic tick, with the bus
+wired.
+
 **`masked_suspected` is the D4(iii) observability signal.** It fires when a
 commissioned worker's queue row is entirely absent past the grace window — the
 signature of a mis-addressed (masked) enqueue. It is a COUNTER + LOG ONLY: the
