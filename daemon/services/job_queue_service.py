@@ -230,6 +230,20 @@ class JobQueueService:
         _queue_repo: Queue repository for queue metadata and concurrency limits.
     """
     
+    @property
+    def repository(self) -> JobRepository:
+        """Public access to the job repository (read-only consumers).
+
+        Proposal B PR3 — the reconciliation sweep's JOBITEM-LIVE probe
+        (RDRS lane 7, the design's R3/OQ-7): "a commission whose
+        ``work_id`` resolves to a non-terminal JobItem is LIVE — hold".
+        The sweep needs the JobItem read; a public accessor replaces the
+        ``_job_queue_service._repository`` reach-through (the reviewer
+        follow-up on the ``_instance_manager._instance_repository``
+        family).
+        """
+        return self._repository
+
     def __init__(
         self,
         repository: JobRepository,

@@ -876,6 +876,43 @@ class ReportInjectionRepository:
             )
         ).first()
 
+    def find_any_for_pair(
+        self,
+        parent_instance_id: str,
+        child_instance_id: str,
+    ) -> ReportInjection | None:
+        """ANY row for the (parent, child) pair, in ANY state.
+
+        The reconciliation sweep's DELIVERY-EVIDENCE probe
+        (Proposal B PR3 — RDRS lane 7, the design's R1/R1b): "has ANY
+        report-injection row been written for this
+        (commissioner, worker) pair?". The read is deliberately
+        state-AGNOSTIC — a row in ANY state (PENDING / DEFERRED /
+        INJECTED / TASK_DELIVERED / FAILED) is positive delivery
+        evidence, and the sweep must not abandon a commission whose
+        obligation row exists.
+
+        NOT keyed on ``child_message_id``: the commission row does NOT
+        carry the child's message id, so the pair read is the coarsest
+        CORRECT evidence shape for the sweep (the same shape the
+        lane-2 PREFIX ledger uses — the commissioner/worker PAIR, not a
+        message triple).
+
+        Read-only; writes nothing.
+        """
+        if not parent_instance_id or not child_instance_id:
+            return None
+        with Session(self.engine) as session:
+            return session.exec(
+                select(ReportInjection)
+                .where(
+                    ReportInjection.parent_instance_id == parent_instance_id
+                )
+                .where(
+                    ReportInjection.child_instance_id == child_instance_id
+                )
+            ).first()
+
     def find_row_by_report_message_id(
         self, report_message_id: str | None
     ) -> ReportInjection | None:

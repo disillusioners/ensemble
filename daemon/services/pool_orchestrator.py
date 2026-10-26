@@ -391,6 +391,27 @@ class PoolOrchestrator:
                 lane_stuck_wake=(
                     svc.report_delivery_recovery_lane_stuck_wake
                 ),
+                # ── Lane 7 (Proposal B PR3): the mission-commission
+                # reconciliation sweep. The mission-record repository is
+                # the DUCK-TYPED admission + guarded-transition surface
+                # (the public accessor — no private reach-through); an
+                # unwired repository degrades the lane to ONE INFO log
+                # + ZERO (the lane never reads and never writes).
+                lane_mission_reconciliation=(
+                    svc.report_delivery_recovery_lane_mission_reconciliation
+                ),
+                mission_record_repo=(
+                    manager.mission_record_service.commission_repository()
+                ),
+                # The TTL horizon: the config-family knob is the
+                # DEFAULT; the ENSEMBLE_MISSION_COMMISSION_TTL_SECONDS
+                # env knob overrides it (the operator lever) — the
+                # precedence is applied inside the service (the wiring
+                # block stays free of module-level names so the
+                # source-structure pin can compile it standalone).
+                mission_commission_ttl_seconds=(
+                    svc.report_delivery_recovery_mission_commission_ttl_seconds
+                ),
             )
             # Fire-and-forget boot sweep (binding order S-c:
             # ``_ensure_postgres_columns`` is in ``initialize()``,

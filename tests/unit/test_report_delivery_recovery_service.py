@@ -321,6 +321,10 @@ class TestSweepServiceShape:
             # Block-1 G4 lane: must be disabled too for the
             # empty-lane-dict assertion.
             lane_stuck_wake=False,
+            # Lane 7 (Proposal B PR3 — the mission-commission
+            # reconciliation): must be disabled too for the
+            # empty-lane-dict assertion.
+            lane_mission_reconciliation=False,
         )
         result = svc.recover_now()
         assert result.lanes == {}

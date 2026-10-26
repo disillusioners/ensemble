@@ -1268,6 +1268,33 @@ class DependencyBus:
         """
         return self._repo.count_pending_for_target(target_instance_id)
 
+    def pending_watchers_for_pair(
+        self,
+        target_instance_id: str,
+        child_instance_id: str,
+    ) -> list[DependencyWatcher]:
+        """PENDING watchers for the (target, child) PAIR — sync.
+
+        Proposal B PR3 — the reconciliation sweep's BUS-WATCHER probe
+        (RDRS lane 7, the design's R4): "a PENDING dependency_watchers
+        row targeting the commissioner FROM that worker is live
+        obligation evidence — HOLD, even past the TTL". The bus and the
+        commission ledger are two ledgers of the same act; the sweep
+        may not declare one dead while the other still expects
+        delivery.
+
+        Sync convenience API (the bus's async-primary / sync-convenience
+        split — the same shape as ``get_pending_count``): the sweep
+        runs on its own thread, NOT on the event loop.
+
+        Read-only; writes nothing (the bus owns the watcher lifecycle).
+        """
+        if not target_instance_id or not child_instance_id:
+            return []
+        return self._repo.fetch_pending_for_target_and_child(
+            target_instance_id, child_instance_id
+        )
+
     async def cancel_for_target(self, target_instance_id: str) -> int:
         """Cancel all PENDING watchers targeting ``target_instance_id``.
 

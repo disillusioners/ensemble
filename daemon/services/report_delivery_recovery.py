@@ -261,14 +261,20 @@ import asyncio
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from daemon.constants import (
     DEFERRED_REASON_RESUME_ROUTER,
+    MISSION_COMMISSION_ABANDON_REASONS,
 )
 from daemon.repositories.instance.models import InstanceStatus
-from daemon.services.report_recipient import resolve_report_recipient
+from daemon.repositories.job_queue.models import AdmissionState
+from daemon.services.report_recipient import (
+    parse_iso_utc,
+    resolve_report_recipient,
+)
+from daemon.services.timestamps import now_utc
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
@@ -381,6 +387,47 @@ _PARENT_TERMINAL_STATUSES: frozenset[str] = frozenset(
 )
 
 
+# ── Lane 7 (Proposal B PR3) — the mission-commission reconciliation ──
+#
+# The mode-ladder tokens (the SAME ladder the rest of the subsystem
+# uses — the sweep does NOT invent a second mode knob).
+MISSION_RECORDS_MODE_OFF = "off"
+MISSION_RECORDS_MODE_DRY = "dry"
+MISSION_RECORDS_MODE_ENFORCE = "enforce"
+
+# The commission-state tokens the sweep writes (``superseded`` is
+# RESERVED to the mint lanes and is never written by the sweep).
+MISSION_COMMISSION_STATE_SATISFIED = "satisfied"
+MISSION_COMMISSION_STATE_ABANDONED = "abandoned"
+
+# The FROZEN abandon-reason vocabulary (the design's R9 / OQ-4).
+MISSION_ABANDON_REASON_WORKER_TERMINAL = "worker_terminal_no_report"
+MISSION_ABANDON_REASON_TTL = "ttl_expired_not_live"
+MISSION_ABANDON_REASON_WORKER_MISSING = "worker_row_missing"
+
+# The JobItem admission states that mean "LIVE work" (the OQ-7
+# JobItem-live check).
+JOB_ADMISSION_QUEUED = AdmissionState.QUEUED.value
+JOB_ADMISSION_ACTIVE = AdmissionState.ACTIVE.value
+
+# The worker-terminal set for R1 — the host's OWN parent-terminal
+# family (``_PARENT_TERMINAL_STATUSES``: COMPLETED / ERROR /
+# TERMINATED / FAILED). ``PAUSED`` / ``WAITING_CHILDREN`` / ``RUNNING``
+# are NON-terminal: a paused worker is temporarily idle, not dead.
+_MISSION_COMMISSION_TERMINAL_STATUSES: frozenset[str] = (
+    _PARENT_TERMINAL_STATUSES
+)
+
+
+class MissionReconciliationProbeError(RuntimeError):
+    """A lane-7 probe could not RUN (an unwired dependency).
+
+    Distinct from a probe that ran and answered "no": a probe that
+    cannot run must HOLD the row (P1 — a probe that cannot prove its
+    predicate must never authorize the destructive transition).
+    """
+
+
 @dataclass
 class LaneResult:
     """Per-lane aggregated counts for a single sweep pass.
@@ -424,6 +471,70 @@ class LaneResult:
             "skipped_already_reported": self.skipped_already_reported,
             "errors": self.errors,
         }
+
+
+@dataclass
+class MissionReconciliationLaneResult(LaneResult):
+    """Lane 7's counters (the design's R9 set).
+
+    A SUBCLASS of :class:`LaneResult` (so the shared
+    ``recovered`` / ``errors`` fields and the sweep's aggregation keep
+    working) with the lane-7-specific counters added. The endpoint
+    surfaces this dict verbatim — the operator sees the sweep's
+    dispositions per row class.
+
+    Counter semantics:
+
+    * ``abandoned_worker_terminal`` / ``abandoned_ttl`` /
+      ``abandoned_worker_missing`` — the DETECTED abandonments (the
+      three frozen abandon reasons). They move in ``dry`` mode too
+      (the dry-run evidence that tunes the TTL default) and in
+      ``enforce`` mode they mean "the row was actually abandoned".
+    * ``satisfied_on_evidence`` — R1b (the delivery happened; the
+      natural satisfy write was lost).
+    * ``skipped_live`` — the worker is live (R2a: young/live work beats
+      the clock).
+    * ``skipped_watcher_pending`` — a PENDING bus watcher exists for
+      the (commissioner, worker) pair (R4).
+    * ``below_ttl_hold`` — the row is young (or the worker is
+      non-terminal and the TTL has not elapsed): HOLD, retried next
+      cycle.
+    * ``already_resolved`` — another actor won the race (the guarded
+      transition's rowcount was 0). NEVER retried in place.
+    * ``masked_suspected`` — the D4(iii) masked-enqueue signal
+      (observability only — never an auto-action).
+    * ``probe_errors`` — the probes that could not prove their
+      predicate (P1: the row was HELD).
+    """
+
+    abandoned_worker_terminal: int = 0
+    abandoned_ttl: int = 0
+    abandoned_worker_missing: int = 0
+    satisfied_on_evidence: int = 0
+    skipped_live: int = 0
+    skipped_watcher_pending: int = 0
+    below_ttl_hold: int = 0
+    already_resolved: int = 0
+    masked_suspected: int = 0
+    probe_errors: int = 0
+
+    def to_dict(self) -> dict[str, int]:
+        base = super().to_dict()
+        base.update(
+            {
+                "abandoned_worker_terminal": self.abandoned_worker_terminal,
+                "abandoned_ttl": self.abandoned_ttl,
+                "abandoned_worker_missing": self.abandoned_worker_missing,
+                "satisfied_on_evidence": self.satisfied_on_evidence,
+                "skipped_live": self.skipped_live,
+                "skipped_watcher_pending": self.skipped_watcher_pending,
+                "below_ttl_hold": self.below_ttl_hold,
+                "already_resolved": self.already_resolved,
+                "masked_suspected": self.masked_suspected,
+                "probe_errors": self.probe_errors,
+            }
+        )
+        return base
 
 
 @dataclass
@@ -474,6 +585,11 @@ class ReportDeliveryRecoveryService:
         lane_recovery_retry: bool = True,
         lane_orphan: bool = True,
         lane_stuck_wake: bool = True,
+        lane_mission_reconciliation: bool = True,
+        mission_record_repo: Any = None,
+        dependency_bus: Any = None,
+        job_repo: Any = None,
+        mission_commission_ttl_seconds: int | None = None,
     ) -> None:
         """Initialize the recovery service.
 
@@ -507,6 +623,27 @@ class ReportDeliveryRecoveryService:
             lane_recovery_retry: Lane 4 kill-switch (default
                 ``True``).
             lane_orphan: Lane 5 kill-switch (default ``True``).
+            lane_stuck_wake: Lane 6 kill-switch (default ``True``).
+            lane_mission_reconciliation: Lane 7 kill-switch (default
+                ``True``) — the mission-commission reconciliation sweep
+                (Proposal B PR3).
+            mission_record_repo: The duck-typed PR1 mission-record
+                repository. Lane 7's ADMISSION + GUARDED TRANSITION
+                live there. ``None`` (or a repository without
+                ``find_outstanding_commissions``) → the lane logs ONE
+                INFO line and returns ZERO (the unwired-degrade
+                contract, the ``force_cancel_and_schedule_retry``
+                precedent) — it never reads and never writes.
+            dependency_bus: The duck-typed dependency bus (lane 7's
+                PENDING-watcher probe). Unwired → the probe HOLDS the
+                row (fail-MISS), it never assumes absence.
+            job_repo: The duck-typed job repository (lane 7's
+                JobItem-live probe, OQ-7). Unwired → the probe HOLDS
+                the row (fail-MISS).
+            mission_commission_ttl_seconds: The commission TTL horizon
+                (the time-bounded fail-MISS backstop). ``None`` → the
+                ``ENSEMBLE_MISSION_COMMISSION_TTL_SECONDS`` env knob
+                (default 21600s = 6h).
         """
         self._task_repo = task_repo
         self._report_injection_repo = report_injection_repo
@@ -524,8 +661,54 @@ class ReportDeliveryRecoveryService:
         self._lane_recovery_retry = bool(lane_recovery_retry)
         self._lane_orphan = bool(lane_orphan)
         self._lane_stuck_wake = bool(lane_stuck_wake)
+        self._lane_mission_reconciliation = bool(lane_mission_reconciliation)
+        self._mission_record_repo = mission_record_repo
+        self._dependency_bus = dependency_bus
+        self._job_repo = job_repo
+        self._mission_commission_ttl_seconds = (
+            self._resolve_commission_ttl_seconds(mission_commission_ttl_seconds)
+        )
+        # The unwired-degrade INFO line is logged ONCE per service
+        # lifetime (not once per sweep pass).
+        self._mission_lane_degrade_logged = False
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+
+    @staticmethod
+    def _resolve_commission_ttl_seconds(configured: int | None = None) -> int:
+        """Resolve the commission TTL horizon.
+
+        PRECEDENCE: the ``ENSEMBLE_MISSION_COMMISSION_TTL_SECONDS`` env
+        knob (the operator lever) wins over the configured default; with
+        neither, the house default (21600s = 6h) applies — the same
+        horizon family as ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` (the
+        one-horizon principle).
+
+        The resolver is the house-switch pattern (restart-read, cached)
+        and NEVER raises: a misconfigured knob must not strand every
+        commission (the exact failure the sweep exists to prevent).
+        """
+        from daemon.constants import DEFAULT_MISSION_COMMISSION_TTL_SECONDS
+
+        fallback = int(
+            configured
+            if configured is not None
+            else DEFAULT_MISSION_COMMISSION_TTL_SECONDS
+        )
+        try:
+            from daemon.services.mission_record_service import (
+                resolve_mission_commission_ttl_seconds,
+            )
+
+            return int(resolve_mission_commission_ttl_seconds(default=fallback))
+        except Exception as exc:  # noqa: BLE001 — never break the sweep
+            logger.warning(
+                "mission_records: the commission TTL knob could not be "
+                "resolved (%s) — using the %ss default",
+                exc,
+                fallback,
+            )
+            return fallback
 
     # --------------------------------------------------------
     # Lifecycle
@@ -565,7 +748,8 @@ class ReportDeliveryRecoveryService:
             f"pending_age={self._lane_pending_age}, "
             f"recovery_retry={self._lane_recovery_retry}, "
             f"orphan={self._lane_orphan}, "
-            f"stuck_wake={self._lane_stuck_wake}]"
+            f"stuck_wake={self._lane_stuck_wake}, "
+            f"mission_reconciliation={self._lane_mission_reconciliation}]"
         )
 
     def stop(self, timeout: float | None = None) -> None:
@@ -766,6 +950,15 @@ class ReportDeliveryRecoveryService:
         # (state='PENDING') and the wake is preserved.
         if self._lane_stuck_wake:
             result.lanes["stuck_wake"] = self._run_stuck_wake_lane()
+        # Lane 7 (Proposal B PR3): the mission-commission reconciliation
+        # sweep. LAST — lanes 1-6 are DELIVERY healing, so a commission
+        # whose report is re-delivered by them in this same pass must be
+        # judged on the POST-HEAL state: the abandonment decision runs
+        # after every delivery lane had its chance.
+        if self._lane_mission_reconciliation:
+            result.lanes["mission_reconciliation"] = (
+                self._run_mission_reconciliation_lane()
+            )
         self._finalize_sweep_result(result)
         return result
 
@@ -1829,3 +2022,697 @@ class ReportDeliveryRecoveryService:
             )
             raise
         result.recovered += 1
+
+    # --------------------------------------------------------
+    # Lane 7 — MISSION-COMMISSION RECONCILIATION (Proposal B PR3)
+    # --------------------------------------------------------
+    #
+    # THE ESCAPE VALVE for the "eternal mission" class: an outstanding
+    # ``mission_commissions`` row whose commissioned work will never
+    # produce a report holds its mission open forever (the D2(c)
+    # settle-hold refuses to settle while ``outstanding_commissions >
+    # 0``). This lane resolves the provably-dead rows to ``abandoned``
+    # (and the provably-delivered ones to ``satisfied``), so the EXISTING
+    # settle machinery can do its job.
+    #
+    # POSTURE — FAIL-MISS, everywhere (§2 of the sweep design):
+    #   * every probe error HOLDS the row (the commission stays
+    #     outstanding, a per-probe error counter increments, the row is
+    #     retried next cycle);
+    #   * the sweep NEVER resolves a commission on a failed probe —
+    #     abandoning a commission is a wrong-side terminal transition
+    #     in the same moral category as finalizing a live mission;
+    #   * the ONE bounded exception is the TTL (P3): past the horizon
+    #     AND with a SUCCESSFUL "not live" liveness probe, the
+    #     unprovable state resolves to ``abandoned`` LOUDLY. A
+    #     liveness-probe ERROR still holds at any age.
+    #
+    # The sweep writes ONLY ``mission_commissions`` (R6): no
+    # ``instances.status`` writes (the terminal-write census stays
+    # untouched), no ``mission_records`` writes (the settle machinery
+    # owns settle), no ``report_injections`` / ``dependency_watchers``
+    # mutations (lanes 1-6 own delivery; the bus owns its lifecycle).
+
+    def _run_mission_reconciliation_lane(
+        self,
+    ) -> MissionReconciliationLaneResult:
+        """Lane 7 — resolve the provably-dead outstanding commissions.
+
+        Admission (R0) is COMMISSION-centric (not report-injection
+        centric): the global ``state='outstanding'`` query is the only
+        admission shape that can see the T2 (worker row gone) / T3
+        (worker stalled) / T4 (masked enqueue) commission shapes the
+        delivery lanes never see.
+
+        Mode ladder (R7): ``off`` → the lane is NOT EVEN QUERIED;
+        ``dry`` → full detect + log + counters, ZERO writes; ``enforce``
+        → writes (the guarded transition).
+
+        Returns:
+            The lane counters (the design's R9 set).
+        """
+        out = MissionReconciliationLaneResult()
+        repo = self._mission_record_repo
+        find_outstanding = getattr(repo, "find_outstanding_commissions", None)
+        if repo is None or not callable(find_outstanding):
+            # UNWIRED DEGRADE (the ``force_cancel_and_schedule_retry``
+            # duck-typed gate precedent): a single INFO log, ZERO — no
+            # reads, no writes. A pre-PR1 binary or a test double
+            # without the repository must stay honest.
+            if not self._mission_lane_degrade_logged:
+                self._mission_lane_degrade_logged = True
+                logger.info(
+                    "RDRS lane 7: mission_record_repo is not wired — the "
+                    "mission-commission reconciliation lane is inert "
+                    "(no reads, no writes)"
+                )
+            return out
+
+        mode = self._mission_records_mode()
+        if mode == MISSION_RECORDS_MODE_OFF:
+            # R7: ``off`` → the lane is not even queried.
+            logger.info(
+                "RDRS lane 7: mission-records mode is off — lane not queried"
+            )
+            return out
+
+        rows = list(find_outstanding(limit=self._batch_cap))
+        logger.info(
+            "RDRS lane 7: mission_reconciliation admitted %d outstanding "
+            "commission(s) (mode=%s, ttl=%ss, batch_cap=%d)",
+            len(rows),
+            mode,
+            self._mission_commission_ttl_seconds,
+            self._batch_cap,
+        )
+        for row in rows:
+            # F4 (2026-08-20): stop-event check between rows — a polite
+            # ``stop()`` exits the batch promptly. Cheap (one
+            # Event.is_set).
+            if self._stop_event.is_set():
+                logger.info(
+                    "RDRS lane 7: stop requested mid-batch — exiting loop"
+                )
+                break
+            try:
+                self._reconcile_one_commission(row, out, mode=mode)
+            except Exception as exc:
+                # P2 — the host's per-row posture: log + errors += 1 +
+                # row untouched. A crashed pass abandons NOTHING.
+                out.errors += 1
+                logger.warning(
+                    "sweep mission_reconciliation row error "
+                    "commission=%s..., mission=%s..., worker=%s...: "
+                    "%s: %s",
+                    str(getattr(row, "commission_id", ""))[:8],
+                    str(getattr(row, "mission_id", ""))[:8],
+                    str(getattr(row, "worker_instance_id", ""))[:8],
+                    type(exc).__name__,
+                    exc,
+                )
+        return out
+
+    def _reconcile_one_commission(
+        self,
+        commission: Any,
+        out: MissionReconciliationLaneResult,
+        *,
+        mode: str,
+    ) -> None:
+        """Reconcile ONE outstanding commission (the design's per-row
+        pseudo-code, step by step).
+
+        Every probe is fail-MISS (P1): a probe error HOLDS the row.
+        """
+        commission_id = commission.commission_id
+        mission_id = commission.mission_id
+        worker_id = commission.worker_instance_id
+        commissioner_id = commission.commissioner_instance_id
+        lane = getattr(commission, "lane", "")
+
+        # ── (1) TTL age math — parsed in PYTHON ──
+        # Never string-compared in SQL (the TEXT-ISO convention). An
+        # unparsable ``created_at`` HOLDS the row — never guess age.
+        age_seconds = self._commission_age_seconds(commission)
+        if age_seconds is None:
+            out.probe_errors += 1
+            logger.warning(
+                "sweep mission_reconciliation HOLD (unparsable created_at) "
+                "mission_id=%s, commission_id=%s, commissioner=%s, "
+                "worker=%s, lane=%s",
+                mission_id,
+                commission_id,
+                commissioner_id,
+                worker_id,
+                lane,
+            )
+            return
+
+        # ── (2) the worker instance row read ──
+        try:
+            worker = self._instance_repo.get(worker_id)
+        except Exception as exc:
+            out.probe_errors += 1
+            logger.warning(
+                "sweep mission_reconciliation HOLD (worker read failed) "
+                "mission_id=%s, commission_id=%s, commissioner=%s, "
+                "worker=%s, lane=%s: %s: %s",
+                mission_id,
+                commission_id,
+                commissioner_id,
+                worker_id,
+                lane,
+                type(exc).__name__,
+                exc,
+            )
+            return
+
+        if worker is None:
+            # POSITIVE ABSENCE (the read succeeded and returned no
+            # row) — the T2 shape. Below the TTL a recent absence may
+            # be a visibility artifact → HOLD.
+            if age_seconds > self._mission_commission_ttl_seconds:
+                self._note_masked_enqueue(
+                    commission, out, age_seconds=age_seconds
+                )
+                self._abandon_commission(
+                    commission,
+                    out,
+                    mode=mode,
+                    reason=MISSION_ABANDON_REASON_WORKER_MISSING,
+                    age_seconds=age_seconds,
+                )
+            else:
+                out.below_ttl_hold += 1
+            return
+
+        worker_status = getattr(worker, "status", None)
+
+        # ── (3) liveness (R3) — the guard's own probe family + the
+        # JobItem-live check (OQ-7). A live worker is NEVER abandoned,
+        # at any age (R2a).
+        try:
+            live = self._commission_worker_is_live(worker_id, commission)
+        except Exception as exc:
+            out.probe_errors += 1
+            logger.warning(
+                "sweep mission_reconciliation HOLD (liveness probe failed) "
+                "mission_id=%s, commission_id=%s, commissioner=%s, "
+                "worker=%s, lane=%s: %s: %s",
+                mission_id,
+                commission_id,
+                commissioner_id,
+                worker_id,
+                lane,
+                type(exc).__name__,
+                exc,
+            )
+            return
+        if live:
+            out.skipped_live += 1
+            return
+
+        # ── (4) the bus watcher (R4) — a PENDING watcher from that
+        # worker targeting the commissioner is live obligation
+        # evidence: HOLD, even past the TTL.
+        try:
+            watchers = self._pending_bus_watchers(commissioner_id, worker_id)
+        except Exception as exc:
+            out.probe_errors += 1
+            logger.warning(
+                "sweep mission_reconciliation HOLD (bus-watcher probe "
+                "failed) mission_id=%s, commission_id=%s, commissioner=%s, "
+                "worker=%s, lane=%s: %s: %s",
+                mission_id,
+                commission_id,
+                commissioner_id,
+                worker_id,
+                lane,
+                type(exc).__name__,
+                exc,
+            )
+            return
+        if watchers:
+            out.skipped_watcher_pending += 1
+            return
+
+        # ── (5) the delivery-evidence TRILET (R1/R1b) — the lane-2
+        # evidence helpers, read on the COMMISSIONER as the recipient.
+        try:
+            has_evidence = self._delivery_evidence_exists(
+                commissioner_id, worker_id
+            )
+        except Exception as exc:
+            out.probe_errors += 1
+            logger.warning(
+                "sweep mission_reconciliation HOLD (delivery-evidence probe "
+                "failed) mission_id=%s, commission_id=%s, commissioner=%s, "
+                "worker=%s, lane=%s: %s: %s",
+                mission_id,
+                commission_id,
+                commissioner_id,
+                worker_id,
+                lane,
+                type(exc).__name__,
+                exc,
+            )
+            return
+
+        # ── (§6) the MASKED-ENQUEUE observability — past the grace
+        # window (= the TTL), a commission with NO queue row at all is
+        # the conservative "the enqueue was masked" signal. OBSERVATION
+        # ONLY: no auto-action, and it NEVER abandons a commission.
+        if age_seconds > self._mission_commission_ttl_seconds:
+            self._note_masked_enqueue(
+                commission, out, age_seconds=age_seconds
+            )
+
+        if has_evidence:
+            # R1b — SATISFY ON EVIDENCE: the delivery happened; the
+            # natural satisfy write was lost (crash between the
+            # delivery and the satisfy). Positive evidence is PROOF, so
+            # the same guarded transition applies.
+            self._satisfy_commission_on_evidence(
+                commission, out, mode=mode, age_seconds=age_seconds
+            )
+            return
+
+        # ── (6) R1 — the worker is terminal and NOTHING was delivered.
+        if worker_status in _MISSION_COMMISSION_TERMINAL_STATUSES:
+            self._abandon_commission(
+                commission,
+                out,
+                mode=mode,
+                reason=MISSION_ABANDON_REASON_WORKER_TERMINAL,
+                age_seconds=age_seconds,
+            )
+            return
+
+        # ── (7) R2b — the TTL backstop (non-terminal, provably idle).
+        if age_seconds > self._mission_commission_ttl_seconds:
+            self._abandon_commission(
+                commission,
+                out,
+                mode=mode,
+                reason=MISSION_ABANDON_REASON_TTL,
+                age_seconds=age_seconds,
+            )
+            return
+
+        # ── (8) below the TTL → HOLD (the row is retried next cycle).
+        out.below_ttl_hold += 1
+
+    # --------------------------------------------------------
+    # Lane 7 — the probes (each one fail-MISS)
+    # --------------------------------------------------------
+
+    def _mission_records_mode(self) -> str:
+        """The mission-record mode ladder (``off`` / ``dry`` / ``enforce``).
+
+        Deferred import (the house style — the mode ladder's owner is
+        ``daemon.services.mission_record_service``). An UNRECOGNIZED
+        token raises loudly at the boot resolution site; the lane must
+        never break on a knob fault, so it degrades to the SAFEST mode
+        (``off`` — no reads, no writes).
+        """
+        from daemon.services.mission_record_service import (
+            MISSION_RECORDS_MODE_ENV,
+            MissionRecordMode,
+            resolve_mission_records_mode,
+        )
+
+        try:
+            return resolve_mission_records_mode()
+        except Exception as exc:  # noqa: BLE001 — never break on a knob fault
+            logger.warning(
+                "mission_records: %s unresolved (%s) — the reconciliation "
+                "lane stays INERT",
+                MISSION_RECORDS_MODE_ENV,
+                exc,
+            )
+            return MissionRecordMode.OFF
+
+    def _commission_age_seconds(self, commission: Any) -> float | None:
+        """The commission's age in seconds — parsed in PYTHON.
+
+        ``None`` when ``created_at`` is missing or unparsable (the
+        ``parse_iso_utc`` contract): the caller HOLDS the row — age is
+        never guessed. The TEXT-ISO column is NEVER string-compared in
+        SQL (the report-recipient rule-4 precedent).
+        """
+        created_at = getattr(commission, "created_at", None)
+        parsed = parse_iso_utc(created_at) if created_at else None
+        if parsed is None:
+            return None
+        return max(0.0, (now_utc() - parsed).total_seconds())
+
+    def _commission_worker_is_live(
+        self, worker_id: str, commission: Any
+    ) -> bool:
+        """R3 — is the commissioned worker LIVE?
+
+        Two legs, both from the SAME repository method families the
+        mission-live guard reads (no consumer-side re-derivation):
+
+        * the guard's member-alive leg (``instance_repo.has_live_work``);
+        * the JobItem-live check (OQ-7): a commission whose ``work_id``
+          resolves to a NON-TERMINAL JobItem is live — the commission
+          row CARRIES the work linkage, which is a strict improvement
+          over the guard's named residual.
+
+        Raises:
+            MissionReconciliationProbeError: the probe could not run
+                (an unwired dependency) — the caller HOLDS (P1).
+        """
+        live = bool(self._instance_repo.has_live_work(worker_id))
+        if live:
+            return True
+        work_id = getattr(commission, "work_id", None)
+        if not work_id:
+            # No job linkage → the JobItem leg does not apply (NOT an
+            # error: there is nothing to probe).
+            return False
+        get_job = getattr(self._resolve_job_repo(), "get", None)
+        if not callable(get_job):
+            raise MissionReconciliationProbeError(
+                "job_repo is not wired — the JobItem-live check cannot run"
+            )
+        job = get_job(work_id)
+        if job is None:
+            # A missing JobItem is NOT live work (the row simply does
+            # not exist — the T2 shape is handled by the WORKER read).
+            return False
+        admission_state = getattr(job, "admission_state", None)
+        return admission_state in (
+            JOB_ADMISSION_QUEUED,
+            JOB_ADMISSION_ACTIVE,
+        )
+
+    def _pending_bus_watchers(
+        self, commissioner_id: str, worker_id: str
+    ) -> list[Any]:
+        """R4 — the PENDING bus watchers for the (commissioner, worker) pair.
+
+        Raises:
+            MissionReconciliationProbeError: the bus is not wired — the
+                caller HOLDS (P1: we cannot prove absence).
+        """
+        probe = getattr(
+            self._resolve_dependency_bus(), "pending_watchers_for_pair", None
+        )
+        if not callable(probe):
+            raise MissionReconciliationProbeError(
+                "dependency_bus is not wired — the bus-watcher probe "
+                "cannot run"
+            )
+        return list(probe(commissioner_id, worker_id))
+
+    def _resolve_dependency_bus(self) -> Any:
+        """The dependency bus (the injected one, else the singleton).
+
+        LAZY resolution on purpose: the bus singleton is registered
+        AFTER the recovery service is wired (the boot order), so the
+        constructor-time value is often ``None``. The probe resolves it
+        at CALL time; an absent bus HOLDs the row (fail-MISS) — the
+        sweep never assumes "no watcher" from a missing dependency.
+        """
+        if self._dependency_bus is not None:
+            return self._dependency_bus
+        try:
+            from daemon.services.dependency_bus import get_dependency_bus
+
+            return get_dependency_bus()
+        except Exception:  # noqa: BLE001 — the probe HOLDs on a miss
+            return None
+
+    def _resolve_job_repo(self) -> Any:
+        """The job repository (the injected one, else the manager's).
+
+        LAZY resolution on purpose: the JobQueueService is wired AFTER
+        the recovery service (the boot order). The public
+        ``JobQueueService.repository`` accessor is used — no private
+        ``_repository`` reach-through.
+        """
+        if self._job_repo is not None:
+            return self._job_repo
+        service = getattr(self._manager, "_job_queue_service", None)
+        if service is None:
+            return None
+        return getattr(service, "repository", None)
+
+    def _delivery_evidence_exists(
+        self, commissioner_id: str, worker_id: str
+    ) -> bool:
+        """R1/R1b — the delivery-evidence TRILET, read on the COMMISSIONER.
+
+        The lane-2 evidence helpers, reused on the COMMISSIONER as the
+        recipient (the commissioner's report is the obligation):
+
+        1. an injection row in ANY state for the (commissioner, worker)
+           pair;
+        2. the queue-side PREFIX ledger (``internal_report:{worker}:%``);
+        3. the parent-history PREFIX ledger (loop-bound → bridged onto
+           the manager's loop via ``_run_async_on_manager_loop``).
+
+        Raises:
+            MissionReconciliationProbeError: a probe could not run — the
+                caller HOLDS (P1).
+        """
+        find_pair = getattr(
+            self._report_injection_repo, "find_any_for_pair", None
+        )
+        if not callable(find_pair):
+            raise MissionReconciliationProbeError(
+                "report_injection_repo lacks find_any_for_pair — the "
+                "injection-row probe cannot run"
+            )
+        if find_pair(commissioner_id, worker_id) is not None:
+            return True
+
+        queue_evidence = getattr(
+            self._queue_repo, "find_wake_already_delivered_evidence", None
+        )
+        if not callable(queue_evidence):
+            raise MissionReconciliationProbeError(
+                "queue_repo lacks find_wake_already_delivered_evidence — "
+                "the queue-side PREFIX probe cannot run"
+            )
+        if queue_evidence(commissioner_id, worker_id):
+            return True
+
+        checkpointer = getattr(self._manager, "_checkpointer", None)
+        if checkpointer is None:
+            # Without the parent-history ledger we cannot PROVE absence
+            # → HOLD (P1). The lane-2 delivery path degrades to
+            # "no evidence" because a MISS there is the normal case;
+            # here a miss authorizes a DESTRUCTIVE transition.
+            raise MissionReconciliationProbeError(
+                "no checkpointer — the parent-history PREFIX probe cannot run"
+            )
+        from daemon.services.report_delivery_ledger import (
+            parent_history_has_internal_report,
+        )
+
+        return bool(
+            self._run_async_on_manager_loop(
+                parent_history_has_internal_report,
+                checkpointer,
+                commissioner_id,
+                worker_id,
+                None,
+            )
+        )
+
+    def _note_masked_enqueue(
+        self,
+        commission: Any,
+        out: MissionReconciliationLaneResult,
+        *,
+        age_seconds: float,
+    ) -> None:
+        """§6 — the MASKED-ENQUEUE observability (counter + log ONLY).
+
+        A commission whose commissioning act left NO queue row at all
+        (whole-window absence — any source, any status) past the grace
+        window (= the TTL) is the conservative "the enqueue was masked"
+        signal (D4(iii)).
+
+        NO AUTO-ACTION: a masked commission is NOT abandoned on this
+        signal alone (the worker may be a live target of a sub-lane that
+        legitimately writes no MessageQueue row), and it is NOT
+        re-delivered (no re-commissioning machinery is in scope).
+
+        A probe fault here is an OBSERVABILITY fault, not a decision
+        fault: it increments ``probe_errors`` but never HOLDS the row.
+        """
+        if age_seconds <= self._mission_commission_ttl_seconds:
+            return
+        try:
+            has_rows = self._queue_repo.has_row_since(
+                commission.worker_instance_id,
+                self._commission_created_at_naive(commission),
+            )
+        except Exception as exc:
+            out.probe_errors += 1
+            logger.warning(
+                "sweep mission_reconciliation masked-probe failed "
+                "mission_id=%s, commission_id=%s, worker=%s: %s: %s",
+                commission.mission_id,
+                commission.commission_id,
+                commission.worker_instance_id,
+                type(exc).__name__,
+                exc,
+            )
+            return
+        if has_rows:
+            return
+        out.masked_suspected += 1
+        logger.warning(
+            "sweep mission_reconciliation MASKED ENQUEUE suspected "
+            "mission_id=%s, commission_id=%s, commissioner=%s, worker=%s, "
+            "lane=%s, age_seconds=%d — no queue row since the mint; "
+            "NO auto-action",
+            commission.mission_id,
+            commission.commission_id,
+            commission.commissioner_instance_id,
+            commission.worker_instance_id,
+            getattr(commission, "lane", ""),
+            int(age_seconds),
+        )
+
+    def _commission_created_at_naive(self, commission: Any):
+        """The commission's mint time as a NAIVE UTC datetime.
+
+        The ``message_queue.enqueued_at`` column is a
+        ``timestamp without time zone`` column — the PG-UTC convention
+        binds NAIVE UTC values (a tz-aware bind would render in the
+        session TimeZone).
+        """
+        parsed = parse_iso_utc(getattr(commission, "created_at", None))
+        if parsed is None:
+            raise MissionReconciliationProbeError(
+                "commission created_at is unparsable"
+            )
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+    # --------------------------------------------------------
+    # Lane 7 — the writes (R5 guarded transition + R7 mode ladder)
+    # --------------------------------------------------------
+
+    def _abandon_commission(
+        self,
+        commission: Any,
+        out: MissionReconciliationLaneResult,
+        *,
+        mode: str,
+        reason: str,
+        age_seconds: float,
+    ) -> None:
+        """R5/R7 — the guarded ABANDONMENT.
+
+        ONE guarded statement (``UPDATE ... WHERE state='outstanding'``);
+        ``rowcount == 0`` means another actor won the race →
+        ``already_resolved``, NEVER a retry in place.
+
+        The abandon-reason vocabulary is FROZEN (the design's OQ-4):
+        ``worker_terminal_no_report`` / ``ttl_expired_not_live`` /
+        ``worker_row_missing``. ``superseded`` is reserved to the mint
+        lanes and is never written here.
+        """
+        if reason not in MISSION_COMMISSION_ABANDON_REASONS:
+            raise ValueError(
+                f"unknown mission-commission abandon reason: {reason!r}"
+            )
+        enforcing = mode == MISSION_RECORDS_MODE_ENFORCE
+        if enforcing:
+            resolved = self._mission_record_repo.resolve_commission(
+                commission.commission_id,
+                MISSION_COMMISSION_STATE_ABANDONED,
+                abandon_reason=reason,
+            )
+            if not resolved:
+                out.already_resolved += 1
+                logger.info(
+                    "sweep mission_reconciliation already_resolved "
+                    "mission_id=%s, commission_id=%s, commissioner=%s, "
+                    "worker=%s, lane=%s, abandon_reason=%s",
+                    commission.mission_id,
+                    commission.commission_id,
+                    commission.commissioner_instance_id,
+                    commission.worker_instance_id,
+                    getattr(commission, "lane", ""),
+                    reason,
+                )
+                return
+            out.recovered += 1
+        # The DETECTION counters move in every mode (in ``dry`` they are
+        # the dry-run evidence that tunes the TTL default).
+        if reason == MISSION_ABANDON_REASON_WORKER_TERMINAL:
+            out.abandoned_worker_terminal += 1
+        elif reason == MISSION_ABANDON_REASON_TTL:
+            out.abandoned_ttl += 1
+        else:
+            out.abandoned_worker_missing += 1
+        logger.warning(
+            "sweep mission_reconciliation %s mission_id=%s, "
+            "commission_id=%s, commissioner=%s, worker=%s, lane=%s, "
+            "abandon_reason=%s, age_seconds=%d",
+            "ABANDONED" if enforcing else "WOULD ABANDON (dry-run)",
+            commission.mission_id,
+            commission.commission_id,
+            commission.commissioner_instance_id,
+            commission.worker_instance_id,
+            getattr(commission, "lane", ""),
+            reason,
+            int(age_seconds),
+        )
+
+    def _satisfy_commission_on_evidence(
+        self,
+        commission: Any,
+        out: MissionReconciliationLaneResult,
+        *,
+        mode: str,
+        age_seconds: float,
+    ) -> None:
+        """R1b — SATISFY ON EVIDENCE (the mirror of R1).
+
+        The worker reached a terminal state (or not) WITH positive
+        delivery evidence while the row is still ``outstanding``: the
+        natural satisfy write was lost (a crash between the delivery and
+        the satisfy). Positive evidence is PROOF, so the same guarded
+        transition and the same fail-MISS probing apply.
+        """
+        enforcing = mode == MISSION_RECORDS_MODE_ENFORCE
+        if enforcing:
+            resolved = self._mission_record_repo.resolve_commission(
+                commission.commission_id,
+                MISSION_COMMISSION_STATE_SATISFIED,
+            )
+            if not resolved:
+                out.already_resolved += 1
+                logger.info(
+                    "sweep mission_reconciliation already_resolved "
+                    "(satisfy-on-evidence) mission_id=%s, commission_id=%s, "
+                    "commissioner=%s, worker=%s, lane=%s",
+                    commission.mission_id,
+                    commission.commission_id,
+                    commission.commissioner_instance_id,
+                    commission.worker_instance_id,
+                    getattr(commission, "lane", ""),
+                )
+                return
+            out.recovered += 1
+        out.satisfied_on_evidence += 1
+        logger.warning(
+            "sweep mission_reconciliation %s mission_id=%s, "
+            "commission_id=%s, commissioner=%s, worker=%s, lane=%s, "
+            "satisfy_reason=delivery_evidence, age_seconds=%d",
+            "SATISFIED" if enforcing else "WOULD SATISFY (dry-run)",
+            commission.mission_id,
+            commission.commission_id,
+            commission.commissioner_instance_id,
+            commission.worker_instance_id,
+            getattr(commission, "lane", ""),
+            int(age_seconds),
+        )

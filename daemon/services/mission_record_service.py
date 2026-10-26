@@ -145,6 +145,10 @@ from ..repositories.mission_record.repository import (
     MissionRecordError,
     MissionRecordRepository,
 )
+from ..constants import (
+    DEFAULT_MISSION_COMMISSION_TTL_SECONDS,
+    MISSION_COMMISSION_TTL_ENV,
+)
 from .timestamps import now_utc_iso
 
 if TYPE_CHECKING:
@@ -278,6 +282,69 @@ def _mode_is_off() -> bool:
         return True
 
 
+# ---------------------------------------------------------------------------
+# Commission TTL horizon (the reconciliation sweep's time-bounded
+# fail-MISS backstop — Proposal B PR3)
+# ---------------------------------------------------------------------------
+
+#: The CACHED resolved TTL horizon (restart-read, house-switch pattern —
+#: the same shape as :func:`resolve_mission_records_mode`). ``None`` =
+#: not resolved yet.
+_MISSION_COMMISSION_TTL_SECONDS: int | None = None
+
+
+def resolve_mission_commission_ttl_seconds(
+    default: int = DEFAULT_MISSION_COMMISSION_TTL_SECONDS,
+) -> int:
+    """Resolve the commission TTL horizon from the environment.
+
+    ``ENSEMBLE_MISSION_COMMISSION_TTL_SECONDS`` — the operator knob
+    for the reconciliation sweep's time-bounded fail-MISS backstop
+    (the design's R2/P3). Default ``21600`` (6h) — the same horizon
+    family as ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` (the
+    one-horizon principle).
+
+    House-switch pattern: the value is resolved ONCE and cached
+    (restart-read) so a mid-run env mutation cannot change a resolved
+    knob. An UNRECOGNIZED / non-positive value degrades to the
+    ``default`` with a WARNING (never raises): a misconfigured knob must
+    not break the sweep thread (the fail-MISS producer posture — a
+    raised knob fault would strand every commission forever, which is
+    the exact failure the sweep exists to prevent).
+    """
+    global _MISSION_COMMISSION_TTL_SECONDS
+    raw = (os.environ.get(MISSION_COMMISSION_TTL_ENV) or "").strip()
+    if not raw:
+        # No env override → the caller's configured default applies
+        # (per call — the cache holds the ENV value only, so two
+        # constructions with different configured defaults do not
+        # poison each other).
+        return int(default)
+    if _MISSION_COMMISSION_TTL_SECONDS is None:
+        try:
+            candidate = int(raw)
+        except ValueError:
+            candidate = 0
+        if candidate > 0:
+            _MISSION_COMMISSION_TTL_SECONDS = candidate
+        else:
+            logger.warning(
+                "mission_records: invalid %s value %r — using the "
+                "default %ss",
+                MISSION_COMMISSION_TTL_ENV,
+                raw,
+                default,
+            )
+            _MISSION_COMMISSION_TTL_SECONDS = int(default)
+    return _MISSION_COMMISSION_TTL_SECONDS
+
+
+def _reset_mission_commission_ttl_for_tests() -> None:
+    """Clear the cached TTL horizon (unit-test isolation only)."""
+    global _MISSION_COMMISSION_TTL_SECONDS
+    _MISSION_COMMISSION_TTL_SECONDS = None
+
+
 def scheduler_mint_extension_enabled() -> bool:
     """The INERT scheduler extension-point gate (default OFF).
 
@@ -347,6 +414,22 @@ class MissionRecordService:
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
         self._repo = MissionRecordRepository(engine)
+
+    def commission_repository(self) -> MissionRecordRepository:
+        """Public access to the underlying commission/record repository.
+
+        Proposal B PR3 — the RECONCILIATION SWEEP (RDRS lane 7) is a
+        READER + the single GUARDED RESOLVER of commission rows; it
+        needs the repository's guarded transition primitives
+        (``find_outstanding_commissions`` / ``resolve_commission``)
+        without reaching into a private attribute.
+
+        The accessors this replaces: ``service._repo`` reach-throughs
+        (the reviewer follow-up on the ``_instance_manager._instance_repository``
+        family). The repository is the SAME object the service writes
+        through — no second writer, no drift.
+        """
+        return self._repo
 
     # ── internal validation ──
 
@@ -1687,6 +1770,8 @@ __all__ = [
     "MissionResolution",
     "MissionRecordMode",
     "MISSION_RECORDS_MODE_ENV",
+    "MISSION_COMMISSION_TTL_ENV",
+    "resolve_mission_commission_ttl_seconds",
     "MISSION_ID_KEY",
     "SCHEDULER_MINT_EXTENSION_ENV",
     "resolve_mission_records_mode",
