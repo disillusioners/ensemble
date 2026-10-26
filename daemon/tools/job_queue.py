@@ -2048,12 +2048,21 @@ def create_job_tools(
             #       accidentally use the work-side primitive to
             #       message.
             #
-            #     Non-JobItem work (``kind != "job"`` — Task / report)
-            #     is unaffected: the gate only fires for JobItem rows
-            #     whose ``job_type`` is the mirror kind. ``record.job_type``
-            #     is sourced from the resolver-backed WorkRecord, so
-            #     the check is consistent with the four Fix-C read
-            #     surfaces (§8.2). The fallback to ``old_job.job_type``
+            #     FIRST CLAUSE IS NOT KIND-RESTRICTED (comment fix,
+            #     PR2 runtime-gate finding #3 — the behavior is
+            #     correct and matches the docstring; only this
+            #     comment was wrong): the gate keys on
+            #     ``record.job_type == 'message'`` REGARDLESS of
+            #     ``kind``, so a message-origin Task (``kind='task'``,
+            #     ``job_type='message'`` — the mirror receipt's
+            #     work-side row) IS refused here, exactly like a
+            #     JobItem mirror row. Only genuinely non-mirror work
+            #     (``job_type`` not ``'message'``) passes. The second
+            #     clause is the legacy belt for older fixtures where
+            #     ``job_type`` is absent from the WorkRecord and only
+            #     the JobItem row carries it.
+            #
+            #     The fallback to ``old_job.job_type``
             #     covers the legacy branch when ``job_type`` is not on
             #     the WorkRecord (older test fixtures).
             if getattr(record, "job_type", None) == "message" or (
