@@ -137,7 +137,7 @@ valve so it cannot become an eternal mission.
 | **②** Scheduler anchoring | **UNCHANGED — the scheduler mint hook stays INERT.** `ENSEMBLE_MISSION_RECORDS_SCHEDULER_MINT` stays default-OFF (the mode ladder alone does not arm it — both gates must open). Lane 9 stays bare. | PR1 notes §(a) item 6 · PR2 notes §(a) item 10 · PR2 runtime gate item 6 |
 | **③** The amendment fires AT DELIVERY | **SHIPPED** (ruling ③) — the re-founding amendment fires on EVERY DELIVERY (it is DECOUPLED from the message-tap site, so it does not depend on the tap's side table), not when the window is scanned. Kills the ~14-minute mid-turn correction lag seam. | PR2 notes §(a) item 7 (AMENDED) · `tests/unit/test_mission_record_pr2_tap_amend.py` · the PR2 runtime gate's lag-seam item (11/11, with the real unmocked seam + the guarded UPDATE in SQL + the delivery-not-scan structural proof) |
 | **④** Multi-commissioner tie-break | **THE OLDEST-OUTSTANDING DISCRIMINATOR STANDS** — the routing leg takes the OLDEST outstanding row (`created_at ASC`), the same deterministic order the rung-2 resolution always used, now carrying ROUTING authority. | PR3 notes §(b) · `tests/unit/test_mission_record_pr3_routing_flip.py::TestTheRoutingFlip::test_multi_commissioner_takes_the_oldest_outstanding` |
-| **⑤** The TTL | **A KNOB, NOT A DECISION — no hard-coded decision was taken.** The knob is `ENSEMBLE_MISSION_COMMISSION_TTL_SECONDS` with the house default 21600 s (6 h). The DEFAULT is a starting point, not a decision: the `dry`-mode counters are the evidence that tunes it. | PR3 notes §(h) + §(j) · `tests/unit/test_mission_reconciliation_sweep.py::TestTheTtlKnob` (4 nodes: the 6-hour house default, the env override, the invalid-value fallback that never raises, the config default when the env knob is absent) |
+| **⑤** The TTL | **A KNOB, NOT A DECISION — no hard-coded decision was taken.** The knob is `ENSEMBLE_MISSION_COMMISSION_TTL_SECONDS` with the house default 21600 s (6 h). The DEFAULT is a starting point, not a decision: the `dry`-mode counters are the evidence that tunes it. | PR3 notes §(h) + §(j) · `tests/unit/test_mission_reconciliation_sweep.py::TestTheTtlKnob` (5 nodes: the 6-hour house default, the env override, the invalid-value fallback that never raises, the invalid value that does not poison the other defaults, the config default when the env knob is absent) |
 
 ### (d.2) The deferrals and the residual list
 
@@ -233,15 +233,17 @@ census is:
 | `abandon_commission` | `daemon/services/report_delivery_recovery.py:3196` (the service call inside `_abandon_commission`, defined at `:3157`) — the helper has **three call sites, all in RDRS lane 7**: `:2397`, `:2539`, `:2550` |
 | `supersede_commission` | **ZERO** (no call site anywhere in `daemon/`; the method is defined at `daemon/services/mission_record_service.py:1045` and never called) |
 
-**Action for the next editor of the PR3 notes:** §(e)'s table and its
-"ZERO production callers" line should be corrected to match (f) below. The
-notes are the implementation truth, so a stale line in them is a live
-misstatement. **CLOSED at `4e37aa711`** — the notes' §(e) table + the
-"ZERO production callers" line were corrected in this branch (the sweep's
-three abandon call sites + the "the service METHOD has zero callers" split).
-The remaining census-pin drift is a SEPARATE item — see (d.4) below.
+**Action for the next editor of the PR3 notes:** the PR3 adoption notes' §(e) table
+and its "ZERO production callers" line should be corrected to match the
+grep-verified caller census table above (the census at the last content commit,
+`2453e271c`) — NOT to a "(f)": neither this table's §(f) nor the adoption notes'
+§(f) carries that census. The notes are the implementation truth, so a stale
+line in them is a live misstatement. **CLOSED at `4e37aa711`** — the notes' §(e)
+table + the "ZERO production callers" line were corrected in this branch (the
+sweep's three abandon call sites + the "the service METHOD has zero callers"
+split). The remaining census-pin drift is a SEPARATE item — see (d.4) below.
 
-### (d.4) The census `hooked_at` pin drift — a RE-ANCHOR note (NOT re-anchored here)
+### (d.4) The census `hooked_at` pin drift — a RE-ANCHOR note (the FIXTURE was NOT re-anchored here)
 
 **Pre-existing + quarantined.** The fixture
 `tests/job_queue/test_terminal_write_census.py` pins each `hooked` entry's
