@@ -5,9 +5,10 @@ IMPLEMENTATION TRUTH; this file is the CLOSURE VERDICT per defect, per the
 design's own §3 per-defect table (proposal-b) and the architecture map. It
 does not restate implementation prose beyond what a verdict row needs.
 
-**Branch:** `feature/mission-records-pr3` — range `013895287..4e37aa711`
-(base `013895287`). The counts below are measured **as of the review
-commit `4e37aa711`**: 23 commits, 38 files, +6098/−231. (Later commits
+**Branch:** `feature/mission-records-pr3` — range `013895287..2453e271c`
+(base `013895287`). The counts below are measured **as of the last
+CONTENT commit `2453e271c`** (`test(mission-records): pin the F5 boot
+mode line's INFO level`): 37 commits, 43 files, +8768/−241. (Later commits
 on the branch change the totals — cite the range, not a self-referential
 count.)
 
@@ -95,7 +96,7 @@ commission-quiet.
 | The read consumer — `mission_record_reads.count_outstanding_commissions` flips to the anchor-scoped read; the fail-open `-1` sentinel contract is preserved EXACTLY (never a 0 default); "anchor has no epochs at all" stays a real `0`; "no open epoch" is NO LONGER automatically quiet | `a3e033984` |
 | **The orphan-hold test** (the mandatory pin — built so the L3 gate is actually REACHED, per the PR2 runtime gate's caveat (e): a live non-terminal descendant is seeded and the hold reason names `mission_commissions=1`, proving the mission leg fired before the liveness leg could defer) | `tests/unit/test_mission_record_pr3_cross_epoch_hold.py::test_the_orphaned_commission_on_a_superseded_epoch_still_holds_the_publish` (+ the release-on-satisfy, the R2 cross-epoch non-quiet, the advisory exclusion, the `-1` sentinel, the real-zero, and the census-scope pins — 7 nodes) |
 | **The retirement path** — the sweep is the only thing that retires an orphan the delivery path cannot reach | `13aa51e1a` (RDRS lane 7) |
-| Attribution never re-points; `supersede_commission` stays ZERO-CALLERS (grep-verified at HEAD: no call site anywhere in `daemon/`) | `daemon/services/mission_record_service.py` |
+| Attribution never re-points; `supersede_commission` stays ZERO-CALLERS (grep-verified at the last content commit `2453e271c`: no call site anywhere in `daemon/`) | `daemon/services/mission_record_service.py` |
 | The census scope ruling — the attestation CENSUS deliberately STAYS open-epoch-scoped; the ruling text names the L3 hold + the R2 quiet input only | `tests/unit/test_mission_record_pr3_cross_epoch_hold.py::test_the_census_stays_open_epoch_scoped` |
 
 **The deliberate cost, stated plainly:** the eternal-mission class. An orphan
@@ -152,7 +153,7 @@ valve so it cannot become an eternal mission.
 | **Test-scaffolding consolidation** | RE-DEFERRED — there is no house helper to consolidate onto (`tests/helpers/` carries no mission-record fixture) |
 | **The pre-existing environment hangs + the A/B-proven base reds** | Not branch-caused — the tester lane's standing quarantine rows + the A/B-parity proof (the PR2 full-pool A/B measured zero branch-caused reds) |
 | **The "four vs five tap sites" prose** | PRE-EXISTING, outside the PR2 surface — `daemon/services/message_tap.py`'s module docstring says "the four approved tap sites" while the module carries FIVE source labels (the fifth, `compaction_precall_95`, was added by the proactive-compaction fix). A separate hygiene pass, not this arc |
-| **F2 (Batch A) — the delivery-evidence legs 2/3 (the queue-side PREFIX ledger + the parent-history PREFIX ledger) are PAIR-keyed and TIME-unbounded ⇒ an EARLIER commission's delivery — or a mere ENQUEUE — satisfied a FRESH commission** | ✅ **CLOSED — NOT deferred** (leader ruling, PR3 Batch A). **The trace:** `report_delivery_recovery.py` `_delivery_evidence_exists` → `_reconcile_one_commission` (the `has_evidence` branch) → `_satisfy_commission_on_evidence` → the guarded UPDATE → `mission_record/repository.py` `transition_commission_state` (counter-only under `dry`, a LIVE write under `enforce`). **Why it was wrong:** leg 2 matches the source `internal_report:{worker}:%` with NO commission id and NO time bound (and counts a `ready` — ENQUEUED, never processed — row as evidence); leg 3 scans the commissioner's WHOLE history. Neither can tell THIS commission's delivery from an EARLIER one's on the same pair, so the publish hold released EARLY (the premature-publish harm class). **The ruling applied:** legs 2/3 may NEVER authorise a `satisfied` and may NEVER authorise a hold-against-abandon — they are DIAGNOSTIC ONLY (they keep running; their result is logged; their FAULTS are counted in their own counter). Leg 1 (MAJ-1's commission-bound, state-filtered injection-row read) is the ONLY authority. **The consequence, stated deliberately:** a commission whose delivery is visible ONLY through legs 2/3 is no longer satisfied early — it resolves via the terminator on the real delivery path, or via the TTL-bounded abandon; the publish hold therefore releases NO EARLIER than the TTL horizon (fail-closed, bounded, safe). **The fault semantics (the leader's binding interpretation):** a diagnostic leg's fault does NOT hold the row (a persistently failing diagnostic probe would make the hold UNBOUNDED, contradicting the ruling's own boundedness promise) — it is counted in its OWN counter, `diagnostic_probe_errors` (the `masked_probe_errors` precedent), and the row stays on the abandon path; ONLY leg 1's fault may HOLD. **The pins:** `tests/unit/test_mission_reconciliation_sweep.py::TestTheDiagnosticEvidenceLegs` (6 nodes — Batch B added the V-F1 pin that asserts the diagnostic POSITIVE path is LOGGED; without it the positive path was UNPINNED and could have been deleted silently) + the re-anchored authority-fault HOLD pin. **The F1 dangling pointer this closes:** the old `_delivery_evidence_exists` docstring claimed "the residual is recorded in the B-arc closure table's deferral list" — NO SUCH ROW EXISTED; the docstring now states the ruling and cites THIS row. **A WORDING IMPRECISION IN THE IMMUTABLE COMMIT MESSAGE (Batch A `e95405296`):** that message says the diagnostic legs' "result is logged + counted" — the code counts only the FAULTS (in `diagnostic_probe_errors`); the POSITIVE result is LOGGED only. The accurate wording — "their result is logged; their FAULTS are counted in their own counter" — is what the code, the docstrings, this row and the enforce-promotion runbook §3.3 now carry. (Commit messages are immutable — the message is NOT amended; the correction is recorded here.) |
+| **F2 (Batch A) — the delivery-evidence legs 2/3 (the queue-side PREFIX ledger + the parent-history PREFIX ledger) are PAIR-keyed and TIME-unbounded ⇒ an EARLIER commission's delivery — or a mere ENQUEUE — satisfied a FRESH commission** | ✅ **CLOSED — NOT deferred** (leader ruling, PR3 Batch A). **The trace (the DEFECT's path — `_delivery_evidence_exists` is the PRE-SPLIT name):** `report_delivery_recovery.py` `_delivery_evidence_exists` → `_reconcile_one_commission` (the `has_evidence` branch) → `_satisfy_commission_on_evidence` → the guarded UPDATE → `mission_record/repository.py` `transition_commission_state` (counter-only under `dry`, a LIVE write under `enforce`). **Batch A's own ruling SPLIT that probe — the method `_delivery_evidence_exists` was REMOVED and replaced by TWO methods:** `_commission_bound_delivery_evidence` (leg 1 — the commission-bound, state-filtered injection-row read, the ONLY authority) and `_note_diagnostic_delivery_evidence` (legs 2/3 — the DIAGNOSTIC queue-side + parent-history PREFIX-ledger pair). The LIVE trace today runs through `_commission_bound_delivery_evidence`; the name above records the DEFECT's path, not the current code. **Why it was wrong:** leg 2 matches the source `internal_report:{worker}:%` with NO commission id and NO time bound (and counts a `ready` — ENQUEUED, never processed — row as evidence); leg 3 scans the commissioner's WHOLE history. Neither can tell THIS commission's delivery from an EARLIER one's on the same pair, so the publish hold released EARLY (the premature-publish harm class). **The ruling applied:** legs 2/3 may NEVER authorise a `satisfied` and may NEVER authorise a hold-against-abandon — they are DIAGNOSTIC ONLY (they keep running; their result is logged; their FAULTS are counted in their own counter). Leg 1 (MAJ-1's commission-bound, state-filtered injection-row read) is the ONLY authority. **The consequence, stated deliberately:** a commission whose delivery is visible ONLY through legs 2/3 is no longer satisfied early — it resolves via the terminator on the real delivery path, or via the TTL-bounded abandon; the publish hold therefore releases NO EARLIER than the TTL horizon (fail-closed, bounded, safe). **The fault semantics (the leader's binding interpretation):** a diagnostic leg's fault does NOT hold the row (a persistently failing diagnostic probe would make the hold UNBOUNDED, contradicting the ruling's own boundedness promise) — it is counted in its OWN counter, `diagnostic_probe_errors` (the `masked_probe_errors` precedent), and the row stays on the abandon path; ONLY leg 1's fault may HOLD. **The pins:** `tests/unit/test_mission_reconciliation_sweep.py::TestTheDiagnosticEvidenceLegs` (6 nodes — Batch B added the V-F1 pin that asserts the diagnostic POSITIVE path is LOGGED; without it the positive path was UNPINNED and could have been deleted silently) + the re-anchored authority-fault HOLD pin. **The F1 dangling pointer this closes:** the old `_delivery_evidence_exists` docstring claimed "the residual is recorded in the B-arc closure table's deferral list" — NO SUCH ROW EXISTED; the docstring now states the ruling and cites THIS row. **A WORDING IMPRECISION IN THE IMMUTABLE COMMIT MESSAGE (Batch A `e95405296`):** that message says the diagnostic legs' "result is logged + counted" — the code counts only the FAULTS (in `diagnostic_probe_errors`); the POSITIVE result is LOGGED only. The accurate wording — "their result is logged; their FAULTS are counted in their own counter" — is what the code, the docstrings, this row and the enforce-promotion runbook §3.3 now carry. (Commit messages are immutable — the message is NOT amended; the correction is recorded here.) |
 | **F13 — the worker-missing branch runs NO delivery-evidence leg** (a commission whose delivery is visible but whose WORKER ROW was deleted is abandoned `worker_row_missing` instead of satisfied) | ⛔ **DEFERRED — DESIGN-CONFORMANT, NOT A DEFECT** (NO code change was made). **The shape:** in `report_delivery_recovery.py`'s `_reconcile_one_commission`, the `worker is None` branch (the T2 shape) runs the R4 bus-watcher probe (MAJ-5) and then abandons the row with the frozen reason `worker_row_missing` once it is past the TTL — it never runs the leg-1 delivery-evidence read, so a DELIVERED-but-worker-row-deleted commission is abandoned rather than satisfied. **The design-conformance citation:** the design's own per-row pseudo-code omits the evidence read from that branch exactly (`reconciliation-sweep-design.md` lines 331-333: `if worker is None:` → `if age > TTL: abandon(commission, "worker_row_missing")` / `else: hold(commission, "below_ttl_hold"); continue` — the `read_delivery_evidence` step appears only AFTER the `worker is None` branch), so the implementation MATCHES the design and the shape is a deliberate consequence of it. **The blast radius is the AUDIT TRAIL ONLY:** the row resolves to `abandoned` (with the frozen reason) at the TTL horizon instead of `satisfied` at the evidence read — the commission is still retired, the hold still releases, and no premature publish and no wrong-side live transition is introduced (the abandon is TTL-bounded and loud). **No code change was made** — the branch is recorded here as a DESIGN-LEVEL DEFERRAL so the audit trail shows the shape instead of leaving it as an unexplained discrepancy. |
 
 **F14 — the MAJ-1 commission-bound comparison is a PARSED-INSTANT comparison, BY DESIGN (a later reader must NOT "correct" it).** The MAJ-1 ruling record (the commit `MAJ-1 — the delivery-evidence probe is state-filtered + commission-bounded`) settles the commission linkage as a PYTHON-SIDE bound: a delivered injection row STRICTLY OLDER than the commission's mint belongs to an EARLIER commission on the same pair, so it is not THIS commission's evidence. The comparison is made on **PARSED, tz-aware UTC instants** (`parse_iso_utc`) — DELIBERATELY, NOT as a TEXT-ISO string comparison: the two columns carry DIFFERENT ISO shapes (the commission's `now_utc_iso()` vs the injection row's `datetime.now(timezone.utc).isoformat()`), so a TEXT comparison across shapes is not safe, and the TEXT-ISO convention forbids a string comparison in SQL anyway. A row whose stamp EQUALS the mint counts as evidence; only a STRICTLY older row is excluded, and an undateable stamp on either side is fail-MISS. **Do not "fix" the parsed-instant comparison back into a TEXT-ISO comparison** — that would reintroduce the cross-shape comparison bug the MAJ-1 ruling closed. (The code docstring at `report_delivery_recovery.py`'s `_delivered_row_is_this_commission` already carries this rationale; the code is unchanged by this note, and no planning-subtree note records the MAJ-1 commission-bound ruling text — hence the note sits here, in the table's MAJ-1 area.)
@@ -184,8 +185,10 @@ batch's docs half). They are the independent review's riders, not the tidy
 pass's.
 
 **The measured F2 concurrency pack — the "12/12" correction.** The prior
-iteration reported the F2 concurrency pack as "**12/12**". **That figure appears
-NOWHERE in either tree and was UNSUBSTANTIATED** — and the pack defines
+iteration reported the F2 concurrency pack as "**12/12**". **That figure was
+MEASURED nowhere in either tree and was UNSUBSTANTIATED** (this row and the
+paragraph below QUOTE the string in order to correct it — they do not measure
+it) — and the pack defines
 exactly **6** test functions. The MEASURED run:
 
 ```
@@ -196,8 +199,10 @@ uv run python -m pytest tests/unit/test_mission_record_f2_concurrency.py -q
 **The honest figure is 6 nodes, 6 passed** (the pack's classes:
 `TestTheSingleStatementGuard` 3 · `TestTheOrderingContract` 2 ·
 `TestTheConcurrentPair` 1). The string "12/12" appears NOWHERE in the
-MISSION-RECORDS surface — the PR1/PR2/PR3 planning directories, the
-enforce-promotion runbook, the F2 pack itself — and this row is the single
+MISSION-RECORDS surface — **EXCEPT in this very table, which sits IN the
+PR3 planning directory and so cannot be inside the surface it denies** (the
+PR1/PR2 planning directories, the enforce-promotion runbook and the F2 pack
+itself carry no such string). This row is the single
 place the pack's figure is recorded. (The branch's other "12/12" hits are
 unrelated subsystems — among them the approver's nest-ops tracker, the
 designer-critic orchestration map, the langgraph-checkpoint-perf phase notes
@@ -219,13 +224,14 @@ rebased; the correction lives here, in the auditable rider list.
 The PR3 adoption notes §(e) (the terminator call-site table) was authored at
 `3ee9d6673` — BEFORE lane 7 landed — and its "RDRS lane 7 (next cycle)" and
 "`abandon_commission` still has ZERO production callers" lines are now
-**STALE**. At HEAD the grep-verified caller census is:
+**STALE**. At the last CONTENT commit (`2453e271c`) the grep-verified caller
+census is:
 
-| Function | Production callers (anchors at HEAD b5812c1ddf) |
+| Function | Production callers (anchors at the last content commit `2453e271c`) |
 |---|---|
-| `satisfy_commission` | `daemon/services/child_reports.py:4753` (via `satisfy_commission_fail_open`) + `daemon/services/report_delivery_recovery.py:2446` (`_satisfy_commission_on_evidence`) |
-| `abandon_commission` | `daemon/services/report_delivery_recovery.py:2331`, `:2453`, `:2464` — **three callers, all in RDRS lane 7** |
-| `supersede_commission` | **ZERO** (no call site anywhere in `daemon/`) |
+| `satisfy_commission` | `daemon/services/child_reports.py:4753` (via `satisfy_commission_fail_open`) + `daemon/services/report_delivery_recovery.py:3269` (the service call inside `_satisfy_commission_on_evidence`, which is defined at `:3241` and invoked from `:2532`) |
+| `abandon_commission` | `daemon/services/report_delivery_recovery.py:3196` (the service call inside `_abandon_commission`, defined at `:3157`) — the helper has **three call sites, all in RDRS lane 7**: `:2397`, `:2539`, `:2550` |
+| `supersede_commission` | **ZERO** (no call site anywhere in `daemon/`; the method is defined at `daemon/services/mission_record_service.py:1045` and never called) |
 
 **Action for the next editor of the PR3 notes:** §(e)'s table and its
 "ZERO production callers" line should be corrected to match (f) below. The
@@ -247,34 +253,50 @@ before this branch and is a known quarantined red (`.agents/tester/
 QUARANTINE.md` rows 38 + 50 — the `test_terminal_write_census` family;
 row 50 names the `child_reports.py:3941 ×4` pins explicitly).
 
-**The branch's shift (+107 lines).** The PR3 commits added lines above the
+**The branch's shift (+118 lines).** The PR3 commits added lines above the
 call sites, so the live `notify_watchers` calls moved:
 
-| `notify_watchers` call in `daemon/services/child_reports.py` | base `013895287` | branch `4e37aa711` | Δ |
+| `notify_watchers` call in `daemon/services/child_reports.py` | base `013895287` | branch `2453e271c` | Δ |
 |---|---|---|---|
-| first call | `:5540` | `:5647` | **+107** |
-| second call | `:5556` | `:5663` | **+107** |
+| first call | `:5540` | `:5658` | **+118** |
+| second call | `:5556` | `:5674` | **+118** |
 
-(the third `notify_watchers` mention at `:5668` is a log string, not a call.)
+(the third `notify_watchers` mention at `:5679` is a log string, not a call.)
 
 **The pins are stale BEFORE and AFTER.** The fixture pins
 `daemon/services/child_reports.py:3941` (×4 — the root-completion /
 dispatch-wrapper family) and `:5457` (×2 — the mission-strand-healer
 family). At base, `:5457` was already 83 lines from the live `:5540` call
-and `:3941` was 1599 away; after the branch's +107 shift the live calls are
-`:5647` / `:5663`, i.e. **190 lines** past the `:5457` pin. The fixture was
+and `:3941` was 1599 away; after the branch's +118 shift the live calls are
+`:5658` / `:5674`, i.e. **201 lines** past the `:5457` pin. The fixture was
 **deliberately NOT touched by PR3** — re-anchoring it here would absorb an
 unrelated, already-quarantined rot into this branch's diff and mask it.
 
+**The observer pin is stale AT BASE too — the same class, previously
+omitted from this list.** The fixture pins
+`daemon/services/job_feedback_observer.py:2071` (×1 — the atomic-transition
+site). Its LIVE `notify_watchers` calls are at `:2226` / `:2232` — **155
+lines** from the pin, so it was ALREADY outside the ±5 anti-rot window at
+BASE. The branch never shifted that file: the live pair is byte-identical
+at base `013895287`, at Batch A `e95405296` and at the anchor `2453e271c`.
+That pin is therefore PRE-EXISTING rot, not branch-caused — the same
+verdict the `child_reports.py` pins carry.
+
 **Re-anchor note for whoever re-anchors next (outside this PR):**
 
-* the two `:5457` pins → the live pair `:5647` / `:5663` (a plain line bump);
+* the two `:5457` pins → the live pair `:5658` / `:5674` (a plain line bump);
 * the four `:3941` pins → these point at a call that no longer exists at
   that site at all (the live pair is the one above) — they need a RE-SURVEY
   of the root-completion hook, not a line bump;
 * re-run `tests/job_queue/test_terminal_write_census.py` and confirm the
-  family's other pins (the row-50 list: `task_processor.py:1087`,
-  `job_feedback_observer.py:2071`) in the same pass;
+  family's other pins (the row-50 list) in the same pass. **The two values
+  below are the FIXTURE's pinned values — NOT live anchors.** Read each
+  against its OWN live pair before moving it: `task_processor.py:1087` (the
+  FIXTURE's pin → the live call is `daemon/services/task_processor.py:1275`,
+  unchanged by this branch) and `job_feedback_observer.py:2071` (the
+  FIXTURE's pin → the live pair is
+  `daemon/services/job_feedback_observer.py:2226` / `:2232`, also unchanged
+  by this branch);
 * the fixture's own anti-rot guidance (its module docstring) is the
   sanctioned procedure — follow it rather than editing the numbers blind.
 
@@ -292,7 +314,8 @@ Production terminal paths → the terminator that retires the commission row.
 | Epoch supersession | **NOTHING** — ruling (c): the rows keep pointing at their owning epoch; the read scope absorbs them instead | — | — |
 
 **The "not satisfied by the delivery path" list** (each with an owner — from
-the terminator commit body, and still accurate at HEAD):
+the terminator commit body, and still accurate at the last content commit
+`2453e271c`):
 
 * **A dead commissioner** — the write path's dead-recipient guard fell back to
   the structural parent, so no delivery to the commissioner happened ⇒ the row

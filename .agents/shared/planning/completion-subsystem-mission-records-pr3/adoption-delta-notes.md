@@ -81,7 +81,7 @@ The no-row backstop's admission predicate is CHILD-KEYED (since
 ``4aa1bb690``) — a mission-routed delivery ALREADY counts as delivered;
 lane 2's resolution names the commissioner so its evidence guards query
 the right queue. The comment block at ``report_delivery_recovery``
-(:~1468-1500) documenting "teach the resolution" is preserved +
+(:~1791-1813) documenting "teach the resolution" is preserved +
 extended. Pinned end-to-end:
 ``TestC3CrossParentFirewall`` (delivered-not-readmitted;
 undelivered-still-admitted).
@@ -105,9 +105,10 @@ TERMINATOR CALL-SITE LIST (production terminal paths → terminator):
 | Worker-terminal / TTL / no-report-ever | ``abandoned`` (fail-MISS probes) | RDRS lane 7 (LANDED — section (j)) |
 | Epoch supersession | NOTHING (ruling (c) — rows keep pointing at their epoch) | — |
 
-The SWEEP abandons commissions: ``ReportDeliveryRecoveryService.
-_abandon_commission`` (three call sites — ``report_delivery_recovery.
-py:2331`` / ``:2453`` / ``:2464``) resolves each row through the
+The SWEEP abandons commissions:
+``ReportDeliveryRecoveryService._abandon_commission`` (three call sites —
+``daemon/services/report_delivery_recovery.py:2397`` / ``:2539`` / ``:2550``)
+resolves each row through the
 mission-record SERVICE's guarded transition
 (``MissionRecordService.abandon_commission(..., reason=...)`` → the
 repository's ONE guarded single-statement UPDATE,

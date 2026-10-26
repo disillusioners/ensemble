@@ -31,6 +31,13 @@ only.
 and verify). It does NOT cover the install/upgrade pipeline — see
 `docs/runbooks/upgrade-drills.md` for staging/promote/rollback mechanics.
 
+**Verified against:** the branch's last CONTENT commit `2453e271c`
+(`feature/mission-records-pr3`) — every `file:line` anchor in this runbook was
+read at that sha. The HISTORICAL commit shas quoted below (`13aa51e1a`,
+`3bd21ecbb`, `a3e033984`, `be8806ff5`, `d97132cff`) record WHICH COMMIT landed
+a feature — they are immutable history, NOT tree anchors, and are not
+re-anchored when the tree moves.
+
 ---
 
 ## 0. The one-paragraph version
@@ -98,7 +105,7 @@ together tells the operator exactly which mode the live daemon is in:
 |---|---|---|
 | **The boot mode line** | `mission_records: mode resolved (mode=dry)` or `mission_records: mode resolved (mode=enforce)` — ONE `INFO` line, emitted at the mode-resolution site in `daemon/manager.py` | `dry` and `enforce` ONLY. Under `off` there is **NO** mission-records boot line at all. |
 | **The enforce boot backfill line** | `mission_records: advisory nudge-commission backfill COMMITTED run (enforce boot): {...}` (`INFO`) — and in `dry` its counterpart `mission_records: advisory nudge-commission backfill dry-run plan: {...}` (`INFO`) | `enforce` (the COMMITTING run) resp. `dry` (the preview). Both fire ONLY when the backfill actually scanned something (the `scanned` counter is non-zero) — a boot that scanned nothing logs neither. |
-| **The sweep's `(mode=…)` field** | inside the sweep's admission line: `RDRS lane 7: mission_reconciliation admitted N outstanding commission(s) (mode=…, ttl=…s, batch_cap=…)` (`INFO`) | every lane-7 pass in `dry` / `enforce` — `N` may be `0`; the `(mode=…)` field reads `(mode=dry)` or `(mode=enforce)`. Under `off` the lane is NOT EVEN QUERIED: the sweep logs `RDRS lane 7: mission-records mode is off — lane not queried` (`INFO`) instead, and that line carries NO `(mode=…)` field. |
+| **The sweep's `(mode=…)` field** | inside the sweep's admission line: `RDRS lane 7: mission_reconciliation admitted N outstanding commission(s) (mode=…, ttl=…s, batch_cap=…)` (`INFO`) | every lane-7 pass in `dry` / `enforce` **on a WIRED lane** — `N` may be `0`; the `(mode=…)` field reads `(mode=dry)` or `(mode=enforce)`. Under `off` the lane is NOT EVEN QUERIED: the sweep logs `RDRS lane 7: mission-records mode is off — lane not queried` (`INFO`) instead, and that line carries NO `(mode=…)` field. **Two WIRING-DEGRADE paths also skip the admission line** (the lane returns before it): an unwired repository logs `RDRS lane 7: mission_record_repo is not wired — the mission-commission reconciliation lane is inert (no reads, no writes)` (`INFO`, `daemon/services/report_delivery_recovery.py:2222`), and — in `enforce` ONLY — an unwired mission-record SERVICE logs `RDRS lane 7: the mission-record SERVICE is not wired — the mission-commission reconciliation lane is inert in enforce (no reads, no writes)` (`WARNING`, `daemon/services/report_delivery_recovery.py:2252`). Both are ONE-SHOT (logged once per service lifetime). **NO `(mode=…)` field ⇒ check those two lines before concluding anything about the mode.** |
 
 **Reading them:**
 
@@ -112,6 +119,18 @@ together tells the operator exactly which mode the live daemon is in:
   `mission_records: mode resolved …` line, no backfill line, and no
   `(mode=…)` field anywhere (the sweep's `mode is off — lane not queried`
   line carries none). *Daemon up + no mission-records boot line ⇒ `off`.*
+* **THE LANE CAN BE INERT — and then the `(mode=…)` field is ABSENT for a
+  reason that is NOT `off`.** Two wiring-degrade paths make lane 7 return
+  BEFORE the admission line: an unwired `mission_record_repo` (`INFO`,
+  `RDRS lane 7: mission_record_repo is not wired — the mission-commission
+  reconciliation lane is inert (no reads, no writes)`) and — in `enforce`
+  only — an unwired mission-record SERVICE (`WARNING`, `RDRS lane 7: the
+  mission-record SERVICE is not wired — the mission-commission
+  reconciliation lane is inert in enforce (no reads, no writes)`). Both are
+  logged ONCE per service lifetime, so a single grep may need the service
+  restart to re-emit them. **If the boot line says `dry` or `enforce` but NO
+  `(mode=…)` field ever appears, the lane is INERT, not idle** — it will
+  never retire a row, and §5.3's "the hold can be PERMANENT" applies.
 * **A THIRD, distinct case — a BAD ENV TOKEN.** This is NOT `off`. An
   unrecognized `ENSEMBLE_MISSION_RECORDS` token raises a loud `ValueError`
   at the SAME resolution site, OUTSIDE every swallow envelope, so **the
@@ -126,10 +145,10 @@ read, no write, no probe), so it is the reliable first check.
 
 ### 1.2 The ship default stays `dry` — and an invalid token fails the boot LOUDLY
 
-`ENSEMBLE_MISSION_RECORDS` is unset ⇒ `dry` (`mission_record_service.py:
-resolve_mission_records_mode`, the empty-token branch sets `DRY`). Do not
-change the default; the promotion is an operator action against a specific
-install's env.
+`ENSEMBLE_MISSION_RECORDS` is unset ⇒ `dry`
+(`daemon/services/mission_record_service.py:208: resolve_mission_records_mode`;
+the empty-token branch at `:227-228` sets `DRY`). Do not change the default;
+the promotion is an operator action against a specific install's env.
 
 The knob is validated at boot: an **unrecognized token raises a loud
 `ValueError`** naming the env var and the expected set — it does not silently
@@ -356,6 +375,9 @@ does). Do not "fix" it by widening the census.
 
 ### 3.3 The sweep's first runs
 
+**Read §3.3.1 BEFORE you promote** — the `dry` counters you tuned on read
+DIFFERENTLY in the first `enforce` pass, and §3.3.1 says how.
+
 **Force one pass** (the operator seam — the periodic sweep's interval is
 independent of your promotion):
 
@@ -393,6 +415,7 @@ inherited lane counters `recovered` / `errors` / `skipped_busy` /
 **Log lines to recognise:**
 
 ```
+RDRS lane 7: mission-records mode is off — lane not queried
 RDRS lane 7: mission_reconciliation admitted N outstanding commission(s) (mode=…, ttl=…s, batch_cap=…)
 sweep mission_reconciliation ABANDONED mission_id=…, commission_id=…, commissioner=…, worker=…, lane=…, abandon_reason=…, age_seconds=…
 sweep mission_reconciliation SATISFIED mission_id=…, commission_id=…, commissioner=…, worker=…, lane=…, satisfy_reason=delivery_evidence, age_seconds=…
@@ -401,6 +424,13 @@ sweep mission_reconciliation DIAGNOSTIC delivery evidence (NOT a resolution auth
 sweep mission_reconciliation DIAGNOSTIC evidence probe failed (queue PREFIX ledger) mission_id=…, commission_id=…, commissioner=…, worker=…, lane=…: … — DIAGNOSTIC ONLY: the row is NOT held and the abandon path is NOT blocked
 sweep mission_reconciliation DIAGNOSTIC evidence probe failed (parent-history PREFIX ledger) mission_id=…, commission_id=…, commissioner=…, worker=…, lane=…: … — DIAGNOSTIC ONLY: the row is NOT held and the abandon path is NOT blocked
 ```
+
+The FIRST line is the lane-level `off` observable — the third of §1.1's three.
+Under `off` the lane is not even QUERIED, so it REPLACES the admission line
+rather than accompanying it, and it carries no `(mode=…)` field. (Its two
+wiring-degrade siblings — the `INFO` "mission_record_repo is not wired" and
+the `WARNING` "the mission-record SERVICE is not wired" lines — are named in
+§1.1; an ABSENT admission line with NO `off` line means the lane is INERT.)
 
 The last three lines are the F2 DIAGNOSTIC legs 2/3 (the queue-side + the
 parent-history PREFIX ledgers). They are **DIAGNOSTIC ONLY** — they never
@@ -438,6 +468,33 @@ sweep never auto-acts on it and never abandons a row on this signal alone. The
 D4(iii) FIX is deferred (it is another architect's seam); this counter is the
 observability half, shipped.
 
+### 3.3.1 Read the FIRST enforce pass against §3.3 — the counters will move
+
+**The `dry` counters you tuned on are NOT the counters the first `enforce`
+pass will show.** Two things change between the passes, and both are BY
+DESIGN:
+
+* **A FAILED-delivery commission is ABANDONABLE, not satisfiable.** The
+  delivered-states-only filtering means a commission whose delivery FAILED
+  can never be satisfied — it is resolved to `abandoned` instead. So
+  `abandoned_worker_terminal` and `abandoned_ttl` read DIFFERENTLY in the
+  first enforce pass than the dry counters suggested.
+* **A delivery visible ONLY through the diagnostic legs resolves NO EARLIER
+  than the TTL horizon.** Batch A's ruling makes the diagnostic legs
+  (legs 2/3) non-authoritative: they can no longer satisfy a commission, and
+  they can no longer hold one against abandonment. A commission whose
+  delivery is visible only that way waits for the terminator on the real
+  delivery path, or for the TTL-bounded abandon.
+
+**Read the counters against §3.3's table above BEFORE you promote** — a
+counter that climbs in the first enforce pass is usually the promotion
+working, not a regression. And **expect some holds to last up to the TTL
+HORIZON** (knob `ENSEMBLE_MISSION_COMMISSION_TTL_SECONDS`, default `21600`
+= 6 h): a hold that releases on the TTL rather than on the delivery is the
+fail-closed, bounded behaviour the ruling promised — read §3.5's tuning
+rules against it, and do not shorten the TTL to chase the first pass's
+numbers.
+
 ### 3.4 Dry-then-enforce sequencing — do not skip the soak
 
 The intended sequence is: **soak in `dry` first.** In `dry` the detection
@@ -447,7 +504,8 @@ the tuning dataset. Then:
 1. Run in `dry` for a meaningful window (long enough to see a full mission
    lifecycle: a nudge, a `send_message` delegation, a worker completion, and at
    least one worker that dies or never reports).
-2. Read the `mission_reconciliation` counters on a forced sweep pass.
+2. Read the `mission_reconciliation` counters on a forced sweep pass
+   (**against §3.3.1** — the first `enforce` pass reads them DIFFERENTLY).
 3. Tune the TTL if the counters say so (§3.5).
 4. **Only then** flip to `enforce` and restart.
 
@@ -660,7 +718,8 @@ they cannot arm anything; they are durable history.
 ### 5.8 Read the `dry` counters before you flip
 
 Covered in §3.4. The `dry` counters ARE the TTL-tuning dataset; flipping
-without them means tuning on live traffic with writes enabled.
+without them means tuning on live traffic with writes enabled. Read them
+against §3.3 and §3.3.1 — the first `enforce` pass reads them differently.
 
 ---
 
