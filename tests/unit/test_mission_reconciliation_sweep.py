@@ -155,6 +155,7 @@ class FakeQueueRepo:
         self.delivered = delivered
         self.has_rows = has_rows
         self.evidence_error: Exception | None = None
+        self.masked_error: Exception | None = None
 
     def find_wake_already_delivered_evidence(self, parent_id, child_id) -> bool:
         if self.evidence_error is not None:
@@ -162,6 +163,8 @@ class FakeQueueRepo:
         return self.delivered
 
     def has_row_since(self, instance_id, since) -> bool:
+        if self.masked_error is not None:
+            raise self.masked_error
         return self.has_rows
 
 
@@ -1196,6 +1199,101 @@ class TestTheMaskedEnqueueObservability:
 
 
 # ---------------------------------------------------------------------------
+# MAJ-3 — the masked probe has its OWN counter and HOLDS the row
+# ---------------------------------------------------------------------------
+
+
+class TestTheMaskedProbeHolds:
+    """MAJ-3: a masked-probe FAULT holds the row for that pass.
+
+    The masked-enqueue signal is an OBSERVABILITY probe (it never
+    authorises an action by itself), but its fault used to increment
+    ``probe_errors`` — whose contract says "the row was HELD" — and
+    then let the caller proceed to the abandon / the evidence probe in
+    the SAME pass. The counter was lying about the row's fate.
+    """
+
+    def test_a_masked_probe_fault_holds_the_missing_worker_row(
+        self, engine, manager_loop
+    ):
+        """THE PIN (the worker-missing branch): no abandon."""
+        commission_id = _mint_commission(engine, age_seconds=99_999)
+        queue_repo = FakeQueueRepo()
+        queue_repo.masked_error = RuntimeError("queue read exploded")
+        service, _ = _build_service(
+            engine,
+            manager_loop=manager_loop,
+            instance_repo=FakeInstanceRepo(statuses={}),
+            queue_repo=queue_repo,
+        )
+
+        lane = service.recover_now().lanes["mission_reconciliation"]
+
+        assert lane.masked_probe_errors == 1
+        assert lane.probe_errors == 0
+        assert lane.abandoned_worker_missing == 0
+        assert lane.abandoned_ttl == 0
+        assert _row(engine, commission_id).state == (
+            CommissionState.OUTSTANDING.value
+        )
+
+    def test_a_masked_probe_fault_holds_the_terminal_worker_row(
+        self, engine, manager_loop
+    ):
+        """THE PIN (the §6 site): no abandon."""
+        commission_id = _mint_commission(engine, age_seconds=99_999)
+        queue_repo = FakeQueueRepo()
+        queue_repo.masked_error = RuntimeError("queue read exploded")
+        service, _ = _build_service(
+            engine,
+            manager_loop=manager_loop,
+            instance_repo=FakeInstanceRepo(statuses={"worker-1": "completed"}),
+            queue_repo=queue_repo,
+        )
+
+        lane = service.recover_now().lanes["mission_reconciliation"]
+
+        assert lane.masked_probe_errors == 1
+        assert lane.probe_errors == 0
+        assert lane.abandoned_worker_terminal == 0
+        assert _row(engine, commission_id).state == (
+            CommissionState.OUTSTANDING.value
+        )
+
+    def test_a_masked_probe_fault_holds_the_satisfy(self, engine, manager_loop):
+        """THE PIN (the §6 site): no satisfy either."""
+        from daemon.repositories.report_injection.models import (
+            ReportInjectionState,
+        )
+
+        commission_id = _mint_commission(
+            engine, created_at=_iso_seconds_ago(7200)
+        )
+        _seed_injection(
+            engine,
+            state=ReportInjectionState.INJECTED.value,
+            created_at=_iso_seconds_ago(3600),
+        )
+        queue_repo = FakeQueueRepo()
+        queue_repo.masked_error = RuntimeError("queue read exploded")
+        service, _ = _build_service(
+            engine,
+            manager_loop=manager_loop,
+            instance_repo=FakeInstanceRepo(statuses={"worker-1": "completed"}),
+            queue_repo=queue_repo,
+        )
+
+        lane = service.recover_now().lanes["mission_reconciliation"]
+
+        assert lane.masked_probe_errors == 1
+        assert lane.probe_errors == 0
+        assert lane.satisfied_on_evidence == 0
+        assert _row(engine, commission_id).state == (
+            CommissionState.OUTSTANDING.value
+        )
+
+
+# ---------------------------------------------------------------------------
 # T9 — the endpoint shape
 # ---------------------------------------------------------------------------
 
@@ -1215,6 +1313,7 @@ class TestTheEndpointShape:
         assert lane["abandoned_ttl"] == 1
         assert lane["skipped_live"] == 0
         assert lane["probe_errors"] == 0
+        assert lane["masked_probe_errors"] == 0
         assert lane["masked_suspected"] == 0
         assert lane["already_resolved"] == 0
         assert lane["below_ttl_hold"] == 0

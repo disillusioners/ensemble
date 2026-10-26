@@ -517,6 +517,12 @@ class MissionReconciliationLaneResult(LaneResult):
       (observability only — never an auto-action).
     * ``probe_errors`` — the probes that could not prove their
       predicate (P1: the row was HELD).
+    * ``masked_probe_errors`` — the MASKED-ENQUEUE probe's own faults
+      (MAJ-3: the masked probe is an OBSERVABILITY probe, so its fault
+      has its OWN counter — it no longer borrows ``probe_errors``, whose
+      contract says "the row was HELD"). A masked-probe fault HOLDS
+      the row for that pass (the masked signal never authorises an
+      abandon or a satisfy).
     """
 
     abandoned_worker_terminal: int = 0
@@ -529,6 +535,7 @@ class MissionReconciliationLaneResult(LaneResult):
     already_resolved: int = 0
     masked_suspected: int = 0
     probe_errors: int = 0
+    masked_probe_errors: int = 0
 
     def to_dict(self) -> dict[str, int]:
         base = super().to_dict()
@@ -544,6 +551,7 @@ class MissionReconciliationLaneResult(LaneResult):
                 "already_resolved": self.already_resolved,
                 "masked_suspected": self.masked_suspected,
                 "probe_errors": self.probe_errors,
+                "masked_probe_errors": self.masked_probe_errors,
             }
         )
         return base
@@ -2243,9 +2251,13 @@ class ReportDeliveryRecoveryService:
             # row) — the T2 shape. Below the TTL a recent absence may
             # be a visibility artifact → HOLD.
             if age_seconds > self._mission_commission_ttl_seconds:
-                self._note_masked_enqueue(
+                # MAJ-3: a masked-probe FAULT holds the row for this
+                # pass — the caller must NOT abandon a row whose
+                # observability probe could not run.
+                if self._note_masked_enqueue(
                     commission, out, age_seconds=age_seconds
-                )
+                ):
+                    return
                 self._abandon_commission(
                     commission,
                     out,
@@ -2336,10 +2348,14 @@ class ReportDeliveryRecoveryService:
         # window (= the TTL), a commission with NO queue row at all is
         # the conservative "the enqueue was masked" signal. OBSERVATION
         # ONLY: no auto-action, and it NEVER abandons a commission.
+        # MAJ-3: a masked-probe FAULT holds the row for this pass — the
+        # satisfy / abandon legs below must NOT run on a row whose
+        # observability probe could not complete.
         if age_seconds > self._mission_commission_ttl_seconds:
-            self._note_masked_enqueue(
+            if self._note_masked_enqueue(
                 commission, out, age_seconds=age_seconds
-            )
+            ):
+                return
 
         if has_evidence:
             # R1b — SATISFY ON EVIDENCE: the delivery happened; the
@@ -2654,7 +2670,7 @@ class ReportDeliveryRecoveryService:
         out: MissionReconciliationLaneResult,
         *,
         age_seconds: float,
-    ) -> None:
+    ) -> bool:
         """§6 — the MASKED-ENQUEUE observability (counter + log ONLY).
 
         A commission whose commissioning act left NO queue row at all
@@ -2667,30 +2683,47 @@ class ReportDeliveryRecoveryService:
         legitimately writes no MessageQueue row), and it is NOT
         re-delivered (no re-commissioning machinery is in scope).
 
-        A probe fault here is an OBSERVABILITY fault, not a decision
-        fault: it increments ``probe_errors`` but never HOLDS the row.
+        **MAJ-3 — the fault HALDS the row.** A probe fault is not a
+        decision fault, but it is still a fault: the row is NOT
+        resolved in this pass. The method now RETURNS ``True`` on a
+        fault and the callers HOLD the row (no abandon, no satisfy).
+        The old shape ("it increments ``probe_errors`` but never HOLDS
+        the row") let the caller proceed to the abandon / the evidence
+        probe in the SAME pass — while ``probe_errors``' contract says
+        "the row was HELD". The counter was lying.
+
+        The fault also has its OWN counter now
+        (``masked_probe_errors``): ``probe_errors`` means "a DECISION
+        probe could not prove its predicate ⇒ the row was HELD", and
+        borrowing it for an OBSERVABILITY probe broke that contract.
+
+        Returns:
+            ``True`` when the masked probe FAILED (the caller MUST hold
+            the row for this pass); ``False`` when the probe ran
+            (whether or not the masked signal fired).
         """
         if age_seconds <= self._mission_commission_ttl_seconds:
-            return
+            return False
         try:
             has_rows = self._queue_repo.has_row_since(
                 commission.worker_instance_id,
                 self._commission_created_at_naive(commission),
             )
         except Exception as exc:
-            out.probe_errors += 1
+            out.masked_probe_errors += 1
             logger.warning(
                 "sweep mission_reconciliation masked-probe failed "
-                "mission_id=%s, commission_id=%s, worker=%s: %s: %s",
+                "mission_id=%s, commission_id=%s, worker=%s: %s: %s "
+                "— HOLDING the row for this pass",
                 commission.mission_id,
                 commission.commission_id,
                 commission.worker_instance_id,
                 type(exc).__name__,
                 exc,
             )
-            return
+            return True
         if has_rows:
-            return
+            return False
         out.masked_suspected += 1
         logger.warning(
             "sweep mission_reconciliation MASKED ENQUEUE suspected "
@@ -2704,6 +2737,7 @@ class ReportDeliveryRecoveryService:
             getattr(commission, "lane", ""),
             int(age_seconds),
         )
+        return False
 
     def _commission_created_at_naive(self, commission: Any):
         """The commission's mint time as a NAIVE UTC datetime.
