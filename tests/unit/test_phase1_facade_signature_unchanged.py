@@ -1,4 +1,4 @@
-"""Phase 1 — the InstanceManager facade signature did not GROW.
+"""Phase 1 — the InstanceManager facade signature matches the pinned tuple.
 
 Proposal-a §7's convention-conformance checklist asks for "a cheap
 anti-regression assert that the facade signature did not grow".
@@ -13,7 +13,9 @@ WHY THIS MATTERS
 
   The Phase-1 train (D4(i) stamping + D2 census/mint/C-union + D1
   resolver + D5(i) epoch clears + the W1/W2/T2 ledger) is designed to
-  add NO new InstanceManager kwarg:
+  add NO new InstanceManager kwarg (Proposal B PR1 sanctioned exactly
+  ONE — ``mission_id``, keyword-only on both enqueue methods; any
+  FURTHER growth is a deviation that must be reported):
 
   * D4(i) is constants-only plus a local derivation helper;
   * D1 uses the row carrier (``_ChildCompletionDbResult
@@ -40,8 +42,14 @@ import inspect
 from daemon.manager import InstanceManager
 
 
-#: The facade signatures at the Phase-0 base leg (dabe1f04d). Any
-#: change here is a Phase-1 deviation that must be reported.
+#: The facade signatures as pinned at the Phase-0 base leg (dabe1f04d)
+#: plus PR1's ONE sanctioned growth. Any change here is a deviation
+#: that must be reported.
+# Proposal B PR1 (2026-10-25): ``mission_id`` is the train's ONE
+# sanctioned facade growth — keyword-only on both enqueue methods,
+# forwarded to the service (the Facade-Forwarding Discipline; the
+# mission_id half is pinned in
+# ``tests/unit/test_mission_record_facade_forwarding.py``).
 _EXPECTED_ENQUEUE_MESSAGE_PARAMS = (
     "self",
     "instance_id",
@@ -55,8 +63,14 @@ _EXPECTED_ENQUEUE_MESSAGE_PARAMS = (
     "work_id",
     "work_id_required",
     "image_refs",
+    "mission_id",
 )
 
+# NOTE (PR1 audit): the F11 ``dispatch_chain`` kwarg crossed the facade
+# WITHOUT this pin ever being updated — the job-half of this guard was
+# silently RED at base 7af1d2632 (pre-existing drift, A/B-proven). PR1
+# repairs the pin to the TRUE current signature (dispatch_chain) AND
+# adds ``mission_id``.
 _EXPECTED_ENQUEUE_MESSAGE_JOB_PARAMS = (
     "self",
     "instance_id",
@@ -70,17 +84,19 @@ _EXPECTED_ENQUEUE_MESSAGE_JOB_PARAMS = (
     "queue_id",
     "image_refs",
     "idempotency_key",
+    "dispatch_chain",
+    "mission_id",
 )
 
 
-def test_enqueue_message_facade_signature_did_not_grow():
+def test_enqueue_message_facade_signature_matches_the_pinned_tuple():
     params = tuple(
         inspect.signature(InstanceManager.enqueue_message).parameters
     )
     assert params == _EXPECTED_ENQUEUE_MESSAGE_PARAMS
 
 
-def test_enqueue_message_job_facade_signature_did_not_grow():
+def test_enqueue_message_job_facade_signature_matches_the_pinned_tuple():
     params = tuple(
         inspect.signature(InstanceManager.enqueue_message_job).parameters
     )

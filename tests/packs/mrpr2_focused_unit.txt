@@ -1,0 +1,19 @@
+# mrpr2_focused_unit — the mission-record unit files (the FAST pack)
+#
+# one repo-relative path per line; the pack invocation is:
+#   pytest -q $(grep -v '^#' <this file>)
+#
+tests/unit/test_mission_record_reads.py
+tests/unit/test_mission_record_pr2_gate_reads.py
+tests/unit/test_mission_record_pr2_carries.py
+tests/unit/test_mission_record_pr2_tap_amend.py
+tests/unit/test_mission_record_pr2_l3_ledger.py
+tests/unit/test_mission_record_pr2_ledger_forwarding.py
+tests/unit/test_mission_record_pr2_amend_guard.py
+tests/unit/test_mission_record_service.py
+tests/unit/test_mission_record_facade_forwarding.py
+tests/unit/test_mission_record_migrations_sqlite.py
+tests/unit/test_mission_record_review_fixes.py
+tests/unit/test_mission_record_revive_enqueue_integration.py
+tests/unit/test_nudge_completion_watcher_d2.py
+tests/unit/test_attestation_resolver_activation.py

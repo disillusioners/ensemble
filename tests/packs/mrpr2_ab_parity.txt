@@ -1,0 +1,21 @@
+# mrpr2_ab_parity — the BASE-PRESENT files only (the A/B parity set; the PR2-only files are absent on the base leg)
+#
+# one repo-relative path per line; the pack invocation is:
+#   pytest -q $(grep -v '^#' <this file>)
+#
+tests/unit/test_attestation_ledger.py
+tests/unit/test_attestation_ledger_failopen.py
+tests/unit/test_attestation_epoch_clears_d5i.py
+tests/unit/test_attestation_epoch_replay.py
+tests/unit/test_attestation_gate.py
+tests/unit/test_attestation_scanner.py
+tests/unit/test_attestation_resolver_activation.py
+tests/unit/test_attestation_fail_open.py
+tests/unit/test_mission_record_service.py
+tests/unit/test_mission_record_facade_forwarding.py
+tests/unit/test_mission_record_migrations_sqlite.py
+tests/unit/test_mission_record_review_fixes.py
+tests/unit/test_mission_record_revive_enqueue_integration.py
+tests/unit/test_nudge_completion_watcher_d2.py
+tests/unit/services/test_message_tap_slot.py
+tests/integration/test_attestation_hold_semantics_independent.py

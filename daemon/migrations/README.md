@@ -277,9 +277,15 @@ ALTER TABLE sessions ADD COLUMN priority INTEGER DEFAULT 0;
 -- Good: CREATE INDEX (reversible)
 CREATE INDEX IF NOT EXISTS idx_priority ON sessions(priority);
 
--- Good: Check column exists (idempotent)
--- The runner handles "duplicate column name" errors gracefully
-ALTER TABLE sessions ADD COLUMN IF NOT EXISTS email TEXT;
+-- Good: ADD COLUMN (bare) — idempotent BY THE RUNNER, not by the SQL
+-- SQLite has NO "ADD COLUMN IF NOT EXISTS" syntax (it is invalid and
+-- the statement fails), so write the BARE form. The runner tolerates
+-- the resulting "duplicate column name" error (runner.py:684-688) and
+-- the "already exists" error for objects (runner.py:703-707), then
+-- records the migration as applied regardless (runner.py:728-735) —
+-- so the migration is a no-op on a database whose schema already has
+-- the column (e.g. one created by create_all).
+ALTER TABLE sessions ADD COLUMN email TEXT;
 ```
 
 ## Auto-Migration on Startup

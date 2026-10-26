@@ -958,12 +958,12 @@ class TestAssembleContextMessages:
         assert args[0] == "inst-blueprint-tap"
         items = args[1]
         assert isinstance(items, list) and len(items) >= 1
-        recorded_ids = [mid for mid, _ts, _seq in items]
+        recorded_ids = [mid for mid, _ts, _seq, *_rest in items]
         # The blueprint id is in the side-table batch — this is the
         # acceptance-criterion assertion: a row for the prepended
         # blueprint context message was written.
         assert blueprint_id in recorded_ids
-        for _mid, recorded_ts, recorded_seq in items:
+        for _mid, recorded_ts, recorded_seq, *_rest in items:
             assert isinstance(recorded_ts, str) and len(recorded_ts) > 0
             # The third tuple slot is the optional source_seq (None
             # for the entry tap — see ``MessageTapSlot.tap_node_return``).

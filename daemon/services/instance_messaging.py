@@ -45,10 +45,16 @@ from .resource_monitor.charge import (
     note_message_replace as _charge_note_message_replace,
 )
 from .messaging_types import AsyncMessageResult, LinkageContractError
+from .mission_record_service import (  # Proposal B PR1 — mission-record anchor
+    MISSION_ID_KEY,
+    _mode_is_off as _mission_records_mode_is_off,
+    mint_revive_epoch_fail_open,
+)
 from .message_tap import (  # Phase 1 C2 — langgraph-checkpoint-perf
     MessageTapSlot,
     SOURCE_USER_MESSAGE_ENTRY,
     SOURCE_COMPACTION_MESSAGING,
+    resolve_turn_mission_id,
 )
 from .project_normalizer import normalize_project_id
 from .skill_meta_parser import extract_load_skill, parse_meta_tag
@@ -541,6 +547,7 @@ def _build_graph_input(
     message_source: str | None = None,
     image_refs: list[str] | None = None,
     fresh_episode_attestation_reset: bool = False,
+    mission_id: str | None = None,
 ) -> dict[str, list[HumanMessage]]:
     """Build the LangGraph ``graph_input`` dict, prepending the persistent context block.
 
@@ -679,6 +686,13 @@ def _build_graph_input(
     extra_kwargs: dict[str, Any] = {}
     if fresh_episode_attestation_reset:
         extra_kwargs["fresh_episode_attestation_reset"] = True
+    # Proposal B PR1: the mission carrier rides the user message's
+    # ``additional_kwargs`` (the fresh-episode-sentinel shape) so the
+    # delivery-time mission stamp is visible to anything holding the
+    # HumanMessage. ADDITIVE and absent when ``mission_id`` is None —
+    # byte-identical wire shape for every pre-PR1 caller.
+    if mission_id:
+        extra_kwargs["mission_id"] = mission_id
     if stamped_kwargs is not None:
         user_message = HumanMessage(
             content=content,
@@ -872,6 +886,16 @@ class _PreparedEnqueueContext(NamedTuple):
     # EXISTS but its id could not be read back — the target WILL be
     # woken). Threaded onto ``AsyncMessageResult.not_queued_reason``.
     not_queued_reason: str | None = None
+    # Proposal B PR1 (mission-record anchor): the mission carrier —
+    # keyword-only ``mission_id`` threaded from the commissioning lane
+    # through the facade into this prelude (the Carrier-Threading
+    # producer site). Carried here AND persisted on the MessageQueue
+    # row's ``message_metadata`` JSONB under the reserved
+    # ``__ens_mission_id__`` key (the CLAIM path re-reads it into
+    # ``ProcessingContext.mission_id``; the entry tap stamps
+    # ``message_metadata.mission_id`` at delivery). ``None`` = every
+    # pre-PR1 caller (byte-identical).
+    mission_id: str | None = None
 
 
 class ActivityCallbackHandler(BaseCallbackHandler):
@@ -1637,6 +1661,11 @@ class InstanceMessagingService:
                 await _compaction_tap.tap_node_return(
                     result.replacement_messages,
                     instance_id,
+                    # Proposal B PR2 — the mission stamp rides the CARRIED
+                    # value (the producer stamped it on the delivered
+                    # user message's kwargs; the tap READS it — never
+                    # re-derives it from message shapes).
+                    mission_id=resolve_turn_mission_id(messages),
                 )
 
             # Log compaction result (only when there was an actual
@@ -2110,6 +2139,7 @@ class InstanceMessagingService:
         work_id: str | None = None,
         work_id_required: bool = False,
         image_refs: list[str] | None = None,
+        mission_id: str | None = None,
     ) -> _PreparedEnqueueContext:
         """Shared prelude for ``enqueue_message``.
 
@@ -2263,6 +2293,18 @@ class InstanceMessagingService:
         # module-level pure helper ``_ensure_work_id_fail_closed`` —
         # directly unit-testable without a DB session.
         work_id = _ensure_work_id_fail_closed(work_id, work_id_required)
+
+        # Proposal B PR1 — the mission carrier is COMPUTED ONCE at this
+        # producer (the lane resolved-or-minted before calling the
+        # facade) and persisted under the RESERVED metadata key so the
+        # claim path can carry it to delivery (the F11 dispatch_chain
+        # reserved-key precedent). The caller's metadata dict is NEVER
+        # mutated — a copy carries the key.
+        if mission_id:
+            if metadata:
+                metadata = {**metadata, MISSION_ID_KEY: mission_id}
+            else:
+                metadata = {MISSION_ID_KEY: mission_id}
 
         with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
             # ── D4(ii/iii) READ-BACK GUARD (2026-10-24, Phase 0) ───────────
@@ -2630,6 +2672,39 @@ class InstanceMessagingService:
                                 f"completion_gate_escalated and the "
                                 f"attestation:denial_epochs ledger"
                             )
+                            # ─── Proposal B PR1 (mission-record anchor):
+                            # the revive epoch MINT — the existing clears
+                            # above become the RECORDED CONSEQUENCE of
+                            # this mint (lane 13: "the existing
+                            # fresh-episode counter clear becomes the
+                            # recorded consequence of this mint, not an
+                            # accident of message shape"). RECORD-SIDE
+                            # ONLY: this writes mission_records (new
+                            # epoch, parent chain, founding_source=
+                            # 'revive', founding_message_id=<this
+                            # message>) and touches NOTHING else — no
+                            # additional counter/flag/ledger write, no
+                            # new terminal-status writer (the §2.4
+                            # "generalize the clear to every boundary"
+                            # policy is PR2+; the legacy clears above
+                            # keep their exact current behavior).
+                            #
+                            # SAME-TRANSACTION: rides THIS
+                            # WriteGuardSession so the epoch boundary is
+                            # atomic with the revive (the mint's
+                            # begin_nested savepoint keeps a mint failure
+                            # from poisoning the enqueue's transaction —
+                            # the wrapper then degrades to no-record and
+                            # the enqueue proceeds unchanged).
+                            mint_revive_epoch_fail_open(
+                                getattr(
+                                    self._manager, "mission_record_service", None
+                                ),
+                                instance_id,
+                                session=session,
+                                context_label="enqueue_fresh_episode_revive",
+                                founding_message_id=message_id,
+                            )
                 # Naive-UTC digits (DC-A fix): last_activity_at is a
                 # tz-naive column on PostgreSQL.
                 instance.last_activity_at = now_utc_naive()
@@ -2700,6 +2775,10 @@ class InstanceMessagingService:
             is_fresh_episode_user_message=is_fresh_episode_user_message,
             # W1 — the not-queued reason travels with the context.
             not_queued_reason=not_queued_reason,
+            # Proposal B PR1 — the mission carrier travels with the
+            # context (the producer computed it; the claim path
+            # re-reads it off the persisted MessageQueue row).
+            mission_id=mission_id,
         )
 
     async def enqueue_message(
@@ -2716,6 +2795,7 @@ class InstanceMessagingService:
         work_id: str | None = None,
         work_id_required: bool = False,
         image_refs: list[str] | None = None,
+        mission_id: str | None = None,
     ) -> "AsyncMessageResult":
         """Enqueue a message via the unified dispatcher.
 
@@ -2775,6 +2855,7 @@ class InstanceMessagingService:
             work_id=work_id,
             work_id_required=work_id_required,
             image_refs=image_refs,
+            mission_id=mission_id,
         )
 
         # Phase 5 (Option B): when this message is being delivered via
@@ -2908,6 +2989,7 @@ class InstanceMessagingService:
         image_refs: list[str] | None = None,
         idempotency_key: str | None = None,
         dispatch_chain: dict[str, Any] | None = None,
+        mission_id: str | None = None,
     ) -> "AsyncMessageResult":
         """Submit a message to the queue as a JobItem (Option B).
 
@@ -3176,6 +3258,10 @@ class InstanceMessagingService:
             is_background=is_background,
             work_id=job_id,
             work_id_required=True,
+            # Proposal B PR1: the mission carrier rides through to the
+            # MessageQueue row (reserved metadata key) exactly as on the
+            # plain-enqueue path.
+            mission_id=mission_id,
             # Phase 2 / clipboard-image-chat (round-2 amendment #27,
             # #28): forward image_refs to the prelude so the row
             # audit column carries refs and the checkpoint kwargs
@@ -3573,6 +3659,132 @@ class InstanceMessagingService:
             not_queued_reason=ctx.not_queued_reason,
         )
 
+    async def _amend_mission_anchor_at_delivery(
+        self,
+        *,
+        instance_id: str,
+        message_id: str,
+        is_p1_human: bool,
+        mission_id: str | None,
+    ) -> None:
+        """Re-found the mission anchor at DELIVERY (Proposal B PR2, ruling ③).
+
+        The re-founding amendment seam (proposal-b §2.2): "a new p1-HUMAN
+        user-lane message landing on an instance whose epoch is open
+        updates ``founding_message_id``". The amendment fires AT
+        DELIVERY — the message tap site — not at enqueue time and not
+        when the delegation window is scanned. That is what kills the
+        ~14-minute mid-turn correction lag seam: the anchor is a DURABLE
+        row, visible to the gate at would-be END, even while the
+        window's content is still being drained.
+
+        PRECONDITIONS (all must hold):
+        * the delivered message is p1-HUMAN (the ledger's
+          ``priority == 1 AND type == HUMAN`` — the carried
+          ``is_fresh_episode_user_message`` flag, computed ONCE at the
+          producer and threaded here; never re-derived here);
+        * a mission epoch is OPEN for this instance.
+
+        THE ANCHOR-INSTANCE GUARD (the targeting guard): the
+        amendment may only re-found the epoch whose ANCHOR is the
+        DELIVERING instance. The carrier names the mission the delivery
+        belongs to; if it names a FOREIGN mission (another instance's
+        epoch — e.g. a commissioner epoch carried onto a worker's
+        delivery), the amendment is REFUSED and the delivery DEGRADES TO
+        THE LEGACY LADDER (the gate keeps deriving the anchor from the
+        message ladder — today's behavior, exactly). Without the guard,
+        a worker's delivery would re-found the COMMISSIONER's epoch
+        (moving the commissioner's anchor to a worker's message id).
+
+        The guard is F2-bounded: the amend write itself is guarded on
+        the epoch being OPEN (``UPDATE ... WHERE status='open'``), so a
+        closed epoch is never rewritten and a stale carrier is a safe
+        no-op.
+
+        MODE ``off`` SHORT-CIRCUIT: the whole subsystem is off (no
+        mints, no records) — the amendment would be a no-op anyway, so
+        the guard short-circuits BEFORE the two DB reads and pays no
+        per-delivery read cost. The mode is read through the CACHED
+        resolver (the house switch pattern — restart-read, no env
+        re-read per call).
+
+        FAIL-OPEN: the amendment is a RECORD write — it must never break
+        the delivery. Any failure is logged at WARNING and swallowed.
+        """
+        if not is_p1_human or not message_id or not instance_id:
+            return
+        if _mission_records_mode_is_off():
+            # The subsystem is off — nothing to amend (and no reads to
+            # pay for). The cached resolver never raises.
+            return
+        try:
+            service = getattr(self._manager, "mission_record_service", None)
+            if service is None:
+                return
+            target_mission_id = mission_id
+            if not target_mission_id:
+                # No carrier (the lane did not resolve a mission — e.g.
+                # the record was off when the message was enqueued).
+                # Resolve the OPEN epoch of THIS instance through the
+                # manager's public facade (no private-attribute reach).
+                target_mission_id = await asyncio.to_thread(
+                    self._manager.get_open_mission_id,
+                    instance_id,
+                )
+                if not target_mission_id:
+                    return
+            # ── The anchor-instance guard (see the docstring) ─────────
+            anchor_instance_id = await asyncio.to_thread(
+                self._manager.get_mission_anchor_instance_id,
+                target_mission_id,
+            )
+            if anchor_instance_id is None:
+                # READ FAULT (or a vanished row) — NOT a foreign
+                # mission. The causes are DIFFERENT and must not be
+                # reported as one: a missing anchor is an UNKNOWN
+                # (fail-open → refuse the amendment; the legacy ladder
+                # stays in charge), while a foreign anchor is a
+                # DECISION (the carrier names another instance's epoch).
+                logger.info(
+                    "mission_records: amend-at-delivery skipped for %s… — "
+                    "the anchor of the target mission (%s…) is unknown "
+                    "(read fault or a vanished row) — the anchor stays "
+                    "as-is (legacy ladder)",
+                    instance_id[:8],
+                    target_mission_id[:8],
+                )
+                return
+            if anchor_instance_id != instance_id:
+                # FOREIGN mission — refuse the amendment and degrade to
+                # the legacy ladder. Logged at INFO: the degradation is
+                # expected and benign (the carrier names another
+                # instance's epoch), but it must not be SILENT.
+                logger.info(
+                    "mission_records: amend-at-delivery refused for %s… — "
+                    "the carrier names a foreign mission (%s…, anchor=%s…) "
+                    "— the anchor stays as-is (legacy ladder)",
+                    instance_id[:8],
+                    target_mission_id[:8],
+                    anchor_instance_id[:8],
+                )
+                return
+            from .mission_record_service import amend_anchor_fail_open
+
+            await asyncio.to_thread(
+                amend_anchor_fail_open,
+                service,
+                target_mission_id,
+                message_id,
+            )
+        except Exception as amend_exc:  # noqa: BLE001 — never break delivery
+            logger.warning(
+                "mission_records: amend-at-delivery failed for %s…: %s: %s "
+                "— the delivery continues without the amendment",
+                instance_id[:8],
+                type(amend_exc).__name__,
+                amend_exc,
+            )
+
     async def _process_message_with_tracking(
         self,
         instance_id: str,
@@ -3588,6 +3800,7 @@ class InstanceMessagingService:
         image_refs: list[str] | None = None,
         *,
         is_fresh_episode_user_message: bool = False,
+        mission_id: str | None = None,
     ) -> "MessageResult":
         """Process message with activity tracking and cancellation support.
 
@@ -3618,6 +3831,16 @@ class InstanceMessagingService:
                 ``False`` is the safe default for the cascade-resume
                 direct-dispatch site (which bypasses enqueue) and any other
                 non-enqueued dispatch.
+            mission_id: Proposal B PR1 — the mission carrier. Threaded
+                from the persisted MessageQueue row's reserved
+                ``__ens_mission_id__`` metadata key via
+                ``ProcessingContext.mission_id`` (``task_processor._process``
+                reads it at claim). Consumed ONLY by the
+                ``user_message_entry`` tap (stamps
+                ``message_metadata.mission_id`` at delivery) and the
+                HumanMessage ``mission_id`` kwargs stamp — record-side
+                writes; NO gate/census/anchor read consumes it in PR1.
+                ``None`` (default) is byte-identical pre-PR1 behavior.
 
         Returns:
             MessageResult with response data.
@@ -4909,6 +5132,10 @@ class InstanceMessagingService:
                         # the user message always carries the
                         # sentinel when this is a fresh episode.
                         fresh_episode_attestation_reset=is_fresh_episode_user_message,
+                        # Proposal B PR1: the founding/amendment carrier
+                        # rides to the HumanMessage kwargs stamp (record
+                        # side; the entry tap stamps message_metadata).
+                        mission_id=mission_id,
                     )
                 else:
                     # Pure checkpoint resume (silent mode or no content)
@@ -4922,6 +5149,7 @@ class InstanceMessagingService:
                     message_source=message_source,
                     image_refs=image_refs,
                     fresh_episode_attestation_reset=is_fresh_episode_user_message,
+                    mission_id=mission_id,
                 )
         else:
             # First attempt - add message to conversation, with the
@@ -4950,6 +5178,7 @@ class InstanceMessagingService:
                 message_source=message_source,
                 image_refs=image_refs,
                 fresh_episode_attestation_reset=is_fresh_episode_user_message,
+                mission_id=mission_id,
             )
 
         # ── D2 seam drain — post-build phase ─────────────────────────────
@@ -5015,7 +5244,41 @@ class InstanceMessagingService:
             await _entry_tap.tap_node_return(
                 graph_input.get("messages", []),
                 instance_id,
+                # Proposal B PR1: the delivery-time mission stamp — the
+                # carrier threaded claim → ProcessingContext → here.
+                # Record-side only (the tap is non-load-bearing; the
+                # stamp is consumed by PR2 reads, never PR1).
+                mission_id=mission_id,
             )
+
+        # ── Proposal B PR2 — the RE-FOUNDING AMENDMENT (ruling ③) ──
+        # The amendment fires AT DELIVERY (here, at the delivery site) —
+        # NOT at enqueue time and NOT when the window is scanned.
+        # A delivered p1-HUMAN user-lane message during an OPEN epoch
+        # re-anchors the epoch: the mission's ``founding_message_id``
+        # becomes the delivered correction, so the delegation window
+        # re-bounds on the correction and the anchor is visible to the
+        # gate at would-be END even though the window's CONTENT is still
+        # being drained (the ~14-minute mid-turn lag seam).
+        #
+        # The amendment is RECORD-ONLY: in ``dry`` mode it moves the
+        # anchor row while every read site stays legacy (zero behavior
+        # change). The guarded amend path touches only an OPEN epoch
+        # (F2), so a stale carrier is a safe no-op.
+        #
+        # DECOUPLED FROM THE TAP (review finding): the amendment does
+        # NOT depend on the ``message_metadata`` side table — it needs
+        # the mission service + the carried mission id, nothing else.
+        # It therefore fires on EVERY delivery, even when the metadata
+        # repo is absent (or ``graph_input`` is None on a checkpoint
+        # resume) — nesting it under the tap's guard would silently
+        # disable the anchor amendment for those deliveries.
+        await self._amend_mission_anchor_at_delivery(
+            instance_id=instance_id,
+            message_id=message_id,
+            is_p1_human=is_fresh_episode_user_message,
+            mission_id=mission_id,
+        )
 
         # Persistent context HumanMessages are graph inputs rather than normal
         # user turns, so they are not seen by the streaming loop's HumanMessage

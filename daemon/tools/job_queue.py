@@ -67,6 +67,11 @@ from daemon.constants import INJECTION_ELIGIBLE_STATUSES
 from daemon.models.common import ErrorCodes
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
+from daemon.services.mission_record_service import (
+    attach_founding_message_fail_open,
+    attach_work_id_fail_open,
+    mint_continuation_epoch_fail_open,
+)
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.services.queue_ref import (
     QUEUE_ALIAS_TO_CANONICAL,
@@ -2175,6 +2180,31 @@ def create_job_tools(
             # a JobItem mirror alongside the Task row so ``new_job_id`` below
             # is a real JobItem. The legacy flag-checked dispatcher and the
             # Task-only fallback were removed in Phase 5.
+            #
+            # ── Proposal B PR1 — job_continue epoch mint (lane 3) ─────
+            # A follow-on job is a NEW mission epoch on the same
+            # instance (force-mint — NOT rung-1 reuse): the prior OPEN
+            # epoch transitions ``open -> superseded`` RECORD-SIDE ONLY
+            # and the new epoch chains to it via ``parent_mission_id``.
+            # The new ``work_id`` / founding message id only exist after
+            # the enqueue, so the record is COMPLETED by the two
+            # guarded attaches below (mint-then-attach). KNOWN
+            # ATTRIBUTION-GRAIN GAP (comparison.md §3-B, unaddressed by
+            # design in PR1): the source token is AGENT-grain
+            # (``agent:{caller_agent_id}``) — recording it in
+            # ``commissioner_instance_id`` (an instance-id column) would
+            # poison the PR2/PR3 instance-keyed joins, so the epoch's
+            # commissioner stays NULL and the caller rides the log
+            # line + the source token only.
+            # FAIL-OPEN, record-side only (zero behavior change).
+            _mission_record_service = getattr(
+                manager, "mission_record_service", None
+            )
+            _mission_id = await asyncio.to_thread(
+                mint_continuation_epoch_fail_open,
+                _mission_record_service,
+                instance_id,
+            )
             result = await manager.enqueue_message_job(
                 instance_id=instance_id,
                 message=message,
@@ -2191,7 +2221,28 @@ def create_job_tools(
                 dispatch_chain=_build_dispatch_chain(
                     current_instance_id, caller_agent_id
                 ),
+                # Proposal B PR1: the continuation epoch's carrier rides
+                # the enqueue so the founding message is stamped at
+                # delivery.
+                mission_id=_mission_id,
             )
+            # Complete the continuation record: work_id = the NEW job id
+            # (the ``Task.work_id`` linkage contract), founding message =
+            # the follow-on message. Record-side only; never fails the
+            # tool result.
+            if _mission_id:
+                await asyncio.to_thread(
+                    attach_work_id_fail_open,
+                    _mission_record_service,
+                    _mission_id,
+                    result.job_id,
+                )
+                await asyncio.to_thread(
+                    attach_founding_message_fail_open,
+                    _mission_record_service,
+                    _mission_id,
+                    result.message_id,
+                )
 
             # 6b. Counter increment AFTER successful enqueue_message_job
             #     (W1, ordering convention from W2/Polish#1 in

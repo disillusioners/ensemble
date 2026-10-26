@@ -6750,10 +6750,33 @@ def create_attestation_gate_node(
             )
             try:
                 if decision.decision is Decision.DENIED:
+                    # Proposal B PR2 — the EPOCH TAG for the deny entry.
+                    # The O4 dedup entry carries the owning mission so
+                    # the same fingerprint under a DIFFERENT epoch counts
+                    # again (the "the previous mission's deny ledger
+                    # rides forward" lane dies by construction). The
+                    # mission id is read from the manager facade on the
+                    # DENY path only (the rare path) and is validated as
+                    # a real string — a duck-typed / mocked facade can
+                    # never inject a non-string into the ledger.
+                    _deny_mission_id: str | None = None
+                    _mission_id_reader = getattr(
+                        manager, "get_mission_id", None
+                    )
+                    if callable(_mission_id_reader):
+                        try:
+                            _candidate = _mission_id_reader(
+                                effective_instance_id
+                            )
+                        except Exception:  # noqa: BLE001 — advisory read
+                            _candidate = None
+                        if isinstance(_candidate, str) and _candidate:
+                            _deny_mission_id = _candidate
                     increment_result = safe_increment(
                         ledger,
                         effective_instance_id,
                         denial_epoch,
+                        mission_id=_deny_mission_id,
                         log_context={
                             "instance_id": effective_instance_id,
                             "denial_epoch": denial_epoch,
@@ -7547,6 +7570,13 @@ async def _maybe_precall_compact_95(
     ``pairing_synthesized_msgs`` is MUTATED (placeholders appended) so
     the C2 return persists them — same contract as the CLE handler.
     """
+    # Proposal B PR2 — the mission carrier reader (the tap's mission
+    # stamp). Imported LOCALLY: the module-level import would create a
+    # cycle (``daemon.services.__init__`` → ``child_reports`` →
+    # ``daemon.graph``) — the same local-import discipline the
+    # attestation services use in this module.
+    from .services.message_tap import resolve_turn_mission_id
+
     # 0. Availability + kill-switch (A.8 — single flag governs both
     # auto triggers; OFF = hook is a no-op).
     if compactor is None or graph_ref is None or graph_ref[0] is None:
@@ -7764,6 +7794,9 @@ async def _maybe_precall_compact_95(
                 await precall_compaction_tap_slot.tap_node_return(
                     result.replacement_messages,
                     instance_id,
+                    # Proposal B PR2 — the mission stamp (the carried
+                    # value; see the agent_node_return site).
+                    mission_id=resolve_turn_mission_id(full_messages),
                 )
             logger.info(
                 "[Compaction][precall-95] complete: instance=%s, "
@@ -8147,6 +8180,10 @@ def create_agent_node(
     async def agent_node(state, config=None):
         messages = state['messages']
         full_messages = [SystemMessage(content=system_prompt)] + list(messages)
+        # Proposal B PR2 — the mission carrier reader (the taps' mission
+        # stamp). LOCAL import (cycle discipline — see the precall-95
+        # site).
+        from .services.message_tap import resolve_turn_mission_id
         transient = retry_config.get('transient_attempts', 8) if retry_config else 8
         timeout = retry_config.get('timeout_attempts', 3) if retry_config else 3
         instance_id = (config or {}).get('configurable', {}).get('thread_id', 'unknown')
@@ -9422,6 +9459,9 @@ def create_agent_node(
                 await compaction_tap_slot.tap_node_return(
                     result.replacement_messages,
                     instance_id,
+                    # Proposal B PR2 — the mission stamp (the carried
+                    # value; see the agent_node_return site).
+                    mission_id=resolve_turn_mission_id(full_messages),
                 )
 
             logger.info(f'[LLM] Reactive compaction complete: {result.messages_before} -> {result.messages_after} messages, {result.tokens_saved} tokens saved ({result.compaction_type})')
@@ -10080,7 +10120,15 @@ def create_agent_node(
         # graph turn); ``None`` slot disables the tap entirely (test
         # fixtures + backward compat).
         if message_tap_slot is not None:
-            await message_tap_slot.tap_node_return(outgoing, instance_id)
+            await message_tap_slot.tap_node_return(
+                outgoing,
+                instance_id,
+                # Proposal B PR2 — the mission stamp rides the CARRIED
+                # value (the producer stamped it on the delivered user
+                # message's kwargs; the tap READS it — never re-derives
+                # it from message shapes).
+                mission_id=resolve_turn_mission_id(messages),
+            )
         return_value: dict[str, Any] = {
             **watchover_state_reset,
             'messages': outgoing,

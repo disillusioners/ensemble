@@ -2208,12 +2208,13 @@ def test_length_log_placeholder_count_is_27():
                 break
     format_text = "\n".join(format_string_lines)
     placeholder_count = format_text.count("%s")
-    assert placeholder_count == 27, (
+    assert placeholder_count == 28, (
         f"canonical gate log format string placeholder count drifted: "
-        f"expected 27 (34 - attest_seen_outside_window "
+        f"expected 28 (34 - attest_seen_outside_window "
         f"- trigger_suppressed_by - marker_path - marker_judge_verdict "
         f"- marker_judge_latency_ms - marker_judge_error_class "
-        f"- trigger_source [Stage 3 R1/R5/R6 retirements]), "
+        f"- trigger_source [Stage 3 R1/R5/R6 retirements] "
+        f"+ outstanding_commissions [Proposal B PR2's fifth R2 input]), "
         f"got {placeholder_count}. Update the drift pin if the "
         f"placeholder count is correct for the new schema."
     )

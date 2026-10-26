@@ -24,6 +24,7 @@ from daemon.services.message_processing_errors import (
     handle_message_processing_error,
 )
 from daemon.services.job_queue_service import DISPATCH_CHAIN_KEY
+from daemon.services.mission_record_service import MISSION_ID_KEY
 from daemon.services.usage_limit_schedule import clear_usage_limit_first_seen
 from daemon.services.work_notifier import notify_work_watchers
 
@@ -541,6 +542,17 @@ class ProcessMessageProcessor(BaseProcessor):
             message_metadata.get(DISPATCH_CHAIN_KEY)
             if message_metadata else None
         )
+        # Proposal B PR1 — the MISSION carrier, read off the SAME
+        # persisted metadata under its RESERVED key (stamped once at the
+        # producer, ``_prepare_enqueued_message``). This is persistence-
+        # carried threading (the F11 shape), NOT consumer-side
+        # re-derivation: the producer computed the value and it travels
+        # verbatim. Record-side only in PR1 — the only consumer is the
+        # delivery-time ``message_metadata.mission_id`` stamp.
+        mission_id = (
+            message_metadata.get(MISSION_ID_KEY)
+            if message_metadata else None
+        )
 
         # ---- Build pipeline input ----
         # P0 hotfix (review-2): compute the ledger-derived
@@ -587,6 +599,9 @@ class ProcessMessageProcessor(BaseProcessor):
             # F11: the delegation chain (a POINTER to the delegating
             # instance) — claim → context → funnel.
             dispatch_chain=dispatch_chain,
+            # Proposal B PR1: the mission carrier — claim → context →
+            # delivery-side stamp (record-side only).
+            mission_id=mission_id,
         )
         callbacks = self._build_callbacks(task)
 

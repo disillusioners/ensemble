@@ -34,6 +34,25 @@ from .persistence import (
     get_instance_messages,
     get_checkpointer,
 )
+from .services.mission_record_service import (
+    MissionRecordMode,
+    MissionRecordService,
+    mint_cascade_resume_epoch_if_stranded_fail_open,
+    # The mode ladder's OWNER — the single definition of the enforce
+    # gate (the reads module imports it; it never redefines it).
+    mission_records_enforce_enabled,
+    resolve_mission_records_mode,
+)
+from .services.mission_record_reads import (
+    count_outstanding_commissions as _read_outstanding_commissions,
+    list_outstanding_commissions,
+    read_founding_message_id as _read_founding_message_id,
+    read_mission_anchor_instance_id as _read_mission_anchor_instance_id,
+    read_mission_census as _read_mission_census,
+    read_mission_id as _read_mission_id,
+    read_open_mission_id as _read_open_mission_id,
+)
+from .repositories.mission_record.models import OPEN_EPOCH_STATUS_SQL
 from .repositories import (
         SQLModelInstanceRepository,
         SQLModelProjectRepository,
@@ -778,6 +797,27 @@ class InstanceManager:
         from .repositories.mcp_kb_keys.models import (  # noqa: F401
             McpKbKey,
         )
+
+        # Completion-subsystem Proposal B PR1 (mission-record anchor):
+        # the two mission-record tables are registered with
+        # ``SQLModel.metadata`` BEFORE ``create_all`` so they are created
+        # on BOTH drivers at manager boot (snapshot/maintenance_runs
+        # precedent for brand-new tables — no _ensure_postgres_columns
+        # mirror for the tables themselves). The registration import now
+        # lives in ``daemon/repositories/__init__.py`` (the 8/8 sibling
+        # new-table convention) — this module imports that package, so
+        # the models are registered before ``create_all`` runs. The
+        # SQLite-side canonical DDL auto-applies via the migration runner
+        # (20261025_122631_create_mission_records.sql +
+        # 20261025_122700_create_mission_commissions.sql). PR1 contract:
+        # mints write, NOTHING reads these tables for decisions (the
+        # ENSEMBLE_MISSION_RECORDS mode ladder ships default ``dry``).
+        # NAME COLLISION (read-only note): the legacy mission READ-MODEL
+        # is the ``MissionRecord`` dataclass at
+        # ``daemon/services/mission_resolver.py:241`` (wired at
+        # ``api.py:3132``) — a DIFFERENT symbol from the
+        # ``mission_records`` table registered here. No module imports
+        # both, so no import alias is needed.
         from .models.app_settings import AppSetting  # noqa: F401  # db-backed-settings P1: register app_settings before create_all
         # resource-cost-control Phase 1: register the 4 observability
         # tables BEFORE create_all so the PG boot path lands them on
@@ -969,6 +1009,74 @@ class InstanceManager:
             engine=self._engine,
             create_tables=False,
         )
+
+        # Mission-record anchor (completion-subsystem Proposal B PR1).
+        # The SINGLE WRITER for ``mission_records`` /
+        # ``mission_commissions`` — the commissioning lanes call it
+        # through the fail-open wrappers in
+        # :mod:`daemon.services.mission_record_service`. The mode ladder
+        # (``ENSEMBLE_MISSION_RECORDS=off|dry|enforce``) is resolved
+        # ONCE at boot and cached (restart-read; ship default ``dry`` =
+        # mints write, NOTHING reads — zero behavior change).
+        self._mission_record_service = MissionRecordService(self._engine)
+
+        # F5 (house switch pattern): resolve the mission-records mode
+        # ladder ONCE, at boot, OUTSIDE any swallow-envelope — an
+        # unrecognized ``ENSEMBLE_MISSION_RECORDS`` token raises a LOUD
+        # ValueError here, so an operator typo fails the daemon start
+        # (exactly like the other kill-switches) instead of silently
+        # degrading a live lane. The resolver CACHES the value
+        # (restart-read): a mid-run env mutation can no longer flip it.
+        # Bound ONCE here — the backfill block below reuses the local
+        # instead of re-resolving (the resolver is cached, so the two
+        # are equivalent; binding keeps the boot read explicit).
+        _mission_records_mode = resolve_mission_records_mode()
+
+        # ── Proposal B PR1 — adoption-delta (b): advisory nudge-commission
+        # backfill (dry-run-loggable) ──────────────────────────────────
+        # Best-effort historical coverage of the existing
+        # ``instance_ops_audit`` nudge rows (the tiny surface: 6 rows / 1
+        # committed nudge all-time): committed non-dry nudges whose
+        # target is STILL NON-TERMINAL mint ADVISORY commission rows
+        # (``provenance='backfill'``, deterministic ids, EXCLUDED from
+        # routing authority forever). IDEMPOTENT (deterministic UUID5
+        # commission ids + epoch-0 resolve-if-none). Runs DRY-RUN ONLY at
+        # boot in PR1 (the loggable plan; the committing run is an
+        # operator action — ``backfill_advisory_nudge_commissions(
+        # dry_run=False)`` — matching proposal-b §5.2's "runs
+        # dry-run-loggable before commit"). NEVER breaks boot: the
+        # envelope swallows everything but logs loudly. Skipped entirely
+        # when the mode ladder is ``off``.
+        #
+        # ORDERING (independent-review F1): this block runs AFTER the
+        # ``self._mission_record_service`` assignment above. It used to
+        # sit next to the migration block (≈200 lines EARLIER), where
+        # ``self._mission_record_service`` did not exist yet — the
+        # resulting AttributeError was swallowed by the boot envelope
+        # below, so the documented dry-run plan NEVER ran and never
+        # logged on the default ``dry`` path.
+        try:
+            if _mission_records_mode != MissionRecordMode.OFF:
+                # SYNC context (manager __init__ — the migration block
+                # above is sync too): call the backfill directly.
+                _backfill = (
+                    self._mission_record_service.backfill_advisory_nudge_commissions(
+                        dry_run=True,
+                    )
+                )
+                if _backfill.get("scanned"):
+                    logger.info(
+                        "mission_records: advisory nudge-commission backfill "
+                        "dry-run plan: %s",
+                        _backfill,
+                    )
+        except Exception as _backfill_exc:  # noqa: BLE001 — never break boot
+            logger.warning(
+                "mission_records: backfill dry-run failed at boot (ignored): "
+                "%s: %s",
+                type(_backfill_exc).__name__,
+                _backfill_exc,
+            )
 
         # Instance UI preferences (pin + color tag). Global-scope table
         # keyed by instance_id; merge happens at the API router layer so
@@ -3066,6 +3174,19 @@ class InstanceManager:
         read-path changes in PR2).
         """
         return self._message_metadata_repo
+
+    @property
+    def mission_record_service(self) -> MissionRecordService:
+        """Public read-only access to the :class:`MissionRecordService`.
+
+        Completion-subsystem Proposal B PR1 — the SINGLE WRITER for the
+        mission-record tables. Callers (the commissioning lanes) go
+        through the fail-open wrappers in
+        :mod:`daemon.services.mission_record_service`; direct reads of
+        the underlying tables for DECISIONS are PR2/PR3 territory (the
+        ``enforce`` flip) and do not exist in PR1.
+        """
+        return self._mission_record_service
 
     @property
     def db_pool_manager(self):
@@ -8223,6 +8344,58 @@ class InstanceManager:
                 "CREATE INDEX IF NOT EXISTS ix_message_metadata_thread "
                 "ON message_metadata (thread_id)"
             ),
+            # ── Proposal B PR1 — mission-provenance columns (2026-10-25) ─
+            # The THREE additive provenance columns (proposal-b §2.1).
+            # SQLite counterpart:
+            # ``daemon/migrations/versions/20261025_122730_add_mission_
+            # provenance_columns.sql``. The migration runner is a NO-OP
+            # on PostgreSQL, so the equivalent idempotent ADD COLUMN
+            # statements run here for existing PG databases; fresh PG
+            # databases get the columns from
+            # ``SQLModel.metadata.create_all()`` via the model fields
+            # (ReportInjection / MessageMetadata). All nullable —
+            # additive-only, old binaries ignore them.
+            #   * report_injections.mission_id /
+            #     report_injections.commissioner_instance_id — written by
+            #     the PR3 ROUTING FLIP (column lands in PR1 with no
+            #     writers).
+            #   * message_metadata.mission_id — written by the
+            #     MessageTapSlot delivery stamps via the threaded
+            #     ``mission_id`` carrier (composite PK unchanged).
+            "ALTER TABLE report_injections ADD COLUMN IF NOT EXISTS mission_id TEXT",
+            "ALTER TABLE report_injections ADD COLUMN IF NOT EXISTS commissioner_instance_id TEXT",
+            "ALTER TABLE message_metadata ADD COLUMN IF NOT EXISTS mission_id TEXT",
+            # ── Proposal B PR2 — F1 carry: the OPEN-EPOCH partial unique
+            # index (2026-10-25). At most ONE ``open`` mission_records row
+            # may exist per anchor — the resolution ladder's rung-1
+            # lookup returns a single row BY CONSTRUCTION once this
+            # index exists. The statement order matters: the idempotent
+            # normalization UPDATE runs FIRST (it closes the crash
+            # window in which the job_continue lane had inserted a new
+            # epoch but not yet superseded the prior one), then the
+            # index is created. Both statements run in the SAME
+            # transaction (the statements loop below), so the index can
+            # never be created against un-normalized rows.
+            # The index name + predicate MUST stay byte-identical with
+            # the SQLite counterpart
+            # (``daemon/migrations/versions/20261025_140000_add_mission_open_epoch_unique_index.sql``)
+            # and with the SQLModel ``__table_args__`` declaration in
+            # ``daemon/repositories/mission_record/models.py`` (3-site pin).
+            (
+                "UPDATE mission_records SET status = 'superseded' "
+                f"WHERE {OPEN_EPOCH_STATUS_SQL} AND EXISTS ("
+                "SELECT 1 FROM mission_records newer "
+                "WHERE newer.anchor_instance_id = mission_records.anchor_instance_id "
+                f"AND newer.{OPEN_EPOCH_STATUS_SQL} AND ("
+                "newer.created_at > mission_records.created_at OR ("
+                "newer.created_at = mission_records.created_at "
+                "AND newer.mission_id > mission_records.mission_id)))"
+            ),
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_mission_records_anchor_open "
+                "ON mission_records (anchor_instance_id) "
+                f"WHERE {OPEN_EPOCH_STATUS_SQL}"
+            ),
             # ── Critical-notes lifecycle columns (Phase 1, 2026-09-15) ──
             # Additive columns on ``critical_notes`` per
             # architecture-recommendation §5.1. The SQLite companion is
@@ -9706,6 +9879,7 @@ class InstanceManager:
         work_id: str | None = None,
         work_id_required: bool = False,
         image_refs: list[str] | None = None,
+        mission_id: str | None = None,
     ) -> AsyncMessageResult:
         """Enqueue a message WITHOUT a JobItem mirror (internal-only path).
 
@@ -9753,6 +9927,11 @@ class InstanceManager:
             work_id=work_id,
             work_id_required=work_id_required,
             image_refs=image_refs,
+            # Proposal B PR1: the mission carrier MUST cross the facade —
+            # the Facade-Forwarding Discipline (guards extended, not
+            # bypassed: test_phase1_facade_signature_unchanged +
+            # test_mission_record_facade_forwarding).
+            mission_id=mission_id,
         )
 
     async def enqueue_message_job(
@@ -9770,6 +9949,7 @@ class InstanceManager:
         image_refs: list[str] | None = None,
         idempotency_key: str | None = None,
         dispatch_chain: dict[str, Any] | None = None,
+        mission_id: str | None = None,
     ) -> AsyncMessageResult:
         """POC variant of :meth:`enqueue_message` that also creates a JobItem mirror.
 
@@ -9811,6 +9991,9 @@ class InstanceManager:
             image_refs=image_refs,
             idempotency_key=idempotency_key,
             dispatch_chain=dispatch_chain,
+            # Proposal B PR1: the mission carrier MUST cross the facade
+            # (Facade-Forwarding Discipline — see enqueue_message above).
+            mission_id=mission_id,
         )
 
     async def _process_message_with_tracking(
@@ -9829,6 +10012,7 @@ class InstanceManager:
         *,
         is_fresh_episode_user_message: bool = False,  # P0 hotfix (review-2): threaded from ProcessingContext
         dispatch_chain: dict[str, Any] | None = None,  # F11: the delegation chain (a POINTER to the delegating instance)
+        mission_id: str | None = None,  # Proposal B PR1: the mission carrier (claim path → delivery stamp)
     ) -> MessageResult:
         """Process message with activity tracking and cancellation support.
         
@@ -9918,6 +10102,10 @@ class InstanceManager:
             # canonical worker-pool claim path; explicit False at the
             # cascade-resume direct-dispatch site (see below).
             is_fresh_episode_user_message=is_fresh_episode_user_message,
+            # Proposal B PR1: the mission carrier MUST cross the facade
+            # (Facade-Forwarding Discipline) — consumed by the
+            # delivery-time mission stamp (record-side only).
+            mission_id=mission_id,
         )
 
     def _get_instance_report_prefix(self, instance_id: str, agent_id: str) -> str:
@@ -11662,6 +11850,169 @@ class InstanceManager:
             instance_id
         )
 
+    # ------------------------------------------------------------------
+    # Proposal B PR2 — the mission-record READ facades.
+    #
+    # These are the R2-region siblings of the four tree counters above.
+    # They read the ``mission_records`` / ``mission_commissions`` tables
+    # (the PR1 substrate) so the gate's census, its SOURCE U anchor and
+    # its 5th R2 input can consume the RECORD instead of re-deriving
+    # "what is this mission?" from message shapes.
+    #
+    # MODE-AWARE (the single gate): the reads are consulted ONLY when
+    # the mission-record mode ladder is ``enforce``
+    # (``ENSEMBLE_MISSION_RECORDS=enforce``). In ``dry`` (the ship
+    # default) and ``off`` the facades return the INACTIVE value — the
+    # legacy posture, byte-identical to pre-PR2. The gate itself never
+    # consults the mode: the decision lives here, in ONE place.
+    #
+    # FAIL-OPEN (convention #3): a read failure NEVER degrades to a
+    # ``0`` default. The count facade returns ``-1`` ("unknown") and
+    # the census facade returns ``None`` ("no answer") — the callers
+    # fall back to the legacy leg in both cases.
+    # ------------------------------------------------------------------
+
+    def count_outstanding_commissions(self, instance_id: str) -> int:
+        """The FIFTH R2 input — the mission-scoped outstanding count.
+
+        The four tree counters above are TREE-scoped: they cannot see an
+        OUT-OF-TREE commissioned worker (the nudge lane's blind spot —
+        the D2 premature-settle class). This input is MISSION-scoped:
+        it counts the open mission's outstanding commission rows, so a
+        running out-of-tree worker holds the mission instead of letting
+        it settle.
+
+        Returns:
+            ``0``  — inactive (mode ``dry``/``off``) OR the mission is
+                      quiet (no open epoch, or no outstanding rows).
+            ``N>0``— the open mission has N outstanding commissions.
+            ``-1`` — UNKNOWN (the read failed). The fail-open sentinel:
+                      the caller treats it as "behave as before the
+                      records existed", NEVER as "0 outstanding".
+
+        TERMINATOR (PR3): PR2 ships no writer that retires a
+        commission row, so an outstanding commission holds the L3
+        publish until the epoch closes — the enforce promotion is
+        GATED on PR3's reconciliation sweep (the PR2 adoption notes
+        §(f)).
+        """
+        if not mission_records_enforce_enabled():
+            # Inactive input — the legacy quiet predicate is preserved
+            # exactly (a real 0, not the unknown sentinel: the feature
+            # is OFF, not unknown).
+            return 0
+        return _read_outstanding_commissions(self._engine, instance_id)
+
+    def mission_has_commissions(self, instance_id: str) -> bool | None:
+        """The delegation-census read: "does the open mission have any
+        commission rows?"
+
+        Replaces the tool-name-literal walk (``attestation_scanner``)
+        when the record answers. The census is no longer reset by a new
+        user message re-anchoring the window — the commission rows
+        belong to the EPOCH.
+
+        Returns:
+            ``True``/``False`` — the record's answer (an open mission
+                      with / without commission rows).
+            ``None``   — no answer (no open epoch, or the read failed)
+                      → the caller uses the LEGACY delegation scan
+                      (the declared fallback leg).
+        """
+        if not mission_records_enforce_enabled():
+            return None
+        return _read_mission_census(self._engine, instance_id)
+
+    def get_mission_founding_message_id(self, instance_id: str) -> str | None:
+        """The SOURCE U anchor read: the open epoch's founding message id.
+
+        ``None`` → the caller falls back to the LEGACY six-step exclusion
+        ladder (today's behavior, exactly).
+        """
+        if not mission_records_enforce_enabled():
+            return None
+        return _read_founding_message_id(self._engine, instance_id)
+
+    def get_open_mission_id(self, instance_id: str) -> str | None:
+        """The open epoch's ``mission_id`` for this instance.
+
+        A WRITER-side read (the re-founding amendment's no-carrier
+        fallback). NOT mode-gated: the amendment is a record-side WRITE
+        that runs in every mode where mints happen (``dry`` included) —
+        the mode ladder gates the GATE-side reads (the census, the
+        anchor lookup, the 5th R2 input), never the record-side writes.
+
+        It is a FACADE GETTER rather than a private-attribute reach: the
+        messaging service reads the record through the manager's public
+        surface instead of ``manager._engine`` (the Facade-Forwarding
+        Discipline's "no private reach across the facade" half).
+
+        Fail-open: ``None`` on any failure (the caller then skips the
+        amendment — the safe direction).
+        """
+        return _read_open_mission_id(self._engine, instance_id)
+
+    def get_mission_anchor_instance_id(self, mission_id: str) -> str | None:
+        """The ANCHOR INSTANCE of a mission row (``None`` on a miss).
+
+        The re-founding amendment's TARGETING GUARD read: the
+        amendment may only re-found the epoch whose anchor is the
+        DELIVERING instance — a delivery whose carrier names a foreign
+        mission must not move that mission's anchor.
+
+        Fail-open: ``None`` on any failure (the caller then refuses the
+        amendment).
+        """
+        return _read_mission_anchor_instance_id(self._engine, mission_id)
+
+    def get_mission_id(self, instance_id: str) -> str | None:
+        """The open epoch's ``mission_id`` (``None`` when there is none).
+
+        The epoch tag for the deny ledger (proposal-b §2.4): a deny entry
+        records the owning mission so the boundary prune can drop the
+        closed-epoch entries.
+        """
+        if not mission_records_enforce_enabled():
+            return None
+        return _read_mission_id(self._engine, instance_id)
+
+    def list_mission_outstanding_commissions(
+        self, instance_id: str
+    ) -> list[dict[str, Any]]:
+        """The open mission's OUTSTANDING commission rows.
+
+        The judge's SOURCE C membership half (proposal-b §3 NEW(v)):
+        "C's membership = tree ∪ commissions". The tree walk can only
+        see the STRUCTURAL descendants; the commission rows are the
+        OUT-OF-TREE commissioned workers (the nudge lane) the tree
+        walk can never see.
+
+        Returns:
+            One raw row per outstanding commission:
+            ``{"instance_id": <worker>, "lane": <commission lane>,
+            "state": <commission state>}``. Empty list when the mode is
+            not ``enforce``, when there is no open mission, or when the
+            read fails (the union is fail-open — counts-only C evidence,
+            never a wrong verdict).
+
+            The C-row SHAPE (the ``commissioned_pending`` status
+            vocabulary) is owned by
+            :mod:`daemon.services.attestation_resolver_activation` — this
+            facade returns the raw record data, never the vocabulary.
+        """
+        if not mission_records_enforce_enabled():
+            return []
+        rows: list[dict[str, Any]] = []
+        for commission in list_outstanding_commissions(self._engine, instance_id):
+            rows.append(
+                {
+                    "instance_id": str(commission.worker_instance_id or ""),
+                    "lane": str(commission.lane or ""),
+                    "state": str(commission.state or ""),
+                }
+            )
+        return rows
+
     # Live-descendants count cap (R2 third-input, 2026-09-06). The cap
     # bounds the BFS tree walk on the gate hot path; production trees are
     # well under 500 (the cap is admin-tool-only escalation territory,
@@ -13319,6 +13670,29 @@ class InstanceManager:
             #    WorkerPool / JobQueue dispatch) would race on the langgraph
             #    checkpoint and corrupt it.
             async def _do_process():
+                # ── Proposal B PR1 — cascade_resume epoch boundary
+                # (lane 10, direct sub-lane) ── NO mint unless the
+                # instance is stranded (no OPEN epoch): an in-mission
+                # resume continues its open epoch (resume is delivery,
+                # not founding); a stranded root gets an honest
+                # ``founding_source='revive'`` boundary row.
+                # RECORD-SIDE ONLY, FAIL-OPEN (the resume must never
+                # wedge on a record failure).
+                try:
+                    await asyncio.to_thread(
+                        mint_cascade_resume_epoch_if_stranded_fail_open,
+                        self._mission_record_service,
+                        instance_id,
+                    )
+                except Exception as _mint_exc:  # noqa: BLE001 — never wedge
+                    logger.warning(
+                        "cascade_resume: mission-record mint failed for "
+                        "instance=%s…: %s: %s (resume proceeds)",
+                        instance_id[:8],
+                        type(_mint_exc).__name__,
+                        _mint_exc,
+                    )
+
                 # P0 hotfix (review-2): cascade_resume bypasses enqueue
                 # (this call goes directly to
                 # ``_process_message_with_tracking``, not through

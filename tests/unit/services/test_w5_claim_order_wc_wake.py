@@ -947,12 +947,12 @@ class TestSeamDrainEntryTapThroughProductionSeam:
         metadata_repo.upsert_batch.assert_called_once()
         args, _ = metadata_repo.upsert_batch.call_args
         assert args[0] == "iid-seam-tap"
-        recorded_ids = {mid for mid, _ts, _seq in args[1]}
+        recorded_ids = {mid for mid, _ts, _seq, *_rest in args[1]}
         # The drained leftover is recorded under its STAMPED echo id and
         # the user turn under its dispatch message_id — both messages
         # were constructed by production code, not hand-built here.
         assert echo_id in recorded_ids
         assert "user-turn-id" in recorded_ids
-        for _mid, ts, seq in args[1]:
+        for _mid, ts, seq, *_rest in args[1]:
             assert isinstance(ts, str) and len(ts) > 0
             assert seq is None
