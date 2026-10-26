@@ -128,9 +128,10 @@ together tells the operator exactly which mode the live daemon is in:
   reconciliation lane is inert (no reads, no writes)`) and — in `enforce`
   only — an unwired mission-record SERVICE (`WARNING`, `RDRS lane 7: the
   mission-record SERVICE is not wired — the mission-commission
-  reconciliation lane is inert in enforce (no reads, no writes)`). Both are
-  logged ONCE per service lifetime, so a single grep may need the service
-  restart to re-emit them. **If the boot line says `dry` or `enforce` but NO
+  reconciliation lane is inert in enforce (no reads, no writes)`). Both share
+  the one `_mission_lane_degrade_logged` flag, so at most ONE of the two is
+  ever emitted in a service's lifetime — and a restart re-emits the SAME one,
+  never the other. **If the boot line says `dry` or `enforce` but NO
   `(mode=…)` field ever appears, the lane is INERT, not idle** — it will
   never retire a row, and §5.3's "the hold can be PERMANENT" applies.
 * **A THIRD, distinct case — a BAD ENV TOKEN.** This is NOT `off`. An
