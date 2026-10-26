@@ -898,6 +898,12 @@ def test_privileged_category_set_is_pinned() -> None:
         # allow entries are the only access path, and every tool body
         # ALSO carries its own agent_id gate.
         "mcp_rpc",
+        # ari-voice (2026-10-25): the ``notify-user`` category — ONE
+        # deliberate message from a non-user-originated turn to the
+        # SESSION'S OWN registered chat source. opt-in-only; the ari
+        # allow entry is the only access path, and the tool body ALSO
+        # carries its own agent_id gate.
+        "notify-user",
 }
     ), (
         f"PRIVILEGED_TOOL_CATEGORIES drifted from the post-override "

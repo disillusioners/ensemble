@@ -99,8 +99,8 @@ class TestStaticRegistrationChecklist:
         assert "tools.extend(upgrade_tool_list)" in source
         assert "create_upgrade_tools(" in source
 
-    def test_privileged_categories_is_exactly_fifteen_entries(self) -> None:
-        """The default-deny set is exactly fifteen entries —
+    def test_privileged_categories_is_exactly_sixteen_entries(self) -> None:
+        """The default-deny set is exactly sixteen entries —
         ``system_upgrade``, ``system-log``, ``ens-db``,
         ``ens-env``, ``view-views``, ``secrets``,
         ``settings``, ``board`` and ``self-alarm``.
@@ -213,6 +213,12 @@ class TestStaticRegistrationChecklist:
         # allow entries are the only access path, and every tool body
         # ALSO carries its own agent_id gate.
         "mcp_rpc",
+        # ari-voice (2026-10-25): the ``notify-user`` category — ONE
+        # deliberate message from a non-user-originated turn to the
+        # SESSION'S OWN registered chat source. opt-in-only; the ari
+        # allow entry is the only access path, and the tool body ALSO
+        # carries its own agent_id gate.
+        "notify-user",
 })
 
     def test_checklist_comment_block_present_in_module(self) -> None:

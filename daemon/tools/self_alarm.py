@@ -51,7 +51,10 @@ The user ruling of 2026-10-20 (Discord, direct) RETRACTS the earlier
 "the fired instance is a FRESH instance with no memory" framing. The
 five §8.4 obligations (lateness in both cap states, board-never-ping,
 unobservable-fire, list semantics, the ``self-alarm:`` label namespace)
-SURVIVE unchanged.
+SURVIVE unchanged — with one ari-voice clarification (2026-10-25):
+board-never-ping forbids AUTOMATIC chat delivery; the deliberate
+``notify_user`` opt-in (the ``notify-user`` category, ari-only) is the
+ONE chat path, chosen per turn, never promised casually.
 """
 
 from __future__ import annotations
@@ -101,11 +104,17 @@ instance's own session — the SAME instance, with its context intact. The
 message names the action explicitly (that is the wake reason), but the
 session it lands in is the one that armed the alarm.
 
-What the alarm is NOT: a notification. The scheduler source is one-way
-and the receiving instance has no chat identity, so there is NO chat /
-Discord / Slack ping and no interruption. The BOARD is the user-visible
-surface: the fired session acts (updates the board item, dispatches a
-job) and the board shows the result.
+What the alarm is NOT: a notification. The alarm itself injects nothing
+into any chat channel and nothing fires AUTOMATICALLY into chat. The
+BOARD is the user-visible surface: the fired session acts (updates the
+board item, dispatches a job) and the board shows the result — that is
+the guaranteed surface. There is NO automatic chat / Discord / Slack
+ping and no interruption. The ONE exception is deliberate (ari-voice,
+2026-10-25): the fired session MAY invoke ``notify_user`` — the
+``notify-user`` category, ari-only — to send a single opt-in message to
+the session's own registered chat source when the content genuinely
+needs the user. Silence stays the default; the board remains the
+always-on surface.
 
 Minimum horizon: 30 minutes. Anything shorter must be done inside the
 current turn with ``bash`` + ``sleep``, not with an alarm.
@@ -564,18 +573,23 @@ its context intact. The wake reason rides in the message, so
 `message_to_self` is appended VERBATIM as the message's Action line and
 must name the action explicitly.
 
-The board is the user-visible surface — there is NO ping
+The board is the user-visible surface — no AUTOMATIC ping
 --------------------------------------------------------------------
 The promise: at the scheduled instant YOUR OWN session is woken with your
 message, performs the action and leaves evidence ON THE BOARD (status /
 notes) and in any job it dispatches; the live board view shows the change.
-What is NOT promised: a chat / Discord / Slack message, a reminder in the
-conversation, or an interruption. The scheduler source is one-way and the
-receiving instance has no chat identity — so the board is the only
-guaranteed surface. When you set or move a board item's due date, arm (or
-re-arm) a self_alarm for it and pass `link_board_item` — the alarm is the
-reminder mechanism, the board item's due date stays the source of truth
-for the deadline.
+What is NOT promised: an AUTOMATIC chat / Discord / Slack message, a
+reminder in the conversation, or an interruption. The scheduler source is
+one-way and the receiving session has no automatic chat delivery — so the
+board is the only guaranteed surface. The ONE deliberate exception
+(ari-voice, 2026-10-25): the woken session may invoke `notify_user` (the
+notify-user category, ari-only) to send a single opt-in chat message to
+the session's own registered chat source — at most one per ~minute and
+six per hour per destination, every attempt audited. Silence is the
+default; when you set or move a board item's due date, arm (or re-arm) a
+self_alarm for it and pass `link_board_item` — the alarm is the reminder
+mechanism, the board item's due date stays the source of truth for the
+deadline, and the board shows the outcome.
 
 Lateness — both cap states, and the skip signature
 ---------------------------------------------------

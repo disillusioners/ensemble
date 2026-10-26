@@ -103,6 +103,12 @@ EXPECTED_PRIVILEGED_SET: frozenset[str] = frozenset({
 # allow entries are the only access path, and every tool body
 # ALSO carries its own agent_id gate.
 "mcp_rpc",
+# ari-voice (2026-10-25): the ``notify-user`` category — ONE
+# deliberate message from a non-user-originated turn to the
+# SESSION'S OWN registered chat source. opt-in-only; the ari
+# allow entry is the only access path, and the tool body ALSO
+# carries its own agent_id gate.
+"notify-user",
 })
 
 #: The ONLY agent allowed to hold the self-alarm category.
@@ -199,11 +205,11 @@ class TestPrivilegedCategory:
     def test_self_alarm_is_in_the_privileged_set(self) -> None:
         assert SELF_ALARM_CATEGORY in PRIVILEGED_TOOL_CATEGORIES
 
-    def test_the_set_is_exactly_the_fifteen_entries(self) -> None:
+    def test_the_set_is_exactly_the_sixteen_entries(self) -> None:
         assert PRIVILEGED_TOOL_CATEGORIES == EXPECTED_PRIVILEGED_SET
 
-    def test_the_set_has_fifteen_members(self) -> None:
-        assert len(PRIVILEGED_TOOL_CATEGORIES) == 15
+    def test_the_set_has_sixteen_members(self) -> None:
+        assert len(PRIVILEGED_TOOL_CATEGORIES) == 16
 
 
 # ── the allow-lists ──────────────────────────────────────────────────────
@@ -459,15 +465,35 @@ class TestToolDocObligations:
         assert "no dispatch" in doc.lower() or "dispatches NOTHING" in doc
         assert "no user-visible signal" in doc
 
-    def test_obligation_2_the_board_is_the_surface_never_a_ping(self) -> None:
-        """The board is the user-visible surface — a ping is NOT
-        promised."""
+    def test_obligation_2_the_board_is_the_surface_never_an_automatic_ping(self) -> None:
+        """The board is the user-visible surface — an AUTOMATIC ping is
+        NOT promised; notify_user is the ONE deliberate exception
+        (ari-voice doctrine amendment, 2026-10-25)."""
         doc = _flat_doc()
         assert "The board is the user-visible surface" in doc
-        assert "NO ping" in doc
+        assert "no AUTOMATIC ping" in doc
         assert "What is NOT promised" in doc
         assert "Slack" in doc
         assert "interruption" in doc
+        # The amended doctrine — the deliberate exception is named and
+        # bounded, and silence stays the default.
+        assert "notify_user" in doc
+        assert "notify-user category" in doc
+        assert "ari-only" in doc
+        assert "Silence is the default" in doc
+        # The FALSIFIED absolute is gone: the doc must no longer claim
+        # an unconditional "there is NO ping".
+        assert "there is NO ping" not in doc
+
+    def test_the_module_docstring_carries_the_ari_voice_clarification(self) -> None:
+        """The 2026-10-25 amendment — board-never-ping forbids AUTOMATIC
+        chat delivery; notify_user is the ONE deliberate chat path."""
+        module_doc = " ".join(
+            __import__("daemon.tools.self_alarm", fromlist=["__doc__"]).__doc__.split()
+        )
+        assert "board-never-ping" in module_doc
+        assert "AUTOMATIC chat delivery" in module_doc
+        assert "notify_user" in module_doc
 
     def test_obligation_3_the_fire_is_unobservable(self) -> None:
         """What the wrapper CANNOT observe."""

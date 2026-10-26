@@ -40,7 +40,8 @@
       "view-write",
       "board-link",
       "mcp_rpc",
-      "wedge-capture"
+      "wedge-capture",
+      "notify-user"
     ],
     "deny": ["edit_file", "write_file", "watch_job", "watch_jobs"]
   },

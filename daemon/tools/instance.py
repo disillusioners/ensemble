@@ -283,6 +283,7 @@ from .instance_ops import create_instance_ops_tools
 from .view_write import create_view_write_tools
 from .board_link import create_board_link_tools
 from .wedge_capture import create_wedge_capture_tools
+from .notify_user import create_notify_user_tools
 from .db_tools import create_db_tools
 from .infra import create_infra_tools, create_kms_tools, create_mcp_env_tools
 from .system import create_system_tools
@@ -2674,6 +2675,40 @@ def create_self_alarm_tools_if_available(manager, current_instance_id: str, agen
         source_repo=getattr(manager, "_source_repository", None),
         instance_repository=getattr(manager, "_instance_repository", None),
         project_repository=getattr(manager, "_project_repository", None),
+        current_instance_id=current_instance_id,
+        agent_id=agent_id,
+        agent_tag=agent_tag,
+    )
+
+
+def create_notify_user_tools_if_available(manager, current_instance_id: str, agent_id: str, agent_tag: str | None = None) -> list:
+    """Create the notify tool for one instance/agent.
+
+    ari-voice (2026-10-25) — the tool resolves the session's bound chat
+    source through the manager's ``_instance_repository`` +
+    ``_source_repository`` + ``source_registry``, writes its audit/budget
+    rows through the manager's ``engine``, and reads its knobs through
+    ``config.notify_user``. The factory itself ALWAYS constructs (the
+    tool refuses cleanly when a handle is missing) — there is no
+    service-presence wiring check here, unlike the sibling
+    ``*_if_available`` factories.
+
+    Per-agent visibility is scoped afterwards by ``_apply_tool_filter``
+    via the ``notify-user`` PRIVILEGED category (entry #16) — granted via
+    the explicit ``tools.allow: ["notify-user"]`` entry in
+    ``agents/ari/meta.json`` and NOWHERE else (ari-for-ari). The
+    privileged category is NOT sufficient on its own — a literal tool
+    name in an allow list bypasses the category gate — so the tool body
+    ALSO carries its own ``agent_id == "ari"`` gate. Both gates are
+    required.
+
+    Decorator-only registration is SILENTLY INVISIBLE — the extend of
+    this factory's return list inside ``create_instance_tools`` is the
+    third step of the three-step registration seam (decorator + registry
+    entry + construction).
+    """
+    return create_notify_user_tools(
+        manager,
         current_instance_id=current_instance_id,
         agent_id=agent_id,
         agent_tag=agent_tag,
@@ -6447,6 +6482,31 @@ Returns:
             current_instance_id=current_instance_id,
             agent_id=agent_id,
             agent_tag=version_tag,
+        )
+    )
+
+    # ── Notify tool (ari-voice, 2026-10-25) ──────────────────────────
+    # Same critical list-append pattern as board_tool_list /
+    # self_alarm_tool_list / the wedge-capture extend above:
+    # decorator-only registration is SILENTLY INVISIBLE — this extend is
+    # the third step of the three-step registration seam (decorator +
+    # registry entries + construction).
+    #
+    # PLACEMENT: this extend MUST precede ``create_help_tool`` (which
+    # snapshots the tool list into its index), ``scan_tools_for_full_docs``
+    # and ``_apply_tool_filter`` (which applies the per-agent allow list
+    # and the privileged-category default-deny strip). A later extend is
+    # either invisible to the help tool or BYPASSES the privileged strip.
+    #
+    # The category is PRIVILEGED (entry #16): the tool writes ONE
+    # deliberate message to the user's OWN registered chat channel — the
+    # empty-allow inherit universe must never hold it. The tool body
+    # carries a SECOND, independent agent_id gate (ari-only) — a LITERAL
+    # tool name in an allow list bypasses the category gate, so the
+    # category alone cannot spell the audience.
+    tools.extend(
+        create_notify_user_tools_if_available(
+            manager, current_instance_id, agent_id, agent_tag=version_tag
         )
     )
 

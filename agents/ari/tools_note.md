@@ -722,6 +722,8 @@ narrow the filters to reach the rest. Items carry NO notes timeline; use
 timeline, oldest-first.
 
 The board is also where a fired self-alarm becomes visible — See Self-Alarm.
+When a fired alarm's content genuinely needs the user right now, the ONE
+chat path is `notify_user` — See Notify-User.
 
 ---
 
@@ -770,13 +772,18 @@ if the schedule row could not be bound.
    only remedy is a manual `task_schedule_update` that moves the alarm to
    a new time. The composed message always states the scheduled instant,
    so a late delivery is detectable.
-2. **The board is the user-visible surface — promise the board, never a
-   ping.** At the scheduled instant THIS session is woken with my
+2. **The board is the user-visible surface — promise the board, never an
+   automatic ping.** At the scheduled instant THIS session is woken with my
    message (same instance, context intact), performs the action, and
    leaves evidence ON THE BOARD
    (status/notes) and in any job it dispatches; the live board view shows
-   the change. I NEVER promise the user a chat/Discord/Slack ping, a
-   reminder in the conversation, or an interruption — no such path exists.
+   the change. There is NO AUTOMATIC chat/Discord/Slack ping, no reminder
+   in the conversation, no interruption — nothing fires into chat by
+   itself. The ONE deliberate exception (ari-voice, 2026-10-25): I can
+   invoke `notify_user` (See Notify-User) to send a single opt-in message
+   to this session's registered chat source when the content genuinely
+   needs the user — chosen per turn, never promised casually, never a
+   bulk channel.
 3. **What I cannot observe about a fired alarm.** There is no post-fire
    hook. "It fired" is readable only from the schedule row:
    `status='stopped'`, `enabled=False` — and `stopped` means DISPATCHED,
@@ -807,6 +814,49 @@ When I set or move a board item's `due_at`, I arm (or re-arm) a
 `self_alarm` for it and pass `link_board_item` — the alarm is the reminder
 mechanism; the board item's due date stays the source of truth for the
 deadline.
+
+---
+
+## Notify-User
+
+`notify_user` is my ONE deliberate voice into the user's own chat. It
+sends a single message from THIS session to the session's registered chat
+source (Discord/Slack/Telegram — the chat the user reached this session
+through). There is NO destination parameter: the destination is resolved
+server-side from the session's own binding, so I cannot message anyone
+except the user who owns this session.
+
+**When to speak and when to stay silent.** The board is the ALWAYS
+surface — every alarm/scheduled turn acts and leaves evidence there. The
+chat message is the MAY voice: I use it when the content genuinely needs
+the user RIGHT NOW (a blocker, a decision only they can make, a finished
+thing they asked to be told about). Everything else stays silent. If this
+wake shape already delivers my final response to chat (internal-report
+wakes do, when the session carries a chat binding), I PREFER SILENCE —
+the final response will arrive anyway and a notify would double the ping.
+On scheduler/self-alarm wakes there is NO automatic final delivery, so
+`notify_user` is the only channel.
+
+```raw
+notify_user(message="Deploy pipeline is red on main — I need your go/no-go to roll back.")
+```
+
+**The bounds (enforced against the audit ledger, not by good intentions).**
+At most ONE message per 60 seconds per session, and at most 6 per rolling
+hour per destination (shared across all ari sessions notifying the same
+user channel). Over-length text (>2000 chars) is refused before anything
+happens. A rate-limit refusal tells me when the next send becomes legal;
+a timeout refusal says delivery is UNKNOWN — do NOT re-send blindly.
+
+**What is audited.** Every attempt — including every refusal — is
+ledgered; the message body is stored as a hash + length, never as text.
+The ledger is also the rate budget, so if it is unavailable the tool
+refuses rather than sending something it cannot account for.
+
+**When there is no legal target.** Sessions never contacted via chat
+(API-created, scheduler-only) have no bound chat source — `notify_user`
+refuses with `notify_no_bound_chat_source`. That is correct behavior, not
+a bug: the board stays the surface for those sessions.
 
 ---
 

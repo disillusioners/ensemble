@@ -140,6 +140,14 @@ DYNAMIC_TOOL_NAMES: frozenset[str] = frozenset({
     # the runtime agent gate lives in the tool bodies.
     "wedge_capture_list",
     "wedge_capture_get",
+    # ari-voice (2026-10-25): the notify tool — created by the
+    # create_notify_user_tools() factory (daemon/tools/notify_user.py).
+    # Factory-built (not import-time registered), so it belongs in
+    # DYNAMIC_TOOL_NAMES and KNOWN_TOOL_NAMES. The category is
+    # PRIVILEGED (entry #16) — opt-in only, never default-granted; the
+    # ari-only runtime gate lives in the tool body. The category key is
+    # EXACTLY "notify-user" (N7) — never "notify".
+    "notify_user",
     # system_upgrade tools — created by create_upgrade_tools() factory
     # (daemon/tools/upgrade_tools.py, P2.2 Dispatch A read pair + Dispatch B
     # actor pair).
@@ -304,9 +312,15 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # the W4 leader decision, reviewer council 2026-10-02).
 #
 # SAME-PR RULE (D18/A14): the set is pinned by exact-equality asserts at
-# EIGHT sites — six inline ``frozenset({...})`` literals + two
-# ``EXPECTED_PRIVILEGED_SET`` constants. Adding or removing a category
-# REQUIRES updating ALL EIGHT pins in the same commit:
+# TEN sites — five inline ``frozenset({...})`` literals + five
+# ``EXPECTED_PRIVILEGED_SET`` constants — plus a
+# ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count assertion at FIVE
+# phase-local pins — plus ONE allow-array TRAILING-ENTRY pin (the
+# ``tools.allow`` ARRAY-ORDER discipline: only the categories appended
+# after the board may follow it — the board registration pin) —
+# SIXTEEN assertion sites across TEN files
+# (re-grepped on tip 9098df432; ari-voice lane). Adding or
+# removing a category REQUIRES updating ALL of them in the same commit:
 # ``tests/unit/tools/test_upgrade_registration.py``,
 # ``tests/unit/tools/test_attestation_registration.py``,
 # ``tests/integration/test_maintenancer_spawn_resolves_tools.py``,
@@ -317,13 +331,18 @@ DYNAMIC_TOOL_PREFIXES: frozenset[str] = frozenset({
 # fifth exact-set pin — the originally-omitted one, added by the
 # iteration-002 council B2 correction),
 # ``tests/unit/test_board_registration.py`` (the ari-tools Phase 1
-# pin — added 2026-10-20) and
+# pin — added 2026-10-20),
 # ``tests/unit/test_self_alarm_registration.py`` (the ari-tools Phase 2
-# pin — added 2026-10-20) and
+# pin — added 2026-10-20),
 # ``tests/unit/test_instance_ops_registration.py`` (the nest-ops pin —
 # added 2026-10-21; it pins BOTH categories plus the registration
-# wiring). The three phase-local pins ALSO carry a
-# ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count assertion (15 today).
+# wiring) and
+# ``tests/unit/test_wedge_capture_registration.py`` (the wedge-capture
+# pin — added 2026-10-22; exact-set AND count) and
+# ``tests/unit/test_notify_user_registration.py`` (the ari-voice pin —
+# added 2026-10-25; exact-set AND count). The five phase-local
+# pins ALSO carry a ``len(PRIVILEGED_TOOL_CATEGORIES) == N`` count
+# assertion (16 as of the notify-user entry).
 #
 # DERIVE THE PIN SET BY GREPPING THE TREE — do NOT trust this prose:
 #   grep -rn "PRIVILEGED_TOOL_CATEGORIES == frozenset" tests/ --include=*.py
@@ -570,6 +589,32 @@ PRIVILEGED_TOOL_CATEGORIES: frozenset[str] = frozenset({
     # as those eight insertions — the set must never be red between two
     # commits).
     "mcp_rpc",
+    # ari-voice (2026-10-25): ``notify-user`` is the deliberate
+    # chat-message category (#16 in PRIVILEGED_TOOL_CATEGORIES — 15 →
+    # 16 post-rebase; ``mcp_rpc`` joined 2026-10-22 making the count
+    # 15 before this entry; the ``cu`` removal of 2026-10-24 took the
+    # old base's 16 down to 15). The category owns ONE factory-built
+    # tool (``notify_user``) that sends ONE deliberate message from a
+    # non-user-originated turn to the SESSION'S OWN registered chat
+    # source. Why privileged: the tool writes to the user's OWN chat
+    # channel — the empty-allow inherit universe must never hold a
+    # (bounded, audited, but still real) channel into the user's
+    # Discord/Slack/Telegram. The bounds are structural: ari-only
+    # allow entry, N=1/turn as the >=60s interval proxy, M=6/rolling-
+    # hour per resolved destination from the notify_audit ledger,
+    # 2000-char cap, ONE 10s never-block bound, every attempt
+    # ledgered. NEVER default-granted — opt-in-only; the ari
+    # meta.json ``tools.allow`` entry is the only access path
+    # (ari-for-ari). Defence in depth: a LITERAL TOOL NAME in an allow
+    # list bypasses the category gate, so the tool body ALSO carries
+    # an ``agent_id == "ari"`` runtime gate. Both gates are required;
+    # neither substitutes for the other.
+    # SAME-PR pin updates at the TEN files carrying the SIXTEEN
+    # assertion sites (10 exact-set + 5 count + 1 allow-array
+    # trailing-entry pin — re-grepped on tip 9098df432, ari-voice lane)
+    # are mandatory (this entry ships in the SAME commit as those bumps
+    # — the set must never be red between two commits).
+    "notify-user",
 })
 
 
@@ -1019,6 +1064,19 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     # privilege stamping keys off the category prefix, so the two must
     # agree.
     "wedge-capture": "daemon.tools.wedge_capture",
+    # ari-voice (2026-10-25): the deliberate chat-message category.
+    # PRIVILEGED category (entry #16 of PRIVILEGED_TOOL_CATEGORIES):
+    # the tool writes to the user's OWN chat channel, so the
+    # empty-allow inherit universe must never auto-grant it.
+    #
+    # The value MUST be a ``daemon.tools.*`` path — the AST scanner
+    # resolves the value as ``daemon/tools/<parts[2:]>.py``; a
+    # ``daemon.services.*`` value is NEVER discovered and the
+    # exact-equality drift pin fails at boot. The category key is
+    # KEBAB-case (``notify-user``) while the tool name is snake-case
+    # (``notify_user``) — the house pattern (``self-alarm`` →
+    # ``self_alarm``, ``wedge-capture`` → ``wedge_capture_*``).
+    "notify-user": "daemon.tools.notify_user",
     # Mission tools (M2 of mission-class, 2026-09-02) — additive
     # READ-ONLY surface for the mission read-model projection. No
     # writers; census stays at 23.
@@ -1280,6 +1338,13 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     # the runtime agent gate lives in the tool bodies.
     "wedge_capture_list",
     "wedge_capture_get",
+    # ari-voice (2026-10-25): the notify tool — created by the
+    # create_notify_user_tools() factory (daemon/tools/notify_user.py).
+    # Factory-built (not import-time registered), so it belongs in
+    # DYNAMIC_TOOL_NAMES and KNOWN_TOOL_NAMES. The category is
+    # PRIVILEGED (entry #16) — opt-in only, never default-granted; the
+    # ari-only runtime gate lives in the tool body.
+    "notify_user",
     "blueprint_acknowledge_pending",
     "blueprint_claim_pending",
     "blueprint_create",

@@ -1409,6 +1409,19 @@ class TestInstallerSkillHygiene:
 # outcome. Only this ONE row changed; the other 34 keep their values. The value is a CONTENT-SHA256
 # of the sealed file (NOT a commit sha):
 #   agents/ari/workflow.md <- 4f07f32708ff97094752f3578a4169a92e07570ef73fff6f0d47017145b3c00f (content-sha256) | user ruling 2026-10-20 Rule 2: the fired alarm wakes the CALLING instance (same session), not a fresh instance
+# 2026-10-25 ari-voice DOCTRINE-AMENDMENT re-pin (1 file, recomputed from real file bytes on the
+# feature/ari-notify-user worktree @ the ari-notify-user lane) — attribution: the ari-notify-user
+# commission (frozen D12 + fold-2). notify_user falsifies the absolute "no ping path exists"
+# doctrine, so agents/ari/workflow.md ("Fired alarms surface on the board" + the patrol loop) was
+# AMENDED (never deleted) to "no AUTOMATIC chat delivery — the deliberate notify_user opt-in is the
+# ONE chat path"; the prompt-artifacts manifest rows were re-stamped in the SAME commit (161/161
+# regenerated; the ari/tools_note.md + ari/workflow.md rows changed — plus the leader/tools_note.md
+# row, a PRE-EXISTING base drift at 7af1d2632d repaired by the tree-wide regeneration, disclosed).
+# The tripwire row had to be re-pinned here or the binding 0-stale gate would go red (the same
+# adjudicated deviation as 2026-10-20). Only this ONE row changed; the other 34 keep their values —
+# agents/ari/rule.md was NOT touched by the amendment (no doctrine content there) and its pin is
+# unchanged. The value is a CONTENT-SHA256 of the sealed file (NOT a commit sha):
+#   agents/ari/workflow.md <- 26f68f44ce975839a5d3dea7b3617909e1284c719a1a266bab15f3a34d461c43 (content-sha256) | ari-voice doctrine amendment 2026-10-25: no AUTOMATIC chat delivery; the deliberate notify_user opt-in is the ONE chat path
 SEALED_SHA_BASELINES: dict[str, str] = {
     # Phase A — charter agent + install skill + chart innate skill + ari workflow (8)
     "agents/charter/workflow.md": "2a5078f93bd2dcfe427900e85c075ee9671b8aedae17d07c7ef6abb6df4603ab",
@@ -1418,7 +1431,12 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "agents/charter/skills-template/install-mermaid-cli.md": "ee43576c9b9d746c8ce6563c85ed289567e9fcebadc75c0bd7ede417aaaa667e",
     "agents/charter/skills-template/install-mermaid-cli.lib.sh": "fcd6f4612d6077a81fe521341e6e2332d1f5da31880d3fc710decbc0579fedbf",
     "agents/_prompt_system/innate-skills/chart/skill.md": "fa29084d7dc0f86c87d667ef46dcfc060fa11e20e0b647295cdd75ff43353515",
-    "agents/ari/workflow.md": "fd481d9473942a8828d5ff80a569574fc44be82d87b7e8e26597ecf6eaa840a9",
+    # agents/ari/workflow.md re-pinned 2026-10-25 (ari-voice doctrine
+    # amendment — D12/fold-2): the "no ping path exists" absolute became
+    # FALSE when notify_user shipped, so the file's alarm-surfacing and
+    # patrol passages were AMENDED (never deleted). Prior value
+    # 4f07f32708ff9709…b3c00f (the 2026-10-20 user-ruling re-pin).
+    "agents/ari/workflow.md": "26f68f44ce975839a5d3dea7b3617909e1284c719a1a266bab15f3a34d461c43",
     # Phase B — 7 daemon files
     "daemon/sources/base.py": "ca2762ac8840bd8f7050955744af25f16325ed6806d09ba1fe3d020383581f3a",
     # registry.py re-pinned 2026-10-18 (resource-cost-control O4): the
