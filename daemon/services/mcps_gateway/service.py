@@ -13,6 +13,29 @@ Direction of the protocol (dossier correction #2)
   ``session.end``, ``tools/list``, ``tools/call`` — as REQUESTS, and the
   machine answers with a ``response`` envelope.
 
+WHY THIS MODULE IS LARGE
+------------------------
+
+It is the CENTER of the protocol, and the protocol has grown a second
+surface: the session LIFECYCLE. The module carries, in order: the
+transport/connection lifecycle; the hello exchange; the outbound
+requests (the centre is the requestor); the housekeeping sweep (the
+heartbeat kill and the expiry reap); the ops read surface; the
+agent-facing surface (roster / connect / command / disconnect); the
+audit (the command rows and the session-lifecycle rows); and the
+shutdown path.
+
+The package is already split along its seams — ``protocol`` (the wire
+vocabulary), ``config`` (the knobs), ``store`` (the roster),
+``sessions`` (the live sessions), ``tombstones`` (the ended sessions),
+``audit`` (the ledger) — and the END CONTRACT (the reason-coded
+envelope, the expiry sweep, the tombstone lookup) is the piece that
+would justify ONE more split (``session_end.py``). It is a RECORDED
+FOLLOW-UP, not this branch's work: the extraction would introduce a
+five-dependency collaborator (the sessions, the store, the connections,
+the tombstones and the private request/audit helpers) on a defect
+branch, which is a worse trade than a longer module.
+
 The machine MINTS the ``session_id`` (§6.4) and the center adopts it.
 
 Every frame the center writes carries ``v: "0.1"`` — the shipped client
@@ -79,6 +102,7 @@ from .store import InMemoryMachineStore, MachineStore
 from .tombstones import (
     CAUSE_IDLE,
     CAUSE_TTL,
+    EXPIRY_CAUSES,
     LEDGER_MACHINE_TIMEOUT,
     LEDGER_MACHINE_UNREACHABLE,
     REASON_ALREADY_ENDED,
@@ -141,13 +165,12 @@ AUDIT_ALLOWED_SESSION_ERROR_CODES: frozenset[str] = (
     | {
         LEDGER_MACHINE_UNREACHABLE,
         LEDGER_MACHINE_TIMEOUT,
-        CAUSE_IDLE,
-        CAUSE_TTL,
         REASON_EXPIRED,
         REASON_ALREADY_ENDED,
         REASON_UNKNOWN_SESSION,
         REASON_MACHINE_REFUSED,
     }
+    | EXPIRY_CAUSES
 )
 
 #: The audit detail CLASSIFICATIONS of the SESSION-LIFECYCLE rows.
@@ -787,11 +810,25 @@ class McpGatewayService:
             # (and it must: the centre's own deadline authorises an
             # authoritative release, a relayed timeout is a REFUSAL and
             # the session survives it).
-            raise GatewayAckTimeout(
-                CODE_TOOL_TIMEOUT,
-                f"{method} exceeded the center deadline of {timeout_ms or self.config.command_timeout_ms} ms",
-                {"method": method, "timeout_ms": timeout_ms or self.config.command_timeout_ms},
-            ) from None
+            #
+            # The TYPE is session-end SPECIFIC: its contract is "the
+            # centre may release the session AUTHORITATIVELY", and only
+            # the session.end path may do that. A ``session.begin`` or a
+            # ``tools/call`` that runs out of time must not carry a
+            # contract it does not own, so those keep the plain
+            # GatewayProtocolError (the command path discriminates on
+            # ``exc.code``, so its behaviour is unchanged).
+            message = (
+                f"{method} exceeded the center deadline of "
+                f"{timeout_ms or self.config.command_timeout_ms} ms"
+            )
+            data = {
+                "method": method,
+                "timeout_ms": timeout_ms or self.config.command_timeout_ms,
+            }
+            if method == METHOD_SESSION_END:
+                raise GatewayAckTimeout(CODE_TOOL_TIMEOUT, message, data) from None
+            raise GatewayProtocolError(CODE_TOOL_TIMEOUT, message, data) from None
         finally:
             connection.pending.pop(request_id, None)
 
@@ -965,6 +1002,12 @@ class McpGatewayService:
         """Why the sweep reaped this session — ``ttl`` or ``idle``.
 
         The TTL ceiling wins when both passed: it is the harder bound.
+
+        THIS MUST MIRROR ``SessionManager.expire_due``
+        (``daemon/services/mcps_gateway/sessions.py``) — that is the
+        predicate that decides WHICH sessions are due; this only says
+        WHY one of them was. If the two ever disagree, the ledger would
+        name a cause the reaper did not apply.
         """
         if now >= session.expires_at:
             return CAUSE_TTL
@@ -1004,7 +1047,14 @@ class McpGatewayService:
         )
 
     async def _forward_session_end_outcome(self, session: GatewaySession) -> str:
-        """The one forward, classified.
+        """The one forward, classified — the SWEEP arm.
+
+        The mirror of the explicit end's forward for the sweep path; the
+        asymmetry between the two is DELIBERATE: the sweep releases the
+        session centre-side FIRST (the two-pass invariant), so its
+        "refusal" can only be a ledger fact, while the explicit end
+        keeps the session ALIVE on a refusal. The shared-helper variant
+        is a recorded follow-up (the seam is named here on purpose).
 
         The FRAME keeps EXACTLY the params it has always had —
         ``{"session_id": ...}``. The reason of the end never travels on
@@ -1485,6 +1535,14 @@ class McpGatewayService:
         describe the CENTRE's release path and NEVER appear in a
         response: they are audit-row reasons only.
 
+        ``machine_notified`` says whether the machine ACKNOWLEDGED the
+        session end. ``False`` means the CENTRE released the session
+        AUTHORITATIVELY — the machine was never reached, or it was
+        reached and did not answer in time — so the machine's LOCAL LOCK
+        may persist until it processes the frame or the connection dies.
+        An agent must read ``machine_notified: false`` as "do NOT assume
+        the machine is free".
+
         ``session_id`` / ``machine_id`` are included ONLY when they are
         known — an unknown session must never leak the existence of
         somebody else's session.
@@ -1528,6 +1586,14 @@ class McpGatewayService:
                 audit_detail=AUDIT_DETAIL_SESSION_UNREACHABLE,
             )
 
+        # The EXPLICIT arm — the mirror of the sweep's
+        # ``_forward_session_end_outcome`` for the explicit path. The
+        # asymmetry between the two is DELIBERATE: a refusal here keeps
+        # the session ALIVE (the centre does not invent a release the
+        # peer did not acknowledge), while the sweep has already
+        # released centre-side before it forwards. The shared-helper
+        # variant is a recorded follow-up (the seam is named here on
+        # purpose).
         try:
             result = await self._request(
                 connection,
@@ -1617,7 +1683,9 @@ class McpGatewayService:
                 "session_id": session.session_id,
                 "machine_id": session.machine_id,
                 "ended": False,
-                "why_not_ended": REASON_MACHINE_REFUSED,
+                # Every response-borne reason passes the SAME disjointness
+                # guard — the refusal arm is not an exception to it.
+                "why_not_ended": self._response_reason(REASON_MACHINE_REFUSED),
                 "detail": f"the machine refused the session end ({safe_code})",
                 "machine_notified": True,
             }
@@ -1715,6 +1783,11 @@ class McpGatewayService:
         centre's release is the truth, and the ledger records WHY — the
         ledger-only token (``machine_unreachable`` / ``machine_timeout``),
         never a response reason.
+
+        ``machine_notified`` is ``False`` here because the machine did
+        not ACKNOWLEDGE the end — and the machine's LOCAL LOCK may
+        therefore persist until it processes the frame or the connection
+        dies. The agent must not assume the machine is free.
         """
         # The machine was not there (or did not answer) — it was NOT
         # notified of the end.
@@ -1972,12 +2045,13 @@ class McpGatewayService:
 
         The ledger is where the operator asks "why did this session not
         end?", so it needs the reason. The ``error_code`` carries a
-        token of the CENTRE's own vocabulary: the RESPONSE-borne reasons
-        (``expired``, ``already_ended``, ``unknown_session``,
-        ``machine_refused``), the LEDGER-only reasons
-        (``machine_unreachable``, ``machine_timeout``) and the expiry
-        causes (``idle``, ``ttl``). It NEVER carries the peer's free
-        text — the ``detail`` is a FIXED classification.
+        token of the session surface's OWN vocabulary: the PROTOCOL codes
+        (the machine may answer ``SESSION_NOT_FOUND``) PLUS the
+        centre-minted tokens — the RESPONSE-borne reasons (``expired``,
+        ``already_ended``, ``unknown_session``, ``machine_refused``), the
+        LEDGER-only reasons (``machine_unreachable``, ``machine_timeout``)
+        and the expiry causes (``idle``, ``ttl``). It NEVER carries the
+        peer's free text — the ``detail`` is a FIXED classification.
 
         The vocabulary is :data:`AUDIT_ALLOWED_SESSION_ERROR_CODES` — the
         protocol codes PLUS the centre-only tokens. The COMMAND rows keep

@@ -348,7 +348,11 @@ and the KILL SWITCH (a disabled gateway) — both come back as
   only when the machine acknowledged the end.
 - ``session_id`` / ``machine_id`` are present only when they are known:
   the answer never leaks the existence of somebody else's session.
-- ``machine_notified`` says whether the MACHINE was reached at all.
+- ``machine_notified`` says whether the machine ACKNOWLEDGED the end.
+  ``false`` means the center released the session AUTHORITATIVELY (the
+  machine was never reached, or it did not answer in time) — the
+  machine's local lock may persist, so do NOT assume the machine is
+  free.
 
 The tool takes NO argument: the end is AGENT-ADDRESSED — it ends the
 session this agent holds, if any.

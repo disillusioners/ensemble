@@ -729,7 +729,9 @@ paths (a socket that dies, a pre-hello deadline, the daemon shutting
 down) close sockets too, and none of them is a session-end closure.
 
 **The ack deadline.** The `session.end` forward has its **own bounded
-ack deadline — 5000 ms** — separate from the 30 s `command_timeout_ms`
+ack deadline — 5000 ms** (the `session.end` ack deadline; it is NOT the
+read timeout, which is also 5000 ms) — separate from the 30 s
+`command_timeout_ms`
 (§2.2). It is a **gateway-internal config field with a default, NOT an
 env knob** (`GatewayConfig.session_end_ack_timeout_ms`,
 `daemon/services/mcps_gateway/config.py`): it bounds a protocol
@@ -772,20 +774,25 @@ tool renders as `{"error": {"code", "message"}}`:
 * `session_id` / `machine_id` are included **only when known** — the
   answer never leaks the existence of a session belonging to another
   agent.
-* `machine_notified` says whether the MACHINE was told. For a LATE end
-  of a session that already ended it is what the tombstone recorded
-  (the machine acknowledged the end — or refused it — or the centre
-  released the session on its own); it is `false` while the sweep's
-  forward is still in flight, because the tombstone is written before
-  the forward.
+* `machine_notified` says whether the machine **ACKNOWLEDGED** the
+  session end — NOT merely whether a frame was written. `false` means
+  the centre released the session **AUTHORITATIVELY**: the machine was
+  never reached, or it was reached and did not answer in time. **The
+  machine's LOCAL LOCK may then persist** until it processes the frame
+  or the connection dies — an agent must read `machine_notified: false`
+  as *"do NOT assume the machine is free"*. For a LATE end of a session
+  that already ended it is what the tombstone recorded (the machine
+  acknowledged the end — or refused it — or the centre released the
+  session on its own); it is `false` while the sweep's forward is still
+  in flight, because the tombstone is written before the forward.
 
 | Situation | Answer |
 |---|---|
 | live session, the machine acks | `ended: true`, `machine_notified: true`, `result` = the ack verbatim; the center releases; the tombstone reason is `already_ended` |
 | live session, the machine answers `SESSION_NOT_FOUND` | `ended: true`, `machine_notified: true`, `detail` says the machine no longer held the session; the center releases |
 | live session, the machine answers any OTHER error envelope (including a relayed `TOOL_TIMEOUT`) | `ended: false`, `why_not_ended: machine_refused`, `detail` carries the machine's code (PROTOCOL vocabulary only — anything else becomes `UNRECOGNIZED_ERROR_CODE`), `machine_notified: true` — **the session SURVIVES** |
-| live session, the connection is gone / unreachable | `ended: true`, `machine_notified: false`, `detail` says the center released authoritatively; the ledger reason is `machine_unreachable`; the center releases; the tombstone reason is `already_ended` |
-| live session, the center's own ack deadline fired | `ended: true`, `machine_notified: false`, `detail` states the deadline in ms; the ledger reason is `machine_timeout`; the center releases; the tombstone reason is `already_ended` |
+| live session, the connection is gone / unreachable | `ended: true`, `machine_notified: false` (the machine did not ACKNOWLEDGE), `detail` says the center released authoritatively; the ledger reason is `machine_unreachable`; the center releases; the tombstone reason is `already_ended` |
+| live session, the center's own ack deadline fired | `ended: true`, `machine_notified: false` (the machine did not ACKNOWLEDGE — the frame may have been written, but nothing answered), `detail` states the deadline in ms; the ledger reason is `machine_timeout`; the center releases; the tombstone reason is `already_ended` |
 | no live session, an `expired` tombstone matched | `ended: false`, `why_not_ended: expired`, `detail`, `session_id` (the reaped session — always known here) and `machine_id` (if the tombstone knows it) |
 | no live session, an `already_ended` tombstone matched | `ended: false`, `why_not_ended: already_ended`, `detail`, `session_id` (the ended session — always known here) and `machine_id` (if the tombstone knows it) |
 | no live session, no tombstone | `ended: false`, `why_not_ended: unknown_session`, ONE neutral detail text for "never existed" and "not yours" (it must not become an existence oracle), **no** `machine_id` |
@@ -961,7 +968,7 @@ Phase-A interpretations document.
 | `SESSION_NOT_FOUND` on command | no open session for this agent | the session expired (TTL/idle), was killed by heartbeat loss, or was never opened. Re-`connect` — there is nothing to resume |
 | `MACHINE_NOT_ENROLLED` on connect — which case? | same code, two meanings | read the `enrolled` detail: `enrolled: true` + *"is enrolled but currently offline — reconnect pending"* → WAIT for the machine to reconnect (§8.1), do not re-enroll; `enrolled: false` + *"is not in the enrolled roster — re-enrollment is required"* → the roster never knew it (fresh machine, roster wiped by a restart, or `MCPS_GATEWAY_ALLOWED_MACHINES` excludes it) |
 | `SESSION_EXPIRED` on command | TTL (1 h) or idle (5 min) passed | re-`connect`; raise `MCPS_GATEWAY_SESSION_TTL_MS` / `MCPS_GATEWAY_SESSION_IDLE_TIMEOUT_MS` if the workload needs longer. The code is the same whichever path noticed the expiry (§4.1) — the sweep's reap leaves an `expired` tombstone behind, so a late call is still `SESSION_EXPIRED` and carries the real session id |
-| `mcp_rpc_disconnect` answers `ended: false` | the session-state reason | read `why_not_ended`: `expired` / `already_ended` (the sweep already reaped it — re-`connect`), `unknown_session` (this agent held no session — nothing to end), `machine_refused` (the machine refused the end — **the session is still alive**: retry, or check the machine) |
+| `mcp_rpc_disconnect` answers `ended: false` | the session-state reason | read `why_not_ended`: `expired` (the SWEEP already reaped it — re-`connect`), `already_ended` (the session was already ended — by an explicit end, or by the sweep; re-`connect`), `unknown_session` (this agent held no session — nothing to end), `machine_refused` (the machine refused the end — **the session is still alive**: retry, or check the machine). A `machine_notified: false` on top of that means the machine did not ACKNOWLEDGE — do not assume its local lock is gone |
 | `TOOL_TIMEOUT` on command | the machine did not answer in time | the center waits `MCPS_GATEWAY_COMMAND_TIMEOUT_MS` (default 30 s). A wedged remote tool or a sleepy machine surfaces here — the bound exists so a wedged machine cannot hang an agent tool forever |
 | Client dials the wrong path | `CenterURL` configured without a path | the client appends `/remote-hands/v1` only when the URL has NO path — configure the full URL **including** `/api/mcps-gateway/ws` (§2.4) |
 | **503** on the route | the service is not wired on `app.state` | a boot-order defect, not an ops condition — report it; the route answered instead of crashing |

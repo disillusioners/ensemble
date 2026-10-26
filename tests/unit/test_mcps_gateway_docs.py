@@ -1181,8 +1181,19 @@ def test_doc_states_the_ack_deadline_is_a_config_field_not_an_env_knob() -> None
     assert "ack deadline" in text, (
         "the doc must name the session.end ack deadline."
     )
-    assert "5000 ms" in text, (
-        "the doc must pin the ack deadline's default (5000 ms)."
+    # The needle is ANCHORED to the ack-deadline SENTENCE: the bare
+    # number "5000 ms" is also the READ timeout's default, so a doc that
+    # mentioned only the read timeout would satisfy the bare needle. The
+    # anchor carries the bound INLINE, and it is matched against the
+    # whitespace-collapsed prose so the doc's hard wrapping cannot break
+    # it.
+    assert (
+        "The `session.end` forward has its **own bounded ack deadline — 5000 ms**"
+        in _doc_prose()
+    ), (
+        "the doc must pin the ack deadline's own sentence with its 5000 ms "
+        "bound — the bare number (the read timeout is 5000 ms too) does not "
+        "pin it."
     )
     assert "gateway-internal CONFIG FIELD with a default, NOT" in text, (
         "the doc must state the ack deadline is a gateway-internal config "

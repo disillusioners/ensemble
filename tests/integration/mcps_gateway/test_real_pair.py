@@ -2308,6 +2308,12 @@ async def _phase_p3(
         f"rows + the session.end row of the explicit end)",
     )
 
+    # The SESSION-END surface wrote a row about THIS session. The
+    # args_hash is the discriminator (it hashes {"session_id": ...}), and
+    # the OUTCOME is deliberately NOT asserted: which end path ran
+    # (the explicit end, or the late end over a tombstone when the
+    # session died first) is the subject of the "p3-session-closed" gate
+    # above — this row only proves the ledger carries the surface.
     session_end_rows = _pick_row(rows, tool="session.end")
     result.add(
         17,
@@ -2315,7 +2321,6 @@ async def _phase_p3(
         len(session_end_rows) == 1
         and session_end_rows[0].get("args_hash")
         == canonical_args_hash({"session_id": session_id})
-        and session_end_rows[0].get("outcome") == "ok"
         and session_end_rows[0].get("session_id") == session_id,
         f"rows={len(session_end_rows)} "
         f"row={json.dumps(session_end_rows[0], sort_keys=True, default=str)[:300] if session_end_rows else None} "

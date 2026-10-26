@@ -42,6 +42,8 @@ from daemon.services.mcps_gateway.protocol import (
     CODE_SESSION_NOT_FOUND,
     CODE_TOOL_TIMEOUT,
     PROTOCOL_VERSION,
+    GatewayAckTimeout,
+    GatewayProtocolError,
 )
 from daemon.services.mcps_gateway.service import (
     AUDIT_ALLOWED_ERROR_CODES,
@@ -50,6 +52,8 @@ from daemon.services.mcps_gateway.service import (
 )
 from daemon.services.mcps_gateway.store import InMemoryMachineStore
 from daemon.services.mcps_gateway.tombstones import (
+    DEFAULT_TOMBSTONE_MAX_AGE_SECONDS,
+    DEFAULT_TOMBSTONE_MAX_ENTRIES,
     LEDGER_MACHINE_TIMEOUT,
     LEDGER_MACHINE_UNREACHABLE,
     LEDGER_ONLY_REASONS,
@@ -59,6 +63,7 @@ from daemon.services.mcps_gateway.tombstones import (
     REASON_UNKNOWN_SESSION,
     RESPONSE_REASONS,
     SessionTombstone,
+    TombstoneStore,
 )
 
 #: The canonical ids of the fixtures — LETTER-BEARING on purpose.
@@ -514,6 +519,16 @@ class TestTheTombstone:
         assert "session_id" not in result
         assert result["detail"]
 
+    def test_the_tombstone_bounds_are_the_exported_constants(self):
+        """T-6: the bounds are named constants, not bare literals."""
+        from daemon.services.mcps_gateway.tombstones import TombstoneStore
+
+        store = TombstoneStore()
+        assert store._max_entries == DEFAULT_TOMBSTONE_MAX_ENTRIES
+        assert store._max_age_seconds == DEFAULT_TOMBSTONE_MAX_AGE_SECONDS
+        assert DEFAULT_TOMBSTONE_MAX_ENTRIES == 512
+        assert DEFAULT_TOMBSTONE_MAX_AGE_SECONDS == 3_600.0
+
     async def test_the_tombstone_is_bounded_by_age(self):
         clock = Clock()
         service = make_service(clock=clock)
@@ -529,12 +544,10 @@ class TestTheTombstone:
         assert "machine_id" not in result
 
     async def test_the_tombstone_is_bounded_by_count(self):
-        from daemon.services.mcps_gateway.tombstones import (
-            SessionTombstone,
-            TombstoneStore,
+        store = TombstoneStore(
+            max_entries=3,
+            max_age_seconds=DEFAULT_TOMBSTONE_MAX_AGE_SECONDS,
         )
-
-        store = TombstoneStore(max_entries=3, max_age_seconds=3_600.0)
         for index in range(5):
             store.record(
                 SessionTombstone(
@@ -817,6 +830,29 @@ class TestTheSessionAuditRows:
         assert record.args_hash == hash_args({"session_id": SESSION_ID})
         assert SESSION_ID not in record.args_hash
 
+    async def test_the_ttl_ceiling_wins_the_tie_with_the_idle_timeout(self):
+        """T-8(a): when BOTH bounds passed, the TTL is the cause.
+
+        The tie-break is stated in ``_expiry_cause`` and must mirror
+        ``SessionManager.expire_due``'s predicate — this pins it.
+        """
+        audit = MemoryAuditSink()
+        clock = Clock()
+        service = make_service(
+            audit_sink=audit,
+            clock=clock,
+            session_ttl_ms=1_000,
+            session_idle_timeout_ms=100,
+        )
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+        clock.advance(2.0)  # both the TTL (1 s) and the idle timeout (0.1 s) passed
+
+        await service.expire_sessions()
+
+        assert len(audit.records) == 1
+        assert audit.records[0].error_code == "ttl"
+
     async def test_an_idle_expiry_records_the_idle_cause(self):
         audit = MemoryAuditSink()
         clock = Clock()
@@ -882,6 +918,29 @@ class TestTheSessionAuditRows:
         assert record.tool == "session.expire"
         assert record.error_code == REASON_MACHINE_REFUSED
         assert record.outcome == "error"
+
+    async def test_a_machine_that_never_had_the_session_is_not_a_refusal(self):
+        """T-7: the ``FORWARD_ALREADY_GONE`` arm.
+
+        The machine answers ``SESSION_NOT_FOUND`` — it never held the
+        session, so there is no local lock left to release. That is NOT
+        a refusal: the ledger records the expiry CAUSE and a successful
+        outcome.
+        """
+        audit = MemoryAuditSink()
+        clock = Clock()
+        service = make_service(audit_sink=audit, clock=clock)
+        machine = await open_machine(service, FakeMachine(service))
+        await expired_session(service, machine, clock)
+        machine.errors["session.end"] = (CODE_SESSION_NOT_FOUND, "no such session")
+
+        await service.expire_sessions()
+
+        assert len(audit.records) == 1
+        record = audit.records[0]
+        assert record.tool == "session.expire"
+        assert record.error_code == "ttl"
+        assert record.outcome == "ok"
 
     async def test_a_wedged_machine_leaves_the_machine_timeout_ledger_row(self):
         audit = MemoryAuditSink()
@@ -1199,6 +1258,28 @@ class TestTheExplicitEndArms:
         assert record.error_code == LEDGER_MACHINE_UNREACHABLE
         assert record.outcome == "error"
 
+    async def test_the_ack_timeout_type_is_session_end_only(self):
+        """T-2: the TYPE carries a session-end contract, so only the
+        session.end path may raise it.
+
+        The command path may NOT release the session authoritatively, so
+        it must not inherit a type whose contract says it may.
+        """
+        # The command's own deadline is PINNED SMALL: a test must never
+        # wait the real 30 s command timeout (the suite is fenced at 30 s
+        # per test).
+        service = make_service(command_timeout_ms=100)
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+        machine.hold.add("tools/call")
+
+        with pytest.raises(GatewayProtocolError) as excinfo:
+            await service.command(agent_id=AGENT_ID, tool="screenshot")
+
+        assert excinfo.value.code == CODE_TOOL_TIMEOUT
+        # NOT the session-end subtype.
+        assert not isinstance(excinfo.value, GatewayAckTimeout)
+
     async def test_a_peer_cannot_smuggle_a_ledger_only_token_into_the_response(self):
         """B-3: the code slot of the peer's frame is PEER-CONTROLLED."""
         service = make_service()
@@ -1230,6 +1311,34 @@ class TestTheExplicitEndArms:
             assert (
                 McpGatewayService._safe_peer_code(code) == "UNRECOGNIZED_ERROR_CODE"
             )
+
+    async def test_the_ack_timeout_detail_and_the_flag_definition_agree(self):
+        """T-1(c): the detail says the machine did NOT acknowledge, and
+        the definition says the flag means ACKNOWLEDGED.
+
+        The flag is NOT flipped to ``True`` for the ack-timeout case
+        (the frame may have been written, but nothing acknowledged it):
+        the DEFINITION is what changes — ``machine_notified`` means
+        "whether the machine ACKNOWLEDGED the session end", so
+        ``False`` means the centre released the session AUTHORITATIVELY
+        and the machine's local lock may persist.
+        """
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+        machine.hold.add("session.end")
+
+        result = await service.disconnect(agent_id=AGENT_ID)
+
+        assert result["machine_notified"] is False
+        # The DETAIL says the machine did not acknowledge it.
+        assert "did not acknowledge" in result["detail"]
+        # And the service's own docstring defines the flag the same way.
+        # The docstring is hard-wrapped, so the needle is matched against
+        # the whitespace-collapsed text.
+        doc = " ".join(McpGatewayService.disconnect.__doc__.split())
+        assert "ACKNOWLEDGED the session end" in doc
+        assert "released the session AUTHORITATIVELY" in doc
 
     async def test_a_protocol_code_is_still_echoed_in_the_detail(self):
         """The sanitiser must not swallow the PROTOCOL vocabulary."""

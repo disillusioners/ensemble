@@ -135,6 +135,20 @@ CAUSE_TTL = "ttl"
 #: The causes the sweep can record.
 EXPIRY_CAUSES: frozenset[str] = frozenset({CAUSE_IDLE, CAUSE_TTL})
 
+#: The default CAP of the tombstone store — how many ended sessions are
+#: remembered. The oldest is evicted first.
+#:
+#: A named constant, not a bare literal in the signature: the runbook
+#: pins this number (``docs/mcps-gateway.md`` §4.5) and the test must
+#: not re-type it (a re-typed literal drifts from the code it claims
+#: to pin).
+DEFAULT_TOMBSTONE_MAX_ENTRIES = 512
+
+#: The default AGE HORIZON of the tombstone store, in seconds — an entry
+#: older than this is pruned and the honest answer reverts to
+#: ``unknown_session``. Same reasoning as the cap above.
+DEFAULT_TOMBSTONE_MAX_AGE_SECONDS = 3_600.0
+
 
 @dataclass(frozen=True)
 class SessionTombstone:
@@ -186,8 +200,8 @@ class TombstoneStore:
     def __init__(
         self,
         *,
-        max_entries: int = 512,
-        max_age_seconds: float = 3_600.0,
+        max_entries: int = DEFAULT_TOMBSTONE_MAX_ENTRIES,
+        max_age_seconds: float = DEFAULT_TOMBSTONE_MAX_AGE_SECONDS,
     ) -> None:
         self._entries: list[SessionTombstone] = []
         self._max_entries = max(1, int(max_entries))
@@ -262,6 +276,8 @@ class TombstoneStore:
 __all__ = [
     "CAUSE_IDLE",
     "CAUSE_TTL",
+    "DEFAULT_TOMBSTONE_MAX_AGE_SECONDS",
+    "DEFAULT_TOMBSTONE_MAX_ENTRIES",
     "EXPIRY_CAUSES",
     "LEDGER_MACHINE_TIMEOUT",
     "LEDGER_MACHINE_UNREACHABLE",
