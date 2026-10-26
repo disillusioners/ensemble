@@ -54,6 +54,7 @@ from daemon.services.mcps_gateway.tombstones import (
     REASON_MACHINE_REFUSED,
     REASON_UNKNOWN_SESSION,
     RESPONSE_REASONS,
+    SessionTombstone,
 )
 
 #: The canonical ids of the fixtures — LETTER-BEARING on purpose.
@@ -949,3 +950,42 @@ class TestTheReasonVocabulary:
         assert RESPONSE_REASONS == frozenset(
             {"expired", "already_ended", "unknown_session", "machine_refused"}
         )
+
+    async def test_the_runtime_guard_keeps_a_ledger_only_token_out_of_a_response(
+        self,
+    ):
+        """The RUNTIME half of the invariant — the guard is EXERCISED.
+
+        The two tests above are a statement about the CONSTANTS. The
+        GUARD (``McpGatewayService._response_reason``) is what enforces
+        the invariant at the moment a reason is put into a response, and
+        NOTHING in the current write paths can produce a ledger-only
+        tombstone — so the guard is defence-in-depth, and without this
+        test it could be deleted or reordered with EVERY test still
+        green.
+
+        A ledger-only token is therefore injected straight into the
+        tombstone store: the response must fall back to the neutral
+        reason and must never carry the token.
+        """
+        clock = Clock()
+        service = make_service(clock=clock)
+        service.tombstones.record(
+            SessionTombstone(
+                session_id=SESSION_ID,
+                reason=LEDGER_MACHINE_UNREACHABLE,
+                at=clock.now,
+                agent_id=AGENT_ID,
+                instance_id="",
+                machine_id=MACHINE_ID,
+                cause="",
+            )
+        )
+
+        result = await service.disconnect(agent_id=AGENT_ID)
+
+        assert result["ended"] is False
+        # The guard's fallback: the neutral reason, never the token.
+        assert result["why_not_ended"] == REASON_UNKNOWN_SESSION
+        assert result["why_not_ended"] not in LEDGER_ONLY_REASONS
+        assert LEDGER_MACHINE_UNREACHABLE not in json.dumps(result, default=str)
