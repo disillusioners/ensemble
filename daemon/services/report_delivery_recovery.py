@@ -507,7 +507,9 @@ class MissionReconciliationLaneResult(LaneResult):
     * ``skipped_live`` — the worker is live (R2a: young/live work beats
       the clock).
     * ``skipped_watcher_pending`` — a PENDING bus watcher exists for
-      the (commissioner, worker) pair (R4).
+      the (commissioner, worker) pair (R4): the row is HELD. The hold
+      is a PER-PASS decision, re-evaluated against the current watcher
+      set on every cycle (MAJ-5) — it is not an eternal hold.
     * ``below_ttl_hold`` — the row is young (or the worker is
       non-terminal and the TTL has not elapsed): HOLD, retried next
       cycle.
@@ -2251,6 +2253,42 @@ class ReportDeliveryRecoveryService:
             # row) — the T2 shape. Below the TTL a recent absence may
             # be a visibility artifact → HOLD.
             if age_seconds > self._mission_commission_ttl_seconds:
+                # ── MAJ-5: the R4 bus-watcher probe runs BEFORE the
+                # R2c abandon. A PENDING watcher targeting the
+                # commission is LIVE OBLIGATION EVIDENCE ⇒ the row is
+                # HELD (no abandon). The old shape abandoned a
+                # commission whose obligation was still tracked
+                # whenever the worker's row had disappeared.
+                #
+                # BOUNDED SEMANTICS: the hold is a PER-PASS decision,
+                # re-evaluated on every cycle against the CURRENT
+                # watcher set — it is NOT an eternal hold (when the
+                # watcher stops being pending, the row proceeds to the
+                # TTL backstop) and it is NOT the design's "hold even
+                # past the TTL" pseudo-code, which reads as an
+                # unconditional promise the sweep does not make.
+                try:
+                    watchers = self._pending_bus_watchers(
+                        commissioner_id, worker_id
+                    )
+                except Exception as exc:
+                    out.probe_errors += 1
+                    logger.warning(
+                        "sweep mission_reconciliation HOLD (bus-watcher "
+                        "probe failed) mission_id=%s, commission_id=%s, "
+                        "commissioner=%s, worker=%s, lane=%s: %s: %s",
+                        mission_id,
+                        commission_id,
+                        commissioner_id,
+                        worker_id,
+                        lane,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    return
+                if watchers:
+                    out.skipped_watcher_pending += 1
+                    return
                 # MAJ-3: a masked-probe FAULT holds the row for this
                 # pass — the caller must NOT abandon a row whose
                 # observability probe could not run.
@@ -2297,7 +2335,18 @@ class ReportDeliveryRecoveryService:
 
         # ── (4) the bus watcher (R4) — a PENDING watcher from that
         # worker targeting the commissioner is live obligation
-        # evidence: HOLD, even past the TTL.
+        # evidence: the row is HELD for this pass (the sweep never
+        # abandons a row whose obligation is still tracked).
+        #
+        # BOUNDED SEMANTICS (MAJ-5): the hold is a PER-PASS decision,
+        # re-evaluated on every cycle against the CURRENT watcher set
+        # — it is NOT an eternal hold (when the watcher stops being
+        # pending, the row proceeds to the TTL backstop) and it is NOT
+        # the design's "hold even past the TTL" pseudo-code, which
+        # reads as an unconditional promise the sweep does not make.
+        # The worker-missing branch runs the SAME probe BEFORE its
+        # abandon (the obligation may still be tracked even when the
+        # worker's own row has disappeared).
         try:
             watchers = self._pending_bus_watchers(commissioner_id, worker_id)
         except Exception as exc:

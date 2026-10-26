@@ -1472,6 +1472,87 @@ class TestTheAdvisoryExclusion:
 
 
 # ---------------------------------------------------------------------------
+# MAJ-5 — the worker-missing branch runs the R4 bus-watcher probe FIRST
+# ---------------------------------------------------------------------------
+
+
+class TestTheWorkerMissingBusWatcher:
+    """MAJ-5: the worker-missing branch must not abandon a commission
+    whose obligation is still TRACKED.
+
+    The branch used to abandon a past-TTL commission whenever the
+    worker's own row had disappeared — WITHOUT asking the bus whether
+    a pending watcher still tracks the obligation. A live obligation
+    evidence (the R4 probe) must be read BEFORE the R2c abandon.
+    """
+
+    def test_a_pending_bus_watcher_holds_the_missing_worker_row(
+        self, engine, manager_loop
+    ):
+        """THE PIN: worker row missing + past TTL + a pending bus
+        watcher ⇒ NO abandon (held)."""
+        commission_id = _mint_commission(engine, age_seconds=99_999)
+        service, _ = _build_service(
+            engine,
+            manager_loop=manager_loop,
+            instance_repo=FakeInstanceRepo(statuses={}),
+            bus=FakeBus(pending=True),
+        )
+
+        lane = service.recover_now().lanes["mission_reconciliation"]
+
+        assert lane.skipped_watcher_pending == 1
+        assert lane.abandoned_worker_missing == 0
+        assert lane.abandoned_ttl == 0
+        assert _row(engine, commission_id).state == (
+            CommissionState.OUTSTANDING.value
+        )
+
+    def test_a_bus_probe_fault_holds_the_missing_worker_row(
+        self, engine, manager_loop
+    ):
+        """A bus-watcher probe that cannot run HOLDS the row (fail-MISS)."""
+        commission_id = _mint_commission(engine, age_seconds=99_999)
+        bus = FakeBus()
+        bus.error = RuntimeError("bus down")
+        service, _ = _build_service(
+            engine,
+            manager_loop=manager_loop,
+            instance_repo=FakeInstanceRepo(statuses={}),
+            bus=bus,
+        )
+
+        lane = service.recover_now().lanes["mission_reconciliation"]
+
+        assert lane.probe_errors == 1
+        assert lane.abandoned_worker_missing == 0
+        assert _row(engine, commission_id).state == (
+            CommissionState.OUTSTANDING.value
+        )
+
+    def test_without_a_watcher_the_missing_worker_row_is_still_abandoned(
+        self, engine, manager_loop
+    ):
+        """The R4 probe does not disarm the abandon: no watcher ⇒ the
+        old behaviour stands."""
+        commission_id = _mint_commission(engine, age_seconds=99_999)
+        service, _ = _build_service(
+            engine,
+            manager_loop=manager_loop,
+            instance_repo=FakeInstanceRepo(statuses={}),
+            bus=FakeBus(pending=False),
+        )
+
+        lane = service.recover_now().lanes["mission_reconciliation"]
+
+        assert lane.skipped_watcher_pending == 0
+        assert lane.abandoned_worker_missing == 1
+        assert _row(engine, commission_id).state == (
+            CommissionState.ABANDONED.value
+        )
+
+
+# ---------------------------------------------------------------------------
 # MAJ-4 — the liveness leg carries the guard's task-stamp HORIZON
 # ---------------------------------------------------------------------------
 
