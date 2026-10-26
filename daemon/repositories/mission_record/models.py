@@ -157,8 +157,9 @@ class CommissionState(str, enum.Enum):
     (the ``dependency_watchers`` PENDING→FIRED exactly-once shape).
     Multiple OUTSTANDING rows for the same worker are ALLOWED
     (adoption-delta (a): the guarded-state lifecycle is the
-    discriminator; routing authority stays with the A-resolver until the
-    PR2/PR3 flip).
+    discriminator; routing authority STAYED with the A-resolver until
+    the PR2/PR3 flip — PR3 flipped it to the OLDEST outstanding row,
+    the A-resolver surviving as the declared legacy fallback leg).
     """
 
     OUTSTANDING = "outstanding"

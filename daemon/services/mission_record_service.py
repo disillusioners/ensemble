@@ -77,10 +77,14 @@ commissioned twice, the second commission MINTS A SECOND OUTSTANDING
 ROW — the guarded-state lifecycle (``outstanding`` →
 ``satisfied``/``abandoned``/``superseded``) is the discriminator, and
 the rung-2 lookup takes the OLDEST outstanding row (deterministic).
-ROUTING AUTHORITY STAYS WITH THE A-RESOLVER until the PR2/PR3 flip:
-nothing in PR1 routes reports by commission rows. A-resolver (latest
-committed nudge) vs B (multiple outstanding rows, oldest-first rung-2)
-is a PR3-flip decision, not a PR1 behavior.
+ROUTING AUTHORITY STAYED WITH THE A-RESOLVER until the PR2/PR3 flip;
+**PR3 IS THE FLIP** (ruling ④): report routing now keys on the OLDEST
+OUTSTANDING commission row (advisory backfill rows excluded FOREVER)
+ahead of the A-resolver, which survives as the DECLARED LEGACY
+FALLBACK leg — see ``report_recipient.resolve_report_recipient`` (the
+flip lives INSIDE the resolver, so every call site inherits it) and
+the report_recipient module docstring ("ADOPTION DELTA (a) — … AMENDED
+PR3").
 
 ADOPTION DELTA (b) — HISTORICAL COVERAGE (advisory backfill)
 ------------------------------------------------------------
@@ -825,7 +829,10 @@ class MissionRecordService:
         ADOPTION DELTA (a): a second commission of the same worker
         mints a SECOND OUTSTANDING row — the guarded-state lifecycle is
         the discriminator (see the module docstring for the precedence
-        decision). Routing authority stays with the A-resolver in PR1.
+        decision). Routing authority STAYED with the A-resolver through
+        PR1/PR2; **PR3 flipped it** — the OLDEST outstanding row now
+        routes (report_recipient.resolve_report_recipient, enforce
+        -gated; the A-resolver is the declared legacy fallback leg).
 
         ``commission_id`` may be pinned (deterministic UUID5) by the
         BACKFILL so its idempotency PRE-CHECK (``get_commission``) keys

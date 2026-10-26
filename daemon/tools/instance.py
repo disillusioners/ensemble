@@ -1246,8 +1246,11 @@ async def _register_child_completion_watcher(
         # either (the commission mint rides the watcher's boundary, per
         # the docs' "written alongside the existing watcher mint").
         # ADOPTION DELTA (a): a second commission of the same worker
-        # mints a SECOND OUTSTANDING row; routing authority stays with
-        # the A-resolver (report_recipient) until the PR2/PR3 flip.
+        # mints a SECOND OUTSTANDING row; routing authority STAYED with
+        # the A-resolver (report_recipient) through PR1/PR2 — the PR3
+        # flip moved it to the OLDEST OUTSTANDING commission row
+        # (enforce-gated, advisory-excluded; the A-resolver is now the
+        # declared legacy fallback leg).
         #
         # CARRIER (intentional, do not "fix"): this is the ONLY
         # commissioning lane that does NOT thread the resolved mission
