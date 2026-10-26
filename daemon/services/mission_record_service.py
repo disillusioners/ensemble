@@ -1490,6 +1490,93 @@ def mint_commission_fail_open(
         return None
 
 
+def satisfy_commission_fail_open(
+    service: MissionRecordService | None,
+    commission_id: str | None,
+    *,
+    session: Session | None = None,
+) -> bool:
+    """Commission-terminator wrapper (never raise) — the PR3 delivery
+    terminator.
+
+    The DELIVERY-side ``outstanding → satisfied`` write: the natural
+    completion write path calls this when a LEG-1 (mission-commission)
+    -routed report is actually written + addressed to its commissioner.
+    The posture is FAIL-OPEN — a satisfy failure (or a records-side
+    error, or mode ``off``) must NEVER break delivery; the caller logs
+    and delivery proceeds with the commission still outstanding (the
+    reconciliation sweep's probes are the net, RDRS lane 7).
+
+    Guarded transition ONLY: ``UPDATE ... WHERE state='outstanding'``
+    (rowcount 0 = another actor won — counted, never retried in
+    place). When ``session`` is provided the write rides the CALLER's
+    transaction via a SAVEPOINT — atomic with the report write (a
+    rolled-back delivery can never leave a satisfied commission
+    behind); with ``session=None`` the repository owns the transaction.
+
+    Returns:
+        ``True``  — the guarded transition moved exactly one row (this
+                     actor won) — STAGED when ``session`` is given.
+        ``False`` — mode ``off``, no commission id, a lost race
+                     (rowcount 0), or ANY error (fail-open).
+    """
+    if service is None or not commission_id:
+        return False
+    if _mode_is_off():
+        return False
+    try:
+        if session is not None:
+            moved = False
+            with session.begin_nested():
+                moved = service.satisfy_commission(
+                    commission_id, session=session
+                )
+            if moved:
+                # Caller-owned transaction: STAGED until the caller
+                # commits — the caller announces the durable success
+                # post-commit (a success log that precedes a rollback
+                # is a false success record).
+                logger.debug(
+                    "mission_records COMMISSION SATISFIED (staged — "
+                    "caller owns the commit) commission=%s…",
+                    commission_id[:8],
+                )
+            else:
+                # Guarded-transition lost race: another actor moved the
+                # row first. Count it, never retry in place.
+                logger.info(
+                    "mission_records: satisfy lost the guarded race "
+                    "(commission=%s… already moved) — counted, not "
+                    "retried",
+                    commission_id[:8],
+                )
+            return moved
+        moved = service.satisfy_commission(commission_id)
+        if moved:
+            logger.info(
+                "mission_records COMMISSION SATISFIED commission=%s… "
+                "(repo-owned transaction — durable)",
+                commission_id[:8],
+            )
+        else:
+            logger.info(
+                "mission_records: satisfy lost the guarded race "
+                "(commission=%s… already moved) — counted, not retried",
+                commission_id[:8],
+            )
+        return moved
+    except Exception as exc:  # noqa: BLE001 — fail-open terminator
+        logger.warning(
+            "mission_records: satisfy_commission failed "
+            "(commission=%s…): %s: %s — fail-OPEN, delivery proceeds "
+            "with the commission outstanding",
+            commission_id[:8] if commission_id else "?",
+            type(exc).__name__,
+            exc,
+        )
+        return False
+
+
 def attach_work_id_fail_open(
     service: MissionRecordService | None,
     mission_id: str | None,

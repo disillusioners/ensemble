@@ -27,9 +27,8 @@ from ..repositories.dependency_bus.models import DependencyWatcher, DependencyWa
 from ..repositories.report_injection.models import ReportInjection, ReportInjectionState
 from ..registry import get_registry
 from .mission_record_service import (
-    MissionRecordMode,
     MissionRecordService,
-    resolve_mission_records_mode,
+    satisfy_commission_fail_open,
 )
 from .report_recipient import (
     resolve_report_recipient,
@@ -4706,6 +4705,56 @@ Provide a concise summary:"""
                     agent_id=instance.agent_id,
                     parent_id=instance.parent_id,
                 )
+
+            # ── PR3 — THE COMMISSION TERMINATOR (delivery-side) ──────
+            # When the LEG-1 mission-commission leg decided the routing
+            # AND the report is actually addressed to its commissioner
+            # (the dead-recipient guard did NOT fall back), the routing
+            # commission is SATISFIED: ``outstanding → satisfied``, the
+            # guarded ``UPDATE ... WHERE state='outstanding'`` shape —
+            # a rowcount 0 (another actor won) is counted, never
+            # retried in place.
+            #
+            # ATOMIC with the delivery write: the satisfy rides THIS
+            # WriteGuardSession via a SAVEPOINT
+            # (``satisfy_commission_fail_open(session=…)``), so a
+            # rolled-back delivery can never leave a satisfied
+            # commission behind — and a satisfy failure rolls back ONLY
+            # the savepoint (fail-OPEN: delivery proceeds with the
+            # commission outstanding; the reconciliation sweep's probes
+            # — RDRS lane 7, a separate cycle — are the net).
+            #
+            # Deliberately NOT satisfied here (each stays the sweep's /
+            # another path's):
+            # * a dead/TERMINATED commissioner (the guard fell back to
+            #   the structural parent — the report never reached the
+            #   commissioner; the row stays outstanding, honestly);
+            # * deferred-pause / pending-messages markers (no delivery
+            #   happened);
+            # * idempotency / recovered-marker race skips (a prior or
+            #   concurrent path owns the delivery).
+            if (
+                _routing_commission is not None
+                and recipient_for_report
+                == _routing_commission.commissioner_instance_id
+                and report_injection_row is not None
+            ):
+                _mission_service = MissionRecordService(self._manager.engine)
+                _satisfied = satisfy_commission_fail_open(
+                    _mission_service,
+                    _routing_commission.commission_id,
+                    session=session,
+                )
+                if _satisfied:
+                    logger.info(
+                        "child_reports: routing commission %s… SATISFIED "
+                        "on delivery (child=%s… commissioner=%s… "
+                        "mission=%s…) — staged with this transaction",
+                        _routing_commission.commission_id[:8],
+                        instance_id[:8],
+                        recipient_for_report[:8],
+                        str(_routing_commission.mission_id)[:8],
+                    )
 
             # --- Inline: _update_parent_on_child_complete (no await needed) ---
             # The bus is the SOLE completion authority.
