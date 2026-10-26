@@ -175,6 +175,41 @@ They are durable by design ("if dropped, the ledger is worse than no ledger";
 no pruning, no TTL). This is a consequence of the promotion, not a separate
 action.
 
+### 1.6 The two binding rulings, and the incident chain this promotion closes
+
+**Ruling ① — Term-1 bypass-recording: REMOVED.** The attested arm stays a
+no-op / bypass BY DESIGN: there is NO bypass-recording and NO quiet-mission
+blocking rule. The design's NEW(i) / NEW(ii) rows were superseded by the ruling
+and were NEVER built — so nothing in this promotion records a bypass, and
+nothing blocks a quiet mission on the strength of one. If you are looking for a
+"bypass was recorded" artefact, there is none and there is not going to be
+one: the ruling removed the requirement.
+
+**Ruling ② — Scheduler anchoring: UNCHANGED (and inert).** The scheduler mint
+hook stays INERT: `ENSEMBLE_MISSION_RECORDS_SCHEDULER_MINT` stays default-OFF
+and the mode ladder alone does NOT arm it (both gates must open). Lane 9 stays
+bare. Promoting to `enforce` does not change this: a scheduled mission mints no
+commission rows, so the sweep has nothing of the scheduler's to reconcile.
+
+**The incident chain this promotion closes (`fd302262`).** The investigation
+re-derived the chain and OVERTURNED its premise — the workers were real; the
+phantom was in the RECORD of what happened. Three defects sat underneath:
+
+* **D1** — the `instance_nudge` report routed to the STRUCTURAL PARENT, not the
+  nudger (the audit ledger had ZERO readers). **CLOSED** by the routing flip.
+* **D2** — the completion gate was blind to OUT-OF-TREE commissioned work (the
+  mission settled ~5 minutes early while a commissioned worker was still
+  running). **CLOSED** by the quiet + L3 legs (PR2) and hardened to the
+  anchor-scoped count (PR3).
+* **D3** — the phantom-id LIKE-fusion seam. **DEFERRED BY DESIGN** — the
+  record's blast is reduced (the routing keys on FULL ids resolved at mint
+  time), but the unique-prefix-or-raise lane itself has NOT landed.
+
+The chain's full table and the per-defect closure verdicts live in
+`.agents/shared/planning/completion-subsystem-mission-records-pr3/b-arc-closure-table.md`
+§(c) + §(a). This promotion is the LAST step of that chain: without it, D2's
+fix is armed but the sweep that releases the hold is not yet trusted to write.
+
 ---
 
 ## 2. The promotion
@@ -208,7 +243,7 @@ re-exec → `/livez`).
 | `ENSEMBLE_MISSION_COMMISSION_TTL_SECONDS` | `daemon/constants.py::MISSION_COMMISSION_TTL_ENV` (resolved by `mission_record_service.resolve_mission_commission_ttl_seconds`) | `21600` (6 h) | The commission TTL horizon. It **OVERRIDES** the config-family knob below. An invalid value warns and falls back to the default — it NEVER raises (a misconfigured knob must not strand every commission). |
 | `SERVICES_REPORT_DELIVERY_RECOVERY_MISSION_COMMISSION_TTL_SECONDS` | `ServicesConfig.report_delivery_recovery_mission_commission_ttl_seconds` | `21600` | The config-family default for the horizon (env prefix `SERVICES_` on `ServicesConfig`). |
 | `SERVICES_REPORT_DELIVERY_RECOVERY_LANE_MISSION_RECONCILIATION` | `ServicesConfig.report_delivery_recovery_lane_mission_reconciliation` | `True` | Lane 7's OWN kill-switch (master + lane, like the other six lanes). `False` → the lane does not run at all — see §5.3, this can make holds permanent. |
-| `SERVICES_REPORT_DELIVERY_RECOVERY_ENABLED` | `ServicesConfig.report_delivery_recovery_enabled` | `True` | The RDRS MASTER kill-switch. `False` → the whole `ReportDeliveryRecoveryService` is not constructed and the crash-recovery endpoint is unavailable — **including lane 7**. |
+| `SERVICES_REPORT_DELIVERY_RECOVERY_ENABLED` | `ServicesConfig.report_delivery_recovery_enabled` | `True` | The RDRS MASTER kill-switch. `False` → the service is constructed but DISABLED: no lane runs (the periodic thread never starts, the boot sweep is skipped, and the crash-recovery endpoint returns **503** with "disabled by config" — MAJ-2). Lane 7 is off with it. |
 
 ### 2.4 What `enforce` actually changes (the surface you are arming)
 
@@ -316,6 +351,7 @@ inherited lane counters `recovered` / `errors` / `skipped_busy` /
 | `already_resolved` | Another actor won the guarded transition (rowcount 0) ⇒ counted, never retried in place. |
 | `masked_suspected` | The D4(iii) masked-enqueue signal (see below). |
 | `probe_errors` | A probe could not prove its question ⇒ the row is HELD (fail-MISS). |
+| `masked_probe_errors` | The MASKED-ENQUEUE probe's own fault (MAJ-3). It has its own counter because it is an OBSERVABILITY probe; a fault HOLDS the row for that pass (no abandon, no satisfy) and is retried next cycle. |
 | `errors` | A crashed row — logged + counted + untouched. |
 
 **Log lines to recognise:**
@@ -331,6 +367,14 @@ In `dry` mode the verb on the first two lines is the dry-run variant
 (`WOULD ABANDON (dry-run)` / `WOULD SATISFY (dry-run)`) — that is how you tell
 a detection from a write. The abandon reason vocabulary is FROZEN:
 `worker_terminal_no_report` · `ttl_expired_not_live` · `worker_row_missing`.
+
+**LOG LEVELS.** `WARNING` is for sweep ACTIONS only — a REAL ledger write in
+`enforce` (`ABANDONED` / `SATISFIED`). The dry-run previews are `INFO`: a dry
+pass writes nothing, so a WARNING there would fire on every detection and
+drown the real signal. The `MASKED ENQUEUE suspected` line is a WARNING for a
+different reason — it is an ANOMALY signal, not an action (and it has a
+documented false-positive population: see §3.6 — do not trip the rollback on
+it alone).
 
 **`masked_suspected` is the D4(iii) observability signal.** It fires when a
 commissioned worker's queue row is entirely absent past the grace window — the
@@ -382,8 +426,14 @@ TTL ruling was deliberately left open; the `dry` counters are the evidence).
 
 * `probe_errors` climbing at a sustained rate — the sweep cannot prove its
   questions, so rows accumulate as holds rather than resolving.
-* `masked_suspected` climbing — a mis-addressed-enqueue class; the commission
-  can never be satisfied because the work was never addressed.
+* **NOISY — do NOT trip the rollback on `masked_suspected` ALONE.** It has a
+  documented FALSE-POSITIVE population: the signal fires when the commissioned
+  worker has NO queue row at all since the mint, and a legitimate worker path
+  can write no MessageQueue row of its own (the signal is OBSERVATION ONLY — it
+  never triggers an action, and it never abandons a row). It is a tuning
+  signal, not a standalone rollback tripwire: read it together with
+  `probe_errors` / `already_resolved` and with a hold that does not release.
+  (The D4(iii) FIX itself is deferred — another architect's seam.)
 * Holds that do not release and no sweep counter explains why.
 * `already_resolved` climbing — another actor is winning the guarded
   transitions; check that the delivery-side terminator and the sweep are not
@@ -474,7 +524,7 @@ This is the sharpest edge in the whole promotion:
   the TTL. If the sweep runs, a dead commission is abandoned within the TTL
   horizon and the hold releases.
 * **If the sweep is disabled** (`SERVICES_REPORT_DELIVERY_RECOVERY_ENABLED=False`
-  — the whole service is not even constructed — or
+  — the service is constructed but DISABLED, so no lane runs — or
   `SERVICES_REPORT_DELIVERY_RECOVERY_LANE_MISSION_RECONCILIATION=False` — lane
   7 does not run), then **the hold can be PERMANENT**: `enforce` holds
   publishes for missions with outstanding commissions, and with the sweep off

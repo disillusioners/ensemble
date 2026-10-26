@@ -40,7 +40,7 @@ NOT closed.
 | **D4(ii)** — spawn read-back WARNING-only | 🟡 **PARTIAL — mint-path validation SHIPPED; general hardening DEFERRED** | The mint lanes validate their own writes: a commission row whose worker target row is missing at mint time is an immediate RAISE (the mint is the semantic contract — a commission that can never be satisfied must not be recorded as outstanding). The general enqueue read-back/masking hardening for NON-mission enqueues is seam territory — deferred. | PR1 — `tests/unit/test_mission_record_service.py::TestMintPathValidation` |
 | **D4(iii)** — enqueue masking (mis-addressed row invisible to the sender) | 🟡 **PARTIAL — the FIX is DEFERRED; the OBSERVABILITY SHIPPED** | The seam patch itself is still deferred. What shipped is the observability half: RDRS lane 7 detects a whole-window queue-row absence past the grace window and counts it as `masked_suspected` with a WARNING line. **Counter + log ONLY** — never an auto-action, never an abandonment on this signal alone. | `13aa51e1a` · `tests/unit/test_mission_reconciliation_sweep.py::TestTheMaskedEnqueueObservability` (3 nodes) |
 | **D4(iv)** — `send_message` result.status swallowed | ⛔ **DEFERRED — NOT CLOSED** | A pure seam patch; the commission ledger adds an audit surface but the tool-result surfacing is independent. | proposal-b §3 D4(iv) |
-| **D5-latent** — stale anchoring on `internal_agent:*` lanes; `denial_epochs` never cleared; the ~14-minute anchor lag | ✅ **CLOSED** | Epoch semantics are the core construction: the anchor is a durable row minted at enqueue and **amended AT DELIVERY** (ruling ③) — no would-be-END window re-derivation, no lag seam. The `denial_epochs` ledger is epoch-tagged and the **epoch-boundary clear is armed in `enforce`** (it is a gate-visible behaviour change, so it rides the same operator promotion). The F2 amend guard was hardened in PR3 into ONE shared single-statement guarded UPDATE (the status predicate lives in the WHERE, the outcome is decided by the ROWCOUNT, no prior read) — the PR2 flake fix. | PR1 (the records/mints/stamps) + PR2 (amend-at-delivery; the boundary clear; the epoch tag) — `tests/unit/test_mission_record_pr2_tap_amend.py`, `tests/unit/test_mission_record_pr2_l3_ledger.py::TestEpochBoundaryLedgerClear` / `::TestEpochTaggedDenyLedger`, `tests/unit/test_mission_record_pr2_carries.py::TestF2AmendGuard` · PR3 hardening: `0bff3a4dd` + `tests/unit/test_mission_record_f2_concurrency.py` |
+| **D5-latent** — stale anchoring on `internal_agent:*` lanes; `denial_epochs` never cleared; the ~14-minute anchor lag | ✅ **CLOSED** | Epoch semantics are the core construction: the anchor is a durable row minted at enqueue and **amended AT DELIVERY** (ruling ③) — no would-be-END window re-derivation, no lag seam. The `denial_epochs` ledger is epoch-tagged and the **epoch-boundary clear is armed in `enforce`** (it is a gate-visible behaviour change, so it rides the same operator promotion). The F2 amend guard was hardened in PR3 into ONE shared single-statement guarded UPDATE (the status predicate lives in the WHERE, the outcome is decided by the ROWCOUNT, no prior read) — the PR2 flake fix. | PR1 (the records/mints/stamps) + PR2 (amend-at-delivery; the boundary clear; the epoch tag) — `tests/unit/test_mission_record_pr2_tap_amend.py`, `tests/unit/test_mission_record_pr2_l3_ledger.py::TestEpochBoundaryLedgerClear` / `::TestEpochTaggedDenyLedger`, `tests/unit/test_mission_record_pr2_carries.py::TestF2AmendGuard` · PR3 hardening: `0bff3a4dd` + `tests/unit/test_mission_record_f2_concurrency.py` (**MEASURED: 6 nodes, 6 passed** — `uv run python -m pytest tests/unit/test_mission_record_f2_concurrency.py -q` → `6 passed in 0.70s`; see §(d.2.1) for the correction of the unsubstantiated "12/12" figure) |
 
 ### (a.2) The five NEW rows
 
@@ -152,6 +152,53 @@ valve so it cannot become an eternal mission.
 | **Test-scaffolding consolidation** | RE-DEFERRED — there is no house helper to consolidate onto (`tests/helpers/` carries no mission-record fixture) |
 | **The pre-existing environment hangs + the A/B-proven base reds** | Not branch-caused — the tester lane's standing quarantine rows + the A/B-parity proof (the PR2 full-pool A/B measured zero branch-caused reds) |
 | **The "four vs five tap sites" prose** | PRE-EXISTING, outside the PR2 surface — `daemon/services/message_tap.py`'s module docstring says "the four approved tap sites" while the module carries FIVE source labels (the fifth, `compaction_precall_95`, was added by the proactive-compaction fix). A separate hygiene pass, not this arc |
+
+### (d.2.1) The PR2 tidy-pass RIDER items this branch handled — the auditable list
+
+The prior iteration's report claimed "**9 handled** (PR2 tidier M/L items)". **That
+figure had NO auditable source.** `.agents/tidier/notes.md` carries exactly ONE
+mission-records entry — the 2026-10-25 "mission-records PR2 enforce-reads tidy
+pass" (2 High / 18 Medium / 24 Low) — and it ships NO per-item ledger, so "9"
+could not be sourced from it (or from anywhere else in either tree). The honest
+number is the count of rider items this branch's commits actually address:
+**8 rider items across 7 branch commits.** Every row below was verified by
+reading the commit's diff.
+
+| # | PR2 rider item (the tidier note, 2026-10-25) | What this branch did | Commit |
+|---|---|---|---|
+| 1 | **High #2** — the mutation harness scored ANY non-zero pytest exit as "killed" (exit-4 "no tests ran" ⇒ a false PASS N/N) | The SCORER fix itself landed at `d9e8fbdd2` (PR2 round 3 — already in this branch's base). What this branch fixed is the FOLLOW-ON: two mutations whose ANCHORS the PR2 sentinel-unification + PR3's F2 hardening had made stale — the matrix was FAILING (21/23), not falsely green. Re-anchored ⇒ 23/23 killed. | `710785e34` |
+| 2 | **Medium** — the PACKS figure ledger cited a superseded measurement sha | The PR2 section's FIGURE LEDGER now cites the tester's measured gate sha `3fc16bc66` (figures only — no count changed) | `7ce4b2cdd` |
+| 3 | **Low** — two unused PR2 test imports (F401) | Both dropped (ruff F401 on the two files: 2 hits → 0). Provenance note: the commit cites the PR2 *evidence table*'s F401 row, and that table is NOT in either tree — the row's own text is not re-verifiable here. | `db11128db` |
+| 4 | **"OUTER except → []"** (the tidy pass routed it to PR3) — the SOURCE C tree-rows provider swallowed ANY exception and returned `[]` with NO log line | The swallow becomes a LOGGED fail-open (the RETURN value stays: the empty list IS the contract — the C seam's whole-eval fail-open ALLOWS the leader mission, a looser posture than the counts-only degradation) | `10097fb1f` |
+| 5 | **"_engine reach-through @ instance_messaging.py"** (routed to PR3) | The public `InstanceManager.engine` accessor replaces the private reach-through (behaviour-neutral — the property returns the same object) | `c1afe2a3d` |
+| 6 | **Recurring pattern** — the sentinel spelled two ways (`-1` literal vs `MISSION_READ_UNKNOWN`) | ONE spelling on the producing side (the gate side already imported the constant); behaviour-neutral — the constant IS `-1` | `7f778b42d` |
+| 7 | **Recurring pattern** — the ordinal/counter prose drift ("THREE vs FOUR input"; "three vs four tree counters"; the FIFTH collision) | All four sites re-derived at HEAD and corrected (prose only — no decision branch changed) | `e08d36089` |
+| 8 | **Recurring pattern** — the same "three vs four tree counters" drift, in the SOURCE C signals docstring | Corrected to four (the site that already said four is what made the contradiction visible) | `10097fb1f` |
+
+**Not tidier items — the review batch** (listed so the count cannot be muddled):
+`826664811` (the REVIEW's batch: M-A + six MINORs) and `49f58cb24` (that
+batch's docs half). They are the independent review's riders, not the tidy
+pass's.
+
+**The measured F2 concurrency pack — the "12/12" correction.** The prior
+iteration reported the F2 concurrency pack as "**12/12**". **That figure appears
+NOWHERE in either tree and was UNSUBSTANTIATED** — and the pack defines
+exactly **6** test functions. The MEASURED run:
+
+```
+uv run python -m pytest tests/unit/test_mission_record_f2_concurrency.py -q
+→ 6 passed in 0.70s
+```
+
+**The honest figure is 6 nodes, 6 passed** (the pack's classes:
+`TestTheSingleStatementGuard` 3 · `TestTheOrderingContract` 2 ·
+`TestTheConcurrentPair` 1). The string "12/12" appears NOWHERE in the
+MISSION-RECORDS surface — the PR1/PR2/PR3 planning directories, the
+enforce-promotion runbook, the F2 pack itself — and this row is the single
+place the pack's figure is recorded. (The branch's other "12/12" hits are
+unrelated subsystems: the approver's nest-ops tracker, the designer-critic
+orchestration map, the langgraph-checkpoint-perf phase notes, the oauth2
+rollout notes.)
 
 ### (d.3) The doc-drift this table found
 
