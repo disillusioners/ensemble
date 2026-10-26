@@ -1,0 +1,17 @@
+# mrpr3_pg_scratch — the real-PG boot-path pack (F1 index + idempotency + IntegrityError, census/anchor/count/amend reads, ledger forwarding, commission persistence)
+#
+# one repo-relative path per line; the pack invocation is:
+#   pytest -q $(grep -v '^#' <this file>)
+# gate form (scrubbed):
+#   timeout 300 ./scripts/run_tests_scrubbed.sh -p no:cacheprovider -q --tb=short $(grep -v '^#' <this file>)
+#
+# REQUIRES the fenced DB env (POSTGRES_DB=ensemble_dev_test_only, ENSEMBLE_SELF_ENV=dev)
+# and the PG_TEST_* scratch variables — the tests mint + self-drop scratch DBs
+# (gate used scratch prefix ensemble_mrpr3_test_reads_<rand>; the default
+# per-test scratch prefixes also work — the prefix redirect was an in-memory
+# tester-lane plugin, NOT a test dependency).
+#
+# gate-3 measured @ 35df7171e: 12/12 PASS (5.84s; scratch teardown 0-residue)
+#
+tests/integration/test_mission_records_pr2_enforce_reads_pg.py
+tests/unit/test_mission_record_commission_persistence_pg.py

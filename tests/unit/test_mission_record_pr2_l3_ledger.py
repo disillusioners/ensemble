@@ -29,7 +29,7 @@ import daemon.repositories.instance.models  # noqa: F401
 import daemon.repositories.mission_record.models  # noqa: F401
 import daemon.repositories.message_queue.models  # noqa: F401
 import daemon.repositories.task.models  # noqa: F401
-from daemon.repositories.instance.models import Instance, InstanceStatus
+from daemon.repositories.instance.models import Instance
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.services.child_reports import ChildReportsService
 from daemon.services.mission_record_reads import count_outstanding_commissions

@@ -21,6 +21,11 @@ Every read here fails OPEN and NEVER degrades to a ``0`` default:
   read failed). ``-1`` is NOT ``0``: ``0`` is a real answer ("no
   outstanding commissions"), and collapsing the two would let a failed
   read masquerade as a quiet mission — the exact blindness D2 is about.
+  Since PR3 (MAJOR-1 ruling (c)) the count is ANCHOR-scoped: it spans
+  the anchor's OPEN and SUPERSEDED epochs (the cross-epoch hold — an
+  orphaned commission on a superseded epoch keeps holding), while
+  ``read_mission_census`` deliberately STAYS OPEN-EPOCH-SCOPED (the
+  attestation-census scope ruling — documented, not silently widened).
 * The census read returns ``None`` for "unknown / no record" (a boolean
   read has no ``-1``; ``None`` is its analogue). ``None`` means "the
   record has no answer" and the caller falls back to the LEGACY leg.
@@ -235,30 +240,43 @@ def count_outstanding_commissions(
     engine: "Engine",
     anchor_instance_id: str,
 ) -> int:
-    """Count the open mission's OUTSTANDING commissions.
+    """Count the anchor's OUTSTANDING commissions — ACROSS ALL EPOCHS.
 
-    The 5th R2 input (``outstanding_commissions``) and the L3 root
-    gate's mission leg both consume this.
+    MAJOR-1 = ruling (c) CROSS-EPOCH HOLD (Proposal B PR3). The count
+    is ANCHOR-scoped: it spans the anchor's OPEN **and** SUPERSEDED
+    epochs, so a commission orphaned by a ``job_continue`` epoch
+    supersession (the prior epoch's rows keep
+    ``state='outstanding'`` and keep pointing at the superseded epoch)
+    STILL counts. The L3 publish hold and the R2 quiet predicate are
+    therefore released only when EVERY epoch of the anchor is
+    commission-quiet. There is NO re-pointing and NO auto-supersede of
+    the orphaned rows — attribution stays with the owning epoch.
+
+    SCOPE RULING — the attestation CENSUS is deliberately NOT widened:
+    ``read_mission_census`` below stays OPEN-EPOCH-SCOPED (the census
+    answers "did the CURRENT epoch delegate?"; the ruling text names
+    the L3 hold + the R2 quiet input only). The two scopes coexist
+    deliberately — this is the documented decision, not a drift.
+
+    Consumers: the 5th R2 input (``outstanding_commissions``, via
+    ``InstanceManager.count_outstanding_commissions``) and the L3 root
+    gate's mission leg (``child_reports._root_completion_gate``).
 
     Returns:
-        ``0``  — the anchor has an open epoch with no outstanding
-                  commissions (a REAL answer: the mission is quiet), OR
-                  the anchor has no open epoch at all (no mission ⇒ no
-                  commissions ⇒ quiet — the legacy behavior).
-        ``N>0``— the open mission has N outstanding commissions.
+        ``0``  — quiet: the anchor has NO recorded epochs at all, or
+                  every epoch of the anchor is commission-quiet (a REAL
+                  answer). NOTE the semantic change from PR2: "no open
+                  epoch" is no longer automatically quiet — an orphaned
+                  commission on a superseded epoch holds.
+        ``N>0``— some epoch of the anchor (open OR superseded) has N
+                  outstanding (non-advisory) commissions.
         ``-1`` — UNKNOWN (the read failed). The fail-open sentinel: the
                   caller treats it as "behave as before the records
                   existed" — NEVER as "0 outstanding".
     """
     try:
-        record = _repo(engine).find_open_epoch_by_anchor(anchor_instance_id)
-        if record is None:
-            # No open epoch ⇒ no mission ⇒ no outstanding commissions.
-            # A REAL zero (not the unknown sentinel): the legacy
-            # behavior for an instance with no record.
-            return 0
-        return _repo(engine).count_outstanding_commissions_for_mission(
-            record.mission_id
+        return _repo(engine).count_outstanding_commissions_for_anchor(
+            anchor_instance_id
         )
     except Exception as exc:  # noqa: BLE001 — fail-open read
         logger.warning(

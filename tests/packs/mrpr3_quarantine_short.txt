@@ -1,0 +1,30 @@
+# mrpr3_quarantine_short — the gate-3/6 adjudication lane (6 short invocations
+# over the standing quarantined families; expected: 14 ledgered reds / 0 unmatched)
+#
+# one repo-relative path (or path::node) per line; the gate ran these as SIX
+# separate short invocations (Q1..Q6 below). A single combined invocation
+# over all non-comment lines is equivalent set-wise.
+# gate form (scrubbed, per group):
+#   timeout 300 ./scripts/run_tests_scrubbed.sh -p no:cacheprovider -q --tb=short <group files>
+#
+# gate-3/6 measured @ 35df7171e: 14 reds / 14 LEDGERED / 0 unmatched
+#   (census 2F · instance_metadata 5F · sync_runner 1F · test_api 6F node-for-node;
+#    tz_matrix 29/29 green; guardrails 77/77 green)
+#
+# --- Q1 census (2 standing ledgered reds) ---
+tests/job_queue/test_terminal_write_census.py
+# --- Q2 instance-metadata atomic, top-level path (5 standing ledgered reds) ---
+tests/test_instance_metadata_atomic.py
+# --- Q3 tz matrix (29/29 green; its standing row was location-attributed, now resolved) ---
+tests/job_queue/test_f1_killswitch_tz_matrix.py
+# --- Q4 sync runner (1 standing ledgered red) ---
+tests/unit/plugin_subsystem/test_sync_runner.py
+# --- Q5 fs walk guardrails (77/77 green) ---
+tests/unit/test_filesystem_walk_guardrails.py
+# --- Q6 test_api x6 (6 standing ledgered reds, node-level) ---
+tests/test_api.py::test_list_instances_no_project_id_filter
+tests/test_api.py::test_list_instances_filter_by_project_id
+tests/test_api.py::test_list_instances_filter_by_nonexistent_project_id
+tests/test_api.py::test_list_instances_project_id_with_status_filter
+tests/test_api.py::test_send_message_success
+tests/test_api.py::test_global_exception_handler

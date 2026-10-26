@@ -30,6 +30,17 @@
 --   the boot-time pre-check → insert TOCTOU window a PK conflict
 --   would RAISE, not no-op. Live mints use random UUID4s.
 --
+--   DDL ALIGNMENT (PR3 carry-over, 2026-10-26): the boolean column
+--   ``advisory_backfill`` was declared ``INTEGER`` here while the MODEL
+--   (``daemon/repositories/mission_record/models.py``) declares ``bool``
+--   (SQLModel ``Boolean``). The MODELS ARE TRUTH — this file now spells it
+--   ``BOOLEAN``. The values are identical on SQLite (0/1, NUMERIC affinity),
+--   so the alignment is a declaration fix, not a data migration; existing
+--   SQLite databases keep their INTEGER declaration (the ORM converts on
+--   read either way). On PostgreSQL the column was ALWAYS ``BOOLEAN``
+--   (``create_all`` owns a brand-new table's DDL) — there is no PG-side
+--   drift and no ``_ensure_postgres_columns`` mirror is needed for it.
+--
 --   Additive-only and rollback-safe. On PostgreSQL the table is created
 --   by ``SQLModel.metadata.create_all()`` (model registered before
 --   create_all at manager boot — snapshot precedent); the migration
@@ -49,7 +60,7 @@ CREATE TABLE IF NOT EXISTS mission_commissions (
     created_at TEXT NOT NULL,
     satisfied_at TEXT,
     abandon_reason TEXT,
-    advisory_backfill INTEGER NOT NULL DEFAULT 0
+    advisory_backfill BOOLEAN NOT NULL DEFAULT 0
 );
 
 -- D1 routing key (PR3) + mission-scoped commission census (D2).

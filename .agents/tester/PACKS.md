@@ -23,7 +23,7 @@
 >
 > **THE PACK FILE LISTS ARE MACHINE-READABLE AND COMMITTED** — `tests/packs/mrpr2_*.txt` (one repo-relative path per line; `#` comment lines allowed). The invocation is `pytest -q $(grep -v '^#' tests/packs/<pack>.txt)` — the list in this table is NEVER prose, so the enumeration cannot drift from the invocation (the round-3 finding: the prose said "× 24 files" while the set was different, and two blind-spot files were missing from it).
 >
-> **FIGURE LEDGER — every figure below was MEASURED AT `d9e8fbdd2` (the post-fix commit) by DIRECT EXECUTION on both legs.** No figure is carried forward from an earlier commit.
+> **FIGURE LEDGER — every figure below was MEASURED AT `3fc16bc66` (the tester's gate sha) by DIRECT EXECUTION on both legs.** No figure is carried forward from an earlier commit (the earlier `d9e8fbdd2` figures are SUPERSEDED by this run — see the full-pool row).
 > * **278/278** = `mrpr2_focused_unit` — the FAST pack (the mission-record unit files + the two blind-spot files).
 > * **455/455** = `mrpr2_scoped_wide` — the WIDE pack (the focused pack + the existing seam files + the PG scratch integration + the AST tap gate).
 > * **350/350 (BOTH legs)** = `mrpr2_ab_parity` — the BASE-PRESENT subset (the PR2-only files are absent on the base leg — collection-on-base = absent, nothing to A/B).

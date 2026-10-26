@@ -659,3 +659,107 @@ class TestWiringFailureTolerance:
             "operator triage; got detail="
             f"{exc.value.detail!r}"
         )
+
+    def test_endpoint_returns_503_when_recovery_is_wired_but_disabled(
+        self,
+        sqlite_engine: Engine,
+    ) -> None:
+        """MAJ-2: the WIRED-BUT-DISABLED shape also returns 503.
+
+        The service is CONSTRUCTED even when
+        ``report_delivery_recovery_enabled=False`` (the wiring passes
+        the knob through), so the ``_report_recovery is None`` check
+        alone does NOT cover the disabled state — the endpoint's
+        documented 503 promise ("the recovery service is disabled by
+        config") covers BOTH shapes.
+
+        The service's own ``recover_now`` is the single choke point
+        (a disabled service runs no lane); this endpoint-level pin
+        makes the OPERATOR-visible contract explicit.
+        """
+        from fastapi import HTTPException
+        from unittest.mock import MagicMock as _MM
+
+        from daemon.routers.recovery import recover_report_delivery
+
+        disabled_service = _MM()
+        # The public flag the router reads (the service's own
+        # ``enabled`` property).
+        disabled_service.enabled = False
+        disabled_service.recover_now.side_effect = AssertionError(
+            "a disabled service MUST NOT run the sweep"
+        )
+
+        request = _MM()
+        request.app.state.manager._report_recovery = disabled_service
+        request.app.state.manager.is_write_paused = False
+
+        with pytest.raises(HTTPException) as exc:
+            import asyncio
+
+            asyncio.run(recover_report_delivery(request))
+        assert exc.value.status_code == 503, (
+            "the recovery endpoint MUST return 503 when the service is "
+            "wired but DISABLED — the operator sees 'disabled' not a "
+            "silent no-op; got status_code=" f"{exc.value.status_code}"
+        )
+        assert "disabled" in str(exc.value.detail).lower(), (
+            "503 detail MUST mention the disabled state for operator "
+            f"triage; got detail={exc.value.detail!r}"
+        )
+        disabled_service.recover_now.assert_not_called()
+
+    def test_endpoint_returns_503_when_the_service_does_not_expose_enabled(
+        self,
+        sqlite_engine: Engine,
+    ) -> None:
+        """F9(a): a service WITHOUT the ``enabled`` flag is FAIL-SAFE.
+
+        The router read the flag as ``getattr(service, "enabled", True)``
+        — a fail-OPEN default: an object that does not expose the flag
+        (a partial init, a test double, a renamed attribute) was treated
+        as ENABLED and the sweep ran behind the operator's back. The
+        default is now ``False``: an object that cannot prove it is
+        enabled gets the documented 503 ("disabled"), never a 200.
+
+        This is the ONLY fail-open read on the kill-switch path; the
+        write choke point (``recover_now``) re-checks ``self._enabled``
+        itself, so the blast radius is the HTTP status only.
+        """
+        from fastapi import HTTPException
+        from unittest.mock import MagicMock as _MM
+
+        from daemon.routers.recovery import recover_report_delivery
+
+        class _ServiceWithoutEnabled:
+            """A service-shaped object that does NOT expose ``enabled``.
+
+            NOT a ``MagicMock``: a mock auto-creates any attribute, so
+            ``getattr(mock, "enabled", ...)`` would always find a
+            truthy mock — it could not exercise the missing-attribute
+            branch at all.
+            """
+
+            def recover_now(self):  # pragma: no cover — must never run
+                raise AssertionError(
+                    "a service without the 'enabled' flag MUST NOT run "
+                    "the sweep"
+                )
+
+        request = _MM()
+        request.app.state.manager._report_recovery = _ServiceWithoutEnabled()
+        request.app.state.manager.is_write_paused = False
+
+        with pytest.raises(HTTPException) as exc:
+            import asyncio
+
+            asyncio.run(recover_report_delivery(request))
+        assert exc.value.status_code == 503, (
+            "the recovery endpoint MUST return 503 (not 200) when the "
+            "service does not expose the 'enabled' flag — the "
+            "fail-safe default; got status_code=" f"{exc.value.status_code}"
+        )
+        assert "disabled" in str(exc.value.detail).lower(), (
+            "503 detail MUST mention the disabled state for operator "
+            f"triage; got detail={exc.value.detail!r}"
+        )

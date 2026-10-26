@@ -26,7 +26,12 @@ from ..repositories.event.models import Event, EventKind
 from ..repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState
 from ..repositories.report_injection.models import ReportInjection, ReportInjectionState
 from ..registry import get_registry
-from .report_recipient import resolve_report_recipient
+from .mission_record_service import (
+    MissionRecordService,
+    satisfy_commission_fail_open,
+)
+from .mission_record_reads import MISSION_READ_UNKNOWN
+from .report_recipient import resolve_report_recipient_with_commission
 from .completion_content import (
     event_created_at_as_utc,
     get_last_assistant_timestamp,
@@ -2501,13 +2506,14 @@ Provide a concise summary:"""
         (``InstanceManager.count_outstanding_commissions``), which is
         MODE-AWARE (the mission-record ladder must be in ``enforce``
         mode for the leg to be armed) and FAIL-OPEN (a read failure
-        constructs the ``-1`` "unknown" sentinel).
+        constructs the ``MISSION_READ_UNKNOWN`` "unknown" sentinel).
 
         Returns:
             ``0``  — inactive / quiet / no open mission.
             ``N>0``— the mission has N outstanding commissions.
-            ``-1`` — UNKNOWN (the read failed) → the caller proceeds
-                      (the gate's fail-open posture).
+            ``MISSION_READ_UNKNOWN`` (``-1``) — UNKNOWN (the read
+                      failed) → the caller proceeds (the gate's
+                      fail-open posture).
         """
         try:
             reader = getattr(
@@ -2532,7 +2538,7 @@ Provide a concise summary:"""
                 type(count_exc).__name__,
                 count_exc,
             )
-            return -1
+            return MISSION_READ_UNKNOWN
 
     async def _root_completion_gate(
         self,
@@ -2610,32 +2616,46 @@ Provide a concise summary:"""
             # terminal "completed" event while the commissioned work is
             # still running.
             #
-            # The mission-scoped leg closes that hole: the open mission
-            # epoch's OUTSTANDING commission rows are the record-side
-            # truth ("this mission commissioned work that has not
-            # reported yet"). While any commission is outstanding, the
-            # publish is HELD.
+            # The mission-scoped leg closes that hole: the OUTSTANDING
+            # commission rows are the record-side truth ("this mission
+            # commissioned work that has not reported yet"). While any
+            # commission is outstanding, the publish is HELD.
+            #
+            # MAJOR-1 = ruling (c) CROSS-EPOCH HOLD (PR3): the count is
+            # ANCHOR-scoped — a commission orphaned on a SUPERSEDED
+            # epoch (the job_continue continuation superseded the epoch
+            # that minted it) STILL holds the publish. No re-pointing,
+            # no auto-supersede of the orphaned rows (attribution stays
+            # with the owning epoch); the hold releases only when a
+            # terminator retires the row (the PR3 delivery terminator
+            # on ``satisfied``; the reconciliation sweep's
+            # ``abandoned`` + TTL is the escape valve — RDRS lane 7).
+            # The attestation CENSUS stays open-epoch-scoped (the
+            # scope ruling — this leg is NOT the census).
             #
             # FAIL-OPEN (the gate's posture — a missing terminal is
             # worse than an extra premature one): the read returns the
-            # ``-1`` "unknown" sentinel on failure and ``0`` when the
-            # mission is quiet (or the mission ladder is not in
-            # ``enforce`` mode — the input is INACTIVE, the legacy
-            # publish path is preserved exactly). Only a POSITIVE count
-            # holds the publish.
+            # ``MISSION_READ_UNKNOWN`` ("unknown") sentinel on failure
+            # and ``0`` when the mission is quiet (or the mission ladder
+            # is not in ``enforce`` mode — the input is INACTIVE, the
+            # legacy publish path is preserved exactly). Only a POSITIVE
+            # count holds the publish.
             #
             # WATCHERS STAY AS THEY ARE: this leg is ADDITIVE — the
             # bus-pending leg, the tree-liveness leg and the freshness
             # leg are untouched.
             #
-            # TERMINATOR (PR3): PR2 ships NO writer that retires a
-            # commission row — ``satisfy_commission`` /
-            # ``abandon_commission`` have no production caller (the
-            # reconciliation sweep is the PR3 deliverable). So in
-            # enforce mode this hold has no escape valve until PR3: a
-            # mission with an outstanding commission holds until its
-            # epoch closes. That is why the enforce promotion is GATED
-            # on PR3 (the PR2 adoption notes §(f)).
+            # TERMINATOR (PR3): the natural completion write path now
+            # SATISFIES the routing commission when the report is
+            # actually delivered to its commissioner (child_reports
+            # ``_process_child_completion_db_sync``, the ReportInjection
+            # writer region — guarded ``UPDATE ... WHERE
+            # state='outstanding'``, in-transaction, fail-open). The
+            # ``abandoned`` write + the TTL backstop are the
+            # reconciliation sweep's (RDRS lane 7): a commission whose
+            # report is NEVER delivered still holds until the sweep
+            # retires it (the sweep resolves it through the
+            # mission-record service).
             mission_commissions = self._count_outstanding_mission_commissions(
                 instance_id
             )
@@ -3093,29 +3113,47 @@ Provide a concise summary:"""
             # recipient ONCE, right here — right after the instance
             # fetch, before ANY write-path site runs.
             #
-            # The resolver reads the ``instance_ops_audit`` ledger for a
-            # fresh COMMITTED ``instance_nudge`` against this child and
-            # returns the COMMISSIONER (the nudger) instead of the
-            # structural parent — the byte-level no-op for every child
-            # that was never nudged.
+            # PR3 (Proposal B §3 D1) — THE ROUTING FLIP: the resolution
+            # is now THREE-LEGGED (see report_recipient.py). LEG 1
+            # (armed ONLY in ``enforce``): the child's OLDEST
+            # outstanding commission row (``mission_commissions.
+            # worker_instance_id == child``, ``advisory_backfill=False``
+            # — excluded from routing authority FOREVER) routes the
+            # report to its ``commissioner_instance_id`` (ruling ④:
+            # oldest-outstanding tie-break). LEG 2: the audit-recency
+            # heuristic — the DECLARED LEGACY FALLBACK, byte-identical.
+            # LEG 3: the structural parent. In ``dry``/``off`` the
+            # resolution is byte-for-byte the Phase-1 behavior.
             #
-            # POSTURE: fail-back to the structural parent on ANY read /
-            # parse / DB error — a delivery-path routing decision, not a
-            # heal-probe; the documented posture is at-least-once.
+            # The resolver reads the ``instance_ops_audit`` ledger for a
+            # fresh COMMITTED ``instance_nudge`` against this child (leg
+            # 2) and returns the COMMISSIONER (the nudger) instead of
+            # the structural parent — the byte-level no-op for every
+            # child that was never nudged nor commissioned.
+            #
+            # POSTURE: fail-open at every leg (leg 1 → leg 2 → leg 3) —
+            # a delivery-path routing decision, not a heal-probe; the
+            # documented posture is at-least-once.
             #
             # The resolved value is CARRIED on the result
             # (``report_recipient_id``) and threaded to every write-path
-            # site below. The STRUCTURAL parent (``instance.parent_id``)
-            # is NEVER overloaded — the bus corrective emit and the
+            # site below. The deciding commission row (leg 1 only) rides
+            # the local for the ``report_injections`` mission-provenance
+            # writers + the PR3 delivery terminator further below. The
+            # STRUCTURAL parent (``instance.parent_id``) is NEVER
+            # overloaded — the bus corrective emit and the
             # ``child_completed`` SSE stay structural.
-            report_recipient_id = resolve_report_recipient(
+            _resolved_destination = resolve_report_recipient_with_commission(
                 engine=self._manager.engine,
                 # NO ``session=`` — the resolver opens its OWN session
                 # (F1: a failed audit read must not poison this write
-                # transaction on PG — see report_recipient.py).
+                # transaction on PG — see report_recipient.py). The
+                # commission leg ALWAYS opens its own session.
                 child_instance_id=instance_id,
                 structural_parent_id=instance.parent_id,
             )
+            report_recipient_id = _resolved_destination.recipient_id
+            _routing_commission = _resolved_destination.commission
 
             # ─── Fix 2 idempotency short-circuit ─────────────────────────
             # If the instance is already in a terminal state (COMPLETED
@@ -4510,6 +4548,36 @@ Provide a concise summary:"""
                         child_message_id=completed_message_id,
                         report_message_id=report_message_id,
                         content=last_content,
+                        # ── PR3 D1 — the mission-provenance WRITERS ──
+                        # (the PR1 columns finally gain them). The
+                        # semantics, each with ONE meaning:
+                        # * ``commissioner_instance_id`` = the
+                        #   COMMISSION-SCOPED attribution: the
+                        #   deciding LEG-1 commission row's
+                        #   commissioner id, written ONLY when the
+                        #   commission leg decided the routing. A
+                        #   legacy-leg delivery (the audit-recency
+                        #   heuristic / the structural parent) is an
+                        #   honest NULL — the report's actual
+                        #   destination is ``parent_instance_id``, and
+                        #   this column never carries a
+                        #   non-commissioner id (the dead-recipient
+                        #   fallback is exactly that case).
+                        # * ``mission_id`` = the deciding LEG-1
+                        #   commission row's mission — set ONLY when the
+                        #   mission-record leg decided the routing
+                        #   (enforce mode); a legacy-leg delivery is an
+                        #   honest NULL (no record-based attribution).
+                        mission_id=(
+                            _routing_commission.mission_id
+                            if _routing_commission is not None
+                            else None
+                        ),
+                        commissioner_instance_id=(
+                            _routing_commission.commissioner_instance_id
+                            if _routing_commission is not None
+                            else None
+                        ),
                     )
                     session.add(report_injection_row)
                     # Flush to surface the IntegrityError early. Only
@@ -4647,6 +4715,56 @@ Provide a concise summary:"""
                     agent_id=instance.agent_id,
                     parent_id=instance.parent_id,
                 )
+
+            # ── PR3 — THE COMMISSION TERMINATOR (delivery-side) ──────
+            # When the LEG-1 mission-commission leg decided the routing
+            # AND the report is actually addressed to its commissioner
+            # (the dead-recipient guard did NOT fall back), the routing
+            # commission is SATISFIED: ``outstanding → satisfied``, the
+            # guarded ``UPDATE ... WHERE state='outstanding'`` shape —
+            # a rowcount 0 (another actor won) is counted, never
+            # retried in place.
+            #
+            # ATOMIC with the delivery write: the satisfy rides THIS
+            # WriteGuardSession via a SAVEPOINT
+            # (``satisfy_commission_fail_open(session=…)``), so a
+            # rolled-back delivery can never leave a satisfied
+            # commission behind — and a satisfy failure rolls back ONLY
+            # the savepoint (fail-OPEN: delivery proceeds with the
+            # commission outstanding; the reconciliation sweep's probes
+            # — RDRS lane 7 — are the net).
+            #
+            # Deliberately NOT satisfied here (each stays the sweep's /
+            # another path's):
+            # * a dead/TERMINATED commissioner (the guard fell back to
+            #   the structural parent — the report never reached the
+            #   commissioner; the row stays outstanding, honestly);
+            # * deferred-pause / pending-messages markers (no delivery
+            #   happened);
+            # * idempotency / recovered-marker race skips (a prior or
+            #   concurrent path owns the delivery).
+            if (
+                _routing_commission is not None
+                and recipient_for_report
+                == _routing_commission.commissioner_instance_id
+                and report_injection_row is not None
+            ):
+                _mission_service = MissionRecordService(self._manager.engine)
+                _satisfied = satisfy_commission_fail_open(
+                    _mission_service,
+                    _routing_commission.commission_id,
+                    session=session,
+                )
+                if _satisfied:
+                    logger.info(
+                        "child_reports: routing commission %s… SATISFIED "
+                        "on delivery (child=%s… commissioner=%s… "
+                        "mission=%s…) — staged with this transaction",
+                        _routing_commission.commission_id[:8],
+                        instance_id[:8],
+                        recipient_for_report[:8],
+                        str(_routing_commission.mission_id)[:8],
+                    )
 
             # --- Inline: _update_parent_on_child_complete (no await needed) ---
             # The bus is the SOLE completion authority.

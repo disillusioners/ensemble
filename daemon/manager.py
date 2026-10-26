@@ -1032,21 +1032,59 @@ class InstanceManager:
         # are equivalent; binding keeps the boot read explicit).
         _mission_records_mode = resolve_mission_records_mode()
 
+        # F5 (the operator's boot observable): ONE INFO line naming the
+        # RESOLVED mode, so an operator can tell ``dry`` from ``enforce``
+        # from the boot log ALONE (the enforce-promotion runbook §1.1
+        # reads this line).
+        #
+        # EMITTED ONLY WHEN THE MODE IS NOT ``off``: under ``off`` the
+        # lane is inert, so there is NO mission-records boot line at all
+        # — and that ABSENCE is the signal (the other two observables —
+        # the enforce boot backfill line and the sweep's ``(mode=…)``
+        # field — are silent under ``off`` too).
+        #
+        # SIDE-EFFECT-FREE: a logger call only — no read, no write, no
+        # probe. It sits OUTSIDE every swallow envelope (the backfill
+        # block's ``try`` starts below), so it is emitted even if the
+        # backfill itself fails. An UNRECOGNIZED
+        # ``ENSEMBLE_MISSION_RECORDS`` token raises the loud ValueError
+        # at the resolver line ABOVE, OUTSIDE any envelope — the daemon
+        # does not start, so "daemon up + no line" means ``off``, and
+        # "daemon not up" means a bad token (or another boot failure).
+        if _mission_records_mode != MissionRecordMode.OFF:
+            logger.info(
+                "mission_records: mode resolved (mode=%s)",
+                _mission_records_mode,
+            )
+
         # ── Proposal B PR1 — adoption-delta (b): advisory nudge-commission
-        # backfill (dry-run-loggable) ──────────────────────────────────
+        # backfill (mode-gated: PR3 makes it COMMITTING in enforce) ────
         # Best-effort historical coverage of the existing
         # ``instance_ops_audit`` nudge rows (the tiny surface: 6 rows / 1
         # committed nudge all-time): committed non-dry nudges whose
         # target is STILL NON-TERMINAL mint ADVISORY commission rows
         # (``provenance='backfill'``, deterministic ids, EXCLUDED from
         # routing authority forever). IDEMPOTENT (deterministic UUID5
-        # commission ids + epoch-0 resolve-if-none). Runs DRY-RUN ONLY at
-        # boot in PR1 (the loggable plan; the committing run is an
-        # operator action — ``backfill_advisory_nudge_commissions(
-        # dry_run=False)`` — matching proposal-b §5.2's "runs
-        # dry-run-loggable before commit"). NEVER breaks boot: the
-        # envelope swallows everything but logs loudly. Skipped entirely
-        # when the mode ladder is ``off``.
+        # commission ids + epoch-0 resolve-if-none). NEVER breaks boot:
+        # the envelope swallows everything but logs loudly.
+        #
+        # MODE LADDER (PR3 — proposal-b §5.2 + the PR1 notes §(b)):
+        # * ``off``     — skipped entirely (no mints, no reads, no
+        #                 backfill).
+        # * ``dry``     — the ship default: DRY-RUN ONLY (the loggable
+        #                 plan; zero writes).
+        # * ``enforce`` — the COMMITTING run (``dry_run=False``): the
+        #                 advisory rows are minted at boot. IDEMPOTENT:
+        #                 a re-boot re-derives the SAME UUID5 ids and
+        #                 pre-checks them (conflict = no-op), so every
+        #                 subsequent boot is a no-op scan.
+        # RETENTION STORY: advisory rows are DURABLE by design — they
+        # are the historical ledger ("if dropped, the ledger is worse
+        # than no ledger"); there is NO pruning/TTL. They are excluded
+        # from EVERY read that consults commissions (routing, census
+        # record-leg, quiet, L3 hold — and the to-come sweep) by the ONE
+        # consistent ``advisory_backfill = False`` predicate, so their
+        # persistence is audit-only and can never arm a gate.
         #
         # ORDERING (independent-review F1): this block runs AFTER the
         # ``self._mission_record_service`` assignment above. It used to
@@ -1056,9 +1094,25 @@ class InstanceManager:
         # below, so the documented dry-run plan NEVER ran and never
         # logged on the default ``dry`` path.
         try:
-            if _mission_records_mode != MissionRecordMode.OFF:
+            if _mission_records_mode == MissionRecordMode.ENFORCE:
                 # SYNC context (manager __init__ — the migration block
-                # above is sync too): call the backfill directly.
+                # above is sync too): call the backfill directly. The
+                # COMMITTING run (writes; idempotent on re-boot).
+                _backfill = (
+                    self._mission_record_service.backfill_advisory_nudge_commissions(
+                        dry_run=False,
+                    )
+                )
+                if _backfill.get("scanned"):
+                    logger.info(
+                        "mission_records: advisory nudge-commission "
+                        "backfill COMMITTED run (enforce boot): %s",
+                        _backfill,
+                    )
+            elif _mission_records_mode == MissionRecordMode.DRY:
+                # SYNC context (manager __init__ — the migration block
+                # above is sync too): call the backfill directly. The
+                # DRY-RUN preview (the PR1/PR2 boot posture).
                 _backfill = (
                     self._mission_record_service.backfill_advisory_nudge_commissions(
                         dry_run=True,
@@ -1070,9 +1124,10 @@ class InstanceManager:
                         "dry-run plan: %s",
                         _backfill,
                     )
+            # ``off`` — skipped entirely.
         except Exception as _backfill_exc:  # noqa: BLE001 — never break boot
             logger.warning(
-                "mission_records: backfill dry-run failed at boot (ignored): "
+                "mission_records: backfill failed at boot (ignored): "
                 "%s: %s",
                 type(_backfill_exc).__name__,
                 _backfill_exc,
@@ -6908,6 +6963,23 @@ class InstanceManager:
             except Exception as e:
                 logger.warning(f"Cached instance cleanup failed: {e}")
 
+    @property
+    def job_queue_service(self) -> Any:
+        """Public read access to the late-bound JobQueueService.
+
+        Proposal B PR3 — the reconciliation sweep's JOBITEM-LIVE probe
+        (RDRS lane 7) resolves the job repository through the PUBLIC
+        accessors: this property, then ``JobQueueService.repository``.
+        The private ``_job_queue_service`` attribute is an
+        implementation detail, not a contract — the sweep reads the
+        public hop instead of reaching through it (the same
+        discipline that retired the ``_instance_repository`` family).
+
+        ``None`` before ``set_job_queue_service`` runs (the boot
+        order) — callers degrade, never assume presence.
+        """
+        return self._job_queue_service
+
     def set_job_queue_service(self, service: Any) -> None:
         """Set the JobQueueService reference.
 
@@ -8365,6 +8437,19 @@ class InstanceManager:
             "ALTER TABLE report_injections ADD COLUMN IF NOT EXISTS mission_id TEXT",
             "ALTER TABLE report_injections ADD COLUMN IF NOT EXISTS commissioner_instance_id TEXT",
             "ALTER TABLE message_metadata ADD COLUMN IF NOT EXISTS mission_id TEXT",
+            # ── Proposal B PR3 (OQ-3(b)) — the commission RESOLUTION stamp.
+            # Written by the guarded transition that leaves
+            # ``outstanding`` (``MissionRecordRepository
+            # .transition_commission_state`` — the ONE guarded UPDATE
+            # the service's satisfy / abandon / supersede writes all
+            # land on) for EVERY resolution (abandoned OR satisfied).
+            # Nullable, default NULL
+            # — "unresolved" is the honest default for an outstanding row.
+            # The SQLite counterpart is
+            # ``daemon/migrations/versions/20261026_060000_add_mission_commission_resolved_at.sql``;
+            # the model field is ``MissionCommission.resolved_at`` in
+            # ``daemon/repositories/mission_record/models.py`` (3-site pin).
+            "ALTER TABLE mission_commissions ADD COLUMN IF NOT EXISTS resolved_at TEXT",
             # ── Proposal B PR2 — F1 carry: the OPEN-EPOCH partial unique
             # index (2026-10-25). At most ONE ``open`` mission_records row
             # may exist per anchor — the resolution ladder's rung-1
@@ -11873,28 +11958,38 @@ class InstanceManager:
     # ------------------------------------------------------------------
 
     def count_outstanding_commissions(self, instance_id: str) -> int:
-        """The FIFTH R2 input — the mission-scoped outstanding count.
+        """The FIFTH R2 input — the anchor-scoped outstanding count.
 
         The four tree counters above are TREE-scoped: they cannot see an
         OUT-OF-TREE commissioned worker (the nudge lane's blind spot —
-        the D2 premature-settle class). This input is MISSION-scoped:
-        it counts the open mission's outstanding commission rows, so a
-        running out-of-tree worker holds the mission instead of letting
-        it settle.
+        the D2 premature-settle class). This input is MISSION-record
+        scoped — and since PR3 (MAJOR-1 ruling (c)) ANCHOR-scoped
+        ACROSS ALL EPOCHS: the open epoch's rows AND the superseded
+        epochs' orphaned rows both count. A ``job_continue``
+        continuation that supersedes the epoch holding an outstanding
+        commission does NOT release the hold — the mission stays held
+        until a terminator retires the row (the reconciliation sweep's
+        escape valve, RDRS lane 7). There is NO re-pointing and NO
+        auto-supersede of orphaned rows (ruling (c)).
 
         Returns:
-            ``0``  — inactive (mode ``dry``/``off``) OR the mission is
-                      quiet (no open epoch, or no outstanding rows).
-            ``N>0``— the open mission has N outstanding commissions.
+            ``0``  — inactive (mode ``dry``/``off``) OR every recorded
+                      epoch of the anchor is commission-quiet.
+            ``N>0``— some epoch of the anchor (open OR superseded) has
+                      N outstanding commissions.
             ``-1`` — UNKNOWN (the read failed). The fail-open sentinel:
                       the caller treats it as "behave as before the
                       records existed", NEVER as "0 outstanding".
 
-        TERMINATOR (PR3): PR2 ships no writer that retires a
-        commission row, so an outstanding commission holds the L3
-        publish until the epoch closes — the enforce promotion is
-        GATED on PR3's reconciliation sweep (the PR2 adoption notes
-        §(f)).
+        TERMINATOR: PR3 wires ``satisfy_commission`` into the natural
+        completion write path (the report-delivery terminator); the
+        ``abandoned`` write + the TTL backstop are the
+        reconciliation sweep's (RDRS lane 7).
+        The abandonment IS live in production — the sweep abandons
+        through the mission-record SERVICE
+        (``MissionRecordService.abandon_commission`` → the repository's
+        ONE guarded transition,
+        ``MissionRecordRepository.transition_commission_state``).
         """
         if not mission_records_enforce_enabled():
             # Inactive input — the legacy quiet predicate is preserved

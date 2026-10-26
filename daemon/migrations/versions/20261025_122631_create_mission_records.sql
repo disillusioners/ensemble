@@ -45,6 +45,15 @@
 
 -- UP
 
+--   DDL ALIGNMENT (PR3 carry-over, 2026-10-26): the boolean column
+--   ``attestation_bypassed`` was declared ``INTEGER`` here while the
+--   MODEL (``daemon/repositories/mission_record/models.py``) declares
+--   ``bool`` (SQLModel ``Boolean``). The MODELS ARE TRUTH — this file
+--   now spells it ``BOOLEAN`` (the same rationale as the sibling
+--   ``advisory_backfill`` alignment: identical 0/1 values, a
+--   declaration fix, no data migration). On PostgreSQL the column was
+--   ALWAYS ``BOOLEAN`` (``create_all`` owns a brand-new table's DDL).
+--
 CREATE TABLE IF NOT EXISTS mission_records (
     mission_id TEXT PRIMARY KEY,
     anchor_instance_id TEXT NOT NULL,
@@ -57,7 +66,7 @@ CREATE TABLE IF NOT EXISTS mission_records (
     status TEXT NOT NULL DEFAULT 'open',
     attested_at TEXT,
     attest_method TEXT,
-    attestation_bypassed INTEGER NOT NULL DEFAULT 0,
+    attestation_bypassed BOOLEAN NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     settled_at TEXT,
     provenance TEXT NOT NULL DEFAULT 'live'

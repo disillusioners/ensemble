@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import update
 from sqlmodel import Session, select
@@ -122,6 +122,13 @@ class MissionRecordRepository:
         Oldest-first (deterministic under adoption-delta (a)'s
         multiple-outstanding-rows rule): the commission that has been
         waiting longest is the one the work most plausibly belongs to.
+
+        NOTE: this is the MINT-LADDER lookup (resolve_or_mint rung 2).
+        It does NOT filter advisory backfill rows — rung 2 resolves a
+        commissioning act's mission, and an advisory backfill row IS a
+        recorded commission. ROUTING must NOT use this method: use
+        :meth:`find_routing_commission_for_worker` (advisory rows are
+        excluded from routing authority FOREVER).
         """
         stmt = (
             select(MissionCommission)
@@ -134,6 +141,93 @@ class MissionRecordRepository:
             return session.exec(stmt).first()
         with Session(self._engine) as own:
             return own.exec(stmt).first()
+
+    def find_routing_commission_for_worker(
+        self,
+        worker_instance_id: str,
+        *,
+        session: Session | None = None,
+    ) -> MissionCommission | None:
+        """The D1 ROUTING key (PR3): the worker's OLDEST outstanding
+        commission row, advisory backfill rows EXCLUDED FOREVER.
+
+        The routing-authority rule (adoption-delta (a) + (b)): the
+        advisory backfill rows are historical noise — "if dropped, the
+        ledger is worse than no ledger" — so a report must never route
+        to a backfilled nudge's actor. Multi-commissioner tie-break =
+        ruling ④, the OLDEST-outstanding discriminator (created_at
+        ASC; identical to the rung-2 resolution order, now carrying
+        ROUTING authority).
+
+        Consumers: the three-leg report-recipient resolution
+        (``report_recipient.resolve_report_recipient``) in every mode
+        where the mission-record ladder is ``enforce``.
+        """
+        stmt = (
+            select(MissionCommission)
+            .where(MissionCommission.worker_instance_id == worker_instance_id)
+            .where(MissionCommission.state == CommissionState.OUTSTANDING.value)
+            .where(
+                MissionCommission.advisory_backfill.is_(False)  # type: ignore[union-attr]
+            )
+            .order_by(MissionCommission.created_at.asc())  # type: ignore[attr-defined]
+            .limit(1)
+        )
+        if session is not None:
+            return session.exec(stmt).first()
+        with Session(self._engine) as own:
+            return own.exec(stmt).first()
+
+    def find_outstanding_commissions(
+        self,
+        *,
+        limit: int = 100,
+        include_advisory: bool = False,
+        session: Session | None = None,
+    ) -> list[MissionCommission]:
+        """R0 — the GLOBAL admission query for the RECONCILIATION SWEEP.
+
+        Proposal B PR3 (the sweep design R0): ``SELECT ... FROM
+        mission_commissions WHERE state='outstanding' ORDER BY
+        created_at LIMIT :batch_cap``. The sweep's admission set is
+        COMMISSION-centric (not report-injection-centric) — it is the
+        only admission shape that can see the T2 (worker row gone) /
+        T3 (worker stalled) / T4 (masked enqueue) commission shapes that
+        the delivery lanes never see.
+
+        OLDEST FIRST (``created_at`` ASC): the oldest outstanding
+        commission is the one most likely to be the strand, so the
+        batch cap spends its budget on the rows that have waited
+        longest.
+
+        ADVISORY ROWS EXCLUDED BY DEFAULT (adoption-delta (b)): the
+        backfill rows are historical noise — admitting them would make
+        the sweep resolve rows that nothing will ever satisfy (and
+        that the routing/census/quiet reads already ignore). The
+        exclusion predicate is ONE consistent shape across every
+        commission read (routing, census, quiet, hold, sweep).
+
+        TIMESTAMPS: ``created_at`` is TEXT ISO — the TTL age math is
+        done in PYTHON by the caller (``parse_iso_utc``), never by
+        string-comparing in SQL.
+        """
+        stmt = (
+            select(MissionCommission)
+            .where(
+                MissionCommission.state == CommissionState.OUTSTANDING.value
+            )
+        )
+        if not include_advisory:
+            stmt = stmt.where(
+                MissionCommission.advisory_backfill.is_(False)  # type: ignore[union-attr]
+            )
+        stmt = stmt.order_by(
+            MissionCommission.created_at.asc()  # type: ignore[attr-defined]
+        ).limit(max(1, int(limit)))
+        if session is not None:
+            return list(session.exec(stmt))
+        with Session(self._engine) as own:
+            return list(own.exec(stmt))
 
     def find_epoch_by_anchor_and_founding_message(
         self,
@@ -281,6 +375,59 @@ class MissionRecordRepository:
             session=session,
         )
 
+    def count_outstanding_commissions_for_anchor(
+        self,
+        anchor_instance_id: str,
+        *,
+        include_advisory: bool = False,
+        session: Session | None = None,
+    ) -> int:
+        """Count OUTSTANDING commissions across ALL epochs of the anchor.
+
+        MAJOR-1 = ruling (c) CROSS-EPOCH HOLD (Proposal B PR3): the
+        count spans the anchor's OPEN **and** SUPERSEDED epochs — a
+        commission orphaned on a superseded epoch (the ``job_continue``
+        continuation superseded the epoch that minted it) STILL counts.
+        NO re-pointing, NO auto-supersede of the orphaned rows: they
+        keep pointing at their owning epoch and they keep holding the
+        mission until a terminator (``satisfied`` / ``abandoned``)
+        retires them. The reads (the L3 publish hold + the R2 quiet
+        predicate) are quiet only when EVERY epoch of the anchor is
+        commission-quiet.
+
+        The deliberate cost is the eternal-mission class (proposal-b
+        §8): an orphan that nothing will ever satisfy holds forever —
+        the reconciliation sweep (RDRS lane 7) plus its TTL backstop is
+        the escape valve (the sweep is LIVE: it resolves the rows
+        through the mission-record service).
+
+        ADVISORY ROWS EXCLUDED by default (adoption-delta (b) — the
+        exclusion predicate is ONE consistent shape across every read
+        that consults commissions: routing, census, quiet, L3 hold).
+
+        Returns:
+            ``0`` when the anchor has NO epochs at all (nothing was
+            ever recorded — a REAL zero); ``N>0`` while any epoch of
+            the anchor has an outstanding (non-advisory) commission.
+        """
+        stmt = (
+            select(MissionCommission)
+            .join(
+                MissionRecord,
+                MissionRecord.mission_id == MissionCommission.mission_id,
+            )
+            .where(MissionRecord.anchor_instance_id == anchor_instance_id)
+            .where(MissionCommission.state == CommissionState.OUTSTANDING.value)
+        )
+        if not include_advisory:
+            stmt = stmt.where(
+                MissionCommission.advisory_backfill.is_(False)  # type: ignore[union-attr]
+            )
+        if session is not None:
+            return len(list(session.exec(stmt)))
+        with Session(self._engine) as own:
+            return len(list(own.exec(stmt)))
+
     def list_commissions_for_mission(
         self,
         mission_id: str,
@@ -381,6 +528,50 @@ class MissionRecordRepository:
             own.refresh(commission)
             return commission
 
+    def _guarded_epoch_update(
+        self,
+        *,
+        mission_id: str,
+        values: dict[str, object],
+        from_statuses: tuple[str, ...] = (MissionStatus.OPEN.value,),
+        extra_conditions: tuple[Any, ...] = (),
+        session: Session | None = None,
+    ) -> bool:
+        """THE ONE guarded epoch UPDATE (the F2 single-statement shape).
+
+        F2 (Proposal B PR2 carry — PR3 hardening): every guarded write
+        on an epoch goes through THIS helper, so the guard shape is
+        uniform and CANNOT DRIFT between the call sites:
+
+        * the status predicate lives IN the UPDATE's WHERE clause — the
+          DATABASE evaluates it against the row's CURRENT version, so
+          a closed epoch's anchor is immutable without any prior read;
+        * the callers NEVER read the status first — the read-then-write
+          window is what let an amendment land on an epoch a
+          concurrent close had already moved (the PR2 F2 flake, ~1/8
+          under the pack runs; the LESSONS' recipe);
+        * the outcome is decided by the ROWCOUNT (exactly-once: a
+          second concurrent transition of the same kind is a no-op).
+
+        Returns:
+            ``True`` iff exactly one row moved.
+        """
+        stmt = (
+            update(MissionRecord)
+            .where(MissionRecord.mission_id == mission_id)
+            .where(MissionRecord.status.in_(from_statuses))
+        )
+        for condition in extra_conditions:
+            stmt = stmt.where(condition)
+        stmt = stmt.values(**values)
+        if session is not None:
+            result = session.exec(stmt)
+            return (result.rowcount or 0) == 1
+        with Session(self._engine) as own:
+            result = own.exec(stmt)
+            own.commit()
+            return (result.rowcount or 0) == 1
+
     def transition_epoch_status(
         self,
         mission_id: str,
@@ -400,19 +591,12 @@ class MissionRecordRepository:
         values: dict[str, object] = {"status": to_status}
         if settled_at is not None:
             values["settled_at"] = settled_at
-        stmt = (
-            update(MissionRecord)
-            .where(MissionRecord.mission_id == mission_id)
-            .where(MissionRecord.status.in_(from_statuses))
-            .values(**values)
+        return self._guarded_epoch_update(
+            mission_id=mission_id,
+            values=values,
+            from_statuses=from_statuses,
+            session=session,
         )
-        if session is not None:
-            result = session.exec(stmt)
-            return (result.rowcount or 0) == 1
-        with Session(self._engine) as own:
-            result = own.exec(stmt)
-            own.commit()
-            return (result.rowcount or 0) == 1
 
     def transition_commission_state(
         self,
@@ -428,10 +612,25 @@ class MissionRecordRepository:
         commission_id=:id AND state='outstanding'`` — the
         ``dependency_watchers`` PENDING→FIRED exactly-once contract: a
         satisfied commission can never be abandoned (and vice versa).
+
+        OQ-3(b): the ``resolved_at`` resolution stamp rides EVERY
+        guarded transition that leaves ``outstanding`` — the satisfied
+        write (the delivery terminator), the abandoned write and the
+        superseded write alike. It is the ONE guarded UPDATE the
+        commission resolution goes through: the sweep (RDRS lane 7)
+        resolves through the SERVICE
+        (:meth:`daemon.services.mission_record_service.MissionRecordService.abandon_commission`
+        / ``.satisfy_commission``), which lands here — so there is one
+        implementation that owns the stamps and the column never
+        promises a stamp it did not write. ``resolved_at`` is DISTINCT
+        from ``satisfied_at`` on purpose: dual-purposing
+        ``satisfied_at`` for abandoned rows would make the column name
+        lie.
         """
-        values: dict[str, object] = {"state": to_state}
+        stamp = _utc_now_iso()
+        values: dict[str, object] = {"state": to_state, "resolved_at": stamp}
         if to_state == CommissionState.SATISFIED.value:
-            values["satisfied_at"] = _utc_now_iso()
+            values["satisfied_at"] = stamp
         if abandon_reason is not None:
             values["abandon_reason"] = abandon_reason
         stmt = (
@@ -470,20 +669,15 @@ class MissionRecordRepository:
         on a row the settle machinery already closed. Mirrors the
         ``dependency_watchers`` PENDING→FIRED guarded-transition shape.
         """
-        stmt = (
-            update(MissionRecord)
-            .where(MissionRecord.mission_id == mission_id)
-            .where(MissionRecord.founding_message_id.is_(None))  # type: ignore[union-attr]
-            .where(MissionRecord.status == MissionStatus.OPEN.value)
-            .values(founding_message_id=founding_message_id)
+        return self._guarded_epoch_update(
+            mission_id=mission_id,
+            values={"founding_message_id": founding_message_id},
+            from_statuses=(MissionStatus.OPEN.value,),
+            extra_conditions=(
+                MissionRecord.founding_message_id.is_(None),  # type: ignore[union-attr]
+            ),
+            session=session,
         )
-        if session is not None:
-            result = session.exec(stmt)
-            return (result.rowcount or 0) == 1
-        with Session(self._engine) as own:
-            result = own.exec(stmt)
-            own.commit()
-            return (result.rowcount or 0) == 1
 
     def amend_founding_message(
         self,
@@ -505,19 +699,12 @@ class MissionRecordRepository:
         immutable (the settle machinery closed it). Same guarded-UPDATE
         shape as the ``dependency_watchers`` PENDING→FIRED transition.
         """
-        stmt = (
-            update(MissionRecord)
-            .where(MissionRecord.mission_id == mission_id)
-            .where(MissionRecord.status == MissionStatus.OPEN.value)
-            .values(founding_message_id=founding_message_id)
+        return self._guarded_epoch_update(
+            mission_id=mission_id,
+            values={"founding_message_id": founding_message_id},
+            from_statuses=(MissionStatus.OPEN.value,),
+            session=session,
         )
-        if session is not None:
-            result = session.exec(stmt)
-            return (result.rowcount or 0) == 1
-        with Session(self._engine) as own:
-            result = own.exec(stmt)
-            own.commit()
-            return (result.rowcount or 0) == 1
 
     def attach_work_id(
         self,

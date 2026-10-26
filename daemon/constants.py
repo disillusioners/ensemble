@@ -419,6 +419,37 @@ SNAPSHOT_CREATE_ENABLED_VALUES = frozenset({"on", "true", "1", "yes"})
 DEFAULT_AGENT_VERSIONS_METADATA_KEY = "default_agent_versions"  # metadata key in project_metadata_records
 
 # ---------------------------------------------------------------------------
+# Mission-commission reconciliation sweep (Proposal B PR3)
+# ---------------------------------------------------------------------------
+# The TTL horizon for an UNPROVABLE outstanding commission (the sweep's
+# time-bounded fail-MISS backstop — the design's R2 / P3). Past this
+# horizon AND with no positive liveness evidence the commission resolves
+# to ``abandoned`` LOUDLY; a liveness-probe ERROR still HOLDS at any age
+# (P1 — a probe that cannot prove its predicate must never authorize the
+# destructive transition).
+#
+# DEFAULT 21600s (6h) — the SAME horizon family as
+# ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` (6h,
+# ``daemon/services/mission_live_guard.py``) BY DEFAULT (both default
+# to 6 h): a hold can never last forever, and the two hold-hosts START
+# on the same clock. The horizon family is a DEFAULT, NOT an invariant
+# — this TTL is INDEPENDENTLY env-tunable and MAY DIVERGE from the
+# guard's fixed constant as soon as an operator sets a TTL != 21600. It
+# is an ENV KNOB (restart-read), never a hard-coded decision.
+MISSION_COMMISSION_TTL_ENV: str = "ENSEMBLE_MISSION_COMMISSION_TTL_SECONDS"
+DEFAULT_MISSION_COMMISSION_TTL_SECONDS: int = 6 * 60 * 60  # 21600s = 6h
+
+# The FROZEN abandon-reason vocabulary (the design's R9 / OQ-4). The
+# log lines and the endpoint payloads depend on these stable tokens.
+# ``superseded`` is RESERVED to the mint lanes (job_continue
+# parent-supersede) and is NEVER written by the sweep.
+MISSION_COMMISSION_ABANDON_REASONS: tuple[str, ...] = (
+    "worker_terminal_no_report",
+    "ttl_expired_not_live",
+    "worker_row_missing",
+)
+
+# ---------------------------------------------------------------------------
 # Plane Project Sync
 # ---------------------------------------------------------------------------
 # Metadata keys for the Plane project sync subsystem. Each Ensemble project

@@ -213,6 +213,11 @@ logger = logging.getLogger(__name__)
 #   every message enqueue, so it can never prove a tree is quiet).
 #   A childless root falls back to its OWN stamp — the root IS the
 #   whole tree there, so its activity is the tree activity.
+# * The horizon family is a DEFAULT, NOT an invariant: this constant is
+#   FIXED (6 h), while the reconciliation sweep's commission TTL
+#   (``ENSEMBLE_MISSION_COMMISSION_TTL_SECONDS``) is INDEPENDENTLY
+#   env-tunable and starts on the same 6 h default — it MAY DIVERGE from
+#   this constant the moment an operator sets a TTL != 21600.
 MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS: int = 6 * 60 * 60  # 6 hours
 
 
@@ -419,6 +424,38 @@ async def evaluate_mission_live(
             ),
             error=True,
         )
+
+
+def member_live_task_attempt_at(
+    instance_repository: "SQLModelInstanceRepository",
+    instance_id: str,
+) -> datetime | None:
+    """PUBLIC cross-module accessor for the member's task-stamp probe.
+
+    Proposal B PR3 (MAJ-4) — the RECONCILIATION SWEEP (RDRS lane 7)
+    reuses the guard's task-stamp-age predicate instead of
+    re-deriving a second spelling of the same rule (two spellings of
+    one rule are how the two legs drift apart). The sweep's liveness
+    leg answers the same question the guard's member-alive leg asks:
+    "does this member own a NON-TERMINAL task row, and how old is the
+    newest one?"
+
+    The contract is :func:`_member_live_task_attempt_at`'s, verbatim —
+    this is a VISIBILITY wrapper, not a second implementation (the
+    probe itself, its fail-MISS floor and its undateable-row handling
+    live in one place).
+
+    Args:
+        instance_repository: The instance repository (its ``engine``
+            carries the task read).
+        instance_id: The member whose stamp is probed.
+
+    Returns:
+        The newest ATTEMPT stamp among the member's non-terminal task
+        rows (naive UTC), or ``None`` when the member owns no
+        non-terminal task row at all.
+    """
+    return _member_live_task_attempt_at(instance_repository, instance_id)
 
 
 def _member_live_task_attempt_at(

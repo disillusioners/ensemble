@@ -77,10 +77,14 @@ commissioned twice, the second commission MINTS A SECOND OUTSTANDING
 ROW — the guarded-state lifecycle (``outstanding`` →
 ``satisfied``/``abandoned``/``superseded``) is the discriminator, and
 the rung-2 lookup takes the OLDEST outstanding row (deterministic).
-ROUTING AUTHORITY STAYS WITH THE A-RESOLVER until the PR2/PR3 flip:
-nothing in PR1 routes reports by commission rows. A-resolver (latest
-committed nudge) vs B (multiple outstanding rows, oldest-first rung-2)
-is a PR3-flip decision, not a PR1 behavior.
+ROUTING AUTHORITY STAYED WITH THE A-RESOLVER until the PR2/PR3 flip;
+**PR3 IS THE FLIP** (ruling ④): report routing now keys on the OLDEST
+OUTSTANDING commission row (advisory backfill rows excluded FOREVER)
+ahead of the A-resolver, which survives as the DECLARED LEGACY
+FALLBACK leg — see ``report_recipient.resolve_report_recipient`` (the
+flip lives INSIDE the resolver, so every call site inherits it) and
+the report_recipient module docstring ("ADOPTION DELTA (a) — … AMENDED
+PR3").
 
 ADOPTION DELTA (b) — HISTORICAL COVERAGE (advisory backfill)
 ------------------------------------------------------------
@@ -140,6 +144,11 @@ from ..repositories.mission_record.models import (
 from ..repositories.mission_record.repository import (
     MissionRecordError,
     MissionRecordRepository,
+)
+from ..constants import (
+    DEFAULT_MISSION_COMMISSION_TTL_SECONDS,
+    MISSION_COMMISSION_ABANDON_REASONS,
+    MISSION_COMMISSION_TTL_ENV,
 )
 from .timestamps import now_utc_iso
 
@@ -238,10 +247,25 @@ def mission_records_enforce_enabled() -> bool:
 
     Lives HERE (the mode ladder's owner) so the reader module and the
     writer module share ONE definition — no import cycle, no drift.
+
+    **THE SWALLOW IS NOT SILENT.** An unresolved mode token used to be
+    swallowed with NO log, so an operator could not tell "the ladder is
+    not in enforce" from "the ladder is BROKEN". The two sibling
+    swallow sites (``_mode_is_off`` and the reconciliation sweep's mode
+    resolver) already log a WARNING for the same failure class; this
+    gate now matches them. **OBSERVABILITY ONLY** — the daemon still
+    fails LOUDLY at boot (the manager resolves the ladder OUTSIDE any
+    swallow envelope), so this is NOT a boot-contract change.
     """
     try:
         return resolve_mission_records_mode() == MissionRecordMode.ENFORCE
-    except Exception:  # noqa: BLE001 — never break a gate on a knob fault
+    except Exception as exc:  # noqa: BLE001 — never break a gate on a knob fault
+        logger.warning(
+            "mission_records: %s unresolved (%s) — the mode gate "
+            "degrades to not-enforcing",
+            MISSION_RECORDS_MODE_ENV,
+            exc,
+        )
         return False
 
 
@@ -272,6 +296,85 @@ def _mode_is_off() -> bool:
             exc,
         )
         return True
+
+
+# ---------------------------------------------------------------------------
+# Commission TTL horizon (the reconciliation sweep's time-bounded
+# fail-MISS backstop — Proposal B PR3)
+# ---------------------------------------------------------------------------
+
+#: The CACHED resolved TTL horizon (restart-read, house-switch pattern —
+#: the same shape as :func:`resolve_mission_records_mode`). ``None`` =
+#: not resolved yet.
+_MISSION_COMMISSION_TTL_SECONDS: int | None = None
+
+
+def resolve_mission_commission_ttl_seconds(
+    default: int = DEFAULT_MISSION_COMMISSION_TTL_SECONDS,
+) -> int:
+    """Resolve the commission TTL horizon from the environment.
+
+    ``ENSEMBLE_MISSION_COMMISSION_TTL_SECONDS`` — the operator knob
+    for the reconciliation sweep's time-bounded fail-MISS backstop
+    (the design's R2/P3). Default ``21600`` (6h) — the same horizon
+    family as ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` BY DEFAULT (both
+    default to 6 h); the sweep's TTL is INDEPENDENTLY env-tunable and
+    MAY DIVERGE from the guard's fixed constant.
+
+    House-switch pattern: the value is resolved ONCE and cached
+    (restart-read) so a mid-run env mutation cannot change a resolved
+    knob. An UNRECOGNIZED / non-positive value degrades to the
+    ``default`` with a WARNING (never raises): a misconfigured knob must
+    not break the sweep thread (the fail-MISS producer posture — a
+    raised knob fault would strand every commission forever, which is
+    the exact failure the sweep exists to prevent).
+
+    **THE CACHE HOLDS THE ENV VALUE ONLY.** Two constructions with
+    different configured defaults do not poison each other: the
+    caller's ``default`` is returned PER CALL and is NEVER written to
+    the process-global cache. An INVALID env value therefore resolves
+    to NOTHING and leaves the cache untouched (caching the default
+    there would freeze the FIRST caller's default for every later
+    caller).
+    """
+    global _MISSION_COMMISSION_TTL_SECONDS
+    raw = (os.environ.get(MISSION_COMMISSION_TTL_ENV) or "").strip()
+    if not raw:
+        # No env override → the caller's configured default applies
+        # (per call — the cache holds the ENV value only, so two
+        # constructions with different configured defaults do not
+        # poison each other).
+        return int(default)
+    if _MISSION_COMMISSION_TTL_SECONDS is None:
+        try:
+            candidate = int(raw)
+        except ValueError:
+            candidate = 0
+        if candidate > 0:
+            _MISSION_COMMISSION_TTL_SECONDS = candidate
+        else:
+            logger.warning(
+                "mission_records: invalid %s value %r — using the "
+                "default %ss",
+                MISSION_COMMISSION_TTL_ENV,
+                raw,
+                default,
+            )
+            # The cache holds the ENV value ONLY (the function's own
+            # contract — two constructions with different configured
+            # defaults do not poison each other). An INVALID env value
+            # resolves to NOTHING, so the caller's default is returned
+            # PER CALL and the process-global cache stays untouched —
+            # caching the default here would freeze the FIRST caller's
+            # default for every later caller.
+            return int(default)
+    return _MISSION_COMMISSION_TTL_SECONDS
+
+
+def _reset_mission_commission_ttl_for_tests() -> None:
+    """Clear the cached TTL horizon (unit-test isolation only)."""
+    global _MISSION_COMMISSION_TTL_SECONDS
+    _MISSION_COMMISSION_TTL_SECONDS = None
 
 
 def scheduler_mint_extension_enabled() -> bool:
@@ -343,6 +446,23 @@ class MissionRecordService:
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
         self._repo = MissionRecordRepository(engine)
+
+    def commission_repository(self) -> MissionRecordRepository:
+        """Public access to the underlying commission/record repository.
+
+        Proposal B PR3 — the RECONCILIATION SWEEP (RDRS lane 7) READS
+        the outstanding commissions through the repository
+        (:meth:`MissionRecordRepository.find_outstanding_commissions`).
+        Its WRITES go through THIS service (``satisfy_commission`` /
+        ``abandon_commission``) — one guarded UPDATE, one owner of the
+        ``resolved_at`` / ``satisfied_at`` stamps.
+
+        The accessors this replaces: ``service._repo`` reach-throughs
+        (the reviewer follow-up on the ``_instance_manager._instance_repository``
+        family). The repository is the SAME object the service writes
+        through — no second writer, no drift.
+        """
+        return self._repo
 
     # ── internal validation ──
 
@@ -825,7 +945,10 @@ class MissionRecordService:
         ADOPTION DELTA (a): a second commission of the same worker
         mints a SECOND OUTSTANDING row — the guarded-state lifecycle is
         the discriminator (see the module docstring for the precedence
-        decision). Routing authority stays with the A-resolver in PR1.
+        decision). Routing authority STAYED with the A-resolver through
+        PR1/PR2; **PR3 flipped it** — the OLDEST outstanding row now
+        routes (report_recipient.resolve_report_recipient, enforce
+        -gated; the A-resolver is the declared legacy fallback leg).
 
         ``commission_id`` may be pinned (deterministic UUID5) by the
         BACKFILL so its idempotency PRE-CHECK (``get_commission``) keys
@@ -859,14 +982,22 @@ class MissionRecordService:
     ) -> bool:
         """``outstanding → satisfied`` (guarded).
 
-        **NO production caller in PR1 or PR2** — the terminator is the
-        PR3 reconciliation sweep (the delivery-evidence probe). This is
-        why the enforce promotion is GATED on PR3: until the sweep
-        lands, a minted commission row stays ``outstanding`` for the
-        life of the epoch, the L3 root-completion gate holds the
-        terminal publish, and the mission can never reach its quiet
-        state (the 5th R2 input). See the PR2 adoption notes §(f) —
-        "ENFORCE-PROMOTION PRECONDITION".
+        **PR3 lands the production caller**: the natural completion
+        write path satisfies the ROUTING commission when the child's
+        report is actually written + addressed to its commissioner
+        (``child_reports._process_child_completion_db_sync``, the
+        ReportInjection writer region — in-transaction, savepoint
+        -guarded, fail-open: a satisfy failure never breaks delivery).
+        Rowcount 0 = another actor won the guarded transition; the
+        loser counts it and never retries in place.
+
+        **THE SECOND CALLER (MAJ-6): the RECONCILIATION SWEEP** (RDRS
+        lane 7) resolves a commission on DELIVERY EVIDENCE through this
+        same method — the sweep's ``_satisfy_commission_on_evidence``.
+        Both callers land on ONE guarded UPDATE
+        (:meth:`MissionRecordRepository.transition_commission_state`),
+        so the ``resolved_at`` / ``satisfied_at`` stamps have ONE
+        owner.
         """
         return self._repo.transition_commission_state(
             commission_id, CommissionState.SATISFIED.value, session=session
@@ -882,11 +1013,28 @@ class MissionRecordService:
         """``outstanding → abandoned`` (guarded).
 
         The reconciliation sweep's outcome write (the eternal-mission
-        escape hatch, proposal-b §8). **NO production caller in PR1 or
-        PR2** — the sweep itself is the PR3 deliverable, and the enforce
-        promotion is GATED on it (the PR2 adoption notes §(f)). The seam
-        ships record-side complete.
+        escape hatch, proposal-b §8). **LIVE**: the sweep (RDRS lane 7)
+        calls this method — its ``_abandon_commission`` resolves the
+        worker-terminal / TTL / missing-row rows through here (MAJ-6:
+        the sweep goes through the SERVICE, so there is ONE guarded
+        UPDATE owning the ``resolved_at`` stamp; the repository's own
+        duplicate implementation was removed).
+
+        **THE FROZEN VOCABULARY IS VALIDATED HERE — AT THE WRITER.**
+        The abandon-reason set (``MISSION_COMMISSION_ABANDON_REASONS``
+        — the design's R9 / OQ-4) used to be checked ONLY at the CALLER
+        (the sweep's ``_abandon_commission``), so this writer took the
+        ``abandon_reason`` VERBATIM: any other caller could write a
+        token outside the frozen set and the operator-facing vocabulary
+        would silently grow a second spelling. An unknown reason now
+        raises ``ValueError`` HERE (the same shape and message as the
+        caller's own check — the caller keeps its guard, the writer
+        gains its own).
         """
+        if reason not in MISSION_COMMISSION_ABANDON_REASONS:
+            raise ValueError(
+                f"unknown mission-commission abandon reason: {reason!r}"
+            )
         return self._repo.transition_commission_state(
             commission_id,
             CommissionState.ABANDONED.value,
@@ -1483,6 +1631,93 @@ def mint_commission_fail_open(
         return None
 
 
+def satisfy_commission_fail_open(
+    service: MissionRecordService | None,
+    commission_id: str | None,
+    *,
+    session: Session | None = None,
+) -> bool:
+    """Commission-terminator wrapper (never raise) — the PR3 delivery
+    terminator.
+
+    The DELIVERY-side ``outstanding → satisfied`` write: the natural
+    completion write path calls this when a LEG-1 (mission-commission)
+    -routed report is actually written + addressed to its commissioner.
+    The posture is FAIL-OPEN — a satisfy failure (or a records-side
+    error, or mode ``off``) must NEVER break delivery; the caller logs
+    and delivery proceeds with the commission still outstanding (the
+    reconciliation sweep's probes are the net, RDRS lane 7).
+
+    Guarded transition ONLY: ``UPDATE ... WHERE state='outstanding'``
+    (rowcount 0 = another actor won — counted, never retried in
+    place). When ``session`` is provided the write rides the CALLER's
+    transaction via a SAVEPOINT — atomic with the report write (a
+    rolled-back delivery can never leave a satisfied commission
+    behind); with ``session=None`` the repository owns the transaction.
+
+    Returns:
+        ``True``  — the guarded transition moved exactly one row (this
+                     actor won) — STAGED when ``session`` is given.
+        ``False`` — mode ``off``, no commission id, a lost race
+                     (rowcount 0), or ANY error (fail-open).
+    """
+    if service is None or not commission_id:
+        return False
+    if _mode_is_off():
+        return False
+    try:
+        if session is not None:
+            moved = False
+            with session.begin_nested():
+                moved = service.satisfy_commission(
+                    commission_id, session=session
+                )
+            if moved:
+                # Caller-owned transaction: STAGED until the caller
+                # commits — the caller announces the durable success
+                # post-commit (a success log that precedes a rollback
+                # is a false success record).
+                logger.debug(
+                    "mission_records COMMISSION SATISFIED (staged — "
+                    "caller owns the commit) commission=%s…",
+                    commission_id[:8],
+                )
+            else:
+                # Guarded-transition lost race: another actor moved the
+                # row first. Count it, never retry in place.
+                logger.info(
+                    "mission_records: satisfy lost the guarded race "
+                    "(commission=%s… already moved) — counted, not "
+                    "retried",
+                    commission_id[:8],
+                )
+            return moved
+        moved = service.satisfy_commission(commission_id)
+        if moved:
+            logger.info(
+                "mission_records COMMISSION SATISFIED commission=%s… "
+                "(repo-owned transaction — durable)",
+                commission_id[:8],
+            )
+        else:
+            logger.info(
+                "mission_records: satisfy lost the guarded race "
+                "(commission=%s… already moved) — counted, not retried",
+                commission_id[:8],
+            )
+        return moved
+    except Exception as exc:  # noqa: BLE001 — fail-open terminator
+        logger.warning(
+            "mission_records: satisfy_commission failed "
+            "(commission=%s…): %s: %s — fail-OPEN, delivery proceeds "
+            "with the commission outstanding",
+            commission_id[:8] if commission_id else "?",
+            type(exc).__name__,
+            exc,
+        )
+        return False
+
+
 def attach_work_id_fail_open(
     service: MissionRecordService | None,
     mission_id: str | None,
@@ -1586,6 +1821,8 @@ __all__ = [
     "MissionResolution",
     "MissionRecordMode",
     "MISSION_RECORDS_MODE_ENV",
+    "MISSION_COMMISSION_TTL_ENV",
+    "resolve_mission_commission_ttl_seconds",
     "MISSION_ID_KEY",
     "SCHEDULER_MINT_EXTENSION_ENV",
     "resolve_mission_records_mode",

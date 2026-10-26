@@ -438,9 +438,10 @@ class GateDecision:
     #: 2026-09-16 answer-gate blindness fix (incident 6a0d60c9,
     #: FIX-2) — True when the leader has an OPEN awaiting-answer
     #: suspension handle at gate time (the FIFTH legitimate-pending
-    #: input). Plain allow: no marker scan, no judge, no nudge, no
-    #: hint, no counter movement. Logged as the 18th canonical
-    #: schema field.
+    #: input — a DIFFERENT enumeration from the FIFTH R2 input below:
+    #: ``outstanding_commissions``). Plain allow: no marker scan, no
+    #: judge, no nudge, no hint, no counter movement. Logged as the 18th
+    #: canonical schema field.
     user_answer_pending: bool = False
     #: Proposal B PR2 — the FIFTH R2 input (mission-scoped): the count
     #: of OUTSTANDING commission rows on the leader's open mission
@@ -448,6 +449,13 @@ class GateDecision:
     #: tuple — the same additive shape as ``busy_descendants``): the
     #: count is surfaced for forensics and consumed by the predicate's
     #: ``c_quiet`` term.
+    #:
+    #: ORDINAL NOTE: this is the FIFTH of the FIVE R2 inputs
+    #: (``pending_children`` / ``queued_or_expected_wakeups`` /
+    #: ``live_descendants`` / ``busy_descendants`` /
+    #: ``outstanding_commissions``). It is NOT the "FIFTH
+    #: legitimate-pending input" (``user_answer_pending`` above) — two
+    #: different enumerations, two different FIFTHs.
     #:
     #: ``0`` = the mission is quiet (or the input is INACTIVE — the
     #: mission ladder is not in ``enforce`` mode). ``-1`` = UNKNOWN
@@ -769,13 +777,15 @@ def decide(
         outstanding_commissions: Proposal B PR2 — the FIFTH R2 input
             (mission-scoped). The count of OUTSTANDING commission rows
             on the leader's open mission epoch — the OUT-OF-TREE
-            commissioned workers the three tree counters cannot see (the
+            commissioned workers the four tree counters cannot see (the
             D2 premature-settle class).
 
             Semantics: ``> 0`` arms the same legitimate-pending allow as
-            the three tree counters (the mission has work en route; the
-            leader's turn may end; the L3 root gate holds the SETTLE
-            until the commission is satisfied). ``0`` = the mission is
+            the three quiet-predicate counters (``pending_children`` /
+            ``queued_or_expected_wakeups`` / ``live_descendants`` — the
+            mission has work en route; the leader's turn may end; the
+            L3 root gate holds the SETTLE until the commission is
+            satisfied). ``0`` = the mission is
             quiet. ``-1`` = UNKNOWN (the fail-open sentinel) — the
             caller (the gate's ``evaluate``) never passes ``-1`` here:
             an unknown input short-circuits to the whole-evaluation
@@ -832,13 +842,14 @@ def decide(
     # ``queued_or_expected_wakeups`` stays 0).
     #
     # Proposal B PR2 — the ``outstanding_commissions`` arm: the
-    # MISSION-scoped sibling of the three tree counters. An
+    # MISSION-scoped sibling of the four tree counters. An
     # OUT-OF-TREE commissioned worker (the nudge lane) is invisible
-    # to the tree BFS, so the three counters read "quiet" while the
-    # mission's work is still running (the D2 premature-settle
-    # class). The commission count arms the SAME legitimate-pending
-    # allow: the work is en route, the leader's turn may end, and the
-    # L3 root gate holds the SETTLE until the commission is satisfied.
+    # to the tree BFS, so the three quiet-predicate counters read
+    # "quiet" while the mission's work is still running (the D2
+    # premature-settle class). The commission count arms the SAME
+    # legitimate-pending allow: the work is en route, the leader's turn
+    # may end, and the L3 root gate holds the SETTLE until the
+    # commission is satisfied.
     if (
         pending_children > 0
         or queued_or_expected_wakeups > 0
@@ -1261,11 +1272,13 @@ def evaluate(
         messages: In-node ``state["messages"]`` — NEVER an
             ``aget_state`` result (see module docstring).
         mode_resolver: :class:`GateSettings` (window/bound/mode).
-        manager: Handle exposing the THREE NEW facades
+        manager: Handle exposing the FIVE R2 facades
             (``count_pending_children`` / ``get_queued_or_expected_
-            wakeups`` / ``count_live_descendants``). May be ``None``
-            ONLY in degenerate embeddings — the response is fail-open
-            allow (R2 inputs unreadable).
+            wakeups`` / ``count_live_descendants`` /
+            ``count_busy_descendants`` /
+            ``count_outstanding_commissions``). May be ``None`` ONLY
+            in degenerate embeddings — the response is fail-open allow
+            (R2 inputs unreadable).
         attestation_enabled: C2 flag — Term-0 input to the unified
             activation predicate (mirrored by the early return below;
             enforced primarily at graph-build time — the gate node is
@@ -1459,7 +1472,7 @@ def evaluate(
                 mission_census or delegation_scan.delegation_since_last_user
             )
 
-        # (ii) R2 inputs — the THREE NEW manager facades (SYNC reads; the
+        # (ii) R2 inputs — the FIVE R2 manager facades (SYNC reads; the
         # graph node bridges this whole function via asyncio.to_thread).
         # DB seam: `except Exception` (KeyboardInterrupt stays fail-closed).
         # ``busy_descendants`` (2026-09-12) is the FOURTH input — the
@@ -1497,10 +1510,19 @@ def evaluate(
                 else False
             )
             # ── Proposal B PR2 — the FIFTH R2 input (mission-scoped) ──
-            # The count of OUTSTANDING commission rows on the leader's
-            # open mission epoch — the OUT-OF-TREE commissioned workers
-            # the three tree counters cannot see (the D2
+            # The count of OUTSTANDING commission rows anchoring on the
+            # leader's mission record — the OUT-OF-TREE commissioned
+            # workers the four tree counters cannot see (the D2
             # premature-settle class).
+            #
+            # MAJOR-1 = ruling (c) CROSS-EPOCH HOLD (PR3): the count is
+            # ANCHOR-scoped ACROSS ALL EPOCHS — the superseded epochs'
+            # orphaned rows (a job_continue continuation superseded the
+            # epoch that minted them) STILL count, so a continuation
+            # cannot launder an outstanding commission into a quiet
+            # predicate. Quiet requires EVERY epoch of the anchor to be
+            # commission-quiet. (The attestation CENSUS stays
+            # open-epoch-scoped — the scope ruling.)
             #
             # Duck-typing guard (the FIX-2 discipline): a missing facade
             # or a non-int return reads as INACTIVE (``0``) — the legacy
@@ -1640,7 +1662,7 @@ def evaluate(
                 "queued_or_expected_wakeups=%s "
                 "live_descendants=%s "
                 "busy_descendants=%s "
-                "outstanding_commissions=-1 "
+                "outstanding_commissions=%s "
                 "messages_scanned=%s "
                 "scanned_window_size=%s "
                 "decision=fail_open_allowed "
@@ -1655,6 +1677,7 @@ def evaluate(
                 queued_or_expected_wakeups,
                 live_descendants,
                 busy_descendants,
+                MISSION_READ_UNKNOWN,
                 scan.messages_scanned,
                 mode_resolver.window,
             )

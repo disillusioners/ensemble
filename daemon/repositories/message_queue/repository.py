@@ -251,6 +251,48 @@ class SQLModelMessageQueueRepository:
             return row is not None
 
     # --------------------------------------------------------
+    # MASKED-ENQUEUE OBSERVABILITY (Proposal B PR3 — RDRS lane 7)
+    # --------------------------------------------------------
+
+    def has_row_since(
+        self,
+        instance_id: str,
+        since: datetime,
+    ) -> bool:
+        """Is there ANY queue row for ``instance_id`` at/after ``since``?
+
+        The reconciliation sweep's D4(iii) MASKED-ENQUEUE probe
+        (Proposal B PR3 — the design's §6): "an outstanding commission
+        whose commissioning act left NO queue row at all" is the
+        conservative signal that the enqueue was MASKED (the
+        commissioning act was recorded but the message never reached a
+        queue).
+
+        The check is WHOLE-WINDOW (any source, any status): a
+        per-source match would false-positive on every live-target
+        inject (the ``send_message`` live-target sub-lane writes NO
+        MessageQueue row), so only the absence of ALL rows in the
+        window is treated as a signal.
+
+        ``since`` is a NAIVE UTC datetime (``enqueued_at`` is a
+        ``timestamp without time zone`` column — the PG-UTC
+        convention: bind naive UTC, never a tz-aware value).
+
+        Read-only; writes nothing.
+        """
+        if not instance_id:
+            return False
+        with Session(self.engine) as session:
+            stmt = (
+                select(MessageQueue.message_id)
+                .where(MessageQueue.instance_id == instance_id)
+                .where(MessageQueue.enqueued_at >= since)
+                .limit(1)
+            )
+            row = session.exec(stmt).first()
+            return row is not None
+
+    # --------------------------------------------------------
     # DEQUEUE (get next ready message)
     # --------------------------------------------------------
 

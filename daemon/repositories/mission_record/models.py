@@ -157,8 +157,9 @@ class CommissionState(str, enum.Enum):
     (the ``dependency_watchers`` PENDING→FIRED exactly-once shape).
     Multiple OUTSTANDING rows for the same worker are ALLOWED
     (adoption-delta (a): the guarded-state lifecycle is the
-    discriminator; routing authority stays with the A-resolver until the
-    PR2/PR3 flip).
+    discriminator; routing authority STAYED with the A-resolver until
+    the PR2/PR3 flip — PR3 flipped it to the OLDEST outstanding row,
+    the A-resolver surviving as the declared legacy fallback leg).
     """
 
     OUTSTANDING = "outstanding"
@@ -398,6 +399,19 @@ class MissionCommission(SQLModel, table=True):
             EXCLUDED from routing authority forever (the
             "if dropped, the ledger is worse than no ledger" rule,
             comparison.md §4c).
+        resolved_at: TEXT ISO stamp written when the row leaves
+        ``outstanding`` for ANY reason (``abandoned`` OR ``satisfied``
+        OR ``superseded``). It is written by the ONE guarded UPDATE
+        that owns it — ``MissionRecordRepository
+        .transition_commission_state`` — which every writer lands on
+        (the delivery terminator's satisfy, the RECONCILIATION SWEEP's
+        abandon / satisfy-on-evidence (Proposal B PR3, OQ-3(b)), and
+        the mint lanes' supersede), so there is no double-stamp and no
+        second implementation that can forget the stamp.
+        It is DISTINCT from ``satisfied_at`` on purpose: dual-purposing
+        ``satisfied_at`` for abandoned rows would make the column name
+        lie (an abandoned commission was never satisfied). NULL while
+        the row is outstanding, which is the honest default.
     """
 
     __tablename__ = "mission_commissions"
@@ -455,6 +469,11 @@ class MissionCommission(SQLModel, table=True):
         default=None,
         sa_column=Column("abandon_reason", Text, nullable=True),
     )
+    # PR3 (OQ-3(b)) — the RESOLUTION stamp: when the row left
+    # ``outstanding`` (abandoned OR satisfied). Distinct from
+    # ``satisfied_at`` on purpose (an abandoned row was never
+    # satisfied). TEXT ISO, nullable — NULL means "unresolved".
+    resolved_at: str | None = Field(default=None)
     advisory_backfill: bool = Field(default=False)
 
 

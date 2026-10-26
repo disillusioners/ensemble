@@ -5920,7 +5920,10 @@ class InstanceMessagingService:
             Non-negative int — the sum of the five counts. Never raises
             on empty/unknown instance (count of zero rows is 0).
         """
-        engine = self._manager._engine
+        # The PUBLIC engine accessor (``InstanceManager.engine``) — not a
+        # private ``_engine`` reach-through (the house accessor rule:
+        # the private attribute is the manager's own business).
+        engine = self._manager.engine
         now = datetime.now(timezone.utc)
         # Task.next_retry_at is a str column stamped by schedule_retry /
         # requeue_task_with_backoff as

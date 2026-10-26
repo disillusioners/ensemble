@@ -1,0 +1,18 @@
+# mrpr3_seam_wide — the carried + seam-family pack (mission-record service/reads/l3_ledger/review_fixes/facade_forwarding + the D1 routing integration + the mission_terminal/u1_slice/option_b commission pin files)
+#
+# one repo-relative path per line; the pack invocation is:
+#   pytest -q $(grep -v '^#' <this file>)
+# gate form (scrubbed):
+#   timeout 300 ./scripts/run_tests_scrubbed.sh -p no:cacheprovider -q --tb=short $(grep -v '^#' <this file>)
+#
+# gate-3 measured @ 35df7171e: 144/144 PASS (17.14s)
+#
+tests/unit/test_mission_record_service.py
+tests/unit/test_mission_record_reads.py
+tests/unit/test_mission_record_pr2_l3_ledger.py
+tests/unit/test_mission_record_review_fixes.py
+tests/unit/test_mission_record_facade_forwarding.py
+tests/integration/test_report_recipient_routing_d1.py
+tests/job_queue/test_mission_terminal_commission_pins.py
+tests/job_queue/test_u1_slice_commission_pins.py
+tests/job_queue/test_option_b_message_routing.py

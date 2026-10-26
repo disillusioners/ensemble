@@ -1950,6 +1950,46 @@ class ServicesConfig(BaseSettings):
             "is the heal frontier for the captured wedge shape)."
         ),
     )
+    # Lane 7 (Proposal B PR3) — the mission-commission reconciliation
+    # sweep. The lane is the ESCAPE VALVE for the "eternal mission"
+    # class: an outstanding commission whose commissioned work will
+    # never produce a report holds its mission open forever. The lane
+    # is mode-gated by the EXISTING ``ENSEMBLE_MISSION_RECORDS`` ladder
+    # (off → not queried / dry → detect + counters, zero writes /
+    # enforce → writes) — there is NO second mode knob.
+    report_delivery_recovery_lane_mission_reconciliation: bool = Field(
+        default=True,
+        description=(
+            "Lane 7 (mission-commission reconciliation — Proposal B "
+            "PR3) per-lane kill-switch. The lane resolves the "
+            "provably-dead outstanding commissions to 'abandoned' (and "
+            "the provably-delivered ones to 'satisfied') so the "
+            "settle-hold can release. Its OWN posture is fail-MISS: "
+            "every probe error HOLDS the row. Defaults to True; the "
+            "ENSEMBLE_MISSION_RECORDS mode ladder still gates it (off → "
+            "the lane is not even queried, dry → counters only, no "
+            "writes)."
+        ),
+    )
+    report_delivery_recovery_mission_commission_ttl_seconds: int = Field(
+        default=21600,
+        ge=1,
+        description=(
+            "The commission TTL horizon in seconds — the sweep's "
+            "time-bounded fail-MISS backstop. Past this horizon AND "
+            "with a SUCCESSFUL 'not live' liveness probe, an "
+            "unprovable outstanding commission resolves to 'abandoned' "
+            "loudly; a liveness-probe ERROR still holds at any age. "
+            "Default 21600s (6h) — the same horizon family as "
+            "MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS BY DEFAULT (both "
+            "default to 6 h), but independently tunable: this TTL MAY "
+            "diverge from the guard's fixed constant. The "
+            "ENSEMBLE_MISSION_COMMISSION_TTL_SECONDS env knob "
+            "overrides this value (the operator lever; the operator "
+            "typo convention: an invalid value warns and falls back to "
+            "the default, never raising)."
+        ),
+    )
     # Stale-pause backstop (feature/fix/question-pause-resume-asymmetry,
     # R3). The question pause parks the asker's whole tree; a parked
     # instance with no live turn and no outstanding question holds its

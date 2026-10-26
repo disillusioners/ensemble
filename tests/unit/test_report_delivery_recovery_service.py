@@ -321,6 +321,10 @@ class TestSweepServiceShape:
             # Block-1 G4 lane: must be disabled too for the
             # empty-lane-dict assertion.
             lane_stuck_wake=False,
+            # Lane 7 (Proposal B PR3 — the mission-commission
+            # reconciliation): must be disabled too for the
+            # empty-lane-dict assertion.
+            lane_mission_reconciliation=False,
         )
         result = svc.recover_now()
         assert result.lanes == {}
@@ -1922,6 +1926,220 @@ class TestF2LiveDeliveryRace:
             status=MessageStatus.COMPLETED.value,
         )
         return child_id, child_msg_id
+
+
+class TestNoRowBackstopQueuePrefixLedgerSkip:
+    """The queue-side PREFIX-ledger SKIP in the no-row backstop's
+    per-row pass (``_recover_one_no_row`` step 0).
+
+    F-2 (durability-f1-f2 / phase2, task 2.5): the queue-side
+    ``MessageQueueRepository.find_wake_already_delivered_evidence(parent,
+    child)`` match is the OPERATIVE cross-path dedup (decisions.md
+    §14a). When it matches, the per-row pass MUST
+
+    1. COUNT the skip — ``result.skipped_already_reported += 1`` — the
+       operator-visible counter that says "the sweep did NOT re-mint
+       this obligation", and
+    2. RETURN — no obligation is minted, and no recovery is handed to
+       the manager (the natural path owns the delivery).
+
+    BOTH halves are load-bearing and the pins assert BOTH: the counter
+    alone would hide a double-injection (the obligation would be
+    minted anyway), and the RETURN alone would hide the skip from the
+    operator (the counter would never move).
+
+    The pins drive the REAL production seams — the REAL
+    ``SQLModelMessageQueueRepository`` decides the PREFIX match (real
+    SQL over a real ``MessageQueue`` row, not a mock's return value),
+    the REAL ``ReportInjectionRepository`` would mint the obligation,
+    and the REAL ``LaneResult`` is the object the lane hands to the
+    per-row pass.
+    """
+
+    def _seed_completed_child_with_message(
+        self,
+        engine: Engine,
+        parent_id: str,
+        child_msg_id: str = "child-msg",
+    ) -> tuple[str, str]:
+        """Seed a COMPLETED child instance + its COMPLETED message."""
+        child_id = _seed_instance(
+            engine,
+            parent_id=parent_id,
+            status=InstanceStatus.COMPLETED.value,
+        )
+        _seed_message(
+            engine,
+            instance_id=child_id,
+            msg_id=child_msg_id,
+            status=MessageStatus.COMPLETED.value,
+        )
+        return child_id, child_msg_id
+
+    def _seed_live_delivery(
+        self, engine: Engine, parent_id: str, child_id: str
+    ) -> str:
+        """Seed the natural path's LIVE delivery — a parent-side
+        ``internal_report:{child}:%`` row (the PREFIX ledger's
+        evidence)."""
+        msg_id = f"live-report-{uuid.uuid4().hex[:8]}"
+        _seed_message(
+            engine,
+            instance_id=parent_id,
+            msg_id=msg_id,
+            source=f"internal_report:{child_id}:live-anchor-msg",
+            msg_type=MessageType.COMPLETION_REPORT.value,
+            status=MessageStatus.READY.value,
+        )
+        return msg_id
+
+    def _build_service(
+        self,
+        engine: Engine,
+        *,
+        on_scan=None,
+    ) -> tuple[ReportDeliveryRecoveryService, MagicMock]:
+        """Build the service with the REAL queue repository and the
+        REAL report-injection repository.
+
+        ``on_scan`` — an OPTIONAL hook fired immediately AFTER the
+        lane-2 scan returns, i.e. INSIDE the TOCTOU window the
+        production code documents ("live delivery between scan and
+        ledger re-check"). It simulates the concurrent natural-path
+        delivery landing between the two steps.
+        """
+        from daemon.repositories.message_queue.repository import (
+            SQLModelMessageQueueRepository,
+        )
+        from daemon.repositories.report_injection.repository import (
+            ReportInjectionRepository,
+        )
+
+        class _ScanHookRepository(ReportInjectionRepository):
+            """The real repository + the concurrent-delivery hook."""
+
+            def __init__(self, *args, hook=None, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._hook = hook
+                self._hook_fired = False
+
+            def find_completed_children_without_delivery(self, **kwargs):
+                rows = super().find_completed_children_without_delivery(
+                    **kwargs
+                )
+                if self._hook is not None and not self._hook_fired:
+                    self._hook_fired = True
+                    self._hook()
+                return rows
+
+        ri_repo = _ScanHookRepository(engine=engine, hook=on_scan)
+        queue_repo = SQLModelMessageQueueRepository(engine=engine)
+        task_repo = MagicMock()
+        task_repo.has_instance_busy = MagicMock(return_value=False)
+        manager = MagicMock()
+        manager.engine = engine
+        manager._checkpointer = None
+        manager._handle_recover_deferred_report = MagicMock()
+
+        service = ReportDeliveryRecoveryService(
+            task_repo=task_repo,
+            report_injection_repo=ri_repo,
+            queue_repo=queue_repo,
+            instance_repo=MagicMock(),
+            manager_ref=manager,
+            interval_seconds=300,
+            age_bound_minutes=10,
+            batch_cap=100,
+            recovery_retry_minutes=1,
+            enabled=True,
+            lane_orphan=False,
+        )
+        return service, manager
+
+    def _injection_rows(self, engine: Engine) -> list[Any]:
+        with Session(engine) as session:
+            return list(session.exec(sm_select(ReportInjection)).all())
+
+    def test_the_queue_side_ledger_match_skips_the_row_and_mints_nothing(
+        self, engine: Engine
+    ) -> None:
+        """The per-row pass MUST skip when the queue-side PREFIX ledger
+        matches: the skip is COUNTED and NOTHING is admitted for that
+        (parent, child)."""
+        parent = _seed_instance(engine)
+        child_id, child_msg_id = self._seed_completed_child_with_message(
+            engine, parent
+        )
+        # The natural path's LIVE delivery (the ledger's evidence).
+        self._seed_live_delivery(engine, parent, child_id)
+
+        service, manager = self._build_service(engine)
+
+        result = LaneResult()
+        service._recover_one_no_row(
+            child_id=child_id,
+            child_msg_id=child_msg_id,
+            parent_id=parent,
+            result=result,
+        )
+
+        # (1) THE COUNTER moved — the skip is counted ...
+        assert result.skipped_already_reported == 1, (
+            "a queue-side PREFIX-ledger match MUST count the skip "
+            "(skipped_already_reported += 1) — the operator-visible "
+            "counter that says the sweep did NOT re-mint this "
+            f"obligation; got {result.to_dict()!r}"
+        )
+        # ... and NOTHING else moved.
+        assert result.recovered == 0
+        assert result.already_recovered == 0
+        assert result.errors == 0
+        assert result.skipped_busy == 0
+        # (2) NO ADMISSION: no obligation was minted for the pair ...
+        assert self._injection_rows(engine) == [], (
+            "a queue-side PREFIX-ledger match MUST NOT mint an "
+            "obligation — the natural path already delivered (or is "
+            "in-flight) and the cross-path dedup is the operative one"
+        )
+        # ... and no recovery was handed to the manager.
+        manager._handle_recover_deferred_report.assert_not_called()
+
+    def test_the_lane_aggregates_the_skip_when_the_delivery_lands_between_the_scan_and_the_row(
+        self, engine: Engine
+    ) -> None:
+        """The lane-level shape of the SAME guarantee: a delivery that
+        lands in the TOCTOU window (after the lane's scan, before the
+        per-row pass reads the ledger) is caught by the per-row pass
+        and surfaces in the lane's ``LaneResult`` — with no obligation
+        minted for the pair."""
+        parent = _seed_instance(engine)
+        child_id, child_msg_id = self._seed_completed_child_with_message(
+            engine, parent
+        )
+
+        landed: list[str] = []
+
+        def _deliver_live() -> None:
+            landed.append(
+                self._seed_live_delivery(engine, parent, child_id)
+            )
+
+        service, manager = self._build_service(engine, on_scan=_deliver_live)
+
+        lane = service._run_no_row_backstop_lane()
+
+        assert landed, (
+            "the simulated concurrent delivery never landed — the "
+            "TOCTOU window was not exercised"
+        )
+        assert lane.skipped_already_reported == 1, (
+            "the lane MUST surface the queue-side PREFIX-ledger skip "
+            f"in its LaneResult; got {lane.to_dict()!r}"
+        )
+        assert lane.recovered == 0
+        assert lane.errors == 0
+        assert self._injection_rows(engine) == []
+        manager._handle_recover_deferred_report.assert_not_called()
 
 
 class TestF2ChildMessageIdStableButDifferent:
