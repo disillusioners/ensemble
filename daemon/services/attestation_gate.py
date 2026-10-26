@@ -1497,10 +1497,19 @@ def evaluate(
                 else False
             )
             # ── Proposal B PR2 — the FIFTH R2 input (mission-scoped) ──
-            # The count of OUTSTANDING commission rows on the leader's
-            # open mission epoch — the OUT-OF-TREE commissioned workers
-            # the three tree counters cannot see (the D2
+            # The count of OUTSTANDING commission rows anchoring on the
+            # leader's mission record — the OUT-OF-TREE commissioned
+            # workers the three tree counters cannot see (the D2
             # premature-settle class).
+            #
+            # MAJOR-1 = ruling (c) CROSS-EPOCH HOLD (PR3): the count is
+            # ANCHOR-scoped ACROSS ALL EPOCHS — the superseded epochs'
+            # orphaned rows (a job_continue continuation superseded the
+            # epoch that minted them) STILL count, so a continuation
+            # cannot launder an outstanding commission into a quiet
+            # predicate. Quiet requires EVERY epoch of the anchor to be
+            # commission-quiet. (The attestation CENSUS stays
+            # open-epoch-scoped — the scope ruling.)
             #
             # Duck-typing guard (the FIX-2 discipline): a missing facade
             # or a non-int return reads as INACTIVE (``0``) — the legacy

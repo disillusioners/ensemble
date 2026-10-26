@@ -11873,28 +11873,34 @@ class InstanceManager:
     # ------------------------------------------------------------------
 
     def count_outstanding_commissions(self, instance_id: str) -> int:
-        """The FIFTH R2 input — the mission-scoped outstanding count.
+        """The FIFTH R2 input — the anchor-scoped outstanding count.
 
         The four tree counters above are TREE-scoped: they cannot see an
         OUT-OF-TREE commissioned worker (the nudge lane's blind spot —
-        the D2 premature-settle class). This input is MISSION-scoped:
-        it counts the open mission's outstanding commission rows, so a
-        running out-of-tree worker holds the mission instead of letting
-        it settle.
+        the D2 premature-settle class). This input is MISSION-record
+        scoped — and since PR3 (MAJOR-1 ruling (c)) ANCHOR-scoped
+        ACROSS ALL EPOCHS: the open epoch's rows AND the superseded
+        epochs' orphaned rows both count. A ``job_continue``
+        continuation that supersedes the epoch holding an outstanding
+        commission does NOT release the hold — the mission stays held
+        until a terminator retires the row (the reconciliation sweep's
+        escape valve, RDRS lane 7). There is NO re-pointing and NO
+        auto-supersede of orphaned rows (ruling (c)).
 
         Returns:
-            ``0``  — inactive (mode ``dry``/``off``) OR the mission is
-                      quiet (no open epoch, or no outstanding rows).
-            ``N>0``— the open mission has N outstanding commissions.
+            ``0``  — inactive (mode ``dry``/``off``) OR every recorded
+                      epoch of the anchor is commission-quiet.
+            ``N>0``— some epoch of the anchor (open OR superseded) has
+                      N outstanding commissions.
             ``-1`` — UNKNOWN (the read failed). The fail-open sentinel:
                       the caller treats it as "behave as before the
                       records existed", NEVER as "0 outstanding".
 
-        TERMINATOR (PR3): PR2 ships no writer that retires a
-        commission row, so an outstanding commission holds the L3
-        publish until the epoch closes — the enforce promotion is
-        GATED on PR3's reconciliation sweep (the PR2 adoption notes
-        §(f)).
+        TERMINATOR: PR3 wires ``satisfy_commission`` into the natural
+        completion write path (the report-delivery terminator); the
+        ``abandoned`` write + the TTL backstop remain the
+        reconciliation sweep's (RDRS lane 7, a separate cycle) —
+        ``abandon_commission`` still has no production caller.
         """
         if not mission_records_enforce_enabled():
             # Inactive input — the legacy quiet predicate is preserved

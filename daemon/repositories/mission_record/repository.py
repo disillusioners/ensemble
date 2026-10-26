@@ -281,6 +281,58 @@ class MissionRecordRepository:
             session=session,
         )
 
+    def count_outstanding_commissions_for_anchor(
+        self,
+        anchor_instance_id: str,
+        *,
+        include_advisory: bool = False,
+        session: Session | None = None,
+    ) -> int:
+        """Count OUTSTANDING commissions across ALL epochs of the anchor.
+
+        MAJOR-1 = ruling (c) CROSS-EPOCH HOLD (Proposal B PR3): the
+        count spans the anchor's OPEN **and** SUPERSEDED epochs — a
+        commission orphaned on a superseded epoch (the ``job_continue``
+        continuation superseded the epoch that minted it) STILL counts.
+        NO re-pointing, NO auto-supersede of the orphaned rows: they
+        keep pointing at their owning epoch and they keep holding the
+        mission until a terminator (``satisfied`` / ``abandoned``)
+        retires them. The reads (the L3 publish hold + the R2 quiet
+        predicate) are quiet only when EVERY epoch of the anchor is
+        commission-quiet.
+
+        The deliberate cost is the eternal-mission class (proposal-b
+        §8): an orphan that nothing will ever satisfy holds forever —
+        the reconciliation sweep (RDRS lane 7, a separate cycle) plus
+        its TTL backstop is the escape valve.
+
+        ADVISORY ROWS EXCLUDED by default (adoption-delta (b) — the
+        exclusion predicate is ONE consistent shape across every read
+        that consults commissions: routing, census, quiet, L3 hold).
+
+        Returns:
+            ``0`` when the anchor has NO epochs at all (nothing was
+            ever recorded — a REAL zero); ``N>0`` while any epoch of
+            the anchor has an outstanding (non-advisory) commission.
+        """
+        stmt = (
+            select(MissionCommission)
+            .join(
+                MissionRecord,
+                MissionRecord.mission_id == MissionCommission.mission_id,
+            )
+            .where(MissionRecord.anchor_instance_id == anchor_instance_id)
+            .where(MissionCommission.state == CommissionState.OUTSTANDING.value)
+        )
+        if not include_advisory:
+            stmt = stmt.where(
+                MissionCommission.advisory_backfill.is_(False)  # type: ignore[union-attr]
+            )
+        if session is not None:
+            return len(list(session.exec(stmt)))
+        with Session(self._engine) as own:
+            return len(list(own.exec(stmt)))
+
     def list_commissions_for_mission(
         self,
         mission_id: str,

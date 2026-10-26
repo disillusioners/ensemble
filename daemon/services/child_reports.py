@@ -2610,11 +2610,22 @@ Provide a concise summary:"""
             # terminal "completed" event while the commissioned work is
             # still running.
             #
-            # The mission-scoped leg closes that hole: the open mission
-            # epoch's OUTSTANDING commission rows are the record-side
-            # truth ("this mission commissioned work that has not
-            # reported yet"). While any commission is outstanding, the
-            # publish is HELD.
+            # The mission-scoped leg closes that hole: the OUTSTANDING
+            # commission rows are the record-side truth ("this mission
+            # commissioned work that has not reported yet"). While any
+            # commission is outstanding, the publish is HELD.
+            #
+            # MAJOR-1 = ruling (c) CROSS-EPOCH HOLD (PR3): the count is
+            # ANCHOR-scoped — a commission orphaned on a SUPERSEDED
+            # epoch (the job_continue continuation superseded the epoch
+            # that minted it) STILL holds the publish. No re-pointing,
+            # no auto-supersede of the orphaned rows (attribution stays
+            # with the owning epoch); the hold releases only when a
+            # terminator retires the row (the PR3 delivery terminator
+            # on ``satisfied``; the reconciliation sweep's
+            # ``abandoned`` + TTL is the escape valve — RDRS lane 7).
+            # The attestation CENSUS stays open-epoch-scoped (the
+            # scope ruling — this leg is NOT the census).
             #
             # FAIL-OPEN (the gate's posture — a missing terminal is
             # worse than an extra premature one): the read returns the
@@ -2628,14 +2639,16 @@ Provide a concise summary:"""
             # bus-pending leg, the tree-liveness leg and the freshness
             # leg are untouched.
             #
-            # TERMINATOR (PR3): PR2 ships NO writer that retires a
-            # commission row — ``satisfy_commission`` /
-            # ``abandon_commission`` have no production caller (the
-            # reconciliation sweep is the PR3 deliverable). So in
-            # enforce mode this hold has no escape valve until PR3: a
-            # mission with an outstanding commission holds until its
-            # epoch closes. That is why the enforce promotion is GATED
-            # on PR3 (the PR2 adoption notes §(f)).
+            # TERMINATOR (PR3): the natural completion write path now
+            # SATISFIES the routing commission when the report is
+            # actually delivered to its commissioner (child_reports
+            # ``_process_child_completion_db_sync``, the ReportInjection
+            # writer region — guarded ``UPDATE ... WHERE
+            # state='outstanding'``, in-transaction, fail-open). The
+            # ``abandoned`` write + the TTL backstop remain the
+            # reconciliation sweep's (RDRS lane 7, a separate cycle): a
+            # commission whose report is NEVER delivered still holds
+            # until that sweep lands.
             mission_commissions = self._count_outstanding_mission_commissions(
                 instance_id
             )

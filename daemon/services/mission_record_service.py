@@ -859,14 +859,21 @@ class MissionRecordService:
     ) -> bool:
         """``outstanding → satisfied`` (guarded).
 
-        **NO production caller in PR1 or PR2** — the terminator is the
-        PR3 reconciliation sweep (the delivery-evidence probe). This is
-        why the enforce promotion is GATED on PR3: until the sweep
-        lands, a minted commission row stays ``outstanding`` for the
-        life of the epoch, the L3 root-completion gate holds the
-        terminal publish, and the mission can never reach its quiet
-        state (the 5th R2 input). See the PR2 adoption notes §(f) —
-        "ENFORCE-PROMOTION PRECONDITION".
+        **PR3 lands the production caller**: the natural completion
+        write path satisfies the ROUTING commission when the child's
+        report is actually written + addressed to its commissioner
+        (``child_reports._process_child_completion_db_sync``, the
+        ReportInjection writer region — in-transaction, savepoint
+        -guarded, fail-open: a satisfy failure never breaks delivery).
+        Rowcount 0 = another actor won the guarded transition; the
+        loser counts it and never retries in place.
+
+        NOT covered here (deliberate): the reconciliation sweep's
+        delivery-evidence probes and the ``abandoned``/
+        worker-terminal/TTL writes — that is RDRS lane 7, a separate
+        cycle. Until it lands, a commission whose report is never
+        delivered still holds the mission (the eternal-mission class,
+        MAJOR-1 ruling (c) keeps it deliberately).
         """
         return self._repo.transition_commission_state(
             commission_id, CommissionState.SATISFIED.value, session=session
@@ -882,10 +889,10 @@ class MissionRecordService:
         """``outstanding → abandoned`` (guarded).
 
         The reconciliation sweep's outcome write (the eternal-mission
-        escape hatch, proposal-b §8). **NO production caller in PR1 or
-        PR2** — the sweep itself is the PR3 deliverable, and the enforce
-        promotion is GATED on it (the PR2 adoption notes §(f)). The seam
-        ships record-side complete.
+        escape hatch, proposal-b §8). **STILL no production caller in
+        PR3** — the sweep is RDRS lane 7, a separate cycle (the PR3
+        terminator covers ONLY the delivery-side ``satisfied`` write).
+        The seam ships record-side complete.
         """
         return self._repo.transition_commission_state(
             commission_id,
