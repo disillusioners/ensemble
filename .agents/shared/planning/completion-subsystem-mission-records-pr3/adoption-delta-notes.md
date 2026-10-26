@@ -4,7 +4,8 @@ Completion-subsystem Proposal B, **PR3 of 3**. PR1 shipped the record
 substrate; PR2 shipped the enforce reads; **PR3 ships the routing flip,
 the commission terminator, the cross-epoch hold, the committing
 backfill — and closes the MAJOR-1 ruling.** The reconciliation sweep
-(RDRS lane 7) is explicitly NOT here (a separate cycle owns it).
+(RDRS lane 7) landed in the FOLLOW-ON cycle of this same branch — see
+section (j) below for its knobs, counters and vocabulary.
 
 The authoritative design docs are UNTRACKED files in the MAIN checkout
 (``.agents/shared/planning/completion-subsystem/``) and are deliberately
@@ -128,8 +129,13 @@ scopes coexist deliberately; pinned by
 
 ## (h) The TTL ⑤ ruling
 
-TTL is a knob with no hard decision taken — and the TTL mechanism lives
-in the sweep (lane 7). PR3 ships NO TTL logic; nothing to wire.
+TTL is a knob with no hard decision taken. The sweep (lane 7, section
+(j)) landed the MECHANISM in the follow-on cycle: the knob is
+``ENSEMBLE_MISSION_COMMISSION_TTL_SECONDS`` with the house default
+21600s (6h) — the same horizon family as
+``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS``. The DEFAULT is a starting
+point, not a decision: the ``dry``-mode counters are the evidence that
+tunes it.
 
 ## (i) The micro-fix
 
@@ -138,16 +144,103 @@ claimed "Non-JobItem work is unaffected" while the first clause is NOT
 kind-restricted — a message-origin Task IS refused (PR2 runtime-gate
 finding #3). Behavior matches the docstring; the comment now says so.
 
+## (j) The RECONCILIATION SWEEP (RDRS lane 7) — the follow-on cycle
+
+The escape valve for the eternal-mission class: an outstanding
+``mission_commissions`` row whose commissioned work will never produce
+a report holds its mission open forever (the D2(c) settle-hold refuses
+to settle while ``outstanding_commissions > 0``). Lane 7 resolves the
+provably-dead rows to ``abandoned`` (and the provably-delivered ones to
+``satisfied``); the EXISTING settle machinery then releases the hold.
+
+### Knobs
+
+| Knob | Where | Default | Meaning |
+|---|---|---|---|
+| ``SERVICES_REPORT_DELIVERY_RECOVERY_LANE_MISSION_RECONCILIATION`` | ``ServicesConfig.report_delivery_recovery_lane_mission_reconciliation`` | ``True`` | The lane's own kill-switch (master + lane, like the other six lanes) |
+| ``ENSEMBLE_MISSION_COMMISSION_TTL_SECONDS`` | ``daemon/constants.py::MISSION_COMMISSION_TTL_ENV`` (resolved by ``mission_record_service.resolve_mission_commission_ttl_seconds``) | ``21600`` (6h) | The TTL horizon — the operator lever; it OVERRIDES the config-family knob |
+| ``SERVICES_REPORT_DELIVERY_RECOVERY_MISSION_COMMISSION_TTL_SECONDS`` | ``ServicesConfig.report_delivery_recovery_mission_commission_ttl_seconds`` | ``21600`` | The config-family default for the horizon |
+| ``ENSEMBLE_MISSION_RECORDS`` | (the EXISTING ladder) | ``dry`` | The MODE: ``off`` → the lane is not even queried; ``dry`` → detect + counters, ZERO writes; ``enforce`` → writes. **No second mode knob.** |
+
+The TTL resolution is restart-read (the house-switch pattern) and NEVER
+raises: an invalid env value warns and falls back to the default (a
+misconfigured knob must not strand every commission).
+
+### Counters (the lane dict the crash-recovery endpoint returns verbatim)
+
+``abandoned_worker_terminal`` · ``abandoned_ttl`` ·
+``abandoned_worker_missing`` · ``satisfied_on_evidence`` ·
+``skipped_live`` · ``skipped_watcher_pending`` · ``below_ttl_hold`` ·
+``already_resolved`` · ``masked_suspected`` · ``probe_errors`` ·
+``errors`` (+ the inherited ``recovered`` / ``skipped_*`` /
+``already_recovered`` / ``orphan_disposition`` / ``skipped_already_reported``).
+
+In ``dry`` mode the DETECTION counters move and NOTHING is written (the
+dry-run evidence that tunes the TTL default); ``recovered`` stays 0
+(nothing was recovered).
+
+### Vocabulary (FROZEN)
+
+* States written: ``satisfied`` · ``abandoned``. ``superseded`` stays
+  mint-lane-only — the sweep NEVER writes it.
+* Abandon reasons (the closed set): ``worker_terminal_no_report`` ·
+  ``ttl_expired_not_live`` · ``worker_row_missing``.
+* The resolution stamp: ``mission_commissions.resolved_at`` (TEXT ISO;
+  written for EVERY resolution — abandoned OR satisfied; NULL while the
+  row is outstanding).
+
+### Posture (the binding contract)
+
+FAIL-MISS everywhere: every probe error HOLDS the row
+(``probe_errors``++, zero writes) — the sweep never resolves a
+commission on a failed probe. The TTL is the ONE time-bounded
+exception: past the horizon AND with a SUCCESSFUL "not live" liveness
+probe the unprovable state resolves LOUDLY; a liveness-probe ERROR
+still holds at any age. The sweep writes ONLY ``mission_commissions``
+(no instance status, no mission_records, no report_injections, no
+dependency_watchers).
+
+### The rulings applied
+
+* **R1b (satisfy on evidence)** — INCLUDED: positive delivery evidence
+  with an outstanding row means the natural satisfy write was lost.
+* **OQ-3(b) (``resolved_at``)** — ADDED: the model field, the SQLite
+  migration ``20261026_060000_add_mission_commission_resolved_at.sql``
+  and the PostgreSQL ``_ensure_postgres_columns`` mirror (3-site pin).
+* **OQ-4 (the abandon vocabulary)** — FROZEN as above.
+* **OQ-6 (the ``(state, created_at)`` index)** — DEFERRED with a perf
+  note: at the expected cardinality (the outstanding set is tiny) the
+  state-only filter suffices.
+* **OQ-7 (the JobItem-live check)** — INCLUDED: a commission whose
+  ``work_id`` resolves to a non-terminal JobItem is LIVE → HOLD.
+* **Advisory rows** — EXCLUDED from the sweep admission (one
+  consistent predicate with the routing / census / quiet reads); they
+  are audit-only by design.
+
+### Pins
+
+``tests/unit/test_mission_reconciliation_sweep.py`` — the design's
+T1-T9 mapped to real tests (T1 probe-error HOLD per probe, T2 the TTL
+matrix, T3 R1 + R1b, T4 the guarded transition, T5 the mode ladder, T6
+the write boundary, T7 the lane order / kill-switch / unwired
+degrade, T8 the masked signal, T9 the endpoint shape) + the
+escape-valve CHAIN at the service level (abandon → the outstanding
+count reads 0 → the hold releases). T10's real-boot E2E stays the
+TESTER's lane.
+
 ---
 
 ## Ship + promotion posture
 
 * ``ENSEMBLE_MISSION_RECORDS`` stays ``dry`` (ship default; restart-read).
 * The PR2 §(f) enforce-promotion gate ("DO NOT PROMOTE BEFORE THE PR3
-  TERMINATOR") is now SATISFIED on the delivery side — but lane 7 (the
-  ``abandoned`` escape + TTL) has NOT landed, so a commission whose
-  report is never delivered still holds forever. **The enforce
-  promotion should wait for lane 7** (or be taken with open eyes on the
-  eternal-mission class).
+  TERMINATOR") is now SATISFIED on the delivery side — and lane 7 (the
+  ``abandoned`` escape + TTL) HAS landed (section (j)), so a commission
+  whose report is never delivered no longer holds forever: the sweep
+  abandons it under the fail-MISS probes + the TTL horizon.
+* The enforce promotion still needs the SWEEP's own evidence: the
+  ``dry``-mode counters (``abandoned_ttl`` / ``skipped_live`` /
+  ``masked_suspected``) are the TTL-tuning dataset — read them BEFORE
+  flipping the lane to ``enforce``.
 * Activation of everything here = rebuild + restart (staging ≠
   activation).
