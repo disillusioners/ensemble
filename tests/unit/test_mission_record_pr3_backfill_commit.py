@@ -179,6 +179,28 @@ class TestTheBootModeLine:
             f"enforce-promotion runbook §1.1 quotes: {self._LOG_STRING!r}"
         )
 
+    def test_the_boot_line_is_emitted_at_the_INFO_level(self):
+        """The line MUST be emitted at ``INFO`` — the runbook §1.1's
+        central inference ("daemon up + NO mission-records boot line ⇒
+        ``off``") is only sound while the line is VISIBLE at the default
+        INFO log level. A silent demotion to ``DEBUG`` leaves every
+        sibling pin GREEN (the text, the ``off`` guard, the position and
+        the runbook agreement all still hold) while quietly breaking the
+        operator's ONLY mode observable: at INFO, ``dry`` and ``enforce``
+        would become INDISTINGUISHABLE from ``off``."""
+        src = self._init_src()
+        log_at = src.index(self._LOG_STRING)
+        # The logger call that carries the string is the LAST ``logger.``
+        # before it.
+        call = src[:log_at].rsplit("logger.", 1)[-1]
+        assert call.startswith("info("), (
+            "the boot mode line MUST be emitted via logger.info(...) — the "
+            "runbook §1.1 reads the resolved mode off THIS line at the "
+            "default INFO log level, and under 'off' the line's ABSENCE is "
+            "the operator's signal (a DEBUG-level line would make 'dry' and "
+            "'enforce' indistinguishable from 'off' with no other signal)"
+        )
+
     def test_the_boot_line_is_guarded_by_the_off_check(self):
         """The line fires ONLY when the mode is NOT ``off`` — under
         ``off`` the ABSENCE of the line is the signal."""
