@@ -26,7 +26,15 @@ from ..repositories.event.models import Event, EventKind
 from ..repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState
 from ..repositories.report_injection.models import ReportInjection, ReportInjectionState
 from ..registry import get_registry
-from .report_recipient import resolve_report_recipient
+from .mission_record_service import (
+    MissionRecordMode,
+    MissionRecordService,
+    resolve_mission_records_mode,
+)
+from .report_recipient import (
+    resolve_report_recipient,
+    resolve_report_recipient_with_commission,
+)
 from .completion_content import (
     event_created_at_as_utc,
     get_last_assistant_timestamp,
@@ -3106,29 +3114,47 @@ Provide a concise summary:"""
             # recipient ONCE, right here — right after the instance
             # fetch, before ANY write-path site runs.
             #
-            # The resolver reads the ``instance_ops_audit`` ledger for a
-            # fresh COMMITTED ``instance_nudge`` against this child and
-            # returns the COMMISSIONER (the nudger) instead of the
-            # structural parent — the byte-level no-op for every child
-            # that was never nudged.
+            # PR3 (Proposal B §3 D1) — THE ROUTING FLIP: the resolution
+            # is now THREE-LEGGED (see report_recipient.py). LEG 1
+            # (armed ONLY in ``enforce``): the child's OLDEST
+            # outstanding commission row (``mission_commissions.
+            # worker_instance_id == child``, ``advisory_backfill=False``
+            # — excluded from routing authority FOREVER) routes the
+            # report to its ``commissioner_instance_id`` (ruling ④:
+            # oldest-outstanding tie-break). LEG 2: the audit-recency
+            # heuristic — the DECLARED LEGACY FALLBACK, byte-identical.
+            # LEG 3: the structural parent. In ``dry``/``off`` the
+            # resolution is byte-for-byte the Phase-1 behavior.
             #
-            # POSTURE: fail-back to the structural parent on ANY read /
-            # parse / DB error — a delivery-path routing decision, not a
-            # heal-probe; the documented posture is at-least-once.
+            # The resolver reads the ``instance_ops_audit`` ledger for a
+            # fresh COMMITTED ``instance_nudge`` against this child (leg
+            # 2) and returns the COMMISSIONER (the nudger) instead of
+            # the structural parent — the byte-level no-op for every
+            # child that was never nudged nor commissioned.
+            #
+            # POSTURE: fail-open at every leg (leg 1 → leg 2 → leg 3) —
+            # a delivery-path routing decision, not a heal-probe; the
+            # documented posture is at-least-once.
             #
             # The resolved value is CARRIED on the result
             # (``report_recipient_id``) and threaded to every write-path
-            # site below. The STRUCTURAL parent (``instance.parent_id``)
-            # is NEVER overloaded — the bus corrective emit and the
+            # site below. The deciding commission row (leg 1 only) rides
+            # the local for the ``report_injections`` mission-provenance
+            # writers + the PR3 delivery terminator further below. The
+            # STRUCTURAL parent (``instance.parent_id``) is NEVER
+            # overloaded — the bus corrective emit and the
             # ``child_completed`` SSE stay structural.
-            report_recipient_id = resolve_report_recipient(
+            _resolved_destination = resolve_report_recipient_with_commission(
                 engine=self._manager.engine,
                 # NO ``session=`` — the resolver opens its OWN session
                 # (F1: a failed audit read must not poison this write
-                # transaction on PG — see report_recipient.py).
+                # transaction on PG — see report_recipient.py). The
+                # commission leg ALWAYS opens its own session.
                 child_instance_id=instance_id,
                 structural_parent_id=instance.parent_id,
             )
+            report_recipient_id = _resolved_destination.recipient_id
+            _routing_commission = _resolved_destination.commission
 
             # ─── Fix 2 idempotency short-circuit ─────────────────────────
             # If the instance is already in a terminal state (COMPLETED
@@ -4523,6 +4549,26 @@ Provide a concise summary:"""
                         child_message_id=completed_message_id,
                         report_message_id=report_message_id,
                         content=last_content,
+                        # ── PR3 D1 — the mission-provenance WRITERS ──
+                        # (the PR1 columns finally gain them). The
+                        # semantics, each with ONE meaning:
+                        # * ``commissioner_instance_id`` = the row's
+                        #   ACTUAL destination (== parent_instance_id
+                        #   here; after the dead-recipient guard's
+                        #   fallback it is the structural parent — the
+                        #   honest record of where the report really
+                        #   went).
+                        # * ``mission_id`` = the deciding LEG-1
+                        #   commission row's mission — set ONLY when the
+                        #   mission-record leg decided the routing
+                        #   (enforce mode); a legacy-leg delivery is an
+                        #   honest NULL (no record-based attribution).
+                        mission_id=(
+                            _routing_commission.mission_id
+                            if _routing_commission is not None
+                            else None
+                        ),
+                        commissioner_instance_id=recipient_for_report,
                     )
                     session.add(report_injection_row)
                     # Flush to surface the IntegrityError early. Only

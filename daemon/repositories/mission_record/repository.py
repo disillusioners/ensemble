@@ -122,11 +122,54 @@ class MissionRecordRepository:
         Oldest-first (deterministic under adoption-delta (a)'s
         multiple-outstanding-rows rule): the commission that has been
         waiting longest is the one the work most plausibly belongs to.
+
+        NOTE: this is the MINT-LADDER lookup (resolve_or_mint rung 2).
+        It does NOT filter advisory backfill rows — rung 2 resolves a
+        commissioning act's mission, and an advisory backfill row IS a
+        recorded commission. ROUTING must NOT use this method: use
+        :meth:`find_routing_commission_for_worker` (advisory rows are
+        excluded from routing authority FOREVER).
         """
         stmt = (
             select(MissionCommission)
             .where(MissionCommission.worker_instance_id == worker_instance_id)
             .where(MissionCommission.state == CommissionState.OUTSTANDING.value)
+            .order_by(MissionCommission.created_at.asc())  # type: ignore[attr-defined]
+            .limit(1)
+        )
+        if session is not None:
+            return session.exec(stmt).first()
+        with Session(self._engine) as own:
+            return own.exec(stmt).first()
+
+    def find_routing_commission_for_worker(
+        self,
+        worker_instance_id: str,
+        *,
+        session: Session | None = None,
+    ) -> MissionCommission | None:
+        """The D1 ROUTING key (PR3): the worker's OLDEST outstanding
+        commission row, advisory backfill rows EXCLUDED FOREVER.
+
+        The routing-authority rule (adoption-delta (a) + (b)): the
+        advisory backfill rows are historical noise — "if dropped, the
+        ledger is worse than no ledger" — so a report must never route
+        to a backfilled nudge's actor. Multi-commissioner tie-break =
+        ruling ④, the OLDEST-outstanding discriminator (created_at
+        ASC; identical to the rung-2 resolution order, now carrying
+        ROUTING authority).
+
+        Consumers: the three-leg report-recipient resolution
+        (``report_recipient.resolve_report_recipient``) in every mode
+        where the mission-record ladder is ``enforce``.
+        """
+        stmt = (
+            select(MissionCommission)
+            .where(MissionCommission.worker_instance_id == worker_instance_id)
+            .where(MissionCommission.state == CommissionState.OUTSTANDING.value)
+            .where(
+                MissionCommission.advisory_backfill.is_(False)  # type: ignore[union-attr]
+            )
             .order_by(MissionCommission.created_at.asc())  # type: ignore[attr-defined]
             .limit(1)
         )

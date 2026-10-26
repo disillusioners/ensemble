@@ -1471,6 +1471,16 @@ class ReportDeliveryRecoveryService:
         # PREFIX ledger was queried for the structural parent) and the
         # lane minted a SECOND obligation for the structural parent —
         # the §7.4 duplication firewall.
+        #
+        # PR3 (Proposal B §3 D1): the resolution gained its
+        # COMMISSION-FIRST leg (the child's oldest outstanding
+        # commission row → its commissioner, enforce-gated) INSIDE
+        # ``resolve_report_recipient`` — this site substitutes the
+        # resolution and touches nothing downstream (the property the
+        # paragraph above documents; the sweep design §3's "teach the
+        # RESOLUTION, not the downstream guards"). Lane 7 (the
+        # mission_reconciliation abandonment probes) is a separate
+        # cycle and is deliberately NOT added here.
         parent_id = resolve_report_recipient(
             engine=getattr(self._manager, "engine", None),
             child_instance_id=child_id,

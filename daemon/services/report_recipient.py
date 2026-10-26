@@ -78,35 +78,75 @@ It keeps the demonstrated harm (the structural parent still consumes the
 foreign report) and needs two recipient sets taught to the backstop.
 
 ADOPTION DELTA (a) — TIE-BREAK PRECEDENCE vs THE MISSION-COMMISSION
-ROWS (completion-subsystem Proposal B PR1)
-----------------------------------------------------------
-Proposal B PR1 now mints ``mission_commissions`` rows on the nudge and
-send_message lanes (multiple OUTSTANDING rows per worker allowed; the
-guarded-state lifecycle is the discriminator; the rung-2 lookup takes
-the OLDEST outstanding row). THIS RESOLVER'S AUTHORITY IS UNCHANGED:
-report routing still keys on the audit-ledger latest-committed-nudge
-tie-break, NOT on commission rows. The commission ledger is
-PR1-write-only (``ENSEMBLE_MISSION_RECORDS`` mode ladder, default
-``dry``); the routing flip (commission-row lookup, with whatever
-multi-commissioner tie-break is decided for the flip) is the PR2/PR3
-boundary. Advisory backfill commission rows
-(``advisory_backfill=True``, ``provenance='backfill'``) are EXCLUDED
-from routing authority FOREVER — if a future flip ever consults
-commission rows, it must filter them out (the "if dropped, the ledger
-is worse than no ledger" rule).
+ROWS (completion-subsystem Proposal B PR1; AMENDED PR3 — THE FLIP)
+--------------------------------------------------------------------------
+PR1 minted ``mission_commissions`` rows on the nudge and send_message
+lanes with routing authority deliberately left with THIS resolver's
+audit-ledger latest-committed-nudge tie-break ("the routing flip … is
+the PR2/PR3 boundary").
+
+**PR3 IS THE FLIP.** The routing authority now reads the record first
+(Proposal B §3 D1 + the reconciliation-sweep design §3, "Lane 2's
+commission-first leg"):
+
+  LEG 1 (the record — armed ONLY in ``enforce``): the child's OLDEST
+  OUTSTANDING commission row
+  (``mission_commissions.worker_instance_id == child``,
+  ``advisory_backfill = False`` — advisory backfill rows are EXCLUDED
+  from routing authority FOREVER) → ``commissioner_instance_id``.
+  Multi-commissioner tie-break = ruling ④: the OLDEST-outstanding
+  discriminator. NO liveness filter on this leg: a TERMINATED
+  commissioner is handled downstream by the write path's dead-recipient
+  guard (which falls back to the structural parent and leaves the
+  commission outstanding for the reconciliation sweep — the honest
+  shape; routing a dead commissioner's report straight to the parent
+  here would silently satisfy nothing and strand the obligation).
+
+  LEG 2 (the DECLARED LEGACY FALLBACK — this module's audit-recency
+  heuristic, UNCHANGED): the latest committed ``instance_nudge`` audit
+  rule, exactly as documented above.
+
+  LEG 3: the STRUCTURAL PARENT (the audit leg's own fail-back).
+
+Mode ladder: in ``dry`` (the ship default) and ``off`` leg 1 is INERT —
+the resolution is byte-for-byte the PR1/PR2 behavior (the audit
+heuristic + the structural-parent fail-back). ``enforce`` is an
+operator promotion (restart-read).
+
+FAIL-OPEN POSTURE (unchanged): leg 1 fails OPEN to leg 2 on any read
+error (a records-side problem must never break delivery); leg 2 keeps
+failing back to the structural parent on any error. At-least-once
+delivery preserved on every path.
+
+RESOLVED REPORT DESTINATION (PR3)
+---------------------------------
+:func:`resolve_report_recipient_with_commission` exposes the FULL
+resolution: the recipient id PLUS the deciding commission row (``None``
+when a legacy leg decided). The natural completion write path uses it
+to write ``report_injections.mission_id`` /
+``report_injections.commissioner_instance_id`` (the PR1 columns gain
+their writers) and to SATISFY the routing commission when the report is
+actually delivered to the commissioner (the PR3 terminator — guarded
+``UPDATE ... WHERE state='outstanding'``, fail-open).
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, NamedTuple
 
 from sqlmodel import Session, select
 
 from ..repositories.instance.models import Instance, InstanceStatus
 from ..repositories.instance_ops.models import InstanceOpsAudit
+from ..repositories.mission_record.models import MissionCommission
+from ..repositories.mission_record.repository import MissionRecordRepository
 from ..repositories.report_injection.models import ReportInjection
+# The mode ladder has ONE owner (``mission_record_service``); the reads
+# module re-exports the gate for read-side consumers. IMPORTED, never
+# redefined — a second definition would be a shadowed knob.
+from .mission_record_reads import mission_records_enforce_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +246,112 @@ def _last_report_time(
     return max(stamps) if stamps else None
 
 
-def resolve_report_recipient(
+class ResolvedReportDestination(NamedTuple):
+    """The FULL routing resolution (PR3 D1 flip).
+
+    ``recipient_id`` — the instance the report should be delivered to
+    (the structural parent when no leg decided otherwise).
+    ``commission`` — the deciding LEG-1 commission row (``None`` when
+    the audit heuristic or the structural parent decided). The natural
+    write path uses it for the ``report_injections`` mission-provenance
+    writers + the PR3 delivery terminator.
+    """
+
+    recipient_id: str | None
+    commission: MissionCommission | None
+
+
+def _resolve_commission_leg(
+    engine: Any,
+    child_instance_id: str,
+) -> MissionCommission | None:
+    """LEG 1 — the child's oldest outstanding (non-advisory) commission.
+
+    Armed ONLY in ``enforce`` (the mode ladder gates the read sites);
+    runs on its OWN session (the mission-record data plane is a
+    separate store from the caller's transaction — the F1 session
+    -isolation discipline); fails OPEN to ``None`` (→ the audit leg)
+    on ANY error.
+    """
+    try:
+        if not mission_records_enforce_enabled():
+            return None
+        commission = MissionRecordRepository(
+            engine
+        ).find_routing_commission_for_worker(child_instance_id)
+        if commission is None:
+            return None
+        commissioner_id = getattr(
+            commission, "commissioner_instance_id", None
+        )
+        if not isinstance(commissioner_id, str) or not commissioner_id:
+            # A malformed row must not route the report at None —
+            # fail open to the audit leg.
+            logger.warning(
+                "report recipient commission leg: commission %s… has a "
+                "malformed commissioner id — falling through to the "
+                "audit leg",
+                str(getattr(commission, "commission_id", ""))[:8],
+            )
+            return None
+        return commission
+    except Exception as exc:  # noqa: BLE001 — fail-open (leg 1 → leg 2)
+        logger.warning(
+            "report recipient commission leg failed (child=%s) — "
+            "falling through to the audit leg: %s: %s",
+            child_instance_id[:8],
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
+def resolve_report_recipient_with_commission(
+    *,
+    engine: Any,
+    child_instance_id: str,
+    structural_parent_id: str | None,
+    session: Session | None = None,
+    completion_time: datetime | None = None,
+) -> ResolvedReportDestination:
+    """The FULL three-leg resolution (see the module docstring).
+
+    Leg 1 (enforce only): the child's oldest outstanding commission →
+    its commissioner. Leg 2: the audit-recency heuristic (the declared
+    legacy fallback). Leg 3: the structural parent. Every failure is
+    fail-open to the next leg; delivery is never broken by a
+    records-side problem.
+    """
+    if not child_instance_id or not structural_parent_id:
+        return ResolvedReportDestination(structural_parent_id, None)
+    commission = _resolve_commission_leg(engine, child_instance_id)
+    if commission is not None:
+        recipient = commission.commissioner_instance_id
+        logger.info(
+            "report recipient resolved to the mission commissioner "
+            "(child=%s, commissioner=%s, structural_parent=%s, "
+            "mission=%s…, commission=%s…)",
+            child_instance_id[:8],
+            recipient[:8],
+            (structural_parent_id or "")[:8],
+            str(getattr(commission, "mission_id", ""))[:8],
+            str(getattr(commission, "commission_id", ""))[:8],
+        )
+        return ResolvedReportDestination(recipient, commission)
+    # Legs 2 + 3 — the legacy audit resolver, byte-identical.
+    return ResolvedReportDestination(
+        _resolve_legacy_audit_recipient(
+            engine=engine,
+            child_instance_id=child_instance_id,
+            structural_parent_id=structural_parent_id,
+            session=session,
+            completion_time=completion_time,
+        ),
+        None,
+    )
+
+
+def _resolve_legacy_audit_recipient(
     *,
     engine: Any,
     child_instance_id: str,
@@ -214,34 +359,11 @@ def resolve_report_recipient(
     session: Session | None = None,
     completion_time: datetime | None = None,
 ) -> str | None:
-    """Resolve the instance that should receive ``child_instance_id``'s
-    completion report.
+    """LEG 2 + LEG 3 — the PR1/PR2 audit-recency resolver, unchanged.
 
-    See the module docstring for the rule. The return value is the
-    RECIPIENT — the structural parent when the resolver cannot (or
-    must not) decide.
-
-    Args:
-        engine: The SQLAlchemy engine (used when no ``session`` is
-            supplied).
-        child_instance_id: The child that produced the report.
-        structural_parent_id: The child's structural parent (the
-            pre-D1 behaviour — the fail-back target).
-        session: OPTIONAL caller-owned session. When given, the reads
-            run on THAT session (inside the caller's transaction) and
-            the method does NOT commit. ``None`` opens its own
-            session — this is the ONLY shape any daemon call site
-            uses, and it is REQUIRED for a caller whose session sits
-            inside a write transaction: on PostgreSQL a failed read on
-            the caller's session poisons that transaction and the
-            fail-back becomes a no-op (see the module docstring,
-            "SESSION ISOLATION — THE HAZARD THAT WAS REMOVED").
-        completion_time: The completion instant (``T_completion``).
-            ``None`` means "now" — the resolver's own clock.
-
-    Returns:
-        The recipient instance id, or ``structural_parent_id`` on a
-        miss or on ANY error (fail-back posture).
+    Demoted to the declared legacy fallback by the PR3 flip (see the
+    module docstring, "ADOPTION DELTA (a) — … AMENDED PR3"); its body
+    is byte-identical to the pre-flip ``resolve_report_recipient``.
     """
     if not child_instance_id or not structural_parent_id:
         return structural_parent_id
@@ -268,6 +390,58 @@ def resolve_report_recipient(
             exc,
         )
         return structural_parent_id
+
+
+def resolve_report_recipient(
+    *,
+    engine: Any,
+    child_instance_id: str,
+    structural_parent_id: str | None,
+    session: Session | None = None,
+    completion_time: datetime | None = None,
+) -> str | None:
+    """Resolve the instance that should receive ``child_instance_id``'s
+    completion report — the PR3 three-leg resolution (commission-first
+    in ``enforce``; the audit heuristic + structural parent otherwise).
+
+    The signature and return type are UNCHANGED from PR1/PR2 — every
+    production call site (``child_reports`` producer,
+    ``message_processing_pipeline`` Site-1 marker,
+    ``report_delivery_recovery`` lane 2) inherits the commission-first
+    leg without call-site churn, and its downstream recipient-aware
+    guards keep reading the resolved recipient (the design's "teach the
+    RESOLUTION, not the downstream guards" property).
+
+    See :func:`resolve_report_recipient_with_commission` for the full
+    result (the deciding commission row) and the module docstring for
+    the rule + posture.
+
+    Args:
+        engine: The SQLAlchemy engine (used when no ``session`` is
+            supplied).
+        child_instance_id: The child that produced the report.
+        structural_parent_id: The child's structural parent (the
+            pre-D1 behaviour — the fail-back target).
+        session: OPTIONAL caller-owned session — applies to the LEGACY
+            audit leg only (the commission leg ALWAYS opens its own
+            session: the mission-record data plane must never join a
+            caller's write transaction). ``None`` opens its own
+            session — this is the ONLY shape any daemon call site
+            uses (see the module docstring, "SESSION ISOLATION").
+        completion_time: The completion instant (``T_completion``).
+            ``None`` means "now" — the resolver's own clock.
+
+    Returns:
+        The recipient instance id, or ``structural_parent_id`` on a
+        miss or on ANY error (fail-back posture).
+    """
+    return resolve_report_recipient_with_commission(
+        engine=engine,
+        child_instance_id=child_instance_id,
+        structural_parent_id=structural_parent_id,
+        session=session,
+        completion_time=completion_time,
+    ).recipient_id
 
 
 def _resolve_in_session(
@@ -324,6 +498,8 @@ def _resolve_in_session(
 __all__ = [
     "NUDGE_ACTION",
     "NUDGE_OUTCOME_COMMITTED",
+    "ResolvedReportDestination",
     "parse_iso_utc",
     "resolve_report_recipient",
+    "resolve_report_recipient_with_commission",
 ]
