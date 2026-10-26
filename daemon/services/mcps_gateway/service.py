@@ -42,6 +42,8 @@ from .audit import (
 )
 from .config import GatewayConfig, load_gateway_config
 from .protocol import (
+    AUDIT_TOOL_SESSION_END,
+    AUDIT_TOOL_SESSION_EXPIRE,
     CENTER_EMITTED_CODES,
     CODE_CAPABILITY_MISSING,
     CODE_HEARTBEAT_TIMEOUT,
@@ -49,6 +51,7 @@ from .protocol import (
     CODE_MACHINE_BUSY,
     CODE_MACHINE_NOT_ENROLLED,
     CODE_PROTOCOL_VERSION_UNSUPPORTED,
+    CODE_SESSION_NOT_FOUND,
     CODE_TOOL_TIMEOUT,
     METHOD_HEARTBEAT,
     METHOD_HELLO,
@@ -65,12 +68,26 @@ from .protocol import (
     TYPE_NOTIFICATION,
     TYPE_REQUEST,
     TYPE_RESPONSE,
+    GatewayAckTimeout,
     GatewayProtocolError,
     make_envelope,
     make_error_envelope,
 )
 from .sessions import GatewaySession, SessionManager
 from .store import InMemoryMachineStore, MachineStore
+from .tombstones import (
+    CAUSE_IDLE,
+    CAUSE_TTL,
+    LEDGER_MACHINE_TIMEOUT,
+    LEDGER_MACHINE_UNREACHABLE,
+    REASON_ALREADY_ENDED,
+    REASON_EXPIRED,
+    REASON_MACHINE_REFUSED,
+    REASON_UNKNOWN_SESSION,
+    RESPONSE_REASONS,
+    SessionTombstone,
+    TombstoneStore,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,9 +111,81 @@ AUDIT_DETAIL_UNRECOGNIZED_CODE = (
 #: The error codes the audit is allowed to record verbatim. Everything
 #: else (a peer's free text that happens to sit in the code slot) is
 #: replaced by :data:`AUDIT_DETAIL_UNRECOGNIZED_CODE`.
+#:
+#: The vocabulary is the protocol codes (centre-emitted + relayed) PLUS
+#: the tokens of the SESSION-LIFECYCLE ledger: the two LEDGER-ONLY
+#: reasons (a release the machine did not confirm) and the two EXPIRY
+#: CAUSES (why the sweep reaped a session). The peer-text guard is
+#: untouched: a code that arrives from the peer and is outside this set
+#: is still rewritten to ``UNRECOGNIZED_ERROR_CODE``.
 AUDIT_ALLOWED_ERROR_CODES: frozenset[str] = frozenset(
     CENTER_EMITTED_CODES | RELAYED_CODES
-) | {"UNRECOGNIZED_ERROR_CODE"}
+) | {
+    "UNRECOGNIZED_ERROR_CODE",
+    LEDGER_MACHINE_UNREACHABLE,
+    LEDGER_MACHINE_TIMEOUT,
+    CAUSE_IDLE,
+    CAUSE_TTL,
+    REASON_EXPIRED,
+    REASON_ALREADY_ENDED,
+    REASON_UNKNOWN_SESSION,
+    REASON_MACHINE_REFUSED,
+}
+
+#: The audit detail CLASSIFICATIONS of the SESSION-LIFECYCLE rows.
+#:
+#: Same rule as the command rows: a FIXED classification, never the
+#: peer's free text and never the raw arguments. The reason token is
+#: appended in brackets by the write path, exactly like the command
+#: rows do.
+AUDIT_DETAIL_SESSION_ENDED = "the remote session was ended"
+AUDIT_DETAIL_SESSION_ENDED_ALREADY_GONE = (
+    "the remote session was ended; the machine held no such session"
+)
+AUDIT_DETAIL_SESSION_REFUSED = "the machine refused to end the remote session"
+AUDIT_DETAIL_SESSION_UNREACHABLE = (
+    "the machine was unreachable; the center released the remote session"
+)
+AUDIT_DETAIL_SESSION_TIMEOUT = "the machine did not answer the session end in time"
+AUDIT_DETAIL_SESSION_ALREADY_ENDED = "the remote session had already ended"
+AUDIT_DETAIL_SESSION_EXPIRED = "the remote session had already expired"
+AUDIT_DETAIL_EXPIRE_RELEASED = (
+    "the remote session expired and the machine released it"
+)
+AUDIT_DETAIL_EXPIRE_ALREADY_GONE = (
+    "the remote session expired and the machine held no such session"
+)
+AUDIT_DETAIL_EXPIRE_UNREACHABLE = (
+    "the remote session expired and the machine was unreachable"
+)
+AUDIT_DETAIL_EXPIRE_TIMEOUT = (
+    "the remote session expired and the machine did not answer the end in time"
+)
+AUDIT_DETAIL_EXPIRE_REFUSED = (
+    "the remote session expired and the machine refused the end"
+)
+
+# ── the outcomes of a ``session.end`` FORWARD ─────────────────────────────
+#
+# The forward is best-effort and NEVER raises: the sweep must survive a
+# wedged machine, and the sweep is the only owner of the expiry reap.
+
+#: The machine acknowledged the end — it released its local lock.
+FORWARD_ACK = "ack"
+
+#: The machine answered ``SESSION_NOT_FOUND`` — it never held the
+#: session, so there is no local lock to release. The machine WAS
+#: notified (it answered), and the session IS over.
+FORWARD_ALREADY_GONE = "already_gone"
+
+#: The CENTRE's own ack deadline fired (``GatewayAckTimeout``).
+FORWARD_TIMEOUT = "timeout"
+
+#: There is no connection, or it is closed — the machine is unreachable.
+FORWARD_UNREACHABLE = "unreachable"
+
+#: The machine answered with any other error envelope — it REFUSED.
+FORWARD_REFUSED = "refused"
 
 #: The deadline of the audit write (R1). A stalled PostgreSQL must not
 #: hang an agent tool call indefinitely: the write is abandoned, the
@@ -123,6 +212,13 @@ DEFAULT_PRE_HELLO_TIMEOUT_MS = 30_000
 #: punished: the sweep reads the CURRENT last-heartbeat stamp, and
 #: §3.3's timeout is already three times the heartbeat interval.
 DEFAULT_MONITOR_INTERVAL_SECONDS = 0.1
+
+
+#: The outcome of a ``session.end`` FORWARD that carries no
+#: acknowledgement payload. A sentinel, not ``None``: the machine's ack
+#: may legitimately BE ``{}``, and an empty acknowledgement is still an
+#: acknowledgement.
+_NO_RESULT = object()
 
 
 class GatewayTransport(Protocol):
@@ -158,6 +254,7 @@ class McpGatewayService:
         *,
         store: MachineStore | None = None,
         audit_sink: AuditSink | None = None,
+        tombstones: TombstoneStore | None = None,
         clock: Callable[[], float] = time.time,
         monitor_interval_seconds: float = DEFAULT_MONITOR_INTERVAL_SECONDS,
         audit_write_timeout_seconds: float = DEFAULT_AUDIT_WRITE_TIMEOUT_SECONDS,
@@ -167,10 +264,16 @@ class McpGatewayService:
         self.config = config if config is not None else load_gateway_config()
         self._store = store if store is not None else InMemoryMachineStore()
         self._audit = audit_sink if audit_sink is not None else NullAuditSink()
+        self._tombstones = tombstones if tombstones is not None else TombstoneStore()
         self._clock = clock
         self._server_version = server_version
         self._audit_write_timeout_seconds = audit_write_timeout_seconds
         self._pre_hello_timeout_ms = pre_hello_timeout_ms
+        # The bound of the CENTRE's own wait for a ``session.end``
+        # acknowledgement — its own deadline, tight and separate from the
+        # command timeout (a wedged machine must never hold an agent for
+        # the whole command timeout).
+        self._session_end_ack_timeout_ms = self.config.session_end_ack_timeout_ms
 
         self._sessions = SessionManager(
             session_ttl_ms=self.config.session_ttl_ms,
@@ -224,6 +327,16 @@ class McpGatewayService:
     def store(self) -> MachineStore:
         """The machine roster of the center."""
         return self._store
+
+    @property
+    def tombstones(self) -> TombstoneStore:
+        """The bounded memory of the ENDED sessions.
+
+        The read surface does NOT expose it: ``GET /sessions`` shows the
+        LIVE sessions only (a tombstone answers a late end, it is not a
+        session anybody can drive).
+        """
+        return self._tombstones
 
     @property
     def audit_failures(self) -> int:
@@ -297,6 +410,10 @@ class McpGatewayService:
                 self._by_machine.pop(connection.machine_id, None)
         killed = self._sessions.end_for_connection(connection.connection_id)
         for session in killed:
+            # The session died WITH its connection: it leaves an
+            # ``already_ended`` tombstone, so a LATE end answers
+            # ``already_ended`` instead of a bare ``unknown_session``.
+            self._record_tombstone(session, reason=REASON_ALREADY_ENDED)
             logger.warning(
                 "the session %s was killed: the connection of the machine %s is gone (%s)",
                 session.session_id,
@@ -642,7 +759,14 @@ class McpGatewayService:
             timeout_s = (timeout_ms or self.config.command_timeout_ms) / 1000.0
             return await asyncio.wait_for(future, timeout=timeout_s)
         except asyncio.TimeoutError:
-            raise GatewayProtocolError(
+            # The CENTRE's OWN deadline fired — a distinct TYPE, not a
+            # distinct code. ``TOOL_TIMEOUT`` is both a centre-emitted
+            # and a RELAYED code, so the code cannot tell this apart from
+            # a machine that relayed its own tool timeout; the TYPE can
+            # (and it must: the centre's own deadline authorises an
+            # authoritative release, a relayed timeout is a REFUSAL and
+            # the session survives it).
+            raise GatewayAckTimeout(
                 CODE_TOOL_TIMEOUT,
                 f"{method} exceeded the center deadline of {timeout_ms or self.config.command_timeout_ms} ms",
                 {"method": method, "timeout_ms": timeout_ms or self.config.command_timeout_ms},
@@ -728,7 +852,13 @@ class McpGatewayService:
             )
             # The session dies FIRST (it is not resumable), then the
             # refusal goes out in-band, then the socket closes.
-            self._sessions.end_for_connection(connection.connection_id)
+            for session in self._sessions.end_for_connection(
+                connection.connection_id
+            ):
+                # The session died with the machine: it leaves an
+                # ``already_ended`` tombstone, so a LATE end answers
+                # ``already_ended`` instead of a bare ``unknown_session``.
+                self._record_tombstone(session, reason=REASON_ALREADY_ENDED)
             await self._send(
                 connection,
                 make_error_envelope(
@@ -744,13 +874,218 @@ class McpGatewayService:
         return killed
 
     async def expire_sessions(self) -> list[GatewaySession]:
-        """Drop the sessions that passed their TTL or their idle timeout."""
-        expired = self._sessions.expire_due(self._clock())
-        for session in expired:
+        """Reap the sessions that passed their TTL or their idle timeout.
+
+        THE SINGLE OWNER OF THE EXPIRY REAP
+        ----------------------------------
+
+        This method is the ONLY place that reaps an EXPIRED session. The
+        command path REFUSES an expired session (``SESSION_EXPIRED``) but
+        never releases it, and the explicit end path is not a reap at
+        all. The reason is mechanical: the sweep can only see the
+        sessions that are STILL in the session manager — a session
+        released by another owner is invisible to it, so the machine
+        would keep its local lock while the centre's roster already said
+        the slot was free.
+
+        TWO PASSES, ON PURPOSE
+        ---------------------
+
+        PASS 1 does NOT await anything: for the WHOLE expired batch it
+        clears the centre-side roster pointer and writes the ``expired``
+        tombstone. PASS 2 then forwards the ``session.end`` to each
+        machine, one after the other, under its own bounded deadline.
+
+        The order is not cosmetic. While the sweep waits for machine A's
+        acknowledgement, machine B must ALREADY be released centre-side:
+        otherwise the roster would report ``busy: true`` with a DEAD
+        session id, and B would have no tombstone — so a late end for B
+        would answer ``unknown_session`` instead of ``expired``.
+
+        The centre-side release of the whole batch is therefore COMPLETE
+        before ANY forward starts; the machine-side forward is the
+        bounded part (N x the ack deadline in the worst case).
+
+        THE SOCKET STAYS OPEN
+        ----------------------
+
+        The forward is the ONLY thing the sweep does to the machine. The
+        socket is NOT closed: the machine releases its local lock when it
+        acknowledges the ``session.end`` and returns to ``ready`` on the
+        SAME connection, so the next session opens on that connection.
+        """
+        now = self._clock()
+        expired = self._sessions.expire_due(now)
+        if not expired:
+            return []
+        batch = [(session, self._expiry_cause(session, now)) for session in expired]
+
+        # PASS 1 — NO await at all: the centre-side release of the WHOLE
+        # batch (the roster pointer + the tombstone).
+        for session, cause in batch:
             logger.warning(
-                "the session %s expired (ttl or idle timeout)", session.session_id
+                "the session %s expired (%s)", session.session_id, cause
             )
+            # The roster release is session-id-guarded: a machine that
+            # re-helloed and bound a NEW session keeps that new session.
+            self._store.clear_session(session.machine_id, session.session_id)
+            self._record_tombstone(session, reason=REASON_EXPIRED, cause=cause)
+
+        # PASS 2 — serial, awaiting: the machine-side release (bounded).
+        for session, cause in batch:
+            await self._reap_expired_session(session, cause)
         return expired
+
+    @staticmethod
+    def _expiry_cause(session: GatewaySession, now: float) -> str:
+        """Why the sweep reaped this session — ``ttl`` or ``idle``.
+
+        The TTL ceiling wins when both passed: it is the harder bound.
+        """
+        if now >= session.expires_at:
+            return CAUSE_TTL
+        return CAUSE_IDLE
+
+    def _record_tombstone(
+        self,
+        session: GatewaySession,
+        *,
+        reason: str,
+        cause: str = "",
+        at: float | None = None,
+    ) -> None:
+        """Remember an ended session in the bounded tombstone store.
+
+        The tombstone is what lets a LATE end request answer ``expired``
+        or ``already_ended`` instead of a bare ``unknown_session`` — and
+        it is bounded in BOTH count and age, so it cannot grow into a
+        memory leak (see ``daemon/services/mcps_gateway/tombstones.py``).
+        """
+        self._tombstones.record(
+            SessionTombstone(
+                session_id=session.session_id,
+                reason=reason,
+                at=self._clock() if at is None else at,
+                agent_id=session.agent_id,
+                instance_id=session.instance_id,
+                machine_id=session.machine_id,
+                cause=cause,
+            )
+        )
+
+    async def _forward_session_end(self, session: GatewaySession) -> bool:
+        """Forward the ``session.end`` of a session to its machine.
+
+        Best-effort and NEVER raises: the sweep must survive a wedged
+        machine, and the sweep is the only owner of the expiry reap.
+
+        Returns whether the MACHINE was notified: it answered (an
+        acknowledgement, or ``SESSION_NOT_FOUND`` — the machine holds no
+        such session, so its local lock is already gone). No connection,
+        a closed connection, a refusal and a missing acknowledgement all
+        answer ``False``.
+        """
+        outcome = await self._forward_session_end_outcome(session)
+        return outcome in (FORWARD_ACK, FORWARD_ALREADY_GONE)
+
+    async def _forward_session_end_outcome(self, session: GatewaySession) -> str:
+        """The one forward, classified.
+
+        The FRAME keeps EXACTLY the params it has always had —
+        ``{"session_id": ...}``. The reason of the end never travels on
+        the wire: it lives in the agent-facing response envelope and in
+        the audit ledger.
+        """
+        connection = self._connections.get(session.connection_id)
+        if connection is None or connection.closed:
+            logger.warning(
+                "the machine %r is unreachable; the session %s stays "
+                "released centre-side",
+                session.machine_id,
+                session.session_id,
+            )
+            return FORWARD_UNREACHABLE
+        try:
+            await self._request(
+                connection,
+                METHOD_SESSION_END,
+                {"session_id": session.session_id},
+                session_id=session.session_id,
+                timeout_ms=self._session_end_ack_timeout_ms,
+            )
+        except GatewayAckTimeout:
+            # The CENTRE's own deadline fired (the TYPE, never the code
+            # string: a RELAYED timeout is a plain GatewayProtocolError
+            # and falls through to the refusal branch below).
+            logger.warning(
+                "the machine %r did not acknowledge the session end of %s "
+                "within %d ms",
+                session.machine_id,
+                session.session_id,
+                self._session_end_ack_timeout_ms,
+            )
+            return FORWARD_TIMEOUT
+        except GatewayProtocolError as exc:
+            if exc.code == CODE_SESSION_NOT_FOUND:
+                # The machine does not know the session: its local lock
+                # is already gone, so there is nothing left to release.
+                return FORWARD_ALREADY_GONE
+            logger.warning(
+                "the machine %r refused the session end of %s (%s)",
+                session.machine_id,
+                session.session_id,
+                exc.code,
+            )
+            return FORWARD_REFUSED
+        except Exception as exc:  # noqa: BLE001 — the forward is best-effort
+            logger.warning(
+                "the session end of %s could not be forwarded to the "
+                "machine %r: %s",
+                session.session_id,
+                session.machine_id,
+                exc,
+            )
+            return FORWARD_UNREACHABLE
+        return FORWARD_ACK
+
+    async def _reap_expired_session(self, session: GatewaySession, cause: str) -> None:
+        """Forward one reaped session's end and write its audit row.
+
+        The audit row is what answers the operator question "why did this
+        session not end?" — the sweep's own release leaves no other
+        trace in the ledger.
+        """
+        outcome = await self._forward_session_end_outcome(session)
+        if outcome == FORWARD_ACK:
+            audit_outcome = OUTCOME_OK
+            error_code = cause
+            detail = AUDIT_DETAIL_EXPIRE_RELEASED
+        elif outcome == FORWARD_ALREADY_GONE:
+            audit_outcome = OUTCOME_OK
+            error_code = cause
+            detail = AUDIT_DETAIL_EXPIRE_ALREADY_GONE
+        elif outcome == FORWARD_TIMEOUT:
+            audit_outcome = OUTCOME_TIMEOUT
+            error_code = LEDGER_MACHINE_TIMEOUT
+            detail = AUDIT_DETAIL_EXPIRE_TIMEOUT
+        elif outcome == FORWARD_UNREACHABLE:
+            audit_outcome = OUTCOME_ERROR
+            error_code = LEDGER_MACHINE_UNREACHABLE
+            detail = AUDIT_DETAIL_EXPIRE_UNREACHABLE
+        else:
+            audit_outcome = OUTCOME_ERROR
+            error_code = REASON_MACHINE_REFUSED
+            detail = AUDIT_DETAIL_EXPIRE_REFUSED
+        await self._audit_session(
+            agent_id=session.agent_id,
+            instance_id=session.instance_id,
+            machine_id=session.machine_id,
+            session_id=session.session_id,
+            tool=AUDIT_TOOL_SESSION_EXPIRE,
+            outcome=audit_outcome,
+            error_code=error_code,
+            detail=detail,
+        )
 
     # ── the ops read surface (Phase C) ────────────────────────────────────
     #
@@ -953,6 +1288,14 @@ class McpGatewayService:
 
         session = self._sessions.for_agent(agent_id)
         if session is None:
+            # The sweep may have reaped this session already. The refusal
+            # then answers SESSION_EXPIRED — with the session id of the
+            # reaped session — instead of SESSION_NOT_FOUND: the SAME
+            # expiry must not produce two different codes depending on
+            # which path noticed it.
+            tombstone = self._tombstones.latest_for_agent(agent_id, self._clock())
+            if tombstone is not None and tombstone.reason == REASON_EXPIRED:
+                raise SessionManager.session_expired(tombstone.session_id)
             # P1: the refusal names the AGENT (there is no session id to
             # name) — the contract's ``data.session_id`` carries a
             # SESSION id, so it is absent here, not the agent id.
@@ -966,8 +1309,11 @@ class McpGatewayService:
         if now >= session.expires_at or (
             now - session.last_activity
         ) >= (self.config.session_idle_timeout_ms / 1000.0):
-            self._sessions.end(session.session_id)
-            self._store.clear_session(session.machine_id, session.session_id)
+            # SINGLE OWNER: the SWEEP reaps an expired session — this
+            # path only REFUSES. Releasing here would hide the session
+            # from the sweep (it only sees the sessions still in the
+            # manager), so the machine would keep its local lock while
+            # the roster already said the slot was free.
             raise SessionManager.session_expired(session.session_id)
 
         try:
@@ -1042,40 +1388,318 @@ class McpGatewayService:
         The machine keeps the SOCKET OPEN and returns to ``ready``: the
         next session is opened on the same connection.
 
+        THE END CONTRACT
+        ----------------
+
+        ``disconnect`` answers a dict for EVERY outcome — it never
+        raises for a session-state reason (the kill switch, i.e. a
+        disabled gateway, is the ONLY thing that raises). The shape is::
+
+            {
+              "session_id": str,      # ONLY when it is known
+              "machine_id": str,      # ONLY when it is known
+              "ended": bool,
+              "detail": str,
+              "machine_notified": bool,
+              "why_not_ended": str,   # present IFF "ended" is False
+              "result": Any,          # ONLY on the acknowledged path
+            }
+
+        ``why_not_ended`` carries one of the four RESPONSE-borne reasons
+        (``expired``, ``already_ended``, ``unknown_session``,
+        ``machine_refused`` — see
+        ``daemon/services/mcps_gateway/tombstones.py``). The two
+        LEDGER-only tokens (``machine_unreachable``, ``machine_timeout``)
+        describe the CENTRE's release path and NEVER appear in a
+        response: they are audit-row reasons only.
+
+        ``session_id`` / ``machine_id`` are included ONLY when they are
+        known — an unknown session must never leak the existence of
+        somebody else's session.
+
+        PROVENANCE: the envelope and the reason taxonomy are a
+        CENTRE-SIDE CONVENTION ported from the sibling fleet's
+        remote-hands centre for parity. They are NOT SPEC v0.1 text (the
+        SPEC mandates the typed errors ``SESSION_EXPIRED`` /
+        ``SESSION_NOT_FOUND`` and the server-side ownership of the
+        session timeouts, and says nothing about ``why_not_ended``), and
+        the WIRE PROTOCOL is unchanged by them: the ``session.end``
+        frame keeps exactly the params it always had. An amendment
+        request to the SPEC owner is pending — it is not this repo's job.
+
         R2: it refuses while the transport is off, like the other three
         operations.
         """
         self._assert_enabled()
+
         session = self._sessions.for_agent(agent_id)
         if session is None:
-            raise SessionManager.session_not_found(agent_id)
+            return await self._end_without_session(agent_id, instance_id)
 
         connection = self._connections.get(session.connection_id)
         if connection is None or connection.closed:
-            self._sessions.end(session.session_id)
-            self._store.clear_session(session.machine_id, session.session_id)
-            raise SessionManager.session_not_found(session.session_id)
+            # (d) The machine is unreachable. Guarded against a DOUBLE
+            # RELEASE: the sweep may have reaped this session while the
+            # caller was on its way here — then the session is gone and
+            # the tombstone answers.
+            if self._sessions.get(session.session_id) is None:
+                return await self._end_without_session(agent_id, instance_id)
+            return await self._end_without_machine(
+                session,
+                agent_id=agent_id,
+                instance_id=instance_id,
+                error_code=LEDGER_MACHINE_UNREACHABLE,
+                detail=(
+                    "the machine is unreachable; the center released the "
+                    "session authoritatively"
+                ),
+                audit_detail=AUDIT_DETAIL_SESSION_UNREACHABLE,
+            )
 
-        # The machine acknowledges the end with the session id (§6.8).
-        # A refusal (e.g. SESSION_NOT_FOUND — the machine does not know
-        # the session) propagates UNCHANGED and the session SURVIVES:
-        # the center mirrors the machine here, it does not invent a
-        # local release the peer did not acknowledge.
-        result = await self._request(
-            connection,
-            METHOD_SESSION_END,
-            {"session_id": session.session_id},
-            session_id=session.session_id,
+        try:
+            result = await self._request(
+                connection,
+                METHOD_SESSION_END,
+                {"session_id": session.session_id},
+                session_id=session.session_id,
+                timeout_ms=self._session_end_ack_timeout_ms,
+            )
+        except GatewayAckTimeout:
+            # (e) The CENTRE's OWN ack deadline fired. The TYPE is the
+            # discrimination — a RELAYED timeout is a plain
+            # GatewayProtocolError and falls through to the refusal
+            # branch below, where the session SURVIVES.
+            return await self._end_without_machine(
+                session,
+                agent_id=agent_id,
+                instance_id=instance_id,
+                error_code=LEDGER_MACHINE_TIMEOUT,
+                detail=(
+                    "the machine did not acknowledge the end of the session "
+                    "within the center deadline of "
+                    f"{self._session_end_ack_timeout_ms} ms; the center "
+                    "released the session authoritatively"
+                ),
+                audit_detail=AUDIT_DETAIL_SESSION_TIMEOUT,
+            )
+        except GatewayProtocolError as exc:
+            if exc.code == CODE_SESSION_NOT_FOUND:
+                # (b) The machine no longer holds the session — its lock
+                # is already gone, so there is nothing left to release.
+                return await self._end_acknowledged(
+                    session,
+                    agent_id=agent_id,
+                    instance_id=instance_id,
+                    error_code=CODE_SESSION_NOT_FOUND,
+                    detail=(
+                        "machine_session_already_gone — the machine no longer "
+                        "held the session"
+                    ),
+                    audit_detail=AUDIT_DETAIL_SESSION_ENDED_ALREADY_GONE,
+                )
+            # (c) Any other refusal — including a RELAYED TOOL_TIMEOUT.
+            # The machine WAS notified and it REFUSED: the session
+            # SURVIVES, and the centre does not invent a local release
+            # the peer did not acknowledge.
+            await self._audit_session(
+                agent_id=agent_id,
+                instance_id=instance_id,
+                machine_id=session.machine_id,
+                session_id=session.session_id,
+                tool=AUDIT_TOOL_SESSION_END,
+                outcome=OUTCOME_ERROR,
+                error_code=REASON_MACHINE_REFUSED,
+                detail=AUDIT_DETAIL_SESSION_REFUSED,
+            )
+            return {
+                "session_id": session.session_id,
+                "machine_id": session.machine_id,
+                "ended": False,
+                "why_not_ended": REASON_MACHINE_REFUSED,
+                "detail": f"the machine refused the session end ({exc.code})",
+                "machine_notified": True,
+            }
+
+        # (a) The machine acknowledged the end.
+        return await self._end_acknowledged(
+            session,
+            agent_id=agent_id,
+            instance_id=instance_id,
+            error_code="",
+            detail="the machine acknowledged the end of the session",
+            audit_detail=AUDIT_DETAIL_SESSION_ENDED,
+            result=result,
         )
 
-        self._sessions.end(session.session_id)
-        self._store.clear_session(session.machine_id, session.session_id)
+    async def _end_acknowledged(
+        self,
+        session: GatewaySession,
+        *,
+        agent_id: str,
+        instance_id: str,
+        error_code: str,
+        detail: str,
+        audit_detail: str,
+        result: Any = _NO_RESULT,
+    ) -> dict[str, Any]:
+        """The end the MACHINE confirmed (or confirmed it no longer holds).
+
+        The centre-side state is released and the session leaves an
+        ``already_ended`` tombstone, so a LATE end answers
+        ``already_ended`` instead of a bare ``unknown_session``.
+        """
+        self._release_centre_side(session)
+        envelope: dict[str, Any] = {
+            "session_id": session.session_id,
+            "machine_id": session.machine_id,
+            "ended": True,
+            "detail": detail,
+            "machine_notified": True,
+        }
+        if result is not _NO_RESULT:
+            # The machine's VERBATIM acknowledgement — only on the
+            # acknowledged path.
+            envelope["result"] = result
+        await self._audit_session(
+            agent_id=agent_id,
+            instance_id=instance_id,
+            machine_id=session.machine_id,
+            session_id=session.session_id,
+            tool=AUDIT_TOOL_SESSION_END,
+            outcome=OUTCOME_OK,
+            error_code=error_code,
+            detail=audit_detail,
+        )
+        return envelope
+
+    async def _end_without_machine(
+        self,
+        session: GatewaySession,
+        *,
+        agent_id: str,
+        instance_id: str,
+        error_code: str,
+        detail: str,
+        audit_detail: str,
+    ) -> dict[str, Any]:
+        """The end the CENTRE released AUTHORITATIVELY.
+
+        The machine was not there (or did not answer in time): the
+        centre's release is the truth, and the ledger records WHY — the
+        ledger-only token (``machine_unreachable`` / ``machine_timeout``),
+        never a response reason.
+        """
+        self._release_centre_side(session)
+        await self._audit_session(
+            agent_id=agent_id,
+            instance_id=instance_id,
+            machine_id=session.machine_id,
+            session_id=session.session_id,
+            tool=AUDIT_TOOL_SESSION_END,
+            outcome=(
+                OUTCOME_TIMEOUT
+                if error_code == LEDGER_MACHINE_TIMEOUT
+                else OUTCOME_ERROR
+            ),
+            error_code=error_code,
+            detail=audit_detail,
+        )
         return {
             "session_id": session.session_id,
             "machine_id": session.machine_id,
             "ended": True,
-            "result": result,
+            "detail": detail,
+            "machine_notified": False,
         }
+
+    async def _end_without_session(
+        self, agent_id: str, instance_id: str
+    ) -> dict[str, Any]:
+        """The end of a session that is NOT (or no longer) live.
+
+        The agent's most recent tombstone decides the answer: ``expired``
+        (the sweep reaped it) or ``already_ended`` (it was ended). With
+        no tombstone the honest answer is ``unknown_session`` — ONE
+        neutral text for "never existed" and "not yours", so the answer
+        can never become an existence oracle for somebody else's
+        session.
+
+        NO audit row is written for the unknown case: there is no
+        machine to attribute the row to, and the ledger attributes EVERY
+        row.
+        """
+        tombstone = self._tombstones.latest_for_agent(agent_id, self._clock())
+        if tombstone is None:
+            return {
+                "ended": False,
+                "why_not_ended": REASON_UNKNOWN_SESSION,
+                "detail": "there is no open session for this agent",
+                "machine_notified": False,
+            }
+        if tombstone.reason == REASON_EXPIRED:
+            detail = "the session expired and was reaped by the center"
+            audit_detail = AUDIT_DETAIL_SESSION_EXPIRED
+        else:
+            detail = "the session was already ended"
+            audit_detail = AUDIT_DETAIL_SESSION_ALREADY_ENDED
+        # The RESPONSE carries a response-borne reason only — the guard
+        # is the runtime half of the "two disjoint sets" invariant.
+        response_reason = self._response_reason(tombstone.reason)
+        if tombstone.machine_id:
+            # The ledger attributes EVERY row — a row without a machine
+            # cannot be attributed, so it is not written.
+            await self._audit_session(
+                agent_id=tombstone.agent_id,
+                instance_id=tombstone.instance_id or instance_id,
+                machine_id=tombstone.machine_id,
+                session_id=tombstone.session_id,
+                tool=AUDIT_TOOL_SESSION_END,
+                outcome=OUTCOME_ERROR,
+                error_code=tombstone.reason,
+                detail=audit_detail,
+            )
+        envelope: dict[str, Any] = {
+            "ended": False,
+            "why_not_ended": response_reason,
+            "detail": detail,
+            "machine_notified": False,
+        }
+        if tombstone.session_id:
+            envelope["session_id"] = tombstone.session_id
+        if tombstone.machine_id:
+            envelope["machine_id"] = tombstone.machine_id
+        return envelope
+
+    @staticmethod
+    def _response_reason(reason: str) -> str:
+        """Guard the DISJOINT reason sets at runtime.
+
+        A response may carry ONLY a response-borne reason. A ledger-only
+        token here would be a BUG — those describe the CENTRE's release
+        path (``machine_unreachable`` / ``machine_timeout``), not the
+        agent's session, and an agent that branched on them would be
+        branching on an implementation detail. The guard logs the leak
+        loudly and falls back to the neutral reason.
+        """
+        if reason in RESPONSE_REASONS:
+            return reason
+        logger.error(
+            "the ledger-only reason %r reached an end response — this is a "
+            "bug (the two reason sets must stay disjoint)",
+            reason,
+        )
+        return REASON_UNKNOWN_SESSION
+
+    def _release_centre_side(self, session: GatewaySession) -> None:
+        """Release the centre-side state of a session and remember it.
+
+        The roster release is session-id-guarded (``store.clear_session``
+       ): a machine that re-helloed and bound a NEW session keeps that
+        new session.
+        """
+        self._sessions.end(session.session_id)
+        self._store.clear_session(session.machine_id, session.session_id)
+        self._record_tombstone(session, reason=REASON_ALREADY_ENDED)
 
     # ── the audit ────────────────────────────────────────────────────────
 
@@ -1151,11 +1775,92 @@ class McpGatewayService:
             detail=detail,
             created_at=now_utc_iso(),
         )
+        await self._write_audit_record(record)
+
+    async def _audit_session(
+        self,
+        *,
+        agent_id: str,
+        instance_id: str,
+        machine_id: str,
+        session_id: str,
+        tool: str,
+        outcome: str,
+        error_code: str = "",
+        detail: str = "",
+    ) -> None:
+        """Write ONE audit row for a SESSION-LIFECYCLE event.
+
+        The session surfaces (``session.end`` — the explicit end, and
+        ``session.expire`` — the sweep's reap) have no remote tool, so
+        their rows carry the SURFACE name in the ``tool`` column and the
+        hash of the session.end PARAMS in ``args_hash`` — the arguments
+        are hashed, never stored (the same rule as a command row).
+
+        The ledger is where the operator asks "why did this session not
+        end?", so it needs the reason. The ``error_code`` carries a
+        token of the CENTRE's own vocabulary: the RESPONSE-borne reasons
+        (``expired``, ``already_ended``, ``unknown_session``,
+        ``machine_refused``), the LEDGER-only reasons
+        (``machine_unreachable``, ``machine_timeout``) and the expiry
+        causes (``idle``, ``ttl``). It NEVER carries the peer's free
+        text — the ``detail`` is a FIXED classification.
+
+        The write inherits the command path's discipline: it is off the
+        event loop, it is bounded, and it NEVER aborts the operation.
+        """
+        if not self.config.audit_enabled:
+            return
+        if error_code and error_code not in AUDIT_ALLOWED_ERROR_CODES:
+            error_code = "UNRECOGNIZED_ERROR_CODE"
+        if error_code:
+            detail = f"{detail} [{error_code}]" if detail else f"[{error_code}]"
+        record = AuditRecord(
+            agent_id=agent_id,
+            instance_id=instance_id,
+            machine_id=machine_id,
+            tool=tool,
+            args_hash=hash_args({"session_id": session_id}),
+            outcome=outcome,
+            session_id=session_id,
+            error_code=error_code,
+            detail=detail,
+            created_at=now_utc_iso(),
+        )
+        await self._write_audit_record(record)
+
+    async def _write_audit_record(self, record: AuditRecord) -> None:
+        """Write ONE audit row — off the event loop, bounded, never fatal.
+
+        An audit failure NEVER aborts the operation the row describes: a
+        command that was forwarded, or a session that was ended, has
+        already happened — refusing to report it because the
+        OBSERVABILITY write failed would turn an audit problem into an
+        availability problem. The failure is logged loudly and counted.
+
+        THE WRITE IS OFF THE EVENT LOOP
+        --------------------------------
+
+        The DB-backed sink (:class:`McpGatewayAuditRepository`) is
+        SYNCHRONOUS — it opens a ``Session(engine)`` and commits, and a
+        slow or stalled PostgreSQL would freeze the WHOLE daemon event
+        loop (every agent, every socket, the gateway's own sweep). So the
+        write is bridged through ``asyncio.to_thread`` — the repo's
+        established convention for calling a blocking repository from
+        async code (``daemon/services/auth_service.py``,
+        ``daemon/services/work_notifier.py``).
+
+        The write is still AWAITED, not fired and forgotten: the row is
+        durable before the operation returns, so there is no race between
+        the audit and the answer, and a shutdown cannot lose the row of
+        an operation that already happened. Nothing else is held while
+        it runs (no lock, no session), so the offload cannot deadlock.
+        """
         try:
             # R1: the write is BOUNDED. A stalled PostgreSQL must not
             # hang an agent tool call indefinitely — the write is
             # abandoned, the failure is counted and logged, and the
-            # command result stands.
+            # operation result stands.
             await asyncio.wait_for(
                 asyncio.to_thread(self._audit.record, record),
                 timeout=self._audit_write_timeout_seconds,
@@ -1163,15 +1868,15 @@ class McpGatewayService:
         except asyncio.TimeoutError:
             self._audit_failures += 1
             logger.error(
-                "the remote-command audit write timed out after %.1fs (%d "
-                "failures so far); the command result stands",
+                "the remote-hands audit write timed out after %.1fs (%d "
+                "failures so far); the operation result stands",
                 self._audit_write_timeout_seconds,
                 self._audit_failures,
             )
         except Exception as exc:  # noqa: BLE001 — the audit must not wedge the gateway
             self._audit_failures += 1
             logger.error(
-                "the remote-command audit row could not be written (%d failures so far): %s",
+                "the remote-hands audit row could not be written (%d failures so far): %s",
                 self._audit_failures,
                 exc,
             )

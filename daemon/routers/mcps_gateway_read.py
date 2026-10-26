@@ -84,9 +84,14 @@ router = APIRouter(prefix="/mcps-gateway", tags=["mcps-gateway"])
 #: The lifecycle state of a session in the center.
 #:
 #: The center keeps only LIVE sessions: a session belongs to its
-#: connection (§6.8) and is KILLED with it — there is no resumption and
-#: no "ended" tombstone. The field is nevertheless reported, so the
-#: page renders a state without a second lookup.
+#: connection (§6.8) and is KILLED with it — there is no resumption. An
+#: ENDED session leaves a bounded IN-MEMORY tombstone
+#: (``daemon/services/mcps_gateway/tombstones.py``), but the tombstone is
+#: bookkeeping, not a session: it answers a LATE end (and keeps the
+#: command path's error code honest), and it is **NOT exposed on this
+#: read surface** — ``GET /sessions`` still shows the LIVE sessions only.
+#: The field is nevertheless reported, so the page renders a state without
+#: a second lookup.
 SESSION_STATE_LIVE = "live"
 
 #: The pagination contract of the audit tail — the same shape as the

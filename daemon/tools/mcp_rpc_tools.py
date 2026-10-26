@@ -297,13 +297,17 @@ Returns:
     @register_tool_category("mcp_rpc")
     @tool(args_schema=McpRpcDisconnectInput)
     async def mcp_rpc_disconnect() -> dict[str, Any]:
-        """End the open remote session. Use tool_help("mcp_rpc_disconnect") for details."""
+        """End the open remote session (reason-coded answer). Use tool_help("mcp_rpc_disconnect") for details."""
         if not _is_mcp_rpc_authorized(caller_agent_id):
             return _error(
                 CODE_INTERNAL,
                 "remote-hands control is not permitted for this agent",
             )
         try:
+            # The service answers a REASON-CODED ENVELOPE for every
+            # session-state outcome — it never raises for one (the
+            # kill-switch, i.e. a disabled gateway, is the only thing
+            # that raises, and it reaches the agent as a typed error).
             return await gateway_service.disconnect(
                 agent_id=caller_agent_id,
                 instance_id=caller_instance_id,
@@ -319,10 +323,31 @@ Returns:
 The machine keeps its socket open and returns to ``ready``: the next
 session is opened on the same connection.
 
+The answer is a REASON-CODED ENVELOPE and it is returned for EVERY
+session-state outcome — the tool never raises for one (only the
+kill-switch, i.e. a disabled gateway, answers ``{"error": {...}}``)::
+
+    {session_id?, machine_id?, ended: bool, detail: str,
+     machine_notified: bool, why_not_ended?, result?}
+
+- ``why_not_ended`` is present IFF ``ended`` is false; its value is one
+  of ``expired`` (the session was reaped by the expiry sweep),
+  ``already_ended`` (it was ended before), ``unknown_session`` (this
+  agent holds no session, and none is remembered) or ``machine_refused``
+  (the machine refused the end — the session SURVIVES).
+- ``result`` is the machine's VERBATIM acknowledgement and is present
+  only when the machine acknowledged the end.
+- ``session_id`` / ``machine_id`` are present only when they are known:
+  the answer never leaks the existence of somebody else's session.
+- ``machine_notified`` says whether the MACHINE was reached at all.
+
+The tool takes NO argument: the end is AGENT-ADDRESSED — it ends the
+session this agent holds, if any.
+
 Args: none.
 
 Returns:
-    {"session_id", "machine_id", "ended": true}
+    The reason-coded envelope above.
 """
 
     return [

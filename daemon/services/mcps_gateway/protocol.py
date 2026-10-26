@@ -144,6 +144,15 @@ RELAYED_CODES: frozenset[str] = frozenset(
     }
 )
 
+#: The audit ``tool`` values of the SESSION-LIFECYCLE surfaces.
+#:
+#: A command row carries the name of the REMOTE TOOL that was called. The
+#: two session-lifecycle surfaces have no remote tool, so they carry the
+#: name of the SURFACE instead — a stable, filterable value that lets an
+#: operator ask the ledger "why did this session not end?".
+AUDIT_TOOL_SESSION_END = "session.end"
+AUDIT_TOOL_SESSION_EXPIRE = "session.expire"
+
 #: The protocol limit of a single frame (§6.7) and the hard ceiling above
 #: it — the same shape the shipped client uses.
 DEFAULT_MAX_FRAME_BYTES = 8 << 20
@@ -177,6 +186,32 @@ class GatewayProtocolError(Exception):
         if self.data:
             error["data"] = self.data
         return error
+
+
+class GatewayAckTimeout(GatewayProtocolError):
+    """The CENTRE's own ack deadline fired while it waited for the machine.
+
+    A distinct TYPE, never a distinct CODE. ``TOOL_TIMEOUT`` is BOTH a
+    centre-emitted code (the centre's own deadline) and a RELAYED code
+    (the machine relayed its own tool timeout), so the code alone cannot
+    tell the two apart — and the two must be treated differently: the
+    centre's own deadline means the centre may release the session
+    AUTHORITATIVELY, while a RELAYED timeout is the machine's refusal to
+    end the session, and the session SURVIVES it.
+
+    This subclass is raised ONLY at the centre's ``wait_for`` site (the
+    one place the centre gives up on its OWN wait), so
+    ``isinstance(exc, GatewayAckTimeout)`` is the only honest
+    discrimination — never a comparison against the code string.
+    """
+
+    def __init__(
+        self,
+        code: str,
+        message: str = "",
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(code, message, data)
 
 
 def make_envelope(
@@ -253,6 +288,8 @@ def canonical_json(value: Any) -> str:
 
 
 __all__ = [
+    "AUDIT_TOOL_SESSION_END",
+    "AUDIT_TOOL_SESSION_EXPIRE",
     "CENTER_EMITTED_CODES",
     "CENTER_ORIGINATED_METHODS",
     "CLIENT_ORIGINATED_METHODS",
@@ -272,6 +309,7 @@ __all__ = [
     "CODE_TOOL_NOT_FOUND",
     "CODE_TOOL_TIMEOUT",
     "DEFAULT_MAX_FRAME_BYTES",
+    "GatewayAckTimeout",
     "GatewayProtocolError",
     "HARD_MAX_FRAME_BYTES",
     "METHOD_HEARTBEAT",
