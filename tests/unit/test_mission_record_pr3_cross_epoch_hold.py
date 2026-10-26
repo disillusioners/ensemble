@@ -29,7 +29,6 @@ mission leg precedes the tree-liveness leg in
 
 from __future__ import annotations
 
-import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -219,7 +218,7 @@ class TestCrossEpochHold:
         seeded; the hold reason names the mission leg, proving the
         mission leg fired BEFORE the liveness leg could defer).
         """
-        service = _orphan_scenario(engine)
+        _orphan_scenario(engine)
         # PR2 caveat (e): a LIVE descendant in the tree — the hold must
         # come from the MISSION leg, not be masked/replaced by a
         # liveness deferral.

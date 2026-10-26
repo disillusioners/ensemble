@@ -49,7 +49,6 @@ from daemon.services.mission_record_reads import (
     read_mission_census,
 )
 from daemon.services.mission_record_service import (
-    MISSION_RECORDS_MODE_ENV,
     MissionRecordService,
     _reset_mission_records_mode_for_tests,
 )
@@ -162,7 +161,6 @@ class TestAdvisoryExclusionEverywhere:
         assert counters["minted_commissions"] == 1
 
         # The row EXISTS and is durable (the audit ledger).
-        repo = MissionRecordRepository(engine)
         rows = list(
             Session(engine).exec(select(MissionCommission)).all()
         )

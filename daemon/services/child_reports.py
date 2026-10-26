@@ -30,10 +30,7 @@ from .mission_record_service import (
     MissionRecordService,
     satisfy_commission_fail_open,
 )
-from .report_recipient import (
-    resolve_report_recipient,
-    resolve_report_recipient_with_commission,
-)
+from .report_recipient import resolve_report_recipient_with_commission
 from .completion_content import (
     event_created_at_as_utc,
     get_last_assistant_timestamp,
