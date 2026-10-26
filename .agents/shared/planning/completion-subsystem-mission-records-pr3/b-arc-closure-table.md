@@ -5,8 +5,11 @@ IMPLEMENTATION TRUTH; this file is the CLOSURE VERDICT per defect, per the
 design's own §3 per-defect table (proposal-b) and the architecture map. It
 does not restate implementation prose beyond what a verdict row needs.
 
-**Branch:** `feature/mission-records-pr3` @ `7ce4b2cdd` (base `013895287` —
-21 commits, 36 files, +5351/−231).
+**Branch:** `feature/mission-records-pr3` — range `013895287..4e37aa711`
+(base `013895287`). The counts below are measured **as of the review
+commit `4e37aa711`**: 23 commits, 38 files, +6098/−231. (Later commits
+on the branch change the totals — cite the range, not a self-referential
+count.)
 
 **Rule for every row below:** a defect counts as CLOSED only if the defect AS
 CATALOGUED is closed, not merely made non-load-bearing. A row that says
@@ -144,6 +147,7 @@ valve so it cannot become an eternal mission.
 | **D4(iii) — the enqueue-masking FIX** | Deferred (the observability shipped as `masked_suspected`) |
 | **D4(iv) — `send_message` result.status surfacing** | Deferred (a pure seam patch) |
 | **OQ-6 — the `(state, created_at)` composite index** | DEFERRED with a perf note: at the expected cardinality (the outstanding set is tiny) the state-only filter suffices |
+| **OQ-7 — the commission row's ``work_id`` is never stamped (the JobItem-live leg is INERT)** | **OPEN — IMPLEMENTED + WIRED, UNREACHABLE.** The lane-7 JobItem-live probe reads ``mission_commissions.work_id``, but NO mint lane stamps it: the ``send_message`` lane (``daemon/tools/instance.py``) and the ``instance_nudge`` lane (``daemon/tools/instance_ops.py``) mint commissions WITHOUT a work id, and the only job-driven lane (``job_continue``, ``daemon/tools/job_queue.py``) attaches the work id to the EPOCH row (``mission_records.work_id``) and mints NO commission row. Every production commission therefore takes the "no linkage → not live" branch — the leg is dead code in production. **FAIL-SAFE (why this is not a live defect):** the worker-side ``instance_repo.has_live_work`` leg covers the JobItem-queued-on-the-worker case, so a live worker is never abandoned at any age. **FOLLOW-UP:** stamp the linkage at a mint lane (deliberately NOT invented in PR3 — the sweep's job-item lookup shape is not settled). The probe's own tests (``tests/unit/test_mission_reconciliation_sweep.py::TestTheJobItemLiveCheck``) build the row BY HAND and prove the code path, NOT the wiring. |
 | **OQ-3(a) — the `enqueue_message_id` column** | NOT RULED IN — the nullable column (precise D4(iii) matching) was never adopted; `resolved_at` (OQ-3(b)) WAS, `provenance` (OQ-3(c)) went to `mission_records` only |
 | **Test-scaffolding consolidation** | RE-DEFERRED — there is no house helper to consolidate onto (`tests/helpers/` carries no mission-record fixture) |
 | **The pre-existing environment hangs + the A/B-proven base reds** | Not branch-caused — the tester lane's standing quarantine rows + the A/B-parity proof (the PR2 full-pool A/B measured zero branch-caused reds) |
@@ -165,8 +169,53 @@ The PR3 adoption notes §(e) (the terminator call-site table) was authored at
 **Action for the next editor of the PR3 notes:** §(e)'s table and its
 "ZERO production callers" line should be corrected to match (f) below. The
 notes are the implementation truth, so a stale line in them is a live
-misstatement. *(Not corrected here — this cycle is documentation-only and the
-notes are not in this cycle's deliverable set.)*
+misstatement. **CLOSED at `4e37aa711`** — the notes' §(e) table + the
+"ZERO production callers" line were corrected in this branch (the sweep's
+three abandon call sites + the "the service METHOD has zero callers" split).
+The remaining census-pin drift is a SEPARATE item — see (d.4) below.
+
+### (d.4) The census `hooked_at` pin drift — a RE-ANCHOR note (NOT re-anchored here)
+
+**Pre-existing + quarantined.** The fixture
+`tests/job_queue/test_terminal_write_census.py` pins each `hooked` entry's
+`hooked_at` at the `notify_watchers` call that covers the site; the anti-rot
+check requires such a call within **±5 lines** of the pin. The
+`daemon/services/child_reports.py` pins are **already stale AT BASE** — the
+live calls sit far outside the ±5 window there — so the check was red
+before this branch and is a known quarantined red (`.agents/tester/
+QUARANTINE.md` rows 38 + 50 — the `test_terminal_write_census` family;
+row 50 names the `child_reports.py:3941 ×4` pins explicitly).
+
+**The branch's shift (+107 lines).** The PR3 commits added lines above the
+call sites, so the live `notify_watchers` calls moved:
+
+| `notify_watchers` call in `daemon/services/child_reports.py` | base `013895287` | branch `4e37aa711` | Δ |
+|---|---|---|---|
+| first call | `:5540` | `:5647` | **+107** |
+| second call | `:5556` | `:5663` | **+107** |
+
+(the third `notify_watchers` mention at `:5668` is a log string, not a call.)
+
+**The pins are stale BEFORE and AFTER.** The fixture pins
+`daemon/services/child_reports.py:3941` (×4 — the root-completion /
+dispatch-wrapper family) and `:5457` (×2 — the mission-strand-healer
+family). At base, `:5457` was already 83 lines from the live `:5540` call
+and `:3941` was 1599 away; after the branch's +107 shift the live calls are
+`:5647` / `:5663`, i.e. **190 lines** past the `:5457` pin. The fixture was
+**deliberately NOT touched by PR3** — re-anchoring it here would absorb an
+unrelated, already-quarantined rot into this branch's diff and mask it.
+
+**Re-anchor note for whoever re-anchors next (outside this PR):**
+
+* the two `:5457` pins → the live pair `:5647` / `:5663` (a plain line bump);
+* the four `:3941` pins → these point at a call that no longer exists at
+  that site at all (the live pair is the one above) — they need a RE-SURVEY
+  of the root-completion hook, not a line bump;
+* re-run `tests/job_queue/test_terminal_write_census.py` and confirm the
+  family's other pins (the row-50 list: `task_processor.py:1087`,
+  `job_feedback_observer.py:1989`) in the same pass;
+* the fixture's own anti-rot guidance (its module docstring) is the
+  sanctioned procedure — follow it rather than editing the numbers blind.
 
 ---
 

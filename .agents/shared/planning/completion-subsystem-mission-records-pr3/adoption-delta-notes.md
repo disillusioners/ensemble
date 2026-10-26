@@ -194,7 +194,11 @@ dry-run evidence that tunes the TTL default); ``recovered`` stays 0
   ``ttl_expired_not_live`` · ``worker_row_missing``.
 * The resolution stamp: ``mission_commissions.resolved_at`` (TEXT ISO;
   written for EVERY resolution — abandoned OR satisfied; NULL while the
-  row is outstanding).
+  row is outstanding). It is written by BOTH guarded writers — the
+  reconciliation sweep (``resolve_commission``) and the delivery
+  terminator's guarded transition (``transition_commission_state``) —
+  each its own single-statement guarded UPDATE, so there is no
+  double-stamp.
 
 ### Posture (the binding contract)
 
@@ -218,8 +222,20 @@ dependency_watchers).
 * **OQ-6 (the ``(state, created_at)`` index)** — DEFERRED with a perf
   note: at the expected cardinality (the outstanding set is tiny) the
   state-only filter suffices.
-* **OQ-7 (the JobItem-live check)** — INCLUDED: a commission whose
-  ``work_id`` resolves to a non-terminal JobItem is LIVE → HOLD.
+* **OQ-7 (the JobItem-live check)** — IMPLEMENTED + WIRED, but INERT
+  in production: the leg reads ``mission_commissions.work_id``, and
+  NO mint lane stamps it — the ``send_message`` lane
+  (``daemon/tools/instance.py``) and the ``instance_nudge`` lane
+  (``daemon/tools/instance_ops.py``) mint commissions without a work
+  id, and the only job-driven lane (``job_continue``,
+  ``daemon/tools/job_queue.py``) attaches the work id to the EPOCH row
+  (``mission_records.work_id``) and mints NO commission row. Every
+  production commission therefore takes the "no linkage → not live"
+  branch. The sweep stays FAIL-SAFE — the worker-side
+  ``instance_repo.has_live_work`` leg covers the JobItem-queued-on-
+  the-worker case, so a live worker is never abandoned. FOLLOW-UP
+  (OPEN, not in this PR): stamp the work linkage at a mint lane — see
+  the B-arc closure table §(d.2).
 * **Advisory rows** — EXCLUDED from the sweep admission (one
   consistent predicate with the routing / census / quiet reads); they
   are audit-only by design.
