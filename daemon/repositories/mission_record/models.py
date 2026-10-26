@@ -399,6 +399,13 @@ class MissionCommission(SQLModel, table=True):
             EXCLUDED from routing authority forever (the
             "if dropped, the ledger is worse than no ledger" rule,
             comparison.md §4c).
+        resolved_at: TEXT ISO stamp written by the RECONCILIATION SWEEP
+        (Proposal B PR3, OQ-3(b)) when the row leaves ``outstanding``
+        for ANY reason (``abandoned`` OR ``satisfied``). It is
+        DISTINCT from ``satisfied_at`` on purpose: dual-purposing
+        ``satisfied_at`` for abandoned rows would make the column name
+        lie (an abandoned commission was never satisfied). NULL while
+        the row is outstanding, which is the honest default.
     """
 
     __tablename__ = "mission_commissions"
@@ -456,6 +463,11 @@ class MissionCommission(SQLModel, table=True):
         default=None,
         sa_column=Column("abandon_reason", Text, nullable=True),
     )
+    # PR3 (OQ-3(b)) — the RESOLUTION stamp: when the row left
+    # ``outstanding`` (abandoned OR satisfied). Distinct from
+    # ``satisfied_at`` on purpose (an abandoned row was never
+    # satisfied). TEXT ISO, nullable — NULL means "unresolved".
+    resolved_at: str | None = Field(default=None)
     advisory_backfill: bool = Field(default=False)
 
 

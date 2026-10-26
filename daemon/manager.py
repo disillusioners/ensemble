@@ -8395,6 +8395,16 @@ class InstanceManager:
             "ALTER TABLE report_injections ADD COLUMN IF NOT EXISTS mission_id TEXT",
             "ALTER TABLE report_injections ADD COLUMN IF NOT EXISTS commissioner_instance_id TEXT",
             "ALTER TABLE message_metadata ADD COLUMN IF NOT EXISTS mission_id TEXT",
+            # ── Proposal B PR3 (OQ-3(b)) — the commission RESOLUTION stamp.
+            # Written by the reconciliation sweep's guarded transition
+            # (``MissionRecordRepository.resolve_commission``) for EVERY
+            # resolution (abandoned OR satisfied). Nullable, default NULL
+            # — "unresolved" is the honest default for an outstanding row.
+            # The SQLite counterpart is
+            # ``daemon/migrations/versions/20261026_060000_add_mission_commission_resolved_at.sql``;
+            # the model field is ``MissionCommission.resolved_at`` in
+            # ``daemon/repositories/mission_record/models.py`` (3-site pin).
+            "ALTER TABLE mission_commissions ADD COLUMN IF NOT EXISTS resolved_at TEXT",
             # ── Proposal B PR2 — F1 carry: the OPEN-EPOCH partial unique
             # index (2026-10-25). At most ONE ``open`` mission_records row
             # may exist per anchor — the resolution ladder's rung-1
