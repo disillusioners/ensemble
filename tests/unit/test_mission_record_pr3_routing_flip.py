@@ -43,6 +43,7 @@ import daemon.repositories.mission_record.models  # noqa: F401
 import daemon.repositories.report_injection.models  # noqa: F401
 import daemon.repositories.task.models  # noqa: F401
 from daemon.repositories.instance.models import Instance, InstanceStatus
+from daemon.repositories.mission_record.models import MissionCommission
 from daemon.repositories.mission_record.repository import (
     MissionRecordRepository,
 )
@@ -129,17 +130,49 @@ def _seed_commission(
     lane="send_message",
     advisory=False,
     created_at=None,
-    state="outstanding",
 ):
+    """Mint one commission row and (optionally) stamp its ``created_at``.
+
+    ``created_at`` is HONOURED — via a post-mint UPDATE. The mint call
+    (``MissionRecordService.mint_commission``) takes NO timestamp
+    kwarg, so the previous shape of this helper SILENTLY DROPPED the
+    argument: the two seeded rows landed ~2.8 ms apart, and the
+    ruling-④ tie-break pin still passed with the repository's
+    ``ORDER BY created_at ASC`` REMOVED (a VACUOUS pin). The stamp is
+    applied here so the row's ``created_at`` is exactly the value the
+    caller asked for.
+
+    The ``state`` kwarg is GONE: the mint always produces an
+    ``outstanding`` row and no caller ever asked for another state
+    (the grep found no ``state=`` call site) — a silently-dropped
+    parameter is a trap, not an API.
+    """
     service = MissionRecordService(engine)
     resolution = service.resolve_or_mint(commissioner, "user_api")
-    return service.mint_commission(
+    commission = service.mint_commission(
         resolution.mission_id,
         commissioner_instance_id=commissioner,
         worker_instance_id=worker,
         lane=lane,
         advisory_backfill=advisory,
     )
+    if created_at is not None:
+        with Session(engine) as session:
+            session.exec(
+                update(MissionCommission)
+                .where(
+                    MissionCommission.commission_id == commission.commission_id
+                )
+                .values(created_at=created_at)
+            )
+            session.commit()
+            # Re-read the row so the RETURNED object carries the
+            # stamped value (the mint's own object is detached and
+            # still holds the pre-stamp default).
+            refreshed = session.get(MissionCommission, commission.commission_id)
+            if refreshed is not None:
+                commission = refreshed
+    return commission
 
 
 def _resolve(engine, **kwargs):
@@ -208,20 +241,55 @@ class TestTheRoutingFlip:
         self, engine, enforce_mode
     ):
         """Ruling ④: the OLDEST-outstanding discriminator is the
-        multi-commissioner tie-break."""
+        multi-commissioner tie-break.
+
+        THE PIN IS LIVE, NOT VACUOUS. Two things make it so:
+
+        * the two rows are stamped with a REAL 2 h gap (the
+          fixture-realness guard below), so ``created_at`` ORDER is
+          unambiguous; and
+        * the seeding order is INVERTED — the NEWER commission is
+          inserted FIRST and the OLDER one SECOND — so INSERTION order
+          ≠ ``created_at`` order. Without the inversion the pin would
+          still be vacuous: SQLite returns rows in insertion order when
+          there is no composite ``(state, created_at)`` index (OQ-6,
+          DEFERRED), so removing the repository's
+          ``ORDER BY created_at ASC`` would still yield the older row
+          and the pin would stay GREEN.
+
+        The test's MEANING is unchanged by the inversion ("the
+        OLDEST-outstanding wins") — only the incidental seeding order
+        moved.
+        """
         _seed_base(engine)
         _seed_instance(engine, COMMISSIONER_2)
         old = datetime.now(timezone.utc) - timedelta(hours=2)
         new = datetime.now(timezone.utc)
-        _seed_commission(
+        # The fixture-realness guard: the two rows must differ by AT
+        # LEAST 1 h, so a millisecond-scale stamp (the shape the
+        # silently-dropped kwarg produced) can never pass as "oldest".
+        assert (new - old) >= timedelta(hours=1), (
+            "the tie-break fixture MUST separate the two rows by at "
+            "least 1 h — a sub-second gap cannot discriminate the "
+            "oldest-outstanding rule"
+        )
+        # INVERTED seeding order: the NEWER row is inserted FIRST.
+        newer = _seed_commission(
+            engine,
+            commissioner=COMMISSIONER_2,
+            created_at=new.isoformat(),
+        )
+        older = _seed_commission(
             engine,
             commissioner=COMMISSIONER,
             created_at=old.isoformat(),
         )
-        _seed_commission(
-            engine,
-            commissioner=COMMISSIONER_2,
-            created_at=new.isoformat(),
+        # The two rows really are in the inverted order (the guard the
+        # VACUITY proof rests on).
+        assert newer.created_at > older.created_at, (
+            "the newer commission must be the one inserted FIRST — "
+            "otherwise the tie-break pin does not discriminate the "
+            "ORDER BY from insertion order"
         )
         recipient, deciding = resolve_report_recipient_with_commission(
             engine=engine,

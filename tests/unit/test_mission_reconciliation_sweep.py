@@ -45,6 +45,7 @@ level).
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import uuid
 from pathlib import Path
@@ -979,7 +980,8 @@ class TestTheDiagnosticEvidenceLegs:
     The ruling: legs 2/3 may NEVER authorise a ``satisfied`` and may
     NEVER authorise a hold-against-abandon. Leg 1 (the commission-bound,
     state-filtered injection-row read) is the ONLY authority. The
-    diagnostic legs KEEP RUNNING (their result is logged + counted).
+    diagnostic legs KEEP RUNNING (their result is logged; their FAULTS
+    are counted in their own counter).
     """
 
     def test_an_earlier_commissions_queue_enqueue_does_not_satisfy_a_fresh_commission(
@@ -1124,6 +1126,61 @@ class TestTheDiagnosticEvidenceLegs:
         assert payload["diagnostic_probe_errors"] == 0
         assert payload["probe_errors"] == 0
         assert payload["masked_probe_errors"] == 0
+
+    def test_the_diagnostic_positive_result_is_logged(
+        self, engine, manager_loop, caplog
+    ):
+        """V-F1: the diagnostic POSITIVE path is PINNED, not merely run.
+
+        The F2 ruling says the diagnostic legs "keep running; their
+        result is logged and counted" — but the code counts only the
+        FAULTS (in ``diagnostic_probe_errors``); the POSITIVE result
+        is LOGGED (the operator signal) and nothing else. Without a
+        pin, DISCARDING the positive result entirely (the mutation:
+        never set ``evidence = True``) left this whole file GREEN: the
+        positive path was UNPINNED and could have been silently
+        deleted without any test noticing.
+
+        The pin asserts the operator-visible INFO line IS emitted for a
+        commission whose leg-2 (queue-side PREFIX ledger) read returns
+        POSITIVE. It also pins the DIAGNOSTIC-ONLY invariant on the
+        same pass: the positive diagnostic must NOT satisfy the row.
+        """
+        commission_id = _mint_commission(
+            engine, created_at=_iso_seconds_ago(60)
+        )
+        service, _ = _build_service(
+            engine,
+            manager_loop=manager_loop,
+            instance_repo=FakeInstanceRepo(statuses={"worker-1": "running"}),
+            queue_repo=FakeQueueRepo(delivered=True),
+        )
+
+        with caplog.at_level(
+            logging.INFO, logger="daemon.services.report_delivery_recovery"
+        ):
+            lane = service.recover_now().lanes["mission_reconciliation"]
+
+        diagnostic_lines = [
+            record.getMessage()
+            for record in caplog.records
+            if "DIAGNOSTIC delivery evidence" in record.getMessage()
+        ]
+        assert diagnostic_lines, (
+            "the diagnostic legs' POSITIVE result MUST be LOGGED (the "
+            "operator signal the F2 ruling promises) — no INFO line was "
+            "emitted, so the positive path is UNPINNED"
+        )
+        assert commission_id in diagnostic_lines[0], (
+            "the diagnostic INFO line MUST carry the commission id (the "
+            "operator needs to trace WHICH row); got "
+            f"{diagnostic_lines[0]!r}"
+        )
+        # The diagnostic stays DIAGNOSTIC-ONLY: the positive leg-2
+        # signal never satisfies the row (leg 1 is the only authority).
+        assert lane.satisfied_on_evidence == 0
+        row = _row(engine, commission_id)
+        assert row.state == CommissionState.OUTSTANDING.value
 
 
 # ---------------------------------------------------------------------------

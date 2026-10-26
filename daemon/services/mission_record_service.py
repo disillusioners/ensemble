@@ -301,8 +301,9 @@ def resolve_mission_commission_ttl_seconds(
     ``ENSEMBLE_MISSION_COMMISSION_TTL_SECONDS`` — the operator knob
     for the reconciliation sweep's time-bounded fail-MISS backstop
     (the design's R2/P3). Default ``21600`` (6h) — the same horizon
-    family as ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` (the
-    one-horizon principle).
+    family as ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` BY DEFAULT (both
+    default to 6 h); the sweep's TTL is INDEPENDENTLY env-tunable and
+    MAY DIVERGE from the guard's fixed constant.
 
     House-switch pattern: the value is resolved ONCE and cached
     (restart-read) so a mid-run env mutation cannot change a resolved

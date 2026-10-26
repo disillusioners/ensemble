@@ -8,9 +8,11 @@
 --   WHY.
 --
 --   * mission_commissions.resolved_at — TEXT ISO UTC. Written by the
---     sweep's guarded transition (``resolve_commission``) for EVERY
---     resolution. NULL while the row is outstanding ("unresolved" is
---     the honest default).
+--     ONE guarded UPDATE that owns every resolution —
+--     ``MissionRecordRepository.transition_commission_state`` — for
+--     EVERY resolution (the sweep's abandon / satisfy-on-evidence, the
+--     delivery terminator's satisfy, the mint lanes' supersede). NULL
+--     while the row is outstanding ("unresolved" is the honest default).
 --
 --   DISTINCT FROM ``satisfied_at`` ON PURPOSE: dual-purposing
 --   ``satisfied_at`` for ABANDONED rows would make the column name

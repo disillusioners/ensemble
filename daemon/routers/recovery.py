@@ -91,7 +91,15 @@ async def recover_report_delivery(request: Request) -> dict[str, Any]:
     # documented 503 promise covers BOTH shapes; the switch itself
     # lives in ONE place (the service) — the router only READS the
     # public ``enabled`` flag, it does not re-implement the check.
-    if not getattr(service, "enabled", True):
+    #
+    # F9(a): the ``enabled`` default is FAIL-SAFE (``False``), not
+    # fail-open. A service object that does NOT expose the flag (a
+    # partial init, a test double, a future refactor that renames the
+    # attribute) MUST NOT be treated as ENABLED — the write choke point
+    # (``recover_now``) re-checks ``self._enabled`` itself, so this
+    # default only decides the HTTP status, and 503 ("disabled") is the
+    # safe answer for an object that cannot prove it is enabled.
+    if not getattr(service, "enabled", False):
         raise HTTPException(
             status_code=503,
             detail=(

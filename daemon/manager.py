@@ -1032,6 +1032,31 @@ class InstanceManager:
         # are equivalent; binding keeps the boot read explicit).
         _mission_records_mode = resolve_mission_records_mode()
 
+        # F5 (the operator's boot observable): ONE INFO line naming the
+        # RESOLVED mode, so an operator can tell ``dry`` from ``enforce``
+        # from the boot log ALONE (the enforce-promotion runbook §1.1
+        # reads this line).
+        #
+        # EMITTED ONLY WHEN THE MODE IS NOT ``off``: under ``off`` the
+        # lane is inert, so there is NO mission-records boot line at all
+        # — and that ABSENCE is the signal (the other two observables —
+        # the enforce boot backfill line and the sweep's ``(mode=…)``
+        # field — are silent under ``off`` too).
+        #
+        # SIDE-EFFECT-FREE: a logger call only — no read, no write, no
+        # probe. It sits OUTSIDE every swallow envelope (the backfill
+        # block's ``try`` starts below), so it is emitted even if the
+        # backfill itself fails. An UNRECOGNIZED
+        # ``ENSEMBLE_MISSION_RECORDS`` token raises the loud ValueError
+        # at the resolver line ABOVE, OUTSIDE any envelope — the daemon
+        # does not start, so "daemon up + no line" means ``off``, and
+        # "daemon not up" means a bad token (or another boot failure).
+        if _mission_records_mode != MissionRecordMode.OFF:
+            logger.info(
+                "mission_records: mode resolved (mode=%s)",
+                _mission_records_mode,
+            )
+
         # ── Proposal B PR1 — adoption-delta (b): advisory nudge-commission
         # backfill (mode-gated: PR3 makes it COMMITTING in enforce) ────
         # Best-effort historical coverage of the existing

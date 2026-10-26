@@ -430,9 +430,12 @@ DEFAULT_AGENT_VERSIONS_METADATA_KEY = "default_agent_versions"  # metadata key i
 #
 # DEFAULT 21600s (6h) — the SAME horizon family as
 # ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` (6h,
-# ``daemon/services/mission_live_guard.py``): the one-horizon principle
-# (a hold can never last forever, and the two hold-hosts share one
-# clock). It is an ENV KNOB (restart-read), never a hard-coded decision.
+# ``daemon/services/mission_live_guard.py``) BY DEFAULT (both default
+# to 6 h): a hold can never last forever, and the two hold-hosts START
+# on the same clock. The horizon family is a DEFAULT, NOT an invariant
+# — this TTL is INDEPENDENTLY env-tunable and MAY DIVERGE from the
+# guard's fixed constant as soon as an operator sets a TTL != 21600. It
+# is an ENV KNOB (restart-read), never a hard-coded decision.
 MISSION_COMMISSION_TTL_ENV: str = "ENSEMBLE_MISSION_COMMISSION_TTL_SECONDS"
 DEFAULT_MISSION_COMMISSION_TTL_SECONDS: int = 6 * 60 * 60  # 21600s = 6h
 

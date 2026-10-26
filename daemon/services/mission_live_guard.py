@@ -213,6 +213,11 @@ logger = logging.getLogger(__name__)
 #   every message enqueue, so it can never prove a tree is quiet).
 #   A childless root falls back to its OWN stamp — the root IS the
 #   whole tree there, so its activity is the tree activity.
+# * The horizon family is a DEFAULT, NOT an invariant: this constant is
+#   FIXED (6 h), while the reconciliation sweep's commission TTL
+#   (``ENSEMBLE_MISSION_COMMISSION_TTL_SECONDS``) is INDEPENDENTLY
+#   env-tunable and starts on the same 6 h default — it MAY DIVERGE from
+#   this constant the moment an operator sets a TTL != 21600.
 MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS: int = 6 * 60 * 60  # 6 hours
 
 

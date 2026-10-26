@@ -79,7 +79,8 @@ house deploy trap applies in full:
   `ENSEMBLE_MISSION_RECORDS=dry` and a restart (§4.4).
 
 **Verify before continuing:** the running daemon's boot log shows the mode
-resolution, and the record substrate is present in the live database. The
+resolution — the THREE observables below, read together — and the record
+substrate is present in the live database. The
 schema lands ADDITIVELY — SQLite via the migration runner
 (`20261025_122631_create_mission_records.sql`,
 `20261025_122700_create_mission_commissions.sql`,
@@ -88,6 +89,40 @@ schema lands ADDITIVELY — SQLite via the migration runner
 `resolved_at` column and the F1 open-epoch index are applied by the boot
 path, so a pre-PR3 binary simply ignores them — the daemon must have BOOTED
 once on the new binary before those PG-side statements have run.
+
+**The mode resolution — the THREE observables.** There is no summary line;
+the mode shows up in the log as one of the following, and reading them
+together tells the operator exactly which mode the live daemon is in:
+
+| Observable | Exact shape | Fires when |
+|---|---|---|
+| **The boot mode line** | `mission_records: mode resolved (mode=dry)` or `mission_records: mode resolved (mode=enforce)` — ONE `INFO` line, emitted at the mode-resolution site in `daemon/manager.py` | `dry` and `enforce` ONLY. Under `off` there is **NO** mission-records boot line at all. |
+| **The enforce boot backfill line** | `mission_records: advisory nudge-commission backfill COMMITTED run (enforce boot): {...}` (`INFO`) — and in `dry` its counterpart `mission_records: advisory nudge-commission backfill dry-run plan: {...}` (`INFO`) | `enforce` (the COMMITTING run) resp. `dry` (the preview). Both fire ONLY when the backfill actually scanned something (the `scanned` counter is non-zero) — a boot that scanned nothing logs neither. |
+| **The sweep's `(mode=…)` field** | inside the sweep's admission line: `RDRS lane 7: mission_reconciliation admitted N outstanding commission(s) (mode=…, ttl=…s, batch_cap=…)` (`INFO`) | every lane-7 pass in `dry` / `enforce` — `N` may be `0`; the `(mode=…)` field reads `(mode=dry)` or `(mode=enforce)`. Under `off` the lane is NOT EVEN QUERIED: the sweep logs `RDRS lane 7: mission-records mode is off — lane not queried` (`INFO`) instead, and that line carries NO `(mode=…)` field. |
+
+**Reading them:**
+
+* **`dry`** → the boot line `(mode=dry)` **and** the dry-run plan line
+  (when the backfill scanned something) **and** the sweep's `(mode=dry)`.
+* **`enforce`** → the boot line `(mode=enforce)` **and** the backfill's
+  `COMMITTED run (enforce boot)` line (when it scanned something) **and**
+  the sweep's `(mode=enforce)`.
+* **`off`** → **the ABSENCE of the boot mode line is the signal.** Under
+  `off` the lane is inert, so none of the three observables fire: no
+  `mission_records: mode resolved …` line, no backfill line, and no
+  `(mode=…)` field anywhere (the sweep's `mode is off — lane not queried`
+  line carries none). *Daemon up + no mission-records boot line ⇒ `off`.*
+* **A THIRD, distinct case — a BAD ENV TOKEN.** This is NOT `off`. An
+  unrecognized `ENSEMBLE_MISSION_RECORDS` token raises a loud `ValueError`
+  at the SAME resolution site, OUTSIDE every swallow envelope, so **the
+  daemon does not start at all** (see §1.2). *Daemon NOT up ⇒ a bad token
+  (or some other boot failure) — never `off`.* Do not read "no line" as
+  `off` without first checking that the daemon is actually running
+  (`/livez`).
+
+The boot mode line is the ONLY one of the three that is emitted
+unconditionally for its mode (it is a logger call and nothing else — no
+read, no write, no probe), so it is the reliable first check.
 
 ### 1.2 The ship default stays `dry` — and an invalid token fails the boot LOUDLY
 
@@ -362,7 +397,19 @@ RDRS lane 7: mission_reconciliation admitted N outstanding commission(s) (mode=�
 sweep mission_reconciliation ABANDONED mission_id=…, commission_id=…, commissioner=…, worker=…, lane=…, abandon_reason=…, age_seconds=…
 sweep mission_reconciliation SATISFIED mission_id=…, commission_id=…, commissioner=…, worker=…, lane=…, satisfy_reason=delivery_evidence, age_seconds=…
 sweep mission_reconciliation MASKED ENQUEUE suspected mission_id=…, commission_id=…, commissioner=…, worker=…, lane=…, age_seconds=… — no queue row since the mint; NO auto-action
+sweep mission_reconciliation DIAGNOSTIC delivery evidence (NOT a resolution authority — F2) mission_id=…, commission_id=…, commissioner=…, worker=…, lane=…
+sweep mission_reconciliation DIAGNOSTIC evidence probe failed (queue PREFIX ledger) mission_id=…, commission_id=…, commissioner=…, worker=…, lane=…: … — DIAGNOSTIC ONLY: the row is NOT held and the abandon path is NOT blocked
+sweep mission_reconciliation DIAGNOSTIC evidence probe failed (parent-history PREFIX ledger) mission_id=…, commission_id=…, commissioner=…, worker=…, lane=…: … — DIAGNOSTIC ONLY: the row is NOT held and the abandon path is NOT blocked
 ```
+
+The last three lines are the F2 DIAGNOSTIC legs 2/3 (the queue-side + the
+parent-history PREFIX ledgers). They are **DIAGNOSTIC ONLY** — they never
+authorise a `satisfied` and never authorise a hold-against-abandon. The
+`DIAGNOSTIC delivery evidence` line is the POSITIVE signal (the legs saw
+something); the two `DIAGNOSTIC evidence probe failed` lines are the FAULT
+signal (the legs could not run). A positive diagnostic is logged ONLY; a
+diagnostic FAULT is logged AND counted in `diagnostic_probe_errors` (its own
+counter — see the counter table above).
 
 In `dry` mode the verb on the first two lines is the dry-run variant
 (`WOULD ABANDON (dry-run)` / `WOULD SATISFY (dry-run)`) — that is how you tell
@@ -375,7 +422,14 @@ pass writes nothing, so a WARNING there would fire on every detection and
 drown the real signal. The `MASKED ENQUEUE suspected` line is a WARNING for a
 different reason — it is an ANOMALY signal, not an action (and it has a
 documented false-positive population: see §3.6 — do not trip the rollback on
-it alone).
+it alone). **The DIAGNOSTIC-probe FAULT line is the SECOND documented
+anomaly exception** (`DIAGNOSTIC evidence probe failed`): a persistently
+failing diagnostic probe IS an anomaly worth surfacing — it is an
+OBSERVABILITY probe that has stopped observing, and it writes nothing (the
+row is NOT held and the abandon path is NOT blocked). Its `INFO` POSITIVE
+counterpart (`DIAGNOSTIC delivery evidence`) stays `INFO`: a positive
+diagnostic fires on every delivery seen on a pair, so a WARNING there would
+drown the real signal exactly like the dry-run previews do.
 
 **`masked_suspected` is the D4(iii) observability signal.** It fires when a
 commissioned worker's queue row is entirely absent past the grace window — the

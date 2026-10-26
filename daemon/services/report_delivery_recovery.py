@@ -725,9 +725,16 @@ class ReportDeliveryRecoveryService:
 
         PRECEDENCE: the ``ENSEMBLE_MISSION_COMMISSION_TTL_SECONDS`` env
         knob (the operator lever) wins over the configured default; with
-        neither, the house default (21600s = 6h) applies — the same
-        horizon family as ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` (the
-        one-horizon principle).
+        neither, the house default (21600s = 6h) applies.
+
+        **THE HORIZON FAMILY IS A DEFAULT, NOT AN INVARIANT.** The
+        sweep's TTL is in the same horizon family as
+        ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` BY DEFAULT (both default
+        to 6 h), but the sweep's TTL is INDEPENDENTLY env-tunable and MAY
+        DIVERGE from the guard's fixed constant the moment an operator
+        sets a TTL != 21600. (The horizon the sweep MEASURES against is
+        its OWN TTL — see :meth:`_member_is_within_the_liveness_horizon`
+        — never the guard's constant.)
 
         The resolver is the house-switch pattern (restart-read, cached)
         and NEVER raises: a misconfigured knob must not strand every
@@ -2419,7 +2426,8 @@ class ReportDeliveryRecoveryService:
         # read — the ONLY leg that may authorise a ``satisfied``) and a
         # DIAGNOSTIC pair (leg 2 = the queue-side PREFIX ledger, leg 3 =
         # the parent-history PREFIX ledger). The diagnostic pair KEEPS
-        # RUNNING (its result is logged + counted) but it may NEVER
+        # RUNNING (their result is logged; their FAULTS are counted in
+        # their own counter) but it may NEVER
         # authorise a transition — not a ``satisfied``, and not a
         # hold-against-abandon. The trace that forced the split: legs
         # 2/3 are PAIR-keyed AND time-unbounded, so an EARLIER
@@ -2639,7 +2647,9 @@ class ReportDeliveryRecoveryService:
         release the row — one horizon family inside the sweep. (The
         guard's orphan timeout belongs to the mission-finalisation
         backstop: a different subsystem with a different lifecycle.
-        The two happen to share the 6 h default.)
+        The two happen to share the 6 h default — BY DEFAULT only: the
+        sweep's TTL is INDEPENDENTLY env-tunable and MAY DIVERGE from
+        the guard's fixed constant.)
 
         **Fail-safe on a probe fault.** A probe that cannot run (no
         ``engine`` on the repository, a DB error) cannot prove that
@@ -2831,7 +2841,8 @@ class ReportDeliveryRecoveryService:
 
         **DIAGNOSTIC ONLY — NEVER a resolution authority.** The two
         PREFIX ledgers keep running (the ruling says "keep running
-        them"), and their result is logged and counted, but NO
+        them"), and their result is logged; their FAULTS are counted in
+        their own counter (``diagnostic_probe_errors``). But NO
         transition may depend on them:
 
         * leg 2 — the queue-side PREFIX ledger
@@ -2966,9 +2977,10 @@ class ReportDeliveryRecoveryService:
 
         **Fail-MISS on an undateable stamp.** An unparsable commission
         mint or an unparsable row stamp cannot PROVE the row is not
-        older than the mint ⇒ it is not evidence (the row is held, not
-        satisfied). A row whose stamp EQUALS the mint counts as
-        evidence (only a STRICTLY older row is excluded).
+        older than the mint ⇒ it is not evidence (the row is NOT
+        satisfied — and possibly abandoned — never published on it). A
+        row whose stamp EQUALS the mint counts as evidence (only a
+        STRICTLY older row is excluded).
         """
         minted_at = parse_iso_utc(getattr(commission, "created_at", None))
         if minted_at is None:

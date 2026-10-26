@@ -143,6 +143,98 @@ class TestBootModeGating:
         assert "backfill_advisory_nudge_commissions" not in tail
 
 
+class TestTheBootModeLine:
+    """F5: the operator's boot observable — ONE INFO line naming the mode.
+
+    The enforce-promotion runbook §1.1 tells the operator to read the
+    resolved mode out of the boot log. Before this line existed there
+    was NO such observable: under ``off`` the boot was completely
+    silent and ``dry`` vs ``off`` were INDISTINGUISHABLE from the log.
+
+    The line is emitted ONLY when the resolved mode is NOT ``off`` —
+    under ``off`` the ABSENCE of the line is the signal (the lane is
+    inert, so the backfill line and the sweep's ``(mode=…)`` field are
+    silent too). A bad ``ENSEMBLE_MISSION_RECORDS`` token is a THIRD,
+    distinct case: the resolver raises a loud ``ValueError`` OUTSIDE
+    any swallow envelope, so the daemon never starts (see the runbook
+    §1.2).
+
+    The pins are SOURCE-level (the house ``inspect.getsource``
+    substring style — the manager ``__init__`` is far too heavy to
+    construct for a knob check; the same seam the boot-mode-gating
+    pins above already use).
+    """
+
+    _LOG_STRING = "mission_records: mode resolved (mode=%s)"
+
+    def _init_src(self) -> str:
+        return inspect.getsource(manager_module.InstanceManager.__init__)
+
+    def test_the_boot_line_exists_with_the_exact_log_shape(self):
+        """The line's text is FIXED — the runbook quotes it verbatim, so
+        a reword would silently break the operator's grep."""
+        src = self._init_src()
+        assert self._LOG_STRING in src, (
+            "the boot mode line MUST log the exact shape the "
+            f"enforce-promotion runbook §1.1 quotes: {self._LOG_STRING!r}"
+        )
+
+    def test_the_boot_line_is_guarded_by_the_off_check(self):
+        """The line fires ONLY when the mode is NOT ``off`` — under
+        ``off`` the ABSENCE of the line is the signal."""
+        src = self._init_src()
+        guard = src.split(self._LOG_STRING, 1)[0]
+        assert "_mission_records_mode != MissionRecordMode.OFF" in guard, (
+            "the boot mode line MUST be guarded by the OFF check — under "
+            "'off' the line must NOT be emitted (its absence is the "
+            "operator's signal)"
+        )
+
+    def test_the_boot_line_sits_at_the_resolution_site_outside_any_envelope(
+        self,
+    ):
+        """The line is emitted at the RESOLUTION site and OUTSIDE every
+        swallow envelope — so it is logged even when the backfill block
+        below it fails, and a bad env token still fails the boot
+        loudly."""
+        src = self._init_src()
+        resolve_at = src.index("resolve_mission_records_mode()")
+        log_at = src.index(self._LOG_STRING)
+        assert resolve_at < log_at, (
+            "the boot mode line MUST come AFTER the mode resolution"
+        )
+        # The first ``try:`` of the boot block is the backfill envelope —
+        # the line must be ABOVE it (outside it).
+        try_at = src.index("try:", log_at)
+        assert try_at > log_at, (
+            "the boot mode line MUST sit OUTSIDE the backfill's swallow "
+            "envelope — otherwise a failing backfill would swallow the "
+            "operator's only mode observable"
+        )
+
+    def test_the_runbook_quotes_the_real_boot_line(self):
+        """The operator-facing doc and the code MUST agree — the runbook
+        §1.1 is the ONLY place the operator learns what to look for."""
+        runbook = (
+            Path(__file__).resolve().parents[2]
+            / "docs"
+            / "mission-records-enforce-promotion-runbook.md"
+        )
+        text = runbook.read_text(encoding="utf-8")
+        assert "mission_records: mode resolved (mode=dry)" in text, (
+            "the runbook §1.1 MUST quote the exact boot line the code "
+            "emits (the 'dry' shape)"
+        )
+        assert "mission_records: mode resolved (mode=enforce)" in text, (
+            "the runbook §1.1 MUST quote the exact boot line the code "
+            "emits (the 'enforce' shape)"
+        )
+        assert "ABSENCE of the boot mode line is the signal" in text, (
+            "the runbook §1.1 MUST state that under 'off' the ABSENCE of "
+            "the boot line is the signal"
+        )
+
+
 class TestAdvisoryExclusionEverywhere:
     def test_committed_backfill_rows_are_excluded_from_every_read(
         self, engine
