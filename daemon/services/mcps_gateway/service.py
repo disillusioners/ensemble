@@ -1924,18 +1924,43 @@ class McpGatewayService:
     ) -> dict[str, Any]:
         """The params of a centre-originated ``session.end``.
 
-        THE ``reason`` MEMBER IS VERSION-SCOPED (§6.9.2).
+        THE ``reason`` MEMBER IS VERSION-AND-CAPABILITY-SCOPED (§6.9.6).
 
-        A ``"0.1"``-negotiated connection gets EXACTLY the params it has
-        always got — ``{"session_id": ...}`` and nothing else. The
-        connection's frames stay byte-identical.
+        A connection that did not negotiate the capability gets EXACTLY
+        the params it has always got — ``{"session_id": ...}`` and
+        nothing else. The connection's frames stay byte-identical.
 
-        A ``"0.2"``-negotiated connection gets the ``reason`` member: it
-        names WHY the centre ended the session, and the machine answers
-        with ``{"session_id", "ended": true, "reason"}`` — the reason
-        echoing ours. The two centre-cause values of §6.9.2 group (ii)
-        are ``reaped_by_center`` (the sweep reaped it) and ``superseded``
-        (the session was replaced by an explicit end).
+        §6.9.6: a centre ending a session on a live socket by its own
+        mechanism MUST deliver ``session.end`` with ``params.reason``
+        "on a ``0.2``-negotiated connection where BOTH capability maps
+        carry ``client_terminate: true``". On any other connection —
+        a v0.1 one, or a v0.2 one WITHOUT the negotiated capability —
+        "the frame carries no reason member and its params stay exactly
+        ``{"session_id": …}``".
+
+        WHY ONE FLAG IS ENOUGH (the derivation):
+
+        * ``connection.client_terminate`` is set at the hello exchange
+          to ``(negotiated_version == "0.2") AND (the machine
+          advertised client_terminate)`` — so it is TRUE only when the
+          MACHINE's map carries the capability;
+        * the centre's OWN advertised map is DERIVED from that same
+          flag (``_capabilities_for`` sets
+          ``caps[CAP_CLIENT_TERMINATE] = connection.client_terminate``)
+          — so it is TRUE only when the CENTRE's map carries it too.
+
+        Therefore "both maps carry ``client_terminate: true``" is
+        EQUIVALENT to "``connection.client_terminate`` is True", and
+        gating on that single flag is the whole rule — no second
+        condition can drift from the first.
+
+        A ``"0.2"``-negotiated connection WITH the capability gets the
+        ``reason`` member: it names WHY the centre ended the session,
+        and the machine answers with ``{"session_id", "ended": true,
+        "reason"}`` — the reason echoing ours. The two centre-cause
+        values of §6.10.2 group (ii) are ``reaped_by_center`` (the
+        sweep reaped it) and ``superseded`` (the session was replaced by
+        an explicit end).
 
         The params of the centre's own request are NOT the ``reason`` of
         a RESPONSE: the ledger-only tokens (``machine_unreachable`` /
@@ -1943,7 +1968,10 @@ class McpGatewayService:
         never reach the machine.
         """
         params: dict[str, Any] = {"session_id": session_id}
-        if connection.negotiated_version == PROTOCOL_VERSION_V02:
+        if (
+            connection.negotiated_version == PROTOCOL_VERSION_V02
+            and connection.client_terminate
+        ):
             params["reason"] = reason
         return params
 
@@ -1957,14 +1985,15 @@ class McpGatewayService:
         keeps the session ALIVE on a refusal. The shared-helper variant
         is a recorded follow-up (the seam is named here on purpose).
 
-        The FRAME's params are VERSION-SCOPED (§6.9.2): on a
-        ``"0.1"``-negotiated connection the frame keeps EXACTLY the
-        params it has always had — ``{"session_id": ...}`` and nothing
-        else; on a ``"0.2"``-negotiated connection it carries the
+        The FRAME's params are VERSION-AND-CAPABILITY-SCOPED (§6.9.6): a
+        connection that did not negotiate ``client_terminate`` keeps
+        EXACTLY the params it has always had — ``{"session_id": ...}``
+        and nothing else; on a ``"0.2"``-negotiated connection whose
+        machine advertised the capability the frame carries the
         ``reason`` member too (``reaped_by_center`` — the sweep's
         centre cause), so the reason of the end DOES travel on the
-        wire there. On a v0.1 connection the reason lives only in the
-        agent-facing response envelope and in the audit ledger.
+        wire there. On every other connection the reason lives only in
+        the agent-facing response envelope and in the audit ledger.
         """
         connection = self._connections.get(session.connection_id)
         if connection is None or connection.closed:

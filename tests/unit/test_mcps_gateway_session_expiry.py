@@ -78,6 +78,23 @@ SESSION_ID = "sess-alpha"
 #: timeout.
 ACK_TIMEOUT_MS = 50
 
+#: The capability map a v0.1 machine advertises — the historical seven
+#: keys. A machine that never heard of ``client_terminate`` advertises
+#: exactly this map.
+CAPS_V01: dict[str, bool] = {
+    "session": True,
+    "tools": True,
+    "notifications": False,
+    "heartbeat": True,
+    "screenshot_delta": False,
+    "multi_session": False,
+    "client_cert": False,
+}
+
+#: The capability map a v0.2 machine that supports the client-initiated
+#: termination advertises: the v0.1 map plus ``client_terminate``.
+CAPS_V02: dict[str, bool] = {**CAPS_V01, "client_terminate": True}
+
 
 class Clock:
     """A pinnable clock — the expiry is deterministic, never a sleep."""
@@ -109,6 +126,7 @@ class FakeMachine:
         machine_id: str = MACHINE_ID,
         session_id: str = SESSION_ID,
         version: str = PROTOCOL_VERSION,
+        capabilities: dict[str, bool] | None = None,
     ) -> None:
         self.service = service
         self.machine_id = machine_id
@@ -117,6 +135,14 @@ class FakeMachine:
         #: default is the historical ``"0.1"`` — the sweep's forward
         #: params are byte-identical on that version.
         self.version = version
+        #: The capability map the machine advertises in its hello. The
+        #: DEFAULT is the historical seven-key map — a machine that has
+        #: never heard of ``client_terminate``. A v0.2 machine that
+        #: supports the client-initiated termination advertises
+        #: :data:`CAPS_V02`.
+        self.capabilities = (
+            dict(CAPS_V01) if capabilities is None else dict(capabilities)
+        )
         self.connection = None
         self.sent: list[dict[str, Any]] = []
         self.closed = False
@@ -193,15 +219,7 @@ class FakeMachine:
                         "protocol_version": self.version,
                         "client": {"name": "mcps-client", "version": "0.1.0"},
                         "machine_id": self.machine_id,
-                        "capabilities": {
-                            "session": True,
-                            "tools": True,
-                            "notifications": False,
-                            "heartbeat": True,
-                            "screenshot_delta": False,
-                            "multi_session": False,
-                            "client_cert": False,
-                        },
+                        "capabilities": dict(self.capabilities),
                     },
                 }
             ),
@@ -304,21 +322,25 @@ class TestTheSweepForwardsTheSessionEnd:
         assert frame["method"] == "session.end"
         # The frame keeps EXACTLY the params it always had on a v0.1
         # connection (the wire contract does not change for it — the
-        # ``reason`` member of §6.9.2 is VERSION-SCOPED to v0.2).
+        # ``reason`` member of §6.9.6 is VERSION-AND-CAPABILITY-SCOPED).
         assert frame["params"] == {"session_id": SESSION_ID}
         assert frame["v"] == PROTOCOL_VERSION
 
     async def test_the_sweep_tells_the_v02_machine_why_it_was_reaped(self):
-        """§6.9.2 group (ii): the v0.2 sweep forward carries the reason.
+        """§6.9.6 group (ii): the v0.2 sweep forward carries the reason.
 
-        The v0.2 connection's ``session.end`` params gain the ``reason``
-        member — ``reaped_by_center`` — and the machine's end-ack echoes
-        it. A v0.1 connection keeps the historical params EXACTLY.
+        The ``session.end`` params gain the ``reason`` member —
+        ``reaped_by_center`` — on a ``0.2``-negotiated connection whose
+        machine advertised ``client_terminate`` (the capability half of
+        the gate). A v0.1 connection keeps the historical params EXACTLY.
         """
         clock = Clock()
         service = make_service(clock=clock)
         machine = await open_machine(
-            service, FakeMachine(service, version=PROTOCOL_VERSION_V02)
+            service,
+            FakeMachine(
+                service, version=PROTOCOL_VERSION_V02, capabilities=dict(CAPS_V02)
+            ),
         )
         await expired_session(service, machine, clock)
 
@@ -331,6 +353,38 @@ class TestTheSweepForwardsTheSessionEnd:
             "session_id": SESSION_ID,
             "reason": REASON_REAPED_BY_CENTER,
         }
+        assert frame["v"] == PROTOCOL_VERSION_V02
+
+    async def test_a_v02_machine_without_the_capability_gets_bare_params(self):
+        """§6.9.6 — the reason is VERSION-AND-CAPABILITY-SCOPED.
+
+        "on a ``0.2`` connection WITHOUT the negotiated capability — the
+        frame carries NO reason member and its params stay exactly
+        ``{"session_id": …}``". A v0.2 machine that did not advertise
+        ``client_terminate`` is exactly that peer, so the sweep's
+        forward must stay byte-identical to the v0.1 shape.
+
+        THE ANTI-TAUTOLOGY RULE: the machine's map has NO
+        ``client_terminate`` key, so the version ALONE cannot carry the
+        reason — a version-only gate would put the member on the wire
+        and this test fails.
+        """
+        clock = Clock()
+        service = make_service(clock=clock)
+        machine = await open_machine(
+            service,
+            FakeMachine(
+                service, version=PROTOCOL_VERSION_V02, capabilities=dict(CAPS_V01)
+            ),
+        )
+        await expired_session(service, machine, clock)
+
+        expired = await service.expire_sessions()
+
+        assert len(expired) == 1
+        assert len(machine.session_ends) == 1
+        frame = machine.session_ends[0]
+        assert frame["params"] == {"session_id": SESSION_ID}
         assert frame["v"] == PROTOCOL_VERSION_V02
 
     async def test_the_sweep_does_not_close_the_socket(self):

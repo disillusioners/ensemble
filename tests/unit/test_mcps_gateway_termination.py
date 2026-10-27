@@ -853,7 +853,15 @@ class TestOrderlyTerminationClose:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestVersionScopedSessionEndParams:
+class TestVersionAndCapabilityScopedSessionEndParams:
+    """§6.9.6 — the ``reason`` member is VERSION-AND-CAPABILITY-SCOPED.
+
+    "on a ``0.2``-negotiated connection where BOTH capability maps carry
+    ``client_terminate: true``"; on a v0.1 connection — and on a v0.2
+    connection WITHOUT the negotiated capability — "the params stay
+    exactly ``{"session_id": …}``".
+    """
+
     async def test_the_v01_session_end_params_stay_exactly_the_session_id(self):
         """A v0.1 connection's frames are byte-identical to the old ones."""
         clock = Clock()
@@ -875,6 +883,7 @@ class TestVersionScopedSessionEndParams:
         assert machine.session_ends[0]["params"] == {"session_id": SESSION_ID}
 
     async def test_the_v02_sweep_sends_reaped_by_center(self):
+        """A v0.2 connection whose machine advertised the capability."""
         clock = Clock()
         service = make_service(clock=clock)
         machine = await open_machine(service, FakeMachine(service))
@@ -906,3 +915,60 @@ class TestVersionScopedSessionEndParams:
             "session_id": SESSION_ID,
             "reason": REASON_SUPERSEDED,
         }
+
+    async def test_a_v02_connection_without_the_capability_sends_bare_params(self):
+        """§6.9.6 — the capability half of the gate.
+
+        A v0.2 machine that did NOT advertise ``client_terminate`` is a
+        connection on which the reason must NOT ride: "on a ``0.2``
+        connection without the negotiated capability — the frame carries
+        no reason member and its params stay exactly ``{"session_id":
+        …}``".
+
+        THE ANTI-TAUTOLOGY RULE: the machine's map has no
+        ``client_terminate`` key, so the version ALONE cannot carry the
+        reason — a version-only gate puts the member on the wire and
+        this test fails.
+        """
+        clock = Clock()
+        service = make_service(clock=clock)
+        machine = await open_machine(
+            service,
+            FakeMachine(
+                service,
+                version=PROTOCOL_VERSION_V02,
+                capabilities=dict(CAPS_V01),
+            ),
+        )
+        await open_session(service, machine)
+
+        clock.advance(2.0)
+        await service.expire_sessions()
+
+        assert len(machine.session_ends) == 1
+        assert machine.session_ends[0]["params"] == {"session_id": SESSION_ID}
+        assert machine.session_ends[0]["v"] == PROTOCOL_VERSION_V02
+
+    async def test_a_v02_connection_without_the_capability_sends_bare_params_on_an_explicit_end(
+        self,
+    ):
+        """The explicit end rides the SAME gate as the sweep."""
+        service = make_service()
+        machine = await open_machine(
+            service,
+            FakeMachine(
+                service,
+                version=PROTOCOL_VERSION_V02,
+                capabilities=dict(CAPS_V01),
+            ),
+        )
+        await open_session(service, machine)
+
+        task = asyncio.create_task(service.disconnect(agent_id=AGENT_ID))
+        await asyncio.sleep(0.02)
+        await machine.answer_last({"session_id": SESSION_ID, "ended": True})
+        answer = await task
+
+        assert answer["ended"] is True
+        assert len(machine.session_ends) == 1
+        assert machine.session_ends[0]["params"] == {"session_id": SESSION_ID}
