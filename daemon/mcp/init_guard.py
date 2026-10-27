@@ -315,7 +315,7 @@ def state_snapshot() -> dict[str, dict[str, Any]]:
 def quarantine_server(
     server: str,
     reason: str,
-    error_class: str | None = None,
+    error_class: Optional[str] = None,
 ) -> None:
     """Quarantine a server for THIS boot (the explicit entry point).
 

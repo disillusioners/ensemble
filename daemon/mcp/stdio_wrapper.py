@@ -44,7 +44,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import mcp
 from mcp import StdioServerParameters
