@@ -1458,8 +1458,11 @@ class InKitCenter:
 
         The IDEMPOTENT goal state is NOT an error: a repeat (or a race
         with the sweep) answers ``ended: false`` with a MANDATORY
-        ``reason`` — the machine releases its local lock on a known
-        reason and keeps it on an unknown or missing one.
+        ``reason``.  The shipped client RELEASES its local lock by
+        default on ``ended: false`` (the ended-elsewhere arm) and
+        RETAINS it only for ``refused`` / ``machine_refused`` — so the
+        reason is always sent, to make the client's decision explicit
+        instead of leaving it to a fallback.
         """
         request_id = envelope.get("id")
         version = self._conn_version.get(conn_id, PROTOCOL_VERSION)
@@ -1479,8 +1482,11 @@ class InKitCenter:
             }
         else:
             # The IDEMPOTENT goal state: the session is not live.  The
-            # REASON is mandatory — the machine releases its local lock on
-            # a known reason and keeps it on an unknown or missing one.
+            # REASON is mandatory — on ``ended: false`` the shipped
+            # client releases its local lock by DEFAULT (the
+            # ended-elsewhere arm) and retains it only for ``refused`` /
+            # ``machine_refused``, so the reason makes the decision
+            # explicit instead of leaving it to a fallback.
             # A session the SWEEP reaped says so (``reaped_by_center``);
             # any other not-live session says ``already_ended``.
             reaped = self._expired_sessions.get(conn_id)

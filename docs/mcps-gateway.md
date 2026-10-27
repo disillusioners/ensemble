@@ -151,9 +151,19 @@ socket is closed; the incumbent keeps its socket AND its live session
 duplicate id. The id frees again as soon as the incumbent is **dead**
 (its heartbeat timed out) or its **socket closed** — so a genuine
 reconnect is admitted, and the reconnect tolerance of §8.1 is preserved.
-The practical consequence: a machine that reconnects while its OLD
-socket is still nominally open waits for that socket to be reaped (the
+The dead incumbent's session is released **at that moment** (not at the
+next sweep tick), so the newcomer's first `session.begin` is not
+refused `MACHINE_BUSY` for a session whose machine is gone. The
+practical consequence: a machine that reconnects while its OLD socket
+is still nominally open waits for that socket to be reaped (the
 heartbeat timeout) before its new socket is admitted.
+
+**The refusal is NOT version-scoped.** It is emitted on a `"0.1"`
+connection exactly as on a `"0.2"` one — the ONE deliberate exception
+to the version scoping of §4.6, and deliberately so: the refusal
+protects the **incumbent** (its socket and its live session) instead
+of evicting it, and a mixed fleet must get that protection on both
+sides of the version line.
 
 ### 1.5 Where the audit records land
 
@@ -871,10 +881,19 @@ rows follow SPEC §8, which is explicitly **RECOMMENDED** (§4.3).
 one capability (`client_terminate`), one `reason` member on the center's
 `session.end` params, one typed refusal (`MACHINE_ID_CONFLICT`) and one
 close classification (the orderly termination). **Everything is
-VERSION-SCOPED**: a connection that negotiated `"0.1"` behaves
-byte-identically to the historical center — no new capability key, no
-new method, and a `session.end` whose params are exactly
-`{"session_id": ...}`.
+VERSION-SCOPED**: a connection that negotiated `"0.1"` sees no new
+capability key, no new method, and a `session.end` whose params are
+exactly `{"session_id": ...}`.
+
+**THE ONE DELIBERATE EXCEPTION — the duplicate-machine-id refusal.**
+`MACHINE_ID_CONFLICT` is emitted **UNVERSIONED**: a `"0.1"`-negotiated
+connection is refused exactly like a `"0.2"` one, so this refusal **does
+change a v0.1 connection's behaviour** (the historical center silently
+superseded the incumbent instead). It is deliberate: the refusal
+**protects the INCUMBENT** — its socket and its live session — instead
+of evicting it, and a mixed fleet (v0.1 and v0.2 machines) must get the
+same protection on both sides. Every OTHER v0.2 element stays
+version-scoped.
 
 **The negotiation.** The center speaks `"0.2"` and `"0.1"`. The version a
 connection **runs** is the one the machine **requested** in
@@ -913,10 +932,15 @@ may still be carrying a late `tools/call` answer.
 | no live session (a repeat, or a race) | `{"session_id", "ended": false, "reason": "already_ended", "machine_notified": true}` — the **idempotent goal state, never an error** |
 | the sweep reaped it first | the same idempotent shape with `reason: "reaped_by_center"` |
 
-The `reason` is **mandatory** on the `ended: false` arm: the shipped
-client releases its local lock on a known reason and **keeps** it on an
-unknown or missing one. The ack carries **exactly four members** — a
-stray `why_not_ended` would make the client take the wrong branch.
+The `reason` is **mandatory** on the `ended: false` arm, and the
+rationale is the shipped client's own decision table: on `ended: false`
+it **releases** its local lock by default (the ended-elsewhere arm) and
+**retains** it only for `refused` / `machine_refused` (the machine
+refused — the session survives). A missing or unknown reason therefore
+falls into the release default; sending the reason always makes the
+client's decision **explicit** instead of leaving it to a fallback. The
+ack carries **exactly four members** — a stray `why_not_ended` would
+make the client take the wrong branch.
 
 The receipt also **frees the §8.3 slot**: the session is removed from
 the registry and the roster pointer is cleared, so the next
@@ -925,10 +949,14 @@ the registry and the roster pointer is cleared, so the next
 
 **The ledger row.** The receipt writes one row with the reserved tool
 name `session.terminate`. The raw `reason_code` is recorded
-**verbatim**: it rides the row's `detail` (a bounded copy) and the
-row's `extra` member (the unbounded value), never the guarded
-`error_code` slot — that slot would rewrite an unknown code into
-`UNRECOGNIZED_ERROR_CODE`.
+**verbatim**: it rides the row's `detail` — a **bounded** copy (128
+characters) — and the row's `extra` member, never the guarded
+`error_code` slot (that slot would rewrite an unknown code into
+`UNRECOGNIZED_ERROR_CODE`). **The durable copy is the `detail`**: the
+audit table has no column for `extra` and the DB sink writes only the
+table's columns, so `extra` survives only in the in-memory sinks — the
+bounded `detail` is what an operator finds in the ledger after a
+restart.
 
 **The `reason` member of the center's `session.end` params.** Version-
 scoped: a `"0.1"` connection gets exactly `{"session_id": ...}`; a
@@ -981,7 +1009,7 @@ client (`mcps_client/internal/remote`) is the interop ground truth.
 | §6.8 no resumption / heartbeat loss kills | implemented — a session belongs to its connection; reconnect = new session. The expiry reap uses that SAME `session.end` request (no new verb): the machine is told, releases its own lock and returns to `ready` on the same connection (§4.5). A second connection claiming a LIVE machine id is refused `MACHINE_ID_CONFLICT` — the incumbent is never evicted (§4.6) |
 | §7 MCP fidelity | implemented for `tools/call` — the params object is forwarded unwrapped and the result returned raw |
 | §8 center obligations (roster/presence/exclusivity/audit) | **RECOMMENDED, not wire-protocol conformance** — SPEC §8 says so itself. This center implements all four anyway: roster + presence (§8.1), one-agent-one-remote (§8.2), one-session-per-machine with `MACHINE_BUSY` reject (§8.3), and the who/machine/tool/args-hash audit (§8.4) |
-| **v0.2 session termination** | implemented — `session.terminate` (the machine asks, the center never refuses), the `client_terminate` capability, the version-scoped `reason` on the center's `session.end` params, `MACHINE_ID_CONFLICT`, and the orderly-termination close (§4.6). Every element is VERSION-SCOPED: a `"0.1"` connection is byte-identical to the historical one |
+| **v0.2 session termination** | implemented — `session.terminate` (the machine asks, the center never refuses), the `client_terminate` capability, the version-scoped `reason` on the center's `session.end` params, `MACHINE_ID_CONFLICT`, and the orderly-termination close (§4.6). Every element is VERSION-SCOPED — **except the duplicate-machine-id refusal, which is deliberately UNVERSIONED** (it protects the incumbent, so a v0.1 connection is refused too) |
 | §10 conformance kit | **EXISTS (Phase D1)** — `scripts/conformance/run.sh` + `tests/conformance/` in THIS repo: an independent, center-agnostic pack mapped 1:1 onto the §10 areas, pointable at any center with a URL + a machine (five pointing keys, §10 below) |
 
 **The expiry hardening did not change the WIRE.** The sweep reuses the

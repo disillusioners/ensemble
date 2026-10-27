@@ -256,8 +256,10 @@ async def test_a_terminate_for_a_session_that_is_not_live_is_idempotent(
     target,
 ) -> None:
     """§6.10 — the IDEMPOTENT goal state is NEVER an error, and its
-    ``reason`` is MANDATORY (the machine releases its local lock on a
-    known reason and keeps it on an unknown or missing one)."""
+    ``reason`` is MANDATORY: on ``ended: false`` the shipped client
+    RELEASES its local lock by default (the ended-elsewhere arm) and
+    RETAINS it only for ``refused`` / ``machine_refused`` — sending the
+    reason always makes the client's decision explicit."""
 
     peer = _v02_peer(target)
     try:
@@ -398,8 +400,9 @@ async def test_the_reap_race_answers_the_idempotent_goal_state(
 ) -> None:
     """§6.10 — the sweep reaped the session and the machine asks
     afterwards: the answer is the IDEMPOTENT one, NEVER an error, and it
-    carries a MANDATORY reason (the machine releases its local lock on a
-    known reason and keeps it on an unknown one)."""
+    carries a MANDATORY reason (on ``ended: false`` the shipped client
+    releases its local lock by default — the ended-elsewhere arm — and
+    retains it only for ``refused`` / ``machine_refused``)."""
 
     peer = _v02_peer(target)
     try:

@@ -58,6 +58,11 @@ class FakeMachine:
         self.sent: list[dict[str, Any]] = []
         self.closed = False
         self.close_code: int | None = None
+        #: The protocol version the machine NEGOTIATED (§5.2). Every
+        #: frame the machine writes carries it — the check is
+        #: connection-scoped, so a "0.1" answer on a "0.2" connection
+        #: closes the socket.
+        self.version: str = PROTOCOL_VERSION
         #: method → the result the machine answers with.
         self.answers: dict[str, Any] = {}
         #: method → (code, message) — the refusal the machine answers with.
@@ -101,6 +106,7 @@ class FakeMachine:
         otherwise (a machine that asks for a version it does not stamp
         is a protocol inconsistency the tests may want to pin).
         """
+        self.version = version
         await self.service.handle_frame(
             self.connection,
             json.dumps(
@@ -136,7 +142,7 @@ class FakeMachine:
             self.connection,
             json.dumps(
                 {
-                    "v": PROTOCOL_VERSION,
+                    "v": self.version,
                     "type": "notification",
                     "method": "heartbeat",
                     "params": {},
@@ -151,7 +157,7 @@ class FakeMachine:
         request = self.last_request()
         assert request is not None, "the center sent no request"
         payload: dict[str, Any] = {
-            "v": PROTOCOL_VERSION,
+            "v": self.version,
             "type": "error" if error else "response",
             "id": request["id"],
         }
@@ -167,7 +173,7 @@ class FakeMachine:
     ) -> None:
         """Answer ONE specific request by id."""
         payload: dict[str, Any] = {
-            "v": PROTOCOL_VERSION,
+            "v": self.version,
             "type": "error" if error else "response",
             "id": request_id,
         }
@@ -1504,6 +1510,51 @@ class TestDuplicateMachineIdIsRefused:
         await second.hello(machine_id="mach_1")
         assert second.frames_of_type("error") == []
         assert second.frames_of_type("response")
+
+    @pytest.mark.parametrize("version", [PROTOCOL_VERSION, PROTOCOL_VERSION_V02])
+    async def test_the_reconnected_machine_is_not_told_machine_busy(self, version):
+        """W-1 — a DEAD incumbent must not hold the §8.3 slot.
+
+        THE RESTORED PIN (it used to exist, and both of its
+        replacements pre-swept — so the hole was open).
+
+        The heartbeat kill is the SWEEP's job and it runs on its own
+        tick. Here the tick has NOT run: the incumbent's silence passed
+        the advertised timeout (so the incumbent is DEAD and its id is
+        free) while its session is still LIVE in the session manager.
+
+        The newcomer is admitted — and it must be able to USE the
+        machine at once: the first ``session.begin`` must SUCCEED
+        instead of drawing a transient ``MACHINE_BUSY`` for a session
+        whose machine is gone.
+        """
+        service = make_service(heartbeat_timeout_ms=50, client_dead_detect_ms=50)
+        machine = await open_machine(service, FakeMachine(service))
+        await connect_machine(service, machine)
+        assert service.sessions.for_machine("mach_1") is not None
+
+        # The machine goes silent. The unit service never starts the
+        # monitor, so the sweep has NOT ticked: the incumbent's session
+        # is still live.
+        await asyncio.sleep(0.1)
+        assert service.sessions.for_machine("mach_1") is not None, (
+            "the fixture must still hold the dead incumbent's session — "
+            "the pin is about the PRE-SWEEP window"
+        )
+
+        second = FakeMachine(service)
+        second.connection = await service.open_connection(second)
+        await second.hello(machine_id="mach_1", version=version)
+
+        # The incumbent is dead: the newcomer is ADMITTED (no refusal).
+        assert second.frames_of_type("error") == []
+        # ...and the dead incumbent's session does NOT hold the slot.
+        service.sessions.assert_machine_free("mach_1")
+
+        result = await connect_machine(
+            service, second, session_id="sess_second", machine_id="mach_1"
+        )
+        assert result["session_id"] == "sess_second"
 
     async def test_the_surviving_incumbent_can_reconnect_after_the_death(self):
         """The reconnect tolerance of §8.1 is preserved."""

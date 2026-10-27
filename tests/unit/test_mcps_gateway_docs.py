@@ -586,14 +586,39 @@ def test_doc_pins_the_orderly_termination_close() -> None:
     )
 
 
-def test_doc_states_the_v01_connection_is_byte_identical() -> None:
-    """The v0.2 elements are VERSION-SCOPED."""
+def test_doc_states_the_v01_connection_is_version_scoped_with_one_exception() -> None:
+    """W-2: the v0.2 elements are VERSION-SCOPED — with ONE deliberate
+    exception (the unversioned duplicate-machine-id refusal).
+
+    The old pin asserted "byte-identically" over the WHOLE doc — a
+    needle that also matches an unrelated §10 sentence about the
+    catalog re-encoding, so it could no longer tell whether the
+    version-scoping claim itself was still unqualified.
+    """
     text = _doc_prose()
     assert "VERSION-SCOPED" in text, (
         "the doc must say the v0.2 elements are version-scoped."
     )
-    assert "byte-identically" in text, (
-        "the doc must say a v0.1 connection behaves byte-identically."
+    assert "ONE DELIBERATE EXCEPTION" in text, (
+        "the doc must name the ONE exception to the version scoping."
+    )
+    assert "MACHINE_ID_CONFLICT` is emitted **UNVERSIONED**" in text, (
+        "the doc must say the duplicate-machine-id refusal is unversioned."
+    )
+    assert "protects the INCUMBENT" in text, (
+        "the doc must say WHY it is unversioned: it protects the incumbent."
+    )
+
+
+def test_doc_states_the_durable_audit_copy_is_the_bounded_detail() -> None:
+    """W-3: ``AuditRecord.extra`` is NOT persisted — the durable verbatim
+    copy of a raw reason_code is the bounded ``detail``."""
+    text = _doc_prose()
+    assert "The durable copy is the `detail`" in text, (
+        "the doc must say the durable verbatim copy is the bounded detail."
+    )
+    assert "survives only in the in-memory sinks" in text, (
+        "the doc must say the `extra` member is in-memory only."
     )
 
 

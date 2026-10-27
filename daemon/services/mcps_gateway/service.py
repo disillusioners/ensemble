@@ -61,6 +61,13 @@ Everything v0.2 adds is VERSION-SCOPED to a v0.2-negotiated connection:
 A ``"0.1"``-negotiated connection therefore sees exactly the frames it
 saw before: no new capability key, no new method, and a ``session.end``
 whose params are exactly ``{"session_id": ...}``.
+
+THE ONE DELIBERATE EXCEPTION: the ``MACHINE_ID_CONFLICT`` refusal
+(§5.6) is emitted UNVERSIONED, so it DOES change a v0.1 connection's
+behaviour (the historical centre silently superseded the incumbent).
+It is deliberate: the refusal protects the INCUMBENT — its socket and
+its live session — instead of evicting it, and a mixed fleet must get
+that protection on both sides of the version line.
 """
 
 from __future__ import annotations
@@ -254,9 +261,11 @@ AUDIT_DETAIL_HELLO_CONFLICT = (
 #:
 #: The reason code is recorded VERBATIM (the wire contract of §6.10
 #: requires it — the machine reads it back), but the ledger must not be
-#: a place a peer can stuff megabytes into: the copy in the detail is
-#: bounded, and the UNBOUNDED verbatim value rides the row's ``extra``
-#: member (see :meth:`McpGatewayService._audit_terminate`).
+#: a place a peer can stuff megabytes into: the DURABLE copy is the
+#: BOUNDED one that rides the row's ``detail``.  The row's ``extra``
+#: member carries the unbounded value but is IN-MEMORY ONLY (the audit
+#: table has no column for it — see
+#: :meth:`McpGatewayService._audit_terminate`).
 TERMINATE_REASON_MAX_CHARS = 128
 
 #: The bound of the PEER-CONTROLLED WebSocket close reason.
@@ -269,24 +278,36 @@ TERMINATE_REASON_MAX_CHARS = 128
 CLOSE_REASON_MAX_CHARS = 123
 
 
-def bounded_close_reason(reason: str | None) -> str:
-    """Render a close reason safely for a LOG line or an exception text.
+def bounded_peer_text(text: str | None, *, max_chars: int) -> str:
+    """Render PEER-CONTROLLED free text safely for a LOG line.
 
-    The text is capped at :data:`CLOSE_REASON_MAX_CHARS` characters and
-    then ``repr()``-escaped: control characters and newlines become
-    visible escapes instead of log structure. The RAW reason is kept
-    where it is compared (``reason == "session.terminate"``) — this
-    helper is for the places where the reason is RENDERED, never for
-    the wire.
+    The text is capped at ``max_chars`` characters and then
+    ``repr()``-escaped: control characters and newlines become visible
+    escapes instead of log structure. The RAW text is kept where it is
+    compared or carried on the wire — this helper is for the places
+    where the text is RENDERED, never for the wire.
 
     The escaped form may be a few characters longer than the cap (the
     quotes and the escapes), but it stays BOUNDED: the peer-controlled
-    part never exceeds :data:`CLOSE_REASON_MAX_CHARS` characters.
+    part never exceeds ``max_chars`` characters.
+
+    EVERY peer-controlled string that reaches a log line goes through
+    here — the WebSocket close reason and the ``session.terminate``
+    reason code are both the MACHINE's to choose.
     """
-    text = reason or ""
-    if len(text) > CLOSE_REASON_MAX_CHARS:
-        text = text[:CLOSE_REASON_MAX_CHARS] + "..."
-    return repr(text)
+    rendered = text or ""
+    if len(rendered) > max_chars:
+        rendered = rendered[:max_chars] + "..."
+    return repr(rendered)
+
+
+def bounded_close_reason(reason: str | None) -> str:
+    """Render a close reason safely for a LOG line or an exception text.
+
+    The bound is :data:`CLOSE_REASON_MAX_CHARS` (the RFC 6455 cap on a
+    close reason); the escaping is :func:`bounded_peer_text`'s.
+    """
+    return bounded_peer_text(reason, max_chars=CLOSE_REASON_MAX_CHARS)
 
 
 # ── the outcomes of a ``session.end`` FORWARD ─────────────────────────────
@@ -541,10 +562,12 @@ class McpGatewayService:
         *,
         orderly_termination: bool = False,
     ) -> None:
-        """Tear a connection down: kill its session, then close the socket.
+        """Tear a connection down: end its session, then close the socket.
 
-        A session belongs to its connection (§6.8): the session is KILLED,
-        never paused, and its id is dead afterwards.
+        A session belongs to its connection (§6.8): the session is KILLED
+        (never paused) and its id is dead afterwards — EXCEPT on the
+        orderly termination below, where the machine ASKED for the end
+        and the session is therefore TERMINATED, not killed.
 
         ``orderly_termination`` marks the ONE close that is NOT a death:
         the machine closed the socket with the WebSocket code ``1000``
@@ -592,8 +615,13 @@ class McpGatewayService:
                     detail=AUDIT_DETAIL_SESSION_TERMINATED,
                 )
             logger.warning(
-                "the session %s was killed: the connection of the machine %s is gone (%s)",
+                "the session %s was %s: the connection of the machine %s is gone (%s)",
                 session.session_id,
+                # An orderly termination is NOT a kill: the machine asked
+                # for the end (§6.10.5), so the session was TERMINATED.
+                "terminated at the machine's request"
+                if orderly_termination
+                else "killed",
                 session.machine_id,
                 # The reason can be PEER-CONTROLLED free text (the WS
                 # close reason) — it is bounded and escaped here.
@@ -824,9 +852,15 @@ class McpGatewayService:
         * NO live session (a repeat, or a race with the sweep) → the
           IDEMPOTENT goal state, NEVER an error:
           ``{"session_id", "ended": false, "reason", "machine_notified": true}``.
-          The ``reason`` is MANDATORY here — the shipped machine
-          releases its local lock on a known reason and keeps it on an
-          unknown or missing one.
+          The ``reason`` is MANDATORY here — and the rationale is the
+          shipped client's OWN decision table (``terminate.go``): on
+          ``ended: false`` it RELEASES its local lock by DEFAULT (the
+          ended-elsewhere arm) and RETAINS it only for ``refused`` /
+          ``machine_refused`` (the machine refused — the session
+          survives). A missing or unknown reason therefore falls into
+          the release default; sending the reason always makes the
+          client's decision EXPLICIT instead of leaving it to a
+          fallback.
         """
         request_id = payload.get("id")
         # §6.1 — the session id rides the ENVELOPE.
@@ -876,7 +910,13 @@ class McpGatewayService:
                 "the machine %r terminated the session %s (%s)",
                 session.machine_id,
                 session_id,
-                reason or "no reason code",
+                # The reason code is PEER-CONTROLLED free text — it is
+                # bounded and escaped here, exactly like the close
+                # reason (a hostile machine must not be able to flood
+                # the log or smuggle newlines into it).
+                bounded_peer_text(
+                    reason or "no reason code", max_chars=TERMINATE_REASON_MAX_CHARS
+                ),
             )
         else:
             # The IDEMPOTENT arm. The goal state (no live session) is
@@ -956,9 +996,17 @@ class McpGatewayService:
         ``UNRECOGNIZED_ERROR_CODE``. The raw code therefore rides
         members that are NOT guarded:
 
-        * the ``detail`` (a BOUNDED copy — the ledger must not be a
+        * the ``detail`` — a BOUNDED copy (the ledger must not be a
           place a peer can stuff megabytes into), and
-        * the row's ``extra`` member (the UNBOUNDED verbatim value).
+        * the row's ``extra`` member — the UNBOUNDED verbatim value.
+
+        THE DURABLE COPY IS THE ``detail``. ``AuditRecord.extra`` is
+        **NOT PERSISTED**: the audit table has no column for it and the
+        DB sink writes only the table's columns
+        (``daemon/repositories/mcps_gateway/repository.py``), so the
+        ``extra`` member survives only in the IN-MEMORY sinks (the unit
+        tests' ``MemoryAuditSink``). The bounded ``detail`` is what an
+        operator finds in the ledger after a restart.
 
         A reason code that IS part of the centre's own vocabulary may
         ADDITIONALLY set the guarded ``error_code`` — that is a
@@ -1159,6 +1207,14 @@ class McpGatewayService:
             async with self._lock:
                 if self._by_machine.get(machine_id) is incumbent:
                     self._by_machine.pop(machine_id, None)
+            # The incumbent's SESSION may still be LIVE: the heartbeat
+            # kill — the sweep tick that would have released it — has
+            # not run yet. The id is free but the §8.3 SLOT is taken,
+            # and the newcomer's first ``session.begin`` would be
+            # refused ``MACHINE_BUSY`` for a session nobody can use
+            # (its machine is gone). Close it out NOW, with the SAME
+            # release discipline the sweep uses.
+            self._release_dead_incumbent_sessions(incumbent)
 
         connection.machine_id = machine_id
         connection.hello_received = True
@@ -1239,6 +1295,41 @@ class McpGatewayService:
         if limit_ms and silence_ms > limit_ms:
             return "dead"
         return "open"
+
+    def _release_dead_incumbent_sessions(self, incumbent: ClientConnection) -> None:
+        """Release the sessions a DEAD (or closed) incumbent still holds.
+
+        THE SAME RELEASE DISCIPLINE AS THE SWEEP — no second path:
+
+        * the session leaves the session registry
+          (``sessions.end_for_connection``),
+        * the roster pointer is cleared BY THE SESSION-ID GUARD
+          (``store.clear_session`` — a machine that re-helloed and bound
+          a NEW session keeps that new session), and
+        * the session leaves an ``already_ended`` tombstone with
+          ``machine_notified=False`` (the machine is GONE — it was
+          never told; this is the same tombstone the socket-death path
+          writes).
+
+        WHY IT IS NEEDED
+        ----------------
+
+        The heartbeat kill is the SWEEP's job and it runs on its own
+        tick. Between the moment the incumbent's silence passed the
+        advertised timeout and the moment that tick fires, the
+        incumbent is DEAD (its id is free) while its session is still
+        LIVE in the session manager: the §8.3 SLOT is taken, and the
+        newcomer's first ``session.begin`` would be refused
+        ``MACHINE_BUSY`` — for a session nobody can use, because its
+        machine is gone.
+
+        The newcomer is admitted either way; this only makes the
+        admission USABLE at once. It touches NOTHING of a live
+        incumbent: the newcomer is refused (never reaches this helper)
+        while the incumbent is alive.
+        """
+        for session in self._sessions.end_for_connection(incumbent.connection_id):
+            self._release_centre_side(session, machine_notified=False)
 
     async def _refuse_duplicate_machine_id(
         self,
@@ -1654,10 +1745,14 @@ class McpGatewayService:
         keeps the session ALIVE on a refusal. The shared-helper variant
         is a recorded follow-up (the seam is named here on purpose).
 
-        The FRAME keeps EXACTLY the params it has always had —
-        ``{"session_id": ...}``. The reason of the end never travels on
-        the wire: it lives in the agent-facing response envelope and in
-        the audit ledger.
+        The FRAME's params are VERSION-SCOPED (§6.9.2): on a
+        ``"0.1"``-negotiated connection the frame keeps EXACTLY the
+        params it has always had — ``{"session_id": ...}`` and nothing
+        else; on a ``"0.2"``-negotiated connection it carries the
+        ``reason`` member too (``reaped_by_center`` — the sweep's
+        centre cause), so the reason of the end DOES travel on the
+        wire there. On a v0.1 connection the reason lives only in the
+        agent-facing response envelope and in the audit ledger.
         """
         connection = self._connections.get(session.connection_id)
         if connection is None or connection.closed:
