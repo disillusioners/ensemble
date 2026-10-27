@@ -38,6 +38,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -94,7 +95,7 @@ _boot_age_override: Optional[float] = None
 
 #: Test/ops seam — override the install root (a scratch dir in tests).
 #: ``None`` means "resolve it from the SELF-ENV marker".
-_install_dir_override: Optional[Any] = None
+_install_dir_override: Optional[Path] = None
 
 
 @dataclass
@@ -110,7 +111,7 @@ class DeferredCandidate:
     """
 
     seam: str
-    payload: dict = field(default_factory=dict)
+    payload: dict[str, Any] = field(default_factory=dict)
     deferred_at: float = 0.0
 
 
@@ -125,7 +126,7 @@ _FALSE_READS: int = 0
 # ── the predicate (requirements.md §4.7 P7) ───────────────────────────
 
 
-def _resolve_install_root() -> Optional[Any]:
+def _resolve_install_root() -> Optional[Path]:
     """Resolve the install root whose ``releases/state.json`` is read.
 
     Reuses the EXISTING resolution machinery
@@ -156,7 +157,7 @@ def _resolve_install_root() -> Optional[Any]:
         return None
 
 
-def _read_state(install_dir: Any) -> Optional[dict]:
+def _read_state(install_dir: Any) -> Optional[dict[str, Any]]:
     """READ-ONLY, torn-safe read of ``<install_dir>/releases/state.json``.
 
     Returns the parsed dict, or ``None`` when the journal is absent /
@@ -293,7 +294,7 @@ def promote_txn_live() -> bool:
 # ── the deferral registry ─────────────────────────────────────────────
 
 
-def defer_resume(seam: str, payload: Optional[dict] = None) -> DeferredCandidate:
+def defer_resume(seam: str, payload: Optional[dict[str, Any]] = None) -> DeferredCandidate:
     """DEFER a resume candidate for the given seam.
 
     The candidate is PARKED (never dropped) and the release driver is
@@ -322,7 +323,7 @@ def pending_count(seam: Optional[str] = None) -> int:
     return sum(len(v) for v in _DEFERRED.values())
 
 
-def hold_snapshot() -> dict:
+def hold_snapshot() -> dict[str, Any]:
     """The hold's OBSERVABLE counters (published in the readyz detail).
 
     ``{deferred, per_seam, counters, reason, driver_running,
@@ -498,7 +499,7 @@ async def shutdown() -> None:
 # ── test/ops seams ───────────────────────────────────────────────────
 
 
-def set_install_dir_override(path: Optional[Any]) -> None:
+def set_install_dir_override(path: Optional[Path]) -> None:
     """Override the install root (a scratch dir in tests)."""
     global _install_dir_override
     _install_dir_override = path
