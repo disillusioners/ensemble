@@ -75,6 +75,10 @@ HOLD_REASON = "pipeline-busy"
 #: seams).
 SEAM_BOOT_CONTINUE = "boot_continue"
 SEAM_RUNTIME_RESUME = "runtime_resume"
+#: SEAM_ELIGIBLE_PENDING deliberately does NOT defer: the eligible-pending
+#: sweep SKIPS statelessly while the txn is live (decisions §9 Q3 — the
+#: next 90s tick retries; the sweep owns no deferral rows). The constant
+#: is kept to name the fourth seam; no handler is registered for it.
 SEAM_ELIGIBLE_PENDING = "eligible_pending"
 SEAM_ORPHAN_SWEEP = "orphan_sweep"
 
@@ -187,8 +191,12 @@ def _heartbeat_fresh(install_dir: Any) -> bool:
         return False
 
 
-def daemon_boot_age_s() -> Optional[float]:
-    """The daemon's boot age in seconds (``None`` when unknown)."""
+def daemon_boot_age_s() -> float:
+    """The daemon's boot age in seconds (never negative).
+
+    Both paths return a float: the override seam coerces, and the real
+    path clamps at 0.0 — there is no "unknown" case.
+    """
     if _boot_age_override is not None:
         return float(_boot_age_override)
     return max(0.0, time.time() - _PROCESS_START_EPOCH)
@@ -251,7 +259,7 @@ def evaluate_promote_txn() -> tuple[bool, bool]:
 
     heartbeat_fresh = _heartbeat_fresh(install_dir)
     boot_age = daemon_boot_age_s()
-    in_boot_window = boot_age is not None and boot_age < BOOT_LIVENESS_S
+    in_boot_window = boot_age < BOOT_LIVENESS_S
     started_at = _parse_started_at(in_flight.get("started_at"))
 
     live = False
