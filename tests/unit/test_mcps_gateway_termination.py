@@ -621,6 +621,51 @@ class TestSessionTerminate:
         assert rows, "the receipt must still be audited"
         assert rows[-1].machine_id == "machine-alpha"
 
+    async def test_a_foreign_live_session_answers_exactly_like_a_truly_unknown_one(
+        self,
+    ):
+        """§6.10.2 — the FOREIGN-SESSION LEAK BAN (Fork C).
+
+        "whatever the responder returns — the ``unknown_session`` outcome
+        code or the typed ``SESSION_NOT_FOUND`` — the answer MUST be
+        indistinguishable from the answer for a truly unknown id. No
+        existence oracle for another workspace's live session."
+
+        THE ANTI-TAUTOLOGY RULE: the two payloads are compared
+        MEMBER-BY-MEMBER (every member but the caller's own session id
+        must be EQUAL), so a distinguishable answer fails even when it
+        is "semantically the same" — a different reason code, a
+        different key set or a different flag all fail.
+        """
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+
+        other = FakeMachine(service, machine_id="machine-beta")
+        other.connection = await service.open_connection(other)
+        await other.hello()
+
+        foreign = await other.terminate(
+            session_id=SESSION_ID, request_id="req-foreign"
+        )
+        unknown = await other.terminate(
+            session_id="sess-never-existed", request_id="req-unknown"
+        )
+
+        foreign_result = dict(foreign["result"])
+        unknown_result = dict(unknown["result"])
+        # The ONLY member that may differ is the session id itself — it
+        # is the caller's own input.
+        foreign_result.pop("session_id")
+        unknown_result.pop("session_id")
+        assert foreign_result == unknown_result
+        # The neutral answer of the never-existed arm, spelled out.
+        assert unknown_result["reason"] == REASON_ALREADY_ENDED
+        assert unknown_result["ended"] is False
+        assert unknown_result["machine_notified"] is False
+        # The foreign session is STILL live — the answer did not end it.
+        assert service.sessions.get(SESSION_ID) is not None
+
     async def test_the_terminate_of_another_connections_session_is_not_ended(self):
         """The centre never ends another connection's session."""
         service = make_service()

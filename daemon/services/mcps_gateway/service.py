@@ -979,6 +979,14 @@ class McpGatewayService:
           the release default; sending the reason always makes the
           client's decision EXPLICIT instead of leaving it to a
           fallback.
+
+        THE FOREIGN-SESSION LEAK BAN (§6.10.2, Fork C)
+
+        A live session of ANOTHER connection is answered EXACTLY like a
+        session that never existed: the same ``already_ended`` reason
+        and the same key set. The answer must be INDISTINGUISHABLE —
+        a distinguishable one is an existence oracle for another
+        workspace's live session.
         """
         request_id = payload.get("id")
         # §6.1 — the session id rides the ENVELOPE.
@@ -1090,11 +1098,17 @@ class McpGatewayService:
                     # machine's local lock was released by the sweep's
                     # forward, not by this request.
                     wire_reason = REASON_REAPED_BY_CENTER
-            elif session is not None:
-                # The session is live but belongs to ANOTHER connection.
-                # The centre never ends another connection's session on a
-                # machine's word — and it says so honestly.
-                wire_reason = REASON_UNKNOWN_SESSION
+            # A LIVE session of ANOTHER connection is NOT distinguished
+            # from a truly unknown id (§6.10.2 — the foreign-session
+            # leak ban; Fork C): "whatever the responder returns … the
+            # answer MUST be indistinguishable from the answer for a
+            # truly unknown id". A distinguishable answer here would be
+            # an EXISTENCE ORACLE for another workspace's live session,
+            # so the foreign-live case keeps the SAME neutral
+            # ``already_ended`` the never-existed case answers. The
+            # centre still never ends another connection's session on a
+            # machine's word — the difference is only that the answer
+            # no longer says WHICH case it was.
             ack = self._terminate_ack(
                 session_id,
                 ended=False,
