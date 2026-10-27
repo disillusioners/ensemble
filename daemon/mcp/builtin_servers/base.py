@@ -139,7 +139,38 @@ class BuiltinServerDefinition(ABC):
             covers built-ins whose only dependencies are external CLI
             binaries (``uvx``, ``npx``) and are therefore always available
             when the daemon can spawn subprocesses.
+
+        C1 (soak-gate-mcp-warmup) — the PER-BOOT QUARANTINE consult.
+        A server whose init failed enough times is disabled for this
+        boot; the registry lives in ``daemon.mcp.init_guard`` (the ONE
+        leaf home). The consult happens BEFORE the ``required_package``
+        check so a quarantined server is skipped even when its package
+        is installed.
+
+        The import is FUNCTION-LOCAL (the codebase's coupling-narrow
+        pattern) so ``base`` → ``init_guard`` never creates an import
+        cycle — the guard imports NOTHING from ``daemon.mcp``.
+
+        INSTANCE FORM REQUIRED: ``name`` is a ``@property
+        @abstractmethod`` (below), so the class-level attribute ``cls.name``
+        is a **property object**, not a string — ``is_quarantined(cls.name)``
+        would never match a registry key and would silently disable the
+        whole quarantine. The instance form ``cls().name`` is required
+        (the definitions are stateless — they are already instantiated at
+        ``builtin_servers/__init__.py:79-81``).
         """
+        try:
+            from daemon.mcp import init_guard
+
+            if init_guard.is_quarantined(cls().name):
+                return False
+        except Exception:  # noqa: BLE001 — the guard must never break the seam
+            logger.debug(
+                "Quarantine registry consult failed for builtin '%s'; "
+                "treating as available",
+                getattr(cls, "__name__", "?"),
+                exc_info=True,
+            )
         if cls.required_package is None:
             return True
         import importlib.util
@@ -163,6 +194,28 @@ class BuiltinServerDefinition(ABC):
         }
         """
         return {}
+
+    def get_precheck_url(self, env: dict[str, str] | None = None) -> str | None:
+        """The URL whose HOST the C2 DNS pre-check resolves.
+
+        C2 (soak-gate-mcp-warmup): a URL-bearing server resolves its
+        API base BEFORE the child is spawned, so a dead host is refused
+        in ~2 s instead of hanging to the package's 30 s init timeout.
+
+        The default is ``None`` — the server has NO URL-bearing base
+        (e.g. ``webfetch`` fetches arbitrary URLs the daemon never sees;
+        ``plane`` is a streamable-http transport that is not spawned as
+        a child), so the pre-check is skipped for it.
+
+        ``env`` is the EFFECTIVE merged env the child will receive (the
+        row's ``config.env`` overlaid on the definition defaults — the
+        precedence ``build_pooled_stdio_config`` pins: the row wins on
+        every key). Implementations MUST read the effective env, never
+        the daemon's own environment: the MCP SDK passes only
+        ``get_default_environment()`` (HOME/LOGNAME/PATH/SHELL/TERM/USER)
+        to the child, so the daemon's env never reaches it.
+        """
+        return None
 
     @abstractmethod
     def get_config_schema(self) -> list[dict[str, Any]]:

@@ -280,7 +280,16 @@ class PlaneServerDefinition(BuiltinServerDefinition):
         Historical note: the module docstring used to claim "there is
         intentionally NO disable toggle" — superseded 2026-09-20 by the
         sanctioned ``PLANE_MCP_ENABLED`` switch.
+
+        C1 (soak-gate-mcp-warmup) — the per-boot QUARANTINE consult.
+        This override bypassed ``super().is_available()`` entirely, so a
+        quarantined plane would NOT have been skipped (the W-5
+        quarantine hole). The ``super()`` call is therefore the FIRST
+        statement: the base class consults the quarantine registry (and
+        the ``required_package`` check) before the plane-specific gates.
         """
+        if not super().is_available():
+            return False
         if not _mcp_kill_switch_enabled():
             cls._log_kill_switch_once()
             return False

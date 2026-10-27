@@ -44,8 +44,7 @@ logger = logging.getLogger(__name__)
 # Cold-discovery retry delay (Fix 2): seconds to wait before the single
 # retry of a transient first-connect failure during schema discovery.
 # Module-level so tests can shrink it to zero instead of sleeping.
-SCHEMA_DISCOVERY_CONNECT_RETRY_DELAY_S = 1.5
-# Negative-cache throttle (Fix 1): minimum seconds between two cold
+SCHEMA_DISCOVERY_CONNECT_RETRY_DELAY_S = 1.5# Negative-cache throttle (Fix 1): minimum seconds between two cold
 # discoveries of a server whose previous discovery came back empty.
 # Empty results are never cached; this bounds re-discovery of a dead
 # server to one attempt per window instead of once per spawn.
@@ -67,6 +66,22 @@ EMPTY_DISCOVERY_RETRY_THROTTLE_S = 30.0
 # path. Module-level (not class-level) so a test fixture can flip
 # it without instantiating the service.
 _preload_gate_skip_log_emitted: bool = False
+
+
+def _is_server_quarantined(server_name: str) -> bool:
+    """Is this MCP server disabled for THIS boot? (C1 — the quarantine).
+
+    The per-boot quarantine registry lives in ``daemon.mcp.init_guard``
+    (the ONE leaf home). The consult is a pure read — a missing guard
+    module degrades to "not quarantined" (the pre-C1 behaviour) rather
+    than breaking the MCP layer.
+    """
+    try:
+        from daemon.mcp.init_guard import is_quarantined
+
+        return bool(is_quarantined(server_name))
+    except Exception:  # noqa: BLE001 — the guard must never break MCP
+        return False
 
 
 class _McpSessionProviderImpl:
@@ -164,6 +179,21 @@ class _McpSessionProviderImpl:
             raise ToolException(
                 f"MCP server '{server_name}' not found. "
                 f"It may have been removed."
+            )
+
+        # C1 / S5 (soak-gate-mcp-warmup): the per-boot quarantine
+        # consult on the COLD-SPAWN path. This fall-through spawns one
+        # npx child PER INSTANCE — the incident's ×4 cold-spawn
+        # multiplier. A server that is quarantined for this boot must
+        # NOT be spawned here: the quarantine is the prevention, and
+        # without this consult a quarantined server would keep
+        # re-entering the incident's shape.
+        if _is_server_quarantined(server_name):
+            raise ToolException(
+                f"MCP server '{server_name}' is quarantined for this boot "
+                f"(its init failed repeatedly) — no session was spawned. "
+                f"It returns automatically after the breaker's recovery "
+                f"window (no daemon restart needed)."
             )
 
         await conn_mgr.connect_instance(
@@ -461,6 +491,21 @@ class McpService:
         # guarantees we stay in our own namespace even if a user names
         # a server after a UUID.
         discovery_id = f"_schema_discovery:{server.name}"
+        # C1 / S4 (soak-gate-mcp-warmup): the per-boot quarantine
+        # consult. A server whose init failed enough times is disabled
+        # for this boot — the cold discovery must NOT spawn it (that
+        # spawn is the incident's ×4 cold-spawn multiplier: one npx
+        # child PER INSTANCE). The consult is the same
+        # ``is_available()`` seam the bootstrap and warmup layers use;
+        # here it is checked directly so the COLD path is covered even
+        # when it is reached outside ``preload_mcp_tools``.
+        if _is_server_quarantined(server.name):
+            logger.info(
+                "MCP server '%s' is quarantined for this boot — skipping "
+                "the cold schema discovery (no subprocess spawned)",
+                server.name,
+            )
+            return []
         try:
             # Fix 2: session acquisition goes through the retry helper
             # (one bounded retry on connection-type failures; auth

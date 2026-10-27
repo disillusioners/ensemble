@@ -18,6 +18,20 @@ from mcp import StdioServerParameters
 from langchain_mcp_adapters.tools import load_mcp_tools
 
 from daemon.mcp.config import McpStdioConfig
+from daemon.mcp.init_guard import (
+    DNS_PRECHECK_TIMEOUT_S,
+    FAILURE_CLASS_INIT_FAILED,
+    FAILURE_CLASS_INIT_TIMEOUT,
+    INIT_RECOVERY_TIMEOUT_S,
+    McpInitRefused,
+    McpServerQuarantined,
+    can_attempt,
+    dns_precheck,
+    is_quarantined,
+    record_failure,
+    record_success,
+    server_state,
+)
 from daemon.mcp.managed_session import ManagedClientSession
 from daemon.mcp.models import McpToolSchema
 from daemon.mcp.stdio_wrapper import TaskScopedStdioClient
@@ -92,6 +106,18 @@ _SECRET_RESOLVE_EXECUTOR = ThreadPoolExecutor(
     max_workers=2, thread_name_prefix="mcp-secret"
 )
 
+
+def _init_failure_class(exc: BaseException) -> str:
+    """Map an init exception onto the C1 failure-class taxonomy.
+
+    A TIMEOUT is its own class (``init_timeout``); everything else is
+    ``init_failed``. The class is what the breaker counts (threshold 3)
+    and what the ``detail.mcp`` surface publishes.
+    """
+    if isinstance(exc, asyncio.TimeoutError):
+        return FAILURE_CLASS_INIT_TIMEOUT
+    return FAILURE_CLASS_INIT_FAILED
+
 class McpWarmupPool:
     """
     Pre-warmed connection pool for built-in STDIO MCP servers.
@@ -137,6 +163,13 @@ class McpWarmupPool:
         # it disables the per-call timeout wrap entirely, so we must use
         # ``is not None`` checks (not truthiness) when populating / looking up.
         self._tool_call_timeouts: dict[str, int] = {}
+        # C2 (soak-gate-mcp-warmup): the per-server DNS pre-check
+        # resolver. It maps the EFFECTIVE merged env (the row's env
+        # overlaid on the definition defaults — the precedence
+        # ``build_pooled_stdio_config`` pins) to the URL whose HOST the
+        # pre-check resolves, or ``None`` for a server with no
+        # URL-bearing base (the pre-check is skipped for it).
+        self._precheck_resolvers: dict[str, Any] = {}
 
     def register_server(
         self,
@@ -144,6 +177,7 @@ class McpWarmupPool:
         config: McpStdioConfig,
         pool_size: int = DEFAULT_POOL_SIZE,
         tool_call_timeout: int | None = None,
+        precheck_resolver: Any = None,
     ) -> None:
         """
         Register a built-in STDIO server for pooling.
@@ -158,6 +192,12 @@ class McpWarmupPool:
                 integer is provided — including ``0``, which disables the
                 per-call timeout wrap entirely — it overrides the pool default
                 for this server only.
+            precheck_resolver: Optional callable ``(env) -> str | None``
+                returning the URL whose host the C2 DNS pre-check resolves.
+                ``None`` (the default) disables the pre-check for this
+                server. The callable receives the EFFECTIVE merged env, so
+                an env change (``mcp_set_env`` / ``kms_attach``) is picked
+                up by the next attempt.
         """
         if server_name in self._pools:
             logger.warning(
@@ -174,6 +214,8 @@ class McpWarmupPool:
             # ``is not None`` (not truthiness) — ``0`` must be stored because it
             # is a valid override that disables the timeout wrap.
             self._tool_call_timeouts[server_name] = tool_call_timeout
+        if precheck_resolver is not None:
+            self._precheck_resolvers[server_name] = precheck_resolver
         logger.debug(f"Registered server '{server_name}' with pool_size={pool_size}")
 
     async def warmup(self, pool_size: dict[str, int] | None = None) -> None:
@@ -208,6 +250,23 @@ class McpWarmupPool:
                     logger.warning(f"Partially warmed up pool for '{server_name}' ({success_count}/{size} connections)")
                 else:
                     logger.error(f"Failed to warm up pool for '{server_name}' (0/{size} connections created)")
+            except McpServerQuarantined as exc:
+                # C1: an EXPECTED state — the server is disabled for this
+                # boot. Not an ERROR (it would drown the real faults).
+                logger.info(
+                    "MCP server '%s' warmup skipped — quarantined (%s)",
+                    server_name,
+                    exc.reason,
+                )
+            except McpInitRefused as exc:
+                # C2: the DNS pre-check refused the spawn (no child was
+                # started). A REAL failure — visible at WARNING.
+                logger.warning(
+                    "MCP server '%s' warmup refused by the DNS pre-check "
+                    "(class=%s) — no child spawned",
+                    server_name,
+                    exc.error_class,
+                )
             except Exception as e:
                 logger.error(f"Failed to warm up pool for '{server_name}': {e}", exc_info=True)
 
@@ -258,7 +317,23 @@ class McpWarmupPool:
 
         success_count = 0
         for result in results:
-            if isinstance(result, (Exception, asyncio.CancelledError)):
+            if isinstance(result, McpServerQuarantined):
+                # C1: the server is disabled for this boot — an EXPECTED
+                # state, not a fault.
+                logger.info(
+                    "MCP server '%s' not spawned — quarantined (%s)",
+                    server_name,
+                    result.reason,
+                )
+            elif isinstance(result, McpInitRefused):
+                # C2: the DNS pre-check refused the spawn.
+                logger.warning(
+                    "MCP server '%s' not spawned — DNS pre-check refused "
+                    "(class=%s)",
+                    server_name,
+                    result.error_class,
+                )
+            elif isinstance(result, (Exception, asyncio.CancelledError)):
                 logger.error(
                     f"Failed to create pooled connection for '{server_name}': "
                     f"{type(result).__name__}: {result}",
@@ -273,6 +348,69 @@ class McpWarmupPool:
 
         return success_count
 
+    async def _run_dns_precheck(
+        self,
+        server_name: str,
+        config: McpStdioConfig,
+    ) -> None:
+        """C2 — the bounded DNS pre-check, run BEFORE the child is spawned.
+
+        The target is the EFFECTIVE base the child would actually use:
+        the merged env (the row's ``config.env`` overlaid on the
+        definition defaults — ``build_pooled_stdio_config`` pins the
+        precedence: the row wins on every key) mapped through the
+        server's pre-check resolver.
+
+        The daemon's OWN environment is never consulted: the MCP SDK
+        passes only ``get_default_environment()`` (HOME/LOGNAME/PATH/
+        SHELL/TERM/USER) to the child, so the daemon env never reaches
+        it (premise P2).
+
+        Outcomes (requirements §4.5 P5):
+
+        * ``ok`` → proceed (the resolved ADDRESS IS DISCARDED — the
+          pre-check is a PROBE, never a pin),
+        * ``resolver_timeout`` → PROCEED (a resolver hiccup must never
+          block the boot); the server is recorded as degraded but is
+          NOT quarantine-eligible,
+        * ``dns_nxdomain`` / ``dns_servfail`` → the attempt is REFUSED
+          (no child spawned) and the failure is recorded on the
+          breaker; NXDOMAIN quarantines IMMEDIATELY (a definitive
+          answer), SERVFAIL counts toward the threshold of 3.
+        """
+        resolver = self._precheck_resolvers.get(server_name)
+        if resolver is None:
+            return
+        try:
+            target = resolver(config.env or {})
+        except Exception as exc:  # noqa: BLE001 — a resolver must never break init
+            logger.warning(
+                "MCP DNS pre-check target resolution failed for '%s': %s",
+                server_name,
+                exc,
+            )
+            return
+        if not target:
+            return
+        outcome = await dns_precheck(target)
+        if outcome == "ok":
+            await record_success(server_name, scope="dns")
+            return
+        if outcome == "resolver_timeout":
+            # NOT quarantine-eligible — record the class and PROCEED.
+            await record_failure(server_name, outcome)
+            logger.warning(
+                "MCP DNS pre-check for '%s' hit the resolver timeout "
+                "(%.1fs bound) — NOT quarantine-eligible; proceeding with "
+                "the spawn (the child does its own resolution)",
+                server_name,
+                DNS_PRECHECK_TIMEOUT_S,
+            )
+            return
+        # A resolution failure — refuse the init, NO child spawned.
+        await record_failure(server_name, outcome)
+        raise McpInitRefused(server_name, outcome, target)
+
     async def _create_pooled_connection(self, server_name: str) -> PooledConnection:
         """
         Create a single pooled connection.
@@ -280,6 +418,14 @@ class McpWarmupPool:
         Creates STDIO subprocess, completes handshake, discovers tools.
 
         CRITICAL: Cleans up subprocess on any failure to prevent orphans.
+
+        C1 (soak-gate-mcp-warmup): the init path is wrapped by the
+        per-boot quarantine guard. A quarantined server is NEVER spawned
+        (the prevention is the primary fix); the only spawn allowed
+        while quarantined is the breaker's single recovery probe after
+        the recovery window. C2: the DNS pre-check runs BEFORE the spawn
+        so a dead API host is refused in ~2 s instead of hanging to the
+        package's 30 s init timeout — and NO child is spawned.
 
         Args:
             server_name: Name of the server to connect to
@@ -291,6 +437,19 @@ class McpWarmupPool:
             Exception: On connection failure (after cleanup)
         """
         config = self._configs[server_name]
+        # ── C1: the quarantine gate ────────────────────────────────
+        # ``can_attempt`` is False ONLY when the server is quarantined
+        # and no recovery probe is due. The raise is a distinct type so
+        # the two failure loops below can log it as an EXPECTED state
+        # (INFO) rather than a fault (ERROR).
+        if not await can_attempt(server_name):
+            entry = server_state(server_name)
+            raise McpServerQuarantined(
+                server_name,
+                (entry.reason if entry is not None else "unknown") or "unknown",
+            )
+        # ── C2: the DNS pre-check (off-loop, bounded at 2.0s) ─────
+        await self._run_dns_precheck(server_name, config)
         # agent-secrets P2 (design §1c) — LITERAL composition:
         # ``resolve_secret_markers(resolve_env(config.env))``. Stored
         # config NEVER holds resolved values (R1); the resolution
@@ -377,6 +536,10 @@ class McpWarmupPool:
                     tools = adapt_mcp_tools(server_name, tools, tool_call_timeout=timeout)
                     self._tool_discovery_cache[server_name] = tools
 
+            # C1: a healthy init closes the breaker and (when this was
+            # a recovery probe) lifts the quarantine — the server comes
+            # back WITHOUT a daemon restart.
+            await record_success(server_name, scope="init")
             return PooledConnection(
                 session=session,
                 stream_cm=streams_cm,
@@ -384,7 +547,15 @@ class McpWarmupPool:
                 server_name=server_name,
                 created_at=time.monotonic(),
             )
-        except BaseException:
+        except BaseException as exc:
+            # C1: the init failure is recorded on the per-boot breaker.
+            # A CANCELLATION is not an init failure (the daemon is
+            # shutting down / the task was cancelled) — it must never
+            # count towards the quarantine threshold.
+            if not isinstance(exc, asyncio.CancelledError):
+                await record_failure(
+                    server_name, _init_failure_class(exc)
+                )
             # Clean up to prevent orphaned subprocess.
             #
             # B3: the close request comes FIRST and is SYNCHRONOUS. Under
@@ -632,6 +803,21 @@ class McpWarmupPool:
         if pool is None or pool.qsize() >= self._pool_sizes.get(server_name, self.DEFAULT_POOL_SIZE):
             return
 
+        # C1 (S3): a QUARANTINED server is never re-spawned this boot.
+        # This is the seam that stops the forever-retry: the health
+        # check evicts a dead connection every 60 s and the replenish
+        # re-ran the failing init chain forever. The quarantine ends
+        # that loop — the server returns only via the breaker's recovery
+        # probe after the recovery window.
+        if is_quarantined(server_name):
+            logger.info(
+                "MCP server '%s' is quarantined for this boot — skipping "
+                "the replenish (it returns via the breaker's recovery "
+                "probe, no daemon restart needed)",
+                server_name,
+            )
+            return
+
         async with self._replenish_semaphore:
             if not self._running:
                 return
@@ -644,8 +830,37 @@ class McpWarmupPool:
                     conn = await self._create_pooled_connection(server_name)
                     await pool.put(conn)
                     logger.debug(f"Replenished pool for {server_name}")
+                except McpServerQuarantined as exc:
+                    # An EXPECTED state (the server is disabled for this
+                    # boot) — not a fault. The failure is already on the
+                    # breaker (see ``_create_pooled_connection``).
+                    logger.info(
+                        "MCP server '%s' replenish skipped — quarantined "
+                        "(%s)",
+                        server_name,
+                        exc.reason,
+                    )
+                except McpInitRefused as exc:
+                    # The DNS pre-check refused the spawn (no child was
+                    # started). This is a REAL failure — it is recorded
+                    # on the breaker and it is visible at WARNING.
+                    logger.warning(
+                        "MCP server '%s' replenish refused by the DNS "
+                        "pre-check (class=%s) — no child spawned",
+                        server_name,
+                        exc.error_class,
+                    )
                 except Exception as e:
-                    logger.debug(f"Failed to replenish pool for {server_name}: {e}", exc_info=True)
+                    # C4 addendum: this failure used to be swallowed at
+                    # DEBUG — invisible at INFO/WARNING while the pool
+                    # re-spawned forever. It is now a WARNING, and the
+                    # failure is ALSO recorded on the per-boot breaker
+                    # (inside ``_create_pooled_connection``), so the
+                    # server degrades visibly and eventually quarantines.
+                    logger.warning(
+                        f"Failed to replenish pool for {server_name}: {e}",
+                        exc_info=True,
+                    )
 
     async def health_check(self) -> None:
         """
@@ -703,6 +918,20 @@ class McpWarmupPool:
                 # on the same cadence as health-evicted ones — the pool keeps
                 # its warm-start contract; only a connection's LIFETIME is
                 # bounded by ``idle_reap_seconds``.
+                #
+                # C1 (S3): a QUARANTINED server is not re-spawned here
+                # either. Without this consult the health loop would
+                # evict the dead connection and the replenish would
+                # re-run the failing init chain every 60 s — forever.
+                if is_quarantined(server_name):
+                    logger.info(
+                        "MCP server '%s' is quarantined for this boot — the "
+                        "health check will not re-spawn it (recovery is via "
+                        "the breaker's half-open probe after %.0fs)",
+                        server_name,
+                        INIT_RECOVERY_TIMEOUT_S,
+                    )
+                    continue
                 if len(healthy) < self._pool_sizes.get(server_name, self.DEFAULT_POOL_SIZE):
                     self._start_tracked_replenish(server_name)
 
