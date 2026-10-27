@@ -6,10 +6,10 @@ Eliminates cold-start delay by keeping ready-to-use subprocess connections avail
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import logging
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -104,9 +104,13 @@ WARMUP_TOTAL_BUDGET_S: float = 90.0
 # Queue depth: bounded by spawn count, fully bounded only by phase-3's C1
 # quarantine (S1). Process-lifetime lazy threads (house precedent); no
 # shutdown path wired here (manager.py is out of the daemon-file scope fence).
-_SECRET_RESOLVE_EXECUTOR = ThreadPoolExecutor(
+SECRET_RESOLVE_EXECUTOR = ThreadPoolExecutor(
     max_workers=2, thread_name_prefix="mcp-secret"
 )
+# Pinned private alias — tests/unit/tools/test_stdio_wrapper_bounded_wait.py
+# pins THIS name (thread_name_prefix + max_workers); it is the SAME object.
+# Remove only together with a test-side re-point (outside the hygiene batch).
+_SECRET_RESOLVE_EXECUTOR = SECRET_RESOLVE_EXECUTOR
 
 
 def _init_failure_class(exc: BaseException) -> str:
@@ -119,6 +123,7 @@ def _init_failure_class(exc: BaseException) -> str:
     if isinstance(exc, asyncio.TimeoutError):
         return FAILURE_CLASS_INIT_TIMEOUT
     return FAILURE_CLASS_INIT_FAILED
+
 
 class McpWarmupPool:
     """
@@ -204,7 +209,8 @@ class McpWarmupPool:
         if server_name in self._pools:
             logger.warning(
                 f"Server '{server_name}' already registered, skipping "
-                f"(ignored timeout override: pool already using its original tool_call_timeout)"
+                f"(ignored tool_call_timeout / precheck_resolver overrides: "
+                f"pool already using its original registration)"
             )
             return
 
@@ -392,7 +398,7 @@ class McpWarmupPool:
             # Already recorded by the pre-check (with the DNS class).
             # The CLAIM RELEASE for this path is owned by
             # ``init_guard.record_failure``'s already-quarantined branch
-            # (init_guard.py:684-692), which clears ``probe_claimed`` and
+            # (init_guard.py:725-731), which clears ``probe_claimed`` and
             # re-arms the recovery window — that is why this branch does
             # NOT release it itself.
             return
