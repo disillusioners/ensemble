@@ -125,7 +125,7 @@ def test_g1_cancellation_runs_aexit():
             wrapper = sw.TaskScopedStdioClient(
                 _params(), instance_id="i", server_name="s"
             )
-            with pytest.raises(BaseException):
+            with pytest.raises(asyncio.CancelledError):
                 await wrapper.__aenter__()
         return holder["cm"]
 

@@ -459,7 +459,7 @@ async def test_an_early_raise_in_the_claim_span_is_recorded(monkeypatch):
     monkeypatch.setattr(warmup_pool_module, "resolve_secret_markers", _boom)
 
     for _ in range(3):
-        with pytest.raises(Exception):
+        with pytest.raises(RuntimeError):
             await pool._create_pooled_connection("context7")
 
     entry = init_guard.server_state("context7")
@@ -496,13 +496,13 @@ async def test_an_early_raise_releases_the_recovery_probe_claim(monkeypatch):
     monkeypatch.setattr(warmup_pool_module, "resolve_secret_markers", _boom)
 
     for _ in range(3):
-        with pytest.raises(Exception):
+        with pytest.raises(RuntimeError):
             await pool._create_pooled_connection("context7")
     assert init_guard.is_quarantined("context7") is True
 
     await asyncio.sleep(0.1)
     # The probe is due: the create path claims it, the marker raises.
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError):
         await pool._create_pooled_connection("context7")
 
     entry = init_guard.server_state("context7")

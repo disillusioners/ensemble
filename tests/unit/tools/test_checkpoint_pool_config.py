@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 
 import pytest
+from pydantic import ValidationError
 
 from daemon import constants
 from daemon.config import LimitsConfig
@@ -113,11 +114,13 @@ class TestCheckpointPoolConfigLadder:
         assert ok is False and failure == "validation"
 
     def test_the_field_clamps_too(self):
-        with pytest.raises(Exception):
+        # The Field bounds raise pydantic's ValidationError — the pin
+        # names the type so an unrelated exception cannot satisfy it.
+        with pytest.raises(ValidationError):
             LimitsConfig(checkpoint_pool_max_size=21)
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             LimitsConfig(checkpoint_pool_max_size=4)
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             LimitsConfig(checkpoint_pool_timeout_s=0)
 
     def test_the_sizing_arithmetic_is_the_documented_one(self):
