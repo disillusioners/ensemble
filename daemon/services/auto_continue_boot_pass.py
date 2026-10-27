@@ -126,7 +126,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from daemon.services.mission_record_service import (
     mint_boot_epoch_if_none_fail_open,
@@ -303,7 +303,9 @@ def _register_a3_release_handlers(manager, task_repo, boot_epoch) -> None:
     )
 
 
-def _make_boot_continue_release_handler(manager, task_repo, boot_epoch):
+def _make_boot_continue_release_handler(
+    manager, task_repo, boot_epoch,
+) -> Callable[[list[promote_txn_hold.DeferredCandidate]], Awaitable[None]]:
     """Build the seam-1 release handler (the boot auto-continue pass).
 
     Re-issues the silent checkpoint resume for every deferred candidate
@@ -312,7 +314,7 @@ def _make_boot_continue_release_handler(manager, task_repo, boot_epoch):
     ``{"status": "resuming"}``).
     """
 
-    async def _release(candidates):
+    async def _release(candidates: list[promote_txn_hold.DeferredCandidate]) -> None:
         for cand in candidates:
             payload = cand.payload
             instance_id = payload.get("instance_id")
@@ -370,14 +372,16 @@ def _make_boot_continue_release_handler(manager, task_repo, boot_epoch):
     return _release
 
 
-def _make_orphan_sweep_release_handler(manager):
+def _make_orphan_sweep_release_handler(
+    manager,
+) -> Callable[[list[promote_txn_hold.DeferredCandidate]], Awaitable[None]]:
     """Build the seam-4 release handler (the task-less orphan sweep).
 
     Re-issues the silent checkpoint resume for every deferred orphan
     through the SAME resume primitive the sweep uses.
     """
 
-    async def _release(candidates):
+    async def _release(candidates: list[promote_txn_hold.DeferredCandidate]) -> None:
         for cand in candidates:
             payload = cand.payload
             instance_id = payload.get("instance_id")

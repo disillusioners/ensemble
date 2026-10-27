@@ -13243,7 +13243,9 @@ class InstanceManager:
             self._release_runtime_resume_candidates,
         )
 
-    async def _release_runtime_resume_candidates(self, candidates) -> None:
+    async def _release_runtime_resume_candidates(
+        self, candidates: list[promote_txn_hold.DeferredCandidate],
+    ) -> None:
         """Release the deferred runtime resumes through the ORIGINAL seam."""
         for cand in candidates:
             payload = cand.payload
