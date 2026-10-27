@@ -33,6 +33,7 @@ from daemon.services.mcps_gateway.protocol import (
     CENTER_EMITTED_CODES,
     CENTER_ORIGINATED_METHODS,
     CLIENT_ORIGINATED_METHODS,
+    CODE_INTERNAL,
     CODE_MACHINE_ID_CONFLICT,
     METHOD_SESSION_TERMINATE,
     PROTOCOL_VERSION,
@@ -43,12 +44,14 @@ from daemon.services.mcps_gateway.protocol import (
     SUPPORTED_PROTOCOL_VERSIONS,
     TYPE_ERROR,
     TYPE_REQUEST,
+    GatewayProtocolError,
     make_envelope,
     make_error_envelope,
 )
 from daemon.services.mcps_gateway.tombstones import (
     CENTER_WIRE_REASONS,
     LEDGER_ONLY_REASONS,
+    REASON_EXPIRED,
     RESPONSE_REASONS,
     SessionTombstone,
     TombstoneStore,
@@ -127,11 +130,6 @@ class TestMakeEnvelope:
         assert envelope["v"] == PROTOCOL_VERSION_V02
 
     def test_the_error_envelope_carries_the_version_too(self) -> None:
-        from daemon.services.mcps_gateway.protocol import (
-            CODE_INTERNAL,
-            GatewayProtocolError,
-        )
-
         envelope = make_error_envelope(
             id="req-1",
             error=GatewayProtocolError(CODE_INTERNAL, "nope"),
@@ -157,13 +155,15 @@ class TestTheTombstoneLookup:
         store.record(
             SessionTombstone(
                 session_id="sess-alpha",
-                reason="expired",
+                reason=REASON_EXPIRED,
                 at=1_000.0,
                 agent_id="ari",
             )
         )
         found = store.get("sess-alpha", now=1_000.0)
         assert found is not None
+        # The WIRE vocabulary is pinned by the literal, not by the
+        # constant that produced it (the anti-tautology rule).
         assert found.reason == "expired"
 
     def test_an_unknown_session_id_is_not_found(self) -> None:

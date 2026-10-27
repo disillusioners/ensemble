@@ -37,10 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from typing import Any
-
-import pytest
 
 from daemon.services.mcps_gateway.audit import MemoryAuditSink
 from daemon.services.mcps_gateway.config import GatewayConfig
@@ -48,9 +45,12 @@ from daemon.services.mcps_gateway.protocol import (
     AUDIT_TOOL_SESSION_TERMINATE,
     CAP_CLIENT_TERMINATE,
     CODE_INTERNAL,
-    CODE_MACHINE_BUSY,
+    METHOD_SESSION_END,
     PROTOCOL_VERSION,
     PROTOCOL_VERSION_V02,
+    TYPE_ERROR,
+    TYPE_REQUEST,
+    TYPE_RESPONSE,
 )
 from daemon.services.mcps_gateway.service import McpGatewayService
 from daemon.services.mcps_gateway.tombstones import (
@@ -64,10 +64,9 @@ AGENT_ID = "ari"
 MACHINE_ID = "machine-alpha"
 SESSION_ID = "sess-alpha"
 
-#: The capability map a v0.2 machine advertises. ``client_terminate`` is
-#: the v0.2 addition: the machine tells the centre it can terminate a
-#: session from its own side.
-CAPS_V02 = {
+#: The capability map a v0.1 machine advertises — the historical seven
+#: keys; a v0.1 machine has never heard of ``client_terminate``.
+CAPS_V01: dict[str, bool] = {
     "session": True,
     "tools": True,
     "notifications": False,
@@ -75,8 +74,12 @@ CAPS_V02 = {
     "screenshot_delta": False,
     "multi_session": False,
     "client_cert": False,
-    CAP_CLIENT_TERMINATE: True,
 }
+
+#: The capability map a v0.2 machine advertises. ``client_terminate`` is
+#: the v0.2 addition: the machine tells the centre it can terminate a
+#: session from its own side. Exactly the v0.1 map plus the one key.
+CAPS_V02: dict[str, bool] = {**CAPS_V01, CAP_CLIENT_TERMINATE: True}
 
 
 class Clock:
@@ -120,7 +123,10 @@ class FakeMachine:
 
     async def send_json(self, payload: dict[str, Any]) -> None:
         self.sent.append(payload)
-        if payload.get("type") == "request" and payload.get("method") == "session.end":
+        if (
+            payload.get("type") == TYPE_REQUEST
+            and payload.get("method") == METHOD_SESSION_END
+        ):
             self.session_ends.append(payload)
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
@@ -133,7 +139,7 @@ class FakeMachine:
         return [f for f in self.sent if f.get("type") == type_]
 
     def last_response(self) -> dict[str, Any] | None:
-        responses = self.frames_of_type("response")
+        responses = self.frames_of_type(TYPE_RESPONSE)
         return responses[-1] if responses else None
 
     async def hello(self) -> dict[str, Any]:
@@ -181,7 +187,9 @@ class FakeMachine:
             payload.update(extra_envelope)
         await self.service.handle_frame(self.connection, json.dumps(payload))
         for frame in reversed(self.sent):
-            if frame.get("type") in ("response", "error") and frame.get("id") == request_id:
+            if frame.get("type") in (TYPE_RESPONSE, TYPE_ERROR) and (
+                    frame.get("id") == request_id
+            ):
                 return frame
         return {}
 
@@ -199,7 +207,7 @@ class FakeMachine:
         )
 
     async def answer_last(self, result: Any = None) -> None:
-        requests = self.frames_of_type("request")
+        requests = self.frames_of_type(TYPE_REQUEST)
         assert requests, "the center sent no request"
         request = requests[-1]
         await self.service.handle_frame(
@@ -460,7 +468,7 @@ class TestSessionTerminate:
 
         ack = await machine.terminate()
 
-        assert ack["type"] == "response"
+        assert ack["type"] == TYPE_RESPONSE
         assert "error" not in ack
 
     async def test_a_terminate_for_a_session_that_is_not_live_is_idempotent(self):
@@ -518,22 +526,14 @@ class TestTerminateNeedsTheCapability:
             FakeMachine(
                 service,
                 version=PROTOCOL_VERSION,
-                capabilities={
-                    "session": True,
-                    "tools": True,
-                    "notifications": False,
-                    "heartbeat": True,
-                    "screenshot_delta": False,
-                    "multi_session": False,
-                    "client_cert": False,
-                },
+                capabilities=dict(CAPS_V01),
             ),
         )
         await open_session(service, machine)
 
         ack = await machine.terminate()
 
-        assert ack["type"] == "error"
+        assert ack["type"] == TYPE_ERROR
         assert ack["error"]["code"] == CODE_INTERNAL
         # NO session effect: the session is still live.
         assert service.sessions.get(SESSION_ID) is not None
@@ -549,7 +549,7 @@ class TestTerminateNeedsTheCapability:
 
         ack = await machine.terminate()
 
-        assert ack["type"] == "error"
+        assert ack["type"] == TYPE_ERROR
         assert ack["error"]["code"] == CODE_INTERNAL
         assert service.sessions.get(SESSION_ID) is not None
 
@@ -633,15 +633,7 @@ class TestVersionScopedSessionEndParams:
             FakeMachine(
                 service,
                 version=PROTOCOL_VERSION,
-                capabilities={
-                    "session": True,
-                    "tools": True,
-                    "notifications": False,
-                    "heartbeat": True,
-                    "screenshot_delta": False,
-                    "multi_session": False,
-                    "client_cert": False,
-                },
+                capabilities=dict(CAPS_V01),
             ),
         )
         await open_session(service, machine)

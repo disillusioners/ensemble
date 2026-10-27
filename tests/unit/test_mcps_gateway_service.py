@@ -49,6 +49,20 @@ from daemon.services.mcps_gateway.service import (
 )
 
 
+#: The capability map a v0.2 machine advertises — the historical map plus
+#: ``client_terminate`` (§5.3/§6.10), the ONLY difference from v0.1.
+CAPS_V02: dict[str, bool] = {
+    "session": True,
+    "tools": True,
+    "notifications": False,
+    "heartbeat": True,
+    "screenshot_delta": False,
+    "multi_session": False,
+    "client_cert": False,
+    CAP_CLIENT_TERMINATE: True,
+}
+
+
 class FakeMachine:
     """The machine side of the socket, as the service sees it."""
 
@@ -340,9 +354,11 @@ class TestHello:
         assert errors[0]["error"]["code"] == CODE_PROTOCOL_VERSION_UNSUPPORTED
         # The refusal names the versions the centre DOES speak (§5.2) —
         # the newest first.
+        # The tuple itself is pinned value-for-value in
+        # test_mcps_gateway_protocol.py; the assertion tracks the constant.
         assert errors[0]["error"]["data"] == {
             "requested": "0.9",
-            "supported": ["0.2", "0.1"],
+            "supported": list(SUPPORTED_PROTOCOL_VERSIONS),
         }
         assert errors[0]["id"] == "req-0001"
         assert machine.closed is True
@@ -406,16 +422,7 @@ class TestProtocolNegotiation:
         machine.connection = await service.open_connection(machine)
         await machine.hello(
             version=PROTOCOL_VERSION_V02,
-            capabilities={
-                "session": True,
-                "tools": True,
-                "notifications": False,
-                "heartbeat": True,
-                "screenshot_delta": False,
-                "multi_session": False,
-                "client_cert": False,
-                CAP_CLIENT_TERMINATE: True,
-            },
+            capabilities=dict(CAPS_V02),
         )
         response = machine.frames_of_type("response")[0]
         assert response["v"] == PROTOCOL_VERSION_V02
@@ -548,16 +555,7 @@ class TestProtocolNegotiation:
         machine.connection = await service.open_connection(machine)
         await machine.hello(
             version=PROTOCOL_VERSION_V02,
-            capabilities={
-                "session": True,
-                "tools": True,
-                "notifications": False,
-                "heartbeat": True,
-                "screenshot_delta": False,
-                "multi_session": False,
-                "client_cert": False,
-                CAP_CLIENT_TERMINATE: True,
-            },
+            capabilities=dict(CAPS_V02),
         )
         caps = machine.frames_of_type("response")[0]["result"]["capabilities"]
         assert caps[CAP_CLIENT_TERMINATE] is True
@@ -1559,7 +1557,7 @@ class TestDuplicateMachineIdIsRefused:
     async def test_the_surviving_incumbent_can_reconnect_after_the_death(self):
         """The reconnect tolerance of §8.1 is preserved."""
         service = make_service(heartbeat_timeout_ms=50, client_dead_detect_ms=50)
-        machine = await open_machine(service, FakeMachine(service))
+        await open_machine(service, FakeMachine(service))
         await asyncio.sleep(0.08)
         await service.check_heartbeats()
 

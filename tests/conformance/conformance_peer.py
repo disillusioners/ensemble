@@ -1469,7 +1469,10 @@ class InKitCenter:
         session_id = str(envelope.get("session_id") or "")
         params = envelope.get("params") or {}
         raw_reason = params.get("reason_code")
-        reason = raw_reason if isinstance(raw_reason, str) else ("" if raw_reason is None else str(raw_reason))
+        if isinstance(raw_reason, str):
+            reason = raw_reason
+        else:
+            reason = "" if raw_reason is None else str(raw_reason)
         live = self._machine_session.get(conn_id)
         if live is not None and live == session_id:
             self._machine_session.pop(conn_id, None)

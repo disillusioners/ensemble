@@ -310,6 +310,26 @@ def bounded_close_reason(reason: str | None) -> str:
     return bounded_peer_text(reason, max_chars=CLOSE_REASON_MAX_CHARS)
 
 
+# ── the incumbent-connection states (§5.6) ────────────────────────────────
+#
+# The state of the INCUMBENT connection as it rides the WIRE: the
+# ``MACHINE_ID_CONFLICT`` error ``data.incumbent_connection`` member and
+# the audit detail of the refusal. Named constants, not bare literals —
+# the doc (``docs/mcps-gateway.md`` §4.6) pins the vocabulary and the
+# tests assert the exact strings.
+
+#: The incumbent is ALIVE — it HOLDS the machine id, so a second socket
+#: claiming the same id is refused (§5.6).
+INCUMBENT_STATE_OPEN = "open"
+
+#: The incumbent's transport is CLOSED — the id is free again.
+INCUMBENT_STATE_CLOSED = "closed"
+
+#: The incumbent is silent past the heartbeat timeout — the id is free
+#: again and the sweep is about to close it.
+INCUMBENT_STATE_DEAD = "dead"
+
+
 # ── the outcomes of a ``session.end`` FORWARD ─────────────────────────────
 #
 # The forward is best-effort and NEVER raises: the sweep must survive a
@@ -817,6 +837,24 @@ class McpGatewayService:
             return None
         return session.session_id
 
+    @staticmethod
+    def _terminate_ack(session_id: str, *, ended: bool, reason: str) -> dict[str, Any]:
+        """The ack of a ``session.terminate`` receipt — EXACTLY four members.
+
+        The key set is LOAD-BEARING (§6.10): the shipped client reads
+        ``ended`` / ``reason`` / ``why_not_ended``, and a STRAY member (a
+        ``why_not_ended`` on the successful path) would make it take the
+        wrong branch. Both arms of the receipt — the live end and the
+        idempotent goal state — build their answer HERE, so the contract
+        has exactly one home.
+        """
+        return {
+            "session_id": session_id,
+            "ended": ended,
+            "reason": reason,
+            "machine_notified": True,
+        }
+
     async def _handle_session_terminate(
         self, connection: ClientConnection, payload: dict[str, Any]
     ) -> None:
@@ -868,13 +906,10 @@ class McpGatewayService:
         params = payload.get("params")
         params = params if isinstance(params, dict) else {}
         # The reason code is taken VERBATIM and NEVER validated (§6.10.3).
+        # ``str()`` of a string is the string itself, so this is the
+        # verbatim value for every input the machine can send.
         raw_reason = params.get("reason_code")
-        if raw_reason is None:
-            reason = ""
-        elif isinstance(raw_reason, str):
-            reason = raw_reason
-        else:
-            reason = str(raw_reason)
+        reason = "" if raw_reason is None else str(raw_reason)
 
         session = self._sessions.get(session_id) if session_id else None
         owned = (
@@ -891,12 +926,7 @@ class McpGatewayService:
             # The machine ACKNOWLEDGED — it asked for the end, so it has
             # released its own local lock.
             self._release_centre_side(session, machine_notified=True)
-            ack: dict[str, Any] = {
-                "session_id": session_id,
-                "ended": True,
-                "reason": reason,
-                "machine_notified": True,
-            }
+            ack = self._terminate_ack(session_id, ended=True, reason=reason)
             await self._audit_terminate(
                 connection=connection,
                 session_id=session_id,
@@ -943,12 +973,7 @@ class McpGatewayService:
                 # The centre never ends another connection's session on a
                 # machine's word — and it says so honestly.
                 wire_reason = REASON_UNKNOWN_SESSION
-            ack = {
-                "session_id": session_id,
-                "ended": False,
-                "reason": wire_reason,
-                "machine_notified": True,
-            }
+            ack = self._terminate_ack(session_id, ended=False, reason=wire_reason)
             await self._audit_terminate(
                 connection=connection,
                 session_id=session_id,
@@ -1188,7 +1213,7 @@ class McpGatewayService:
         incumbent = self._by_machine.get(machine_id)
         if incumbent is not None and incumbent is not connection:
             incumbent_state = self._incumbent_state(incumbent)
-            if incumbent_state == "open":
+            if incumbent_state == INCUMBENT_STATE_OPEN:
                 logger.warning(
                     "the machine %r is already connected on another socket "
                     "(connection %s); the new connection is refused",
@@ -1289,12 +1314,12 @@ class McpGatewayService:
           socket claiming the same id is refused (§5.6).
         """
         if incumbent.closed:
-            return "closed"
+            return INCUMBENT_STATE_CLOSED
         limit_ms = self.config.heartbeat_timeout_ms
         silence_ms = (self._clock() - incumbent.last_heartbeat) * 1000.0
         if limit_ms and silence_ms > limit_ms:
-            return "dead"
-        return "open"
+            return INCUMBENT_STATE_DEAD
+        return INCUMBENT_STATE_OPEN
 
     def _release_dead_incumbent_sessions(self, incumbent: ClientConnection) -> None:
         """Release the sessions a DEAD (or closed) incumbent still holds.

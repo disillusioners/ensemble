@@ -69,7 +69,13 @@ def _peer(target, **kwargs) -> ConformancePeer:
 
 
 def _v02_peer(target, **kwargs) -> ConformancePeer:
-    """A peer that negotiates v0.2 and advertises ``client_terminate``."""
+    """An alias of :func:`_peer` for the rows that speak v0.2.
+
+    The FACTORY negotiates nothing: the version is chosen per row by
+    the ``hello`` arguments (``protocol_version=PROTOCOL_VERSION_V02``
+    plus ``CLIENT_CAPABILITIES_V02``). The alias only MARKS the intent
+    of the row it serves.
+    """
     return _peer(target, **kwargs)
 
 

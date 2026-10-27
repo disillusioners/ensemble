@@ -62,7 +62,6 @@ from daemon.services.mcps_gateway.tombstones import (
     REASON_EXPIRED,
     REASON_MACHINE_REFUSED,
     REASON_REAPED_BY_CENTER,
-    REASON_SUPERSEDED,
     REASON_UNKNOWN_SESSION,
     RESPONSE_REASONS,
     SessionTombstone,
@@ -823,7 +822,7 @@ class TestTheDirectionBEnvelopeKeySet:
 
     async def test_the_unknown_session_envelope_carries_exactly_its_members(self):
         service = make_service()
-        machine = await open_machine(service, FakeMachine(service))
+        await open_machine(service, FakeMachine(service))
 
         result = await service.disconnect(agent_id=AGENT_ID)
 
