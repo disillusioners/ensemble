@@ -295,7 +295,29 @@ def _mcp_server_to_info(mcp_server) -> McpServerInfo:
         initial_values=initial_values,
         created_at=parse_utc_datetime(mcp_server.created_at),
         updated_at=parse_utc_datetime(mcp_server.updated_at) if mcp_server.updated_at else None,
+        health_state=_mcp_server_health_state(mcp_server.name),
     )
+
+
+def _mcp_server_health_state(server_name: str) -> str | None:
+    """The per-boot health state of an MCP server (C4).
+
+    ``ok`` / ``degraded`` / ``quarantined`` / ``None`` (unknown — the
+    registry has never seen this server, which is the case for every
+    user-created server). The value comes from the per-boot quarantine
+    registry (``daemon.mcp.init_guard``) — a READ-ONLY consume; a
+    registry that cannot be reached degrades to ``None`` (the field is
+    then absent, which is the older-consumer tolerance contract).
+    """
+    try:
+        from daemon.mcp.init_guard import server_state
+
+        entry = server_state(server_name)
+        if entry is None:
+            return None
+        return entry.state
+    except Exception:  # noqa: BLE001 — the health state is advisory
+        return None
 
 
 # ==================== Endpoints ====================

@@ -39,6 +39,21 @@ class McpServerInfo(BaseModel):
     initial_values: dict[str, Any] | None = Field(default=None, description="Initial values for form pre-fill")
     created_at: datetime = Field(..., description="Creation timestamp")
     updated_at: datetime | None = Field(default=None, description="Last update timestamp")
+    # C4 (soak-gate-mcp-warmup): the ADDITIVE per-boot health state of
+    # the server — ``ok`` / ``degraded`` / ``quarantined`` / ``None``
+    # (unknown: the server is not a built-in, or the registry has never
+    # seen it). It is populated from the per-boot quarantine registry
+    # (``daemon.mcp.init_guard``) so the operator sees the quarantine
+    # state in the existing servers list WITHOUT a readiness call.
+    # OPTIONAL: ``None`` keeps the OFF-state body byte-identical for
+    # consumers that do not know the field.
+    health_state: str | None = Field(
+        default=None,
+        description=(
+            "Per-boot health state of the server: ok | degraded | "
+            "quarantined (null when unknown)"
+        ),
+    )
 
 
 class McpServerListResponse(BaseModel):

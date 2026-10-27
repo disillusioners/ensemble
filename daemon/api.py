@@ -3292,6 +3292,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001 — shutdown must never fail
         logger.warning(f"Promote-txn hold shutdown error: {e}")
 
+    # Flush the C4 MCP state-transition journal buffer (soak-gate-mcp-warmup).
+    # The daemon-side MCP journal writes are SUPPRESSED while a promote
+    # txn is live (they would drop ``in_flight`` mid-promote); the
+    # buffered entries are flushed here — at graceful shutdown — so a
+    # buffered transition is never silently dropped.
+    try:
+        from daemon.mcp import init_guard as _init_guard
+
+        flushed = _init_guard.flush_buffered_transitions()
+        if flushed:
+            logger.info(
+                "Flushed %d buffered MCP state-transition journal entr%s",
+                flushed,
+                "y" if flushed == 1 else "ies",
+            )
+    except Exception as e:  # noqa: BLE001 — shutdown must never fail
+        logger.warning(f"MCP transition journal flush error: {e}")
+
     # Stop the OAuth2 auth background machinery (Phase 2, T2.4 — the
     # cancel-AND-await tail of the readiness-refresher pattern; safe
     # no-op when auth is OFF — nothing was ever constructed).
@@ -3783,6 +3801,45 @@ def _read_burst_signal_snapshot(manager) -> Optional[dict]:
     }
 
 
+def _read_mcp_snapshot() -> Optional[dict]:
+    """The per-built-in MCP server health map (readiness ``detail.mcp``).
+
+    C4 (soak-gate-mcp-warmup). A READ-ONLY consume of the per-boot
+    quarantine registry (``daemon.mcp.init_guard``) merged with the
+    built-in registry's names — every built-in is published, so the
+    operator can tell "not yet initialised" from "broken" (decisions
+    §3h H1/H5).
+
+    ADVISORY ONLY: this map NEVER feeds a readiness component and never
+    makes ``/readyz`` 503. A degraded MCP server is visible here while
+    the daemon stays ready.
+
+    ``None`` when the guard cannot be reached (the key is then absent
+    from the payload — the older-consumer tolerance contract).
+    """
+    try:
+        from daemon.mcp import init_guard
+        from daemon.mcp.builtin_servers import get_registry
+
+        snapshot: dict = init_guard.state_snapshot()
+        for definition in get_registry().get_all():
+            name = definition.name
+            if name in snapshot:
+                continue
+            snapshot[name] = {
+                "state": "ok",
+                "reason": None,
+                "since": None,
+                "init_attempts": 0,
+                "last_error_class": None,
+                "breaker_state": None,
+                "recoverable": True,
+            }
+        return snapshot
+    except Exception:  # noqa: BLE001 — advisory only
+        return None
+
+
 async def _periodic_readiness_refresh_loop(
     *,
     manager,
@@ -3883,6 +3940,10 @@ async def _periodic_readiness_refresh_loop(
                 # (requirements.md §4.2 P2).
                 resume_hold=_read_resume_hold_snapshot(app_state),
                 burst_signals=_read_burst_signal_snapshot(manager),
+                # The C4 MCP health map — ADVISORY ONLY (it never feeds
+                # a readiness component; a degraded MCP server must not
+                # take the readiness gate down with it).
+                mcp_servers=_read_mcp_snapshot(),
             )
             # Drill knob (deferred tester probe P7): read PER TICK from
             # the environment so flipping it between ticks of an

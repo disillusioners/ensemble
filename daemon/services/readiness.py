@@ -327,6 +327,15 @@ class ReadinessComposite:
     # resume-deferral counters). CONTEXT ONLY: never an arming
     # precondition (requirements.md §4.2 P2).
     burst_signals: Optional[dict] = None
+    # ── C4 additive field (soak-gate-mcp-warmup) ──────────────────
+    # ``mcp_servers`` — the per-built-in MCP server health map
+    # (``{server: {state, reason, since, init_attempts,
+    # last_error_class, breaker_state, recoverable}}``). ADVISORY ONLY:
+    # it NEVER feeds ``ready`` / ``reasons`` / ``components`` — a
+    # degraded (or quarantined) MCP server must NEVER flip a readiness
+    # component or make ``/readyz`` 503 (decisions §3h H2/H4). The
+    # daemon stays up and says so; the GATE decides what to do with it.
+    mcp_servers: Optional[dict] = None
 
     @property
     def ready(self) -> bool:
@@ -431,6 +440,17 @@ class ReadinessComposite:
             payload["detail"]["resume_hold"] = dict(self.resume_hold)
         if self.burst_signals is not None:
             payload["detail"]["burst_signals"] = dict(self.burst_signals)
+        # ── C4 additive detail key (soak-gate-mcp-warmup) ───────────
+        # ``detail.mcp`` — the per-built-in MCP server health map. It is
+        # ADVISORY ONLY: it NEVER changes ``status`` / ``components`` /
+        # ``detail.reasons``. A degraded or quarantined MCP server is
+        # VISIBLE here while the daemon stays READY (decisions §3h H2:
+        # "a degraded daemon must stay visible" — and a degraded MCP
+        # server must not take the daemon down with it).
+        if self.mcp_servers:
+            payload["detail"]["mcp"] = {
+                name: dict(entry) for name, entry in self.mcp_servers.items()
+            }
         return payload
 
 
@@ -966,6 +986,7 @@ def compute_readiness_composite(
     grace_holds: int = 0,
     resume_hold: Optional[dict] = None,
     burst_signals: Optional[dict] = None,
+    mcp_servers: Optional[dict] = None,
 ) -> ReadinessComposite:
     """Assemble a composite from component outcomes.
 
@@ -988,6 +1009,12 @@ def compute_readiness_composite(
     failure classes ride the composite but NEVER enter
     ``ready``/``reasons``/``components``. The daemon never lies: a
     grace-held composite is still ``degraded`` with its reasons intact.
+
+    ``mcp_servers`` (C4) is additive and advisory in the same way: the
+    per-built-in MCP health map rides the composite (published as
+    ``detail.mcp``) and NEVER enters ``ready``/``reasons``/``components``
+    — a degraded or quarantined MCP server must not take the readiness
+    gate down with it.
     """
     reasons: list[str] = list(extra_reasons or [])
     if not database_ok:
@@ -1034,6 +1061,7 @@ def compute_readiness_composite(
         grace_holds=grace_holds,
         resume_hold=resume_hold,
         burst_signals=burst_signals,
+        mcp_servers=mcp_servers,
     )
 
 
@@ -1054,6 +1082,10 @@ _A1_COMPOSITE_FIELD_NAMES = (
     "grace_holds",
     "resume_hold",
     "burst_signals",
+    # C4 (soak-gate-mcp-warmup): the MCP health map is ADDITIVE too and
+    # must survive the forced-degradation rebuild (the drill must not
+    # silently drop the operator's MCP visibility).
+    "mcp_servers",
 )
 
 
@@ -1141,6 +1173,7 @@ async def refresh_readiness_composite(
     psycopg_pool: Any = None,
     resume_hold: Optional[dict] = None,
     burst_signals: Optional[dict] = None,
+    mcp_servers: Optional[dict] = None,
 ) -> ReadinessComposite:
     """Run one refresh cycle and return the composite.
 
@@ -1390,6 +1423,7 @@ async def refresh_readiness_composite(
         grace_holds=(observation.holds if observation else 0),
         resume_hold=resume_hold,
         burst_signals=burst_signals,
+        mcp_servers=mcp_servers,
     )
 
 

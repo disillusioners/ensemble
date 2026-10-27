@@ -1016,6 +1016,33 @@ async def _probe_self(manager: "InstanceManager", path: str) -> dict[str, Any] |
         return None
 
 
+def _readyz_reasons(payload: dict[str, Any]) -> list:
+    """The ``reasons`` list of a ``/readyz`` payload.
+
+    C4 / H7 (soak-gate-mcp-warmup). The reader used to read a
+    TOP-LEVEL ``reasons`` key while the readyz payload NESTS
+    ``reasons`` under ``detail`` — so it ALWAYS rendered ``[]``, even
+    for a daemon that was reporting reasons. That directly
+    contradicts the commission's thesis ("a degraded daemon must stay
+    visible").
+
+    The reader now takes ``detail.reasons`` and falls back to the
+    top-level ``reasons`` for an OLDER daemon that published the flat
+    shape. A malformed value degrades to ``[]`` (never raises).
+    """
+    if not isinstance(payload, dict):
+        return []
+    detail = payload.get("detail")
+    if isinstance(detail, dict):
+        nested = detail.get("reasons")
+        if isinstance(nested, list):
+            return nested
+    legacy = payload.get("reasons")
+    if isinstance(legacy, list):
+        return legacy
+    return []
+
+
 def _env_display(self_env: str | None) -> str:
     return self_env if self_env else "unresolved (dev-context)"
 
@@ -2089,7 +2116,7 @@ def create_upgrade_tools(
                     if readyz is not None:
                         block.append(
                             f"daemon :{port} /readyz status={readyz.get('status', '?')} "
-                            f"reasons={readyz.get('reasons', [])}"
+                            f"reasons={_readyz_reasons(readyz)}"
                         )
                     else:
                         block.append(f"daemon :{port} /readyz: not answering")
