@@ -1728,3 +1728,18 @@ remaining rows are renumbered **1–7 consecutively**.
 `daemon/`, `scripts/`, `tests/`, `agents/` or config file was modified. The live daemon, the
 install `.env`, `state.json`, `releases/` and the `current` symlink were read only (the
 `current` symlink was observed read-only to confirm the live release is v0.27.8).*
+---
+
+## 10. Post-ship adjudications — leader rulings, 2026-10-27 (Phase 1 Part A: SHIP-WITH-NOTES accepted)
+
+### RULING 1 — §4.4 trend arm RATIFIED AS SHIPPED (subsumed by the exhaustion arm; no live literal arm)
+(a) the literal 3-tick rising-trend arm provably fires on the plan's own §5(i) healthy-busy series — that false positive is the 2026-10-26 incident's own shape (grace refused on a healthy release ⇒ rollback); (b) the exhaustion arm catches the harm-relevant state — a pool that is actually degrading readiness; a slow leak below exhaustion is not yet masking anything; (c) the residual exposure is bounded twice over by the 120 s observation-relative clock and the unconditional never-green rollback; (d) the leak itself is out of scope and owned by the DB-pool follow-up commission. REVISIT: the trend arm WHEN the follow-up commission fixes the queue_freshness leak, at which point a rising-trend signal can be tuned against real leak data instead of guessed at.
+
+### RULING 2 — V4 ghost-waiter ACCEPTED AS SHIPPED (D1a + observability; dedicated-connection lane REJECTED)
+Measured finding stands (cancelling a task blocked in pool.getconn does NOT remove its queue entry; requests_waiting stays 5 and drains only on connection return) — verify-not-assume, exactly what the commission needed. The real mitigation is shipped: the pool timeout is bounded at 5.0 s, so a ghost waiter no longer lingers for the 30 s library default. The N-c dedicated-connection probe is REJECTED — a dedicated connection cannot observe pool starvation and would blind the exact detector D1a needs. REVISIT: with the DB-pool follow-up commission, which owns the leak that produces ghost waiters at scale.
+
+### Advisories F3–F6 — dispositions
+- F3 (boot-grace-suppressed readyz can classify HELD within the 60 s window; literal §4.2 says RESET): ACCEPT WITH DISCLOSURE — the deviation is conservative (holds rather than resets the counter), never fakes a green, and is bounded by MAX_HOLDS_PER_GREEN=2. No code change in this lane.
+- F4 (seam-2 gate also covers answer/dismiss paths; deferred, never dropped): ACCEPT WITH DISCLOSURE.
+- F5 (release-time re-entrancy skips the a′ CAS stamp in a race): ACCEPT WITH DISCLOSURE — re-flag to the leader if the tester can construct the race cheaply; otherwise it rides.
+- F6 (registry ge=0 vs Field gt=0 on checkpoint_pool_timeout_s; env-overridable normative constants): FOLD — fixed in-lane as config hygiene (registry bound aligned with the Field bound; constants noted env-overridable by design with §4.6 values as the defaults).
