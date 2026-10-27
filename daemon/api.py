@@ -56,8 +56,11 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request, APIRouter
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator, Optional, TYPE_CHECKING
 from pathlib import Path
+
+if TYPE_CHECKING:  # annotation-only: avoids a runtime import cycle with daemon.manager
+    from daemon.manager import InstanceManager
 
 _LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").upper()
 _daemon_log_level = os.environ.get("LOG_LEVEL_DAEMON", "info").upper()
@@ -3757,7 +3760,7 @@ async def _periodic_drift_reconcile_loop(
             return
 
 
-def _read_resume_hold_snapshot(app_state) -> Optional[dict]:
+def _read_resume_hold_snapshot() -> Optional[dict]:
     """The A3 promote-txn hold's observable counters (readiness detail).
 
     Journal-free and in-process: an operator can see that resumes were
@@ -3773,7 +3776,7 @@ def _read_resume_hold_snapshot(app_state) -> Optional[dict]:
         return None
 
 
-def _read_burst_signal_snapshot(manager) -> Optional[dict]:
+def _read_burst_signal_snapshot(manager: "InstanceManager") -> Optional[dict]:
     """The published BURST context (readiness detail).
 
     CONTEXT ONLY — never an arming precondition (requirements.md §4.2
@@ -3841,7 +3844,7 @@ def _read_mcp_snapshot() -> Optional[dict]:
         from daemon.mcp import init_guard
         from daemon.mcp.builtin_servers import get_registry
 
-        snapshot: dict = init_guard.state_snapshot()
+        snapshot = init_guard.state_snapshot()
         for definition in get_registry().get_all():
             name = definition.name
             if name in snapshot:
@@ -3958,7 +3961,7 @@ async def _periodic_readiness_refresh_loop(
                 # The A3 hold counters + the published burst CONTEXT.
                 # CONTEXT ONLY — never an arming precondition
                 # (requirements.md §4.2 P2).
-                resume_hold=_read_resume_hold_snapshot(app_state),
+                resume_hold=_read_resume_hold_snapshot(),
                 burst_signals=_read_burst_signal_snapshot(manager),
                 # The C4 MCP health map — ADVISORY ONLY (it never feeds
                 # a readiness component; a degraded MCP server must not
