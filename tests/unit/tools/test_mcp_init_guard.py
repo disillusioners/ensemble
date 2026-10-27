@@ -259,6 +259,109 @@ async def test_no_further_spawn_attempts_for_a_quarantined_server(monkeypatch):
     assert spawned == [], "no child may be spawned for a quarantined server"
 
 
+async def test_the_replenish_skips_a_quarantined_server(monkeypatch):
+    """S3 — the replenish loop stops re-spawning a quarantined server.
+
+    The forever-retry shape: the health check evicts a dead connection
+    every 60 s and the replenish re-ran the failing init chain FOREVER.
+    The quarantine ends that loop.
+    """
+    pool = McpWarmupPool()
+    pool.register_server(
+        "context7",
+        McpStdioConfig(transport="stdio", command="false", args=[]),
+    )
+    pool._running = True
+    spawned: list[object] = []
+
+    class _SentinelClient:
+        def __init__(self, params):  # pragma: no cover — must never run
+            spawned.append(params)
+
+    monkeypatch.setattr(warmup_pool_module, "TaskScopedStdioClient", _SentinelClient)
+
+    for _ in range(3):
+        await init_guard.record_failure(
+            "context7", init_guard.FAILURE_CLASS_INIT_FAILED
+        )
+
+    calls: list[str] = []
+
+    async def _never(*args, **kwargs):
+        calls.append("create")
+        raise AssertionError(
+            "the replenish must NOT even attempt a create for a "
+            "quarantined server"
+        )
+
+    monkeypatch.setattr(pool, "_create_pooled_connection", _never)
+    await pool._replenish("context7")
+    assert calls == [], (
+        "the replenish must not attempt a create for a quarantined server"
+    )
+    assert spawned == [], (
+        "the replenish must not spawn a child for a quarantined server"
+    )
+
+
+async def test_the_health_check_does_not_respawn_a_quarantined_server(monkeypatch):
+    """S3 — the health-check loop stops re-spawning a quarantined server."""
+    pool = McpWarmupPool()
+    pool.register_server(
+        "context7",
+        McpStdioConfig(transport="stdio", command="false", args=[]),
+    )
+    pool._running = True
+    spawned: list[object] = []
+
+    class _SentinelClient:
+        def __init__(self, params):  # pragma: no cover — must never run
+            spawned.append(params)
+
+    monkeypatch.setattr(warmup_pool_module, "TaskScopedStdioClient", _SentinelClient)
+
+    for _ in range(3):
+        await init_guard.record_failure(
+            "context7", init_guard.FAILURE_CLASS_INIT_FAILED
+        )
+
+    # A dead connection in the pool -> the health check evicts it and
+    # would normally START a replenish. The S3 consult is what stops
+    # the loop (the pool would otherwise re-run the failing init chain
+    # every 60 s, forever).
+    await pool._pools["context7"].put(_dead_connection())
+    await pool.health_check()
+    assert not pool._replenish_tasks, (
+        "the health check must not start a replenish for a quarantined "
+        "server — that loop is the forever-retry shape"
+    )
+    assert spawned == [], (
+        "the health check must not re-spawn a quarantined server"
+    )
+
+
+def _dead_connection():
+    """A pooled connection whose ping fails (the health check evicts it)."""
+
+    class _FailingSession:
+        async def send_ping(self):
+            raise RuntimeError("dead")
+
+    class _StreamCM:
+        async def __aexit__(self, *args):
+            return False
+
+    from daemon.mcp.warmup_pool import PooledConnection
+
+    return PooledConnection(
+        session=_FailingSession(),
+        stream_cm=_StreamCM(),
+        tools=[],
+        server_name="context7",
+        created_at=0.0,
+    )
+
+
 async def test_the_recovery_probe_brings_the_server_back_without_a_restart(
     monkeypatch,
 ):
