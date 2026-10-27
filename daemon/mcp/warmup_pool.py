@@ -1,6 +1,15 @@
 """MCP pre-warmed connection pool for built-in STDIO servers.
 
 Eliminates cold-start delay by keeping ready-to-use subprocess connections available.
+
+SCOPE NOTE (why this module is large): the quarantine-gated spawn path
+(soak-gate-mcp-warmup C1 — claim → DNS pre-check → secret resolution →
+handshake, with the per-boot breaker recording on every exit arm), the
+C2 bounded DNS pre-check, and the dedicated off-loop
+``SECRET_RESOLVE_EXECUTOR`` for secret/KMS marker resolution are
+CANONICAL RESIDENTS here — they share one spawn budget and one
+failure-class vocabulary with the pool lifecycle below; the size is
+cohesion, not accretion.
 """
 
 from __future__ import annotations
@@ -11,7 +20,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from langchain_core.tools import BaseTool
 from mcp import StdioServerParameters
@@ -212,7 +221,7 @@ class McpWarmupPool:
         # ``build_pooled_stdio_config`` pins) to the URL whose HOST the
         # pre-check resolves, or ``None`` for a server with no
         # URL-bearing base (the pre-check is skipped for it).
-        self._precheck_resolvers: dict[str, Any] = {}
+        self._precheck_resolvers: dict[str, Callable[[dict[str, str]], str | None]] = {}
 
     def register_server(
         self,
@@ -220,7 +229,7 @@ class McpWarmupPool:
         config: McpStdioConfig,
         pool_size: int = DEFAULT_POOL_SIZE,
         tool_call_timeout: int | None = None,
-        precheck_resolver: Any = None,
+        precheck_resolver: Callable[[dict[str, str]], str | None] | None = None,
     ) -> None:
         """
         Register a built-in STDIO server for pooling.
