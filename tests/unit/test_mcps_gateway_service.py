@@ -49,20 +49,14 @@ from daemon.services.mcps_gateway.service import (
     McpGatewayService,
     bounded_close_reason,
 )
+from tests.helpers.mcps_gateway_fixtures import CAPS_V02 as CAPS_V02_FIXTURE
 
 
 #: The capability map a v0.2 machine advertises — the historical map plus
 #: ``client_terminate`` (§5.3/§6.10), the ONLY difference from v0.1.
-CAPS_V02: dict[str, bool] = {
-    "session": True,
-    "tools": True,
-    "notifications": False,
-    "heartbeat": True,
-    "screenshot_delta": False,
-    "multi_session": False,
-    "client_cert": False,
-    CAP_CLIENT_TERMINATE: True,
-}
+#: The fixture lives in ONE place (the three gateway unit suites share
+#: it): ``tests/helpers/mcps_gateway_fixtures.py``.
+CAPS_V02 = CAPS_V02_FIXTURE
 
 
 class FakeMachine:
@@ -781,7 +775,9 @@ class TestSessions:
 
         task = asyncio.create_task(service.disconnect(agent_id="ari"))
         await asyncio.sleep(0.01)
-        await machine.answer_last({"session_id": "sess_abc"})
+        # The CONFORMANT accepted end-ack (§6.9.7): {session_id, ended:
+        # true, reason?} — the machine acknowledged the end.
+        await machine.answer_last({"session_id": "sess_abc", "ended": True})
         result = await task
 
         assert result["ended"] is True
@@ -789,6 +785,32 @@ class TestSessions:
         assert machine.closed is False
         # The machine lock is released.
         assert service.sessions.for_machine("mach_1") is None
+
+    async def test_a_declined_end_ack_is_not_an_acknowledged_end(self):
+        """§6.9.7 — a DECLINED ack is a REFUSAL, not an acknowledgement.
+
+        "the responder MUST NOT record or report the end as
+        machine-acknowledged on the basis of a declined ack, and MUST
+        NOT forward the decline to its agents as an acknowledged end".
+        """
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await connect_machine(service, machine)
+
+        task = asyncio.create_task(service.disconnect(agent_id="ari"))
+        await asyncio.sleep(0.01)
+        await machine.answer_last(
+            {"session_id": "sess_abc", "ended": False, "reason": "refused"}
+        )
+        result = await task
+
+        assert result["ended"] is False
+        assert result["machine_notified"] is False
+        assert result["why_not_ended"] == "machine_refused"
+        # The decline is NOT forwarded as an acknowledged end.
+        assert "result" not in result
+        # The session SURVIVES the decline.
+        assert service.sessions.for_machine("mach_1") is not None
 
     async def test_a_session_does_not_survive_a_dropped_socket(self):
         service = make_service()

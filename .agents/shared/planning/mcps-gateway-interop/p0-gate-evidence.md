@@ -2458,3 +2458,189 @@ lsof listeners after the run:
 (none)
 client stop report: {"pid": 27371, "signalled": "SIGTERM", "exit_code": 0, "stub_children": []}
 ```
+
+## Attempt 1 — PASS (2026-10-27T16:37:17Z)
+
+```
+=== Phase-D1 P0 GATE — attempt 1 — PASS ===
+[PASS] go-build-offline — client=/tmp/mcps-d1/mcps-client stub=/tmp/mcps-d1/adversarial.test
+[PASS] listener-baseline-excludes-gateway-port — baseline=[] gateway_port=63891
+[PASS] tls-route-registered — routes=['/openapi.json', '/docs', '/docs/oauth2-redirect', '/redoc', '/api/health', '/api/info']
+[PASS] tls-cert-has-ip-san — /tmp/mcps-d1/gate/attempt-1/center-cert.pem
+[PASS] engine-is-postgres — dialect=postgresql url=postgresql+psycopg://nguyenminhkha:***@127.0.0.1:5432/ensemble_dev_test_only?connect_timeout=10
+[PASS] engine-targets-fence-db — url=postgresql+psycopg://nguyenminhkha:***@127.0.0.1:5432/ensemble_dev_test_only?connect_timeout=10
+[PASS] daemon-event-loop-responsive-after-boot — status=200 latency=0.005s body='{"status":"healthy","uptime_seconds":0.547450065612793,"version":"0.27.9","current_database":"postgres","postgres_env_av'
+[PASS] audit-sink-is-db-repository — sink=McpGatewayAuditRepository
+[PASS] audit-sink-engine-is-manager-engine — sink_engine=Engine(postgresql+psycopg://nguyenminhkha:***@127.0.0.1:5432/ensemble_dev_test_only?connect_timeout=10)
+[PASS] audit-enabled — audit_enabled=True
+[PASS] audit-canary-visible-on-independent-engine — rows=1
+[PASS] audit-canary-hash-exact — stored=e5f1ad2376f4c5f5c184edfbf7baa939241b2ca34e360e0d852324b7b1ca217a recomputed=e5f1ad2376f4c5f5c184edfbf7baa939241b2ca34e360e0d852324b7b1ca217a
+[PASS] audit-pre-flow-count-zero — count=0
+[PASS] client-check-config-exit-0 — exit=0 stdout=the configuration /tmp/mcps-d1/gate/attempt-1/client-config.yaml is valid stderr=
+[PASS] client-child-started — the stub child reported 'child started'
+[PASS] client-handshake-accepted — the client reported 'the center accepted the handshake'
+[PASS] centre-saw-hello — frames=1
+[PASS] centre-sent-hello-ack — frames=1
+[PASS] hello-ack-echoes-id-verbatim — hello_id='req-0001' ack_id='req-0001'
+[PASS] hello-ack-protocol-version-0.1 — protocol_version='0.1'
+[PASS] hello-ack-advertises-three-timings — {"heartbeat_interval_ms": 5000, "heartbeat_timeout_ms": 15000, "client_dead_detect_ms": 15000}
+[PASS] centre-saw-heartbeat — a heartbeat notification arrived centre-side
+[PASS] session-begin-answered — {"expires_at_epoch_ms": 1793122637125, "machine_id": "mach_interop", "session_id": "sess_d0514464fc3d0d5c", "tools": [{"description": "A tool that fails with the arguments in its error message.", "inputSchema": {"properties": {"password": {"type": "string"}}, "type": "object"}, "name": "echo_tool"},
+[PASS] tools-call-round-trip — {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "adversarial-recording-child", "version": "0.0.1"}}, "content": [{"text": "the secret tool ran", "type": "text"}], "resultType": "complete"}
+[PASS] session-end-acknowledged — {"ack_body": {"session_id": "sess_d0514464fc3d0d5c"}, "ack_declined": false, "ended": true}
+[PASS] audit-flow-row-exists — rows=2
+[PASS] audit-session-end-row-exists — rows=1
+[PASS] audit-command-row-exists — command_rows=1 of rows=2
+[PASS] audit-row-session-id-matches — row='sess_d0514464fc3d0d5c' observed='sess_d0514464fc3d0d5c'
+[PASS] audit-row-tool-matches — row='secret_tool'
+[PASS] audit-row-outcome-ok — row='ok'
+[PASS] audit-row-args-hash-exact — stored='8de14a6f7d7e368cb09e8e62fb2e340a6f59821655b832c9dbc134fe14db1449' recomputed=8de14a6f7d7e368cb09e8e62fb2e340a6f59821655b832c9dbc134fe14db1449
+[PASS] audit-row-no-raw-arguments — the row carries the raw arguments
+[PASS] audit-no-write-failure-log — no audit write failure was logged
+[PASS] audit-failures-zero — audit_failures=0
+[PASS] plane-sync-kill-switch-effective — enabled=False reason='disabled by kill-switch (PLANE_SYNC_ENABLED=false)'
+[PASS] plane-mcp-kill-switch-effective — switch_off=True available=False rows=[{'name': 'plane', 'is_active': False}] error=
+[PASS] job-queue-items-empty — count=0 baseline=0
+[PASS] job-queues-unchanged — count=5 baseline=5
+[PASS] server-task-completed — the uvicorn server task finished cleanly
+[PASS] no-orphan-stub-child — pids=[]
+[PASS] client-process-stopped — exit=0
+[PASS] no-orphan-client-process — pgid=46108 group_alive=False pid=46108
+[PASS] no-listener-left — remaining=[] baseline=[]
+--- timings (s) ---
+  go_build_s: 2.446
+  boot_s: 5.084
+  boot_probe_s: 0.005
+  client_start_s: 0.005
+  handshake_s: 0.110
+  heartbeat_s: 4.966
+  round_trip_s: 0.035
+  server_shutdown_s: 0.162
+--- evidence ---
+gateway ws url: wss://127.0.0.1:63891/api/mcps-gateway/ws
+gateway route registered: True
+fence ledger rows deleted before the attempt: 8
+boot probe: GET /api/health -> status=200 in 0.005s ({"status":"healthy","uptime_seconds":0.547450065612793,"version":"0.27.9","current_database":"postgres","postgres_env_av)
+canary row: {"agent_id": "ari-canary", "args_hash": "e5f1ad2376f4c5f5c184edfbf7baa939241b2ca34e360e0d852324b7b1ca217a", "created_at": "2026-10-27T16:37:11.997334+00:00", "detail": "p0 canary row", "error_code": null, "id": "dbf301fb-089d-42e3-8f5f-47db32e38870", "instance_id": null, "machine_id": "mach_canary_a1", "outcome": "ok", "session_id": "sess_canary", "tool": "canary_tool"}
+client config: /tmp/mcps-d1/gate/attempt-1/client-config.yaml
+hello: 0.1 {"capabilities": {"client_cert": false, "heartbeat": true, "multi_session": false, "notifications": false, "screenshot_delta": false, "session": true, "tools": true}, "id": "req-0001", "machine_id": "mach_interop"}
+hello_ack: {"id": "req-0001", "result": {"capabilities": {"client_cert": false, "heartbeat": true, "multi_session": false, "notifications": false, "screenshot_delta": false, "session": true, "tools": true}, "client_dead_detect_ms": 15000, "heartbeat_interval_ms": 5000, "heartbeat_timeout_ms": 15000, "protocol_version": "0.1", "server": {"name": "ensemble-gateway", "version": "0.1.0"}}, "type": "response", "v": "0.1"}
+heartbeat: {"v":"0.1","type":"notification","method":"heartbeat","params":{}}
+session.begin result: {"expires_at_epoch_ms": 1793122637125, "machine_id": "mach_interop", "session_id": "sess_d0514464fc3d0d5c", "tools": [{"description": "A tool that fails with the arguments in its error message.", "inputSchema": {"properties": {"password": {"type": "string"}}, "type": "object"}, "name": "echo_tool"}, {"description": "A tool the policy layer gates off.", "inputSchema": {"properties": {"value": {"type": "string"}}, "type": "object"}, "name": "secret_tool"}]}
+tools/call result: {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "adversarial-recording-child", "version": "0.0.1"}}, "content": [{"text": "the secret tool ran", "type": "text"}], "resultType": "complete"}
+audit row: {"agent_id": "ari", "args_hash": "8de14a6f7d7e368cb09e8e62fb2e340a6f59821655b832c9dbc134fe14db1449", "created_at": "2026-10-27T16:37:17.137677+00:00", "detail": "the remote command completed", "error_code": null, "id": "6c34dd91-0e18-4d26-88f5-0b7ad3efe54a", "instance_id": null, "machine_id": "mach_interop", "outcome": "ok", "session_id": "sess_d0514464fc3d0d5c", "tool": "secret_tool"}
+centre transcript:
+000 recv {"v":"0.1","type":"request","id":"req-0001","method":"hello","params":{"protocol_version":"0.1","client":{"name":"mcps-client","version":"0.1.0"},"machine_id":"mach_interop","capabilities":{"client_cert":false,"heartbeat":true,"multi_session":false,"notifications":false,"screenshot_delta":false,"session":true,"tools":true}}}
+001 send {"v": "0.1", "type": "response", "id": "req-0001", "result": {"protocol_version": "0.1", "server": {"name": "ensemble-gateway", "version": "0.1.0"}, "capabilities": {"session": true, "tools": true, "notifications": false, "heartbeat": true, "screenshot_delta": false, "multi_session": false, "client_cert": false}, "heartbeat_interval_ms": 5000, "heartbeat_timeout_ms": 15000, "client_dead_detect_ms": 15000}}
+002 recv {"v":"0.1","type":"notification","method":"heartbeat","params":{}}
+003 send {"v": "0.1", "type": "request", "id": "ctr-0001", "method": "session.begin", "params": {"machine_id": "mach_interop", "context": {"agent_id": "ari", "reason": "p0-gate"}}}
+004 recv {"v":"0.1","type":"response","id":"ctr-0001","session_id":"sess_d0514464fc3d0d5c","result":{"session_id":"sess_d0514464fc3d0d5c","machine_id":"mach_interop","expires_at_ms":1793122637124,"tools":[{"name":"echo_tool","description":"A tool that fails with the arguments in its error message.","inputSchema":{"properties":{"password":{"type":"string"}},"type":"object"}},{"name":"secret_tool","description":"A tool the policy layer gates off.","inputSchema":{"properties":{"value":{"type":"string"}},"type":"object"}}]}}
+005 send {"v": "0.1", "type": "request", "id": "ctr-0002", "session_id": "sess_d0514464fc3d0d5c", "method": "tools/call", "params": {"name": "secret_tool", "arguments": {"command": "uptime", "timeout_ms": 5000}}}
+006 recv {"v":"0.1","type":"response","id":"ctr-0002","session_id":"sess_d0514464fc3d0d5c","result":{"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"adversarial-recording-child","version":"0.0.1"}},"content":[{"type":"text","text":"the secret tool ran"}],"resultType":"complete"}}
+007 send {"v": "0.1", "type": "request", "id": "ctr-0003", "session_id": "sess_d0514464fc3d0d5c", "method": "session.end", "params": {"session_id": "sess_d0514464fc3d0d5c"}}
+008 recv {"v":"0.1","type":"response","id":"ctr-0003","session_id":"sess_d0514464fc3d0d5c","result":{"session_id":"sess_d0514464fc3d0d5c"}}
+client log tail:
+{"time":"2026-10-27T23:37:12.046094+07:00","level":"INFO","msg":"starting mcps-client","version":"0.1.0","config":"/tmp/mcps-d1/gate/attempt-1/client-config.yaml","listen":"127.0.0.1:63842","path":"/mcp","child":"/tmp/mcps-d1/adversarial.test"}
+{"time":"2026-10-27T23:37:12.047502+07:00","level":"WARN","msg":"no server pin is configured for the center: the certificate is trusted by the ordinary trust store. SPEC.md §4.1 provisions a pin at enrollment; without one the center identity is only as strong as the CA that issued the certificate","center_url":"wss://127.0.0.1:63891/api/mcps-gateway/ws"}
+{"time":"2026-10-27T23:37:12.047507+07:00","level":"INFO","msg":"the remote hop is enabled","center_url":"wss://127.0.0.1:63891/api/mcps-gateway/ws","machine_id":"mach_interop"}
+{"time":"2026-10-27T23:37:12.048175+07:00","level":"INFO","msg":"local MCP listener started","addr":"127.0.0.1:63842","path":"/mcp"}
+{"time":"2026-10-27T23:37:12.096115+07:00","level":"INFO","msg":"the center accepted the handshake","heartbeat_interval_ms":5000,"client_dead_detect_ms":15000}
+{"time":"2026-10-27T23:37:12.107011+07:00","level":"INFO","msg":"child started","attempt":1}
+{"time":"2026-10-27T23:37:12.107021+07:00","level":"INFO","msg":"supervised child is ready"}
+lsof listeners after the run:
+(none)
+client stop report: {"pid": 46108, "signalled": "SIGTERM", "exit_code": 0, "stub_children": []}
+```
+
+## Attempt 1 — PASS (2026-10-27T17:56:27Z)
+
+```
+=== Phase-D1 P0 GATE — attempt 1 — PASS ===
+[PASS] go-build-offline — client=/tmp/mcps-d1/mcps-client stub=/tmp/mcps-d1/adversarial.test
+[PASS] listener-baseline-excludes-gateway-port — baseline=[] gateway_port=58539
+[PASS] tls-route-registered — routes=['/openapi.json', '/docs', '/docs/oauth2-redirect', '/redoc', '/api/health', '/api/info']
+[PASS] tls-cert-has-ip-san — /tmp/mcps-d1/gate/attempt-1/center-cert.pem
+[PASS] engine-is-postgres — dialect=postgresql url=postgresql+psycopg://nguyenminhkha:***@127.0.0.1:5432/ensemble_dev_test_only?connect_timeout=10
+[PASS] engine-targets-fence-db — url=postgresql+psycopg://nguyenminhkha:***@127.0.0.1:5432/ensemble_dev_test_only?connect_timeout=10
+[PASS] daemon-event-loop-responsive-after-boot — status=200 latency=0.005s body='{"status":"healthy","uptime_seconds":0.5600850582122803,"version":"0.27.9","current_database":"postgres","postgres_env_a'
+[PASS] audit-sink-is-db-repository — sink=McpGatewayAuditRepository
+[PASS] audit-sink-engine-is-manager-engine — sink_engine=Engine(postgresql+psycopg://nguyenminhkha:***@127.0.0.1:5432/ensemble_dev_test_only?connect_timeout=10)
+[PASS] audit-enabled — audit_enabled=True
+[PASS] audit-canary-visible-on-independent-engine — rows=1
+[PASS] audit-canary-hash-exact — stored=e5f1ad2376f4c5f5c184edfbf7baa939241b2ca34e360e0d852324b7b1ca217a recomputed=e5f1ad2376f4c5f5c184edfbf7baa939241b2ca34e360e0d852324b7b1ca217a
+[PASS] audit-pre-flow-count-zero — count=0
+[PASS] client-check-config-exit-0 — exit=0 stdout=the configuration /tmp/mcps-d1/gate/attempt-1/client-config.yaml is valid stderr=
+[PASS] client-child-started — the stub child reported 'child started'
+[PASS] client-handshake-accepted — the client reported 'the center accepted the handshake'
+[PASS] centre-saw-hello — frames=1
+[PASS] centre-sent-hello-ack — frames=1
+[PASS] hello-ack-echoes-id-verbatim — hello_id='req-0001' ack_id='req-0001'
+[PASS] hello-ack-protocol-version-0.1 — protocol_version='0.1'
+[PASS] hello-ack-advertises-three-timings — {"heartbeat_interval_ms": 5000, "heartbeat_timeout_ms": 15000, "client_dead_detect_ms": 15000}
+[PASS] centre-saw-heartbeat — a heartbeat notification arrived centre-side
+[PASS] session-begin-answered — {"expires_at_epoch_ms": 1793127386432, "machine_id": "mach_interop", "session_id": "sess_d2c15d65b35b4a73", "tools": [{"description": "A tool that fails with the arguments in its error message.", "inputSchema": {"properties": {"password": {"type": "string"}}, "type": "object"}, "name": "echo_tool"},
+[PASS] tools-call-round-trip — {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "adversarial-recording-child", "version": "0.0.1"}}, "content": [{"text": "the secret tool ran", "type": "text"}], "resultType": "complete"}
+[PASS] session-end-acknowledged — {"ack_body": {"session_id": "sess_d2c15d65b35b4a73"}, "ack_declined": false, "ended": true}
+[PASS] audit-flow-row-exists — rows=2
+[PASS] audit-session-end-row-exists — rows=1
+[PASS] audit-command-row-exists — command_rows=1 of rows=2
+[PASS] audit-row-session-id-matches — row='sess_d2c15d65b35b4a73' observed='sess_d2c15d65b35b4a73'
+[PASS] audit-row-tool-matches — row='secret_tool'
+[PASS] audit-row-outcome-ok — row='ok'
+[PASS] audit-row-args-hash-exact — stored='8de14a6f7d7e368cb09e8e62fb2e340a6f59821655b832c9dbc134fe14db1449' recomputed=8de14a6f7d7e368cb09e8e62fb2e340a6f59821655b832c9dbc134fe14db1449
+[PASS] audit-row-no-raw-arguments — the row carries the raw arguments
+[PASS] audit-no-write-failure-log — no audit write failure was logged
+[PASS] audit-failures-zero — audit_failures=0
+[PASS] plane-sync-kill-switch-effective — enabled=False reason='disabled by kill-switch (PLANE_SYNC_ENABLED=false)'
+[PASS] plane-mcp-kill-switch-effective — switch_off=True available=False rows=[{'name': 'plane', 'is_active': False}] error=
+[PASS] job-queue-items-empty — count=0 baseline=0
+[PASS] job-queues-unchanged — count=5 baseline=5
+[PASS] server-task-completed — the uvicorn server task finished cleanly
+[PASS] no-orphan-stub-child — pids=[]
+[PASS] client-process-stopped — exit=0
+[PASS] no-orphan-client-process — pgid=77227 group_alive=False pid=77227
+[PASS] no-listener-left — remaining=[] baseline=[]
+--- timings (s) ---
+  go_build_s: 0.589
+  boot_s: 4.541
+  boot_probe_s: 0.005
+  client_start_s: 0.005
+  handshake_s: 0.106
+  heartbeat_s: 4.956
+  round_trip_s: 0.028
+  server_shutdown_s: 0.194
+--- evidence ---
+gateway ws url: wss://127.0.0.1:58539/api/mcps-gateway/ws
+gateway route registered: True
+fence ledger rows deleted before the attempt: 8
+boot probe: GET /api/health -> status=200 in 0.005s ({"status":"healthy","uptime_seconds":0.5600850582122803,"version":"0.27.9","current_database":"postgres","postgres_env_a)
+canary row: {"agent_id": "ari-canary", "args_hash": "e5f1ad2376f4c5f5c184edfbf7baa939241b2ca34e360e0d852324b7b1ca217a", "created_at": "2026-10-27T17:56:21.317644+00:00", "detail": "p0 canary row", "error_code": null, "id": "a06bc24a-975f-4f6c-8025-027fe077742f", "instance_id": null, "machine_id": "mach_canary_a1", "outcome": "ok", "session_id": "sess_canary", "tool": "canary_tool"}
+client config: /tmp/mcps-d1/gate/attempt-1/client-config.yaml
+hello: 0.1 {"capabilities": {"client_cert": false, "heartbeat": true, "multi_session": false, "notifications": false, "screenshot_delta": false, "session": true, "tools": true}, "id": "req-0001", "machine_id": "mach_interop"}
+hello_ack: {"id": "req-0001", "result": {"capabilities": {"client_cert": false, "heartbeat": true, "multi_session": false, "notifications": false, "screenshot_delta": false, "session": true, "tools": true}, "client_dead_detect_ms": 15000, "heartbeat_interval_ms": 5000, "heartbeat_timeout_ms": 15000, "protocol_version": "0.1", "server": {"name": "ensemble-gateway", "version": "0.1.0"}}, "type": "response", "v": "0.1"}
+heartbeat: {"v":"0.1","type":"notification","method":"heartbeat","params":{}}
+session.begin result: {"expires_at_epoch_ms": 1793127386432, "machine_id": "mach_interop", "session_id": "sess_d2c15d65b35b4a73", "tools": [{"description": "A tool that fails with the arguments in its error message.", "inputSchema": {"properties": {"password": {"type": "string"}}, "type": "object"}, "name": "echo_tool"}, {"description": "A tool the policy layer gates off.", "inputSchema": {"properties": {"value": {"type": "string"}}, "type": "object"}, "name": "secret_tool"}]}
+tools/call result: {"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "adversarial-recording-child", "version": "0.0.1"}}, "content": [{"text": "the secret tool ran", "type": "text"}], "resultType": "complete"}
+audit row: {"agent_id": "ari", "args_hash": "8de14a6f7d7e368cb09e8e62fb2e340a6f59821655b832c9dbc134fe14db1449", "created_at": "2026-10-27T17:56:26.442115+00:00", "detail": "the remote command completed", "error_code": null, "id": "67ca67c9-a88b-4d37-956d-33e8d114d596", "instance_id": null, "machine_id": "mach_interop", "outcome": "ok", "session_id": "sess_d2c15d65b35b4a73", "tool": "secret_tool"}
+centre transcript:
+000 recv {"v":"0.1","type":"request","id":"req-0001","method":"hello","params":{"protocol_version":"0.1","client":{"name":"mcps-client","version":"0.1.0"},"machine_id":"mach_interop","capabilities":{"client_cert":false,"heartbeat":true,"multi_session":false,"notifications":false,"screenshot_delta":false,"session":true,"tools":true}}}
+001 send {"v": "0.1", "type": "response", "id": "req-0001", "result": {"protocol_version": "0.1", "server": {"name": "ensemble-gateway", "version": "0.1.0"}, "capabilities": {"session": true, "tools": true, "notifications": false, "heartbeat": true, "screenshot_delta": false, "multi_session": false, "client_cert": false}, "heartbeat_interval_ms": 5000, "heartbeat_timeout_ms": 15000, "client_dead_detect_ms": 15000}}
+002 recv {"v":"0.1","type":"notification","method":"heartbeat","params":{}}
+003 send {"v": "0.1", "type": "request", "id": "ctr-0001", "method": "session.begin", "params": {"machine_id": "mach_interop", "context": {"agent_id": "ari", "reason": "p0-gate"}}}
+004 recv {"v":"0.1","type":"response","id":"ctr-0001","session_id":"sess_d2c15d65b35b4a73","result":{"session_id":"sess_d2c15d65b35b4a73","machine_id":"mach_interop","expires_at_ms":1793127386431,"tools":[{"name":"echo_tool","description":"A tool that fails with the arguments in its error message.","inputSchema":{"properties":{"password":{"type":"string"}},"type":"object"}},{"name":"secret_tool","description":"A tool the policy layer gates off.","inputSchema":{"properties":{"value":{"type":"string"}},"type":"object"}}]}}
+005 send {"v": "0.1", "type": "request", "id": "ctr-0002", "session_id": "sess_d2c15d65b35b4a73", "method": "tools/call", "params": {"name": "secret_tool", "arguments": {"command": "uptime", "timeout_ms": 5000}}}
+006 recv {"v":"0.1","type":"response","id":"ctr-0002","session_id":"sess_d2c15d65b35b4a73","result":{"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"adversarial-recording-child","version":"0.0.1"}},"content":[{"type":"text","text":"the secret tool ran"}],"resultType":"complete"}}
+007 send {"v": "0.1", "type": "request", "id": "ctr-0003", "session_id": "sess_d2c15d65b35b4a73", "method": "session.end", "params": {"session_id": "sess_d2c15d65b35b4a73"}}
+008 recv {"v":"0.1","type":"response","id":"ctr-0003","session_id":"sess_d2c15d65b35b4a73","result":{"session_id":"sess_d2c15d65b35b4a73"}}
+client log tail:
+{"time":"2026-10-28T00:56:21.36827+07:00","level":"INFO","msg":"starting mcps-client","version":"0.1.0","config":"/tmp/mcps-d1/gate/attempt-1/client-config.yaml","listen":"127.0.0.1:58471","path":"/mcp","child":"/tmp/mcps-d1/adversarial.test"}
+{"time":"2026-10-28T00:56:21.369858+07:00","level":"WARN","msg":"no server pin is configured for the center: the certificate is trusted by the ordinary trust store. SPEC.md §4.1 provisions a pin at enrollment; without one the center identity is only as strong as the CA that issued the certificate","center_url":"wss://127.0.0.1:58539/api/mcps-gateway/ws"}
+{"time":"2026-10-28T00:56:21.369873+07:00","level":"INFO","msg":"the remote hop is enabled","center_url":"wss://127.0.0.1:58539/api/mcps-gateway/ws","machine_id":"mach_interop"}
+{"time":"2026-10-28T00:56:21.370606+07:00","level":"INFO","msg":"local MCP listener started","addr":"127.0.0.1:58471","path":"/mcp"}
+{"time":"2026-10-28T00:56:21.413459+07:00","level":"INFO","msg":"the center accepted the handshake","heartbeat_interval_ms":5000,"client_dead_detect_ms":15000}
+{"time":"2026-10-28T00:56:21.418676+07:00","level":"INFO","msg":"child started","attempt":1}
+{"time":"2026-10-28T00:56:21.418687+07:00","level":"INFO","msg":"supervised child is ready"}
+lsof listeners after the run:
+(none)
+client stop report: {"pid": 77227, "signalled": "SIGTERM", "exit_code": 0, "stub_children": []}
+```

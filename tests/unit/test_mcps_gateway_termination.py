@@ -60,28 +60,21 @@ from daemon.services.mcps_gateway.tombstones import (
     REASON_REAPED_BY_CENTER,
     REASON_SUPERSEDED,
 )
+from tests.helpers.mcps_gateway_fixtures import (
+    CAPS_V01 as CAPS_V01_FIXTURE,
+    CAPS_V02 as CAPS_V02_FIXTURE,
+)
 
 #: The canonical ids of the fixtures — LETTER-BEARING on purpose.
 AGENT_ID = "ari"
 MACHINE_ID = "machine-alpha"
 SESSION_ID = "sess-alpha"
 
-#: The capability map a v0.1 machine advertises — the historical seven
-#: keys; a v0.1 machine has never heard of ``client_terminate``.
-CAPS_V01: dict[str, bool] = {
-    "session": True,
-    "tools": True,
-    "notifications": False,
-    "heartbeat": True,
-    "screenshot_delta": False,
-    "multi_session": False,
-    "client_cert": False,
-}
-
-#: The capability map a v0.2 machine advertises. ``client_terminate`` is
-#: the v0.2 addition: the machine tells the centre it can terminate a
-#: session from its own side. Exactly the v0.1 map plus the one key.
-CAPS_V02: dict[str, bool] = {**CAPS_V01, CAP_CLIENT_TERMINATE: True}
+#: The capability maps a machine advertises — ONE shared fixture (the
+#: three gateway unit suites share it, so the wire token has one
+#: spelling): ``tests/helpers/mcps_gateway_fixtures.py``.
+CAPS_V01 = CAPS_V01_FIXTURE
+CAPS_V02 = CAPS_V02_FIXTURE
 
 
 class Clock:
@@ -621,6 +614,52 @@ class TestSessionTerminate:
         assert rows, "the receipt must still be audited"
         assert rows[-1].machine_id == "machine-alpha"
 
+    async def test_a_foreign_live_session_answers_exactly_like_a_truly_unknown_one(
+        self,
+    ):
+        """§6.10.2 — the FOREIGN-SESSION LEAK BAN (spec-changelog.md
+        §11.0 Fork C — mcps_client @ feature/session-termination).
+
+        "whatever the responder returns — the ``unknown_session`` outcome
+        code or the typed ``SESSION_NOT_FOUND`` — the answer MUST be
+        indistinguishable from the answer for a truly unknown id. No
+        existence oracle for another workspace's live session."
+
+        THE ANTI-TAUTOLOGY RULE: the two payloads are compared
+        MEMBER-BY-MEMBER (every member but the caller's own session id
+        must be EQUAL), so a distinguishable answer fails even when it
+        is "semantically the same" — a different reason code, a
+        different key set or a different flag all fail.
+        """
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+
+        other = FakeMachine(service, machine_id="machine-beta")
+        other.connection = await service.open_connection(other)
+        await other.hello()
+
+        foreign = await other.terminate(
+            session_id=SESSION_ID, request_id="req-foreign"
+        )
+        unknown = await other.terminate(
+            session_id="sess-never-existed", request_id="req-unknown"
+        )
+
+        foreign_result = dict(foreign["result"])
+        unknown_result = dict(unknown["result"])
+        # The ONLY member that may differ is the session id itself — it
+        # is the caller's own input.
+        foreign_result.pop("session_id")
+        unknown_result.pop("session_id")
+        assert foreign_result == unknown_result
+        # The neutral answer of the never-existed arm, spelled out.
+        assert unknown_result["reason"] == REASON_ALREADY_ENDED
+        assert unknown_result["ended"] is False
+        assert unknown_result["machine_notified"] is False
+        # The foreign session is STILL live — the answer did not end it.
+        assert service.sessions.get(SESSION_ID) is not None
+
     async def test_the_terminate_of_another_connections_session_is_not_ended(self):
         """The centre never ends another connection's session."""
         service = make_service()
@@ -636,6 +675,75 @@ class TestSessionTerminate:
         assert ack["result"]["ended"] is False
         # The live session is untouched.
         assert service.sessions.get(SESSION_ID) is not None
+
+    async def test_an_absent_reason_code_omits_the_reason_member(self):
+        """§6.9.3 / §6.10.1 (spec-changelog.md §11.0 Fork B — mcps_client
+        @ feature/session-termination) — ``reason`` is present-when-known.
+
+        "``reason`` is required when known and omitted when sanitized or
+        unknown (never empty-string)". A machine that sent NO
+        ``reason_code`` has told the centre NOTHING about the cause, so
+        the member is OMITTED.
+
+        THE ANTI-TAUTOLOGY RULE: the assertion is on the KEY SET — a
+        ``reason: ""`` would satisfy a truthiness check but NOT this
+        one.
+        """
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+
+        ack = await machine.terminate(params={})
+
+        result = ack["result"]
+        assert result["ended"] is True
+        assert "reason" not in result
+        assert set(result) == {"session_id", "ended", "machine_notified"}
+
+    async def test_an_empty_reason_code_never_produces_an_empty_reason(self):
+        """The same rule for an EMPTY cause — ``reason: ""`` is forbidden.
+
+        The member is "omitted when sanitized or unknown — never
+        empty-string", and an empty string is not a cause.
+        """
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+
+        ack = await machine.terminate(params={"reason_code": ""})
+
+        result = ack["result"]
+        assert result["ended"] is True
+        assert "reason" not in result
+        assert set(result) == {"session_id", "ended", "machine_notified"}
+
+    async def test_an_absent_reason_code_is_still_recorded_verbatim(self):
+        """The LEDGER keeps the raw value VERBATIM — only the RESPONSE is
+        sanitized (§6.9.1: the audit is the truth, the response is the
+        sanitized view).
+
+        THE ABSENT-CAUSE RULE IS §6.9.3 / §6.10.1 — "required when
+        known; omitted when sanitized or unknown — never
+        empty-string" — and the BAN it puts on the wire is
+        RESPONSE-SCOPED: the ledger is exempt, it is the audit truth
+        (§6.10.2 records the ledger-only exemption for the ledger-ONLY
+        pair; this test is about the ABSENT cause, whose clause is
+        §6.9.3). So the ledger's copy of an absent cause is the empty
+        verbatim value — and the ledger NEVER invents a cause either.
+        """
+        audit = MemoryAuditSink()
+        service = make_service(audit_sink=audit)
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+
+        await machine.terminate(params={})
+
+        rows = [r for r in audit.records if r.tool == AUDIT_TOOL_SESSION_TERMINATE]
+        assert rows, "the receipt must still be audited"
+        assert rows[-1].extra["reason_code"] == ""
+        # No cause was invented for the row.
+        assert "[" not in rows[-1].detail
+        assert rows[-1].error_code == ""
 
 
 class TestTerminateNeedsTheCapability:
@@ -740,11 +848,20 @@ class TestOrderlyTerminationClose:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# §6.9.2 — the version-scoped ``reason`` member of the session.end params
+# §6.9.6 — the version-AND-capability-scoped ``reason`` member of the
+# session.end params
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestVersionScopedSessionEndParams:
+class TestVersionAndCapabilityScopedSessionEndParams:
+    """§6.9.6 — the ``reason`` member is VERSION-AND-CAPABILITY-SCOPED.
+
+    "on a ``0.2``-negotiated connection where BOTH capability maps carry
+    ``client_terminate: true``"; on a v0.1 connection — and on a v0.2
+    connection WITHOUT the negotiated capability — "the params stay
+    exactly ``{"session_id": …}``".
+    """
+
     async def test_the_v01_session_end_params_stay_exactly_the_session_id(self):
         """A v0.1 connection's frames are byte-identical to the old ones."""
         clock = Clock()
@@ -766,6 +883,7 @@ class TestVersionScopedSessionEndParams:
         assert machine.session_ends[0]["params"] == {"session_id": SESSION_ID}
 
     async def test_the_v02_sweep_sends_reaped_by_center(self):
+        """A v0.2 connection whose machine advertised the capability."""
         clock = Clock()
         service = make_service(clock=clock)
         machine = await open_machine(service, FakeMachine(service))
@@ -797,3 +915,60 @@ class TestVersionScopedSessionEndParams:
             "session_id": SESSION_ID,
             "reason": REASON_SUPERSEDED,
         }
+
+    async def test_a_v02_connection_without_the_capability_sends_bare_params(self):
+        """§6.9.6 — the capability half of the gate.
+
+        A v0.2 machine that did NOT advertise ``client_terminate`` is a
+        connection on which the reason must NOT ride: "on a ``0.2``
+        connection without the negotiated capability — the frame carries
+        no reason member and its params stay exactly ``{"session_id":
+        …}``".
+
+        THE ANTI-TAUTOLOGY RULE: the machine's map has no
+        ``client_terminate`` key, so the version ALONE cannot carry the
+        reason — a version-only gate puts the member on the wire and
+        this test fails.
+        """
+        clock = Clock()
+        service = make_service(clock=clock)
+        machine = await open_machine(
+            service,
+            FakeMachine(
+                service,
+                version=PROTOCOL_VERSION_V02,
+                capabilities=dict(CAPS_V01),
+            ),
+        )
+        await open_session(service, machine)
+
+        clock.advance(2.0)
+        await service.expire_sessions()
+
+        assert len(machine.session_ends) == 1
+        assert machine.session_ends[0]["params"] == {"session_id": SESSION_ID}
+        assert machine.session_ends[0]["v"] == PROTOCOL_VERSION_V02
+
+    async def test_a_v02_connection_without_the_capability_sends_bare_params_on_an_explicit_end(
+        self,
+    ):
+        """The explicit end rides the SAME gate as the sweep."""
+        service = make_service()
+        machine = await open_machine(
+            service,
+            FakeMachine(
+                service,
+                version=PROTOCOL_VERSION_V02,
+                capabilities=dict(CAPS_V01),
+            ),
+        )
+        await open_session(service, machine)
+
+        task = asyncio.create_task(service.disconnect(agent_id=AGENT_ID))
+        await asyncio.sleep(0.02)
+        await machine.answer_last({"session_id": SESSION_ID, "ended": True})
+        answer = await task
+
+        assert answer["ended"] is True
+        assert len(machine.session_ends) == 1
+        assert machine.session_ends[0]["params"] == {"session_id": SESSION_ID}

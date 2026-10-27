@@ -31,7 +31,7 @@ read while being written.
 | Handshake | capability map | `notifications:false` ACCEPTED (offering-side reading); flat boolean map; a missing `tools` ⇒ `CAPABILITY_MISSING` + close | §5.3 |
 | Session lifecycle | begin → end | `sess_` machine-minted id, catalog accepted, `session.end` acked, the socket survives, a second session opens (self-host lane; pointed mode asserts begin + names the end gap) | §6.4/§6.8 |
 | Session lifecycle | expiry — the refusal | a call past the center's idle window is refused `SESSION_EXPIRED` (self-host lane — the window is center-owned and not on the wire) | §3.3 |
-| Session lifecycle | expiry — the wire notification | on a CENTER-owned expiry the machine RECEIVES a `session.end` frame (params EXACTLY `{"session_id": ...}` — the wire contract does not change), the socket STAYS OPEN, and the machine released its lock → a NEW session opens on the SAME connection (self-host lane) | §3.3/§6.8 |
+| Session lifecycle | expiry — the wire notification | on a CENTER-owned expiry the machine RECEIVES a `session.end` frame, the socket STAYS OPEN, and the machine released its lock → a NEW session opens on the SAME connection (self-host lane). The frame's params are VERSION-AND-CAPABILITY-SCOPED (§6.9.6): on a v0.1 connection they are EXACTLY `{"session_id": ...}`; on a `0.2`-negotiated connection whose client advertised `client_terminate: true` the forward MUST carry a center-cause `params.reason` | §3.3/§6.8/§6.9.6 |
 | Session lifecycle | `MACHINE_BUSY` | a second begin reaches NO frame at the machine — the refusal is the CENTER's. The kit's machine side ALSO models the machine's OWN lock (a concurrent begin is refused `MACHINE_BUSY`, like the shipped client), so a STRANDED lock — a centre that reaped a session without telling the machine — is observable | §8.3 |
 | Transport | heartbeat adoption | the advertised values satisfy the shipped client's own validation (timeout ≥ 3× interval) and the machine heartbeats on them without being killed | §3.3 |
 | Transport | kill-on-silence | close within [T, 2T] of the ADVERTISED timeout; the `HEARTBEAT_TIMEOUT` error frame; the G1 pin (below); the S2 close-code pin | §3.3/§6.8 |
@@ -49,18 +49,22 @@ read while being written.
 | Auth | enrollment out of band | the peer has no issuance surface (stance pin) | §10 |
 | **Termination (v0.2)** | the v0.2 handshake | a machine that asks for `"0.2"` gets a `"0.2"` connection — the reply's `v` EQUALS the result's `protocol_version` (the shipped client fatals on a mismatch) — and the centre advertises `client_terminate` because the machine advertised it | §5.2/§5.3 |
 | **Termination (v0.2)** | the terminate receipt | the machine asks for the end; the centre NEVER refuses; the ack is `{session_id, ended: true, reason, machine_notified: true}` with the machine's OWN reason code VERBATIM; `why_not_ended` is ABSENT; the socket STAYS OPEN | §6.10/§6.10.1 |
+| **Termination (v0.2)** | the absent cause | a terminate with NO `reason_code` answers WITHOUT the `reason` member — the cause is "required when known and omitted when sanitized or unknown — never empty-string", so `reason: ""` can never appear on the wire | §6.9.3/§6.10.1 |
 | **Termination (v0.2)** | the liberal acceptance | an UNKNOWN `reason_code` is accepted and echoed VERBATIM; unknown members in the envelope or the params are TOLERATED (never a rejection) | §6.10.3 |
 | **Termination (v0.2)** | the idempotent goal state | a terminate for a session that is NOT live is NEVER an error: `ended: false` with a MANDATORY `reason` (the shipped client RELEASES its local lock by default on `ended: false` — the ended-elsewhere arm — and RETAINS it only for `refused` / `machine_refused`; sending the reason always makes the decision explicit instead of leaving it to a fallback) | §6.10 |
-| **Termination (v0.2)** | the reap race | the sweep reaped the session and the machine asks afterwards ⇒ `ended: false` with the centre-cause reason `reaped_by_center` (self-host lane — the window is centre-owned) | §6.10/§6.9.2 |
+| **Termination (v0.2)** | the foreign-session leak ban | a terminate for ANOTHER machine's LIVE session is answered EXACTLY like a truly unknown id — the same reason code and the same key set. A distinguishable answer is an existence oracle for another workspace's live session (self-host lane — it needs a second machine identity) | §6.10.2 |
+| **Termination (v0.2)** | the reap race | the sweep reaped the session and the machine asks afterwards ⇒ `ended: false` with the centre-cause reason `reaped_by_center` (self-host lane — the window is centre-owned) | §6.10/§6.9.6 |
+| **Termination (v0.2)** | the declined end-ack | the machine DECLINES the centre's `session.end` (`{ended: false, reason}`): the end is a REFUSAL, not an acknowledgement — the machine KEEPS its lock and the centre KEEPS its slot, so neither side reports the session as ended (self-host lane — the explicit end is an agent-side verb) | §6.9.7 |
 | **Termination (v0.2)** | the duplicate machine id | a second connection claiming a LIVE machine id is refused with `MACHINE_ID_CONFLICT` (+ `data{machine_id, …}`); the INCUMBENT is NOT evicted (its socket stays open). NEITHER connection is evicted | §5.6 |
 | **Termination (v0.2)** | the v0.1 connection is unchanged | a v0.1 connection answers `protocol_version: "0.1"` and its capability map carries NO `client_terminate` key — v0.2 does not leak into v0.1 | §5.2/§5.3 |
-| **Termination (v0.2)** | the v0.2 `session.end` reason | on a `"0.2"` connection the centre's `session.end` names the centre cause — `reason: "reaped_by_center"` for the sweep's reap and `reason: "superseded"` for an explicit end (the v0.1 lane keeps EXACTLY `{"session_id": ...}`) | §6.9.2 |
+| **Termination (v0.2)** | the v0.2 `session.end` reason | on a `"0.2"` connection whose client advertised `client_terminate: true` the centre's `session.end` names the centre cause — `reason: "reaped_by_center"` for the sweep's reap and `reason: "superseded"` for an explicit end. The reason is VERSION-AND-CAPABILITY-SCOPED (§6.9.6): a v0.1 connection — and a v0.2 one WITHOUT the negotiated capability — keeps EXACTLY `{"session_id": ...}` | §6.9.6 |
+| **Termination (v0.2)** | the v0.2 connection WITHOUT the capability | the NEGATIVE half of the capability gate: a `"0.2"`-negotiated connection whose machine did NOT advertise `client_terminate` gets EXACTLY `{"session_id": ...}` — the centre's map carries `client_terminate: false` and the version alone cannot carry the reason, so a version-only gate fails this row (self-host lane — the explicit end is an agent-side verb) | §6.9.6 |
 
 ## §-by-§ NOT exercised (with the reason)
 
 | Row | Why not |
 |---|---|
-| **The v0.2 termination rows in POINTED mode** | The rows are WIRE-driven and need a machine that speaks v0.2 — the peer does (§6.10). They run against any centre that answers a `"0.2"` hello. The ONE exception is the reap-race's centre-cause token (`reaped_by_center`): the reap window is centre-owned and not advertised on the wire, so the token is asserted in the self-consistency lane only (the general row — `ended: false` + a mandatory reason — runs in both lanes). |
+| **The v0.2 termination rows in POINTED mode** | The rows are WIRE-driven and need a machine that speaks v0.2 — the peer does (§6.10). They run against any centre that answers a `"0.2"` hello. The exceptions are the lanes that need something only a SECOND machine identity or an AGENT-SIDE verb can provide: the **foreign-session leak ban** (a second enrolled machine), the **reap race** (the reap window is centre-owned), the **declined end-ack** (the explicit end is an agent-side verb) and the **v0.2-without-the-capability** lane (the explicit end is an agent-side verb too) — all four are SELF-HOST ONLY. |
 | **Session expiry in pointed mode** | The TTL/idle window is CENTER-owned and NOT advertised on the wire — the `hello` result carries only the three `heartbeat_*` parameters — so the kit **cannot compress a foreign center's window**. The CONTRACT itself is in the kit: a center-owned expiry DOES reach the machine as a `session.end` frame (the machine releases its own lock and the connection returns to `ready` — SPEC §6.8; that frame is the only thing that frees the machine's lock, which is why a SILENT reap strands it). But the kit can only OBSERVE it against a center whose window it can compress — the self-host lane (compressed 2 s window). Against a foreign center the window is as long as the operator configured, so the lane stays **SELF-HOST ONLY**. |
 | **The agent-facing end envelope** (`ended` / `why_not_ended` / `machine_notified` / the audit ledger's `error_code`) | That is a **CENTER-TOOL convention**, NOT wire: nothing about it crosses the protocol, so the kit — which drives the wire — cannot observe it. It is out of the kit's scope by construction; the center's own runbook and doc-pins own it. |
 | **`session.end` / `tools/call` / args-hash / denied in pointed mode** | The begin-hook contract covers BEGIN only; there is no agent-side END/call verb to drive through a foreign hook. The self-host lane drives them in-process; the begin-hook ECHO document (`agent_catalog`, `agent_audit`) closes the catalog + args-hash rows when a center provides it. |
@@ -91,6 +95,21 @@ read while being written.
   `{"n":1}` and `{"n":1.0}` to one hash. The kit computes BOTH forms and
   reports the divergence; the SPEC amendment recommendation is JCS
   (RFC 8785) or sorted keys + `ensure_ascii=false` + shortest-roundtrip.
+* **K1 — the in-kit reference centre's IDEMPOTENT arm answers
+  `machine_notified: true`, the reference DAEMON answers `false`.**
+  This is a DELIBERATE divergence, not a defect, and it is legal on both
+  sides (§6.10.1): on the idempotent path the field records whether
+  the machine was notified of the end BY THAT EXCHANGE, and a
+  machine-initiated terminate ack **MAY** carry `true` — the response
+  frame is itself the notification the machine acts on ("the response
+  frame is itself the notification the machine acts on" is why the kit's
+  centre says `true`). The daemon's own idempotent arm reports `false`
+  (or absent) — the legal alternative for an exchange that did not reach
+  the machine (a centre-authoritative release, or an agent-commanded end
+  of an already-ended session); an ABSENT field carries the same meaning
+  as `false`. The kit asserts the SHAPE and the KEY SET of that arm
+  (`ended: false` + a MANDATORY `reason`), never the flag's value — the
+  flag's value is centre-specific and legal either way.
 
 ## Independence attestation
 
@@ -110,4 +129,6 @@ implementation copy).
 dependencies are stdlib + `websockets` (the repo's declared set). The
 sanctioned-importer list of the interop lane is UNCHANGED:
 `tls_harness.py`, `p0_gate.py`, `harness.py` (and `go_client.py` imports
-none).
+none). The lane's NEW daemon-free module — `ack_shape.py`, the shared
+decline detector — imports nothing from `daemon.*` either, so it does
+not join the sanctioned list.

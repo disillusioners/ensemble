@@ -183,9 +183,11 @@ async def test_session_expiry_notifies_the_machine(target, serving, begin) -> No
 
     1. the machine RECEIVES a ``session.end`` frame for the expired
        session (the notification IS the reap);
-    2. the frame carries EXACTLY the ``{"session_id": ...}`` params — the
-       wire contract does not change (no reason/cause member rides
-       along);
+    2. the frame's params are VERSION-SCOPED (SPEC §6.9.6): on a v0.1
+       connection they are EXACTLY ``{"session_id": ...}`` — no
+       reason/cause member rides along; on a ``0.2``-negotiated
+       connection whose client advertised ``client_terminate: true``
+       the forward MUST carry a center-cause ``params.reason``;
     3. the machine's socket STAYS OPEN (expiry is not a close);
     4. the machine released its lock and the connection returned to
        ``ready`` — a NEW session opens on the SAME connection (a machine
@@ -221,8 +223,10 @@ async def test_session_expiry_notifies_the_machine(target, serving, begin) -> No
                     "window passed — the machine's own lock would stay held",
                     peer.transcript.excerpt(),
                 )
-            # The wire contract does not change: the params are exactly
-            # {"session_id": ...} — no reason/cause member rides along.
+            # The wire contract is VERSION-SCOPED (SPEC §6.9.6): the
+            # v0.1 params are exactly {"session_id": ...} — no reason
+            # member rides along; a 0.2-negotiated forward to a
+            # client_terminate:true client MUST carry params.reason.
             frame = next(
                 (
                     f
@@ -232,13 +236,33 @@ async def test_session_expiry_notifies_the_machine(target, serving, begin) -> No
                 None,
             )
             params = dict((frame or {}).get("params") or {})
-            if params != {"session_id": expired_id}:
+            negotiated = str(peer.adopted.get("protocol_version") or "")
+            center_caps = dict(peer.adopted.get("capabilities") or {})
+            v02_terminate = (
+                negotiated == "0.2" and center_caps.get("client_terminate") is True
+            )
+            if v02_terminate:
+                # §6.9.6: the reason is version-scoped, never universal —
+                # on the 0.2/client_terminate lane it MUST ride the forward.
+                if params.get("session_id") != expired_id or params.get(
+                    "reason"
+                ) not in ("reaped_by_center", "superseded"):
+                    raise ConformanceFinding(
+                        "session",
+                        "expiry-end-params-reason",
+                        "§6.9.6",
+                        f"the 0.2/client_terminate forward carried {params!r} — it "
+                        f"MUST carry session_id and a center-cause reason "
+                        f"('reaped_by_center' | 'superseded')",
+                        peer.transcript.excerpt(),
+                    )
+            elif params != {"session_id": expired_id}:
                 raise ConformanceFinding(
                     "session",
                     "expiry-end-params",
                     "§6.1",
-                    f"the session.end frame carried {params!r} — the wire params "
-                    f"are exactly {{'session_id': {expired_id!r}}}",
+                    f"the session.end frame carried {params!r} — the v0.1 wire "
+                    f"params are exactly {{'session_id': {expired_id!r}}}",
                     peer.transcript.excerpt(),
                 )
             # §6.8 — the socket stays open; expiry is not a close.

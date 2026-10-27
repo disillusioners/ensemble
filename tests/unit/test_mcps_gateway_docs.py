@@ -559,8 +559,14 @@ def test_doc_pins_the_session_terminate_receipt() -> None:
     )
 
 
-def test_doc_pins_the_version_scoped_session_end_reason() -> None:
-    """§6.9.2: the ``reason`` member rides the v0.2 connection only."""
+def test_doc_pins_the_version_and_capability_scoped_session_end_reason() -> None:
+    """§6.9.6: the ``reason`` member rides the v0.2 connection AND the
+    negotiated ``client_terminate`` capability — never the version alone.
+
+    The capability half is the load-bearing one: on a ``0.2``
+    connection whose machine did NOT advertise ``client_terminate`` the
+    params stay exactly ``{"session_id": ...}``.
+    """
     text = _doc_prose()
     assert "reaped_by_center" in text, (
         "the doc must name the reaped_by_center reason."
@@ -569,8 +575,53 @@ def test_doc_pins_the_version_scoped_session_end_reason() -> None:
         "the doc must name the superseded reason."
     )
     assert 'exactly `{"session_id": ...}`' in text, (
-        "the doc must state that a v0.1 session.end keeps exactly its "
-        "historical params."
+        "the doc must state that a session.end without the negotiated "
+        "capability keeps exactly its historical params."
+    )
+    # BOTH SIDES NORMALIZED: the needle is lower-case and the prose is
+    # lower-cased too.  The doc hard-wraps, so the raw prose carries the
+    # phrase with a line break inside it — and the earlier needle
+    # ("VERSION-\nAND-CAPABILITY-scoped") could never match a
+    # whitespace-collapsed prose, so it only ever passed by accident
+    # through a different line of the runbook.
+    assert "version-and-capability-scoped" in text.lower(), (
+        "the doc must state that the session.end reason is scoped by the "
+        "version AND the capability — not by the version alone."
+    )
+
+
+def test_doc_pins_the_declined_end_ack_is_a_refusal() -> None:
+    """§6.9.7: a declined end-ack is a REFUSAL, not an acknowledgement."""
+    text = _doc_prose()
+    assert "DECLINES" in text, (
+        "the doc must carry the declined-ack row of the end contract."
+    )
+    # BOTH SIDES NORMALIZED (the needle is lower-case, the prose is
+    # lower-cased): the mixed-case needle could only match a second
+    # rendering of the same sentence, never the §4.6 row itself.
+    assert "a declined ack is a refusal" in text.lower(), (
+        "the doc must say a declined ack is a refusal, not an "
+        "acknowledgement."
+    )
+
+
+def test_doc_pins_the_absent_cause_omits_the_reason_member() -> None:
+    """§6.9.3 / §6.10.1 (spec-changelog.md §11.0 Fork B — mcps_client @
+    feature/session-termination): ``reason`` is present-when-known.
+
+    An absent cause is OMITTED — ``reason: ""`` is forbidden on the wire.
+    """
+    text = _doc_prose()
+    assert "never empty-string" in text, (
+        "the doc must state that an empty-string reason is forbidden."
+    )
+
+
+def test_doc_pins_the_foreign_session_leak_ban() -> None:
+    """§6.10.2: a foreign live session answers like a truly unknown id."""
+    text = _doc_prose()
+    assert "existence oracle" in text, (
+        "the doc must name the foreign-session leak ban."
     )
 
 
@@ -749,6 +800,53 @@ def test_doc_does_not_claim_the_listener_is_on_by_default() -> None:
             "MCPS_GATEWAY_ENABLED is DEFAULT OFF and the route is not "
             "registered at all while it is off."
         )
+
+
+def test_doc_does_not_claim_the_reason_member_is_version_only() -> None:
+    """The RETIRED version-only wording must not come back.
+
+    The retired sentence was:
+
+        a `"0.2"` connection additionally gets `reason` — `reaped_by_center`
+        (the sweep reaped it) or `superseded` (an explicit end replaced it).
+
+    It was TRUE ONLY under the version-only gate, which the v0.2
+    conformity round retired: the ``reason`` member rides the forward
+    ONLY where BOTH capability maps carry ``client_terminate: true``
+    (§6.9.6), so a `"0.2"` connection whose machine did NOT advertise
+    the capability gets exactly ``{"session_id": ...}``.
+
+    (The positive counterpart — the version-AND-capability scoping —
+    lives in ``test_doc_pins_the_version_and_capability_scoped_session_end_reason``.)
+    """
+    text = _doc_prose()
+    retired = 'connection additionally gets `reason`'
+    assert retired not in text, (
+        f"the runbook still carries the retired sentence {retired!r} — the "
+        "reason member is VERSION-AND-CAPABILITY-scoped (§6.9.6): a 0.2 "
+        "connection WITHOUT the negotiated client_terminate capability "
+        "keeps exactly {'session_id': ...}."
+    )
+
+
+def test_doc_does_not_cite_the_retired_clause_for_the_reason_member() -> None:
+    """The RETIRED §6.9.2 cite must not come back.
+
+    The ``reason`` member of the centre's ``session.end`` params was
+    cited as **§6.9.2** — the vocabulary section.  The clause that
+    governs it is **§6.9.6** (the capability-scoped rule), so the
+    retired cite is wrong for this member.
+
+    (The positive counterpart — the §6.9.6 clause itself — lives in
+    ``test_doc_pins_the_version_and_capability_scoped_session_end_reason``.)
+    """
+    text = _doc_prose()
+    retired = "§6.9.2"
+    assert retired not in text, (
+        f"the runbook still cites {retired!r} — the session.end reason "
+        "member is governed by §6.9.6 (the version-AND-capability-scoped "
+        "rule), not by the retired vocabulary cite."
+    )
 
 
 def test_doc_does_not_mention_the_removed_audit_path_knob() -> None:

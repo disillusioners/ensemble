@@ -49,9 +49,17 @@ from daemon.services.mcps_gateway.protocol import (
 from daemon.services.mcps_gateway.service import (
     AUDIT_ALLOWED_ERROR_CODES,
     AUDIT_ALLOWED_SESSION_ERROR_CODES,
+    AUDIT_DETAIL_EXPIRE_DECLINED,
+    AUDIT_DETAIL_EXPIRE_REFUSED,
+    AUDIT_DETAIL_SESSION_DECLINED,
+    AUDIT_DETAIL_SESSION_REFUSED,
     McpGatewayService,
 )
 from daemon.services.mcps_gateway.store import InMemoryMachineStore
+from tests.helpers.mcps_gateway_fixtures import (
+    CAPS_V01 as CAPS_V01_FIXTURE,
+    CAPS_V02 as CAPS_V02_FIXTURE,
+)
 from daemon.services.mcps_gateway.tombstones import (
     DEFAULT_TOMBSTONE_MAX_AGE_SECONDS,
     DEFAULT_TOMBSTONE_MAX_ENTRIES,
@@ -77,6 +85,12 @@ SESSION_ID = "sess-alpha"
 #: wedged machine must not hold a test for the real (30 s) command
 #: timeout.
 ACK_TIMEOUT_MS = 50
+
+#: The capability maps a machine advertises — ONE shared fixture (the
+#: three gateway unit suites share it, so the wire token has one
+#: spelling): ``tests/helpers/mcps_gateway_fixtures.py``.
+CAPS_V01 = CAPS_V01_FIXTURE
+CAPS_V02 = CAPS_V02_FIXTURE
 
 
 class Clock:
@@ -109,6 +123,7 @@ class FakeMachine:
         machine_id: str = MACHINE_ID,
         session_id: str = SESSION_ID,
         version: str = PROTOCOL_VERSION,
+        capabilities: dict[str, bool] | None = None,
     ) -> None:
         self.service = service
         self.machine_id = machine_id
@@ -117,6 +132,14 @@ class FakeMachine:
         #: default is the historical ``"0.1"`` — the sweep's forward
         #: params are byte-identical on that version.
         self.version = version
+        #: The capability map the machine advertises in its hello. The
+        #: DEFAULT is the historical seven-key map — a machine that has
+        #: never heard of ``client_terminate``. A v0.2 machine that
+        #: supports the client-initiated termination advertises
+        #: :data:`CAPS_V02`.
+        self.capabilities = (
+            dict(CAPS_V01) if capabilities is None else dict(capabilities)
+        )
         self.connection = None
         self.sent: list[dict[str, Any]] = []
         self.closed = False
@@ -193,15 +216,7 @@ class FakeMachine:
                         "protocol_version": self.version,
                         "client": {"name": "mcps-client", "version": "0.1.0"},
                         "machine_id": self.machine_id,
-                        "capabilities": {
-                            "session": True,
-                            "tools": True,
-                            "notifications": False,
-                            "heartbeat": True,
-                            "screenshot_delta": False,
-                            "multi_session": False,
-                            "client_cert": False,
-                        },
+                        "capabilities": dict(self.capabilities),
                     },
                 }
             ),
@@ -304,21 +319,25 @@ class TestTheSweepForwardsTheSessionEnd:
         assert frame["method"] == "session.end"
         # The frame keeps EXACTLY the params it always had on a v0.1
         # connection (the wire contract does not change for it — the
-        # ``reason`` member of §6.9.2 is VERSION-SCOPED to v0.2).
+        # ``reason`` member of §6.9.6 is VERSION-AND-CAPABILITY-SCOPED).
         assert frame["params"] == {"session_id": SESSION_ID}
         assert frame["v"] == PROTOCOL_VERSION
 
     async def test_the_sweep_tells_the_v02_machine_why_it_was_reaped(self):
-        """§6.9.2 group (ii): the v0.2 sweep forward carries the reason.
+        """§6.9.6 group (ii): the v0.2 sweep forward carries the reason.
 
-        The v0.2 connection's ``session.end`` params gain the ``reason``
-        member — ``reaped_by_center`` — and the machine's end-ack echoes
-        it. A v0.1 connection keeps the historical params EXACTLY.
+        The ``session.end`` params gain the ``reason`` member —
+        ``reaped_by_center`` — on a ``0.2``-negotiated connection whose
+        machine advertised ``client_terminate`` (the capability half of
+        the gate). A v0.1 connection keeps the historical params EXACTLY.
         """
         clock = Clock()
         service = make_service(clock=clock)
         machine = await open_machine(
-            service, FakeMachine(service, version=PROTOCOL_VERSION_V02)
+            service,
+            FakeMachine(
+                service, version=PROTOCOL_VERSION_V02, capabilities=dict(CAPS_V02)
+            ),
         )
         await expired_session(service, machine, clock)
 
@@ -331,6 +350,38 @@ class TestTheSweepForwardsTheSessionEnd:
             "session_id": SESSION_ID,
             "reason": REASON_REAPED_BY_CENTER,
         }
+        assert frame["v"] == PROTOCOL_VERSION_V02
+
+    async def test_a_v02_machine_without_the_capability_gets_bare_params(self):
+        """§6.9.6 — the reason is VERSION-AND-CAPABILITY-SCOPED.
+
+        "on a ``0.2`` connection WITHOUT the negotiated capability — the
+        frame carries NO reason member and its params stay exactly
+        ``{"session_id": …}``". A v0.2 machine that did not advertise
+        ``client_terminate`` is exactly that peer, so the sweep's
+        forward must stay byte-identical to the v0.1 shape.
+
+        THE ANTI-TAUTOLOGY RULE: the machine's map has NO
+        ``client_terminate`` key, so the version ALONE cannot carry the
+        reason — a version-only gate would put the member on the wire
+        and this test fails.
+        """
+        clock = Clock()
+        service = make_service(clock=clock)
+        machine = await open_machine(
+            service,
+            FakeMachine(
+                service, version=PROTOCOL_VERSION_V02, capabilities=dict(CAPS_V01)
+            ),
+        )
+        await expired_session(service, machine, clock)
+
+        expired = await service.expire_sessions()
+
+        assert len(expired) == 1
+        assert len(machine.session_ends) == 1
+        frame = machine.session_ends[0]
+        assert frame["params"] == {"session_id": SESSION_ID}
         assert frame["v"] == PROTOCOL_VERSION_V02
 
     async def test_the_sweep_does_not_close_the_socket(self):
@@ -474,6 +525,50 @@ class _RecordingMachine(FakeMachine):
 
 
 class TestTheTombstone:
+    async def test_a_declined_sweep_ack_is_an_honest_refusal(self):
+        """§6.9.7 — a DECLINED end-ack is a REFUSAL, not an ack.
+
+        The machine answered the sweep's forward with ``{ended: false,
+        reason: …}`` — it did NOT release its local lock. The sweep has
+        already released the session centre-side (the two-pass
+        invariant), so the release is a FACT; but the machine did NOT
+        acknowledge the end, and the tombstone must not claim it did.
+
+        THE ANTI-TAUTOLOGY RULE: the tombstone's ``machine_notified``
+        and the ledger's outcome/error_code are both asserted — a
+        declined ack classified as an ack flips BOTH.
+        """
+        audit = MemoryAuditSink()
+        clock = Clock()
+        service = make_service(audit_sink=audit, clock=clock)
+        machine = await open_machine(service, FakeMachine(service))
+        machine.answers["session.end"] = {
+            "session_id": SESSION_ID,
+            "ended": False,
+            "reason": "refused",
+        }
+        await expired_session(service, machine, clock)
+
+        await service.expire_sessions()
+
+        tombstone = service._tombstones.get(SESSION_ID, clock())
+        assert tombstone is not None
+        assert tombstone.machine_notified is False, (
+            "a declined ack must NOT be recorded as machine-notified"
+        )
+        # The ledger records the refusal HONESTLY.
+        rows = [r for r in audit.records if r.tool == "session.expire"]
+        assert len(rows) == 1
+        assert rows[0].outcome == "error"
+        assert rows[0].error_code == REASON_MACHINE_REFUSED
+        # The SWEEP arm's DECLINE has its OWN detail constant — it is not
+        # the error-frame refusal's. The two arms differ by what the
+        # machine DID (it declined vs it refused), and the ledger must be
+        # able to say which.  (The error code rides the detail in
+        # brackets, so the classification is the PREFIX.)
+        assert rows[0].detail.startswith(AUDIT_DETAIL_EXPIRE_DECLINED)
+        assert not rows[0].detail.startswith(AUDIT_DETAIL_EXPIRE_REFUSED)
+
     async def test_a_late_end_after_the_sweep_answers_expired(self):
         clock = Clock()
         service = make_service(clock=clock)
@@ -669,6 +764,60 @@ class TestTheEndContract:
         assert audit.records[0].tool == "session.end"
         assert audit.records[0].error_code == REASON_MACHINE_REFUSED
         assert audit.records[0].outcome == "error"
+
+    async def test_a_declined_ack_is_a_refusal_and_the_session_survives(
+        self,
+    ):
+        """§6.9.7 — a DECLINED end-ack is a REFUSAL of the end.
+
+        "the responder MUST NOT record or report the end as
+        machine-acknowledged on the basis of a declined ack, and MUST
+        NOT forward the decline to its agents as an acknowledged end".
+
+        THE ANTI-TAUTOLOGY RULE: every assertion below flips when the
+        decline is misread as an acknowledgement — ``ended`` becomes
+        True, ``machine_notified`` becomes True, the session is released
+        and the machine's VERBATIM declined body rides the envelope.
+        """
+        audit = MemoryAuditSink()
+        service = make_service(audit_sink=audit)
+        machine = await open_machine(service, FakeMachine(service))
+        machine.answers["session.end"] = {
+            "session_id": SESSION_ID,
+            "ended": False,
+            "reason": "refused",
+        }
+        await open_session(service, machine)
+
+        result = await service.disconnect(agent_id=AGENT_ID)
+
+        assert result["ended"] is False
+        assert result["why_not_ended"] == REASON_MACHINE_REFUSED
+        # The machine did NOT acknowledge the end.
+        assert result["machine_notified"] is False
+        # The VERBATIM declined body is NOT forwarded — it is not an
+        # acknowledgement, and the ``result`` member belongs to the
+        # acknowledged path only.
+        assert "result" not in result
+        # The session SURVIVES the decline: the centre does not invent a
+        # release the peer did not acknowledge.
+        assert service.sessions.for_agent(AGENT_ID) is not None
+        assert service.sessions.for_machine(MACHINE_ID) is not None
+        assert service.store.get(MACHINE_ID).session_id == SESSION_ID
+        # The ledger records the REFUSAL — that is what answers "why did
+        # this session not end?".
+        assert len(audit.records) == 1
+        assert audit.records[0].tool == "session.end"
+        assert audit.records[0].error_code == REASON_MACHINE_REFUSED
+        assert audit.records[0].outcome == "error"
+        # The EXPLICIT arm's DECLINE has its OWN detail constant — not
+        # the error-frame refusal's, and not the sweep arm's (the two
+        # arms record the same outcome code but DIFFERENT details).
+        # (The error code rides the detail in brackets, so the
+        # classification is the PREFIX.)
+        assert audit.records[0].detail.startswith(AUDIT_DETAIL_SESSION_DECLINED)
+        assert not audit.records[0].detail.startswith(AUDIT_DETAIL_SESSION_REFUSED)
+        assert not audit.records[0].detail.startswith(AUDIT_DETAIL_EXPIRE_DECLINED)
 
     async def test_a_relayed_tool_timeout_is_a_refusal_and_the_session_survives(
         self,
@@ -1033,6 +1182,14 @@ class TestTheSessionAuditRows:
         session, so there is no local lock left to release. That is NOT
         a refusal: the ledger records the expiry CAUSE and a successful
         outcome.
+
+        §6.9.7 — in the TERMINATION family ``SESSION_NOT_FOUND`` is a
+        SUCCESS SIGNAL, not an error ("a v0.2 center MUST map an
+        end-ack of ``SESSION_NOT_FOUND`` to **``ended: true``** …
+        MUST NOT treat it as a failure"): the centre maps it to
+        ``ended: true`` and reports ``machine_notified: true`` (the
+        machine answered with this very ack). The tombstone says so too:
+        the machine ACKNOWLEDGED the end's arrival.
         """
         audit = MemoryAuditSink()
         clock = Clock()
@@ -1048,6 +1205,11 @@ class TestTheSessionAuditRows:
         assert record.tool == "session.expire"
         assert record.error_code == "ttl"
         assert record.outcome == "ok"
+        # The machine ANSWERED (with SESSION_NOT_FOUND) — so it WAS told,
+        # and the tombstone says so.
+        tombstone = service._tombstones.get(SESSION_ID, clock())
+        assert tombstone is not None
+        assert tombstone.machine_notified is True
 
     async def test_a_wedged_machine_leaves_the_machine_timeout_ledger_row(self):
         audit = MemoryAuditSink()

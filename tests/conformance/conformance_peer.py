@@ -159,6 +159,32 @@ DENIAL_ERROR_CODE = "TOOL_NOT_FOUND"
 REFERENCE_CLOSE_CODE = 1000
 
 
+def ack_declines(result: Any) -> bool:
+    """Did the peer DECLINE the end? (SPEC §6.9.7 — PRESENT AND FALSY)
+
+    The kit's own re-implementation of the decline rule — the kit
+    imports NOTHING from ``daemon.*``, so the rule is transcribed here
+    from the SPEC, not imported.  It is the SAME shape as the
+    reference daemon's predicate (``McpGatewayService._ack_declines``):
+    a decline is a DICT that CARRIES an ``ended`` member whose value is
+    FALSY.
+
+    * a dict whose ``ended`` is truthy is an ACCEPTANCE;
+    * a dict with NO ``ended`` member at all is an ACCEPTANCE too (the
+      shipped v0.1 client answers ``session.end`` with ``{"session_id"}``
+      and no ``ended`` member — the member is simply absent);
+    * a non-dict result (``None`` included) is an ACCEPTANCE.
+
+    ONE helper, TWO call sites (the machine side and the in-kit
+    reference centre) — the rule must not drift between them.
+    """
+    if not isinstance(result, dict):
+        return False
+    if "ended" not in result:
+        return False
+    return not result["ended"]
+
+
 # ── the pointing surface (B8d) — exactly these eight env keys ────────────
 
 #: The FIVE pointing keys — the complete surface for pointing the kit at
@@ -878,18 +904,25 @@ class ConformancePeer:
             sid = str((envelope.get("params") or {}).get("session_id") or "")
             self.ended_sessions.append(sid)
             self.session_end_frames.append(dict(envelope))
-            # §6.8 — the machine releases its LOCAL lock on a session.end
-            # frame (``internal/remote/client.go:1040`` — ``clearSession``)
-            # and the connection returns to ``ready``.  This is the ONLY
-            # thing that frees the lock, which is why a centre that reaps
-            # a session WITHOUT telling the machine strands it.
-            if not self._live_session_id or sid == self._live_session_id:
-                self._live_session_id = ""
             result = {"session_id": sid}
             if on_session_end is not None:
                 override = on_session_end(envelope)
                 if override:
                     result.update(override)
+            # §6.8 — the machine releases its LOCAL lock on a session.end
+            # frame (``internal/remote/client.go:1040`` — ``clearSession``)
+            # and the connection returns to ``ready``.  This is the ONLY
+            # thing that frees the lock, which is why a centre that reaps
+            # a session WITHOUT telling the machine strands it.
+            #
+            # §6.9.3 — a DECLINED ack is a REFUSAL of the end, not an
+            # acknowledgement: the machine RETAINS its session (and its
+            # lock) on the ``ended: false`` arm.  The kit's machine can
+            # therefore EXPRESS a decline — and the lock it keeps is what
+            # makes the decline observable.
+            declined = ack_declines(result)
+            if not declined and (not self._live_session_id or sid == self._live_session_id):
+                self._live_session_id = ""
             await self._send_frame({**base, "result": result})
         else:
             # Unknown method: the reference center answers INTERNAL.
@@ -1283,6 +1316,14 @@ class InKitCenter:
         #: The NEGOTIATED protocol version per connection (§5.2) — every
         #: frame the centre writes on a connection carries it.
         self._conn_version: dict[str, str] = {}
+        #: Whether the connection negotiated the ``client_terminate``
+        #: capability (§5.3) — the OTHER half of the ``session.end``
+        #: reason gate (§6.9.6). It is True only on a ``0.2``-negotiated
+        #: connection whose machine advertised the capability, and the
+        #: centre's OWN advertised map is DERIVED from it — so "both
+        #: maps carry ``client_terminate: true``" is equivalent to this
+        #: flag.
+        self._conn_client_terminate: dict[str, bool] = {}
         #: The machine id per connection, and the connection that holds
         #: each machine id (§5.6 — the duplicate-id refusal).
         self._conn_machine: dict[str, str] = {}
@@ -1480,9 +1521,16 @@ class InKitCenter:
             ack: dict[str, Any] = {
                 "session_id": session_id,
                 "ended": True,
-                "reason": reason,
                 "machine_notified": True,
             }
+            # §6.9.3 / §6.10.1 (spec-changelog.md §11.0 Fork B —
+            # mcps_client @ feature/session-termination) — ``reason`` is
+            # "required when known and omitted when sanitized or unknown
+            # — never empty-string".  A machine that sent NO
+            # ``reason_code`` has told the centre NOTHING about the
+            # cause, so the member is OMITTED — never ``reason: ""``.
+            if reason:
+                ack["reason"] = reason
         else:
             # The IDEMPOTENT goal state: the session is not live.  The
             # REASON is mandatory — on ``ended: false`` the shipped
@@ -1572,6 +1620,7 @@ class InKitCenter:
         client_terminate = (
             version == PROTOCOL_VERSION_V02 and bool(caps.get("client_terminate"))
         )
+        self._conn_client_terminate[conn_id] = client_terminate
         capabilities: dict[str, bool] = {
             "session": True,
             "tools": True,
@@ -1723,9 +1772,14 @@ class InKitCenter:
                 continue
             conn_version = self._conn_version.get(conn_key, PROTOCOL_VERSION)
             end_params: dict[str, Any] = {"session_id": session_id}
-            if conn_version == PROTOCOL_VERSION_V02:
-                # §6.9.2 group (ii) — the v0.2 forward names the centre
-                # cause.  A v0.1 connection keeps the historical params.
+            if conn_version == PROTOCOL_VERSION_V02 and self._conn_client_terminate.get(
+                conn_key, False
+            ):
+                # §6.9.6 — the reason rides the forward ONLY on a 0.2
+                # connection where BOTH capability maps carry
+                # ``client_terminate: true``.  On a 0.1 connection — and
+                # on a 0.2 one WITHOUT the negotiated capability — the
+                # params stay exactly ``{"session_id": ...}``.
                 end_params["reason"] = "reaped_by_center"
             try:
                 await self._request(
@@ -1846,20 +1900,33 @@ class InKitCenter:
     async def agent_end(self) -> dict[str, Any]:
         ws = self._live_ws()
         key = _conn_key(self._conns, ws)
-        session_id = self._machine_session.pop(key, "")
+        session_id = self._machine_session.get(key, "")
         if not session_id:
             raise CenterRefused("SESSION_NOT_FOUND")
         end_params: dict[str, Any] = {"session_id": session_id}
-        if self._conn_version.get(key, PROTOCOL_VERSION) == PROTOCOL_VERSION_V02:
-            # §6.9.2 group (ii) — the explicit end names the centre cause.
+        if (
+            self._conn_version.get(key, PROTOCOL_VERSION) == PROTOCOL_VERSION_V02
+            and self._conn_client_terminate.get(key, False)
+        ):
+            # §6.9.6 — the reason rides the forward ONLY on a 0.2
+            # connection where BOTH capability maps carry
+            # ``client_terminate: true``.
             end_params["reason"] = "superseded"
-        return await self._request(
+        result = await self._request(
             ws,
             "session.end",
             end_params,
             session_id=session_id,
             version=self._conn_version.get(key, PROTOCOL_VERSION),
         )
+        # §6.9.7 — a DECLINED ack is a REFUSAL of the end, not an
+        # acknowledgement: the session SURVIVES it (the centre does not
+        # invent a release the peer did not acknowledge), so the slot is
+        # NOT freed here.
+        declined = ack_declines(result)
+        if not declined:
+            self._machine_session.pop(key, "")
+        return result
 
     async def agent_echo_document(self) -> dict[str, Any]:
         """The hook ECHO: the agent-visible catalog + the center's audit rows."""
@@ -2045,6 +2112,7 @@ __all__ = [
     "Target",
     "Transcript",
     "UpgradeRefused",
+    "ack_declines",
     "begin_on_target",
     "check_close_code",
     "check_error_envelope",
