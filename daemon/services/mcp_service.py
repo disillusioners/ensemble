@@ -44,7 +44,8 @@ logger = logging.getLogger(__name__)
 # Cold-discovery retry delay (Fix 2): seconds to wait before the single
 # retry of a transient first-connect failure during schema discovery.
 # Module-level so tests can shrink it to zero instead of sleeping.
-SCHEMA_DISCOVERY_CONNECT_RETRY_DELAY_S = 1.5# Negative-cache throttle (Fix 1): minimum seconds between two cold
+SCHEMA_DISCOVERY_CONNECT_RETRY_DELAY_S = 1.5
+# Negative-cache throttle (Fix 1): minimum seconds between two cold
 # discoveries of a server whose previous discovery came back empty.
 # Empty results are never cached; this bounds re-discovery of a dead
 # server to one attempt per window instead of once per spawn.
@@ -84,6 +85,21 @@ def _is_server_quarantined(server_name: str) -> bool:
         return False
 
 
+def _quarantined_refusal(server_name: str) -> ToolException:
+    """The ToolException raised when a quarantined server is consulted.
+
+    One message, two consult sites (the ``get_session`` top and the
+    cold-start fall-through below) — kept byte-identical by
+    construction.
+    """
+    return ToolException(
+        f"MCP server '{server_name}' is quarantined for this boot "
+        f"(its init failed repeatedly) — no session was spawned. "
+        f"It returns automatically after the breaker's recovery "
+        f"window (no daemon restart needed)."
+    )
+
+
 class _McpSessionProviderImpl:
     """Pool-aware lazy session resolver bound to a specific instance.
 
@@ -120,12 +136,7 @@ class _McpSessionProviderImpl:
         # instance path). Without this consult a quarantined server
         # would keep re-entering the incident's shape.
         if _is_server_quarantined(server_name):
-            raise ToolException(
-                f"MCP server '{server_name}' is quarantined for this boot "
-                f"(its init failed repeatedly) — no session was spawned. "
-                f"It returns automatically after the breaker's recovery "
-                f"window (no daemon restart needed)."
-            )
+            raise _quarantined_refusal(server_name)
 
         conn_mgr = get_mcp_connection_manager()
 
@@ -206,12 +217,7 @@ class _McpSessionProviderImpl:
         # the TOP of ``get_session`` — this second check is the
         # defence-in-depth for a direct cold-start call.)
         if _is_server_quarantined(server_name):
-            raise ToolException(
-                f"MCP server '{server_name}' is quarantined for this boot "
-                f"(its init failed repeatedly) — no session was spawned. "
-                f"It returns automatically after the breaker's recovery "
-                f"window (no daemon restart needed)."
-            )
+            raise _quarantined_refusal(server_name)
 
         await conn_mgr.connect_instance(
             self._instance_id,
