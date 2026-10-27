@@ -7753,10 +7753,34 @@ async def _maybe_precall_compact_95(
         # stamp so the misleading stamp-only path can never mask
         # recurrence again.
         if not current_messages and payload_count > 0:
-            logger.warning(
-                "[Compaction][precall-95] empty snapshot read — "
-                "suspected namespace/config defect, skipping stamp"
+            # Defect-signal WARN routed through the rate limiter
+            # (compaction.py:2366) so a residual-defect path cannot
+            # storm. The FIRST detection per instance is UNCONDITIONAL
+            # — a shared limiter already tripped by a sibling WARN
+            # must not suppress the first defect signal (otherwise
+            # recurrence would be silently masked again).
+            _reported = getattr(
+                compactor, "_precall_defect_guard_reported", None
             )
+            if _reported is None:
+                _reported = set()
+                compactor._precall_defect_guard_reported = _reported
+            _first = instance_id not in _reported
+            _reported.add(instance_id)
+            if _first:
+                import time as _t
+                compactor._precall_warn_state[instance_id] = (
+                    _t.monotonic()
+                )
+                logger.warning(
+                    "[Compaction][precall-95] empty snapshot read — "
+                    "suspected namespace/config defect, skipping stamp"
+                )
+            elif compactor.precall_warn_should_emit(instance_id):
+                logger.warning(
+                    "[Compaction][precall-95] empty snapshot read — "
+                    "suspected namespace/config defect, skipping stamp"
+                )
             return _PRECALL_NOOP
         # Cycle 2 (review suggestion 3) — guard ``llm_config=None``.
         # ``ContextCompactor.llm_config`` is typed ``dict | None``
@@ -9424,66 +9448,46 @@ def create_agent_node(
                 )
                 raise
 
-            # Architect §5 — W1 fix: read the pre-compaction
-            # snapshot, then run the seam helper that emits the
-            # ``REMOVE_ALL_MESSAGES`` sentinel recipe. The sentinel
-            # MUST be element 0; anything before it is discarded.
-            # NO per-id RemoveMessages are sent (eliminates the
-            # ValueError-on-absent-id class entirely).
-            pre_state = await graph.aget_state(thread_config)
-            pre_messages = list(
-                (pre_state.values or {}).get('messages', []) or []
+            # Route the persist through the SHARED seam so the
+            # empty-replacement interlock holds: the seam writes ONLY
+            # ``compacted_at`` (stamp-only) when
+            # ``result.replacement_messages`` is empty and NEVER calls
+            # ``build_sentinel_replacement`` — structurally preventing
+            # the live-channel REMOVE_ALL wipe. The seam also carries
+            # the hardened engine-vs-site invariant (explicit
+            # ``CompactionAborted`` raise, not a strippable assert)
+            # and integrates with ``abort_policy``.
+            from .compaction import CompactionAborted
+            from .services._compaction_persist_seam import (
+                persist_compaction_result,
             )
-            from .compaction import (
-                build_sentinel_replacement,
-                CompactionAborted,
-            )
-            # B1 + B2 fix (2026-09-01) — engine's compacted_ids
-            # is authoritative; site derives from
-            # ``pre_ids − new_replacement_ids`` (non-RemoveMessage
-            # keep set; RemoveMessage targets are NOT "kept").
-            # See compact_executor.py:1597 for the full rationale.
-            pre_ids = {
-                getattr(m, "id", None)
-                for m in pre_messages
-            }
-            pre_ids.discard(None)
-            new_replacement_ids = {
-                getattr(m, "id", None)
-                for m in result.replacement_messages
-                if not isinstance(m, RemoveMessage)
-            }
-            new_replacement_ids.discard(None)
-            site_compacted_ids: set[str] = pre_ids - new_replacement_ids
-            engine_compacted_ids = getattr(result, "compacted_ids", None)
-            if engine_compacted_ids is not None:
-                assert set(engine_compacted_ids) <= site_compacted_ids, (
-                    "engine populated compacted_ids that are NOT a "
-                    "subset of the site-derived set — engine and "
-                    "site disagree on the removed span"
-                )
-                compacted_ids: set[str] = set(engine_compacted_ids)
-            else:
-                compacted_ids = site_compacted_ids
             try:
-                replacement_messages = build_sentinel_replacement(
-                    result, pre_messages, compacted_ids=compacted_ids
+                persisted = await persist_compaction_result(
+                    None,
+                    instance_id=instance_id,
+                    result=result,
+                    mid_turn=True,
+                    abort_policy="raise",
+                    graph=graph,
                 )
             except CompactionAborted as abort_exc:
-                # W1 mitigation: pre-write guard refused the write.
-                # The checkpoint is untouched; the reactive path
-                # re-raises so the upstream CLE handler can surface
-                # the failure (this is the CLE-retry path, not the
-                # auto-proactive path; fail-closed is correct here).
                 logger.warning(
                     "reactive compaction pre-write guard refused the "
                     "write: %s — re-raising", abort_exc
                 )
                 raise
-
-            await graph.aupdate_state(thread_config, {'messages': replacement_messages}, as_node='agent')
-            if result.compacted_at:
-                await graph.aupdate_state(thread_config, {'compacted_at': result.compacted_at}, as_node='agent')
+            # Empty replacement (anti-refire / stamp-only): the seam
+            # has written only ``compacted_at`` (dedup). Re-raise the
+            # active ContextLengthExceededError — fail-closed, so the
+            # turn does not retry on an uncompacted payload.
+            if not result.replacement_messages:
+                logger.warning(
+                    "[Compaction][CLE] empty replacement — stamp-only, "
+                    "re-raising ContextLengthExceeded"
+                )
+                raise
+            if not persisted:
+                raise
 
             # C2 (Phase 1 — langgraph-checkpoint-perf): fire the
             # ``compaction_aupdate_reactive`` message_metadata tap on

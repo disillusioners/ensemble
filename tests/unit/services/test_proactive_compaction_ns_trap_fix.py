@@ -28,7 +28,7 @@ from langchain_core.messages import (
 import daemon.loader as loader_mod
 from daemon.compaction import ContextCompactor
 from daemon.config import CompactionConfig as CompactionConfigModel
-from daemon.graph import _PRECALL_NOOP, _maybe_precall_compact_95, _root_thread_config
+from daemon.graph import _PRECALL_NOOP, _maybe_precall_compact_95
 from daemon.loader import estimate_messages_tokens
 from daemon.services import _compaction_persist_seam as seam_mod
 
@@ -296,6 +296,7 @@ class TestNsTrapEmptyReadGuard:
 
 class TestNsTrapCLETargeting:
     def test_root_thread_config_helper_exists(self):
+        from daemon.graph import _root_thread_config
         assert callable(_root_thread_config)
         cfg = _root_thread_config("abc-123")
         assert cfg == {"configurable": {"thread_id": "abc-123"}}
@@ -306,14 +307,95 @@ class TestNsTrapCLETargeting:
         source = inspect.getsource(graph_mod)
         # thread_config assignment changed to use helper
         assert "thread_config = _root_thread_config(instance_id)" in source
-        # writes still use thread_config variable (root-ns target)
-        assert source.count("await graph.aupdate_state(thread_config, {'messages': replacement_messages}, as_node='agent')") == 1
-        assert source.count("await graph.aupdate_state(thread_config, {'compacted_at': result.compacted_at}, as_node='agent')") == 1
+        # CLE persist now routes through the shared seam (Critical interlock)
+        assert 'abort_policy="raise",' in source
+        assert source.count('abort_policy="raise",') == 1
         # guard present at CLE read
         assert "empty snapshot read — suspected" in source or "empty snapshot read" in source
 
     def test_cle_guard_raises(self):
-        # Source-level: bare raise follows the guard
+        # Structural: the guard branch must contain a raise (not just a
+        # log substring), otherwise the guard is a no-op.
         import daemon.graph as graph_mod
+        import re
         source = inspect.getsource(graph_mod)
         assert "[Compaction][CLE] empty snapshot read" in source
+        assert re.search(
+            r"\[Compaction\]\[CLE\] empty snapshot read.*?\n\s*raise",
+            source,
+            re.DOTALL,
+        ), "CLE guard must contain a raise statement"
+
+
+# =============================================================================
+# Seam-level behavioral pin for the Critical interlock (Finding 6)
+# =============================================================================
+
+
+class TestSeamEmptyReplacementInterlock:
+    @pytest.mark.asyncio
+    async def test_empty_replacement_writes_only_compacted_at(self):
+        from daemon.compaction import CompactionResult
+        from daemon.services._compaction_persist_seam import persist_compaction_result
+
+        graph = _NsTrapGraph(values={"messages": make_messages(5)})
+        result = CompactionResult(
+            replacement_messages=[],
+            tokens_before=100,
+            tokens_after=100,
+            tokens_saved=0,
+            messages_before=5,
+            messages_after=5,
+            compaction_type="anti_refire_skip",
+            compacted_at="2026-01-01T00:00:00Z",
+        )
+
+        persisted = await persist_compaction_result(
+            None,
+            instance_id="ns-trap-instance-0001",
+            result=result,
+            mid_turn=True,
+            abort_policy="raise",
+            graph=graph,
+        )
+
+        assert persisted is True
+        # NO messages write occurred
+        msgs_writes = [c for c in graph.aupdate_state_calls if "messages" in c[1]]
+        assert msgs_writes == [], "empty replacement must NOT reach a messages write"
+        # ONLY compacted_at write
+        stamp_writes = [c for c in graph.aupdate_state_calls if "compacted_at" in c[1]]
+        assert len(stamp_writes) == 1
+        # all writes thread-id-only (root ns)
+        for cfg, upd, kw in graph.aupdate_state_calls:
+            assert "checkpoint_ns" not in (cfg.get("configurable") or {})
+
+    @pytest.mark.asyncio
+    async def test_real_replacement_writes_messages(self):
+        from daemon.compaction import CompactionResult
+        from daemon.services._compaction_persist_seam import persist_compaction_result
+
+        graph = _NsTrapGraph(values={"messages": make_messages(5)})
+        result = CompactionResult(
+            replacement_messages=[HumanMessage(content="compacted", id="c-1")],
+            tokens_before=100,
+            tokens_after=50,
+            tokens_saved=50,
+            messages_before=5,
+            messages_after=1,
+            compaction_type="chunked",
+            compacted_at="2026-01-01T00:00:00Z",
+        )
+
+        persisted = await persist_compaction_result(
+            None,
+            instance_id="ns-trap-instance-0001",
+            result=result,
+            mid_turn=True,
+            abort_policy="raise",
+            graph=graph,
+        )
+
+        assert persisted is True
+        msgs_writes = [c for c in graph.aupdate_state_calls if "messages" in c[1]]
+        assert len(msgs_writes) == 1

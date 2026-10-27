@@ -757,14 +757,10 @@ class TestPreCall95KillSwitch:
 # Byte-exact CLE persist lines (the handler's Variant B writes). The
 # 95% hook must NOT touch them — source-pinned here so any edit to the
 # handler's persist recipe fails this suite (task T-isolation anchor).
-_CLE_PERSIST_MESSAGES_LINE = (
-    "await graph.aupdate_state(thread_config, "
-    "{'messages': replacement_messages}, as_node='agent')"
+_CLE_PERSIST_SEAM_LINE = (
+    'abort_policy="raise",'
 )
-_CLE_PERSIST_STAMP_LINE = (
-    "await graph.aupdate_state(thread_config, "
-    "{'compacted_at': result.compacted_at}, as_node='agent')"
-)
+
 
 
 class TestPreCall95CLEIsolation:
@@ -775,13 +771,9 @@ class TestPreCall95CLEIsolation:
         import daemon.graph as graph_mod
 
         source = inspect.getsource(graph_mod)
-        assert source.count(_CLE_PERSIST_MESSAGES_LINE) == 1, (
-            "CLE persist (messages) site must stay byte-identical and "
-            "appear exactly once"
-        )
-        assert source.count(_CLE_PERSIST_STAMP_LINE) == 1, (
-            "CLE persist (compacted_at) site must stay byte-identical "
-            "and appear exactly once"
+        assert source.count(_CLE_PERSIST_SEAM_LINE) == 1, (
+            "CLE persist must route through the shared seam with "
+            "abort_policy='raise' exactly once"
         )
         # The CLE handler keeps its in-frame rebuild + single re-invoke.
         assert "compact_messages = [SystemMessage(content=system_prompt)] + updated_state.values.get('messages', [])" in source
