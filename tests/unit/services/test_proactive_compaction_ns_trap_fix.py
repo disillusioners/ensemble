@@ -313,18 +313,44 @@ class TestNsTrapCLETargeting:
         # guard present at CLE read
         assert "empty snapshot read — suspected" in source or "empty snapshot read" in source
 
-    def test_cle_guard_raises(self):
-        # Structural: the guard branch must contain a raise (not just a
-        # log substring), otherwise the guard is a no-op.
+    @staticmethod
+    def _if_node_at_lineno(lineno: int):
+        import ast
+        import inspect
         import daemon.graph as graph_mod
-        import re
-        source = inspect.getsource(graph_mod)
-        assert "[Compaction][CLE] empty snapshot read" in source
-        assert re.search(
-            r"\[Compaction\]\[CLE\] empty snapshot read.*?\n\s*raise",
-            source,
-            re.DOTALL,
-        ), "CLE guard must contain a raise statement"
+        path = inspect.getsourcefile(graph_mod)
+        tree = ast.parse(open(path).read())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.If) and getattr(node, "lineno", None) == lineno:
+                return node
+        return None
+
+    @staticmethod
+    def _has_warn_and_raise(if_node) -> bool:
+        import ast
+        assert if_node is not None, "expected If node not found"
+        has_raise = any(isinstance(n, ast.Raise) for n in if_node.body)
+        has_warn = False
+        for n in ast.walk(if_node):
+            if isinstance(n, ast.Call):
+                func = n.func
+                if isinstance(func, ast.Attribute) and func.attr == "warning":
+                    has_warn = True
+        return has_raise and has_warn
+
+    def test_cle_guard_has_warn_and_raise(self):
+        node = self._if_node_at_lineno(9321)
+        assert self._has_warn_and_raise(node), (
+            "CLE empty-snapshot guard (line 9321) must contain BOTH a "
+            "logger.warning call AND a Raise in its body"
+        )
+
+    def test_empty_replacement_branch_has_warn_and_raise(self):
+        node = self._if_node_at_lineno(9483)
+        assert self._has_warn_and_raise(node), (
+            "CLE empty-replacement branch (line 9483) must contain BOTH a "
+            "logger.warning call AND a Raise in its body"
+        )
 
 
 # =============================================================================
