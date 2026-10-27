@@ -702,7 +702,18 @@ class GraceTracker:
         )
 
         # ── 5. arming / expiry (§4.3 P3 — ONE observation-relative clock) ──
-        if eligible and self._armed_at is None:
+        # (Re)arm: the FIRST grace-eligible observation of an EPISODE
+        # arms the window. A tick INSIDE the window never moves
+        # ``armed_at`` (the grace is NEVER extended). Once the window has
+        # FULLY lapsed the grace stays OFF — a re-arm requires the
+        # episode to be reset, which happens only when the composite
+        # becomes fully healthy again (the daemon recovered). A new
+        # window then starts a NEW expiry (a re-arm, never an extension
+        # of the old one).
+        if not degraded:
+            # Fully healthy ⇒ the episode ends (the grace is reset).
+            self._armed_at = None
+        elif eligible and self._armed_at is None:
             self._armed_at = moment
         expires_at = (
             self._armed_at + timedelta(seconds=self._horizon_s)
@@ -1110,14 +1121,18 @@ async def refresh_readiness_composite(
         The pair form is ``(verdict, class)``. A ``QueueProbeResult`` is a
         2-field NamedTuple and is NOT a pair — it is returned verbatim by
         the queue probe, which is handled on its own path below.
+
+        A LEGACY bare bool carries NO class (``None``): the caller
+        attributes the class, so the orchestrator's own attribution (a
+        TIMEOUT ⇒ ``probe_timeout``; an EXCEPTION ⇒
+        ``hard_component_red``) is never overridden by the legacy
+        default.
         """
         if isinstance(value, QueueProbeResult):
             return value, None
         if isinstance(value, tuple) and len(value) == 2:
             verdict, cls = value
             return verdict, (cls if isinstance(cls, str) else None)
-        if isinstance(value, bool):
-            return value, (FAILURE_CLASS_OK if value else FAILURE_CLASS_UNKNOWN)
         return value, None
 
     async def _guarded(probe, timeout_s, default):

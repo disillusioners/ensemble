@@ -216,7 +216,18 @@ class TestCreatePostgresCheckpointer:
         kwargs = captured["pool_kwargs"]
         assert kwargs["open"] is False, "pool.open() must be explicit"
         assert kwargs["min_size"] == 1
-        assert kwargs["max_size"] == 5
+        # A4 (soak-gate-mcp-warmup): the size is the CONFIG-TUNABLE knob
+        # ``limits.checkpoint_pool_max_size`` (the shipped default tier is
+        # 10 — the hard-coded 5 was BELOW the 7-writer ceiling), and the
+        # pool carries an EXPLICIT acquisition ``timeout`` (the library
+        # default was 30.0 s — the ghost-waiter lifetime).
+        from daemon.constants import (
+            CHECKPOINT_POOL_MAX_SIZE_DEFAULT,
+            CHECKPOINT_POOL_TIMEOUT_S_DEFAULT,
+        )
+
+        assert kwargs["max_size"] == CHECKPOINT_POOL_MAX_SIZE_DEFAULT
+        assert kwargs["timeout"] == CHECKPOINT_POOL_TIMEOUT_S_DEFAULT
         # ``check=`` wired to AsyncConnectionPool.check_connection —
         # the static liveness probe that catches dead conns.
         assert kwargs["check"] is _FakeAsyncConnectionPool.check_connection

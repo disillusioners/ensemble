@@ -148,6 +148,36 @@ ADAPTIVE_SOAK_CAP_S="${ADAPTIVE_SOAK_CAP_S:-120}"
 ADAPTIVE_SOAK_CONSECUTIVE="${ADAPTIVE_SOAK_CONSECUTIVE:-3}"
 ADAPTIVE_SOAK_CADENCE_S="${ADAPTIVE_SOAK_CADENCE_S:-15}"
 
+# ── A1/A2 grace semantics (soak-gate-mcp-warmup) ────────────────────────
+# The class-gated readiness grace (A1) and the soak's three observation
+# kinds (A2). The NORMATIVE predicate definitions live in
+# .agents/shared/planning/soak-gate-mcp-warmup/requirements.md §4.1-§4.3
+# (the single normative home); these are the SHELL-side constants only.
+#
+# GRACE_HORIZON_S — the daemon-side grace horizon (requirements §4.3 P3):
+# ONE number, OBSERVATION-RELATIVE (the daemon owns the clock; the
+# shell never keeps a second one). The shell needs the number so its
+# window-extension bound agrees with the daemon's ceiling.
+GRACE_HORIZON_S="${GRACE_HORIZON_S:-120.0}"
+# GRACE_EXTENSION_CAP_S — the BOUNDED window extension the soak may
+# spend when a grace-eligible HOLD was observed (requirements §4.3 P3).
+# It is SPENT, NOT REFUNDED: a re-arm does not hand back extension
+# budget. The soak's ABSOLUTE bound is
+#     soak_entry + ADAPTIVE_SOAK_CAP_S (120) + GRACE_EXTENSION_CAP_S (180)
+#   = soak_entry + 300s.
+GRACE_EXTENSION_CAP_S="${GRACE_EXTENSION_CAP_S:-180.0}"
+# The INTEGER projection of GRACE_EXTENSION_CAP_S — the shell's
+# arithmetic is integer-only ($(( ))) and the normative value (180 s) is
+# a whole number of seconds. "%%.*" strips a fractional part when there
+# is one and is a no-op when there is not.
+GRACE_EXTENSION_CAP_S_INT="${GRACE_EXTENSION_CAP_S%%.*}"
+# MAX_HOLDS_PER_GREEN — the bound on consecutive HOLD observations
+# (requirements §4.2 P2). A green counts only behind AT MOST this many
+# consecutive holds; a green behind more is REJECTED (the consecutive
+# streak resets) — a never-green daemon still ends at cap-reach with
+# consecutive_green < 3 and is rolled back.
+MAX_HOLDS_PER_GREEN="${MAX_HOLDS_PER_GREEN:-2}"
+
 # P3 / decision (e) — boot-window grace (D-P3.7). Grace period starts
 # on restart_via_launcher returning 0; ends on earliest of (a) 60s
 # elapsed OR (b) 3 consecutive non-transient greens on livez. During
@@ -582,6 +612,137 @@ _json_sub() {
         rest="${rest:1}"
     done
     return 1
+}
+
+# ── A1/A2 readiness-class parser (soak-gate-mcp-warmup) ─────────────────
+#
+# The daemon computes the failure CLASS of every readiness component and
+# publishes it in the /readyz body (detail.component_classes), together
+# with the grace state (detail.grace) and the leak signal
+# (detail.leak_signal). The gate CONSUMES that structured signal — it
+# never re-derives a class from a free-text reason string (the legacy
+# reason string is stale; decisions §2 row 23).
+#
+# Parsing follows the EXISTING _json_sub / _json_field precedent
+# (_read_inflight_turns_bounded) — pure bash, no jq dependency.
+#
+# FAIL-CLOSED BY CONSTRUCTION: an absent / unreadable / unexpected
+# payload ⇒ "not grace-eligible". An OLDER daemon that publishes no
+# detail.grace block is therefore read as the "unknown" class ⇒ NO
+# GRACE ⇒ the pre-change soak behaviour is preserved verbatim
+# (R-MASK-8).
+
+# The GRACE-ELIGIBLE failure classes (requirements.md §4.2 P2).
+GRACE_ELIGIBLE_CLASSES_SH="probe_timeout pool_busy queue_stale read_timeout"
+
+# _readyz_detail <body> — the readyz "detail" object (empty on failure).
+_readyz_detail() {
+    local body="$1"
+    [ -n "$body" ] || return 1
+    _json_sub "$body" detail 2>/dev/null
+}
+
+# _readyz_grace_active <body> — 0 (true) when the daemon reports an
+# ACTIVE class-gated grace; 1 (false) otherwise (including an absent
+# grace block ⇒ fail-closed ⇒ no grace).
+_readyz_grace_active() {
+    local detail grace active
+    detail="$(_readyz_detail "$1")" || return 1
+    [ -n "$detail" ] || return 1
+    grace="$(_json_sub "$detail" grace 2>/dev/null)" || return 1
+    [ -n "$grace" ] || return 1
+    active="$(_json_field "$grace" grace_active 2>/dev/null)" || return 1
+    [ "$active" = "true" ] && return 0
+    return 1
+}
+
+# _readyz_leak_detected <body> — 0 (true) when the daemon reports a
+# pool-leak signal (the grace must REFUSE / DISENGAGE); 1 (false)
+# otherwise. An absent leak_signal block reads as "no leak" (the daemon
+# publishes it whenever the predicate could be evaluated).
+_readyz_leak_detected() {
+    local detail leak detected
+    detail="$(_readyz_detail "$1")" || return 1
+    [ -n "$detail" ] || return 1
+    leak="$(_json_sub "$detail" leak_signal 2>/dev/null)" || return 1
+    [ -n "$leak" ] || return 1
+    detected="$(_json_field "$leak" detected 2>/dev/null)" || return 1
+    [ "$detected" = "true" ] && return 0
+    return 1
+}
+
+# _json_bool_field <json> <key> — the boolean value of a FLAT key
+# ("key": true / false). Returns 1 when the key is absent.
+_json_bool_field() {
+    local json="$1" key="$2" rest
+    rest="${json#*"\"${key}\""}"
+    [ "$rest" = "$json" ] && return 1
+    rest="${rest#*:}"
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    case "$rest" in
+        true*) printf 'true' ;;
+        false*) printf 'false' ;;
+        *) return 1 ;;
+    esac
+}
+
+# _readyz_grace_eligible_transient <body> — 0 (true) when EVERY DEGRADED
+# component carries a GRACE-ELIGIBLE failure class (requirements §4.2
+# P2). Any never-eligible class, any unknown class, a missing class map
+# or a missing components map ⇒ 1 (NOT eligible — fail-closed).
+#
+# The aggregation is a CONJUNCTION, never a vote: one hard-red component
+# among three timeouts kills the grace for that tick.
+_readyz_grace_eligible_transient() {
+    local body="$1" detail classes comps name value cls
+    detail="$(_readyz_detail "$body")" || return 1
+    [ -n "$detail" ] || return 1
+    classes="$(_json_sub "$detail" component_classes 2>/dev/null)" || return 1
+    [ -n "$classes" ] || return 1
+    comps="$(_json_sub "$body" components 2>/dev/null)" || return 1
+    [ -n "$comps" ] || return 1
+    local saw_degraded=0
+    for name in database queue_freshness services checkpoint_saver; do
+        value="$(_json_bool_field "$comps" "$name")" || return 1
+        if [ "$value" = "false" ]; then
+            saw_degraded=1
+            cls="$(_json_field "$classes" "$name" 2>/dev/null)" || return 1
+            [ -n "$cls" ] || return 1
+            case " $GRACE_ELIGIBLE_CLASSES_SH " in
+                *" $cls "*) : ;;
+                *) return 1 ;;
+            esac
+        fi
+    done
+    # A readyz that is not degraded at all is not a "grace-eligible
+    # transient" (the HELD kind requires a degraded readyz).
+    [ "$saw_degraded" = "1" ] || return 1
+    return 0
+}
+
+# _soak_effective_cap <granted> <ceremony_remaining_s> <soak_s> — the
+# effective soak cap (requirements.md §4.3 P3):
+#     min(ADAPTIVE_SOAK_CAP_S + granted,
+#         ceremony_remaining_s - 60,
+#         soak_s,
+#         ADAPTIVE_SOAK_CAP_S + GRACE_EXTENSION_CAP_S)
+# The 4th term is the ABSOLUTE ceiling; the 2nd is the ceremony budget
+# (skipped when the caller passed no budget); the 3rd is the operator's
+# own ceiling. With granted=0 the result is EXACTLY the pre-change
+# min(ADAPTIVE_SOAK_CAP_S, ceremony_remaining_s - 60, soak_s).
+_soak_effective_cap() {
+    local granted="$1" remaining="$2" soak_s="$3" cap ceiling c
+    cap=$(( ADAPTIVE_SOAK_CAP_S + granted ))
+    if [ -n "$remaining" ] && [ "$remaining" -gt 60 ]; then
+        c=$(( remaining - 60 ))
+        [ "$c" -lt "$cap" ] && cap="$c"
+    fi
+    if [ "$soak_s" -lt "$cap" ]; then
+        cap="$soak_s"
+    fi
+    ceiling=$(( ADAPTIVE_SOAK_CAP_S + GRACE_EXTENSION_CAP_S_INT ))
+    [ "$ceiling" -lt "$cap" ] && cap="$ceiling"
+    printf '%s' "$cap"
 }
 
 # ── Target resolution (D1 topology table) ────────────────────────────────────
@@ -3002,7 +3163,13 @@ _probe_once_classified() {
     # Read body for callers that need it (e.g. inflight_turns extraction
     # for the busy-amnesty reader; gate_version for the version field).
     # Skip the read for empty/connection-error results (no body landed).
-    if [ -s "$tmp_body" ] && [ "$_PROBE_STATUS" = "green" ]; then
+    #
+    # A1 (soak-gate-mcp-warmup): the body is ALSO read on the TRANSIENT
+    # path — the soak's class-gated grace is published in the readyz
+    # 503 body (detail.grace / detail.leak_signal /
+    # detail.component_classes), and the gate can only classify a
+    # transient if it can READ the body. The green read is unchanged.
+    if [ -s "$tmp_body" ] && { [ "$_PROBE_STATUS" = "green" ] || [ "$_PROBE_STATUS" = "transient" ]; }; then
         _PROBE_BODY="$(cat "$tmp_body" 2>/dev/null)"
     fi
     rm -f "$tmp_body" 2>/dev/null
@@ -5152,14 +5319,37 @@ gate_soak() {
     _log "soak ${adaptive_cap}s (early-exit on ${adaptive_n} consecutive green probes @ ${adaptive_cadence}s cadence, floor ${adaptive_floor}s; user-set soak_s=${soak_s} — the adaptive CAP governs, soak_s is a hard ceiling)"
     _PROBE_SUPPRESSION_STRICT=0   # W1: adaptive default re-enables grace/amnesty
     deadline=$(( $(_now_epoch) + adaptive_cap ))
+    # ── A2 (soak-gate-mcp-warmup) — the soak's grace state ──────────
+    # consecutive_hold — the consecutive HOLD observations (a HOLD does
+    #   NOT advance the green counter; it HOLDS it).
+    # granted — the window extension spent so far (0 until a
+    #   grace-eligible HOLD is observed; the extension is SPENT, NOT
+    #   REFUNDED).
+    # soak_absolute_bound — the ABSOLUTE bound of the soak window:
+    #   soak_entry + ADAPTIVE_SOAK_CAP_S + GRACE_EXTENSION_CAP_S
+    #   (= soak_entry + 300s). The grace-eligible observation window can
+    #   NEVER extend past it (requirements §4.3 P3).
+    local consecutive_hold=0
+    local granted=0
+    local soak_absolute_bound=$(( soak_start + ADAPTIVE_SOAK_CAP_S + GRACE_EXTENSION_CAP_S_INT ))
     while :; do
         lock_heartbeat
         # Classified probe path (D-P3.6): 503/7/22/28 → transient
         # (counted as "no green" — does not advance counter, does not
         # fail the phase). All other non-2xx → red (fail-fast).
-        local livez_rc readyz_rc
+        #
+        # ── A2: the per-probe status locals ────────────────────────
+        # Each probe's status is captured IMMEDIATELY after its OWN
+        # call. The counter below reads these LOCALS, not the probe-level
+        # global ``_PROBE_STATUS`` — which the SECOND probe overwrites
+        # (the aliasing defect: decisions §3b B5 / R-MASK-6). The
+        # global stays the probe-level value everywhere else (~22 call
+        # sites) — the fix is AT THE COUNTER SITE ONLY.
+        local livez_rc readyz_rc livez_status readyz_status livez_body readyz_body
         _probe_once_classified "/livez" "$PORT"
         livez_rc=$?
+        livez_status="$_PROBE_STATUS"
+        livez_body="$_PROBE_BODY"
         case "$livez_rc" in
             0) ;;  # green (or boot-grace-suppressed / busy-amnesty)
             1)
@@ -5180,6 +5370,8 @@ gate_soak() {
         esac
         _probe_once_classified "/readyz" "$PORT"
         readyz_rc=$?
+        readyz_status="$_PROBE_STATUS"
+        readyz_body="$_PROBE_BODY"
         case "$readyz_rc" in
             0) ;;  # green (or busy-amnesty soft-green)
             1)
@@ -5209,15 +5401,86 @@ gate_soak() {
         fi
         # Advance the consecutive-green counter ONLY on real green
         # results (boot-grace-suppressed and busy-amnesty soft-greens
-        # do NOT count — the C-1 invariant is "consecutive_green" is
-        # the count of NON-transient green probes; soft-greens are
+        # do NOT count — the C-1 invariant is "consecutive_green" is the
+        # count of NON-transient green probes; soft-greens are
         # explicitly excluded so the floor requirement stays load-
         # bearing).
-        if [ "$livez_rc" = "0" ] && [ "$_PROBE_STATUS" = "green" ] && \
-           [ "$readyz_rc" = "0" ] && [ "$_PROBE_STATUS" = "green" ]; then
-            consecutive_green=$((consecutive_green + 1))
-        else
-            consecutive_green=0
+        #
+        # ── A2 (soak-gate-mcp-warmup): the THREE observation kinds ───
+        # The normative rule is requirements.md §4.2 (P2). In short:
+        #
+        #   GREEN — livez HARD-green (rc=0 AND its per-probe status is
+        #           literally "green" — NOT a busy-amnesty soft-green)
+        #           AND readyz hard-green (rc=0 AND status "green").
+        #           => consecutive_green += 1 AND consecutive_hold = 0.
+        #   HELD  — livez HARD-green AND readyz is a grace-eligible
+        #           transient AND the daemon reports an ACTIVE grace AND
+        #           no leak signal.
+        #           => consecutive_green UNCHANGED, consecutive_hold += 1.
+        #   RESET — EVERYTHING ELSE, INCLUDING any tick where livez is
+        #           NOT a hard green (a livez transient is a RESET, never
+        #           a HOLD), any never-eligible class, any unknown
+        #           class, any hard red, and the boot-grace-suppressed
+        #           class.
+        #           => consecutive_green = 0 AND consecutive_hold = 0.
+        #
+        # A green counts only behind AT MOST MAX_HOLDS_PER_GREEN
+        # consecutive holds; a green behind more is REJECTED (the streak
+        # breaks and resets) — a stream of holds can never manufacture
+        # greens, and a never-green daemon still ends at cap-reach with
+        # consecutive_green < 3 => return 1 => auto-rollback.
+        local observation_kind="RESET"
+        if [ "$livez_rc" = "0" ] && [ "$livez_status" = "green" ] && \
+           [ "$readyz_rc" = "0" ] && [ "$readyz_status" = "green" ]; then
+            observation_kind="GREEN"
+        elif [ "$livez_rc" = "0" ] && [ "$livez_status" = "green" ] && \
+             [ "$readyz_status" != "green" ] && \
+             _readyz_grace_eligible_transient "$readyz_body" && \
+             _readyz_grace_active "$readyz_body" && \
+             ! _readyz_leak_detected "$readyz_body"; then
+            observation_kind="HELD"
+        fi
+        case "$observation_kind" in
+            GREEN)
+                if [ "$consecutive_hold" -gt "$MAX_HOLDS_PER_GREEN" ]; then
+                    # The hold budget is SPENT: a green behind more than
+                    # MAX_HOLDS_PER_GREEN consecutive holds does NOT
+                    # count toward the 3 — the consecutive streak breaks.
+                    consecutive_green=0
+                else
+                    consecutive_green=$((consecutive_green + 1))
+                fi
+                consecutive_hold=0
+                ;;
+            HELD)
+                consecutive_hold=$((consecutive_hold + 1))
+                ;;
+            RESET)
+                consecutive_green=0
+                consecutive_hold=0
+                ;;
+        esac
+        # ── A2: the BOUNDED window extension (requirements §4.3 P3) ───
+        # The extension is granted only when a grace-eligible HOLD was
+        # observed AND the leak predicate is false. It is SPENT, NOT
+        # REFUNDED, and the ABSOLUTE bound (soak_entry + 300s) always
+        # dominates: the deadline is re-anchored at each (re)grant but
+        # can NEVER exceed the absolute bound.
+        if [ "$observation_kind" = "HELD" ] && ! _readyz_leak_detected "$readyz_body"; then
+            if [ "$granted" -eq 0 ]; then
+                granted="$GRACE_EXTENSION_CAP_S_INT"
+                journal_history_append soak_grace_extended "grace-eligible HOLD observed — the soak window is extended by ${GRACE_EXTENSION_CAP_S_INT}s (bounded: absolute bound soak_entry+${ADAPTIVE_SOAK_CAP_S}+${GRACE_EXTENSION_CAP_S_INT}s; the never-green trigger is unchanged and unconditional)" \
+                                  || true
+            fi
+            local new_cap new_deadline
+            new_cap="$(_soak_effective_cap "$granted" "$ceremony_remaining_s" "$soak_s")"
+            new_deadline=$(( $(_now_epoch) + new_cap ))
+            [ "$new_deadline" -gt "$soak_absolute_bound" ] && new_deadline="$soak_absolute_bound"
+            if [ "$new_deadline" -gt "$deadline" ]; then
+                deadline="$new_deadline"
+                adaptive_cap="$new_cap"
+                _log "soak: grace-eligible HOLD — window extended to ${deadline} (cap ${new_cap}s, absolute bound ${soak_absolute_bound})"
+            fi
         fi
         now="$(_now_epoch)"
         # C-1 corrected: cap-reach with insufficient greens → exit 1
