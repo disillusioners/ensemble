@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+from concurrent.futures import ThreadPoolExecutor
 import os
 import threading
 from contextlib import AbstractAsyncContextManager
@@ -99,6 +100,18 @@ _PROC_ROOT: Path = Path("/proc")
 # budget stays authoritative (30 + 2 + 30 + 6 = 68 s <= 60 s is the
 # documented split; 55 s is REJECTED).
 HANDSHAKE_WAIT_TIMEOUT_S: float = 30.0
+
+# Dedicated executor for the /proc child-stamp scan (architecture §5.1).
+# NOT the shared default executor: asyncio.to_thread / run_in_executor(None, ...)
+# share the default pool, which carries the daemon's LLM calls and compaction
+# (graph.py:1952-1957, compaction.py:4647); because the scan is awaited before
+# _ready.set(), a queued scan would stall the handshake behind a 120s LLM call.
+# Queue depth: bounded by spawn count, which is fully bounded only by phase-3's
+# C1 quarantine (S1). Process-lifetime lazy threads (house precedent); no
+# shutdown path is wired here (manager.py is out of the daemon-file scope fence).
+_PROC_SCAN_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="mcp-procscan"
+)
 
 
 def _basename_command(command: str) -> str:
@@ -502,7 +515,7 @@ class TaskScopedStdioClient(TaskScopedContextManager):
         super().__init__(
             factory=lambda: mcp.stdio_client(server_params),
             name="mcp-stdio-client",
-            on_ready=self._stamp_children,
+            on_ready=self._schedule_stamp,
             on_close=self._mark_children_exit,
         )
 
@@ -511,7 +524,7 @@ class TaskScopedStdioClient(TaskScopedContextManager):
         """The ``[(pid, start_time)]`` pairs registered this session."""
         return list(self._registered)
 
-    def _stamp_children_sync(self) -> None:
+    def _stamp_children(self) -> None:
         """Best-effort /proc scan → register every spawned child.
 
         Never raises (the ``on_ready`` hook swallows anyway). A
@@ -566,15 +579,19 @@ class TaskScopedStdioClient(TaskScopedContextManager):
                     pid, type(exc).__name__, exc,
                 )
 
-    def _stamp_children(self):
-        # W-3: perform the /proc scan OFF-loop (asyncio.to_thread) and
-        # return the awaitable so the transport awaits it BEFORE
+    def _schedule_stamp(self):
+        # W-3: perform the /proc scan OFF-loop on the DEDICATED executor
+        # and return the awaitable so the transport awaits it BEFORE
         # _ready.set() — work off-loop, await on-loop. Registration is
         # therefore complete before __aenter__ returns (required by
         # tests/test_resource_pid_registry.py:505-510). A fire-and-forget
         # shape is UNSAFE (a deferred scan can find a dead child and
         # return [] with no reap handle).
-        return asyncio.to_thread(self._stamp_children_sync)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+        return loop.run_in_executor(_PROC_SCAN_EXECUTOR, self._stamp_children)
 
     def _mark_children_exit(self) -> None:
         """Mark every child registered this session as exited.

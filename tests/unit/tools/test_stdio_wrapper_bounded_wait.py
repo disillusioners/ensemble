@@ -13,12 +13,12 @@ import pytest
 import daemon.mcp.stdio_wrapper as sw
 
 
-def test_on_ready_returns_awaitable():
+def test_on_ready_uses_dedicated_executor():
     params = types.SimpleNamespace(command="uvx", args=["mcp-server-x"])
     cm = sw.TaskScopedStdioClient(params, instance_id="i", server_name="s")
     # _stamp_children now performs the /proc scan OFF-loop and returns
     # the awaitable (W-3 shape) instead of running synchronously.
-    res = cm._stamp_children()
+    res = cm._schedule_stamp()
     assert inspect.isawaitable(res)
     # close the coroutine to avoid unawaited-coroutine warning
     if hasattr(res, "close"):

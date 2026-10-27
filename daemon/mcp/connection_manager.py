@@ -235,7 +235,11 @@ class McpConnectionManager:
                 surface="mcp_spawn",
             )
 
-        resolved_env = await asyncio.to_thread(_resolve_env_sync)
+        from daemon.mcp.warmup_pool import _SECRET_RESOLVE_EXECUTOR
+
+        resolved_env = await asyncio.get_event_loop().run_in_executor(
+            _SECRET_RESOLVE_EXECUTOR, _resolve_env_sync
+        )
         server_params = StdioServerParameters(
             command=config.command,
             args=config.args,
@@ -523,7 +527,11 @@ class McpConnectionManager:
                 surface="mcp_spawn",
             )
 
-        resolved_env = await asyncio.to_thread(_resolve_env_sync)
+        from daemon.mcp.warmup_pool import _SECRET_RESOLVE_EXECUTOR
+
+        resolved_env = await asyncio.get_event_loop().run_in_executor(
+            _SECRET_RESOLVE_EXECUTOR, _resolve_env_sync
+        )
         server_params = StdioServerParameters(
             command=config.command,
             args=config.args,

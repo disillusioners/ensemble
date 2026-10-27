@@ -70,6 +70,22 @@ class PooledConnection:
     created_at: float
 
 
+# Total warmup budget (outer timeout). The plan's only warmup budget is
+# the 60s outer timeout (phase2-plan.md step 3). The contract's
+# WARMUP_TOTAL_BUDGET_S=90 is NOT defined in the plan text; the plan
+# never introduces a 90s warmup budget, so the as-implemented budget
+# remains the existing 60s outer timeout (adjudicated from plan text).
+WARMUP_TOTAL_BUDGET_S: float = 60.0
+
+# Dedicated executor for secret/KMS marker resolution (architecture §5.1).
+# NOT the shared default executor (which carries LLM calls + compaction).
+# Queue depth: bounded by spawn count, fully bounded only by phase-3's C1
+# quarantine (S1). Process-lifetime lazy threads (house precedent); no
+# shutdown path wired here (manager.py is out of the daemon-file scope fence).
+_SECRET_RESOLVE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="mcp-secret"
+)
+
 class McpWarmupPool:
     """
     Pre-warmed connection pool for built-in STDIO MCP servers.
@@ -265,7 +281,9 @@ class McpWarmupPool:
                 surface="mcp_spawn",
             )
 
-        resolved_env = await asyncio.to_thread(_resolve_env_sync)
+        resolved_env = await asyncio.get_event_loop().run_in_executor(
+            _SECRET_RESOLVE_EXECUTOR, _resolve_env_sync
+        )
         server_params = StdioServerParameters(
             command=config.command,
             args=config.args,
@@ -279,7 +297,7 @@ class McpWarmupPool:
             # Single outer timeout wrapping everything from startup to tool discovery
             # (the handshake __aenter__ is now INSIDE the budget — previously
             # it sat outside and a hung handshake could wedge forever).
-            async with asyncio.timeout(60):
+            async with asyncio.timeout(WARMUP_TOTAL_BUDGET_S):
                 read_stream, write_stream = await streams_cm.__aenter__()
 
                 # Give subprocess time to start up (npx/uvx need time for package resolution)
