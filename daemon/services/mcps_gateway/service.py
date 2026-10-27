@@ -366,7 +366,42 @@ FORWARD_TIMEOUT = "timeout"
 FORWARD_UNREACHABLE = "unreachable"
 
 #: The machine answered with any other error envelope — it REFUSED.
+#:
+#: THE TOMBSTONE SEMANTICS GOVERN THIS ARM: the machine WAS told (it
+#: answered), so the tombstone records ``machine_notified: true``. That
+#: is the ERROR-FRAME arm — the machine refused to release its lock.
+#: A DECLINED ack (a result body, not an error frame) is a DIFFERENT
+#: outcome — see :data:`FORWARD_DECLINED`.
 FORWARD_REFUSED = "refused"
+
+#: The machine DECLINED the end (§6.9.7): it answered with a result
+#: body whose ``ended`` is falsy. A declined ack is a REFUSAL of the
+#: end, NOT an acknowledgement (§6.9.7 / Fork A) — so the machine did
+#: NOT acknowledge the end, and the tombstone must NOT claim it did.
+#:
+#: The sweep has already released the session centre-side (the
+#: two-pass invariant), so the outcome is a CENTRE-AUTHORITATIVE
+#: release with an HONEST refusal record: ``machine_notified: false``
+#: and an ``error`` audit row. This is the one arm where the sweep and
+#: the explicit end AGREE that the session survives the DECLINE —
+#: they do not: the sweep released centre-side BEFORE it forwarded, so
+#: its release is a fact, not an invention.
+FORWARD_DECLINED = "declined"
+
+#: The DECLINE outcome codes a peer may use on a declined end-ack
+#: (SPEC §6.10.2 group (iii)). ONLY these are echoed into an
+#: agent-facing detail — anything else is peer-controlled free text and
+#: becomes the neutral :data:`UNRECOGNIZED_ERROR_CODE` (the same
+#: guard the error-code slot gets).
+DECLINE_OUTCOME_CODES: frozenset[str] = frozenset(
+    {
+        REASON_ALREADY_ENDED,
+        REASON_REAPED_BY_CENTER,
+        REASON_SUPERSEDED,
+        REASON_UNKNOWN_SESSION,
+        "refused",
+    }
+)
 
 #: The deadline of the audit write (R1). A stalled PostgreSQL must not
 #: hang an agent tool call indefinitely: the write is abandoned, the
@@ -1913,7 +1948,7 @@ class McpGatewayService:
             )
             return FORWARD_UNREACHABLE
         try:
-            await self._request(
+            result = await self._request(
                 connection,
                 METHOD_SESSION_END,
                 self._session_end_params(
@@ -1974,6 +2009,19 @@ class McpGatewayService:
                 exc,
             )
             return FORWARD_UNREACHABLE
+        # §6.9.7 — a DECLINED ack is a REFUSAL of the end, NOT an
+        # acknowledgement: the machine did NOT release its local lock.
+        # The sweep has already released the session centre-side (the
+        # two-pass invariant), so the outcome is a CENTRE-AUTHORITATIVE
+        # release with an HONEST refusal record — the machine was NOT
+        # notified of the end, and the ledger says the machine refused.
+        if self._ack_declines(result):
+            logger.warning(
+                "the machine %r declined the session end of %s",
+                session.machine_id,
+                session.session_id,
+            )
+            return FORWARD_DECLINED
         return FORWARD_ACK
 
     async def _reap_expired_session(self, session: GatewaySession, cause: str) -> None:
@@ -1989,6 +2037,13 @@ class McpGatewayService:
         the machine was notified.
         """
         outcome = await self._forward_session_end_outcome(session)
+        # §6.9.7 — a DECLINED ack is a REFUSAL, not an acknowledgement, so
+        # it is NOT in the "the machine was told" tuple: the machine did
+        # NOT acknowledge the end, and the tombstone must not claim it
+        # did. The ERROR-FRAME refusal (FORWARD_REFUSED) keeps its place
+        # in the tuple — there the machine WAS told (it answered with an
+        # error envelope), and the tombstone's documented "was told"
+        # semantics govern that path.
         self._tombstones.mark_notified(
             session.session_id,
             outcome in (FORWARD_ACK, FORWARD_ALREADY_GONE, FORWARD_REFUSED),
@@ -2009,6 +2064,14 @@ class McpGatewayService:
             audit_outcome = OUTCOME_ERROR
             error_code = LEDGER_MACHINE_UNREACHABLE
             detail = AUDIT_DETAIL_EXPIRE_UNREACHABLE
+        elif outcome == FORWARD_DECLINED:
+            # The machine DECLINED the end (§6.9.7): the sweep released
+            # centre-side (the two-pass invariant), so the release is a
+            # FACT — but the machine did NOT acknowledge it, and the
+            # ledger records the refusal HONESTLY.
+            audit_outcome = OUTCOME_ERROR
+            error_code = REASON_MACHINE_REFUSED
+            detail = AUDIT_DETAIL_EXPIRE_REFUSED
         else:
             audit_outcome = OUTCOME_ERROR
             error_code = REASON_MACHINE_REFUSED
@@ -2389,6 +2452,13 @@ class McpGatewayService:
         An agent must read ``machine_notified: false`` as "do NOT assume
         the machine is free".
 
+        ``machine_notified: false`` ALSO covers a DECLINED end-ack
+        (§6.9.7): a decline is a REFUSAL of the end, not an
+        acknowledgement, so the machine did NOT acknowledge it. The
+        explicit end keeps the session ALIVE in that case (the centre
+        does not invent a release the peer did not acknowledge) and
+        answers ``ended: false`` with ``why_not_ended: machine_refused``.
+
         ``session_id`` / ``machine_id`` are included ONLY when they are
         known — an unknown session must never leak the existence of
         somebody else's session.
@@ -2561,6 +2631,20 @@ class McpGatewayService:
                 audit_detail=AUDIT_DETAIL_SESSION_UNREACHABLE,
             )
 
+        # (a) The machine's answer. A DECLINED ack (§6.9.7) is a
+        # REFUSAL of the end, NOT an acknowledgement: the responder MUST
+        # NOT record or report the end as machine-acknowledged, and MUST
+        # NOT forward the decline to its agents as an acknowledged end.
+        # The classification happens on the BODY, BEFORE any release —
+        # so a decline can never reach the acknowledged path.
+        if self._ack_declines(result):
+            return await self._end_declined(
+                session,
+                agent_id=agent_id,
+                instance_id=instance_id,
+                result=result,
+            )
+
         # (a) The machine acknowledged the end.
         return await self._end_acknowledged(
             session,
@@ -2571,6 +2655,59 @@ class McpGatewayService:
             audit_detail=AUDIT_DETAIL_SESSION_ENDED,
             result=result,
         )
+
+    async def _end_declined(
+        self,
+        session: GatewaySession,
+        *,
+        agent_id: str,
+        instance_id: str,
+        result: Any,
+    ) -> dict[str, Any]:
+        """The machine DECLINED the end — the session SURVIVES. (§6.9.7)
+
+        A declined end-ack (``{session_id, ended: false, reason}``) is a
+        REFUSAL of the end, not an acknowledgement (§6.9.7 / Fork A).
+        The explicit end's own convention applies: the centre does not
+        invent a release the peer did not acknowledge, so the session
+        STAYS ALIVE and the answer says so.
+
+        THE FIELD IS ``machine_notified: false`` — the machine did NOT
+        acknowledge the end (§6.9.7: "``machine_notified`` MUST NOT be
+        true because of a declined ack"). The asymmetry with the
+        ERROR-FRAME refusal arm is DELIBERATE: there the machine
+        answered with an error envelope (it was TOLD and it refused),
+        while here it answered with a decline — and the field's
+        redefined meaning is "the machine ACKNOWLEDGED the end".
+
+        The machine's VERBATIM declined result is NOT forwarded: it is
+        not an acknowledgement, and the acknowledged path is the only
+        one that carries a ``result`` member. A SAFE, BOUNDED echo of
+        the machine's outcome code rides the detail string instead.
+        """
+        safe_code = self._safe_outcome_code(
+            result.get("reason") if isinstance(result, dict) else None
+        )
+        await self._audit_session(
+            agent_id=agent_id,
+            instance_id=instance_id,
+            machine_id=session.machine_id,
+            session_id=session.session_id,
+            tool=AUDIT_TOOL_SESSION_END,
+            outcome=OUTCOME_ERROR,
+            error_code=REASON_MACHINE_REFUSED,
+            detail=AUDIT_DETAIL_SESSION_REFUSED,
+        )
+        return {
+            "session_id": session.session_id,
+            "machine_id": session.machine_id,
+            "ended": False,
+            # Every response-borne reason passes the SAME disjointness
+            # guard — the declined arm is not an exception to it.
+            "why_not_ended": self._response_reason(REASON_MACHINE_REFUSED),
+            "detail": f"the machine declined the session end ({safe_code})",
+            "machine_notified": False,
+        }
 
     async def _end_acknowledged(
         self,
@@ -2725,6 +2862,51 @@ class McpGatewayService:
         if tombstone.machine_id:
             envelope["machine_id"] = tombstone.machine_id
         return envelope
+
+    @staticmethod
+    def _ack_declines(result: Any) -> bool:
+        """Did the machine DECLINE the end? (SPEC §6.9.7)
+
+        The end-ack has THREE outcomes (§6.9.7):
+
+        * ACCEPTED — ``{session_id, ended: true, reason?}``;
+        * DECLINED — ``{session_id, ended: false, reason: <outcome>}``;
+        * ALREADY GONE — the typed error ``SESSION_NOT_FOUND``, which
+          never reaches this test: it is an ERROR FRAME and each error
+          frame has its own arm.
+
+        A declined ack is a REFUSAL of the end, NOT an acknowledgement
+        (§6.9.7 — "the responder MUST NOT record or report the end as
+        machine-acknowledged on the basis of a declined ack, and MUST
+        NOT forward the decline to its agents as an acknowledged end").
+
+        THE DETECTION IS DELIBERATELY NARROW: only a DICT that carries
+        an ``ended`` member whose value is FALSY is a decline. A dict
+        whose ``ended`` is truthy is an acceptance; a dict with NO
+        ``ended`` member at all is an acceptance too (the shipped
+        client's acknowledgement is not obliged to carry the member, and
+        over-tightening the test would turn a conforming ack into a
+        refusal); a non-dict result is an acceptance for the same
+        reason. Anything else would be a guess about the peer's shape.
+        """
+        if not isinstance(result, dict):
+            return False
+        if "ended" not in result:
+            return False
+        return not result["ended"]
+
+    @staticmethod
+    def _safe_outcome_code(code: Any) -> str:
+        """The peer's DECLINE outcome code, sanitised for a detail.
+
+        The outcome code of a declined ack is PEER-CONTROLLED free text
+        — exactly like the error-code slot. Only the SPEC's own
+        group-(iii) outcome codes are echoed; anything else becomes the
+        neutral :data:`UNRECOGNIZED_ERROR_CODE`.
+        """
+        if not isinstance(code, str) or code not in DECLINE_OUTCOME_CODES:
+            return UNRECOGNIZED_ERROR_CODE
+        return code
 
     @staticmethod
     def _safe_peer_code(code: str) -> str:

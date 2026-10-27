@@ -474,6 +474,43 @@ class _RecordingMachine(FakeMachine):
 
 
 class TestTheTombstone:
+    async def test_a_declined_sweep_ack_is_an_honest_refusal(self):
+        """§6.9.7 — a DECLINED end-ack is a REFUSAL, not an ack.
+
+        The machine answered the sweep's forward with ``{ended: false,
+        reason: …}`` — it did NOT release its local lock. The sweep has
+        already released the session centre-side (the two-pass
+        invariant), so the release is a FACT; but the machine did NOT
+        acknowledge the end, and the tombstone must not claim it did.
+
+        THE ANTI-TAUTOLOGY RULE: the tombstone's ``machine_notified``
+        and the ledger's outcome/error_code are both asserted — a
+        declined ack classified as an ack flips BOTH.
+        """
+        audit = MemoryAuditSink()
+        clock = Clock()
+        service = make_service(audit_sink=audit, clock=clock)
+        machine = await open_machine(service, FakeMachine(service))
+        machine.answers["session.end"] = {
+            "session_id": SESSION_ID,
+            "ended": False,
+            "reason": "refused",
+        }
+        await expired_session(service, machine, clock)
+
+        await service.expire_sessions()
+
+        tombstone = service._tombstones.get(SESSION_ID, clock())
+        assert tombstone is not None
+        assert tombstone.machine_notified is False, (
+            "a declined ack must NOT be recorded as machine-notified"
+        )
+        # The ledger records the refusal HONESTLY.
+        rows = [r for r in audit.records if r.tool == "session.expire"]
+        assert len(rows) == 1
+        assert rows[0].outcome == "error"
+        assert rows[0].error_code == REASON_MACHINE_REFUSED
+
     async def test_a_late_end_after_the_sweep_answers_expired(self):
         clock = Clock()
         service = make_service(clock=clock)
@@ -660,6 +697,52 @@ class TestTheEndContract:
         assert "TOOL_ERROR" in result["detail"]
         assert result["machine_notified"] is True
         # The session SURVIVES the refusal.
+        assert service.sessions.for_agent(AGENT_ID) is not None
+        assert service.sessions.for_machine(MACHINE_ID) is not None
+        assert service.store.get(MACHINE_ID).session_id == SESSION_ID
+        # The ledger records the REFUSAL — that is what answers "why did
+        # this session not end?".
+        assert len(audit.records) == 1
+        assert audit.records[0].tool == "session.end"
+        assert audit.records[0].error_code == REASON_MACHINE_REFUSED
+        assert audit.records[0].outcome == "error"
+
+    async def test_a_declined_ack_is_a_refusal_and_the_session_survives(
+        self,
+    ):
+        """§6.9.7 — a DECLINED end-ack is a REFUSAL of the end.
+
+        "the responder MUST NOT record or report the end as
+        machine-acknowledged on the basis of a declined ack, and MUST
+        NOT forward the decline to its agents as an acknowledged end".
+
+        THE ANTI-TAUTOLOGY RULE: every assertion below flips when the
+        decline is misread as an acknowledgement — ``ended`` becomes
+        True, ``machine_notified`` becomes True, the session is released
+        and the machine's VERBATIM declined body rides the envelope.
+        """
+        audit = MemoryAuditSink()
+        service = make_service(audit_sink=audit)
+        machine = await open_machine(service, FakeMachine(service))
+        machine.answers["session.end"] = {
+            "session_id": SESSION_ID,
+            "ended": False,
+            "reason": "refused",
+        }
+        await open_session(service, machine)
+
+        result = await service.disconnect(agent_id=AGENT_ID)
+
+        assert result["ended"] is False
+        assert result["why_not_ended"] == REASON_MACHINE_REFUSED
+        # The machine did NOT acknowledge the end.
+        assert result["machine_notified"] is False
+        # The VERBATIM declined body is NOT forwarded — it is not an
+        # acknowledgement, and the ``result`` member belongs to the
+        # acknowledged path only.
+        assert "result" not in result
+        # The session SURVIVES the decline: the centre does not invent a
+        # release the peer did not acknowledge.
         assert service.sessions.for_agent(AGENT_ID) is not None
         assert service.sessions.for_machine(MACHINE_ID) is not None
         assert service.store.get(MACHINE_ID).session_id == SESSION_ID
