@@ -4326,22 +4326,25 @@ class TestSentinelAcrossPersistSites:
         )
 
     def test_persist_site_invariants_graph_reactive_uses_as_node(self):
-        """The graph.py (reactive) site uses ``as_node='agent'``."""
+        """The graph.py (reactive) CLE site routes the persist
+        through the shared seam with ``mid_turn=True`` -> the seam's
+        mid_turn arm writes ``as_node='agent'`` (seam :252-263).
+        The seam write-site behavior is pinned by
+        test_proactive_compaction_fix_p1b.py::test_both_seam_writes_carry_as_node_agent."""
         import inspect
         from daemon import graph as dg
         src = inspect.getsource(dg)
-        # Find the compaction aupdate_state with replacement_messages.
-        idx = src.find("'messages': replacement_messages")
-        if idx < 0:
-            # Try alternative
-            idx = src.find("{'messages': replacement_messages}")
+        # ``abort_policy="raise"`` is unique in graph.py — the CLE
+        # reactive seam call; the L2 hook uses "fail_open".
+        idx = src.find('abort_policy="raise"')
         assert idx >= 0
-        call_idx = src.rfind("await graph.aupdate_state(", 0, idx)
+        call_idx = src.rfind("persist_compaction_result(", 0, idx)
         assert call_idx >= 0
         call_end = src.find(")", call_idx)
         call = src[call_idx:call_end]
-        assert "as_node='agent'" in call, (
-            f"reactive path must use as_node='agent'; got: {call!r}"
+        assert "mid_turn=True" in call, (
+            f"reactive site must route the shared seam with "
+            f"mid_turn=True (-> as_node='agent' writes); got: {call!r}"
         )
 
 
