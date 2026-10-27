@@ -390,10 +390,17 @@ class McpWarmupPool:
             return
         if isinstance(exc, McpInitRefused):
             # Already recorded by the pre-check (with the DNS class).
+            # The CLAIM RELEASE for this path is owned by
+            # ``init_guard.record_failure``'s already-quarantined branch
+            # (init_guard.py:684-692), which clears ``probe_claimed`` and
+            # re-arms the recovery window — that is why this branch does
+            # NOT release it itself.
             return
-        # Release the claim FIRST (synchronously) so no failure in this
-        # span can wedge the server's recovery for the rest of the boot.
-        release_attempt(server_name)
+        # Release the claim FIRST (before the recording) so no failure in
+        # this span can wedge the server's recovery for the rest of the
+        # boot. The ordering is LOAD-BEARING: a cancelled recorder must
+        # not be able to skip the release (N2 pins it).
+        await release_attempt(server_name)
         if isinstance(exc, asyncio.CancelledError):
             # A CANCELLATION is not an init failure (the daemon is
             # shutting down / the task was cancelled) — it must never
@@ -635,7 +642,20 @@ class McpWarmupPool:
             # A CANCELLATION is not an init failure (the daemon is
             # shutting down / the task was cancelled) — it must never
             # count towards the quarantine threshold.
-            if not isinstance(exc, asyncio.CancelledError):
+            if isinstance(exc, asyncio.CancelledError):
+                # N1: a cancellation inside the SPAWN span (the daemon
+                # shutting down cancels the replenish tasks, ``drain()``
+                # runs, the watchdog cancels) would otherwise leave the
+                # CLAIMED recovery probe stuck — ``probe_claimed`` set
+                # and the breaker HALF_OPEN — so ``can_attempt`` reads
+                # False for the rest of the boot and the server's
+                # recovery is wedged until a restart (the exact false
+                # promise C-1 was fixing). The pre-try escape handler
+                # above mirrors this: the claim is released, the
+                # cancellation is NOT counted as an init failure, and
+                # the release happens BEFORE the cleanup.
+                await release_attempt(server_name)
+            else:
                 await record_failure(
                     server_name, _init_failure_class(exc)
                 )

@@ -358,15 +358,28 @@ def quarantine_server(
     )
 
 
-def release_attempt(server: str) -> None:
+async def release_attempt(server: str) -> None:
     """Release a claimed recovery probe WITHOUT counting a failure.
 
     The init span between the claim and the spawn (the DNS pre-check,
-    the secret-marker resolution) can raise. If it does, the claim must
-    still be released: a stuck ``probe_claimed`` means the server's
-    recovery is wedged for the REST OF THE BOOT (the breaker's
-    single-probe slot stays taken and the entry's window never
-    re-arms).
+    the secret-marker resolution) — and the SPAWN span itself (a
+    cancellation lands there when the daemon shuts down, when
+    ``drain()`` runs, or when the watchdog cancels the replenish) — can
+    end without a recorded outcome. If the claim is not released, the
+    server's recovery is wedged for the REST OF THE BOOT.
+
+    BOTH halves of the claim are released:
+
+    * the ENTRY's ``probe_claimed`` flag — what ``can_attempt`` reads
+      (``can_attempt`` → the ``probe_claimed`` check). Released
+      SYNCHRONOUSLY and FIRST, so a cancelled recorder can never leave
+      it set (the ordering invariant N2 pins);
+    * the BREAKER's single-probe slot (``_probe_in_flight``) — what
+      ``can_execute`` reads. Released UNDER THE BREAKER'S OWN LOCK (the
+      same discipline ``record_failure`` uses), WITHOUT counting a
+      failure and WITHOUT closing the breaker. The release is SHIELDED:
+      a cancellation cannot interrupt it half-way and leave the slot
+      stuck (which would wedge the recovery just as hard).
 
     This does NOT touch the breaker's failure counter — the caller
     records the failure separately (with the right class).
@@ -374,6 +387,34 @@ def release_attempt(server: str) -> None:
     entry = _SERVERS.get(server)
     if entry is not None:
         entry.probe_claimed = False
+    breaker = _BREAKERS.get(server)
+    if breaker is None:
+        return
+    try:
+        await asyncio.shield(_release_breaker_probe_slot(breaker))
+    except asyncio.CancelledError:
+        # The shielded release CONTINUES in the background (the slot IS
+        # cleared); the entry flag — the half ``can_attempt`` reads — is
+        # already cleared. Never mask the caller's exception.
+        return
+
+
+async def _release_breaker_probe_slot(breaker: CircuitBreaker) -> None:
+    """Clear the breaker's single-probe slot under its OWN lock.
+
+    ``CircuitBreaker`` exposes no "release the probe" mutator: only
+    ``record_failure`` (which COUNTS a failure and re-arms the OPEN
+    window) and ``record_success`` (which CLOSES the breaker and clears
+    the counter) touch ``_probe_in_flight``. A cancellation is neither a
+    failure nor a success, so the slot is cleared HERE — under the
+    breaker's own lock, the same discipline ``record_failure`` uses.
+
+    The unsynchronised ``CircuitBreaker.reset()`` is NEVER called (S11):
+    this is the LOCK-PROTECTED equivalent of the one field it would
+    have cleared.
+    """
+    async with breaker._lock:
+        breaker._probe_in_flight = False
 
 
 def flush_if_txn_closed() -> int:

@@ -201,6 +201,11 @@ async def main():
         # wiring). The loop tolerates the health check winning the
         # single-probe race: whichever caller gets the probe performs
         # it, and the registry must end up at "ok".
+        #
+        # SCOPE NOTE: this leg proves the GATE WIRING. The probe claim
+        # itself (``claim_attempt``) is exercised by the unit pins and
+        # by the real spawn below — this leg does not assert on the
+        # claim's internals.
         recovered = False
         recover_error = None
         for _ in range(12):
@@ -209,6 +214,11 @@ async def main():
             if state == "ok" and not init_guard.is_quarantined(PROBE):
                 recovered = True
                 break
+            recover_error = (
+                "the recovery probe did not land within the loop: "
+                f"state={{state!r}} quarantined={{init_guard.is_quarantined(PROBE)}} "
+                f"attempts={{(init_guard.server_state(PROBE) or {{}}).attempts}}"
+            )
             await asyncio.sleep(1.2)
         result["recovered"] = recovered
         result["recover_error"] = recover_error

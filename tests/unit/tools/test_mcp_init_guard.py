@@ -373,6 +373,13 @@ async def test_the_recovery_probe_fires_through_the_production_gates(monkeypatch
     unreachable in PRODUCTION. This pin drives the production gates
     themselves (not the init_guard API directly) with a shrunk recovery
     window.
+
+    WHAT THIS PIN DOES NOT COVER: the create path is FAKED here (the
+    real SDK handshake is unreachable inside pytest — the root conftest
+    mocks the ``mcp`` package), so ``claim_attempt`` itself is NOT
+    exercised by this pin. It is covered by the pre-existing
+    claim-attempt pin and by the integration leg, which drives the real
+    spawn.
     """
     monkeypatch.setattr(init_guard, "INIT_RECOVERY_TIMEOUT_S", 0.05)
 
@@ -508,6 +515,116 @@ async def test_an_early_raise_releases_the_recovery_probe_claim(monkeypatch):
     assert entry.probe_claimed is False, (
         "the early raise MUST release the claimed probe — a stuck claim "
         "wedges the server's recovery for the whole boot"
+    )
+
+
+async def test_a_cancellation_in_the_spawn_span_releases_the_claim(monkeypatch):
+    """N1: a cancellation inside the SPAWN span must release the claim.
+
+    The spawn span (after the pre-try region) can be cancelled — the
+    daemon shutdown cancels the replenish tasks, ``drain()`` runs, the
+    watchdog cancels. The spawn's own ``except`` skips
+    ``record_failure`` for a cancellation, so the CLAIMED recovery probe
+    would stay claimed (``probe_claimed`` set and the breaker
+    HALF_OPEN) → ``can_attempt`` reads False for the rest of the boot
+    → the server's recovery is wedged until a daemon restart (the exact
+    false promise C-1 was fixing, under a narrow path).
+    """
+    monkeypatch.setattr(init_guard, "INIT_RECOVERY_TIMEOUT_S", 0.05)
+
+    pool = McpWarmupPool()
+    pool.register_server(
+        "context7",
+        McpStdioConfig(transport="stdio", command="false", args=[]),
+    )
+    pool._running = True
+
+    class _CancellingClient:
+        """A spawn whose ``__aenter__`` is cancelled."""
+
+        def __init__(self, params):
+            self.params = params
+
+        async def __aenter__(self):
+            raise asyncio.CancelledError()
+
+        async def __aexit__(self, *args):
+            return False
+
+        def request_close(self):
+            pass
+
+    monkeypatch.setattr(warmup_pool_module, "TaskScopedStdioClient", _CancellingClient)
+
+    for _ in range(3):
+        await init_guard.record_failure(
+            "context7", init_guard.FAILURE_CLASS_INIT_FAILED
+        )
+    assert init_guard.is_quarantined("context7") is True
+
+    await asyncio.sleep(0.1)  # the recovery window elapses
+    assert await init_guard.can_attempt("context7") is True
+
+    with pytest.raises(asyncio.CancelledError):
+        await pool._create_pooled_connection("context7")
+
+    entry = init_guard.server_state("context7")
+    assert entry.probe_claimed is False, (
+        "the cancellation MUST release the claimed probe — a stuck claim "
+        "wedges the server's recovery for the rest of the boot"
+    )
+    # The recovery is genuinely re-claimable (the breaker's probe slot
+    # was released too — the entry flag alone would not be enough).
+    assert await init_guard.claim_attempt("context7") is True, (
+        "the recovery probe must be claimable again after a cancelled "
+        "spawn — otherwise the server stays wedged until a restart"
+    )
+
+
+async def test_the_claim_is_released_before_the_failure_recording(monkeypatch):
+    """N2: the load-bearing ORDER (release BEFORE record) is pinned.
+
+    The release must happen BEFORE the recording: a recorder that is
+    itself cancelled (or that raises) would otherwise skip the release
+    and leave the claim stuck — the server's recovery wedged for the
+    boot — with EVERY other pin still green. This pin drives the real
+    escape path with a recorder that raises ``CancelledError``.
+    """
+    monkeypatch.setattr(init_guard, "INIT_RECOVERY_TIMEOUT_S", 0.05)
+
+    pool = McpWarmupPool()
+    pool.register_server(
+        "context7",
+        McpStdioConfig(transport="stdio", command="false", args=[]),
+    )
+    pool._running = True
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("the secret-marker envelope failed")
+
+    monkeypatch.setattr(warmup_pool_module, "resolve_secret_markers", _boom)
+
+    async def _cancelled_recorder(*args, **kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(warmup_pool_module, "record_failure", _cancelled_recorder)
+
+    for _ in range(3):
+        await init_guard.record_failure(
+            "context7", init_guard.FAILURE_CLASS_INIT_FAILED
+        )
+    assert init_guard.is_quarantined("context7") is True
+
+    await asyncio.sleep(0.1)  # the recovery window elapses
+    assert await init_guard.can_attempt("context7") is True
+
+    with pytest.raises(RuntimeError):
+        await pool._create_pooled_connection("context7")
+
+    entry = init_guard.server_state("context7")
+    assert entry.probe_claimed is False, (
+        "the claim MUST be released BEFORE the recording — a cancelled "
+        "recorder must not be able to skip the release"
     )
 
 
