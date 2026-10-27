@@ -259,6 +259,36 @@ AUDIT_DETAIL_HELLO_CONFLICT = (
 #: member (see :meth:`McpGatewayService._audit_terminate`).
 TERMINATE_REASON_MAX_CHARS = 128
 
+#: The bound of the PEER-CONTROLLED WebSocket close reason.
+#:
+#: The close reason is free text the MACHINE chooses. RFC 6455 caps a
+#: close reason at 123 bytes, but the peer is NOT trusted to honour it:
+#: the text is capped AND escaped before it reaches a log line or an
+#: exception message, so a hostile machine can neither flood the log
+#: nor smuggle newlines or control characters into it.
+CLOSE_REASON_MAX_CHARS = 123
+
+
+def bounded_close_reason(reason: str | None) -> str:
+    """Render a close reason safely for a LOG line or an exception text.
+
+    The text is capped at :data:`CLOSE_REASON_MAX_CHARS` characters and
+    then ``repr()``-escaped: control characters and newlines become
+    visible escapes instead of log structure. The RAW reason is kept
+    where it is compared (``reason == "session.terminate"``) — this
+    helper is for the places where the reason is RENDERED, never for
+    the wire.
+
+    The escaped form may be a few characters longer than the cap (the
+    quotes and the escapes), but it stays BOUNDED: the peer-controlled
+    part never exceeds :data:`CLOSE_REASON_MAX_CHARS` characters.
+    """
+    text = reason or ""
+    if len(text) > CLOSE_REASON_MAX_CHARS:
+        text = text[:CLOSE_REASON_MAX_CHARS] + "..."
+    return repr(text)
+
+
 # ── the outcomes of a ``session.end`` FORWARD ─────────────────────────────
 #
 # The forward is best-effort and NEVER raises: the sweep must survive a
@@ -565,14 +595,17 @@ class McpGatewayService:
                 "the session %s was killed: the connection of the machine %s is gone (%s)",
                 session.session_id,
                 session.machine_id,
-                reason or "connection closed",
+                # The reason can be PEER-CONTROLLED free text (the WS
+                # close reason) — it is bounded and escaped here.
+                bounded_close_reason(reason or "connection closed"),
             )
         for future in list(connection.pending.values()):
             if not future.done():
                 future.set_exception(
                     GatewayProtocolError(
                         CODE_INTERNAL,
-                        f"the connection was closed ({reason or 'closed'})",
+                        "the connection was closed ("
+                        f"{bounded_close_reason(reason or 'closed')})",
                     )
                 )
         connection.pending.clear()
@@ -615,15 +648,25 @@ class McpGatewayService:
         each other on the same socket.
 
         BEFORE the hello exchange there is no negotiated version yet, so
-        the frame must name a version the centre SUPPORTS — with ONE
+        EVERY frame must name the connection's version — which is the
+        default ``"0.1"`` until the negotiation completes — with ONE
         exception: the HELLO frame itself always reaches the hello
-        handler, whatever version it names. The negotiation is the
-        frame's ``params.protocol_version`` (§5.2), and an UNSUPPORTED
-        request must be answered with the typed
+        handler, whatever version it names. The hello frame's own ``v``
+        is NOT the gate: the negotiation is its
+        ``params.protocol_version`` (§5.2), and an UNSUPPORTED request
+        must be answered with the typed
         ``PROTOCOL_VERSION_UNSUPPORTED`` refusal — a frame that never
         reached the handler could not be answered at all (the socket
         close would be the only answer, and §5.2 mandates the typed
         one).
+
+        That is EXACTLY the historical gate (the base centre closed the
+        socket on any frame whose ``v`` was not ``PROTOCOL_VERSION``)
+        with the HELLO frame lifted out of it — the hello frame is the
+        only frame whose ``v`` is adjudicated elsewhere. Every OTHER
+        pre-hello frame is refused unless it names the connection's
+        version, so a pre-hello frame stamped ``"0.2"`` is refused
+        exactly as it was before v0.2 existed.
 
         A frame that names no version at all is refused in both windows
         — §6.1 makes ``v`` a REQUIRED member.
@@ -632,12 +675,16 @@ class McpGatewayService:
             return False
         if connection.hello_received:
             return version == connection.negotiated_version
-        if version in SUPPORTED_PROTOCOL_VERSIONS:
-            return True
-        return (
+        # PRE-HELLO: the HELLO frame is the ONE exception (its version
+        # is adjudicated inside ``_handle_hello``). EVERY other frame
+        # must name the connection's version, which is the default
+        # "0.1" until the negotiation completes — the historical gate.
+        if (
             payload.get("type") == TYPE_REQUEST
             and payload.get("method") == METHOD_HELLO
-        )
+        ):
+            return True
+        return version == connection.negotiated_version
 
     async def handle_frame(self, connection: ClientConnection, raw: str) -> None:
         """Handle one text frame from the client.
@@ -1275,12 +1322,21 @@ class McpGatewayService:
     async def _send(self, connection: ClientConnection, payload: dict[str, Any]) -> None:
         """Write ONE frame to the machine.
 
-        THE SINGLE VERSION CHOKE POINT: every outbound frame is stamped
+        THE VERSION STAMP CHOKE POINT: every outbound frame is stamped
         with the connection's NEGOTIATED version (§5.2). The shipped
         client checks the version of EVERY inbound frame and closes the
         socket silently on a mismatch, so a frame that carried the
-        module default by accident would kill the connection. One
-        choke point means there is no second place to get it wrong.
+        module default by accident would kill the connection.
+
+        There are exactly TWO stamped write sites, and BOTH stamp the
+        SAME value: this method, and ``_request`` — which builds its
+        envelope with ``v=connection.negotiated_version`` and writes it
+        through the transport DIRECTLY, because it registers the
+        pending future before it waits for the answer (and a write
+        failure must PROPAGATE to its caller instead of being logged
+        and swallowed here). A third outbound write path must stamp
+        ``v`` with ``connection.negotiated_version`` as well: these two
+        are the places to keep in sync.
         """
         payload["v"] = connection.negotiated_version
         try:

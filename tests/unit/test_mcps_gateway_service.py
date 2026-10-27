@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import time
 from datetime import datetime, timedelta
 from typing import Any
@@ -34,13 +35,18 @@ from daemon.services.mcps_gateway.protocol import (
     CODE_SESSION_EXPIRED,
     CODE_SESSION_NOT_FOUND,
     CODE_TOOL_TIMEOUT,
+    METHOD_TOOLS_LIST,
     PROTOCOL_VERSION,
     PROTOCOL_VERSION_V02,
     REQUIRED_CLIENT_CAPABILITIES,
     SERVER_CAPABILITIES,
     SUPPORTED_PROTOCOL_VERSIONS,
 )
-from daemon.services.mcps_gateway.service import McpGatewayService
+from daemon.services.mcps_gateway.service import (
+    CLOSE_REASON_MAX_CHARS,
+    McpGatewayService,
+    bounded_close_reason,
+)
 
 
 class FakeMachine:
@@ -475,6 +481,61 @@ class TestProtocolNegotiation:
         )
         assert machine.closed is True
 
+    async def test_a_pre_hello_v02_frame_closes_the_socket(self):
+        """FIX 1 (a): PRE-HELLO, the HELLO frame is the ONE exception from
+        the version gate. Every other frame must name the connection's
+        version — the default "0.1" until the negotiation completes — so
+        a non-hello frame stamped "0.2" is refused exactly as the
+        historical centre refused it."""
+        service = make_service()
+        machine = FakeMachine(service)
+        machine.connection = await service.open_connection(machine)
+        assert machine.connection.hello_received is False
+
+        await service.handle_frame(
+            machine.connection,
+            json.dumps(
+                {
+                    "v": PROTOCOL_VERSION_V02,
+                    "type": "notification",
+                    "method": "heartbeat",
+                    "params": {},
+                }
+            ),
+        )
+        assert machine.closed is True
+
+    async def test_a_pre_hello_hello_frame_stamped_v02_reaches_the_handler(self):
+        """FIX 1 (b): the HELLO frame reaches the handler whatever it
+        stamps — the negotiation is ``params.protocol_version`` (§5.2)
+        and the handler owns it."""
+        service = make_service()
+        machine = FakeMachine(service)
+        machine.connection = await service.open_connection(machine)
+
+        await machine.hello(
+            version=PROTOCOL_VERSION_V02,
+            envelope_version=PROTOCOL_VERSION_V02,
+        )
+        assert machine.closed is False
+        response = machine.frames_of_type("response")[0]
+        assert response["v"] == PROTOCOL_VERSION_V02
+        assert response["result"]["protocol_version"] == PROTOCOL_VERSION_V02
+
+    async def test_a_pre_hello_hello_frame_stamped_v02_is_still_adjudicated(self):
+        """FIX 1 (b): the hello frame is refused by the HANDLER — with the
+        typed answer of §5.2 — never by the version gate."""
+        service = make_service()
+        machine = FakeMachine(service)
+        machine.connection = await service.open_connection(machine)
+
+        await machine.hello(version="0.9", envelope_version=PROTOCOL_VERSION_V02)
+
+        errors = machine.frames_of_type("error")
+        assert len(errors) == 1
+        assert errors[0]["error"]["code"] == CODE_PROTOCOL_VERSION_UNSUPPORTED
+        assert machine.closed is True
+
     async def test_the_client_terminate_capability_is_advertised_on_v02(self):
         service = make_service()
         machine = FakeMachine(service)
@@ -517,6 +578,68 @@ class TestProtocolNegotiation:
         machine = await open_machine(service, FakeMachine(service))
         assert machine.frames_of_type("error") == []
         assert machine.connection.client_terminate is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The close reason (PEER-CONTROLLED text)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestCloseReasonHygiene:
+    async def test_a_peer_close_reason_is_bounded_and_escaped_in_the_log(
+        self, caplog
+    ):
+        """FIX 2: the WebSocket close reason is free text the MACHINE
+        chooses. It is capped and repr()-escaped before it reaches a
+        log line — a hostile machine can neither flood the log nor forge
+        a log line of its own."""
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await connect_machine(service, machine)
+
+        hostile = "boom\nforged: INFO the machine is fine " + "x" * 500
+        with caplog.at_level(logging.WARNING):
+            await service.close_connection(machine.connection, hostile)
+
+        text = "\n".join(record.getMessage() for record in caplog.records)
+        # The newline is ESCAPED, not rendered.
+        assert "boom\\nforged" in text
+        assert "\nforged" not in text
+        # The peer text is BOUNDED.
+        assert "x" * 500 not in text
+        assert len(text) < 1000
+
+    async def test_a_peer_close_reason_is_bounded_in_the_pending_error(self):
+        """FIX 2: the same bound and escape hold for the exception the
+        pending futures are failed with."""
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+
+        # The centre asks the machine something and gets no answer.
+        task = asyncio.create_task(
+            service._request(machine.connection, METHOD_TOOLS_LIST, {})
+        )
+        await asyncio.sleep(0.01)
+
+        await service.close_connection(
+            machine.connection, "boom\n" + "x" * 500
+        )
+        with pytest.raises(Exception) as excinfo:
+            await task
+        message = excinfo.value.message
+        assert "boom\\n" in message
+        assert "x" * 500 not in message
+        assert len(message) < 1000
+
+    def test_the_bounded_close_reason_caps_and_escapes(self):
+        """FIX 2: the renderer itself — bounded, escaped, never empty."""
+        assert bounded_close_reason(None) == "''"
+        assert bounded_close_reason("") == "''"
+        assert bounded_close_reason("boom") == "'boom'"
+        rendered = bounded_close_reason("a\nb" + "x" * 500)
+        assert "\\n" in rendered
+        assert "x" * 500 not in rendered
+        assert len(rendered) <= CLOSE_REASON_MAX_CHARS + 8
 
 
 # ─────────────────────────────────────────────────────────────────────────────
