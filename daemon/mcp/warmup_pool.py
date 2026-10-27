@@ -704,19 +704,36 @@ class McpWarmupPool:
             # never learn it must close and the spawned child would
             # survive. ``request_close()`` sets the close event with no
             # await, so it works from a cancelled task.
+            #
+            # WHY ``except BaseException`` on the two ``await`` arms (and
+            # not ``except Exception``): a cancellation delivered
+            # MID-CLEANUP must not displace the ORIGINAL exception this
+            # block re-raises below — the transport teardown is
+            # best-effort, the re-raise is the contract. Every swallowed
+            # failure is logged at DEBUG so a failed teardown (the
+            # orphan-child signal B3 exists to prevent) is never silent.
             try:
                 streams_cm.request_close()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "MCP connection cleanup: request_close() failed: %s: %s",
+                    type(exc).__name__, exc,
+                )
             if session is not None:
                 try:
                     await session.stop()
-                except BaseException:
-                    pass
+                except BaseException as exc:
+                    logger.debug(
+                        "MCP connection cleanup: session.stop() failed: %s: %s",
+                        type(exc).__name__, exc,
+                    )
             try:
                 await streams_cm.__aexit__(*sys.exc_info())
-            except BaseException:
-                pass
+            except BaseException as exc:
+                logger.debug(
+                    "MCP connection cleanup: stream __aexit__ failed: %s: %s",
+                    type(exc).__name__, exc,
+                )
             raise
 
     async def acquire(self, server_name: str) -> PooledConnection | None:
