@@ -283,6 +283,26 @@ STAGGER_SLEEP_SECONDS: float = 2.0
 # what the pass would have issued at defer time.
 
 
+def _register_a3_release_handlers(manager, task_repo, boot_epoch) -> None:
+    """Register the A3 seam-1 + seam-4 release handlers.
+
+    ONE home for the registration pair — both passes
+    (``continue_running_instances_after_restart`` and
+    ``sweep_orphaned_live_turns``) call this so the handlers are
+    available either way. The registration is IDEMPOTENT (last wins,
+    same shape) and the ORDER is preserved exactly:
+    SEAM_BOOT_CONTINUE first, then SEAM_ORPHAN_SWEEP.
+    """
+    promote_txn_hold.register_release_handler(
+        promote_txn_hold.SEAM_BOOT_CONTINUE,
+        _make_boot_continue_release_handler(manager, task_repo, boot_epoch),
+    )
+    promote_txn_hold.register_release_handler(
+        promote_txn_hold.SEAM_ORPHAN_SWEEP,
+        _make_orphan_sweep_release_handler(manager),
+    )
+
+
 def _make_boot_continue_release_handler(manager, task_repo, boot_epoch):
     """Build the seam-1 release handler (the boot auto-continue pass).
 
@@ -527,14 +547,7 @@ async def continue_running_instances_after_restart(
     # ORIGINAL seams — the checkpoint-resume path, never a cold
     # dispatch. The handlers re-issue EXACTLY what the pass would have
     # done (resume + the a′ CAS stamp).
-    promote_txn_hold.register_release_handler(
-        promote_txn_hold.SEAM_BOOT_CONTINUE,
-        _make_boot_continue_release_handler(manager, task_repo, boot_epoch),
-    )
-    promote_txn_hold.register_release_handler(
-        promote_txn_hold.SEAM_ORPHAN_SWEEP,
-        _make_orphan_sweep_release_handler(manager),
-    )
+    _register_a3_release_handlers(manager, task_repo, boot_epoch)
 
     # Sweep-level guard (Layer 2) — wraps the entire loop.
     loop_started = time.monotonic()
@@ -965,16 +978,9 @@ async def sweep_orphaned_live_turns(
     # ── A3: register the release handlers (idempotent) ───────────────
     # The orphan sweep may run without the boot pass (it is a sister
     # pass); registering here makes the seam-4 release path available
-    # either way. The registration is idempotent (last wins, same
-    # shape).
-    promote_txn_hold.register_release_handler(
-        promote_txn_hold.SEAM_BOOT_CONTINUE,
-        _make_boot_continue_release_handler(manager, task_repo, boot_epoch),
-    )
-    promote_txn_hold.register_release_handler(
-        promote_txn_hold.SEAM_ORPHAN_SWEEP,
-        _make_orphan_sweep_release_handler(manager),
-    )
+    # either way. Same helper, same order, last-wins — see
+    # ``_register_a3_release_handlers``.
+    _register_a3_release_handlers(manager, task_repo, boot_epoch)
 
     loop_started = time.monotonic()
     try:
