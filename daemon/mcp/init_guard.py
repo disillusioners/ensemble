@@ -123,15 +123,6 @@ FAILURE_CLASS_RESOLVER_TIMEOUT = "resolver_timeout"
 FAILURE_CLASS_INIT_TIMEOUT = "init_timeout"
 FAILURE_CLASS_INIT_FAILED = "init_failed"
 
-#: The classes that trip the quarantine at the THRESHOLD (3).
-THRESHOLD_CLASSES = frozenset(
-    {
-        FAILURE_CLASS_DNS_SERVFAIL,
-        FAILURE_CLASS_INIT_TIMEOUT,
-        FAILURE_CLASS_INIT_FAILED,
-    }
-)
-
 #: The class that trips the quarantine IMMEDIATELY (threshold-1).
 IMMEDIATE_CLASSES = frozenset({FAILURE_CLASS_DNS_NXDOMAIN})
 
@@ -197,8 +188,10 @@ class ServerState:
     ``state`` is one of ``ok`` / ``degraded`` / ``quarantined``.
     ``since`` is the ISO stamp of the CURRENT state (not of the boot).
     ``attempts`` counts the init attempts of this boot.
-    ``retry_at`` is the monotonic deadline of the next recovery probe
-    (only meaningful for an immediate — NXDOMAIN — quarantine).
+    ``retry_at`` is the monotonic deadline of the next recovery probe —
+    armed on EVERY quarantine entry (``quarantine_server``, the
+    already-quarantined re-arm, the immediate and the threshold branches
+    of ``record_failure``) and re-armed after every failed probe.
     """
 
     server: str
