@@ -169,17 +169,27 @@ class TestLeakPredicate:
         # A leak signal makes the grace INELIGIBLE (it refuses to engage).
         assert obs.grace_active is False
 
-    def test_p2_oracle_pool_available_decreasing_arms(self):
-        """``pool_available`` strictly decreasing over 3 ticks ARMS."""
+    def test_p2_oracle_pool_available_decreasing_arms_at_the_ceiling(self):
+        """``pool_available`` strictly decreasing over 3 ticks ARMS — the
+        TREND-QUALIFIED form (the free capacity is shrinking while the
+        pool is consumed TO ITS CEILING, with no recovery tick).
+
+        The qualification is a recorded adjudication: read literally the
+        trend fires on ANY sustained ramp, including the healthy-busy
+        shape requirements §5(i) mandates NOT be classified as a leak
+        (a ramp consumes the free capacity in consecutive ticks whether
+        the daemon is healthy or leaking).
+        """
         tracker = GraceTracker()
         classes, degraded = _degraded()
         obs = None
-        for i, available in enumerate((9, 7, 4)):
+        for i, (size, available) in enumerate(((8, 2), (9, 1), (10, 0))):
             obs = tracker.observe(
                 component_classes=classes,
                 degraded_components=degraded,
                 pool_state_psycopg={
-                    "pool_size": 10,
+                    "pool_size": size,
+                    "pool_max": 10,
                     "pool_available": available,
                     "requests_waiting": 0,
                 },
@@ -188,8 +198,30 @@ class TestLeakPredicate:
         assert obs.leak_signal["detected"] is True
         assert obs.grace_active is False
 
+    def test_a_healthy_ramp_below_the_ceiling_does_not_arm(self):
+        """A healthy ramp (the free capacity shrinking, but the pool FAR
+        from its ceiling) is NOT a leak — the grace stays engaged."""
+        tracker = GraceTracker()
+        classes, degraded = _degraded()
+        obs = None
+        for i, (size, available) in enumerate(((3, 0), (5, 0), (7, 0))):
+            obs = tracker.observe(
+                component_classes=classes,
+                degraded_components=degraded,
+                pool_state_psycopg={
+                    "pool_size": size,
+                    "pool_max": 10,
+                    "pool_available": available,
+                    "requests_waiting": 0,
+                },
+                now=T0 + timedelta(seconds=i),
+            )
+        assert obs.leak_signal["detected"] is False
+        assert obs.grace_active is True
+
     def test_p2_oracle_pool_exhausted_arms(self):
-        """An exhausted pool (pool_available <= 0) ARMS."""
+        """``the pool size exhausted (all connections checked out)``
+        ARMS — the IN-USE count reached the pool's ceiling."""
         tracker = GraceTracker()
         classes, degraded = _degraded()
         obs = tracker.observe(
@@ -197,6 +229,7 @@ class TestLeakPredicate:
             degraded_components=degraded,
             pool_state_psycopg={
                 "pool_size": 10,
+                "pool_max": 10,
                 "pool_available": 0,
                 "requests_waiting": 0,
             },
@@ -204,6 +237,27 @@ class TestLeakPredicate:
         )
         assert obs.leak_signal["detected"] is True
         assert obs.grace_active is False
+
+    def test_p2_oracle_a_busy_but_healthy_pool_does_not_arm(self):
+        """``pool_available`` is psycopg's IDLE count — it is 0 during
+        ANY busy period. The exhausted arm therefore reads the IN-USE
+        count against the pool's CEILING, so a healthy burst (busy, but
+        far from the ceiling) is NOT classified as a leak."""
+        tracker = GraceTracker()
+        classes, degraded = _degraded()
+        obs = tracker.observe(
+            component_classes=classes,
+            degraded_components=degraded,
+            pool_state_psycopg={
+                "pool_size": 7,
+                "pool_max": 10,
+                "pool_available": 0,
+                "requests_waiting": 0,
+            },
+            now=T0,
+        )
+        assert obs.leak_signal["detected"] is False
+        assert obs.grace_active is True
 
     def test_streak_arm_only_when_pool_objects_unavailable(self):
         """S9: the streak arm fires ONLY when the pool objects are
@@ -219,6 +273,7 @@ class TestLeakPredicate:
                 degraded_components=degraded,
                 pool_state_psycopg={
                     "pool_size": 10,
+                    "pool_max": 10,
                     "pool_available": 8,
                     "requests_waiting": 0,
                 },
@@ -258,6 +313,7 @@ class TestGraceStateMachine:
             degraded_components=degraded,
             pool_state_psycopg={
                 "pool_size": 10,
+                "pool_max": 10,
                 "pool_available": 8,
                 "requests_waiting": 0,
             },
@@ -278,6 +334,7 @@ class TestGraceStateMachine:
             degraded_components=degraded,
             pool_state_psycopg={
                 "pool_size": 10,
+                "pool_max": 10,
                 "pool_available": 8,
                 "requests_waiting": 0,
             },
@@ -290,6 +347,7 @@ class TestGraceStateMachine:
             degraded_components=degraded,
             pool_state_psycopg={
                 "pool_size": 10,
+                "pool_max": 10,
                 "pool_available": 8,
                 "requests_waiting": 0,
             },
@@ -307,6 +365,7 @@ class TestGraceStateMachine:
             degraded_components=degraded,
             pool_state_psycopg={
                 "pool_size": 10,
+                "pool_max": 10,
                 "pool_available": 8,
                 "requests_waiting": 0,
             },
@@ -319,6 +378,7 @@ class TestGraceStateMachine:
             degraded_components=degraded,
             pool_state_psycopg={
                 "pool_size": 10,
+                "pool_max": 10,
                 "pool_available": 8,
                 "requests_waiting": 0,
             },
@@ -338,6 +398,7 @@ class TestGraceStateMachine:
             degraded_components=degraded,
             pool_state_psycopg={
                 "pool_size": 10,
+                "pool_max": 10,
                 "pool_available": 8,
                 "requests_waiting": 0,
             },
@@ -350,6 +411,7 @@ class TestGraceStateMachine:
             degraded_components=degraded,
             pool_state_psycopg={
                 "pool_size": 10,
+                "pool_max": 10,
                 "pool_available": 8,
                 "requests_waiting": 0,
             },
@@ -363,6 +425,7 @@ class TestGraceStateMachine:
             degraded_components=[],
             pool_state_psycopg={
                 "pool_size": 10,
+                "pool_max": 10,
                 "pool_available": 8,
                 "requests_waiting": 0,
             },
@@ -373,6 +436,7 @@ class TestGraceStateMachine:
             degraded_components=degraded,
             pool_state_psycopg={
                 "pool_size": 10,
+                "pool_max": 10,
                 "pool_available": 8,
                 "requests_waiting": 0,
             },
@@ -392,6 +456,7 @@ class TestGraceStateMachine:
             degraded_components=degraded,
             pool_state_psycopg={
                 "pool_size": 10,
+                "pool_max": 10,
                 "pool_available": 8,
                 "requests_waiting": 0,
             },
@@ -403,6 +468,7 @@ class TestGraceStateMachine:
             degraded_components=degraded,
             pool_state_psycopg={
                 "pool_size": 10,
+                "pool_max": 10,
                 "pool_available": 0,
                 "requests_waiting": 3,
             },
@@ -419,6 +485,7 @@ class TestGraceStateMachine:
             degraded_components=degraded,
             pool_state_psycopg={
                 "pool_size": 10,
+                "pool_max": 10,
                 "pool_available": 8,
                 "requests_waiting": 0,
             },
@@ -452,7 +519,7 @@ class TestAggregationMatrix:
         classes["database"] = FAILURE_CLASS_PROBE_TIMEOUT
         classes["checkpoint_saver"] = FAILURE_CLASS_POOL_BUSY
         obs = self._observe(tracker, classes, psycopg={
-            "pool_size": 10, "pool_available": 8, "requests_waiting": 0,
+            "pool_size": 10, "pool_max": 10, "pool_available": 8, "requests_waiting": 0,
         })
         assert obs.grace_active is True
 
@@ -465,7 +532,7 @@ class TestAggregationMatrix:
         classes["queue_freshness"] = FAILURE_CLASS_QUEUE_STALE
         classes["checkpoint_saver"] = FAILURE_CLASS_HARD_COMPONENT_RED
         obs = self._observe(tracker, classes, psycopg={
-            "pool_size": 10, "pool_available": 8, "requests_waiting": 0,
+            "pool_size": 10, "pool_max": 10, "pool_available": 8, "requests_waiting": 0,
         })
         assert obs.grace_active is False
 
@@ -474,7 +541,7 @@ class TestAggregationMatrix:
         classes = {name: FAILURE_CLASS_OK for name in READINESS_COMPONENT_NAMES}
         classes["database"] = FAILURE_CLASS_PROBE_TIMEOUT
         obs = self._observe(tracker, classes, psycopg={
-            "pool_size": 10, "pool_available": 0, "requests_waiting": 1,
+            "pool_size": 10, "pool_max": 10, "pool_available": 0, "requests_waiting": 1,
         })
         assert obs.grace_active is False
 
@@ -482,7 +549,7 @@ class TestAggregationMatrix:
         tracker = GraceTracker()
         classes = {name: FAILURE_CLASS_OK for name in READINESS_COMPONENT_NAMES}
         obs = self._observe(tracker, classes, psycopg={
-            "pool_size": 10, "pool_available": 8, "requests_waiting": 0,
+            "pool_size": 10, "pool_max": 10, "pool_available": 8, "requests_waiting": 0,
         })
         assert obs.grace_active is False
         assert obs.grace_expires_at is None

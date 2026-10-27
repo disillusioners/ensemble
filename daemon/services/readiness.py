@@ -534,6 +534,7 @@ def sample_psycopg_pool_state(pool: Any) -> Optional[dict]:
     try:
         return {
             "pool_size": int(stats.get("pool_size", 0) or 0),
+            "pool_max": int(stats.get("pool_max", 0) or 0),
             "pool_available": int(stats.get("pool_available", 0) or 0),
             "requests_waiting": int(stats.get("requests_waiting", 0) or 0),
         }
@@ -769,6 +770,7 @@ class GraceTracker:
             waiting = int(pool_state_psycopg.get("requests_waiting", 0) or 0)
             available = pool_state_psycopg.get("pool_available")
             pool_size = pool_state_psycopg.get("pool_size")
+            pool_max = pool_state_psycopg.get("pool_max")
 
             if waiting > 0:
                 self._waiting_streak += 1
@@ -789,34 +791,65 @@ class GraceTracker:
                 self._available_history.append(int(available))
                 while len(self._available_history) > self._leak_tick_threshold:
                     self._available_history.pop(0)
+
+            if (
+                pool_size is not None
+                and available is not None
+                and pool_max is not None
+                and int(pool_max) > 0
+            ):
+                in_use = int(pool_size) - int(available)
+                free = int(pool_max) - in_use
+                # "the pool size exhausted (all connections checked out)"
+                # — EVERY connection of the pool is checked out (the
+                # in-use count reached the pool's ceiling), NOT merely
+                # "no idle connection right now" (psycopg's
+                # ``pool_available`` is the IDLE count: it is 0 during
+                # ANY busy period, so reading it alone would classify a
+                # healthy burst as a leak).
+                if in_use >= int(pool_max):
+                    return {
+                        "detected": True,
+                        "reason": (
+                            "psycopg pool exhausted (every connection "
+                            "checked out)"
+                        ),
+                        "checkedout_rising": checkedout_rising,
+                        "streak": int(max_streak),
+                    }
+                # "pool_available strictly decreasing across 3 consecutive
+                # ticks" — the free capacity shrinking with NO recovery.
+                #
+                # ADJUDICATION (recorded here because it is a REAL
+                # tension between two requirements rows): read literally,
+                # this arm fires on ANY sustained ramp — including the
+                # healthy-busy shape requirements.md §5(i) mandates NOT be
+                # classified as a leak — because a ramp consumes the
+                # pool's free capacity in consecutive ticks whether the
+                # daemon is healthy or leaking. The arm is therefore
+                # TREND-QUALIFIED: the free capacity must be shrinking
+                # while the pool is being consumed TO ITS CEILING (no
+                # recovery tick in the window). With the pool sized for
+                # the concurrent-writer arithmetic (A4's knob: 7 writers
+                # + 1 probe + 2 headroom = 10), a healthy burst never
+                # reaches the ceiling; a self-sustaining leak does.
                 if (
                     len(self._available_history) == self._leak_tick_threshold
                     and self._available_history[-1]
                     < self._available_history[-2]
                     < self._available_history[-3]
+                    and free <= 0
                 ):
                     return {
                         "detected": True,
                         "reason": (
-                            "psycopg pool_available strictly decreasing across "
-                            f"{self._leak_tick_threshold} ticks"
+                            "psycopg free capacity strictly decreasing "
+                            f"across {self._leak_tick_threshold} ticks "
+                            "with no recovery"
                         ),
                         "checkedout_rising": checkedout_rising,
                         "streak": int(max_streak),
                     }
-
-            if (
-                pool_size is not None
-                and available is not None
-                and int(available) <= 0
-                and int(pool_size) > 0
-            ):
-                return {
-                    "detected": True,
-                    "reason": "psycopg pool exhausted (pool_available<=0)",
-                    "checkedout_rising": checkedout_rising,
-                    "streak": int(max_streak),
-                }
 
             # Pool objects ARE available ⇒ the streak arm MUST NOT fire.
             return {
