@@ -39,9 +39,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from concurrent.futures import ThreadPoolExecutor
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -352,12 +352,11 @@ class TaskScopedContextManager:
                 raise self._error
             return self._streams
         except BaseException:
-            # G1 (verified against the PINNED mcp==1.27.1): the SDK's
-            # process-group shutdown lives in the async generator's
-            # ``finally`` AFTER the ``yield``. Cancelling the task that
-            # awaits ``__aenter__`` leaves that generator SUSPENDED — its
-            # ``finally`` never runs and the spawned child is ORPHANED
-            # (measured: the child stays in /proc after the cancel).
+            # G1 (full note in ``_run``): the SDK's process-group shutdown
+            # lives in the async generator's ``finally`` AFTER the
+            # ``yield`` — cancelling the task that awaits ``__aenter__``
+            # leaves that generator SUSPENDED and the spawned child
+            # ORPHANED.
             #
             # This block covers EVERY failure path of ``__aenter__`` —
             # including a cancellation delivered in the window AFTER
@@ -410,14 +409,14 @@ class TaskScopedContextManager:
         reach the inner ``__aexit__``. This method therefore sets the
         close event and arms a bounded watchdog; it never cancels the
         background task (a cancelled inner ``__aenter__`` orphans the
-        spawned child — see the G1 note in ``__aenter__``).
+        spawned child — see the G1 note in ``_run``).
         """
         self._close.set()
         task = self._task
         if task is None or task.done() or self._watchdog is not None:
             return
 
-        async def _watchdog() -> None:
+        async def _run_close_watchdog() -> None:
             try:
                 await asyncio.wait_for(
                     asyncio.shield(task), timeout=CLOSE_GRACE_S
@@ -441,7 +440,7 @@ class TaskScopedContextManager:
                 pass
 
         self._watchdog = asyncio.create_task(
-            _watchdog(), name=f"{self._name}-close-watchdog"
+            _run_close_watchdog(), name=f"{self._name}-close-watchdog"
         )
 
     def _reap_orphans(self) -> None:
@@ -552,13 +551,10 @@ class TaskScopedContextManager:
             try:
                 self._streams = await streams_cm.__aenter__()
             except asyncio.CancelledError:
-                # G1: a cancellation delivered while the inner transport
-                # is STILL ENTERING must not skip the inner __aexit__.
-                # The SDK's process-group shutdown lives in its async
-                # generator's ``finally`` AFTER the ``yield``, so a
-                # cancelled enter never runs it and the spawned child is
-                # ORPHANED (measured against mcp==1.27.1: the child
-                # stays in /proc after the cancel).
+                # G1 (see the full note just above): a cancelled enter
+                # never reaches the SDK's ``finally`` teardown, so the
+                # spawned child would be ORPHANED without the explicit
+                # exit below.
                 #
                 # Run the teardown explicitly here. It is best-effort: an
                 # @asynccontextmanager whose __aenter__ was interrupted
