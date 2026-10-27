@@ -757,8 +757,9 @@ NOT release its local lock — so the sweep records the tombstone with
 released the session centre-side (the two-pass invariant), so that
 release is a fact, not an invention; what is NOT a fact is the machine's
 acknowledgement, and the ledger must not claim it. (The ERROR-FRAME
-refusal arm is different: there the machine WAS told — it answered with
-an error envelope — so the tombstone keeps `machine_notified: true`.)
+refusal arm is different: there the machine ANSWERED the end — it
+replied with an error envelope — so the tombstone keeps
+`machine_notified: true`.)
 
 **The ack deadline.** The `session.end` forward has its **own bounded
 ack deadline — 5000 ms** (the `session.end` ack deadline; it is NOT the
@@ -821,7 +822,7 @@ tool renders as `{"error": {"code", "message"}}`:
 | Situation | Answer |
 |---|---|
 | live session, the machine acks | `ended: true`, `machine_notified: true`, `result` = the ack verbatim; the center releases; the tombstone reason is `already_ended` |
-| live session, the machine **DECLINES** the end (`{ended: false, reason}`) | `ended: false`, `why_not_ended: machine_refused`, `detail` names the decline (the machine's outcome code, sanitised — anything outside the protocol vocabulary becomes `UNRECOGNIZED_ERROR_CODE`), `machine_notified: false`, **no** `result` member — **the session SURVIVES**. A declined ack is a REFUSAL of the end, not an acknowledgement (§6.9.7): the machine did NOT release its local lock, and the decline is never forwarded as an acknowledged end. The center does not invent a release the peer did not acknowledge |
+| live session, the machine **DECLINES** the end (`{ended: false, reason}`) | `ended: false`, `why_not_ended: machine_refused`, `detail` names the decline (the machine's outcome code, sanitised — anything outside the §6.10.2 group-(iii) outcome codes becomes `UNRECOGNIZED_ERROR_CODE`), `machine_notified: false`, **no** `result` member — **the session SURVIVES**. A declined ack is a REFUSAL of the end, not an acknowledgement (§6.9.7): the machine did NOT release its local lock, and the decline is never forwarded as an acknowledged end. The center does not invent a release the peer did not acknowledge |
 | live session, the machine answers `SESSION_NOT_FOUND` | `ended: true`, `machine_notified: true`, `detail` says the machine no longer held the session; the center releases |
 | live session, the machine answers any OTHER error envelope (including a relayed `TOOL_TIMEOUT`) | `ended: false`, `why_not_ended: machine_refused`, `detail` carries the machine's code (PROTOCOL vocabulary only — anything else becomes `UNRECOGNIZED_ERROR_CODE`), `machine_notified: true` — **the session SURVIVES** |
 | live session, the connection is gone / unreachable | `ended: true`, `machine_notified: false` (the machine did not ACKNOWLEDGE), `detail` says the center released authoritatively; the ledger reason is `machine_unreachable`; the center releases; the tombstone reason is `already_ended` |
@@ -851,7 +852,7 @@ escape as a bare error:
 a session that is gone. A record carries: `session_id`, `reason`
 (`expired` | `already_ended`), `at`, `agent_id`, `instance_id`,
 `machine_id`, `cause` (`idle` | `ttl`) and `machine_notified` (whether
-the machine was told about the end — the sweep records the forward's
+the machine ACKNOWLEDGED the end — the sweep records the forward's
 outcome after it happened, the explicit end records the ack).
 
 * **Bounded twice**: by the number of entries (512 — the oldest is
@@ -893,9 +894,12 @@ rows follow SPEC §8, which is explicitly **RECOMMENDED** (§4.3).
 one capability (`client_terminate`), one `reason` member on the center's
 `session.end` params, one typed refusal (`MACHINE_ID_CONFLICT`) and one
 close classification (the orderly termination). **Everything is
-VERSION-SCOPED**: a connection that negotiated `"0.1"` sees no new
-capability key, no new method, and a `session.end` whose params are
-exactly `{"session_id": ...}`.
+VERSION-AND-CAPABILITY-SCOPED**: a connection that negotiated `"0.1"`
+sees no new capability key, no new method, and a `session.end` whose
+params are exactly `{"session_id": ...}` — and so does a `"0.2"`
+connection whose machine did NOT advertise `client_terminate` (the
+`reason` member rides the forward only where BOTH capability maps carry
+`client_terminate: true`, §6.9.6).
 
 **THE ONE DELIBERATE EXCEPTION — the duplicate-machine-id refusal.**
 `MACHINE_ID_CONFLICT` is emitted **UNVERSIONED**: a `"0.1"`-negotiated
@@ -905,7 +909,7 @@ superseded the incumbent instead). It is deliberate: the refusal
 **protects the INCUMBENT** — its socket and its live session — instead
 of evicting it, and a mixed fleet (v0.1 and v0.2 machines) must get the
 same protection on both sides. Every OTHER v0.2 element stays
-version-scoped.
+version-AND-capability-scoped.
 
 **The negotiation.** The center speaks `"0.2"` and `"0.1"`. The version a
 connection **runs** is the one the machine **requested** in
@@ -958,17 +962,17 @@ ack carries **exactly four members** — a stray `why_not_ended` would
 make the client take the wrong branch — or **three** on the sanitized
 `ended: true` arm (the `reason` is then absent, §6.9.7).
 
-`machine_notified` says whether the machine was **told**: it is `true`
-on the accepted arm (the machine asked for the end — it acknowledged)
+`machine_notified` says whether the machine **ACKNOWLEDGED** the end: it is
+`true` on the accepted arm (the machine asked for the end — it acknowledged)
 and **`false` on every `ended: false` arm** (the center delivered
-nothing to the machine there).
+nothing to the machine there, so there was nothing to acknowledge).
 
 ON THE EXPLICIT END, `machine_notified: false` ALSO covers a **declined**
 ack (§6.9.7): the field means "the machine ACKNOWLEDGED the end", and a
 decline is a refusal of the end, not an acknowledgement — so it can
 never be `true` because of one. The error-frame refusal arm keeps its
-`true`: there the machine WAS told (it answered with an error envelope)
-and refused.
+`true` — the sweep's row above states that arm's rule (there the
+machine ANSWERED the end and refused).
 
 The receipt also **frees the §8.3 slot**: the session is removed from
 the registry and the roster pointer is cleared, so the next
@@ -986,9 +990,9 @@ table's columns, so `extra` survives only in the in-memory sinks — the
 bounded `detail` is what an operator finds in the ledger after a
 restart.
 
-**The `reason` member of the center's `session.end` params.** Version-
-AND-CAPABILITY-scoped (§6.9.6): the reason rides the forward ONLY on a
-`"0.2"`-negotiated connection where **both** capability maps carry
+**The `reason` member of the center's `session.end` params.**
+VERSION-AND-CAPABILITY-scoped (§6.9.6): the reason rides the forward ONLY
+on a `"0.2"`-negotiated connection where **both** capability maps carry
 `client_terminate: true`; a `"0.1"` connection — and a `"0.2"` one
 whose machine did NOT advertise the capability — gets exactly
 `{"session_id": ...}`. The two center-cause values are `reaped_by_center`
@@ -1046,7 +1050,7 @@ client (`mcps_client/internal/remote`) is the interop ground truth.
 | §6.8 no resumption / heartbeat loss kills | implemented — a session belongs to its connection; reconnect = new session. The expiry reap uses that SAME `session.end` request (no new verb): the machine is told, releases its own lock and returns to `ready` on the same connection (§4.5). A second connection claiming a LIVE machine id is refused `MACHINE_ID_CONFLICT` — the incumbent is never evicted (§4.6) |
 | §7 MCP fidelity | implemented for `tools/call` — the params object is forwarded unwrapped and the result returned raw |
 | §8 center obligations (roster/presence/exclusivity/audit) | **RECOMMENDED, not wire-protocol conformance** — SPEC §8 says so itself. This center implements all four anyway: roster + presence (§8.1), one-agent-one-remote (§8.2), one-session-per-machine with `MACHINE_BUSY` reject (§8.3), and the who/machine/tool/args-hash audit (§8.4) |
-| **v0.2 session termination** | implemented — `session.terminate` (the machine asks, the center never refuses), the `client_terminate` capability, the VERSION-AND-CAPABILITY-scoped `reason` on the center's `session.end` params, `MACHINE_ID_CONFLICT`, and the orderly-termination close (§4.6). Every element is VERSION-SCOPED — **except the duplicate-machine-id refusal, which is deliberately UNVERSIONED** (it protects the incumbent, so a v0.1 connection is refused too) |
+| **v0.2 session termination** | implemented — `session.terminate` (the machine asks, the center never refuses), the `client_terminate` capability, the VERSION-AND-CAPABILITY-scoped `reason` on the center's `session.end` params, `MACHINE_ID_CONFLICT`, and the orderly-termination close (§4.6). Every element is VERSION-SCOPED (the `reason` member is VERSION-AND-CAPABILITY-scoped) — **except the duplicate-machine-id refusal, which is deliberately UNVERSIONED** (it protects the incumbent, so a v0.1 connection is refused too) |
 | §10 conformance kit | **EXISTS (Phase D1)** — `scripts/conformance/run.sh` + `tests/conformance/` in THIS repo: an independent, center-agnostic pack mapped 1:1 onto the §10 areas, pointable at any center with a URL + a machine (five pointing keys, §10 below) |
 
 **The expiry hardening did not change the WIRE.** The sweep reuses the
