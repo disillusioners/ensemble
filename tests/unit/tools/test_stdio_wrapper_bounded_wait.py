@@ -1,11 +1,28 @@
-"""Bounded-wait + off-loop on_ready pin for TaskScopedStdioClient (Part B B1/B3)."""
+"""Bounded-wait + off-loop on_ready + G1 teardown pins for the stdio wrapper.
+
+Part B (B1 / B3) of soak-gate-mcp-warmup.
+
+PINS
+----
+(a) the ``on_ready`` hook performs the /proc scan OFF-loop on the
+    DEDICATED executor and returns the awaitable (the W-3 shape);
+(b) the transport's handshake wait is BOUNDED (``HANDSHAKE_WAIT_TIMEOUT_S``,
+    the arch-pinned 30.0 s — the 55 s value is REJECTED) and is strictly
+    inside the 60 s warmup outer budget;
+(c) the G1 teardown guarantee: a cancellation delivered while the inner
+    transport is still entering STILL runs the inner ``__aexit__`` — the
+    SDK's process-group shutdown. The inner CM is a small stand-in whose
+    ``__aexit__`` sets a flag, so the code path is directly observable
+    (the REAL child liveness is proven by the integration pin
+    ``tests/integration/test_mcp_child_liveness.py``, which censuses
+    /proc against the REAL pinned SDK).
+"""
 
 from __future__ import annotations
 
 import asyncio
 import inspect
 import types
-from contextlib import asynccontextmanager
 from unittest.mock import patch
 
 import pytest
@@ -13,31 +30,46 @@ import pytest
 import daemon.mcp.stdio_wrapper as sw
 
 
+def _params() -> types.SimpleNamespace:
+    return types.SimpleNamespace(command="uvx", args=["mcp-server-x"])
+
+
+# ── (a) the off-loop scan runs on the DEDICATED executor ────────────────
+
+
 def test_on_ready_uses_dedicated_executor():
-    params = types.SimpleNamespace(command="uvx", args=["mcp-server-x"])
-    cm = sw.TaskScopedStdioClient(params, instance_id="i", server_name="s")
-    # _stamp_children now performs the /proc scan OFF-loop and returns
-    # the awaitable (W-3 shape) instead of running synchronously.
+    cm = sw.TaskScopedStdioClient(_params(), instance_id="i", server_name="s")
+    # The hook returns an awaitable (W-3 shape) — it does NOT run the
+    # /proc scan inline on the event-loop thread.
     res = cm._schedule_stamp()
     assert inspect.isawaitable(res)
-    # close the coroutine to avoid unawaited-coroutine warning
+    # ...and it targets the DEDICATED executor, not the shared default
+    # pool (which carries the daemon's LLM calls and compaction).
+    assert sw._PROC_SCAN_EXECUTOR._thread_name_prefix == "mcp-procscan"
+    assert sw._PROC_SCAN_EXECUTOR._max_workers == 2
     if hasattr(res, "close"):
         res.close()
 
 
+def test_secret_executor_is_dedicated():
+    from daemon.mcp import warmup_pool
+
+    assert warmup_pool._SECRET_RESOLVE_EXECUTOR._thread_name_prefix == "mcp-secret"
+    assert warmup_pool._SECRET_RESOLVE_EXECUTOR._max_workers == 2
+
+
+# ── (b) the handshake wait is bounded ───────────────────────────────────
+
+
 def test_handshake_wait_bounded(monkeypatch):
-    # Force a very small bound.
     monkeypatch.setattr(sw, "HANDSHAKE_WAIT_TIMEOUT_S", 0.1)
 
     async def _hang(self):
         # Never set _ready; simulate a hung handshake.
         await asyncio.sleep(10)
 
-    params = types.SimpleNamespace(command="uvx", args=["mcp-server-x"])
-
     async def _run():
-        cm = sw.TaskScopedStdioClient(params, instance_id="i", server_name="s")
-        # Replace _run with the hanging variant.
+        cm = sw.TaskScopedStdioClient(_params(), instance_id="i", server_name="s")
         cm._run = _hang.__get__(cm, type(cm))
         with pytest.raises((asyncio.TimeoutError, TimeoutError)):
             await cm.__aenter__()
@@ -50,30 +82,59 @@ def test_handshake_bound_less_than_sixty():
     assert sw.HANDSHAKE_WAIT_TIMEOUT_S == 30.0
 
 
+# ── (c) the G1 teardown guarantee ──────────────────────────────────────
+
+
+class _RecordingCM:
+    """A stand-in inner CM whose ``__aexit__`` records that it ran.
+
+    ``__aenter__`` raises ``CancelledError`` immediately — the G1 route:
+    the cancellation lands while the inner transport is still entering.
+    """
+
+    def __init__(self) -> None:
+        self.exited = False
+        self.enter_attempted = False
+
+    async def __aenter__(self):
+        self.enter_attempted = True
+        raise asyncio.CancelledError()
+
+    async def __aexit__(self, *exc):
+        self.exited = True
+        return False
+
+
 def test_g1_cancellation_runs_aexit():
-    # Inject a cancellation during __aenter__ and assert the inner
-    # __aexit__ ran (child-tree teardown).
-    import asyncio as _a
+    """A cancelled inner enter MUST still run the inner ``__aexit__``."""
+    holder: dict = {}
 
-    @asynccontextmanager
-    async def fake_client(server_params):
-        # Raise CancelledError during __aenter__ to exercise G1.
-        raise _a.CancelledError()
-        yield ("r", "w")  # pragma: no cover
-
-    params = types.SimpleNamespace(command="uvx", args=["mcp-server-x"])
+    def fake_client(server_params):
+        cm = _RecordingCM()
+        holder["cm"] = cm
+        return cm
 
     async def _run():
         with patch.object(sw.mcp, "stdio_client", fake_client):
-            cm = sw.TaskScopedStdioClient(params, instance_id="i", server_name="s")
-            try:
-                await cm.__aenter__()
-            except (_a.CancelledError, BaseException):
-                pass
-        # If we reach here without hanging, the cancellation path
-        # completed (G1 guarantee: __aexit__ ran). No assertion on
-        # counter — a mocked client cannot prove child liveness; the
-        # integration pin (test_mcp_child_liveness.py) does that.
-        return True
+            wrapper = sw.TaskScopedStdioClient(
+                _params(), instance_id="i", server_name="s"
+            )
+            with pytest.raises(BaseException):
+                await wrapper.__aenter__()
+        return holder["cm"]
 
-    assert asyncio.run(_run()) is True
+    inner = asyncio.run(_run())
+    assert inner.enter_attempted, "the inner __aenter__ was never reached"
+    assert inner.exited is True, (
+        "G1 BROKEN: the inner __aexit__ did not run after the cancellation — "
+        "the SDK's process-group shutdown would be skipped and the spawned "
+        "child would be orphaned"
+    )
+
+
+def test_request_close_is_synchronous():
+    """``request_close`` must not await — a cancelled task cannot await."""
+    cm = sw.TaskScopedStdioClient(_params(), instance_id="i", server_name="s")
+    # Calling it from a synchronous context must not raise.
+    cm.request_close()
+    assert cm._close.is_set()

@@ -101,6 +101,19 @@ _PROC_ROOT: Path = Path("/proc")
 # documented split; 55 s is REJECTED).
 HANDSHAKE_WAIT_TIMEOUT_S: float = 30.0
 
+#: Grace window the close-watchdog gives the background task to run the
+#: inner transport's own ``__aexit__`` (the SDK's process-group shutdown)
+#: before the task is hard-cancelled and orphan children are reaped.
+CLOSE_GRACE_S: float = 10.0
+
+#: Bound on the inner transport's teardown when it runs on a CANCELLED
+#: path. The SDK's own shutdown sequence (stdin close -> wait 2 s ->
+#: SIGTERM -> SIGKILL) can take a few seconds, but an inner
+#: ``__aexit__`` that never returns must NOT wedge the cancelling
+#: caller — so the teardown is bounded and the deterministic child reap
+#: (``_reap_orphans``) is the backstop.
+INNER_EXIT_GRACE_S: float = 5.0
+
 # Dedicated executor for the /proc child-stamp scan (architecture §5.1).
 # NOT the shared default executor: asyncio.to_thread / run_in_executor(None, ...)
 # share the default pool, which carries the daemon's LLM calls and compaction
@@ -305,6 +318,7 @@ class TaskScopedContextManager:
         self._error: BaseException | None = None
         self._on_ready = on_ready
         self._on_close = on_close
+        self._watchdog: asyncio.Task | None = None
 
     async def __aenter__(self) -> Any:
         """Spawn the background task and wait for the streams to be ready.
@@ -324,22 +338,118 @@ class TaskScopedContextManager:
         self._task = asyncio.create_task(self._run(), name=self._name)
         try:
             await asyncio.wait_for(self._ready.wait(), timeout=HANDSHAKE_WAIT_TIMEOUT_S)
-        except BaseException:
-            if self._task is not None and not self._task.done():
-                self._task.cancel()
+            if self._error is not None:
+                assert self._task is not None
                 try:
                     await self._task
                 except BaseException:
                     pass
+                raise self._error
+            return self._streams
+        except BaseException:
+            # G1 (verified against the PINNED mcp==1.27.1): the SDK's
+            # process-group shutdown lives in the async generator's
+            # ``finally`` AFTER the ``yield``. Cancelling the task that
+            # awaits ``__aenter__`` leaves that generator SUSPENDED — its
+            # ``finally`` never runs and the spawned child is ORPHANED
+            # (measured: the child stays in /proc after the cancel).
+            #
+            # This block covers EVERY failure path of ``__aenter__`` —
+            # including a cancellation delivered in the window AFTER
+            # ``_ready.wait()`` returned but BEFORE the streams were
+            # handed to the caller (which used to skip the cleanup
+            # entirely and leave the transport open forever).
+            #
+            # The two cases are handled differently:
+            #
+            # * the inner transport is ALREADY ENTERED (``_ready`` set):
+            #   signal close and let the background task run the SDK's own
+            #   ``__aexit__`` — that is what actually reaps the child.
+            # * the inner transport is STILL ENTERING: the SDK generator
+            #   is suspended and its teardown can never run, so we cancel
+            #   the background task and reap the spawned child EXPLICITLY
+            #   (the STDIO subclass's /proc census + process-group kill).
+            if self._ready.is_set():
+                self._signal_close()
+            else:
+                task = self._task
+                if task is not None and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except BaseException:
+                        pass
+                self._reap_orphans()
             raise
-        if self._error is not None:
-            assert self._task is not None
+
+    def request_close(self) -> None:
+        """Ask the transport to close — SYNCHRONOUS, never awaits.
+
+        This is the cancellation-safe close request. Under a
+        cancellation, ``await cm.__aexit__(...)`` never even enters the
+        coroutine (the cancellation is delivered AT the await point), so
+        the transport would never learn that it must close — and the
+        spawned child would survive. This method therefore sets the
+        close event (and arms the watchdog) with NO await, so it works
+        from a cancelled task.
+
+        Safe to call from any task, any number of times.
+        """
+        self._signal_close()
+
+    def _signal_close(self) -> None:
+        """Ask the background task to close the inner transport.
+
+        The background task owns the inner context manager, so the ONLY
+        way to run the SDK's process-group shutdown is to let that task
+        reach the inner ``__aexit__``. This method therefore sets the
+        close event and arms a bounded watchdog; it never cancels the
+        background task (a cancelled inner ``__aenter__`` orphans the
+        spawned child — see the G1 note in ``__aenter__``).
+        """
+        self._close.set()
+        task = self._task
+        if task is None or task.done() or self._watchdog is not None:
+            return
+
+        async def _watchdog() -> None:
             try:
-                await self._task
+                await asyncio.wait_for(
+                    asyncio.shield(task), timeout=CLOSE_GRACE_S
+                )
+            except asyncio.TimeoutError:
+                # The inner transport wedged: hard-cancel the task and
+                # reap any orphan child it spawned.
+                task.cancel()
+                try:
+                    await task
+                except BaseException:
+                    pass
+                try:
+                    await self._reap_orphans()
+                except Exception as exc:  # pragma: no cover — best effort
+                    logger.warning(
+                        "TaskScopedContextManager orphan reap failed: %s: %s",
+                        type(exc).__name__, exc,
+                    )
             except BaseException:
                 pass
-            raise self._error
-        return self._streams
+
+        self._watchdog = asyncio.create_task(
+            _watchdog(), name=f"{self._name}-close-watchdog"
+        )
+
+    def _reap_orphans(self) -> None:
+        """Reap child processes orphaned by a cancelled inner transport.
+
+        Transport-agnostic default: nothing to reap. The STDIO subclass
+        overrides this with a /proc census of the spawned children.
+
+        SYNCHRONOUS on purpose: it is called from ``finally`` blocks
+        that may run UNDER a cancellation, and a sync call cannot be
+        interrupted by one.
+        """
+        return None
 
     @property
     def background_task(self) -> asyncio.Task | None:
@@ -372,14 +482,24 @@ class TaskScopedContextManager:
         self._close.set()
         task = self._task
         self._task = None
-        if task is not None:
+        try:
+            if task is not None:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    if _is_caller_cancelled():
+                        raise
+                except Exception:
+                    pass
+        finally:
+            # B3 backstop (synchronous, so a cancellation cannot skip it):
+            # the SDK's own teardown may not have completed — or may have
+            # been interrupted — so census /proc and kill whatever this
+            # session still owns.
             try:
-                await task
-            except asyncio.CancelledError:
-                if _is_caller_cancelled():
-                    raise
-            except Exception:
-                pass
+                self._reap_orphans()
+            except Exception as exc:  # pragma: no cover — best effort
+                logger.debug("mcp_child reap failed: %s: %s", type(exc).__name__, exc)
         return False
 
     async def _run(self) -> None:
@@ -401,46 +521,83 @@ class TaskScopedContextManager:
             self._error = e
             self._ready.set()
             return
+        # G1 (verified against the PINNED mcp==1.27.1): the inner
+        # transport's teardown — the SDK's process-group shutdown (stdin
+        # close -> wait -> SIGTERM -> SIGKILL) — lives in the async
+        # generator's ``finally`` AFTER the ``yield``. So the teardown
+        # only runs if the inner ``__aexit__`` is actually reached.
+        #
+        # The teardown is therefore installed in a ``finally`` that
+        # covers the WHOLE post-``__aenter__`` region (the on_ready hook
+        # included). A cancellation anywhere in that region — including
+        # during the off-loop /proc stamp — would otherwise re-raise
+        # BEFORE the teardown was installed and the spawned child would
+        # be ORPHANED (measured against the pinned SDK: the child stays
+        # in /proc after the cancel).
         try:
             try:
                 self._streams = await streams_cm.__aenter__()
             except asyncio.CancelledError:
-                # G1 guarantee: a cancellation that arrives while the
-                # inner transport is still entering must NOT skip the
-                # inner __aexit__ (which installs the SDK's process-group
-                # shutdown: stdin close -> killpg SIGTERM -> SIGKILL).
-                # Historically the re-raise at this point happened BEFORE
-                # the finally: block below could install __aexit__, so the
-                # spawned child survived. Run __aexit__ explicitly here.
+                # G1: a cancellation delivered while the inner transport
+                # is STILL ENTERING must not skip the inner __aexit__.
+                # The SDK's process-group shutdown lives in its async
+                # generator's ``finally`` AFTER the ``yield``, so a
+                # cancelled enter never runs it and the spawned child is
+                # ORPHANED (measured against mcp==1.27.1: the child
+                # stays in /proc after the cancel).
+                #
+                # Run the teardown explicitly here. It is best-effort: an
+                # @asynccontextmanager whose __aenter__ was interrupted
+                # can refuse __aexit__ ("generator didn't yield") — that
+                # must not mask the cancellation, and the explicit
+                # child reap (below) is the deterministic backstop.
                 try:
-                    await streams_cm.__aexit__(None, None, None)
+                    await asyncio.wait_for(
+                        streams_cm.__aexit__(None, None, None),
+                        timeout=INNER_EXIT_GRACE_S,
+                    )
                 except BaseException:
                     pass
                 raise
             except BaseException as e:
+                # B3: the inner transport failed to enter. Run its
+                # __aexit__ defensively so a partially-spawned child is
+                # torn down (the SDK's own generator may or may not have
+                # unwound). Guarded: an @asynccontextmanager whose
+                # __aenter__ raised can refuse __aexit__ ("generator
+                # didn't yield") — that must not mask the real error.
+                try:
+                    await streams_cm.__aexit__(None, None, None)
+                except BaseException:
+                    pass
                 self._error = e
                 self._ready.set()
                 return
-            # D5 — best-effort on_ready hook (MCP child stamp). Runs
-            # in the background task, right after the child is
-            # guaranteed alive AND BEFORE ``_ready.set()`` so the
-            # stamp is guaranteed complete by the time the
-            # ``__aenter__`` waiter resumes (deterministic ordering
-            # — no dependence on the event-loop's wake schedule).
-            # Exceptions are swallowed: a hook failure must never
-            # break the transport.
-            if self._on_ready is not None:
-                try:
-                    result = self._on_ready()
-                    if inspect.isawaitable(result):
-                        await result
-                except Exception as exc:
-                    logger.warning(
-                        "TaskScopedContextManager on_ready hook failed: "
-                        "%s: %s", type(exc).__name__, exc,
-                    )
-            self._ready.set()
             try:
+                # D5 — best-effort on_ready hook (MCP child stamp). Runs
+                # in the background task, right after the child is
+                # guaranteed alive AND BEFORE ``_ready.set()`` so the
+                # stamp is guaranteed complete by the time the
+                # ``__aenter__`` waiter resumes (deterministic ordering
+                # — no dependence on the event-loop's wake schedule).
+                # Exceptions are swallowed: a hook failure must never
+                # break the transport.
+                #
+                # It sits INSIDE this try so the teardown below is
+                # installed before the hook runs — a cancellation during
+                # the (off-loop) stamp must still reach the SDK's
+                # process-group shutdown.
+                if self._on_ready is not None:
+                    try:
+                        result = self._on_ready()
+                        if inspect.isawaitable(result):
+                            await result
+                    except Exception as exc:
+                        logger.warning(
+                            "TaskScopedContextManager on_ready hook failed: "
+                            "%s: %s", type(exc).__name__, exc,
+                        )
+                self._ready.set()
                 await self._close.wait()
             finally:
                 try:
@@ -449,6 +606,13 @@ class TaskScopedContextManager:
                     raise
                 except BaseException as e:
                     logger.debug("Inner context manager __aexit__ raised: %s", e)
+                # B3 backstop: the SDK's own teardown is not reliable on
+                # every path (its killpg lives after the yield), so the
+                # session's children are censused and reaped explicitly.
+                try:
+                    self._reap_orphans()
+                except Exception as exc:  # pragma: no cover — best effort
+                    logger.debug("mcp_child reap failed: %s: %s", type(exc).__name__, exc)
                 # D5 — best-effort on_close hook (MCP child exit-mark).
                 # Runs AFTER the inner __aexit__ has torn down the
                 # transport (the child is gone or going). Exceptions
@@ -512,12 +676,29 @@ class TaskScopedStdioClient(TaskScopedContextManager):
         # (pid, start_time) key the register used (PID-recycle
         # defense at mark_exit).
         self._registered: list[tuple[int, int]] = []
+        # PIDs of matching children observed BEFORE the transport was
+        # entered — the baseline the orphan reap diffs against, so a
+        # reap never touches a child that predates this session.
+        self._preexisting_children: set[int] = set()
         super().__init__(
-            factory=lambda: mcp.stdio_client(server_params),
+            factory=self._make_factory(server_params),
             name="mcp-stdio-client",
             on_ready=self._schedule_stamp,
             on_close=self._mark_children_exit,
         )
+
+    def _make_factory(self, server_params):
+        """Factory that snapshots the pre-existing children, then spawns.
+
+        The snapshot runs immediately before the inner transport is
+        created so the orphan reap has a precise baseline.
+        """
+
+        def _factory():
+            self._snapshot_preexisting()
+            return mcp.stdio_client(server_params)
+
+        return _factory
 
     @property
     def registered_child_pids(self) -> list[tuple[int, int]]:
@@ -592,6 +773,102 @@ class TaskScopedStdioClient(TaskScopedContextManager):
         except RuntimeError:
             loop = asyncio.new_event_loop()
         return loop.run_in_executor(_PROC_SCAN_EXECUTOR, self._stamp_children)
+
+    def _snapshot_preexisting(self) -> None:
+        """Record the matching children that existed BEFORE this session.
+
+        Called right before the inner transport is entered. The orphan
+        reap diffs against this baseline so it can only ever kill a
+        child this session spawned.
+        """
+        try:
+            matches = scan_mcp_child_pids(
+                command=self._server_params.command,
+                args=list(self._server_params.args or []),
+            )
+        except Exception:  # pragma: no cover — the scan never raises
+            matches = []
+        self._preexisting_children = {pid for pid, _ in matches}
+
+    def _session_children(self) -> list[int]:
+        """The pids of children THIS session spawned (and still owns).
+
+        A child belongs to this session when it
+
+        * is a direct child of this process,
+        * its argv[0] basename matches this server's command, and
+        * it was NOT present in the baseline snapshot taken before the
+          transport was created (so a pre-existing sibling is never
+          touched), and
+        * no other live session has claimed it (the claim-once ledger).
+
+        The command-only match (no argv[1:] requirement) is deliberate:
+        the SDK spawns ``[command, *args]``, and a server configured
+        with ``args=[]`` would otherwise be unmatchable — which is
+        exactly the case that leaks.
+        """
+        import os as _os
+
+        want = _basename_command(self._server_params.command)
+        if not want:
+            return []
+        found: list[int] = []
+        try:
+            entries = list(_PROC_ROOT.iterdir())
+        except (FileNotFoundError, PermissionError, OSError):
+            return []
+        me = _os.getpid()
+        for entry in entries:
+            name = entry.name
+            if not name.isdigit():
+                continue
+            try:
+                pid = int(name)
+            except ValueError:
+                continue
+            if pid == me or pid in self._preexisting_children:
+                continue
+            ppid, starttime = _read_ppid_and_starttime(_PROC_ROOT, pid)
+            if ppid != me or starttime is None:
+                continue
+            argv = _read_cmdline(_PROC_ROOT, pid)
+            if not argv or _basename_command(argv[0]) != want:
+                continue
+            if (
+                (pid, starttime) in _claimed_children
+                and (pid, starttime) not in self._registered
+            ):
+                # Claimed by ANOTHER live session — never touch it.
+                # (A claim made by THIS session is in ``self._registered``
+                # and is exactly the child we may reap.)
+                continue
+            found.append(pid)
+        return found
+
+    def _reap_orphans(self) -> None:
+        """Kill the children THIS session spawned but could not close.
+
+        The SDK's process-group shutdown lives in its async generator's
+        ``finally`` AFTER the ``yield``; when the transport is
+        interrupted before that point the generator is left suspended
+        and the child survives (verified against mcp==1.27.1). This
+        reap is the deterministic backstop: it censuses /proc for the
+        children this session owns and kills their process groups.
+        """
+        import os as _os
+        import signal as _signal
+
+        for pid in self._session_children():
+            try:
+                _os.killpg(_os.getpgid(pid), _signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                try:
+                    _os.kill(pid, _signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    continue
+            logger.warning(
+                "mcp_child reap: killed orphaned child pid=%d", pid,
+            )
 
     def _mark_children_exit(self) -> None:
         """Mark every child registered this session as exited.

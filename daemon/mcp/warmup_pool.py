@@ -6,6 +6,7 @@ Eliminates cold-start delay by keeping ready-to-use subprocess connections avail
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import sys
 import time
@@ -72,10 +73,15 @@ class PooledConnection:
 
 # Total warmup budget (outer timeout). The plan's only warmup budget is
 # the 60s outer timeout (phase2-plan.md step 3). The contract's
-# WARMUP_TOTAL_BUDGET_S=90 is NOT defined in the plan text; the plan
-# never introduces a 90s warmup budget, so the as-implemented budget
-# remains the existing 60s outer timeout (adjudicated from plan text).
-WARMUP_TOTAL_BUDGET_S: float = 60.0
+# Warmup budgets (architecture-recommendation.md:263, :549 constants table):
+#   WARMUP_CREATE_BUDGET_S = 60.0  — per-spawn budget (the outer timeout
+#                                    around a single _create_pooled_connection).
+#   WARMUP_TOTAL_BUDGET_S   = 90.0  — belt-and-braces around the per-server
+#                                    gather in warmup() so warmup() RETURNS
+#                                    even when the initial gather would hang
+#                                    (the hang-wedge mechanism).
+WARMUP_CREATE_BUDGET_S: float = 60.0
+WARMUP_TOTAL_BUDGET_S: float = 90.0
 
 # Dedicated executor for secret/KMS marker resolution (architecture §5.1).
 # NOT the shared default executor (which carries LLM calls + compaction).
@@ -205,10 +211,20 @@ class McpWarmupPool:
             except Exception as e:
                 logger.error(f"Failed to warm up pool for '{server_name}': {e}", exc_info=True)
 
-        await asyncio.gather(
-            *[warmup_server(name) for name in self._configs],
-            return_exceptions=True,
-        )
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(
+                    *[warmup_server(name) for name in self._configs],
+                    return_exceptions=True,
+                ),
+                timeout=WARMUP_TOTAL_BUDGET_S,
+            )
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            logger.warning(
+                "MCP warmup total budget (%.1fs) exceeded; proceeding so "
+                "starters can run (hang-wedge belt-and-braces).",
+                WARMUP_TOTAL_BUDGET_S,
+            )
         logger.info(f"MCP warmup complete: {len(self._configs)} server(s) ready")
 
     async def _warmup_server(self, server_name: str, size: int) -> int:
@@ -297,7 +313,7 @@ class McpWarmupPool:
             # Single outer timeout wrapping everything from startup to tool discovery
             # (the handshake __aenter__ is now INSIDE the budget — previously
             # it sat outside and a hung handshake could wedge forever).
-            async with asyncio.timeout(WARMUP_TOTAL_BUDGET_S):
+            async with asyncio.timeout(WARMUP_CREATE_BUDGET_S):
                 read_stream, write_stream = await streams_cm.__aenter__()
 
                 # Give subprocess time to start up (npx/uvx need time for package resolution)
@@ -355,15 +371,27 @@ class McpWarmupPool:
                 created_at=time.monotonic(),
             )
         except BaseException:
-            # Clean up to prevent orphaned subprocess
+            # Clean up to prevent orphaned subprocess.
+            #
+            # B3: the close request comes FIRST and is SYNCHRONOUS. Under
+            # a cancellation, the FIRST await in this block raises
+            # CancelledError immediately, so any cleanup that is not
+            # requested before it would never run — the transport would
+            # never learn it must close and the spawned child would
+            # survive. ``request_close()`` sets the close event with no
+            # await, so it works from a cancelled task.
+            try:
+                streams_cm.request_close()
+            except Exception:
+                pass
             if session is not None:
                 try:
                     await session.stop()
-                except Exception:
+                except BaseException:
                     pass
             try:
                 await streams_cm.__aexit__(*sys.exc_info())
-            except Exception:
+            except BaseException:
                 pass
             raise
 
@@ -697,7 +725,7 @@ class McpWarmupPool:
                 self._close_connection(conn), timeout=REAP_CLOSE_GRACE_SECONDS
             )
             return
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.CancelledError):
             logger.warning(
                 f"Idle reap teardown for server='{server_name}' exceeded the "
                 f"{REAP_CLOSE_GRACE_SECONDS:.0f}s grace window "
