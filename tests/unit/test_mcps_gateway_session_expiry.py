@@ -42,6 +42,7 @@ from daemon.services.mcps_gateway.protocol import (
     CODE_SESSION_NOT_FOUND,
     CODE_TOOL_TIMEOUT,
     PROTOCOL_VERSION,
+    PROTOCOL_VERSION_V02,
     GatewayAckTimeout,
     GatewayProtocolError,
 )
@@ -60,6 +61,7 @@ from daemon.services.mcps_gateway.tombstones import (
     REASON_ALREADY_ENDED,
     REASON_EXPIRED,
     REASON_MACHINE_REFUSED,
+    REASON_REAPED_BY_CENTER,
     REASON_UNKNOWN_SESSION,
     RESPONSE_REASONS,
     SessionTombstone,
@@ -106,10 +108,15 @@ class FakeMachine:
         *,
         machine_id: str = MACHINE_ID,
         session_id: str = SESSION_ID,
+        version: str = PROTOCOL_VERSION,
     ) -> None:
         self.service = service
         self.machine_id = machine_id
         self.session_id = session_id
+        #: The protocol version the machine negotiates (§5.2). The
+        #: default is the historical ``"0.1"`` — the sweep's forward
+        #: params are byte-identical on that version.
+        self.version = version
         self.connection = None
         self.sent: list[dict[str, Any]] = []
         self.closed = False
@@ -162,7 +169,7 @@ class FakeMachine:
         error: tuple[str, str] | None = None,
     ) -> None:
         payload: dict[str, Any] = {
-            "v": PROTOCOL_VERSION,
+            "v": self.version,
             "type": "error" if error else "response",
             "id": request_id,
         }
@@ -178,12 +185,12 @@ class FakeMachine:
             self.connection,
             json.dumps(
                 {
-                    "v": PROTOCOL_VERSION,
+                    "v": self.version,
                     "type": "request",
                     "id": "req-0001",
                     "method": "hello",
                     "params": {
-                        "protocol_version": PROTOCOL_VERSION,
+                        "protocol_version": self.version,
                         "client": {"name": "mcps-client", "version": "0.1.0"},
                         "machine_id": self.machine_id,
                         "capabilities": {
@@ -295,9 +302,36 @@ class TestTheSweepForwardsTheSessionEnd:
         assert len(machine.session_ends) == 1
         frame = machine.session_ends[0]
         assert frame["method"] == "session.end"
-        # The frame keeps EXACTLY the params it always had (the wire
-        # contract does not change in this job).
+        # The frame keeps EXACTLY the params it always had on a v0.1
+        # connection (the wire contract does not change for it — the
+        # ``reason`` member of §6.9.2 is VERSION-SCOPED to v0.2).
         assert frame["params"] == {"session_id": SESSION_ID}
+        assert frame["v"] == PROTOCOL_VERSION
+
+    async def test_the_sweep_tells_the_v02_machine_why_it_was_reaped(self):
+        """§6.9.2 group (ii): the v0.2 sweep forward carries the reason.
+
+        The v0.2 connection's ``session.end`` params gain the ``reason``
+        member — ``reaped_by_center`` — and the machine's end-ack echoes
+        it. A v0.1 connection keeps the historical params EXACTLY.
+        """
+        clock = Clock()
+        service = make_service(clock=clock)
+        machine = await open_machine(
+            service, FakeMachine(service, version=PROTOCOL_VERSION_V02)
+        )
+        await expired_session(service, machine, clock)
+
+        expired = await service.expire_sessions()
+
+        assert len(expired) == 1
+        assert len(machine.session_ends) == 1
+        frame = machine.session_ends[0]
+        assert frame["params"] == {
+            "session_id": SESSION_ID,
+            "reason": REASON_REAPED_BY_CENTER,
+        }
+        assert frame["v"] == PROTOCOL_VERSION_V02
 
     async def test_the_sweep_does_not_close_the_socket(self):
         """R3: the machine keeps its socket and returns to ``ready``.
@@ -738,6 +772,79 @@ class TestTheEndContract:
         assert result["why_not_ended"] not in LEDGER_ONLY_REASONS
         assert LEDGER_MACHINE_UNREACHABLE not in RESPONSE_REASONS
         assert LEDGER_MACHINE_TIMEOUT not in RESPONSE_REASONS
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The Direction-B envelope — its EXACT KEY SET
+#
+# The per-key assertions above cannot catch a STRAY member: an envelope
+# that grew a member the agent-facing contract does not define would
+# still pass every per-key check. The contract is
+#
+#   {session_id?, machine_id?, ended, detail, machine_notified,
+#    why_not_ended?, result?}
+#
+# — the optional members are present IFF their condition holds, and
+# NOTHING else is. The key set is pinned here, per outcome.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTheDirectionBEnvelopeKeySet:
+    #: The members every Direction-B envelope carries.
+    BASE = {"ended", "detail", "machine_notified"}
+
+    async def test_the_acknowledged_envelope_carries_exactly_its_members(self):
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+
+        result = await service.disconnect(agent_id=AGENT_ID)
+
+        assert set(result) == self.BASE | {
+            "session_id",
+            "machine_id",
+            "result",
+        }
+        assert "why_not_ended" not in result
+
+    async def test_the_authoritative_release_carries_exactly_its_members(self):
+        """The centre released the session: no machine ack, no reason."""
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+        machine.hold.add("session.end")  # the machine never answers
+
+        result = await service.disconnect(agent_id=AGENT_ID)
+
+        assert set(result) == self.BASE | {"session_id", "machine_id"}
+        assert "why_not_ended" not in result
+        assert "result" not in result
+
+    async def test_the_unknown_session_envelope_carries_exactly_its_members(self):
+        service = make_service()
+        await open_machine(service, FakeMachine(service))
+
+        result = await service.disconnect(agent_id=AGENT_ID)
+
+        assert set(result) == self.BASE | {"why_not_ended"}
+        assert "session_id" not in result
+        assert "machine_id" not in result
+
+    async def test_the_expired_envelope_carries_exactly_its_members(self):
+        clock = Clock()
+        service = make_service(clock=clock)
+        machine = await open_machine(service, FakeMachine(service))
+        await expired_session(service, machine, clock)
+        await service.expire_sessions()
+
+        result = await service.disconnect(agent_id=AGENT_ID)
+
+        assert set(result) == self.BASE | {
+            "session_id",
+            "machine_id",
+            "why_not_ended",
+        }
+        assert "result" not in result
 
 
 # ─────────────────────────────────────────────────────────────────────────────

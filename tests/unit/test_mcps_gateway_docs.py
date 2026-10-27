@@ -470,11 +470,178 @@ def test_doc_states_the_pre_hello_deadline() -> None:
     )
 
 
-def test_doc_states_reconnect_ends_the_old_session_immediately() -> None:
-    """D4(e): reconnect ends the old connection's session immediately."""
+def test_doc_states_a_duplicate_machine_id_is_refused_not_merged() -> None:
+    """§5.6: a second connection claiming a LIVE machine id is refused
+    with ``MACHINE_ID_CONFLICT``; the incumbent is never evicted.
+
+    (This replaced the old "a reconnect ends the old connection's
+    session **immediately**" pin: the center no longer evicts a live
+    connection to make room for a duplicate id.)
+    """
     text = _doc_prose()
-    assert "ends the old connection's session **immediately**" in text, (
-        "the doc must say a reconnect ends the old session immediately."
+    assert "MACHINE_ID_CONFLICT" in text, (
+        "the doc must name the duplicate-machine-id refusal."
+    )
+    assert "REFUSED, not" in text, (
+        "the doc must say a duplicate machine id is refused, not merged."
+    )
+    assert "never evicts a live connection" in text, (
+        "the doc must say the center never evicts a live connection."
+    )
+
+
+def test_doc_states_the_reconnect_tolerance_is_preserved() -> None:
+    """§8.1: a DEAD or CLOSED incumbent frees the id — a genuine
+    reconnect is admitted."""
+    text = _doc_prose()
+    assert "reconnect tolerance" in text, (
+        "the doc must name the reconnect tolerance."
+    )
+    assert "as soon as the incumbent is **dead**" in text, (
+        "the doc must say the id frees when the incumbent dies."
+    )
+
+
+def test_doc_pins_the_v02_version_negotiation() -> None:
+    """§5.2: the connection RUNS the requested version; no silent
+    downgrade; the supported list is accurate."""
+    text = _doc_prose()
+    assert 'the center speaks `"0.2"` and `"0.1"`' in text, (
+        "the doc must state which protocol versions the center speaks."
+    )
+    assert "never a silent downgrade" in text, (
+        "the doc must state that the center never silently downgrades."
+    )
+    assert 'data.supported = ["0.2", "0.1"]' in text, (
+        "the doc must pin the supported-version list of the refusal."
+    )
+
+
+def test_doc_pins_the_connection_scoped_version_check() -> None:
+    """§6.1: a frame is accepted IFF it names the connection's
+    negotiated version."""
+    text = _doc_prose()
+    assert "connection-scoped" in text, (
+        "the doc must say the per-frame version check is connection-scoped."
+    )
+    assert "negotiated version" in text, (
+        "the doc must say the frame must name the negotiated version."
+    )
+
+
+def test_doc_pins_the_client_terminate_capability() -> None:
+    """§5.3: the capability is advertised only on v0.2 and only when
+    the machine advertised it; it is never REQUIRED."""
+    text = _doc_prose()
+    assert "client_terminate" in text, (
+        "the doc must name the client_terminate capability."
+    )
+    assert "**not** a required capability" in text, (
+        "the doc must say client_terminate is not a required capability."
+    )
+
+
+def test_doc_pins_the_session_terminate_receipt() -> None:
+    """§6.10: the machine asks, the center never refuses; the ack's
+    shape; the liberal acceptance."""
+    text = _doc_prose()
+    assert "session.terminate" in text, (
+        "the doc must name the session.terminate receipt."
+    )
+    assert "never refuses" in text, (
+        "the doc must say the center never refuses a termination request."
+    )
+    assert "why_not_ended` is ABSENT" in text, (
+        "the doc must say why_not_ended is absent on the successful ack."
+    )
+    assert "liberal-acceptance" in text, (
+        "the doc must name the liberal-acceptance rule."
+    )
+
+
+def test_doc_pins_the_version_scoped_session_end_reason() -> None:
+    """§6.9.2: the ``reason`` member rides the v0.2 connection only."""
+    text = _doc_prose()
+    assert "reaped_by_center" in text, (
+        "the doc must name the reaped_by_center reason."
+    )
+    assert "superseded" in text, (
+        "the doc must name the superseded reason."
+    )
+    assert 'exactly `{"session_id": ...}`' in text, (
+        "the doc must state that a v0.1 session.end keeps exactly its "
+        "historical params."
+    )
+
+
+def test_doc_pins_the_orderly_termination_close() -> None:
+    """§6.10.5: a 1000 / session.terminate close is a termination, not a
+    machine death."""
+    text = _doc_prose()
+    assert "orderly termination" in text.lower(), (
+        "the doc must name the orderly termination."
+    )
+    assert "`session.terminate`" in text, (
+        "the doc must name the close reason that carries the termination."
+    )
+
+
+def test_doc_states_the_v01_connection_is_version_scoped_with_one_exception() -> None:
+    """W-2: the v0.2 elements are VERSION-SCOPED — with ONE deliberate
+    exception (the unversioned duplicate-machine-id refusal).
+
+    The old pin asserted "byte-identically" over the WHOLE doc — a
+    needle that also matches an unrelated §10 sentence about the
+    catalog re-encoding, so it could no longer tell whether the
+    version-scoping claim itself was still unqualified.
+    """
+    text = _doc_prose()
+    assert "VERSION-SCOPED" in text, (
+        "the doc must say the v0.2 elements are version-scoped."
+    )
+    assert "ONE DELIBERATE EXCEPTION" in text, (
+        "the doc must name the ONE exception to the version scoping."
+    )
+    assert "MACHINE_ID_CONFLICT` is emitted **UNVERSIONED**" in text, (
+        "the doc must say the duplicate-machine-id refusal is unversioned."
+    )
+    assert "protects the INCUMBENT" in text, (
+        "the doc must say WHY it is unversioned: it protects the incumbent."
+    )
+
+
+def test_doc_does_not_claim_an_unqualified_v01_byte_identity() -> None:
+    """F-1: the NEGATIVE companion of the version-scoping pin.
+
+    The repo convention keeps positive and negative needles in SEPARATE
+    test functions — and the positive pin above cannot police an
+    ABSENCE.  The only legitimate ``byte-identically`` in the runbook
+    is the §10 sentence about the conformance kit's catalog re-encoding
+    (it has nothing to do with the protocol version); a SECOND hit
+    would be an unqualified v0.1 byte-identity claim — the thing W-2
+    removed.
+    """
+    text = _doc_text()
+    hits = [line for line in text.splitlines() if "byte-identical" in line]
+    assert len(hits) == 1, (
+        "the doc must carry exactly ONE 'byte-identical' — the §10 catalog "
+        f"sentence; found {len(hits)}"
+    )
+    assert "catalog" in hits[0], (
+        "the one 'byte-identical' must be the §10 catalog sentence: "
+        f"{hits[0][:120]!r}"
+    )
+
+
+def test_doc_states_the_durable_audit_copy_is_the_bounded_detail() -> None:
+    """W-3: ``AuditRecord.extra`` is NOT persisted — the durable verbatim
+    copy of a raw reason_code is the bounded ``detail``."""
+    text = _doc_prose()
+    assert "The durable copy is the `detail`" in text, (
+        "the doc must say the durable verbatim copy is the bounded detail."
+    )
+    assert "survives only in the in-memory sinks" in text, (
+        "the doc must say the `extra` member is in-memory only."
     )
 
 

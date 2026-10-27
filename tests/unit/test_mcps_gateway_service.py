@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import time
 from datetime import datetime, timedelta
 from typing import Any
@@ -23,19 +24,45 @@ import pytest
 from daemon.services.mcps_gateway.audit import MemoryAuditSink, hash_args
 from daemon.services.mcps_gateway.config import GatewayConfig
 from daemon.services.mcps_gateway.protocol import (
+    AUDIT_TOOL_HELLO_CONFLICT,
+    CAP_CLIENT_TERMINATE,
     CODE_CAPABILITY_MISSING,
     CODE_HEARTBEAT_TIMEOUT,
     CODE_MACHINE_BUSY,
+    CODE_MACHINE_ID_CONFLICT,
     CODE_MACHINE_NOT_ENROLLED,
     CODE_PROTOCOL_VERSION_UNSUPPORTED,
     CODE_SESSION_EXPIRED,
     CODE_SESSION_NOT_FOUND,
     CODE_TOOL_TIMEOUT,
+    METHOD_TOOLS_LIST,
     PROTOCOL_VERSION,
+    PROTOCOL_VERSION_V02,
     REQUIRED_CLIENT_CAPABILITIES,
     SERVER_CAPABILITIES,
+    SUPPORTED_PROTOCOL_VERSIONS,
 )
-from daemon.services.mcps_gateway.service import McpGatewayService
+from daemon.services.mcps_gateway.service import (
+    CLOSE_REASON_MAX_CHARS,
+    INCUMBENT_STATE_UNKNOWN,
+    ClientConnection,
+    McpGatewayService,
+    bounded_close_reason,
+)
+
+
+#: The capability map a v0.2 machine advertises — the historical map plus
+#: ``client_terminate`` (§5.3/§6.10), the ONLY difference from v0.1.
+CAPS_V02: dict[str, bool] = {
+    "session": True,
+    "tools": True,
+    "notifications": False,
+    "heartbeat": True,
+    "screenshot_delta": False,
+    "multi_session": False,
+    "client_cert": False,
+    CAP_CLIENT_TERMINATE: True,
+}
 
 
 class FakeMachine:
@@ -47,6 +74,11 @@ class FakeMachine:
         self.sent: list[dict[str, Any]] = []
         self.closed = False
         self.close_code: int | None = None
+        #: The protocol version the machine NEGOTIATED (§5.2). Every
+        #: frame the machine writes carries it — the check is
+        #: connection-scoped, so a "0.1" answer on a "0.2" connection
+        #: closes the socket.
+        self.version: str = PROTOCOL_VERSION
         #: method → the result the machine answers with.
         self.answers: dict[str, Any] = {}
         #: method → (code, message) — the refusal the machine answers with.
@@ -80,13 +112,29 @@ class FakeMachine:
         version: str = PROTOCOL_VERSION,
         capabilities: dict[str, bool] | None = None,
         request_id: str = "req-0001",
+        envelope_version: str | None = None,
     ) -> dict[str, Any]:
-        """Send the hello request and return the answer frame."""
+        """Send the hello request and return the answer frame.
+
+        ``version`` is the version the machine REQUESTS
+        (``params.protocol_version``); it is also the version the
+        machine stamps on the frame unless ``envelope_version`` says
+        otherwise (a machine that asks for a version it does not stamp
+        is a protocol inconsistency the tests may want to pin).
+        """
+        # The fake tracks the version it actually STAMPS on the frame
+        # (``envelope_version or version``) — that is the version the
+        # centre sees on the wire, and therefore the version every
+        # later frame of this machine must carry.  Tracking only the
+        # REQUESTED version would make the fake answer a mismatched
+        # probe with the wrong ``v``.
+        stamped = envelope_version if envelope_version is not None else version
+        self.version = stamped
         await self.service.handle_frame(
             self.connection,
             json.dumps(
                 {
-                    "v": PROTOCOL_VERSION,
+                    "v": stamped,
                     "type": "request",
                     "id": request_id,
                     "method": "hello",
@@ -117,7 +165,7 @@ class FakeMachine:
             self.connection,
             json.dumps(
                 {
-                    "v": PROTOCOL_VERSION,
+                    "v": self.version,
                     "type": "notification",
                     "method": "heartbeat",
                     "params": {},
@@ -132,7 +180,7 @@ class FakeMachine:
         request = self.last_request()
         assert request is not None, "the center sent no request"
         payload: dict[str, Any] = {
-            "v": PROTOCOL_VERSION,
+            "v": self.version,
             "type": "error" if error else "response",
             "id": request["id"],
         }
@@ -148,7 +196,7 @@ class FakeMachine:
     ) -> None:
         """Answer ONE specific request by id."""
         payload: dict[str, Any] = {
-            "v": PROTOCOL_VERSION,
+            "v": self.version,
             "type": "error" if error else "response",
             "id": request_id,
         }
@@ -313,7 +361,14 @@ class TestHello:
         errors = machine.frames_of_type("error")
         assert len(errors) == 1
         assert errors[0]["error"]["code"] == CODE_PROTOCOL_VERSION_UNSUPPORTED
-        assert errors[0]["error"]["data"] == {"requested": "0.9", "supported": ["0.1"]}
+        # The refusal names the versions the centre DOES speak (§5.2) —
+        # the newest first.
+        # The tuple itself is pinned value-for-value in
+        # test_mcps_gateway_protocol.py; the assertion tracks the constant.
+        assert errors[0]["error"]["data"] == {
+            "requested": "0.9",
+            "supported": list(SUPPORTED_PROTOCOL_VERSIONS),
+        }
         assert errors[0]["id"] == "req-0001"
         assert machine.closed is True
 
@@ -354,6 +409,250 @@ class TestHello:
         errors = machine.frames_of_type("error")
         assert len(errors) == 1
         assert machine.closed is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# §5.2 — the version negotiation (v0.1 + v0.2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestProtocolNegotiation:
+    async def test_a_v01_hello_still_runs_v01(self):
+        """The v0.1 connection is byte-identical to the historical one."""
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        response = machine.frames_of_type("response")[0]
+        assert response["v"] == PROTOCOL_VERSION
+        assert response["result"]["protocol_version"] == PROTOCOL_VERSION
+
+    async def test_a_v02_hello_runs_v02(self):
+        service = make_service()
+        machine = FakeMachine(service)
+        machine.connection = await service.open_connection(machine)
+        await machine.hello(
+            version=PROTOCOL_VERSION_V02,
+            capabilities=dict(CAPS_V02),
+        )
+        response = machine.frames_of_type("response")[0]
+        assert response["v"] == PROTOCOL_VERSION_V02
+        assert response["result"]["protocol_version"] == PROTOCOL_VERSION_V02
+
+    async def test_the_result_version_always_equals_the_envelope_version(self):
+        """The shipped client fatals on a mismatch between the two."""
+        service = make_service()
+        for index, version in enumerate((PROTOCOL_VERSION, PROTOCOL_VERSION_V02)):
+            machine = FakeMachine(service)
+            machine.connection = await service.open_connection(machine)
+            await machine.hello(machine_id=f"mach_{index}", version=version)
+            response = machine.frames_of_type("response")[0]
+            assert response["v"] == response["result"]["protocol_version"]
+
+    async def test_the_centre_never_downgrades(self):
+        """A v0.1 client gets v0.1 — not the newest version."""
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        response = machine.frames_of_type("response")[0]
+        assert response["result"]["protocol_version"] == PROTOCOL_VERSION
+
+    async def test_every_outbound_frame_carries_the_negotiated_version(self):
+        service = make_service()
+        machine = FakeMachine(service)
+        machine.connection = await service.open_connection(machine)
+        await machine.hello(version=PROTOCOL_VERSION_V02)
+        await machine.heartbeat()
+        service._by_machine.pop("mach_1", None)
+
+        assert machine.sent, "the machine received no frame"
+        for frame in machine.sent:
+            assert frame["v"] == PROTOCOL_VERSION_V02
+
+    async def test_a_frame_of_the_other_version_closes_the_socket(self):
+        """The check is CONNECTION-SCOPED: the two generations never mix."""
+        service = make_service()
+        machine = FakeMachine(service)
+        machine.connection = await service.open_connection(machine)
+        await machine.hello(version=PROTOCOL_VERSION_V02)
+
+        await service.handle_frame(
+            machine.connection,
+            json.dumps(
+                {
+                    "v": PROTOCOL_VERSION,
+                    "type": "notification",
+                    "method": "heartbeat",
+                    "params": {},
+                }
+            ),
+        )
+        assert machine.closed is True
+
+    async def test_a_v02_frame_on_a_v01_connection_closes_the_socket(self):
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+
+        await service.handle_frame(
+            machine.connection,
+            json.dumps(
+                {
+                    "v": PROTOCOL_VERSION_V02,
+                    "type": "notification",
+                    "method": "heartbeat",
+                    "params": {},
+                }
+            ),
+        )
+        assert machine.closed is True
+
+    async def test_a_pre_hello_v02_frame_closes_the_socket(self):
+        """FIX 1 (a): PRE-HELLO, the HELLO frame is the ONE exception from
+        the version gate. Every other frame must name the connection's
+        version — the default "0.1" until the negotiation completes — so
+        a non-hello frame stamped "0.2" is refused exactly as the
+        historical centre refused it."""
+        service = make_service()
+        machine = FakeMachine(service)
+        machine.connection = await service.open_connection(machine)
+        assert machine.connection.hello_received is False
+
+        await service.handle_frame(
+            machine.connection,
+            json.dumps(
+                {
+                    "v": PROTOCOL_VERSION_V02,
+                    "type": "notification",
+                    "method": "heartbeat",
+                    "params": {},
+                }
+            ),
+        )
+        assert machine.closed is True
+
+    async def test_a_pre_hello_hello_frame_stamped_v02_reaches_the_handler(self):
+        """FIX 1 (b): the HELLO frame reaches the handler whatever it
+        stamps — the negotiation is ``params.protocol_version`` (§5.2)
+        and the handler owns it."""
+        service = make_service()
+        machine = FakeMachine(service)
+        machine.connection = await service.open_connection(machine)
+
+        await machine.hello(
+            version=PROTOCOL_VERSION_V02,
+            envelope_version=PROTOCOL_VERSION_V02,
+        )
+        assert machine.closed is False
+        response = machine.frames_of_type("response")[0]
+        assert response["v"] == PROTOCOL_VERSION_V02
+        assert response["result"]["protocol_version"] == PROTOCOL_VERSION_V02
+
+    async def test_a_pre_hello_hello_frame_stamped_v02_is_still_adjudicated(self):
+        """FIX 1 (b): the hello frame is refused by the HANDLER — with the
+        typed answer of §5.2 — never by the version gate."""
+        service = make_service()
+        machine = FakeMachine(service)
+        machine.connection = await service.open_connection(machine)
+
+        await machine.hello(version="0.9", envelope_version=PROTOCOL_VERSION_V02)
+
+        errors = machine.frames_of_type("error")
+        assert len(errors) == 1
+        assert errors[0]["error"]["code"] == CODE_PROTOCOL_VERSION_UNSUPPORTED
+        assert machine.closed is True
+
+    async def test_the_client_terminate_capability_is_advertised_on_v02(self):
+        service = make_service()
+        machine = FakeMachine(service)
+        machine.connection = await service.open_connection(machine)
+        await machine.hello(
+            version=PROTOCOL_VERSION_V02,
+            capabilities=dict(CAPS_V02),
+        )
+        caps = machine.frames_of_type("response")[0]["result"]["capabilities"]
+        assert caps[CAP_CLIENT_TERMINATE] is True
+
+    async def test_the_client_terminate_capability_is_false_when_the_client_has_none(self):
+        service = make_service()
+        machine = FakeMachine(service)
+        machine.connection = await service.open_connection(machine)
+        await machine.hello(version=PROTOCOL_VERSION_V02)
+        caps = machine.frames_of_type("response")[0]["result"]["capabilities"]
+        assert caps[CAP_CLIENT_TERMINATE] is False
+
+    async def test_the_v01_capability_map_carries_no_client_terminate_key(self):
+        """The v0.1 hello result is byte-identical: the key is ABSENT."""
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        caps = machine.frames_of_type("response")[0]["result"]["capabilities"]
+        assert CAP_CLIENT_TERMINATE not in caps
+        assert caps == SERVER_CAPABILITIES
+
+    async def test_the_client_terminate_capability_is_not_required(self):
+        """A v0.1 machine must never be refused for a missing v0.2 cap."""
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        assert machine.frames_of_type("error") == []
+        assert machine.connection.client_terminate is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The close reason (PEER-CONTROLLED text)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestCloseReasonHygiene:
+    async def test_a_peer_close_reason_is_bounded_and_escaped_in_the_log(
+        self, caplog
+    ):
+        """FIX 2: the WebSocket close reason is free text the MACHINE
+        chooses. It is capped and repr()-escaped before it reaches a
+        log line — a hostile machine can neither flood the log nor forge
+        a log line of its own."""
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await connect_machine(service, machine)
+
+        hostile = "boom\nforged: INFO the machine is fine " + "x" * 500
+        with caplog.at_level(logging.WARNING):
+            await service.close_connection(machine.connection, hostile)
+
+        text = "\n".join(record.getMessage() for record in caplog.records)
+        # The newline is ESCAPED, not rendered.
+        assert "boom\\nforged" in text
+        assert "\nforged" not in text
+        # The peer text is BOUNDED.
+        assert "x" * 500 not in text
+        assert len(text) < 1000
+
+    async def test_a_peer_close_reason_is_bounded_in_the_pending_error(self):
+        """FIX 2: the same bound and escape hold for the exception the
+        pending futures are failed with."""
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+
+        # The centre asks the machine something and gets no answer.
+        task = asyncio.create_task(
+            service._request(machine.connection, METHOD_TOOLS_LIST, {})
+        )
+        await asyncio.sleep(0.01)
+
+        await service.close_connection(
+            machine.connection, "boom\n" + "x" * 500
+        )
+        with pytest.raises(Exception) as excinfo:
+            await task
+        message = excinfo.value.message
+        assert "boom\\n" in message
+        assert "x" * 500 not in message
+        assert len(message) < 1000
+
+    def test_the_bounded_close_reason_caps_and_escapes(self):
+        """FIX 2: the renderer itself — bounded, escaped, never empty."""
+        assert bounded_close_reason(None) == "''"
+        assert bounded_close_reason("") == "''"
+        assert bounded_close_reason("boom") == "'boom'"
+        rendered = bounded_close_reason("a\nb" + "x" * 500)
+        assert "\\n" in rendered
+        assert "x" * 500 not in rendered
+        assert len(rendered) <= CLOSE_REASON_MAX_CHARS + 8
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1118,35 +1417,214 @@ class TestSessionSlotIsAtomic:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# S3 — a reconnect supersedes the previous socket
+# §5.6 — a DUPLICATE machine id is refused; the incumbent SURVIVES
+#
+# The silent supersede (the newcomer evicted the incumbent) is GONE: the
+# centre never evicts a live connection to make room for a second socket
+# that claims the same machine id. The newcomer is refused with the typed
+# MACHINE_ID_CONFLICT and the incumbent keeps its socket AND its session.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestReconnectSupersedesTheOldSession:
-    async def test_the_superseded_session_dies_with_the_old_socket(self):
-        """S3: a reconnect must not leave the old session alive."""
+class TestDuplicateMachineIdIsRefused:
+    async def test_the_newcomer_is_refused_with_machine_id_conflict(self):
         service = make_service()
         machine = await open_machine(service, FakeMachine(service))
         await connect_machine(service, machine)
-        assert service.sessions.for_machine("mach_1") is not None
 
-        # The machine reconnects on a NEW socket.
         second = FakeMachine(service)
         second.connection = await service.open_connection(second)
         await second.hello(machine_id="mach_1")
 
-        # The old session is gone and the old socket is closed.
-        assert service.sessions.for_machine("mach_1") is None
-        assert machine.closed is True
-        # The new connection is the live one.
-        assert service.store.get("mach_1") is not None
+        # R2: the refusal is UNVERSIONED — this newcomer is a v0.1
+        # machine (the default hello), and it is refused exactly like a
+        # v0.2 one.
+        assert second.version == PROTOCOL_VERSION
 
-    async def test_the_reconnected_machine_is_not_told_machine_busy(self):
-        """S3: the practical consequence — the reconnected machine can
-        open a session immediately instead of waiting for the timeout."""
+        errors = second.frames_of_type("error")
+        assert len(errors) == 1
+        error = errors[0]["error"]
+        assert error["code"] == CODE_MACHINE_ID_CONFLICT
+        assert error["data"]["machine_id"] == "mach_1"
+        assert error["data"]["incumbent_machine_id"] == "mach_1"
+        assert error["data"]["incumbent_connection"] == "open"
+        # The newcomer's socket is closed.
+        assert second.closed is True
+
+    async def test_the_incumbent_keeps_its_socket_and_its_session(self):
+        """§5.6: the refusal NEVER evicts the incumbent."""
         service = make_service()
         machine = await open_machine(service, FakeMachine(service))
         await connect_machine(service, machine)
+
+        second = FakeMachine(service)
+        second.connection = await service.open_connection(second)
+        await second.hello(machine_id="mach_1")
+
+        # The incumbent is untouched: its socket is open, its session is
+        # live, and it is still the connection the roster points at.
+        assert machine.closed is False
+        session = service.sessions.for_machine("mach_1")
+        assert session is not None
+        assert session.session_id == "sess_abc"
+        record = service.store.get("mach_1")
+        assert record is not None
+        assert record.session_id == "sess_abc"
+
+    async def test_the_incumbent_is_not_told_machine_busy(self):
+        """The practical consequence: the SURVIVOR can keep working."""
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await connect_machine(service, machine)
+
+        second = FakeMachine(service)
+        second.connection = await service.open_connection(second)
+        await second.hello(machine_id="mach_1")
+
+        # The incumbent's session is still usable — a command is still
+        # forwarded to it.
+        task = asyncio.create_task(service.command(agent_id="ari", tool="click"))
+        await asyncio.sleep(0.02)
+        await machine.answer_last({"ok": True})
+        assert await task == {"ok": True}
+
+    async def test_the_refusal_is_audited(self):
+        audit = MemoryAuditSink()
+        service = make_service(audit_sink=audit)
+        machine = await open_machine(service, FakeMachine(service))
+        await connect_machine(service, machine)
+
+        second = FakeMachine(service)
+        second.connection = await service.open_connection(second)
+        await second.hello(machine_id="mach_1")
+
+        rows = [r for r in audit.records if r.tool == AUDIT_TOOL_HELLO_CONFLICT]
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.machine_id == "mach_1"
+        assert row.session_id == "sess_abc"
+        assert row.error_code == CODE_MACHINE_ID_CONFLICT
+
+    async def test_the_refusal_is_sent_even_when_the_incumbent_state_is_unknown(
+        self, monkeypatch
+    ):
+        """§5.6 — an INDETERMINATE liveness must never abort the refusal.
+
+        The centre cannot name what it could not determine, so the
+        ``incumbent_connection`` member is OMITTED — but the refusal
+        itself IS sent, and the incumbent keeps the id (an unknown
+        liveness is treated as ALIVE: the newcomer is refused).
+        """
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        monkeypatch.setattr(
+            service,
+            "_incumbent_state",
+            lambda incumbent: INCUMBENT_STATE_UNKNOWN,
+        )
+
+        second = FakeMachine(service)
+        second.connection = await service.open_connection(second)
+        await second.hello(machine_id="mach_1")
+
+        errors = second.frames_of_type("error")
+        assert len(errors) == 1
+        assert errors[0]["error"]["code"] == CODE_MACHINE_ID_CONFLICT
+        data = errors[0]["error"]["data"]
+        assert data["machine_id"] == "mach_1"
+        # The state could not be determined: the member is OMITTED.
+        assert "incumbent_connection" not in data
+        # The incumbent survives — the newcomer was refused, not merged.
+        assert machine.closed is False
+        assert second.closed is True
+
+    def test_the_incumbent_classifier_never_raises(self):
+        """An indeterminate liveness is a STATE, not an exception.
+
+        A raised error here would abort the refusal and leave the
+        newcomer holding the id of a possibly-live incumbent.
+        """
+
+        class _ExplodingClock:
+            def __call__(self) -> float:
+                raise RuntimeError("the clock is unavailable")
+
+        service = make_service()
+        machine = FakeMachine(service)
+        incumbent = ClientConnection(connection_id="conn-x", transport=machine)
+        service._clock = _ExplodingClock()
+
+        assert service._incumbent_state(incumbent) == INCUMBENT_STATE_UNKNOWN
+
+    async def test_a_dead_incumbent_frees_the_machine_id(self):
+        """A heartbeat-killed incumbent must not lock the id forever."""
+        service = make_service(heartbeat_timeout_ms=50, client_dead_detect_ms=50)
+        machine = await open_machine(service, FakeMachine(service))
+
+        # The machine stops heartbeating: the sweep kills the connection.
+        await asyncio.sleep(0.08)
+        killed = await service.check_heartbeats()
+        assert len(killed) == 1
+        assert machine.closed is True
+
+        # A NEW connection with the SAME id is admitted.
+        second = FakeMachine(service)
+        second.connection = await service.open_connection(second)
+        await second.hello(machine_id="mach_1")
+        assert second.frames_of_type("error") == []
+        assert second.frames_of_type("response")
+
+    @pytest.mark.parametrize("version", [PROTOCOL_VERSION, PROTOCOL_VERSION_V02])
+    async def test_the_reconnected_machine_is_not_told_machine_busy(self, version):
+        """W-1 — a DEAD incumbent must not hold the §8.3 slot.
+
+        THE RESTORED PIN (it used to exist, and both of its
+        replacements pre-swept — so the hole was open).
+
+        The heartbeat kill is the SWEEP's job and it runs on its own
+        tick. Here the tick has NOT run: the incumbent's silence passed
+        the advertised timeout (so the incumbent is DEAD and its id is
+        free) while its session is still LIVE in the session manager.
+
+        The newcomer is admitted — and it must be able to USE the
+        machine at once: the first ``session.begin`` must SUCCEED
+        instead of drawing a transient ``MACHINE_BUSY`` for a session
+        whose machine is gone.
+        """
+        service = make_service(heartbeat_timeout_ms=50, client_dead_detect_ms=50)
+        machine = await open_machine(service, FakeMachine(service))
+        await connect_machine(service, machine)
+        assert service.sessions.for_machine("mach_1") is not None
+
+        # The machine goes silent. The unit service never starts the
+        # monitor, so the sweep has NOT ticked: the incumbent's session
+        # is still live.
+        await asyncio.sleep(0.1)
+        assert service.sessions.for_machine("mach_1") is not None, (
+            "the fixture must still hold the dead incumbent's session — "
+            "the pin is about the PRE-SWEEP window"
+        )
+
+        second = FakeMachine(service)
+        second.connection = await service.open_connection(second)
+        await second.hello(machine_id="mach_1", version=version)
+
+        # The incumbent is dead: the newcomer is ADMITTED (no refusal).
+        assert second.frames_of_type("error") == []
+        # ...and the dead incumbent's session does NOT hold the slot.
+        service.sessions.assert_machine_free("mach_1")
+
+        result = await connect_machine(
+            service, second, session_id="sess_second", machine_id="mach_1"
+        )
+        assert result["session_id"] == "sess_second"
+
+    async def test_the_surviving_incumbent_can_reconnect_after_the_death(self):
+        """The reconnect tolerance of §8.1 is preserved."""
+        service = make_service(heartbeat_timeout_ms=50, client_dead_detect_ms=50)
+        await open_machine(service, FakeMachine(service))
+        await asyncio.sleep(0.08)
+        await service.check_heartbeats()
 
         second = FakeMachine(service)
         second.connection = await service.open_connection(second)
