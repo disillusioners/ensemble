@@ -5479,7 +5479,7 @@ gate_soak() {
             if [ "$granted" -eq 0 ]; then
                 granted="$GRACE_EXTENSION_CAP_S_INT"
                 journal_history_append soak_grace_extended "grace-eligible HOLD observed — the soak window is extended by ${GRACE_EXTENSION_CAP_S_INT}s (bounded: absolute bound soak_entry+${ADAPTIVE_SOAK_CAP_S}+${GRACE_EXTENSION_CAP_S_INT}s; the never-green trigger is unchanged and unconditional)" \
-                                  || true
+                                  || true   # the journal line is advisory; the window extension is already decided
             fi
             local new_cap new_deadline
             new_cap="$(_soak_effective_cap "$granted" "$ceremony_remaining_s" "$soak_s")"
