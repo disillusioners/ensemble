@@ -258,10 +258,96 @@ class TestConcurrentBurstShapes:
             await pool.close()
 
 
-def _tick_time(tick: int):
-    """A monotonic per-tick timestamp (the grace clock is wall-clock)."""
+    @pytest.mark.asyncio
+    async def test_sub_ceiling_monotonic_rise_is_the_bounded_gap(
+        self, pool_dsn, scratch_env
+    ):
+        """The §4.4-vs-§5(i) SUB-CEILING gap, on a REAL pool.
+
+        A monotonic no-recovery rise that never reaches the pool's
+        ceiling and never queues a waiter does NOT arm the leak class
+        (§4.4's trend arm is DELIBERATELY SUBSUMED by the exhaustion
+        arm — see the ADJUDICATION in readiness.py::_evaluate_leak).
+
+        The gap is BOUNDED: the grace EXPIRES at
+        ``first_grace_eligible_observation + 120 s`` even though the
+        series keeps rising, so the gap can never hold the grace open
+        (and the never-green trigger still fires at cap-reach).
+        """
+        from psycopg_pool import AsyncConnectionPool
+
+        pool = AsyncConnectionPool(
+            conninfo=pool_dsn,
+            open=False,
+            min_size=1,
+            max_size=POOL_MAX_SIZE,
+            timeout=5.0,
+        )
+        await pool.open()
+        tracker = GraceTracker()
+        classes = _degraded_classes()
+        held: list = []
+        in_use_series: list[int] = []
+        try:
+            # Hold an increasing number of connections, never releasing
+            # them, but stay BELOW the ceiling (5 of 10) so nobody is
+            # ever queued.
+            # 15 ticks x 10 s = 150 s — the series crosses the 120 s
+            # grace horizon, so the BOUND is exercised.
+            for tick in range(15):
+                if tick < 5:
+                    held.append(await pool.getconn())
+                await asyncio.sleep(0.05)
+                stats = pool.get_stats()
+                in_use = int(stats["pool_size"]) - int(stats["pool_available"])
+                in_use_series.append(in_use)
+                assert int(stats["requests_waiting"]) == 0, (
+                    "a waiter appeared — the series was not sub-ceiling"
+                )
+                assert in_use < POOL_MAX_SIZE, (
+                    "the pool reached its ceiling — the series was not "
+                    "sub-ceiling"
+                )
+                obs = tracker.observe(
+                    component_classes=classes,
+                    degraded_components=["database"],
+                    pool_state_psycopg={
+                        "pool_size": int(stats["pool_size"]),
+                        "pool_max": int(stats["pool_max"]),
+                        "pool_available": int(stats["pool_available"]),
+                        "requests_waiting": int(stats["requests_waiting"]),
+                    },
+                    now=_tick_time(tick, step_s=10),
+                )
+                # THE GAP: the leak class does NOT arm.
+                assert obs.leak_signal["detected"] is False, (
+                    "the sub-ceiling series armed the leak class"
+                )
+                # THE BOUND: the grace is held only inside the horizon.
+                if tick * 10 >= 120:  # the grace horizon (GRACE_HORIZON_S)
+                    assert obs.grace_active is False, (
+                        f"the grace was still held at tick {tick} — the "
+                        "sub-ceiling gap held it open"
+                    )
+            print(
+                f"[burst] sub-ceiling in_use series (never reaching the "
+                f"ceiling): {in_use_series}"
+            )
+        finally:
+            for conn in held:
+                await pool.putconn(conn)
+            await pool.close()
+
+
+def _tick_time(tick: int, step_s: int = 1):
+    """A monotonic per-tick timestamp (the grace clock is wall-clock).
+
+    ``step_s`` is the per-tick wall-clock step — the readiness
+    refresher's cadence is 10 s, so a leg that has to cross the grace
+    horizon uses ``step_s=10``.
+    """
     from datetime import datetime, timedelta, timezone
 
     return datetime(2026, 10, 27, tzinfo=timezone.utc) + timedelta(
-        seconds=tick
+        seconds=tick * step_s
     )

@@ -762,6 +762,45 @@ class GraceTracker:
         (S9): with the pool objects available, a sustained busy-but-
         healthy burst — the incident's own shape — must never be
         classified as a leak.
+
+        ADJUDICATION — §4.4's TREND ARM IS DELIBERATELY SUBSUMED (this
+        is a DEVIATION from §4.4's literal text and is FLAGGED FOR
+        LEADER RATIFICATION — reviewer finding F1):
+
+        * §4.4 lists three arms for the ORACLE pool: ``requests_waiting
+          > 0`` sustained, ``pool_available`` strictly decreasing across
+          3 consecutive ticks, and the pool size exhausted. Only the
+          first and the third are implemented as independent arms; the
+          second is SUBSUMED by the exhaustion arm.
+        * WHY: read literally, the trend arm is UNSATISFIABLE in-band
+          alongside §5(i)'s healthy-burst mandate. §5(i)'s own healthy
+          series is a checked-out count that RISES AND FALLS — e.g.
+          ``[1, 3, 5, 7, 5, 3, 1, 0, ...]`` — and its rising phase is
+          three consecutive availability DECREASES before the first
+          recovery tick, so a literal 3-tick trend arm fires on it. Any
+          "≥3-tick episode with no recovery" variant fires on it too:
+          no in-band sub-ceiling rule separates a long healthy ramp from
+          a slow leak, because the two are the same observation until
+          one of them recovers.
+        * WHAT IS IMPLEMENTED: the exhaustion arm (``in_use >= pool_max``
+          — every connection checked out), with the availability TREND
+          reported inside its reason token (so the trend stays
+          OBSERVABLE) rather than as a second, unreachable arm.
+        * THE SUB-CEILING EXPOSURE IS BOUNDED, NOT OPEN-ENDED: a
+          sub-ceiling monotonic no-recovery series does NOT arm the leak
+          class, but it also cannot hold the grace open — the grace
+          EXPIRES at ``first_grace_eligible_observation + GRACE_HORIZON_S``
+          (120 s, §4.3), the soak's absolute bound is
+          ``soak_entry + ADAPTIVE_SOAK_CAP_S + GRACE_EXTENSION_CAP_S``
+          (300 s, §4.3), and the never-green trigger is byte-identical
+          and UNCONDITIONAL (§4.1) — so a daemon that never greens still
+          reaches cap-reach with ``consecutive_green < 3`` and is rolled
+          back. A5(iv) therefore holds ON THE TIME BOUNDS.
+        * The pin that proves the bounded property is
+          ``test_sub_ceiling_no_recovery_series_cannot_hold_the_grace_open``
+          in ``tests/unit/tools/test_readiness_failure_class.py`` (and its
+          real-pool twin in
+          ``tests/integration/test_checkpoint_pool_burst_shapes.py``).
         """
         checkedout_rising = self._checkedout_rising(pool_state_sqlalchemy)
 
@@ -799,7 +838,6 @@ class GraceTracker:
                 and int(pool_max) > 0
             ):
                 in_use = int(pool_size) - int(available)
-                free = int(pool_max) - in_use
                 # "the pool size exhausted (all connections checked out)"
                 # — EVERY connection of the pool is checked out (the
                 # in-use count reached the pool's ceiling), NOT merely
@@ -813,43 +851,27 @@ class GraceTracker:
                         "reason": (
                             "psycopg pool exhausted (every connection "
                             "checked out)"
+                            + (
+                                "; availability strictly decreasing across "
+                                f"{self._leak_tick_threshold} ticks"
+                                if self._availability_decreasing()
+                                else ""
+                            )
                         ),
                         "checkedout_rising": checkedout_rising,
                         "streak": int(max_streak),
                     }
-                # "pool_available strictly decreasing across 3 consecutive
-                # ticks" — the free capacity shrinking with NO recovery.
-                #
-                # ADJUDICATION (recorded here because it is a REAL
-                # tension between two requirements rows): read literally,
-                # this arm fires on ANY sustained ramp — including the
-                # healthy-busy shape requirements.md §5(i) mandates NOT be
-                # classified as a leak — because a ramp consumes the
-                # pool's free capacity in consecutive ticks whether the
-                # daemon is healthy or leaking. The arm is therefore
-                # TREND-QUALIFIED: the free capacity must be shrinking
-                # while the pool is being consumed TO ITS CEILING (no
-                # recovery tick in the window). With the pool sized for
-                # the concurrent-writer arithmetic (A4's knob: 7 writers
-                # + 1 probe + 2 headroom = 10), a healthy burst never
-                # reaches the ceiling; a self-sustaining leak does.
-                if (
-                    len(self._available_history) == self._leak_tick_threshold
-                    and self._available_history[-1]
-                    < self._available_history[-2]
-                    < self._available_history[-3]
-                    and free <= 0
-                ):
-                    return {
-                        "detected": True,
-                        "reason": (
-                            "psycopg free capacity strictly decreasing "
-                            f"across {self._leak_tick_threshold} ticks "
-                            "with no recovery"
-                        ),
-                        "checkedout_rising": checkedout_rising,
-                        "streak": int(max_streak),
-                    }
+
+                # ── §4.4's "pool_available strictly decreasing across 3
+                #    consecutive ticks" arm — DELIBERATELY SUBSUMED (see
+                #    the ADJUDICATION below). It is NOT implemented as an
+                #    independent arm: there is no in-band precondition
+                #    that separates a long healthy ramp from a slow leak,
+                #    so any live form of it would arm the leak class on
+                #    the healthy-burst shape requirements.md §5(i)
+                #    mandates NOT be classified as a leak. The trend is
+                #    therefore reported as PART OF the exhaustion arm's
+                #    reason token (above) instead of as a second arm.
 
             # Pool objects ARE available ⇒ the streak arm MUST NOT fire.
             return {
@@ -876,6 +898,24 @@ class GraceTracker:
             "checkedout_rising": checkedout_rising,
             "streak": int(max_streak),
         }
+
+    def _availability_decreasing(self) -> bool:
+        """Has the ORACLE pool's availability been strictly decreasing?
+
+        This is the §4.4 TREND observation, reported as PART OF the
+        exhaustion arm's reason token (the trend arm itself is
+        DELIBERATELY SUBSUMED — see the ADJUDICATION in
+        :meth:`_evaluate_leak`). The availability history is therefore
+        live state, not a dead buffer: it is what makes the exhaustion
+        verdict's trend evidence observable.
+        """
+        if len(self._available_history) < self._leak_tick_threshold:
+            return False
+        return (
+            self._available_history[-1]
+            < self._available_history[-2]
+            < self._available_history[-3]
+        )
 
     def _checkedout_rising(self, pool_state_sqlalchemy: Optional[dict]) -> bool:
         """ADVISORY signal: the P1 ``checkedout()`` count rising monotonically.

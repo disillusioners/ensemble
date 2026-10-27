@@ -106,6 +106,15 @@ _body_plain_green() {
 {"status":"ready","components":{"database":true,"queue_freshness":true,"services":true,"checkpoint_saver":true},"detail":{"reasons":[],"queue_max_age_seconds":null,"checked_at":null,"inflight_turns":0}}
 JSON
 }
+_body_grace_expired() {
+    # The daemon's grace AFTER its horizon: grace_active is false, so
+    # the readyz transient is NO LONGER grace-eligible (the §4.3
+    # expiry). The gate must treat it as a RESET — the sub-ceiling gap
+    # can never hold the counter open.
+    cat <<'JSON'
+{"status":"degraded","components":{"database":false,"queue_freshness":true,"services":true,"checkpoint_saver":true},"detail":{"reasons":["database: SELECT 1 probe failed or timed out"],"component_classes":{"database":"probe_timeout","queue_freshness":"ok","services":"ok","checkpoint_saver":"ok"},"grace":{"grace_active":false},"leak_signal":{"detected":false,"checkedout_rising":false,"streak":0}}}
+JSON
+}
 _body_legacy_no_grace() {
     # An OLDER daemon: NO detail.grace / detail.leak_signal /
     # detail.component_classes block at all (R-MASK-8).
@@ -119,6 +128,7 @@ JSON
 BODY_GRACED="$(_body_grace_active)"
 BODY_GRACED_LEAK="$(_body_grace_leak)"
 BODY_GRACED_HARD="$(_body_grace_hard_red)"
+BODY_GRACED_EXPIRED="$(_body_grace_expired)"
 BODY_LEGACY="$(_body_legacy_no_grace)"
 BODY_PLAIN_GREEN="$(_body_plain_green)"
 
@@ -127,6 +137,7 @@ _body_for() {
         graced)       printf '%s' "$BODY_GRACED" ;;
         graced-leak)  printf '%s' "$BODY_GRACED_LEAK" ;;
         graced-hard)  printf '%s' "$BODY_GRACED_HARD" ;;
+        graced-expired) printf '%s' "$BODY_GRACED_EXPIRED" ;;
         legacy)       printf '%s' "$BODY_LEGACY" ;;
         *)            printf '%s' "$BODY_PLAIN_GREEN" ;;
     esac
@@ -171,7 +182,7 @@ _probe_once_classified() {
         softgreen)  _PROBE_STATUS="busy-amnesty"; _PROBE_CODE="200" ;;
         transient)  _PROBE_STATUS="transient"; _PROBE_CODE="503" ;;
         red)        _PROBE_STATUS="red"; _PROBE_CODE="500" ;;
-        graced|graced-leak|graced-hard|legacy)
+        graced|graced-leak|graced-hard|graced-expired|legacy)
                     _PROBE_STATUS="transient"; _PROBE_CODE="503" ;;
         *)          _PROBE_STATUS="green"; _PROBE_CODE="200" ;;
     esac
@@ -296,6 +307,9 @@ run_scenario "S9 hard-red class is never held" 1 6 green graced-hard graced-hard
 
 echo "--- S10: an OLDER daemon (no grace block) is fail-closed (rc 1) ---"
 run_scenario "S10 legacy daemon body is fail-closed" 1 6 green legacy legacy legacy
+
+echo "--- S15: an EXPIRED grace is a RESET (the sub-ceiling gap cannot hold the counter open) ---"
+run_scenario "S15 an expired grace resets the counter" 1 6 green graced-expired graced-expired graced-expired
 
 echo
 echo "--- S11: the effective-cap arithmetic (requirements §4.3) ---"
