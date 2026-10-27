@@ -3772,7 +3772,11 @@ def _read_resume_hold_snapshot() -> Optional[dict]:
         from daemon.services import promote_txn_hold
 
         return promote_txn_hold.hold_snapshot()
-    except Exception:  # noqa: BLE001 — advisory only
+    except Exception as exc:  # noqa: BLE001 — advisory only
+        logger.debug(
+            "[Readiness] promote-txn hold snapshot unavailable: %s: %s",
+            type(exc).__name__, exc,
+        )
         return None
 
 
@@ -3796,7 +3800,11 @@ def _read_burst_signal_snapshot(manager: "InstanceManager") -> Optional[dict]:
         from daemon.services import promote_txn_hold
 
         resume_deferred = int(promote_txn_hold.pending_count())
-    except Exception:  # noqa: BLE001 — advisory only
+    except Exception as exc:  # noqa: BLE001 — advisory only
+        logger.debug(
+            "[Readiness] promote-txn hold pending count unavailable: %s: %s",
+            type(exc).__name__, exc,
+        )
         resume_deferred = 0
     return {
         "warmup_pending": warmup_pending,
@@ -3820,7 +3828,11 @@ def _read_mcp_buffered_count() -> Optional[int]:
         from daemon.mcp import init_guard
 
         return int(init_guard.buffered_transition_count())
-    except Exception:  # noqa: BLE001 — advisory only
+    except Exception as exc:  # noqa: BLE001 — advisory only
+        logger.debug(
+            "[Readiness] MCP buffered-transition count unavailable: %s: %s",
+            type(exc).__name__, exc,
+        )
         return None
 
 
@@ -3859,7 +3871,11 @@ def _read_mcp_snapshot() -> Optional[dict]:
                 "recoverable": True,
             }
         return snapshot
-    except Exception:  # noqa: BLE001 — advisory only
+    except Exception as exc:  # noqa: BLE001 — advisory only
+        logger.debug(
+            "[Readiness] MCP server health snapshot unavailable: %s: %s",
+            type(exc).__name__, exc,
+        )
         return None
 
 
@@ -5025,8 +5041,11 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
             if auth_service is not None:
                 try:
                     auth_dependency_status = auth_service.get_readiness_state()
-                except Exception:  # noqa: BLE001 — advisory only
-                    auth_dependency_status = None
+                except Exception as auth_state_exc:  # noqa: BLE001
+                    logger.warning(
+                        "[Readiness] auth_dependency_status probe failed: %s",
+                        auth_state_exc,
+                    )
             detail = {
                 "reasons": ["readiness composite not yet computed"],
                 "queue_max_age_seconds": None,
