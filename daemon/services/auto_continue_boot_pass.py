@@ -124,13 +124,14 @@ import asyncio
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
 
 from daemon.services.mission_record_service import (
     mint_boot_epoch_if_none_fail_open,
 )
+from daemon.services import promote_txn_hold
 
 logger = logging.getLogger(__name__)
 
@@ -251,6 +252,14 @@ class ContinueResult:
     # ── wedge-capture carrier fields (additive; default "unknown") ──
     auto_continue_mode: str = "unknown"
     auto_continue_raw_env: str | None = None
+    # ── A3 additive fields (soak-gate-mcp-warmup) ────────────────────
+    #: Candidates DEFERRED by the promote-txn hold (the A3 seam). The
+    #: hold DEFERS, never drops: the candidates are parked in the hold
+    #: module's per-seam list and released through THIS pass's own
+    #: checkpoint-resume path when the promote transaction closes.
+    deferred_pipeline_busy: int = 0
+    #: The deferred candidates' work ids (observability).
+    deferred_work_ids: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +271,124 @@ class ContinueResult:
 #: N=33 → 6 stagger pauses → ~12 s sleep + ~2 s scheduling ≈ 14 s total.
 STAGGER_EVERY: int = 5
 STAGGER_SLEEP_SECONDS: float = 2.0
+
+
+# ---------------------------------------------------------------------------
+# A3 release handlers (soak-gate-mcp-warmup)
+# ---------------------------------------------------------------------------
+#
+# The hold module DEFERS the resume burst while a promote transaction is
+# live and RELEASES it through the ORIGINAL seam — the checkpoint-resume
+# path, never a cold re-dispatch. The handlers below re-issue EXACTLY
+# what the pass would have issued at defer time.
+
+
+def _make_boot_continue_release_handler(manager, task_repo, boot_epoch):
+    """Build the seam-1 release handler (the boot auto-continue pass).
+
+    Re-issues the silent checkpoint resume for every deferred candidate
+    and stamps the a′ CAS marker (``task.auto_continued_at``) exactly
+    as the pass itself does (stamped AFTER the schedule returns
+    ``{"status": "resuming"}``).
+    """
+
+    async def _release(candidates):
+        for cand in candidates:
+            payload = cand.payload
+            instance_id = payload.get("instance_id")
+            work_id = payload.get("work_id")
+            task_id = payload.get("task_id")
+            try:
+                resume = await manager._schedule_explicit_handle_resume(
+                    instance_id=instance_id,
+                    message="",
+                    silent=True,
+                    images=None,
+                    target_work_id=work_id,
+                    selected_suspension_reason=None,
+                    handle_work_id=work_id,
+                    route_outcome="boot_continue",
+                    image_refs=None,
+                )
+                if (
+                    resume is None
+                    or not isinstance(resume, dict)
+                    or resume.get("status") != "resuming"
+                ):
+                    logger.info(
+                        "[BOOT_CONTINUE] RELEASED-but-refused instance=%s "
+                        "work_id=%s: resume refused (resume=%r)",
+                        str(instance_id)[:8], str(work_id)[:8], resume,
+                    )
+                    continue
+                if task_id is not None and boot_epoch is not None:
+                    try:
+                        await asyncio.to_thread(
+                            task_repo.mark_task_auto_continued,
+                            task_id, boot_epoch,
+                        )
+                    except Exception as stamp_exc:  # noqa: BLE001
+                        logger.warning(
+                            "[BOOT_CONTINUE] RELEASED stamp failed "
+                            "instance=%s work_id=%s: %s",
+                            str(instance_id)[:8], str(work_id)[:8],
+                            stamp_exc,
+                        )
+                logger.info(
+                    "[BOOT_CONTINUE] RELEASED instance=%s work_id=%s "
+                    "(checkpoint-resume path)",
+                    str(instance_id)[:8], str(work_id)[:8],
+                )
+            except Exception as exc:  # noqa: BLE001 — one candidate never blocks the rest
+                logger.warning(
+                    "[BOOT_CONTINUE] RELEASED failed instance=%s "
+                    "work_id=%s: %s: %s",
+                    str(instance_id)[:8], str(work_id)[:8],
+                    type(exc).__name__, exc,
+                )
+
+    return _release
+
+
+def _make_orphan_sweep_release_handler(manager):
+    """Build the seam-4 release handler (the task-less orphan sweep).
+
+    Re-issues the silent checkpoint resume for every deferred orphan
+    through the SAME resume primitive the sweep uses.
+    """
+
+    async def _release(candidates):
+        for cand in candidates:
+            payload = cand.payload
+            instance_id = payload.get("instance_id")
+            work_id = payload.get("work_id")
+            try:
+                resume = await manager._schedule_explicit_handle_resume(
+                    instance_id=instance_id,
+                    message="",
+                    silent=True,
+                    images=None,
+                    target_work_id=work_id,
+                    selected_suspension_reason=None,
+                    handle_work_id=work_id,
+                    route_outcome="boot_continue_orphan_sweep",
+                    image_refs=None,
+                )
+                logger.info(
+                    "[BOOT_CONTINUE] orphan-sweep RELEASED instance=%s "
+                    "work_id=%s (resume=%r)",
+                    str(instance_id)[:8], str(work_id)[:8],
+                    (resume or {}).get("status")
+                    if isinstance(resume, dict) else resume,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[BOOT_CONTINUE] orphan-sweep RELEASED failed "
+                    "instance=%s: %s: %s",
+                    str(instance_id)[:8], type(exc).__name__, exc,
+                )
+
+    return _release
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +522,20 @@ async def continue_running_instances_after_restart(
         "initialize() before boot subsystems run"
     )
 
+    # ── A3: register the release handlers (soak-gate-mcp-warmup) ─────
+    # The hold module releases the deferred candidates through the
+    # ORIGINAL seams — the checkpoint-resume path, never a cold
+    # dispatch. The handlers re-issue EXACTLY what the pass would have
+    # done (resume + the a′ CAS stamp).
+    promote_txn_hold.register_release_handler(
+        promote_txn_hold.SEAM_BOOT_CONTINUE,
+        _make_boot_continue_release_handler(manager, task_repo, boot_epoch),
+    )
+    promote_txn_hold.register_release_handler(
+        promote_txn_hold.SEAM_ORPHAN_SWEEP,
+        _make_orphan_sweep_release_handler(manager),
+    )
+
     # Sweep-level guard (Layer 2) — wraps the entire loop.
     loop_started = time.monotonic()
     try:
@@ -459,6 +600,40 @@ async def continue_running_instances_after_restart(
                 # (5b) Schedule the silent resume against the orphan's
                 # work_id. kwargs-only — see
                 # ``daemon/manager.py:10915``.
+                #
+                # ── A3 SEAM 1 (soak-gate-mcp-warmup) ─────────────────
+                # A promote transaction is live ⇒ DEFER (never drop).
+                # The boot pass runs EXACTLY ONCE per boot, so a
+                # "re-evaluate next pass" release would fall through to
+                # StaleTaskRecovery's force-cancel-retry and LOSE the
+                # checkpoint resume. The hold module owns the release
+                # (bounded re-consult → release through THIS pass's own
+                # checkpoint-resume path).
+                if promote_txn_hold.promote_txn_live():
+                    promote_txn_hold.defer_resume(
+                        promote_txn_hold.SEAM_BOOT_CONTINUE,
+                        {
+                            "instance_id": instance_id,
+                            "work_id": work_id,
+                            "task_id": task.id,
+                            "boot_epoch": (
+                                boot_epoch.isoformat()
+                                if boot_epoch is not None
+                                else None
+                            ),
+                        },
+                    )
+                    result.deferred_pipeline_busy += 1
+                    result.deferred_work_ids.append(work_id)
+                    logger.info(
+                        "[BOOT_CONTINUE] DEFERRED instance=%s work_id=%s: "
+                        "reason=%s (promote txn live — the hold releases "
+                        "it through the checkpoint-resume path)",
+                        instance_id[:8], work_id[:8],
+                        promote_txn_hold.HOLD_REASON,
+                    )
+                    continue
+
                 resume = await manager._schedule_explicit_handle_resume(  # type: ignore[attr-defined]
                     instance_id=instance_id,
                     message="",
@@ -787,6 +962,20 @@ async def sweep_orphaned_live_turns(
         "initialize() before boot subsystems run"
     )
 
+    # ── A3: register the release handlers (idempotent) ───────────────
+    # The orphan sweep may run without the boot pass (it is a sister
+    # pass); registering here makes the seam-4 release path available
+    # either way. The registration is idempotent (last wins, same
+    # shape).
+    promote_txn_hold.register_release_handler(
+        promote_txn_hold.SEAM_BOOT_CONTINUE,
+        _make_boot_continue_release_handler(manager, task_repo, boot_epoch),
+    )
+    promote_txn_hold.register_release_handler(
+        promote_txn_hold.SEAM_ORPHAN_SWEEP,
+        _make_orphan_sweep_release_handler(manager),
+    )
+
     loop_started = time.monotonic()
     try:
         # (4) Selection — read-only repo method.
@@ -883,6 +1072,30 @@ async def sweep_orphaned_live_turns(
                     f"orphan-sweep-{instance_id[:8]}-"
                     f"{int(time.monotonic() * 1000)}"
                 )
+                # ── A3 SEAM 4 (soak-gate-mcp-warmup) ─────────────────
+                # A promote transaction is live ⇒ DEFER (never drop).
+                # These orphans are TASK-LESS, so StaleTaskRecovery
+                # cannot reap them: an unreleased deferral would strand
+                # them for the whole boot. The hold module releases them
+                # through THIS pass's own resume primitive.
+                if promote_txn_hold.promote_txn_live():
+                    promote_txn_hold.defer_resume(
+                        promote_txn_hold.SEAM_ORPHAN_SWEEP,
+                        {
+                            "instance_id": instance_id,
+                            "work_id": synthetic_wid,
+                        },
+                    )
+                    result.deferred_pipeline_busy += 1
+                    result.deferred_work_ids.append(synthetic_wid)
+                    logger.info(
+                        "[BOOT_CONTINUE] orphan-sweep DEFERRED "
+                        "instance=%s: reason=%s (promote txn live — the "
+                        "hold releases it through the resume primitive)",
+                        instance_id[:8], promote_txn_hold.HOLD_REASON,
+                    )
+                    continue
+
                 resume = await manager._schedule_explicit_handle_resume(  # type: ignore[attr-defined]
                     instance_id=instance_id,
                     message="",

@@ -39,6 +39,8 @@ from .llm_error_classifier import (
 
 from .constants import (
     CHAT_WORKER_POOL_SIZE,
+    CHECKPOINT_POOL_MAX_SIZE_DEFAULT,
+    CHECKPOINT_POOL_TIMEOUT_S_DEFAULT,
     CHECKPOINT_TTL_HOURS,
     CHECKPOINT_CLEANUP_INTERVAL_HOURS,
     CHECKPOINT_MAX_PER_THREAD_FLOOR,
@@ -614,6 +616,42 @@ class LimitsConfig(BaseSettings):
         description=(
             "Chat-lane worker threads (boot-applied; DB/env/yaml resolve "
             "at boot via managed keys)"
+        ),
+    )
+    # ── Checkpoint saver pool sizing (soak-gate-mcp-warmup, A4) ─────────
+    # Two ordinary limits.* config knobs resolved by the SAME 4-tier ladder
+    # as llm_concurrency (DB > os.environ > yaml literal > default). The
+    # defaults are imported FROM daemon.constants so the constant stays the
+    # single canonical default-tier truth; env names fall out of
+    # ``env_prefix="LIMITS_"``: ``LIMITS_CHECKPOINT_POOL_MAX_SIZE`` /
+    # ``LIMITS_CHECKPOINT_POOL_TIMEOUT_S``.
+    #
+    # SIZING ARITHMETIC (decisions §3d D2): the effective concurrent
+    # checkpoint-writer ceiling is min(llm_concurrency, worker_pool_size +
+    # chat_worker_pool_size) = min(10, 5 + 2) = 7; the readiness sentinel
+    # probe takes ONE more slot (+1) and headroom adds 2 ⇒ 10. The Field
+    # bounds clamp it to [5, 20].
+    #
+    # HONESTY (decisions §3d D4): sizing does NOT cure the SQLAlchemy-side
+    # pool leak — that is a SEPARATE defect owned by a follow-up
+    # commission. This knob only buys headroom against the concurrent-writer
+    # arithmetic and bounds the ghost-waiter lifetime.
+    checkpoint_pool_max_size: int = Field(
+        default=CHECKPOINT_POOL_MAX_SIZE_DEFAULT,
+        ge=5,
+        le=20,
+        description=(
+            "psycopg checkpoint-saver pool max connections (boot-applied; "
+            "DB/env/yaml resolve at boot via managed keys)"
+        ),
+    )
+    checkpoint_pool_timeout_s: float = Field(
+        default=CHECKPOINT_POOL_TIMEOUT_S_DEFAULT,
+        gt=0,
+        description=(
+            "psycopg checkpoint-saver pool acquisition timeout in seconds "
+            "(bounds the ghost-waiter lifetime an abandoned readiness "
+            "probe leaves behind)"
         ),
     )
 

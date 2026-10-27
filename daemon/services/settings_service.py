@@ -130,6 +130,15 @@ class ManagedKeySpec:
     value_type: str  # "int" | "float" | "bool" | "str"
     default: Any
     ge: int | None = None
+    # ``le`` is OPTIONAL and additive (soak-gate-mcp-warmup, A4): the
+    # v1 registry carried no upper bound because no v1 key had one. A
+    # backing pydantic Field with an upper bound (``Field(le=20)``)
+    # MUST have its bound mirrored here, otherwise the registry
+    # validator would ACCEPT a value the Field would REJECT — a
+    # second, drifting truth of validation (Ruling 1). ``None`` (the
+    # default) means "no upper bound" and preserves every pre-existing
+    # key's behavior byte-for-byte.
+    le: int | None = None
     requires_restart: bool = True
     sensitive: bool = False
     description: str = ""
@@ -137,7 +146,13 @@ class ManagedKeySpec:
     def constraint_desc(self) -> str:
         """Human-readable constraint for log lines / 422 details
         (Ruling 3 log wording: ``failed validation (ge=1)``)."""
-        return f"ge={self.ge}" if self.ge is not None else "none"
+        if self.ge is not None and self.le is not None:
+            return f"ge={self.ge},le={self.le}"
+        if self.ge is not None:
+            return f"ge={self.ge}"
+        if self.le is not None:
+            return f"le={self.le}"
+        return "none"
 
 
 #: The managed-key registry. v1.1 union (2026-10-19): SIX entries —
@@ -216,6 +231,70 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
             "min(limits.llm_concurrency, this pool + the other pool's "
             "boot-applied size). Precedence: DB override > env var "
             "LIMITS_CHAT_WORKER_POOL_SIZE > config.yaml literal > default."
+        ),
+    ),
+    # ── checkpoint saver pool sizing (soak-gate-mcp-warmup, A4) ───────────
+    # psycopg checkpoint-saver pool max connections. Mirrors
+    # LimitsConfig.checkpoint_pool_max_size
+    # Field(default=CHECKPOINT_POOL_MAX_SIZE_DEFAULT, ge=5, le=20). The
+    # pool is constructed once at boot (daemon/persistence.py), so a change
+    # requires a daemon restart.
+    #
+    # SIZING ARITHMETIC (decisions §3d D2):
+    #   concurrent checkpoint writers = min(llm_concurrency=10,
+    #                                       worker_pool_size=5 +
+    #                                       chat_worker_pool_size=2) = 7
+    #   max_size = clamp(7 + 1 readiness-probe slot + 2 headroom,
+    #                    min=5, max=20) = 10
+    # HONESTY (decisions §3d D4): sizing does NOT cure the SQLAlchemy-side
+    # pool leak — that is a separate defect owned by a follow-up
+    # commission. Precedence: DB override > env var
+    # LIMITS_CHECKPOINT_POOL_MAX_SIZE > config.yaml literal > default.
+    "limits.checkpoint_pool_max_size": ManagedKeySpec(
+        key="limits.checkpoint_pool_max_size",
+        config_path="limits.checkpoint_pool_max_size",
+        env_var="LIMITS_CHECKPOINT_POOL_MAX_SIZE",
+        value_type="int",
+        default=constants.CHECKPOINT_POOL_MAX_SIZE_DEFAULT,
+        ge=5,
+        le=20,
+        requires_restart=True,
+        sensitive=False,
+        description=(
+            "psycopg checkpoint-saver pool max connections. Sizing "
+            "arithmetic: min(llm_concurrency, worker_pool_size + "
+            "chat_worker_pool_size) = 7 concurrent checkpoint writers, "
+            "+1 readiness-probe slot, +2 headroom, clamped to [5, 20]. "
+            "Boot-applied (the pool is constructed once at boot). "
+            "Precedence: DB override > env var "
+            "LIMITS_CHECKPOINT_POOL_MAX_SIZE > config.yaml literal > "
+            "default. NOTE: sizing does NOT cure the SQLAlchemy-side "
+            "pool leak (separate defect, follow-up commission)."
+        ),
+    ),
+    # psycopg checkpoint-saver pool ACQUISITION deadline. Mirrors
+    # LimitsConfig.checkpoint_pool_timeout_s
+    # Field(default=CHECKPOINT_POOL_TIMEOUT_S_DEFAULT, gt=0). The library
+    # default is 30.0s; an abandoned readiness probe leaves a queued
+    # (ghost) waiter in the pool until that deadline, so an explicit
+    # bounded deadline caps the ghost lifetime.
+    "limits.checkpoint_pool_timeout_s": ManagedKeySpec(
+        key="limits.checkpoint_pool_timeout_s",
+        config_path="limits.checkpoint_pool_timeout_s",
+        env_var="LIMITS_CHECKPOINT_POOL_TIMEOUT_S",
+        value_type="float",
+        default=constants.CHECKPOINT_POOL_TIMEOUT_S_DEFAULT,
+        ge=0,  # mirrors the Field's gt=0 floor (0 itself is rejected by the Field)
+        requires_restart=True,
+        sensitive=False,
+        description=(
+            "psycopg checkpoint-saver pool acquisition timeout in "
+            "seconds. Replaces the library's 30.0s default so an "
+            "abandoned readiness probe cannot leave a ghost waiter in "
+            "the pool's waiting queue beyond this bound. Boot-applied. "
+            "Precedence: DB override > env var "
+            "LIMITS_CHECKPOINT_POOL_TIMEOUT_S > config.yaml literal > "
+            "default."
         ),
     ),
     # ── O3 instance-graph cache bounding (resource-cost-control, 2026-10-18) ──
@@ -379,6 +458,13 @@ def parse_and_validate(spec: ManagedKeySpec, raw: Any) -> tuple[bool, Any, str |
     except (ValueError, TypeError) as exc:
         return False, None, "parse", str(exc)
     if spec.ge is not None and value < spec.ge:
+        return (
+            False,
+            value,
+            "validation",
+            f"value {value!r} fails constraint {spec.constraint_desc()}",
+        )
+    if spec.le is not None and value > spec.le:
         return (
             False,
             value,

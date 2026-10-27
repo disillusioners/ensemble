@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from daemon.services.timestamps import now_utc_naive
+from daemon.services import promote_txn_hold
 from pathlib import Path
 from typing import Any
 from langgraph.graph.state import CompiledStateGraph
@@ -13159,6 +13160,58 @@ class InstanceManager:
         )
         return None
 
+    async def _ensure_promote_hold_release_handlers(self) -> None:
+        """Register the A3 seam-2 release handler (idempotent, lazy).
+
+        The handler re-issues the ORIGINAL ``create_task(
+        self._resume_processing_background(...))`` — the checkpoint-resume
+        path, never a cold re-dispatch.
+        """
+        if getattr(self, "_promote_hold_handlers_registered", False):
+            return
+        self._promote_hold_handlers_registered = True
+        promote_txn_hold.register_release_handler(
+            promote_txn_hold.SEAM_RUNTIME_RESUME,
+            self._release_runtime_resume_candidates,
+        )
+
+    async def _release_runtime_resume_candidates(self, candidates) -> None:
+        """Release the deferred runtime resumes through the ORIGINAL seam."""
+        for cand in candidates:
+            payload = cand.payload
+            instance_id = payload.get("instance_id")
+            try:
+                cancellation_source = self._request_registry.register(
+                    message_id=payload.get("message_id"),
+                    instance_id=instance_id,
+                )
+                task = asyncio.create_task(
+                    self._resume_processing_background(
+                        instance_id=instance_id,
+                        message=(
+                            payload.get("message")
+                            if not payload.get("silent")
+                            else ""
+                        ),
+                        message_id=payload.get("message_id"),
+                        old_job_id=payload.get("target_work_id"),
+                        silent=payload.get("silent"),
+                        images=payload.get("images"),
+                        image_refs=payload.get("image_refs"),
+                        cancellation_token=cancellation_source.token,
+                    )
+                )
+                self._graph_tasks[instance_id] = task
+                logger.info(
+                    "[RESUME] instance=%s RELEASED (checkpoint-resume path)",
+                    str(instance_id)[:8],
+                )
+            except Exception as exc:  # noqa: BLE001 — one candidate never blocks the rest
+                logger.warning(
+                    "[RESUME] instance=%s RELEASED failed: %s: %s",
+                    str(instance_id)[:8], type(exc).__name__, exc,
+                )
+
     async def _schedule_explicit_handle_resume(
         self,
         *,
@@ -13654,6 +13707,46 @@ class InstanceManager:
             f"background processing against target_work_id="
             f"{target_work_id}"
         )
+
+        # ── A3 SEAM 2 (soak-gate-mcp-warmup) ─────────────────────────
+        # A promote transaction is live ⇒ DEFER the resume. The task is
+        # NOT created; the resume is parked in the hold module's seam-2
+        # list and released through THIS seam (the original
+        # ``create_task(self._resume_processing_background(...))`` — the
+        # checkpoint-resume path, never a cold dispatch) when the
+        # promote transaction closes.
+        #
+        # The check sits BEFORE the request-registry registration so a
+        # deferred resume never leaves an orphaned CancellationToken
+        # source in the registry.
+        if promote_txn_hold.promote_txn_live():
+            await self._ensure_promote_hold_release_handlers()
+            promote_txn_hold.defer_resume(
+                promote_txn_hold.SEAM_RUNTIME_RESUME,
+                {
+                    "instance_id": instance_id,
+                    "message": message,
+                    "message_id": message_id,
+                    "target_work_id": target_work_id,
+                    "silent": silent,
+                    "images": images,
+                    "image_refs": image_refs,
+                    "route_outcome": route_outcome,
+                },
+            )
+            logger.info(
+                "[RESUME] instance=%s DEFERRED: reason=%s (promote txn "
+                "live — the hold releases it through the "
+                "checkpoint-resume path)",
+                instance_id[:8], promote_txn_hold.HOLD_REASON,
+            )
+            return {
+                "instance_id": instance_id,
+                "job_id": target_work_id,
+                "message_id": message_id,
+                "status": "deferred",
+                "reason": promote_txn_hold.HOLD_REASON,
+            }
 
         # W4: Register with the request registry BEFORE creating
         # the task so ``pause_instance_cascade`` (which calls

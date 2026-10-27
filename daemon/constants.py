@@ -156,6 +156,54 @@ CHECKPOINT_INTERVAL: int = 1  # Checkpoint interval (messages)
 CHECKPOINT_TTL_HOURS: int = 168  # Checkpoint TTL (7 days)
 CHECKPOINT_CLEANUP_INTERVAL_HOURS: int = 24  # Checkpoint cleanup interval
 
+# ── Readiness grace window + leak signature (soak-gate-mcp-warmup, A1) ──
+# READINESS_GRACE_HORIZON_S is the daemon's mirror of the normative
+# GRACE_HORIZON_S (requirements.md §4.3 P3): ONE clock, OBSERVATION-RELATIVE
+# (``grace_expires_at = first_grace_eligible_observation +
+# READINESS_GRACE_HORIZON_S``). The grace is NEVER extended; there is NO
+# boot-relative ceiling (the valueless ``grace_abs_ceiling_s`` is deleted).
+READINESS_GRACE_HORIZON_S: float = 120.0
+# The leak-signature tick threshold (requirements.md §4.4 P4). It is the
+# number of consecutive ticks for the ORACLE pool's "sustained" signals:
+# ``requests_waiting > 0`` sustained, and ``pool_available`` strictly
+# decreasing. It is ALSO the streak-arm threshold — but the streak arm
+# fires ONLY when the pool objects are UNAVAILABLE (S9), so a sustained
+# busy-but-healthy burst is never classified as a leak. FIRST CUT: a
+# starting proposal, not a measured value (decisions §9 Q2) — the
+# predicate is deliberately fail-closed (a false leak ⇒ no grace), so an
+# over-eager threshold costs grace availability, never safety.
+READINESS_LEAK_TICK_THRESHOLD: int = 3
+
+# ── Checkpoint saver pool sizing (soak-gate-mcp-warmup, A4) ─────────────
+# These are the DEFAULT tiers ONLY (house 4-tier ladder, same shape as
+# WORKER_POOL_SIZE / CHAT_WORKER_POOL_SIZE above): the runtime value
+# resolves DB > env > yaml > this default at boot via the managed keys
+# ``limits.checkpoint_pool_max_size`` (env ``LIMITS_CHECKPOINT_POOL_MAX_SIZE``)
+# and ``limits.checkpoint_pool_timeout_s`` (env
+# ``LIMITS_CHECKPOINT_POOL_TIMEOUT_S``). They feed the
+# ``LimitsConfig.checkpoint_pool_max_size`` / ``.checkpoint_pool_timeout_s``
+# Field defaults (daemon/config.py), which ``daemon/persistence.py`` reads
+# when it constructs the psycopg saver pool.
+#
+# SIZING ARITHMETIC (decisions §3d D2 — the formula, re-derivable):
+#   concurrent_checkpoint_writers = min(limits.llm_concurrency,
+#                                       limits.worker_pool_size +
+#                                       limits.chat_worker_pool_size)
+#                                  = min(10, 5 + 2) = 7
+#   checkpoint_pool_max_size = clamp(7 writers + 1 readiness-probe slot
+#                                    + 2 headroom, min=5, max=20) = 10
+# The old hard-coded ``max_size=5`` was BELOW the 7-writer ceiling before
+# the probe was even counted.
+CHECKPOINT_POOL_MAX_SIZE_DEFAULT: int = 10
+# The psycopg pool's ACQUISITION deadline. The library default is 30.0s,
+# which is what a ghost waiter inherits today: the readiness sentinel probe
+# abandons at 0.9s (inner) / 1.0s (outer) but the pool RETAINS its queued
+# waiter until the pool deadline — at the 10s refresh cadence every
+# timed-out probe leaves a ghost waiter that consumes a slot when granted
+# (a self-amplifying drain). An explicit, bounded deadline caps the ghost
+# lifetime.
+CHECKPOINT_POOL_TIMEOUT_S_DEFAULT: float = 5.0
+
 # ── Checkpoint readiness sentinel (incident 2026-10-10, W1) ─────────────
 # Fixed, discoverable namespace for the checkpoint-saver readiness
 # probe's sentinel write+read. The sentinel goes through the REAL saver

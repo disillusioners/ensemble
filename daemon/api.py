@@ -56,7 +56,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request, APIRouter
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 from pathlib import Path
 
 _LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").upper()
@@ -181,13 +181,16 @@ from daemon.services.boot_epoch import get_boot_epoch
 # ``MCPS_GATEWAY_ENABLED`` is ON.
 from daemon.services.mcps_gateway.config import load_gateway_config
 from daemon.services.readiness import (
+    FAILURE_CLASS_BOOT_INCOMPLETE,
     READINESS_FORCE_DEGRADED_ENV,
+    GraceTracker,
     ReadinessComposite,
     apply_forced_degradation,
     make_checkpoint_saver_probe,
     make_db_probe,
     make_queue_probe,
     refresh_readiness_composite,
+    resolve_psycopg_pool,
 )
 from daemon.constants import SSE_TIMEOUT_S, SSE_PING_INTERVAL, SSE_QUEUE_MAXSIZE
 from daemon.repositories.instance.models import InstanceStatus
@@ -2481,6 +2484,13 @@ async def lifespan(app: FastAPI):
     )
     app.state.readiness_refresher_task = readiness_task
     app.state.readiness_composite = None  # populated by the first tick
+    # ── A1: the class-gated grace tracker (soak-gate-mcp-warmup) ───────
+    # The tracker is the STATEFUL half of the grace (arming / expiry /
+    # leak-refusal). It lives on ``app.state`` so the readiness detail
+    # and the operators can observe it; the refresher owns the tick.
+    # It is created HERE (not inside the loop) so the state survives a
+    # refresher restart and so the readyz handler can read it.
+    app.state.readiness_grace_tracker = GraceTracker()
     daemon_logger.info(
         f"[Readiness] Refresher started: interval={config.services.readiness_refresh_interval_seconds}s, "
         f"queue_freshness_threshold={config.services.readiness_queue_freshness_threshold_seconds}s"
@@ -3270,6 +3280,18 @@ async def lifespan(app: FastAPI):
                 logger.warning(f"Readiness refresher shutdown error: {e}")
         app.state.readiness_refresher_task = None
 
+    # Stop the A3 promote-txn hold's release driver (soak-gate-mcp-warmup).
+    # The driver is lazily created on the FIRST deferral and ticks only
+    # while deferrals are outstanding; cancelling it here means a
+    # shutdown mid-hold does not leak a task. The deferred candidates
+    # stay parked — the next boot's pass owns them.
+    try:
+        from daemon.services import promote_txn_hold as _promote_hold
+
+        await _promote_hold.shutdown()
+    except Exception as e:  # noqa: BLE001 — shutdown must never fail
+        logger.warning(f"Promote-txn hold shutdown error: {e}")
+
     # Stop the OAuth2 auth background machinery (Phase 2, T2.4 — the
     # cancel-AND-await tail of the readiness-refresher pattern; safe
     # no-op when auth is OFF — nothing was ever constructed).
@@ -3717,6 +3739,50 @@ async def _periodic_drift_reconcile_loop(
             return
 
 
+def _read_resume_hold_snapshot(app_state) -> Optional[dict]:
+    """The A3 promote-txn hold's observable counters (readiness detail).
+
+    Journal-free and in-process: an operator can see that resumes were
+    DEFERRED (not lost) while a promote transaction was live. ``None``
+    when the hold module cannot be reached (the key is then absent from
+    the payload — the older-consumer tolerance contract).
+    """
+    try:
+        from daemon.services import promote_txn_hold
+
+        return promote_txn_hold.hold_snapshot()
+    except Exception:  # noqa: BLE001 — advisory only
+        return None
+
+
+def _read_burst_signal_snapshot(manager) -> Optional[dict]:
+    """The published BURST context (readiness detail).
+
+    CONTEXT ONLY — never an arming precondition (requirements.md §4.2
+    P2: eligibility is CLASS-driven, never conjunctive on boot-age or
+    burst). The two signals are the ones the daemon actually knows:
+
+    * ``warmup_pending`` — the MCP warmup task is still running
+      (``manager._warmup_task``);
+    * ``resume_deferred`` — the A3 hold's deferred-candidate count.
+    """
+    warmup_task = getattr(manager, "_warmup_task", None)
+    warmup_pending = bool(
+        warmup_task is not None and not warmup_task.done()
+    )
+    resume_deferred = 0
+    try:
+        from daemon.services import promote_txn_hold
+
+        resume_deferred = int(promote_txn_hold.pending_count())
+    except Exception:  # noqa: BLE001 — advisory only
+        resume_deferred = 0
+    return {
+        "warmup_pending": warmup_pending,
+        "resume_deferred": resume_deferred,
+    }
+
+
 async def _periodic_readiness_refresh_loop(
     *,
     manager,
@@ -3798,6 +3864,25 @@ async def _periodic_readiness_refresh_loop(
                     else None
                 ),
                 auth_dependency_status=auth_dependency_status,
+                # ── A1 wiring (soak-gate-mcp-warmup) ─────────────────
+                # The class-gated grace tracker (stateful; lives on
+                # app.state so the detail can publish its verdict) and
+                # the TWO pool handles the leak predicate samples:
+                #   P1 sqlalchemy = the ADVISORY manager engine pool
+                #   P2 psycopg    = the ORACLE checkpoint-saver pool
+                # Both samples are IN-MEMORY reads (no DB round trip).
+                grace_tracker=(
+                    getattr(app_state, "readiness_grace_tracker", None)
+                ),
+                sqlalchemy_pool=getattr(getattr(manager, "engine", None), "pool", None),
+                psycopg_pool=resolve_psycopg_pool(
+                    getattr(manager, "checkpointer", None)
+                ),
+                # The A3 hold counters + the published burst CONTEXT.
+                # CONTEXT ONLY — never an arming precondition
+                # (requirements.md §4.2 P2).
+                resume_hold=_read_resume_hold_snapshot(app_state),
+                burst_signals=_read_burst_signal_snapshot(manager),
             )
             # Drill knob (deferred tester probe P7): read PER TICK from
             # the environment so flipping it between ticks of an
@@ -4842,6 +4927,24 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
                 "queue_max_age_seconds": None,
                 "checked_at": None,
                 "inflight_turns": None,
+                # ── A1 (soak-gate-mcp-warmup) ─────────────────────────
+                # The no-composite branch is the ``boot_incomplete``
+                # class (§4.0) — NEVER grace-eligible. The class is
+                # published so the gate can classify the tick without
+                # re-deriving it from the reason string, and the grace
+                # block says plainly that no grace is held.
+                "component_classes": {
+                    "database": FAILURE_CLASS_BOOT_INCOMPLETE,
+                    "queue_freshness": FAILURE_CLASS_BOOT_INCOMPLETE,
+                    "services": FAILURE_CLASS_BOOT_INCOMPLETE,
+                    "checkpoint_saver": FAILURE_CLASS_BOOT_INCOMPLETE,
+                },
+                "grace": {"grace_active": False},
+                "leak_signal": {
+                    "detected": False,
+                    "checkedout_rising": False,
+                    "streak": 0,
+                },
             }
             body = ReadyzResponse(
                 status="degraded",

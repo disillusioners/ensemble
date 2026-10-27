@@ -52,6 +52,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from .pool_orchestrator import safe_notify_all_pools
+from . import promote_txn_hold
 
 if TYPE_CHECKING:
     from daemon.repositories.task.repository import TaskRepository
@@ -153,6 +154,9 @@ class EligiblePendingSweepService:
         self._eligible_total: int = 0
         self._notified_total: int = 0
         self._errors_total: int = 0
+        # ── A3 (soak-gate-mcp-warmup) — the promote-txn skip counter ──
+        self._skipped_promote_hold_total: int = 0
+        self._last_skipped_promote_hold: int = 0
 
     # --------------------------------------------------------
     # Public API
@@ -322,6 +326,32 @@ class EligiblePendingSweepService:
             # — production returns None when no pool was reachable,
             # MagicMock returns a truthy MagicMock when one was).
             if eligible_count > 0:
+                # ── A3 SEAM 3 (soak-gate-mcp-warmup) ─────────────────
+                # A promote transaction is live ⇒ SKIP the wake (a
+                # STATELESS skip — the next 90s tick retries; decisions
+                # §9 Q3 ruled "skip", not "defer-row": the sweep owns no
+                # persistent deferral state, and a skip count makes the
+                # behaviour observable).
+                if promote_txn_hold.promote_txn_live():
+                    self._skipped_promote_hold_total += eligible_count
+                    self._last_skipped_promote_hold = eligible_count
+                    logger.info(
+                        "EligiblePendingSweepService: tick %s SKIPPED the "
+                        "wake of %s eligible PENDING row(s): reason=%s "
+                        "(promote txn live — the next tick retries)",
+                        self._ticks_total, eligible_count,
+                        promote_txn_hold.HOLD_REASON,
+                    )
+                    return {
+                        "ticks": self._ticks_total,
+                        "eligible": eligible_count,
+                        "notified": False,
+                        "errors": self._errors_total,
+                        "cumulative_eligible": self._eligible_total,
+                        "cumulative_notified": self._notified_total,
+                        "cumulative_errors": self._errors_total,
+                        "skipped_promote_hold": eligible_count,
+                    }
                 notify_result = safe_notify_all_pools(
                     self._manager,
                     site_label="EligiblePendingSweep",
@@ -378,6 +408,9 @@ class EligiblePendingSweepService:
             "eligible_total": self._eligible_total,
             "notified_total": self._notified_total,
             "errors_total": self._errors_total,
+            # ── A3 additive counters (soak-gate-mcp-warmup) ─────────
+            "skipped_promote_hold_total": self._skipped_promote_hold_total,
+            "last_skipped_promote_hold": self._last_skipped_promote_hold,
         }
 
     # --------------------------------------------------------

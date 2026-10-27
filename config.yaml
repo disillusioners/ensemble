@@ -240,6 +240,28 @@ limits:
   # WORKER_POOL_SIZE / CHAT_WORKER_POOL_SIZE from daemon.constants.
   worker_pool_size: 5
   chat_worker_pool_size: 2
+  # Checkpoint saver pool sizing (soak-gate-mcp-warmup, A4). Same 4-tier
+  # ladder as llm_concurrency: DB override > env var
+  # LIMITS_CHECKPOINT_POOL_MAX_SIZE / LIMITS_CHECKPOINT_POOL_TIMEOUT_S >
+  # this yaml literal > built-in default. Both are boot-applied (the pool
+  # is constructed once at boot).
+  #
+  # SIZING ARITHMETIC (decisions §3d D2 — re-derivable):
+  #   concurrent checkpoint writers = min(llm_concurrency=10,
+  #                                       worker_pool_size=5 +
+  #                                       chat_worker_pool_size=2) = 7
+  #   max_size = clamp(7 writers + 1 readiness-probe slot + 2 headroom,
+  #                    min=5, max=20) = 10
+  # The previous hard-coded max_size=5 was BELOW the 7-writer ceiling.
+  # NOTE (honesty, decisions §3d D4): sizing does NOT cure the
+  # SQLAlchemy-side pool leak — a separate defect, a follow-up commission.
+  checkpoint_pool_max_size: 10
+  # The psycopg pool's ACQUISITION deadline. The library default is 30.0s;
+  # the readiness sentinel probe abandons at 0.9s/1.0s but the pool keeps
+  # its queued waiter until the pool deadline — at the 10s refresh cadence
+  # every timed-out probe leaves a ghost waiter that consumes a slot when
+  # granted. An explicit deadline caps that ghost lifetime.
+  checkpoint_pool_timeout_s: 5.0
   # S5 degenerate re-invoke cap (empty-response-guard Phase 1): max
   # consecutive reasoning-only / <think>-tag-only AI responses the
   # router re-invokes over before falling through to nudge/END

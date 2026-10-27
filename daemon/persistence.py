@@ -38,6 +38,10 @@ import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from daemon.checkpoint_adapter import CheckpointerAdapter, SqliteCheckpointerAdapter
+from daemon.constants import (
+    CHECKPOINT_POOL_MAX_SIZE_DEFAULT,
+    CHECKPOINT_POOL_TIMEOUT_S_DEFAULT,
+)
 from daemon.checkpoint_perf import (
     checkpoint_perf_logs_enabled,
     log_messages_api,
@@ -224,6 +228,34 @@ async def create_postgres_checkpointer(config: EnsembleConfig) -> CheckpointerAd
         f"{config.postgres.port}/{config.postgres.db}"
     )
 
+    # ── Checkpoint pool sizing knobs (soak-gate-mcp-warmup, A4) ────────
+    # Resolved ONCE here from the already-loaded ``EnsembleConfig`` (the
+    # 4-tier ladder — DB > env > yaml > default — is applied by the
+    # settings resolver before this point). Read defensively so a config
+    # object built without the ``limits`` section still yields the
+    # documented default tier instead of raising at pool construction.
+    limits_cfg = getattr(config, "limits", None)
+    checkpoint_pool_max_size = int(
+        getattr(
+            limits_cfg,
+            "checkpoint_pool_max_size",
+            CHECKPOINT_POOL_MAX_SIZE_DEFAULT,
+        )
+    )
+    checkpoint_pool_timeout_s = float(
+        getattr(
+            limits_cfg,
+            "checkpoint_pool_timeout_s",
+            CHECKPOINT_POOL_TIMEOUT_S_DEFAULT,
+        )
+    )
+    logger.info(
+        "Checkpoint pool sizing: max_size=%s timeout_s=%s "
+        "(limits.checkpoint_pool_max_size / limits.checkpoint_pool_timeout_s)",
+        checkpoint_pool_max_size,
+        checkpoint_pool_timeout_s,
+    )
+
     # Both the saver (psycopg) and the adapter's asyncpg pool are long-lived
     # resources tied to the application's lifetime. We open them inside a
     # single try/except so that a failure during pool creation also closes
@@ -270,18 +302,53 @@ async def create_postgres_checkpointer(config: EnsembleConfig) -> CheckpointerAd
         # handing out a connection — caught dead conns get replaced
         # transparently. The check runs on a worker thread, NOT the
         # caller's event loop.
+        #
+        # POOL SIZING (soak-gate-mcp-warmup, A4 — delivered knob; the
+        # "FUTURE KNOB" note below is SUPERSEDED):
+        #
+        # * ``max_size`` is the CONFIG-TUNABLE knob
+        #   ``limits.checkpoint_pool_max_size`` (default tier
+        #   ``CHECKPOINT_POOL_MAX_SIZE_DEFAULT`` = 10; env
+        #   ``LIMITS_CHECKPOINT_POOL_MAX_SIZE``; yaml
+        #   ``limits.checkpoint_pool_max_size``; DB override above all).
+        #   The arithmetic (decisions §3d D2):
+        #     concurrent_checkpoint_writers =
+        #         min(limits.llm_concurrency,
+        #             limits.worker_pool_size + limits.chat_worker_pool_size)
+        #         = min(10, 5 + 2) = 7
+        #     max_size = clamp(7 writers + 1 readiness-probe slot
+        #                      + 2 headroom, min=5, max=20) = 10
+        #   The previous hard-coded ``max_size=5`` was BELOW the 7-writer
+        #   ceiling before the probe was even counted.
+        # * ``timeout`` is the CONFIG-TUNABLE acquisition deadline
+        #   ``limits.checkpoint_pool_timeout_s`` (default tier
+        #   ``CHECKPOINT_POOL_TIMEOUT_S_DEFAULT`` = 5.0s; env
+        #   ``LIMITS_CHECKPOINT_POOL_TIMEOUT_S``). There was NO ``timeout``
+        #   kwarg before, so psycopg_pool's 30.0s library default applied:
+        #   the readiness sentinel probe abandons at 0.9s (inner) / 1.0s
+        #   (outer) but the pool RETAINS its queued waiter until the pool
+        #   deadline — at the 10s refresh cadence every timed-out probe
+        #   leaves a GHOST WAITER that consumes a slot when granted (a
+        #   self-amplifying drain). The explicit deadline caps that
+        #   ghost lifetime.
+        #
+        # HONESTY CLAUSE (decisions §3d D4 — MANDATORY wording): sizing
+        # does NOT cure the leak. The confirmed leak is on the OTHER pool
+        # (P1 — the SQLAlchemy manager engine, ``pool_size=5`` /
+        # ``max_overflow=10``); the checkpoint saver's own P2 pool is
+        # sized here with headroom against the concurrent-writer
+        # arithmetic and a bounded acquisition deadline. Neither change
+        # repairs a pool that is being poisoned underneath it — the
+        # SQLAlchemy-side idle-in-transaction leak is a SEPARATE defect
+        # owned by a follow-up commission. The readiness detail publishes
+        # BOTH pools' state (``detail.pool_state``) so the poison is
+        # VISIBLE rather than inferred from timeouts.
         saver_pool = AsyncConnectionPool(
             conninfo=conn_string,
             open=False,
-            # FUTURE KNOB (incident 2026-10-10 round-2 note): pool sizing
-            # (min_size/max_size) is hard-coded, not config-tunable. Both
-            # pools (saver + asyncpg) would take a settings-plumbed
-            # size if concurrent checkpoint contention ever warrants it —
-            # deliberately NOT done in this fix (no behavior change;
-            # a knob without an observed contention signal is surface
-            # without payoff).
             min_size=1,
-            max_size=5,
+            max_size=checkpoint_pool_max_size,
+            timeout=checkpoint_pool_timeout_s,
             check=AsyncConnectionPool.check_connection,
             max_lifetime=3600,
             max_idle=600,
@@ -308,10 +375,17 @@ async def create_postgres_checkpointer(config: EnsembleConfig) -> CheckpointerAd
         # This pool is independent of the saver pool (different driver,
         # different purpose — the maintenance service does raw SQL that
         # the saver does not own).
+        #
+        # ``max_size`` shares the checkpoint pool-sizing knob
+        # (``limits.checkpoint_pool_max_size``) — DISCLOSED: this is the
+        # max-size only; the saver pool's acquisition ``timeout`` kwarg has
+        # no asyncpg equivalent (asyncpg's ``create_pool`` takes
+        # ``max_inactive_connection_lifetime`` / ``command_timeout``, which
+        # are DIFFERENT semantics and are deliberately NOT wired here).
         pool = await asyncpg.create_pool(
             conn_string,
             min_size=1,
-            max_size=5,
+            max_size=checkpoint_pool_max_size,
         )
     except Exception:
         # If any step in resource setup fails, close the saver pool

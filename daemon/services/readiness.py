@@ -18,7 +18,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from concurrent.futures import TimeoutError as FuturesTimeout
+from datetime import datetime, timedelta, timezone
 from typing import Callable, NamedTuple, Optional
 
 from sqlalchemy import text as sa_text
@@ -31,10 +32,67 @@ from daemon.constants import (
     CHECKPOINT_SENTINEL_TASK_ID,
     CHECKPOINT_SENTINEL_THREAD_ID,
     CHECKPOINT_SENTINEL_VALUE,
+    READINESS_GRACE_HORIZON_S,
+    READINESS_LEAK_TICK_THRESHOLD,
 )
 from daemon.services.boot_epoch import BOOT_EPOCH_FLOOR
 
 logger = logging.getLogger(__name__)
+
+# ════════════════════════════════════════════════════════════════════════
+# Failure classes (soak-gate-mcp-warmup, A1)
+# ════════════════════════════════════════════════════════════════════════
+#
+# The failure-CLASS table is NORMATIVE in ``requirements.md`` §4.0 (the
+# table) and §4.2 (P2 — eligibility + aggregation + the counter kinds).
+# This module only fixes WHERE the classifier lives and WHAT it returns:
+# the class names below are the §4.0 names, unmodified, so no consumer can
+# drift into a private vocabulary.
+#
+# GRACE-ELIGIBLE (row 1 — "the system was simply too busy to answer
+# within its budget"):
+FAILURE_CLASS_PROBE_TIMEOUT = "probe_timeout"
+FAILURE_CLASS_POOL_BUSY = "pool_busy"
+FAILURE_CLASS_QUEUE_STALE = "queue_stale"
+FAILURE_CLASS_READ_TIMEOUT = "read_timeout"
+#
+# NEVER grace-eligible (rows 2-4 — hard failure / identity / boot / leak):
+FAILURE_CLASS_BOOT_INCOMPLETE = "boot_incomplete"
+FAILURE_CLASS_IDENTITY_MISMATCH = "identity_mismatch"
+FAILURE_CLASS_HARD_COMPONENT_RED = "hard_component_red"
+FAILURE_CLASS_NOT_SERVING = "not_serving"
+FAILURE_CLASS_POOL_LEAK = "pool_leak"
+FAILURE_CLASS_UNKNOWN = "unknown"
+#
+# The healthy marker (not a §4.0 row — a component that passed carries no
+# failure class).
+FAILURE_CLASS_OK = "ok"
+
+#: The GRACE-ELIGIBLE class set (requirements.md §4.2 P2). Anything NOT in
+#: this set is fail-closed: never held, always a counter RESET.
+GRACE_ELIGIBLE_FAILURE_CLASSES: frozenset[str] = frozenset(
+    {
+        FAILURE_CLASS_PROBE_TIMEOUT,
+        FAILURE_CLASS_POOL_BUSY,
+        FAILURE_CLASS_QUEUE_STALE,
+        FAILURE_CLASS_READ_TIMEOUT,
+    }
+)
+
+#: The readiness component names (the composite's four components). Used
+#: for the per-component class map and the failure streak.
+READINESS_COMPONENT_NAMES: tuple[str, ...] = (
+    "database",
+    "queue_freshness",
+    "services",
+    "checkpoint_saver",
+)
+
+#: The GRACE SCOPE published in ``detail.grace.scope`` — the only scope
+#: today ("load"). Boot age and burst state are published CONTEXT, never
+#: arming preconditions (requirements.md §4.2 P2).
+READINESS_GRACE_SCOPE_LOAD = "load"
+
 
 # Hard timeout for the SELECT 1 liveness query against the manager
 # engine. The existing engine is sync SQLAlchemy, so the query runs in
@@ -224,6 +282,51 @@ class ReadinessComposite:
     # auth disabled (field absent from the payload — OFF-state body
     # byte-identical) or state unknown. NEVER feeds `ready`/`reasons`.
     auth_dependency_status: Optional[str] = None
+    # ── A1 additive fields (soak-gate-mcp-warmup) ─────────────────────
+    # Every field below is ADDITIVE and OPTIONAL: ``None``/default ⇒ the
+    # key is either absent from the payload or carries its default. None
+    # of them EVER feeds ``ready``/``reasons``/``components`` — the
+    # daemon's verdict is untouched by the grace (decisions §3a A1.1:
+    # "the daemon never lies; the gate decides to wait").
+    #
+    # ``component_classes`` — the §4.0 failure class of EACH component
+    # (``"ok"`` for a healthy one). The class travels WITH the verdict so
+    # no consumer has to re-derive it from free-text reason strings (the
+    # legacy reason string is stale — decisions §2 row 23).
+    component_classes: dict[str, str] = field(default_factory=dict)
+    # ``first_seen_degraded`` — when the composite FIRST went degraded in
+    # the current degraded episode (None when ready).
+    first_seen_degraded: Optional[datetime] = None
+    # ``failure_streak`` — per-component consecutive-failure counts.
+    failure_streak: dict[str, int] = field(default_factory=dict)
+    # ``pool_state_sqlalchemy`` — ADVISORY pool (P1): {checkedout, size,
+    # overflow}. Published for the operator; it MUST NOT arm the leak
+    # class (requirements.md §4.4 P4).
+    pool_state_sqlalchemy: Optional[dict] = None
+    # ``pool_state_psycopg`` — ORACLE pool (P2): {pool_size,
+    # pool_available, requests_waiting}. Its signals DO arm the leak
+    # class (requirements.md §4.4 P4).
+    pool_state_psycopg: Optional[dict] = None
+    # ``leak_signal`` — {detected, checkedout_rising, streak, reason}.
+    leak_signal: Optional[dict] = None
+    # ``grace_active`` — is a class-gated grace currently held. The grace
+    # NEVER renders the daemon healthy: ``ready``/``reasons``/
+    # ``components`` are unchanged while it is held.
+    grace_active: bool = False
+    # ``grace_reason`` — the failure class that armed the grace.
+    grace_reason: Optional[str] = None
+    # ``grace_expires_at`` — the hard expiry (observation-relative clock).
+    grace_expires_at: Optional[datetime] = None
+    # ``grace_scope`` — the grace scope (today only "load").
+    grace_scope: Optional[str] = None
+    # ``grace_holds`` — how many ticks the grace has been held.
+    grace_holds: int = 0
+    # ``resume_hold`` — the A3 promote-txn hold's observable counters.
+    resume_hold: Optional[dict] = None
+    # ``burst_signals`` — the published burst CONTEXT (warmup pending,
+    # resume-deferral counters). CONTEXT ONLY: never an arming
+    # precondition (requirements.md §4.2 P2).
+    burst_signals: Optional[dict] = None
 
     @property
     def ready(self) -> bool:
@@ -271,6 +374,63 @@ class ReadinessComposite:
             payload["detail"]["auth_dependency_status"] = (
                 self.auth_dependency_status
             )
+        # ── A1 additive detail keys (soak-gate-mcp-warmup) ─────────────
+        # ``detail.grace`` — the class-gated grace state. It NEVER changes
+        # ``status``/``components``/``detail.reasons``: a grace-held
+        # composite is still ``degraded`` with its reasons intact (a
+        # suppressed reason string is a DEFECT — decisions §4 invariant 2).
+        # The block is ALWAYS published so the gate can read
+        # ``grace_active`` explicitly; when the grace is NOT held the block
+        # carries ONLY ``grace_active: false`` (no null-padded
+        # ``grace_reason``/``grace_expires_at``). An OLDER daemon that
+        # publishes NO ``grace`` block is read by the gate as the
+        # ``unknown`` class ⇒ fail-closed ⇒ no grace (R-MASK-8).
+        grace_block: dict = {"grace_active": bool(self.grace_active)}
+        if self.grace_active:
+            grace_block["grace_reason"] = self.grace_reason
+            grace_block["grace_expires_at"] = (
+                self.grace_expires_at.isoformat()
+                if self.grace_expires_at is not None
+                else None
+            )
+            grace_block["scope"] = self.grace_scope
+            grace_block["holds"] = int(self.grace_holds)
+        payload["detail"]["grace"] = grace_block
+        # ``detail.leak_signal`` — the leak predicate's verdict. The
+        # ORACLE pool (P2) arms it; the ADVISORY pool (P1) is published
+        # but MUST NOT arm it (requirements.md §4.4 P4).
+        leak = self.leak_signal
+        if leak is not None:
+            payload["detail"]["leak_signal"] = {
+                "detected": bool(leak.get("detected", False)),
+                "checkedout_rising": bool(leak.get("checkedout_rising", False)),
+                "streak": int(leak.get("streak", 0) or 0),
+            }
+            if leak.get("reason"):
+                payload["detail"]["leak_signal"]["reason"] = leak["reason"]
+        # ``detail.pool_state`` — the pool-health inputs (P1 advisory /
+        # P2 oracle). Published whenever the pool objects are observable,
+        # so an operator can SEE the poison instead of inferring it from
+        # timeouts (decisions §3d D5).
+        pool_state: dict = {}
+        if self.pool_state_sqlalchemy is not None:
+            pool_state["sqlalchemy"] = dict(self.pool_state_sqlalchemy)
+        if self.pool_state_psycopg is not None:
+            pool_state["psycopg"] = dict(self.pool_state_psycopg)
+        if pool_state:
+            payload["detail"]["pool_state"] = pool_state
+        # ``detail.component_classes`` — the §4.0 failure class per
+        # component. The gate consumes these instead of re-deriving a
+        # class from free-text reason strings.
+        if self.component_classes:
+            payload["detail"]["component_classes"] = dict(self.component_classes)
+        # ``detail.resume_hold`` / ``detail.burst_signals`` — the A3 hold
+        # counters and the published burst CONTEXT (never arming
+        # preconditions).
+        if self.resume_hold is not None:
+            payload["detail"]["resume_hold"] = dict(self.resume_hold)
+        if self.burst_signals is not None:
+            payload["detail"]["burst_signals"] = dict(self.burst_signals)
         return payload
 
 
@@ -292,6 +452,412 @@ def evaluate_queue_freshness(
     return age <= threshold_seconds, age
 
 
+# ════════════════════════════════════════════════════════════════════════
+# Pool-state sampling (A1 — leak predicate inputs)
+# ════════════════════════════════════════════════════════════════════════
+
+
+def resolve_psycopg_pool(checkpointer: Any) -> Any:
+    """Resolve the psycopg checkpoint-saver pool object (P2 — the ORACLE).
+
+    The saver stores its pool under ``.conn`` (``langgraph/checkpoint/
+    postgres/aio.py:57``); the daemon's ``raw_saver`` is the retry PROXY,
+    whose ``__getattr__`` passes ``.conn`` through unchanged. The pool is
+    duck-typed on the pool-only ``get_stats`` + ``min_size`` attributes
+    (an ``AsyncConnection`` has neither) — the same detection the
+    sentinel probe uses.
+
+    Returns ``None`` when the saver is not pool-backed (SQLite / the
+    historical single-connection shape) — the caller then treats the pool
+    objects as UNAVAILABLE (the leak predicate's streak-arm fallback).
+    """
+    saver = getattr(checkpointer, "raw_saver", None) if checkpointer is not None else None
+    if saver is None:
+        return None
+    conn = getattr(saver, "conn", None)
+    if conn is None:
+        return None
+    if hasattr(conn, "get_stats") and hasattr(conn, "min_size"):
+        return conn
+    return None
+
+
+def sample_sqlalchemy_pool_state(pool: Any) -> Optional[dict]:
+    """Sample the ADVISORY pool (P1 — the SQLAlchemy manager engine).
+
+    Returns ``{"checkedout": int, "size": int, "overflow": int}`` or
+    ``None`` when the pool object is absent / not a QueuePool-shaped pool.
+
+    P1 is ADVISORY (requirements.md §4.4 P4): its signals are PUBLISHED
+    in ``detail.pool_state`` but MUST NOT arm the leak class — with
+    ``pool_size=5`` / ``max_overflow=10``, ``overflow() > 0`` is non-zero
+    on a busy-but-healthy pool BY DESIGN, so a P1-armed leak class would
+    refuse the grace on the incident's own busy shape.
+
+    The read is IN-MEMORY (no DB round trip): an extra query on a
+    poisoned pool would amplify the disease.
+    """
+    if pool is None:
+        return None
+    try:
+        return {
+            "checkedout": int(pool.checkedout()),
+            "size": int(pool.size()),
+            "overflow": int(pool.overflow()),
+        }
+    except Exception:  # noqa: BLE001 — a pool without this API is "unknown"
+        return None
+
+
+def sample_psycopg_pool_state(pool: Any) -> Optional[dict]:
+    """Sample the ORACLE pool (P2 — the psycopg checkpoint-saver pool).
+
+    Returns ``{"pool_size": int, "pool_available": int,
+    "requests_waiting": int}`` or ``None`` when the pool object is
+    absent or its ``get_stats()`` plumbing is unavailable.
+
+    P2 is the ORACLE (requirements.md §4.4 P4): its signals ARM the leak
+    class. The read is IN-MEMORY (``get_stats()`` reads the pool's own
+    counters; it never touches PostgreSQL).
+    """
+    if pool is None:
+        return None
+    getter = getattr(pool, "get_stats", None)
+    if not callable(getter):
+        return None
+    try:
+        stats = getter() or {}
+    except Exception:  # noqa: BLE001 — unreadable stats ⇒ "unavailable"
+        return None
+    if not isinstance(stats, dict):
+        return None
+    try:
+        return {
+            "pool_size": int(stats.get("pool_size", 0) or 0),
+            "pool_available": int(stats.get("pool_available", 0) or 0),
+            "requests_waiting": int(stats.get("requests_waiting", 0) or 0),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
+# ════════════════════════════════════════════════════════════════════════
+# The grace state machine (A1 — requirements.md §4.2 P2 / §4.3 P3 /
+# §4.4 P4)
+# ════════════════════════════════════════════════════════════════════════
+
+
+@dataclass(frozen=True)
+class GraceObservation:
+    """One tick's grace verdict (the tracker's output).
+
+    ``grace_active`` — the CONJUNCTION of §4.2 P2: every degraded
+    component is grace-eligible AND no leak signal is present. It is
+    False whenever the composite is fully healthy (the grace is then
+    irrelevant) and False whenever ANY component carries a
+    never-eligible class.
+    ``grace_reason`` — the failure class that armed the grace (the class
+    of the first degraded component).
+    ``grace_expires_at`` — the OBSERVATION-RELATIVE expiry
+    (``first_grace_eligible_observation + GRACE_HORIZON_S``). It is
+    NEVER extended: a re-arm starts a NEW window with a NEW expiry.
+    ``holds`` — how many ticks the grace has been held so far.
+    ``leak_signal`` — the leak predicate's verdict for this tick.
+    ``failure_streak`` — the per-component consecutive-failure counts.
+    ``first_seen_degraded`` — when the current degraded episode began.
+    """
+
+    grace_active: bool = False
+    grace_reason: Optional[str] = None
+    grace_expires_at: Optional[datetime] = None
+    grace_scope: Optional[str] = None
+    holds: int = 0
+    leak_signal: dict = field(default_factory=dict)
+    failure_streak: dict = field(default_factory=dict)
+    first_seen_degraded: Optional[datetime] = None
+
+
+class GraceTracker:
+    """Stateful, class-gated grace-window tracker.
+
+    The daemon-side half of A1. It is deliberately SEPARATE from the
+    verdict: the tracker NEVER changes ``ready`` / ``reasons`` /
+    ``components`` — it only publishes whether a class-gated grace is
+    currently held, so the GATE can decide to wait (decisions §3a A1.1:
+    "the daemon never lies; the gate decides to wait").
+
+    THE STATE MACHINE (requirements.md §4.2 P2 + §4.3 P3 + §4.4 P4):
+
+    * **Arming** — the FIRST tick whose degraded components are ALL
+      grace-eligible (and no leak signal is present) arms the window and
+      records ``armed_at``. The expiry is
+      ``armed_at + GRACE_HORIZON_S`` — ONE clock, OBSERVATION-RELATIVE.
+      There is NO boot-relative ceiling.
+    * **Holding** — while the window is open, the grace is held only on
+      ticks where the CONJUNCTION still holds. Any never-eligible class
+      or any leak signal ⇒ ``grace_active`` is False THIS tick (the
+      conjunction is not a vote and there is no per-component grace).
+    * **Expiry** — at ``armed_at + GRACE_HORIZON_S`` the window is
+      lapsed: ``grace_active`` is False. The expiry is NEVER extended.
+    * **Re-arm** — re-arming requires the grace to have FULLY lapsed: a
+      NEW window starts at the next grace-eligible observation, with a
+      NEW expiry. A new window is NOT an extension of the old one (the
+      old expiry is never moved forward).
+    * **Disengage** — a leak signal (or any never-eligible class)
+      disengages the grace immediately; the window's expiry is NOT
+      moved.
+
+    The tracker is a plain in-process object (no schema, no migration);
+    it lives on ``app.state`` so the readiness detail and the operators
+    can observe it.
+    """
+
+    def __init__(
+        self,
+        *,
+        horizon_s: float = READINESS_GRACE_HORIZON_S,
+        leak_tick_threshold: int = READINESS_LEAK_TICK_THRESHOLD,
+    ) -> None:
+        self._horizon_s = float(horizon_s)
+        self._leak_tick_threshold = int(leak_tick_threshold)
+        self._armed_at: Optional[datetime] = None
+        self._holds = 0
+        self._failure_streak: dict[str, int] = {}
+        self._first_seen_degraded: Optional[datetime] = None
+        # Leak-predicate history (per-process, in-memory).
+        self._available_history: list[int] = []
+        self._checkedout_history: list[int] = []
+        self._waiting_streak = 0
+
+    # ── observability ──────────────────────────────────────────────
+    @property
+    def horizon_s(self) -> float:
+        """The grace horizon (seconds) — ONE number, config-free."""
+        return self._horizon_s
+
+    @property
+    def armed_at(self) -> Optional[datetime]:
+        """When the current window was armed (None when never armed)."""
+        return self._armed_at
+
+    @property
+    def holds(self) -> int:
+        """How many ticks the grace has been held (all windows)."""
+        return self._holds
+
+    # ── the tick ───────────────────────────────────────────────────
+    def observe(
+        self,
+        *,
+        component_classes: dict[str, str],
+        degraded_components: list[str],
+        pool_state_psycopg: Optional[dict] = None,
+        pool_state_sqlalchemy: Optional[dict] = None,
+        now: Optional[datetime] = None,
+    ) -> GraceObservation:
+        """Evaluate one readiness tick and return the grace verdict.
+
+        ``component_classes`` — the §4.0 class of each component
+        (``"ok"`` for a healthy one). ``degraded_components`` — the names
+        of the components that failed this tick. ``pool_state_*`` — the
+        sampled pool states (P2 = oracle, P1 = advisory).
+        """
+        moment = now or datetime.now(timezone.utc)
+
+        # ── 1. per-component failure streak ────────────────────────
+        streak = dict(self._failure_streak)
+        for name in READINESS_COMPONENT_NAMES:
+            cls = component_classes.get(name)
+            if cls and cls != FAILURE_CLASS_OK:
+                streak[name] = int(streak.get(name, 0)) + 1
+            else:
+                streak[name] = 0
+        self._failure_streak = streak
+        max_streak = max(streak.values()) if streak else 0
+
+        # ── 2. leak predicate (requirements.md §4.4 P4) ────────────
+        leak = self._evaluate_leak(
+            pool_state_psycopg=pool_state_psycopg,
+            pool_state_sqlalchemy=pool_state_sqlalchemy,
+            max_streak=max_streak,
+        )
+
+        # ── 3. degraded episode bookkeeping ────────────────────────
+        degraded = [c for c in degraded_components if c]
+        if degraded:
+            if self._first_seen_degraded is None:
+                self._first_seen_degraded = moment
+        else:
+            self._first_seen_degraded = None
+
+        # ── 4. the CONJUNCTION (§4.2 P2 — not a vote) ─────────────
+        degraded_classes = [
+            component_classes.get(name) or FAILURE_CLASS_UNKNOWN
+            for name in degraded
+        ]
+        eligible = (
+            bool(degraded)
+            and all(c in GRACE_ELIGIBLE_FAILURE_CLASSES for c in degraded_classes)
+            and not leak.get("detected")
+        )
+
+        # ── 5. arming / expiry (§4.3 P3 — ONE observation-relative clock) ──
+        if eligible and self._armed_at is None:
+            self._armed_at = moment
+        expires_at = (
+            self._armed_at + timedelta(seconds=self._horizon_s)
+            if self._armed_at is not None
+            else None
+        )
+        grace_active = bool(
+            eligible
+            and expires_at is not None
+            and moment < expires_at
+        )
+        if grace_active:
+            self._holds += 1
+
+        return GraceObservation(
+            grace_active=grace_active,
+            grace_reason=(degraded_classes[0] if degraded_classes else None),
+            grace_expires_at=expires_at,
+            grace_scope=READINESS_GRACE_SCOPE_LOAD if grace_active else None,
+            holds=self._holds,
+            leak_signal=leak,
+            failure_streak=dict(streak),
+            first_seen_degraded=self._first_seen_degraded,
+        )
+
+    # ── the leak predicate (requirements.md §4.4 P4) ───────────────
+    def _evaluate_leak(
+        self,
+        *,
+        pool_state_psycopg: Optional[dict],
+        pool_state_sqlalchemy: Optional[dict],
+        max_streak: int,
+    ) -> dict:
+        """Compute the leak signal for one tick.
+
+        The ORACLE is the P2 psycopg saver pool: it arms on
+        ``requests_waiting > 0`` sustained, or ``pool_available`` strictly
+        decreasing across 3 consecutive ticks, or the pool size exhausted.
+
+        The P1 SQLAlchemy pool is ADVISORY: its signals are PUBLISHED but
+        MUST NOT arm the class.
+
+        The STREAK arm (the same-component-failing-on-every-tick
+        fallback) fires ONLY when the pool objects are UNAVAILABLE
+        (S9): with the pool objects available, a sustained busy-but-
+        healthy burst — the incident's own shape — must never be
+        classified as a leak.
+        """
+        checkedout_rising = self._checkedout_rising(pool_state_sqlalchemy)
+
+        # ── ORACLE pool (P2) ────────────────────────────────────────
+        if pool_state_psycopg is not None:
+            waiting = int(pool_state_psycopg.get("requests_waiting", 0) or 0)
+            available = pool_state_psycopg.get("pool_available")
+            pool_size = pool_state_psycopg.get("pool_size")
+
+            if waiting > 0:
+                self._waiting_streak += 1
+            else:
+                self._waiting_streak = 0
+            if self._waiting_streak >= self._leak_tick_threshold:
+                return {
+                    "detected": True,
+                    "reason": (
+                        "psycopg pool requests_waiting>0 sustained "
+                        f"({self._waiting_streak} ticks)"
+                    ),
+                    "checkedout_rising": checkedout_rising,
+                    "streak": int(max_streak),
+                }
+
+            if available is not None:
+                self._available_history.append(int(available))
+                while len(self._available_history) > self._leak_tick_threshold:
+                    self._available_history.pop(0)
+                if (
+                    len(self._available_history) == self._leak_tick_threshold
+                    and self._available_history[-1]
+                    < self._available_history[-2]
+                    < self._available_history[-3]
+                ):
+                    return {
+                        "detected": True,
+                        "reason": (
+                            "psycopg pool_available strictly decreasing across "
+                            f"{self._leak_tick_threshold} ticks"
+                        ),
+                        "checkedout_rising": checkedout_rising,
+                        "streak": int(max_streak),
+                    }
+
+            if (
+                pool_size is not None
+                and available is not None
+                and int(available) <= 0
+                and int(pool_size) > 0
+            ):
+                return {
+                    "detected": True,
+                    "reason": "psycopg pool exhausted (pool_available<=0)",
+                    "checkedout_rising": checkedout_rising,
+                    "streak": int(max_streak),
+                }
+
+            # Pool objects ARE available ⇒ the streak arm MUST NOT fire.
+            return {
+                "detected": False,
+                "reason": None,
+                "checkedout_rising": checkedout_rising,
+                "streak": int(max_streak),
+            }
+
+        # ── pool objects UNAVAILABLE ⇒ the streak arm is eligible (S9) ──
+        if int(max_streak) >= self._leak_tick_threshold:
+            return {
+                "detected": True,
+                "reason": (
+                    "same component failing on every tick with pool objects "
+                    f"unavailable ({max_streak} ticks)"
+                ),
+                "checkedout_rising": checkedout_rising,
+                "streak": int(max_streak),
+            }
+        return {
+            "detected": False,
+            "reason": None,
+            "checkedout_rising": checkedout_rising,
+            "streak": int(max_streak),
+        }
+
+    def _checkedout_rising(self, pool_state_sqlalchemy: Optional[dict]) -> bool:
+        """ADVISORY signal: the P1 ``checkedout()`` count rising monotonically.
+
+        PUBLISHED in ``detail.leak_signal.checkedout_rising`` and NEVER
+        arming the leak class (requirements.md §4.4 P4).
+        """
+        if pool_state_sqlalchemy is None:
+            return False
+        checkedout = pool_state_sqlalchemy.get("checkedout")
+        if checkedout is None:
+            return False
+        try:
+            self._checkedout_history.append(int(checkedout))
+        except (TypeError, ValueError):
+            return False
+        while len(self._checkedout_history) > self._leak_tick_threshold:
+            self._checkedout_history.pop(0)
+        if len(self._checkedout_history) < self._leak_tick_threshold:
+            return False
+        return all(
+            self._checkedout_history[i] < self._checkedout_history[i + 1]
+            for i in range(len(self._checkedout_history) - 1)
+        )
+
+
 def compute_readiness_composite(
     *,
     database_ok: bool,
@@ -303,6 +869,19 @@ def compute_readiness_composite(
     inflight_turns: Optional[int] = None,
     checkpoint_saver_ok: bool = True,
     auth_dependency_status: Optional[str] = None,
+    component_classes: Optional[dict[str, str]] = None,
+    first_seen_degraded: Optional[datetime] = None,
+    failure_streak: Optional[dict[str, int]] = None,
+    pool_state_sqlalchemy: Optional[dict] = None,
+    pool_state_psycopg: Optional[dict] = None,
+    leak_signal: Optional[dict] = None,
+    grace_active: bool = False,
+    grace_reason: Optional[str] = None,
+    grace_expires_at: Optional[datetime] = None,
+    grace_scope: Optional[str] = None,
+    grace_holds: int = 0,
+    resume_hold: Optional[dict] = None,
+    burst_signals: Optional[dict] = None,
 ) -> ReadinessComposite:
     """Assemble a composite from component outcomes.
 
@@ -319,6 +898,12 @@ def compute_readiness_composite(
     ``auth_dependency_status`` (P3 T3.9) is advisory-only in the same
     way: the FR-30 enum value (``ok``/``degraded``/``unconfigured``)
     rides the composite verbatim and never enters ``ready``/``reasons``.
+
+    The A1 keyword arguments are ADDITIVE and advisory in exactly the
+    same way: the grace state, the leak signal, the pool state and the
+    failure classes ride the composite but NEVER enter
+    ``ready``/``reasons``/``components``. The daemon never lies: a
+    grace-held composite is still ``degraded`` with its reasons intact.
     """
     reasons: list[str] = list(extra_reasons or [])
     if not database_ok:
@@ -334,8 +919,13 @@ def compute_readiness_composite(
             "services: critical services (job_processor/live_hub) not bound"
         )
     if not checkpoint_saver_ok:
+        # The reason names the SENTINEL READ — the probe was replaced by
+        # the sentinel ``aget_tuple`` cycle (the old string still named
+        # the removed ``AsyncConnectionPool.check()`` probe; decisions §2
+        # row 23).
         reasons.append(
-            "checkpoint_saver: AsyncConnectionPool.check() failed or timed out"
+            "checkpoint_saver: sentinel checkpoint read (aget_tuple) "
+            "failed or timed out"
         )
     return ReadinessComposite(
         database=database_ok,
@@ -347,7 +937,47 @@ def compute_readiness_composite(
         checked_at=checked_at or datetime.now(timezone.utc),
         inflight_turns=inflight_turns,
         auth_dependency_status=auth_dependency_status,
+        component_classes=dict(component_classes or {}),
+        first_seen_degraded=first_seen_degraded,
+        failure_streak=dict(failure_streak or {}),
+        pool_state_sqlalchemy=pool_state_sqlalchemy,
+        pool_state_psycopg=pool_state_psycopg,
+        leak_signal=leak_signal,
+        grace_active=grace_active,
+        grace_reason=grace_reason,
+        grace_expires_at=grace_expires_at,
+        grace_scope=grace_scope,
+        grace_holds=grace_holds,
+        resume_hold=resume_hold,
+        burst_signals=burst_signals,
     )
+
+
+#: The A1 additive fields, extracted from a composite so a rebuilt copy
+#: (the forced-degradation drill) carries them forward instead of
+#: dropping them.
+_A1_COMPOSITE_FIELD_NAMES = (
+    "component_classes",
+    "first_seen_degraded",
+    "failure_streak",
+    "pool_state_sqlalchemy",
+    "pool_state_psycopg",
+    "leak_signal",
+    "grace_active",
+    "grace_reason",
+    "grace_expires_at",
+    "grace_scope",
+    "grace_holds",
+    "resume_hold",
+    "burst_signals",
+)
+
+
+def _A1_COMPOSITE_FIELDS(composite: "ReadinessComposite") -> dict:
+    """The A1 additive fields of ``composite`` as a kwargs dict."""
+    return {
+        name: getattr(composite, name) for name in _A1_COMPOSITE_FIELD_NAMES
+    }
 
 
 def forced_degradation_active(env_value: Optional[str]) -> bool:
@@ -395,6 +1025,7 @@ def apply_forced_degradation(
             checked_at=composite.checked_at,
             forced_degraded=True,
             auth_dependency_status=composite.auth_dependency_status,
+            **_A1_COMPOSITE_FIELDS(composite),
         )
     return ReadinessComposite(
         database=composite.database,
@@ -408,18 +1039,24 @@ def apply_forced_degradation(
         checked_at=composite.checked_at,
         forced_degraded=True,
         auth_dependency_status=composite.auth_dependency_status,
+        **_A1_COMPOSITE_FIELDS(composite),
     )
 
 
 async def refresh_readiness_composite(
     *,
-    db_probe: Optional[Callable[[], bool]],
-    queue_probe: Optional[Callable[[], Optional[float]]],
+    db_probe: Optional[Callable[[], Any]],
+    queue_probe: Optional[Callable[[], Any]],
     services_ok: bool,
     queue_freshness_threshold_seconds: float,
     now: Optional[Callable[[], datetime]] = None,
-    checkpoint_saver_probe: Optional[Callable[[], bool]] = None,
+    checkpoint_saver_probe: Optional[Callable[[], Any]] = None,
     auth_dependency_status: Optional[str] = None,
+    grace_tracker: Optional["GraceTracker"] = None,
+    sqlalchemy_pool: Any = None,
+    psycopg_pool: Any = None,
+    resume_hold: Optional[dict] = None,
+    burst_signals: Optional[dict] = None,
 ) -> ReadinessComposite:
     """Run one refresh cycle and return the composite.
 
@@ -453,42 +1090,86 @@ async def refresh_readiness_composite(
     the advisory ``inflight_turns`` count alongside the age. A
     timeout or failure leaves the count None (unknown — advisory
     fields never guess).
+
+    PROBE RETURN CONTRACT (A1): a probe may return EITHER the legacy
+    bare bool OR a ``(verdict, failure_class)`` pair. The pair form is
+    what the shipped factories return (decisions §3d D1a: "the probe
+    callable's signature goes from ``Callable[[], bool]`` to a
+    ``(bool, class)`` pair, so the orchestrator can consume the class
+    without re-deriving it from free-text reasons"). The legacy bool
+    form stays ACCEPTED so existing injected callables (and the
+    pure-seam tests) keep working unchanged: a bare ``True`` means
+    healthy with the class ``ok``, a bare ``False`` means failed with
+    the class ``unknown`` — which is NEVER grace-eligible (fail-closed).
     """
     checked_at = (now or (lambda: datetime.now(timezone.utc)))()
 
-    async def _guarded(probe, timeout_s, default):
-        """Run one probe; return ``(timed_out, value)``.
+    def _unpack(value: Any) -> tuple[Any, Optional[str]]:
+        """Split a probe result into ``(verdict, failure_class)``.
 
-        ``value`` is the probe result, the component default when the
+        The pair form is ``(verdict, class)``. A ``QueueProbeResult`` is a
+        2-field NamedTuple and is NOT a pair — it is returned verbatim by
+        the queue probe, which is handled on its own path below.
+        """
+        if isinstance(value, QueueProbeResult):
+            return value, None
+        if isinstance(value, tuple) and len(value) == 2:
+            verdict, cls = value
+            return verdict, (cls if isinstance(cls, str) else None)
+        if isinstance(value, bool):
+            return value, (FAILURE_CLASS_OK if value else FAILURE_CLASS_UNKNOWN)
+        return value, None
+
+    async def _guarded(probe, timeout_s, default):
+        """Run one probe; return ``(timed_out, raw_value, failure_class)``.
+
+        ``raw_value`` is the probe result, the component default when the
         probe is ``None``/raises, or ``None`` on timeout; ``timed_out``
         disambiguates a timeout from a legitimate ``None`` default so
-        each component can apply its own timeout semantics.
+        each component can apply its own timeout semantics;
+        ``failure_class`` is the §4.0 class the ORCHESTRATOR attributes to
+        the failure (a TIMEOUT ⇒ ``probe_timeout``; an EXCEPTION ⇒
+        ``hard_component_red``). A probe that returns a ``(verdict, class)``
+        PAIR overrides the orchestrator's attribution with the pair's own
+        class — that is the D1a contract (the probe knows more than the
+        orchestrator does).
         """
         if probe is None:
-            return False, default
+            return False, default, None
         try:
-            return False, await asyncio.wait_for(
+            raw = await asyncio.wait_for(
                 asyncio.to_thread(probe), timeout=timeout_s
             )
         except asyncio.CancelledError:
             raise
         except TimeoutError:
-            return True, None
+            return True, None, FAILURE_CLASS_PROBE_TIMEOUT
         except Exception as exc:
             # W2 (incident 2026-10-10): probe exceptions can carry
             # libpq server identifiers — redact before logging.
             logger.warning(
                 "Readiness probe failed: %s", redact_exc_str(exc)
             )
-            return False, default
+            # An EXCEPTION (not a timeout) is row 2 — NEVER grace-
+            # eligible (requirements.md §4.0).
+            return False, default, FAILURE_CLASS_HARD_COMPONENT_RED
+        return False, raw, None
 
-    db_timed_out, database_ok = await _guarded(db_probe, DB_PROBE_TIMEOUT_S, False)
-    # A DB-probe timeout MUST degrade ``database`` — the guard returns
-    # None as the value, but the flag is authoritative (m4: a truthy
-    # sentinel leaking into database_ok would fail OPEN).
+    db_timed_out, database_raw, db_class = await _guarded(
+        db_probe, DB_PROBE_TIMEOUT_S, False
+    )
+    database_ok, db_pair_class = _unpack(database_raw)
+    if db_pair_class:
+        db_class = db_pair_class
     if db_timed_out:
         database_ok = False
-    queue_timed_out, queue_result = await _guarded(
+        db_class = FAILURE_CLASS_PROBE_TIMEOUT
+    if database_ok and db_class is None:
+        db_class = FAILURE_CLASS_OK
+    elif not database_ok and db_class in (None, FAILURE_CLASS_OK):
+        db_class = FAILURE_CLASS_UNKNOWN
+
+    queue_timed_out, queue_raw, _queue_guard_class = await _guarded(
         queue_probe, QUEUE_PROBE_TIMEOUT_S, None
     )
 
@@ -500,24 +1181,33 @@ async def refresh_readiness_composite(
     if checkpoint_saver_probe is None:
         checkpoint_saver_ok = True
         ckpt_extra_reason = ""
+        ckpt_class = FAILURE_CLASS_OK
     else:
-        ckpt_timed_out, ckpt_value = await _guarded(
+        ckpt_timed_out, ckpt_raw, ckpt_class = await _guarded(
             checkpoint_saver_probe, CHECKPOINT_SAVER_PROBE_TIMEOUT_S, False
         )
+        ckpt_value, ckpt_pair_class = _unpack(ckpt_raw)
+        if ckpt_pair_class:
+            ckpt_class = ckpt_pair_class
         if ckpt_timed_out:
             checkpoint_saver_ok = False
+            ckpt_class = FAILURE_CLASS_PROBE_TIMEOUT
             ckpt_extra_reason = (
                 "checkpoint_saver: sentinel checkpoint read (aget_tuple) "
                 f"timed out after {CHECKPOINT_SAVER_PROBE_TIMEOUT_S}s"
             )
         elif not ckpt_value:
             checkpoint_saver_ok = False
+            if ckpt_class in (None, FAILURE_CLASS_OK):
+                ckpt_class = FAILURE_CLASS_HARD_COMPONENT_RED
             ckpt_extra_reason = (
                 "checkpoint_saver: sentinel checkpoint read failed "
                 "(checkpoint path cannot serve reads — see readiness logs)"
             )
         else:
             checkpoint_saver_ok = True
+            if ckpt_class is None:
+                ckpt_class = FAILURE_CLASS_OK
             ckpt_extra_reason = ""
 
     inflight_turns: Optional[int] = None
@@ -528,9 +1218,9 @@ async def refresh_readiness_composite(
         queue_max_age_seconds = None
         fresh = False
         extra_reasons.append("queue_freshness: queue probe timed out")
-    elif isinstance(queue_result, QueueProbeResult):
-        queue_max_age_seconds = queue_result.max_age_seconds
-        inflight_turns = queue_result.inflight_turns
+    elif isinstance(queue_raw, QueueProbeResult):
+        queue_max_age_seconds = queue_raw.max_age_seconds
+        inflight_turns = queue_raw.inflight_turns
         # Negative ages clamp to 0.0 inside evaluate_queue_freshness —
         # see the freshness-clamp docstring at :245.
         fresh, age = evaluate_queue_freshness(
@@ -539,7 +1229,7 @@ async def refresh_readiness_composite(
         )
         queue_max_age_seconds = age
     else:
-        queue_max_age_seconds = queue_result
+        queue_max_age_seconds = queue_raw
         # Negative ages clamp to 0.0 inside evaluate_queue_freshness —
         # see the freshness-clamp docstring at :245.
         fresh, age = evaluate_queue_freshness(
@@ -549,6 +1239,46 @@ async def refresh_readiness_composite(
         queue_max_age_seconds = age
     if ckpt_extra_reason:
         extra_reasons.append(ckpt_extra_reason)
+
+    # ── A1: per-component failure classes (§4.0) ────────────────────
+    # The class travels WITH the verdict so no consumer re-derives it
+    # from the (stale) free-text reason strings.
+    component_classes: dict[str, str] = {
+        "database": db_class or FAILURE_CLASS_OK,
+        "services": (
+            FAILURE_CLASS_OK if services_ok else FAILURE_CLASS_HARD_COMPONENT_RED
+        ),
+        "checkpoint_saver": ckpt_class or FAILURE_CLASS_OK,
+    }
+    if queue_timed_out:
+        queue_class = FAILURE_CLASS_PROBE_TIMEOUT
+    elif fresh:
+        queue_class = FAILURE_CLASS_OK
+    else:
+        queue_class = FAILURE_CLASS_QUEUE_STALE
+    component_classes["queue_freshness"] = queue_class
+
+    degraded_components = [
+        name
+        for name in READINESS_COMPONENT_NAMES
+        if component_classes.get(name, FAILURE_CLASS_UNKNOWN)
+        != FAILURE_CLASS_OK
+    ]
+
+    # ── A1: pool-state sampling + the class-gated grace ────────────
+    pool_state_sqlalchemy = sample_sqlalchemy_pool_state(sqlalchemy_pool)
+    pool_state_psycopg = sample_psycopg_pool_state(psycopg_pool)
+
+    observation = None
+    if grace_tracker is not None:
+        observation = grace_tracker.observe(
+            component_classes=component_classes,
+            degraded_components=degraded_components,
+            pool_state_psycopg=pool_state_psycopg,
+            pool_state_sqlalchemy=pool_state_sqlalchemy,
+            now=checked_at,
+        )
+
     return compute_readiness_composite(
         database_ok=database_ok,
         queue_fresh_ok=fresh,
@@ -559,25 +1289,46 @@ async def refresh_readiness_composite(
         inflight_turns=inflight_turns,
         checkpoint_saver_ok=checkpoint_saver_ok,
         auth_dependency_status=auth_dependency_status,
+        component_classes=component_classes,
+        first_seen_degraded=(observation.first_seen_degraded if observation else None),
+        failure_streak=(observation.failure_streak if observation else {}),
+        pool_state_sqlalchemy=pool_state_sqlalchemy,
+        pool_state_psycopg=pool_state_psycopg,
+        leak_signal=(observation.leak_signal if observation else None),
+        grace_active=bool(observation.grace_active) if observation else False,
+        grace_reason=(observation.grace_reason if observation else None),
+        grace_expires_at=(observation.grace_expires_at if observation else None),
+        grace_scope=(observation.grace_scope if observation else None),
+        grace_holds=(observation.holds if observation else 0),
+        resume_hold=resume_hold,
+        burst_signals=burst_signals,
     )
 
 
-def make_db_probe(engine: Engine) -> Callable[[], bool]:
+def make_db_probe(engine: Engine) -> Callable[[], tuple[bool, Optional[str]]]:
     """Build the database component probe bound to a sync engine.
 
     Raises on any connectivity/execute failure — the orchestrator's
-    timeout/exception guard turns that into ``database=False``.
+    timeout/exception guard turns that into ``database=False`` AND
+    classifies it as ``hard_component_red`` (an EXCEPTION is row 2, never
+    grace-eligible).
+
+    The probe returns the A1 ``(verdict, failure_class)`` PAIR: the
+    verdict and its §4.0 class travel together so the orchestrator never
+    re-derives a class from a free-text reason string.
     """
 
-    def _probe() -> bool:
+    def _probe() -> tuple[bool, Optional[str]]:
         with engine.connect() as conn:
             conn.execute(sa_text("SELECT 1"))
-        return True
+        return True, None
 
     return _probe
 
 
-def make_checkpoint_saver_probe(checkpointer: Any) -> Callable[[], bool]:
+def make_checkpoint_saver_probe(
+    checkpointer: Any,
+) -> Callable[[], tuple[bool, Optional[str]]]:
     """Build a sync probe that reads a SENTINEL CHECKPOINT through the
     saver path.
 
@@ -666,8 +1417,8 @@ def make_checkpoint_saver_probe(checkpointer: Any) -> Callable[[], bool]:
         # No running loop at construction time (e.g. test seam).
         # The probe becomes a no-op True so it never degrades a
         # refresh cycle that runs without a loop.
-        def _noop_probe() -> bool:
-            return True
+        def _noop_probe() -> tuple[bool, Optional[str]]:
+            return True, None
 
         return _noop_probe
 
@@ -685,8 +1436,8 @@ def make_checkpoint_saver_probe(checkpointer: Any) -> Callable[[], bool]:
         # never degrades for SQLite installs (the spec-required
         # pass-through). This is intentionally NOT a "skip" — the
         # component is set True so the composite stays ready.
-        def _passthrough_probe() -> bool:
-            return True
+        def _passthrough_probe() -> tuple[bool, Optional[str]]:
+            return True, None
 
         return _passthrough_probe
 
@@ -722,23 +1473,70 @@ def make_checkpoint_saver_probe(checkpointer: Any) -> Callable[[], bool]:
         # only an exception (or the outer timeout) degrades.
         await saver.aget_tuple(sentinel_read_config)
 
-    def _probe() -> bool:
+    def _saver_lock_held() -> bool:
+        """The NON-BLOCKING saver-lock observation (D1a).
+
+        ``checkpointer.raw_saver.lock.locked()`` — a cheap, synchronous
+        boolean read of the saver's single ``asyncio.Lock``. The probe
+        NEVER ACQUIRES the lock: the saver's lock is a plain
+        NON-REENTRANT ``asyncio.Lock`` that every production checkpoint
+        op also takes (``langgraph/checkpoint/postgres/aio.py:374``), so
+        an acquire-and-read variant would self-deadlock the probe AND
+        queue every production write behind it (SAFETY #5).
+
+        Returns ``False`` when the attribute cannot be resolved — an
+        unresolvable expression must never silently degrade the class
+        to "pool busy" (it fails toward the UNKNOWN class, which is
+        never grace-eligible).
+        """
+        lock_obj = getattr(saver, "lock", None)
+        locked = getattr(lock_obj, "locked", None)
+        if not callable(locked):
+            return False
+        try:
+            return bool(locked())
+        except Exception:  # noqa: BLE001 — unreadable ⇒ "not held"
+            return False
+
+    def _probe() -> tuple[bool, Optional[str]]:
         # Schedule the sentinel cycle on the captured loop from this
         # worker thread and wait for it synchronously with a timeout
         # that is slightly under ``CHECKPOINT_SAVER_PROBE_TIMEOUT_S``
         # so ``asyncio.wait_for`` in ``_guarded`` is the budget
         # authority (defense in depth — both layers enforce it).
+        #
+        # D1a (decisions §3d): the probe distinguishes "the saver's LOCK
+        # is saturated" (``pool_busy`` — grace-eligible) from "the
+        # checkpoint path is broken" (``hard_component_red`` — never
+        # grace-eligible) from "the read timed out with the lock FREE"
+        # (``read_timeout`` — grace-eligible). The lock is OBSERVED, never
+        # acquired.
+        future = asyncio.run_coroutine_threadsafe(_sentinel_cycle(), loop)
         try:
-            future = asyncio.run_coroutine_threadsafe(_sentinel_cycle(), loop)
             future.result(timeout=CHECKPOINT_SAVER_PROBE_TIMEOUT_S - 0.1)
-            return True
+        except FuturesTimeout:
+            # GHOST-WAITER WITHDRAWAL (decisions §3d D1b): the budget
+            # expired while the scheduled cycle was still queued/running.
+            # Cancel it so the pool does NOT retain a queued acquisition
+            # until the pool deadline (the library default was 30s — the
+            # pool's own ``timeout`` kwarg now bounds that too). Whether
+            # cancelling removes psycopg_pool's internal waiter is a
+            # LIBRARY-BEHAVIOUR question pinned by the ghost-waiter
+            # integration pin, not assumed here.
+            future.cancel()
+            if _saver_lock_held():
+                return False, FAILURE_CLASS_POOL_BUSY
+            return False, FAILURE_CLASS_READ_TIMEOUT
         except Exception:
             # NO logging here — ``_guarded`` in
             # refresh_readiness_composite is the single log site for
             # probe failures (the prior revision logged here AND in
             # _guarded: a double log). Re-raise so the orchestrator
-            # degrades the component with the sentinel-read reason.
+            # degrades the component with the sentinel-read reason and
+            # classifies it as ``hard_component_red`` (an EXCEPTION is
+            # row 2 — NEVER grace-eligible).
             raise
+        return True, None
 
     return _probe
 
