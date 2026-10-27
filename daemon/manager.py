@@ -300,6 +300,54 @@ def _effective_instance_cache_max_entries(manager: Any) -> int:
     return INSTANCE_CACHE_MAX_ENTRIES
 
 
+def _heal_config_preserving_env(
+    default_config: dict[str, Any],
+    existing_config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build the schema-drift heal config WITHOUT dropping the operator's env.
+
+    C3 / BLOCKING 3 (soak-gate-mcp-warmup). The built-in schema-version
+    heal used to be a WHOLE-CONFIG REPLACE
+    (``update_mcp_server(..., config=definition.build_config({}))``), so
+    the operator-set env (the pinned ``CONTEXT7_API_URL``) and the
+    KMS-marker keys written by ``mcp_set_env`` / ``kms_attach`` were
+    DROPPED on the first boot after the upgrade. That silently defeats
+    the point of making the base URL settable — and it makes C2's DNS
+    pre-check validate the DEFAULT host instead of the configured one.
+
+    The heal is therefore ENV-PRESERVING:
+
+    * the TEMPLATE-derived defaults are rebuilt (``build_config({})``),
+    * the row's ``config.env`` is merged OVER them — the SAME precedence
+      ``build_pooled_stdio_config`` pins (the row is the live state and
+      wins on every key),
+    * every key the row carries is retained, including keys the new
+      schema does not declare — a schema narrowing must not silently
+      discard a KMS marker.
+
+    Only the ``env`` axis is preserved; ``transport`` / ``command`` /
+    ``args`` stay template-derived (the bootstrap path always
+    regenerates them from the definition).
+    """
+    healed: dict[str, Any] = dict(default_config or {})
+    row_env: dict[str, str] = {}
+    if isinstance(existing_config, dict):
+        candidate = existing_config.get("env")
+        if isinstance(candidate, dict):
+            row_env = {
+                k: v
+                for k, v in candidate.items()
+                if isinstance(k, str) and isinstance(v, str)
+            }
+    if row_env:
+        merged_env: dict[str, str] = {
+            **(healed.get("env") or {}),
+            **row_env,
+        }
+        healed["env"] = merged_env
+    return healed
+
+
 def _build_message_content(message: str, images: list[str] | None) -> str | list:
     """Build multimodal content array for messages with optional images.
     
@@ -2854,14 +2902,25 @@ class InstanceManager:
                         logger.info(f"Reactivated built-in MCP server: {definition.name}")
                     # Check schema version drift
                     if existing.config_schema_version != schema_version:
+                        # C3 / BLOCKING 3: the heal is ENV-PRESERVING.
+                        # The operator-set env (the pinned
+                        # ``CONTEXT7_API_URL``) and the KMS-marker keys
+                        # SURVIVE the schema-version change; only the
+                        # template-derived defaults are rebuilt. The
+                        # previous whole-config replace silently DROPPED
+                        # them on the first boot after the upgrade.
+                        healed_config = _heal_config_preserving_env(
+                            default_config,
+                            existing.config,
+                        )
                         self._mcp_server_repository.update_mcp_server(
                             existing.id,
-                            config=default_config,  # refresh stale config with rebuilt defaults
+                            config=healed_config,  # template defaults rebuilt, operator env preserved
                             config_schema=schema_dicts,
                             config_schema_version=schema_version,
                         )
                         logger.warning(
-                            "Built-in MCP server '%s' config reset to defaults due to schema version change (%s → %s)",
+                            "Built-in MCP server '%s' config refreshed due to schema version change (%s → %s) — operator-set env keys PRESERVED, template defaults rebuilt",
                             definition.name,
                             existing.config_schema_version,
                             schema_version,
@@ -3119,11 +3178,20 @@ class InstanceManager:
             # this resilient if a third-party definition subclasses the
             # ABC without re-declaring the property.
             server_timeout = getattr(definition, "tool_call_timeout", None)
+            # C2 (soak-gate-mcp-warmup): the DNS pre-check resolver. The
+            # definition maps the EFFECTIVE merged env to the URL whose
+            # host the pre-check resolves (``None`` for a server with no
+            # URL-bearing base — the pre-check is skipped for it). The
+            # resolver is stored, not the resolved URL, so an env change
+            # (``mcp_set_env`` / ``kms_attach``) is picked up by the next
+            # attempt.
+            precheck_resolver = getattr(definition, "get_precheck_url", None)
             pool.register_server(
                 name,
                 stdio_config,
                 pool_size=pool_size,
                 tool_call_timeout=server_timeout,
+                precheck_resolver=precheck_resolver,
             )
 
         # Wire pool into MCP service for use during tool execution
