@@ -112,6 +112,21 @@ class _McpSessionProviderImpl:
         Raises:
             ToolException: If the server is unknown or unreachable.
         """
+        # C1 / S5 (soak-gate-mcp-warmup): the per-boot quarantine
+        # consult comes FIRST — before the pooled fast path and before
+        # the cold start. A quarantined server is disabled for this
+        # boot: it is neither transferred from the pool nor cold-spawned
+        # (the cold spawn is the incident's ×4 one-npx-child-per-
+        # instance path). Without this consult a quarantined server
+        # would keep re-entering the incident's shape.
+        if _is_server_quarantined(server_name):
+            raise ToolException(
+                f"MCP server '{server_name}' is quarantined for this boot "
+                f"(its init failed repeatedly) — no session was spawned. "
+                f"It returns automatically after the breaker's recovery "
+                f"window (no daemon restart needed)."
+            )
+
         conn_mgr = get_mcp_connection_manager()
 
         # 1. Fast path: an existing session is tracked by the manager.
@@ -187,7 +202,9 @@ class _McpSessionProviderImpl:
         # multiplier. A server that is quarantined for this boot must
         # NOT be spawned here: the quarantine is the prevention, and
         # without this consult a quarantined server would keep
-        # re-entering the incident's shape.
+        # re-entering the incident's shape. (The SAME consult runs at
+        # the TOP of ``get_session`` — this second check is the
+        # defence-in-depth for a direct cold-start call.)
         if _is_server_quarantined(server_name):
             raise ToolException(
                 f"MCP server '{server_name}' is quarantined for this boot "
