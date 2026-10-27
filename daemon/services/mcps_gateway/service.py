@@ -915,7 +915,10 @@ class McpGatewayService:
           (``machine_unreachable`` / ``machine_timeout``): those
           describe the CENTRE's own release path and must NEVER reach a
           response (the two reason sets are disjoint by construction), so
-          the member is OMITTED;
+          the member is OMITTED. An ABSENT cause is OMITTED too — the
+          member is "required when known; omitted when sanitized or
+          unknown — never empty-string" (§6.9.3 / §6.10.1, Fork B), so
+          ``reason: ""`` can never be emitted;
         * on the ``ended: false`` arm the reason is the centre's own
           idempotent token and is ALWAYS present.
 
@@ -961,10 +964,12 @@ class McpGatewayService:
           — the ``reason`` is the machine's own ``reason_code``,
           VERBATIM (even when the centre does not recognise it), and
           ``why_not_ended`` is ABSENT (the machine's kit pins its
-          absence on the successful path);
+          absence on the successful path). The ``reason`` member is
+          OMITTED — never ``reason: ""`` — when the cause is ABSENT
+          or is a LEDGER-ONLY token (§6.9.3 / §6.10.1, Fork B);
         * NO live session (a repeat, or a race with the sweep) → the
           IDEMPOTENT goal state, NEVER an error:
-          ``{"session_id", "ended": false, "reason", "machine_notified": true}``.
+          ``{"session_id", "ended": false, "reason", "machine_notified": false}``.
           The ``reason`` is MANDATORY here — and the rationale is the
           shipped client's OWN decision table (``terminate.go``): on
           ``ended: false`` it RELEASES its local lock by DEFAULT (the
@@ -1010,8 +1015,17 @@ class McpGatewayService:
             # on ``ended: true``). Every OTHER code — known or not —
             # is echoed VERBATIM (the liberal-acceptance rule), and
             # the AUDIT row still records the raw code verbatim.
+            #
+            # AN ABSENT cause is OMITTED too (§6.9.3 / §6.10.1 / Fork
+            # B): ``reason`` is "required when known; omitted when
+            # sanitized or unknown — never empty-string". A machine
+            # that sent NO ``reason_code`` has told the centre NOTHING
+            # about the cause, so the member is omitted — never
+            # ``reason: ""``. (The AUDIT row still records the raw
+            # value verbatim: the ledger is the truth, the response is
+            # the sanitized view.)
             wire_reason: str | None = reason
-            if reason in LEDGER_ONLY_REASONS:
+            if not reason or reason in LEDGER_ONLY_REASONS:
                 wire_reason = None
             ack = self._terminate_ack(
                 session_id,

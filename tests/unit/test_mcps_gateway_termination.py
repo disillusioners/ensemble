@@ -637,6 +637,70 @@ class TestSessionTerminate:
         # The live session is untouched.
         assert service.sessions.get(SESSION_ID) is not None
 
+    async def test_an_absent_reason_code_omits_the_reason_member(self):
+        """§6.9.3 / §6.10.1 (Fork B) — ``reason`` is present-when-known.
+
+        "``reason`` is required when known and omitted when sanitized or
+        unknown (never empty-string)". A machine that sent NO
+        ``reason_code`` has told the centre NOTHING about the cause, so
+        the member is OMITTED.
+
+        THE ANTI-TAUTOLOGY RULE: the assertion is on the KEY SET — a
+        ``reason: ""`` would satisfy a truthiness check but NOT this
+        one.
+        """
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+
+        ack = await machine.terminate(params={})
+
+        result = ack["result"]
+        assert result["ended"] is True
+        assert "reason" not in result
+        assert set(result) == {"session_id", "ended", "machine_notified"}
+
+    async def test_an_empty_reason_code_never_produces_an_empty_reason(self):
+        """The same rule for an EMPTY cause — ``reason: ""`` is forbidden.
+
+        The member is "omitted when sanitized or unknown — never
+        empty-string", and an empty string is not a cause.
+        """
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+
+        ack = await machine.terminate(params={"reason_code": ""})
+
+        result = ack["result"]
+        assert result["ended"] is True
+        assert "reason" not in result
+        assert set(result) == {"session_id", "ended", "machine_notified"}
+
+    async def test_an_absent_reason_code_is_still_recorded_verbatim(self):
+        """The LEDGER keeps the raw value VERBATIM — only the RESPONSE is
+        sanitized (§6.9.1: the audit is the truth, the response is the
+        sanitized view).
+
+        THE BAN IS RESPONSE-SCOPED (§6.10.2: "the ban is response-scoped;
+        the ledger is exempt — it is the audit truth"), so the ledger's
+        copy of an absent cause is the empty verbatim value — and the
+        ledger NEVER invents a cause either.
+        """
+        audit = MemoryAuditSink()
+        service = make_service(audit_sink=audit)
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+
+        await machine.terminate(params={})
+
+        rows = [r for r in audit.records if r.tool == AUDIT_TOOL_SESSION_TERMINATE]
+        assert rows, "the receipt must still be audited"
+        assert rows[-1].extra["reason_code"] == ""
+        # No cause was invented for the row.
+        assert "[" not in rows[-1].detail
+        assert rows[-1].error_code == ""
+
 
 class TestTerminateNeedsTheCapability:
     async def test_a_v01_connection_refuses_the_terminate(self):
