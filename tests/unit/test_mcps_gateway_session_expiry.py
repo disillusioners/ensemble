@@ -1170,6 +1170,12 @@ class TestTheSessionAuditRows:
         session, so there is no local lock left to release. That is NOT
         a refusal: the ledger records the expiry CAUSE and a successful
         outcome.
+
+        §6.9.7 :1130-1137 — in the TERMINATION family
+        ``SESSION_NOT_FOUND`` is a SUCCESS SIGNAL, not an error: the
+        centre maps it to ``ended: true`` and reports
+        ``machine_notified: true`` (the machine answered with this very
+        ack). The tombstone says so too: the machine WAS told.
         """
         audit = MemoryAuditSink()
         clock = Clock()
@@ -1185,6 +1191,11 @@ class TestTheSessionAuditRows:
         assert record.tool == "session.expire"
         assert record.error_code == "ttl"
         assert record.outcome == "ok"
+        # The machine ANSWERED (with SESSION_NOT_FOUND) — so it WAS told,
+        # and the tombstone says so.
+        tombstone = service._tombstones.get(SESSION_ID, clock())
+        assert tombstone is not None
+        assert tombstone.machine_notified is True
 
     async def test_a_wedged_machine_leaves_the_machine_timeout_ledger_row(self):
         audit = MemoryAuditSink()
