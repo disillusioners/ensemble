@@ -56,7 +56,9 @@ Everything v0.2 adds is VERSION-SCOPED to a v0.2-negotiated connection:
 
 * the ``client_terminate`` capability (§5.3),
 * the ``session.terminate`` receipt (§6.10),
-* the ``reason`` member of the centre's ``session.end`` params (§6.9.2).
+* the ``reason`` member of the centre's ``session.end`` params (§6.9.6) —
+  which is VERSION-AND-CAPABILITY-SCOPED: it rides only where BOTH
+  capability maps carry ``client_terminate: true``.
 
 A ``"0.1"``-negotiated connection therefore sees exactly the frames it
 saw before: no new capability key, no new method, and a ``session.end``

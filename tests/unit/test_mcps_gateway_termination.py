@@ -849,7 +849,8 @@ class TestOrderlyTerminationClose:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# §6.9.2 — the version-scoped ``reason`` member of the session.end params
+# §6.9.6 — the version-AND-capability-scoped ``reason`` member of the
+# session.end params
 # ─────────────────────────────────────────────────────────────────────────────
 
 

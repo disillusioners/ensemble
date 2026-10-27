@@ -28,10 +28,11 @@ THE ROWS
 5. **the reap race** — the sweep reaped the session and the machine asks
    afterwards: the answer is the IDEMPOTENT one (``ended: false``) with
    a MANDATORY ``reason`` — never an error (§6.10).
-6. **the v0.2 ``session.end`` reason** — on a ``"0.2"`` connection the
-   centre's ``session.end`` names the centre cause (``reaped_by_center``
-   for the sweep's reap, ``superseded`` for an explicit end) — the
-   v0.1 lane keeps exactly ``{"session_id": ...}`` (§6.9.2).
+6. **the v0.2 ``session.end`` reason** — on a ``"0.2"`` connection whose
+   client advertised ``client_terminate: true`` the centre's
+   ``session.end`` names the centre cause (``reaped_by_center`` for the
+   sweep's reap, ``superseded`` for an explicit end) — every other lane
+   keeps exactly ``{"session_id": ...}`` (§6.9.6).
 
 THE INDEPENDENCE CONTRACT
 --------------------------
@@ -674,7 +675,7 @@ async def test_the_reap_race_answers_the_idempotent_goal_state(
             )
         if target.mode == "self-host":
             # The in-kit centre's sweep owns the reap and remembers it:
-            # the answer names the centre cause (§6.9.2 group (ii)).  A
+            # the answer names the centre cause (§6.9.6 group (ii)).  A
             # FOREIGN centre's reap window is not observable from the
             # machine side, so the token is asserted in the
             # self-consistency lane only.
@@ -682,7 +683,7 @@ async def test_the_reap_race_answers_the_idempotent_goal_state(
                 raise _finding(
                     "termination",
                     "reap-race-reason",
-                    "§6.9.2",
+                    "§6.9.6",
                     f"the reap-race ack carries reason="
                     f"{result.get('reason')!r}, want 'reaped_by_center'",
                 )
