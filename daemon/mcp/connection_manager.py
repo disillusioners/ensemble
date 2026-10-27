@@ -226,15 +226,16 @@ class McpConnectionManager:
         # A failing marker raises the typed envelope BEFORE the
         # subprocess spawns — the server does NOT start with literal
         # markers or partial env (fail-closed).
-        resolved_env = resolve_secret_markers(
-            resolve_env(config.env),
-            secret_service=_get_process_secret_service(),
-            # Server-scoped (see warm-pool note): no agent context at
-            # cold spawn — audit actor is the ``<secret_resolver>``
-            # sentinel, explicit.
-            actor="<secret_resolver>",
-            surface="mcp_spawn",
-        )
+        # Off-loop secret/KMS marker resolution (B1) — fail-closed preserved.
+        def _resolve_env_sync() -> dict[str, str] | None:
+            return resolve_secret_markers(
+                resolve_env(config.env),
+                secret_service=_get_process_secret_service(),
+                actor="<secret_resolver>",
+                surface="mcp_spawn",
+            )
+
+        resolved_env = await asyncio.to_thread(_resolve_env_sync)
         server_params = StdioServerParameters(
             command=config.command,
             args=config.args,
@@ -513,15 +514,16 @@ class McpConnectionManager:
         # ``resolve_secret_markers(resolve_env(...))`` — identical to
         # cold spawn #1 and the warm pool (BOTH cold paths must be
         # wrapped, not just the pool).
-        resolved_env = resolve_secret_markers(
-            resolve_env(config.env),
-            secret_service=_get_process_secret_service(),
-            # Server-scoped (see warm-pool note): no agent context at
-            # cold spawn — audit actor is the ``<secret_resolver>``
-            # sentinel, explicit.
-            actor="<secret_resolver>",
-            surface="mcp_spawn",
-        )
+        # Off-loop secret/KMS marker resolution (B1) — fail-closed preserved.
+        def _resolve_env_sync() -> dict[str, str] | None:
+            return resolve_secret_markers(
+                resolve_env(config.env),
+                secret_service=_get_process_secret_service(),
+                actor="<secret_resolver>",
+                surface="mcp_spawn",
+            )
+
+        resolved_env = await asyncio.to_thread(_resolve_env_sync)
         server_params = StdioServerParameters(
             command=config.command,
             args=config.args,

@@ -37,6 +37,7 @@ Two classes are exposed:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import threading
@@ -92,6 +93,12 @@ AsyncContextManagerFactory = Callable[[], AbstractAsyncContextManager[Any]]
 # tree (the 2026-10-12 fence discipline). Production default is
 # the real ``/proc``.
 _PROC_ROOT: Path = Path("/proc")
+
+# Bounded handshake wait (normative in requirements.md §4.6, P6).
+# 30.0 s — strictly inside the 60 s warmup outer budget so the outer
+# budget stays authoritative (30 + 2 + 30 + 6 = 68 s <= 60 s is the
+# documented split; 55 s is REJECTED).
+HANDSHAKE_WAIT_TIMEOUT_S: float = 30.0
 
 
 def _basename_command(command: str) -> str:
@@ -263,7 +270,7 @@ class TaskScopedContextManager:
         factory: AsyncContextManagerFactory,
         name: str = "mcp-client",
         *,
-        on_ready: Optional[Callable[[], None]] = None,
+        on_ready: Optional[Callable[[], Optional[Awaitable[Any]]]] = None,
         on_close: Optional[Callable[[], None]] = None,
     ) -> None:
         """Store the factory; defer work to ``__aenter__``.
@@ -303,7 +310,7 @@ class TaskScopedContextManager:
         """
         self._task = asyncio.create_task(self._run(), name=self._name)
         try:
-            await self._ready.wait()
+            await asyncio.wait_for(self._ready.wait(), timeout=HANDSHAKE_WAIT_TIMEOUT_S)
         except BaseException:
             if self._task is not None and not self._task.done():
                 self._task.cancel()
@@ -385,6 +392,17 @@ class TaskScopedContextManager:
             try:
                 self._streams = await streams_cm.__aenter__()
             except asyncio.CancelledError:
+                # G1 guarantee: a cancellation that arrives while the
+                # inner transport is still entering must NOT skip the
+                # inner __aexit__ (which installs the SDK's process-group
+                # shutdown: stdin close -> killpg SIGTERM -> SIGKILL).
+                # Historically the re-raise at this point happened BEFORE
+                # the finally: block below could install __aexit__, so the
+                # spawned child survived. Run __aexit__ explicitly here.
+                try:
+                    await streams_cm.__aexit__(None, None, None)
+                except BaseException:
+                    pass
                 raise
             except BaseException as e:
                 self._error = e
@@ -400,7 +418,9 @@ class TaskScopedContextManager:
             # break the transport.
             if self._on_ready is not None:
                 try:
-                    self._on_ready()
+                    result = self._on_ready()
+                    if inspect.isawaitable(result):
+                        await result
                 except Exception as exc:
                     logger.warning(
                         "TaskScopedContextManager on_ready hook failed: "
@@ -491,7 +511,7 @@ class TaskScopedStdioClient(TaskScopedContextManager):
         """The ``[(pid, start_time)]`` pairs registered this session."""
         return list(self._registered)
 
-    def _stamp_children(self) -> None:
+    def _stamp_children_sync(self) -> None:
         """Best-effort /proc scan → register every spawned child.
 
         Never raises (the ``on_ready`` hook swallows anyway). A
@@ -545,6 +565,16 @@ class TaskScopedStdioClient(TaskScopedContextManager):
                     "mcp_child stamp: register(pid=%d) failed: %s: %s",
                     pid, type(exc).__name__, exc,
                 )
+
+    def _stamp_children(self):
+        # W-3: perform the /proc scan OFF-loop (asyncio.to_thread) and
+        # return the awaitable so the transport awaits it BEFORE
+        # _ready.set() — work off-loop, await on-loop. Registration is
+        # therefore complete before __aenter__ returns (required by
+        # tests/test_resource_pid_registry.py:505-510). A fire-and-forget
+        # shape is UNSAFE (a deferred scan can find a dead child and
+        # return [] with no reap handle).
+        return asyncio.to_thread(self._stamp_children_sync)
 
     def _mark_children_exit(self) -> None:
         """Mark every child registered this session as exited.

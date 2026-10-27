@@ -85,6 +85,7 @@ class McpWarmupPool:
         self,
         tool_call_timeout: int = 120,
         idle_reap_seconds: int = 1800,
+        health_check_timeout: int = 5,
     ) -> None:
         """Initialize the warmup pool with empty state.
 
@@ -108,6 +109,7 @@ class McpWarmupPool:
         self._replenish_semaphore: asyncio.Semaphore = asyncio.Semaphore(2)
         self._tool_call_timeout: int = tool_call_timeout
         self._idle_reap_seconds: int = idle_reap_seconds
+        self._health_check_timeout: int = health_check_timeout
         # Per-server timeout overrides. Servers without an entry fall back to
         # ``self._tool_call_timeout``. A value of ``0`` is meaningful here —
         # it disables the per-call timeout wrap entirely, so we must use
@@ -250,32 +252,36 @@ class McpWarmupPool:
         # marker (missing id, malformed, DB down) raises the typed
         # envelope BEFORE the subprocess spawns — the server does NOT
         # start with literal markers or partial env (fail-closed).
+        # Off-loop: secret/KMS marker resolution is synchronous and
+        # can block on Fernet/KMS I/O — run it on a worker thread so it
+        # never occupies the event loop (B1). Fail-closed semantics are
+        # preserved: a raising marker propagates and aborts the spawn
+        # BEFORE the subprocess starts.
+        def _resolve_env_sync() -> dict[str, str] | None:
+            return resolve_secret_markers(
+                resolve_env(config.env),
+                secret_service=_get_process_secret_service(),
+                actor="<secret_resolver>",
+                surface="mcp_spawn",
+            )
+
+        resolved_env = await asyncio.to_thread(_resolve_env_sync)
         server_params = StdioServerParameters(
             command=config.command,
             args=config.args,
-            env=resolve_secret_markers(
-                resolve_env(config.env),
-                secret_service=_get_process_secret_service(),
-                # Server-scoped resolution: the pool spawns servers
-                # process-wide with NO agent in context — the audit
-                # row's actor is the ``<secret_resolver>`` sentinel
-                # (the resolver default, made explicit here). Which
-                # agent later USES the server is not knowable at
-                # spawn time; per-use attribution lives with the
-                # agent-side seams (§1a/§1d), not here.
-                actor="<secret_resolver>",
-                surface="mcp_spawn",
-            ),
+            env=resolved_env,
         )
         streams_cm = TaskScopedStdioClient(server_params)
         read_stream = write_stream = None
         session: ManagedClientSession | None = None
 
         try:
-            read_stream, write_stream = await streams_cm.__aenter__()
-
             # Single outer timeout wrapping everything from startup to tool discovery
+            # (the handshake __aenter__ is now INSIDE the budget — previously
+            # it sat outside and a hung handshake could wedge forever).
             async with asyncio.timeout(60):
+                read_stream, write_stream = await streams_cm.__aenter__()
+
                 # Give subprocess time to start up (npx/uvx need time for package resolution)
                 await asyncio.sleep(2.0)
 
@@ -621,7 +627,7 @@ class McpWarmupPool:
                             )
                             continue
                     try:
-                        await asyncio.wait_for(conn.session.send_ping(), timeout=5.0)
+                        await asyncio.wait_for(conn.session.send_ping(), timeout=self._health_check_timeout)
                         healthy.append(conn)
                     except Exception as e:
                         logger.warning(
