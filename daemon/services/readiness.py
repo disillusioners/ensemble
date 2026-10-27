@@ -894,7 +894,8 @@ class GraceTracker:
 
                 # ── §4.4's "pool_available strictly decreasing across 3
                 #    consecutive ticks" arm — DELIBERATELY SUBSUMED (see
-                #    the ADJUDICATION below). It is NOT implemented as an
+                #    the ADJUDICATION in the docstring above). It is NOT
+                #    implemented as an
                 #    independent arm: there is no in-band precondition
                 #    that separates a long healthy ramp from a slow leak,
                 #    so any live form of it would arm the leak class on
@@ -1138,38 +1139,31 @@ def apply_forced_degradation(
     """
     if not forced_degradation_active(env_value):
         return composite
-    if not composite.ready:
-        # Already degraded by real causes — add the drill marker so the
-        # reason list stays truthful about every contributor.
-        return ReadinessComposite(
-            database=composite.database,
-            queue_freshness=composite.queue_freshness,
-            services=composite.services,
-            checkpoint_saver=composite.checkpoint_saver,
-            reasons=[
-                *composite.reasons,
-                f"readiness: degraded forced by {READINESS_FORCE_DEGRADED_ENV} (drill)",
-            ],
-            queue_max_age_seconds=composite.queue_max_age_seconds,
-            checked_at=composite.checked_at,
-            forced_degraded=True,
-            auth_dependency_status=composite.auth_dependency_status,
-            **_A1_COMPOSITE_FIELDS(composite),
-        )
-    return ReadinessComposite(
+    # The shared degraded-copy kwargs — the drill preserves every real
+    # reading; only the `reasons` list differs between the two shapes.
+    degraded_copy = dict(
         database=composite.database,
         queue_freshness=composite.queue_freshness,
         services=composite.services,
         checkpoint_saver=composite.checkpoint_saver,
-        reasons=[
-            f"readiness: degraded forced by {READINESS_FORCE_DEGRADED_ENV} (drill)",
-        ],
         queue_max_age_seconds=composite.queue_max_age_seconds,
         checked_at=composite.checked_at,
         forced_degraded=True,
         auth_dependency_status=composite.auth_dependency_status,
         **_A1_COMPOSITE_FIELDS(composite),
     )
+    if not composite.ready:
+        # Already degraded by real causes — add the drill marker so the
+        # reason list stays truthful about every contributor.
+        degraded_copy["reasons"] = [
+            *composite.reasons,
+            f"readiness: degraded forced by {READINESS_FORCE_DEGRADED_ENV} (drill)",
+        ]
+    else:
+        degraded_copy["reasons"] = [
+            f"readiness: degraded forced by {READINESS_FORCE_DEGRADED_ENV} (drill)",
+        ]
+    return ReadinessComposite(**degraded_copy)
 
 
 async def refresh_readiness_composite(
@@ -1353,25 +1347,18 @@ async def refresh_readiness_composite(
         queue_max_age_seconds = None
         fresh = False
         extra_reasons.append("queue_freshness: queue probe timed out")
-    elif isinstance(queue_raw, QueueProbeResult):
-        queue_max_age_seconds = queue_raw.max_age_seconds
-        inflight_turns = queue_raw.inflight_turns
-        # Negative ages clamp to 0.0 inside evaluate_queue_freshness —
-        # see the freshness-clamp docstring at :245.
-        fresh, age = evaluate_queue_freshness(
-            queue_max_age_seconds,
-            threshold_seconds=queue_freshness_threshold_seconds,
-        )
-        queue_max_age_seconds = age
     else:
-        queue_max_age_seconds = queue_raw
+        if isinstance(queue_raw, QueueProbeResult):
+            queue_max_age_seconds = queue_raw.max_age_seconds
+            inflight_turns = queue_raw.inflight_turns
+        else:
+            queue_max_age_seconds = queue_raw
         # Negative ages clamp to 0.0 inside evaluate_queue_freshness —
         # see the freshness-clamp docstring at :245.
-        fresh, age = evaluate_queue_freshness(
+        fresh, queue_max_age_seconds = evaluate_queue_freshness(
             queue_max_age_seconds,
             threshold_seconds=queue_freshness_threshold_seconds,
         )
-        queue_max_age_seconds = age
     if ckpt_extra_reason:
         extra_reasons.append(ckpt_extra_reason)
 
