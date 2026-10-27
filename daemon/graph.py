@@ -7529,6 +7529,23 @@ class _PreCall95Outcome(NamedTuple):
 _PRECALL_NOOP = _PreCall95Outcome(None, None, None)
 
 
+def _root_thread_config(instance_id: str) -> dict:
+    """Canonical root-namespace thread config for checkpoint state access.
+
+    ALL in-node ``graph.aget_state`` / ``graph.aupdate_state`` calls for
+    compaction MUST use this recipe — thread-id only, NO ``checkpoint_ns``.
+    LangGraph resolves a ns-stamped config (e.g.
+    ``checkpoint_ns='agent:<task_id>'``) as a SUBGRAPH namespace lookup
+    and returns a truthy-but-EMPTY ``StateSnapshot`` because the
+    checkpoints live at ``ns=''``. See seam line
+    ``daemon/services/_compaction_persist_seam.py:139`` (L1 healthy
+    example: ``daemon/services/instance_messaging.py:3908-3913``) and
+    the LoopRepairer rationale at graph.py:1637/:1827. Derive from
+    ``instance_id`` so the recipe can't drift across call sites.
+    """
+    return {"configurable": {"thread_id": instance_id}}
+
+
 # P1b proactive-compaction addition; this block lives in an already-large module.
 async def _maybe_precall_compact_95(
     *,
@@ -7721,9 +7738,26 @@ async def _maybe_precall_compact_95(
         # exactly like the CLE handler); the system prompt tokens are
         # computed from the in-scope prompt so the engine's numerator
         # matches the payload estimate above.
-        current_state = await graph.aget_state(thread_config)
+        # Namespace trap fix: resolve the REAL root-namespace checkpoint.
+        # The caller's ns-stamped ``thread_config`` (checkpoint_ns=
+        # 'agent:<task_id>') makes LangGraph return a truthy-but-EMPTY
+        # StateSnapshot; use the thread-id-only recipe instead (see
+        # ``_root_thread_config`` / seam line 139).
+        current_state = await graph.aget_state(_root_thread_config(instance_id))
         state_values = (current_state.values or {}) if current_state else {}
         current_messages = state_values.get("messages", []) or []
+        # Defect-signal guard (recurrence detector): a healthy hook
+        # measurement (payload_count > 0) with an empty resolved
+        # snapshot means the checkpoint read missed — emit a
+        # distinguishable WARN and return NOOP without a compacted_at
+        # stamp so the misleading stamp-only path can never mask
+        # recurrence again.
+        if not current_messages and payload_count > 0:
+            logger.warning(
+                "[Compaction][precall-95] empty snapshot read — "
+                "suspected namespace/config defect, skipping stamp"
+            )
+            return _PRECALL_NOOP
         # Cycle 2 (review suggestion 3) — guard ``llm_config=None``.
         # ``ContextCompactor.llm_config`` is typed ``dict | None``
         # at construction; if a custom builder forgot to wire it
@@ -7828,7 +7862,7 @@ async def _maybe_precall_compact_95(
         # 7. Rebuild the LLM-bound payload from the post-compaction
         # state — the CLE handler's in-frame pattern (persist →
         # aget_state → rebuild → invoke; A.7).
-        updated_state = await graph.aget_state(thread_config)
+        updated_state = await graph.aget_state(_root_thread_config(instance_id))
         compacted_channel = list(
             ((updated_state.values or {}) if updated_state else {}).get(
                 "messages", []
@@ -9248,11 +9282,24 @@ def create_agent_node(
             logger.info(f'[LLM] Context length exceeded, attempting reactive compaction for {len(messages)} messages')
 
             graph = graph_ref[0]
-            thread_config = config or {}
+            # Namespace trap fix: resolve the REAL root-namespace
+            # checkpoint (thread-id-only config; see
+            # ``_root_thread_config`` / seam line 139). The caller's
+            # ns-stamped config returns an empty StateSnapshot.
+            thread_config = _root_thread_config(instance_id)
 
             current_state = await graph.aget_state(thread_config)
             current_messages = current_state.values.get('messages', [])
             compacted_at_val = current_state.values.get('compacted_at')
+            # Defect-signal guard: an empty resolved snapshot while the
+            # turn carried messages means the checkpoint read missed —
+            # WARN and re-raise the active CLE (fail-closed by design).
+            if not current_messages and len(messages) > 0:
+                logger.warning(
+                    "[Compaction][CLE] empty snapshot read — suspected "
+                    "namespace/config defect, re-raising ContextLengthExceeded"
+                )
+                raise
 
             from .compaction import CompactionContext, _extract_msg_timestamps
             # F1 fix (2026-09-01) — pre-stamp the first-appearance
