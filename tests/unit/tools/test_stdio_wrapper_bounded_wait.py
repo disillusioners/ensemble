@@ -60,8 +60,8 @@ def test_on_ready_uses_dedicated_executor():
 def test_secret_executor_is_dedicated():
     from daemon.mcp import warmup_pool
 
-    assert warmup_pool._SECRET_RESOLVE_EXECUTOR._thread_name_prefix == "mcp-secret"
-    assert warmup_pool._SECRET_RESOLVE_EXECUTOR._max_workers == 2
+    assert warmup_pool.SECRET_RESOLVE_EXECUTOR._thread_name_prefix == "mcp-secret"
+    assert warmup_pool.SECRET_RESOLVE_EXECUTOR._max_workers == 2
 
 
 # ── (b) the handshake wait is bounded ───────────────────────────────────

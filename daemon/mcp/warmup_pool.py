@@ -116,10 +116,6 @@ WARMUP_TOTAL_BUDGET_S: float = 90.0
 SECRET_RESOLVE_EXECUTOR = ThreadPoolExecutor(
     max_workers=2, thread_name_prefix="mcp-secret"
 )
-# Pinned private alias — tests/unit/tools/test_stdio_wrapper_bounded_wait.py
-# pins THIS name (thread_name_prefix + max_workers); it is the SAME object.
-# Remove only together with a test-side re-point (outside the hygiene batch).
-_SECRET_RESOLVE_EXECUTOR = SECRET_RESOLVE_EXECUTOR
 
 
 def resolve_spawn_env(config: McpStdioConfig) -> dict[str, str] | None:
