@@ -154,7 +154,9 @@ class ManagedKeySpec:
 
     def constraint_desc(self) -> str:
         """Human-readable constraint for log lines / 422 details
-        (Ruling 3 log wording: ``failed validation (ge=1)``)."""
+        (Ruling 3 log wording: ``failed validation (gt=0)`` /
+        ``failed validation (ge=5,le=20)`` — multi-part when several
+        bounds apply)."""
         parts: list[str] = []
         if self.gt is not None:
             parts.append(f"gt={self.gt}")

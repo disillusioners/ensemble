@@ -1016,7 +1016,7 @@ async def _probe_self(manager: "InstanceManager", path: str) -> dict[str, Any] |
         return None
 
 
-def _readyz_reasons(payload: dict[str, Any]) -> list:
+def _readyz_reasons(payload: dict[str, Any]) -> list[Any]:
     """The ``reasons`` list of a ``/readyz`` payload.
 
     C4 / H7 (soak-gate-mcp-warmup). The reader used to read a
