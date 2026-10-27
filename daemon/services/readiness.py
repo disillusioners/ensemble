@@ -11,6 +11,16 @@ Contract (ADR-003): the HTTP handler is an O(1) memory read of the
 last composite; the ONLY database toucher for readiness is the
 background refresher running at ``readiness_refresh_interval_seconds``
 (default 10s). Liveness (``/livez``) never consults this module.
+
+SCOPE NOTE (why this module is large): four readiness concerns are
+CANONICAL RESIDENTS here and must evolve together — the A1
+failure-CLASS table (soak-gate-mcp-warmup, requirements §4.0), the
+class-gated grace + leak state machine (``GraceTracker`` /
+``GraceObservation``, §4.3-§4.4), the P1/P2 pool-state samplers
+(advisory SQLAlchemy + oracle psycopg), and the ADR-003 composite
+itself. They share one failure-class vocabulary and one
+observation-relative clock; the size is cohesion, not accretion —
+do not split the class table away from its consumers.
 """
 
 from __future__ import annotations
@@ -20,7 +30,7 @@ import logging
 from dataclasses import dataclass, field
 from concurrent.futures import TimeoutError as FuturesTimeout
 from datetime import datetime, timedelta, timezone
-from typing import Callable, NamedTuple, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 from sqlalchemy import text as sa_text
 from sqlalchemy.engine import Engine
@@ -1103,7 +1113,7 @@ _A1_COMPOSITE_FIELD_NAMES = (
 )
 
 
-def _A1_COMPOSITE_FIELDS(composite: "ReadinessComposite") -> dict:
+def _a1_composite_fields(composite: "ReadinessComposite") -> dict[str, Any]:
     """The A1 additive fields of ``composite`` as a kwargs dict."""
     return {
         name: getattr(composite, name) for name in _A1_COMPOSITE_FIELD_NAMES
@@ -1150,7 +1160,7 @@ def apply_forced_degradation(
         checked_at=composite.checked_at,
         forced_degraded=True,
         auth_dependency_status=composite.auth_dependency_status,
-        **_A1_COMPOSITE_FIELDS(composite),
+        **_a1_composite_fields(composite),
     )
     if not composite.ready:
         # Already degraded by real causes — add the drill marker so the
