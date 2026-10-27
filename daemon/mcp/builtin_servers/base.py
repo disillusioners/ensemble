@@ -165,7 +165,11 @@ class BuiltinServerDefinition(ABC):
             if init_guard.is_quarantined(cls().name):
                 return False
         except Exception:  # noqa: BLE001 — the guard must never break the seam
-            logger.debug(
+            # WARNING, not DEBUG: the consult FAILS OPEN — the server is
+            # treated as available and IS spawned, so the per-boot
+            # quarantine is defeated. That is operator-visible, and the
+            # sibling guard-failure sites in this branch log at WARNING.
+            logger.warning(
                 "Quarantine registry consult failed for builtin '%s'; "
                 "treating as available",
                 getattr(cls, "__name__", "?"),
