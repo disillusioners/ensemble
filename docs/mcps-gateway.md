@@ -931,7 +931,7 @@ may still be carrying a late `tools/call` answer.
 | a LIVE session of this connection | `{"session_id", "ended": true, "reason", "machine_notified": true}` — the `reason` is the machine's own `reason_code`, **verbatim** (even when the center does not recognise it); **`why_not_ended` is ABSENT** |
 | the machine sent a LEDGER-ONLY reason code | the same shape with the `reason` member **OMITTED** — `{"session_id", "ended": true, "machine_notified": true}`. `machine_unreachable` / `machine_timeout` describe the **center's** own release path and must never reach a response; the shipped client does not validate `reason` on `ended: true` |
 | no live session (a repeat, or a race) | `{"session_id", "ended": false, "reason": "already_ended", "machine_notified": false}` — the **idempotent goal state, never an error** |
-| the sweep reaped it first | the same idempotent shape with `reason: "reaped_by_center"` |
+| the sweep reaped it first, and the tombstone is THIS machine's | the same idempotent shape with `reason: "reaped_by_center"` — the lookup is scoped to the responder's OWN machine: a tombstone belonging to ANOTHER machine is not resolved, and the reply is the neutral `already_ended` |
 
 The `reason` is **mandatory** on the `ended: false` arm, and the
 rationale is the shipped client's own decision table: on `ended: false`

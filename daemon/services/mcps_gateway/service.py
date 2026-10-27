@@ -1019,6 +1019,18 @@ class McpGatewayService:
             tombstone = (
                 self._tombstones.get(session_id, self._clock()) if session_id else None
             )
+            # THE LOOKUP IS SCOPED TO THE RESPONDER'S OWNERSHIP (§6.9.3).
+            # A tombstone that belongs to ANOTHER machine is not ours to
+            # resolve: answering ``reaped_by_center`` for it would be a
+            # POSITIVE answer over a foreign id (and the ledger row
+            # would be attributed to the foreign machine's agent). A
+            # foreign tombstone therefore falls through to the NEUTRAL
+            # arm — the same shape as no tombstone at all.
+            if (
+                tombstone is not None
+                and tombstone.machine_id != connection.machine_id
+            ):
+                tombstone = None
             if tombstone is not None:
                 agent_id = tombstone.agent_id
                 instance_id = tombstone.instance_id

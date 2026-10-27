@@ -560,6 +560,10 @@ class TestSessionTerminate:
         The TOMBSTONE-HIT arm: ``machine_notified`` is ``False`` here
         too — the sweep's forward is the centre's own frame, and this
         receipt delivered nothing to the machine.
+
+        THE COMPANION of the ownership guard: the tombstone belongs to
+        the ASKING machine, so the consult is OURS and the centre may
+        name the centre cause.
         """
         clock = Clock()
         service = make_service(clock=clock)
@@ -576,6 +580,46 @@ class TestSessionTerminate:
         assert result["ended"] is False
         assert result["reason"] == REASON_REAPED_BY_CENTER
         assert result["machine_notified"] is False
+
+    async def test_a_foreign_tombstone_is_not_resolved_into_a_positive_answer(self):
+        """§6.9.3 — THE LOOKUP IS SCOPED TO THE RESPONDER'S OWNERSHIP.
+
+        M2's session was reaped by the sweep, so an ``expired``
+        tombstone that belongs to **M2** exists.  M1 asks about that
+        session id: the centre must NOT resolve M2's tombstone into a
+        positive answer (``reaped_by_center``) — the reply is the
+        NEUTRAL arm, the same shape as no tombstone at all, and the
+        ledger row is attributed to the ASKING machine.
+        """
+        audit = MemoryAuditSink()
+        clock = Clock()
+        service = make_service(audit_sink=audit, clock=clock)
+
+        beta = await open_machine(
+            service,
+            FakeMachine(service, machine_id="machine-beta", session_id="sess-beta"),
+        )
+        await open_session(service, beta)
+
+        # The sweep reaps M2's session: an `expired` tombstone owned by
+        # machine-beta.
+        clock.advance(2.0)
+        await service.expire_sessions()
+
+        alpha = await open_machine(
+            service,
+            FakeMachine(service, machine_id="machine-alpha", session_id="sess-alpha"),
+        )
+        ack = await alpha.terminate(session_id="sess-beta")
+
+        result = ack["result"]
+        assert result["ended"] is False
+        assert result["reason"] == REASON_ALREADY_ENDED
+        assert result["machine_notified"] is False
+        # The ledger row belongs to the ASKING machine, not to M2.
+        rows = [r for r in audit.records if r.tool == AUDIT_TOOL_SESSION_TERMINATE]
+        assert rows, "the receipt must still be audited"
+        assert rows[-1].machine_id == "machine-alpha"
 
     async def test_the_terminate_of_another_connections_session_is_not_ended(self):
         """The centre never ends another connection's session."""
