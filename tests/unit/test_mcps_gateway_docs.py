@@ -559,8 +559,14 @@ def test_doc_pins_the_session_terminate_receipt() -> None:
     )
 
 
-def test_doc_pins_the_version_scoped_session_end_reason() -> None:
-    """§6.9.2: the ``reason`` member rides the v0.2 connection only."""
+def test_doc_pins_the_version_and_capability_scoped_session_end_reason() -> None:
+    """§6.9.6: the ``reason`` member rides the v0.2 connection AND the
+    negotiated ``client_terminate`` capability — never the version alone.
+
+    The capability half is the load-bearing one: on a ``0.2``
+    connection whose machine did NOT advertise ``client_terminate`` the
+    params stay exactly ``{"session_id": ...}``.
+    """
     text = _doc_prose()
     assert "reaped_by_center" in text, (
         "the doc must name the reaped_by_center reason."
@@ -569,8 +575,47 @@ def test_doc_pins_the_version_scoped_session_end_reason() -> None:
         "the doc must name the superseded reason."
     )
     assert 'exactly `{"session_id": ...}`' in text, (
-        "the doc must state that a v0.1 session.end keeps exactly its "
-        "historical params."
+        "the doc must state that a session.end without the negotiated "
+        "capability keeps exactly its historical params."
+    )
+    assert "VERSION-\nAND-CAPABILITY-scoped" in text or (
+        "VERSION-AND-CAPABILITY-scoped" in text
+    ), (
+        "the doc must state that the session.end reason is scoped by the "
+        "version AND the capability — not by the version alone."
+    )
+
+
+def test_doc_pins_the_declined_end_ack_is_a_refusal() -> None:
+    """§6.9.7: a declined end-ack is a REFUSAL, not an acknowledgement."""
+    text = _doc_prose()
+    assert "DECLINES" in text, (
+        "the doc must carry the declined-ack row of the end contract."
+    )
+    assert "a declined ack is a REFUSAL" in text.lower() or (
+        "DECLINED ack is a refusal" in text
+    ), (
+        "the doc must say a declined ack is a refusal, not an "
+        "acknowledgement."
+    )
+
+
+def test_doc_pins_the_absent_cause_omits_the_reason_member() -> None:
+    """§6.9.3 / §6.10.1 (Fork B): ``reason`` is present-when-known.
+
+    An absent cause is OMITTED — ``reason: ""`` is forbidden on the wire.
+    """
+    text = _doc_prose()
+    assert "never empty-string" in text, (
+        "the doc must state that an empty-string reason is forbidden."
+    )
+
+
+def test_doc_pins_the_foreign_session_leak_ban() -> None:
+    """§6.10.2: a foreign live session answers like a truly unknown id."""
+    text = _doc_prose()
+    assert "existence oracle" in text, (
+        "the doc must name the foreign-session leak ban."
     )
 
 
