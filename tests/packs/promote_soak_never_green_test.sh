@@ -230,101 +230,16 @@ fi
 echo
 echo "--- N4: the REAL auto-rollback route (promote.sh sandbox, scratch install root) ---"
 
-FIXTURE="$WORKDIR/fixture"
-FAKE_REPO="$FIXTURE/repo"
-SBX="$FIXTURE/installsb"
-mkdir -p "$FAKE_REPO/scripts/upgrade" "$FAKE_REPO/agents/leader" \
-         "$FAKE_REPO/daemon/migrations/versions" \
-         "$FAKE_REPO/daemon/plugin_subsystem" \
-         "$FAKE_REPO/frontend/dist/frontend/browser" \
-         "$FAKE_REPO/plugins/opendesign" \
-         "$SBX/releases"
+if ! soak_pack_build_promote_fixture "$WORKDIR"; then
+    echo "FAIL: cannot build the promote fixture"; echo "RESULT: FAIL"; exit 1;
+fi
+FAKE_REPO="$SOAK_FAKE_REPO"
+SBX="$SOAK_SBX"
+SBX_V1="$SOAK_SBX_V1"
+SBX_V2="$SOAK_SBX_V2"
+run_stage() { soak_pack_run_stage "$1"; }
 
-# The stub plugin payload (the staleness predicate reads the MANIFEST).
-printf 'plugin:\n  name: opendesign\nschema_version: 1.0.3\n' \
-    > "$FAKE_REPO/plugins/opendesign/MANIFEST.yaml"
-# The stub staleness predicate — the real one refuses fail-closed when the
-# module is absent (the fixture has no daemon tree), which would mask
-# the gate behaviour under test.
-cat > "$FAKE_REPO/daemon/plugin_subsystem/promote_staleness.py" <<'PYEOF'
-#!/usr/bin/env python3
-"""Stub promote-staleness predicate (fixture only) — always FRESH."""
-import sys
-
-
-def main() -> int:
-    plugin_dir = sys.argv[1] if len(sys.argv) > 1 else ""
-    name = plugin_dir.rstrip("/").split("/")[-1] if plugin_dir else "unknown"
-    print(f"PLUGIN-STALENESS=fresh plugin={name}")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-PYEOF
-chmod +x "$FAKE_REPO/daemon/plugin_subsystem/promote_staleness.py"
-
-# The REAL upgrade scripts (the subject of this pack).
-cp "$REPO_ROOT/scripts/upgrade/lib.sh"           "$FAKE_REPO/scripts/upgrade/lib.sh"
-cp "$REPO_ROOT/scripts/upgrade/journal_splice.py" "$FAKE_REPO/scripts/upgrade/journal_splice.py"
-cp "$REPO_ROOT/scripts/upgrade/stage.sh"          "$FAKE_REPO/scripts/upgrade/stage.sh"
-cp "$REPO_ROOT/scripts/upgrade/promote.sh"        "$FAKE_REPO/scripts/upgrade/promote.sh"
-cp "$REPO_ROOT/scripts/upgrade/rollback.sh"       "$FAKE_REPO/scripts/upgrade/rollback.sh"
-cp "$REPO_ROOT/scripts/upgrade/status.sh"         "$FAKE_REPO/scripts/upgrade/status.sh"
-cp "$REPO_ROOT/scripts/stop-ensemble.sh"          "$FAKE_REPO/scripts/stop-ensemble.sh"
-chmod +x "$FAKE_REPO/scripts/upgrade/"*.sh "$FAKE_REPO/scripts/stop-ensemble.sh"
-
-# The stub payload tree + launcher.
-printf '#!/bin/bash\n# stub launcher (fixture)\n' > "$FAKE_REPO/launcher.sh"
-printf 'stub-agent-definition\n' > "$FAKE_REPO/agents/leader/soul.md"
-printf 'port: ${PORT:-8088}\n' > "$FAKE_REPO/config.yaml"
-printf 'stub-index\n' > "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
-printf 'stub-app\n' > "$FAKE_REPO/frontend/dist/frontend/browser/main.js"
-printf 'CREATE TABLE x (id int);\n' > "$FAKE_REPO/daemon/migrations/versions/20260101_000001_init.sql"
-printf 'dist/\n*.build-provenance.json\n' > "$FAKE_REPO/.gitignore"
-printf '#!/bin/bash\nexit 78\n' > "$FIXTURE/stub-prod"
-chmod +x "$FIXTURE/stub-prod"
-
-git -C "$FAKE_REPO" init -q
-git -C "$FAKE_REPO" add -A 2>/dev/null
-git -C "$FAKE_REPO" -c user.email=t@t -c user.name=t commit -qm fixture >/dev/null 2>&1
-SBX_V1="v1.0.0-sbx"
-SBX_V2="v2.0.0-sbx"
-git -C "$FAKE_REPO" tag "$SBX_V1"
-
-# _stamp_provenance_for_repo <repo> <artifacts...> — re-stamp the stub
-# artifacts' provenance sidecars through the PRODUCTION writer so the
-# stage freshness guard passes.
-_stamp_provenance_for_repo() {
-    local repo="$1"; shift
-    local head dirty art
-    head="$(git -C "$repo" rev-parse HEAD 2>/dev/null)" || return 0
-    dirty="$(REPO_ROOT="$repo" bash -c '
-        . "'"$REPO_ROOT"'/scripts/upgrade/lib.sh"
-        _git_dirty_porcelain
-    ' 2>/dev/null)"
-    [ -n "$dirty" ] || dirty=false
-    for art in "$@"; do
-        [ -f "$art" ] || continue
-        REPO_ROOT="$repo" bash -c '
-            . "'"$REPO_ROOT"'/scripts/upgrade/lib.sh"
-            _provenance_write "$1" "$2" "$3" "stub:tests/packs/promote_soak_never_green_test.sh"
-        ' _stamp "$art" "$head" "$dirty" >/dev/null 2>&1
-    done
-}
-
-run_stage() {  # run_stage <version>
-    local ver="$1"
-    _stamp_provenance_for_repo "$FAKE_REPO" \
-        "$FIXTURE/stub-prod" \
-        "$FAKE_REPO/frontend/dist/frontend/browser/index.html"
-    HOME="$SOAK_PACK_FAKE_HOME" VERSION="$ver" TARGET=sandbox \
-        INSTALL_DIR="$SBX" PORT="$SBX_PORT" \
-        bash "$FAKE_REPO/scripts/upgrade/stage.sh" sandbox --skip-build "$FIXTURE/stub-prod"
-}
-
-SBX_PORT="$(soak_pack_free_port)" || exit 1
-run_stage "$SBX_V1" > "$WORKDIR/stage-v1.log" 2>&1
+soak_pack_run_stage "$SBX_V1" > "$WORKDIR/stage-v1.log" 2>&1
 if [ -f "$SBX/releases/$SBX_V1/manifest.json" ]; then
     soak_pack_report "N4a the previous release is staged in the scratch install root" 1
 else
@@ -338,7 +253,7 @@ printf 'second-release\n' > "$FAKE_REPO/SECOND"
 git -C "$FAKE_REPO" add SECOND 2>/dev/null
 git -C "$FAKE_REPO" -c user.email=t@t -c user.name=t commit -qm second >/dev/null 2>&1
 git -C "$FAKE_REPO" tag "$SBX_V2"
-run_stage "$SBX_V2" > "$WORKDIR/stage-v2.log" 2>&1
+soak_pack_run_stage "$SBX_V2" > "$WORKDIR/stage-v2.log" 2>&1
 if [ -f "$SBX/releases/$SBX_V2/manifest.json" ]; then
     soak_pack_report "N4b the broken release is staged in the scratch install root" 1
 else
@@ -348,14 +263,7 @@ fi
 
 # The install's `current` points at the PREVIOUS release; the journal is
 # seeded the same way the house fixture seeds it.
-( cd "$SBX" && ln -sfn "releases/$SBX_V1" current )
-(
-    export INSTALL_DIR="$SBX"
-    # shellcheck source=/dev/null
-    . "$FAKE_REPO/scripts/upgrade/lib.sh"
-    journal_init
-    journal_set_current "$SBX_V1"
-) >/dev/null 2>&1
+soak_pack_seed_journal "$SBX_V1"
 
 # The daemon: the PROMOTED release answers hard-red, the PREVIOUS one
 # answers green (the release under test is broken; the rollback target

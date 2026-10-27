@@ -179,6 +179,36 @@ def _readyz_body(state: State) -> tuple[int, dict]:
                 "detail": {"reasons": [], "inflight_turns": 0},
             }
         return 500, {"status": "degraded", "detail": {"reasons": ["database: hard red"]}}
+    if mode == "version-flip":
+        # The PROMOTED release is broken AND it breaks MID-SOAK: its
+        # FIRST /readyz request is green (the promote gate consumes it)
+        # and every later request is a hard red (the soak's first tick).
+        # The ROLLED-BACK release (whatever ``current`` points at after
+        # the rollback) always answers green — so the promote's short
+        # re-gate passes and the rollback completes.
+        if state.bad_version and state.current_version() != state.bad_version:
+            return 200, {
+                "status": "ready",
+                "components": {
+                    "database": True,
+                    "queue_freshness": True,
+                    "services": True,
+                    "checkpoint_saver": True,
+                },
+                "detail": {"reasons": [], "inflight_turns": 0},
+            }
+        if hit == 1:
+            return 200, {
+                "status": "ready",
+                "components": {
+                    "database": True,
+                    "queue_freshness": True,
+                    "services": True,
+                    "checkpoint_saver": True,
+                },
+                "detail": {"reasons": [], "inflight_turns": 0},
+            }
+        return 500, {"status": "degraded", "detail": {"reasons": ["database: hard red"]}}
     if mode == "version-aware":
         if state.bad_version and state.current_version() == state.bad_version:
             return 500, {

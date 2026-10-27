@@ -280,3 +280,123 @@ soak_pack_journal_sub() {
         _json_sub "$(journal_read)" "$key" 2>/dev/null
     )
 }
+
+# ── 7. THE PROMOTE FIXTURE (a throwaway repo + install root) ───────
+# The REAL promote.sh needs a staged release tree, a launcher and an
+# install root. The fixture is built from the REAL scripts (the subject
+# of the packs) plus STUB payload trees — the house pattern
+# (tests/test_release_journal.sh). NOTHING here is live-shaped: the
+# install root lives under the pack's own workdir (inside the FAKE_HOME
+# tree) and the fake repo is a throwaway git repo.
+#
+# Exports: SOAK_FIXTURE SOAK_FAKE_REPO SOAK_SBX SOAK_SBX_V1 SOAK_SBX_V2
+#          SOAK_SBX_PORT
+soak_pack_build_promote_fixture() {
+    local workdir="$1"
+    SOAK_FIXTURE="$workdir/fixture"
+    SOAK_FAKE_REPO="$SOAK_FIXTURE/repo"
+    SOAK_SBX="$SOAK_FIXTURE/installsb"
+    SOAK_SBX_V1="v1.0.0-sbx"
+    SOAK_SBX_V2="v2.0.0-sbx"
+    mkdir -p "$SOAK_FAKE_REPO/scripts/upgrade" "$SOAK_FAKE_REPO/agents/leader" \
+             "$SOAK_FAKE_REPO/daemon/migrations/versions" \
+             "$SOAK_FAKE_REPO/daemon/plugin_subsystem" \
+             "$SOAK_FAKE_REPO/frontend/dist/frontend/browser" \
+             "$SOAK_FAKE_REPO/plugins/opendesign" \
+             "$SOAK_SBX/releases"
+
+    # The stub plugin payload (the staleness predicate reads the MANIFEST).
+    printf 'plugin:\n  name: opendesign\nschema_version: 1.0.3\n' \
+        > "$SOAK_FAKE_REPO/plugins/opendesign/MANIFEST.yaml"
+    # The stub staleness predicate — the real one refuses fail-closed when
+    # the module is absent (the fixture has no daemon tree), which would
+    # mask the gate behaviour under test.
+    cat > "$SOAK_FAKE_REPO/daemon/plugin_subsystem/promote_staleness.py" <<'PYEOF'
+#!/usr/bin/env python3
+"""Stub promote-staleness predicate (fixture only) — always FRESH."""
+import sys
+
+
+def main() -> int:
+    plugin_dir = sys.argv[1] if len(sys.argv) > 1 else ""
+    name = plugin_dir.rstrip("/").split("/")[-1] if plugin_dir else "unknown"
+    print(f"PLUGIN-STALENESS=fresh plugin={name}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+PYEOF
+    chmod +x "$SOAK_FAKE_REPO/daemon/plugin_subsystem/promote_staleness.py"
+
+    # The REAL upgrade scripts (the subject of the packs).
+    cp "$SOAK_PACK_REPO_ROOT/scripts/upgrade/lib.sh"           "$SOAK_FAKE_REPO/scripts/upgrade/lib.sh"
+    cp "$SOAK_PACK_REPO_ROOT/scripts/upgrade/journal_splice.py" "$SOAK_FAKE_REPO/scripts/upgrade/journal_splice.py"
+    cp "$SOAK_PACK_REPO_ROOT/scripts/upgrade/stage.sh"          "$SOAK_FAKE_REPO/scripts/upgrade/stage.sh"
+    cp "$SOAK_PACK_REPO_ROOT/scripts/upgrade/promote.sh"        "$SOAK_FAKE_REPO/scripts/upgrade/promote.sh"
+    cp "$SOAK_PACK_REPO_ROOT/scripts/upgrade/rollback.sh"       "$SOAK_FAKE_REPO/scripts/upgrade/rollback.sh"
+    cp "$SOAK_PACK_REPO_ROOT/scripts/upgrade/status.sh"         "$SOAK_FAKE_REPO/scripts/upgrade/status.sh"
+    cp "$SOAK_PACK_REPO_ROOT/scripts/stop-ensemble.sh"          "$SOAK_FAKE_REPO/scripts/stop-ensemble.sh"
+    chmod +x "$SOAK_FAKE_REPO/scripts/upgrade/"*.sh "$SOAK_FAKE_REPO/scripts/stop-ensemble.sh"
+
+    # The stub payload tree + launcher.
+    printf '#!/bin/bash\n# stub launcher (fixture)\n' > "$SOAK_FAKE_REPO/launcher.sh"
+    printf 'stub-agent-definition\n' > "$SOAK_FAKE_REPO/agents/leader/soul.md"
+    printf 'port: ${PORT:-8088}\n' > "$SOAK_FAKE_REPO/config.yaml"
+    printf 'stub-index\n' > "$SOAK_FAKE_REPO/frontend/dist/frontend/browser/index.html"
+    printf 'stub-app\n' > "$SOAK_FAKE_REPO/frontend/dist/frontend/browser/main.js"
+    printf 'CREATE TABLE x (id int);\n' > "$SOAK_FAKE_REPO/daemon/migrations/versions/20260101_000001_init.sql"
+    printf 'dist/\n*.build-provenance.json\n' > "$SOAK_FAKE_REPO/.gitignore"
+    printf '#!/bin/bash\nexit 78\n' > "$SOAK_FIXTURE/stub-prod"
+    chmod +x "$SOAK_FIXTURE/stub-prod"
+
+    git -C "$SOAK_FAKE_REPO" init -q
+    git -C "$SOAK_FAKE_REPO" add -A 2>/dev/null
+    git -C "$SOAK_FAKE_REPO" -c user.email=t@t -c user.name=t commit -qm fixture >/dev/null 2>&1
+    git -C "$SOAK_FAKE_REPO" tag "$SOAK_SBX_V1"
+    SOAK_SBX_PORT="$(soak_pack_free_port)" || return 1
+}
+
+# _stamp_provenance_for_repo <repo> <artifacts...> — re-stamp the stub
+# artifacts' provenance sidecars through the PRODUCTION writer so the
+# stage freshness guard passes.
+soak_pack_stamp_provenance() {
+    local repo="$1"; shift
+    local head dirty art
+    head="$(git -C "$repo" rev-parse HEAD 2>/dev/null)" || return 0
+    dirty="$(REPO_ROOT="$repo" bash -c '
+        . "'"$SOAK_PACK_REPO_ROOT"'/scripts/upgrade/lib.sh"
+        _git_dirty_porcelain
+    ' 2>/dev/null)"
+    [ -n "$dirty" ] || dirty=false
+    for art in "$@"; do
+        [ -f "$art" ] || continue
+        REPO_ROOT="$repo" bash -c '
+            . "'"$SOAK_PACK_REPO_ROOT"'/scripts/upgrade/lib.sh"
+            _provenance_write "$1" "$2" "$3" "stub:soak-gate pack fixture"
+        ' _stamp "$art" "$head" "$dirty" >/dev/null 2>&1
+    done
+}
+
+soak_pack_run_stage() {  # soak_pack_run_stage <version> — stages into the
+    # scratch install root with the REAL stage.sh.
+    local ver="$1"
+    soak_pack_stamp_provenance "$SOAK_FAKE_REPO" \
+        "$SOAK_FIXTURE/stub-prod" \
+        "$SOAK_FAKE_REPO/frontend/dist/frontend/browser/index.html"
+    HOME="$SOAK_PACK_FAKE_HOME" VERSION="$ver" TARGET=sandbox \
+        INSTALL_DIR="$SOAK_SBX" PORT="$SOAK_SBX_PORT" \
+        bash "$SOAK_FAKE_REPO/scripts/upgrade/stage.sh" sandbox --skip-build "$SOAK_FIXTURE/stub-prod"
+}
+
+soak_pack_seed_journal() {  # soak_pack_seed_journal <current-version>
+    local ver="$1"
+    ( cd "$SOAK_SBX" && ln -sfn "releases/$ver" current )
+    (
+        export INSTALL_DIR="$SOAK_SBX"
+        # shellcheck source=/dev/null
+        . "$SOAK_FAKE_REPO/scripts/upgrade/lib.sh"
+        journal_init
+        journal_set_current "$ver"
+    ) >/dev/null 2>&1
+}
