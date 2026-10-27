@@ -237,7 +237,7 @@ class McpConnectionManager:
 
         from daemon.mcp.warmup_pool import _SECRET_RESOLVE_EXECUTOR
 
-        resolved_env = await asyncio.get_event_loop().run_in_executor(
+        resolved_env = await asyncio.get_running_loop().run_in_executor(
             _SECRET_RESOLVE_EXECUTOR, _resolve_env_sync
         )
         server_params = StdioServerParameters(
@@ -529,7 +529,7 @@ class McpConnectionManager:
 
         from daemon.mcp.warmup_pool import _SECRET_RESOLVE_EXECUTOR
 
-        resolved_env = await asyncio.get_event_loop().run_in_executor(
+        resolved_env = await asyncio.get_running_loop().run_in_executor(
             _SECRET_RESOLVE_EXECUTOR, _resolve_env_sync
         )
         server_params = StdioServerParameters(

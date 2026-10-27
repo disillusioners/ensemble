@@ -39,16 +39,22 @@ def _params() -> types.SimpleNamespace:
 
 def test_on_ready_uses_dedicated_executor():
     cm = sw.TaskScopedStdioClient(_params(), instance_id="i", server_name="s")
-    # The hook returns an awaitable (W-3 shape) — it does NOT run the
-    # /proc scan inline on the event-loop thread.
-    res = cm._schedule_stamp()
-    assert inspect.isawaitable(res)
+
+    async def _call():
+        # The hook returns an awaitable (W-3 shape) — it does NOT run
+        # the /proc scan inline on the event-loop thread. The hook always
+        # runs inside a running loop (the transport's background task),
+        # so the executor is bound to THAT loop.
+        res = cm._schedule_stamp()
+        assert inspect.isawaitable(res)
+        await res
+        return res
+
+    asyncio.run(_call())
     # ...and it targets the DEDICATED executor, not the shared default
     # pool (which carries the daemon's LLM calls and compaction).
     assert sw._PROC_SCAN_EXECUTOR._thread_name_prefix == "mcp-procscan"
     assert sw._PROC_SCAN_EXECUTOR._max_workers == 2
-    if hasattr(res, "close"):
-        res.close()
 
 
 def test_secret_executor_is_dedicated():
@@ -138,3 +144,59 @@ def test_request_close_is_synchronous():
     # Calling it from a synchronous context must not raise.
     cm.request_close()
     assert cm._close.is_set()
+
+
+# ── (d) the warmup task must not swallow an OUTER cancellation ──────────
+#
+# This is the CRITICAL-1 regression pin: ``McpWarmupPool.warmup()``
+# wraps its per-server gather in ``asyncio.wait_for(...)`` with the
+# total budget. ``asyncio.wait_for`` converts its OWN timeout to
+# ``TimeoutError``, so a ``CancelledError`` reaching that ``except`` is
+# an OUTER cancellation (the daemon shutting down). Swallowing it makes
+# the warmup task complete SUCCESSFULLY, so the manager's
+# ``await self._warmup_task`` does not raise and ``_warmup_and_report``
+# continues past the cancel — calling ``start_health_check`` and
+# ``eager_warm_schemas()`` DURING SHUTDOWN, which can spawn fresh MCP
+# subprocesses while the daemon is going down.
+
+
+def test_warmup_task_propagates_outer_cancellation():
+    """Cancelling a task awaiting ``pool.warmup()`` must re-raise."""
+    from daemon.mcp.config import McpStdioConfig
+    from daemon.mcp.warmup_pool import McpWarmupPool
+
+    async def _run():
+        pool = McpWarmupPool()
+        pool.register_server(
+            "slow",
+            McpStdioConfig(command="sleep", args=["300"]),
+            pool_size=1,
+        )
+
+        async def _never_finishes(self, server_name, size):
+            await asyncio.sleep(300)
+            return 0
+
+        # Replace the per-server warmup with a sleep so the gather is
+        # genuinely in flight (the real spawn path needs the MCP SDK,
+        # which the unit conftest mocks).
+        pool._warmup_server = _never_finishes.__get__(pool, type(pool))
+        task = asyncio.ensure_future(pool.warmup())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        raised = None
+        try:
+            await task
+        except BaseException as exc:
+            raised = type(exc).__name__
+        return raised, task.cancelled()
+
+    raised, cancelled = asyncio.run(_run())
+    assert raised == "CancelledError", (
+        "the cancelled warmup task did NOT raise CancelledError — the "
+        f"outer cancellation was swallowed (raised={raised!r}, "
+        f"cancelled={cancelled!r})"
+    )
+    assert cancelled is True, (
+        f"the warmup task completed instead of being cancelled: {cancelled!r}"
+    )

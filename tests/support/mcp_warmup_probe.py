@@ -488,3 +488,121 @@ def child_cancellation_script() -> str:
         "\n"
         "asyncio.run(main())\n"
     )
+
+
+def warmup_cancel_script() -> str:
+    """Cancelling a task awaiting ``pool.warmup()`` must RE-RAISE.
+
+    The exact observable the reviewer asked for: a manager-shaped
+    ``await self._warmup_task`` must see ``CancelledError`` (and
+    ``task.cancelled()`` must be True) when the warmup task is
+    cancelled — NOT a successful completion. If the total-budget
+    ``except`` swallowed the cancellation, the task would complete
+    successfully, ``_warmup_and_report`` would continue past the
+    cancel and would call ``start_health_check`` /
+    ``eager_warm_schemas`` DURING SHUTDOWN (spawning fresh MCP
+    subprocesses while the daemon goes down).
+
+    The probe registers a server that never speaks the MCP protocol
+    (so the warmup is genuinely in flight) and cancels the awaiting
+    task.
+    """
+    return (
+        "import asyncio, json, os, sys, time\n"
+        "sys.path.insert(0, %r)\n" % str(repo_root())
+        + "from daemon.mcp.warmup_pool import McpWarmupPool\n"
+        "from daemon.mcp.config import McpStdioConfig\n"
+        "import daemon.mcp.warmup_pool as wp\n"
+        "wp.WARMUP_TOTAL_BUDGET_S = 6.0\n"
+        "wp.WARMUP_CREATE_BUDGET_S = 45.0\n"
+        "\n"
+        "SERVER = %r\n" % HANGING_SERVER_SCRIPT
+        + "\n"
+        "async def main():\n"
+        "    home = os.environ['HOME']\n"
+        "    path = os.path.join(home, 'hang.py')\n"
+        "    with open(path, 'w') as fh:\n"
+        "        fh.write(SERVER)\n"
+        "    pool = McpWarmupPool()\n"
+        "    pool.register_server('hang', McpStdioConfig(command=sys.executable, args=[path]), pool_size=1)\n"
+        "    task = asyncio.ensure_future(pool.warmup())\n"
+        "    await asyncio.sleep(1.0)\n"
+        "    task.cancel()\n"
+        "    raised = None\n"
+        "    try:\n"
+        "        await task\n"
+        "    except BaseException as exc:\n"
+        "        raised = type(exc).__name__\n"
+        "    print(json.dumps({\n"
+        "        'raised': raised,\n"
+        "        'cancelled': task.cancelled(),\n"
+        "    }))\n"
+        "\n"
+        "asyncio.run(main())\n"
+    )
+
+
+def sibling_reap_script() -> str:
+    """A failing session's reap must NOT kill a live sibling's child.
+
+    The sibling uses the SAME command basename with DIFFERENT args (the
+    common case — two npx-based MCP servers). The baseline snapshot and
+    the reap candidate set MUST use the SAME matcher, otherwise the
+    sibling is absent from the baseline, present in the reap set, and
+    (until its own stamp claims it) vulnerable to a cross-session
+    killpg.
+
+    The probe: spawns the sibling child (same command, different args),
+    then drives a FAILING session's ``_reap_orphans()`` and checks
+    that the sibling is still alive.
+    """
+    return (
+        "import asyncio, json, os, sys, time\n"
+        "sys.path.insert(0, %r)\n" % str(repo_root())
+        + "import daemon.mcp.stdio_wrapper as sw\n"
+        "from daemon.mcp.stdio_wrapper import TaskScopedStdioClient\n"
+        "\n"
+        "SERVER = %r\n" % HANGING_SERVER_SCRIPT
+        + "\n"
+        "def alive(pid):\n"
+        "    try:\n"
+        "        with open('/proc/%d/stat' % pid) as fh:\n"
+        "            return fh.read()\n"
+        "    except OSError:\n"
+        "        return None\n"
+        "\n"
+        "async def main():\n"
+        "    home = os.environ['HOME']\n"
+        "    sibling_path = os.path.join(home, 'sibling.py')\n"
+        "    with open(sibling_path, 'w') as fh:\n"
+        "        fh.write(SERVER)\n"
+        "    # A LIVE sibling: same command basename, DIFFERENT args.\n"
+        "    import subprocess\n"
+        "    # start_new_session mirrors the SDK's anyio.open_process\n"
+        "    # (start_new_session=True) — the child leads its OWN process\n"
+        "    # group, so a killpg on it cannot reach this probe.\n"
+        "    sibling = subprocess.Popen(\n"
+        "        [sys.executable, sibling_path], start_new_session=True,\n"
+        "    )\n"
+        "    await asyncio.sleep(0.5)\n"
+        "    # The failing session: same command basename, different args.\n"
+        "    import types\n"
+        "    failing_args = [os.path.join(home, 'failing.py')]\n"
+        "    with open(failing_args[0], 'w') as fh:\n"
+        "        fh.write(SERVER)\n"
+        "    params = types.SimpleNamespace(command=sys.executable, args=failing_args)\n"
+        "    session = TaskScopedStdioClient(params, instance_id='failing', server_name='failing')\n"
+        "    session._snapshot_preexisting()\n"
+        "    session._reap_orphans()\n"
+        "    await asyncio.sleep(0.5)\n"
+        "    sibling_alive = sibling.poll() is None\n"
+        "    print(json.dumps({\n"
+        "        'sibling_alive': sibling_alive,\n"
+        "        'sibling_pid': sibling.pid,\n"
+        "    }))\n"
+        "    if sibling_alive:\n"
+        "        sibling.kill()\n"
+        "        sibling.wait()\n"
+        "\n"
+        "asyncio.run(main())\n"
+    )

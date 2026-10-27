@@ -96,9 +96,14 @@ AsyncContextManagerFactory = Callable[[], AbstractAsyncContextManager[Any]]
 _PROC_ROOT: Path = Path("/proc")
 
 # Bounded handshake wait (normative in requirements.md §4.6, P6).
-# 30.0 s — strictly inside the 60 s warmup outer budget so the outer
-# budget stays authoritative (30 + 2 + 30 + 6 = 68 s <= 60 s is the
-# documented split; 55 s is REJECTED).
+# 30.0 s — the handshake bound is INSIDE the 60 s per-spawn warmup
+# budget. The documented worst-case split is 30 (handshake) + 2
+# (npx grace) + 30 (3 initialize retries) + 6 (backoff) = 68 s, i.e.
+# 68 s > 60 s, so the OUTER (per-spawn) budget wins and cancels the
+# 3rd initialize retry — the inner bound is a backstop for the
+# handshake itself, not a widening of the outer budget. The 55 s
+# value is REJECTED (it pushes the split further past the outer
+# budget).
 HANDSHAKE_WAIT_TIMEOUT_S: float = 30.0
 
 #: Grace window the close-watchdog gives the background task to run the
@@ -479,7 +484,12 @@ class TaskScopedContextManager:
             at ``DEBUG`` and swallowed — the caller can't act on them
             and the connection is going away anyway.
         """
-        self._close.set()
+        # NOTE-3: signal close (not a bare ``_close.set()``) so the
+        # CLOSE_GRACE_S watchdog is armed — the normal path's
+        # ``await task`` below is unbounded, and without the watchdog a
+        # wedged inner ``__aexit__`` would leave the reap backstop
+        # unreached.
+        self._signal_close()
         task = self._task
         self._task = None
         try:
@@ -505,15 +515,19 @@ class TaskScopedContextManager:
     async def _run(self) -> None:
         """Background task that owns the inner context manager lifecycle.
 
-        ``CancelledError`` is NEVER caught here. The background task
-        may be cancelled by ``__aenter__``'s cleanup path (when the
-        caller of ``__aenter__`` is cancelled) or by external code
+        The cancellation is PROPAGATED, never swallowed: the background
+        task may be cancelled by ``__aenter__``'s cleanup path (when
+        the caller of ``__aenter__`` is cancelled) or by external code
         awaiting the task (e.g. ``__aexit__``'s ``await task`` when
-        the caller of ``__aexit__`` is cancelled). Catching
-        ``CancelledError`` would silently swallow the cancellation
-        and cause the awaiter to see a normal completion instead of
-        ``CancelledError`` — breaking cancellation propagation
-        through the wrapper.
+        the caller of ``__aexit__`` is cancelled). Swallowing
+        ``CancelledError`` would make the awaiter see a normal
+        completion instead of ``CancelledError`` — breaking
+        cancellation propagation through the wrapper.
+
+        The teardown (``__aexit__``) and the child reap DO run on the
+        cancelled path — they are installed in ``finally`` blocks and
+        are bounded (``INNER_EXIT_GRACE_S``) / synchronous, so a
+        cancellation cannot skip them and cannot wedge the canceller.
         """
         try:
             streams_cm = self._factory()
@@ -600,19 +614,29 @@ class TaskScopedContextManager:
                 self._ready.set()
                 await self._close.wait()
             finally:
+                # NOTE-4: the cancellation is captured and re-raised
+                # AFTER the teardown and the reap — a bare ``raise`` in
+                # an ``except CancelledError`` arm would skip everything
+                # that follows it.
+                cancel_exc: BaseException | None = None
                 try:
                     await streams_cm.__aexit__(None, None, None)
-                except asyncio.CancelledError:
-                    raise
+                except asyncio.CancelledError as exc:
+                    cancel_exc = exc
                 except BaseException as e:
                     logger.debug("Inner context manager __aexit__ raised: %s", e)
                 # B3 backstop: the SDK's own teardown is not reliable on
                 # every path (its killpg lives after the yield), so the
                 # session's children are censused and reaped explicitly.
+                # It is SYNCHRONOUS, so a cancellation cannot skip it.
                 try:
                     self._reap_orphans()
                 except Exception as exc:  # pragma: no cover — best effort
                     logger.debug("mcp_child reap failed: %s: %s", type(exc).__name__, exc)
+                # The cancellation (if any) propagates only AFTER the
+                # teardown and the reap have run.
+                if cancel_exc is not None:
+                    raise cancel_exc
                 # D5 — best-effort on_close hook (MCP child exit-mark).
                 # Runs AFTER the inner __aexit__ has torn down the
                 # transport (the child is gone or going). Exceptions
@@ -768,79 +792,78 @@ class TaskScopedStdioClient(TaskScopedContextManager):
         # tests/test_resource_pid_registry.py:505-510). A fire-and-forget
         # shape is UNSAFE (a deferred scan can find a dead child and
         # return [] with no reap handle).
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
+        # NOTE-9: ``get_running_loop`` only — the old
+        # ``new_event_loop()`` fallback could hand the executor a
+        # FOREIGN loop (a latent cross-loop trap) and was unreachable
+        # from the real call path anyway (the hook always runs inside a
+        # running loop).
+        loop = asyncio.get_running_loop()
         return loop.run_in_executor(_PROC_SCAN_EXECUTOR, self._stamp_children)
+
+    def _matching_children(self) -> list[tuple[int, int]]:
+        """The children of THIS process that match this server EXACTLY.
+
+        ONE matcher, used by BOTH the baseline snapshot and the reap
+        candidate set — so the baseline is always a superset of the reap
+        set and the two can never diverge.
+
+        The predicate is the exact-argv one (``scan_mcp_child_pids``):
+        a direct child of this process whose argv[0] basename equals the
+        server command AND whose argv[1:] starts with the server args.
+        A concurrent sibling that uses the SAME command basename with
+        DIFFERENT args (the common case — two npx-based MCP servers)
+        therefore does NOT match, so it can never be reaped by a failing
+        session.
+
+        A server configured with ``args=[]`` matches NOTHING here — the
+        same deliberate W-3 rule the child STAMP uses (a basename-only
+        match would wildcard-match any same-basename child of the
+        daemon). Such a server is therefore never a reap candidate
+        either: ambiguity is resolved in favour of NOT killing.
+        """
+        try:
+            return scan_mcp_child_pids(
+                command=self._server_params.command,
+                args=list(self._server_params.args or []),
+            )
+        except Exception:  # pragma: no cover — the scan never raises
+            return []
 
     def _snapshot_preexisting(self) -> None:
         """Record the matching children that existed BEFORE this session.
 
         Called right before the inner transport is entered. The orphan
         reap diffs against this baseline so it can only ever kill a
-        child this session spawned.
+        child this session spawned. The baseline uses the SAME matcher
+        as the reap candidate set (``_matching_children``).
         """
-        try:
-            matches = scan_mcp_child_pids(
-                command=self._server_params.command,
-                args=list(self._server_params.args or []),
-            )
-        except Exception:  # pragma: no cover — the scan never raises
-            matches = []
-        self._preexisting_children = {pid for pid, _ in matches}
+        self._preexisting_children = {
+            pid for pid, _ in self._matching_children()
+        }
 
     def _session_children(self) -> list[int]:
         """The pids of children THIS session spawned (and still owns).
 
         A child belongs to this session when it
 
-        * is a direct child of this process,
-        * its argv[0] basename matches this server's command, and
-        * it was NOT present in the baseline snapshot taken before the
+        * matches this server EXACTLY (same matcher as the baseline),
+        * was NOT present in the baseline snapshot taken before the
           transport was created (so a pre-existing sibling is never
           touched), and
         * no other live session has claimed it (the claim-once ledger).
 
-        The command-only match (no argv[1:] requirement) is deliberate:
-        the SDK spawns ``[command, *args]``, and a server configured
-        with ``args=[]`` would otherwise be unmatchable — which is
-        exactly the case that leaks.
+        A claim made by THIS session is in ``self._registered`` and is
+        exactly the child we may reap.
         """
-        import os as _os
-
-        want = _basename_command(self._server_params.command)
-        if not want:
-            return []
         found: list[int] = []
-        try:
-            entries = list(_PROC_ROOT.iterdir())
-        except (FileNotFoundError, PermissionError, OSError):
-            return []
-        me = _os.getpid()
-        for entry in entries:
-            name = entry.name
-            if not name.isdigit():
-                continue
-            try:
-                pid = int(name)
-            except ValueError:
-                continue
-            if pid == me or pid in self._preexisting_children:
-                continue
-            ppid, starttime = _read_ppid_and_starttime(_PROC_ROOT, pid)
-            if ppid != me or starttime is None:
-                continue
-            argv = _read_cmdline(_PROC_ROOT, pid)
-            if not argv or _basename_command(argv[0]) != want:
+        for pid, starttime in self._matching_children():
+            if pid in self._preexisting_children:
                 continue
             if (
                 (pid, starttime) in _claimed_children
                 and (pid, starttime) not in self._registered
             ):
                 # Claimed by ANOTHER live session — never touch it.
-                # (A claim made by THIS session is in ``self._registered``
-                # and is exactly the child we may reap.)
                 continue
             found.append(pid)
         return found

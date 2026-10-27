@@ -219,12 +219,26 @@ class McpWarmupPool:
                 ),
                 timeout=WARMUP_TOTAL_BUDGET_S,
             )
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+        except asyncio.TimeoutError:
+            # ONLY the total budget's own timeout reaches here:
+            # ``asyncio.wait_for`` converts its timeout to TimeoutError.
+            # A CancelledError here is an OUTER cancellation (the daemon
+            # shutting down) and MUST propagate: swallowing it would let
+            # this task complete successfully, so the manager's
+            # ``await self._warmup_task`` would not raise and
+            # ``_warmup_and_report`` would CONTINUE past the shutdown
+            # cancel — calling ``start_health_check`` (a new background
+            # task during shutdown) and ``eager_warm_schemas()``, which
+            # can SPAWN FRESH MCP SUBPROCESSES while the daemon is going
+            # down and block the shutdown on that discovery.
             logger.warning(
                 "MCP warmup total budget (%.1fs) exceeded; proceeding so "
                 "starters can run (hang-wedge belt-and-braces).",
                 WARMUP_TOTAL_BUDGET_S,
             )
+        except asyncio.CancelledError:
+            # An OUTER cancellation (daemon shutdown) — propagate it.
+            raise
         logger.info(f"MCP warmup complete: {len(self._configs)} server(s) ready")
 
     async def _warmup_server(self, server_name: str, size: int) -> int:
@@ -297,7 +311,7 @@ class McpWarmupPool:
                 surface="mcp_spawn",
             )
 
-        resolved_env = await asyncio.get_event_loop().run_in_executor(
+        resolved_env = await asyncio.get_running_loop().run_in_executor(
             _SECRET_RESOLVE_EXECUTOR, _resolve_env_sync
         )
         server_params = StdioServerParameters(
@@ -725,12 +739,19 @@ class McpWarmupPool:
                 self._close_connection(conn), timeout=REAP_CLOSE_GRACE_SECONDS
             )
             return
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+        except asyncio.TimeoutError:
+            # ONLY the grace window's own timeout reaches here. An outer
+            # cancellation (the health-check task being cancelled) MUST
+            # propagate — swallowing it would make the cancelled task
+            # complete successfully and hide the cancel from its awaiter.
             logger.warning(
                 f"Idle reap teardown for server='{server_name}' exceeded the "
                 f"{REAP_CLOSE_GRACE_SECONDS:.0f}s grace window "
                 f"(idle={idle_seconds:.0f}s); escalating to hard teardown cancel"
             )
+        except asyncio.CancelledError:
+            # An OUTER cancellation — propagate it.
+            raise
         except Exception as e:
             logger.warning(
                 f"Idle reap teardown error for server='{server_name}' "

@@ -32,7 +32,12 @@ pytestmark = pytest.mark.integration
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from support.mcp_warmup_probe import run_probe, starters_script  # noqa: E402
+from support.mcp_warmup_probe import (  # noqa: E402
+    run_probe,
+    sibling_reap_script,
+    starters_script,
+    warmup_cancel_script,
+)
 
 
 @pytest.mark.timeout(180)
@@ -48,4 +53,46 @@ def test_one_hanging_server_does_not_starve_the_starters():
     assert result["schema_cache_populated"] is True, (
         f"the schema/discovery cache of the healthy server was never "
         f"populated — the hanging server starved the starters: {result}"
+    )
+
+
+@pytest.mark.timeout(180)
+def test_cancelling_the_warmup_task_propagates_cancelled_error():
+    """A cancelled warmup task must RE-RAISE ``CancelledError``.
+
+    The observable the reviewer's CRITICAL-1 is about: a manager-shaped
+    ``await self._warmup_task`` must see ``CancelledError`` (and the
+    task must report ``cancelled() is True``) when the warmup task is
+    cancelled. If the total-budget ``except`` swallowed the
+    cancellation, the task would complete SUCCESSFULLY, the manager's
+    ``_warmup_and_report`` would continue past the cancel and would
+    call ``start_health_check`` / ``eager_warm_schemas`` DURING
+    SHUTDOWN — spawning fresh MCP subprocesses while the daemon goes
+    down and blocking the shutdown on that discovery.
+    """
+    result = run_probe(warmup_cancel_script(), timeout=150)
+    assert result["raised"] == "CancelledError", (
+        "the cancelled warmup task did NOT raise CancelledError — the "
+        f"cancellation was swallowed: {result}"
+    )
+    assert result["cancelled"] is True, (
+        f"the warmup task completed instead of being cancelled: {result}"
+    )
+
+
+@pytest.mark.timeout(180)
+def test_a_failing_session_does_not_reap_a_live_sibling():
+    """A failing session's reap must not kill a live sibling's child.
+
+    The sibling uses the SAME command basename with DIFFERENT args (the
+    common case — two npx-based MCP servers). The reap's baseline
+    snapshot and its candidate set MUST use the SAME matcher; when they
+    diverged, the sibling was absent from the baseline, present in the
+    candidate set, and (until its own stamp claimed it) vulnerable to
+    a cross-session process-group kill.
+    """
+    result = run_probe(sibling_reap_script(), timeout=150)
+    assert result["sibling_alive"] is True, (
+        "a failing session's reap KILLED a live sibling's child — the "
+        f"baseline and the reap candidate set use different matchers: {result}"
     )
