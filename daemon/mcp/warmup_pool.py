@@ -26,6 +26,7 @@ from daemon.mcp.init_guard import (
     McpInitRefused,
     McpServerQuarantined,
     can_attempt,
+    claim_attempt,
     dns_precheck,
     is_quarantined,
     record_failure,
@@ -438,11 +439,11 @@ class McpWarmupPool:
         """
         config = self._configs[server_name]
         # ── C1: the quarantine gate ────────────────────────────────
-        # ``can_attempt`` is False ONLY when the server is quarantined
+        # ``claim_attempt`` is False ONLY when the server is quarantined
         # and no recovery probe is due. The raise is a distinct type so
         # the two failure loops below can log it as an EXPECTED state
         # (INFO) rather than a fault (ERROR).
-        if not await can_attempt(server_name):
+        if not await claim_attempt(server_name):
             entry = server_state(server_name)
             raise McpServerQuarantined(
                 server_name,

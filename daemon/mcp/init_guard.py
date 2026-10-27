@@ -319,6 +319,45 @@ def state_snapshot() -> dict[str, dict[str, Any]]:
     return {name: entry.as_dict() for name, entry in _SERVERS.items()}
 
 
+def quarantine_server(
+    server: str,
+    reason: str,
+    error_class: str | None = None,
+) -> None:
+    """Quarantine a server for THIS boot (the explicit entry point).
+
+    The equivalent of a breach of the breaker — used by an operator
+    path or a test. The entry carries the machine class in ``reason``
+    and (optionally) the failure class in ``error_class``.
+
+    The recovery window is armed the same way the failure path arms it:
+    the server returns via the breaker's single recovery probe after
+    ``INIT_RECOVERY_TIMEOUT_S`` (or immediately after
+    ``clear_quarantine``).
+    """
+    entry = _ensure(server)
+    entry.state = STATE_QUARANTINED
+    entry.reason = reason
+    entry.since = _now_iso()
+    entry.last_error_class = error_class or reason
+    entry.retry_at = time.monotonic() + INIT_RECOVERY_TIMEOUT_S
+    entry.probe_claimed = False
+    entry.breaker_state = _breaker(server).get_state()
+    logger.warning(
+        "MCP server '%s' QUARANTINED for this boot (reason=%s) — recovery "
+        "probe after %.0fs",
+        server,
+        reason,
+        INIT_RECOVERY_TIMEOUT_S,
+    )
+    _emit_transition(
+        server,
+        STATE_QUARANTINED,
+        f"class={entry.last_error_class} reason={reason} "
+        f"recovery_timeout_s={INIT_RECOVERY_TIMEOUT_S}",
+    )
+
+
 def clear_quarantine(server: str) -> bool:
     """Manually clear a server's quarantine (the operator reset path).
 
@@ -514,18 +553,39 @@ def _set_state(entry: ServerState, state: str, reason: Optional[str]) -> bool:
 
 
 async def can_attempt(server: str) -> bool:
-    """May an init attempt be made for this server right now?
+    """MAY an init attempt be made for this server right now?
+
+    A PURE query — it never claims the recovery probe and never mutates
+    the breaker. The spawn path uses :func:`claim_attempt` (which does
+    claim the probe); observers (the readiness surface, the tests) use
+    this one.
 
     * Not quarantined → True (the ordinary path).
-    * Quarantined by the BREAKER (threshold reached) → the breaker's own
-      gate decides: False until ``INIT_RECOVERY_TIMEOUT_S`` has elapsed,
-      then True for exactly ONE probe (the CR-4 single-probe guard).
-    * Quarantined IMMEDIATELY (NXDOMAIN) → the entry's own recovery
-      window decides, with the same single-probe discipline.
+    * Quarantined → True only once the recovery window
+      (``INIT_RECOVERY_TIMEOUT_S``) has elapsed AND no recovery probe is
+      already in flight.
+    """
+    entry = _SERVERS.get(server)
+    if entry is None or entry.state != STATE_QUARANTINED:
+        return True
+    if entry.retry_at is not None:
+        if time.monotonic() < entry.retry_at:
+            return False
+        if entry.probe_claimed:
+            return False
+    return True
 
-    A quarantined server is NEVER spawned outside a recovery probe — the
-    prevention (no spawn) is the primary fix; the probe is how it comes
-    back without a restart.
+
+async def claim_attempt(server: str) -> bool:
+    """Claim the right to make an init attempt (the SPAWN path's gate).
+
+    Same predicate as :func:`can_attempt` PLUS the probe claim: the
+    breaker's own gate (OPEN → HALF_OPEN, claiming the CR-4 single
+    probe slot) and the entry's ``probe_claimed`` flag.
+
+    A quarantined server is NEVER spawned outside a recovery probe —
+    the prevention (no spawn) is the primary fix; the probe is how it
+    comes back without a restart.
     """
     entry = _SERVERS.get(server)
     if entry is None or entry.state != STATE_QUARANTINED:
@@ -825,12 +885,14 @@ __all__ = [
     "STATE_QUARANTINED",
     "buffered_transition_count",
     "can_attempt",
+    "claim_attempt",
     "classify_dns_failure",
     "clear_quarantine",
     "dns_precheck",
     "flush_buffered_transitions",
     "is_quarantined",
     "quarantine_entries",
+    "quarantine_server",
     "record_failure",
     "record_success",
     "reset_for_tests",

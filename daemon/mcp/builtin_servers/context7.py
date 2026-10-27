@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from daemon.mcp.builtin_servers.base import BuiltinServerDefinition
+from daemon.mcp.config import McpConfigValidationError
 
 
 #: The daemon-side MIRROR of the package's hardcoded site root.
@@ -111,17 +112,20 @@ class Context7ServerDefinition(BuiltinServerDefinition):
     def build_config(self, user_values: dict[str, Any]) -> dict[str, Any]:
         """Build the config, validating the URL-shaped values (G4).
 
-        Rejects a non-``http(s)`` scheme and embedded userinfo. The
-        router translates the ``ValueError`` into a **422** (the
-        ``webfetch.py`` precedent), so the failure mode is a clean 422
-        and not a 500.
+        Rejects a non-``http(s)`` scheme and embedded userinfo.
+
+        The raised error is ``McpConfigValidationError`` — a
+        ``ValueError`` SUBCLASS (so the webfetch ``ValueError``
+        precedent holds and a plain ``except ValueError`` still
+        catches it) that the ``/configure-builtin`` route translates
+        into a clean **422** instead of an opaque 500.
         """
         for key in ("CONTEXT7_BASE_URL", "CONTEXT7_API_URL"):
             value = user_values.get(key)
             if value is None:
                 continue
             if not isinstance(value, str):
-                raise ValueError(f"{key} must be a string")
+                raise McpConfigValidationError(f"{key} must be a string")
             text = value.strip()
             if not text:
                 # An empty string is "unset" — ``build_config`` skips
@@ -157,15 +161,15 @@ def _validate_base_url(key: str, value: str) -> None:
     try:
         parts = urlsplit(value)
     except ValueError as exc:
-        raise ValueError(f"{key} is not a valid URL: {exc}") from exc
+        raise McpConfigValidationError(f"{key} is not a valid URL: {exc}") from exc
     if parts.scheme not in ("http", "https"):
-        raise ValueError(
+        raise McpConfigValidationError(
             f"{key} must start with http:// or https:// "
             f"(got '{value}')"
         )
     if parts.username or parts.password or "@" in parts.netloc:
-        raise ValueError(
+        raise McpConfigValidationError(
             f"{key} must not embed credentials (userinfo) in the URL"
         )
     if not parts.hostname:
-        raise ValueError(f"{key} must contain a host")
+        raise McpConfigValidationError(f"{key} must contain a host")
