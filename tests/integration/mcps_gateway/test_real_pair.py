@@ -1232,6 +1232,14 @@ async def _phase_p1(
     frames_before_end = len(lines.frames)
     end_result = await service.disconnect(agent_id=AGENT_ID)
     end_frame = _response_to(lines, "session.end")
+    # §6.9.7 — the machine's ack BODY decides whether the end was
+    # acknowledged: a DECLINED ack ({ended: false}) is a REFUSAL of the
+    # end, so the row must fail on it even when the daemon envelope
+    # claims an end.  The v0.1 client answers {"session_id"} with NO
+    # "ended" member at all — that is an ACCEPTED ack (the member is
+    # simply absent), so only an EXPLICIT falsy "ended" is a decline.
+    ack_body = end_frame.result if end_frame is not None else {}
+    ack_declined = "ended" in ack_body and not ack_body["ended"]
     # the socket stays open: heartbeats keep arriving after the end
     await asyncio.sleep(1.5)
     heartbeats_after = [
@@ -1246,10 +1254,13 @@ async def _phase_p1(
         13,
         "session-end-is-acknowledged-and-the-socket-stays-open",
         bool(end_result.get("ended"))
+        and not ack_declined
         and end_frame is not None
         and bool(heartbeats_after)
         and roster_after.get("session_id") in (None, ""),
         f"ended={end_result.get('ended')} "
+        f"ack_body={json.dumps(ack_body, sort_keys=True, default=str)[:200]} "
+        f"ack_declined={ack_declined} "
         f"heartbeats_after_the_end={len(heartbeats_after)} "
         f"roster_session_id={roster_after.get('session_id')!r}",
         evidence=f"session.end answer: {end_frame.raw}" if end_frame else "",

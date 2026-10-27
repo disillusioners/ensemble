@@ -587,10 +587,37 @@ async def run_gate(
                 )
                 result.evidence.append("tools/call result: " + json.dumps(command_result, sort_keys=True, default=str)[:600])
                 end_result = await gw.service.disconnect(agent_id=AGENT_ID)
+                # §6.9.7 — the machine's ack BODY decides whether the
+                # end was acknowledged: a DECLINED ack ({ended:
+                # false}) is a REFUSAL of the end, so the row must fail
+                # on it even when the daemon envelope claims an end.
+                # The v0.1 client answers {"session_id"} with NO
+                # "ended" member at all — that is an ACCEPTED ack (the
+                # member is simply absent), so only an EXPLICIT falsy
+                # "ended" is a decline.
+                end_requests = gw.transcript.find(
+                    direction="send", method="session.end", type="request"
+                )
+                ack_body: dict = {}
+                if end_requests:
+                    wanted_id = end_requests[-1].id
+                    for frame in gw.transcript.find(direction="recv", type="response"):
+                        if frame.id == wanted_id:
+                            ack_body = frame.result
+                            break
+                ack_declined = "ended" in ack_body and not ack_body["ended"]
                 result.add(
                     "session-end-acknowledged",
-                    bool(end_result.get("ended")),
-                    json.dumps(end_result, sort_keys=True, default=str)[:200],
+                    bool(end_result.get("ended")) and not ack_declined,
+                    json.dumps(
+                        {
+                            "ended": end_result.get("ended"),
+                            "ack_body": ack_body,
+                            "ack_declined": ack_declined,
+                        },
+                        sort_keys=True,
+                        default=str,
+                    )[:300],
                 )
             except Exception as exc:  # noqa: BLE001 — the failure IS the deliverable
                 result.add(
