@@ -1,4 +1,4 @@
-"""The remote-hands gateway service — the CENTER side of SPEC.md v0.1.
+"""The remote-hands gateway service — the CENTER side of SPEC.md v0.1/v0.2.
 
 The module is importable WITHOUT the FastAPI app, so the unit tests can
 drive the whole protocol against a fake transport. The FastAPI router
@@ -8,7 +8,8 @@ Direction of the protocol (dossier correction #2)
 -------------------------------------------------
 
 * The MACHINE sends exactly two protocol messages: ``hello`` (a request)
-  and ``heartbeat`` (a notification).
+  and ``heartbeat`` (a notification).  From v0.2 on it may also send
+  ``session.terminate`` (a request — SPEC v0.2 §6.10).
 * The CENTER sends the four MCP methods — ``session.begin``,
   ``session.end``, ``tools/list``, ``tools/call`` — as REQUESTS, and the
   machine answers with a ``response`` envelope.
@@ -38,9 +39,28 @@ branch, which is a worse trade than a longer module.
 
 The machine MINTS the ``session_id`` (§6.4) and the center adopts it.
 
-Every frame the center writes carries ``v: "0.1"`` — the shipped client
-checks the version of EVERY inbound message and closes the socket
-silently (no error frame) on a missing or wrong ``v``.
+VERSION SCOPING (v0.2)
+----------------------
+
+Every frame the center writes carries ``v`` — the shipped client checks
+the version of EVERY inbound message and closes the socket silently (no
+error frame) on a missing or wrong ``v``.
+
+The centre speaks TWO protocol versions: ``"0.1"`` (the historical
+behaviour, byte-identical) and ``"0.2"`` (the session-termination
+generation). The version a connection RUNS is the one the client
+REQUESTED in its hello (§5.2) — never one the centre picked for it, and
+never a silent downgrade.
+
+Everything v0.2 adds is VERSION-SCOPED to a v0.2-negotiated connection:
+
+* the ``client_terminate`` capability (§5.3),
+* the ``session.terminate`` receipt (§6.10),
+* the ``reason`` member of the centre's ``session.end`` params (§6.9.2).
+
+A ``"0.1"``-negotiated connection therefore sees exactly the frames it
+saw before: no new capability key, no new method, and a ``session.end``
+whose params are exactly ``{"session_id": ...}``.
 """
 
 from __future__ import annotations
@@ -65,13 +85,17 @@ from .audit import (
 )
 from .config import GatewayConfig, load_gateway_config
 from .protocol import (
+    AUDIT_TOOL_HELLO_CONFLICT,
     AUDIT_TOOL_SESSION_END,
     AUDIT_TOOL_SESSION_EXPIRE,
+    AUDIT_TOOL_SESSION_TERMINATE,
+    CAP_CLIENT_TERMINATE,
     CENTER_EMITTED_CODES,
     CODE_CAPABILITY_MISSING,
     CODE_HEARTBEAT_TIMEOUT,
     CODE_INTERNAL,
     CODE_MACHINE_BUSY,
+    CODE_MACHINE_ID_CONFLICT,
     CODE_MACHINE_NOT_ENROLLED,
     CODE_PROTOCOL_VERSION_UNSUPPORTED,
     CODE_SESSION_NOT_FOUND,
@@ -81,13 +105,16 @@ from .protocol import (
     METHOD_NOTIFICATIONS_PREFIX,
     METHOD_SESSION_BEGIN,
     METHOD_SESSION_END,
+    METHOD_SESSION_TERMINATE,
     METHOD_TOOLS_CALL,
     PROTOCOL_VERSION,
+    PROTOCOL_VERSION_V02,
     RELAYED_CODES,
     RESERVED_AUDIT_TOOL_NAMES,
     REQUIRED_CLIENT_CAPABILITIES,
     SERVER_CAPABILITIES,
     SERVER_NAME,
+    SUPPORTED_PROTOCOL_VERSIONS,
     TYPE_ERROR,
     TYPE_NOTIFICATION,
     TYPE_REQUEST,
@@ -108,6 +135,8 @@ from .tombstones import (
     REASON_ALREADY_ENDED,
     REASON_EXPIRED,
     REASON_MACHINE_REFUSED,
+    REASON_REAPED_BY_CENTER,
+    REASON_SUPERSEDED,
     REASON_UNKNOWN_SESSION,
     RESPONSE_REASONS,
     SessionTombstone,
@@ -206,6 +235,30 @@ AUDIT_DETAIL_EXPIRE_REFUSED = (
     "the remote session expired and the machine refused the end"
 )
 
+# ── the v0.2 audit detail classifications ─────────────────────────────────
+#
+# The termination receipt (SPEC v0.2 §6.10) and the duplicate-machine-id
+# refusal (§5.6) are SESSION-LIFECYCLE rows, so they carry a FIXED
+# classification like every other lifecycle row — the peer's free text
+# never becomes the classification.
+
+AUDIT_DETAIL_SESSION_TERMINATED = "the remote session was terminated by the machine"
+AUDIT_DETAIL_SESSION_TERMINATE_ALREADY_GONE = (
+    "the remote session was already ended when the machine terminated it"
+)
+AUDIT_DETAIL_HELLO_CONFLICT = (
+    "a connection claimed a machine id that a live connection already holds"
+)
+
+#: The bound of the raw ``reason_code`` copy that rides the audit DETAIL.
+#:
+#: The reason code is recorded VERBATIM (the wire contract of §6.10
+#: requires it — the machine reads it back), but the ledger must not be
+#: a place a peer can stuff megabytes into: the copy in the detail is
+#: bounded, and the UNBOUNDED verbatim value rides the row's ``extra``
+#: member (see :meth:`McpGatewayService._audit_terminate`).
+TERMINATE_REASON_MAX_CHARS = 128
+
 # ── the outcomes of a ``session.end`` FORWARD ─────────────────────────────
 #
 # The forward is best-effort and NEVER raises: the sweep must survive a
@@ -274,7 +327,20 @@ class GatewayTransport(Protocol):
 
 @dataclass
 class ClientConnection:
-    """One live client socket."""
+    """One live client socket.
+
+    Attributes:
+        negotiated_version: The protocol version this connection RUNS
+            (§5.2). It is the version the client REQUESTED in its hello,
+            and it governs BOTH directions: every outbound frame is
+            stamped with it and every inbound frame must carry it. It
+            stays at the default (``"0.1"``) until the hello exchange
+            completes.
+        client_terminate: Whether this connection may send a
+            ``session.terminate`` receipt (SPEC v0.2 §6.10). It is True
+            only on a v0.2-negotiated connection whose machine advertised
+            the ``client_terminate`` capability.
+    """
 
     connection_id: str
     transport: GatewayTransport
@@ -284,6 +350,8 @@ class ClientConnection:
     last_heartbeat: float = 0.0
     pending: dict[str, asyncio.Future] = field(default_factory=dict)
     closed: bool = False
+    negotiated_version: str = PROTOCOL_VERSION
+    client_terminate: bool = False
 
 
 class McpGatewayService:
@@ -436,11 +504,32 @@ class McpGatewayService:
             self._connections[connection_id] = connection
         return connection
 
-    async def close_connection(self, connection: ClientConnection, reason: str = "") -> None:
+    async def close_connection(
+        self,
+        connection: ClientConnection,
+        reason: str = "",
+        *,
+        orderly_termination: bool = False,
+    ) -> None:
         """Tear a connection down: kill its session, then close the socket.
 
         A session belongs to its connection (§6.8): the session is KILLED,
         never paused, and its id is dead afterwards.
+
+        ``orderly_termination`` marks the ONE close that is NOT a death:
+        the machine closed the socket with the WebSocket code ``1000``
+        and the reason ``"session.terminate"`` (SPEC v0.2 §6.10.5 — the
+        graceful-shutdown tail of the machine, or its ack-timeout
+        fallback). The machine asked for the end, so:
+
+        * the session leaves an ``already_ended`` tombstone with
+          ``machine_notified=True`` (the machine ACKNOWLEDGED — it is the
+          one that asked), and
+        * the audit row records a TERMINATION.
+
+        Any other close (a dead socket, a killed heartbeat, the daemon
+        shutting down) is a machine death: the tombstone says
+        ``machine_notified=False`` and nothing is written to the ledger.
         """
         if connection.closed:
             return
@@ -454,10 +543,24 @@ class McpGatewayService:
             # The session died WITH its connection: it leaves an
             # ``already_ended`` tombstone, so a LATE end answers
             # ``already_ended`` instead of a bare ``unknown_session``.
-            # The machine was NOT notified (its socket is gone).
+            # The machine was NOT notified (its socket is gone) — UNLESS
+            # the machine itself asked for the end (the orderly
+            # termination), in which case it DID acknowledge.
             self._record_tombstone(
-                session, reason=REASON_ALREADY_ENDED, machine_notified=False
+                session,
+                reason=REASON_ALREADY_ENDED,
+                machine_notified=orderly_termination,
             )
+            if orderly_termination:
+                await self._audit_session(
+                    agent_id=session.agent_id,
+                    instance_id=session.instance_id,
+                    machine_id=session.machine_id,
+                    session_id=session.session_id,
+                    tool=AUDIT_TOOL_SESSION_TERMINATE,
+                    outcome=OUTCOME_OK,
+                    detail=AUDIT_DETAIL_SESSION_TERMINATED,
+                )
             logger.warning(
                 "the session %s was killed: the connection of the machine %s is gone (%s)",
                 session.session_id,
@@ -499,6 +602,43 @@ class McpGatewayService:
 
     # ── inbound frames ───────────────────────────────────────────────────
 
+    @staticmethod
+    def _frame_version_accepted(
+        connection: ClientConnection, version: Any, payload: dict[str, Any]
+    ) -> bool:
+        """May this frame be read on this connection?
+
+        THE CHECK IS CONNECTION-SCOPED (§5.2): a frame is accepted IFF it
+        names the version the connection NEGOTIATED. A v0.2 connection
+        therefore refuses a ``"0.1"`` frame and a v0.1 connection
+        refuses a ``"0.2"`` frame — the two generations never speak to
+        each other on the same socket.
+
+        BEFORE the hello exchange there is no negotiated version yet, so
+        the frame must name a version the centre SUPPORTS — with ONE
+        exception: the HELLO frame itself always reaches the hello
+        handler, whatever version it names. The negotiation is the
+        frame's ``params.protocol_version`` (§5.2), and an UNSUPPORTED
+        request must be answered with the typed
+        ``PROTOCOL_VERSION_UNSUPPORTED`` refusal — a frame that never
+        reached the handler could not be answered at all (the socket
+        close would be the only answer, and §5.2 mandates the typed
+        one).
+
+        A frame that names no version at all is refused in both windows
+        — §6.1 makes ``v`` a REQUIRED member.
+        """
+        if not isinstance(version, str):
+            return False
+        if connection.hello_received:
+            return version == connection.negotiated_version
+        if version in SUPPORTED_PROTOCOL_VERSIONS:
+            return True
+        return (
+            payload.get("type") == TYPE_REQUEST
+            and payload.get("method") == METHOD_HELLO
+        )
+
     async def handle_frame(self, connection: ClientConnection, raw: str) -> None:
         """Handle one text frame from the client.
 
@@ -516,14 +656,14 @@ class McpGatewayService:
             return
 
         version = payload.get("v")
-        if version != PROTOCOL_VERSION:
+        if not self._frame_version_accepted(connection, version, payload):
             # §6.1: "v | string | yes | Protocol version of this message
             # ("0.1")". A frame that does not name the version cannot be
-            # read as a v0.1 message, and §5.2 forbids a silent
-            # downgrade — so the frame is REFUSED and the connection
-            # goes down. This mirrors the shipped client, which checks
-            # the version of EVERY inbound message and tears the
-            # connection down on a mismatch (interpretation §2.4).
+            # read as a message of this connection's version, and §5.2
+            # forbids a silent downgrade — so the frame is REFUSED and
+            # the connection goes down. This mirrors the shipped client,
+            # which checks the version of EVERY inbound message and tears
+            # the connection down on a mismatch (interpretation §2.4).
             #
             # NO error frame goes out: there is nothing to correlate the
             # refusal with (the frame's id belongs to a message the
@@ -533,7 +673,7 @@ class McpGatewayService:
                 "the machine sent a frame with the protocol version %r "
                 "(expected %r); the connection is closed",
                 version,
-                PROTOCOL_VERSION,
+                connection.negotiated_version,
             )
             await self.close_connection(connection, "protocol version violation")
             return
@@ -558,6 +698,15 @@ class McpGatewayService:
         request_id = payload.get("id")
         if method == METHOD_HELLO:
             await self._handle_hello(connection, payload)
+            return
+        if method == METHOD_SESSION_TERMINATE and connection.client_terminate:
+            # §6.10 — the machine asks for the session to be ended. The
+            # connection negotiated the ``client_terminate`` capability,
+            # so the request is HONOURED (never refused). A connection
+            # that did NOT negotiate it falls through to the unknown
+            # method arm below: the request is refused AND it has no
+            # session effect.
+            await self._handle_session_terminate(connection, payload)
             return
         # The machine sends no request other than hello. The reference
         # client answers an unknown method with INTERNAL; so does the
@@ -592,6 +741,210 @@ class McpGatewayService:
         if session is None or session.connection_id != connection.connection_id:
             return None
         return session.session_id
+
+    async def _handle_session_terminate(
+        self, connection: ClientConnection, payload: dict[str, Any]
+    ) -> None:
+        """The CLIENT-ORIGINATED termination receipt (SPEC v0.2 §6.10).
+
+        THE CONTRACT
+        ------------
+
+        * The ``session_id`` is read from the ENVELOPE — never from the
+          params (the params carry the machine's ``reason_code`` and an
+          optional ``detail``, and nothing else).
+        * The centre NEVER refuses. The machine owns the machine, and
+          §6.10.1 forbids a refusal of an operator-forced end. The
+          centre's only two typed exceptions are the unknown-method arm
+          (a connection that did not negotiate ``client_terminate``) and
+          the machine's own ``SESSION_NOT_FOUND`` end-ack.
+        * ``params.detail`` is NEVER parsed, and ``params.reason_code`` is
+          NEVER validated against a set — every string is accepted and
+          audited VERBATIM (the liberal-acceptance rule of §6.10.3).
+        * The socket STAYS OPEN: the connection may still be carrying a
+          late ``tools/call`` answer (§6.10.4).
+
+        THE TWO ANSWERS
+        ----------------
+
+        * a LIVE session of THIS connection → it is closed IMMEDIATELY
+          and removed from the registry (the §8.3 slot is free again):
+          ``{"session_id", "ended": true, "reason", "machine_notified": true}``
+          — the ``reason`` is the machine's own ``reason_code``,
+          VERBATIM (even when the centre does not recognise it), and
+          ``why_not_ended`` is ABSENT (the machine's kit pins its
+          absence on the successful path);
+        * NO live session (a repeat, or a race with the sweep) → the
+          IDEMPOTENT goal state, NEVER an error:
+          ``{"session_id", "ended": false, "reason", "machine_notified": true}``.
+          The ``reason`` is MANDATORY here — the shipped machine
+          releases its local lock on a known reason and keeps it on an
+          unknown or missing one.
+        """
+        request_id = payload.get("id")
+        # §6.1 — the session id rides the ENVELOPE.
+        session_id = str(payload.get("session_id") or "")
+        params = payload.get("params")
+        params = params if isinstance(params, dict) else {}
+        # The reason code is taken VERBATIM and NEVER validated (§6.10.3).
+        raw_reason = params.get("reason_code")
+        if raw_reason is None:
+            reason = ""
+        elif isinstance(raw_reason, str):
+            reason = raw_reason
+        else:
+            reason = str(raw_reason)
+
+        session = self._sessions.get(session_id) if session_id else None
+        owned = (
+            session is not None and session.connection_id == connection.connection_id
+        )
+
+        if owned:
+            assert session is not None  # narrowed by ``owned``
+            # The session is closed IMMEDIATELY and REMOVED from the
+            # registry: the §8.3 slot is free again, so the next
+            # ``session.begin`` on this connection is NOT refused with
+            # ``MACHINE_BUSY``.
+            #
+            # The machine ACKNOWLEDGED — it asked for the end, so it has
+            # released its own local lock.
+            self._release_centre_side(session, machine_notified=True)
+            ack: dict[str, Any] = {
+                "session_id": session_id,
+                "ended": True,
+                "reason": reason,
+                "machine_notified": True,
+            }
+            await self._audit_terminate(
+                connection=connection,
+                session_id=session_id,
+                agent_id=session.agent_id,
+                instance_id=session.instance_id,
+                machine_id=session.machine_id,
+                raw_reason=raw_reason,
+                ended=True,
+            )
+            logger.info(
+                "the machine %r terminated the session %s (%s)",
+                session.machine_id,
+                session_id,
+                reason or "no reason code",
+            )
+        else:
+            # The IDEMPOTENT arm. The goal state (no live session) is
+            # reached, so this is NEVER an error.
+            wire_reason = REASON_ALREADY_ENDED
+            agent_id = ""
+            instance_id = ""
+            machine_id = connection.machine_id
+            tombstone = (
+                self._tombstones.get(session_id, self._clock()) if session_id else None
+            )
+            if tombstone is not None:
+                agent_id = tombstone.agent_id
+                instance_id = tombstone.instance_id
+                if tombstone.machine_id:
+                    machine_id = tombstone.machine_id
+                if tombstone.reason == REASON_EXPIRED:
+                    # The sweep reaped it BEFORE the machine asked: the
+                    # machine's local lock was released by the sweep's
+                    # forward, not by this request.
+                    wire_reason = REASON_REAPED_BY_CENTER
+            elif session is not None:
+                # The session is live but belongs to ANOTHER connection.
+                # The centre never ends another connection's session on a
+                # machine's word — and it says so honestly.
+                wire_reason = REASON_UNKNOWN_SESSION
+            ack = {
+                "session_id": session_id,
+                "ended": False,
+                "reason": wire_reason,
+                "machine_notified": True,
+            }
+            await self._audit_terminate(
+                connection=connection,
+                session_id=session_id,
+                agent_id=agent_id,
+                instance_id=instance_id,
+                machine_id=machine_id,
+                raw_reason=raw_reason,
+                ended=False,
+            )
+            logger.info(
+                "the machine %r terminated the session %s, which is not "
+                "live on this connection (%s)",
+                connection.machine_id,
+                session_id,
+                wire_reason,
+            )
+
+        await self._send(
+            connection,
+            make_envelope(
+                type=TYPE_RESPONSE,
+                id=request_id,
+                result=ack,
+            ),
+        )
+
+    async def _audit_terminate(
+        self,
+        *,
+        connection: ClientConnection,
+        session_id: str,
+        agent_id: str,
+        instance_id: str,
+        machine_id: str,
+        raw_reason: Any,
+        ended: bool,
+    ) -> None:
+        """Write the audit row of a client-originated termination.
+
+        THE RAW REASON CODE IS RECORDED VERBATIM
+        ------------------------------------------
+
+        The ``error_code`` member is GUARDED: the session-lifecycle
+        writer replaces anything outside the centre's own vocabulary with
+        ``UNRECOGNIZED_ERROR_CODE``. The raw code therefore rides
+        members that are NOT guarded:
+
+        * the ``detail`` (a BOUNDED copy — the ledger must not be a
+          place a peer can stuff megabytes into), and
+        * the row's ``extra`` member (the UNBOUNDED verbatim value).
+
+        A reason code that IS part of the centre's own vocabulary may
+        ADDITIONALLY set the guarded ``error_code`` — that is a
+        convenience, never the only copy.
+        """
+        verbatim = "" if raw_reason is None else str(raw_reason)
+        bounded = verbatim[:TERMINATE_REASON_MAX_CHARS]
+        error_code = (
+            verbatim if verbatim in AUDIT_ALLOWED_SESSION_ERROR_CODES else ""
+        )
+        detail = (
+            AUDIT_DETAIL_SESSION_TERMINATED
+            if ended
+            else AUDIT_DETAIL_SESSION_TERMINATE_ALREADY_GONE
+        )
+        if bounded:
+            detail = f"{detail} [{bounded}]"
+        await self._audit_session(
+            agent_id=agent_id,
+            instance_id=instance_id,
+            machine_id=machine_id,
+            session_id=session_id,
+            tool=AUDIT_TOOL_SESSION_TERMINATE,
+            outcome=OUTCOME_OK,
+            error_code=error_code,
+            detail=detail,
+            extra={
+                "reason_code": verbatim,
+                "ended": ended,
+                "machine_notified": True,
+                "connection_id": connection.connection_id,
+            },
+        )
 
     def _handle_notification(
         self, connection: ClientConnection, payload: dict[str, Any]
@@ -657,7 +1010,7 @@ class McpGatewayService:
             return
 
         requested_version = str(params.get("protocol_version") or "")
-        if requested_version != PROTOCOL_VERSION:
+        if requested_version not in SUPPORTED_PROTOCOL_VERSIONS:
             # §5.2: the server does NOT silently downgrade.
             await self._send(
                 connection,
@@ -667,12 +1020,22 @@ class McpGatewayService:
                         CODE_PROTOCOL_VERSION_UNSUPPORTED,
                         f"protocol version {requested_version or '(none)'} is not "
                         f"supported by this center",
-                        {"requested": requested_version, "supported": [PROTOCOL_VERSION]},
+                        {
+                            "requested": requested_version,
+                            "supported": list(SUPPORTED_PROTOCOL_VERSIONS),
+                        },
                     ),
                 ),
             )
             await self.close_connection(connection, "unsupported protocol version")
             return
+
+        # §5.2 — the NEGOTIATED version is the one the client REQUESTED.
+        # It is set HERE, before anything is written on this connection:
+        # every outbound frame of the connection carries it from now on
+        # (the single `_send` choke point), and every inbound frame must
+        # carry it (the connection-scoped version check).
+        connection.negotiated_version = requested_version
 
         machine_id = str(params.get("machine_id") or "")
         if not machine_id or not self.config.machine_allowed(machine_id):
@@ -717,25 +1080,50 @@ class McpGatewayService:
         # (§3.3), and the silence of the machine starts now.
         now = self._clock()
 
-        # A RECONNECT supersedes the previous socket (S3). The old
-        # connection's session must die WITH it: a session belongs to its
-        # connection (§6.8), and a machine that reconnects starts over
-        # from the beginning (§6.8 — no resumption in v0.1). Without this
-        # the superseded session would live on until the heartbeat
-        # timeout, and the reconnected machine would be told
-        # ``MACHINE_BUSY`` for up to 45 s by a session nobody can use.
-        stale = self._by_machine.get(machine_id)
-        if stale is not None and stale is not connection and not stale.closed:
-            logger.warning(
-                "the machine %r reconnected on a new socket; the previous "
-                "connection and its session are closed",
-                machine_id,
-            )
-            await self.close_connection(stale, "the machine reconnected")
+        # §5.6 — a DUPLICATE machine id is refused, and the INCUMBENT
+        # survives. The centre never evicts a live connection to make
+        # room for a second socket that claims the same id: the
+        # incumbent keeps its socket AND its live session, and the
+        # newcomer is told why it was refused.
+        #
+        # A DEAD or CLOSED incumbent does NOT block: the id is free
+        # again (the heartbeat kill and the teardown both drop the
+        # roster pointer), so a genuine reconnect is admitted — the
+        # reconnect tolerance of §8.1.
+        incumbent = self._by_machine.get(machine_id)
+        if incumbent is not None and incumbent is not connection:
+            incumbent_state = self._incumbent_state(incumbent)
+            if incumbent_state == "open":
+                logger.warning(
+                    "the machine %r is already connected on another socket "
+                    "(connection %s); the new connection is refused",
+                    machine_id,
+                    incumbent.connection_id,
+                )
+                await self._refuse_duplicate_machine_id(
+                    connection,
+                    request_id=request_id,
+                    machine_id=machine_id,
+                    incumbent=incumbent,
+                )
+                return
+            # The incumbent is dead or closed: the id is free. Drop the
+            # stale pointer so the binding below cannot resurrect it.
+            async with self._lock:
+                if self._by_machine.get(machine_id) is incumbent:
+                    self._by_machine.pop(machine_id, None)
 
         connection.machine_id = machine_id
         connection.hello_received = True
         connection.last_heartbeat = now
+        # §5.3 — the ``client_terminate`` capability is advertised ONLY
+        # on a v0.2-negotiated connection whose machine advertised it
+        # too. A v0.1 connection's capability map is the historical one,
+        # byte for byte (the key is ABSENT, not ``false``).
+        connection.client_terminate = (
+            requested_version == PROTOCOL_VERSION_V02
+            and bool(capabilities.get(CAP_CLIENT_TERMINATE))
+        )
         self._store.upsert(machine_id, connection.connection_id, now)
         async with self._lock:
             self._by_machine[machine_id] = connection
@@ -755,13 +1143,126 @@ class McpGatewayService:
                 type=TYPE_RESPONSE,
                 id=request_id,
                 result={
-                    "protocol_version": PROTOCOL_VERSION,
+                    # §5.4 — the result's protocol_version MUST equal the
+                    # envelope's ``v``: the shipped client fatals on a
+                    # mismatch (it compares the two before it adopts the
+                    # result).
+                    "protocol_version": connection.negotiated_version,
                     "server": {"name": SERVER_NAME, "version": self._server_version},
-                    "capabilities": dict(SERVER_CAPABILITIES),
+                    "capabilities": self._capabilities_for(connection),
                     "heartbeat_interval_ms": self.config.heartbeat_interval_ms,
                     "heartbeat_timeout_ms": self.config.heartbeat_timeout_ms,
                     "client_dead_detect_ms": self.config.client_dead_detect_ms,
                 },
+            ),
+        )
+
+    @staticmethod
+    def _capabilities_for(connection: ClientConnection) -> dict[str, bool]:
+        """The capability map this connection advertises.
+
+        The v0.1 map is the historical one, byte for byte: the
+        ``client_terminate`` key is ABSENT (not ``false``), because a
+        v0.1 client has never seen the name and the hello result of a
+        v0.1 connection must not change.
+
+        A v0.2 connection carries the key — ``True`` when the machine
+        advertised ``client_terminate`` too, ``False`` when it did not
+        (the centre never claims a capability the peer does not have).
+        """
+        caps = dict(SERVER_CAPABILITIES)
+        if connection.negotiated_version == PROTOCOL_VERSION_V02:
+            caps[CAP_CLIENT_TERMINATE] = connection.client_terminate
+        return caps
+
+    def _incumbent_state(self, incumbent: ClientConnection) -> str:
+        """Is the incumbent connection ``open``, ``closed`` or ``dead``?
+
+        * ``dead`` — the heartbeat monitor has declared it silent (its
+          silence passed the advertised timeout). The id is free: the
+          sweep is about to close it.
+        * ``closed`` — its transport is closed. The id is free.
+        * ``open`` — it is alive. It HOLDS the machine id: a second
+          socket claiming the same id is refused (§5.6).
+        """
+        if incumbent.closed:
+            return "closed"
+        limit_ms = self.config.heartbeat_timeout_ms
+        silence_ms = (self._clock() - incumbent.last_heartbeat) * 1000.0
+        if limit_ms and silence_ms > limit_ms:
+            return "dead"
+        return "open"
+
+    async def _refuse_duplicate_machine_id(
+        self,
+        connection: ClientConnection,
+        *,
+        request_id: Any,
+        machine_id: str,
+        incumbent: ClientConnection,
+    ) -> None:
+        """Refuse a newcomer that claims an id a LIVE connection holds.
+
+        The refusal is a TYPED error (§5.6 / §6.5) whose ``data`` names
+        the refused id, the protected incumbent and the state of the
+        incumbent's connection. The NEWCOMER's socket is closed; the
+        incumbent is NOT touched — it keeps its socket and its session.
+        """
+        state = self._incumbent_state(incumbent)
+        incumbent_session = self._sessions.for_machine(machine_id)
+        await self._send(
+            connection,
+            make_error_envelope(
+                id=request_id,
+                error=GatewayProtocolError(
+                    CODE_MACHINE_ID_CONFLICT,
+                    f"the machine id {machine_id!r} is already held by a live "
+                    "connection of this center",
+                    {
+                        "machine_id": machine_id,
+                        "incumbent_machine_id": incumbent.machine_id or machine_id,
+                        "incumbent_connection": state,
+                    },
+                ),
+            ),
+        )
+        await self._audit_duplicate_machine_id(
+            machine_id=machine_id,
+            incumbent=incumbent,
+            incumbent_session=incumbent_session,
+            state=state,
+        )
+        await self.close_connection(connection, "duplicate machine id")
+
+    async def _audit_duplicate_machine_id(
+        self,
+        *,
+        machine_id: str,
+        incumbent: ClientConnection,
+        incumbent_session: GatewaySession | None,
+        state: str,
+    ) -> None:
+        """Write the audit row of a REFUSED duplicate machine id.
+
+        The row names the refused id and the PROTECTED incumbent (its
+        machine id and the session it holds, if any) — so an operator
+        asking "why was this machine refused?" finds the answer in the
+        ledger instead of in a log line.
+        """
+        agent_id = incumbent_session.agent_id if incumbent_session else ""
+        instance_id = incumbent_session.instance_id if incumbent_session else ""
+        session_id = incumbent_session.session_id if incumbent_session else ""
+        await self._audit_session(
+            agent_id=agent_id,
+            instance_id=instance_id,
+            machine_id=machine_id,
+            session_id=session_id,
+            tool=AUDIT_TOOL_HELLO_CONFLICT,
+            outcome=OUTCOME_ERROR,
+            error_code=CODE_MACHINE_ID_CONFLICT,
+            detail=(
+                f"{AUDIT_DETAIL_HELLO_CONFLICT} "
+                f"[incumbent_connection={state}]"
             ),
         )
 
@@ -772,6 +1273,16 @@ class McpGatewayService:
         return f"ctr-{self._request_counter:04d}"
 
     async def _send(self, connection: ClientConnection, payload: dict[str, Any]) -> None:
+        """Write ONE frame to the machine.
+
+        THE SINGLE VERSION CHOKE POINT: every outbound frame is stamped
+        with the connection's NEGOTIATED version (§5.2). The shipped
+        client checks the version of EVERY inbound frame and closes the
+        socket silently on a mismatch, so a frame that carried the
+        module default by accident would kill the connection. One
+        choke point means there is no second place to get it wrong.
+        """
+        payload["v"] = connection.negotiated_version
         try:
             await connection.transport.send_json(payload)
         except Exception as exc:  # noqa: BLE001 — a dead socket is not a crash
@@ -794,6 +1305,8 @@ class McpGatewayService:
             session_id=session_id,
             method=method,
             params=params,
+            # The frame carries the connection's NEGOTIATED version (§5.2).
+            v=connection.negotiated_version,
         )
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
@@ -1046,6 +1559,35 @@ class McpGatewayService:
             )
         )
 
+    @staticmethod
+    def _session_end_params(
+        connection: ClientConnection, session_id: str, *, reason: str
+    ) -> dict[str, Any]:
+        """The params of a centre-originated ``session.end``.
+
+        THE ``reason`` MEMBER IS VERSION-SCOPED (§6.9.2).
+
+        A ``"0.1"``-negotiated connection gets EXACTLY the params it has
+        always got — ``{"session_id": ...}`` and nothing else. The
+        connection's frames stay byte-identical.
+
+        A ``"0.2"``-negotiated connection gets the ``reason`` member: it
+        names WHY the centre ended the session, and the machine answers
+        with ``{"session_id", "ended": true, "reason"}`` — the reason
+        echoing ours. The two centre-cause values of §6.9.2 group (ii)
+        are ``reaped_by_center`` (the sweep reaped it) and ``superseded``
+        (the session was replaced by an explicit end).
+
+        The params of the centre's own request are NOT the ``reason`` of
+        a RESPONSE: the ledger-only tokens (``machine_unreachable`` /
+        ``machine_timeout``) describe the CENTRE's release path and must
+        never reach the machine.
+        """
+        params: dict[str, Any] = {"session_id": session_id}
+        if connection.negotiated_version == PROTOCOL_VERSION_V02:
+            params["reason"] = reason
+        return params
+
     async def _forward_session_end_outcome(self, session: GatewaySession) -> str:
         """The one forward, classified — the SWEEP arm.
 
@@ -1074,7 +1616,9 @@ class McpGatewayService:
             await self._request(
                 connection,
                 METHOD_SESSION_END,
-                {"session_id": session.session_id},
+                self._session_end_params(
+                    connection, session.session_id, reason=REASON_REAPED_BY_CENTER
+                ),
                 session_id=session.session_id,
                 timeout_ms=self._session_end_ack_timeout_ms,
             )
@@ -1489,7 +2033,9 @@ class McpGatewayService:
             await self._request(
                 connection,
                 METHOD_SESSION_END,
-                {"session_id": session_id},
+                self._session_end_params(
+                    connection, session_id, reason=REASON_SUPERSEDED
+                ),
                 session_id=session_id,
                 timeout_ms=2000,
             )
@@ -1598,7 +2144,9 @@ class McpGatewayService:
             result = await self._request(
                 connection,
                 METHOD_SESSION_END,
-                {"session_id": session.session_id},
+                self._session_end_params(
+                    connection, session.session_id, reason=REASON_SUPERSEDED
+                ),
                 session_id=session.session_id,
                 timeout_ms=self._session_end_ack_timeout_ms,
             )
@@ -2034,6 +2582,7 @@ class McpGatewayService:
         outcome: str,
         error_code: str = "",
         detail: str = "",
+        extra: dict[str, Any] | None = None,
     ) -> None:
         """Write ONE audit row for a SESSION-LIFECYCLE event.
 
@@ -2058,8 +2607,11 @@ class McpGatewayService:
         the protocol-only :data:`AUDIT_ALLOWED_ERROR_CODES`, so a hostile
         machine cannot forge a centre token into a command row.
 
-        The write inherits the command path's discipline: it is off the
-        event loop, it is bounded, and it NEVER aborts the operation.
+        ``extra`` carries STRUCTURED members that the guarded
+        ``error_code`` cannot hold (the verbatim ``reason_code`` of a
+        v0.2 termination receipt). It is STORAGE-ONLY: the DB sink's
+        table has no column for it, so the durable copy of a verbatim
+        peer value is the one in ``detail``.
         """
         if not self.config.audit_enabled:
             return
@@ -2078,6 +2630,7 @@ class McpGatewayService:
             error_code=error_code,
             detail=detail,
             created_at=now_utc_iso(),
+            extra=dict(extra or {}),
         )
         await self._write_audit_record(record)
 

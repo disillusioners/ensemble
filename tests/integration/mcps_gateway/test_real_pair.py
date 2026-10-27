@@ -1418,7 +1418,9 @@ async def _phase_p2(
         "an-unsupported-version-is-refused-with-the-requested-and-supported-set",
         (error.get("error") or {}).get("code") == "PROTOCOL_VERSION_UNSUPPORTED"
         and data.get("requested") == "0.9"
-        and data.get("supported") == ["0.1"]
+        # The centre speaks "0.2" and "0.1" (SPEC v0.2) — the refusal
+        # names the versions it DOES speak, newest first.
+        and data.get("supported") == ["0.2", "0.1"]
         and probe["close_code"] is not None
         and not downgraded,
         f"error={json.dumps(error)[:260]} close_code={probe['close_code']} "
