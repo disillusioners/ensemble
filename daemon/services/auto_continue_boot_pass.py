@@ -349,7 +349,7 @@ def _make_boot_continue_release_handler(
                             task_repo.mark_task_auto_continued,
                             task_id, boot_epoch,
                         )
-                    except Exception as stamp_exc:  # noqa: BLE001
+                    except Exception as stamp_exc:  # noqa: BLE001 — the stamp is advisory
                         logger.warning(
                             "[BOOT_CONTINUE] RELEASED stamp failed "
                             "instance=%s work_id=%s: %s",
@@ -405,7 +405,7 @@ def _make_orphan_sweep_release_handler(
                     (resume or {}).get("status")
                     if isinstance(resume, dict) else resume,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001 — one candidate never blocks the rest
                 logger.warning(
                     "[BOOT_CONTINUE] orphan-sweep RELEASED failed "
                     "instance=%s: %s: %s",

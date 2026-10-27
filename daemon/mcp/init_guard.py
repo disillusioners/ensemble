@@ -514,7 +514,7 @@ def _resolve_install_dir() -> Any:
             resolved = install_dir()
             if resolved is not None:
                 return resolved
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 — the hold module's resolution is optional
         pass
     try:
         from daemon.tools.upgrade_tools import (
@@ -527,7 +527,7 @@ def _resolve_install_dir() -> Any:
         if resolved is not None:
             return resolved
         return _canonical_install_root("agents-ensemble")
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 — no install root ⇒ the journal write is skipped
         return None
 
 

@@ -165,7 +165,7 @@ def _read_state(install_dir: Any) -> Optional[dict[str, Any]]:
     """
     try:
         from daemon.tools.upgrade_tools import _journal_read
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 — the tools package is optional
         return None
     try:
         data, status = _journal_read(install_dir)
@@ -184,11 +184,11 @@ def _heartbeat_fresh(install_dir: Any) -> bool:
     """
     try:
         from daemon.tools.upgrade_journal import journal_owner_heartbeat_fresh
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 — the accessor is optional; a missing leg reads as stale
         return False
     try:
         return bool(journal_owner_heartbeat_fresh(install_dir))
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 — defensive: a torn heartbeat read must never raise
         return False
 
 
