@@ -154,6 +154,7 @@ ADAPTIVE_SOAK_CADENCE_S="${ADAPTIVE_SOAK_CADENCE_S:-15}"
 # .agents/shared/planning/soak-gate-mcp-warmup/requirements.md §4.1-§4.3
 # (the single normative home); these are the SHELL-side constants only.
 #
+# ENV-OVERRIDABLE BY DESIGN (4-tier config ladder); requirements.md §4.6 = DEFAULTS.
 # GRACE_HORIZON_S — the daemon-side grace horizon (requirements §4.3 P3):
 # ONE number, OBSERVATION-RELATIVE (the daemon owns the clock; the
 # shell never keeps a second one). The shell needs the number so its

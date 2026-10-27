@@ -139,6 +139,15 @@ class ManagedKeySpec:
     # default) means "no upper bound" and preserves every pre-existing
     # key's behavior byte-for-byte.
     le: int | None = None
+    # ``gt`` is OPTIONAL and additive (soak-gate-mcp-warmup, A4/F6): the
+    # EXCLUSIVE lower bound — the mirror of ``ge``. A backing pydantic
+    # Field with an EXCLUSIVE floor (``Field(gt=0)``) MUST be mirrored
+    # here as ``gt`` and NOT as ``ge``: ``ge=0`` would ACCEPT the value
+    # 0 that the Field REJECTS — a second, drifting truth of validation
+    # (Ruling 1). ``None`` (the default) means "no exclusive lower
+    # bound" and preserves every pre-existing key's behavior
+    # byte-for-byte.
+    gt: float | None = None
     requires_restart: bool = True
     sensitive: bool = False
     description: str = ""
@@ -146,13 +155,14 @@ class ManagedKeySpec:
     def constraint_desc(self) -> str:
         """Human-readable constraint for log lines / 422 details
         (Ruling 3 log wording: ``failed validation (ge=1)``)."""
-        if self.ge is not None and self.le is not None:
-            return f"ge={self.ge},le={self.le}"
+        parts: list[str] = []
+        if self.gt is not None:
+            parts.append(f"gt={self.gt}")
         if self.ge is not None:
-            return f"ge={self.ge}"
+            parts.append(f"ge={self.ge}")
         if self.le is not None:
-            return f"le={self.le}"
-        return "none"
+            parts.append(f"le={self.le}")
+        return ",".join(parts) if parts else "none"
 
 
 #: The managed-key registry. v1.1 union (2026-10-19): SIX entries —
@@ -284,7 +294,11 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
         env_var="LIMITS_CHECKPOINT_POOL_TIMEOUT_S",
         value_type="float",
         default=constants.CHECKPOINT_POOL_TIMEOUT_S_DEFAULT,
-        ge=0,  # mirrors the Field's gt=0 floor (0 itself is rejected by the Field)
+        # Mirrors the Field's EXCLUSIVE ``gt=0`` floor exactly — ``gt=0``,
+        # NOT ``ge=0``: the Field REJECTS 0, so the registry validator must
+        # REJECT it too (Ruling 1 — one validation truth; a ``ge=0`` here
+        # would ACCEPT a value the Field refuses).
+        gt=0,
         requires_restart=True,
         sensitive=False,
         description=(
@@ -457,6 +471,13 @@ def parse_and_validate(spec: ManagedKeySpec, raw: Any) -> tuple[bool, Any, str |
         value = _coerce_value(spec.value_type, raw)
     except (ValueError, TypeError) as exc:
         return False, None, "parse", str(exc)
+    if spec.gt is not None and value <= spec.gt:
+        return (
+            False,
+            value,
+            "validation",
+            f"value {value!r} fails constraint {spec.constraint_desc()}",
+        )
     if spec.ge is not None and value < spec.ge:
         return (
             False,

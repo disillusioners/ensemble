@@ -55,6 +55,10 @@ class TestCheckpointPoolConfigLadder:
         spec2 = settings_service.MANAGED_KEYS["limits.checkpoint_pool_timeout_s"]
         assert spec2.default == constants.CHECKPOINT_POOL_TIMEOUT_S_DEFAULT
         assert spec2.env_var == "LIMITS_CHECKPOINT_POOL_TIMEOUT_S"
+        # The registry carries the Field's EXCLUSIVE floor (``gt=0``), not
+        # an inclusive ``ge=0`` — the two would disagree on the value 0.
+        assert spec2.gt == 0
+        assert spec2.ge is None
 
     def test_the_env_tier_is_effective(self, monkeypatch):
         monkeypatch.setenv("LIMITS_CHECKPOINT_POOL_MAX_SIZE", "13")
@@ -90,6 +94,21 @@ class TestCheckpointPoolConfigLadder:
         assert ok is False and failure == "validation"
         ok, _value, failure, _detail = settings_service.parse_and_validate(
             spec, 4
+        )
+        assert ok is False and failure == "validation"
+
+    def test_the_timeout_floor_is_enforced_by_the_registry_validator(self):
+        """The registry's validator must mirror the Field's ``gt=0``
+        floor — the Field REJECTS 0, so the registry must reject it too
+        (one validation truth). A ``ge=0`` registry bound would ACCEPT
+        the value 0 and hand it to the Field, which refuses it."""
+        spec = settings_service.MANAGED_KEYS["limits.checkpoint_pool_timeout_s"]
+        ok, value, failure, _detail = settings_service.parse_and_validate(
+            spec, 5.0
+        )
+        assert ok is True and value == 5.0
+        ok, _value, failure, _detail = settings_service.parse_and_validate(
+            spec, 0
         )
         assert ok is False and failure == "validation"
 
