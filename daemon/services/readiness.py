@@ -336,6 +336,12 @@ class ReadinessComposite:
     # component or make ``/readyz`` 503 (decisions §3h H2/H4). The
     # daemon stays up and says so; the GATE decides what to do with it.
     mcp_servers: Optional[dict] = None
+    # ``mcp_buffered_transitions`` — how many MCP state-transition journal
+    # entries are currently BUFFERED (suppressed because a promote
+    # transaction was live). ADVISORY: it says whether the daemon is
+    # holding observability back — it never feeds the verdict. Published
+    # so the buffer is not invisible (council A1).
+    mcp_buffered_transitions: Optional[int] = None
 
     @property
     def ready(self) -> bool:
@@ -451,6 +457,10 @@ class ReadinessComposite:
             payload["detail"]["mcp"] = {
                 name: dict(entry) for name, entry in self.mcp_servers.items()
             }
+        if self.mcp_buffered_transitions is not None:
+            payload["detail"]["mcp_buffered_transitions"] = int(
+                self.mcp_buffered_transitions
+            )
         return payload
 
 
@@ -987,6 +997,7 @@ def compute_readiness_composite(
     resume_hold: Optional[dict] = None,
     burst_signals: Optional[dict] = None,
     mcp_servers: Optional[dict] = None,
+    mcp_buffered_transitions: Optional[int] = None,
 ) -> ReadinessComposite:
     """Assemble a composite from component outcomes.
 
@@ -1062,6 +1073,7 @@ def compute_readiness_composite(
         resume_hold=resume_hold,
         burst_signals=burst_signals,
         mcp_servers=mcp_servers,
+        mcp_buffered_transitions=mcp_buffered_transitions,
     )
 
 
@@ -1086,6 +1098,7 @@ _A1_COMPOSITE_FIELD_NAMES = (
     # must survive the forced-degradation rebuild (the drill must not
     # silently drop the operator's MCP visibility).
     "mcp_servers",
+    "mcp_buffered_transitions",
 )
 
 
@@ -1174,6 +1187,7 @@ async def refresh_readiness_composite(
     resume_hold: Optional[dict] = None,
     burst_signals: Optional[dict] = None,
     mcp_servers: Optional[dict] = None,
+    mcp_buffered_transitions: Optional[int] = None,
 ) -> ReadinessComposite:
     """Run one refresh cycle and return the composite.
 

@@ -3801,6 +3801,26 @@ def _read_burst_signal_snapshot(manager) -> Optional[dict]:
     }
 
 
+def _read_mcp_buffered_count() -> Optional[int]:
+    """How many MCP state-transition journal entries are BUFFERED.
+
+    The daemon-side MCP journal writes are SUPPRESSED while a promote
+    transaction is live (they would drop ``in_flight`` mid-promote) and
+    buffered in memory. The count is published so the buffer is not
+    INVISIBLE (council A1): an operator can see that the daemon is
+    holding observability back.
+
+    ``None`` when the guard cannot be reached (the key is then absent
+    from the payload — the older-consumer tolerance contract).
+    """
+    try:
+        from daemon.mcp import init_guard
+
+        return int(init_guard.buffered_transition_count())
+    except Exception:  # noqa: BLE001 — advisory only
+        return None
+
+
 def _read_mcp_snapshot() -> Optional[dict]:
     """The per-built-in MCP server health map (readiness ``detail.mcp``).
 
@@ -3944,6 +3964,7 @@ async def _periodic_readiness_refresh_loop(
                 # a readiness component; a degraded MCP server must not
                 # take the readiness gate down with it).
                 mcp_servers=_read_mcp_snapshot(),
+                mcp_buffered_transitions=_read_mcp_buffered_count(),
             )
             # Drill knob (deferred tester probe P7): read PER TICK from
             # the environment so flipping it between ticks of an
@@ -3954,6 +3975,26 @@ async def _periodic_readiness_refresh_loop(
                 env_value=os.environ.get(READINESS_FORCE_DEGRADED_ENV),
             )
             app_state.readiness_composite = composite
+            # A1: the MCP state-transition journal buffer drains on the
+            # RELEASE path — the promote transaction is over, so the
+            # suppressed entries can be written now (they were held
+            # back only to protect ``in_flight``). The readiness
+            # refresher ticks on a bounded cadence, so the buffer is
+            # never held for longer than one tick (the graceful-shutdown
+            # hook is the backstop).
+            try:
+                from daemon.mcp import init_guard as _init_guard
+
+                _flushed = _init_guard.flush_if_txn_closed()
+                if _flushed:
+                    logger.info(
+                        "Flushed %d buffered MCP state-transition journal "
+                        "entr%s (the promote transaction closed)",
+                        _flushed,
+                        "y" if _flushed == 1 else "ies",
+                    )
+            except Exception as e:  # noqa: BLE001 — advisory only
+                logger.warning(f"MCP transition journal flush error: {e}")
             if not composite.ready:
                 logger.warning(
                     "[Readiness] degraded: %s (queue_max_age=%ss)",

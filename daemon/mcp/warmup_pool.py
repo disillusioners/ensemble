@@ -31,6 +31,7 @@ from daemon.mcp.init_guard import (
     is_quarantined,
     record_failure,
     record_success,
+    release_attempt,
     server_state,
 )
 from daemon.mcp.managed_session import ManagedClientSession
@@ -349,6 +350,70 @@ class McpWarmupPool:
 
         return success_count
 
+    async def _record_escape_failure(
+        self,
+        server_name: str,
+        exc: BaseException,
+    ) -> None:
+        """Record an EARLY raise in the claim → spawn span.
+
+        The span between ``claim_attempt`` and the spawn's own ``try``
+        (the DNS pre-check, the secret-marker resolution, the
+        ``StdioServerParameters`` construction) can raise. Before this
+        hardening such a raise escaped WITHOUT ``record_failure``:
+
+        * an env/marker failure NEVER incremented the breaker → the
+          server never reached the threshold → it was never quarantined
+          → the 60s health-check retry loop continued, invisible in
+          ``detail.mcp``;
+        * the CLAIMED recovery probe leaked (``probe_claimed`` stayed
+          set) → one marker failure during a recovery probe wedged that
+          server's recovery for the whole boot.
+
+        The classification:
+
+        * ``McpServerQuarantined`` — a REFUSAL (the probe was not due),
+          NOT a failure: counting it would grow the breaker on every
+          refusal and the server could never recover;
+        * ``McpInitRefused`` — the DNS pre-check ALREADY recorded the
+          failure (with the DNS class); recording it again would
+          double-count;
+        * ``asyncio.CancelledError`` — an outer cancellation (the daemon
+          is shutting down): NOT an init failure, but the claim is
+          still released;
+        * anything else — a REAL init failure: recorded with the
+          standard class, and the claim released.
+        """
+        if isinstance(exc, McpServerQuarantined):
+            # A refusal, not a failure — the probe was simply not due
+            # (no claim was made either).
+            return
+        if isinstance(exc, McpInitRefused):
+            # Already recorded by the pre-check (with the DNS class).
+            return
+        # Release the claim FIRST (synchronously) so no failure in this
+        # span can wedge the server's recovery for the rest of the boot.
+        release_attempt(server_name)
+        if isinstance(exc, asyncio.CancelledError):
+            # A CANCELLATION is not an init failure (the daemon is
+            # shutting down / the task was cancelled) — it must never
+            # count towards the quarantine threshold.
+            return
+        try:
+            await record_failure(server_name, _init_failure_class(exc))
+        except asyncio.CancelledError:
+            # The cleanup itself was cancelled: the claim is already
+            # released and the per-boot breaker state dies with the
+            # boot. Never mask the ORIGINAL exception.
+            return
+        except Exception:  # noqa: BLE001 — the recording must not mask the cause
+            logger.warning(
+                "MCP init-failure recording failed for '%s': %s",
+                server_name,
+                exc,
+                exc_info=True,
+            )
+
     async def _run_dns_precheck(
         self,
         server_name: str,
@@ -443,43 +508,60 @@ class McpWarmupPool:
         # and no recovery probe is due. The raise is a distinct type so
         # the two failure loops below can log it as an EXPECTED state
         # (INFO) rather than a fault (ERROR).
-        if not await claim_attempt(server_name):
-            entry = server_state(server_name)
-            raise McpServerQuarantined(
-                server_name,
-                (entry.reason if entry is not None else "unknown") or "unknown",
-            )
-        # ── C2: the DNS pre-check (off-loop, bounded at 2.0s) ─────
-        await self._run_dns_precheck(server_name, config)
-        # agent-secrets P2 (design §1c) — LITERAL composition:
-        # ``resolve_secret_markers(resolve_env(config.env))``. Stored
-        # config NEVER holds resolved values (R1); the resolution
-        # happens at the SPAWN POINT, mirroring KMS-Lite. A failing
-        # marker (missing id, malformed, DB down) raises the typed
-        # envelope BEFORE the subprocess spawns — the server does NOT
-        # start with literal markers or partial env (fail-closed).
-        # Off-loop: secret/KMS marker resolution is synchronous and
-        # can block on Fernet/KMS I/O — run it on a worker thread so it
-        # never occupies the event loop (B1). Fail-closed semantics are
-        # preserved: a raising marker propagates and aborts the spawn
-        # BEFORE the subprocess starts.
-        def _resolve_env_sync() -> dict[str, str] | None:
-            return resolve_secret_markers(
-                resolve_env(config.env),
-                secret_service=_get_process_secret_service(),
-                actor="<secret_resolver>",
-                surface="mcp_spawn",
-            )
+        #
+        # The gate → DNS pre-check → marker-resolution span is guarded
+        # as a WHOLE (the ``try`` below): a raise in that span used to
+        # escape WITHOUT ``record_failure`` — so an env/marker failure
+        # never incremented the breaker (the server never reached the
+        # threshold, never quarantined, and the forever-retry continued)
+        # AND the claimed recovery probe leaked (``probe_claimed`` stayed
+        # set → the server's recovery was wedged for the whole boot).
+        try:
+            if not await claim_attempt(server_name):
+                entry = server_state(server_name)
+                raise McpServerQuarantined(
+                    server_name,
+                    (entry.reason if entry is not None else "unknown") or "unknown",
+                )
+            # ── C2: the DNS pre-check (off-loop, bounded at 2.0s) ─────
+            await self._run_dns_precheck(server_name, config)
+            # agent-secrets P2 (design §1c) — LITERAL composition:
+            # ``resolve_secret_markers(resolve_env(config.env))``. Stored
+            # config NEVER holds resolved values (R1); the resolution
+            # happens at the SPAWN POINT, mirroring KMS-Lite. A failing
+            # marker (missing id, malformed, DB down) raises the typed
+            # envelope BEFORE the subprocess spawns — the server does NOT
+            # start with literal markers or partial env (fail-closed).
+            # Off-loop: secret/KMS marker resolution is synchronous and
+            # can block on Fernet/KMS I/O — run it on a worker thread so it
+            # never occupies the event loop (B1). Fail-closed semantics are
+            # preserved: a raising marker propagates and aborts the spawn
+            # BEFORE the subprocess starts.
+            def _resolve_env_sync() -> dict[str, str] | None:
+                return resolve_secret_markers(
+                    resolve_env(config.env),
+                    secret_service=_get_process_secret_service(),
+                    actor="<secret_resolver>",
+                    surface="mcp_spawn",
+                )
 
-        resolved_env = await asyncio.get_running_loop().run_in_executor(
-            _SECRET_RESOLVE_EXECUTOR, _resolve_env_sync
-        )
-        server_params = StdioServerParameters(
-            command=config.command,
-            args=config.args,
-            env=resolved_env,
-        )
-        streams_cm = TaskScopedStdioClient(server_params)
+            resolved_env = await asyncio.get_running_loop().run_in_executor(
+                _SECRET_RESOLVE_EXECUTOR, _resolve_env_sync
+            )
+            server_params = StdioServerParameters(
+                command=config.command,
+                args=config.args,
+                env=resolved_env,
+            )
+            streams_cm = TaskScopedStdioClient(server_params)
+        except BaseException as exc:
+            # The claim → spawn span failed. Record it on the breaker
+            # (else this failure class never reaches the threshold and
+            # the server is never quarantined) and release the claimed
+            # probe (else the server's recovery is wedged for the
+            # boot). The original exception is re-raised by the caller.
+            await self._record_escape_failure(server_name, exc)
+            raise
         read_stream = write_stream = None
         session: ManagedClientSession | None = None
 
@@ -804,18 +886,23 @@ class McpWarmupPool:
         if pool is None or pool.qsize() >= self._pool_sizes.get(server_name, self.DEFAULT_POOL_SIZE):
             return
 
-        # C1 (S3): a QUARANTINED server is never re-spawned this boot.
-        # This is the seam that stops the forever-retry: the health
-        # check evicts a dead connection every 60 s and the replenish
-        # re-ran the failing init chain forever. The quarantine ends
-        # that loop — the server returns only via the breaker's recovery
-        # probe after the recovery window.
-        if is_quarantined(server_name):
+        # C1 (S3): a QUARANTINED server is not re-spawned this boot —
+        # EXCEPT when a recovery probe is DUE.
+        #
+        # The gate is quarantine-AND-not-due, NOT a bare quarantine
+        # consult: the ONLY production caller of the re-probe path is
+        # ``_create_pooled_connection`` (which claims the probe), and a
+        # bare ``is_quarantined()`` early-return here short-circuited
+        # BEFORE it — so the recovery probe could never fire in
+        # production and the "recovers without a daemon restart" promise
+        # was a falsehood.
+        if is_quarantined(server_name) and not await can_attempt(server_name):
             logger.info(
-                "MCP server '%s' is quarantined for this boot — skipping "
-                "the replenish (it returns via the breaker's recovery "
-                "probe, no daemon restart needed)",
+                "MCP server '%s' is quarantined for this boot — no recovery "
+                "probe is due yet (the probe fires once the %.0fs recovery "
+                "window elapses; no daemon restart needed)",
                 server_name,
+                INIT_RECOVERY_TIMEOUT_S,
             )
             return
 
@@ -921,14 +1008,21 @@ class McpWarmupPool:
                 # bounded by ``idle_reap_seconds``.
                 #
                 # C1 (S3): a QUARANTINED server is not re-spawned here
-                # either. Without this consult the health loop would
-                # evict the dead connection and the replenish would
-                # re-run the failing init chain every 60 s — forever.
-                if is_quarantined(server_name):
+                # either — UNLESS a recovery probe is DUE.
+                #
+                # This is the ONLY production path that reaches the
+                # re-probe caller (``_create_pooled_connection``, via
+                # the replenish), so a bare ``continue`` on the
+                # quarantine consult made the recovery probe
+                # unreachable in production. The gate is
+                # quarantine-AND-not-due; ``claim_attempt`` (in the
+                # create path) then enforces the CR-4 single-probe
+                # guard, so a probe fires at most once per window.
+                if is_quarantined(server_name) and not await can_attempt(server_name):
                     logger.info(
-                        "MCP server '%s' is quarantined for this boot — the "
-                        "health check will not re-spawn it (recovery is via "
-                        "the breaker's half-open probe after %.0fs)",
+                        "MCP server '%s' is quarantined for this boot — no "
+                        "recovery probe is due yet (it fires once the %.0fs "
+                        "recovery window elapses; no daemon restart needed)",
                         server_name,
                         INIT_RECOVERY_TIMEOUT_S,
                     )

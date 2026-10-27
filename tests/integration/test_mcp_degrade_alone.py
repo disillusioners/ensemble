@@ -194,13 +194,22 @@ async def main():
             command=sys.executable,
             args=[_ok_path],
         )
+        # C-1 fix: the recovery goes through the PRODUCTION gate
+        # (``_replenish`` — the only path that reaches the re-probe
+        # caller), NOT through a direct ``_create_pooled_connection``
+        # call (which would prove the state machine but not the
+        # wiring). The loop tolerates the health check winning the
+        # single-probe race: whichever caller gets the probe performs
+        # it, and the registry must end up at "ok".
         recovered = False
         recover_error = None
-        try:
-            conn = await pool._create_pooled_connection(PROBE)
-            recovered = conn is not None
-        except Exception as exc:
-            recover_error = f"{{type(exc).__name__}}: {{exc}}"
+        for _ in range(12):
+            await pool._replenish(PROBE)
+            state = init_guard.state_snapshot().get(PROBE, {{}}).get("state")
+            if state == "ok" and not init_guard.is_quarantined(PROBE):
+                recovered = True
+                break
+            await asyncio.sleep(1.2)
         result["recovered"] = recovered
         result["recover_error"] = recover_error
         result["state_after_recovery"] = (
@@ -322,6 +331,8 @@ def test_a_broken_mcp_server_degrades_alone_and_is_reportable(scratch_pg):
     assert payload["quarantined"] is True, payload
     assert payload["can_attempt_after_trip"] is False, payload
     assert payload["can_attempt_after_window"] is True, payload
+    # (d) after the recovery window the server comes back — through the
+    #     PRODUCTION gate (``_replenish``), without a daemon restart.
     assert payload["recovered"] is True, payload
     assert payload["state_after_recovery"] == "ok", payload
     assert payload["quarantined_after_recovery"] is False, payload

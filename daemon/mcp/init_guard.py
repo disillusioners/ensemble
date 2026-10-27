@@ -358,6 +358,44 @@ def quarantine_server(
     )
 
 
+def release_attempt(server: str) -> None:
+    """Release a claimed recovery probe WITHOUT counting a failure.
+
+    The init span between the claim and the spawn (the DNS pre-check,
+    the secret-marker resolution) can raise. If it does, the claim must
+    still be released: a stuck ``probe_claimed`` means the server's
+    recovery is wedged for the REST OF THE BOOT (the breaker's
+    single-probe slot stays taken and the entry's window never
+    re-arms).
+
+    This does NOT touch the breaker's failure counter — the caller
+    records the failure separately (with the right class).
+    """
+    entry = _SERVERS.get(server)
+    if entry is not None:
+        entry.probe_claimed = False
+
+
+def flush_if_txn_closed() -> int:
+    """Flush the suppressed journal buffer when the promote txn closed.
+
+    The buffer drains on the release path (the promote transaction is
+    over), not only on the NEXT state transition — a daemon that goes
+    quiet after a transition would otherwise hold the entry until the
+    graceful shutdown.
+
+    Returns the number of entries flushed (0 when the txn is still live
+    or the buffer is empty).
+    """
+    if not _JOURNAL_BUFFER:
+        # Nothing buffered ⇒ nothing to drain (and NO predicate read —
+        # the readiness tick calls this every cycle).
+        return 0
+    if _promote_txn_live():
+        return 0
+    return flush_buffered_transitions()
+
+
 def clear_quarantine(server: str) -> bool:
     """Manually clear a server's quarantine (the operator reset path).
 
@@ -366,6 +404,12 @@ def clear_quarantine(server: str) -> bool:
     place), because ``CircuitBreaker.reset()`` is the only
     unsynchronised mutator and must never be called concurrently with a
     half-open probe (S11).
+
+    NOTE: this is a PROGRAMMATIC reset — there is no operator-facing
+    surface wired to it yet (the tool/API surface for a manual
+    quarantine reset is not part of this lane). The normal recovery path
+    is the breaker's half-open probe after ``INIT_RECOVERY_TIMEOUT_S``,
+    which needs no operator action and no daemon restart.
 
     Returns True when a quarantine was actually cleared.
     """
@@ -890,11 +934,13 @@ __all__ = [
     "clear_quarantine",
     "dns_precheck",
     "flush_buffered_transitions",
+    "flush_if_txn_closed",
     "is_quarantined",
     "quarantine_entries",
     "quarantine_server",
     "record_failure",
     "record_success",
+    "release_attempt",
     "reset_for_tests",
     "server_state",
     "state_snapshot",

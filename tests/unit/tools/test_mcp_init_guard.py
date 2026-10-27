@@ -23,6 +23,7 @@ This file pins:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -359,6 +360,154 @@ def _dead_connection():
         tools=[],
         server_name="context7",
         created_at=0.0,
+    )
+
+
+async def test_the_recovery_probe_fires_through_the_production_gates(monkeypatch):
+    """C-1 fix: the recovery probe must fire through the REAL gates.
+
+    The bare ``is_quarantined()`` consults in ``_replenish`` and
+    ``health_check`` short-circuited BEFORE the only production
+    re-probe caller (``_create_pooled_connection`` → ``claim_attempt``)
+    — so the "recovers without a daemon restart" promise was
+    unreachable in PRODUCTION. This pin drives the production gates
+    themselves (not the init_guard API directly) with a shrunk recovery
+    window.
+    """
+    monkeypatch.setattr(init_guard, "INIT_RECOVERY_TIMEOUT_S", 0.05)
+
+    pool = McpWarmupPool()
+    pool.register_server(
+        "context7",
+        McpStdioConfig(transport="stdio", command="false", args=[]),
+    )
+    pool._running = True
+
+    attempts: list[str] = []
+
+    async def _fake_create(server_name: str):
+        attempts.append(server_name)
+        raise RuntimeError("the probe failed again")
+
+    monkeypatch.setattr(pool, "_create_pooled_connection", _fake_create)
+
+    for _ in range(3):
+        await init_guard.record_failure(
+            "context7", init_guard.FAILURE_CLASS_INIT_FAILED
+        )
+    assert init_guard.is_quarantined("context7") is True
+
+    # BEFORE the recovery window: the gates must NOT let a probe through.
+    await pool._replenish("context7")
+    assert attempts == [], (
+        "no recovery probe may run before the recovery window elapses"
+    )
+    await pool.health_check()
+    assert not pool._replenish_tasks, (
+        "the health check must not start a replenish before the recovery "
+        "window elapses"
+    )
+    await asyncio.sleep(0)
+    assert attempts == [], "no probe may have run"
+
+    # AFTER the window: the gates MUST let the probe through.
+    await asyncio.sleep(0.1)
+    await pool._replenish("context7")
+    assert attempts == ["context7"], (
+        "the recovery window elapsed — the replenish gate must let the "
+        "probe through to the create path"
+    )
+
+    # The health check is the OTHER production gate — it must start the
+    # replenish once a probe is due.
+    pool._replenish_tasks.clear()
+    await pool.health_check()
+    assert pool._replenish_tasks, (
+        "the health check must start the recovery replenish once the "
+        "recovery window elapsed"
+    )
+    for task in list(pool._replenish_tasks):
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+    pool._replenish_tasks.clear()
+
+
+async def test_an_early_raise_in_the_claim_span_is_recorded(monkeypatch):
+    """WARNING 2: a raise between the claim and the spawn MUST count.
+
+    The span (the DNS pre-check, the secret-marker resolution, the
+    ``StdioServerParameters`` construction) used to escape WITHOUT
+    ``record_failure``: an env/marker failure never incremented the
+    breaker, so the server never reached the threshold, never
+    quarantined, and the 60s health-check retry loop continued
+    invisible in ``detail.mcp``.
+    """
+    pool = McpWarmupPool()
+    pool.register_server(
+        "context7",
+        McpStdioConfig(transport="stdio", command="false", args=[]),
+    )
+    pool._running = True
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("the secret-marker envelope failed")
+
+    monkeypatch.setattr(warmup_pool_module, "resolve_secret_markers", _boom)
+
+    for _ in range(3):
+        with pytest.raises(Exception):
+            await pool._create_pooled_connection("context7")
+
+    entry = init_guard.server_state("context7")
+    assert entry is not None
+    assert entry.attempts == 3, (
+        "an early raise MUST increment the breaker — otherwise this "
+        "failure class can never quarantine"
+    )
+    assert init_guard.is_quarantined("context7") is True, (
+        "the marker-failure class MUST be able to reach the threshold"
+    )
+
+
+async def test_an_early_raise_releases_the_recovery_probe_claim(monkeypatch):
+    """A failure during a recovery probe must not wedge the recovery.
+
+    The claim is taken BEFORE the spawn; a raise in the span left
+    ``probe_claimed`` set, so the breaker's single-probe slot stayed
+    taken and the server's recovery was wedged for the REST OF THE
+    BOOT — one marker failure during a recovery probe was enough.
+    """
+    monkeypatch.setattr(init_guard, "INIT_RECOVERY_TIMEOUT_S", 0.05)
+
+    pool = McpWarmupPool()
+    pool.register_server(
+        "context7",
+        McpStdioConfig(transport="stdio", command="false", args=[]),
+    )
+    pool._running = True
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("the secret-marker envelope failed")
+
+    monkeypatch.setattr(warmup_pool_module, "resolve_secret_markers", _boom)
+
+    for _ in range(3):
+        with pytest.raises(Exception):
+            await pool._create_pooled_connection("context7")
+    assert init_guard.is_quarantined("context7") is True
+
+    await asyncio.sleep(0.1)
+    # The probe is due: the create path claims it, the marker raises.
+    with pytest.raises(Exception):
+        await pool._create_pooled_connection("context7")
+
+    entry = init_guard.server_state("context7")
+    assert entry.probe_claimed is False, (
+        "the early raise MUST release the claimed probe — a stuck claim "
+        "wedges the server's recovery for the whole boot"
     )
 
 
