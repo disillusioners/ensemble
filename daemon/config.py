@@ -626,16 +626,8 @@ class LimitsConfig(BaseSettings):
     # ``env_prefix="LIMITS_"``: ``LIMITS_CHECKPOINT_POOL_MAX_SIZE`` /
     # ``LIMITS_CHECKPOINT_POOL_TIMEOUT_S``.
     #
-    # SIZING ARITHMETIC (decisions §3d D2): the effective concurrent
-    # checkpoint-writer ceiling is min(llm_concurrency, worker_pool_size +
-    # chat_worker_pool_size) = min(10, 5 + 2) = 7; the readiness sentinel
-    # probe takes ONE more slot (+1) and headroom adds 2 ⇒ 10. The Field
-    # bounds clamp it to [5, 20].
-    #
-    # HONESTY (decisions §3d D4): sizing does NOT cure the SQLAlchemy-side
-    # pool leak — that is a SEPARATE defect owned by a follow-up
-    # commission. This knob only buys headroom against the concurrent-writer
-    # arithmetic and bounds the ghost-waiter lifetime.
+    # Sizing arithmetic + the honesty note: see daemon/constants.py
+    # (CHECKPOINT_POOL_MAX_SIZE_DEFAULT) — the single canonical home.
     checkpoint_pool_max_size: int = Field(
         default=CHECKPOINT_POOL_MAX_SIZE_DEFAULT,
         ge=5,

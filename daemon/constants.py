@@ -203,6 +203,18 @@ CHECKPOINT_POOL_MAX_SIZE_DEFAULT: int = 10
 # (a self-amplifying drain). An explicit, bounded deadline caps the ghost
 # lifetime.
 CHECKPOINT_POOL_TIMEOUT_S_DEFAULT: float = 5.0
+#
+# HONESTY (decisions §3d D4 — the CANONICAL wording for the whole A4
+# knob set; every other home carries only a pointer here): sizing does
+# NOT cure the pool leak. The confirmed leak is on the OTHER pool (P1 —
+# the SQLAlchemy manager engine, pool_size=5 / max_overflow=10); the
+# checkpoint saver's own P2 pool is sized with headroom against the
+# concurrent-writer arithmetic and a bounded acquisition deadline, and
+# neither change repairs a pool that is being poisoned underneath it —
+# the SQLAlchemy-side idle-in-transaction leak is a SEPARATE defect
+# owned by a follow-up commission. The readiness detail publishes BOTH
+# pools' state (detail.pool_state) so the poison is VISIBLE rather than
+# inferred from timeouts.
 
 # ── Checkpoint readiness sentinel (incident 2026-10-10, W1) ─────────────
 # Fixed, discoverable namespace for the checkpoint-saver readiness

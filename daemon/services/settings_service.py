@@ -250,15 +250,9 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
     # pool is constructed once at boot (daemon/persistence.py), so a change
     # requires a daemon restart.
     #
-    # SIZING ARITHMETIC (decisions §3d D2):
-    #   concurrent checkpoint writers = min(llm_concurrency=10,
-    #                                       worker_pool_size=5 +
-    #                                       chat_worker_pool_size=2) = 7
-    #   max_size = clamp(7 + 1 readiness-probe slot + 2 headroom,
-    #                    min=5, max=20) = 10
-    # HONESTY (decisions §3d D4): sizing does NOT cure the SQLAlchemy-side
-    # pool leak — that is a separate defect owned by a follow-up
-    # commission. Precedence: DB override > env var
+    # Sizing arithmetic + the honesty note: see daemon/constants.py
+    # (CHECKPOINT_POOL_MAX_SIZE_DEFAULT) — the single canonical home.
+    # Precedence: DB override > env var
     # LIMITS_CHECKPOINT_POOL_MAX_SIZE > config.yaml literal > default.
     "limits.checkpoint_pool_max_size": ManagedKeySpec(
         key="limits.checkpoint_pool_max_size",

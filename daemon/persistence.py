@@ -304,45 +304,15 @@ async def create_postgres_checkpointer(config: EnsembleConfig) -> CheckpointerAd
         # caller's event loop.
         #
         # POOL SIZING (soak-gate-mcp-warmup, A4 — delivered knob; the
-        # "FUTURE KNOB" note below is SUPERSEDED):
-        #
-        # * ``max_size`` is the CONFIG-TUNABLE knob
-        #   ``limits.checkpoint_pool_max_size`` (default tier
-        #   ``CHECKPOINT_POOL_MAX_SIZE_DEFAULT`` = 10; env
-        #   ``LIMITS_CHECKPOINT_POOL_MAX_SIZE``; yaml
-        #   ``limits.checkpoint_pool_max_size``; DB override above all).
-        #   The arithmetic (decisions §3d D2):
-        #     concurrent_checkpoint_writers =
-        #         min(limits.llm_concurrency,
-        #             limits.worker_pool_size + limits.chat_worker_pool_size)
-        #         = min(10, 5 + 2) = 7
-        #     max_size = clamp(7 writers + 1 readiness-probe slot
-        #                      + 2 headroom, min=5, max=20) = 10
-        #   The previous hard-coded ``max_size=5`` was BELOW the 7-writer
-        #   ceiling before the probe was even counted.
-        # * ``timeout`` is the CONFIG-TUNABLE acquisition deadline
-        #   ``limits.checkpoint_pool_timeout_s`` (default tier
-        #   ``CHECKPOINT_POOL_TIMEOUT_S_DEFAULT`` = 5.0s; env
-        #   ``LIMITS_CHECKPOINT_POOL_TIMEOUT_S``). There was NO ``timeout``
-        #   kwarg before, so psycopg_pool's 30.0s library default applied:
-        #   the readiness sentinel probe abandons at 0.9s (inner) / 1.0s
-        #   (outer) but the pool RETAINS its queued waiter until the pool
-        #   deadline — at the 10s refresh cadence every timed-out probe
-        #   leaves a GHOST WAITER that consumes a slot when granted (a
-        #   self-amplifying drain). The explicit deadline caps that
-        #   ghost lifetime.
-        #
-        # HONESTY CLAUSE (decisions §3d D4 — MANDATORY wording): sizing
-        # does NOT cure the leak. The confirmed leak is on the OTHER pool
-        # (P1 — the SQLAlchemy manager engine, ``pool_size=5`` /
-        # ``max_overflow=10``); the checkpoint saver's own P2 pool is
-        # sized here with headroom against the concurrent-writer
-        # arithmetic and a bounded acquisition deadline. Neither change
-        # repairs a pool that is being poisoned underneath it — the
-        # SQLAlchemy-side idle-in-transaction leak is a SEPARATE defect
-        # owned by a follow-up commission. The readiness detail publishes
-        # BOTH pools' state (``detail.pool_state``) so the poison is
-        # VISIBLE rather than inferred from timeouts.
+        # "FUTURE KNOB" note formerly below is SUPERSEDED): ``max_size``
+        # is the config knob ``limits.checkpoint_pool_max_size`` and
+        # ``timeout`` is ``limits.checkpoint_pool_timeout_s`` — the
+        # psycopg 30.0s library default (the ghost-waiter lifetime of an
+        # abandoned readiness probe) is thereby bounded. HONESTY
+        # (decisions §3d D4): sizing does NOT cure the leak — the
+        # confirmed leak is on the OTHER pool. Full arithmetic, honesty
+        # wording and the precedence ladder: see daemon/constants.py
+        # (CHECKPOINT_POOL_MAX_SIZE_DEFAULT) — the single canonical home.
         saver_pool = AsyncConnectionPool(
             conninfo=conn_string,
             open=False,
