@@ -18,23 +18,12 @@ from daemon.mcp.config import (
 )
 from daemon.mcp.managed_session import ManagedClientSession
 from daemon.mcp.stdio_wrapper import TaskScopedContextManager, TaskScopedStdioClient
+# Shared off-loop spawn-env resolution (agent-secrets P2 design §1c) —
+# the R1/R4 pins and the literal composition live on the helper's
+# docstring in warmup_pool; this module only dispatches to it.
+from daemon.mcp.warmup_pool import SECRET_RESOLVE_EXECUTOR, resolve_spawn_env
 from daemon.repositories.mcp_server.models import McpServer
-from daemon.services.kms_resolver import resolve_env, resolve_headers
-# agent-secrets P2 (design §1c) — cold-spawn wrap. The stored env
-# keeps BOTH marker families (``__KMS_REF__…__`` / ``__ENS_SECRET__…__``);
-# only the subprocess env ever sees plaintext. LITERAL composition:
-# ``resolve_secret_markers(resolve_env(config.env))`` — KMS-Lite
-# resolves FIRST (pre-existing seam), agent-secrets resolves on the
-# KMS-resolved dict (marker shapes are disjoint — the composition is
-# order-stable). Surface ``"mcp_spawn"`` (envelope + audit context).
-# ``build_pooled_stdio_config`` remains DO-NOT-TOUCH (R4 — resolving
-# there would persist plaintext into DB config).
-# Gap-2: service discovery consolidated into the scrub module's
-# public ``get_process_secret_service``.
-from daemon.services.secret_persistence_scrub import (
-    get_process_secret_service as _get_process_secret_service,
-)
-from daemon.services.secret_resolver import resolve_secret_markers
+from daemon.services.kms_resolver import resolve_headers
 
 logger = logging.getLogger(__name__)
 STDIO_DEFAULT_TIMEOUT = 30.0
@@ -219,26 +208,12 @@ class McpConnectionManager:
         # KMS marker → plaintext substitution (P3-WP6). Stored env keeps
         # ``__KMS_REF__<handle>__`` markers; only the subprocess env ever
         # sees plaintext. resolve_env returns a NEW dict.
-        # agent-secrets P2 (design §1c) — cold spawn #1: LITERAL
-        # composition ``resolve_secret_markers(resolve_env(...))`` —
-        # agent-secrets markers resolve on the KMS-resolved dict at the
-        # SPAWN POINT (stored config NEVER holds resolved values, R1).
-        # A failing marker raises the typed envelope BEFORE the
-        # subprocess spawns — the server does NOT start with literal
-        # markers or partial env (fail-closed).
-        # Off-loop secret/KMS marker resolution (B1) — fail-closed preserved.
-        def _resolve_env_sync() -> dict[str, str] | None:
-            return resolve_secret_markers(
-                resolve_env(config.env),
-                secret_service=_get_process_secret_service(),
-                actor="<secret_resolver>",
-                surface="mcp_spawn",
-            )
-
-        from daemon.mcp.warmup_pool import _SECRET_RESOLVE_EXECUTOR
-
+        # agent-secrets P2 (design §1c) — cold spawn #1: the shared
+        # spawn-env resolution (R1/R4 pins + fail-closed semantics live
+        # on ``warmup_pool.resolve_spawn_env``). Off-loop (B1) —
+        # fail-closed preserved.
         resolved_env = await asyncio.get_running_loop().run_in_executor(
-            _SECRET_RESOLVE_EXECUTOR, _resolve_env_sync
+            SECRET_RESOLVE_EXECUTOR, resolve_spawn_env, config
         )
         server_params = StdioServerParameters(
             command=config.command,
@@ -514,23 +489,12 @@ class McpConnectionManager:
         # ``__KMS_REF__<handle>__`` markers; only the subprocess env ever
         # sees plaintext. resolve_env returns a NEW dict.
         # agent-secrets P2 (design §1c) — cold spawn #2 (test sessions
-        # carry the same markers as real sessions): LITERAL composition
-        # ``resolve_secret_markers(resolve_env(...))`` — identical to
-        # cold spawn #1 and the warm pool (BOTH cold paths must be
-        # wrapped, not just the pool).
-        # Off-loop secret/KMS marker resolution (B1) — fail-closed preserved.
-        def _resolve_env_sync() -> dict[str, str] | None:
-            return resolve_secret_markers(
-                resolve_env(config.env),
-                secret_service=_get_process_secret_service(),
-                actor="<secret_resolver>",
-                surface="mcp_spawn",
-            )
-
-        from daemon.mcp.warmup_pool import _SECRET_RESOLVE_EXECUTOR
-
+        # carry the same markers as real sessions): the shared spawn-env
+        # resolution, identical to cold spawn #1 and the warm pool
+        # (R1/R4 pins live on ``warmup_pool.resolve_spawn_env``).
+        # Off-loop (B1) — fail-closed preserved.
         resolved_env = await asyncio.get_running_loop().run_in_executor(
-            _SECRET_RESOLVE_EXECUTOR, _resolve_env_sync
+            SECRET_RESOLVE_EXECUTOR, resolve_spawn_env, config
         )
         server_params = StdioServerParameters(
             command=config.command,

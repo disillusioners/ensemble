@@ -113,6 +113,42 @@ SECRET_RESOLVE_EXECUTOR = ThreadPoolExecutor(
 _SECRET_RESOLVE_EXECUTOR = SECRET_RESOLVE_EXECUTOR
 
 
+def resolve_spawn_env(config: McpStdioConfig) -> dict[str, str] | None:
+    """Resolve ONE stdio spawn env: KMS markers first, then agent-secrets.
+
+    The shared body of EVERY spawn site (the warm pool's
+    ``_create_pooled_connection`` below and BOTH cold paths in
+    ``connection_manager``) — extracted verbatim from the three copies
+    that used to carry it. Callers run it OFF the event loop:
+    ``await loop.run_in_executor(SECRET_RESOLVE_EXECUTOR, resolve_spawn_env, config)``.
+
+    agent-secrets P2 (design §1c) pins, carried verbatim from the
+    deduplicated sites:
+
+    * LITERAL composition: ``resolve_secret_markers(resolve_env(config.env))``.
+      KMS-Lite resolves FIRST (the pre-existing seam); agent-secrets
+      markers resolve on the KMS-resolved dict — marker shapes are
+      disjoint, so the composition is order-stable.
+    * R1 — stored config NEVER holds resolved values; the resolution
+      happens at the SPAWN POINT, mirroring KMS-Lite.
+    * R4 — ``build_pooled_stdio_config`` stays DO-NOT-TOUCH: resolving
+      there would persist plaintext into DB config.
+    * Fail-closed: a failing marker (missing id, malformed, DB down)
+      raises the typed envelope BEFORE the subprocess spawns — the
+      server does NOT start with literal markers or partial env.
+    * ``actor="<secret_resolver>"`` — server-scoped spawn: no agent
+      context, so the audit actor is the sentinel, explicit.
+    * ``surface="mcp_spawn"`` (envelope + audit context — the two forms
+      are byte-identical for this seam).
+    """
+    return resolve_secret_markers(
+        resolve_env(config.env),
+        secret_service=_get_process_secret_service(),
+        actor="<secret_resolver>",
+        surface="mcp_spawn",
+    )
+
+
 def _init_failure_class(exc: BaseException) -> str:
     """Map an init exception onto the C1 failure-class taxonomy.
 
@@ -538,28 +574,13 @@ class McpWarmupPool:
                 )
             # ── C2: the DNS pre-check (off-loop, bounded at 2.0s) ─────
             await self._run_dns_precheck(server_name, config)
-            # agent-secrets P2 (design §1c) — LITERAL composition:
-            # ``resolve_secret_markers(resolve_env(config.env))``. Stored
-            # config NEVER holds resolved values (R1); the resolution
-            # happens at the SPAWN POINT, mirroring KMS-Lite. A failing
-            # marker (missing id, malformed, DB down) raises the typed
-            # envelope BEFORE the subprocess spawns — the server does NOT
-            # start with literal markers or partial env (fail-closed).
-            # Off-loop: secret/KMS marker resolution is synchronous and
-            # can block on Fernet/KMS I/O — run it on a worker thread so it
-            # never occupies the event loop (B1). Fail-closed semantics are
-            # preserved: a raising marker propagates and aborts the spawn
-            # BEFORE the subprocess starts.
-            def _resolve_env_sync() -> dict[str, str] | None:
-                return resolve_secret_markers(
-                    resolve_env(config.env),
-                    secret_service=_get_process_secret_service(),
-                    actor="<secret_resolver>",
-                    surface="mcp_spawn",
-                )
-
+            # agent-secrets P2 (design §1c) — the shared spawn-env
+            # resolution; the R1/R4 pins + fail-closed semantics live on
+            # ``resolve_spawn_env``. Off-loop (B1): marker resolution is
+            # synchronous and can block on Fernet/KMS I/O — a raising
+            # marker aborts the spawn BEFORE the subprocess starts.
             resolved_env = await asyncio.get_running_loop().run_in_executor(
-                _SECRET_RESOLVE_EXECUTOR, _resolve_env_sync
+                SECRET_RESOLVE_EXECUTOR, resolve_spawn_env, config
             )
             server_params = StdioServerParameters(
                 command=config.command,
