@@ -38,27 +38,20 @@ echo "Repo:    $(pwd)"
 echo "Started: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo
 
-# ── FAKE_HOME fence ────────────────────────────────────────────────────
+# ── the fence (SHARED helper: tests/helpers/soak_gate_pack_common.sh) ──
 # The install-root resolution is HOME-derived; the pack must never
-# resolve (or touch) a live-shaped path. The escape guard refuses to run
-# when the fake home is under the REAL home.
-REAL_HOME="${HOME:-/root}"
-FAKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/soak-grace-fakehome.XXXXXX")" || {
-    echo "FAIL: cannot create FAKE_HOME"; echo "RESULT: FAIL"; exit 1;
-}
-case "$(cd "$FAKE_HOME" && pwd -P)" in
-    "$(cd "$REAL_HOME" && pwd -P)"/*)
-        echo "FAIL: FAKE_HOME ($FAKE_HOME) resolves under the REAL HOME — refusing to run"
-        echo "RESULT: FAIL"; exit 1
-        ;;
-esac
-export HOME="$FAKE_HOME"
-export ENSEMBLE_UPGRADE_SCRIPTS_DIR="$REPO_ROOT/scripts/upgrade"
+# resolve (or touch) a live-shaped path. soak_pack_fake_home — mktemp
+# FAKE_HOME + the real-home escape guard (+ the live-install-shape
+# refusal); soak_pack_scrub_env — the PER-VARIABLE POSTGRES_*/PORT
+# scrub ("env -u POSTGRES_*" is a silent NO-OP — bash does not glob
+# env names).
+# shellcheck source=/dev/null
+. "$REPO_ROOT/tests/helpers/soak_gate_pack_common.sh"
 
-# ── per-variable env scrub (never `env -u POSTGRES_*` — bash does not
-#    glob env names, so that idiom is a silent NO-OP) ───────────────────
-unset POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD POSTGRES_HOST POSTGRES_PORT
-unset DAEMON_PORT PORT
+soak_pack_fake_home
+FAKE_HOME="$SOAK_PACK_FAKE_HOME"   # alias: the pack's cleanup trap removes it
+export ENSEMBLE_UPGRADE_SCRIPTS_DIR="$REPO_ROOT/scripts/upgrade"
+soak_pack_scrub_env
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/soak-grace-pack.XXXXXX")" || {
     echo "FAIL: cannot create workdir"; echo "RESULT: FAIL"; exit 1;
