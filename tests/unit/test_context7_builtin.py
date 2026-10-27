@@ -54,8 +54,14 @@ class TestContext7Properties:
         assert "AI coding assistants" in context7_definition.description
 
     def test_schema_version(self, context7_definition):
-        """Test that schema_version is '2'."""
-        assert context7_definition.schema_version == "2"
+        """Test that schema_version is '3'.
+
+        C3 (soak-gate-mcp-warmup) bumped the version: the schema gained
+        the two env-section fields. The bump is the drift marker — a row
+        stamped "2" is refused by /configure-builtin (409) until the
+        next boot heals it, and the heal is ENV-PRESERVING.
+        """
+        assert context7_definition.schema_version == "3"
 
 
 # =============================================================================
@@ -98,15 +104,24 @@ class TestContext7BaseConfig:
 class TestContext7ConfigSchema:
     """Tests for get_config_schema()."""
 
-    def test_schema_returns_empty_list(self, context7_definition):
-        """Test that schema returns empty list (no config fields)."""
+    def test_schema_carries_the_two_env_fields(self, context7_definition):
+        """C3: the schema is NO LONGER empty — it carries two env fields.
+
+        ``CONTEXT7_BASE_URL`` is the daemon-side MIRROR (defaulted) and
+        ``CONTEXT7_API_URL`` is the EFFECTIVE lever (no default). The
+        withdrawn ``CONTEXT7_API_BASE_URL`` name must not appear.
+        """
         schema = context7_definition.get_config_schema()
-        assert schema == []
+        keys = [field["key"] for field in schema]
+        assert keys == ["CONTEXT7_BASE_URL", "CONTEXT7_API_URL"]
+        assert "CONTEXT7_API_BASE_URL" not in keys
+        for field in schema:
+            assert field["section"] == "env"
 
     def test_schema_length(self, context7_definition):
-        """Test that schema has zero fields."""
+        """Test that schema has exactly the two env fields."""
         schema = context7_definition.get_config_schema()
-        assert len(schema) == 0
+        assert len(schema) == 2
 
 
 # =============================================================================
@@ -126,21 +141,32 @@ class TestContext7BuildConfig:
         assert result.get("args") == ["-y", "@upstash/context7-mcp"]
 
     def test_build_config_no_extra_fields(self, context7_definition):
-        """Test that build_config doesn't add extra fields."""
+        """C3: build_config adds the env section (and nothing else).
+
+        The env carries the ``CONTEXT7_BASE_URL`` mirror default; the
+        ``CONTEXT7_API_URL`` lever is deliberately ABSENT (no default —
+        a pinned default would freeze the exact thing that broke).
+        """
         result = context7_definition.build_config({})
 
-        # Should only have base config fields
-        assert set(result.keys()) == {"transport", "command", "args"}
+        assert set(result.keys()) == {"transport", "command", "args", "env"}
+        assert result["env"] == {"CONTEXT7_BASE_URL": "https://context7.com"}
+        assert "CONTEXT7_API_URL" not in result["env"]
 
     def test_build_config_with_arbitrary_values_ignored(self, context7_definition):
-        """Test that arbitrary values passed to build_config are ignored (no schema fields)."""
+        """Test that arbitrary values passed to build_config are ignored.
+
+        C3: only the SCHEMA-declared keys are consumed; the base config
+        plus the template-derived env default is what comes out.
+        """
         result = context7_definition.build_config({
             "some_field": "value",
             "another_field": 123,
         })
 
-        # Should still be just the base config
-        assert result == context7_definition.get_base_config()
+        expected = context7_definition.get_base_config()
+        expected["env"] = {"CONTEXT7_BASE_URL": "https://context7.com"}
+        assert result == expected
 
 
 # =============================================================================
@@ -361,16 +387,27 @@ class TestContext7Bootstrap:
         assert server.is_builtin is True, "Server should be marked as builtin"
         assert server.config_schema is not None, "Server should have config schema"
 
-    def test_bootstrap_context7_schema_empty(self, instance_manager_with_repo):
-        """Test that bootstrap creates context7 with empty schema."""
+    def test_bootstrap_context7_schema_carries_the_env_fields(self, instance_manager_with_repo):
+        """C3: bootstrap creates context7 with the TWO env-section fields.
+
+        (The schema used to be EMPTY — that was the "unsettable base URL"
+        hole C3 closes. This pin still ERRORS at setup for a
+        pre-existing reason — the mock config lacks
+        ``service_tool`` — so it does not execute today; the assertion
+        is updated so it is not a stale landmine once the fixture is
+        repaired.)
+        """
         manager = instance_manager_with_repo
 
         # Call bootstrap
         manager._bootstrap_builtin_servers()
 
-        # Verify schema is empty
+        # Verify the schema carries the two env fields
         server = manager._mcp_server_repository.get_mcp_server_by_name("context7")
-        assert server.config_schema == []
+        assert [f["key"] for f in server.config_schema] == [
+            "CONTEXT7_BASE_URL",
+            "CONTEXT7_API_URL",
+        ]
 
     def test_bootstrap_context7_config_matches_base(self, instance_manager_with_repo):
         """Test that bootstrap creates context7 with correct base config."""
@@ -426,8 +463,8 @@ class TestContext7Bootstrap:
         updated_server = repo.get_mcp_server_by_name("context7")
         assert updated_server.config.get("args") == ["-y", "@upstash/context7-mcp"], \
             "Package name should be updated to @upstash/context7-mcp"
-        assert updated_server.config_schema_version == "2", \
-            "Schema version should be updated to 2"
+        assert updated_server.config_schema_version == "3", \
+            "Schema version should be updated to 3 (C3 bumped it)"
 
 
 # =============================================================================

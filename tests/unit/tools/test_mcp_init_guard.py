@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -63,13 +64,21 @@ def _write_state(install_dir: Path, in_flight: dict | None) -> Path:
 def _live_promote_in_flight() -> dict:
     """An ``in_flight`` the §4.7 P7 predicate reads as LIVE.
 
-    The BOOT-WINDOW leg applies (the hold module was imported moments
-    ago, so the daemon boot age is far below ``BOOT_LIVENESS_S``), so
-    ``started_at`` + ``kind`` are enough — no heartbeat needed.
+    BOTH legs are made to apply so the fixture does not depend on how
+    long the test session has been running:
+
+    * the POST-BOOT leg needs a FRESH ``last_heartbeat`` (the shell's
+      epoch-seconds stamp, within the 60s freshness window) — the
+      daemon-boot-age leg would otherwise expire after
+      ``BOOT_LIVENESS_S`` (120s) of module age, which a long test
+      session reaches;
+    * the BOOT-WINDOW leg needs ``started_at`` + a recent stamp.
     """
+    now = time.time()
     return {
         "kind": "promote",
         "started_at": datetime.now(timezone.utc).isoformat(),
+        "last_heartbeat": int(now),
         "run_id": "r-test",
     }
 

@@ -983,7 +983,15 @@ class TestReplenish:
 
     @pytest.mark.asyncio
     async def test_replenish_failure_logged_not_raised(self, pool, mock_stdio_client, mock_load_mcp_tools):
-        """Replenish failure should be logged but not raised."""
+        """Replenish failure should be logged but not raised.
+
+        C4 addendum (soak-gate-mcp-warmup): the failure used to be
+        swallowed at DEBUG — invisible at INFO/WARNING while the pool
+        re-spawned forever (the incident's shape). It is now a WARNING
+        (the operator MUST see it), and the failure is ALSO recorded on
+        the per-boot breaker so the server degrades visibly and
+        eventually quarantines.
+        """
         pool.register_server("context7", _make_config(), pool_size=2)
         pool._running = True
 
@@ -995,8 +1003,10 @@ class TestReplenish:
                 # Should not raise
                 await pool._replenish("context7")
 
-                # Should log debug
-                mock_logger.debug.assert_called()
+                # Should log at WARNING (the raised-the-invisible-failures
+                # rule) — the DEBUG swallow is gone.
+                mock_logger.warning.assert_called()
+                mock_logger.debug.assert_not_called()
 
 
 class TestDrain:
