@@ -81,9 +81,15 @@ from typing import Any
 
 if __package__ in (None, ""):  # pragma: no cover - script invocation
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-    from tests.integration.mcps_gateway import go_client, harness, tls_harness, transcript
+    from tests.integration.mcps_gateway import (
+        ack_shape,
+        go_client,
+        harness,
+        tls_harness,
+        transcript,
+    )
 else:  # pragma: no cover - module invocation
-    from . import go_client, harness, tls_harness, transcript
+    from . import ack_shape, go_client, harness, tls_harness, transcript
 
 # ── the identities of the lane ───────────────────────────────────────────
 
@@ -1239,7 +1245,12 @@ async def _phase_p1(
     # "ended" member at all — that is an ACCEPTED ack (the member is
     # simply absent), so only an EXPLICIT falsy "ended" is a decline.
     ack_body = end_frame.result if end_frame is not None else {}
-    ack_declined = "ended" in ack_body and not ack_body["ended"]
+    # ONE shared decline detector (``ack_shape``) — the check is
+    # PRESENT-AND-FALSY: the shipped v0.1 client answers ``session.end``
+    # with ``{"session_id"}`` and NO "ended" member at all (that is an
+    # ACCEPTED ack — the member is simply absent), so only an
+    # EXPLICITLY falsy "ended" is a DECLINE.
+    ack_declined = ack_shape.ack_declines(ack_body)
     # the socket stays open: heartbeats keep arriving after the end
     await asyncio.sleep(1.5)
     heartbeats_after = [

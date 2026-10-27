@@ -46,9 +46,9 @@ from typing import Any
 
 if __package__ in (None, ""):  # pragma: no cover - script invocation
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-    from tests.integration.mcps_gateway import go_client, tls_harness
+    from tests.integration.mcps_gateway import ack_shape, go_client, tls_harness
 else:  # pragma: no cover - module invocation
-    from . import go_client, tls_harness
+    from . import ack_shape, go_client, tls_harness
 
 #: Where the evidence log is written.
 EVIDENCE_PATH = (
@@ -598,14 +598,19 @@ async def run_gate(
                 end_requests = gw.transcript.find(
                     direction="send", method="session.end", type="request"
                 )
-                ack_body: dict = {}
+                ack_body: dict[str, Any] = {}
                 if end_requests:
                     wanted_id = end_requests[-1].id
                     for frame in gw.transcript.find(direction="recv", type="response"):
                         if frame.id == wanted_id:
                             ack_body = frame.result
                             break
-                ack_declined = "ended" in ack_body and not ack_body["ended"]
+                # ONE shared decline detector (``ack_shape``) — the
+                # check is PRESENT-AND-FALSY, so the shipped v0.1
+                # client's ack ({"session_id"}, no "ended" member) is an
+                # ACCEPTANCE, and only an EXPLICITLY falsy "ended" is a
+                # decline.
+                ack_declined = ack_shape.ack_declines(ack_body)
                 result.add(
                     "session-end-acknowledged",
                     bool(end_result.get("ended")) and not ack_declined,

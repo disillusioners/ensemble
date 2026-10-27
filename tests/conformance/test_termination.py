@@ -33,6 +33,10 @@ THE ROWS
    ``session.end`` names the centre cause (``reaped_by_center`` for the
    sweep's reap, ``superseded`` for an explicit end) — every other lane
    keeps exactly ``{"session_id": ...}`` (§6.9.6).
+7. **the v0.2 connection WITHOUT the capability** — a ``"0.2"``-negotiated
+   connection whose machine did NOT advertise ``client_terminate`` gets
+   EXACTLY ``{"session_id": ...}``: the version alone cannot carry the
+   reason, so a version-only gate fails this row (§6.9.6).
 
 THE INDEPENDENCE CONTRACT
 --------------------------
@@ -45,10 +49,12 @@ transcription of the SPEC (the machine-side vocabulary lives in
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
 from .conformance_peer import (
+    CLIENT_CAPABILITIES,
     CLIENT_CAPABILITIES_V02,
     ConformanceFinding,
     ConformancePeer,
@@ -267,7 +273,8 @@ async def test_the_terminate_accepts_an_unknown_reason_code(
 async def test_a_terminate_without_a_reason_code_omits_the_reason(
     target, serving, begin
 ) -> None:
-    """§6.9.3 / §6.10.1 (Fork B) — ``reason`` is present-when-known.
+    """§6.9.3 / §6.10.1 (spec-changelog.md §11.0 Fork B — mcps_client @
+    feature/session-termination) — ``reason`` is present-when-known.
 
     "``reason`` is required when known and omitted when sanitized or
     unknown — never empty-string". A machine that sent NO
@@ -323,7 +330,8 @@ async def test_a_terminate_without_a_reason_code_omits_the_reason(
 async def test_a_terminate_for_another_machines_session_is_indistinguishable(
     target, serving, begin
 ) -> None:
-    """§6.10.2 — the FOREIGN-SESSION LEAK BAN (Fork C).
+    """§6.10.2 — the FOREIGN-SESSION LEAK BAN (spec-changelog.md §11.0
+    Fork C — mcps_client @ feature/session-termination).
 
     "whatever the responder returns … the answer MUST be
     indistinguishable from the answer for a truly unknown id. No
@@ -424,7 +432,7 @@ async def test_a_declined_end_ack_is_a_refusal_not_an_acknowledgement(
             "SELF-HOST ONLY (COVERAGE.md names this gap)"
         )
 
-    def _decline(envelope: dict) -> dict:
+    def _decline(envelope: dict[str, Any]) -> dict[str, Any]:
         """The machine DECLINES the centre's end."""
         return {"ended": False, "reason": "refused"}
 
@@ -517,7 +525,9 @@ async def test_a_terminate_for_a_session_that_is_not_live_is_idempotent(
             )
         # The reason is MANDATORY on the ``ended: false`` arm ONLY — on
         # the ``ended: true`` arm it is present-when-known (§6.10.1).
-        if result.get("ended") is False and not result.get("reason"):
+        # (The ``ended is False`` half of the condition was REDUNDANT:
+        # the check above already raised unless ``ended`` is False.)
+        if not result.get("reason"):
             raise _finding(
                 "termination",
                 "terminate-reason-mandatory",
@@ -863,6 +873,89 @@ async def test_the_v02_explicit_end_names_the_superseded_cause(
                     f"the session.end frame carried {params!r} — a v0.2 "
                     "connection that negotiated client_terminate must carry "
                     "reason='superseded'",
+                )
+    finally:
+        await peer.close()
+
+
+@pytest.mark.asyncio
+async def test_the_v02_connection_without_the_capability_keeps_the_bare_params(
+    target, serving, begin
+) -> None:
+    """§6.9.6 — a ``0.2`` connection WITHOUT the negotiated capability.
+
+    THE NEGATIVE HALF OF THE CAPABILITY GATE: the ``reason`` member
+    rides the forward ONLY on a ``0.2``-negotiated connection where
+    BOTH capability maps carry ``client_terminate: true``.  A ``0.2``
+    connection whose machine did NOT advertise the capability gets
+    EXACTLY ``{"session_id": ...}`` — the version alone cannot carry
+    the reason, so a version-only gate fails this row.
+
+    The lane is the mirror of ``the v0.2 session.end reason`` row: that
+    one proves the reason IS carried where the capability was
+    negotiated, this one proves it is NOT carried where it was not.
+
+    The explicit end is an AGENT-side verb, and the begin-hook contract
+    covers BEGIN only — so the lane is SELF-HOST ONLY (the in-kit
+    centre drives the agent side in-process).
+    """
+    if target.mode != "self-host":
+        pytest.skip(
+            "SESSION-END-GAP: the explicit end is an agent-side verb and "
+            "the begin-hook contract covers BEGIN only — the end lane is "
+            "SELF-HOST ONLY (COVERAGE.md names this gap)"
+        )
+    peer = _v02_peer(target)
+    try:
+        await peer.connect(send_hello=False)
+        # The machine negotiates ``0.2`` but advertises the v0.1
+        # capability map — NO ``client_terminate`` key at all.
+        await peer.hello(
+            protocol_version=PROTOCOL_VERSION_V02,
+            capabilities=dict(CLIENT_CAPABILITIES),
+        )
+        peer.start_heartbeats(peer.adopted.get("heartbeat_interval_ms", 1000))
+        async with serving(peer, budget_s=25):
+            await open_session(peer, target)
+            session_id = peer.session_ids[0]
+            await target.center.agent_end()
+            await wait_until(lambda: bool(peer.session_end_frames), timeout=10)
+            if not peer.session_end_frames:
+                raise _finding(
+                    "termination",
+                    "v02-no-capability-end-params-bare",
+                    "§6.8",
+                    "no session.end reached the machine on the explicit end",
+                )
+            params = dict(peer.session_end_frames[-1].get("params") or {})
+            negotiated = str(peer.adopted.get("protocol_version") or "")
+            center_caps = dict(peer.adopted.get("capabilities") or {})
+            if negotiated != "0.2":
+                raise _finding(
+                    "termination",
+                    "v02-no-capability-end-params-bare",
+                    "§6.9.6",
+                    f"the connection negotiated {negotiated!r} — the lane "
+                    "needs a 0.2 connection without the capability",
+                )
+            if center_caps.get("client_terminate") is True:
+                raise _finding(
+                    "termination",
+                    "v02-no-capability-end-params-bare",
+                    "§6.9.6",
+                    f"the centre advertised {center_caps!r} — the machine "
+                    "never advertised client_terminate, so the centre must "
+                    "not claim it",
+                )
+            # §6.9.6 — the params stay EXACTLY ``{"session_id": ...}``.
+            if params != {"session_id": session_id}:
+                raise _finding(
+                    "termination",
+                    "v02-no-capability-end-params-bare",
+                    "§6.9.6",
+                    f"the session.end frame carried {params!r} — a 0.2 "
+                    "connection WITHOUT the negotiated capability must "
+                    f"carry exactly {{'session_id': {session_id!r}}}",
                 )
     finally:
         await peer.close()

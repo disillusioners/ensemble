@@ -58,12 +58,13 @@ read while being written.
 | **Termination (v0.2)** | the duplicate machine id | a second connection claiming a LIVE machine id is refused with `MACHINE_ID_CONFLICT` (+ `data{machine_id, …}`); the INCUMBENT is NOT evicted (its socket stays open). NEITHER connection is evicted | §5.6 |
 | **Termination (v0.2)** | the v0.1 connection is unchanged | a v0.1 connection answers `protocol_version: "0.1"` and its capability map carries NO `client_terminate` key — v0.2 does not leak into v0.1 | §5.2/§5.3 |
 | **Termination (v0.2)** | the v0.2 `session.end` reason | on a `"0.2"` connection whose client advertised `client_terminate: true` the centre's `session.end` names the centre cause — `reason: "reaped_by_center"` for the sweep's reap and `reason: "superseded"` for an explicit end. The reason is VERSION-AND-CAPABILITY-SCOPED (§6.9.6): a v0.1 connection — and a v0.2 one WITHOUT the negotiated capability — keeps EXACTLY `{"session_id": ...}` | §6.9.6 |
+| **Termination (v0.2)** | the v0.2 connection WITHOUT the capability | the NEGATIVE half of the capability gate: a `"0.2"`-negotiated connection whose machine did NOT advertise `client_terminate` gets EXACTLY `{"session_id": ...}` — the centre's map carries `client_terminate: false` and the version alone cannot carry the reason, so a version-only gate fails this row (self-host lane — the explicit end is an agent-side verb) | §6.9.6 |
 
 ## §-by-§ NOT exercised (with the reason)
 
 | Row | Why not |
 |---|---|
-| **The v0.2 termination rows in POINTED mode** | The rows are WIRE-driven and need a machine that speaks v0.2 — the peer does (§6.10). They run against any centre that answers a `"0.2"` hello. The exceptions are the lanes that need something only a SECOND machine identity or an AGENT-SIDE verb can provide: the **foreign-session leak ban** (a second enrolled machine), the **reap race** (the reap window is centre-owned) and the **declined end-ack** (the explicit end is an agent-side verb) — all three are SELF-HOST ONLY. |
+| **The v0.2 termination rows in POINTED mode** | The rows are WIRE-driven and need a machine that speaks v0.2 — the peer does (§6.10). They run against any centre that answers a `"0.2"` hello. The exceptions are the lanes that need something only a SECOND machine identity or an AGENT-SIDE verb can provide: the **foreign-session leak ban** (a second enrolled machine), the **reap race** (the reap window is centre-owned), the **declined end-ack** (the explicit end is an agent-side verb) and the **v0.2-without-the-capability** lane (the explicit end is an agent-side verb too) — all four are SELF-HOST ONLY. |
 | **Session expiry in pointed mode** | The TTL/idle window is CENTER-owned and NOT advertised on the wire — the `hello` result carries only the three `heartbeat_*` parameters — so the kit **cannot compress a foreign center's window**. The CONTRACT itself is in the kit: a center-owned expiry DOES reach the machine as a `session.end` frame (the machine releases its own lock and the connection returns to `ready` — SPEC §6.8; that frame is the only thing that frees the machine's lock, which is why a SILENT reap strands it). But the kit can only OBSERVE it against a center whose window it can compress — the self-host lane (compressed 2 s window). Against a foreign center the window is as long as the operator configured, so the lane stays **SELF-HOST ONLY**. |
 | **The agent-facing end envelope** (`ended` / `why_not_ended` / `machine_notified` / the audit ledger's `error_code`) | That is a **CENTER-TOOL convention**, NOT wire: nothing about it crosses the protocol, so the kit — which drives the wire — cannot observe it. It is out of the kit's scope by construction; the center's own runbook and doc-pins own it. |
 | **`session.end` / `tools/call` / args-hash / denied in pointed mode** | The begin-hook contract covers BEGIN only; there is no agent-side END/call verb to drive through a foreign hook. The self-host lane drives them in-process; the begin-hook ECHO document (`agent_catalog`, `agent_audit`) closes the catalog + args-hash rows when a center provides it. |
@@ -94,6 +95,21 @@ read while being written.
   `{"n":1}` and `{"n":1.0}` to one hash. The kit computes BOTH forms and
   reports the divergence; the SPEC amendment recommendation is JCS
   (RFC 8785) or sorted keys + `ensure_ascii=false` + shortest-roundtrip.
+* **K1 — the in-kit reference centre's IDEMPOTENT arm answers
+  `machine_notified: true`, the reference DAEMON answers `false`.**
+  This is a DELIBERATE divergence, not a defect, and it is legal on both
+  sides (§6.10.1): on the idempotent path the field records whether
+  the machine was notified of the end BY THAT EXCHANGE, and a
+  machine-initiated terminate ack **MAY** carry `true` — the response
+  frame is itself the notification the machine acts on ("the response
+  frame is itself the notification the machine acts on" is why the kit's
+  centre says `true`). The daemon's own idempotent arm reports `false`
+  (or absent) — the legal alternative for an exchange that did not reach
+  the machine (a centre-authoritative release, or an agent-commanded end
+  of an already-ended session); an ABSENT field carries the same meaning
+  as `false`. The kit asserts the SHAPE and the KEY SET of that arm
+  (`ended: false` + a MANDATORY `reason`), never the flag's value — the
+  flag's value is centre-specific and legal either way.
 
 ## Independence attestation
 
@@ -113,4 +129,6 @@ implementation copy).
 dependencies are stdlib + `websockets` (the repo's declared set). The
 sanctioned-importer list of the interop lane is UNCHANGED:
 `tls_harness.py`, `p0_gate.py`, `harness.py` (and `go_client.py` imports
-none).
+none). The lane's NEW daemon-free module — `ack_shape.py`, the shared
+decline detector — imports nothing from `daemon.*` either, so it does
+not join the sanctioned list.

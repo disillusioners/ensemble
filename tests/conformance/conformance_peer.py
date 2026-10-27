@@ -159,6 +159,32 @@ DENIAL_ERROR_CODE = "TOOL_NOT_FOUND"
 REFERENCE_CLOSE_CODE = 1000
 
 
+def ack_declines(result: Any) -> bool:
+    """Did the peer DECLINE the end? (SPEC §6.9.7 — PRESENT AND FALSY)
+
+    The kit's own re-implementation of the decline rule — the kit
+    imports NOTHING from ``daemon.*``, so the rule is transcribed here
+    from the SPEC, not imported.  It is the SAME shape as the
+    reference daemon's predicate (``McpGatewayService._ack_declines``):
+    a decline is a DICT that CARRIES an ``ended`` member whose value is
+    FALSY.
+
+    * a dict whose ``ended`` is truthy is an ACCEPTANCE;
+    * a dict with NO ``ended`` member at all is an ACCEPTANCE too (the
+      shipped v0.1 client answers ``session.end`` with ``{"session_id"}``
+      and no ``ended`` member — the member is simply absent);
+    * a non-dict result (``None`` included) is an ACCEPTANCE.
+
+    ONE helper, TWO call sites (the machine side and the in-kit
+    reference centre) — the rule must not drift between them.
+    """
+    if not isinstance(result, dict):
+        return False
+    if "ended" not in result:
+        return False
+    return not result["ended"]
+
+
 # ── the pointing surface (B8d) — exactly these eight env keys ────────────
 
 #: The FIVE pointing keys — the complete surface for pointing the kit at
@@ -894,7 +920,7 @@ class ConformancePeer:
             # lock) on the ``ended: false`` arm.  The kit's machine can
             # therefore EXPRESS a decline — and the lock it keeps is what
             # makes the decline observable.
-            declined = isinstance(result.get("ended"), bool) and not result["ended"]
+            declined = ack_declines(result)
             if not declined and (not self._live_session_id or sid == self._live_session_id):
                 self._live_session_id = ""
             await self._send_frame({**base, "result": result})
@@ -1497,11 +1523,12 @@ class InKitCenter:
                 "ended": True,
                 "machine_notified": True,
             }
-            # §6.9.3 / §6.10.1 (Fork B) — ``reason`` is "required when
-            # known and omitted when sanitized or unknown — never
-            # empty-string".  A machine that sent NO ``reason_code`` has
-            # told the centre NOTHING about the cause, so the member is
-            # OMITTED — never ``reason: ""``.
+            # §6.9.3 / §6.10.1 (spec-changelog.md §11.0 Fork B —
+            # mcps_client @ feature/session-termination) — ``reason`` is
+            # "required when known and omitted when sanitized or unknown
+            # — never empty-string".  A machine that sent NO
+            # ``reason_code`` has told the centre NOTHING about the
+            # cause, so the member is OMITTED — never ``reason: ""``.
             if reason:
                 ack["reason"] = reason
         else:
@@ -1896,7 +1923,7 @@ class InKitCenter:
         # acknowledgement: the session SURVIVES it (the centre does not
         # invent a release the peer did not acknowledge), so the slot is
         # NOT freed here.
-        declined = isinstance(result, dict) and result.get("ended") is False
+        declined = ack_declines(result)
         if not declined:
             self._machine_session.pop(key, "")
         return result
@@ -2085,6 +2112,7 @@ __all__ = [
     "Target",
     "Transcript",
     "UpgradeRefused",
+    "ack_declines",
     "begin_on_target",
     "check_close_code",
     "check_error_envelope",
