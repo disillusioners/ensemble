@@ -381,8 +381,12 @@ class TaskScopedContextManager:
                     task.cancel()
                     try:
                         await task
-                    except BaseException:
-                        pass
+                    except BaseException as exc:
+                        logger.debug(
+                            "TaskScopedContextManager background task did not "
+                            "unwind cleanly: %s: %s",
+                            type(exc).__name__, exc,
+                        )
                 self._reap_orphans()
             raise
 
@@ -427,8 +431,12 @@ class TaskScopedContextManager:
                 task.cancel()
                 try:
                     await task
-                except BaseException:
-                    pass
+                except BaseException as exc:
+                    logger.debug(
+                        "TaskScopedContextManager close-watchdog: the inner "
+                        "task did not unwind cleanly: %s: %s",
+                        type(exc).__name__, exc,
+                    )
                 try:
                     await self._reap_orphans()
                 except Exception as exc:  # pragma: no cover — best effort
@@ -436,8 +444,12 @@ class TaskScopedContextManager:
                         "TaskScopedContextManager orphan reap failed: %s: %s",
                         type(exc).__name__, exc,
                     )
-            except BaseException:
-                pass
+            except BaseException as exc:
+                logger.debug(
+                    "TaskScopedContextManager close-watchdog exited with: "
+                    "%s: %s",
+                    type(exc).__name__, exc,
+                )
 
         self._watchdog = asyncio.create_task(
             _run_close_watchdog(), name=f"{self._name}-close-watchdog"
@@ -566,8 +578,11 @@ class TaskScopedContextManager:
                         streams_cm.__aexit__(None, None, None),
                         timeout=INNER_EXIT_GRACE_S,
                     )
-                except BaseException:
-                    pass
+                except BaseException as exc:
+                    logger.debug(
+                        "Inner context manager __aexit__ raised: %s: %s",
+                        type(exc).__name__, exc,
+                    )
                 raise
             except BaseException as e:
                 # B3: the inner transport failed to enter. Run its
@@ -578,8 +593,11 @@ class TaskScopedContextManager:
                 # didn't yield") — that must not mask the real error.
                 try:
                     await streams_cm.__aexit__(None, None, None)
-                except BaseException:
-                    pass
+                except BaseException as exc:
+                    logger.debug(
+                        "Inner context manager __aexit__ raised: %s: %s",
+                        type(exc).__name__, exc,
+                    )
                 self._error = e
                 self._ready.set()
                 return
