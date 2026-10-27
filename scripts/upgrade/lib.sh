@@ -157,8 +157,11 @@ ADAPTIVE_SOAK_CADENCE_S="${ADAPTIVE_SOAK_CADENCE_S:-15}"
 # ENV-OVERRIDABLE BY DESIGN (4-tier config ladder); requirements.md §4.6 = DEFAULTS.
 # GRACE_HORIZON_S — the daemon-side grace horizon (requirements §4.3 P3):
 # ONE number, OBSERVATION-RELATIVE (the daemon owns the clock; the
-# shell never keeps a second one). The shell needs the number so its
-# window-extension bound agrees with the daemon's ceiling.
+# shell never keeps a second one). DOCUMENTATION-ONLY MIRROR: NO shell
+# code consumes it — the soak's window-extension bound is built from
+# ADAPTIVE_SOAK_CAP_S + GRACE_EXTENSION_CAP_S_INT (see _soak_effective_cap
+# and gate_soak). The constant is kept so a reader sees the daemon-side
+# figure the gate's bounds are designed against.
 GRACE_HORIZON_S="${GRACE_HORIZON_S:-120.0}"
 # GRACE_EXTENSION_CAP_S — the BOUNDED window extension the soak may
 # spend when a grace-eligible HOLD was observed (requirements §4.3 P3).
@@ -5431,6 +5434,11 @@ gate_soak() {
         # greens, and a never-green daemon still ends at cap-reach with
         # consecutive_green < 3 => return 1 => auto-rollback.
         local observation_kind="RESET"
+        # One leak parse per tick — the same unchanged body fed BOTH the
+        # HELD classification below and the extension guard (the parsers
+        # are pure; re-parsing per site would be wasted work).
+        local readyz_leak=0
+        _readyz_leak_detected "$readyz_body" && readyz_leak=1
         if [ "$livez_rc" = "0" ] && [ "$livez_status" = "green" ] && \
            [ "$readyz_rc" = "0" ] && [ "$readyz_status" = "green" ]; then
             observation_kind="GREEN"
@@ -5438,7 +5446,7 @@ gate_soak() {
              [ "$readyz_status" != "green" ] && \
              _readyz_grace_eligible_transient "$readyz_body" && \
              _readyz_grace_active "$readyz_body" && \
-             ! _readyz_leak_detected "$readyz_body"; then
+             [ "$readyz_leak" = "0" ]; then
             observation_kind="HELD"
         fi
         case "$observation_kind" in
@@ -5467,7 +5475,7 @@ gate_soak() {
         # REFUNDED, and the ABSOLUTE bound (soak_entry + 300s) always
         # dominates: the deadline is re-anchored at each (re)grant but
         # can NEVER exceed the absolute bound.
-        if [ "$observation_kind" = "HELD" ] && ! _readyz_leak_detected "$readyz_body"; then
+        if [ "$observation_kind" = "HELD" ] && [ "$readyz_leak" = "0" ]; then
             if [ "$granted" -eq 0 ]; then
                 granted="$GRACE_EXTENSION_CAP_S_INT"
                 journal_history_append soak_grace_extended "grace-eligible HOLD observed — the soak window is extended by ${GRACE_EXTENSION_CAP_S_INT}s (bounded: absolute bound soak_entry+${ADAPTIVE_SOAK_CAP_S}+${GRACE_EXTENSION_CAP_S_INT}s; the never-green trigger is unchanged and unconditional)" \
