@@ -38,14 +38,14 @@ import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from daemon.checkpoint_adapter import CheckpointerAdapter, SqliteCheckpointerAdapter
-from daemon.constants import (
-    CHECKPOINT_POOL_MAX_SIZE_DEFAULT,
-    CHECKPOINT_POOL_TIMEOUT_S_DEFAULT,
-)
 from daemon.checkpoint_perf import (
     checkpoint_perf_logs_enabled,
     log_messages_api,
     time_saver_op,
+)
+from daemon.constants import (
+    CHECKPOINT_POOL_MAX_SIZE_DEFAULT,
+    CHECKPOINT_POOL_TIMEOUT_S_DEFAULT,
 )
 from daemon.ensemble_config import EnsembleConfig
 
