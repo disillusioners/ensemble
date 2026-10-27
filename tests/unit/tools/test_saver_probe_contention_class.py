@@ -58,22 +58,31 @@ class _FakeSaver:
         self._delay_s = delay_s
         self._raise_exc = raise_exc
         self.lock_held_during_read = False
+        # Records whether the scheduled probe cycle was CANCELLED (the
+        # ghost-waiter withdrawal — decisions §3d D1b). The probe's
+        # future must be cancelled when its budget expires, otherwise
+        # the queued acquisition survives as a ghost waiter.
+        self.cancelled = False
 
     async def aput_writes(self, *args, **kwargs):
         return None
 
     async def aget_tuple(self, config):
-        if self._hold_lock:
-            # Simulate the production write storm: the saver's lock is
-            # held by another writer, so the sentinel read queues.
-            async with self.lock:
-                self.lock_held_during_read = True
-                await asyncio.sleep(30)
-        else:
-            if self._delay_s:
-                await asyncio.sleep(self._delay_s)
-            if self._raise_exc:
-                raise RuntimeError("checkpoint path is broken")
+        try:
+            if self._hold_lock:
+                # Simulate the production write storm: the saver's lock
+                # is held by another writer, so the sentinel read queues.
+                async with self.lock:
+                    self.lock_held_during_read = True
+                    await asyncio.sleep(30)
+            else:
+                if self._delay_s:
+                    await asyncio.sleep(self._delay_s)
+                if self._raise_exc:
+                    raise RuntimeError("checkpoint path is broken")
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
         return None
 
 
@@ -96,6 +105,23 @@ class TestSaverProbeContentionClass:
         # The probe never ACQUIRES the lock itself (it only observed it).
         assert saver.lock_held_during_read is False
         lock.release()
+
+    @pytest.mark.asyncio
+    async def test_the_scheduled_future_is_cancelled_at_the_budget(self):
+        """The ghost-waiter withdrawal (decisions §3d D1b): when the
+        probe's budget expires the scheduled cycle is CANCELLED, so the
+        queued acquisition is abandoned instead of surviving as a ghost
+        waiter in the pool."""
+        lock = asyncio.Lock()
+        saver = _FakeSaver(lock, hold_lock=False, delay_s=30.0)
+        probe = make_checkpoint_saver_probe(_FakeCheckpointer(saver))
+        verdict, failure_class = await asyncio.to_thread(probe)
+        assert verdict is False
+        assert failure_class == FAILURE_CLASS_READ_TIMEOUT
+        assert saver.cancelled is True, (
+            "the probe's scheduled future was NOT cancelled at the budget "
+            "— the queued acquisition survives as a ghost waiter"
+        )
 
     @pytest.mark.asyncio
     async def test_a_free_lock_with_a_slow_read_is_read_timeout(self):
