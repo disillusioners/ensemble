@@ -60,28 +60,21 @@ from daemon.services.mcps_gateway.tombstones import (
     REASON_REAPED_BY_CENTER,
     REASON_SUPERSEDED,
 )
+from tests.helpers.mcps_gateway_fixtures import (
+    CAPS_V01 as CAPS_V01_FIXTURE,
+    CAPS_V02 as CAPS_V02_FIXTURE,
+)
 
 #: The canonical ids of the fixtures — LETTER-BEARING on purpose.
 AGENT_ID = "ari"
 MACHINE_ID = "machine-alpha"
 SESSION_ID = "sess-alpha"
 
-#: The capability map a v0.1 machine advertises — the historical seven
-#: keys; a v0.1 machine has never heard of ``client_terminate``.
-CAPS_V01: dict[str, bool] = {
-    "session": True,
-    "tools": True,
-    "notifications": False,
-    "heartbeat": True,
-    "screenshot_delta": False,
-    "multi_session": False,
-    "client_cert": False,
-}
-
-#: The capability map a v0.2 machine advertises. ``client_terminate`` is
-#: the v0.2 addition: the machine tells the centre it can terminate a
-#: session from its own side. Exactly the v0.1 map plus the one key.
-CAPS_V02: dict[str, bool] = {**CAPS_V01, CAP_CLIENT_TERMINATE: True}
+#: The capability maps a machine advertises — ONE shared fixture (the
+#: three gateway unit suites share it, so the wire token has one
+#: spelling): ``tests/helpers/mcps_gateway_fixtures.py``.
+CAPS_V01 = CAPS_V01_FIXTURE
+CAPS_V02 = CAPS_V02_FIXTURE
 
 
 class Clock:
@@ -624,7 +617,8 @@ class TestSessionTerminate:
     async def test_a_foreign_live_session_answers_exactly_like_a_truly_unknown_one(
         self,
     ):
-        """§6.10.2 — the FOREIGN-SESSION LEAK BAN (Fork C).
+        """§6.10.2 — the FOREIGN-SESSION LEAK BAN (spec-changelog.md
+        §11.0 Fork C — mcps_client @ feature/session-termination).
 
         "whatever the responder returns — the ``unknown_session`` outcome
         code or the typed ``SESSION_NOT_FOUND`` — the answer MUST be
@@ -683,7 +677,8 @@ class TestSessionTerminate:
         assert service.sessions.get(SESSION_ID) is not None
 
     async def test_an_absent_reason_code_omits_the_reason_member(self):
-        """§6.9.3 / §6.10.1 (Fork B) — ``reason`` is present-when-known.
+        """§6.9.3 / §6.10.1 (spec-changelog.md §11.0 Fork B — mcps_client
+        @ feature/session-termination) — ``reason`` is present-when-known.
 
         "``reason`` is required when known and omitted when sanitized or
         unknown (never empty-string)". A machine that sent NO
@@ -727,10 +722,14 @@ class TestSessionTerminate:
         sanitized (§6.9.1: the audit is the truth, the response is the
         sanitized view).
 
-        THE BAN IS RESPONSE-SCOPED (§6.10.2: "the ban is response-scoped;
-        the ledger is exempt — it is the audit truth"), so the ledger's
-        copy of an absent cause is the empty verbatim value — and the
-        ledger NEVER invents a cause either.
+        THE ABSENT-CAUSE RULE IS §6.9.3 / §6.10.1 — "required when
+        known; omitted when sanitized or unknown — never
+        empty-string" — and the BAN it puts on the wire is
+        RESPONSE-SCOPED: the ledger is exempt, it is the audit truth
+        (§6.10.2 records the ledger-only exemption for the ledger-ONLY
+        pair; this test is about the ABSENT cause, whose clause is
+        §6.9.3). So the ledger's copy of an absent cause is the empty
+        verbatim value — and the ledger NEVER invents a cause either.
         """
         audit = MemoryAuditSink()
         service = make_service(audit_sink=audit)

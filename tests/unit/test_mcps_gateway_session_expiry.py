@@ -49,9 +49,17 @@ from daemon.services.mcps_gateway.protocol import (
 from daemon.services.mcps_gateway.service import (
     AUDIT_ALLOWED_ERROR_CODES,
     AUDIT_ALLOWED_SESSION_ERROR_CODES,
+    AUDIT_DETAIL_EXPIRE_DECLINED,
+    AUDIT_DETAIL_EXPIRE_REFUSED,
+    AUDIT_DETAIL_SESSION_DECLINED,
+    AUDIT_DETAIL_SESSION_REFUSED,
     McpGatewayService,
 )
 from daemon.services.mcps_gateway.store import InMemoryMachineStore
+from tests.helpers.mcps_gateway_fixtures import (
+    CAPS_V01 as CAPS_V01_FIXTURE,
+    CAPS_V02 as CAPS_V02_FIXTURE,
+)
 from daemon.services.mcps_gateway.tombstones import (
     DEFAULT_TOMBSTONE_MAX_AGE_SECONDS,
     DEFAULT_TOMBSTONE_MAX_ENTRIES,
@@ -78,22 +86,11 @@ SESSION_ID = "sess-alpha"
 #: timeout.
 ACK_TIMEOUT_MS = 50
 
-#: The capability map a v0.1 machine advertises — the historical seven
-#: keys. A machine that never heard of ``client_terminate`` advertises
-#: exactly this map.
-CAPS_V01: dict[str, bool] = {
-    "session": True,
-    "tools": True,
-    "notifications": False,
-    "heartbeat": True,
-    "screenshot_delta": False,
-    "multi_session": False,
-    "client_cert": False,
-}
-
-#: The capability map a v0.2 machine that supports the client-initiated
-#: termination advertises: the v0.1 map plus ``client_terminate``.
-CAPS_V02: dict[str, bool] = {**CAPS_V01, "client_terminate": True}
+#: The capability maps a machine advertises — ONE shared fixture (the
+#: three gateway unit suites share it, so the wire token has one
+#: spelling): ``tests/helpers/mcps_gateway_fixtures.py``.
+CAPS_V01 = CAPS_V01_FIXTURE
+CAPS_V02 = CAPS_V02_FIXTURE
 
 
 class Clock:
@@ -564,6 +561,13 @@ class TestTheTombstone:
         assert len(rows) == 1
         assert rows[0].outcome == "error"
         assert rows[0].error_code == REASON_MACHINE_REFUSED
+        # The SWEEP arm's DECLINE has its OWN detail constant — it is not
+        # the error-frame refusal's. The two arms differ by what the
+        # machine DID (it declined vs it refused), and the ledger must be
+        # able to say which.  (The error code rides the detail in
+        # brackets, so the classification is the PREFIX.)
+        assert rows[0].detail.startswith(AUDIT_DETAIL_EXPIRE_DECLINED)
+        assert not rows[0].detail.startswith(AUDIT_DETAIL_EXPIRE_REFUSED)
 
     async def test_a_late_end_after_the_sweep_answers_expired(self):
         clock = Clock()
@@ -806,6 +810,14 @@ class TestTheEndContract:
         assert audit.records[0].tool == "session.end"
         assert audit.records[0].error_code == REASON_MACHINE_REFUSED
         assert audit.records[0].outcome == "error"
+        # The EXPLICIT arm's DECLINE has its OWN detail constant — not
+        # the error-frame refusal's, and not the sweep arm's (the two
+        # arms record the same outcome code but DIFFERENT details).
+        # (The error code rides the detail in brackets, so the
+        # classification is the PREFIX.)
+        assert audit.records[0].detail.startswith(AUDIT_DETAIL_SESSION_DECLINED)
+        assert not audit.records[0].detail.startswith(AUDIT_DETAIL_SESSION_REFUSED)
+        assert not audit.records[0].detail.startswith(AUDIT_DETAIL_EXPIRE_DECLINED)
 
     async def test_a_relayed_tool_timeout_is_a_refusal_and_the_session_survives(
         self,
@@ -1171,11 +1183,13 @@ class TestTheSessionAuditRows:
         a refusal: the ledger records the expiry CAUSE and a successful
         outcome.
 
-        §6.9.7 :1130-1137 — in the TERMINATION family
-        ``SESSION_NOT_FOUND`` is a SUCCESS SIGNAL, not an error: the
-        centre maps it to ``ended: true`` and reports
-        ``machine_notified: true`` (the machine answered with this very
-        ack). The tombstone says so too: the machine WAS told.
+        §6.9.7 — in the TERMINATION family ``SESSION_NOT_FOUND`` is a
+        SUCCESS SIGNAL, not an error ("a v0.2 center MUST map an
+        end-ack of ``SESSION_NOT_FOUND`` to **``ended: true``** …
+        MUST NOT treat it as a failure"): the centre maps it to
+        ``ended: true`` and reports ``machine_notified: true`` (the
+        machine answered with this very ack). The tombstone says so too:
+        the machine ACKNOWLEDGED the end's arrival.
         """
         audit = MemoryAuditSink()
         clock = Clock()

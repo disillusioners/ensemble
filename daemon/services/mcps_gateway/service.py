@@ -37,6 +37,38 @@ five-dependency collaborator (the sessions, the store, the connections,
 the tombstones and the private request/audit helpers) on a defect
 branch, which is a worse trade than a longer module.
 
+THE DELTA SINCE THE NOTE WAS WRITTEN: the v0.2 conformity round added
+**+241 lines** to this module (3009 → 3250). The extraction's price is
+what the note above says it is — five collaborators — and the piece
+that would move (the END CONTRACT) grew with the protocol surface, so
+the split is a LARGER refactor now than it was when the note was
+written, not a smaller one. The follow-up STAYS a follow-up; this
+branch does NOT extract.
+
+THE OWNER'S FORK RULINGS ("Fork A" / "Fork B" / "Fork C")
+-------------------------------------------------------
+
+Three owner-ratified decisions of the mcps_client spec-reconciliation
+pass are cited by name in this module and in the tests that pin it.
+They live in the SPEC repo's ``docs/spec-changelog.md`` §11.0 ("Second
+findings wave — ensemble v0.2 adoption", "Fork rulings (final)"),
+read-only at mcps_client @ ``feature/session-termination`` (7e748d2):
+
+* **Fork A (N8b)** — a DECLINED end-ack (``{ended: false, reason}``) is
+  a REFUSAL of the end, not an acknowledgement: ``machine_notified``
+  MUST NOT be true because of one, and the decline MUST NOT be
+  forwarded as an acknowledged end. A centre MAY still release
+  centre-authoritatively after a decline PROVIDED it reports
+  ``machine_notified: false`` and records the refusal honestly.
+* **Fork B (N6)** — ``reason`` on an ``ended: true`` response is
+  optional: present when a cause is known, OMITTED when sanitized or
+  unknown, and NEVER ``reason: ""``. The ledger/audit keeps the raw
+  value verbatim (the ban is response-scoped).
+* **Fork C (N3)** — ``unknown_session`` is PERMISSIVE on group (iii);
+  the load-bearing content is the FOREIGN-SESSION LEAK BAN: whatever a
+  responder returns for a session outside its ownership MUST be
+  indistinguishable from the answer for a truly unknown id.
+
 The machine MINTS the ``session_id`` (§6.4) and the center adopts it.
 
 VERSION SCOPING (v0.2)
@@ -223,6 +255,15 @@ AUDIT_DETAIL_SESSION_ENDED_ALREADY_GONE = (
     "the remote session was ended; the machine held no such session"
 )
 AUDIT_DETAIL_SESSION_REFUSED = "the machine refused to end the remote session"
+#: The EXPLICIT end's DECLINE arm (§6.9.7): the machine ANSWERED the
+#: end with a decline — it did NOT acknowledge it. It is its OWN
+#: classification, not the error-frame refusal's
+#: (:data:`AUDIT_DETAIL_SESSION_REFUSED`): the two arms differ in what
+#: the machine DID (it declined the end vs it refused with an error
+#: frame), and the ledger must be able to say which.
+AUDIT_DETAIL_SESSION_DECLINED = (
+    "the machine declined to end the remote session"
+)
 AUDIT_DETAIL_SESSION_UNREACHABLE = (
     "the machine was unreachable; the center released the remote session"
 )
@@ -243,6 +284,15 @@ AUDIT_DETAIL_EXPIRE_TIMEOUT = (
 )
 AUDIT_DETAIL_EXPIRE_REFUSED = (
     "the remote session expired and the machine refused the end"
+)
+#: The SWEEP's DECLINE arm (§6.9.7) — its own classification, not the
+#: error-frame refusal's (:data:`AUDIT_DETAIL_EXPIRE_REFUSED`): the
+#: sweep released the session centre-side BEFORE it forwarded (the
+#: two-pass invariant), so the release is a FACT while the machine's
+#: acknowledgement is not. Two arms, two constants: an operator reading
+#: the ledger can tell a DECLINE from an ERROR-FRAME refusal.
+AUDIT_DETAIL_EXPIRE_DECLINED = (
+    "the remote session expired and the machine declined the end"
 )
 
 # ── the v0.2 audit detail classifications ─────────────────────────────────
@@ -378,17 +428,29 @@ FORWARD_REFUSED = "refused"
 
 #: The machine DECLINED the end (§6.9.7): it answered with a result
 #: body whose ``ended`` is falsy. A declined ack is a REFUSAL of the
-#: end, NOT an acknowledgement (§6.9.7 / Fork A) — so the machine did
-#: NOT acknowledge the end, and the tombstone must NOT claim it did.
+#: end, NOT an acknowledgement (§6.9.7; spec-changelog.md §11.0 Fork A,
+#: mcps_client @ feature/session-termination) — so the machine did not
+#: ACKNOWLEDGE the end, and the tombstone must NOT claim it did.
 #:
-#: The sweep has already released the session centre-side (the
-#: two-pass invariant), so the outcome is a CENTRE-AUTHORITATIVE
-#: release with an HONEST refusal record: ``machine_notified: false``
-#: and an ``error`` audit row. This is the one arm where the sweep and
-#: the explicit end AGREE that the session survives the DECLINE —
-#: they do not: the sweep released centre-side BEFORE it forwarded, so
-#: its release is a fact, not an invention.
+#: THE SWEEP AND THE EXPLICIT END DISAGREE ABOUT THE SESSION'S
+#: SURVIVAL AFTER A DECLINE: the sweep released the session centre-side
+#: BEFORE it forwarded (the two-pass invariant), so its release is a
+#: FACT — the outcome is a CENTRE-AUTHORITATIVE release with an HONEST
+#: refusal record (``machine_notified: false`` and an ``error`` audit
+#: row, :data:`AUDIT_DETAIL_EXPIRE_DECLINED`); the explicit arm keeps
+#: the session LIVE (the centre does not invent a release the peer did
+#: not acknowledge).
 FORWARD_DECLINED = "declined"
+
+#: The PEER's DECLINE outcome code for a refusal (§6.10.2 group (iii)).
+#:
+#: It is NOT :data:`FORWARD_REFUSED` — that one is the CENTRE's own
+#: label for the outcome of a forward (the sweep's classification), and
+#: this one is a token the PEER puts in a declined ack's ``reason``
+#: slot. Two vocabularies, two names: the sweep's outcome label never
+#: rides the wire, and the peer's token is only ever echoed after the
+#: sanitiser has checked it against :data:`DECLINE_OUTCOME_CODES`.
+PEER_DECLINE_REFUSED = "refused"
 
 #: The DECLINE outcome codes a peer may use on a declined end-ack
 #: (SPEC §6.10.2 group (iii)). ONLY these are echoed into an
@@ -401,7 +463,7 @@ DECLINE_OUTCOME_CODES: frozenset[str] = frozenset(
         REASON_REAPED_BY_CENTER,
         REASON_SUPERSEDED,
         REASON_UNKNOWN_SESSION,
-        "refused",
+        PEER_DECLINE_REFUSED,
     }
 )
 
@@ -669,9 +731,10 @@ class McpGatewayService:
             # The session died WITH its connection: it leaves an
             # ``already_ended`` tombstone, so a LATE end answers
             # ``already_ended`` instead of a bare ``unknown_session``.
-            # The machine was NOT notified (its socket is gone) — UNLESS
-            # the machine itself asked for the end (the orderly
-            # termination), in which case it DID acknowledge.
+            # The machine did not ACKNOWLEDGE the end (its socket is
+            # gone — the frame never reached it) — UNLESS the machine
+            # itself asked for the end (the orderly termination), in which
+            # case it DID acknowledge.
             self._record_tombstone(
                 session,
                 reason=REASON_ALREADY_ENDED,
@@ -919,15 +982,20 @@ class McpGatewayService:
           response (the two reason sets are disjoint by construction), so
           the member is OMITTED. An ABSENT cause is OMITTED too — the
           member is "required when known; omitted when sanitized or
-          unknown — never empty-string" (§6.9.3 / §6.10.1, Fork B), so
+          unknown — never empty-string" (§6.9.3 / §6.10.1; spec-changelog.md
+          §11.0 Fork B, mcps_client @ feature/session-termination), so
           ``reason: ""`` can never be emitted;
         * on the ``ended: false`` arm the reason is the centre's own
           idempotent token and is ALWAYS present.
 
-        ``machine_notified`` says whether the MACHINE was told. It is
+        ``machine_notified`` says whether the machine ACKNOWLEDGED the
+        end — the field's ONE meaning across every arm (a declined ack
+        is a refusal of the end, NOT an acknowledgement, so it can never
+        make the field true; spec-changelog.md §11.0 Fork A). It is
         ``True`` on the accepted arm (the machine asked for the end — it
         acknowledged) and ``False`` on every ``ended: false`` arm (the
-        centre delivered NOTHING to the machine there).
+        centre delivered NOTHING to the machine there, so there was
+        nothing to acknowledge).
         """
         ack: dict[str, Any] = {"session_id": session_id, "ended": ended}
         if reason is not None:
@@ -968,7 +1036,8 @@ class McpGatewayService:
           ``why_not_ended`` is ABSENT (the machine's kit pins its
           absence on the successful path). The ``reason`` member is
           OMITTED — never ``reason: ""`` — when the cause is ABSENT
-          or is a LEDGER-ONLY token (§6.9.3 / §6.10.1, Fork B);
+          or is a LEDGER-ONLY token (§6.9.3 / §6.10.1; spec-changelog.md
+          §11.0 Fork B, mcps_client @ feature/session-termination);
         * NO live session (a repeat, or a race with the sweep) → the
           IDEMPOTENT goal state, NEVER an error:
           ``{"session_id", "ended": false, "reason", "machine_notified": false}``.
@@ -982,7 +1051,8 @@ class McpGatewayService:
           client's decision EXPLICIT instead of leaving it to a
           fallback.
 
-        THE FOREIGN-SESSION LEAK BAN (§6.10.2, Fork C)
+        THE FOREIGN-SESSION LEAK BAN (§6.10.2; spec-changelog.md §11.0
+        Fork C, mcps_client @ feature/session-termination)
 
         A live session of ANOTHER connection is answered EXACTLY like a
         session that never existed: the same ``already_ended`` reason
@@ -1100,23 +1170,25 @@ class McpGatewayService:
                     # machine's local lock was released by the sweep's
                     # forward, not by this request.
                     wire_reason = REASON_REAPED_BY_CENTER
-            # A LIVE session of ANOTHER connection is NOT distinguished
-            # from a truly unknown id (§6.10.2 — the foreign-session
-            # leak ban; Fork C): "whatever the responder returns … the
-            # answer MUST be indistinguishable from the answer for a
-            # truly unknown id". A distinguishable answer here would be
-            # an EXISTENCE ORACLE for another workspace's live session,
-            # so the foreign-live case keeps the SAME neutral
-            # ``already_ended`` the never-existed case answers. The
-            # centre still never ends another connection's session on a
-            # machine's word — the difference is only that the answer
-            # no longer says WHICH case it was.
+            # THE FOREIGN-LIVE CASE SHARES THE NEVER-EXISTED ARM
+            # (§6.10.2 — the foreign-session leak ban; spec-changelog.md
+            # §11.0 Fork C, mcps_client @ feature/session-termination):
+            # "whatever the responder returns … the answer MUST be
+            # indistinguishable from the answer for a truly unknown id".
+            # A distinguishable answer here would be an EXISTENCE ORACLE
+            # for another workspace's live session, so a LIVE session of
+            # ANOTHER connection gets the SAME neutral ``already_ended``
+            # the never-existed case answers — the two cases SHARE the
+            # arm. The centre still never ends another connection's
+            # session on a machine's word — the difference is only that
+            # the answer no longer says WHICH case it was.
             ack = self._terminate_ack(
                 session_id,
                 ended=False,
                 reason=wire_reason,
-                # The machine was NOT told: on every ``ended: false``
-                # arm the centre delivered NOTHING to the machine.
+                # The machine did not ACKNOWLEDGE anything here: on every
+                # ``ended: false`` arm the centre delivered NOTHING to
+                # the machine.
                 machine_notified=False,
             )
             await self._audit_terminate(
@@ -1211,7 +1283,8 @@ class McpGatewayService:
                 "reason_code": verbatim,
                 "ended": ended,
                 # The same value the ack carries: on an ``ended: false``
-                # arm the machine was NOT told.
+                # arm the machine did not ACKNOWLEDGE the end (the centre
+                # delivered NOTHING to the machine there).
                 "machine_notified": machine_notified,
                 "connection_id": connection.connection_id,
             },
@@ -1790,7 +1863,8 @@ class McpGatewayService:
                 # The session died with the machine: it leaves an
                 # ``already_ended`` tombstone, so a LATE end answers
                 # ``already_ended`` instead of a bare ``unknown_session``.
-                # The machine was NOT notified (it is gone).
+                # The machine did not ACKNOWLEDGE the end (it is gone —
+                # the frame never reached it).
                 self._record_tombstone(
                     session, reason=REASON_ALREADY_ENDED, machine_notified=False
                 )
@@ -1903,9 +1977,13 @@ class McpGatewayService:
         it is bounded in BOTH count and age, so it cannot grow into a
         memory leak (see ``daemon/services/mcps_gateway/tombstones.py``).
 
-        ``machine_notified`` records whether the MACHINE was told about
-        the end, so the late end's envelope can answer it truthfully
-        instead of hard-coding a value.
+        ``machine_notified`` records whether the machine ACKNOWLEDGED the
+        end, so the late end's envelope can answer it truthfully instead
+        of hard-coding a value. The field's ONE meaning is the
+        ACKNOWLEDGEMENT (a declined ack is a refusal of the end, not an
+        acknowledgement — spec-changelog.md §11.0 Fork A); the
+        error-frame refusal arm's own rule lives in
+        :data:`FORWARD_REFUSED`.
         """
         self._tombstones.record(
             SessionTombstone(
@@ -1960,9 +2038,9 @@ class McpGatewayService:
         ``reason`` member: it names WHY the centre ended the session,
         and the machine answers with ``{"session_id", "ended": true,
         "reason"}`` — the reason echoing ours. The two centre-cause
-        values of §6.10.2 group (ii) are ``reaped_by_center`` (the
-        sweep reaped it) and ``superseded`` (the session was replaced by
-        an explicit end).
+        values THIS CENTRE mints (§6.10.2 group (ii) allows three) are
+        ``reaped_by_center`` (the sweep reaped it) and ``superseded``
+        (the session was replaced by an explicit end).
 
         The params of the centre's own request are NOT the ``reason`` of
         a RESPONSE: the ledger-only tokens (``machine_unreachable`` /
@@ -2072,8 +2150,9 @@ class McpGatewayService:
         # acknowledgement: the machine did NOT release its local lock.
         # The sweep has already released the session centre-side (the
         # two-pass invariant), so the outcome is a CENTRE-AUTHORITATIVE
-        # release with an HONEST refusal record — the machine was NOT
-        # notified of the end, and the ledger says the machine refused.
+        # release with an HONEST refusal record — the machine did not
+        # ACKNOWLEDGE the end (it was sent the frame and answered with a
+        # decline), and the ledger says the machine refused.
         if self._ack_declines(result):
             logger.warning(
                 "the machine %r declined the session end of %s",
@@ -2093,16 +2172,17 @@ class McpGatewayService:
         The tombstone was written BEFORE the forward (the two-pass
         invariant), so the forward's outcome is recorded on it AFTER the
         fact — that is what lets a LATE end answer truthfully whether
-        the machine was notified.
+        the machine acknowledged the end.
         """
         outcome = await self._forward_session_end_outcome(session)
         # §6.9.7 — a DECLINED ack is a REFUSAL, not an acknowledgement, so
-        # it is NOT in the "the machine was told" tuple: the machine did
-        # NOT acknowledge the end, and the tombstone must not claim it
+        # it is NOT in the "the machine ACKNOWLEDGED the end" tuple: the
+        # machine did not acknowledge the end (it was sent the frame and
+        # answered with a decline), and the tombstone must not claim it
         # did. The ERROR-FRAME refusal (FORWARD_REFUSED) keeps its place
-        # in the tuple — there the machine WAS told (it answered with an
-        # error envelope), and the tombstone's documented "was told"
-        # semantics govern that path.
+        # in the tuple — there the machine ANSWERED the end with an error
+        # envelope, and the tombstone's documented semantics govern that
+        # path (see :data:`FORWARD_REFUSED` for that arm's rule).
         self._tombstones.mark_notified(
             session.session_id,
             outcome in (FORWARD_ACK, FORWARD_ALREADY_GONE, FORWARD_REFUSED),
@@ -2127,10 +2207,11 @@ class McpGatewayService:
             # The machine DECLINED the end (§6.9.7): the sweep released
             # centre-side (the two-pass invariant), so the release is a
             # FACT — but the machine did NOT acknowledge it, and the
-            # ledger records the refusal HONESTLY.
+            # ledger records the refusal HONESTLY. Its OWN detail
+            # constant: the arm is a DECLINE, not an error-frame refusal.
             audit_outcome = OUTCOME_ERROR
             error_code = REASON_MACHINE_REFUSED
-            detail = AUDIT_DETAIL_EXPIRE_REFUSED
+            detail = AUDIT_DETAIL_EXPIRE_DECLINED
         else:
             audit_outcome = OUTCOME_ERROR
             error_code = REASON_MACHINE_REFUSED
@@ -2726,7 +2807,9 @@ class McpGatewayService:
         """The machine DECLINED the end — the session SURVIVES. (§6.9.7)
 
         A declined end-ack (``{session_id, ended: false, reason}``) is a
-        REFUSAL of the end, not an acknowledgement (§6.9.7 / Fork A).
+        REFUSAL of the end, not an acknowledgement (§6.9.7;
+        spec-changelog.md §11.0 Fork A, mcps_client @
+        feature/session-termination).
         The explicit end's own convention applies: the centre does not
         invent a release the peer did not acknowledge, so the session
         STAYS ALIVE and the answer says so.
@@ -2734,10 +2817,11 @@ class McpGatewayService:
         THE FIELD IS ``machine_notified: false`` — the machine did NOT
         acknowledge the end (§6.9.7: "``machine_notified`` MUST NOT be
         true because of a declined ack"). The asymmetry with the
-        ERROR-FRAME refusal arm is DELIBERATE: there the machine
-        answered with an error envelope (it was TOLD and it refused),
-        while here it answered with a decline — and the field's
-        redefined meaning is "the machine ACKNOWLEDGED the end".
+        ERROR-FRAME refusal arm is DELIBERATE (that arm's own rule
+        lives in :data:`FORWARD_REFUSED`): there the machine answered
+        with an error envelope, while here it answered with a decline —
+        and the field's redefined meaning is "the machine ACKNOWLEDGED
+        the end".
 
         The machine's VERBATIM declined result is NOT forwarded: it is
         not an acknowledgement, and the acknowledged path is the only
@@ -2755,7 +2839,9 @@ class McpGatewayService:
             tool=AUDIT_TOOL_SESSION_END,
             outcome=OUTCOME_ERROR,
             error_code=REASON_MACHINE_REFUSED,
-            detail=AUDIT_DETAIL_SESSION_REFUSED,
+            # Its OWN detail constant: this arm is a DECLINE, not the
+            # error-frame refusal the sweep's ledger row records.
+            detail=AUDIT_DETAIL_SESSION_DECLINED,
         )
         return {
             "session_id": session.session_id,
@@ -2939,14 +3025,20 @@ class McpGatewayService:
         machine-acknowledged on the basis of a declined ack, and MUST
         NOT forward the decline to its agents as an acknowledged end").
 
-        THE DETECTION IS DELIBERATELY NARROW: only a DICT that carries
-        an ``ended`` member whose value is FALSY is a decline. A dict
-        whose ``ended`` is truthy is an acceptance; a dict with NO
-        ``ended`` member at all is an acceptance too (the shipped
-        client's acknowledgement is not obliged to carry the member, and
-        over-tightening the test would turn a conforming ack into a
-        refusal); a non-dict result is an acceptance for the same
-        reason. Anything else would be a guess about the peer's shape.
+        THE DETECTION IS DELIBERATELY NARROW — PRESENT AND FALSY: only a
+        DICT that carries an ``ended`` member whose value is FALSY is a
+        decline. A dict whose ``ended`` is truthy is an acceptance; a
+        dict with NO ``ended`` member at all is an acceptance too (the
+        shipped client's acknowledgement is not obliged to carry the
+        member, and over-tightening the test would turn a conforming ack
+        into a refusal); a non-dict result (``None`` included) is an
+        acceptance for the same reason. Anything else would be a guess
+        about the peer's shape.
+
+        THIS IS THE CANONICAL SHAPE: the conformance kit re-implements
+        the SAME rule independently (the kit imports nothing from
+        ``daemon.*``) and the integration lane's shared helper uses it,
+        so "a decline" means the same thing in all three places.
         """
         if not isinstance(result, dict):
             return False

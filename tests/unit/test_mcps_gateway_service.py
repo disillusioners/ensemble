@@ -49,20 +49,14 @@ from daemon.services.mcps_gateway.service import (
     McpGatewayService,
     bounded_close_reason,
 )
+from tests.helpers.mcps_gateway_fixtures import CAPS_V02 as CAPS_V02_FIXTURE
 
 
 #: The capability map a v0.2 machine advertises — the historical map plus
 #: ``client_terminate`` (§5.3/§6.10), the ONLY difference from v0.1.
-CAPS_V02: dict[str, bool] = {
-    "session": True,
-    "tools": True,
-    "notifications": False,
-    "heartbeat": True,
-    "screenshot_delta": False,
-    "multi_session": False,
-    "client_cert": False,
-    CAP_CLIENT_TERMINATE: True,
-}
+#: The fixture lives in ONE place (the three gateway unit suites share
+#: it): ``tests/helpers/mcps_gateway_fixtures.py``.
+CAPS_V02 = CAPS_V02_FIXTURE
 
 
 class FakeMachine:
