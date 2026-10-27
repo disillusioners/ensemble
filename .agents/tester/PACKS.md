@@ -82,7 +82,7 @@
 | Pack | Invocation | Scope | Last Run | Status |
 |---|---|---|---|---|
 | d1_mcps_gateway_interop | `timeout 300 env <fence> uv run python -m pytest tests/integration/mcps_gateway --override-ini='addopts=' -m integration -q` | Interop family incl. P0 gate + P1/P2/P3 real-pair | 2026-10-22 @ ac1d00f06 | ✅ PASS 38/38 (70 s) |
-| d1_conformance_kit | `CONFORMANCE_RUN_TIMEOUT=280 timeout 300 bash scripts/conformance/run.sh` | Conformance kit self-host | 2026-10-22 | ✅ PASS 41/41 (12 s) |
+| d1_conformance_kit | `CONFORMANCE_RUN_TIMEOUT=280 timeout 300 bash scripts/conformance/run.sh` | Conformance kit self-host | 2026-10-27 | ✅ PASS 55/55 (19 s) — 52 → 55 on the MCPS v0.2 conformity round (3 new §6.9.7/§6.10.2 rows: the absent cause, the foreign-session leak ban, the declined end-ack) |
 | d1_unit_u1 / b1–b5 | `timeout 300 env <fence> uv run python -m pytest <paths> -n 5 -q` (6 partitions; B1 runs the session-aborter file as a separate `timeout 120` solo leg — pytest-9 `--ignore` does NOT exclude explicit args) | tests/unit 18,202 nodes, census-exact | 2026-10-22 | ✅ PASS (ledger reds only; branch files all green) |
 | d1_int_default / attest_a1–a5 | as Phase C shapes (ignore-glob `*test_attestation*` with leading `*`; shards `-n 4 --override-ini='timeout=120'`) | 878 + 229 nodes | 2026-10-22 | ✅ PASS (227P + 2 by-design skips) |
 | d1_int_marked_i2a/i2b | `timeout 300 env <fence> uv run python -m pytest <half-files> --override-ini='addopts=' -m integration -n 4 -q` | NEW leg: 407 integration-marked nodes (never gated before) | 2026-10-22 | ✅ PASS (all reds base-proven) |
