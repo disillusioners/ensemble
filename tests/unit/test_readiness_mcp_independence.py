@@ -42,7 +42,7 @@ def test_the_mcp_map_is_advisory_only():
     This is the STRONGER form of the B2 narrowing: the source census
     above cannot prove the verdict is MCP-independent, this can.
     """
-    from daemon.services.readiness import ReadinessComposite, compute_readiness_composite
+    from daemon.services.readiness import compute_readiness_composite
 
     composite = compute_readiness_composite(
         database_ok=True,

@@ -20,7 +20,6 @@ pin, not silently degrade the class to "pool busy".
 from __future__ import annotations
 
 import asyncio
-import inspect
 
 import pytest
 

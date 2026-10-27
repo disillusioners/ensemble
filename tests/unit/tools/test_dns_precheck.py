@@ -36,12 +36,6 @@ from daemon.mcp.config import McpStdioConfig
 from daemon.mcp.warmup_pool import McpWarmupPool, build_pooled_stdio_config
 
 
-@pytest.fixture(autouse=True)
-def _clean_registry():
-    init_guard.reset_for_tests()
-    yield
-    init_guard.reset_for_tests()
-
 
 def _gaierror(code: int, message: str) -> socket.gaierror:
     return socket.gaierror(code, message)

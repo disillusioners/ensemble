@@ -16,9 +16,7 @@ never masks a real fault:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
-import pytest
+from datetime import datetime, timezone
 
 from daemon.services.readiness import (
     FAILURE_CLASS_PROBE_TIMEOUT,

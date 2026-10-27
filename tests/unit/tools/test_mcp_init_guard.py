@@ -40,12 +40,6 @@ from daemon.services import promote_txn_hold
 from daemon.sources.circuit_breaker import CircuitBreaker
 
 
-@pytest.fixture(autouse=True)
-def _clean_state():
-    init_guard.reset_for_tests()
-    yield
-    init_guard.reset_for_tests()
-
 
 def _write_state(install_dir: Path, in_flight: dict | None) -> Path:
     """Write a scratch ``releases/state.json``."""

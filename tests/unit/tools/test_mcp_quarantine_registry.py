@@ -31,13 +31,6 @@ from daemon.services import mcp_service
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-@pytest.fixture(autouse=True)
-def _clean_registry():
-    """Every case starts from a clean per-boot registry."""
-    init_guard.reset_for_tests()
-    yield
-    init_guard.reset_for_tests()
-
 
 # ── the seam itself ────────────────────────────────────────────────────
 

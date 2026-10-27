@@ -224,7 +224,6 @@ async def stream_mcp_warmup(manager, report: Report) -> None:
     """
     from daemon.mcp import init_guard
     from daemon.mcp.builtin_servers import get_registry
-    from daemon.mcp.config import McpStdioConfig
     from daemon.mcp.warmup_pool import build_pooled_stdio_config, get_mcp_warmup_pool
 
     out: dict = {"target": DEAD_HOST_URL}
