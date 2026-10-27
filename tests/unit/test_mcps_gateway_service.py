@@ -44,6 +44,8 @@ from daemon.services.mcps_gateway.protocol import (
 )
 from daemon.services.mcps_gateway.service import (
     CLOSE_REASON_MAX_CHARS,
+    INCUMBENT_STATE_UNKNOWN,
+    ClientConnection,
     McpGatewayService,
     bounded_close_reason,
 )
@@ -120,12 +122,19 @@ class FakeMachine:
         otherwise (a machine that asks for a version it does not stamp
         is a protocol inconsistency the tests may want to pin).
         """
-        self.version = version
+        # The fake tracks the version it actually STAMPS on the frame
+        # (``envelope_version or version``) — that is the version the
+        # centre sees on the wire, and therefore the version every
+        # later frame of this machine must carry.  Tracking only the
+        # REQUESTED version would make the fake answer a mismatched
+        # probe with the wrong ``v``.
+        stamped = envelope_version if envelope_version is not None else version
+        self.version = stamped
         await self.service.handle_frame(
             self.connection,
             json.dumps(
                 {
-                    "v": envelope_version if envelope_version is not None else version,
+                    "v": stamped,
                     "type": "request",
                     "id": request_id,
                     "method": "hello",
@@ -1427,6 +1436,11 @@ class TestDuplicateMachineIdIsRefused:
         second.connection = await service.open_connection(second)
         await second.hello(machine_id="mach_1")
 
+        # R2: the refusal is UNVERSIONED — this newcomer is a v0.1
+        # machine (the default hello), and it is refused exactly like a
+        # v0.2 one.
+        assert second.version == PROTOCOL_VERSION
+
         errors = second.frames_of_type("error")
         assert len(errors) == 1
         error = errors[0]["error"]
@@ -1490,6 +1504,57 @@ class TestDuplicateMachineIdIsRefused:
         assert row.machine_id == "mach_1"
         assert row.session_id == "sess_abc"
         assert row.error_code == CODE_MACHINE_ID_CONFLICT
+
+    async def test_the_refusal_is_sent_even_when_the_incumbent_state_is_unknown(
+        self, monkeypatch
+    ):
+        """§5.6 — an INDETERMINATE liveness must never abort the refusal.
+
+        The centre cannot name what it could not determine, so the
+        ``incumbent_connection`` member is OMITTED — but the refusal
+        itself IS sent, and the incumbent keeps the id (an unknown
+        liveness is treated as ALIVE: the newcomer is refused).
+        """
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        monkeypatch.setattr(
+            service,
+            "_incumbent_state",
+            lambda incumbent: INCUMBENT_STATE_UNKNOWN,
+        )
+
+        second = FakeMachine(service)
+        second.connection = await service.open_connection(second)
+        await second.hello(machine_id="mach_1")
+
+        errors = second.frames_of_type("error")
+        assert len(errors) == 1
+        assert errors[0]["error"]["code"] == CODE_MACHINE_ID_CONFLICT
+        data = errors[0]["error"]["data"]
+        assert data["machine_id"] == "mach_1"
+        # The state could not be determined: the member is OMITTED.
+        assert "incumbent_connection" not in data
+        # The incumbent survives — the newcomer was refused, not merged.
+        assert machine.closed is False
+        assert second.closed is True
+
+    def test_the_incumbent_classifier_never_raises(self):
+        """An indeterminate liveness is a STATE, not an exception.
+
+        A raised error here would abort the refusal and leave the
+        newcomer holding the id of a possibly-live incumbent.
+        """
+
+        class _ExplodingClock:
+            def __call__(self) -> float:
+                raise RuntimeError("the clock is unavailable")
+
+        service = make_service()
+        machine = FakeMachine(service)
+        incumbent = ClientConnection(connection_id="conn-x", transport=machine)
+        service._clock = _ExplodingClock()
+
+        assert service._incumbent_state(incumbent) == INCUMBENT_STATE_UNKNOWN
 
     async def test_a_dead_incumbent_frees_the_machine_id(self):
         """A heartbeat-killed incumbent must not lock the id forever."""

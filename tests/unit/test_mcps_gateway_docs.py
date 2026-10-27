@@ -610,6 +610,29 @@ def test_doc_states_the_v01_connection_is_version_scoped_with_one_exception() ->
     )
 
 
+def test_doc_does_not_claim_an_unqualified_v01_byte_identity() -> None:
+    """F-1: the NEGATIVE companion of the version-scoping pin.
+
+    The repo convention keeps positive and negative needles in SEPARATE
+    test functions — and the positive pin above cannot police an
+    ABSENCE.  The only legitimate ``byte-identically`` in the runbook
+    is the §10 sentence about the conformance kit's catalog re-encoding
+    (it has nothing to do with the protocol version); a SECOND hit
+    would be an unqualified v0.1 byte-identity claim — the thing W-2
+    removed.
+    """
+    text = _doc_text()
+    hits = [line for line in text.splitlines() if "byte-identical" in line]
+    assert len(hits) == 1, (
+        "the doc must carry exactly ONE 'byte-identical' — the §10 catalog "
+        f"sentence; found {len(hits)}"
+    )
+    assert "catalog" in hits[0], (
+        "the one 'byte-identical' must be the §10 catalog sentence: "
+        f"{hits[0][:120]!r}"
+    )
+
+
 def test_doc_states_the_durable_audit_copy_is_the_bounded_detail() -> None:
     """W-3: ``AuditRecord.extra`` is NOT persisted — the durable verbatim
     copy of a raw reason_code is the bounded ``detail``."""

@@ -28,6 +28,10 @@ THE ROWS
 5. **the reap race** — the sweep reaped the session and the machine asks
    afterwards: the answer is the IDEMPOTENT one (``ended: false``) with
    a MANDATORY ``reason`` — never an error (§6.10).
+6. **the v0.2 ``session.end`` reason** — on a ``"0.2"`` connection the
+   centre's ``session.end`` names the centre cause (``reaped_by_center``
+   for the sweep's reap, ``superseded`` for an explicit end) — the
+   v0.1 lane keeps exactly ``{"session_id": ...}`` (§6.9.2).
 
 THE INDEPENDENCE CONTRACT
 --------------------------
@@ -50,6 +54,7 @@ from .conformance_peer import (
     PROTOCOL_VERSION,
     PROTOCOL_VERSION_V02,
     open_session,
+    wait_until,
 )
 
 pytestmark = [pytest.mark.conformance]
@@ -497,5 +502,115 @@ async def test_the_v01_connection_is_unchanged(target) -> None:
                 "§5.3",
                 f"the v0.1 capability map carries client_terminate: {caps!r}",
             )
+    finally:
+        await peer.close()
+
+
+@pytest.mark.asyncio
+async def test_the_v02_session_end_names_the_reap_cause(target, serving, begin) -> None:
+    """§6.9.2 group (ii) — on a v0.2 connection the centre's
+    ``session.end`` names WHY the session ended.
+
+    The v0.1 lane keeps the params EXACTLY ``{"session_id": ...}``
+    (``test_session_expiry_notifies_the_machine``); the v0.2 lane adds
+    the ``reason`` member — ``reaped_by_center`` for the sweep's reap.
+
+    The reap window is centre-owned and not advertised on the wire, so
+    the lane is SELF-HOST ONLY (the same gap the v0.1 expiry lane
+    names).
+    """
+    if target.mode != "self-host":
+        pytest.skip(
+            "SESSION-EXPIRY-GAP: the TTL/idle window is center-owned and "
+            "not advertised on the wire — the kit cannot compress a "
+            "foreign center's window, so the expiry lane is SELF-HOST ONLY "
+            "(COVERAGE.md names this gap)"
+        )
+    peer = _v02_peer(target)
+    try:
+        await peer.connect(send_hello=False)
+        await peer.hello(
+            protocol_version=PROTOCOL_VERSION_V02,
+            capabilities=dict(CLIENT_CAPABILITIES_V02),
+        )
+        peer.start_heartbeats(peer.adopted.get("heartbeat_interval_ms", 1000))
+        async with serving(peer, budget_s=25):
+            await open_session(peer, target)
+            expired_id = peer.session_ids[0]
+            await wait_until(lambda: expired_id in peer.ended_sessions, timeout=10)
+            if expired_id not in peer.ended_sessions:
+                raise _finding(
+                    "termination",
+                    "v02-expiry-notifies-machine",
+                    "§6.8",
+                    "no session.end reached the machine when the center's idle "
+                    "window passed",
+                )
+            frame = next(
+                (
+                    f
+                    for f in peer.session_end_frames
+                    if str((f.get("params") or {}).get("session_id") or "") == expired_id
+                ),
+                None,
+            )
+            params = dict((frame or {}).get("params") or {})
+            if params.get("reason") != "reaped_by_center":
+                raise _finding(
+                    "termination",
+                    "v02-expiry-end-reason",
+                    "§6.9.2",
+                    f"the session.end frame carried {params!r} — a v0.2 "
+                    "connection must carry reason='reaped_by_center'",
+                )
+    finally:
+        await peer.close()
+
+
+@pytest.mark.asyncio
+async def test_the_v02_explicit_end_names_the_superseded_cause(
+    target, serving, begin
+) -> None:
+    """§6.9.2 group (ii) — an explicit end on a v0.2 connection names
+    ``superseded``.
+
+    The explicit end is an AGENT-side verb, and the begin-hook contract
+    covers BEGIN only — so the lane is SELF-HOST ONLY (the in-kit
+    centre drives the agent side in-process).
+    """
+    if target.mode != "self-host":
+        pytest.skip(
+            "SESSION-END-GAP: the explicit end is an agent-side verb and "
+            "the begin-hook contract covers BEGIN only — the end lane is "
+            "SELF-HOST ONLY (COVERAGE.md names this gap)"
+        )
+    peer = _v02_peer(target)
+    try:
+        await peer.connect(send_hello=False)
+        await peer.hello(
+            protocol_version=PROTOCOL_VERSION_V02,
+            capabilities=dict(CLIENT_CAPABILITIES_V02),
+        )
+        peer.start_heartbeats(peer.adopted.get("heartbeat_interval_ms", 1000))
+        async with serving(peer, budget_s=25):
+            await open_session(peer, target)
+            await target.center.agent_end()
+            await wait_until(lambda: bool(peer.ended_sessions), timeout=10)
+            if not peer.session_end_frames:
+                raise _finding(
+                    "termination",
+                    "v02-explicit-end-frame",
+                    "§6.8",
+                    "no session.end reached the machine on the explicit end",
+                )
+            params = dict((peer.session_end_frames[-1].get("params") or {}))
+            if params.get("reason") != "superseded":
+                raise _finding(
+                    "termination",
+                    "v02-explicit-end-reason",
+                    "§6.9.2",
+                    f"the session.end frame carried {params!r} — a v0.2 "
+                    "connection must carry reason='superseded'",
+                )
     finally:
         await peer.close()

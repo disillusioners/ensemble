@@ -54,6 +54,7 @@ read while being written.
 | **Termination (v0.2)** | the reap race | the sweep reaped the session and the machine asks afterwards ⇒ `ended: false` with the centre-cause reason `reaped_by_center` (self-host lane — the window is centre-owned) | §6.10/§6.9.2 |
 | **Termination (v0.2)** | the duplicate machine id | a second connection claiming a LIVE machine id is refused with `MACHINE_ID_CONFLICT` (+ `data{machine_id, …}`); the INCUMBENT is NOT evicted (its socket stays open). NEITHER connection is evicted | §5.6 |
 | **Termination (v0.2)** | the v0.1 connection is unchanged | a v0.1 connection answers `protocol_version: "0.1"` and its capability map carries NO `client_terminate` key — v0.2 does not leak into v0.1 | §5.2/§5.3 |
+| **Termination (v0.2)** | the v0.2 `session.end` reason | on a `"0.2"` connection the centre's `session.end` names the centre cause — `reason: "reaped_by_center"` for the sweep's reap and `reason: "superseded"` for an explicit end (the v0.1 lane keeps EXACTLY `{"session_id": ...}`) | §6.9.2 |
 
 ## §-by-§ NOT exercised (with the reason)
 

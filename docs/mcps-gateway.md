@@ -929,7 +929,8 @@ may still be carrying a late `tools/call` answer.
 | Situation | Answer (Direction A — the `result` object) |
 |---|---|
 | a LIVE session of this connection | `{"session_id", "ended": true, "reason", "machine_notified": true}` — the `reason` is the machine's own `reason_code`, **verbatim** (even when the center does not recognise it); **`why_not_ended` is ABSENT** |
-| no live session (a repeat, or a race) | `{"session_id", "ended": false, "reason": "already_ended", "machine_notified": true}` — the **idempotent goal state, never an error** |
+| the machine sent a LEDGER-ONLY reason code | the same shape with the `reason` member **OMITTED** — `{"session_id", "ended": true, "machine_notified": true}`. `machine_unreachable` / `machine_timeout` describe the **center's** own release path and must never reach a response; the shipped client does not validate `reason` on `ended: true` |
+| no live session (a repeat, or a race) | `{"session_id", "ended": false, "reason": "already_ended", "machine_notified": false}` — the **idempotent goal state, never an error** |
 | the sweep reaped it first | the same idempotent shape with `reason: "reaped_by_center"` |
 
 The `reason` is **mandatory** on the `ended: false` arm, and the
@@ -940,7 +941,13 @@ refused — the session survives). A missing or unknown reason therefore
 falls into the release default; sending the reason always makes the
 client's decision **explicit** instead of leaving it to a fallback. The
 ack carries **exactly four members** — a stray `why_not_ended` would
-make the client take the wrong branch.
+make the client take the wrong branch — or **three** on the sanitized
+`ended: true` arm (the `reason` is then absent, §6.9.7).
+
+`machine_notified` says whether the machine was **told**: it is `true`
+on the accepted arm (the machine asked for the end — it acknowledged)
+and **`false` on every `ended: false` arm** (the center delivered
+nothing to the machine there).
 
 The receipt also **frees the §8.3 slot**: the session is removed from
 the registry and the roster pointer is cleared, so the next

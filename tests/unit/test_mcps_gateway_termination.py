@@ -39,6 +39,8 @@ import asyncio
 import json
 from typing import Any
 
+import pytest
+
 from daemon.services.mcps_gateway.audit import MemoryAuditSink
 from daemon.services.mcps_gateway.config import GatewayConfig
 from daemon.services.mcps_gateway.protocol import (
@@ -310,22 +312,86 @@ class TestSessionTerminate:
         assert ack["id"] == "req-term-1"
         assert ack["v"] == PROTOCOL_VERSION_V02
 
-    async def test_the_ack_carries_exactly_four_members(self):
+    @pytest.mark.parametrize(
+        ("reason_code", "expected_members"),
+        [
+            # A normal code: the reason rides the ack.
+            (
+                "operator_force",
+                {"session_id", "ended", "reason", "machine_notified"},
+            ),
+            # A LEDGER-ONLY token is NOT echoed: the member is OMITTED
+            # (the two reason sets are disjoint by construction) — the
+            # key set is still EXACT, never a subset.
+            (
+                "machine_unreachable",
+                {"session_id", "ended", "machine_notified"},
+            ),
+        ],
+    )
+    async def test_the_ack_carries_exactly_the_expected_members(
+        self, reason_code, expected_members
+    ):
         """The exact key set: a stray ``why_not_ended`` would make the
-        shipped client take the wrong branch."""
+        shipped client take the wrong branch — and a stray ``reason``
+        would put a ledger-only token on the wire."""
         service = make_service()
         machine = await open_machine(service, FakeMachine(service))
         await open_session(service, machine)
 
-        ack = await machine.terminate()
+        ack = await machine.terminate(reason_code=reason_code)
 
-        assert set(ack["result"]) == {
-            "session_id",
-            "ended",
-            "reason",
-            "machine_notified",
-        }
+        assert set(ack["result"]) == expected_members
         assert "why_not_ended" not in ack["result"]
+
+    async def test_a_ledger_only_reason_code_is_omitted_from_the_response(self):
+        """Spec defect #3 — a ledger-only token must never reach a
+        RESPONSE.
+
+        The machine may send any ``reason_code``; ``machine_unreachable``
+        and ``machine_timeout`` are the CENTRE's own release-path tokens
+        and must not be relayed back into a response. The member is
+        OMITTED (§6.9.7 — the end-ack's ``reason`` is present-only-when-
+        known); the shipped client does not validate ``reason`` on
+        ``ended: true``.
+        """
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+
+        ack = await machine.terminate(reason_code="machine_unreachable")
+
+        result = ack["result"]
+        assert result["ended"] is True
+        assert "reason" not in result
+        assert result["machine_notified"] is True
+        assert set(result) == {"session_id", "ended", "machine_notified"}
+
+    async def test_a_ledger_only_reason_code_is_still_recorded_verbatim(self):
+        """The LEDGER keeps the raw code VERBATIM — only the RESPONSE is
+        sanitized."""
+        audit = MemoryAuditSink()
+        service = make_service(audit_sink=audit)
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+
+        await machine.terminate(reason_code="machine_unreachable")
+
+        row = [r for r in audit.records if r.tool == AUDIT_TOOL_SESSION_TERMINATE][0]
+        assert row.extra["reason_code"] == "machine_unreachable"
+        assert "machine_unreachable" in row.detail
+
+    async def test_a_genuinely_unknown_reason_code_still_echoes_verbatim(self):
+        """The liberal-acceptance rule is UNCHANGED: every other code —
+        known or not — is echoed verbatim."""
+        service = make_service()
+        machine = await open_machine(service, FakeMachine(service))
+        await open_session(service, machine)
+
+        ack = await machine.terminate(reason_code="operator_latte")
+
+        assert ack["result"]["reason"] == "operator_latte"
+        assert ack["result"]["ended"] is True
 
     async def test_the_idempotent_ack_carries_exactly_four_members(self):
         service = make_service()
@@ -472,6 +538,12 @@ class TestSessionTerminate:
         assert "error" not in ack
 
     async def test_a_terminate_for_a_session_that_is_not_live_is_idempotent(self):
+        """The NOT-LIVE arm: the idempotent goal state.
+
+        ``machine_notified`` is ``False`` — the centre delivered NOTHING
+        to the machine on this arm (it had no session to end and it
+        told the machine nothing).
+        """
         service = make_service()
         machine = await open_machine(service, FakeMachine(service))
 
@@ -480,10 +552,15 @@ class TestSessionTerminate:
         result = ack["result"]
         assert result["ended"] is False
         assert result["reason"] == REASON_ALREADY_ENDED
-        assert result["machine_notified"] is True
+        assert result["machine_notified"] is False
 
     async def test_the_reap_race_answers_reaped_by_center(self):
-        """The sweep reaped the session; the machine asks afterwards."""
+        """The sweep reaped the session; the machine asks afterwards.
+
+        The TOMBSTONE-HIT arm: ``machine_notified`` is ``False`` here
+        too — the sweep's forward is the centre's own frame, and this
+        receipt delivered nothing to the machine.
+        """
         clock = Clock()
         service = make_service(clock=clock)
         machine = await open_machine(service, FakeMachine(service))
@@ -498,7 +575,7 @@ class TestSessionTerminate:
         result = ack["result"]
         assert result["ended"] is False
         assert result["reason"] == REASON_REAPED_BY_CENTER
-        assert result["machine_notified"] is True
+        assert result["machine_notified"] is False
 
     async def test_the_terminate_of_another_connections_session_is_not_ended(self):
         """The centre never ends another connection's session."""

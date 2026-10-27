@@ -139,6 +139,7 @@ from .tombstones import (
     EXPIRY_CAUSES,
     LEDGER_MACHINE_TIMEOUT,
     LEDGER_MACHINE_UNREACHABLE,
+    LEDGER_ONLY_REASONS,
     REASON_ALREADY_ENDED,
     REASON_EXPIRED,
     REASON_MACHINE_REFUSED,
@@ -277,6 +278,14 @@ TERMINATE_REASON_MAX_CHARS = 128
 #: nor smuggle newlines or control characters into it.
 CLOSE_REASON_MAX_CHARS = 123
 
+#: The bound of the PEER-CONTROLLED session id in a log line.
+#:
+#: The session id rides the ENVELOPE (§6.1) — the machine mints it and
+#: the centre adopts it, so it is free text the MACHINE chooses. It is
+#: bounded and escaped exactly like the close reason and the terminate
+#: reason code.
+SESSION_ID_MAX_CHARS = 128
+
 
 def bounded_peer_text(text: str | None, *, max_chars: int) -> str:
     """Render PEER-CONTROLLED free text safely for a LOG line.
@@ -292,8 +301,8 @@ def bounded_peer_text(text: str | None, *, max_chars: int) -> str:
     part never exceeds ``max_chars`` characters.
 
     EVERY peer-controlled string that reaches a log line goes through
-    here — the WebSocket close reason and the ``session.terminate``
-    reason code are both the MACHINE's to choose.
+    here — the WebSocket close reason, the ``session.terminate`` reason
+    code and the session id are all the MACHINE's to choose.
     """
     rendered = text or ""
     if len(rendered) > max_chars:
@@ -328,6 +337,13 @@ INCUMBENT_STATE_CLOSED = "closed"
 #: The incumbent is silent past the heartbeat timeout — the id is free
 #: again and the sweep is about to close it.
 INCUMBENT_STATE_DEAD = "dead"
+
+#: The incumbent's liveness could NOT be determined — the state is
+#: UNKNOWN.  The refusal MUST still be sent (an indeterminate liveness
+#: must never abort it, §5.6): the ``incumbent_connection`` member is
+#: then OMITTED from the error data, because the centre does not know
+#: what to name.
+INCUMBENT_STATE_UNKNOWN = "unknown"
 
 
 # ── the outcomes of a ``session.end`` FORWARD ─────────────────────────────
@@ -838,22 +854,46 @@ class McpGatewayService:
         return session.session_id
 
     @staticmethod
-    def _terminate_ack(session_id: str, *, ended: bool, reason: str) -> dict[str, Any]:
-        """The ack of a ``session.terminate`` receipt — EXACTLY four members.
+    def _terminate_ack(
+        session_id: str,
+        *,
+        ended: bool,
+        reason: str | None = None,
+        machine_notified: bool = True,
+    ) -> dict[str, Any]:
+        """The ack of a ``session.terminate`` receipt.
 
-        The key set is LOAD-BEARING (§6.10): the shipped client reads
-        ``ended`` / ``reason`` / ``why_not_ended``, and a STRAY member (a
-        ``why_not_ended`` on the successful path) would make it take the
-        wrong branch. Both arms of the receipt — the live end and the
-        idempotent goal state — build their answer HERE, so the contract
-        has exactly one home.
+        THE KEY SET IS LOAD-BEARING (§6.9.7 / §6.10): the shipped client
+        reads ``ended`` / ``reason`` / ``why_not_ended``, and a STRAY
+        member (a ``why_not_ended`` on the successful path) would make
+        it take the wrong branch. Both arms of the receipt — the live
+        end and the idempotent goal state — build their answer HERE, so
+        the contract has exactly one home.
+
+        ``reason`` is OPTIONAL and present only when it may be carried
+        (§6.9.7 — ``{session_id, ended: true, reason?}``, present-only-
+        when-known):
+
+        * on the ``ended: true`` arm the machine's own ``reason_code``
+          is echoed VERBATIM (the liberal-acceptance rule, §6.9.1) —
+          EXCEPT when it is a LEDGER-ONLY token
+          (``machine_unreachable`` / ``machine_timeout``): those
+          describe the CENTRE's own release path and must NEVER reach a
+          response (the two reason sets are disjoint by construction), so
+          the member is OMITTED;
+        * on the ``ended: false`` arm the reason is the centre's own
+          idempotent token and is ALWAYS present.
+
+        ``machine_notified`` says whether the MACHINE was told. It is
+        ``True`` on the accepted arm (the machine asked for the end — it
+        acknowledged) and ``False`` on every ``ended: false`` arm (the
+        centre delivered NOTHING to the machine there).
         """
-        return {
-            "session_id": session_id,
-            "ended": ended,
-            "reason": reason,
-            "machine_notified": True,
-        }
+        ack: dict[str, Any] = {"session_id": session_id, "ended": ended}
+        if reason is not None:
+            ack["reason"] = reason
+        ack["machine_notified"] = machine_notified
+        return ack
 
     async def _handle_session_terminate(
         self, connection: ClientConnection, payload: dict[str, Any]
@@ -926,7 +966,24 @@ class McpGatewayService:
             # The machine ACKNOWLEDGED — it asked for the end, so it has
             # released its own local lock.
             self._release_centre_side(session, machine_notified=True)
-            ack = self._terminate_ack(session_id, ended=True, reason=reason)
+            # THE RESPONSE IS SANITIZED; THE LEDGER IS NOT (§6.9.1 /
+            # §6.9.7). A LEDGER-ONLY token (``machine_unreachable`` /
+            # ``machine_timeout``) describes the CENTRE's own release
+            # path and must never appear in a response — the two reason
+            # sets are disjoint by construction. So the member is
+            # OMITTED (the shipped client does not validate ``reason``
+            # on ``ended: true``). Every OTHER code — known or not —
+            # is echoed VERBATIM (the liberal-acceptance rule), and
+            # the AUDIT row still records the raw code verbatim.
+            wire_reason: str | None = reason
+            if reason in LEDGER_ONLY_REASONS:
+                wire_reason = None
+            ack = self._terminate_ack(
+                session_id,
+                ended=True,
+                reason=wire_reason,
+                machine_notified=True,
+            )
             await self._audit_terminate(
                 connection=connection,
                 session_id=session_id,
@@ -935,11 +992,15 @@ class McpGatewayService:
                 machine_id=session.machine_id,
                 raw_reason=raw_reason,
                 ended=True,
+                machine_notified=True,
             )
             logger.info(
                 "the machine %r terminated the session %s (%s)",
                 session.machine_id,
-                session_id,
+                # The session id is PEER-CONTROLLED free text (it rides
+                # the envelope) — it is bounded and escaped here, like
+                # the reason code below.
+                bounded_peer_text(session_id, max_chars=SESSION_ID_MAX_CHARS),
                 # The reason code is PEER-CONTROLLED free text — it is
                 # bounded and escaped here, exactly like the close
                 # reason (a hostile machine must not be able to flood
@@ -973,7 +1034,14 @@ class McpGatewayService:
                 # The centre never ends another connection's session on a
                 # machine's word — and it says so honestly.
                 wire_reason = REASON_UNKNOWN_SESSION
-            ack = self._terminate_ack(session_id, ended=False, reason=wire_reason)
+            ack = self._terminate_ack(
+                session_id,
+                ended=False,
+                reason=wire_reason,
+                # The machine was NOT told: on every ``ended: false``
+                # arm the centre delivered NOTHING to the machine.
+                machine_notified=False,
+            )
             await self._audit_terminate(
                 connection=connection,
                 session_id=session_id,
@@ -982,12 +1050,15 @@ class McpGatewayService:
                 machine_id=machine_id,
                 raw_reason=raw_reason,
                 ended=False,
+                machine_notified=False,
             )
             logger.info(
                 "the machine %r terminated the session %s, which is not "
                 "live on this connection (%s)",
                 connection.machine_id,
-                session_id,
+                # The session id is PEER-CONTROLLED free text (it rides
+                # the envelope) — it is bounded and escaped here.
+                bounded_peer_text(session_id, max_chars=SESSION_ID_MAX_CHARS),
                 wire_reason,
             )
 
@@ -1010,6 +1081,7 @@ class McpGatewayService:
         machine_id: str,
         raw_reason: Any,
         ended: bool,
+        machine_notified: bool = True,
     ) -> None:
         """Write the audit row of a client-originated termination.
 
@@ -1061,7 +1133,9 @@ class McpGatewayService:
             extra={
                 "reason_code": verbatim,
                 "ended": ended,
-                "machine_notified": True,
+                # The same value the ack carries: on an ``ended: false``
+                # arm the machine was NOT told.
+                "machine_notified": machine_notified,
                 "connection_id": connection.connection_id,
             },
         )
@@ -1213,18 +1287,24 @@ class McpGatewayService:
         incumbent = self._by_machine.get(machine_id)
         if incumbent is not None and incumbent is not connection:
             incumbent_state = self._incumbent_state(incumbent)
-            if incumbent_state == INCUMBENT_STATE_OPEN:
+            if incumbent_state in (INCUMBENT_STATE_OPEN, INCUMBENT_STATE_UNKNOWN):
+                # ``unknown`` (the liveness could not be determined) is
+                # treated as ALIVE: the refusal is still sent and the
+                # incumbent keeps the id. An indeterminate liveness must
+                # never hand the id to a newcomer.
                 logger.warning(
                     "the machine %r is already connected on another socket "
-                    "(connection %s); the new connection is refused",
+                    "(connection %s, state %s); the new connection is refused",
                     machine_id,
                     incumbent.connection_id,
+                    incumbent_state,
                 )
                 await self._refuse_duplicate_machine_id(
                     connection,
                     request_id=request_id,
                     machine_id=machine_id,
                     incumbent=incumbent,
+                    incumbent_state=incumbent_state,
                 )
                 return
             # The incumbent is dead or closed: the id is free. Drop the
@@ -1312,19 +1392,41 @@ class McpGatewayService:
         * ``closed`` — its transport is closed. The id is free.
         * ``open`` — it is alive. It HOLDS the machine id: a second
           socket claiming the same id is refused (§5.6).
+        * ``unknown`` — the liveness could NOT be determined. The
+          refusal is STILL sent (an indeterminate liveness must never
+          abort it) and the ``incumbent_connection`` member is omitted
+          from the error data — the centre does not know what to name.
+          The incumbent is treated as ALIVE (the newcomer is refused):
+          an unknown liveness must never hand the id to a newcomer.
+
+        THE CLASSIFIER NEVER RAISES: a failure to read the liveness is
+        an INDETERMINATE state, not an exception. A raised error here
+        would abort the refusal and leave the newcomer holding the id
+        of a possibly-live incumbent — the exact outcome §5.6 forbids.
         """
-        if incumbent.closed:
-            return INCUMBENT_STATE_CLOSED
-        limit_ms = self.config.heartbeat_timeout_ms
-        silence_ms = (self._clock() - incumbent.last_heartbeat) * 1000.0
-        if limit_ms and silence_ms > limit_ms:
-            return INCUMBENT_STATE_DEAD
-        return INCUMBENT_STATE_OPEN
+        try:
+            if incumbent.closed:
+                return INCUMBENT_STATE_CLOSED
+            limit_ms = self.config.heartbeat_timeout_ms
+            silence_ms = (self._clock() - incumbent.last_heartbeat) * 1000.0
+            if limit_ms and silence_ms > limit_ms:
+                return INCUMBENT_STATE_DEAD
+            return INCUMBENT_STATE_OPEN
+        except Exception as exc:  # noqa: BLE001 — an unknown state, never a crash
+            logger.warning(
+                "the liveness of the incumbent connection %s could not be "
+                "determined: %s",
+                incumbent.connection_id,
+                exc,
+            )
+            return INCUMBENT_STATE_UNKNOWN
 
     def _release_dead_incumbent_sessions(self, incumbent: ClientConnection) -> None:
         """Release the sessions a DEAD (or closed) incumbent still holds.
 
-        THE SAME RELEASE DISCIPLINE AS THE SWEEP — no second path:
+        THE END-PATH RELEASE CHAIN — a SUPERSET of the sweep's
+        heartbeat-kill path (which is tombstone-only): no second release
+        path is invented here, the existing helpers do the work.
 
         * the session leaves the session registry
           (``sessions.end_for_connection``),
@@ -1363,6 +1465,7 @@ class McpGatewayService:
         request_id: Any,
         machine_id: str,
         incumbent: ClientConnection,
+        incumbent_state: str | None = None,
     ) -> None:
         """Refuse a newcomer that claims an id a LIVE connection holds.
 
@@ -1370,8 +1473,21 @@ class McpGatewayService:
         the refused id, the protected incumbent and the state of the
         incumbent's connection. The NEWCOMER's socket is closed; the
         incumbent is NOT touched — it keeps its socket and its session.
+
+        THE REFUSAL IS NEVER ABORTED: an INDETERMINATE liveness (the
+        ``unknown`` state) still produces the typed refusal, and the
+        ``incumbent_connection`` member is then OMITTED from the data —
+        the centre cannot name what it could not determine. The refusal
+        itself is the thing that must not fail.
         """
-        state = self._incumbent_state(incumbent)
+        if incumbent_state is None:
+            incumbent_state = self._incumbent_state(incumbent)
+        data: dict[str, Any] = {
+            "machine_id": machine_id,
+            "incumbent_machine_id": incumbent.machine_id or machine_id,
+        }
+        if incumbent_state != INCUMBENT_STATE_UNKNOWN:
+            data["incumbent_connection"] = incumbent_state
         incumbent_session = self._sessions.for_machine(machine_id)
         await self._send(
             connection,
@@ -1381,11 +1497,7 @@ class McpGatewayService:
                     CODE_MACHINE_ID_CONFLICT,
                     f"the machine id {machine_id!r} is already held by a live "
                     "connection of this center",
-                    {
-                        "machine_id": machine_id,
-                        "incumbent_machine_id": incumbent.machine_id or machine_id,
-                        "incumbent_connection": state,
-                    },
+                    data,
                 ),
             ),
         )
@@ -1393,7 +1505,7 @@ class McpGatewayService:
             machine_id=machine_id,
             incumbent=incumbent,
             incumbent_session=incumbent_session,
-            state=state,
+            state=incumbent_state,
         )
         await self.close_connection(connection, "duplicate machine id")
 
