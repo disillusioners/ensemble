@@ -541,6 +541,14 @@ class MissionRecordRepository:
                 for k, v in record.model_dump().items()
                 if v is not None
             }
+            # ``RETURNING mission_id`` is the LOSER SIGNAL: with
+            # ``ON CONFLICT DO NOTHING`` the winner gets exactly one
+            # returned row and the loser gets NONE. It is used instead
+            # of ``rowcount`` because psycopg3 reports ``rowcount = -1``
+            # ("unknown") for an ``INSERT ... ON CONFLICT DO NOTHING``
+            # statement — the affected-row count is not available on
+            # that path (measured on PostgreSQL 16, db-pool-idle-txn
+            # Phase 1). ``RETURNING`` is driver-independent and exact.
             stmt = (
                 insert_fn(MissionRecord.__table__)
                 .values(**values)
@@ -548,10 +556,12 @@ class MissionRecordRepository:
                     index_elements=["anchor_instance_id"],
                     index_where=text(OPEN_EPOCH_STATUS_SQL),
                 )
+                .returning(MissionRecord.__table__.c.mission_id)
             )
             result = own.execute(stmt)
+            won_the_race = result.first() is not None
             own.commit()
-            if result.rowcount == 0:
+            if not won_the_race:
                 # Lost the open-epoch race — the concurrent mint won.
                 # Re-resolve by the ANCHOR (the index's own key); a
                 # NULL-founding boot epoch is findable by THIS probe
