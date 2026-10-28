@@ -56,6 +56,49 @@ def pool() -> McpWarmupPool:
 
 
 @pytest.mark.asyncio
+async def test_an_outer_cancellation_during_the_reap_propagates(pool, monkeypatch):
+    """FC-B1 / W1 — the reap does NOT swallow an OUTER cancellation.
+
+    The graceful teardown's grace window has its own TimeoutError arm; a
+    swallowed ``CancelledError`` would make the cancelled health-check
+    task COMPLETE SUCCESSFULLY and hide the cancel from its awaiter (the
+    same anti-pattern CRIT-1 fixed for the warmup total budget). The
+    outer cancellation MUST propagate.
+    """
+    import asyncio
+
+    # The teardown wedges past the grace window so the reap reaches its
+    # escalation arm — the arm that historically swallowed the cancel.
+    monkeypatch.setattr(
+        warmup_pool_module, "REAP_CLOSE_GRACE_SECONDS", 0.05
+    )
+
+    conn = _make_pooled_connection("context7", idle_seconds=9999)
+
+    async def _wedged_stop():
+        await asyncio.sleep(30)
+
+    conn.session.stop = _wedged_stop
+
+    class _WedgedStreamCM:
+        background_task = None  # non-Task: the hard-cancel escalation is a no-op
+
+        async def __aexit__(self, *exc):
+            await asyncio.sleep(30)
+
+    conn.stream_cm = _WedgedStreamCM()
+
+    # Cancel the CALLER while the reap is in flight — the outer cancel
+    # the health-check loop would deliver.
+    inner = asyncio.ensure_future(pool._reap_idle_connection("context7", conn, 9999))
+    await asyncio.sleep(0.02)
+    assert not inner.done(), "the reap must still be in flight to be cancelled"
+    inner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await inner
+
+
+@pytest.mark.asyncio
 async def test_idle_connection_reaped_beyond_timeout(pool):
     """A connection idle past the timeout is reaped; a fresh one is not."""
     stale = _make_pooled_connection(idle_seconds=10_000.0)

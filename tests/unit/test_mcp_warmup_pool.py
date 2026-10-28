@@ -5,6 +5,7 @@ import time
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import daemon.mcp.warmup_pool as warmup_pool_module
 from daemon.mcp.warmup_pool import (
     McpWarmupPool,
     PooledConnection,
@@ -1007,6 +1008,50 @@ class TestReplenish:
                 # rule) — the DEBUG swallow is gone.
                 mock_logger.warning.assert_called()
                 mock_logger.debug.assert_not_called()
+
+
+class TestWarmupTotalBudget:
+    """FC-B2 — ``WARMUP_TOTAL_BUDGET_S`` is a TRIPWIRE, not decoration.
+
+    Every shipped scenario is un-wedged by the PER-SERVER create budget
+    first, so the TOTAL budget (90 s) had no pin at all: a regression
+    that removed the belt-and-braces ``wait_for`` would leave
+    ``warmup()`` wedged forever with every pin still green.
+    """
+
+    @pytest.mark.asyncio
+    async def test_warmup_returns_when_the_per_server_create_wedges(self, monkeypatch):
+        """The per-server budget is WEDGED past — only the TOTAL budget
+        can return ``warmup()``. It must return (not hang) and the
+        starters after it must still run."""
+        import asyncio
+
+        pool = McpWarmupPool()
+        pool.register_server("context7", _make_config(), pool_size=1)
+        # NOTE: ``warmup()`` itself flips ``_running`` — pre-setting it
+        # makes warmup() skip as "already in progress".
+
+        # The per-server create budget is BYPASSED (no timeout at all):
+        # the create wedges forever. Only ``WARMUP_TOTAL_BUDGET_S`` can
+        # end the gather.
+        monkeypatch.setattr(
+            warmup_pool_module, "WARMUP_CREATE_BUDGET_S", 10_000.0
+        )
+        monkeypatch.setattr(warmup_pool_module, "WARMUP_TOTAL_BUDGET_S", 0.5)
+
+        started = {"n": 0}
+
+        async def _wedge(server_name: str):
+            started["n"] += 1
+            await asyncio.sleep(60)
+
+        monkeypatch.setattr(pool, "_create_pooled_connection", _wedge)
+
+        # warmup() must RETURN inside the total budget (a hang would be
+        # caught by the test's own timeout, but the bound is asserted
+        # explicitly so the failure is readable).
+        await asyncio.wait_for(pool.warmup(), timeout=5.0)
+        assert started["n"] == 1, "the wedged create must have been started"
 
 
 class TestDrain:

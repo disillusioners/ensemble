@@ -94,6 +94,24 @@ _body_grace_hard_red() {
 {"status":"degraded","components":{"database":false,"queue_freshness":true,"services":true,"checkpoint_saver":true},"detail":{"reasons":["database: SELECT 1 probe failed"],"component_classes":{"database":"hard_component_red","queue_freshness":"ok","services":"ok","checkpoint_saver":"ok"},"grace":{"grace_active":false},"leak_signal":{"detected":false,"checkedout_rising":false,"streak":0}}}
 JSON
 }
+_body_grace_active_leak() {
+    # FC-A3's ASYMMETRIC shape: the grace is ACTIVE (so the grace-ACTIVE
+    # gate PASSES) AND the leak signal is DETECTED (so the LEAK gate must
+    # be the one that refuses). The pre-existing leak fixture carried
+    # grace_active:false — the grace-ACTIVE gate decided, and the leak
+    # check was never the decider (the false-confidence family).
+    cat <<'JSON'
+{"status":"degraded","components":{"database":false,"queue_freshness":true,"services":true,"checkpoint_saver":true},"detail":{"reasons":["database: SELECT 1 probe failed or timed out"],"component_classes":{"database":"probe_timeout","queue_freshness":"ok","services":"ok","checkpoint_saver":"ok"},"grace":{"grace_active":true,"grace_reason":"probe_timeout","grace_expires_at":"2026-10-27T00:00:00+00:00","scope":"load","holds":1},"leak_signal":{"detected":true,"checkedout_rising":true,"streak":3}}}
+JSON
+}
+_body_grace_active_hard() {
+    # FC-A4's ASYMMETRIC shape: the grace is ACTIVE (so the grace-ACTIVE
+    # gate PASSES) and the degraded component's class is a NEVER-ELIGIBLE
+    # hard red (so the CLASS gate must be the one that refuses).
+    cat <<'JSON'
+{"status":"degraded","components":{"database":false,"queue_freshness":true,"services":true,"checkpoint_saver":true},"detail":{"reasons":["database: SELECT 1 probe failed"],"component_classes":{"database":"hard_component_red","queue_freshness":"ok","services":"ok","checkpoint_saver":"ok"},"grace":{"grace_active":true,"grace_reason":"probe_timeout","grace_expires_at":"2026-10-27T00:00:00+00:00","scope":"load","holds":1},"leak_signal":{"detected":false,"checkedout_rising":false,"streak":0}}}
+JSON
+}
 _body_plain_green() {
     cat <<'JSON'
 {"status":"ready","components":{"database":true,"queue_freshness":true,"services":true,"checkpoint_saver":true},"detail":{"reasons":[],"queue_max_age_seconds":null,"checked_at":null,"inflight_turns":0}}
@@ -123,12 +141,16 @@ BODY_GRACED_LEAK="$(_body_grace_leak)"
 BODY_GRACED_HARD="$(_body_grace_hard_red)"
 BODY_GRACED_EXPIRED="$(_body_grace_expired)"
 BODY_LEGACY="$(_body_legacy_no_grace)"
+BODY_GRACED_ACTIVE_LEAK="$(_body_grace_active_leak)"
+BODY_GRACED_ACTIVE_HARD="$(_body_grace_active_hard)"
 BODY_PLAIN_GREEN="$(_body_plain_green)"
 
 _body_for() {
     case "$1" in
         graced)       printf '%s' "$BODY_GRACED" ;;
         graced-leak)  printf '%s' "$BODY_GRACED_LEAK" ;;
+        graced-active-leak) printf '%s' "$BODY_GRACED_ACTIVE_LEAK" ;;
+        graced-active-hard) printf '%s' "$BODY_GRACED_ACTIVE_HARD" ;;
         graced-hard)  printf '%s' "$BODY_GRACED_HARD" ;;
         graced-expired) printf '%s' "$BODY_GRACED_EXPIRED" ;;
         legacy)       printf '%s' "$BODY_LEGACY" ;;
@@ -175,7 +197,8 @@ _probe_once_classified() {
         softgreen)  _PROBE_STATUS="busy-amnesty"; _PROBE_CODE="200" ;;
         transient)  _PROBE_STATUS="transient"; _PROBE_CODE="503" ;;
         red)        _PROBE_STATUS="red"; _PROBE_CODE="500" ;;
-        graced|graced-leak|graced-hard|graced-expired|legacy)
+        graced|graced-leak|graced-hard|graced-expired|legacy|\
+graced-active-leak|graced-active-hard)
                     _PROBE_STATUS="transient"; _PROBE_CODE="503" ;;
         *)          _PROBE_STATUS="green"; _PROBE_CODE="200" ;;
     esac
@@ -269,6 +292,25 @@ run_scenario() {
         return
     fi
     _report "$name" 1 "rc=${rc} (probe calls=${_SCRIPT_CALLS})"
+}
+
+# ── the FC (false-confidence) scenarios ───────────────────────────────
+# The four load-bearing HELD gates that no shipped scenario decided:
+#   MAX_HOLDS_PER_GREEN (FC-A2), the leak refusal (FC-A3), the failure-
+#   CLASS gate (FC-A4) and the grace-ACTIVE gate (FC-A5). For A3/A4/A5
+#   the OBSERVABLE is the JOURNAL: a refused observation never grants
+#   the bounded window extension, so ``soak_grace_extended`` must be
+#   ABSENT (the rc alone is identical either way).
+run_scenario_refuses_extension() {
+    local name="$1" expected_rc="$2" cap="$3"; shift 3
+    run_scenario "$name" "$expected_rc" "$cap" "$@"
+    if grep -q "soak_grace_extended" "$_JOURNAL_LOG"; then
+        _report "$name — no extension event" 0 \
+            "the journal carries soak_grace_extended — the gate did NOT refuse"
+        return
+    fi
+    _report "$name — no extension event" 1 \
+        "the journal carries no soak_grace_extended"
 }
 
 echo
@@ -372,6 +414,24 @@ if sed -n '/A2 (soak-gate-mcp-warmup): the THREE observation kinds/,/esac$/p' \
 else
     _report "S14a the counter block does not read the _PROBE_STATUS global" 1
 fi
+
+echo "--- S15b (FC-A2): a green behind >2 consecutive holds does NOT count ---"
+# The shape is load-bearing: the stream carries EXACTLY three green
+# ticks and the FIRST of them sits behind three consecutive HOLDs, so
+# WITHOUT the MAX_HOLDS_PER_GREEN rejection the third green lands at
+# tick 6 and the soak returns 0 — with the rejection it returns 1 (the
+# trailing non-green replays to the cap, so the replay cannot feed the
+# counter a third green).
+run_scenario "S15b a green behind 3 holds is REJECTED" 1 7 graced graced graced green green green graced
+
+echo "--- S15c (FC-A3): an ACTIVE grace + a LEAK signal must refuse ---"
+run_scenario_refuses_extension "S15c the leak gate refuses an active grace" 1 8 graced-active-leak graced-active-leak graced-active-leak graced-active-leak
+
+echo "--- S15d (FC-A4): an ACTIVE grace + a NEVER-ELIGIBLE class must refuse ---"
+run_scenario_refuses_extension "S15d the class gate refuses an active grace" 1 8 graced-active-hard graced-active-hard graced-active-hard graced-active-hard
+
+echo "--- S15e (FC-A5): an EXPIRED grace must not be HELD (no extension) ---"
+run_scenario_refuses_extension "S15e the grace-ACTIVE gate refuses an expired grace" 1 8 graced-expired graced-expired graced-expired graced-expired
 
 echo
 echo "======================================"

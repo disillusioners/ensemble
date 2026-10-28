@@ -318,3 +318,74 @@ async def _exit_in_task(wrapper: TaskScopedStdioClient, event: asyncio.Event) ->
     """Helper: call __aexit__ in a separate task and signal when done."""
     await wrapper.__aexit__(None, None, None)
     event.set()
+
+
+class TestReapBackstop:
+    """FC-B3 — the reap BACKSTOP layer, pinned in ISOLATION.
+
+    The ``__aexit__`` layer is unit-pinned elsewhere and the transitively
+    pinned pair only goes RED with BOTH layers removed. This pin proves
+    the BACKSTOP alone — the /proc census + the process-group kill —
+    kills a real child that NO other layer ever touched.
+    """
+
+    def test_the_backstop_kills_a_child_the_exit_layer_never_touched(self, tmp_path):
+        import os
+        import subprocess
+        import time as _time
+
+        # NOTE: the pytest root conftest MOCKS the ``mcp`` package, so the
+        # real ``StdioServerParameters`` is unreachable here. The backstop
+        # only reads ``_server_params.command`` / ``.args`` (the /proc
+        # matcher), so a plain namespace is exactly what it needs.
+        from types import SimpleNamespace
+
+        child_script = tmp_path / "fc_b3_child.py"
+        child_script.write_text("import time\ntime.sleep(120)\n")
+
+        params = SimpleNamespace(
+            command=os.sys.executable, args=[str(child_script)]
+        )
+        wrapper = TaskScopedStdioClient(
+            params, instance_id="fc-b3", server_name="fc-b3"
+        )
+        # The baseline is taken before the child exists, so the child is
+        # unambiguously THIS session's (never a pre-existing sibling).
+        wrapper._snapshot_preexisting()
+
+        # start_new_session: the REAL transport spawns the child in its
+        # own process group (that is what the backstop's ``killpg``
+        # targets). Without it the child shares OUR group and the
+        # backstop would kill the test runner itself.
+        proc = subprocess.Popen(
+            [os.sys.executable, str(child_script)], start_new_session=True
+        )
+        try:
+            # The census must SEE the live child (non-vacuity).
+            deadline = _time.monotonic() + 10
+            seen = []
+            while _time.monotonic() < deadline and not seen:
+                seen = wrapper._session_children()
+                if not seen:
+                    _time.sleep(0.05)
+            assert seen, (
+                "the census control failed: the live child was not found — "
+                "the backstop is not measuring anything"
+            )
+            assert proc.poll() is None, "the control child died on its own"
+
+            # The BACKSTOP layer alone (no __aexit__, no transport).
+            wrapper._reap_orphans()
+
+            # The child must be GONE (the process group was SIGKILLed).
+            deadline = _time.monotonic() + 10
+            while _time.monotonic() < deadline and proc.poll() is None:
+                _time.sleep(0.05)
+            assert proc.poll() is not None, (
+                "B3 LEAK: the reap backstop did not kill the child it owns "
+                f"(pid={proc.pid})"
+            )
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()

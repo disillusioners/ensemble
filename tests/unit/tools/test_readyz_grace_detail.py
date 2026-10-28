@@ -42,6 +42,33 @@ def _degraded_composite(**kwargs):
     )
 
 
+class TestGraceHorizonValue:
+    """FC-A1 — the daemon-side horizon constant is VALUE-pinned.
+
+    Every other pin is RELATIONAL to ``READINESS_GRACE_HORIZON_S``, so a
+    wrong value (e.g. 100000.0) stayed green: the grace would then be
+    held ~14 minutes instead of 2 and mask a real fault far past the
+    normative window. lib.sh's copy IS value-pinned (S12a); the daemon's
+    mirror must be too (requirements.md §4.3 P3: ONE number,
+    ``GRACE_HORIZON_S = 120.0``, observation-relative, never extended).
+    """
+
+    def test_the_constant_is_120_seconds(self):
+        from daemon import constants
+
+        assert constants.READINESS_GRACE_HORIZON_S == 120.0
+
+    def test_the_tracker_default_is_wired_to_that_constant(self):
+        from daemon import constants
+        from daemon.services import readiness
+
+        assert readiness.READINESS_GRACE_HORIZON_S is (
+            constants.READINESS_GRACE_HORIZON_S
+        )
+        tracker = readiness.GraceTracker()
+        assert tracker.horizon_s == 120.0
+
+
 class TestReadyzGraceDetail:
     def test_a_held_grace_still_reports_degraded_with_its_reasons(self):
         tracker = GraceTracker()
