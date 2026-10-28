@@ -226,13 +226,29 @@ def _build_holder(engine):
     return holder
 
 
-def _slow_content_fetch(monkeypatch, delay_s: float):
-    """Make the content fetch take ``delay_s`` (the instrumented seam)."""
+def _slow_content_fetch(monkeypatch, delay_s: float, *, window=None):
+    """Make the content fetch take ``delay_s`` (the instrumented seam).
+
+    ``window`` (optional) receives the fetch window's start/end marks
+    so the F8-b census can scope itself to the FETCH — the brief P0/P2
+    scoped transactions are legitimate and must not be counted.
+    """
+    import threading as _threading
+
+    started = _threading.Event()
+    ended = _threading.Event()
 
     async def _patched(service, instance_id, agent_id, **kwargs):
-        await asyncio.sleep(delay_s)
+        started.set()
+        try:
+            await asyncio.sleep(delay_s)
+        finally:
+            ended.set()
         return "slow child content"
 
+    if window is not None:
+        window.started = started
+        window.ended = ended
     monkeypatch.setattr(
         child_reports_mod.ChildReportsService,
         "_get_last_assistant_message",
@@ -273,18 +289,28 @@ class TestF8bNoIdleInTransactionDuringTheFetch:
             engine, injection_id=injection_id, parent_id=parent_id, child_id=child_id
         )
 
-        _slow_content_fetch(monkeypatch, 2.0)
+        class _Window:
+            pass
+
+        window = _Window()
+        _slow_content_fetch(monkeypatch, 2.0, window=window)
         holder = _build_holder(engine)
 
-        # Sampler: every 250 ms, census the scratch DB's backends and
-        # the pool's occupancy.
-        samples: list[tuple[int, int]] = []
+        # Sampler: every 200 ms, census the scratch DB's backends and
+        # the MANAGER pool's occupancy — from a DEDICATED census engine
+        # so the census's own connection is not a manager-pool slot and
+        # its own backend state cannot pollute the count.
+        census_engine = create_engine(
+            _PG_URL, pool_pre_ping=True, future=True
+        )
+        all_samples: list[tuple[bool, int, int]] = []
         stop = threading.Event()
 
         def _sample() -> None:
             while not stop.is_set():
+                in_window = window.started.is_set() and not window.ended.is_set()
                 try:
-                    with engine.connect() as conn:
+                    with census_engine.connect() as conn:
                         idle_in_txn = conn.execute(
                             text(
                                 "select count(*) from pg_stat_activity "
@@ -292,10 +318,12 @@ class TestF8bNoIdleInTransactionDuringTheFetch:
                                 "and state = 'idle in transaction'"
                             )
                         ).scalar()
-                    samples.append((idle_in_txn, engine.pool.checkedout()))
+                    all_samples.append(
+                        (in_window, idle_in_txn, engine.pool.checkedout())
+                    )
                 except Exception:  # noqa: BLE001 — sampling is best-effort
                     pass
-                time.sleep(0.25)
+                time.sleep(0.2)
 
         sampler = threading.Thread(target=_sample, daemon=True)
         sampler.start()
@@ -311,17 +339,23 @@ class TestF8bNoIdleInTransactionDuringTheFetch:
         finally:
             stop.set()
             sampler.join(timeout=5)
+            census_engine.dispose()
 
         assert result is not None and result["shape"] == "null_marker_first", (
             f"F8-b: the reconcile did not create the artefacts: {result!r}"
         )
-        assert samples, "F8-b: the sampler collected no samples"
-        peak_checkedout = max(s[1] for s in samples)
-        peak_idle_in_txn = max(s[0] for s in samples)
-        assert peak_checkedout <= 1, (
-            "F8-b: a manager-engine slot was held for the WHOLE fetch "
-            f"(peak checkedout={peak_checkedout}) — the borrow-then-await "
-            "is back"
+        # Non-vacuity: the sampler caught the FETCH WINDOW itself.
+        window_samples = [s for s in all_samples if s[0]]
+        assert len(window_samples) >= 3, (
+            f"F8-b: the sampler caught only {len(window_samples)} "
+            "fetch-window samples — the census is vacuous"
+        )
+        peak_checkedout = max(s[2] for s in window_samples)
+        peak_idle_in_txn = max(s[1] for s in window_samples)
+        assert peak_checkedout == 0, (
+            "F8-b: a manager-engine slot was held during the content "
+            f"fetch (peak checkedout={peak_checkedout}) — the "
+            "borrow-then-await is back"
         )
         assert peak_idle_in_txn == 0, (
             "F8-b: a backend sat 'idle in transaction' while the reconcile "
