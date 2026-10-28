@@ -471,7 +471,7 @@ server-side bound** because the manager engine has no `statement_timeout` and no
 | **c1** first mint for an anchor | ✅ OK, **rung 3** (minted) |
 | **c2** second mint, **same anchor, sequential** | ✅ OK, **rung 1** (found the open epoch) — **NO violation** |
 | **c3** mint for a different anchor | ✅ OK, rung 3 |
-| **c4** 8-way concurrent, same anchor, **no barrier** | 0 errors (the threads did not overlap) |
+| **c4** 8-way concurrent, same anchor, **no barrier** | **7 errors — all 7 are `UniqueViolation` on `ux_mission_records_anchor_open`** (the race fires NATURALLY; no barrier needed) |
 | **c4b** 6-way concurrent, same anchor, **probe→insert window forced to overlap** | **5 × `IntegrityError: duplicate key value violates unique constraint "ux_mission_records_anchor_open"`** |
 | **c5** the losing mint inside a **caller-supplied** session | `IntegrityError` → **the caller's session is poisoned**: `PendingRollbackError: This Session's transaction has been rolled back due to a previous exception during flush.` |
 
@@ -483,7 +483,8 @@ server-side bound** because the manager engine has no `statement_timeout` and no
   (`ux_mission_records_anchor_open`, `WHERE status = 'open'`, `models.py:307-313`) use the
   **same anchor key and the same status predicate** (measured `MissionStatus.OPEN.value == 'open'`).
 - The **only** way the probe misses an open epoch is a **race**: two mints for the same anchor
-  whose probe→insert windows overlap. Measured 5/6 violations when the overlap is forced.
+  whose probe→insert windows overlap. Measured **7/8 violations in a plain 8-way concurrent run
+  (no barrier — the race fires naturally)** and **5/6 when the overlap is forced by a barrier**.
 - Why the loser is *not* recovered: `_mint_epoch_locked`'s `IntegrityError` handler
   (`mission_record_service.py:544-567`) re-resolves via a probe **keyed on
   `founding_message_id`**, and the **boot** mint has `founding_message_id=None` — so the
