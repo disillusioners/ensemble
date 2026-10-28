@@ -11717,11 +11717,27 @@ class InstanceManager:
         if needs_content_fetch:
             # Await directly — do NOT use
             # ``run_coroutine_threadsafe(...).result(...)``
-            # from the loop thread (would self-block).
-            content = await self._fetch_subshape_a_content_async(
-                child_instance_id=child_instance_id,
-                child_agent_id=child_agent_id or "agent",
-            )
+            # from the loop thread (would self-block). F8-e: the fetch
+            # is BOUNDED (asyncio.wait_for) — the async twin's hold
+            # must never be unbounded (the sync twin's bound is the
+            # same 8.0 s, the sweep ``stop()`` join budget — W3). A
+            # budget-exceeding fetch degrades to the fallback string
+            # and the row is re-tried next cycle.
+            try:
+                content = await asyncio.wait_for(
+                    self._fetch_subshape_a_content_async(
+                        child_instance_id=child_instance_id,
+                        child_agent_id=child_agent_id or "agent",
+                    ),
+                    timeout=8.0,
+                )
+            except TimeoutError:
+                logger.warning(
+                    f"reconcile: async content fetch exceeded the 8.0s "
+                    f"budget child={child_instance_id[:8]}... — using "
+                    f"fallback content"
+                )
+                content = "[No response content]"
 
         with self._write_guard:
             with self._session_scope() as session:
