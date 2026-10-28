@@ -31,7 +31,7 @@ resolved ONCE at watchdog start for that reason.
 
 THE READS
 ----------
-* the executing turns — ``tasks`` rows with ``status='running'``,
+* the executing turns — ``task`` rows with ``status='running'``,
   joined to ``instances`` for the agent identity;
 * the checkpoint-store census — ``pg_stat_user_tables`` drift
   (``n_live_tup`` / ``reltuples``) plus the relation sizes;
@@ -305,7 +305,7 @@ def _read_executing_turns(cursor: Any) -> tuple[list[dict[str, Any]], int]:
                    t.created_at, t.started_at, t.last_heartbeat_at,
                    t.suspension_reason, t.resume_target_turn_id,
                    i.agent_id, i.status AS instance_status
-              FROM tasks t
+              FROM task t
               LEFT JOIN instances i ON i.instance_id = t.instance_id
              WHERE t.status = 'running'
              ORDER BY t.last_heartbeat_at DESC NULLS LAST
@@ -384,7 +384,7 @@ def _read_resume_history(cursor: Any) -> list[dict[str, Any]]:
         cursor.execute(
             """
             SELECT work_id, instance_id, auto_continued_at, started_at
-              FROM tasks
+              FROM task
              WHERE auto_continued_at IS NOT NULL
              ORDER BY auto_continued_at DESC
              LIMIT %s
