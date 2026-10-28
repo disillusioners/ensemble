@@ -10,9 +10,11 @@
 
 ## 1. VERDICT
 
-# 🟡 DELTA-CONDITIONS
+# 🟡 DELTA-CONDITIONS — **24 conditions**
 
-**The fold is real work, not a relabel.** 9 of the 12 council criticals are **genuinely closed** in the plan text with named, correct resolutions; 3 are closed in substance but carry a **binding-text defect that survives** (C-7, C-10, C-12); **0 are relabelings**. All six documented deviations are **improvements** in substance — one of them (C-7) is an improvement in the *narrative* that the *binding decision* did not absorb. The fold's self-honesty (FOLD-MAP ST-5 — "a mechanical closure record of the fold, not a quality judgment") is exemplary and I endorse it.
+> **⚠️ READ §14 (FINAL).** The **Phase-0 baseline landed mid-review** (`43e577a5b`) and it **refutes F4's premise** for the incident's shape — a new condition (**DR-29**) that is a *premise rewrite*, not a text fix. §1–§13 are the record as it stood before the baseline landed.
+
+**The fold is real work, not a relabel** — and the Phase-0 baseline that landed during this review is **high-quality measured evidence** that confirms four of my findings empirically (the census blindness, the shared-DSN collision, F8's necessity, the `idle_in_transaction_session_timeout` signature) and settles OQ-1. It also **refutes a plan premise** (F4's), which is now condition **DR-29**. 9 of the 12 council criticals are **genuinely closed** in the plan text with named, correct resolutions; 3 are closed in substance but carry a **binding-text defect that survives** (C-7, C-10, C-12); **0 are relabelings**. All six documented deviations are **improvements** in substance — one of them (C-7) is an improvement in the *narrative* that the *binding decision* did not absorb. The fold's self-honesty (FOLD-MAP ST-5 — "a mechanical closure record of the fold, not a quality judgment") is exemplary and I endorse it.
 
 **But conditions must close before the implementation phase may start.** All of them are **plan-text** defects — no code, no new analysis, no re-planning.
 
@@ -381,4 +383,83 @@ phase2-plan.md:  T2.1→—   T2.2→T2.1   T2.3→T2.2   T2.4→—   T2.5→T2
 - **Runtime behaviour of any pin** — no pin is written; the *forms* were verified, the assertions were not.
 - **All PG-semantics claims** — documentation-only until `BASELINE.md` lands (the §9 P0-1…P0-10 list).
 - **Whether the `env -u DAEMON_PORT` scrub is required** — it is in every fence but its purpose is stated nowhere; not a defect, flagged for the author.
+
+
+---
+
+# ADDENDUM 2 — the Phase-0 baseline landed mid-review (`43e577a5b`, `2fd4480bc`)
+
+**The in-flight measurement arrived while this re-check was running.** `BASELINE.md` (37 KB) + the raw harness evidence (5 targets, 6610 lines) are now on the branch, merged into the plan. This is the evidence §9 was written to demand — and it **answers 6 of the 10 in-flight questions, empirically confirms four of my findings, and refutes a plan premise** (F4's). The verdict stays **DELTA-CONDITIONS**; the condition list grows again, and the new **#1** condition is a premise rewrite, not a text fix.
+
+**Status of the §9 in-flight list, against the landed baseline:**
+
+| P0 | Question | Answered? | Result |
+|---|---|---|---|
+| P0-1 | F8 flip condition | ✅ | **NOT MET ⇒ F8 stands.** Worst hold **8011 ms** (sync twin ceiling 8.0 s); async worst 1059.9 ms. The hold **equals** the awaited fetch latency (median hold 1029.9 ms vs await 1026.5 ms) ⇒ the flip condition must be restated as a **precondition** (**DR-30**) |
+| P0-2/3 | measured max legitimate hold | ⚠️ partial | The hold is **coupled to the fetch, not to the DB**; the real `_fetch_subshape_a_content_async` latency is explicitly **NOT measured** (the harness models the python half) ⇒ the bound's derivation input is still open (**DR-11** stands) |
+| P0-4 | F7 residence budget | ✅ | Healthy residence measured: median **0.0005 s**, p95 **0.0007 s**, max **0.0008 s** over 40 cycles; the invariant is now **measured** (**DR-35**) |
+| P0-5 | per-pool `application_name` | ✅ | **Viable** — but the **conninfo parameter is the stronger channel** than the `-c options` form (**DR-31**); the shared-constant ordering hazard is **re-confirmed** by measurement |
+| P0-6 | F7 invariant shape | ✅ | **The census-blindness claim is CONFIRMED** — a backend checked out before its first statement reports `state='idle'` with `xact_start=NULL` ⇒ an idle-in-txn census is **blind to the dominant occupancy shape** (my C-10, now empirical) |
+| P0-7 | PG runtime semantics | ✅ | **`idle_in_transaction_session_timeout` fires as documented** — `after_wait: null` ("the row is GONE"), `BACKEND GONE (terminated by server)`, FATAL `IdleInTransactionSessionTimeout` ⇒ **this is the P0-7(i) answer and it CONFIRMS DR-1**: the "row gone from `pg_stat_activity`" observable is the signature of the **engine-level idle-in-txn timeout**, not of `statement_timeout` |
+| P0-8 | 3-pool census vs the 15-slot cap | ⚠️ | **11 pool-creation sites**, not 3 ⇒ the attribution model is a **floor**, not the census scope (**DR-32**) |
+| P0-9 | the BEGIN attribution | ✅ | Fingerprints measured per pool; the incident's "aborted connection handed back out" premise is **REFUTED** for the pool path (**DR-34**) |
+| P0-10 | base occupancy/dwell numbers | ✅ | Occupancy across all three states + residence is the correct invariant; the lane's "does not close the symptom class" disclosure is **substantiated** |
+
+## 13. ADDITIONAL FINDINGS FROM THE LANDED BASELINE
+
+### 🔴 CRITICAL
+
+#### DR-29 — the baseline **refutes F4's premise**: under pool starvation the abandoned probe holds **NO** connection
+
+**WHERE** `BASELINE.md` T5b (the "Two findings that change F4's shape" block) and the consolidated table row **3** (*"rewrite F4's premise; a probe-scoped `statement_timeout` does not address the starvation shape"*) · the plan it refutes: `phase1-plan.md` D-04/T1.4 (F4 as the **primary**), `plan-overview.md` §4 (F4 "primary"), `decisions.md` D-35.
+
+**WHAT — measured.** The baseline's T5b table:
+
+| case | timeout | exceeded? | `checkedout()` after | PG state | notes |
+|---|---|---|---|---|---|
+| b1 `SELECT 1` | 0.5 s | no (5.1 ms) | 0 | `idle` | n/a |
+| b2 `SELECT pg_sleep(5)` | 0.5 s | yes at 0.5011 s | **1** | **`active`** | t ≈ 4.52 s |
+| b3 **pool starvation** (15 holders) | 0.5 s | yes at 0.5015 s | **15** (= the holder count, **not 16**) | **n/a — never got a connection** | after the holders release |
+
+> *"Under pool starvation — the realistic incident shape — the abandoned probe thread holds **NO connection**. `checkedout()` after the timeout was **15**, exactly the holder count; the probe thread was a **pool WAITER**, not a holder. It is a stranded thread (bounded by `pool_timeout=30 s`), not a retained connection. **A probe-scoped `SET LOCAL statement_timeout` is therefore IRRELEVANT to this shape** — the probe never reached a statement."*
+
+**WHY IT MATTERS** F4 is the plan's Phase-1 **primary** fix and the stated carrier of "the probe's server-side bound". The measurement shows that in the incident's own shape (starvation) the probe never acquires a connection, so there is nothing for a probe-scoped `SET LOCAL` to bound. When the probe *does* hold a connection (b2) the backend is **`active`, not `idle in transaction`** — a shape an idle-in-txn census cannot see (the baseline's own point 5). The measured hazard is therefore **(i)** a stranded waiter thread and **(ii)** an unbounded statement duration on a connection the probe holds, with no server-side bound because the manager engine carries neither timeout (baseline row 9: **CONFIRMED**). **F4 as designed does not address either.** Implementing F4 as specified would ship the lane's "primary" fix against a shape the incident does not have — the same *causal-completeness* failure the council rejected the original plan for, now measured.
+
+**REQUIRED CHANGE** Before Phase 1: **rewrite F4's premise** per the baseline — (a) restate F4's outcome as *"the probe's statement duration is server-bounded **when the probe holds a connection**"* and drop the "abandoned probe worker cannot hold a connection open indefinitely" rationale, which the measurement refutes for the starvation shape; (b) decide F4's scope against the measured hazard — either add the **engine-level** `statement_timeout`/`idle_in_transaction_session_timeout` backstop that the baseline says is missing (which C-4 had dropped for the boot-DDL reason ⇒ then the `SET LOCAL statement_timeout = 0` carve-out at `manager.py:8760` becomes **mandatory**, per the leader's own OQ-3 ruling), or accept that F4 is defence-in-depth only and **demote it from "primary"** everywhere; (c) add a T5b-shaped pin leg: under **starvation** (not a held lock), assert the probe holds **no** connection and that `checkedout()` equals the holder count. The existing F4-b leg (a deliberately held lock) is a **synthetic** shape and does not cover the incident's shape.
+
+#### DR-30 — the flip condition must be restated as a **precondition**; F8's decision rule must measure the **fetch**, not the hold
+
+**WHERE** `BASELINE.md` consolidated rows **1** and **2** · the plan framing: `plan-overview.md:266` (OQ-6), `final-implementation-spec.md:33` (§0(a)), `decisions.md` D-40.
+
+**WHAT — measured.** *"The flip condition must be restated as a **PRECONDITION**, not a constant: 'the M-R3 hold < 2 s **iff** the awaited content fetch < 2 s.' That is a measurable property of the fetch path … and it is **data-dependent** — an instance with a long history makes the fetch slower. The sync twin is unconditionally ≥ 8 s."* And: *"the hold is **not an independent cost**: it is *exactly* the awaited content-fetch latency (L5: hold median 1029.9 ms vs await median 1026.5 ms; L2: hold 52.4 ms vs await 47.7 ms)."* Consolidated row 2: *"measure the **fetch** latency, not the hold, to decide."*
+
+**WHY IT MATTERS** The plan's OQ-6 states the flip condition as a **constant** ("if hold < 2 s …"), which the measurement shows is a **function of the fetch's data** — a threshold that is true for a short-history instance and false for a long-history one. A gate written against the constant form would decide the lane's mechanism on a number that is not a property of the code. (The good news: the condition is **NOT MET** at base ⇒ **F8 stands** ⇒ the lane's central mechanism is confirmed necessary.)
+
+**REQUIRED CHANGE** Restate OQ-6 / §0(a) / D-40 to the precondition form — *"the M-R3 hold < 2 s **iff** the awaited content fetch < 2 s"* — and make the decision instrument the **fetch-latency** distribution (the async twin's content fetch, and the sync twin's 8 s bridge), not the hold. Record the measured base figures (async worst 1059.9 ms; sync twin ceiling 8.0 s) as the baseline the precondition is compared against, and note that the **real** fetch latency remains unmeasured (baseline: *"needs a booted daemon + a real checkpoint store"*), so the precondition's data-dependence is disclosed, not resolved.
+
+### 🟡 WARNING
+
+- **DR-31 — `application_name` belongs in the **conninfo parameter**, not the `-c options` form.** **Measured:** `options=-c application_name=ensemble-manager` **lands**; within one options string **last `-c` wins** (`alpha` then `beta` ⇒ `beta`); but *"the **conninfo parameter is the STRONGER channel**"* — `conninfo application_name=from-conninfo` **beats** `options=-c application_name=from-options`; `ALTER ROLE … SET application_name` lands; a startup-packet value beats the role default; asyncpg `server_settings={...}` and `?application_name=` both land. And the ordering hazard is **re-confirmed** by measurement: the repair engine, with the shared constant appended last, reports `ensemble-manager` ⇒ `repair_engine_reports_manager_name: true`. ⇒ D-30/F2.3's mechanism (a `-c` in the manager's own options string) is *viable* but is the **weaker** channel: a future edit that appends the shared constant could still override it, which is exactly the hazard the baseline measured. **Fix:** put `application_name` in the **conninfo parameter** of each engine's own URL (the manager engine's `URL.create(...)` query dict and the repair engine's own conninfo), and keep the shared constant free of any `application_name` — then the attribution is override-proof rather than merely last-wins-correct. Amend D-30 / F2.3 / F2.5 / F2.6 accordingly, and assert the channel in the F2-g/F2-h pins.
+- **DR-32 — the attribution model is a **floor**, not the census scope: there are **11 pool-creation sites** in `daemon/`.** Baseline consolidated row 6: *"3 pools → **11** pool-creation sites; the incident's 18 backends are explainable by multi-pool occupancy → widen the census scope."* The three named engines (D-36) are the ones that can hold idle-in-txn, but the **census** must cover every site that can hold a connection. **Fix:** widen the F7 census scope to every pool-creation site (the baseline's T3(a) static scan already enumerates them), and state in D-36 that the three named `application_name`s are the **daemon-internal** subset, not the census boundary.
+- **DR-33 — OQ-1 is **CLOSED**, and its measured mechanism is that the boot path's re-resolve probe is **skipped**, not mis-keyed.** Baseline T5c + row 8: *"the re-resolve probe is **skipped** and the error **re-raises**"*, because the boot mint has `founding_message_id=None`; the trigger is *"a concurrent double-mint for the same anchor"* — and the baseline's own c4 (8-way concurrent, no barrier) produced **7 real `UniqueViolation`s** on `ux_mission_records_anchor_open` *"the race fires NATURALLY; no barrier needed"*, while c4b (probe→insert window forced to overlap) produced **5 `IntegrityError`s**. ⇒ D-09 *"the boot path's re-resolve is keyed on the index's own predicate"* addresses a **probe that does not run** on the boot path. The **upsert** (D-08) is the right fix and is idempotent under any trigger — but the disclosure and the re-resolve wiring must match the measured mechanism. **Fix:** amend D-09 to state the **skip** (and where it happens) as well as the key, and record the measured trigger (concurrent double-mint, 7/8 natural) in the premise ledger; confirm F6.1's upsert is the operative fix and that the anchor-scoped re-resolve is reached on the `rowcount == 0` path.
+- **DR-34 — F5's priority must be raised.** Baseline row 4: the incident's *"aborted connection handed back out"* premise is **REFUTED** for the pool path — `reset_on_return='rollback'` cleans it, and the journal quote is *"a **same-connection cascade** in wedge-capture"* ⇒ *"**raise F5's priority** (the `tasks`→`task` rename is the cascade's root)."* F5 is currently a **Phase-2** item. **Fix:** move F5 (or at least its PG correctness pin) into Phase 1, or record the deferral and its rationale explicitly; the cascade's root is the wrong table name, and the baseline has now measured that.
+- **DR-35 — the measured F7 invariant supersedes D-38's provisional one.** The baseline's **MEASURED F7 invariant** (T2): occupancy across **all three** PG states (`idle` with `xact_start IS NULL` ⇒ checked-out-but-no-statement; `idle in transaction`; **`active`**) **plus** residence (`state_change − xact_start`) against the hold budget of the operation that opened it. *"A guard that counts only `idle in transaction` is **vacuous against two of the three shapes** and is therefore not a valid F7."* The healthy residence is measured (median 0.0005 s, p95 0.0007 s, max 0.0008 s over 40 cycles) ⇒ the provisional 2.0 s budget is **orders of magnitude** above the healthy value, and the budget's real job is to catch a hold that exceeds the operation's own budget. **Fix:** update D-38 to the measured three-state + residence form; replace the 2.0 s placeholder with the measured healthy-residence band plus the hold budget; and make F7-a assert the three states, not just `idle in transaction` (this also closes the residual half of **DR-4**).
+
+### 🟢 ADVISORY
+
+- **DR-36** — the baseline's own disclosed limits should be carried into the plan's honesty blocks: the real `_fetch_subshape_a_content_async` latency was **not measured** (modelled), the real `ChildReportsService._get_last_assistant_message` python-side cost was **not measured**, the incident-window mint overlap is **inferred**, and the `pool_timeout` stall was measured at 3 s (not the 30 s default) to fit the pack budget.
+
+## 14. FINAL VERDICT (superseding §1 and §12)
+
+# 🟡 DELTA-CONDITIONS — 24 conditions
+
+**The fold is real work** (9 of 12 council criticals genuinely closed; 0 relabelings; all six deviations improvements) **and the Phase-0 baseline is high-quality, measured evidence** that confirms four of my findings empirically (the census blindness, the shared-DSN collision, the F8 necessity, the `idle_in_transaction_session_timeout` signature) and settles OQ-1. **But the baseline has now measured a premise the plan rests on — F4's — to be wrong for the incident's shape**, and the preconditions remain partly prose.
+
+**Must close before Phase 1 (11 items):** DR-1 · DR-2 · DR-3 (+DR-21) · DR-16 · DR-17 · DR-18 · DR-19 · DR-20 · **DR-29 (new — F4's premise)** · **DR-30 (new — the flip condition's form)** · DR-25.
+
+**Must close in the same fold pass (13 items):** DR-6 · DR-7 · DR-8 · DR-9 · DR-10 · DR-11 · DR-12–DR-15 · DR-22 · DR-23 · DR-24 · DR-26 · DR-27 · **DR-31 · DR-32 · DR-33 · DR-34 · DR-35** (new) · DR-28.
+
+**Sequencing.** **Phase 0 is DONE** — its output exists and its evidence is on the branch. The next gate is the **plan fold** of the 24 conditions above; **Phase 1 may start only after the 11 must-close items are folded**, and DR-29/DR-30 must be folded **first** because they change what Phase 1 builds.
+
+**What the baseline settles about the council's own findings:** C-7's closure (DR-1) is now **empirically grounded** — the "row gone from `pg_stat_activity`" observable is the signature of `idle_in_transaction_session_timeout` (measured: `BACKEND GONE`, FATAL `IdleInTransactionSessionTimeout`), which F4 does not install. C-10's closure (DR-4) is **empirically confirmed** — the census-blindness claim is measured, and a census over `idle in transaction` alone is vacuous against two of the three leak shapes. C-8's closure (D-36) is **empirically confirmed** and **extended** (DR-32).
 
