@@ -85,7 +85,7 @@ from daemon.services import child_reports as child_reports_mod
 pytestmark = [pytest.mark.integration]
 
 #: The pack-local declared collected count (NEW packs only).
-EXPECTED_COLLECTED = 4
+EXPECTED_COLLECTED = 6
 
 _PG_HOST = os.environ.get("PG_TEST_HOST", "localhost")
 _PG_PORT = int(os.environ.get("PG_TEST_PORT", "5432"))
@@ -160,7 +160,20 @@ def _seed_instance(engine, *, instance_id: str, status: str) -> str:
     return instance_id
 
 
-def _seed_injection(engine, *, injection_id: str, parent_id: str, child_id: str) -> None:
+def _seed_injection(
+    engine,
+    *,
+    injection_id: str,
+    parent_id: str,
+    child_id: str,
+    report_message_id: str | None = None,
+) -> None:
+    """Seed a ReportInjection row.
+
+    ``report_message_id=None`` is the (a) shape (marker-first, no
+    artefact yet); a non-None value is the (b)/(c) shape (the artefact
+    handle is already backfilled).
+    """
     with SQLModelSession(engine) as session:
         session.add(
             ReportInjection(
@@ -168,12 +181,59 @@ def _seed_injection(engine, *, injection_id: str, parent_id: str, child_id: str)
                 parent_instance_id=parent_id,
                 child_instance_id=child_id,
                 child_message_id="child-msg-f8",
-                report_message_id=None,
+                report_message_id=report_message_id,
                 content="report content",
                 state=ReportInjectionState.DEFERRED.value,
             )
         )
         session.commit()
+
+
+def _seed_message(engine, *, message_id: str, instance_id: str) -> None:
+    """Seed a READY completion_report MessageQueue row."""
+    with SQLModelSession(engine) as session:
+        session.add(
+            MessageQueue(
+                message_id=message_id,
+                instance_id=instance_id,
+                content="carrier-dimension report",
+                source="f8-carrier-pin",
+                type=MessageType.COMPLETION_REPORT.value,
+                status=MessageStatus.READY.value,
+                priority=0,
+                enqueued_at=datetime.now(timezone.utc),
+            )
+        )
+        session.commit()
+
+
+def _seed_process_report_task(
+    engine, *, instance_id: str, message_id: str, status: str = TaskStatus.PENDING.value
+) -> None:
+    """Seed a PROCESS_REPORT Task row (PENDING/RUNNING = a LIVE carrier)."""
+    with SQLModelSession(engine) as session:
+        session.add(
+            Task(
+                task_type=TaskType.PROCESS_REPORT.value,
+                instance_id=instance_id,
+                message_id=message_id,
+                status=status,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        session.commit()
+
+
+def _count_process_report_tasks(engine, message_id: str) -> int:
+    """The number of PROCESS_REPORT carrier rows for one message."""
+    with engine.connect() as conn:
+        return conn.execute(
+            text(
+                "select count(*) from task where message_id = :m "
+                "and task_type = :t"
+            ),
+            {"m": message_id, "t": TaskType.PROCESS_REPORT.value},
+        ).scalar()
 
 
 def _build_holder(engine):
@@ -535,4 +595,173 @@ class TestF8eBoundedAsyncHold:
         assert message.content == "[No response content]", (
             "F8-e: the budget-exceeding fetch did not degrade to the "
             f"fallback content (got {message.content!r})"
+        )
+
+
+class TestF8CarrierDimensionNoSecondCarrier:
+    """The CARRIER dimension of the F8 (c) branch (the A1 coverage gap).
+
+    The carrier flag has three possible values at the (c) branch:
+
+    * ``True``  — the check RAN and a live carrier exists ⇒ no revival;
+    * ``False`` — the check RAN and found no live carrier ⇒ revive;
+    * ``None``  — UNKNOWN: the P0 snapshot never reached the (c) shape
+      (the ``carrier_check_needed`` gate), so the check never ran.
+
+    The loose consumer (``not live_carrier_exists``) folds ``None``
+    into "no live carrier" ⇒ it can enqueue a SECOND carrier for a
+    message that already has a live one (duplicate delivery). This pin
+    drives BOTH routes that reach the (c) branch with an UNKNOWN flag
+    and asserts NO second carrier is enqueued.
+
+    * **Route A** — (a)-shaped seed (``report_message_id`` NULL): the
+      seam hook creates the message + a LIVE PROCESS_REPORT carrier and
+      backfills ``report_message_id`` ⇒ P2 sees both rows and reaches
+      (c) with the flag UNKNOWN.
+    * **Route B** — (b)-shaped seed (``report_message_id`` set, the task
+      row missing): the seam hook creates the missing LIVE carrier ⇒
+      P2 sees both rows and reaches (c) with the flag UNKNOWN.
+
+    Plantable mutation: revert the (c) branch to
+    ``not live_carrier_exists`` ⇒ a SECOND carrier is enqueued ⇒ RED.
+    """
+
+    @pytest.mark.timeout(120)
+    def test_route_a_marker_first_falls_through_to_c_without_a_second_carrier(
+        self, engine
+    ):
+        parent_id = _seed_instance(
+            engine,
+            instance_id=f"parent-{uuid.uuid4().hex[:6]}",
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        child_id = _seed_instance(
+            engine,
+            instance_id=f"child-{uuid.uuid4().hex[:6]}",
+            status=InstanceStatus.COMPLETED.value,
+        )
+        injection_id = f"inj-{uuid.uuid4().hex[:8]}"
+        # (a) shape: no artefact handle yet.
+        _seed_injection(
+            engine, injection_id=injection_id, parent_id=parent_id, child_id=child_id
+        )
+        message_id = f"msg-{uuid.uuid4().hex[:8]}"
+
+        holder = _build_holder(engine)
+
+        def _concurrent_actor(injection_id: str) -> None:
+            """The concurrent actor: message + LIVE carrier + backfill."""
+            with SQLModelSession(engine) as session:
+                session.add(
+                    MessageQueue(
+                        message_id=message_id,
+                        instance_id=parent_id,
+                        content="concurrent actor report",
+                        source="f8-carrier-pin",
+                        type=MessageType.COMPLETION_REPORT.value,
+                        status=MessageStatus.READY.value,
+                        priority=0,
+                        enqueued_at=datetime.now(timezone.utc),
+                    )
+                )
+                session.add(
+                    Task(
+                        task_type=TaskType.PROCESS_REPORT.value,
+                        instance_id=parent_id,
+                        message_id=message_id,
+                        status=TaskStatus.PENDING.value,
+                        created_at=datetime.now(timezone.utc),
+                    )
+                )
+                row = session.get(ReportInjection, injection_id)
+                row.report_message_id = message_id
+                session.commit()
+
+        holder._f8_p0_p2_seam_hook = _concurrent_actor
+
+        result = asyncio.run(
+            holder._reconcile_deferred_report_async(
+                child_instance_id=child_id,
+                child_message_id="child-msg-f8",
+                injection_id=injection_id,
+                source="f8-pin",
+            )
+        )
+
+        carriers = _count_process_report_tasks(engine, message_id)
+        assert carriers == 1, (
+            "F8 carrier dimension (route A): a SECOND PROCESS_REPORT "
+            f"carrier was enqueued for message {message_id} "
+            f"(carriers={carriers}) — the (c) branch consumed an UNKNOWN "
+            "carrier flag as 'no live carrier'"
+        )
+        assert result is None or result.get("shape") != "c_revival", (
+            f"F8 carrier dimension (route A): the reconcile took the "
+            f"c_revival path with an UNKNOWN carrier flag: {result!r}"
+        )
+
+    @pytest.mark.timeout(120)
+    def test_route_b_missing_task_appears_at_the_seam_without_a_second_carrier(
+        self, engine
+    ):
+        parent_id = _seed_instance(
+            engine,
+            instance_id=f"parent-{uuid.uuid4().hex[:6]}",
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        child_id = _seed_instance(
+            engine,
+            instance_id=f"child-{uuid.uuid4().hex[:6]}",
+            status=InstanceStatus.COMPLETED.value,
+        )
+        injection_id = f"inj-{uuid.uuid4().hex[:8]}"
+        message_id = f"msg-{uuid.uuid4().hex[:8]}"
+        # (b) shape: the artefact handle is backfilled and the message
+        # row exists, but the carrier task row is MISSING.
+        _seed_injection(
+            engine,
+            injection_id=injection_id,
+            parent_id=parent_id,
+            child_id=child_id,
+            report_message_id=message_id,
+        )
+        _seed_message(engine, message_id=message_id, instance_id=parent_id)
+
+        holder = _build_holder(engine)
+
+        def _concurrent_actor(injection_id: str) -> None:
+            """The concurrent actor: the missing LIVE carrier appears."""
+            with SQLModelSession(engine) as session:
+                session.add(
+                    Task(
+                        task_type=TaskType.PROCESS_REPORT.value,
+                        instance_id=parent_id,
+                        message_id=message_id,
+                        status=TaskStatus.PENDING.value,
+                        created_at=datetime.now(timezone.utc),
+                    )
+                )
+                session.commit()
+
+        holder._f8_p0_p2_seam_hook = _concurrent_actor
+
+        result = asyncio.run(
+            holder._reconcile_deferred_report_async(
+                child_instance_id=child_id,
+                child_message_id="child-msg-f8",
+                injection_id=injection_id,
+                source="f8-pin",
+            )
+        )
+
+        carriers = _count_process_report_tasks(engine, message_id)
+        assert carriers == 1, (
+            "F8 carrier dimension (route B): a SECOND PROCESS_REPORT "
+            f"carrier was enqueued for message {message_id} "
+            f"(carriers={carriers}) — the (c) branch consumed an UNKNOWN "
+            "carrier flag as 'no live carrier'"
+        )
+        assert result is None or result.get("shape") != "c_revival", (
+            f"F8 carrier dimension (route B): the reconcile took the "
+            f"c_revival path with an UNKNOWN carrier flag: {result!r}"
         )

@@ -4,6 +4,15 @@ Lane: ``fix/db-pool-idle-txn`` (job ``634c38f2``). Contract:
 ``final-implementation-spec.md`` §1 F8.1–F8.9 and §5.2. This is the
 static AST twin of the PG legs F8-b/c/d/e.
 
+IT ALSO PINS THE STRICT CARRIER-FLAG CONSUMER (the A1 fix): the (c)
+branch must consume the carrier flag with an IDENTITY test
+(``live_carrier_exists is False``) — the LOOSE form
+(``not live_carrier_exists``) treats an UNKNOWN flag (``None``: the
+P0 snapshot never reached the (c) shape, so the check never ran) as
+"no live carrier" and can enqueue a SECOND carrier for a message that
+already has a live one (duplicate delivery). The twin fails if either
+reconcile variant returns to the loose form.
+
 THE THREE EXPECTED SITES (named here so a FOURTH is a deliberate
 failure — the rule is a whole-tree invariant, and a new violation
 anywhere in ``daemon/`` REDs this pack):
@@ -48,7 +57,7 @@ import ast
 from pathlib import Path
 
 #: The pack-local declared collected count (NEW packs only).
-EXPECTED_COLLECTED = 3
+EXPECTED_COLLECTED = 6
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _DAEMON_DIR = _REPO_ROOT / "daemon"
@@ -205,3 +214,144 @@ class TestF8aNoAwaitInsideManagerSessionScope:
                             )
             return
         pytest.fail("F8-a: _reconcile_deferred_report_async not found")
+
+
+class TestF8StrictCarrierFlagConsumer:
+    """The (c) branch consumes the carrier flag with an IDENTITY test.
+
+    The carrier flag has three possible values at the (c) branch:
+
+    * ``True``  — the check RAN and a live PROCESS_REPORT carrier exists
+      ⇒ never revive;
+    * ``False`` — the check RAN and found no live carrier ⇒ revive
+      (the wedge-fix recovery);
+    * ``None``  — UNKNOWN: the P0 snapshot did not reach the (c) shape
+      (the ``carrier_check_needed`` gate), so the check never ran ⇒
+      MUST NOT revive (a revival would enqueue a second carrier for a
+      message that may already have a live one).
+
+    The loose form (``not live_carrier_exists``) folds ``None`` into
+    "no live carrier" ⇒ it can revive on an unknown flag. This twin
+    pins the strict consumption in BOTH reconcile variants.
+
+    Plantable mutation: replace ``live_carrier_exists is False`` with
+    ``not live_carrier_exists`` in either variant ⇒ RED.
+    """
+
+    #: The two reconcile variants that carry the (c) branch.
+    _VARIANTS = (
+        "_reconcile_deferred_report",
+        "_reconcile_deferred_report_async",
+    )
+
+    def _variants(self) -> dict:
+        tree = ast.parse((_DAEMON_DIR / "manager.py").read_text())
+        found = {}
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name in self._VARIANTS
+            ):
+                found[node.name] = node
+        return found
+
+    def _carrier_flag_nodes(self, fn):
+        """Every place the carrier flag is READ inside one variant."""
+        return [
+            sub
+            for sub in ast.walk(fn)
+            if isinstance(sub, ast.Name) and sub.id == "live_carrier_exists"
+        ]
+
+    def _loose_uses(self, fn) -> list[int]:
+        """Line numbers of the LOOSE form (``not live_carrier_exists``)."""
+        loose = []
+        for sub in ast.walk(fn):
+            if (
+                isinstance(sub, ast.UnaryOp)
+                and isinstance(sub.op, ast.Not)
+                and isinstance(sub.operand, ast.Name)
+                and sub.operand.id == "live_carrier_exists"
+            ):
+                loose.append(sub.lineno)
+        return loose
+
+    def _strict_comparisons(self, fn) -> list[tuple[int, ast.Compare]]:
+        """The carrier flag's IDENTITY comparisons inside one variant."""
+        out = []
+        for sub in ast.walk(fn):
+            if not isinstance(sub, ast.Compare):
+                continue
+            operands = [sub.left, *sub.comparators]
+            if any(
+                isinstance(o, ast.Name) and o.id == "live_carrier_exists"
+                for o in operands
+            ):
+                out.append((sub.lineno, sub))
+        return out
+
+    def test_both_variants_compare_the_flag_by_identity(self):
+        found = self._variants()
+        for name in self._VARIANTS:
+            assert name in found, (
+                f"F8 strict-consumer: {name} not found in daemon/manager.py"
+            )
+            comparisons = self._strict_comparisons(found[name])
+            assert comparisons, (
+                f"F8 strict-consumer: {name} does not compare "
+                "live_carrier_exists at all — the carrier flag must be "
+                "consumed by an identity test"
+            )
+            for lineno, compare in comparisons:
+                assert all(
+                    isinstance(op, (ast.Is, ast.IsNot))
+                    for op in compare.ops
+                ), (
+                    f"F8 strict-consumer: {name}:{lineno} compares "
+                    "live_carrier_exists with a non-identity operator — "
+                    "the strict form must be `is False` / `is not True` "
+                    "(the loose `not live_carrier_exists` folds the "
+                    "UNKNOWN flag into 'no live carrier')"
+                )
+
+    def test_the_loose_form_is_absent_from_both_variants(self):
+        found = self._variants()
+        for name in self._VARIANTS:
+            loose = self._loose_uses(found[name])
+            assert not loose, (
+                f"F8 strict-consumer: {name} uses the LOOSE carrier form "
+                f"`not live_carrier_exists` at line(s) {loose} — an "
+                "UNKNOWN flag (None) must never trigger a c_revival "
+                "(a second carrier for a message that may already have "
+                "a live one)"
+            )
+
+    def test_the_strict_comparison_guards_the_c_revival_branch(self):
+        """The strict comparison must be the (c) branch's CONDITION — not
+        an incidental comparison elsewhere in the function."""
+        found = self._variants()
+        for name in self._VARIANTS:
+            fn = found[name]
+            carrier_ifs = []
+            for node in ast.walk(fn):
+                if not isinstance(node, ast.If):
+                    continue
+                test_src = ast.unparse(node.test)
+                if "live_carrier_exists" not in test_src:
+                    continue
+                body_src = ast.unparse(node)
+                if "c_revival" in body_src or "_TaskRevival" in body_src:
+                    carrier_ifs.append(node)
+            assert carrier_ifs, (
+                f"F8 strict-consumer: {name} has no (c) branch whose "
+                "condition consumes live_carrier_exists — the strict "
+                "comparison must guard the c_revival branch"
+            )
+            for node in carrier_ifs:
+                test_src = ast.unparse(node.test)
+                assert "is False" in test_src or "is not True" in test_src, (
+                    f"F8 strict-consumer: {name}:{node.lineno} — the "
+                    f"(c) branch condition is `{test_src}`; it must use "
+                    "the strict identity form (`live_carrier_exists is "
+                    "False` / `is not True`)"
+                )

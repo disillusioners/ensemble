@@ -11195,8 +11195,21 @@ class InstanceManager:
                 # OWN manager-engine session, so running it inside this
                 # held scope parks the outer backend idle-in-txn across
                 # the callee's checkout wait.
+                #
+                # STRICT CONSUMER (A1 fix, db-pool-idle-txn): the flag is
+                # consumed as ``is False`` — the check MUST have run and
+                # MUST have reported "no live carrier". ``None`` means
+                # UNKNOWN (the P0 snapshot did not reach the (c) shape,
+                # so the check never ran) and must NEVER trigger a
+                # revival: a revival would enqueue a SECOND carrier for
+                # a message that may already have a live one (duplicate
+                # delivery). Fail-safe: unknown ⇒ no revival.
+                # ``_has_live_process_report_carrier`` returns a real
+                # bool (``-> bool``; its only return is the
+                # ``... is not None`` expression) and never None, so
+                # False/True are the only non-unknown values.
                 if (
-                    not live_carrier_exists
+                    live_carrier_exists is False
                     and not db_dead_parent
                     and self._is_parent_alive(parent_row)
                 ):
@@ -11969,8 +11982,21 @@ class InstanceManager:
                 # OWN manager-engine session, so running it inside this
                 # held scope would park the outer backend idle-in-txn
                 # across the callee's checkout wait.
+                #
+                # STRICT CONSUMER (A1 fix, db-pool-idle-txn): the flag is
+                # consumed as ``is False`` — the check MUST have run and
+                # MUST have reported "no live carrier". ``None`` means
+                # UNKNOWN (the P0 snapshot did not reach the (c) shape,
+                # so the check never ran) and must NEVER trigger a
+                # revival: a revival would enqueue a SECOND carrier for
+                # a message that may already have a live one (duplicate
+                # delivery). Fail-safe: unknown ⇒ no revival.
+                # ``_has_live_process_report_carrier`` returns a real
+                # bool (``-> bool``; its only return is the
+                # ``... is not None`` expression) and never None, so
+                # False/True are the only non-unknown values.
                 if (
-                    not live_carrier_exists
+                    live_carrier_exists is False
                     and not db_dead_parent
                     and self._is_parent_alive(parent_row)
                 ):
