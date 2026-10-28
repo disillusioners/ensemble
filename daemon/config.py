@@ -48,6 +48,7 @@ from .constants import (
     ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX,
     MAX_INSTANCE_HISTORY,
     MAINTENANCE_CHECK_INTERVAL_MINUTES,
+    MANAGER_POOL_SIZE_DEFAULT,
     REPORT_REPAIR_EXCLUDED_AGENTS,
     VACUUM_DEAD_TUP_MIN,
     VACUUM_DEAD_TUP_SCALE_FRACTION,
@@ -644,6 +645,28 @@ class LimitsConfig(BaseSettings):
             "psycopg checkpoint-saver pool acquisition timeout in seconds "
             "(bounds the ghost-waiter lifetime an abandoned readiness "
             "probe leaves behind)"
+        ),
+    )
+
+    # ── Manager engine pool sizing (devops incident fix item #7) ────────
+    # One ordinary limits.* config knob resolved by the SAME 4-tier ladder
+    # as checkpoint_pool_max_size (DB > os.environ > yaml literal >
+    # default). The default is imported FROM daemon.constants so the
+    # constant stays the single canonical default-tier truth; the env
+    # name falls out of ``env_prefix="LIMITS_"``:
+    # ``LIMITS_MANAGER_POOL_SIZE``.
+    #
+    # Floor rationale + the honesty context (this is the pool the A4
+    # honesty note points at): see daemon/constants.py
+    # (MANAGER_POOL_SIZE_DEFAULT) — the single canonical home.
+    manager_pool_size: int = Field(
+        default=MANAGER_POOL_SIZE_DEFAULT,
+        ge=15,
+        description=(
+            "SQLAlchemy manager-engine pool_size — the PG engine every "
+            "repository shares (boot-applied; DB/env/yaml resolve at "
+            "boot via the managed key limits.manager_pool_size). Floor "
+            "= the default: values below 15 never take effect."
         ),
     )
 

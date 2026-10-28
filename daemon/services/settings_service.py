@@ -70,6 +70,10 @@ The add-a-key rule stands: registry default mirrors the pydantic
 Field default — chain ``daemon.constants`` → ``LimitsConfig`` Field
 → this registry default (ONE truth). ``effective_max`` is REMOVED
 (D3, settings-worker-slots) — no entry carries it.
+
+v1.2 (2026-10-28): adds ``limits.manager_pool_size`` (devops
+incident fix item #7 — manager-engine pool_size) — SEVEN managed
+keys, same ladder, same add-a-key rule.
 """
 
 from __future__ import annotations
@@ -305,6 +309,43 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
             "Precedence: DB override > env var "
             "LIMITS_CHECKPOINT_POOL_TIMEOUT_S > config.yaml literal > "
             "default."
+        ),
+    ),
+    # ── manager engine pool sizing (devops incident fix item #7) ─────────
+    # SQLAlchemy MANAGER-engine pool_size — the PG engine every
+    # repository shares (daemon/repositories/factory.py::
+    # create_postgres_engine), previously pinned at SQLAlchemy's
+    # unconfigured library default (pool_size=5 + max_overflow=10) with
+    # NO knob; the confirmed leaking pool (the P1 named in the A4
+    # honesty note). Mirrors LimitsConfig.manager_pool_size
+    # Field(default=MANAGER_POOL_SIZE_DEFAULT, ge=15). The engine is
+    # constructed once at boot, so a change requires a daemon restart.
+    #
+    # Floor + sizing rationale: see daemon/constants.py
+    # (MANAGER_POOL_SIZE_DEFAULT) — the single canonical home.
+    # Precedence: DB override > env var LIMITS_MANAGER_POOL_SIZE >
+    # config.yaml literal > default.
+    "limits.manager_pool_size": ManagedKeySpec(
+        key="limits.manager_pool_size",
+        config_path="limits.manager_pool_size",
+        env_var="LIMITS_MANAGER_POOL_SIZE",
+        value_type="int",
+        default=constants.MANAGER_POOL_SIZE_DEFAULT,
+        # Floor = the default (15): mirrors the Field's inclusive
+        # ``ge=15`` exactly (Ruling 1 — one validation truth). No
+        # upper bound — the Field carries none.
+        ge=15,
+        requires_restart=True,
+        sensitive=False,
+        description=(
+            "SQLAlchemy manager-engine pool_size (the PG engine every "
+            "repository shares; replaces the unconfigured library "
+            "default 5 + max_overflow=10 — the confirmed leaking "
+            "pool). Boot-applied (the engine is constructed once at "
+            "boot). Floor = 15 = the default: configured values below "
+            "15 are rejected and never take effect. Precedence: DB "
+            "override > env var LIMITS_MANAGER_POOL_SIZE > "
+            "config.yaml literal > default."
         ),
     ),
     # ── O3 instance-graph cache bounding (resource-cost-control, 2026-10-18) ──

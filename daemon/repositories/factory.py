@@ -11,7 +11,7 @@ from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.engine import URL
 from sqlmodel import Session, SQLModel
 
-from daemon.constants import BOOT_DB_TIMEOUT_S
+from daemon.constants import BOOT_DB_TIMEOUT_S, MANAGER_POOL_SIZE_DEFAULT
 
 from .project.repository import SQLModelProjectRepository
 from .instance.repository import SQLModelInstanceRepository
@@ -320,10 +320,38 @@ def create_postgres_engine(config: "EnsembleConfig") -> Engine:
         f"Creating PostgreSQL engine: {host}:{port}/{db}"
     )
 
+    # ── Manager engine pool sizing (devops incident fix item #7) ────────
+    # Resolved ONCE here from the already-loaded ``EnsembleConfig`` —
+    # the 4-tier ladder (DB > env > yaml > default) is applied by the
+    # settings resolver at boot (``apply_db_settings_overrides``)
+    # BEFORE the manager constructs this engine, so the field below
+    # already carries the winning tier; same defensive-read shape as
+    # the checkpoint pool's read in daemon/persistence.py (a config
+    # built without the ``limits`` section yields the documented
+    # default tier instead of raising at engine construction).
+    # SQLite guard — structural, exactly like the checkpoint knobs:
+    # this read lives ONLY inside this PG-only factory; the SQLite
+    # engine branch (``create_engine_from_config``) constructs without
+    # ``pool_size`` and never sees the knob.
+    limits_cfg = getattr(config, "limits", None)
+    manager_pool_size = int(
+        getattr(
+            limits_cfg,
+            "manager_pool_size",
+            MANAGER_POOL_SIZE_DEFAULT,
+        )
+    )
+    logger.info(
+        "Manager engine pool sizing: pool_size=%s "
+        "(limits.manager_pool_size; default tier %s, floor = default)",
+        manager_pool_size,
+        MANAGER_POOL_SIZE_DEFAULT,
+    )
+
     engine = create_engine(
         url,
         echo=False,
-        pool_size=5,
+        pool_size=manager_pool_size,
         max_overflow=10,
         pool_pre_ping=True,
         # B2/B3: render every PG session clock in UTC (see

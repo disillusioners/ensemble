@@ -19,6 +19,7 @@ age math on a non-UTC-default PG server) is pinned separately in
 from __future__ import annotations
 
 import daemon.repositories.factory as factory_mod
+from daemon.constants import MANAGER_POOL_SIZE_DEFAULT
 from daemon.ensemble_config import EnsembleConfig, PostgresConfig
 from daemon.repositories.factory import (
     PG_SESSION_CONNECT_ARGS,
@@ -109,7 +110,14 @@ class TestPgEngineUtcSessionConnectArgs:
 
         engine = create_postgres_engine(_test_pg_config())
         try:
-            assert captured["kwargs"]["pool_size"] == 5
+            # pool_size is now the LIMITS_MANAGER_POOL_SIZE knob (devops
+            # incident fix item #7); with no limits override on this bare
+            # config it resolves to the default tier, pinned to the
+            # constant exactly like the checkpoint pool's max_size pin in
+            # test_persistence.py. The old hard-coded 5 is gone.
+            assert captured["kwargs"]["pool_size"] == (
+                MANAGER_POOL_SIZE_DEFAULT
+            )
             assert captured["kwargs"]["max_overflow"] == 10
             assert captured["kwargs"]["pool_pre_ping"] is True
         finally:

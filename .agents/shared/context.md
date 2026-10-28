@@ -198,3 +198,7 @@ NO live promote performed.
    capture-era A/B `7c9440b3` still open (resolved_at NULL) — cleanup candidate.
 
 **Disposition (user-decided, executed 2026-10-21/22):** commit 660e73453 KEEP (unpushed; two-lens review = correct + sabotage-clean; P1 test-stub fix + security merge conditions logged as follow-ups); agents/wanderer/skill-set.yaml auto_load flip REVERTED via git restore (auto_load is owner-scoped; the observed leak was search-driven — deactivations were the real barrier; fleet convention = own planner auto_load true). DB cleanup + fix sequencing deferred.
+
+## Manager DB-engine pool knob — LIMITS_MANAGER_POOL_SIZE (2026-10-28, devops incident fix item #7)
+
+New managed knob `limits.manager_pool_size` / env `LIMITS_MANAGER_POOL_SIZE` (4-tier ladder DB > env > yaml > default, same as the checkpoint pool knobs): sizes the SQLAlchemy manager engine's `pool_size` in `daemon/repositories/factory.py::create_postgres_engine` (was the unconfigured library default pool_size=5 + max_overflow=10 — the confirmed leaking pool). Default 15, floor 15 (values below 15 are rejected, never take effect); no overflow/recycle/ping knobs added. Activation = next daemon restart (engine built once at boot).

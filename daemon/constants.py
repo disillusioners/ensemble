@@ -216,6 +216,31 @@ CHECKPOINT_POOL_TIMEOUT_S_DEFAULT: float = 5.0
 # pools' state (detail.pool_state) so the poison is VISIBLE rather than
 # inferred from timeouts.
 
+# ── Manager engine pool sizing (devops incident fix item #7) ────────────
+# The SQLAlchemy MANAGER engine (daemon/repositories/factory.py::
+# ``create_postgres_engine`` — the PG engine carrying
+# ``PG_SESSION_CONNECT_ARGS``) previously ran on SQLAlchemy's
+# unconfigured library default (pool_size=5 + max_overflow=10) — the
+# ONLY pool with no env knob, and the confirmed leaking pool (the P1
+# named in the HONESTY note above).
+#
+# DEFAULT TIER ONLY (house 4-tier ladder, same shape as
+# CHECKPOINT_POOL_MAX_SIZE_DEFAULT above): the runtime value resolves
+# DB > env > yaml > this default at boot via the managed key
+# ``limits.manager_pool_size`` (env ``LIMITS_MANAGER_POOL_SIZE``). It
+# feeds the ``LimitsConfig.manager_pool_size`` Field default
+# (daemon/config.py), which ``create_postgres_engine`` reads when it
+# constructs the engine (defensively, same shape as the checkpoint
+# pool's read in daemon/persistence.py).
+#
+# FLOOR = 15 = the default: the knob REPLACES the library default on
+# the daemon-wide shared engine, so a configured value below 15 would
+# be a capacity regression and never takes effect (Field ``ge=15`` +
+# the mirrored registry bound — the checkpoint clamp mechanism, i.e.
+# validation-reject at the Field/registry validator, not a runtime
+# clamp). pool_size ONLY: no overflow/recycle/ping knobs.
+MANAGER_POOL_SIZE_DEFAULT: int = 15
+
 # ── Checkpoint readiness sentinel (incident 2026-10-10, W1) ─────────────
 # Fixed, discoverable namespace for the checkpoint-saver readiness
 # probe's sentinel write+read. The sentinel goes through the REAL saver

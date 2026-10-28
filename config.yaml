@@ -255,6 +255,14 @@ limits:
   # default was 30.0s). See daemon/constants.py
   # (CHECKPOINT_POOL_TIMEOUT_S_DEFAULT).
   checkpoint_pool_timeout_s: 5.0
+  # Manager engine pool sizing (devops incident fix item #7). Same
+  # 4-tier ladder as llm_concurrency: DB override > env var
+  # LIMITS_MANAGER_POOL_SIZE > this yaml literal > built-in default.
+  # Boot-applied (the manager engine is constructed once at boot).
+  # Floor = 15 = the default (values below 15 never take effect).
+  # Canonical rationale: see daemon/constants.py
+  # (MANAGER_POOL_SIZE_DEFAULT).
+  manager_pool_size: 15
   # S5 degenerate re-invoke cap (empty-response-guard Phase 1): max
   # consecutive reasoning-only / <think>-tag-only AI responses the
   # router re-invokes over before falling through to nudge/END
