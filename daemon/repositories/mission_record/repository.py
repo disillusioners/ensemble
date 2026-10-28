@@ -510,14 +510,19 @@ class MissionRecordRepository:
         (``ON CONFLICT (anchor_instance_id) WHERE <open predicate> DO
         NOTHING`` — the ``ux_mission_records_anchor_open`` partial
         unique index's own key/predicate, byte-identical via
-        :data:`OPEN_EPOCH_STATUS_SQL`). On ``rowcount == 0`` — ANY
-        loser, concurrent or sequential — the winning row is
-        re-resolved via the ANCHOR-scoped probe
-        (:meth:`find_open_epoch_by_anchor`) and returned: no
+        :data:`OPEN_EPOCH_STATUS_SQL`). The LOSER SIGNAL is the
+        upsert's ``RETURNING mission_id`` — the winner gets one
+        returned row, the loser none — so ANY loser, concurrent or
+        sequential, re-resolves the winning row via the ANCHOR-scoped
+        probe (:meth:`find_open_epoch_by_anchor`) and returns it: no
         ``IntegrityError`` is raised and the caller's transaction is
-        not poisoned. The caller-session path (``session is not
-        None``) keeps its documented ORM ``session.add`` semantics
-        (D-10 — poison-and-reraise stays load-bearing there).
+        not poisoned. (``rowcount`` is not a usable signal here —
+        psycopg3 reports ``rowcount = -1`` ("unknown") for ``INSERT
+        ... ON CONFLICT DO NOTHING``, so the affected-row count is
+        not available on that path.) The caller-session path
+        (``session is not None``) keeps its documented ORM
+        ``session.add`` semantics (D-10 — poison-and-reraise stays
+        load-bearing there).
         """
         if session is not None:
             session.add(record)

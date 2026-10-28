@@ -513,8 +513,13 @@ class MissionRecordService:
         Idempotency: the repository upsert handles the measured
         trigger — a CONCURRENT double-mint for the same anchor (D-51)
         — by construction (``ON CONFLICT (anchor) WHERE open DO
-        NOTHING``; ``rowcount == 0`` re-resolves via the anchor-scoped
-        probe and returns the winner). When ``founding_message_id``
+        NOTHING``): the upsert's ``RETURNING mission_id`` is the LOSER
+        SIGNAL (the winner gets one returned row, the loser none), and
+        the loser re-resolves the winning row via the anchor-scoped
+        probe. ``rowcount`` is not a usable signal here — psycopg3
+        reports ``rowcount = -1`` ("unknown") for ``INSERT ... ON
+        CONFLICT DO NOTHING``, so the affected-row count is not
+        available on that path. When ``founding_message_id``
         is set, the pre-insert ``(anchor, founding_message_id)`` probe
         below additionally short-circuits the sequential duplicate
         without a round-trip to the constraint.
@@ -548,7 +553,8 @@ class MissionRecordService:
             # Lost a unique race — the concurrent mint won. The
             # repository upsert already handles the measured trigger
             # (the CONCURRENT DOUBLE-MINT for the same anchor —
-            # D-51: on ``rowcount == 0`` it re-resolves via the
+            # D-51: on the ``RETURNING`` loser signal (no returned
+            # row) it re-resolves via the
             # anchor-scoped probe and returns the winner WITHOUT
             # raising), so this branch is the residual belt for any
             # OTHER IntegrityError shape.
