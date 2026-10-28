@@ -609,9 +609,9 @@ class MissionRecordRepository:
             if stored is not None:
                 return stored
             raise IntegrityError(
-                "insert_mission: rowcount=1 but the minted epoch row "
-                f"{(record.mission_id or '')[:8]}... is not readable "
-                "post-commit",
+                "insert_mission: the mint reported success but the "
+                f"minted epoch row {(record.mission_id or '')[:8]}... "
+                "is not readable post-commit",
                 None,
                 None,
             )

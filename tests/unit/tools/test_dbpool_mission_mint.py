@@ -6,10 +6,13 @@ Lane: ``fix/db-pool-idle-txn`` (job ``634c38f2``). Contract:
 What these pins assert:
 
 * **F6-a** — the boot mint uses an **upsert** with
-  ``on_conflict_do_nothing`` keyed on the ANCHOR; on ``rowcount == 0``
-  it re-resolves via the **anchor-scoped** probe
-  (``find_open_epoch_by_anchor``) — and the sequential double-mint
-  returns the SAME ``mission_id`` without raising.
+  ``on_conflict_do_nothing`` keyed on the ANCHOR; the LOSER SIGNAL is
+  the upsert's ``RETURNING mission_id`` (the winner gets one returned
+  row, the loser none — ``rowcount`` is not a usable signal on this
+  path, psycopg3 reports ``rowcount = -1``), so the loser re-resolves
+  via the **anchor-scoped** probe (``find_open_epoch_by_anchor``) —
+  and the sequential double-mint returns the SAME ``mission_id``
+  without raising.
 * **F6-e** — the CONCRETE F6-subject mutation: the conflict-target
   predicate must stay **byte-identical** to the partial unique index's
   predicate.
@@ -53,7 +56,7 @@ from daemon.repositories.mission_record.models import (
 from daemon.repositories.mission_record.repository import MissionRecordRepository
 
 #: The pack-local declared collected count (NEW packs only).
-EXPECTED_COLLECTED = 8
+EXPECTED_COLLECTED = 7
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _REPO_PATH = _REPO_ROOT / "daemon" / "repositories" / "mission_record" / "repository.py"
@@ -92,7 +95,7 @@ def _function_source(path: Path, name: str) -> str:
 
 class TestF6aUpsertShape:
     """F6-a — the upsert is anchor-keyed and re-resolves on the
-    ``rowcount == 0`` path."""
+    ``RETURNING`` loser-signal path."""
 
     def test_insert_mission_uses_on_conflict_do_nothing(self):
         source = _function_source(_REPO_PATH, "insert_mission")
