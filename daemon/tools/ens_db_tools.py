@@ -182,6 +182,16 @@ REPAIR_POOL_MAX_OVERFLOW = 3
 REPAIR_POOL_RECYCLE_S = 3600
 REPAIR_POOL_TIMEOUT_S = 10
 
+# The repair engine's pool attribution (db-pool-idle-txn, F2.5/D-49).
+# Rides the CONNINFO channel (a psycopg3 connect_args kwarg merged
+# into the conninfo), NOT the ``-c options`` literal — measured
+# (BASELINE.md T3): the conninfo parameter BEATS ``options=-c``, and
+# the shared UTC constant is interpolated LAST into the options
+# string, so a name placed there would be overridden (measured:
+# ``repair_engine_reports_manager_name: true``). The conninfo channel
+# is override-proof, not merely last-wins-correct.
+REPAIR_ENGINE_APPLICATION_NAME = "ensemble-repair"
+
 # PG connect_args timeouts (architect §3.1).
 REPAIR_STATEMENT_TIMEOUT_MS = 60_000
 REPAIR_LOCK_TIMEOUT_MS = 10_000
@@ -608,6 +618,11 @@ def _build_repair_engine(shared_engine: Engine) -> Engine:
         pool_pre_ping=True,
         pool_recycle=REPAIR_POOL_RECYCLE_S,
         pool_timeout=REPAIR_POOL_TIMEOUT_S,
+        # F2.5 (db-pool-idle-txn): pin the reset invariant explicitly —
+        # "an aborted connection is never handed out" (the library
+        # default applies it; an implicit default is not a pinned
+        # invariant). The ONLY knob addition in this lane.
+        pool_reset_on_return="rollback",
     )
     if is_pg:
         # The UTC session option rides the SAME libpq ``options``
@@ -615,7 +630,11 @@ def _build_repair_engine(shared_engine: Engine) -> Engine:
         # engine factory's ``PG_SESSION_CONNECT_ARGS`` so the repair
         # path's SQL-side ``now()`` readers evaluate in the same frame
         # the naive-UTC digit writers stamp (B2/B3 class-closing fix,
-        # daemon/repositories/factory.py).
+        # daemon/repositories/factory.py). The literal below is
+        # BYTE-IDENTICAL to its pre-F2 form (D-17): the shared
+        # constant is interpolated LAST and nothing is appended — the
+        # engine's ``application_name`` rides the conninfo parameter
+        # (its own connect_args key), never this string.
         kwargs["connect_args"] = {
             "options": (
                 f"-c statement_timeout={REPAIR_STATEMENT_TIMEOUT_MS} "
@@ -624,6 +643,11 @@ def _build_repair_engine(shared_engine: Engine) -> Engine:
                 f"{REPAIR_IDLE_IN_TXN_TIMEOUT_MS} "
                 f"{PG_SESSION_CONNECT_ARGS['options']}"
             ),
+            # D-49: attribution via the CONNINFO channel (psycopg3
+            # merges connect_args kwargs into the conninfo) — the
+            # override-proof channel; a later-appended shared constant
+            # cannot flip it.
+            "application_name": REPAIR_ENGINE_APPLICATION_NAME,
         }
     else:
         # SQLite — mirror the shared engine's pragmas (WAL + busy_timeout)
