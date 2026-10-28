@@ -757,14 +757,10 @@ class TestPreCall95KillSwitch:
 # Byte-exact CLE persist lines (the handler's Variant B writes). The
 # 95% hook must NOT touch them — source-pinned here so any edit to the
 # handler's persist recipe fails this suite (task T-isolation anchor).
-_CLE_PERSIST_MESSAGES_LINE = (
-    "await graph.aupdate_state(thread_config, "
-    "{'messages': replacement_messages}, as_node='agent')"
+_CLE_PERSIST_SEAM_LINE = (
+    'abort_policy="raise",'
 )
-_CLE_PERSIST_STAMP_LINE = (
-    "await graph.aupdate_state(thread_config, "
-    "{'compacted_at': result.compacted_at}, as_node='agent')"
-)
+
 
 
 class TestPreCall95CLEIsolation:
@@ -775,13 +771,9 @@ class TestPreCall95CLEIsolation:
         import daemon.graph as graph_mod
 
         source = inspect.getsource(graph_mod)
-        assert source.count(_CLE_PERSIST_MESSAGES_LINE) == 1, (
-            "CLE persist (messages) site must stay byte-identical and "
-            "appear exactly once"
-        )
-        assert source.count(_CLE_PERSIST_STAMP_LINE) == 1, (
-            "CLE persist (compacted_at) site must stay byte-identical "
-            "and appear exactly once"
+        assert source.count(_CLE_PERSIST_SEAM_LINE) == 1, (
+            "CLE persist must route through the shared seam with "
+            "abort_policy='raise' exactly once"
         )
         # The CLE handler keeps its in-frame rebuild + single re-invoke.
         assert "compact_messages = [SystemMessage(content=system_prompt)] + updated_state.values.get('messages', [])" in source
@@ -1060,3 +1052,38 @@ class TestPreCall95TapLabel:
         assert compaction_mod.estimate_messages_tokens is not None
         msgs = make_messages(3)
         assert compaction_mod.estimate_messages_tokens(msgs) > 0
+
+
+class TestCLEHandlerNoDirectAupdateState:
+    """Region-scoped absence pin: the CLE handler block must NOT contain
+    any direct ``aupdate_state(`` call — all persists route through the
+    shared seam. A reintroduced direct write in that block fails this pin."""
+
+    def test_no_direct_aupdate_state_in_cle_handler(self):
+        import inspect
+        import daemon.graph as graph_mod
+
+        path = inspect.getsourcefile(graph_mod)
+        lines = open(path).read().splitlines()
+        # CLE handler block: from 'except ContextLengthExceededError:' to
+        # the post-compaction rebuild line.
+        start = None
+        end = None
+        for i, line in enumerate(lines, 1):
+            if start is None and "except ContextLengthExceededError:" in line:
+                start = i
+            if start is not None and "compact_messages = [SystemMessage(content=system_prompt)] + updated_state" in line:
+                end = i
+                break
+        assert start is not None and end is not None, "CLE handler region not found"
+        region = "\n".join(lines[start - 1:end])
+        # strip comment lines to avoid false negatives on documented mentions
+        code_lines = [
+            ln for ln in region.splitlines()
+            if not ln.lstrip().startswith("#")
+        ]
+        region_code = "\n".join(code_lines)
+        assert "aupdate_state(" not in region_code, (
+            "CLE handler block must not call aupdate_state directly; "
+            "route persists through the shared seam"
+        )

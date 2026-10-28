@@ -12,7 +12,8 @@ What this module owns
 * the envelope of §6.1 (``v`` / ``type`` / ``id`` / ``session_id`` /
   ``ts`` / ``method`` / ``params`` / ``result`` / ``error``),
 * the seven methods of §6.3 (``hello``, ``heartbeat``, ``session.begin``,
-  ``session.end``, ``tools/list``, ``tools/call``, ``notifications/*``),
+  ``session.end``, ``tools/list``, ``tools/call``, ``notifications/*``)
+  plus the v0.2 client-originated ``session.terminate``,
 * the capability map of §5.3,
 * the typed error codes of §6.5.
 
@@ -29,7 +30,37 @@ import json
 from typing import Any
 
 #: The protocol version exchanged in the hello handshake (§5.2).
+#:
+#: This is the DEFAULT — the version the centre stamps on a frame whose
+#: connection has not negotiated one yet, and the version every v0.1
+#: connection runs. It is NOT the only version the centre speaks: see
+#: :data:`SUPPORTED_PROTOCOL_VERSIONS`.
 PROTOCOL_VERSION = "0.1"
+
+#: The v0.2 protocol version — the session-termination generation.
+#:
+#: v0.2 adds the CLIENT-ORIGINATED ``session.terminate`` receipt (§6.10),
+#: the ``client_terminate`` capability and the ``reason`` member of the
+#: centre's ``session.end`` params. Everything v0.2 adds is
+#: VERSION-SCOPED: a connection that negotiated ``"0.1"`` behaves
+#: byte-identically to the v0.1 centre.
+PROTOCOL_VERSION_V02 = "0.2"
+
+#: The protocol versions this centre ACCEPTS in the hello handshake.
+#:
+#: The order is the PREFERENCE order (newest first): the ``supported``
+#: member of a ``PROTOCOL_VERSION_UNSUPPORTED`` refusal lists them, and a
+#: client that can speak several picks the first one it speaks.
+#:
+#: The centre NEVER silently downgrades (§5.2): a client that asks for a
+#: version outside this tuple is refused with
+#: :data:`CODE_PROTOCOL_VERSION_UNSUPPORTED` and its socket is closed.
+#: The version a connection RUNS is the one the client REQUESTED (§5.2)
+#: — never one the centre picked for it.
+SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = (
+    PROTOCOL_VERSION_V02,
+    PROTOCOL_VERSION,
+)
 
 #: The server name advertised in the hello result (§5.4).
 SERVER_NAME = "ensemble-gateway"
@@ -45,6 +76,18 @@ METHOD_HELLO = "hello"
 METHOD_HEARTBEAT = "heartbeat"
 METHOD_SESSION_BEGIN = "session.begin"
 METHOD_SESSION_END = "session.end"
+#: The CLIENT-ORIGINATED termination receipt (SPEC v0.2 §6.10).
+#:
+#: The machine asks the centre to end a session it owns. The centre
+#: NEVER refuses it (the client owns the machine — §6.10.1 forbids a
+#: refusal of an operator-forced end), and the connection STAYS OPEN:
+#: the socket may still be carrying a late ``tools/call`` answer.
+#:
+#: It is a v0.2 method: a connection that negotiated ``"0.1"`` never
+#: advertises the ``client_terminate`` capability, so a ``session.terminate``
+#: on such a connection falls through to the unknown-method arm and has
+#: NO session effect.
+METHOD_SESSION_TERMINATE = "session.terminate"
 #: Defined for protocol completeness: the center serves its catalog via
 #: ``session.begin`` (§6.4 — the catalog rides the session) and never
 #: ISSUES ``tools/list`` (§5.9 makes it optional for the center; the
@@ -62,8 +105,13 @@ CENTER_ORIGINATED_METHODS = (
 )
 
 #: The methods the MACHINE originates (client → center). ``hello`` is a
-#: request; ``heartbeat`` is a notification.
-CLIENT_ORIGINATED_METHODS = (METHOD_HELLO, METHOD_HEARTBEAT)
+#: request; ``heartbeat`` is a notification; ``session.terminate`` is a
+#: request (SPEC v0.2 — see :data:`METHOD_SESSION_TERMINATE`).
+CLIENT_ORIGINATED_METHODS = (
+    METHOD_HELLO,
+    METHOD_HEARTBEAT,
+    METHOD_SESSION_TERMINATE,
+)
 
 # ── Capability flags (§5.3) ──────────────────────────────────────────────
 CAP_SESSION = "session"
@@ -73,6 +121,14 @@ CAP_HEARTBEAT = "heartbeat"
 CAP_SCREENSHOT_DELTA = "screenshot_delta"
 CAP_MULTI_SESSION = "multi_session"
 CAP_CLIENT_CERT = "client_cert"
+#: The v0.2 capability that lets the MACHINE terminate a session from its
+#: own side (SPEC v0.2 §5.3 / §6.10).
+#:
+#: It is NOT part of :data:`REQUIRED_CLIENT_CAPABILITIES`: a v0.1
+#: machine does not know the name, and demanding it would refuse every
+#: shipped client. The centre advertises it only on a v0.2-negotiated
+#: connection, and only when the machine advertised it too.
+CAP_CLIENT_TERMINATE = "client_terminate"
 
 #: The capabilities the CENTER demands of the machine.
 #:
@@ -88,6 +144,12 @@ REQUIRED_CLIENT_CAPABILITIES: tuple[str, ...] = (CAP_SESSION, CAP_TOOLS, CAP_HEA
 #: (``notifications: false``), supports no delta screenshots, runs one
 #: session per machine (``multi_session: false``) and speaks the bearer
 #: tier, not mTLS (``client_cert: false``).
+#:
+#: ``client_terminate`` is DELIBERATELY ABSENT from this map: it is a
+#: v0.2 capability and this map is what a v0.1-negotiated connection
+#: advertises — adding the key here would change the v0.1 hello result
+#: (it must stay byte-identical). The v0.2 map is built per connection
+#: in the service (:func:`_capabilities_for`).
 SERVER_CAPABILITIES: dict[str, bool] = {
     CAP_SESSION: True,
     CAP_TOOLS: True,
@@ -104,6 +166,12 @@ CODE_CAPABILITY_MISSING = "CAPABILITY_MISSING"
 CODE_AUTH_FAILED = "AUTH_FAILED"
 CODE_MACHINE_NOT_ENROLLED = "MACHINE_NOT_ENROLLED"
 CODE_MACHINE_BUSY = "MACHINE_BUSY"
+#: Two connections claim the SAME ``machine_id`` (SPEC v0.2 §5.6).
+#:
+#: The centre refuses the NEWCOMER and leaves the INCUMBENT alone — the
+#: incumbent keeps its socket AND its live session. The centre never
+#: evicts a live connection to make room for a duplicate id.
+CODE_MACHINE_ID_CONFLICT = "MACHINE_ID_CONFLICT"
 CODE_SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
 CODE_SESSION_EXPIRED = "SESSION_EXPIRED"
 CODE_TOOL_NOT_FOUND = "TOOL_NOT_FOUND"
@@ -125,6 +193,7 @@ CENTER_EMITTED_CODES: frozenset[str] = frozenset(
         CODE_CAPABILITY_MISSING,
         CODE_MACHINE_NOT_ENROLLED,
         CODE_MACHINE_BUSY,
+        CODE_MACHINE_ID_CONFLICT,
         CODE_SESSION_NOT_FOUND,
         CODE_SESSION_EXPIRED,
         CODE_HEARTBEAT_TIMEOUT,
@@ -152,6 +221,14 @@ RELAYED_CODES: frozenset[str] = frozenset(
 #: operator ask the ledger "why did this session not end?".
 AUDIT_TOOL_SESSION_END = "session.end"
 AUDIT_TOOL_SESSION_EXPIRE = "session.expire"
+#: The audit ``tool`` value of the CLIENT-ORIGINATED termination receipt
+#: (SPEC v0.2 §6.10). The machine asked for the end, so the row records
+#: a termination the centre did NOT originate.
+AUDIT_TOOL_SESSION_TERMINATE = "session.terminate"
+#: The audit ``tool`` value of the DUPLICATE-MACHINE-ID refusal
+#: (SPEC v0.2 §5.6). The row records which id was refused and which
+#: incumbent it collided with.
+AUDIT_TOOL_HELLO_CONFLICT = "hello.conflict"
 
 #: The audit ``tool`` values the CENTRE RESERVES for the session-lifecycle
 #: surfaces.
@@ -169,7 +246,12 @@ AUDIT_TOOL_SESSION_EXPIRE = "session.expire"
 #: for every other tool) nor the tool input contract (the schema is
 #: unchanged) — it only keeps the ledger's namespace honest.
 RESERVED_AUDIT_TOOL_NAMES: frozenset[str] = frozenset(
-    {AUDIT_TOOL_SESSION_END, AUDIT_TOOL_SESSION_EXPIRE}
+    {
+        AUDIT_TOOL_SESSION_END,
+        AUDIT_TOOL_SESSION_EXPIRE,
+        AUDIT_TOOL_SESSION_TERMINATE,
+        AUDIT_TOOL_HELLO_CONFLICT,
+    }
 )
 
 #: The protocol limit of a single frame (§6.7) and the hard ceiling above
@@ -242,14 +324,22 @@ def make_envelope(
     params: dict[str, Any] | None = None,
     result: Any = None,
     error: dict[str, Any] | None = None,
+    v: str = PROTOCOL_VERSION,
 ) -> dict[str, Any]:
     """Build one envelope of §6.1.
 
     Every frame the center sends carries ``v`` — the shipped client checks
     the version of EVERY inbound message and closes the socket SILENTLY
     (no error frame) on a missing or wrong ``v``.
+
+    ``v`` is the version the frame is stamped with: the DEFAULT is
+    :data:`PROTOCOL_VERSION` (``"0.1"``), which keeps every v0.1 frame
+    byte-identical. A v0.2-negotiated connection stamps its OWN
+    negotiated version on EVERY outbound frame — the centre's single
+    ``_send`` choke point does it, so a frame can never carry the
+    default by accident.
     """
-    envelope: dict[str, Any] = {"v": PROTOCOL_VERSION, "type": type}
+    envelope: dict[str, Any] = {"v": v, "type": type}
     if id is not None:
         envelope["id"] = id
     if session_id:
@@ -270,6 +360,7 @@ def make_error_envelope(
     id: str | None,
     error: GatewayProtocolError,
     session_id: str | None = None,
+    v: str = PROTOCOL_VERSION,
 ) -> dict[str, Any]:
     """Build an error envelope (§6.5).
 
@@ -282,6 +373,7 @@ def make_error_envelope(
         id=id,
         session_id=session_id,
         error=error.to_error_object(),
+        v=v,
     )
 
 
@@ -307,8 +399,11 @@ def canonical_json(value: Any) -> str:
 
 
 __all__ = [
+    "AUDIT_TOOL_HELLO_CONFLICT",
     "AUDIT_TOOL_SESSION_END",
     "AUDIT_TOOL_SESSION_EXPIRE",
+    "AUDIT_TOOL_SESSION_TERMINATE",
+    "CAP_CLIENT_TERMINATE",
     "CENTER_EMITTED_CODES",
     "CENTER_ORIGINATED_METHODS",
     "CLIENT_ORIGINATED_METHODS",
@@ -317,6 +412,7 @@ __all__ = [
     "CODE_HEARTBEAT_TIMEOUT",
     "CODE_INTERNAL",
     "CODE_MACHINE_BUSY",
+    "CODE_MACHINE_ID_CONFLICT",
     "CODE_MACHINE_NOT_ENROLLED",
     "CODE_PAYLOAD_TOO_LARGE",
     "CODE_PROTOCOL_VERSION_UNSUPPORTED",
@@ -336,14 +432,17 @@ __all__ = [
     "METHOD_NOTIFICATIONS_PREFIX",
     "METHOD_SESSION_BEGIN",
     "METHOD_SESSION_END",
+    "METHOD_SESSION_TERMINATE",
     "METHOD_TOOLS_CALL",
     "METHOD_TOOLS_LIST",
     "PROTOCOL_VERSION",
+    "PROTOCOL_VERSION_V02",
     "RELAYED_CODES",
     "RESERVED_AUDIT_TOOL_NAMES",
     "REQUIRED_CLIENT_CAPABILITIES",
     "SERVER_CAPABILITIES",
     "SERVER_NAME",
+    "SUPPORTED_PROTOCOL_VERSIONS",
     "TYPE_ERROR",
     "TYPE_NOTIFICATION",
     "TYPE_REQUEST",

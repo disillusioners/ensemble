@@ -76,9 +76,18 @@ import websockets
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
-# ── constants transcribed from SPEC.md v0.1 ───────────────────────────────
+# ── constants transcribed from SPEC.md v0.1 / v0.2 ───────────────────────
 
 PROTOCOL_VERSION = "0.1"  # §5.2 / §6.1
+
+#: The v0.2 protocol version — the session-termination generation
+#: (§6.10). The kit's peer can negotiate it; the kit's reference centre
+#: implements it.
+PROTOCOL_VERSION_V02 = "0.2"
+
+#: The versions the kit's reference centre ACCEPTS (§5.2 — newest
+#: first; the centre never silently downgrades).
+SUPPORTED_PROTOCOL_VERSIONS = (PROTOCOL_VERSION_V02, PROTOCOL_VERSION)
 
 #: §5.3 — the capabilities the machine advertises.  ``notifications`` is
 #: True here only as the capability-map table entry; the OFFERING-side
@@ -91,6 +100,15 @@ CLIENT_CAPABILITIES: dict[str, bool] = {
     "screenshot_delta": False,
     "multi_session": False,
     "client_cert": False,
+}
+
+#: §5.3 / §6.10 — the v0.2 capability map of a machine that can end a
+#: session from its own side.  ``client_terminate`` is the ONLY
+#: difference: the centre advertises the capability only when the
+#: machine advertised it too.
+CLIENT_CAPABILITIES_V02: dict[str, bool] = {
+    **CLIENT_CAPABILITIES,
+    "client_terminate": True,
 }
 
 #: §5.3 — the entries the CENTER demands of the machine (offering-side).
@@ -139,6 +157,32 @@ DENIAL_ERROR_CODE = "TOOL_NOT_FOUND"
 #: code anywhere, so this is a PIN of current behaviour, gated behind
 #: ``CONFORMANCE_STRICT_CLOSE_CODE`` (default: a recorded warning).
 REFERENCE_CLOSE_CODE = 1000
+
+
+def ack_declines(result: Any) -> bool:
+    """Did the peer DECLINE the end? (SPEC §6.9.7 — PRESENT AND FALSY)
+
+    The kit's own re-implementation of the decline rule — the kit
+    imports NOTHING from ``daemon.*``, so the rule is transcribed here
+    from the SPEC, not imported.  It is the SAME shape as the
+    reference daemon's predicate (``McpGatewayService._ack_declines``):
+    a decline is a DICT that CARRIES an ``ended`` member whose value is
+    FALSY.
+
+    * a dict whose ``ended`` is truthy is an ACCEPTANCE;
+    * a dict with NO ``ended`` member at all is an ACCEPTANCE too (the
+      shipped v0.1 client answers ``session.end`` with ``{"session_id"}``
+      and no ``ended`` member — the member is simply absent);
+    * a non-dict result (``None`` included) is an ACCEPTANCE.
+
+    ONE helper, TWO call sites (the machine side and the in-kit
+    reference centre) — the rule must not drift between them.
+    """
+    if not isinstance(result, dict):
+        return False
+    if "ended" not in result:
+        return False
+    return not result["ended"]
 
 
 # ── the pointing surface (B8d) — exactly these eight env keys ────────────
@@ -474,6 +518,10 @@ class ConformancePeer:
         #: that reaps a session silently leaves the machine locked, and
         #: the next begin is refused.
         self._live_session_id: str = ""
+        #: The protocol version this peer NEGOTIATED (§5.2). Every frame
+        #: the peer writes carries it, and every frame it reads must
+        #: carry it. It is ``"0.1"`` until a hello says otherwise.
+        self.version: str = PROTOCOL_VERSION
 
     # ── TLS / pinning ────────────────────────────────────────────────────
 
@@ -589,6 +637,29 @@ class ConformancePeer:
             raise ValueError(f"the frame is not a JSON object: {raw[:200]}")
         return payload
 
+    async def _recv_response(self, request_id: str, timeout: float = 15.0) -> dict[str, Any]:
+        """Wait for the answer to ONE request, skipping the frames that
+        are not its answer.
+
+        The centre's REQUESTS (its ``session.end`` forward, for instance)
+        arrive on the same socket — a terminate request can be answered
+        only after the centre's own forward was read.  Every skipped
+        frame stays in the transcript (it is evidence), and the answer is
+        the frame that echoes the request id.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError(
+                    f"the centre did not answer {request_id!r} within {timeout}s"
+                )
+            frame = await self._recv_frame(timeout=remaining)
+            if frame.get("id") != request_id:
+                continue
+            if frame.get("type") in ("response", "error"):
+                return frame
+
     # ── hello (§5.1/§5.2) ────────────────────────────────────────────────
 
     async def hello(
@@ -599,11 +670,16 @@ class ConformancePeer:
         machine_id: str | None = None,
         expect_error: bool = False,
     ) -> dict[str, Any]:
-        """Send ``hello`` and return the center's answer envelope."""
+        """Send ``hello`` and return the center's answer envelope.
 
+        §5.2 — the version in ``params.protocol_version`` is the version
+        the machine REQUESTS; the machine stamps the SAME version on the
+        frame itself (``v``), and on every frame it writes afterwards.
+        """
         request_id = f"hello-{uuid.uuid4().hex[:8]}"
+        self.version = protocol_version if protocol_version is not None else PROTOCOL_VERSION
         params: dict[str, Any] = {
-            "protocol_version": protocol_version if protocol_version is not None else PROTOCOL_VERSION,
+            "protocol_version": self.version,
             "machine_id": self.machine_id if machine_id is None else machine_id,
             "client": {"name": "ensemble-conformance-kit", "version": "0.1"},
             "capabilities": (
@@ -612,7 +688,7 @@ class ConformancePeer:
         }
         await self._send_frame(
             {
-                "v": PROTOCOL_VERSION,
+                "v": self.version,
                 "type": "request",
                 "id": request_id,
                 "method": "hello",
@@ -623,6 +699,36 @@ class ConformancePeer:
         if not expect_error and answer.get("type") == "response":
             self.adopted = dict(answer.get("result") or {})
         return answer
+
+    async def terminate(
+        self,
+        *,
+        session_id: str,
+        reason_code: str = "operator_force",
+        params: dict[str, Any] | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Send a ``session.terminate`` receipt and return the ack.
+
+        §6.10 — the ``session_id`` rides the ENVELOPE; the params carry
+        the machine's ``reason_code`` (and optionally a ``detail`` the
+        centre never parses).
+        """
+        rid = request_id or f"term-{uuid.uuid4().hex[:8]}"
+        payload_params = (
+            dict(params) if params is not None else {"reason_code": reason_code}
+        )
+        await self._send_frame(
+            {
+                "v": self.version,
+                "type": "request",
+                "id": rid,
+                "method": "session.terminate",
+                "session_id": session_id,
+                "params": payload_params,
+            }
+        )
+        return await self._recv_response(rid, timeout=15)
 
     # ── heartbeat (§3.3/§6.3) ────────────────────────────────────────────
 
@@ -637,7 +743,7 @@ class ConformancePeer:
             await asyncio.sleep(interval)
             try:
                 await self._send_frame(
-                    {"v": PROTOCOL_VERSION, "type": "notification", "method": "heartbeat"}
+                    {"v": self.version, "type": "notification", "method": "heartbeat"}
                 )
             except (ConnectionClosed, Exception):  # noqa: BLE001
                 return
@@ -691,7 +797,7 @@ class ConformancePeer:
                     req_id = None
                 await self._send_frame(
                     {
-                        "v": PROTOCOL_VERSION,
+                        "v": self.version,
                         "type": "error",
                         **({"id": req_id} if req_id is not None else {}),
                         "error": {
@@ -718,7 +824,7 @@ class ConformancePeer:
     ) -> None:
         method = envelope.get("method") or ""
         request_id = envelope.get("id")
-        base: dict[str, Any] = {"v": PROTOCOL_VERSION, "type": "response", "id": request_id}
+        base: dict[str, Any] = {"v": self.version, "type": "response", "id": request_id}
         if envelope.get("session_id"):
             base["session_id"] = envelope["session_id"]
         if method == "session.begin":
@@ -798,18 +904,25 @@ class ConformancePeer:
             sid = str((envelope.get("params") or {}).get("session_id") or "")
             self.ended_sessions.append(sid)
             self.session_end_frames.append(dict(envelope))
-            # §6.8 — the machine releases its LOCAL lock on a session.end
-            # frame (``internal/remote/client.go:1040`` — ``clearSession``)
-            # and the connection returns to ``ready``.  This is the ONLY
-            # thing that frees the lock, which is why a centre that reaps
-            # a session WITHOUT telling the machine strands it.
-            if not self._live_session_id or sid == self._live_session_id:
-                self._live_session_id = ""
             result = {"session_id": sid}
             if on_session_end is not None:
                 override = on_session_end(envelope)
                 if override:
                     result.update(override)
+            # §6.8 — the machine releases its LOCAL lock on a session.end
+            # frame (``internal/remote/client.go:1040`` — ``clearSession``)
+            # and the connection returns to ``ready``.  This is the ONLY
+            # thing that frees the lock, which is why a centre that reaps
+            # a session WITHOUT telling the machine strands it.
+            #
+            # §6.9.3 — a DECLINED ack is a REFUSAL of the end, not an
+            # acknowledgement: the machine RETAINS its session (and its
+            # lock) on the ``ended: false`` arm.  The kit's machine can
+            # therefore EXPRESS a decline — and the lock it keeps is what
+            # makes the decline observable.
+            declined = ack_declines(result)
+            if not declined and (not self._live_session_id or sid == self._live_session_id):
+                self._live_session_id = ""
             await self._send_frame({**base, "result": result})
         else:
             # Unknown method: the reference center answers INTERNAL.
@@ -1200,6 +1313,21 @@ class InKitCenter:
         self._hello_done: dict[str, bool] = {}
         self._last_heartbeat: dict[str, float] = {}
         self._machine_session: dict[str, str] = {}
+        #: The NEGOTIATED protocol version per connection (§5.2) — every
+        #: frame the centre writes on a connection carries it.
+        self._conn_version: dict[str, str] = {}
+        #: Whether the connection negotiated the ``client_terminate``
+        #: capability (§5.3) — the OTHER half of the ``session.end``
+        #: reason gate (§6.9.6). It is True only on a ``0.2``-negotiated
+        #: connection whose machine advertised the capability, and the
+        #: centre's OWN advertised map is DERIVED from it — so "both
+        #: maps carry ``client_terminate: true``" is equivalent to this
+        #: flag.
+        self._conn_client_terminate: dict[str, bool] = {}
+        #: The machine id per connection, and the connection that holds
+        #: each machine id (§5.6 — the duplicate-id refusal).
+        self._conn_machine: dict[str, str] = {}
+        self._machine_conn: dict[str, str] = {}
         #: The session the SWEEP reaped per connection — the centre's own
         #: memory of an expiry, so a call that arrives after the reap is
         #: still answered SESSION_EXPIRED (the §6.5 code for "the session
@@ -1291,6 +1419,10 @@ class InKitCenter:
             self._hello_done.pop(conn_id, None)
             self._last_heartbeat.pop(conn_id, None)
             self._machine_session.pop(conn_id, None)
+            self._conn_version.pop(conn_id, None)
+            machine_id = self._conn_machine.pop(conn_id, "")
+            if machine_id and self._machine_conn.get(machine_id) == conn_id:
+                self._machine_conn.pop(machine_id, None)
 
     async def _send(self, ws: ServerConnection, payload: dict[str, Any]) -> None:
         await ws.send(json.dumps(payload))
@@ -1299,6 +1431,7 @@ class InKitCenter:
         # §6.7 mirrored: a frame above the protocol limit is ANSWERED with
         # PAYLOAD_TOO_LARGE and the connection survives (the SPEC puts the
         # MUST on the client; a fully-conformant center mirrors it).
+        version = self._conn_version.get(conn_id, PROTOCOL_VERSION)
         if len(raw) > DEFAULT_MAX_FRAME_BYTES:
             try:
                 parsed = json.loads(raw)
@@ -1309,7 +1442,7 @@ class InKitCenter:
                 "code": "PAYLOAD_TOO_LARGE",
                 "message": "the frame exceeded the protocol limit",
             }
-            envelope: dict[str, Any] = {"v": PROTOCOL_VERSION, "type": "error", "error": error}
+            envelope: dict[str, Any] = {"v": version, "type": "error", "error": error}
             if req_id is not None:
                 envelope["id"] = req_id
             await self._send(ws, envelope)
@@ -1320,7 +1453,7 @@ class InKitCenter:
             await self._send(
                 ws,
                 {
-                    "v": PROTOCOL_VERSION,
+                    "v": version,
                     "type": "error",
                     "error": {"code": "INTERNAL", "message": "unparseable frame"},
                 },
@@ -1337,6 +1470,9 @@ class InKitCenter:
         if kind == "request" and method == "hello":
             await self._on_hello(conn_id, ws, envelope)
             return
+        if kind == "request" and method == "session.terminate":
+            await self._on_session_terminate(conn_id, ws, envelope)
+            return
         if kind in ("response", "error"):
             # A response to one of OUR requests: route by id.
             await self._resolve_pending(str(envelope.get("id")), envelope)
@@ -1345,11 +1481,74 @@ class InKitCenter:
         await self._send(
             ws,
             {
-                "v": PROTOCOL_VERSION,
+                "v": version,
                 "type": "error",
                 "id": envelope.get("id"),
                 "error": {"code": "INTERNAL", "message": f"unknown method {method!r}"},
             },
+        )
+
+    async def _on_session_terminate(
+        self, conn_id: str, ws: ServerConnection, envelope: dict[str, Any]
+    ) -> None:
+        """The client-originated termination receipt (§6.10).
+
+        The centre NEVER refuses: the machine owns the machine. The
+        session is closed and the slot released, and the ack names the
+        machine's own ``reason_code`` VERBATIM (no validation gate).
+
+        The IDEMPOTENT goal state is NOT an error: a repeat (or a race
+        with the sweep) answers ``ended: false`` with a MANDATORY
+        ``reason``.  The shipped client RELEASES its local lock by
+        default on ``ended: false`` (the ended-elsewhere arm) and
+        RETAINS it only for ``refused`` / ``machine_refused`` — so the
+        reason is always sent, to make the client's decision explicit
+        instead of leaving it to a fallback.
+        """
+        request_id = envelope.get("id")
+        version = self._conn_version.get(conn_id, PROTOCOL_VERSION)
+        session_id = str(envelope.get("session_id") or "")
+        params = envelope.get("params") or {}
+        raw_reason = params.get("reason_code")
+        if isinstance(raw_reason, str):
+            reason = raw_reason
+        else:
+            reason = "" if raw_reason is None else str(raw_reason)
+        live = self._machine_session.get(conn_id)
+        if live is not None and live == session_id:
+            self._machine_session.pop(conn_id, None)
+            self._expired_sessions.pop(conn_id, None)
+            ack: dict[str, Any] = {
+                "session_id": session_id,
+                "ended": True,
+                "machine_notified": True,
+            }
+            # §6.9.3 / §6.10.1 (spec-changelog.md §11.0 Fork B —
+            # mcps_client @ feature/session-termination) — ``reason`` is
+            # "required when known and omitted when sanitized or unknown
+            # — never empty-string".  A machine that sent NO
+            # ``reason_code`` has told the centre NOTHING about the
+            # cause, so the member is OMITTED — never ``reason: ""``.
+            if reason:
+                ack["reason"] = reason
+        else:
+            # The IDEMPOTENT goal state: the session is not live.  The
+            # REASON is mandatory — on ``ended: false`` the shipped
+            # client releases its local lock by DEFAULT (the
+            # ended-elsewhere arm) and retains it only for ``refused`` /
+            # ``machine_refused``, so the reason makes the decision
+            # explicit instead of leaving it to a fallback.
+            # A session the SWEEP reaped says so (``reaped_by_center``);
+            # any other not-live session says ``already_ended``.
+            reaped = self._expired_sessions.get(conn_id)
+            ack = {
+                "session_id": session_id,
+                "ended": False,
+                "reason": "reaped_by_center" if reaped == session_id else "already_ended",
+                "machine_notified": True,
+            }
+        await self._send(
+            ws, {"v": version, "type": "response", "id": request_id, "result": ack}
         )
 
     async def _on_hello(self, conn_id: str, ws: ServerConnection, envelope: dict[str, Any]) -> None:
@@ -1362,20 +1561,29 @@ class InKitCenter:
             if data is not None:
                 error["data"] = data
             await self._send(
-                ws, {"v": PROTOCOL_VERSION, "type": "error", "id": request_id, "error": error}
+                ws,
+                {
+                    "v": self._conn_version.get(conn_id, PROTOCOL_VERSION),
+                    "type": "error",
+                    "id": request_id,
+                    "error": error,
+                },
             )
             await ws.close(code=self.mutations.close_code, reason="hello refused")
 
         if self._hello_done.get(conn_id):
             await refuse("INTERNAL", "the hello exchange happens once per connection", None)
             return
-        if version != PROTOCOL_VERSION:
+        if version not in SUPPORTED_PROTOCOL_VERSIONS:
             await refuse(
                 "PROTOCOL_VERSION_UNSUPPORTED",
                 f"protocol version {version or '(none)'} is not supported",
-                {"requested": version, "supported": [PROTOCOL_VERSION]},
+                {"requested": version, "supported": list(SUPPORTED_PROTOCOL_VERSIONS)},
             )
             return
+        # The version is known to be supported: the connection RUNS it, and
+        # every frame the centre writes on it carries it (§5.2).
+        self._conn_version[conn_id] = version
         machine_id = str(params.get("machine_id") or "")
         if not machine_id:
             await refuse(
@@ -1391,26 +1599,50 @@ class InKitCenter:
                 {"missing": missing, "required": list(REQUIRED_CAPS)},
             )
             return
+        # §5.6 — a DUPLICATE machine id is refused; the incumbent keeps
+        # its socket AND its session.
+        incumbent = self._machine_conn.get(machine_id)
+        if incumbent is not None and incumbent != conn_id:
+            await refuse(
+                "MACHINE_ID_CONFLICT",
+                f"the machine id {machine_id!r} is already held by a live connection",
+                {
+                    "machine_id": machine_id,
+                    "incumbent_machine_id": machine_id,
+                    "incumbent_connection": "open",
+                },
+            )
+            return
         self._hello_done[conn_id] = True
+        # §5.2 — the connection RUNS the version the machine REQUESTED.
+        self._conn_machine[conn_id] = machine_id
+        self._machine_conn[machine_id] = conn_id
+        client_terminate = (
+            version == PROTOCOL_VERSION_V02 and bool(caps.get("client_terminate"))
+        )
+        self._conn_client_terminate[conn_id] = client_terminate
+        capabilities: dict[str, bool] = {
+            "session": True,
+            "tools": True,
+            "notifications": False,
+            "heartbeat": True,
+            "screenshot_delta": False,
+            "multi_session": False,
+            "client_cert": False,
+        }
+        if version == PROTOCOL_VERSION_V02:
+            capabilities["client_terminate"] = client_terminate
         result: dict[str, Any] = {
-            "protocol_version": self.mutations.hello_version_reply or PROTOCOL_VERSION,
+            "protocol_version": self.mutations.hello_version_reply or version,
             "server": {"name": "in-kit-conformance-center", "version": "0.1"},
-            "capabilities": {
-                "session": True,
-                "tools": True,
-                "notifications": False,
-                "heartbeat": True,
-                "screenshot_delta": False,
-                "multi_session": False,
-                "client_cert": False,
-            },
+            "capabilities": capabilities,
             "heartbeat_interval_ms": self.HEARTBEAT_INTERVAL_MS,
             "client_dead_detect_ms": self.CLIENT_DEAD_DETECT_MS,
         }
         if not self.mutations.omit_heartbeat_timeout_ms:
             result["heartbeat_timeout_ms"] = self.HEARTBEAT_TIMEOUT_MS
         await self._send(
-            ws, {"v": PROTOCOL_VERSION, "type": "response", "id": request_id, "result": result}
+            ws, {"v": version, "type": "response", "id": request_id, "result": result}
         )
         if self.mutations.oversized_request:
             # A deliberate >limit inbound request — the PEER's §6.7 MUST
@@ -1420,11 +1652,17 @@ class InKitCenter:
     # ── pending request routing (the center is the REQUESTOR) ───────────
 
     async def _request(
-        self, ws: ServerConnection, method: str, params: dict[str, Any], *, session_id: str = ""
+        self,
+        ws: ServerConnection,
+        method: str,
+        params: dict[str, Any],
+        *,
+        session_id: str = "",
+        version: str = PROTOCOL_VERSION,
     ) -> dict[str, Any]:
         request_id = f"c-{uuid.uuid4().hex[:8]}"
         envelope: dict[str, Any] = {
-            "v": PROTOCOL_VERSION,
+            "v": version,
             "type": "request",
             "id": request_id,
             "method": method,
@@ -1468,7 +1706,7 @@ class InKitCenter:
                     await self._send(
                         ws,
                         {
-                            "v": PROTOCOL_VERSION,
+                            "v": self._conn_version.get(conn_id, PROTOCOL_VERSION),
                             "type": "error",
                             "error": {
                                 "code": "HEARTBEAT_TIMEOUT",
@@ -1532,12 +1770,24 @@ class InKitCenter:
                     }
                 )
                 continue
+            conn_version = self._conn_version.get(conn_key, PROTOCOL_VERSION)
+            end_params: dict[str, Any] = {"session_id": session_id}
+            if conn_version == PROTOCOL_VERSION_V02 and self._conn_client_terminate.get(
+                conn_key, False
+            ):
+                # §6.9.6 — the reason rides the forward ONLY on a 0.2
+                # connection where BOTH capability maps carry
+                # ``client_terminate: true``.  On a 0.1 connection — and
+                # on a 0.2 one WITHOUT the negotiated capability — the
+                # params stay exactly ``{"session_id": ...}``.
+                end_params["reason"] = "reaped_by_center"
             try:
                 await self._request(
                     ws,
                     "session.end",
-                    {"session_id": session_id},
+                    end_params,
                     session_id=session_id,
+                    version=conn_version,
                 )
             except CenterRefused as exc:
                 self.agent_audit.append(
@@ -1588,6 +1838,7 @@ class InKitCenter:
                 "machine_id": self.machine_id,
                 "context": {"agent_id": agent_id or self.agent_id, "reason": reason},
             },
+            version=self._conn_version.get(key, PROTOCOL_VERSION),
         )
         session_id = str(result.get("session_id") or "")
         self._machine_session[key] = session_id
@@ -1625,7 +1876,11 @@ class InKitCenter:
             raise CenterRefused("SESSION_EXPIRED")
         try:
             result = await self._request(
-                ws, "tools/call", {"name": tool, "arguments": arguments}, session_id=session_id
+                ws,
+                "tools/call",
+                {"name": tool, "arguments": arguments},
+                session_id=session_id,
+                version=self._conn_version.get(key, PROTOCOL_VERSION),
             )
         except CenterRefused as exc:
             self.agent_audit.append({"tool": tool, "outcome": "error", "code": str(exc)})
@@ -1645,12 +1900,33 @@ class InKitCenter:
     async def agent_end(self) -> dict[str, Any]:
         ws = self._live_ws()
         key = _conn_key(self._conns, ws)
-        session_id = self._machine_session.pop(key, "")
+        session_id = self._machine_session.get(key, "")
         if not session_id:
             raise CenterRefused("SESSION_NOT_FOUND")
-        return await self._request(
-            ws, "session.end", {"session_id": session_id}, session_id=session_id
+        end_params: dict[str, Any] = {"session_id": session_id}
+        if (
+            self._conn_version.get(key, PROTOCOL_VERSION) == PROTOCOL_VERSION_V02
+            and self._conn_client_terminate.get(key, False)
+        ):
+            # §6.9.6 — the reason rides the forward ONLY on a 0.2
+            # connection where BOTH capability maps carry
+            # ``client_terminate: true``.
+            end_params["reason"] = "superseded"
+        result = await self._request(
+            ws,
+            "session.end",
+            end_params,
+            session_id=session_id,
+            version=self._conn_version.get(key, PROTOCOL_VERSION),
         )
+        # §6.9.7 — a DECLINED ack is a REFUSAL of the end, not an
+        # acknowledgement: the session SURVIVES it (the centre does not
+        # invent a release the peer did not acknowledge), so the slot is
+        # NOT freed here.
+        declined = ack_declines(result)
+        if not declined:
+            self._machine_session.pop(key, "")
+        return result
 
     async def agent_echo_document(self) -> dict[str, Any]:
         """The hook ECHO: the agent-visible catalog + the center's audit rows."""
@@ -1815,6 +2091,7 @@ __all__ = [
     "CenterMutations",
     "CenterRefused",
     "CLIENT_CAPABILITIES",
+    "CLIENT_CAPABILITIES_V02",
     "CONFORMANCE_ENV_KEYS",
     "ConformanceFinding",
     "ConformancePeer",
@@ -1826,13 +2103,16 @@ __all__ = [
     "KIT_CALL_ARGUMENTS",
     "POINTING_KEYS",
     "PROTOCOL_VERSION",
+    "PROTOCOL_VERSION_V02",
     "REFERENCE_CLOSE_CODE",
     "REQUIRED_CAPS",
     "SessionBeginGap",
     "STRICT_KEYS",
+    "SUPPORTED_PROTOCOL_VERSIONS",
     "Target",
     "Transcript",
     "UpgradeRefused",
+    "ack_declines",
     "begin_on_target",
     "check_close_code",
     "check_error_envelope",

@@ -1,6 +1,6 @@
 """Persistent Multi-Session Agent Daemon"""
 
-__version__ = "0.27.8"
+__version__ = "0.27.10"
 
 # ---------------------------------------------------------------------------
 # P3-WP10 — KMS logging redaction filter

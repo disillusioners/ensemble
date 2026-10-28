@@ -5,7 +5,7 @@
   "icon": "🧪",
   "color": "accent-green",
   "innate_skills": ["test-pack", "todo", "dynamic-skill"],
-  "skill_injection": true,
+  "skill_injection": false,
   "snapshot_enabled": true,
   "tools": {
     "allow": ["instance", "subtree_messages",

@@ -141,10 +141,29 @@ the machine** with a `session.end` frame (§4.5), so the machine releases
 its OWN lock too — and if the machine is **unreachable** (its connection
 is gone) or does not answer inside the ack deadline, the center **still
 releases the slot** and records `machine_notified: false` — the center's
-release is authoritative, the machine's release is best-effort. On
-reconnect, the center ends the old connection's session **immediately** —
-there is no heartbeat-timeout window during which the machine answers
-`MACHINE_BUSY` for a session whose connection is already gone.
+release is authoritative, the machine's release is best-effort.
+
+**A second connection claiming the same `machine_id` is REFUSED, not
+merged.** While a connection for that id is **live**, a newcomer that
+says hello with the same id is answered `MACHINE_ID_CONFLICT` and its
+socket is closed; the incumbent keeps its socket AND its live session
+(§4.6). The center never evicts a live connection to make room for a
+duplicate id. The id frees again as soon as the incumbent is **dead**
+(its heartbeat timed out) or its **socket closed** — so a genuine
+reconnect is admitted, and the reconnect tolerance of §8.1 is preserved.
+The dead incumbent's session is released **at that moment** (not at the
+next sweep tick), so the newcomer's first `session.begin` is not
+refused `MACHINE_BUSY` for a session whose machine is gone. The
+practical consequence: a machine that reconnects while its OLD socket
+is still nominally open waits for that socket to be reaped (the
+heartbeat timeout) before its new socket is admitted.
+
+**The refusal is NOT version-scoped.** It is emitted on a `"0.1"`
+connection exactly as on a `"0.2"` one — the ONE deliberate exception
+to the version scoping of §4.6, and deliberately so: the refusal
+protects the **incumbent** (its socket and its live session) instead
+of evicting it, and a mixed fleet must get that protection on both
+sides of the version line.
 
 ### 1.5 Where the audit records land
 
@@ -565,6 +584,8 @@ Operational caveats:
 | TTL (1 h) / idle (5 min) expiry | the **sweep** reaps it (the sole owner of the reap): the center sends `session.end` to the machine, the machine releases its lock and returns to `ready`, and the slot is released — **the machine keeps its socket**. If the machine is **unreachable** (connection gone) or does not answer inside the ack deadline, the center **still releases the slot** and records `machine_notified: false` (the ledger reason is `machine_unreachable` / `machine_timeout`) |
 | heartbeat loss (> `heartbeat_timeout_ms`) | session killed + in-band `HEARTBEAT_TIMEOUT` error + socket closed — the only socket closure **on the session path** (the teardown paths close sockets too); the machine is expected to reconnect and start over |
 | socket loss (either side) | session killed; roster flips to `offline`; the machine re-appears on its next upgrade |
+| `session.terminate` (the machine asks, v0.2) | the session is closed IMMEDIATELY and removed from the registry — the §8.3 slot is free again and the socket **stays open**; the machine ACKNOWLEDGED (it asked), so the tombstone says `machine_notified: true` (§4.6) |
+| orderly close (`1000` / `session.terminate`) | the machine closed the socket on purpose: the session is ended as a **termination** (`machine_notified: true`, a ledger row) — **not** as a machine death (§4.6) |
 
 **One expiry, one error code.** The expiry is enforced by the center
 (SPEC §3.3 — the window is server policy) and the answer is
@@ -728,6 +749,18 @@ session path** remains the heartbeat-kill path (§4.1); the teardown
 paths (a socket that dies, a pre-hello deadline, the daemon shutting
 down) close sockets too, and none of them is a session-end closure.
 
+**A DECLINED ack is a refusal, not an acknowledgement (§6.9.7).** If the
+machine answers the sweep's forward with `{ended: false, reason}`, it did
+NOT release its local lock — so the sweep records the tombstone with
+`machine_notified: false` and writes an **honest refusal row**
+(`outcome: error`, `error_code: machine_refused`). The sweep has already
+released the session centre-side (the two-pass invariant), so that
+release is a fact, not an invention; what is NOT a fact is the machine's
+acknowledgement, and the ledger must not claim it. (The ERROR-FRAME
+refusal arm is different: there the machine ANSWERED the end — it
+replied with an error envelope — so the tombstone keeps
+`machine_notified: true`.)
+
 **The ack deadline.** The `session.end` forward has its **own bounded
 ack deadline — 5000 ms** (the `session.end` ack deadline; it is NOT the
 read timeout, which is also 5000 ms) — separate from the 30 s
@@ -789,6 +822,7 @@ tool renders as `{"error": {"code", "message"}}`:
 | Situation | Answer |
 |---|---|
 | live session, the machine acks | `ended: true`, `machine_notified: true`, `result` = the ack verbatim; the center releases; the tombstone reason is `already_ended` |
+| live session, the machine **DECLINES** the end (`{ended: false, reason}`) | `ended: false`, `why_not_ended: machine_refused`, `detail` names the decline (the machine's outcome code, sanitised — anything outside the §6.10.2 group-(iii) outcome codes becomes `UNRECOGNIZED_ERROR_CODE`), `machine_notified: false`, **no** `result` member — **the session SURVIVES**. A declined ack is a REFUSAL of the end, not an acknowledgement (§6.9.7): the machine did NOT release its local lock, and the decline is never forwarded as an acknowledged end. The center does not invent a release the peer did not acknowledge |
 | live session, the machine answers `SESSION_NOT_FOUND` | `ended: true`, `machine_notified: true`, `detail` says the machine no longer held the session; the center releases |
 | live session, the machine answers any OTHER error envelope (including a relayed `TOOL_TIMEOUT`) | `ended: false`, `why_not_ended: machine_refused`, `detail` carries the machine's code (PROTOCOL vocabulary only — anything else becomes `UNRECOGNIZED_ERROR_CODE`), `machine_notified: true` — **the session SURVIVES** |
 | live session, the connection is gone / unreachable | `ended: true`, `machine_notified: false` (the machine did not ACKNOWLEDGE), `detail` says the center released authoritatively; the ledger reason is `machine_unreachable`; the center releases; the tombstone reason is `already_ended` |
@@ -818,7 +852,7 @@ escape as a bare error:
 a session that is gone. A record carries: `session_id`, `reason`
 (`expired` | `already_ended`), `at`, `agent_id`, `instance_id`,
 `machine_id`, `cause` (`idle` | `ttl`) and `machine_notified` (whether
-the machine was told about the end — the sweep records the forward's
+the machine ACKNOWLEDGED the end — the sweep records the forward's
 outcome after it happened, the explicit end records the ack).
 
 * **Bounded twice**: by the number of entries (512 — the oldest is
@@ -854,27 +888,169 @@ provenance at all). A SPEC amendment request for them is an **owner
 follow-up in the `mcps_client` repo** — not this repo's job. The audit
 rows follow SPEC §8, which is explicitly **RECOMMENDED** (§4.3).
 
+### 4.6 The v0.2 session-termination generation
+
+**What v0.2 adds.** One client-originated method (`session.terminate`),
+one capability (`client_terminate`), one `reason` member on the center's
+`session.end` params, one typed refusal (`MACHINE_ID_CONFLICT`) and one
+close classification (the orderly termination). **Everything is
+VERSION-AND-CAPABILITY-SCOPED**: a connection that negotiated `"0.1"`
+sees no new capability key, no new method, and a `session.end` whose
+params are exactly `{"session_id": ...}` — and so does a `"0.2"`
+connection whose machine did NOT advertise `client_terminate` (the
+`reason` member rides the forward only where BOTH capability maps carry
+`client_terminate: true`, §6.9.6).
+
+**THE ONE DELIBERATE EXCEPTION — the duplicate-machine-id refusal.**
+`MACHINE_ID_CONFLICT` is emitted **UNVERSIONED**: a `"0.1"`-negotiated
+connection is refused exactly like a `"0.2"` one, so this refusal **does
+change a v0.1 connection's behaviour** (the historical center silently
+superseded the incumbent instead). It is deliberate: the refusal
+**protects the INCUMBENT** — its socket and its live session — instead
+of evicting it, and a mixed fleet (v0.1 and v0.2 machines) must get the
+same protection on both sides. Every OTHER v0.2 element stays
+version-AND-capability-scoped.
+
+**The negotiation.** The center speaks `"0.2"` and `"0.1"`. The version a
+connection **runs** is the one the machine **requested** in
+`params.protocol_version` (§5.2) — never one the center picked for it,
+and never a silent downgrade. A request for anything else is answered
+`PROTOCOL_VERSION_UNSUPPORTED` with `data.supported = ["0.2", "0.1"]`
+and the socket is closed. The hello result's `protocol_version` **equals
+the envelope's `v`** — the shipped client compares the two and refuses
+the connection on a mismatch.
+
+**The per-frame check is connection-scoped.** An inbound frame is
+accepted IFF it names the connection's negotiated version; a mismatch
+closes the socket (no error frame — there is nothing to correlate).
+Before the hello, the frame must name a version the center supports
+(the `hello` frame itself always reaches the handler, so an unsupported
+request can be answered with the typed refusal).
+
+**The capability.** `client_terminate` is advertised **only** on a
+`"0.2"`-negotiated connection **and** only when the machine advertised
+it too. It is **not** a required capability — a v0.1 machine is never
+refused for a name it has never heard of. A `"0.1"` connection's
+capability map carries **no** `client_terminate` key at all (the key is
+absent, not `false` — the v0.1 hello result does not change).
+
+**The `session.terminate` receipt.** The machine asks the center to end
+a session it owns. The center **never refuses** (§6.10.1 — the machine
+owns the machine). The `session_id` is read from the **envelope** (never
+from the params); `params.detail` is never parsed and `params.reason_code`
+is **never validated** — every string is accepted and audited verbatim
+(the liberal-acceptance rule). The **socket stays open**: the connection
+may still be carrying a late `tools/call` answer.
+
+| Situation | Answer (Direction A — the `result` object) |
+|---|---|
+| a LIVE session of this connection | `{"session_id", "ended": true, "reason", "machine_notified": true}` — the `reason` is the machine's own `reason_code`, **verbatim** (even when the center does not recognise it); **`why_not_ended` is ABSENT** |
+| the machine sent a LEDGER-ONLY reason code | the same shape with the `reason` member **OMITTED** — `{"session_id", "ended": true, "machine_notified": true}`. `machine_unreachable` / `machine_timeout` describe the **center's** own release path and must never reach a response; the shipped client does not validate `reason` on `ended: true` |
+| the machine sent **NO** reason code | the same shape with the `reason` member **OMITTED** — `{"session_id", "ended": true, "machine_notified": true}`. The `reason` is "required when known and omitted when sanitized or unknown — **never empty-string**" (§6.9.3 / §6.10.1): a cause the machine never stated is not a cause, and `reason: ""` is forbidden on the wire. The **audit row** still records the raw value verbatim — the ban is response-scoped, the ledger is the audit truth |
+| no live session (a repeat, or a race) | `{"session_id", "ended": false, "reason": "already_ended", "machine_notified": false}` — the **idempotent goal state, never an error** |
+| the sweep reaped it first, and the tombstone is THIS machine's | the same idempotent shape with `reason: "reaped_by_center"` — the lookup is scoped to the responder's OWN machine: a tombstone belonging to ANOTHER machine is not resolved, and the reply is the neutral `already_ended` |
+| the session is live but belongs to ANOTHER connection | the **same** idempotent shape with `reason: "already_ended"` — a foreign live session is answered EXACTLY like a session that never existed (§6.10.2, the foreign-session leak ban: the answer must be indistinguishable, or it becomes an existence oracle for another workspace's live session) |
+
+The `reason` is **mandatory** on the `ended: false` arm, and the
+rationale is the shipped client's own decision table: on `ended: false`
+it **releases** its local lock by default (the ended-elsewhere arm) and
+**retains** it only for `refused` / `machine_refused` (the machine
+refused — the session survives). A missing or unknown reason therefore
+falls into the release default; sending the reason always makes the
+client's decision **explicit** instead of leaving it to a fallback. The
+ack carries **exactly four members** — a stray `why_not_ended` would
+make the client take the wrong branch — or **three** on the sanitized
+`ended: true` arm (the `reason` is then absent, §6.9.7).
+
+`machine_notified` says whether the machine **ACKNOWLEDGED** the end: it is
+`true` on the accepted arm (the machine asked for the end — it acknowledged)
+and **`false` on every `ended: false` arm** (the center delivered
+nothing to the machine there, so there was nothing to acknowledge).
+
+ON THE EXPLICIT END, `machine_notified: false` ALSO covers a **declined**
+ack (§6.9.7): the field means "the machine ACKNOWLEDGED the end", and a
+decline is a refusal of the end, not an acknowledgement — so it can
+never be `true` because of one. The error-frame refusal arm keeps its
+`true` — the sweep's row above states that arm's rule (there the
+machine ANSWERED the end and refused).
+
+The receipt also **frees the §8.3 slot**: the session is removed from
+the registry and the roster pointer is cleared, so the next
+`session.begin` on the same connection is **not** refused with
+`MACHINE_BUSY`.
+
+**The ledger row.** The receipt writes one row with the reserved tool
+name `session.terminate`. The raw `reason_code` is recorded
+**verbatim**: it rides the row's `detail` — a **bounded** copy (128
+characters) — and the row's `extra` member, never the guarded
+`error_code` slot (that slot would rewrite an unknown code into
+`UNRECOGNIZED_ERROR_CODE`). **The durable copy is the `detail`**: the
+audit table has no column for `extra` and the DB sink writes only the
+table's columns, so `extra` survives only in the in-memory sinks — the
+bounded `detail` is what an operator finds in the ledger after a
+restart.
+
+**The `reason` member of the center's `session.end` params.**
+VERSION-AND-CAPABILITY-scoped (§6.9.6): the reason rides the forward ONLY
+on a `"0.2"`-negotiated connection where **both** capability maps carry
+`client_terminate: true`; a `"0.1"` connection — and a `"0.2"` one
+whose machine did NOT advertise the capability — gets exactly
+`{"session_id": ...}`. The two center-cause values are `reaped_by_center`
+(the sweep reaped it) and `superseded` (an explicit end replaced it).
+The machine's end-ack echoes it.
+
+WHY ONE FLAG IS ENOUGH: the connection's `client_terminate` flag is set
+at the hello exchange to "(0.2) AND (the machine advertised
+`client_terminate`)", and the center's OWN advertised map is derived
+from that same flag — so "both maps carry it" is equivalent to that one
+flag, and no second condition can drift from the first.
+
+**The duplicate machine id.** A second connection claiming a `machine_id`
+that a **live** connection already holds is refused with the typed
+`MACHINE_ID_CONFLICT` (the `data` names the refused id, the incumbent's
+id and the state of the incumbent's connection — `open` | `closed` |
+`dead`) and its socket is closed. **The incumbent is not touched** — it
+keeps its socket and its live session. A **closed** or **dead** incumbent
+frees the id: the newcomer is admitted (the reconnect tolerance of
+§8.1). The refusal writes a `hello.conflict` row.
+
+**The orderly termination.** A WebSocket close with the code `1000` and
+the reason `session.terminate` is **not** a machine death: the session
+(if still live) is ended with the tombstone `already_ended` and
+`machine_notified: true` (the machine asked for the end — it
+acknowledged), and the ledger records a **termination**. Every other
+close — a dead socket, a heartbeat kill, the daemon shutting down — keeps
+the existing behaviour (`machine_notified: false`, no row).
+
+**Provenance.** The v0.2 vocabulary is SPEC v0.2 text. The
+`machine_notified` member of the Direction-A ack and the `extra` member
+of the audit row are **center-side conventions** (the SPEC pins neither),
+and the `hello.conflict` / `session.terminate` tool names are the
+center's own ledger namespace — the remote tool names come from the
+machine's catalog, so the center reserves its own.
+
 ---
 
 ## 5. Protocol conformance summary
-Reference: `mcps_client/SPEC.md` v0.1. The shipped reference client
-(`mcps_client/internal/remote`) is the interop ground truth.
+Reference: `mcps_client/SPEC.md` v0.1 and v0.2. The shipped reference
+client (`mcps_client/internal/remote`) is the interop ground truth.
 
 | SPEC section | Status in this center |
 |---|---|
 | §2.3 outbound-only dial | implemented — the machine dials out; the route is a plain WS endpoint on the daemon port |
 | §3.1 TLS-only transport, bearer on the upgrade | implemented — 401 + `WWW-Authenticate` refusal, no protocol message exchanged on refusal |
 | §3.3 heartbeat (interval / timeout / client-dead-detect) | implemented — all three are advertised in the hello result and the client adopts them; the center kills on silence > timeout |
-| §5.1/§5.2 hello + version negotiation | implemented — exactly `"0.1"`; a mismatch answers `PROTOCOL_VERSION_UNSUPPORTED` and closes (no silent downgrade); a second hello on one connection answers `INTERNAL` and closes |
-| §5.3 capability map | implemented — the center advertises `session: true, tools: true, heartbeat: true, notifications: false, screenshot_delta: false, multi_session: false, client_cert: false`; it demands `session`, `tools`, `heartbeat` of the machine (missing → `CAPABILITY_MISSING` + close) |
-| §6.1 envelope, one JSON object per text frame | implemented — every frame carries `v: "0.1"`; an inbound frame with a missing or wrong `v` gets the **socket closed** (the violation is logged as a warning and **no error frame is sent** — mirroring the client's own behavior, no silent tolerance of a version it did not negotiate); binary frames are not part of the protocol and are ignored |
-| §6.3 the seven methods | implemented as: machine sends `hello` (request) + `heartbeat` (notification); center requests `session.begin`, `session.end`, `tools/call`. **`tools/list` is never issued by this center** — the catalog rides `session.begin` (§6.4). `notifications/*` from the machine is accepted and dropped |
+| §5.1/§5.2 hello + version negotiation | implemented — the center speaks `"0.2"` and `"0.1"` and the connection RUNS the version the machine REQUESTED (never a silent downgrade); a mismatch answers `PROTOCOL_VERSION_UNSUPPORTED` with `data.supported = ["0.2", "0.1"]` and closes; a second hello on one connection answers `INTERNAL` and closes (§4.6) |
+| §5.3 capability map | implemented — the center advertises `session: true, tools: true, heartbeat: true, notifications: false, screenshot_delta: false, multi_session: false, client_cert: false`; on a `"0.2"` connection it ALSO advertises `client_terminate` (true only when the machine advertised it too); it demands `session`, `tools`, `heartbeat` of the machine (missing → `CAPABILITY_MISSING` + close) — `client_terminate` is **not** required (§4.6) |
+| §6.1 envelope, one JSON object per text frame | implemented — every frame carries the connection's NEGOTIATED `v` (`"0.1"` or `"0.2"`); an inbound frame with a missing or wrong `v` gets the **socket closed** (the violation is logged as a warning and **no error frame is sent** — mirroring the client's own behavior, no silent tolerance of a version it did not negotiate); binary frames are not part of the protocol and are ignored |
+| §6.3 the seven methods | implemented as: machine sends `hello` (request) + `heartbeat` (notification) — and, on a `"0.2"` connection, `session.terminate` (request, §6.10); center requests `session.begin`, `session.end`, `tools/call`. **`tools/list` is never issued by this center** — the catalog rides `session.begin` (§6.4). `notifications/*` from the machine is accepted and dropped |
 | §6.4 machine-minted `session_id`, catalog verbatim | implemented — the center adopts the machine's id and stores the catalog unmodified |
-| §6.5 typed errors | implemented — center-originated: `PROTOCOL_VERSION_UNSUPPORTED`, `CAPABILITY_MISSING`, `MACHINE_NOT_ENROLLED`, `MACHINE_BUSY`, `SESSION_NOT_FOUND`, `SESSION_EXPIRED`, `HEARTBEAT_TIMEOUT`, `TOOL_TIMEOUT`, `INTERNAL`; machine codes relayed verbatim: `TOOL_NOT_FOUND`, `TOOL_TIMEOUT`, `TOOL_ERROR`, `PAYLOAD_TOO_LARGE`, `RATE_LIMITED`. `TOOL_DENIED` is reserved for v0.2+ and never emitted |
+| §6.5 typed errors | implemented — center-originated: `PROTOCOL_VERSION_UNSUPPORTED`, `CAPABILITY_MISSING`, `MACHINE_NOT_ENROLLED`, `MACHINE_BUSY`, `MACHINE_ID_CONFLICT`, `SESSION_NOT_FOUND`, `SESSION_EXPIRED`, `HEARTBEAT_TIMEOUT`, `TOOL_TIMEOUT`, `INTERNAL`; machine codes relayed verbatim: `TOOL_NOT_FOUND`, `TOOL_TIMEOUT`, `TOOL_ERROR`, `PAYLOAD_TOO_LARGE`, `RATE_LIMITED`. `TOOL_DENIED` is reserved for v0.2+ and never emitted |
 | §6.7 frame-size limit | constant defined (8 MiB protocol default / 32 MiB hard ceiling); not actively enforced by the center in v0.1 |
-| §6.8 no resumption / heartbeat loss kills | implemented — a session belongs to its connection; reconnect = new session. The expiry reap uses that SAME `session.end` request (no new verb): the machine is told, releases its own lock and returns to `ready` on the same connection (§4.5) |
+| §6.8 no resumption / heartbeat loss kills | implemented — a session belongs to its connection; reconnect = new session. The expiry reap uses that SAME `session.end` request (no new verb): the machine is told, releases its own lock and returns to `ready` on the same connection (§4.5). A second connection claiming a LIVE machine id is refused `MACHINE_ID_CONFLICT` — the incumbent is never evicted (§4.6) |
 | §7 MCP fidelity | implemented for `tools/call` — the params object is forwarded unwrapped and the result returned raw |
 | §8 center obligations (roster/presence/exclusivity/audit) | **RECOMMENDED, not wire-protocol conformance** — SPEC §8 says so itself. This center implements all four anyway: roster + presence (§8.1), one-agent-one-remote (§8.2), one-session-per-machine with `MACHINE_BUSY` reject (§8.3), and the who/machine/tool/args-hash audit (§8.4) |
+| **v0.2 session termination** | implemented — `session.terminate` (the machine asks, the center never refuses), the `client_terminate` capability, the VERSION-AND-CAPABILITY-scoped `reason` on the center's `session.end` params, `MACHINE_ID_CONFLICT`, and the orderly-termination close (§4.6). Every element is VERSION-SCOPED (the `reason` member is VERSION-AND-CAPABILITY-scoped) — **except the duplicate-machine-id refusal, which is deliberately UNVERSIONED** (it protects the incumbent, so a v0.1 connection is refused too) |
 | §10 conformance kit | **EXISTS (Phase D1)** — `scripts/conformance/run.sh` + `tests/conformance/` in THIS repo: an independent, center-agnostic pack mapped 1:1 onto the §10 areas, pointable at any center with a URL + a machine (five pointing keys, §10 below) |
 
 **The expiry hardening did not change the WIRE.** The sweep reuses the
@@ -1442,6 +1618,13 @@ terminator a blocking gate, not a detail.
   self-consistency result; cross-center behavioural proof awaits a
   second real center. `tests/conformance/COVERAGE.md` states this and
   the NOT-exercised rows.
+* **The v0.2 termination rows** (`tests/conformance/test_termination.py`):
+  the v0.2 handshake, the `session.terminate` receipt (the machine asks,
+  the center never refuses, the reason is echoed verbatim, the socket
+  stays open), the liberal acceptance of an unknown `reason_code` and of
+  unknown members, the idempotent goal state, the reap race and the
+  duplicate-machine-id refusal (the incumbent survives). They are
+  wire-driven and pointable at any center — like every other row.
 
 ### 10.4 The SPEC §10 pointer (proposed — the mcps_client repo is READ-ONLY)
 

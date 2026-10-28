@@ -67,6 +67,39 @@ UNAUTHORIZED_BODY = b"unauthorized\n"
 PING_INTERVAL_SECONDS = 0.2
 
 
+#: The WebSocket close code of an ORDERLY termination (RFC 6455 §7.4.1 —
+#: ``1000`` is "Normal Closure").
+WS_CLOSE_NORMAL = 1000
+
+#: The WebSocket close REASON of an orderly termination (SPEC v0.2
+#: §6.10.5). The machine closes the socket with ``1000`` and this reason
+#: at the tail of its graceful shutdown — and on its ack-timeout
+#: fallback. It is NOT a machine death: the machine asked for the end.
+WS_CLOSE_REASON_TERMINATE = "session.terminate"
+
+
+def _close_classification(message: dict[str, Any]) -> tuple[str, bool]:
+    """Classify a WebSocket disconnect message.
+
+    Returns ``(reason, orderly_termination)``.
+
+    The ASGI ``websocket.disconnect`` message carries the close ``code``
+    and the close ``reason`` (uvicorn populates both) — they were simply
+    never read before. An ORDERLY TERMINATION is the close that carries
+    the code ``1000`` AND the reason ``"session.terminate"``: the
+    machine asked for the end, so the session is ended as a termination
+    (the machine ACKNOWLEDGED it) and not as a machine death.
+
+    Every other close — a dead socket, a kill, a shutdown — keeps the
+    existing behaviour.
+    """
+    code = message.get("code")
+    raw_reason = message.get("reason")
+    reason = raw_reason if isinstance(raw_reason, str) else ""
+    orderly = code == WS_CLOSE_NORMAL and reason == WS_CLOSE_REASON_TERMINATE
+    return reason, orderly
+
+
 #: The peer host names Starlette's IN-PROCESS test client uses. A real
 #: server connection carries a real socket peer, so there the absence of
 #: an ASGI protocol object is a DEFECT; in the in-process client it is
@@ -309,6 +342,11 @@ async def mcp_gateway_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     transport = WebSocketGatewayTransport(websocket)
     connection: ClientConnection | None = None
+    # The close classification of the socket: the machine's own close
+    # code/reason (SPEC v0.2 §6.10.5) — an orderly termination is NOT
+    # a machine death.
+    close_reason = ""
+    orderly_termination = False
     try:
         # The liveness evidence of §3.3 — a WebSocket CONTROL frame, never
         # a protocol frame. It is started INSIDE the try: the setup below
@@ -320,6 +358,7 @@ async def mcp_gateway_endpoint(websocket: WebSocket) -> None:
         while True:
             message = await websocket.receive()
             if message["type"] == "websocket.disconnect":
+                close_reason, orderly_termination = _close_classification(message)
                 break
             text = message.get("text")
             if text is None:
@@ -332,7 +371,11 @@ async def mcp_gateway_endpoint(websocket: WebSocket) -> None:
     finally:
         try:
             if connection is not None:
-                await service.close_connection(connection, "the client disconnected")
+                await service.close_connection(
+                    connection,
+                    close_reason or "the client disconnected",
+                    orderly_termination=orderly_termination,
+                )
         finally:
             # The ping loop MUST stop on EVERY exit path. The normal path
             # stops it inside ``close_connection`` (which closes the
@@ -412,6 +455,8 @@ def build_mcps_gateway_router(
             await websocket.accept()
             transport = WebSocketGatewayTransport(websocket)
             connection: ClientConnection | None = None
+            close_reason = ""
+            orderly_termination = False
             try:
                 # Started inside the try: the setup below can fail, and a
                 # ping loop left running on a dead socket would ping it
@@ -422,6 +467,9 @@ def build_mcps_gateway_router(
                 while True:
                     message = await websocket.receive()
                     if message["type"] == "websocket.disconnect":
+                        close_reason, orderly_termination = _close_classification(
+                            message
+                        )
                         break
                     text = message.get("text")
                     if text is None:
@@ -431,7 +479,9 @@ def build_mcps_gateway_router(
                 try:
                     if connection is not None:
                         await service.close_connection(
-                            connection, "the client disconnected"
+                            connection,
+                            close_reason or "the client disconnected",
+                            orderly_termination=orderly_termination,
                         )
                 finally:
                     # The ping loop MUST stop on EVERY exit path (the

@@ -212,7 +212,16 @@ class TestHello:
                 response = await machine.send_hello()
                 assert response["type"] == "error"
                 assert response["error"]["code"] == "PROTOCOL_VERSION_UNSUPPORTED"
-                assert response["error"]["data"]["supported"] == ["0.1"]
+                # The SAME constant the centre answers from (and the same
+                # one the unit suite pins) — a re-typed literal here is
+                # exactly how this expectation went stale.
+                from daemon.services.mcps_gateway.protocol import (
+                    SUPPORTED_PROTOCOL_VERSIONS,
+                )
+
+                assert response["error"]["data"]["supported"] == list(
+                    SUPPORTED_PROTOCOL_VERSIONS
+                )
             finally:
                 await machine.close()
 

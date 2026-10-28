@@ -160,6 +160,7 @@ is **no** transcription — the peer is the shipped artifact).
 real lifespan, uvicorn-native TLS, real PostgreSQL fence DB) against the
 **shipped** `mcps_client` (built from the READ-ONLY repository into `/tmp`).
 **Files:** `transcript.py` (frame log + violation recorder, daemon-free),
+`ack_shape.py` (the shared decline detector, daemon-free),
 `test_real_pair.py` (the assertions + the runner), `tls_harness.py` (the ONE
 sanctioned `daemon.*` importer of the lane), `go_client.py` (the peer driver),
 `harness.py` (reused for the env-knob table and the teardown helper only).
@@ -179,7 +180,7 @@ file stays daemon-import-free** — `transcript.py` and
 every daemon object (the app, the service seam, the engine, the audit
 sink, the typed error, the Plane kill switches) is reached through
 `tls_harness`'s API. Verified by source grep:
-`grep -n "^\s*\(from\|import\) daemon" transcript.py test_real_pair.py go_client.py` ⇒
+`grep -n "^\s*\(from\|import\) daemon" transcript.py ack_shape.py test_real_pair.py go_client.py` ⇒
 **no matches**.
 
 ## 1. SPEC sections EXERCISED by the REAL pair (P1 + P2)
@@ -193,7 +194,7 @@ sink, the typed error, the Plane kill switches) is reached through
 | §5.2 | Version negotiation — **no silent downgrade** | P1 #4; P2 #8 | The negotiated version is `0.1`; a `hello` carrying `"0.9"` ⇒ `PROTOCOL_VERSION_UNSUPPORTED` + `data{requested:"0.9", supported:["0.1"]}` + an immediate close, and **no** response frame (no downgrade). |
 | §5.3 | Capability flags — a flat map of booleans; a missing required capability is a refusal | P1 #6; P2 #7 | The centre's map is **exactly** `{session:true, tools:true, notifications:false, heartbeat:true, screenshot_delta:false, multi_session:false, client_cert:false}`; a `hello` **without** `tools` ⇒ `CAPABILITY_MISSING` + close; a `hello` **with** `notifications:false` is **accepted** (the offering-side reading, on both sides). |
 | §6.1 | The message envelope | P1 #3, #4; P2 #16; the violation recorder | `v`/`type`/`id` checked on every frame; the recorder flags missing/wrong `v`, missing `id`, uncorrelatable ids and session-id mismatches — **recorded, never raised**. The recorder found exactly **one** deviation in the whole run: the `HEARTBEAT_TIMEOUT` frame carries **no `id`** (the SPEC requires one) — a **SPEC-vs-code gap, reported**. |
-| §6.2 | Session states — `ready` ⇄ `active`; the socket stays open | P1 #13 | `session.end` is acknowledged, the §8.3 slot is released, the roster's pointer is cleared and the socket stays open (heartbeats keep arriving after the end). |
+| §6.2 | Session states — `ready` ⇄ `active`; the socket stays open | P1 #13 | `session.end` is acknowledged, the §8.3 slot is released, the roster's pointer is cleared and the socket stays open (heartbeats keep arriving after the end). The ack BODY is inspected (§6.9.7): only an **EXPLICITLY falsy `ended`** is a DECLINE — the shipped v0.1 client answers `session.end` with `{"session_id"}` and NO `ended` member at all, which is an ACCEPTED ack (the member is simply absent), so the row stays green against the current client and goes RED against a decline. The detector is the shared `ack_shape.ack_declines` (present-and-falsy; `None` is handled explicitly). |
 | §6.3 | The method set | P1 #9, #11, #12; P2 #25 | The centre's own methods on the wire are `session.begin` / `session.end` / `tools/call` — and **never** `tools/list` (§6.3's "the center never issues it"). |
 | §6.4 | `session.begin` ⇒ `session_id` + catalog; the envelope `session_id` MUST equal `result.session_id` | P1 #9, #10 | The answer carries a non-empty `session_id`, the requested `machine_id` and a **list** of tools; the envelope/result session-id agreement is checked by the violation recorder (no mismatch observed). |
 | §6.5 | Typed errors | P1 #12; P2 #7, #8, #14, #16, #26 | `TOOL_ERROR` is relayed **verbatim** (the child's own text, with its arguments); `CAPABILITY_MISSING`, `PROTOCOL_VERSION_UNSUPPORTED`, `MACHINE_BUSY` and `HEARTBEAT_TIMEOUT` are observed on the wire; `TOOL_TIMEOUT` carries `data{method,timeout_ms}`. |

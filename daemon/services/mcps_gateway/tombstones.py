@@ -15,11 +15,11 @@ late request honestly — ``expired`` (the sweep reaped it) or
 ``already_ended`` (it was ended) — WITHOUT turning the answer into an
 existence oracle for somebody else's session.
 
-THE TWO DISJOINT REASON SETS
-----------------------------
+THE REASON SETS
+---------------
 
-This module owns the vocabulary of the end contract, and the two sets
-below are DISJOINT BY CONSTRUCTION:
+This module owns the vocabulary of the end contract. The sets below are
+DISJOINT BY CONSTRUCTION:
 
 * the RESPONSE-borne reasons — the value of ``why_not_ended`` in the
   agent-facing end envelope: :data:`REASON_EXPIRED`,
@@ -27,7 +27,13 @@ below are DISJOINT BY CONSTRUCTION:
   :data:`REASON_MACHINE_REFUSED`;
 * the LEDGER-only reasons — the value of ``error_code`` in an audit row
   that records a release the MACHINE did not confirm:
-  :data:`LEDGER_MACHINE_UNREACHABLE` and :data:`LEDGER_MACHINE_TIMEOUT`.
+  :data:`LEDGER_MACHINE_UNREACHABLE` and :data:`LEDGER_MACHINE_TIMEOUT`;
+* the v0.2 WIRE reasons — the value of ``reason`` in the Direction-A
+  termination ack (SPEC v0.2 §6.10): :data:`CENTER_WIRE_REASONS`. It
+  CARRIES the four response-borne reasons (a machine may ask about a
+  session the agent already knows about) plus the two centre-cause
+  tokens (:data:`REASON_REAPED_BY_CENTER`, :data:`REASON_SUPERSEDED`).
+  It shares NO member with the LEDGER-only set.
 
 A RESPONSE that carries anything outside the first set is a BUG. The
 ledger-only tokens describe what happened between the centre and the
@@ -95,6 +101,39 @@ REASON_UNKNOWN_SESSION = "unknown_session"
 
 #: The machine was reached and REFUSED the end. The session SURVIVES.
 REASON_MACHINE_REFUSED = "machine_refused"
+
+# ── the v0.2 WIRE reasons (the value of the Direction-A ``reason``) ────────
+#
+# The v0.2 termination receipt answers with a ``reason`` member (never a
+# ``why_not_ended``): the machine reads it to decide whether it may
+# RELEASE its local lock. The vocabulary below is the CENTRE-CAUSE half
+# of it — the tokens the CENTRE mints. A machine-sent ``reason_code`` is
+# NEVER validated against a set (liberal acceptance) and is echoed back
+# VERBATIM; these tokens are the ones the CENTRE itself puts on the wire.
+
+#: The centre's sweep reaped the session (its TTL or its idle window
+#: passed) before the machine asked for the end.
+REASON_REAPED_BY_CENTER = "reaped_by_center"
+
+#: The session was superseded — the centre released it because a NEWER
+#: connection or an explicit agent-requested end took its place.
+REASON_SUPERSEDED = "superseded"
+
+#: Every reason the CENTRE may put on the wire in a Direction-A ``reason``.
+#:
+#: The two LEDGER-only tokens are NOT here: they describe the centre's
+#: own release path and must never reach a response (the disjointness
+#: invariant below).
+CENTER_WIRE_REASONS: frozenset[str] = frozenset(
+    {
+        REASON_ALREADY_ENDED,
+        REASON_EXPIRED,
+        REASON_UNKNOWN_SESSION,
+        REASON_MACHINE_REFUSED,
+        REASON_REAPED_BY_CENTER,
+        REASON_SUPERSEDED,
+    }
+)
 
 #: Every reason a response may carry in ``why_not_ended``.
 RESPONSE_REASONS: frozenset[str] = frozenset(
@@ -255,6 +294,28 @@ class TombstoneStore:
                     latest = entry
             return latest
 
+    def get(self, session_id: str, now: float | None = None) -> SessionTombstone | None:
+        """The tombstone of ONE session id, or ``None``.
+
+        The v0.2 termination receipt needs it: the machine asks about a
+        session by id (the id rides the ENVELOPE), and the answer
+        distinguishes "the sweep reaped it" (``expired``) from "it was
+        ended" — the two produce DIFFERENT wire reasons
+        (``reaped_by_center`` vs ``already_ended``).
+
+        The lookup is by SESSION id, never by agent: the machine knows
+        the session id it minted, and the centre must not turn the
+        answer into an oracle for somebody else's session — the id it
+        is given is the id the machine itself minted.
+        """
+        with self._lock:
+            if now is not None:
+                self._prune(now)
+            for entry in self._entries:
+                if entry.session_id == session_id:
+                    return entry
+            return None
+
     def entries(self) -> list[SessionTombstone]:
         """Every remembered tombstone, oldest first (the test seam)."""
         with self._lock:
@@ -276,6 +337,7 @@ class TombstoneStore:
 __all__ = [
     "CAUSE_IDLE",
     "CAUSE_TTL",
+    "CENTER_WIRE_REASONS",
     "DEFAULT_TOMBSTONE_MAX_AGE_SECONDS",
     "DEFAULT_TOMBSTONE_MAX_ENTRIES",
     "EXPIRY_CAUSES",
@@ -285,6 +347,8 @@ __all__ = [
     "REASON_ALREADY_ENDED",
     "REASON_EXPIRED",
     "REASON_MACHINE_REFUSED",
+    "REASON_REAPED_BY_CENTER",
+    "REASON_SUPERSEDED",
     "REASON_UNKNOWN_SESSION",
     "RESPONSE_REASONS",
     "SessionTombstone",
