@@ -14,7 +14,10 @@
 
 **The fold is real work, not a relabel.** 9 of the 12 council criticals are **genuinely closed** in the plan text with named, correct resolutions; 3 are closed in substance but carry a **binding-text defect that survives** (C-7, C-10, C-12); **0 are relabelings**. All six documented deviations are **improvements** in substance — one of them (C-7) is an improvement in the *narrative* that the *binding decision* did not absorb. The fold's self-honesty (FOLD-MAP ST-5 — "a mechanical closure record of the fold, not a quality judgment") is exemplary and I endorse it.
 
-**But three conditions must close before the implementation phase may start.** All three are **plan-text** defects — no code, no new analysis, no re-planning:
+**But conditions must close before the implementation phase may start.** All of them are **plan-text** defects — no code, no new analysis, no re-planning.
+
+> **⚠️ READ §12 FIRST.** This section was written before the mechanical re-check worker reported. The authoritative close-out list is **§12**: **8 must-close-before-Phase-1** + **13 in the same fold pass** = **21 conditions**.
+> The three below are **DR-1, DR-2, DR-3** — all still valid; **DR-16…DR-21** are the additions found by the mechanical pass (§11).
 
 | # | Condition | Why it blocks |
 |---|---|---|
@@ -22,9 +25,10 @@
 | **DR-2** | The "one canonical ladder" is not one ladder, and **F8's pins (incl. the C-12 measuring pin) and F6's PG leg appear in no canonical gate row** | The flip condition may never be re-verified at HEAD ⇒ R13 ("the dominant producer") is unverified by any gate ⇒ C-12's "gate artifact" requirement is unmet. Three distinct scopes also share the single ID `G2.1–G2.3`. |
 | **DR-3** | The W-11 consistency pin's scope was **narrowed** to two files and its exemption is **prose, not machine-delimited** | A **regression** against the council's W-11 ("consistent across all 12 artifacts, with a machine-checkable pin"); the undefined exemption can mask a real red — and DR-2's defect is exactly such a drift, in a file the narrowed pin does not scan. |
 
-**Plus 8 WARNINGS and 4 ADVISORIES** (§4), all mechanical, all foldable in one pass.
+**Plus 8 WARNINGS and 4 ADVISORIES** (§4), all mechanical, all foldable in one pass — **plus 5 further CRITICAL, 9 WARNING and 1 ADVISORY from the mechanical pass (§11)**; the authoritative close-out list is **§12**.
 
-**The fold is not the problem — three lines of binding text are.**
+**The fold is not the problem — the defects are all in binding text, and every one of them is foldable in one pass.**
+**Phase 0 (measurement-only, scratch DB, no live contact) may start now**; the eight must-close conditions in §12 must be folded before Phase 1.
 
 ---
 
@@ -253,3 +257,128 @@ PG's `statement_timeout` **cancels the statement** (SQLSTATE `57014`, `query_can
 ---
 
 *Produced by the reviewer (dispatcher/controller) as the delta re-check of the council's own findings. Verification workers: `7a8eafb7-539d-47e5-a1e1-b67929ec9dda` (mechanical) and `ccf5861b-6408-4024-8411-25d051a8c5d9` (substantive). The substantive worker judged all 12 closures REAL; I overrule it on **C-7** (D-35 still carries the impossible termination clause) and **C-12** (the measuring pin has no canonical gate row), both of which I verified by direct artifact inspection. Read-only re-check: no `daemon/`, `tests/`, `scripts/` or payload-tree file was modified.*
+
+---
+
+# ADDENDUM — mechanical re-check folded in
+
+**Added:** 2026-10-28, after the mechanical re-check worker (`7a8eafb7-539d-47e5-a1e1-b67929ec9dda`) reported. Every claim below was **re-verified by me against the artifacts** before being folded in; the worker's own evidence is quoted where it is decisive.
+
+**Correction to my earlier report to the leader:** I described the pin inventory as "a **44-pin** inventory". The **actual** count is **38** rows in the contract's §5 — pre-fold **38**, post-fold **38** (the fold changed **nothing** in the binding inventory; set-diff of pre- vs post-fold §5 = **0 dropped, 0 added**). The folded **plan** union is **41**. The correct framing is DR-17: the contract is 3 pins short of the plan, not that the contract shrank.
+
+## 11. ADDITIONAL VERIFIED FINDINGS
+
+### 🔴 CRITICAL
+
+#### DR-16 — the C-1 closure is **partial**: Class-4a/4b remain unfenced
+
+**WHERE** `test-strategy.md:196-212` (the Class-4 block) · claims it falsifies: `plan-overview.md:360` ("**R18** … **Closed by C-1 fold** — the Class-1 env/interpreter fence applies to 4a (per-variable scrub + mktemp HOME + certified interpreter)") and `plan-overview.md:226`.
+
+**WHAT** The Class-4a/4b commands carry the **certified interpreter** and **nothing else** — no `cd` into the worktree, **no per-variable `POSTGRES_*` scrub**, **no `HOME="$(mktemp -d)"` fence**. The fold applied **1 of the 3** parts the council required ("Apply to Classes 1/2/3/**4a/4b** and the §2.3 script").
+
+**WHY IT MATTERS** The worker proved the `cd` is load-bearing: from `/tmp`, the certified interpreter resolves `daemon` to the **shared checkout** (`/home/nea/ensemble-src/daemon/__init__.py`), not the worktree — so the same command form runs against *different code* depending on cwd. A green Class-4a/4b can therefore (a) execute against the **shared checkout** rather than the lane's fixed code, and (b) run with an ambient `POSTGRES_DB=ensemble_prod` still visible, on the **C1/C2 non-interference gate** whose packs touch the saver pool. This is the C1/C2 gate — the one that proves the lane did not weaken soak-gate safety.
+
+**REQUIRED CHANGE** Rewrite `test-strategy.md:196-212` as literal copies of the Class-1 form (`cd /home/nea/ensemble-src-wt-dbpool-idletxn && \` + the 6-variable per-variable scrub + `HOME="$(mktemp -d)" \` + the certified interpreter); apply the same fence to the **§2.3 fence script** (`test-strategy.md:223-242`) and to the ladder's **unit rows** and **whole-tree row** (`phase3-plan.md:45-47`, `:51` — bare interpreter invocations with no `cd`); and correct `plan-overview.md:226`/`:360` to state that **only the interpreter** was applied until the full fence lands.
+
+#### DR-17 — the binding contract's pin inventory is **38 of 41**, and 8 PG pins carry no zero-skips assertion
+
+**WHERE** `final-implementation-spec.md` §5 (the artifact the developer builds from — `final-implementation-spec.md:53`) vs `test-strategy.md:349-350` (F7-b-static, F7-e-static) and `test-strategy.md:370` (G-A) · `final-implementation-spec.md:307` (F6-c), `:320` (F7-a), `:321` (F7-b), `:324` (F7-e), `:326` (F8-b), `:327` (F8-c), `:328` (F8-d), `:329` (F8-e).
+
+**WHAT** (a) Three pins exist **only** in the plan: **F7-b-static**, **F7-e-static** (the W-13 static twins the fold added) and **G-A** (the census-family pin). The contract's §5 rules state *"every PG/integration pin has a **default-collected static twin** (W-13)"* and *"every PG pin asserts **zero skips**"* — but the contract's table contains **no row** for either twin, and **8** of its PG/integration rows show `✅` where the rule requires `✅ + zero-skips`. (b) `tests/postgres/conftest.py:167-169` **skips the whole module** when PostgreSQL is unreachable ⇒ a "green" PG gate that collected 0 and skipped everything is indistinguishable from a real pass unless the skip count is asserted.
+
+**WHY IT MATTERS** A developer implementing from the **binding contract** builds no static twin for F7-b / F7-e and no census pin ⇒ deleting those PG packs leaves the default `pytest` run green — the W-13 false-green **survives the fold in the artifact that binds**. And the missing zero-skips cells are the C3 false-green class, in the same table.
+
+**REQUIRED CHANGE** Add the three missing rows to spec §5 (same `Where / Marker / Mutation / Default-collected? / Count asserted?` columns as `test-strategy.md:349-350`, `:370`); change the 8 PG rows' last column to `✅ + zero-skips`; add `G-consistency` (`phase3-plan.md:92`) to spec §5 as well — the W-11 pin is currently absent from the contract the developer builds from.
+
+#### DR-18 — `F6-e` is an **orphan** whose mutation cell is a TODO pointing at the wrong subsystem
+
+**WHERE** `final-implementation-spec.md:309` · `test-strategy.md:322` · compare `final-implementation-spec.md:297` (F3-e) and `test-strategy.md:274`.
+
+**WHAT** The contract's F6-e mutation cell reads **"Rewrite F6-c's old broad mutation as one concrete edit (A-8)"** — a TODO, not a mutation. The plan resolves it to *the same* edit as F3-e: *"Change the preview string at `:1482`"* — i.e. `daemon/tools/ens_db_tools.py:1482`, the **repair-tool dry-run preview string**, which has nothing to do with F6 (the **mission-record boot mint**, `daemon/repositories/mission_record/repository.py:498-514`). No F6.x numbered change lists F6-e (F6.1→F6-a/F6-b; F6.2→F6-a; F6.3→F6-a/F6-b; F6.4→F6-a; F6.5→F6-c; F6.6→F6-d).
+
+**WHY IT MATTERS** **Deleting F6's entire upsert leaves F6-e GREEN** — the whole F6 change set has a pin that can never fire, and planting the mutation reds F3-e instead. The pin inventory is not mutation-proven for the lane's second-largest fix.
+
+**REQUIRED CHANGE** Replace F6-e with a concrete F6-subject mutation — e.g. *"`OPEN_EPOCH_STATUS_SQL` at `daemon/repositories/mission_record/models.py:209` changed from `status = 'open'` to `status = \"OPEN\"` ⇒ the conflict-target predicate no longer byte-matches the partial index ⇒ RED"* — add F6-e to F6.1/F6.2's Verify cell, and delete the TODO cell at `final-implementation-spec.md:309`.
+
+#### DR-19 — the **task graph** does not gate the preconditions the council made binding
+
+**WHERE** `phase1-plan.md` "Depends" column (T1.0–T1.12) · `phase2-plan.md` "Depends" column (T2.1–T2.12) · claims: `final-implementation-spec.md:20` ("This section is a GATE … no implementation change lands until Phase 0 COMPLETES"), `test-strategy.md:400` (sequencing constraint 1), `council-report.md` C-4 REQUIRED CHANGE (a).
+
+**WHAT — mechanically extracted:**
+
+```
+phase1-plan.md:  T1.0→Phase 0   T1.1→—   T1.4→—   T1.8→—   T1.11→—   T1.12→T1.0-T1.11
+phase2-plan.md:  T2.1→—   T2.2→T2.1   T2.3→T2.2   T2.4→—   T2.5→T2.3   T2.6→T2.4   T2.7→—   …
+```
+
+(a) **Only the F8 tasks depend on Phase 0.** F3 (T1.1), F4 (T1.4), F6 (T1.8) and F1 (T1.11) have **`Depends = —`** ⇒ four of the five change groups can land with **no `BASELINE.md`**, directly violating the binding precondition. (b) **No Phase-1/F8 predecessor exists anywhere in phase 2** — T2.1/T2.2/T2.3 are the tasks that assemble the manager options string carrying the bound ⇒ the engine-level `idle_in_transaction_session_timeout` can land **before** F8 removes the hold, which is precisely the C-4 hazard (the bound can kill M-R3's legitimate 13–15 s dwell). The council's C-4 REQUIRED CHANGE (a) — *"F8 becomes a hard **task-level predecessor** of the bound, **not prose**"* — is **not implemented**.
+
+**WHY IT MATTERS** The preconditions are stated as *GATEs* in the contract but are **prose** in the graph a developer actually follows. Nothing reds if the ordering is violated.
+
+**REQUIRED CHANGE** (a) Add a canonical-ladder row **`G0`** = "BASELINE.md exists, satisfies `phase0-plan.md:150-158`, is reviewed, and the two provisional literals have been replaced by Phase-0 measurements", with a non-vacuity assertion; add it to `phase3-plan.md:45-51` and `test-strategy.md:410-416`. (b) Set the "Depends on" cell of **T1.1, T1.4, T1.8, T1.11** to `G0`. (c) Set the "Depends on" cell of **T2.1, T2.2, T2.3** to `T1.0–T1.0g (F8) + G0`, and add a phase-2 gate cell: *"F8-a…F8-e are green AND the F8 commits are ancestors of this commit"*. (d) Express sequencing constraints 2/3/4 (`test-strategy.md:401-403`) as task dependencies plus a phase-2 gate cell asserting the F2 commit contains the `application_name` change, the AC amendments, the `statement_timeout` DROP and the asyncpg DSN **in one commit**.
+
+#### DR-20 — the pins **hard-code the placeholder**, so Phase 0's measurement cannot be honoured (extends DR-5)
+
+**WHERE** `test-strategy.md:292` (F2-c), `:294` (F2-e) · `phase2-plan.md:29`, `:54`, `:57`, `:97` · `final-implementation-spec.md:180`, `:184`.
+
+**WHAT** `test-strategy.md:292` asserts *"`idle_in_transaction_session_timeout=60000` is in the manager options string"* and `:294` pins the full literal string ending `…idle_in_transaction_session_timeout=60000` (order-pinned). `phase2-plan.md:57` states `MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS = 60_000` **flatly** (no provisional marker). Meanwhile spec §2 marks both literals **PROVISIONAL** and F2.3 says the clause is **omitted entirely** when unmeasurable.
+
+**WHY IT MATTERS** Two mutually exclusive outcomes: the developer hard-codes 60000 and ships an **unmeasured** bound (the C-4 defect the fold claims closed), **or** Phase 0 measures a different value and F2-c/F2-e go RED. The pins make the placeholder permanent, so the measurement cannot be honoured. **No gate row asserts "the constant == 4 × measured P100 (or is disabled with the reason recorded)".**
+
+**REQUIRED CHANGE** F2-c/F2-e must assert the **structure** — the clause is present, its value `== MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS`, the option order pinned — never the literal `60000`; the knob-matrix pin asserts the value against `daemon/constants.py`, not against a number. Add a ladder cell asserting the constant equals `4 × measured P100` from `BASELINE.md` §(a) **or** is disabled with the reason recorded in the gate report. Amend `phase2-plan.md:29/:54/:57/:97` and AC14 to the same template form (this supersedes DR-5's AC14-only scope).
+
+#### DR-21 — the W-11 pin will **false-RED** on the architect's artifact, and **cannot see** the live legacy IDs (sharpens DR-3)
+
+**WHERE** `architecture-recommendation.md:162` (**inside** the pin's scan scope) · `phase3-plan.md:81-86` (**outside** it) · scope defined at `plan-overview.md:179`.
+
+**WHAT** (a) The pin's scope is *"decisions.md and **architecture-recommendation.md**"*, and the exemption covers *"the legacy→canonical mapping table above"* — a table that **does not exist in `architecture-recommendation.md` at all**. The A8 amendment at `:162` contains legacy IDs (`G0…G6`) in plain prose, with no table to exempt ⇒ the pin either REDs on the architect's own amendment (and the developer's only fix is to delete the amendment text) or the skip is widened until it doesn't — which is exactly the masking risk. (b) The **live** legacy IDs sit in `phase3-plan.md:81-86`'s **"Executed by"** column — the field the pin exists to police — and `phase3-plan.md` is **not** in the scan scope. The same table is also internally contradictory with its own ladder (`:48` maps legacy G3 → G2.1–G2.3, while `:84` assigns the F6 PG pack to `G3.1–G3.3` and `:86` assigns the F8 PG pins to `G3/G5`) and with `final-implementation-spec.md:388` (the declared authority), which maps legacy G3 → **G2.1–G2.3**. **The two tables the spec says "must agree" do not agree.**
+
+**REQUIRED CHANGE** See DR-3: sentinel-delimit the exempt regions in all three artifacts; **write the scanner down** (file set, regex, sentinel handling) inside the pin's own artifact; replace the range notation `{G1.1…G3.5}` with an **explicit enumeration** (the range literally admits non-existent IDs such as `G1.2`, `G1.3`, `G2.2`, `G3.2`, `G3.3` — see the could-not-verify below); extend the scan scope to `phase3-plan.md`, `test-strategy.md` and `final-implementation-spec.md` (or split into two pins: canonical IDs everywhere + legacy IDs permitted only inside exempt blocks); re-key `phase3-plan.md:81-86` to canonical IDs; and reword `architecture-recommendation.md:162` to avoid literal legacy IDs (e.g. "not the retired seven-step ladder").
+
+### 🟡 WARNING
+
+- **DR-22 — the F5 store-census keep-green pin was silently dropped and its ID re-purposed.** Pre-fold `test-strategy.md:571` had `F5-c *(keep-green)*` — *"The **store census** query (`:351-363`, over `pg_class`/`pg_namespace`) still works — the wrong-table fix must not have touched it"*, mutation *"Break the census SQL ⇒ RED"*. The folded `test-strategy.md:312` re-purposes F5-c as the static twin of F5-b. Nothing pins the **separate** census query against a regression, and the drop has no disposition in FOLD-MAP. **Fix:** restore it as `F5-d`, add it to F5.3's Verify cell and to spec §5, and record the drop/restore in FOLD-MAP §3.
+- **DR-23 — `EXPECTED` has no independent declared source for the pre-existing packs ⇒ "asserted" degrades to "recorded".** The rule is *"each pack declares its count as a module-level constant **inside the pack**"* (`test-strategy.md:223-242`), but the Class-4a/4b packs are **existing DO-NOT-TOUCH files** that declare no such constant and must not be modified — and the whole-tree legs must *"reconcile `base_collected`/`head_collected` against the sum of the declared `EXPECTED_COLLECTED_*`"*, again with no declaration for the pre-existing corpus. With no independent baseline, `EXPECTED` is filled in from the current run ⇒ the assertion is a **tautology** ⇒ the whole-tree leg is "recorded", not "asserted" — the exact C-1 failure mode. **Fix:** commit a baseline table (e.g. `.agents/shared/planning/db-pool-idle-txn/expected-collected.md`) recording the count per pack **measured at base `19fc11c8b`**, and have the fence read it; keep the pack-local constant for **new** packs only.
+- **DR-24 — F6-c and F7-a have no default-collected static twin, and FOLD-MAP lists F6-c as one.** FOLD-MAP.md:122 enumerates "F7-d, F8-a, **F6-c/d** (original)" as twins — but **F6-c is itself a `postgres` pin** and **F6-d is a process gate** (`n/a`). The W-4 index-presence assertion is therefore invisible to a default run: if `ux_mission_records_anchor_open` is absent in the target DB, the boot mint raises **42P10** instead of the IntegrityError being repaired, and only a PG leg sees it. `test-strategy.md:353` likewise claims *"F7-a … has the F7-c self-pin as its static backstop"*, but F7-c's mutation deletes the assertion **and** decrements the constant — deleting the **residence assertion alone** leaves F7-c **GREEN**, so it is not a backstop for F7-a. **Fix:** add a default-collected static twin for F6-c (assert `OPEN_EPOCH_STATUS_SQL` at `models.py:209` is byte-identical to the predicate at `models.py:305-313` and to `20261025_140000_add_mission_open_epoch_unique_index.sql:67-69`) and for F7-a (assert `DBPOOL_IDLE_IN_TXN_RESIDENCE_BUDGET_S` exists in `daemon/constants.py` and that the guard's assertion references it); correct FOLD-MAP.md:122 and `test-strategy.md:353`.
+- **DR-25 — F4.4's Verify cell names a pin that does not assert it.** `final-implementation-spec.md:117` says *"F4-a (source-level) + diff review"*, but F4-a's assertion list (`test-strategy.md:277`) does **not** include the docstring. The pins that do assert the `readiness.py:107-113` correction are **F4-e** (`final-implementation-spec.md:301`) and **F7-b-static fact (4)** (`test-strategy.md:349`) — neither is named. **Fix:** F4.4 Verify → `F4-e, F7-b-static (fact 4) + diff review`.
+- **DR-26 — F8-a vs F8.4 is ambiguous: the sync twin's bridge "stays unchanged" *and* must be "moved out".** `final-implementation-spec.md:74` (F8.4) says the `asyncio.run_coroutine_threadsafe(…).result(timeout=8.0)` bridge *"stays unchanged"*; `:225` (§3.2) says it is *"moved out (F8.4)"*; `:325` (F8-a) bans `run_coroutine_threadsafe(...).result(...)` **inside the `with`-body**. If the bridge is moved out, F8-a stays green; if it stays in place, F8-a **reds**. The intended reading is almost certainly "the bridge's **call shape and 8.0 s timeout** stay unchanged; its **position** moves out of the held scope" — but it is not stated, and the two readings produce opposite outcomes. **Fix:** one sentence in F8.4 / §3.2 stating that the bridge's timeout and call shape are preserved and only its position changes, and that F8-a's `with`-body scope therefore requires the bridge to be **outside** the scope.
+- **DR-27 — FOLD-MAP's closure record contains two **false verification claims**.** (a) DF-5 (`FOLD-MAP.md:141`) claims *"zero hits in plan-overview.md / research-pool-couplings.md / audit-method.md"* — there are hits in **two of the three** (`plan-overview.md:341`, `audit-method.md:409`); and `:114`'s *"Residual `uv run`/`/usr/bin/python3` references are **GONE from live artifacts**"* is false (they remain in `plan-overview.md`, `phase0-plan.md:71`, `phase3-plan.md:17`, `test-strategy.md:11/:144`, `decisions.md:52-58`). **The defect class is nonetheless closed** — every gate *command* uses the certified interpreter, which the worker verified by execution — so the **record** is false, not the fix. (b) DF-2 (`FOLD-MAP.md:138`) cites `sed -n '171p' plan-overview.md` but quotes the **172** line (`171p` is the G2 row). The corrected text is present at 172, so the defect is genuinely fixed — only the record is wrong. **Fix:** restate DF-5 as *"the interpreter in every gate COMMAND is the certified one; residual `/usr/bin/python3` strings remain as prose describing the defect at …"*; correct DF-2's command to `sed -n '172p'`.
+
+### 🟢 ADVISORY
+
+- **DR-28** — 12 pins use the `tests/unit/…` wildcard instead of a named pack file (`final-implementation-spec.md:305-330`), so W-6's "**ONE** pack inventory" is not an inventory; F3-c's mutation is test-side with no `file:line`; F4-c's "Where" cell is the literal string `readiness unit pack` — **no file at all**; F2.9's Verify cell is a process step with no pin. **Fix:** name the concrete pack files and edit sites; convert F4-c's Where cell to a path.
+
+---
+
+## 12. UPDATED VERDICT AND CONDITIONS
+
+**VERDICT unchanged: 🟡 DELTA-CONDITIONS** — but the condition list grows from 5 to **21**, and two of my original conditions are **re-scoped** by the mechanical pass (DR-3 sharpened by DR-21; DR-5 absorbed into DR-20).
+
+**The fold is still a good fold.** The C-1 interpreter defect **is** closed in every gate command (the worker executed the fenced form: `30 tests collected in 0.40s`; the §2.3 fence script is **mechanically sound** — it correctly caught `collected=0` on a marker-deselected run and `collected≠EXPECTED`); the docs-only claim is verified; the certified interpreter resolves `daemon` to the worktree when cwd = worktree. The residual is that the **fence** (not the interpreter) was not carried to Class 4a/4b, the unit rows, the whole-tree row, and the §2.3 script — and that the **binding contract** was not updated with the pins the plan added.
+
+### MUST CLOSE before the implementation phase (Phase 1) may start — 8 items
+
+| # | Condition | Artifacts to edit |
+|---|---|---|
+| 1 | **DR-1** — align D-35 with `test-strategy.md:281` (statement **cancelled**, `to_thread` returns, `checkedout()` → baseline; the backend row is **expected to persist**) | `decisions.md:124`; reword the T1.7 summary `phase1-plan.md:76` |
+| 2 | **DR-2** — one canonical ladder: one ID per scope (`G2.5` Phase-1 PG, `G2.6` Phase-2 PG, …); F8-a/b/c/d/e and F6-b named in the rows that execute them; re-key `phase3-plan.md:78-90`; add the ladder **rows** to the contract §6; all three mapping tables agree | `test-strategy.md:410-416`; `plan-overview.md:170-179`; `final-implementation-spec.md:381-397`; `phase3-plan.md:45-52`, `:78-90` |
+| 3 | **DR-3 + DR-21** — widen the W-11 pin to every artifact carrying gate/AC IDs; add the fix-ID / AC-ID / pack-inventory checks; **sentinel-delimit** the exempt regions in all three artifacts; **write the scanner down**; replace the `{G1.1…G3.5}` range with an explicit enumeration; reword `architecture-recommendation.md:162` | `plan-overview.md:179`; `final-implementation-spec.md:394-397`; `phase3-plan.md:92`; `architecture-recommendation.md:162` |
+| 4 | **DR-16** — apply the full Class-1 fence (cd + 6-var scrub + `mktemp` HOME) to Class 4a/4b, the §2.3 fence script, the ladder's unit rows and the whole-tree row; correct the R18 disposition | `test-strategy.md:196-212`, `:223-242`; `phase3-plan.md:45-51`; `plan-overview.md:226`, `:360` |
+| 5 | **DR-17** — add F7-b-static, F7-e-static, G-A, G-consistency to the contract's §5; change the 8 PG rows to `✅ + zero-skips` | `final-implementation-spec.md` §5 (`:284-331`) |
+| 6 | **DR-18** — replace F6-e with a concrete F6-subject mutation; add F6-e to F6.1/F6.2's Verify; delete the TODO cell | `final-implementation-spec.md:309`; `test-strategy.md:322` |
+| 7 | **DR-19** — add the canonical **`G0`** row (Phase 0 / BASELINE.md) to the ladder; set T1.1/T1.4/T1.8/T1.11 `Depends = G0`; set T2.1/T2.2/T2.3 `Depends = F8 + G0`; add the phase-2 gate cells for the F8→bound ordering and the one-commit F2 group | `phase1-plan.md` Depends column; `phase2-plan.md` Depends column + T2.12; `phase3-plan.md:45-51`; `test-strategy.md:410-416` |
+| 8 | **DR-20** — F2-c/F2-e assert the **structure**, never the literal `60000`; AC14 + `phase2-plan.md:29/:54/:57/:97` to the template form; add a ladder cell asserting the constant == 4 × measured P100 (or disabled with the reason recorded) | `test-strategy.md:292`, `:294`; `phase2-plan.md:29`, `:54`, `:57`, `:97`; `final-implementation-spec.md:180` |
+
+### MUST CLOSE before Phase 1 (same fold pass; Phase 0 may run in parallel)
+
+9. **DR-6** (the retired ≈689 figure in seven places incl. SC10) · 10. **DR-7** (enablement mechanism) · 11. **DR-8** (honesty block states the backstop's status) · 12. **DR-9** (asyncpg DSN mechanism) · 13. **DR-10** (F8-c injection seam) · 14. **DR-11** (pre-F8 vs post-F8 sizing) · 15. **DR-22** (restore the F5 census keep-green pin as F5-d) · 16. **DR-23** (commit an independent `expected-collected.md` baseline) · 17. **DR-24** (static twins for F6-c and F7-a) · 18. **DR-25** (F4.4's Verify cell) · 19. **DR-26** (the F8-a vs F8.4 bridge sentence) · 20. **DR-27** (correct FOLD-MAP's two false verification rows) · 21. **DR-12**–**DR-15**, **DR-28** (advisories).
+
+**Sequencing.** Phase 0 is measurement-only (scratch DB, no live contact) and can start now. But **DR-1, DR-2, DR-16, DR-19 and DR-20 should be folded before Phase 0 concludes**, because they change what the Phase-0 outputs must confirm: DR-1 fixes the F4-b observable, DR-2 fixes which gate runs the F8 measuring pin, DR-19 creates the `G0` row that consumes `BASELINE.md`, and DR-20 fixes what the pins accept as the applied bound.
+
+### STILL UNVERIFIED (both workers + me)
+
+- **Whether the canonical ladder has 14 entries or 9.** The canonical set is written as **ranges** (`G1.1–G1.4`, `G2.1–G2.3`, `G3.1–G3.4`, `{G1.1…G3.5}`); only G1.1, G1.4, G1.5, G2.1, G2.3, G2.4, G3.1, G3.4, G3.5 appear literally. **No artifact enumerates the ladder's members** ⇒ the W-11 pin's "exists in the canonical set" test has **no authoritative set to test against**, and IDs like `G1.2`, `G1.3`, `G2.2`, `G3.2`, `G3.3` may not exist. Folded into DR-3's required change (explicit enumeration).
+- **Runtime behaviour of any pin** — no pin is written; the *forms* were verified, the assertions were not.
+- **All PG-semantics claims** — documentation-only until `BASELINE.md` lands (the §9 P0-1…P0-10 list).
+- **Whether the `env -u DAEMON_PORT` scrub is required** — it is in every fence but its purpose is stated nowhere; not a defect, flagged for the author.
+
