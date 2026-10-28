@@ -1306,7 +1306,8 @@ async def _register_child_completion_watcher(
         # success record.
         #
         # The commit sits BEFORE the bus watch on purpose: the watch
-        # failure path RETURNS from inside this block, so a commit
+        # failure path RETURNS from the post-scope watch region (F8.5 —
+        # the watch moved OUT of this session scope), so a commit
         # placed after it would be skipped on exactly that path (the
         # commission would be rolled back again). The commissioning act
         # (spawn + enqueue) already happened, so the commission stays
@@ -1334,52 +1335,62 @@ async def _register_child_completion_watcher(
                     _commission_id_for_commission[:8],
                 )
 
-        try:
-            _follow_up = FollowUp(
+    # ── F8.5 (db-pool-idle-txn) — bus watch OUTSIDE the scope ───────────
+    # The ``await _bus.watch(...)`` registration moved OUT of the
+    # WriteGuardSession scope above (the manager-engine transaction is
+    # committed and the scope CLOSED before the await — the borrow-
+    # then-await shape is what the F8-a static pin forbids). Order is
+    # preserved: commission mint + durability commit happen INSIDE the
+    # scope (same transaction); the watch follows AFTER the commit,
+    # exactly as the durability-boundary comment requires.
+    if _bus is None:  # pragma: no cover — defensive double-check
+        return None
+    try:
+        _follow_up = FollowUp(
                 target_instance_id=parent_instance_id,
-                message=(
-                    f"[dependency_bus] child {child_instance_id} "
-                    f"completed for message {message_id}"
+            message=(
+                f"[dependency_bus] child {child_instance_id} "
+                f"completed for message {message_id}"
+            ),
+            source=f"internal_agent:{parent_instance_id}",
+            metadata={
+                "kind": "child_complete",
+                "child_id": child_instance_id,
+                "parent_id": parent_instance_id,
+                "message_id": message_id,
+                # Proposal B PR1: the commission's mission rides the
+                # free-form JSONB (absent when no mission — the
+                # pre-PR1 payload shape is preserved).
+                **(
+                    {"mission_id": _mission_id_for_commission}
+                    if _mission_id_for_commission
+                    else {}
                 ),
-                source=f"internal_agent:{parent_instance_id}",
-                metadata={
-                    "kind": "child_complete",
-                    "child_id": child_instance_id,
-                    "parent_id": parent_instance_id,
-                    "message_id": message_id,
-                    # Proposal B PR1: the commission's mission rides the
-                    # free-form JSONB (absent when no mission — the
-                    # pre-PR1 payload shape is preserved).
-                    **(
-                        {"mission_id": _mission_id_for_commission}
-                        if _mission_id_for_commission
-                        else {}
-                    ),
-                },
-            )
-            await _bus.watch(
-                source_task_id=str(child_task.id),
-                follow_up=_follow_up,
-            )
-            logger.debug(
-                f"bus.watch registered: child_task="
-                f"{str(child_task.id)[:8]}..., "
-                f"parent={parent_instance_id[:8]}..., "
-                f"child={child_instance_id[:8]}..., "
-                f"message={message_id[:8]}...",
-                extra={"completion_delivery_path": "bus"},
-            )
-        except Exception as hook_err:
-            logger.warning(
-                f"bus hook: watch failed "
-                f"(parent={parent_instance_id[:8]}, "
-                f"child={child_instance_id[:8]}, "
-                f"task={str(child_task.id)[:8]}): {hook_err}"
-            )
-            return (
-                f"ERROR: Failed to register message "
-                f"correlation (dependency_bus): {hook_err}"
-            )
+            },
+        )
+        await _bus.watch(
+            source_task_id=str(child_task.id),
+            follow_up=_follow_up,
+        )
+        logger.debug(
+            f"bus.watch registered: child_task="
+            f"{str(child_task.id)[:8]}..., "
+            f"parent={parent_instance_id[:8]}..., "
+            f"child={child_instance_id[:8]}..., "
+            f"message={message_id[:8]}...",
+            extra={"completion_delivery_path": "bus"},
+        )
+    except Exception as hook_err:
+        logger.warning(
+            f"bus hook: watch failed "
+            f"(parent={parent_instance_id[:8]}, "
+            f"child={child_instance_id[:8]}, "
+            f"task={str(child_task.id)[:8]}): {hook_err}"
+        )
+        return (
+            f"ERROR: Failed to register message "
+            f"correlation (dependency_bus): {hook_err}"
+        )
     return None
 
 
