@@ -198,3 +198,7 @@ NO live promote performed.
    capture-era A/B `7c9440b3` still open (resolved_at NULL) — cleanup candidate.
 
 **Disposition (user-decided, executed 2026-10-21/22):** commit 660e73453 KEEP (unpushed; two-lens review = correct + sabotage-clean; P1 test-stub fix + security merge conditions logged as follow-ups); agents/wanderer/skill-set.yaml auto_load flip REVERTED via git restore (auto_load is owner-scoped; the observed leak was search-driven — deactivations were the real barrier; fleet convention = own planner auto_load true). DB cleanup + fix sequencing deferred.
+
+## Manager DB-engine pool knob — LIMITS_MANAGER_POOL_SIZE (2026-10-28, devops incident fix item #7)
+
+Managed knob `limits.manager_pool_size` / env `LIMITS_MANAGER_POOL_SIZE`, ladder **operative end-to-end**: DB > env > yaml > default → boot-apply mutates the YAML Config (`config.limits.manager_pool_size`) → `daemon/manager.py` threads `manager_pool_size=self.config.limits.manager_pool_size` into `create_postgres_engine` (the ensemble.json `EnsembleConfig` has NO `.limits`, so the factory takes the value as an explicit kwarg; other callers default to the constant). Bounds [15, 30] fail-loud (floor 15 = default, ceiling 30 = connection budget 30+10 manager + 2×20 checkpoint = 80 ≤ max_connections 100) — out-of-range values are rejected (422 / ValidationError), never clamped. Activation = next daemon restart (engine built once at boot).
