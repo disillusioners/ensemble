@@ -510,11 +510,14 @@ class MissionRecordService:
     ) -> MissionRecord:
         """The actual epoch INSERT (caller resolved already).
 
-        Idempotency: when ``founding_message_id`` is set, the
-        ``(anchor, founding_message_id)`` probe + partial unique index
-        make the mint idempotent — a concurrent duplicate insert
-        surfaces as ``IntegrityError`` and is re-resolved to the winning
-        row.
+        Idempotency: the repository upsert handles the measured
+        trigger — a CONCURRENT double-mint for the same anchor (D-51)
+        — by construction (``ON CONFLICT (anchor) WHERE open DO
+        NOTHING``; ``rowcount == 0`` re-resolves via the anchor-scoped
+        probe and returns the winner). When ``founding_message_id``
+        is set, the pre-insert ``(anchor, founding_message_id)`` probe
+        below additionally short-circuits the sequential duplicate
+        without a round-trip to the constraint.
         """
         self._require_instance_row(
             actor_instance_id, role="anchor", session=session
@@ -542,28 +545,36 @@ class MissionRecordService:
         try:
             return self._repo.insert_mission(record, session=session)
         except IntegrityError:
-            # Lost the partial-unique race — the concurrent mint won.
-            # Re-resolve (never mint twice for the same founding act).
+            # Lost a unique race — the concurrent mint won. The
+            # repository upsert already handles the measured trigger
+            # (the CONCURRENT DOUBLE-MINT for the same anchor —
+            # D-51: on ``rowcount == 0`` it re-resolves via the
+            # anchor-scoped probe and returns the winner WITHOUT
+            # raising), so this branch is the residual belt for any
+            # OTHER IntegrityError shape.
             if session is not None:
                 # The caller's transaction is poisoned on PG after a
                 # statement-level IntegrityError — fail the mint and
                 # let the caller's fail-open wrapper skip it. (The
                 # revive path re-runs on the next boundary; the window
                 # is a same-tick double boundary, which is not a real
-                # shape.)
+                # shape.) Caller-session semantics UNCHANGED (D-10).
                 raise
-            # The re-resolve probe is keyed on ``founding_message_id``;
-            # a NULL-founding epoch (the boot / backfill / job_continue
-            # shape) can NEVER be found by that probe, so the sentinel
-            # ``or ""`` it used to carry could only ever miss. Guard the
-            # probe on the value being present instead of substituting
-            # an empty-string key.
-            if founding_message_id is not None:
-                existing = self._repo.find_epoch_by_anchor_and_founding_message(
-                    actor_instance_id, founding_message_id, session=None
-                )
-                if existing is not None:
-                    return existing
+            # Boot / own-session path (session is None): re-resolve by
+            # the ANCHOR — the partial index's own key. The pre-F6
+            # founding-keyed probe was SKIPPED for NULL-founding boot
+            # epochs (``founding_message_id is None`` guard below at
+            # the old site) and could never match a boot epoch even
+            # when it ran — the measured mechanism behind
+            # ``mission_records: mint_boot_epoch_if_none failed``
+            # (DR-33: the probe was skipped, not mis-keyed). The
+            # anchor-scoped probe finds the winner for ANY loser
+            # shape, NULL-founding included.
+            existing = self._repo.find_open_epoch_by_anchor(
+                actor_instance_id, session=None
+            )
+            if existing is not None:
+                return existing
             raise
 
     # ── the resolution ladder (commissioning lanes) ──

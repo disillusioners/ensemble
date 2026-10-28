@@ -23,9 +23,12 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy import text
 from sqlmodel import Session, select
 
 from .models import (
+    OPEN_EPOCH_STATUS_SQL,
     CommissionState,
     MissionCommission,
     MissionProvenance,
@@ -501,17 +504,102 @@ class MissionRecordRepository:
         *,
         session: Session | None = None,
     ) -> MissionRecord:
-        """INSERT one epoch row. The partial unique index is the
-        concurrent-mint race backstop; the service re-resolves on
-        ``IntegrityError``."""
+        """INSERT one epoch row — idempotent under concurrent double-mint.
+
+        The own-session (boot) path uses a dialect-appropriate upsert
+        (``ON CONFLICT (anchor_instance_id) WHERE <open predicate> DO
+        NOTHING`` — the ``ux_mission_records_anchor_open`` partial
+        unique index's own key/predicate, byte-identical via
+        :data:`OPEN_EPOCH_STATUS_SQL`). On ``rowcount == 0`` — ANY
+        loser, concurrent or sequential — the winning row is
+        re-resolved via the ANCHOR-scoped probe
+        (:meth:`find_open_epoch_by_anchor`) and returned: no
+        ``IntegrityError`` is raised and the caller's transaction is
+        not poisoned. The caller-session path (``session is not
+        None``) keeps its documented ORM ``session.add`` semantics
+        (D-10 — poison-and-reraise stays load-bearing there).
+        """
         if session is not None:
             session.add(record)
             return record
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
         with Session(self._engine) as own:
-            own.add(record)
+            insert_fn = (
+                pg_insert
+                if (
+                    own.bind is not None
+                    and own.bind.dialect.name == "postgresql"
+                )
+                else sqlite_insert
+            )
+            # Pure Core insert over the ``Table`` (NOT the ORM class —
+            # the house shape at job_queue/repository.py:487-497).
+            values = {
+                k: v
+                for k, v in record.model_dump().items()
+                if v is not None
+            }
+            stmt = (
+                insert_fn(MissionRecord.__table__)
+                .values(**values)
+                .on_conflict_do_nothing(
+                    index_elements=["anchor_instance_id"],
+                    index_where=text(OPEN_EPOCH_STATUS_SQL),
+                )
+            )
+            result = own.execute(stmt)
             own.commit()
-            own.refresh(record)
-            return record
+            if result.rowcount == 0:
+                # Lost the open-epoch race — the concurrent mint won.
+                # Re-resolve by the ANCHOR (the index's own key); a
+                # NULL-founding boot epoch is findable by THIS probe
+                # (the founding-keyed probe could never match it —
+                # D-09 amended). The lookup runs POST-commit so the
+                # returned instance is loaded (not commit-expired).
+                winner = self.find_open_epoch_by_anchor(
+                    record.anchor_instance_id, session=own
+                )
+                if winner is None:
+                    # Unobservable-in-practice belt: the winner closed
+                    # (settled) between the conflict and the
+                    # re-resolve — the anchor's actual latest epoch is
+                    # the honest record to return.
+                    winner = self.find_latest_epoch_by_anchor(
+                        record.anchor_instance_id, session=own
+                    )
+                    if winner is not None:
+                        logger.warning(
+                            "mission_records: open-epoch re-resolve "
+                            "missed (winner settled in-flight); "
+                            "returning latest epoch for anchor "
+                            "%s...",
+                            (record.anchor_instance_id or "")[:8],
+                        )
+                if winner is not None:
+                    return winner
+                raise IntegrityError(
+                    "insert_mission: open-epoch conflict for anchor "
+                    f"{(record.anchor_instance_id or '')[:8]}... but no "
+                    "epoch row could be re-resolved",
+                    None,
+                    None,
+                )
+            # The Core insert does not attach the ORM instance to the
+            # session — re-read by the PK the insert carried so the
+            # caller receives a persistent instance (the old ORM-path
+            # ``own.refresh(record)`` contract, preserved).
+            stored = own.get(MissionRecord, record.mission_id)
+            if stored is not None:
+                return stored
+            raise IntegrityError(
+                "insert_mission: rowcount=1 but the minted epoch row "
+                f"{(record.mission_id or '')[:8]}... is not readable "
+                "post-commit",
+                None,
+                None,
+            )
 
     def insert_commission(
         self,
