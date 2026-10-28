@@ -406,7 +406,10 @@ git rev-parse HEAD                                   # record the base for the r
 #    Path: scripts/audit/borrow_census.py
 
 # 2. Run the AST census (read-only; no DB, no daemon).
-/usr/bin/python3 scripts/audit/borrow_census.py "$(pwd)" | tee /tmp/borrow_census_head.txt
+#    Certified interpreter (C-1/D-29): /usr/bin/python3 has NO pytest and is off the
+#    sanctioned path; use the certified venv interpreter even for a pure-AST scanner
+#    (consistency, no exceptions — per dispatcher adjudication of FOLD-MAP Q3).
+/home/nea/ensemble-src/.venv/bin/python scripts/audit/borrow_census.py "$(pwd)" | tee /tmp/borrow_census_head.txt
 
 # 3. Run the pattern cross-check (§3.2) and record the six numbers.
 

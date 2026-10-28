@@ -10,12 +10,43 @@
 
 ---
 
-## §0 PRECONDITIONS — the plan must be folded and re-reviewed FIRST
+## §0 PHASE 0 — BINDING PRECONDITION (leader ruling 5)
+
+**This section is a GATE, not a formality. No implementation change lands until Phase 0 COMPLETES and `BASELINE.md` exists.** The council had **no DB access**; several PG-semantics claims in this spec (last-`-c`-wins, idle-in-txn vs lock-blocked exclusivity, `idle_in_transaction_session_timeout` firing thresholds, residence times, `application_name` attribution) are **documentation claims, not measurements**. They MUST be measured before we build on them.
+
+**Phase 0 runs FIRST**, on a **lane-created SCRATCH PostgreSQL database**:
+- **NEVER** `ensemble_prod`. **NEVER** the live daemon's DB. **NEVER** a restart of anything.
+- Port `5433`, throwaway role, fresh scratch DB per run, dropped at teardown.
+- **Per-variable env scrub** — `env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_HOST -u POSTGRES_PORT`. `env -u POSTGRES_*` is a **silent NO-OP** (bash does not glob env names) — an ambient `POSTGRES_DB=ensemble_prod` survives it.
+- Test scripts must NEVER resolve live-shaped HOME-derived install paths (mktemp FAKE_HOME + escape guard).
+- Interpreter: `/home/nea/ensemble-src/.venv/bin/python` (C-1).
+
+**Phase 0 deliverable: `BASELINE.md`** (fixed filename) in the planning directory, produced and reviewed before Phase 1 begins. The sibling plan worker owns `phase0-plan.md` and the BASELINE.md contract — align by fixed filename; do not read the sibling's file.
+
+**Four evidence outputs (all required):**
+
+**(a) Base-code M-R3 hold duration under real load** — this **SETTLES the architect's F8 flip condition** (leader ruling 1: if M-R3 holds a manager slot < 2 s under real load, approach C collapses to approach B). Drive `_handle_recover_deferred_report_async` (and the sync twin) against scratch PG with a deliberately slowed content fetch — **leader ruling 4 prefers an instrumented checkpointer** (whose `aget_tuple` sleeps a known duration); the checkpoint-table lock is the **fallback**. Sample `manager.engine.pool.checkedout()` at ≤ 100 ms across the reconcile call. Record: measured max legitimate hold, P100, and the resulting `MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS = 4 × measured max hold` (floor 30 s). If unmeasurable, the bound ships **DISABLED** (constant defined, NOT applied).
+
+**(b) The occupancy/residence census shape at base** — this **defines F7's assertion shape** (C-10). Sample `pg_stat_activity` filtered by the scratch DB's `datname`, capturing `count`, `state`, `wait_event_type`, `state_change`, `xact_start`, `backend_start`, `application_name`. Report residence-time buckets (distinguish "6 short borrows" from "1 long leak"). F7's thresholds/formula are fixed from this measurement, not guessed.
+
+**(c) Measured PG runtime semantics** (documentation claims, not measurements, until Phase 0):
+- `last_query` fingerprints per pool (manager / repair / asyncpg adapter) — settles the A-1 attribution question.
+- `application_name` attribution per pool — confirms the three named engines (F2.3, F2.5, F2.6) are distinguishable.
+- Whether `idle_in_transaction_session_timeout` actually fires as documented (threshold + SQLSTATE `25P03`).
+- PG last-`-c`-wins behaviour under the daemon's exact connect strings (confirms D-17 isolation).
+- `SET LOCAL statement_timeout` semantics inside SQLAlchemy's autobegin (confirms F4's probe-scoped bound lands on the observed pool).
+
+**(d) The 3-pool attribution census** explaining the incident's 18 observed backends vs the 15-slot manager cap: count `pg_stat_activity` rows by `application_name` (and by `datname` for the scratch DB) across manager / repair / asyncpg-adapter / P2-oracle pools. Multi-pool ⇒ unattributable without `application_name` ⇒ confirms F2.3/F2.5/F2.6.
+
+**Gate:** no implementation change in §1 lands until Phase 0 COMPLETES and `BASELINE.md` exists and is reviewed. Phase 0's measurement also fixes the two provisional literals in §2 (`MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS`, `DBPOOL_IDLE_IN_TXN_RESIDENCE_BUDGET_S`) — they are placeholders until Phase 0 replaces them.
+
+---
+
+## §0b FOLD PRECONDITIONS — the plan must be folded and re-reviewed FIRST
 
 The plan set is **not implementable as written** (council verdict REJECT; 12 CRITICAL). The architect's document states *"Status of the planner's artifacts: unmodified"* (`architecture-recommendation.md:9`) — so the plan-of-record still carries the pre-amendment ACs, the ruled-DROP knob, and a test strategy that executes zero tests. **Do not start implementation against the current artifacts.**
 
 **The fold must:**
-
 1. Fold architect amendments **A1–A12** into the plan-of-record (the architect's file becomes an **input**, not the artifact of record).
 2. Fold the **12 CRITICAL + 14 WARNING** findings from `council-report.md`.
 3. Reconcile **AC14, AC15, AC16, T2.4, T2.6, D-19, D-24, G2.4, F2-f, F2-g in ONE change** (C-2) — and re-derive the affected IDs after the fold.
@@ -27,6 +58,7 @@ The plan set is **not implementable as written** (council verdict REJECT; 12 CRI
 **Nothing in this spec authorises implementation before that fold.** The spec tells the developer what the folded plan must say.
 
 ---
+
 
 ## §1 NUMBERED CHANGES
 
@@ -85,12 +117,12 @@ Each row: **`file:line@base` → exact change → verification.** "AC" = the acc
 |---|---|---|---|
 | F2.1 | `daemon/constants.py` | Add the canonical knob constants (**values** live here — D-18): `MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS`, `MANAGER_ENGINE_POOL_RECYCLE_S = 3_600`, `MANAGER_ENGINE_POOL_TIMEOUT_S = 30`, and `MANAGER_ENGINE_LEGITIMATE_HOLD_BUDGET_S` (the **measured** budget, C-4). Each carries its precedent citation. | F2-a (knob matrix) |
 | F2.2 | `daemon/repositories/factory.py:252` | **DO NOT EXTEND `PG_SESSION_CONNECT_ARGS`.** It is embedded **last** into the repair engine's options string (`daemon/tools/ens_db_tools.py:619-627`) ⇒ PG's **last `-c` wins** ⇒ extending it would silently retune the repair engine's `statement_timeout` 60 s → 30 s (D-17). Already fenced by `tests/unit/repositories/test_pg_engine_utc_session.py:65` — keep that assertion green. | F2-f (repair-engine pin) |
-| F2.3 | `daemon/repositories/factory.py:252` (new constant) | Add `MANAGER_PG_SESSION_CONNECT_ARGS` assembled in `factory.py` from the `constants.py` values. **Exact rendered string** (order is load-bearing): `-c timezone=UTC -c application_name=ensemble-manager -c idle_in_transaction_session_timeout=60000`. **NO `statement_timeout`** — it is DROPPED per the leader ruling (C-3): `manager.py:8760-8762` runs the whole `_ensure_postgres_columns` list in ONE transaction, documented as *"FULL TABLE REWRITE with ACCESS EXCLUSIVE lock… may take seconds"* (`:7877-7879`), fail-loud (`:7554-7560`) ⇒ a 30 s cap there means **the daemon does not boot** on a steady-state no-op path. Any future global cap must `SET LOCAL statement_timeout = 0` inside `manager.py:8760`. | F2-a, F2-e |
+| F2.3 | `daemon/repositories/factory.py:252` (new constant) | Add `MANAGER_PG_SESSION_CONNECT_ARGS` assembled in `factory.py` from the `constants.py` values. **Rendered string (order is load-bearing) is a TEMPLATE, not a literal:** `-c timezone=UTC -c application_name=ensemble-manager -c idle_in_transaction_session_timeout=<MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS>` where `MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS` is the value fixed by Phase 0's measurement per the §3.4 rule (`≥ 4 × measured max legitimate hold`, floor 30 s), recorded in the gate report. The literal `60000` appearing elsewhere in this spec is a **PRE-MEASUREMENT PLACEHOLDER** that Phase 0 replaces — it is NOT an unconditional value. **Unmeasurable disposition:** if Phase 0 cannot measure the hold, the knob is **defined but NOT applied** (the `idle_in_transaction_session_timeout` clause is omitted from the rendered string; enablement gated on the measurement). **NO `statement_timeout`** — it is DROPPED per the leader ruling (C-3): `manager.py:8760-8762` runs the whole `_ensure_postgres_columns` list in ONE transaction, documented as *"FULL TABLE REWRITE with ACCESS EXCLUSIVE lock… may take seconds"* (`:7877-7879`), fail-loud (`:7554-7560`) ⇒ a 30 s cap there means **the daemon does not boot** on a steady-state no-op path. Any future global cap must `SET LOCAL statement_timeout = 0` inside `manager.py:8760`. | F2-a, F2-e |
 | F2.4 | `daemon/repositories/factory.py:323-338` (`create_engine`) | `connect_args=dict(MANAGER_PG_SESSION_CONNECT_ARGS)`; **add** `pool_reset_on_return="rollback"`, `pool_recycle=3600`, `pool_timeout=30`. **Leave** `pool_size=5`, `max_overflow=10`, `pool_pre_ping=True` untouched (C-4 — the soak lane's sizing is on the P2 pools, not this one). `pool_use_lifo` deliberately **not** set. | F2-a, F2-b, F2-c, F2-d |
 | F2.5 | `daemon/tools/ens_db_tools.py:603-633` (repair engine) | The **only** knob change is `pool_reset_on_return="rollback"`. Its options string gains `-c application_name=ensemble-repair` appended to **its own literal** (a **distinct** value ⇒ no last-`-c` collision). Every other knob (`pool_size=2`, `max_overflow=3`, `pool_pre_ping=True`, `pool_recycle=3600`, `pool_timeout=10`) and the rest of the options string (`statement_timeout=60000`, `lock_timeout=10000`, `idle_in_transaction_session_timeout=60000`, `timezone=UTC`) stay **byte-identical**. | F2-f |
 | F2.6 | `daemon/persistence.py:355-359` (asyncpg checkpoint-adapter pool) | **Third engine — the one A5 missed.** It opens an **explicit** transaction (`daemon/checkpoint_adapter.py:1231`: `async with conn.transaction():` with three `await`s between DELETEs) ⇒ its backend sits `idle in transaction` **between statements**, with **no** server-side reap. Give it a **separate DSN** carrying `-c application_name=ensemble-checkpoint-adapter`. **DO NOT touch the shared `conn_string`** (`persistence.py:225`) — it also feeds the P2 psycopg **oracle** (`:317`), and touching it would break the P2-immutability pin (T2.7/AC18) and put the C1-protected oracle into the lane's diff. | F2-g (new), F2-h (new) |
 | F2.7 | `daemon/constants.py:207-217` and `daemon/persistence.py:306-315` (honesty blocks) | Refresh both to state: **retention / transaction-hygiene class REPAIRED** by this lane (branch + date); **DWELL / OCCUPANCY class NOT REPAIRED** — residual owner = the event-loop sync-DB follow-ups (`daemon/routers/instances.py:476`, `daemon/routers/queues.py:654`) and the BFS depth loop (`daemon/repositories/instance/repository.py:1434-1645`). **Do not** say "the P1 idle-in-transaction leak is REPAIRED" — P1 has occupancy under dwell, not a leak. **Knob values in these blocks must not move.** | F2-i (new) |
-| F2.8 | `tests/unit/repositories/test_pg_engine_utc_session.py:86-88` | **Explicit pin amendment** (C-9): the exact-equality assertion on the manager engine's `connect_args` must be amended to the new string, value-by-value, **order-pinned**. **Keep `:65` untouched** — it is the D-17 guard. The file is **not** in `SEALED_SHA_BASELINES` ⇒ **no seal re-pin ceremony**. Correct F2-e's stale `:292` anchor → `:86-88`. G2.4 becomes "amended per D-xx, diff attached to the gate report". | F2-a, F2-e, F2-f |
+| F2.8 | `tests/unit/repositories/test_pg_engine_utc_session.py:86-88` | **Explicit pin amendment** (C-9, **D-37**): the exact-equality assertion on the manager engine's `connect_args` must be amended to the new string, value-by-value, **order-pinned**. **Keep `:65` untouched** — it is the D-17 guard. The file is **not** in `SEALED_SHA_BASELINES` ⇒ **no seal re-pin ceremony**. Correct F2-e's stale `:292` anchor → `:86-88`. G2.4 becomes "amended per **D-37**, diff attached to the gate report". | F2-a, F2-e, F2-f |
 | F2.9 | `daemon/repositories/factory.py:215-222` (latent config-driven PG branch) | **NOT hardened** (D-22) — zero daemon-runtime PG callers, deliberately config-driven. | diff review |
 | F2.10 | `daemon/repositories/factory.py:184-199` (SQLite), `daemon/__main__.py` (boot preflight), `daemon/persistence.py:316-331` (P2 oracle), `daemon/tools/ens_db_tools.py:649-695` (vacuum NullPool), `daemon/auth/cli.py:152-160` (one-shot CLI) | **NOT touched** — except the honesty comment in `persistence.py:306-315` (F2.7). | F2-j (P2-immutability pin) |
 
@@ -138,18 +170,18 @@ See **§4** for the invariant, the attribution method and the collected-count as
 | `pool_recycle` | *absent* | `3600` | **ADDED** (house precedent `REPAIR_POOL_RECYCLE_S`, `ens_db_tools.py:182`) |
 | `pool_timeout` | *absent* (library default 30) | `30` | **ADDED, explicit** — deliberately pinned at the default; lowering it converts load into 500 s (D-15) |
 | `pool_use_lifo` | *absent* | *absent* | — (deliberate) |
-| `connect_args` | `{"options": "-c timezone=UTC"}` | `{"options": "-c timezone=UTC -c application_name=ensemble-manager -c idle_in_transaction_session_timeout=60000"}` | **EXTENDED via a NEW constant** — `PG_SESSION_CONNECT_ARGS` stays byte-identical |
+| `connect_args` | `{"options": "-c timezone=UTC"}` | `{"options": "-c timezone=UTC -c application_name=ensemble-manager -c idle_in_transaction_session_timeout=<MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS>"}` (value = Phase-0 measurement per §3.4; the literal `60000` is a PRE-MEASUREMENT PLACEHOLDER) | **EXTENDED via a NEW constant** — `PG_SESSION_CONNECT_ARGS` stays byte-identical |
 | URL `connect_timeout` | `BOOT_DB_TIMEOUT_S` (10) | unchanged | — |
 
 ### Constants to add in `daemon/constants.py`
 
 | Constant | Value | Note |
 |---|---|---|
-| `MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS` | `60_000` | **Conditional on the measured rule (C-4).** Ships **DISABLED** if unmeasurable at stage time; enablement is gated on the measurement. |
+| `MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS` | **PROVISIONAL `60_000` (pre-measurement placeholder)** — Phase 0 fixes the value per the §3.4 rule (`≥ 4 × measured max legitimate hold`, floor 30 s). Ships **DISABLED** (constant defined, NOT applied) if unmeasurable. | **Conditional on the measured rule (C-4).** Ships **DISABLED** if unmeasurable at stage time; enablement is gated on the measurement. |
 | `MANAGER_ENGINE_LEGITIMATE_HOLD_BUDGET_S` | **measured** (P100 of the churn-leg census) | Not a guess. See §3.4. |
 | `MANAGER_ENGINE_POOL_RECYCLE_S` | `3_600` | — |
 | `MANAGER_ENGINE_POOL_TIMEOUT_S` | `30` | — |
-| `DBPOOL_IDLE_IN_TXN_RESIDENCE_BUDGET_S` | `2.0` (post-F8 target) | The F7 residence budget (W-1). |
+| `DBPOOL_IDLE_IN_TXN_RESIDENCE_BUDGET_S` | **PROVISIONAL default `2.0` (post-F8 target)** — **NOT an unconditional value.** Phase 0 fixes it per the derivation rule: `budget = measured P100 legitimate hold + stated margin` (margin ≥ 2× the measurement noise floor, floor 2.0 s). The literal `2.0` is a pre-measurement placeholder. **Danger:** M-R3's legitimate dwell is ≈ 13–15 s and PG resets the idle timer per statement — a 2.0 s budget can redden a HEALTHY daemon (false red) unless F8 removes every hold above it, which nothing guarantees. The margin/floor rule is stated here so the developer cannot pick a number by analogy. | The F7 residence budget (W-1). |
 
 ### Repair engine — `daemon/tools/ens_db_tools.py:603-633`
 
@@ -189,7 +221,7 @@ P2  write scope               (manager engine session OPEN)
 
 | Site | Scope | Awaits inside | Required shape |
 |---|---|---|---|
-| async | `manager.py:11516` | `:11568-11571` (content fetch) **and** `:11754-11557` (`asyncio.to_thread(self._has_live_process_report_carrier)`) | both moved out (F8.2, F8.3) |
+| async | `manager.py:11516` | `:11568-11571` (content fetch) **and** `:11754-11757` (`asyncio.to_thread(self._has_live_process_report_carrier)`) | both moved out (F8.2, F8.3) |
 | sync twin | `manager.py:10860-10861` | `:11216-11224` (the `.result(timeout=8.0)` bridge) + the nested session at `:11110-11112` | both moved out (F8.4) |
 | instance tool | `daemon/tools/instance.py:1207` | `:1360` (`await _bus.watch(...)`) | moved out, or excluded by leader ruling + disclosed (F8.5) |
 
@@ -220,7 +252,7 @@ P2  write scope               (manager engine session OPEN)
 F7 must assert **both**, co-equal:
 
 - **(a) Occupancy returns to baseline** — after a churn cycle, `manager.engine.pool.checkedout()` returns to its baseline. In-memory, no DB round trip (the sampler shape already exists at `daemon/services/readiness.py:525-549`). **This is the invariant that would have caught the incident** — the census alone would not (C-10).
-- **(b) No backend's idle-in-txn residence exceeds the budget** — `now() - state_change <= DBPOOL_IDLE_IN_TXN_RESIDENCE_BUDGET_S`. **Not** a count assertion.
+- **(b) No backend's idle-in-txn residence exceeds the budget** — `now() - state_change <= DBPOOL_IDLE_IN_TXN_RESIDENCE_BUDGET_S`. **Not** a count assertion. The budget value is **PROVISIONAL** (default 2.0 s) — Phase 0 fixes it per the derivation rule `budget = measured P100 legitimate hold + stated margin` (margin ≥ 2× the measurement noise floor, floor 2.0 s). A 2.0 s budget can redden a HEALTHY daemon (false red) unless F8 removes every hold above it — the margin rule prevents picking a number by analogy.
 
 **The old "count == 0 at every sample" invariant is withdrawn.** It is red for a healthy busy daemon and green for a slow leak. A count may be **reported** and **bounded** (`peak_occupancy ≤ λ_measured × budget`, with λ from the leg's own sampler) but never asserted to be zero.
 
@@ -229,9 +261,9 @@ F7 must assert **both**, co-equal:
 ### 4.2 Attribution method (A3, A5, C-2, C-8)
 
 1. **Scratch-database isolation** (D-23/D-24) — the guard creates its own uniquely-named database, points the daemon's engine factory at it, and asserts on `pg_stat_activity WHERE datname = <that db>`. Every backend in that database belongs to the test. **This is the guard's attribution and it stays.**
-2. **`application_name` where present** — the census is attributed *"by `application_name` where present, else by scratch-DB isolation"*. `test-strategy.md:303`'s current wording ("by `application_name` (post-F2)") is **wrong** if D-24 stands ⇒ restate it.
+2. **`application_name` where present** — the census is attributed *"by `application_name` where present, else by scratch-DB isolation"*. The old wording ("by `application_name` (post-F2)") is **wrong** if D-24 stands ⇒ restated in `test-strategy.md` §1.5 (added in the fold amendment). |
 3. **Three engines carry a name** — `ensemble-manager` (F2.3), `ensemble-repair` (F2.5), `ensemble-checkpoint-adapter` (F2.6). The **shared** `PG_SESSION_CONNECT_ARGS` must **never** carry `application_name` (D-17).
-4. **Every census captures** `count` **+** `state_change` **+** `xact_start` **+** `backend_start` **+** `application_name`, and reports **residence-time buckets**, not just a count. The `backend_start > run_start` BASE filter is **prescribed** at `test-strategy.md:132-134` and must be **implemented** in the helper's SQL.
+4. **Every census captures** `count` **+** `state_change` **+** `xact_start` **+** `backend_start` **+** `application_name`, and reports **residence-time buckets**, not just a count. The `backend_start > run_start` BASE filter is **prescribed** in `test-strategy.md` §1.5 item 3 and must be **implemented** in the helper's SQL.
 5. **PG state `idle` is a disclosure metric**, not an assertion (C-10).
 
 ### 4.3 Collected-count assertions (C3 — every gate)
@@ -344,7 +376,25 @@ HOME="$(mktemp -d)" /home/nea/ensemble-src/.venv/bin/python -m pytest <paths> --
 
 (`pyproject.toml:95` deselects `integration`/`postgres`/`slow`/`conformance` by default.)
 
----
+### 6.3 Legacy → canonical gate-ID mapping (authority for FOLD-MAP.md cross-check)
+
+**Canonical source of truth (this spec, §6.1/§6.2):** the gate ladder is **G1.1 … G3.5** (W-6). The legacy `phase3-plan.md` IDs **G0 … G6** are the duplicate ladder being retired. The legacy IDs' **meanings were recovered empirically** from the pre-fold plan at commit `23c232b8d` (`git show 23c232b8d:.agents/shared/planning/db-pool-idle-txn/phase3-plan.md` §2.1) — G0 = the F7 guard's own reachability (unit static pin, G-A); G1 = Phase-1 packs (F3/F4/F6 unit legs); G2 = Phase-2 packs (knob matrix, repair-engine, P2 immutability); G3 = Phase-1 PG legs (F4 retention PG, F6 idempotency PG); G4 = Phase-2 PG legs (wedge-capture correctness); G5 = the F7 guard; G6 = whole-tree sweep. A single mapping table now governs BOTH artifacts (this table + the one in FOLD-MAP.md CF-1, which must agree). The sibling plan worker owns `phase1/2/3-plan.md` and may publish its own mapping table in FOLD-MAP.md; **this spec publishes the canonical-ID side as the authority** so the plan set can be cross-checked against it (do not edit the sibling's files).
+
+| Legacy ID (phase3-plan.md) | Canonical ID(s) (this spec) | Contents |
+|---|---|---|
+| **G0** | **G3.4** (the guard's static reachability leg) | guard's own reachability (unit static pin, G-A) — G0 was a **runnable unit gate**, not a pre-gate; the earlier "(pre-gate)" reading was a content error |
+| **G1** | **G1.1 – G1.4** | Phase-1 unit packs (F3, F5, F6 transaction-hygiene + mechanism pins) |
+| **G2** | **G2.1 – G2.3** | Phase-2 unit packs (F2 knob matrix, repair-engine, P2 immutability) |
+| **G3** | **G2.1 – G2.3** (F4 retention PG leg) | Phase-1 PG legs (F4 retention PG, F6 idempotency PG) — F4 retention is Phase-2 content |
+| **G4** | **G2.1 – G2.3** (F5 wedge-capture PG subset) | Phase-2 PG legs (wedge-capture correctness) |
+| **G5** | **G3.1 – G3.4** | F7 guard (occupancy + residence) |
+| **G6** | **G1.5 / G3.5** | two whole-tree sweep legs |
+
+**Rules:**
+- Any gate ID referenced in `decisions.md` or `architecture-recommendation.md` must exist in the canonical set {G1.1…G3.5} (W-11 static consistency pin).
+- The `F7` self-pin (F7-c) and the F8 static pin (F8-a) are default-collected unit packs and are NOT separate ladder entries — they ride G1.x / G3.x respectively.
+- If the sibling's FOLD-MAP.md uses different legacy→canonical IDs, the canonical side (this table) wins; the sibling reconciles against it, not the reverse.
+- The legacy mapping table is an explicitly-marked exempt block (legacy→canonical audit table, not a gate reference) so the W-11 pin does not self-RED on the plan set (CF-2).
 
 ## §7 DO-NOT-TOUCH
 
