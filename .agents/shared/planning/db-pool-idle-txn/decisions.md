@@ -599,6 +599,8 @@ The dispatch permits refining the HOW but forbids silently dropping a WHAT. Ever
 
 **Displaces:** F5 as a Phase-2 item.
 
+QUALIFICATION (2026-10-28, plan-owner-ratified): this attribution is PARTIAL — the `tasks`→`task` relation error was one of TWO roots. `_read_store_census`'s `n_live_tup`-from-`pg_class` defect is a second, pre-existing root (R-10; owner = the wedge-capture lane). F5 does NOT close the aborted-cascade.
+
 ### D-53 — The measured record's stale rows + one-canonical-copy rule (P-9)
 
 **Decision:** The plan cites **RAW values** (b1=5.8 ms, b2 timeout=0.5017 s, b3 timeout=0.5012 s; PIDs 2325xxx) and drops the byte-exact claim (T4's "byte-exactly" is a prefix check on a 200-char-truncated value; F-A's quoted SQL is the COMPILED SQL, not the observed `last_query`). BASELINE.md ≡ RESULTS line-for-line today (divergence NONE) but the plan names ONE canonical copy (the RESULTS file) and requires the other to carry a pointer, not a fork. The 8 stale rows are recorded as a provenance finding (the reports were written against an earlier harness run).

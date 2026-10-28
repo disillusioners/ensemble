@@ -15,6 +15,8 @@ Repair the two DB-transaction-hygiene mechanisms that are **still live at HEAD**
 
 **This lane does NOT close the incident's symptom class.** The recurrence precondition — **sync DB work on the event loop** (`daemon/routers/instances.py:476`, `daemon/routers/queues.py:654`) — is a **dwell multiplier** that this lane does not remove. The BFS depth-loop transaction span (`daemon/repositories/instance/repository.py:1434-1645`) is also untouched. After this lane the daemon can still hold 15/15 manager slots; the guard's occupancy invariant (F7-e) is the thing that will see it, and the follow-up commission is the owner of the residual. See §10 (Out of scope) and §12 (Routed items).
 
+QUALIFICATION (2026-10-28, plan-owner-ratified): this attribution is PARTIAL — the `tasks`→`task` relation error was one of TWO roots. `_read_store_census`'s `n_live_tup`-from-`pg_class` defect is a second, pre-existing root (R-10; owner = the wedge-capture lane). F5 does NOT close the aborted-cascade.
+
 ## 2. Scope
 
 **In scope**
@@ -94,6 +96,8 @@ Two defects survive the census and the premise corrections:
 
 **Amplifier (not a leak):** the manager engine's small pool (`pool_size=5`, `max_overflow=10` — 15 slots) with a 30s default `pool_timeout` and no server-side timeouts turns any retention into pool starvation → probe timeouts → readiness red → retry → more demand (research-audit-census.md:96-97). Repair: **F2**.
 
+QUALIFICATION (2026-10-28, plan-owner-ratified): this attribution is PARTIAL — the `tasks`→`task` relation error was one of TWO roots. `_read_store_census`'s `n_live_tup`-from-`pg_class` defect is a second, pre-existing root (R-10; owner = the wedge-capture lane). F5 does NOT close the aborted-cascade.
+
 ---
 
 ## 3.5 §PREMISE DELTA (Phase-0 measured) — P-1..P-10
@@ -116,6 +120,8 @@ Phase 0 measured evidence (BASELINE.md + canonical RESULTS + harness/raw/) refut
 | **P-11** | "Two of the four incident fingerprints are NOT reproducible at BASE" (test-strategy §0.3) + architect A4-i "a literal `BEGIN` `last_query` is a generic marker of 'a transaction opened and then went quiet' ⇒ A cannot be the fingerprint owner" (architecture-recommendation.md:63/:154) | **All four fingerprints REPRODUCE byte-exactly** (BASELINE.md:355-362; raw t4:46-55 comparison matrix: BEGIN=true, SELECT instances...=true, SELECT count(*) FROM job_queue_items...=true, INSERT ... mission_records=true). The `BEGIN` owner is **measured-unique to Site A**: the only `text("BEGIN")` in `daemon/` is `ens_db_tools.py:1479` (DDL) / `:1491` (DML) (BASELINE.md:366-367; raw t4:12-18). **psycopg3 does NOT leave `BEGIN` as `last_query`** — autobegin pipelines, leaving the STATEMENT (raw t2_stat_activity.out:48 — `last_query` = the SELECT after an autobegun statement); a literal `BEGIN` `last_query` is therefore a **standalone-BEGIN marker**, measured-unique to Site A (BASELINE.md:385-398). The architect's A4-i generic-marker claim is **REFUTED**. Plan text changed: the fingerprint table's BEGIN row upgraded from "most-consistent origin" to MEASURED-CONFIRMED with the raw cite; R19 reworded (the attribution is now measured-sound — the correction belongs to A4-i, not to the Site-A attribution) (P-11) | Fingerprint table BEGIN row upgraded; R19 reworded; §3.3 premise-1 row already CONFIRMED |
 
 **Additions:** if BASELINE.md yields a premise change NOT in this list, it is recorded as P-11+ and reported. None identified beyond P-1..P-11 (the raw verifier's 58-row score table is fully covered).
+
+QUALIFICATION (2026-10-28, plan-owner-ratified): this attribution is PARTIAL — the `tasks`→`task` relation error was one of TWO roots. `_read_store_census`'s `n_live_tup`-from-`pg_class` defect is a second, pre-existing root (R-10; owner = the wedge-capture lane). F5 does NOT close the aborted-cascade.
 
 ## 4. Per-fix mapping table — PRESERVED (F8 row added)
 
@@ -369,6 +375,8 @@ Each routed item is **out of this lane's scope** and is recorded here with its e
 | **R-7** | **Missed-finalize / RUNNING-stalled coverage** | No finalize leg exists for the RUNNING-stalled shape (f1 needs no Task, f2 needs a terminal Task) | Strand-healer commission | **ROUTED** — not this lane |
 | **R-8** | **OQ-1 trigger investigation** (why the boot-mint UniqueViolation is deterministic) | Candidate: two mint call sites for the same instance (`auto_continue_boot_pass.py:721` and `:1156`) | Architect / data owner | **CLOSED-by-measurement (P-7/DR-33)** — the boot path's re-resolve probe is **skipped** (`founding_message_id=None`, `mission_record_service.py:561/:567`), not mis-keyed; the measured trigger is a **concurrent double-mint** (c4: 8-way, no barrier, 7 UniqueViolations; c4b forced overlap: 5). The upsert (D-08) is idempotent under any trigger; the disclosure is corrected. Originally ROUTED. |
 | **R-9** | **asyncpg checkpoint-adapter idle-in-txn hold** | `daemon/checkpoint_adapter.py:1229-1240` opens an explicit `async with conn.transaction():` with three awaits between DELETEs (measured T3d: leak-capable, no server-side reap, cluster default 0); the shared `conn_string` lands the **same** `application_name` on the P2 psycopg pool and the asyncpg pool (p2_psycopg_pid 2325876 / asyncpg_pid 2325878, both `ensemble-shared-dsn`) ⇒ a **separate DSN** is required (D-36/D-49) | Follow-up DB-pool commission (named owner) | **ROUTED** — this lane owns attribution (D-36/D-49) only; the hold itself is owned by the follow-up under the D-47 enablement gate (D-58). The follow-up adds `server_settings={'idle_in_transaction_session_timeout': <measured>}` to the asyncpg pool's **NEW dedicated DSN** (the same DSN D-49 already mandates — a one-parameter addition there), under the **SAME D-47 enablement gate** (enable iff a trustworthy post-F8 measurement of the adapter's legitimate prune-transaction dwell exists). |
+| **R-10** | **wedge-capture `_read_store_census` is BORN-BROKEN on real PG** | `daemon/services/wedge_capture/db_capture.py:347` selects `c.n_live_tup` from `pg_class`; that column exists ONLY on `pg_stat_user_tables` ⇒ the store census fails on every real server. PRE-EXISTING AT BASE (not introduced by this lane) and a SECOND ROOT of the aborted-connection class: the census failure aborts the connection, so the subsequent reads inherit `InFailedSqlTransaction`. | The wedge-capture lane owner | **QUALIFICATION (mandatory):** F5 fixed ONLY the `tasks`→`task` relation error — the wedge-capture aborted-cascade root is only PARTIALLY addressed by this lane; this lane does NOT close it. |
+| **R-11** | **`instance.py:1346` unreachable defensive check** | `if _bus is None: return None` sits outside the contract's change list and is unreachable (the same condition returns inside the scope at `:1229-1233`). | The follow-up DB-pool commission (instance.py hygiene) | **DISCLOSED**, no patch in this lane. |
 
 ---
 

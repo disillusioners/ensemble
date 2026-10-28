@@ -88,4 +88,8 @@ HOME="$(mktemp -d)" \
 
 ---
 
+**Footnote — row 18 (`tests/unit/tools/test_dbpool_consistency_pin.py`):** this pack carries ONE strict-xfail canary — the AC-id cross-artifact check of the W-11 scanner (contract §6.4.2 check 3). Expected gate result: EXACTLY 1 xfail — the AC-id cross-artifact canary; 0 xfails (drift silently closed without the marker's removal) or 2+ xfails = FAIL. **Row 18's collected-count cell is UNCHANGED** — it still reads `TBD (R-1)`, and the fence's Δ1 cell parser must keep seeing that literal. This footnote is placed at the END of the file (not inside the table) so that the `| 18 |` row's cell positions and the reconciliation block's line anchors are untouched.
+
+---
+
 *Created by the fold round-2 part-B worker (contract + test-strategy re-base). **No number in this file is invented** — every count cell is `TBD (R-1)` pending the tester's base measurement.*

@@ -88,6 +88,7 @@ Each row: **`file:line@base` → exact change → verification.** "AC" = the acc
 | F8.7 | `daemon/manager.py:11366`/`:11383`/`:11400`/`:11421`/`:11430` (`_create_subshape_a_artifacts` reads `inj.parent_instance_id`) | The `inj` row is **detached/expired** after P0 closes ⇒ **re-read it in P2**. | F8-c |
 | F8.8 | `daemon/manager.py:11281-11300` (the write path) | The message INSERT + task INSERT + injection UPDATE must still commit in **one** transaction. The change is **decision↔write**, not write↔write. | F8-d (new pin) |
 | F8.9 | `daemon/write_pause_guard.py` — the `_write_guard` held across the reconcile | **No change.** It is a **counter**, not a lock (`:63-98`) ⇒ not an amplifier; it only delays a `pause_writes()` drain by up to the hold. One line in the F8 rationale so a future reader does not over-claim. | — (disclosure only) |
+| F8.10 | `daemon/manager.py:11212` (sync) / `:11999` (async) — the (c) branch's carrier-flag consumer | **D-33:94 narrowing (plan-owner ruling 2026-10-28: ACCEPTED).** D-33:94 as written says P0 reads `live_carrier_exists` unconditionally. SHIPPED: the carrier read is gated on P0 having observed both the Task and the MessageQueue row (`carrier_check_needed`); the unconditional read would force a second manager-engine session checkout on every (b)-shaped reconcile — the exact amplification F8 removes. The unknown-flag path is fail-safe by the strict consumer at the (c) branch: `not live_carrier_exists` → `live_carrier_exists is False` (`daemon/manager.py:11212` sync / `:11999` async) ⇒ an UNKNOWN flag can never trigger c_revival ⇒ no duplicate carrier on either race route. RESIDUAL: a genuinely carrier-less (c) shape reached with an unknown flag defers revival to the next sweep (fresh P0 snapshot ⇒ the carrier check runs then) — delayed, not lost (R-4/R-7 missed-finalize family). Route A base-fidelity (a post-P1 carrier check) is REJECTED by the plan owner — it buys nothing in the dangerous direction and re-adds a per-(a)-reconcile session checkout; recorded as an ACCEPTED DEVIATION. | — (disclosure only) |
 
 ### F3 — repair-tool dry-run transaction hygiene *(plan D-01/D-02/D-03)*
 
@@ -155,6 +156,7 @@ Each row: **`file:line@base` → exact change → verification.** "AC" = the acc
 | F6.6 | The lane's schema surface | **ZERO new `.sql` files.** Add a companion assertion that the **ORM diff introduces no new TABLE/COLUMN/INDEX** — a `.sql` file-count check alone would not catch an ORM-only table (A-6). | F6-d (process) |
 | F6.7 | `daemon/repositories/mission_record/repository.py:498-514` (the upsert) | **CONCURRENCY IDEMPOTENCY (DR-33).** The upsert must be idempotent **under concurrent mint for the same anchor**, not merely under sequential re-mint. Requirement: on `rowcount == 0` the winner row is re-resolved **by the anchor-scoped probe** (`find_open_epoch_by_anchor`, `:69-93`) — **the anchor-scoped re-resolve is reached on the `rowcount == 0` path**, and it is the path the concurrent race takes. The sequential path is already idempotent (measured c2: `ok: true`, `rung: 1`, **no** violation) ⇒ the leg that must go GREEN is the **concurrent** one. | F6-b (PG, concurrent leg), F6-a |
 | F6.8 | `daemon/repositories/mission_record/models.py:209` (`OPEN_EPOCH_STATUS_SQL`) | **F6-e's mutation subject (DR-18).** The predicate must remain **byte-identical** to the partial unique index's predicate (`models.py:305-313`, `postgresql_where=text("status = 'open'")`; mirrored at `daemon/manager.py:8548-8552` and `daemon/migrations/versions/20261025_140000_add_mission_open_epoch_unique_index.sql:67-69`). The concrete F6-subject mutation is: **change `status = 'open'` to `status = "OPEN"` at `models.py:209`** ⇒ the conflict-target predicate no longer byte-matches the partial index ⇒ the upsert stops being idempotent ⇒ RED. | F6-e |
+| F6.9 | `daemon/repositories/mission_record/repository.py:555-559`, `:571-596`; boot path `daemon/services/mission_record_service.py:573-577` | **mechanism text correction (plan-owner ruling 2026-10-28: ACCEPTED).** The `rowcount == 0` loser signal is not implementable: psycopg3 reports `rowcount = -1` (unknown) for `INSERT … ON CONFLICT DO NOTHING`. SHIPPED: the upsert's `.returning(mission_id)` is the loser signal (winner: one returned row; loser: none), and the loser re-resolves the winning row via the anchor-scoped probe (`daemon/repositories/mission_record/repository.py:555-559`, `:571-596`; boot path `daemon/services/mission_record_service.py:573-577`). The contract's purpose (F6-b) is met and pinned. | F6-b |
 
 ### F2 — manager-engine pool hardening + per-engine attribution *(D-13…D-22; A5; A6; C-2; C-3; C-8; C-9)*
 
@@ -181,11 +183,15 @@ Each row: **`file:line@base` → exact change → verification.** "AC" = the acc
 | F5.2 | `daemon/services/wedge_capture/db_capture.py:387` | `FROM tasks` → `FROM task`. | F5-b, F5-c |
 | F5.3 | `daemon/services/wedge_capture/db_capture.py:34` (docstring) | "``tasks`` rows" → "``task`` rows". **No other change** to the module. The path rides a one-shot `psycopg.connect` (`:196-200`) with `close()` in `finally` (`:289-294`) ⇒ **no pool**, so it cannot leak. **F5-d (the store-census keep-green pin) is added to this cell's Verify set (DR-22)** — the `pg_class`/`pg_namespace` census query (`:351-363`) is a **separate** query from the two fixed ones and must keep working. | F5-b, **F5-d** |
 
+QUALIFICATION (2026-10-28, plan-owner-ratified): this attribution is PARTIAL — the `tasks`→`task` relation error was one of TWO roots. `_read_store_census`'s `n_live_tup`-from-`pg_class` defect is a second, pre-existing root (R-10; owner = the wedge-capture lane). F5 does NOT close the aborted-cascade.
+
 ### F1 — the audit record *(D-11)*
 
 | # | Where | Exact change | Verify |
 |---|---|---|---|
 | F1.1 | `.agents/shared/planning/db-pool-idle-txn/audit-findings.md` (new) | Publish the census headline as the **AST baseline** — **not** the retired "≈689" aggregate: family counts **A=613 / C=4 / B=175 / D=148 / E=14 / F=0**, method cited to `audit-method.md` by filename. **Cite the scanner-independent total (`779`) as the canonical figure and mark the aggregate (≈689) NON-CANONICAL** — `audit-method.md` states the aggregate is not scanner-independent (DR-6). Record RCA sites **B** and **C** as audited-and-clean with their premise corrections. Label the five-backend reconciliation as **inference**. State that **no leak class was found where the census found none**. | F1-a (doc existence) |
+
+**Ship intent (plan-owner confirmed 2026-10-28):** `scripts/audit/borrow_census.py` STAYS in the repo (the F1 audit census tool, specified by this contract). It does NOT enter the release payload — payloads ship no `scripts/`; the giter confirms at stage time and discloses it in the composition record.
 
 ### F7 — the regression guard *(A2, A3, A7, A10; C-10, C-12; W-1, W-13)*
 
@@ -598,6 +604,8 @@ The pin (`G-consistency`, `tests/unit/tools/test_dbpool_consistency_pin.py`) is 
 **6.4.4 — What the pin does NOT do:** it does not check prose semantics, does not verify that a gate's *contents* match its description, and does not check file paths beyond the pack-inventory check. Those are the reviewer's job, not the scanner's.
 
 **6.4.5 — The scanner's own artifact:** the pin **re-reads this section** (the enumerated ladder, the sentinel rules and the §5 pin list) as its source of truth — it must **not** carry a private copy of the id sets. If the pin and this artifact disagree, the pin is wrong.
+
+**6.4.6 — The xfail canary (the AC-id drift marker) — EXPECTED GATE RESULT:** the AC-id cross-artifact check (check 3 above) is a **strict** xfail canary: it is marked `xfail(strict=True)` so that closing the drift silently would turn it XPASS-strict (RED) and force the marker's removal. Expected gate result: EXACTLY 1 xfail — the AC-id cross-artifact canary; 0 xfails (drift silently closed without the marker's removal) or 2+ xfails = FAIL. The `G-consistency` pin's collected count is unchanged by this marker (the canary is one collected test inside the pack, not a second pack).
 
 ---
 
