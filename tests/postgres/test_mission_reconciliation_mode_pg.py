@@ -35,6 +35,7 @@ import asyncio
 import os
 import threading
 import uuid
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
@@ -45,6 +46,14 @@ import daemon.repositories.dependency_bus.models  # noqa: F401
 import daemon.repositories.instance.models  # noqa: F401
 import daemon.repositories.mission_record.models  # noqa: F401
 import daemon.repositories.task.models  # noqa: F401
+# daemon.manager registers FURTHER SQLModel tables (snapshot_embeddings &
+# friends) in the shared metadata — it MUST import at MODULE level so the
+# registration happens BEFORE the session-scoped ``pg_engine`` fixture runs
+# ``create_all`` (the conftest's documented metadata-registration contract;
+# a deferred import would leave those tables uncreated and every LATER
+# test's autouse TRUNCATE would fail on UndefinedTable).
+import daemon.manager  # noqa: F401
+from daemon.manager import InstanceManager
 from daemon.repositories.dependency_bus.repository import (
     DependencyWatcherRepository,
 )
@@ -323,6 +332,72 @@ class TestHModeGateFacadePosture:
             assert facade_count == 1
         else:
             assert facade_count == 0
+
+
+class TestB1FacadePostureSymmetry:
+    """B1 — the posture-symmetry guard (the H-MODE finding, pinned).
+
+    The REAL ``InstanceManager.count_outstanding_commissions``
+    (``daemon/manager.py:12063-12068`` — invoked UNBOUND on a stub
+    ``self`` so the PRODUCTION method body runs, not a re-implementation)
+    must be mode-aware: outside ``enforce`` it returns 0 WITHOUT READING
+    ``mission_commissions`` at all — proven here at the ENGINE level
+    (zero SQL statements cross the wire during the facade call).
+
+    WHY THIS PIN EXISTS (the class it guards): the sweep WRITER writes
+    only in ``enforce``, and the gate facade counts only in ``enforce`` —
+    the two are SYMMETRIC, which is why a default-posture (``dry``)
+    deployment has NO mission_commissions wedge at all. A future refactor
+    that un-gates the facade in ``dry`` (counts the rows while the writer
+    stays inert) would wedge EVERY default-posture deployment behind an
+    inert writer — the exact prod v0.27.8 shape, recreated by a one-line
+    "cleanup". The dry leg asserts the zero-read property; the enforce
+    leg asserts the real count. Both postures run (two processes — the
+    resolver is restart-read); this is the mutation matrix's M2 target.
+    """
+
+    def test_the_facade_reads_nothing_outside_enforce(
+        self, pg_engine, _mode_from_process_env
+    ):
+        from sqlalchemy import event
+
+        mode = _mode_from_process_env
+        anchor = _seed_instance(pg_engine, str(uuid.uuid4()), "running")
+        mission_id = _seed_open_epoch(pg_engine, anchor)
+        _mint_commission(
+            pg_engine,
+            mission_id=mission_id,
+            commissioner=anchor,
+            worker=_seed_instance(pg_engine, str(uuid.uuid4()), "completed"),
+        )
+
+        statements: list[str] = []
+
+        def _record(_conn, _cursor, statement, _parameters, _context, _executemany):
+            statements.append(statement)
+
+        event.listen(pg_engine, "before_cursor_execute", _record)
+        try:
+            stub_self = SimpleNamespace(_engine=pg_engine)
+            value = InstanceManager.count_outstanding_commissions(
+                stub_self, anchor
+            )
+        finally:
+            event.remove(pg_engine, "before_cursor_execute", _record)
+
+        commission_reads = [
+            s for s in statements if "mission_commissions" in s
+        ]
+        if mode == "enforce":
+            assert value == 1
+            assert len(commission_reads) >= 1
+        else:
+            assert mode == "dry"
+            assert value == 0
+            # ZERO DB READS on the dry path — not just a zero return
+            # value: no statement of ANY kind crosses the wire.
+            assert statements == []
+            assert commission_reads == []
 
 
 class TestShippedDefault:

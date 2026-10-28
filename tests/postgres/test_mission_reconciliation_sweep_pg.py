@@ -689,12 +689,29 @@ class TestA4Backlog:
             else:
                 expected.append((commission_id, CommissionState.ABANDONED.value))
 
+        # (iii) TTL-bound backlog rows: idle NON-TERMINAL workers past the
+        # TTL — only the TTL backstop can retire these (no terminal
+        # status, no live work, no evidence). The backlog leg must cover
+        # this class so a neutered age clock (the mutation matrix's M5)
+        # stalls the DRAIN, not just the single-row TTL leg.
+        ttl_expected: list[str] = []
+        for index in range(3):
+            idle_worker = _seed_instance(pg_engine, str(uuid.uuid4()), "running")
+            ttl_id = _mint_commission(
+                pg_engine,
+                mission_id=mission_id,
+                commissioner=commissioner,
+                worker=idle_worker,
+                age_seconds=TTL_SECONDS * (10 + index),
+            )
+            ttl_expected.append(ttl_id)
+
         service = _build_service(
             pg_engine, manager_loop=manager_loop, batch_cap=5
         )
 
         # The gate count BEFORE the sweep — the wedge's input.
-        assert count_outstanding_commissions(pg_engine, anchor) == 12
+        assert count_outstanding_commissions(pg_engine, anchor) == 15
 
         ticks = 0
         while count_outstanding_commissions(pg_engine, anchor) > 0:
@@ -706,6 +723,11 @@ class TestA4Backlog:
         for commission_id, expected_state in expected:
             row = _row(pg_engine, commission_id)
             assert row.state == expected_state, commission_id
+            assert row.resolved_at is not None
+        for ttl_id in ttl_expected:
+            row = _row(pg_engine, ttl_id)
+            assert row.state == CommissionState.ABANDONED.value, ttl_id
+            assert row.abandon_reason == REASON_TTL
             assert row.resolved_at is not None
 
 
