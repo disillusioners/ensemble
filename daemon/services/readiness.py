@@ -107,9 +107,20 @@ READINESS_GRACE_SCOPE_LOAD = "load"
 # Hard timeout for the SELECT 1 liveness query against the manager
 # engine. The existing engine is sync SQLAlchemy, so the query runs in
 # a worker thread via asyncio.to_thread and asyncio.wait_for enforces
-# the budget. A timed-out to_thread leaves the underlying thread
-# running until the driver's own connect/execute timeout releases it —
-# bounded leakage, acceptable at the 10s refresh cadence.
+# the budget. An abandoned probe thread does NOT leak a transaction
+# (measured, Phase-0 BASELINE.md T5b): (i) under pool starvation it
+# never acquires a connection at all — it is a pool WAITER bounded by
+# the engine-level pool_timeout (30 s; the F4-A admission pre-check
+# below refuses entry at capacity so no stranded waiter is created);
+# (ii) when it DOES hold a connection the backend is ``active`` (NOT
+# ``idle in transaction``) and the F4-B probe-scoped
+# ``SET LOCAL statement_timeout = 2x budget`` cancels the statement
+# server-side (57014 / QueryCanceled) — the backend row is EXPECTED TO
+# PERSIST in pg_stat_activity with state='idle' after the statement is
+# cancelled and the connection returns to the pool. The manager engine
+# sets no engine-wide execute timeout (the URL's connect_timeout
+# bounds the connect phase only) — the "the driver's own
+# connect/execute timeout releases it" premise is FALSE at base.
 DB_PROBE_TIMEOUT_S: float = 0.5
 
 # Hard timeout for the checkpoint-saver probe (incident 2026-10-10 fix).
@@ -125,6 +136,20 @@ CHECKPOINT_SAVER_PROBE_TIMEOUT_S: float = 1.0
 # over RUNNING tasks; the budget only guards against a hung database,
 # not query cost.
 QUEUE_PROBE_TIMEOUT_S: float = 2.0
+
+# F4-A (D-57/D-59): the manager engine's LANE-PINNED CONFIGURED
+# CAPACITY — ``pool_size`` 5 + ``max_overflow`` 10 as passed to
+# ``create_engine`` at ``daemon/repositories/factory.py`` (the
+# construction site). The readiness probes refuse to enter the
+# blocking pool checkout once ``checkedout()`` reaches this value
+# (synchronous ``TimeoutError`` ⇒ ``FAILURE_CLASS_PROBE_TIMEOUT`` ⇒
+# grace-eligibility preserved, no stranded waiter thread). Deliberately
+# NOT read from ``QueuePool._max_overflow`` (private API) and NOT from
+# ``pool.overflow()`` (current overflow — a load probe, not the
+# configured limit); a capacity-equality pin asserts this constant
+# equals the engine's configured capacity at construction so a knob
+# drift REDs the pack.
+MANAGER_POOL_CONFIGURED_CAPACITY: int = 15
 
 # Task-status literal for RUNNING (TaskStatus.RUNNING.value in
 # daemon/repositories/task/models.py). Kept as a literal so this
@@ -1460,6 +1485,50 @@ async def refresh_readiness_composite(
     )
 
 
+def _refuse_pool_admission_at_capacity(engine: Engine) -> None:
+    """F4-A: probe-scoped acquisition admission pre-check.
+
+    Runs at the top of each probe body, immediately BEFORE
+    ``engine.connect()``. When the manager pool is at its configured
+    capacity (``MANAGER_POOL_CONFIGURED_CAPACITY``) the probe raises
+    ``TimeoutError`` SYNCHRONOUSLY instead of entering the blocking
+    checkout — ``asyncio.wait_for``'s cancellation cannot stop a
+    running ``to_thread`` worker, so a probe that enters a saturated
+    pool becomes a stranded waiter bounded only by the engine-level
+    ``pool_timeout`` (30 s). The raised ``TimeoutError`` is classified
+    by the EXISTING ``except TimeoutError`` branch in ``_guarded``
+    (``FAILURE_CLASS_PROBE_TIMEOUT``) ⇒ grace-eligibility preserved,
+    no verdict-contract change, and no thread is stranded because the
+    refusal happens before the checkout.
+
+    Engine-agnostic — no statement is issued, so no dialect guard is
+    needed. Residual (disclosed): a checkout that loses the race
+    between this pre-check and ``engine.connect()`` can still strand
+    the probe thread for up to ``pool_timeout`` = 30 s.
+    """
+    pool = getattr(engine, "pool", None)
+    if pool is None:  # pragma: no cover — defensive (Engine always has one)
+        return
+    if pool.checkedout() >= MANAGER_POOL_CONFIGURED_CAPACITY:
+        raise TimeoutError(
+            "readiness probe admission refused: manager pool at "
+            "configured capacity "
+            f"({pool.checkedout()}/{MANAGER_POOL_CONFIGURED_CAPACITY})"
+        )
+
+
+def _probe_statement_timeout_ms(client_budget_s: float) -> int:
+    """F4-B: the probe-scoped server-side statement bound, in ms.
+
+    ``2 x`` the probe's own asyncio client budget (``asyncio.wait_for``
+    in ``_guarded`` fires FIRST at 1x, so the class stays
+    ``probe_timeout``; at <= 1x the server error would race the client
+    and could reclassify a timeout as hard-component-red). The ONE
+    derivation site so the two probes cannot drift.
+    """
+    return int(2 * client_budget_s * 1000)
+
+
 def make_db_probe(engine: Engine) -> Callable[[], tuple[bool, Optional[str]]]:
     """Build the database component probe bound to a sync engine.
 
@@ -1474,8 +1543,25 @@ def make_db_probe(engine: Engine) -> Callable[[], tuple[bool, Optional[str]]]:
     """
 
     def _probe() -> tuple[bool, Optional[str]]:
+        # F4-A — admission pre-check BEFORE the blocking checkout.
+        _refuse_pool_admission_at_capacity(engine)
         with engine.connect() as conn:
+            # F4-B — probe-scoped statement bound, FIRST statement
+            # (it opens the autobegun transaction that scopes the
+            # setting). PG-only, exactly the ens_db_tools.py:787-797
+            # house idiom; SQLite does not support SET LOCAL.
+            if engine.url.get_backend_name().startswith("postgres"):
+                conn.execute(
+                    sa_text(
+                        "SET LOCAL statement_timeout = "
+                        f"{_probe_statement_timeout_ms(DB_PROBE_TIMEOUT_S)}"
+                    )
+                )
             conn.execute(sa_text("SELECT 1"))
+            # D-07 — explicit end-of-transaction before the connection
+            # returns to the pool (documented no-op when no transaction
+            # is active, SQLAlchemy 2.0.48).
+            conn.rollback()
         return True, None
 
     return _probe
@@ -1749,7 +1835,20 @@ def make_queue_probe(
             _QUEUE_MAX_AGE_SQL_POSTGRES if is_postgres else _QUEUE_MAX_AGE_SQL_SQLITE
         )
         inflight: Optional[int] = None
+        # F4-A — admission pre-check BEFORE the blocking checkout.
+        _refuse_pool_admission_at_capacity(engine)
         with engine.connect() as conn:
+            # F4-B — probe-scoped statement bound, FIRST statement
+            # (it opens the autobegun transaction that scopes the
+            # setting). PG-only, exactly the ens_db_tools.py:787-797
+            # house idiom; SQLite does not support SET LOCAL.
+            if engine.url.get_backend_name().startswith("postgres"):
+                conn.execute(
+                    sa_text(
+                        "SET LOCAL statement_timeout = "
+                        f"{_probe_statement_timeout_ms(QUEUE_PROBE_TIMEOUT_S)}"
+                    )
+                )
             value = conn.execute(
                 age_statement,
                 {"status_running": TASK_STATUS_RUNNING, "boot_epoch": epoch_bind},
@@ -1776,6 +1875,10 @@ def make_queue_probe(
                         raw_count,
                     )
                     inflight = None
+            # D-07 — explicit end-of-transaction before the connection
+            # returns to the pool (documented no-op when no transaction
+            # is active, SQLAlchemy 2.0.48).
+            conn.rollback()
         if value is None:
             return QueueProbeResult(max_age_seconds=None, inflight_turns=inflight)
         try:
