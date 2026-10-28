@@ -4,7 +4,7 @@
 - **Worktree:** `/home/nea/ensemble-src-wt-dbpool-idletxn` — branch `fix/db-pool-idle-txn`.
 - **Base commit (all `file:line` citations in this plan set):** `19fc11c8b52239813fd91327ee0c1961c5b6fc87` (= `origin/latest` = the staged **v0.27.11** tree).
 - **HEAD verified** at plan time: `git rev-parse HEAD` → `19fc11c8b52239813fd91327ee0c1961c5b6fc87`. ✔
-- **Status:** PLANNING ONLY — zero code changes in this lane so far. This plan set is the deliverable.
+- **Status:** Phase 0 COMPLETE — BASELINE.md + canonical RESULTS file + harness + raw/ on branch; **no implementation change has landed before Phase 0** (git log 19fc11c8b..HEAD is docs/test only: `23c232b8d … 17dbfe33d`, verified). This plan set is the deliverable.
 - **Sibling artifacts referenced by filename only** (authored in parallel, not read at fold time): `test-strategy.md` (F7 guard design/repro/mutation pins), `wi-78967dba-verdict.md` (verdict write-up), `audit-method.md` (borrow-site audit method + counts), `final-implementation-spec.md` (binding contract), `BASELINE.md` (Phase 0 evidence, produced by the lane).
 
 ---
@@ -65,7 +65,7 @@ The RCA (`/home/nea/ensemble-src/.agents/shared/incident-20261026-db-pool-idle-i
 
 ### 3.2 The borrow-site census — the honest headline (F1) — PRESERVED VERBATIM
 
-A full enumeration of session/connection borrow sites in `daemon/` at HEAD audited **≈689 sites across 6 families and found ZERO unclosed borrows** — every borrow is `with`-form, `try/finally`-form with rollback+close, or an ownership-transferring proxy (method + counts: `audit-method.md`). The one non-`with` session family (4 sites) was verified individually and is clean. **There is no "leaked session" class in this codebase at HEAD.** The hazard set is narrower and different: transaction-state/retention hazards on close-clean borrows (the RISK table in `research-audit-census.md` §1c — R1 = the BEGIN gap, R2 = probe retention, R3 = borrow-then-await amplification).
+A full enumeration of session/connection borrow sites in `daemon/` at HEAD audited **779 sites across 6 families (AST baseline: A=613 / B=175 / C=4 / D=148 / E=14 / F=0) and found ZERO unclosed borrows** — every borrow is `with`-form, `try/finally`-form with rollback+close, or an ownership-transferring proxy (method + counts: `audit-method.md`). The retired aggregate **≈689** is non-canonical (scanner-dependent; `audit-method.md:283-296`); the AST baseline 779 is the cited figure. The one non-`with` session family (4 sites) was verified individually and is clean. **There is no "leaked session" class in this codebase at HEAD.** The hazard set is narrower and different: transaction-state/retention hazards on close-clean borrows (the RISK table in `research-audit-census.md` §1c — R1 = the BEGIN gap, R2 = probe retention, R3 = borrow-then-await amplification).
 
 This is the single most important correction to the RCA's framing, and it is why F1's fix content collapses into F3/F4/F6 plus an audited-and-clean record.
 
@@ -75,7 +75,7 @@ The incident observed **5 `idle in transaction` backends** with these `last_quer
 
 | Fingerprint | Count | Most-consistent origin | Confidence |
 |---|---|---|---|
-| `BEGIN` | 2 | **Site A** — the only `text("BEGIN")` in `daemon/` is `ens_db_tools.py:1479/:1491` (grep: zero other hits). A BEGIN left open on failure is exactly the "idle in transaction, last query = BEGIN" state | **CONFIRMED attribution** (the site exists and the fingerprint is unique to it) |
+| `BEGIN` | 2 | **Site A** — the only `text("BEGIN")` in `daemon/` is `ens_db_tools.py:1479/:1491` (grep: zero other hits). A BEGIN left open on failure is exactly the "idle in transaction, last query = BEGIN" state. **CONFIRMED attribution, cite-backed (P-11/D-56):** measured-unique to Site A — raw `t2_stat_activity.out:48` (psycopg3 autobegin pipelines, leaving the STATEMENT as `last_query`, so a literal `BEGIN` is a standalone-BEGIN marker) + raw `t4_fingerprints.out:12-18` (BEGIN owner = ens_db_tools.py:1479/:1491; byte-exact repro at BASELINE.md:355-362) | **CONFIRMED attribution** (cite-backed; see P-11/D-56) |
 | `SELECT instances.instance_id, ...` | 2 | **Not a leak.** This is the ORM render of `SQLModelInstanceRepository.list`. A request in flight holds one scope-transaction open while the daemon does the BFS + `_enrich_instances` work in Python (repository :1429). Under pool pressure these are ordinary in-flight transactions whose *last* statement was the SELECT — i.e. the fingerprint identifies "a request is mid-flight", not "a connection was abandoned" | **INFERENCE** — consistent with the event-loop-starved in-flight-request shape |
 | `SELECT count(*) FROM job_queue_items ...` | 1 | **Site C's real owner** — `defer_block_resolver._DEFER_PENDING_COUNT_SQL` (:185-191), executed context-managed at :274/:321. Like the row above, the fingerprint identifies a query in flight on a connection that is *about to* be returned | **INFERENCE** — the site is confirmed; the "leaked" reading is not |
 
@@ -96,14 +96,37 @@ Two defects survive the census and the premise corrections:
 
 ---
 
+## 3.5 §PREMISE DELTA (Phase-0 measured) — P-1..P-10
+
+Phase 0 measured evidence (BASELINE.md + canonical RESULTS + harness/raw/) refutes or restates ten plan premises. Every row cites artifact:line. Where a measurement contradicts a plan premise, the plan text changes (visible in the diff), not an annotation.
+
+| ID | Plan said (quote + artifact:line) | Measured (value + cite) | Plan text changed (file + section) |
+|----|-----------------------------------|-------------------------|-----------------------------------|
+| **P-1** | F4 premise: "the abandoned probe worker holds a connection open indefinitely and a probe-scoped `SET LOCAL statement_timeout` bounds it" (phase1-plan D-04/T1.4; plan-overview §4 F4; decisions D-35) | Under pool starvation the probe holds **NO** connection (b3: holders 15, `checkedout_right_after_timeout` 15 — a pool WAITER, bounded by `pool_timeout`); when it does hold one the backend is `active`, NOT `idle in transaction` (b2); probe-scoped `SET LOCAL` is **IRRELEVANT** to the starvation shape (BASELINE T5b; raw t5 b1/b2/b3: b1=5.8 ms, b2 timeout=0.5017 s, b3 timeout=0.5012 s) | **F4 demoted** from "primary" to bounded defence-in-depth (§4 row D; Phase 5 table); outcome restated as "the probe's statement duration is server-bounded **when the probe holds a connection**" |
+| **P-2** | Flip condition as a constant: "if hold < 2 s …" (OQ-6, plan-overview:266; final-implementation-spec §0(a); decisions D-40) | Worst hold 8011.119 ms (sync twin's 8.0 s bridge, n=1); async worst 1059.877 ms but that figure is **MODEL-INJECTED** (t1 py :281-282 injected a 1 s tail), not measured; hold ≈ await at medians (L5 1029.9 vs 1026.5 ms; L2 52.4 vs 47.7 ms; L1 diverges by ~42.8 ms under pressure) ⇒ **F8 STANDS**; condition becomes "hold < 2 s **iff** the awaited content fetch < 2 s" (a property of the FETCH, data-dependent; the real fetch latency is **UNMEASURED** — disclosed) (raw t1) | OQ-6 restated as a precondition (plan-overview:266); decision instrument = fetch-latency distribution |
+| **P-3** | Manager idle-in-txn bound = "4 × measured max legitimate hold, floor 30 s" (decisions D-32; final-implementation-spec §2) | The max legit hold is model-injected (1059.877 ms) or 114.5 ms un-injected (n=30); 4× = 4.24 s ⇒ the 30 s floor dominates AND coincides with the legitimate `pool_timeout` wait (~30 s) ⇒ a 30 s server-side reap risks killing legitimate waiters, and the server **TERMINATES** the backend (raw t2:137-140) ⇒ the bound ships **DISABLED** (defined, not applied) with the enablement mechanism (applied iff BASELINE.md records a trustworthy measurement; while disabled the rendered string omits the clause and the daemon logs `MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS DISABLED — no trustworthy Phase-0 measurement`) (raw verifier derivation (a)) | D-32 amended (decisions); §15.4 stage log records applied/disabled |
+| **P-4** | F7 residence budget + metric: "measured P100 legitimate hold + margin (≥2× noise floor, floor 2.0 s)" using `state_change − xact_start` (decisions D-38; final-implementation-spec §4) | The specified metric is **FROZEN** at the last statement's completion ⇒ a leaked backend shows the SAME sub-ms value as a healthy one ⇒ the budget **CANNOT** fire on the leak. Working metric is `now() − xact_start` (`xact_age_s` — already collected, raw common.py:88 + t2). Healthy residence measured: median 0.0005 s / p95 0.0007 s / max 0.0008 s over 40 cycles ⇒ the 2.0 s placeholder is orders of magnitude too loose AND would falsely red the sync twin (≥8 s by construction) and any long-fetch async instance. F7 becomes the three-state occupancy (idle-with-xact_start-NULL / idle-in-txn / active) + xact_age-residence form (raw M-7; DR-35) | D-38 amended (decisions); F7 invariant rewritten |
+| **P-5** | Attribution via shared connect-args constant with `application_name` appended last (D-30; phase2) | The conninfo parameter **BEATS** `options=-c` (measured); within one options string last `-c` wins; the shared-constant-last hazard is **MEASURED** (`repair_engine_reports_manager_name: true`, raw t3:117) ⇒ per-pool `application_name` moves to each engine's **OWN** conninfo/URL query dict (override-proof); the shared constant carries none (P-5/DR-31) | D-30 amended (decisions); attribution mechanism specified |
+| **P-6** | "Three pools" as the census scope (D-36) | **11 real pool-creation sites** (+1 comment false-positive at factory.py:289) ⇒ the three named engines are a **FLOOR**; the F7 census covers every site (P-6/DR-32; raw T3a) | D-36 boundary statement amended (decisions) |
+| **P-7** | OQ-1: "the boot path's re-resolve is keyed on the index's own predicate" (D-09) — the probe is mis-keyed | The boot path's re-resolve probe is **SKIPPED** (`founding_message_id=None`, `mission_record_service.py:561/:567`) and the error re-raises — D-09's mis-keyed-probe claim **RETRACTED**; the trigger is a **concurrent double-mint** (c4: 8-way, no barrier, 7 UniqueViolations — raw; c4b forced overlap: 5) ⇒ F6's idempotency is specified against **CONCURRENT double-mint** (P-7/DR-33; code-verified) | D-09 amended (decisions); OQ-1 → CLOSED-by-measurement (plan-overview R-8) |
+| **P-8** | F5 priority: Phase-2 item | The incident's "aborted connection handed back out" premise is **REFUTED** for the pool path (`reset_on_return='rollback'` cleans it); the journal quote is a **SAME-CONNECTION CASCADE** in wedge-capture ⇒ F5's priority is **RAISED** (the `tasks`→`task` rename is the cascade's root) and moves to **Phase 1** (P-8/DR-34; BASELINE row 4 + raw t5 a5) | Phase 5 table updated (F5 in Phase 1); §4 F5 row updated |
+| **P-9** | The measured record is authoritative (BASELINE.md ≡ RESULTS) | **8 stale/over-stated rows** in BOTH copies (raw verifier score table): 7 numeric values from a superseded harness run (3.003 vs 3.002; PIDs 2317xxx vs 2325xxx; 5.1 vs 5.8 ms; 0.5011 vs 0.5017; 0.5015 vs 0.5012) and 2 citations over-stated (T4's "byte-exactly" is a prefix check on a 200-char-truncated value; F-A's quoted SQL is the COMPILED SQL, not the observed `last_query`) ⇒ the plan cites **RAW values** and drops the byte-exact claim; BASELINE.md ≡ RESULTS line-for-line today (divergence NONE) but the plan names ONE canonical copy (the RESULTS file) and requires the other to carry a pointer, not a fork (P-9/DR-27) | SC10 + census cites raw values; one-canonical-copy rule recorded |
+| **P-10** | Census blindness (BASELINE point 5 + DR-35) | A probe/connection holding work is `active` or idle-with-no-xact — an idle-in-txn-only census is **vacuous against TWO of the three shapes** ⇒ the three-state invariant (folds into P-4's F7 form) (P-10/DR-35) | F7 invariant rewritten (three-state) |
+
+| **P-11** | "Two of the four incident fingerprints are NOT reproducible at BASE" (test-strategy §0.3) + architect A4-i "a literal `BEGIN` `last_query` is a generic marker of 'a transaction opened and then went quiet' ⇒ A cannot be the fingerprint owner" (architecture-recommendation.md:63/:154) | **All four fingerprints REPRODUCE byte-exactly** (BASELINE.md:355-362; raw t4:46-55 comparison matrix: BEGIN=true, SELECT instances...=true, SELECT count(*) FROM job_queue_items...=true, INSERT ... mission_records=true). The `BEGIN` owner is **measured-unique to Site A**: the only `text("BEGIN")` in `daemon/` is `ens_db_tools.py:1479` (DDL) / `:1491` (DML) (BASELINE.md:366-367; raw t4:12-18). **psycopg3 does NOT leave `BEGIN` as `last_query`** — autobegin pipelines, leaving the STATEMENT (raw t2_stat_activity.out:48 — `last_query` = the SELECT after an autobegun statement); a literal `BEGIN` `last_query` is therefore a **standalone-BEGIN marker**, measured-unique to Site A (BASELINE.md:385-398). The architect's A4-i generic-marker claim is **REFUTED**. Plan text changed: the fingerprint table's BEGIN row upgraded from "most-consistent origin" to MEASURED-CONFIRMED with the raw cite; R19 reworded (the attribution is now measured-sound — the correction belongs to A4-i, not to the Site-A attribution) (P-11) | Fingerprint table BEGIN row upgraded; R19 reworded; §3.3 premise-1 row already CONFIRMED |
+
+**Additions:** if BASELINE.md yields a premise change NOT in this list, it is recorded as P-11+ and reported. None identified beyond P-1..P-11 (the raw verifier's 58-row score table is fully covered).
+
+## 4. Per-fix mapping table — PRESERVED (F8 row added)
+
 ## 4. Per-fix mapping table — PRESERVED (F8 row added)
 
 | Site | Fix | file:line@`19fc11c8b` | Fix pattern (design-level) | Verification (Phase) |
 |---|---|---|---|---|
 | **A** — repair-tool dry-run BEGIN | **F3** | `daemon/tools/ens_db_tools.py:1479` (DDL), `:1491` (DML); outer `try:` :1475, outer `except:` :1513 | **Drop the explicit `BEGIN`** (SQLAlchemy autobegins on the next `execute`; the ROLLBACKs carry the "does not commit" property) **and** move the rollback into a `finally` so every exit path rolls back | P1: unit pin (no `text("BEGIN")` remains; rollback on every exit path, incl. SQL-error and rollback-error paths); no test asserted `text("BEGIN")` before this change (grep: zero hits) |
-| **D** — readiness-probe retention | **F4** | `daemon/services/readiness.py:107-113` (docstring), `:1477` (DB probe connect), `:1752` (queue probe connect), `_guarded` seam :1262-1295 | **Probe-scoped server-side statement bound**: `SET LOCAL statement_timeout` inside each probe's own transaction (house idiom, `ens_db_tools.py:787-797`) sized at 2× the probe's asyncio budget, PG-only (SQLite has no `SET LOCAL`), + an explicit end-of-transaction before the connection is returned. Engine-level backstop lands in **F2** | P1: PG-backed probe-timeout pin (a probe forced to exceed its budget leaves **no** idle-in-transaction backend behind); PG-only guard pinned |
+| **D** — readiness-probe retention | **F4 (demoted 2026-10-28 round-2 — P-1/DR-29: bounded defence-in-depth, NOT primary)** | `daemon/services/readiness.py:107-113` (docstring), `:1477` (DB probe connect), `:1752` (queue probe connect), `_guarded` seam :1262-1295 | **Probe-scoped server-side statement bound (defence-in-depth)**: `SET LOCAL statement_timeout` inside each probe's own transaction, sized at 2× the probe's asyncio budget, PG-only, + an explicit end-of-transaction before the connection is returned. **Premise rewritten (P-1):** the incident's starvation shape (b3: probe holds NO connection — a pool WAITER, bounded by `pool_timeout`) is addressed by F8 + F2's pool occupancy/waiter arguments, NOT by a probe-scoped statement bound; F4's outcome is restated as "the probe's statement duration is server-bounded **when the probe holds a connection**" (b2: `active`, not `idle in transaction`). Engine-level backstop lands in **F2** | P1: PG-backed probe-timeout pin (forced probe timeout leaves **no** idle-in-transaction backend behind); PG-only guard pinned |
 | **E** — mission boot mint | **F6** | `daemon/services/mission_record_service.py:499-567` (IntegrityError handler), `:641-692` (rung-1 probe + boot entry point), `daemon/repositories/mission_record/repository.py:498-514` (own-session insert), `:69-93` (rung-1 probe) | **Idempotent mint**: replace the own-session ORM insert with a dialect upsert `ON CONFLICT (anchor_instance_id) WHERE <open-predicate> DO NOTHING` (house precedent `daemon/repositories/job_queue/repository.py:485-496`) + re-resolve via the **anchor-scoped** rung-1 probe (which uses the *same* predicate as the index) instead of the `founding_message_id`-keyed probe that can never match a NULL-founding boot epoch. **No schema change** — the partial unique index already exists in 3 places | P1: unit pin (upsert shape, dialect selection, re-resolve key) + PG pin (second mint returns the winning epoch, no `IntegrityError`, **and** the caller's transaction is not poisoned) |
-| **F** — wedge-capture table | **F5** | `daemon/services/wedge_capture/db_capture.py:308`, `:387`, docstring :34 | Rename `tasks` → `task` (2 SQL sites + 1 docstring). Correctness fix — this path rides a **one-shot `psycopg.connect`** with no pool, `close()` in `finally` (:289-294) | P2: PG pin (wedge-capture read returns rows; no `relation "tasks" does not exist`); assert the *second* query on the same connection no longer fails with `current transaction is aborted` |
+| **F** — wedge-capture table | **F5 (raised to Phase 1 — P-8/DR-34)** | `daemon/services/wedge_capture/db_capture.py:308`, `:387`, docstring :34 | Rename `tasks` → `task` (2 SQL sites + 1 docstring). Correctness fix — this path rides a **one-shot `psycopg.connect`** with no pool, `close()` in `finally` (:289-294) | P1 (raised 2026-10-28 round-2 — P-8/DR-34): PG pin (wedge-capture read returns rows; no `relation "tasks" does not exist`); assert the *second* query on the same connection no longer fails with `current transaction is aborted` |
 | **B** — `/api/instances` list | **F1 doc** | `daemon/repositories/instance/repository.py:1259/:1383/:1429/:1434`; `daemon/routers/instances.py:370-476`; `daemon/services/instance_lifecycle.py:5021` | **No code change.** Audited-and-clean record + the RCA premise-2 correction | P1: doc artifact only (audit-findings.md) |
 | **C** — `job_queue_items` count | **F1 doc** | `daemon/services/defer_block_resolver.py:185-191/:274/:306/:321`; `daemon/tools/instance_read.py:1408-1416` | **No code change.** Audited-and-clean record + the RCA premise-4 correction | P1: doc artifact only |
 | **P1 pool** — manager engine | **F2** | `daemon/repositories/factory.py:323-338` (+ `:252` connect-args home), `daemon/constants.py` (canonical knob home; `factory.py:14` already imports `BOOT_DB_TIMEOUT_S` from it) | **Knob-by-knob hardening** — exact values + rationale per knob in `phase2-plan.md` §2 and `decisions.md` D-14, D-16, D-17, D-18* | P2: the existing knob-pin file `tests/unit/repositories/test_pg_engine_utc_session.py` (which already captures `create_engine` kwargs at :104-117) is **extended** to assert the complete final knob set |
@@ -117,8 +140,8 @@ Two defects survive the census and the premise corrections:
 | # | Name | File | Objective | Depends on |
 |---|------|------|-----------|------------|
 | **0** | **Empirical baseline** (NEW — leader ruling 5) | `phase0-plan.md` | Convert documentation-only PG-semantics claims into measurements on a scratch DB; produce BASELINE.md | — |
-| **1** | Transaction hygiene + F8 | `phase1-plan.md` | F3 (BEGIN gap) + F4 (probe retention) + F6 (idempotent mint) + F1 (audit documentation for B/C) + **F8 (borrow-then-await removal)** | Phase 0 |
-| **2** | Pool hardening | `phase2-plan.md` | F2 (manager-engine knobs, exact values) + F5 (wedge-capture table) | Phase 1 |
+| **1** | Transaction hygiene + F8 (primary) + F5 | `phase1-plan.md` | F3 (BEGIN gap) + F4 (probe retention, defence-in-depth) + F6 (idempotent mint) + F1 (audit documentation for B/C) + **F8 (borrow-then-await removal — primary, council fold)** + **F5 (wedge-capture table, raised to Phase 1 — P-8/DR-34)** | Phase 0 |
+| **2** | Pool hardening | `phase2-plan.md` | F2 (manager-engine knobs, exact values) | Phase 1 |
 | **3** | Regression guard | `phase3-plan.md` | F7 (idle-in-transaction guard) + the pin packs that freeze F3/F4/F6/F2/F5/F8 | Phases 1-2 |
 
 ### 5.1 Phase gates (summary; per-phase detail in the phase files)
@@ -138,7 +161,7 @@ Two defects survive the census and the premise corrections:
 
 `pool_leak` is **never** grace-eligible, and the refusal is unconditional (soak `requirements.md` §4.4 P4; `risk-safety-register.md` R-MASK-4). This lane's purpose is to make the signal **stop firing** because the condition is gone — not to make it fire less often.
 
-**Therefore this plan proposes NO change to:** the leak predicate (`daemon/services/readiness.py:784-941`), the exhaustion/trend arms, the conjunction at :734-743, the streak arm, the grace arming window, the detail schema (:408-446), the P1/P2 sampling surfaces (:525-582), the `daemon/api.py:3939-3987` wiring, or the `daemon/constants.py` grace/leak constants.
+**Therefore this plan proposes NO change to:** the leak predicate (`daemon/services/readiness.py:784-941`), the exhaustion/trend arms, the conjunction at :739-743, the streak arm, the grace arming window, the detail schema (:408-446), the P1/P2 sampling surfaces (:525-582), the `daemon/api.py:3939-3987` wiring, or the `daemon/constants.py` grace/leak constants.
 
 **What WOULD break C1 and is therefore REJECTED** (see `decisions.md` D-04):
 - A **dedicated readiness-probe engine/pool**. Moving the DB/queue probes off `manager.engine` would let the readiness `database` component report green while the manager pool was poisoned — the probe would stop observing the condition it exists to observe. That is detector leniency by relocation. **Rejected on C1 grounds**, not merely as "more moving parts".
@@ -162,8 +185,9 @@ Every gate in this plan set therefore:
 
 ### C3b — Legacy → canonical gate-ID mapping table (NEW — reconciliation)
 
-The plan set previously used legacy gate IDs (G0–G6) from the phase-3 ladder. The binding contract declares **ONE canonical ladder** using **G1.1…G3.5** (contract §6, W-6). The static consistency pin (W-11) asserts every gate ID referenced in decisions.md / architecture-recommendation.md exists in the canonical ladder — the legacy IDs would RED that pin. This mapping table preserves auditability of the old IDs.
+The plan set previously used legacy gate IDs (G0–G6) from the phase-3 ladder. The binding contract declares **ONE canonical ladder** using **the 17-entry canonical ladder** (contract §6, W-6; enumerated in C3c below). The static consistency pin (W-11) asserts every gate ID referenced in decisions.md / architecture-recommendation.md exists in the canonical ladder — the legacy IDs would RED that pin. This mapping table preserves auditability of the old IDs.
 
+<!-- EXEMPT:BEGIN legacy-gate-map -->
 | Legacy ID | Canonical ID(s) | Notes |
 |-----------|-----------------|-------|
 | G0 (guard's own reachability, unit) | G3.4 | guard reachability is an F7-guard unit pin (G-A) |
@@ -173,10 +197,37 @@ The plan set previously used legacy gate IDs (G0–G6) from the phase-3 ladder. 
 | G4 (Phase-2 PG legs) | G2.1–G2.3 (PG subset) | F5 wedge-capture correctness (PG, integration-marked) |
 | G5 (F7 guard) | G3.1–G3.4 | F7 guard legs G-A through G-F |
 | G6 (whole-tree sweep) | G1.5 / G3.5 | Whole-tree base vs HEAD (G1.5 for Phase 1, G3.5 for Phase 3) |
+<!-- EXEMPT:END -->
 
-**Lane-wide rule (binding):** the canonical ladder (G1.1…G3.5) is the **only** gate vocabulary. A gate must (i) exist in the canonical ladder, (ii) run in a form the runner EXECUTES (certified interpreter `/home/nea/ensemble-src/.venv/bin/python`), and (iii) assert its EXPECTED COLLECTED COUNT. Legacy IDs (G0–G6) are retained in this table for auditability only; new references must use canonical IDs.
+**Lane-wide rule (binding):** the canonical ladder (the 17 entries enumerated in C3c) is the **only** gate vocabulary. A gate must (i) exist in the canonical ladder, (ii) run in a form the runner EXECUTES (certified interpreter `/home/nea/ensemble-src/.venv/bin/python`), and (iii) assert its EXPECTED COLLECTED COUNT. Legacy IDs (G0–G6) are retained in this table for auditability only; new references must use canonical IDs.
 
-**Static consistency pin (NEW — W-11, phase-3 pin inventory):** a default-collected static pin asserts that every gate ID referenced in **decisions.md and architecture-recommendation.md** exists in the canonical ladder (G1.1…G3.5). The legacy→canonical mapping table above is an **explicitly exempt block** (legacy→canonical audit table, not a gate reference) — the scanner skips it. Plantable mutation: a **NON-EXEMPT** reference to a non-canonical gate ID ⇒ RED. The pin is added to the phase-3 pin-pack inventory as **G-consistency** (default-collected, static).
+**Static consistency pin (NEW — W-11, phase-3 pin inventory):** a default-collected static pin asserts that every gate ID referenced across the **8-artifact set** — plan-overview.md, phase1-plan.md, phase2-plan.md, phase3-plan.md, test-strategy.md, decisions.md, architecture-recommendation.md, final-implementation-spec.md — exists in the 17-entry canonical ladder (enumerated in C3c), with the **4 checks**: gate IDs, fix IDs, AC IDs, and the pack inventory. The legacy→canonical mapping table above is delimited by the machine-detectable sentinel pair (the legacy-gate-map BEGIN and END markers, exactly one pair); the scanner skips **only** the region between those two markers, and a sub-assertion requires the pair to be present exactly once. Plantable mutation: a **NON-EXEMPT** reference to a non-canonical gate ID ⇒ RED. The pin is added to the phase-3 pin-pack inventory as **G-consistency** (default-collected, static).
+
+### C3c — Canonical ladder (binding enumeration) — NEW (round-2)
+
+The canonical ladder is **enumerated** (not ranges) in `final-implementation-spec.md` §6.1 and is BINDING on all artifacts. This is the authoritative list; the legacy→canonical mapping above (C3b) re-keys to it.
+
+Canonical ladder entries (binding):
+
+- **G0** — Phase-0 precondition
+- **G1.1** — F3 mechanism unit
+- **G1.2** — F6 mint unit
+- **G1.3** — F5 wedge-capture static
+- **G1.4** — F8 static + F4 unit/static pins
+- **G1.5** — whole-tree
+- **G2.1** — F2 knob-matrix unit
+- **G2.2** — repair-engine isolation unit
+- **G2.3** — P2-oracle immutability unit
+- **G2.4** — the amended utc-session pin
+- **G2.5** — Phase-1 PG legs (F4 retention + F4 starvation + F6-b + F8-b/c/d/e)
+- **G2.6** — Phase-2 PG legs (F5-b)
+- **G3.1** — F7 occupancy+census
+- **G3.2** — F7 residence+self-pin
+- **G3.3** — F7 static backstop pins
+- **G3.4** — F7 reachability (G-A)
+- **G3.5** — whole-tree
+
+Legacy IDs (G0–G6) are retained in the C3b table for auditability only; new references must use canonical IDs from this enumeration. If the sibling contract worker's final §6 enumeration differs from this ruling, the difference is reported — not silently adopted.
 
 ### C4 — Line numbers from the incident snapshot are STALE — PRESERVED
 
@@ -224,7 +275,7 @@ Every `file:line` in the RCA was captured against the Oct-26 live binary and **d
 | **R16 (NEW)** | **Default-executor saturation** by abandoned probes (≈6 of 12 workers on an 8-core host) is an unmodelled daemon-wide latency amplifier (1351 `to_thread` call sites) | medium | Disclose + measure in F7's churn leg (A7); do not relocate probes (C1) | **accepted-with-disclosure** |
 | **R17 (NEW)** | **`application_name` amendment is half-applied** ⇒ F2-g stays RED from birth (AC14/AC16 vs `test-strategy.md:132-134`) | medium | Fold A5 as one amendment across AC14/AC16/F2-g in a single change; PG "last `-c` wins" ⇒ distinct values per engine + option order pinned | **closed-by-C2-fold** |
 | **R18 (NEW)** | **Unfenced Class-4a test command** (no per-var `POSTGRES_*` scrub, no `mktemp -d` HOME, uncertified interpreter) on saver-pool-touching packs | medium | Apply the Class-1 fence to 4a (A8-ii) | **closed-by-C1-fold** |
-| **R19 (NEW)** | **The `BEGIN` fingerprint attribution is unsound** — a future RCA may repeat the Site-A attribution | low | The incident follow-up must carry the correction (A4-i) and the census method must capture residence time (A3) | **routed-to-followup** |
+| **R19 (NEW)** | **The `BEGIN` fingerprint attribution is sound** — Site A is measured-unique (the only `text("BEGIN")` in `daemon/`); the correction belongs to A4-i (the architect's generic-marker claim is refuted), not to the Site-A attribution | The incident follow-up carries the A4-i correction; the census method captures residence time (A3) | **reworded-by-P-11** |
 
 ---
 
@@ -239,7 +290,7 @@ Every `file:line` in the RCA was captured against the Oct-26 live binary and **d
 - **SC7 — wedge-capture reads work.** The capture returns executing-turn rows and resume-history rows against a real PG, and neither read fails with `relation "tasks" does not exist` nor `current transaction is aborted`.
 - **SC8 — The guard is real.** The F7 pack runs in the house runner form, asserts its expected collected count (> 0), and fails when a deliberately-planted idle-in-transaction backend is present (mutation-proven — the pin is RED with the defect present and GREEN without it, per `test-strategy.md`).
 - **SC9 — Zero net-new test reds.** Whole-tree sweep shows no new failures versus the base; any pre-existing red is classified as pre-existing with a citation.
-- **SC10 — The audit record is honest.** The delivered audit-findings document states **0 unclosed borrows across ~689 audited sites** with the method cited (`audit-method.md`), and records B and C as audited-and-clean with the RCA premise corrections — it does **not** claim a leak was found where the census found none.
+- **SC10 — The audit record is honest.** The delivered audit-findings document states **0 unclosed borrows across 779 audited sites (AST baseline: A=613 / B=175 / C=4 / D=148 / E=14 / F=0)** with the method cited (`audit-method.md`), and records B and C as audited-and-clean with the RCA premise corrections — it does **not** claim a leak was found where the census found none. The retired aggregate **≈689** is non-canonical (scanner-dependent); the AST baseline 779 is the cited figure (DR-6).
 - **SC11 (NEW) — F8 removes the borrow-then-await.** The deferred-report reconcile holds no manager-engine transaction across an await; the static AST pin (F8-a) is GREEN; the PG pin (F8-b) shows zero manager-pool idle-in-txn backends attributable to the reconcile; the concurrent-escalation pin (F8-c) shows no double delivery; the write-atomicity pin (F8-d) shows the message/task/injection writes still commit in one transaction.
 - **SC12 (NEW) — Phase 0 evidence exists.** BASELINE.md is written with all four sections (a)-(d), each with a named instrument and a measurement command; the flip condition is settled by measurement, not by paper; the F7 invariant is derived from measurement.
 - **SC13 (NEW) — The lane-wide false-green invariant holds.** Every gate in the lane runs in a form the runner executes and asserts its expected collected count; a zero-collected gate is FATAL.
@@ -252,7 +303,7 @@ Every `file:line` in the RCA was captured against the Oct-26 live binary and **d
 
 - **A1** — The base for the whole plan is `19fc11c8b`; the implementation phase re-verifies its own base and treats drift as a plan-amendment trigger (C4).
 - **A2** — The manager engine's `connect_args` (`factory.py:337`) may safely carry PG session options: the repair engine already does exactly this on the same URL and driver (`ens_db_tools.py:619-627`).
-- **A3** — The repository layer's `with Session(...)` / `with SQLModelSession(...)` discipline is **uniform** (supported by the census: ~689 audited sites, 0 unclosed). If the implementation phase finds a counter-example, F1's census is re-run before anything else.
+- **A3** — The repository layer's `with Session(...)` / `with SQLModelSession(...)` discipline is **uniform** (supported by the census: 779 audited sites (AST baseline A=613 / B=175 / C=4 / D=148 / E=14 / F=0), 0 unclosed). If the implementation phase finds a counter-example, F1's census is re-run before anything else.
 - **A4** — The house rule "every new SQLModel table needs its own `.sql` migration" is **not** triggered by this lane (no new table/column/index). If the implementation phase cannot express F6's upsert without a schema change, that is an **amendment trigger**, not a licence to add a migration silently.
 - **A5** — `test-strategy.md`, `wi-78967dba-verdict.md` and `audit-method.md` are produced by sibling workers in parallel; this plan references them **by filename only** and does not depend on their contents beyond the stated scope.
 
@@ -263,7 +314,7 @@ Every `file:line` in the RCA was captured against the Oct-26 live binary and **d
 - **OQ-3 — Engine-wide `statement_timeout` on the manager engine: include or drop?** **REVERSED by C-3 (leader ruling 2).** The engine-wide `statement_timeout` is **DROPPED**. F4's guarantee is carried by the probe-scoped bound (D-04). The future global cap must `SET LOCAL statement_timeout = 0` inside `manager.py:8760`. **Decision settled: DROP.**
 - **OQ-4 — Is the `pool_timeout` review's "keep 30s" acceptable given the probe budget is 0.5s?** **Recommendation: yes** — the probe budget is an asyncio budget, not a checkout budget; lowering it converts load into 500s. The residual (a probe worker thread lingering up to 30 s in the checkout queue, holding no pool slot) is disclosed in D-15.
 - **OQ-5 — Does the incident's `SELECT instances...` ×2 fingerprint warrant moving `_enrich_instances` outside the session scope now?** **Recommendation: out of scope**, disclosed under R2. The architect may fold it in; it is a repository-semantics change to a shared read path.
-- **OQ-6 (NEW) — Does the M-R3 hold duration under real load make F8 load-bearing?** Phase 0 (a) settles this. If hold < 2 s, F8 is marginal and C collapses to B on mechanism grounds. If hold ≥ 2 s, F8 is load-bearing and C stands. **Decision: settled by measurement, not by paper.**
+- **OQ-6 (NEW, restated 2026-10-28 round-2 as a PRECONDITION, not a constant — P-2/DR-30)** — Does the M-R3 hold duration under real load make F8 load-bearing? **Answer: NOT MET at base ⇒ F8 stands.** The M-R3 hold < 2 s **iff** the awaited content fetch < 2 s (a measurable property of the fetch path; data-dependent — an instance with a long history makes the fetch slower). Decision instrument = the **fetch-latency** distribution (the async twin's content fetch, and the sync twin's 8 s bridge), **not** the hold. Measured base figures: async worst 1059.9 ms (L5, n=15, model-tainted — injected 1.0 s tail); sync twin ceiling 8.0 s (8011.119 ms, n=1). The **real** fetch latency (`_fetch_subshape_a_content_async`) remains **unmeasured** (baseline: "needs a booted daemon + a real checkpoint store") — disclosed, not resolved. Phase 0 (a) settles this. If hold < 2 s, F8 is marginal and C collapses to B on mechanism grounds. If hold ≥ 2 s, F8 is load-bearing and C stands. **Decision: settled by measurement, not by paper.**
 - **OQ-7 (NEW) — Which pool did the incident's 18 backends belong to?** Phase 0 (d) settles this. Without `application_name`, attribution is impossible; Phase 2 (F2) adds `application_name` to make future censuses attributable.
 
 ---
@@ -272,7 +323,7 @@ Every `file:line` in the RCA was captured against the Oct-26 live binary and **d
 
 1. **The readiness leak detector / grace refusal / never-green semantics** — coupling C1/C2. The fix must make the signal stop firing, never make the detector lenient.
 2. **The P2 psycopg saver pool knobs** (`daemon/persistence.py:316-331`) — a different pool with `autocommit=True` (so its connections cannot sit idle-in-txn by construction) and a different reset semantic; it is the leak-signal ORACLE. research-pool-couplings.md:132.
-3. **The asyncpg checkpoint-adapter pool** (`daemon/persistence.py:355-359`) — max-size-only knob, separate driver/failure domain, and not a leak site.
+3. **The asyncpg checkpoint-adapter pool** (`daemon/persistence.py:355-359`) — max-size-only knob, separate driver/failure domain. **REFUTED by measurement (P-8b-extra / BASELINE.md:306-323): it IS a leak-capable site** — it opens an explicit `async with conn.transaction():` (checkpoint_adapter.py:1229-1239) with three awaits between DELETEs, and the baseline MEASURED it holding `idle in transaction` with **NO server-side reap** (server_side_reap_observed: false; cluster default `idle_in_transaction_session_timeout = 0` = disabled); the shared `conn_string` lands the **same** `application_name` on the P2 psycopg pool and the asyncpg pool (p2_psycopg_pid 2325876 / asyncpg_pid 2325878, both `ensemble-shared-dsn`) ⇒ a **separate DSN** is required. This is the reason it gets its own DSN + attribution per D-36/D-49. Out of scope for knob hardening, but NOT "not a leak site".
 4. **`manager.list_instances` running synchronously on the event loop** (`daemon/routers/instances.py:476`) — a real latency defect AND a dwell multiplier. **ROUTED** (see §12) to the event-loop sync-DB commission.
 5. **Moving `_enrich_instances` outside the session scope** (`daemon/repositories/instance/repository.py:1429`) — tempting (it would shrink the idle-in-txn window on the hot path) but it is a repository-semantics change to a shared read path, unrelated to the leak class. Recorded as a **follow-up** under R2.
 6. **The RUNNING-stalled missed-finalize gap** — no sweeper finalizes a JobItem whose backing Task is non-terminal-but-stalled (research-audit-census.md:114-119). The `SERVICES_MISSION_STRAND_HEAL_RUNNING_ZOMBIE_*` surface (v0.26.4) is the adjacent owner; this lane does not touch it. **ROUTED**.
@@ -314,7 +365,7 @@ Each routed item is **out of this lane's scope** and is recorded here with its e
 | **R-5** | **`mission_records` production-data remediation** | Deduping pre-index OPEN rows on production | Mission-records data owner | **ROUTED** — data operation, not code |
 | **R-6** | **Proxy-side `coding-free` deprecated-row drop** | User morning item (D7) — 210 errors/day; killed a coder instance mid-lane | User-owned proxy host surgery | **ROUTED** — not repo work |
 | **R-7** | **Missed-finalize / RUNNING-stalled coverage** | No finalize leg exists for the RUNNING-stalled shape (f1 needs no Task, f2 needs a terminal Task) | Strand-healer commission | **ROUTED** — not this lane |
-| **R-8** | **OQ-1 trigger investigation** (why the boot-mint UniqueViolation is deterministic) | Candidate: two mint call sites for the same instance (`auto_continue_boot_pass.py:721` and `:1156`) | Architect / data owner | **ROUTED** — the upsert is idempotent under every trigger; the trigger is a disclosure question |
+| **R-8** | **OQ-1 trigger investigation** (why the boot-mint UniqueViolation is deterministic) | Candidate: two mint call sites for the same instance (`auto_continue_boot_pass.py:721` and `:1156`) | Architect / data owner | **CLOSED-by-measurement (P-7/DR-33)** — the boot path's re-resolve probe is **skipped** (`founding_message_id=None`, `mission_record_service.py:561/:567`), not mis-keyed; the measured trigger is a **concurrent double-mint** (c4: 8-way, no barrier, 7 UniqueViolations; c4b forced overlap: 5). The upsert (D-08) is idempotent under any trigger; the disclosure is corrected. Originally ROUTED. |
 
 ---
 
@@ -361,7 +412,7 @@ The plan council REJECTED the plan-of-record (unanimous, 12 CRITICAL). The fold 
 | **R16** (default-executor saturation is an unmodelled daemon-wide amplifier) | **Accepted with disclosure** — assessed + disclosed (A7), not fixed; routed to the executor-ceiling commission |
 | **R13** (the plan's fix set does not reduce the dominant producer) | **Closed by F8 + disclosure** — F8 removes the dominant multi-second producer M-R3; the dwell/occupancy class is disclosed as not fully repaired |
 | **R15** (idle_in_transaction_session_timeout kills legitimate M-R3 work) | **Closed by sequencing** — F8 lands before the engine-level bound (A6-i) |
-| **R19** (BEGIN fingerprint attribution is unsound) | **Routed to follow-up** — the incident follow-up must carry the correction (A4-i) and the census method must capture residence time (A3) |
+| **R19** (BEGIN fingerprint attribution is measured-sound) | **Reworded by P-11** — Site A is measured-unique (the only `text("BEGIN")` in `daemon/`); the correction belongs to A4-i (the architect's generic-marker claim is refuted), not to the Site-A attribution | **reworded-by-P-11** |
 
 ---
 
@@ -399,3 +450,48 @@ The plan council REJECTED the plan-of-record (unanimous, 12 CRITICAL). The fold 
 **Closes:** the transaction-abort gap (F3) · the probe's server-side statement bound (F4) · the non-idempotent boot mint (F6) · the wedge-capture table bug (F5) · the manager-engine knob gap (F2) · **the dominant multi-second producer M-R3** (F8) · the attribution blind spot (three named engines) · the empirical baseline (Phase 0).
 
 **Does NOT close — and must be stated in the shipped honesty blocks (F2.7):** the **dwell / occupancy** class. The recurrence precondition — **sync DB work on the event loop** (`daemon/routers/instances.py:476`, `daemon/routers/queues.py:654`) — is **not removed** by this lane, and the **BFS depth-loop** transaction span (`daemon/repositories/instance/repository.py:1434-1645`) is **not** touched. After this lane the daemon can still hold 15/15 manager slots; the guard's occupancy invariant (F7-e) is the thing that will see it, and the follow-up is the **owner** of the residual.
+
+---
+
+## 16. DR closure (round-2) — one line per DR landing in plan-overview.md / decisions.md
+
+Closure lines for DR-1..DR-36 that land in THESE two files (full detail in delta-recheck.md §12-§14):
+
+- **DR-1** (D-35 F4-b observable) → decisions.md D-35 amended in place (AMENDED 2026-10-28 round-2): statement cancelled, `to_thread` returns, `checkedout()` → baseline; backend row EXPECTED to persist (idle). plan-overview §14 C-7 row already carries the corrected clause.
+- **DR-2** (one canonical ladder) → plan-overview C3c enumerates the canonical ladder; C3b legacy mapping re-keyed to it; reference to final-implementation-spec.md §6.1.
+- **DR-3** (W-11 pin scope narrowed) → plan-overview C3b/C3c note the widened scan + sentinel-delimited exemption (prose; full scanner lives in the sibling's contract).
+- **DR-4** (count==0 surviving in phase3) → recorded in decisions.md D-48 (F7 three-state) + plan-overview P-4; phase3 file owned by sibling.
+- **DR-5** (AC14 hardcodes 60000) → decisions.md D-47 (bound ships DISABLED) + P-3; AC14 amendment is phase2-owned, recorded here as the rule.
+- **DR-6** (retired ≈689 figure) → **CLOSED here**: SC10, §3.2, A3 rewritten to AST baseline 779 (A=613/B=175/C=4/D=148/E=14/F=0); aggregate marked non-canonical.
+- **DR-7** (enablement mechanism) → decisions.md D-47 (defined-but-not-applied + enablement gate + log line).
+- **DR-8** (honesty block backstop status) → recorded in decisions.md D-47/D-48; honesty-block text is final-implementation-spec-owned.
+- **DR-9** (asyncpg DSN mechanism) → decisions.md D-49.
+- **DR-10** (F8-c injection seam) → recorded; phase1-owned.
+- **DR-11** (pre-F8 vs post-F8 sizing) → decisions.md D-47 (base measurement is an upper bound; post-F8 re-measurement tightens) + P-3.
+- **DR-12** (stale `:734-743` ref) → plan-overview §6 C1 corrected to `:739-743` (P-10 row + §6 C1).
+- **DR-13** (G3 rationale self-contradictory) → C3c re-key removes the contradictory mapping.
+- **DR-14** (D-29 citation for C-1) → decisions.md index/council fold already cite D-29; no change needed.
+- **DR-15** (pin→twin map) → recorded; contract-owned.
+- **DR-16** (Class-4a/4b unfenced) → recorded; test-strategy-owned.
+- **DR-17** (contract pin inventory 38 of 41) → recorded; contract-owned.
+- **DR-18** (F6-e orphan TODO) → recorded; contract-owned.
+- **DR-19** (task graph doesn't gate preconditions) → recorded; phase files owned by sibling.
+- **DR-20** (pins hard-code the placeholder) → decisions.md D-47 (structure, not literal 60000).
+- **DR-21** (W-11 pin false-REDs on architect artifact) → recorded; contract-owned.
+- **DR-22** (F5 census keep-green pin dropped) → recorded; test-strategy-owned.
+- **DR-23** (EXPECTED has no independent declared source) → recorded; test-strategy-owned.
+- **DR-24** (F6-c/F7-a no static twin) → recorded; contract-owned.
+- **DR-25** (F4.4 Verify cell) → recorded; contract-owned.
+- **DR-26** (F8-a vs F8.4 bridge sentence) → recorded; contract-owned.
+- **DR-27** (FOLD-MAP false verification claims) → recorded; FOLD-MAP-owned.
+- **DR-28** (12 pins use wildcard) → recorded; contract-owned.
+- **DR-29** (F4's premise refuted) → **CLOSED here**: P-1 row + F4 demoted to defence-in-depth + Phase 5 table; decisions.md D-45.
+- **DR-30** (flip condition restated as precondition) → **CLOSED here**: P-2 row + OQ-6 restated; decisions.md D-46.
+- **DR-31** (application_name via conninfo) → decisions.md D-49.
+- **DR-32** (census scope = 11 sites) → decisions.md D-50.
+- **DR-33** (OQ-1 closed: probe skipped, concurrent double-mint) → decisions.md D-51 + OQ-1 → CLOSED-by-measurement (R-8 row).
+- **DR-34** (F5 raised to Phase 1) → **CLOSED here**: P-8 row + Phase 5 table + §4 F5 row; decisions.md D-52.
+- **DR-35** (measured F7 invariant: three-state + xact_age) → decisions.md D-48.
+- **DR-36** (baseline's disclosed limits) → recorded in the honesty/scope statements (plan-overview §1 + §15.5) + decisions.md D-47/D-48.
+
+**Discrepancy with sibling artifacts:** none observed at write time for the in-scope items; the canonical ladder enumeration (C3c) is binding and any divergence with final-implementation-spec.md §6.1 is to be reported, not silently adopted.

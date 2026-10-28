@@ -119,15 +119,15 @@ The static pin (F8-a) is scoped to the `with`-body only (a function-wide AST rul
 
 **Displaces:** A1's single-site scope.
 
-### D-35 — C-7: F4-b re-specified to the true observable
+### D-35 — C-7: F4-b re-specified to the true observable (AMENDED 2026-10-28 round-2 — P-1/DR-29 + DR-1)
 
-**Decision:** D2's expected signal → `state='active'` + `wait_event_type='Lock'`. F4-b asserts (i) the lock-blocked backend is terminated (row gone from `pg_stat_activity`) within the bound AND (ii) `engine.pool.checkedout()` returns to baseline within the bound; the census count is asserted only after the lock is released and the client-side bound elapsed. F4-b's mutation → remove the `SET LOCAL statement_timeout` from `make_queue_probe` (that does redden: the statement stays blocked, the connection stays checked out).
+**Decision (amended):** D2's expected signal → `state='active'` + `wait_event_type='Lock'`. F4-b asserts (i) the probe's statement is **cancelled** (`57014` / `QueryCanceled`), (ii) the abandoned `to_thread` future **returns**, and (iii) `engine.pool.checkedout()` **returns to baseline** within the bound — and states explicitly that the backend **row is EXPECTED to persist** in `pg_stat_activity` (state `idle`, returned to the pool); its persistence is the *correct* observable, not a failure. The census count is asserted only after the lock is released and the client-side bound elapsed. The engine-level `idle_in_transaction_session_timeout` signature (BACKEND GONE, FATAL `IdleInTransactionSessionTimeout`, raw t2:137-140) is **NOT** F4's — F4 installs neither `statement_timeout` engine-wide nor `idle_in_transaction_session_timeout`; the row-gone observable belongs to the engine-level backstop, which ships DISABLED (D-47). F4-b's mutation → remove the `SET LOCAL statement_timeout` from `make_queue_probe` (that does redden: the statement stays blocked, the connection stays checked out).
 
-**Why:** a lock-blocked backend is `state='active'` with `wait_event_type='Lock'`; an `idle in transaction` backend waits on the CLIENT (`wait_event_type='Client'`). They are mutually exclusive ⇒ F4-b's "0 idle in transaction backends" is TRUE AT BASE ⇒ false green. The old mutation (removing an engine-level knob F4 does not install) is a no-op for F4.
+**Why (amended):** a lock-blocked backend is `state='active'` with `wait_event_type='Lock'`; an `idle in transaction` backend waits on the CLIENT (`wait_event_type='Client'`). They are mutually exclusive ⇒ F4-b's "0 idle in transaction backends" is TRUE AT BASE ⇒ false green. The old mutation (removing an engine-level knob F4 does not install) is a no-op for F4. **DR-1 fix:** the binding decision record now matches the pin rows (test-strategy.md:281) instead of contradicting them. **DR-29 (P-1):** under pool starvation the probe holds NO connection (a pool WAITER), so the probe-scoped bound is irrelevant to the starvation shape; F4 is demoted to defence-in-depth and its outcome is restated as "the probe's statement duration is server-bounded **when the probe holds a connection**" (b2: `active`, not `idle in transaction`).
 
-**Evidence:** council-report.md C-7; `readiness.py:1476-1481/:1746-1789`; A9 in architecture-recommendation.md.
+**Evidence:** council-report.md C-7; `readiness.py:1476-1481/:1746-1789`; A9 in architecture-recommendation.md; BASELINE.md T5b (b1/b2/b3); raw t5 (b1=5.8 ms, b2 timeout=0.5017 s, b3 timeout=0.5012 s).
 
-**Displaces:** F4-b's old assertion and mutation.
+**Displaces:** F4-b's old assertion and mutation; the superseded "row gone from `pg_stat_activity`" clause (originated in my own C-7 required-change wording — owned and repaired here).
 
 ### D-36 — C-8: three-pool attribution model (corrects the council's capability table)
 
@@ -323,7 +323,7 @@ The engine-level `connect_args` layer (D-16, now REVERSED for statement_timeout)
 
 ### D-08 — Idempotent mint via a dialect upsert; no schema change
 
-**What the census established.** The rollback-guarantee half of the RCA's fix-item 6 **already holds**: the boot lane passes **no** session (`auto_continue_boot_pass.py:1154-1159`, and the pass loop at :721); `insert_mission` opens `with Session(self._engine) as own:` (`mission_record/repository.py:510`) and commits at :512 — an `IntegrityError` exits the block ⇒ `close()` ⇒ the pool's reset-on-return rollback. **689 audited borrow sites, 0 unclosed** (research-audit-census.md §1b). So the "guarantee the transaction is rolled back" option is **belt-and-braces on an already-guaranteed path** — it would not remove the error.
+**What the census established.** The rollback-guarantee half of the RCA's fix-item 6 **already holds**: the boot lane passes **no** session (`auto_continue_boot_pass.py:1154-1159`, and the pass loop at :721); `insert_mission` opens `with Session(self._engine) as own:` (`mission_record/repository.py:510`) and commits at :512 — an `IntegrityError` exits the block ⇒ `close()` ⇒ the pool's reset-on-return rollback. **779 audited borrow sites (AST baseline: A=613 / B=175 / C=4 / D=148 / E=14 / F=0), 0 unclosed** (research-audit-census.md §1b; the retired aggregate is NON-CANONICAL — not scanner-independent, audit-method.md:283-296). So the "guarantee the transaction is rolled back" option is **belt-and-braces on an already-guaranteed path** — it would not remove the error.
 
 **What is actually broken.** The mint is **not idempotent** for the boot shape: the deterministic 4×/boot `IntegrityError` on `ux_mission_records_anchor_open` (RCA :61, :149) is a real observable whose trigger is unexplained (OQ-1).
 
@@ -338,11 +338,13 @@ No new table, column, or index is introduced ⇒ the house rule ("every new SQLM
 
 **A second, independent benefit.** `DO NOTHING` raises **no** error, so the *caller's* transaction is no longer poisoned by a statement-level `IntegrityError` — the exact failure `_mint_epoch_locked` documents today ("The caller's transaction is poisoned on PG after a statement-level IntegrityError — fail the mint", `mission_record_service.py:548-554`). Poisoned caller transactions are themselves an aborted-transaction source, so this removes a secondary contributor to the incident's aborted-transaction errors.
 
-### D-09 — The boot path's re-resolve is keyed on the index's own predicate
+### D-09 — The boot path's re-resolve is keyed on the index's own predicate (AMENDED 2026-10-28 round-2 — P-7/DR-33)
 
 `ON CONFLICT … DO NOTHING` returns **no row**, so the caller must re-resolve the winning epoch. The existing re-resolve is keyed on `founding_message_id` — and the code itself records that this probe "can NEVER be found by that probe" for a NULL-founding epoch (the boot epoch's `founding_message_id` is NULL by construction, `mission_record_service.py:558-565`, :686-688). The **anchor-scoped** rung-1 probe (`find_open_epoch_by_anchor`, `mission_record/repository.py:69-93`) filters on exactly the index's predicate (`anchor_instance_id` + `status = 'open'`) and is therefore the correct key for the boot path.
 
-**Why this matters for OQ-1:** the upsert is idempotent under **any** trigger (race, duplicate call site, pre-existing duplicate rows), so the fix does not depend on resolving the trigger. The trigger still needs to be understood for the **disclosure** — see OQ-1 and §9.
+**Amendment (P-7/DR-33):** the boot path's re-resolve probe is actually **SKIPPED** (`founding_message_id=None`, `mission_record_service.py:561/:567`), not mis-keyed — D-09's mis-keyed-probe claim is RETRACTED. The measured trigger is a **concurrent double-mint** (c4: 8-way, no barrier, 7 UniqueViolations; c4b forced overlap: 5). The upsert (D-08) is idempotent under any trigger; the disclosure and re-resolve wiring must match the measured mechanism (skip + concurrent double-mint). F6's idempotency is specified against CONCURRENT double-mint.
+
+**Why this matters for OQ-1:** the upsert is idempotent under **any** trigger (race, duplicate call site, pre-existing duplicate rows), so the fix does not depend on resolving the trigger. The trigger is now **measured** (concurrent double-mint) and the disclosure is corrected. See OQ-1 → CLOSED-by-measurement (plan-overview R-8).
 
 ### D-10 — Scope: the own-session (boot) path only
 
@@ -354,7 +356,7 @@ The caller-session path (`session is not None`) keeps its documented semantics �
 
 ### D-11 — A new artifact in this planning dir; the RCA is not edited
 
-The census's headline is the honest result of F1: **~689 borrow sites across 6 families, 0 unclosed borrows, 0 leaks** (research-audit-census.md §1b). The method and the full counts are authored by a sibling worker in **`audit-method.md`** — this plan cites it **by filename** and does not restate its contents.
+The census's headline is the honest result of F1: **779 borrow sites (AST baseline: A=613 / B=175 / C=4 / D=148 / E=14 / F=0) across 6 families, 0 unclosed borrows, 0 leaks** (research-audit-census.md §1b; the retired aggregate is NON-CANONICAL — not scanner-independent, audit-method.md:283-296). The method and the full counts are authored by a sibling worker in **`audit-method.md`** — this plan cites it **by filename** and does not restate its contents.
 
 F1's deliverable is therefore **not** a code change. It is `.agents/shared/planning/db-pool-idle-txn/audit-findings.md`, which records:
 1. the census headline + the method citation (`audit-method.md`);
@@ -383,7 +385,7 @@ Harden the **manager engine** (`daemon/repositories/factory.py:323-338`) and add
 | `pool_recycle` | *absent* | `3600` | Matches the only in-repo recycle precedent (`REPAIR_POOL_RECYCLE_S`, `ens_db_tools.py:182`). Bounds exposure to server-side/credential churn; at 15 slots that is ~15 reconnects/hour — negligible |
 | `pool_timeout` | *absent* (library default `30`) | `30` | See D-15 |
 | `pool_use_lifo` | *absent* | *absent* (deliberate) | LIFO reduces idle-time churn, but `pool_pre_ping` already covers dead connections and `pool_recycle` now governs age. Adding it changes checkout semantics under load with no measured benefit |
-| `connect_args` | `{"options": "-c timezone=UTC"}` | `{"options": "-c timezone=UTC -c application_name=ensemble-manager -c idle_in_transaction_session_timeout=60000"}` | D-16 (REVERSED for statement_timeout) + D-30 (application_name added). The **UTC option is preserved** (the B2/B3 UTC-frame guarantee) and stays **first**, so the existing byte-shape pin's prefix is untouched; the option **order** becomes part of the pinned shape |
+| `connect_args` | `{"options": "-c timezone=UTC"}` | `{"options": "-c timezone=UTC"}` + **per-engine CONNINFO attribution (D-49)**; the `idle_in_transaction_session_timeout` clause is **OMITTED while D-47-DISABLED** (defined but not applied); never the literal `60000` (D-16-AMENDED); `application_name` is set via the conninfo parameter, NOT a shared `-c` (D-49). **Superseded inline:** the old string `{"options": "-c timezone=UTC -c application_name=ensemble-manager … idle_in_transaction_session_timeout=60000"}` is RETIRED — attribution moved to conninfo (D-49), the idle-in-txn clause is omitted while disabled (D-47), and the literal 60000 is forbidden (D-16-AMENDED). | D-16 (REVERSED for statement_timeout) + D-30 (application_name, now via conninfo) + D-47 (disabled) + D-49 (conninfo channel). The **UTC option is preserved** (the B2/B3 UTC-frame guarantee) and stays **first**, so the existing byte-shape pin's prefix is untouched; the option **order** becomes part of the pinned shape |
 | URL `connect_timeout` | `BOOT_DB_TIMEOUT_S` (10) | unchanged | The connect-phase bound is already explicit (:316) |
 
 **Knob values live in `daemon/constants.py`** (D-18).
@@ -396,7 +398,7 @@ The probe budgets (0.5 s DB / 2.0 s queue) are **asyncio** budgets: `asyncio.wai
 
 **Explicitly pinning the default** (rather than leaving it unset) means a future edit cannot silently change it, and the pin documents that 30s was a **decision**, not an oversight.
 
-### D-16 — Engine-level server-side timeouts (REVERSED for statement_timeout)
+### D-16 — Engine-level server-side timeouts (REVERSED for statement_timeout) (AMENDED 2026-10-28 round-2 — P-3/DR-29)
 
 `-c statement_timeout=30000` — **DROPPED** (C-3, leader ruling 2). The future global cap must `SET LOCAL statement_timeout = 0` inside `manager.py:8760`.
 
@@ -405,6 +407,8 @@ The probe budgets (0.5 s DB / 2.0 s queue) are **asyncio** budgets: `asyncio.wai
 **`lock_timeout` is deliberately NOT added**: the manager engine's failure mode is idle-in-txn, not lock contention; a global lock timeout could abort legitimate contended writes.
 
 **This layer is optional (OQ-3, now REVERSED):** F4's guarantee is carried by the probe-scoped bound (D-04). The idle_in_transaction_session_timeout is retained; the statement_timeout is dropped. Dropping the statement_timeout costs F4 nothing.
+
+**Amendment (P-3/DR-29):** the manager idle-in-txn bound ships **DISABLED** (defined, not applied) — the max legitimate hold is model-derived (1059.877 ms) or unidentified (real fetch unmeasured); the arithmetic value is 4.24 s so the 30 s floor dominates and coincides with the legitimate `pool_timeout` wait; a 30 s server-side reap risks killing legitimate waiters and the server TERMINATES backends (raw t2:137-140). Enablement mechanism: applied iff BASELINE.md records a trustworthy measurement (the constant is then set from it); while disabled the rendered string omits the clause and the daemon logs `MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS DISABLED — no trustworthy Phase-0 measurement` at boot. The base measurement is an **upper bound**; the post-F8 re-measurement (F8-b's BASE-vs-HEAD comparison) is the figure the applied value should use once available (DR-11). The 2.0 s placeholder for F7 residence is **withdrawn** in favour of the measured healthy-residence band (median 0.0005 s / p95 0.0007 s / max 0.0008 s over 40 cycles) plus the hold budget, using `xact_age_s` (`now() − xact_start`), not `state_change − xact_start` (P-4/DR-35).
 
 ### D-17 — A NEW connect-args constant; `PG_SESSION_CONNECT_ARGS` is not extended
 
@@ -489,7 +493,7 @@ The dispatch permits refining the HOW but forbids silently dropping a WHAT. Ever
 | Dispatch item | WHAT preserved | How refined / re-targeted | Why |
 |---|---|---|---|
 | **F0 (NEW)** | Empirical baseline | NEW — leader ruling 5 | The council had no DB access; PG-semantics claims must be measured |
-| **F1** — transaction hygiene + site audit | "Document the census honestly; the method + counts live in `audit-method.md`" | The **code** content of F1 collapses to zero: the census found **0 unclosed borrows** across ~689 sites. F1 = the audit document (B/C audited-and-clean + RCA premise corrections), delivered as `audit-findings.md` in this planning dir | research-audit-census.md §1b (689 CLEAN / 0 LEAK); the RCA's premise-2/4 corrections |
+| **F1** — transaction hygiene + site audit | "Document the census honestly; the method + counts live in `audit-method.md`" | The **code** content of F1 collapses to zero: the census found **0 unclosed borrows** across 779 sites (AST baseline: A=613 / B=175 / C=4 / D=148 / E=14 / F=0; the retired aggregate (scanner-dependent, non-canonical), audit-method.md:283-296). F1 = the audit document (B/C audited-and-clean + RCA premise corrections), delivered as `audit-findings.md` in this planning dir | research-audit-census.md §1b (779 CLEAN / 0 LEAK); the RCA's premise-2/4 corrections |
 | **F2** — pool hardening | All five knob families | `pool_pre_ping` was **already** `True`; `reset_on_return` was **already** effectively `'rollback'` (library default). The genuine delta is: the reset pin made **explicit**, `pool_recycle`, the two server-side timeout options (now REVERSED for statement_timeout), and a `pool_timeout` **review outcome** (keep 30s, pinned, residual disclosed). **NEW:** `application_name` added per engine (D-30) | research-pool-couplings.md §Q3 knob matrix; `factory.py:323-338` |
 | **F3** — the BEGIN gap | The site + the guarantee of rollback on every path | HOW chosen: **drop the BEGIN + `finally`-rollback** rather than move-inside-try | research-leak-sites.md:59 + the fingerprint argument in D-01 |
 | **F4** — probe retention | "The readiness probe must not leak / amplify" | The **per-tick** premise is **REFUTED**, so the fix is re-targeted from "stop the per-tick leak" to "**bound the timeout-path retention server-side**" (the WHAT — the probe must not leak or amplify — is preserved). HOW: probe-scoped `SET LOCAL` + explicit end-of-transaction; a dedicated probe pool is **rejected on C1** | research-leak-sites.md §1 Site D + §4 premise 8; soak `decisions.md` §2 premise 10 |
@@ -509,4 +513,133 @@ The dispatch permits refining the HOW but forbids silently dropping a WHAT. Ever
 ## 13. Safety-precedence note — PRESERVED
 
 (See plan-overview.md §13.)
+
+
+---
+
+## 12. Round-2 additions (D-45+) — Phase-0 measured (2026-10-28)
+
+### D-45 — F4 premise rewrite + demotion (P-1/DR-29)
+
+**Decision:** F4 is **demoted** from "primary" to a **bounded defence-in-depth** item. Its outcome is restated as "the probe's statement duration is server-bounded **when the probe holds a connection**" (b2: `active`, not `idle in transaction`); the rationale "the abandoned probe worker cannot hold a connection open indefinitely" is **dropped** because the measurement refutes it for the starvation shape (b3: the probe is a pool WAITER, bounded by `pool_timeout`). The starvation shape is addressed by F8 + F2's pool occupancy/waiter arguments, not by a probe-scoped statement bound. F4's PG-only guard and 2×-budget sizing remain, but F4 no longer carries the lane's primary causal claim.
+
+**Why:** the baseline's T5b table shows that under pool starvation (the realistic incident shape) the abandoned probe thread holds **NO** connection (`checkedout_right_after_timeout` = 15 = holder count). A probe-scoped `SET LOCAL statement_timeout` is therefore IRRELEVANT to that shape. When the probe *does* hold a connection (b2) the backend is `active`, not `idle in transaction` — invisible to an idle-in-txn census.
+
+**Evidence:** BASELINE.md T5b; raw t5 (b1=5.8 ms, b2 timeout=0.5017 s, b3 timeout=0.5012 s); plan-overview §3.5 P-1; delta-recheck.md DR-29.
+
+**Displaces:** F4 as the Phase-1 primary; the original causal-completeness claim for F4.
+
+### D-46 — Flip-condition precondition restatement (P-2/DR-30); F8 stands
+
+**Decision:** The M-R3 flip condition is restated as a **PRECONDITION**, not a constant: "the M-R3 hold < 2 s **iff** the awaited content fetch < 2 s." The decision instrument is the **fetch-latency** distribution (the async twin's content fetch, and the sync twin's 8 s bridge), **not** the hold. Measured base figures: async worst 1059.9 ms (L5, n=15, model-tainted — injected 1.0 s tail); sync twin ceiling 8.0 s (8011.119 ms, n=1). The real fetch latency (`_fetch_subshape_a_content_async`) remains unmeasured (baseline: "needs a booted daemon + a real checkpoint store") — disclosed, not resolved. **F8 stands** (worst hold 8011.119 ms ≥ 2000 ms ⇒ NOT MET).
+
+**Why:** the measurement shows the hold is **not an independent cost** — it is exactly the awaited content-fetch latency (L5: hold median 1029.9 ms vs await median 1026.5 ms; L2: hold 52.4 ms vs await 47.7 ms). A threshold written as a constant decides the lane's mechanism on a number that is a function of the fetch's data.
+
+**Evidence:** BASELINE.md consolidated rows 1-2; raw t1; plan-overview §3.5 P-2, OQ-6.
+
+**Displaces:** OQ-6's constant form; D-40's "if hold < 2 s" phrasing (superseded by the precondition form).
+
+### D-47 — The idle-in-txn bound ships DISABLED with the enablement mechanism (P-3)
+
+**Decision:** `MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS` is **defined but NOT applied** (disabled) at ship. Enablement mechanism: applied **iff** BASELINE.md (or a successor measurement) records a trustworthy measurement (the constant is then set from it); while disabled the rendered string omits the clause and the daemon logs `MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS DISABLED — no trustworthy Phase-0 measurement` at boot. The base measurement is an **upper bound**; the post-F8 re-measurement (F8-b's BASE-vs-HEAD comparison) is the figure the applied value should use once available (DR-11). The pins assert the **structure** (clause present, value == constant, option order pinned) and the constant against `daemon/constants.py` — never the literal `60000` (DR-5/DR-20).
+
+**Why:** the max legitimate hold is model-derived (1059.877 ms) or unidentified (real fetch unmeasured); 4× = 4.24 s so the 30 s floor dominates and coincides with the legitimate `pool_timeout` wait; a 30 s server-side reap risks killing legitimate waiters; the server TERMINATES backends (raw t2:137-140) — a behavioural change with no measured safety margin.
+
+**Evidence:** raw verifier derivation (a); BASELINE.md; plan-overview §3.5 P-3; delta-recheck.md DR-7, DR-8, DR-11.
+
+**Displaces:** D-32's "4 × measured, floor 30 s, applied" disposition; the 60 000 literal in AC14/T2.5.
+
+### D-48 — F7 measured invariant: three-state occupancy + xact_age residence (P-4/P-10/DR-35)
+
+**Decision:** F7's invariant is rewritten to the **measured** three-state + residence form: occupancy across all three PG states (`idle` with `xact_start IS NULL` ⇒ checked-out-but-no-statement; `idle in transaction`; `active`) **plus** residence (`state_change − xact_start` is DEFECTIVE for leak detection — use `xact_age_s` = `now() − xact_start`, already collected at common.py:88) against the hold budget of the operation that opened it. The 2.0 s placeholder is **withdrawn**: the healthy residence is measured (median 0.0005 s / p95 0.0007 s / max 0.0008 s over 40 cycles) and the budget's real job is to catch a hold exceeding the operation's own budget. A guard that counts only `idle in transaction` is **vacuous against two of the three shapes** and is not a valid F7. F7-a asserts the three states, not just `idle in transaction`.
+
+**Why:** the specified metric (`state_change − xact_start`) is FROZEN at the last statement's completion ⇒ a leaked backend shows the same sub-ms value as a healthy one ⇒ the budget cannot fire on the leak; the 2.0 s floor would red a healthy daemon (sync twin holds ≥8 s; the real async fetch is unmeasured and data-dependent).
+
+**Evidence:** raw M-7; BASELINE.md T2; plan-overview §3.5 P-4, P-10; delta-recheck.md DR-4, DR-35.
+
+**Displaces:** D-38's provisional occupancy+residence form and the 2.0 s placeholder.
+
+### D-49 — Attribution via per-pool conninfo (P-5/DR-31)
+
+**Decision:** `application_name` is set in the **conninfo parameter** of each engine's own URL/query dict (the manager engine's `URL.create(...)` query dict and the repair engine's own conninfo), and the shared connect-args constant carries **no** `application_name`. The asyncpg pool uses `server_settings={"application_name": "ensemble-checkpoint-adapter"}` (or `?application_name=`) on a DSN built from the same config **without** reusing the shared `conn_string` variable, so the P2 oracle's `conninfo` stays byte-identical. Attribution is override-proof (conninfo beats `options=-c`), not merely last-wins-correct. F2-g/F2-h assert the channel.
+
+**Why:** measurement shows the conninfo parameter BEATS `options=-c`; within one options string last `-c` wins; the shared-constant-last hazard is MEASURED (`repair_engine_reports_manager_name: true`, raw t3:117). A future edit appending the shared constant could still override the `-c` form.
+
+**Evidence:** BASELINE.md consolidated; raw t3:103-141; plan-overview §3.5 P-5; delta-recheck.md DR-31.
+
+**Displaces:** D-30's mechanism (a `-c` in the manager's own options string) as the authoritative channel (retained as a viable but weaker fallback).
+
+### D-50 — Census scope = 11 sites (P-6/DR-32)
+
+**Decision:** The three named engines (D-36) are the **daemon-internal** subset that can hold idle-in-txn; the **census** covers every pool-creation site (11 real sites + 1 comment false-positive at factory.py:289). D-36's boundary statement is amended: the three `application_name`s are the daemon-internal subset, not the census boundary. The F7 census scope is widened to every site.
+
+**Why:** baseline consolidated row 6: "3 pools → 11 pool-creation sites; the incident's 18 backends are explainable by multi-pool occupancy → widen the census scope."
+
+**Evidence:** BASELINE.md; raw t3:27-101; plan-overview §3.5 P-6; delta-recheck.md DR-32.
+
+**Displaces:** D-36's "three named engines" as the census boundary.
+
+### D-51 — F6 against concurrent double-mint (P-7/DR-33)
+
+**Decision:** F6's idempotency is specified against **CONCURRENT double-mint** (c4: 8-way, no barrier, 7 UniqueViolations; c4b forced overlap: 5). D-09 is amended: the boot path's re-resolve probe is **SKIPPED** (`founding_message_id=None`), not mis-keyed; the measured trigger is the concurrent double-mint. The upsert (D-08) is idempotent under any trigger; the disclosure and re-resolve wiring match the measured mechanism. OQ-1 is CLOSED-by-measurement.
+
+**Why:** the re-resolve probe is skipped on the boot path (code `mission_record_service.py:561/:567`), so D-09's mis-keyed-probe claim addressed a probe that does not run. The trigger is a concurrent double-mint, which the upsert handles by construction.
+
+**Evidence:** BASELINE.md T5c; raw t5 c4/c4b; code `mission_record_service.py:544-567`; plan-overview R-8; delta-recheck.md DR-33.
+
+**Displaces:** D-09's mis-keyed-probe framing (replaced by skip + concurrent-double-mint).
+
+### D-52 — F5 raised to Phase 1 (P-8/DR-34)
+
+**Decision:** F5 (wedge-capture `tasks` → `task` rename) is **raised from Phase 2 to Phase 1**. The incident's "aborted connection handed back out" premise is REFUTED for the pool path (`reset_on_return='rollback'` cleans it); the journal quote is a SAME-CONNECTION CASCADE in wedge-capture ⇒ the `tasks`→`task` rename is the cascade's root. Phase 5 table updated; §4 F5 row updated.
+
+**Why:** the baseline refutes the aborted-connection premise for the pool path and identifies the wrong table name as the cascade's root.
+
+**Evidence:** BASELINE.md row 4; raw t5 a5; plan-overview §3.5 P-8; delta-recheck.md DR-34.
+
+**Displaces:** F5 as a Phase-2 item.
+
+### D-53 — The measured record's stale rows + one-canonical-copy rule (P-9)
+
+**Decision:** The plan cites **RAW values** (b1=5.8 ms, b2 timeout=0.5017 s, b3 timeout=0.5012 s; PIDs 2325xxx) and drops the byte-exact claim (T4's "byte-exactly" is a prefix check on a 200-char-truncated value; F-A's quoted SQL is the COMPILED SQL, not the observed `last_query`). BASELINE.md ≡ RESULTS line-for-line today (divergence NONE) but the plan names ONE canonical copy (the RESULTS file) and requires the other to carry a pointer, not a fork. The 8 stale rows are recorded as a provenance finding (the reports were written against an earlier harness run).
+
+**Why:** both copies carry the same 8 raw-divergent values; mutual agreement is a consistency property, not a correctness property.
+
+**Evidence:** raw verifier score table (rows 18, 33, 34, 36, 37, 41, 42, 45); raw verifier §3; plan-overview §3.5 P-9; delta-recheck.md (the reviewer's T5b figures stale: raw b1=5.8 ms, b2 timeout=0.5017 s, b3 timeout=0.5012 s).
+
+**Displaces:** the byte-exact claim; the retired aggregate (non-canonical).
+
+### D-54 — Phase 0 COMPLETE + precondition held (P-10)
+
+**Decision:** Phase 0 is COMPLETE — BASELINE.md + canonical RESULTS + harness + raw/ on branch; no implementation change landed before Phase 0 (git log 19fc11c8b..HEAD is docs/test only). The precondition "no implementation change lands until Phase 0 completes" held. The census-blindness claim is confirmed (a probe/connection holding work is `active` or idle-with-no-xact — an idle-in-txn-only census is vacuous against two of the three shapes). The three-state invariant folds into D-48's F7 form.
+
+**Why:** the baseline's evidence is on the branch and its disclosed limits (real fetch latency unmeasured; mint overlap inferred; pool_timeout stall measured at 3 s) are carried into the honesty/scope statements.
+
+**Evidence:** git log 19fc11c8b..HEAD; BASELINE.md; plan-overview §1 (status), §16; delta-recheck.md §13 (P0-6/P0-10).
+
+**Displaces:** the "Phase 0 in flight" framing.
+
+### D-55 — DR closure record (one per DR landing in these two files)
+
+**Decision:** The DR closure for DR-1..DR-36 is recorded in plan-overview.md §16 (one line per DR). DRs landing in these two files: DR-1 (D-35 amended), DR-2 (C3c enumeration), DR-3 (C3b/C3c widened-scope note), DR-5 (D-47), DR-6 (SC10/census rewritten), DR-7 (D-47), DR-8 (D-47/D-48), DR-9 (D-49), DR-11 (D-47), DR-12 (§6 C1 corrected to :739-743), DR-13 (C3c re-key), DR-29 (D-45), DR-30 (D-46), DR-31 (D-49), DR-32 (D-50), DR-33 (D-51), DR-34 (D-52), DR-35 (D-48), DR-36 (D-47/D-48 + honesty statements). DRs owned by sibling artifacts (DR-4, DR-10, DR-14, DR-15, DR-16, DR-17, DR-18, DR-19, DR-20, DR-21, DR-22, DR-23, DR-24, DR-25, DR-26, DR-27, DR-28) are recorded as owned by those artifacts, not silently adopted.
+
+**Why:** the delta-recheck's 24 conditions must be traceable to a landing site; these two files own the plan-core + decision-record subset.
+
+**Evidence:** delta-recheck.md §12-§14; plan-overview.md §16.
+
+**Displaces:** none (additive).
+
+### D-56 — The BEGIN fingerprint attribution is measured-unique to Site A (P-11)
+
+**Decision:** The `BEGIN` fingerprint attribution is **MEASURED-CONFIRMED, not unsound**. The only `text("BEGIN")` in `daemon/` is `ens_db_tools.py:1479` (DDL) / `:1491` (DML) — Site A. psycopg3 does NOT leave `BEGIN` as `last_query`: autobegin pipelines, leaving the STATEMENT (raw `t2_stat_activity.out:48` — `last_query` = the SELECT after an autobegun statement); every M-R3 iteration's held backend reported `idle in transaction` with `last_query` = the ORM SELECT. Therefore a literal `BEGIN` `last_query` is a **standalone-BEGIN marker**, measured-unique to Site A. The architect's A4-i generic-marker claim is REFUTED (architecture-recommendation.md:63/:154). All four incident fingerprints reproduce byte-exactly (BASELINE.md:355-362; raw t4:46-55). The correction belongs to A4-i, not to the Site-A attribution; R19 is reworded accordingly.
+
+**Why:** the measurement settles the attribution question that the plan's premise ledger left as "CONFIRMED (the site exists and the fingerprint is unique to it)" with an honesty caveat about `application_name` being empty. The baseline proves the site is unique by SQL text AND that psycopg3's autobegin does not produce a literal `BEGIN` `last_query`, so the attribution is measured-sound.
+
+**Evidence:** BASELINE.md:355-398; raw t4:12-18, t2:37-52; plan-overview §3.3 premise row 1; research-phase0-findings.md P-8b.
+
+**Displaces:** the architect's A4-i generic-marker reading (architecture-recommendation.md:63/:154) and R19's "attribution unsound" framing (reworded to "attribution measured-sound — correction belongs to A4-i").
+
+### D-57 — the F4-A capacity-threshold ruling (F4 admission pre-check)
+
+**Decision:** The F4-A admission pre-check compares `checkedout()` against the **LANE-PINNED configured capacity constant** (`pool_size` 5 + `max_overflow` 10 = 15), with a **capacity-equality pin** asserting the constant equals the engine's configured capacity at construction, so config drift REDs. Rejected alternatives: `QueuePool._max_overflow` (private API), `overflow()` (returns CURRENT overflow — a load probe, not an admission check), a hard-coded 15 without the equality pin, and lowering the engine `pool_timeout` (D-15). **Why:** SQLAlchemy 2.0.48 exposes no per-connect acquisition timeout — `Engine.connect()` takes no timeout and the wait is `QueuePool._do_get()` → `self._pool.get(wait, self._timeout)` at pool level. **Evidence:** BASELINE.md:244 + factory.py:323-338. **Canonical home:** phase1-plan.md's D-57 row (the sibling is re-pointing its phase1-plan "D-56" mentions to D-57 in parallel). **Displaces:** nothing — this record RECORDS the dispatcher ruling (no prior decision occupied this slot on the decisions.md side).
 

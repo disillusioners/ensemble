@@ -246,7 +246,7 @@ and never returned** — the readiness probe's timed-out-`to_thread` shape. Henc
 | D | `with engine.begin()` / `with engine.connect()` | 60 hits | ALL CLEAN (0 non-`with` connection borrows) |
 | E | asyncpg `pool.acquire()` (checkpointer pool) | 15, all `async with` | ALL CLEAN |
 | F | raw psycopg / `raw_connection` / `getconn` / `putconn` | 0 | — |
-| | **TOTAL audited** | **≈689** | **689 CLEAN / 0 LEAK at borrow-hygiene level** |
+| | **TOTAL audited (AST baseline — CANONICAL)** | **779** (A=613 / B=175 / C=4 / D=148 / E=14 / F=0) | **779 close-guaranteed / 0 LEAK at borrow-hygiene level** — the census's **≈689** aggregate is **RETIRED / NON-CANONICAL** (unrecorded pattern breadth for families D and E; conservative, so the conclusion is unaffected — see §5.3: "the scanner definition is the contract, not the aggregate number") |
 
 *(Arithmetic check: 435 + 175 + 4 + 60 + 15 = 689 — the census's own numbers are internally consistent.)*
 
