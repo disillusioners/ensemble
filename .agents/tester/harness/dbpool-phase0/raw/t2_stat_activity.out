@@ -1,0 +1,191 @@
+
+===== T2a0 FRESH CHECKED-OUT-NO-STATEMENT (no pre-ping) =====
+{
+  "pid": 2324534,
+  "application_name": "",
+  "state": "idle",
+  "wait_event_type": "Client",
+  "wait_event": "ClientRead",
+  "xact_start": null,
+  "query_start": "2026-10-28 12:50:25.554535+00:00",
+  "state_change": "2026-10-28 12:50:25.554572+00:00",
+  "backend_start": "2026-10-28 12:50:25.516365+00:00",
+  "last_query": "ROLLBACK",
+  "xact_age_s": null,
+  "state_age_s": 0.201303
+}
+  [a0] visible as 'idle in transaction'? False
+  [a0] xact_start = None
+
+===== T2a CHECKED-OUT-BEFORE-FIRST-STATEMENT =====
+{
+  "pid": 2324537,
+  "application_name": "",
+  "state": "idle",
+  "wait_event_type": "Client",
+  "wait_event": "ClientRead",
+  "xact_start": null,
+  "query_start": "2026-10-28 12:50:25.819752+00:00",
+  "state_change": "2026-10-28 12:50:25.819792+00:00",
+  "backend_start": "2026-10-28 12:50:25.774512+00:00",
+  "last_query": "ROLLBACK",
+  "xact_age_s": null,
+  "state_age_s": 0.200949
+}
+  [a] in_transaction (client-side) = 0
+
+===== T2b AFTER-FIRST-STATEMENT (autobegin) =====
+{
+  "pid": 2324537,
+  "application_name": "",
+  "state": "idle in transaction",
+  "wait_event_type": "Client",
+  "wait_event": "ClientRead",
+  "xact_start": "2026-10-28 12:50:26.027177+00:00",
+  "query_start": "2026-10-28 12:50:26.027517+00:00",
+  "state_change": "2026-10-28 12:50:26.027593+00:00",
+  "backend_start": "2026-10-28 12:50:25.774512+00:00",
+  "last_query": "SELECT 1",
+  "xact_age_s": 0.001073,
+  "state_age_s": 0.000657
+}
+  [b] in_transaction (client-side) = 2
+
+===== T2c1 AFTER EXPLICIT ROLLBACK (still checked out) =====
+{
+  "pid": 2324537,
+  "application_name": "",
+  "state": "idle",
+  "wait_event_type": "Client",
+  "wait_event": "ClientRead",
+  "xact_start": null,
+  "query_start": "2026-10-28 12:50:26.031681+00:00",
+  "state_change": "2026-10-28 12:50:26.031714+00:00",
+  "backend_start": "2026-10-28 12:50:25.774512+00:00",
+  "last_query": "ROLLBACK",
+  "xact_age_s": null,
+  "state_age_s": 0.000456
+}
+
+===== T2c2 AFTER RETURN-TO-POOL (conn.close()) =====
+{
+  "pid": 2324537,
+  "application_name": "",
+  "state": "idle",
+  "wait_event_type": "Client",
+  "wait_event": "ClientRead",
+  "xact_start": null,
+  "query_start": "2026-10-28 12:50:26.031681+00:00",
+  "state_change": "2026-10-28 12:50:26.031714+00:00",
+  "backend_start": "2026-10-28 12:50:25.774512+00:00",
+  "last_query": "ROLLBACK",
+  "xact_age_s": null,
+  "state_age_s": 0.203581
+}
+
+===== T2d RESIDENCE DISTRIBUTION (xact_start -> state_change) =====
+{
+  "samples": {
+    "n": 40,
+    "min_s": 0.0003,
+    "median_s": 0.0005,
+    "p95_s": 0.0007,
+    "max_s": 0.0008,
+    "mean_s": 0.0005
+  },
+  "observed_states_during_borrow": {
+    "idle in transaction": 40
+  },
+  "note": "residence here is the OBSERVABLE lag, not the hold length; the borrow was closed immediately after the sample"
+}
+
+===== T2d2 HELD-BORROW IDLE-IN-TXN OBSERVABILITY =====
+{
+  "hold_requested_s": [
+    0.5,
+    1.0,
+    2.0,
+    3.0
+  ],
+  "observed_hold_s": {
+    "n": 4,
+    "min_s": 0.5017,
+    "median_s": 1.5024,
+    "p95_s": 3.002,
+    "max_s": 3.002,
+    "mean_s": 1.6271
+  },
+  "note": "confirms a held borrow IS visible as idle-in-txn (so a census CAN see it) \u2014 T2a shows the pre-statement case is NOT visible as idle-in-txn"
+}
+
+===== T2e idle_in_transaction_session_timeout=2s OBSERVED =====
+{
+  "before_wait": {
+    "pid": 2324537,
+    "application_name": "",
+    "state": "idle in transaction",
+    "wait_event_type": "Client",
+    "wait_event": "ClientRead",
+    "xact_start": "2026-10-28 12:50:33.325308+00:00",
+    "query_start": "2026-10-28 12:50:33.327719+00:00",
+    "state_change": "2026-10-28 12:50:33.328898+00:00",
+    "backend_start": "2026-10-28 12:50:25.774512+00:00",
+    "last_query": "BEGIN",
+    "xact_age_s": 0.204912,
+    "state_age_s": 0.201322
+  },
+  "after_wait": null,
+  "backend_row_present_after_wait": false,
+  "waited_s": 2.03,
+  "state_after": "BACKEND GONE (terminated by server)"
+}
+
+===== T2e2 idle-in-txn timeout on a BEGIN+SELECT session =====
+{
+  "before": {
+    "pid": 2324641,
+    "application_name": "",
+    "state": "idle in transaction",
+    "wait_event_type": "Client",
+    "wait_event": "ClientRead",
+    "xact_start": "2026-10-28 12:50:35.609660+00:00",
+    "query_start": "2026-10-28 12:50:35.611925+00:00",
+    "state_change": "2026-10-28 12:50:35.612478+00:00",
+    "backend_start": "2026-10-28 12:50:35.567632+00:00",
+    "last_query": "SELECT 1",
+    "xact_age_s": 0.204103,
+    "state_age_s": 0.201285
+  },
+  "after": null,
+  "terminated": true,
+  "elapsed_s": 2.02
+}
+
+===== T2f CHECKED-OUT-NO-STATEMENT row (census blindness check) =====
+{
+  "pid": 2324663,
+  "application_name": "",
+  "state": "idle",
+  "wait_event_type": "Client",
+  "wait_event": "ClientRead",
+  "xact_start": null,
+  "query_start": null,
+  "state_change": "2026-10-28 12:50:37.877461+00:00",
+  "backend_start": "2026-10-28 12:50:37.840954+00:00",
+  "last_query": "",
+  "xact_age_s": null,
+  "state_age_s": 0.001032
+}
+  [f] visible as 'idle in transaction'? False
+
+===== T2 SUMMARY =====
+{
+  "scratch_db": "ensemble_dbpool_scratch_phase0",
+  "a_checked_out_before_statement_state": "idle",
+  "b_after_statement_state": "idle in transaction",
+  "c1_after_rollback_state": "idle",
+  "c2_after_return_to_pool_state": "idle",
+  "e_idle_in_txn_timeout_fired": true,
+  "e2_idle_in_txn_timeout_fired": true,
+  "f_checked_out_no_statement_visible_as_idle_in_txn": false
+}
