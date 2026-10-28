@@ -76,7 +76,7 @@ SCAN_SET = (
     "final-implementation-spec.md",
 )
 
-_GATE_TOKEN = re.compile(r"\bG[0-3]\.\d\b")
+_GATE_TOKEN = re.compile(r"\bG\d\.\d\b")  # ANY first digit — a drifted G4.x must match so membership rejects it
 #: A fix-id token: ``F<digit>`` then either a dot and a number, or a dash
 #: and a LOWERCASE SUFFIX. The suffix must be ID-SHAPED (a single letter
 #: a-j, optionally ``-static``) — otherwise English prose that merely
