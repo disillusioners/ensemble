@@ -183,6 +183,8 @@ transaction yet. The same is true of a connection parked in `active` (see T5b).
 
 ### MEASURED F7 invariant (C-10 — cannot be green while a leak exists)
 
+**ERRATUM (plan-side, 2026-10-28 — D-48/DR-35):** "residence" throughout C-10 means **`xact_age_s = now() − xact_start`**; the printed `state_change − xact_start` form is the **superseded metric** and is the exact vacuous form D-48 withdrew (a frozen sub-ms value cannot equal T1's measured 8.0 s hold).
+
 > **A non-leaking pool looks like this in `pg_stat_activity`:**
 >
 > 1. **Occupancy** — the number of backends in `state='idle in transaction'` attributable to the

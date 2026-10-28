@@ -643,3 +643,23 @@ The dispatch permits refining the HOW but forbids silently dropping a WHAT. Ever
 
 **Decision:** The F4-A admission pre-check compares `checkedout()` against the **LANE-PINNED configured capacity constant** (`pool_size` 5 + `max_overflow` 10 = 15), with a **capacity-equality pin** asserting the constant equals the engine's configured capacity at construction, so config drift REDs. Rejected alternatives: `QueuePool._max_overflow` (private API), `overflow()` (returns CURRENT overflow — a load probe, not an admission check), a hard-coded 15 without the equality pin, and lowering the engine `pool_timeout` (D-15). **Why:** SQLAlchemy 2.0.48 exposes no per-connect acquisition timeout — `Engine.connect()` takes no timeout and the wait is `QueuePool._do_get()` → `self._pool.get(wait, self._timeout)` at pool level. **Evidence:** BASELINE.md:244 + factory.py:323-338. **Canonical home:** phase1-plan.md's D-57 row (the sibling is re-pointing its phase1-plan "D-56" mentions to D-57 in parallel). **Displaces:** nothing — this record RECORDS the dispatcher ruling (no prior decision occupied this slot on the decisions.md side).
 
+
+### D-58 — asyncpg checkpoint-adapter idle-in-txn hold: ROUTED, attribution in-lane (Δ2)
+
+**Decision:** The asyncpg checkpoint-adapter idle-in-txn hold (`checkpoint_adapter.py:1229-1240`) is **ROUTED to the follow-up DB-pool commission**; this lane owns **attribution only** (D-36/D-49). The follow-up commission adds `server_settings={'idle_in_transaction_session_timeout': <measured>}` to the asyncpg pool's **NEW dedicated DSN** (the same DSN D-49 already mandates — a one-parameter addition there), under the **SAME D-47 enablement gate** (enable iff a trustworthy post-F8 measurement of the adapter's legitimate prune-transaction dwell exists). Do NOT pull the fix into this lane. The routed row is recorded as **R-9** in plan-overview.md §12; §10 #3's disclosure now points at R-9 (disclosure-without-owner is the one shape the plan's routing discipline does not tolerate).
+
+**Why:** the asyncpg pool opens an explicit `async with conn.transaction():` with three awaits between DELETEs and holds `idle in transaction` with no server-side reap (measured T3d: leak-capable, `server_side_reap_observed: false`, cluster default 0); a manager-engine backstop would not cover it anyway (different pool/DSN). Attribution (D-36/D-49) is in-lane; the hold needs its own owner and enablement gate, mirroring D-47's disposition for the manager-engine bound.
+
+**Evidence:** architecture-delta.md §③ Δ2 + Q3's compensating-control table; BASELINE.md:306-323 (P-8b-extra); plan-overview.md §10 #3 + §12 R-9.
+
+**Displaces:** the "attribution only, no owner" gap in §10 #3 (disclosure-without-owner).
+
+### D-59 — F4-A capacity constant home pinned to `daemon/services/readiness.py` (Δ6)
+
+**Decision:** The F4-A capacity constant's home is **pinned to `daemon/services/readiness.py` (module-level)** — D-57 permitted either home, the architect rules readiness.py. `constants.py` is NOT the home for this constant. **Conditional note:** if a future implementer prefers `constants.py`, plan-overview.md §6 C5's coupling matrix needs a **one-row Phase-1 amendment for `constants.py` FIRST** — as written the matrix gives `constants.py` to Phase-2 F2 only, and an unamended Phase-1 addition there violates the lane's coupling discipline (recorded as A6 in plan-overview.md §9).
+
+**Why:** coupling discipline — the matrix is the authority on which phase owns which shared surface; an unamended addition would silently break it. The conditional keeps the door open without breaking the rule.
+
+**Evidence:** architecture-delta.md §③ Δ6; plan-overview.md §9 A6; phase1-plan.md D-57 row + T1.4 + AC4.
+
+**Displaces:** the "readiness.py (or constants.py)" permissiveness in phase1-plan.md D-57/T1.4/AC4.

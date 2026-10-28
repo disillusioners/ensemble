@@ -192,7 +192,7 @@ HOME="$(mktemp -d)" \
 - **Per-variable** scrub only, **six** variables: `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST`, `POSTGRES_PORT`, `DAEMON_PORT`. `env -u POSTGRES_*` is a **silent NO-OP** (bash does not glob env names) — an ambient `POSTGRES_DB=ensemble_prod` survives it. (`DAEMON_PORT` is scrubbed so a gate can never bind or probe the live daemon's port.)
 - `HOME="$(mktemp -d)"` — **never** a HOME-derived live install path (two live-install deletions, 2026-10-12).
 - **Certification requirement (blueprint "[INSTALL+PG]"):** the implementer MUST verify `import daemon` resolves **inside the worktree** (`python -c "import daemon, os; print(os.path.dirname(daemon.__file__))"`) and record the resolved path in the gate report before any pack is trusted.
-- **First step of every gate: print the interpreter certification** — `python -c "import daemon,pytest; print(daemon.__file__, pytest.__version__)"` — and attach it to the gate report. `collected == 0` ⇒ **FATAL**, never "0 failed ⇒ pass".
+- **First step of every gate: print the interpreter certification** — `python -c "import daemon,pytest; print(daemon.__file__, pytest.__version__)"` — and attach it to the gate report. `collected == 0` ⇒ **FATAL**, never "0 failed ⇒ pass". **A `TBD` `EXPECTED` cell ⇒ FATAL too — the fence integer-validates before comparing (Δ1).**
 
 **Class 1 — default-run unit packs (no marker; collected by the default `pytest`).**
 
@@ -305,6 +305,8 @@ HOME="$(mktemp -d)" \
 set -euo pipefail
 # $1 = declared expected count (from expected-collected.md), $2 = marker (or "" for default), $3.. = paths
 EXPECTED="$1"; MARKER="$2"; shift 2
+case "$EXPECTED" in ''|*[!0-9]*)
+  echo "FATAL: EXPECTED is not an integer (TBD cell?) for: $*" >&2; exit 1;; esac
 cd /home/nea/ensemble-src-wt-dbpool-idletxn
 ARGS=()
 [ -n "$MARKER" ] && ARGS+=(--override-ini="addopts=" -m "$MARKER")
@@ -325,6 +327,7 @@ echo "COLLECTED-OK count=${COLLECTED} expected=${EXPECTED}"
 ```
 
 **Additional non-vacuity rules that apply to every pack:**
+- **A `TBD` cell in `expected-collected.md` at gate time = FATAL — the fence integer-validates `EXPECTED` before comparing** (Δ1). Without the guard, bash `test` on a non-integer `EXPECTED` errors inside the `if` condition, the FATAL branch is skipped, and the script prints `COLLECTED-OK …` with **exit 0** — the exact C3 vacuous-pass class.
 - **A pack that can be silently skipped is a red gate.** `tests/postgres/conftest.py` **skips the whole module** when PostgreSQL is unreachable (`:167-169`). The gate script MUST therefore assert the run did not produce skips: parse the summary line and fail if `skipped > 0` for the PG classes. **A green PG gate that skipped is a FAILING gate.**
 - `--timeout=N` on every long pin (house convention, 115 usages; `pyproject.toml:97-98` default is 30 s and the kill is `os._exit(1)` ⇒ no traceback). Every new long pin carries an explicit `@pytest.mark.timeout(N)` with N > its worst case.
 - The churn pack's `@pytest.mark.timeout` must exceed `N*60 + 300`.
@@ -358,7 +361,7 @@ Packs: `tests/unit/tools/test_dbpool_probe_bound.py` (NEW), `tests/unit/tools/te
 | **F4-c** | `tests/unit/tools/test_dbpool_probe_failure_class.py` | The probe's returned `(verdict, failure_class)` pair stays `probe_timeout` (not hard-component-red); **F4-A's synchronous `TimeoutError` lands on the same class** (`FAILURE_CLASS_PROBE_TIMEOUT`) ⇒ grace-eligibility preserved. | Change the probe's returned pair, or reclassify a timeout as hard-component-red. |
 | **F4-d** | `tests/unit/tools/test_readyz_grace_detail.py` | Readiness detail fields / serialization unchanged (DO-NOT-TOUCH). | Remove a detail field. |
 | **F4-e** | `tests/unit/tools/test_dbpool_probe_bound.py` | The docstring at `daemon/services/readiness.py:107-113` no longer carries the false premise ("the driver's own connect/execute timeout releases it") **and states the MEASURED semantics** (backend `active`, statement cancelled `57014`, row persists). | Restore the false docstring premise. |
-| **F4-f** | `tests/postgres/test_dbpool_probe_starvation_pg.py` | **NEW — the missing starvation-shaped leg.** Under **15 holders**: the probe holds **NO** connection; `engine.pool.checkedout()` **equals the holder count** (15, not 16); no waiter is left in the pool's checkout queue; the probe thread **terminates within a bounded window**. **BASE-vs-HEAD:** at BASE (no F4-A) the probe is a **stranded waiter** (measured: timeout at **0.5012 s**, `checkedout_right_after_timeout: 15` — raw `t5_fix_sites.out:1960-1967`); at HEAD (with F4-A) it **refuses immediately**. | Remove the F4-A admission pre-check ⇒ at HEAD the probe becomes a waiter again ⇒ the "no waiter / bounded termination" assertion REDs. |
+| **F4-f** | `tests/postgres/test_dbpool_probe_starvation_pg.py` | **NEW — the missing starvation-shaped leg.** Under **15 holders**: the probe holds **NO** connection; `engine.pool.checkedout()` **equals the holder count** (15, not 16); no waiter is left in the pool's checkout queue; the probe thread **terminates within a bounded window**. **Scoping (Δ5):** the 15 holders are created and held **STABLE** before the probe is invoked (quiescent setup); the "no waiter / bounded termination" assertion applies to that setup — the D-57 boundary race (14→15 transition during the pre-check) can still strand one waiter for up to `pool_timeout` and is a **disclosed residual, NOT a pin failure**. **BASE-vs-HEAD:** at BASE (no F4-A) the probe is a **stranded waiter** (measured: timeout at **0.5012 s**, `checkedout_right_after_timeout: 15` — raw `t5_fix_sites.out:1960-1967`); at HEAD (with F4-A) it **refuses immediately**. | Remove the F4-A admission pre-check ⇒ at HEAD the probe becomes a waiter again ⇒ the "no waiter / bounded termination" assertion REDs. |
 
 ### 3.3 F2 — pool hardening on the manager engine (site 1)
 
@@ -418,10 +421,17 @@ Packs: `tests/integration/test_db_pool_idle_in_transaction_guard.py` (NEW), `tes
 - **(b) Residence — `xact_age_s` against the operation's own hold budget.** The metric is **`xact_age_s` = `now() − xact_start`** (raw `common.py:88`). The old metric `state_change − xact_start` is **FROZEN** at the last statement's completion ⇒ a leaked backend shows the **same sub-millisecond value** as a healthy one ⇒ the budget **can never fire on the leak** (raw `t2_stat_activity.out:99`). The **2.0 s placeholder is WITHDRAWN** — the measured healthy band is median **0.0005 s** / p95 **0.0007 s** / max **0.0008 s** (n=40, raw `t2_stat_activity.out:88-95`), and the budget compared against is **the operation's own hold budget**, not a pool-wide literal.
 - **λ is NOT MEASURABLE** ⇒ the `peak_occupancy ≤ λ × budget` bound is **dropped as an assertion**; it is reported and marked **UNMEASURABLE**.
 
+**The per-site budget-derivation step (Δ3 — a CONCRETE Phase-3 task-graph entry, tester-executed at pin-writing):**
+1. **Measure-then-set at pin-writing** — each per-site budget is measured **post-F8** at pin-writing time (NOT Phase-0 — contract §3.4); the measured healthy band (median 0.0005 s / p95 0.0007 s / max 0.0008 s, n=40) is the reference point.
+2. **Derivation note recorded** — each budget's derivation note goes in the **F7 pack header** (`tests/integration/test_db_pool_idle_in_transaction_guard.py`) or a **BASELINE addendum**.
+3. **NOT-DERIVABLE, never guessed** — a site whose budget cannot be measured records `NOT-DERIVABLE` **+ the exclusion in the pack header** (DR-11 made procedural).
+4. **Declaration location pinned** — ONE table in the F7 pack header maps **call-site → budget constant**; **F7-a-static asserts the table's reachability** (every row's constant exists in `daemon/constants.py`).
+5. `MANAGER_ENGINE_LEGITIMATE_HOLD_BUDGET_S` is measured by this same step — its provenance line reads "**measured post-F8 at pin-writing (NOT Phase-0)**" (contract F2.1 / §2 constants table, Δ3 reconciliation).
+
 | Pin | Pack file | What it asserts | Mutation that MUST redden it |
 |---|---|---|---|
 | **F7-a** | `tests/integration/test_db_pool_idle_in_transaction_guard.py` | The residence assertion uses **`xact_age_s`** and compares against **the operation's own hold budget**. | Hold a manager-pool connection across a dwell that exceeds **that operation's** budget ⇒ the `xact_age_s` assertion REDs. **A pin written against `state_change − xact_start` is VACUOUS against the leak** — the mutation that proves this pin alive is a **deliberately long `xact_age_s`**, not a long `state_age_s`. |
-| **F7-a-static** | `tests/unit/tools/test_dbpool_residence_static.py` | **Static twin (DR-24):** the residence budget constant exists in `daemon/constants.py`, the guard's assertion references it, and the guard's metric is `xact_age_s`. | Delete the budget constant, or revert the guard's metric to `state_change − xact_start` ⇒ RED. |
+| **F7-a-static** | `tests/unit/tools/test_dbpool_residence_static.py` | **Static twin (DR-24):** the residence budget constant exists in `daemon/constants.py`, the guard's assertion references it, and the guard's metric is `xact_age_s`; **and (Δ3) every call-site → budget-constant row in the F7 pack-header declaration table resolves to an existing constant** (reachability). | Delete the budget constant, revert the guard's metric to `state_change − xact_start`, **or add a declaration-table row whose constant does not exist** ⇒ RED. |
 | **F7-b** | `tests/integration/test_db_pool_idle_in_transaction_guard.py` | Re-introduce a retention path (e.g. return a connection with an open transaction) is detectable. | Re-introduce a retention path. |
 | **F7-b-static** | `tests/unit/tools/test_dbpool_probe_retention_static.py` | (1) `make_queue_probe` source contains `SET LOCAL statement_timeout`; (2) the derived value equals `2 * QUEUE_PROBE_TIMEOUT_S`; (3) the **saver** probe does **not** contain `SET LOCAL`; (4) the docstring at `daemon/services/readiness.py:107-113` no longer carries the false premise. | Remove `SET LOCAL statement_timeout` from `make_queue_probe` (or add it to the saver probe, or restore the false docstring) ⇒ twin RED. |
 | **F7-c** | `tests/unit/tools/test_dbpool_guard_pack_selfcheck.py` | Self-pin: delete the guard's assertion **and** decrement the count constant ⇒ the self-pin re-reads the source ⇒ still **RED** (A-9). | Delete the assertion + decrement the constant. |
@@ -469,7 +479,7 @@ Packs: `tests/unit/tools/test_dbpool_census_families.py` (NEW), `tests/unit/tool
 | G-consistency | G-consistency | 1 |
 | **TOTAL** | | **46** |
 
-**Inventory rules:** every pin has a **concrete, plantable** mutation (no "any change that alters X", **no TODO cells**); every PG/integration pin has a **default-collected static twin** (W-13 — §3.11); every PG/integration pin asserts **zero skips** in addition to its collected count (DR-17); every pin asserts its **collected count**, sourced from the **independent** `expected-collected.md` declaration (§2.3, DR-23). **Total: 46 pins.**
+**Inventory rules:** every pin has a **concrete, plantable** mutation (no "any change that alters X", **no TODO cells**); every PG/integration pin has a **default-collected static twin** (W-13 — §3.11); every PG/integration pin asserts **zero skips** in addition to its collected count (DR-17); every pin asserts its **collected count**, sourced from the **independent** `expected-collected.md` declaration (§2.3, DR-23) — a `TBD` cell at gate time = **FATAL** (Δ1: the fence integer-validates `EXPECTED` before comparing). **Total: 46 pins.**
 
 ### 3.11 PIN → TWIN MAP (DR-15 — checkable at a glance)
 
@@ -546,7 +556,7 @@ Packs: `tests/unit/tools/test_dbpool_census_families.py` (NEW), `tests/unit/tool
 8. **The census gate's non-vacuity cell** is restated as *"each family's count MUST equal its §7.2 baseline constant; any delta is a FAILURE until classified per §7.3"*, and the **diff** is the failing step (the scanner always exits 0 — OQ-7(c)).
 9. **Net-new test reds = 0** across all phases (G3.5). Any new red must be classified as pre-existing (via the base-vs-HEAD byte-comm) before the gate passes.
 10. **DR-20 — the knob-matrix cell asserts the STRUCTURE, never the literal `60000`:** the clause is present, its value **equals `MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS`** (imported from `daemon/constants.py`), and the option **ORDER** is pinned. **One cell asserts the constant equals the Phase-0 rule OR is DISABLED with the reason recorded** in the gate report.
-11. **DR-23 — the expected collected counts come from the INDEPENDENT artifact** `expected-collected.md` (measured at base; task R-1, tester lane). The pack-local constant applies to **NEW packs only**. **No number is invented in this file.**
+11. **DR-23 — the expected collected counts come from the INDEPENDENT artifact** `expected-collected.md` (measured at base; task R-1, tester lane). The pack-local constant applies to **NEW packs only**. **No number is invented in this file.** **A `TBD` cell at gate time = FATAL — the fence integer-validates `EXPECTED` before comparing (Δ1).**
 12. **Every PG/integration row's last column is `✅ + zero-skips`** — `tests/postgres/conftest.py:167-169` skips the whole module when PG is unreachable ⇒ a skipped-everything PG gate is indistinguishable from a pass (DR-17).
 
 ---

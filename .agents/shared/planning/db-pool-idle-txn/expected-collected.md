@@ -77,6 +77,10 @@ HOME="$(mktemp -d)" \
 
 **The whole-tree reconciliation (G1.5 / G3.5):** `base_collected` (row 35) must equal the sum of the declared `EXPECTED_COLLECTED_*` for the default-collected corpus (rows 1–19 + 27–32, de-duplicated — row 28 is the same file as row 9 and counts once). A **mismatch is FATAL**, not a rounding note.
 
+## Pack-file inventory reconciliation (Δ8 — ONE line, ONE authority)
+
+**AUTHORITATIVE: the contract's §5 per W-6 — ONE inventory.** The differing counts reconcile **by construction, not by drift**: contract §5.1 enumerates **26 pack files** (rows 1–26; its row 27 is the F6-d **process gate**, not a file) ⇒ the **46-pin / 26-pack-file** authority — the dispatch brief's "27" is §5.1's **row count**, not a 27-file set, and nothing here renumbers it. THIS file's **35 rows** = the **26 §5.1 pack files** (rows 1–26) **+ 8 Class-4a/4b DO-NOT-TOUCH read-only regression packs** (rows 27–34 — measured read-only, carry **no pins**, deliberately **not** §5 pack files) **+ 1 whole-tree reconciliation row** (row 35 — the corpus total, not a file) ⇒ **33 unique files** (row 28 duplicates row 9's file — `test_readyz_grace_detail.py` — **marked in-row** as *"one measurement, two consumers"*; kept, NOT silently deleted).
+
 ## Also required by this artifact's role
 
 - The **zero-skips** assertion is separate from the collected count and is **not** in this file: `tests/postgres/conftest.py:167-169` skips the whole module when PostgreSQL is unreachable, so every PG/integration gate additionally asserts `skipped == 0`.
