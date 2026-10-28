@@ -198,3 +198,7 @@ NO live promote performed.
    capture-era A/B `7c9440b3` still open (resolved_at NULL) — cleanup candidate.
 
 **Disposition (user-decided, executed 2026-10-21/22):** commit 660e73453 KEEP (unpushed; two-lens review = correct + sabotage-clean; P1 test-stub fix + security merge conditions logged as follow-ups); agents/wanderer/skill-set.yaml auto_load flip REVERTED via git restore (auto_load is owner-scoped; the observed leak was search-driven — deactivations were the real barrier; fleet convention = own planner auto_load true). DB cleanup + fix sequencing deferred.
+
+## Soak-gate + MCP warmup commission — current state (2026-10-28)
+
+**COMPLETE and STAGED as v0.27.11** (`/home/nea/agents-ensemble/releases/v0.27.11`). NO promote — the user's 3-factor nonce ceremony owns the flip. Lane branch `feature/soak-gate-mcp-warmup` pushed to its audit ref; worktree `/home/nea/ensemble-src-wt-soak-gate` + the KV claim are intentionally left standing for the follow-up DB-pool commission (job 634c38f2). The six out-of-scope defects (queue_freshness probe transaction leak, MCP discovery on the read path, ephemerality, daemon restart, cached-detector cross-contamination, ghost-waiter root cause) are THAT commission's to fix. The prod context7 row is verified clean (SELECT-only) but reverts to the old env at the next live boot until v0.27.11 promotes — do NOT re-pin context7 env before the promote. RCA + fixes: `.agents/shared/analysis-20261026-v0278-soak-failure.md`.
