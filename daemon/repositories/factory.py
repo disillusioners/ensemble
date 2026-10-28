@@ -252,7 +252,10 @@ def create_engine_from_config(config: DatabaseConfig) -> Engine:
 PG_SESSION_CONNECT_ARGS: dict[str, str] = {"options": "-c timezone=UTC"}
 
 
-def create_postgres_engine(config: "EnsembleConfig") -> Engine:
+def create_postgres_engine(
+    config: "EnsembleConfig",
+    manager_pool_size: int = MANAGER_POOL_SIZE_DEFAULT,
+) -> Engine:
     """Create a SQLAlchemy **sync** engine for PostgreSQL.
 
     Uses the psycopg (sync) driver so the returned engine works with the
@@ -268,6 +271,21 @@ def create_postgres_engine(config: "EnsembleConfig") -> Engine:
         config: EnsembleConfig containing PostgreSQL connection details.
                 ``POSTGRES_*`` environment variables override file values
                 for credential rotation without rewriting ``ensemble.json``.
+                NOTE: ``EnsembleConfig`` is the ensemble.json DB-backend
+                config and carries NO ``.limits`` — the managed-key ladder
+                lives on the YAML app ``Config``, so the resolved pool size
+                CANNOT be read off ``config`` here (that defensive read was
+                the severed-knob defect this kwarg fixes).
+        manager_pool_size: The ladder-resolved ``limits.manager_pool_size``
+                value, threaded EXPLICITLY by callers that hold the
+                boot-applied YAML Config (the manager engine path:
+                ``daemon/manager.py`` passes
+                ``self.config.limits.manager_pool_size`` — the same shape
+                ``pool_orchestrator.py`` uses for the worker pools).
+                Defaults to the registry default tier (the constant), which
+                is the correct value for callers with no boot-applied
+                Config (auth CLI, settings bootstrap throwaway,
+                migration worker).
 
     Returns:
         SQLAlchemy Engine instance ready for ``with engine.connect()`` /
@@ -321,26 +339,20 @@ def create_postgres_engine(config: "EnsembleConfig") -> Engine:
     )
 
     # ── Manager engine pool sizing (devops incident fix item #7) ────────
-    # Resolved ONCE here from the already-loaded ``EnsembleConfig`` —
-    # the 4-tier ladder (DB > env > yaml > default) is applied by the
-    # settings resolver at boot (``apply_db_settings_overrides``)
-    # BEFORE the manager constructs this engine, so the field below
-    # already carries the winning tier; same defensive-read shape as
-    # the checkpoint pool's read in daemon/persistence.py (a config
-    # built without the ``limits`` section yields the documented
-    # default tier instead of raising at engine construction).
-    # SQLite guard — structural, exactly like the checkpoint knobs:
-    # this read lives ONLY inside this PG-only factory; the SQLite
-    # engine branch (``create_engine_from_config``) constructs without
-    # ``pool_size`` and never sees the knob.
-    limits_cfg = getattr(config, "limits", None)
-    manager_pool_size = int(
-        getattr(
-            limits_cfg,
-            "manager_pool_size",
-            MANAGER_POOL_SIZE_DEFAULT,
-        )
-    )
+    # The pool size arrives as the EXPLICIT ``manager_pool_size`` kwarg —
+    # threaded from the boot-applied YAML Config by the caller (the
+    # manager reads ``self.config.limits.manager_pool_size`` AFTER
+    # ``apply_db_settings_overrides`` has mutated the field in place, so
+    # the value here already carries the winning ladder tier:
+    # DB > env > yaml > default). It is NOT read off ``config`` — the
+    # ensemble.json ``EnsembleConfig`` has no ``.limits`` (an earlier
+    # defensive read here was dead code: every tier silently degraded to
+    # the default constant). Callers without a boot-applied Config omit
+    # the kwarg and get the default tier.
+    # SQLite guard — structural: this kwarg feed lives ONLY on this
+    # PG-only factory; the SQLite engine branch
+    # (``create_engine_from_config``) constructs without ``pool_size``
+    # and never sees the knob.
     logger.info(
         "Manager engine pool sizing: pool_size=%s "
         "(limits.manager_pool_size; default tier %s, floor = default)",

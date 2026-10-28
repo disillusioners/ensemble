@@ -229,16 +229,33 @@ CHECKPOINT_POOL_TIMEOUT_S_DEFAULT: float = 5.0
 # DB > env > yaml > this default at boot via the managed key
 # ``limits.manager_pool_size`` (env ``LIMITS_MANAGER_POOL_SIZE``). It
 # feeds the ``LimitsConfig.manager_pool_size`` Field default
-# (daemon/config.py), which ``create_postgres_engine`` reads when it
-# constructs the engine (defensively, same shape as the checkpoint
-# pool's read in daemon/persistence.py).
+# (daemon/config.py). The boot-applied YAML Config is the ONLY carrier
+# of the resolved value: the engine factory receives the ensemble.json
+# ``EnsembleConfig`` (NO ``.limits``), so the manager THREADS the
+# resolved field explicitly into ``create_postgres_engine`` — reading
+# it defensively off the factory's ``config`` argument does NOT work
+# (first-cut defect: every ladder tier silently degraded to this
+# constant).
 #
-# FLOOR = 15 = the default: the knob REPLACES the library default on
-# the daemon-wide shared engine, so a configured value below 15 would
-# be a capacity regression and never takes effect (Field ``ge=15`` +
-# the mirrored registry bound — the checkpoint clamp mechanism, i.e.
-# validation-reject at the Field/registry validator, not a runtime
-# clamp). pool_size ONLY: no overflow/recycle/ping knobs.
+# FLOOR = 15 = the default, and it is a FAIL-LOUD validation-reject —
+# NOT a graceful clamp or tier-skip. A below-15 value is REJECTED
+# wherever it enters: the settings API PUT answers 422; the pydantic
+# Field (``ge=15``) raises ValidationError and CRASHES load whenever
+# the env tier reaches it unshadowed (i.e. when no yaml literal is
+# present to shadow it). On the production boot path the shipped
+# config.yaml literal shadows the pydantic env tier and the house
+# resolver rejects the below-floor tier itself — one WARNING, that
+# tier skipped, the lower tier active (the resolver's uniform
+# fail-open, Ruling 3). Nothing anywhere clamps a smaller value up to
+# 15: the knob REPLACES the library default on the daemon-wide shared
+# engine, so a smaller value is a capacity regression and is refused,
+# never silently coerced.
+#
+# CEILING = 30 (Field ``le=30`` + mirrored registry bound): connection
+# budget — 30+10 manager (pool+overflow) + 2×20 checkpoint
+# (max_size+headroom) = 80 ≤ max_connections=100, leaving headroom for
+# ad-hoc/superuser connections. pool_size ONLY: no
+# overflow/recycle/ping knobs.
 MANAGER_POOL_SIZE_DEFAULT: int = 15
 
 # ── Checkpoint readiness sentinel (incident 2026-10-10, W1) ─────────────

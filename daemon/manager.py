@@ -765,7 +765,19 @@ class InstanceManager:
         #   - ensemble_config.is_sqlite (or None) → existing sync SQLite path
         if self._ensemble_config is not None and self._ensemble_config.is_postgres:
             from .repositories.factory import create_postgres_engine
-            self._engine = create_postgres_engine(self._ensemble_config)
+            # Manager-engine pool knob (devops incident fix item #7):
+            # thread the ladder-resolved value EXPLICITLY — the
+            # ensemble.json EnsembleConfig passed below carries NO
+            # .limits, so the factory cannot read the knob off it
+            # (severed-knob defect: every tier silently degraded to the
+            # default). ``self.config`` is the YAML Config whose limits
+            # were boot-applied (apply_db_settings_overrides ran before
+            # InstanceManager construction) — same read shape as
+            # pool_orchestrator.py's worker-pool resolution.
+            self._engine = create_postgres_engine(
+                self._ensemble_config,
+                manager_pool_size=self.config.limits.manager_pool_size,
+            )
         else:
             db_config = DatabaseConfig.sqlite(db_path=str(self.db_path))
             self._engine = create_engine_from_config(db_config)

@@ -656,17 +656,24 @@ class LimitsConfig(BaseSettings):
     # name falls out of ``env_prefix="LIMITS_"``:
     # ``LIMITS_MANAGER_POOL_SIZE``.
     #
-    # Floor rationale + the honesty context (this is the pool the A4
-    # honesty note points at): see daemon/constants.py
+    # FAIL-LOUD bounds — floor 15 == the default and ceiling 30 are
+    # validation-rejects, NOT clamps: a below-15 value reaching this
+    # Field raises ValidationError (load crashes); an above-30 value
+    # likewise. On the production boot path the shipped yaml literal
+    # shadows the pydantic env tier and the settings resolver rejects
+    # an out-of-range tier with a WARNING instead (lower tier active).
+    # Budget rationale: see daemon/constants.py
     # (MANAGER_POOL_SIZE_DEFAULT) — the single canonical home.
     manager_pool_size: int = Field(
         default=MANAGER_POOL_SIZE_DEFAULT,
         ge=15,
+        le=30,
         description=(
             "SQLAlchemy manager-engine pool_size — the PG engine every "
             "repository shares (boot-applied; DB/env/yaml resolve at "
-            "boot via the managed key limits.manager_pool_size). Floor "
-            "= the default: values below 15 never take effect."
+            "boot via the managed key limits.manager_pool_size). "
+            "Fail-loud bounds [15, 30] = [floor==default, ceiling]: "
+            "out-of-range values are rejected, never clamped."
         ),
     )
 
