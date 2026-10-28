@@ -1403,13 +1403,30 @@ async def refresh_readiness_composite(
 
     observation = None
     if grace_tracker is not None:
-        observation = grace_tracker.observe(
-            component_classes=component_classes,
-            degraded_components=degraded_components,
-            pool_state_psycopg=pool_state_psycopg,
-            pool_state_sqlalchemy=pool_state_sqlalchemy,
-            now=checked_at,
-        )
+        # F5: the observe call is GUARDED. An exception here would abort
+        # the whole tick and leave the composite STALE — a bug in the
+        # grace code would then break the EXISTING readiness reporting,
+        # the most safety-critical surface in this commission. The guard
+        # fails TOWARD the pre-grace behaviour (no grace for this
+        # observation) and NEVER toward suppressing readiness: the real
+        # component readings and reasons still ride the composite.
+        try:
+            observation = grace_tracker.observe(
+                component_classes=component_classes,
+                degraded_components=degraded_components,
+                pool_state_psycopg=pool_state_psycopg,
+                pool_state_sqlalchemy=pool_state_sqlalchemy,
+                now=checked_at,
+            )
+        except Exception as exc:  # noqa: BLE001 — the tick must complete
+            logger.error(
+                "Readiness grace observation failed (%s: %s) — the tick "
+                "continues WITHOUT grace for this observation (the "
+                "component readings and reasons are unaffected)",
+                type(exc).__name__,
+                redact_exc_str(exc),
+            )
+            observation = None
 
     return compute_readiness_composite(
         database_ok=database_ok,
@@ -1435,6 +1452,11 @@ async def refresh_readiness_composite(
         resume_hold=resume_hold,
         burst_signals=burst_signals,
         mcp_servers=mcp_servers,
+        # F2: the buffered-transition count MUST be forwarded here —
+        # accepting it on the orchestrator and dropping it here made
+        # ``detail.mcp_buffered_transitions`` DEAD on the live path
+        # (the "true in unit, dead in production" family).
+        mcp_buffered_transitions=mcp_buffered_transitions,
     )
 
 

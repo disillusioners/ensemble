@@ -37,7 +37,7 @@
 #
 # Internal watchdog: 600s.
 
-set -u
+set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT" || { echo "FAIL: cannot cd to repo root"; echo "RESULT: FAIL"; exit 1; }
@@ -121,8 +121,10 @@ if soak_pack_start_fake_daemon "flip" "$F1_PORT" "$_FAKE_LOG" "$WORKDIR/f1.ready
     PORT="$F1_PORT"
     : > "$_JOURNAL_LOG"
     F1_T0="$(date +%s)"
-    gate_soak 300 "v-test" > "$WORKDIR/f1.out" 2>&1
-    F1_RC=$?
+    # The soak is EXPECTED to fail here (the hard-red leg) — the rc
+    # capture must be errexit-safe under `set -e`.
+    F1_RC=0
+    gate_soak 300 "v-test" > "$WORKDIR/f1.out" 2>&1 || F1_RC=$?
     F1_T1="$(date +%s)"
     F1_ELAPSED=$(( F1_T1 - F1_T0 ))
     F1_PROBES="$(_probe_count)"
@@ -210,10 +212,12 @@ F2_PORT="$(soak_pack_free_port)" || exit 1
 F2_LOG="$WORKDIR/f2.probes.log"
 if soak_pack_start_fake_daemon "version-flip" "$F2_PORT" "$F2_LOG" "$WORKDIR/f2.ready" "$SBX" "2.0.0-sbx"; then
     F2_T0="$(date +%s)"
+    # The promote is EXPECTED to exit 1 (the soak failure rolled it
+    # back) — the rc capture must be errexit-safe under `set -e`.
+    F2_RC=0
     F2_OUT="$(HOME="$SOAK_PACK_FAKE_HOME" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$F2_PORT" \
         VERSION="$SBX_V2" LIVEZ_BUDGET_S=6 READYZ_BUDGET_S=6 \
-        bash "$FAKE_REPO/scripts/upgrade/promote.sh" sandbox 2>&1)"
-    F2_RC=$?
+        bash "$FAKE_REPO/scripts/upgrade/promote.sh" sandbox 2>&1)" || F2_RC=$?
     F2_T1="$(date +%s)"
     F2_ELAPSED=$(( F2_T1 - F2_T0 ))
     soak_pack_stop_fake_daemon

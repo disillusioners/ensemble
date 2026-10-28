@@ -45,7 +45,7 @@
 # Internal watchdog: 2400s (this pack boots three REAL daemons and then
 # runs the whole lane's gate set).
 
-set -u
+set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT" || { echo "FAIL: cannot cd to repo root"; echo "RESULT: FAIL"; exit 1; }
@@ -67,8 +67,13 @@ WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/soak-acceptance.XXXXXX")" || {
 }
 CHILD_PID=""
 cleanup() {
-    [ -n "$CHILD_PID" ] && kill "$CHILD_PID" 2>/dev/null
-    [ -n "$CHILD_PID" ] && wait "$CHILD_PID" 2>/dev/null
+    # The child may already be gone — errexit-safe under `set -e` (and
+    # the scratch DB MUST still be dropped: a failing `[ -n ]` test
+    # would abort the trap before the cleanup).
+    if [ -n "$CHILD_PID" ]; then
+        kill "$CHILD_PID" 2>/dev/null || true
+        wait "$CHILD_PID" 2>/dev/null || true
+    fi
     soak_pack_drop_scratch_db
     if [ "${SOAK_PACK_KEEP:-0}" = "1" ]; then
         echo "KEPT: $WORKDIR"
@@ -121,8 +126,10 @@ soak_start_child() {
 
 soak_stop_child() {
     [ -n "$CHILD_PID" ] || return 0
-    kill "$CHILD_PID" 2>/dev/null
-    wait "$CHILD_PID" 2>/dev/null
+    # The child may already be gone — both calls are errexit-safe under
+    # `set -e` (the house pack convention).
+    kill "$CHILD_PID" 2>/dev/null || true
+    wait "$CHILD_PID" 2>/dev/null || true
     CHILD_PID=""
 }
 
@@ -380,8 +387,10 @@ tests/unit/test_context7_builtin.py::TestContext7Bootstrap::test_schema_drift_re
 UNIT_LOG="$WORKDIR/unit.log"
 env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_HOST -u POSTGRES_PORT \
     HOME="$SOAK_PACK_FAKE_HOME" \
-    $PYTEST_CMD "${UNIT_FILES[@]}" -q > "$UNIT_LOG" 2>&1
-UNIT_RC=$?
+    # The unit set carries the KNOWN-BASELINE reds (documented below) —
+    # the rc capture must be errexit-safe under `set -e`.
+    UNIT_RC=0
+    $PYTEST_CMD "${UNIT_FILES[@]}" -q > "$UNIT_LOG" 2>&1 || UNIT_RC=$?
 UNIT_SUMMARY="$(grep -E 'passed|failed|error' "$UNIT_LOG" | tail -1)"
 UNIT_COUNT="$("$SOAK_PACK_PYTHON" - "$UNIT_LOG" <<'PYEOF'
 import re, sys
@@ -431,9 +440,11 @@ fi
 INTEG_LOG="$WORKDIR/integration.log"
 env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_HOST -u POSTGRES_PORT \
     HOME="$SOAK_PACK_FAKE_HOME" \
+    # The rc capture must be errexit-safe under `set -e` (the gate
+    # ASSERTS the rc, it does not abort on it).
+    INTEG_RC=0
     $PYTEST_CMD --override-ini="addopts=" -m integration "${INTEGRATION_FILES[@]}" -v \
-    > "$INTEG_LOG" 2>&1
-INTEG_RC=$?
+    > "$INTEG_LOG" 2>&1 || INTEG_RC=$?
 INTEG_SUMMARY="$(grep -E 'passed|failed|error' "$INTEG_LOG" | tail -1)"
 INTEG_COUNT="$("$SOAK_PACK_PYTHON" - "$INTEG_LOG" <<'PYEOF'
 import re, sys
@@ -466,10 +477,10 @@ PACK_FAIL=0
 for p in "${PACK_FILES[@]}"; do
     name="$(basename "$p")"
     plog="$WORKDIR/${name}.log"
+    prc=0
     env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_HOST -u POSTGRES_PORT \
         HOME="$SOAK_PACK_FAKE_HOME" \
-        bash "$REPO_ROOT/$p" > "$plog" 2>&1
-    prc=$?
+        bash "$REPO_ROOT/$p" > "$plog" 2>&1 || prc=$?
     if [ "$prc" = "0" ]; then
         PACK_PASS=$(( PACK_PASS + 1 ))
         echo "    pack ${name}: rc=0"

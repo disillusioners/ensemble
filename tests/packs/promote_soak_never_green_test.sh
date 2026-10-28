@@ -41,7 +41,7 @@
 #
 # Internal watchdog: 600s (this pack drives the REAL promote.sh).
 
-set -u
+set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT" || { echo "FAIL: cannot cd to repo root"; echo "RESULT: FAIL"; exit 1; }
@@ -130,8 +130,10 @@ run_soak() {
     PORT="$port"
     local t0 t1
     t0="$(date +%s)"
-    gate_soak 300 "v-test" > "$WORKDIR/${name}.out" 2>&1
-    SOAK_RC=$?
+    # The soak is EXPECTED to fail (the never-green leg) — the rc capture
+    # must be errexit-safe under `set -e`.
+    SOAK_RC=0
+    gate_soak 300 "v-test" > "$WORKDIR/${name}.out" 2>&1 || SOAK_RC=$?
     t1="$(date +%s)"
     SOAK_ELAPSED=$(( t1 - t0 ))
     SOAK_PROBES="$(_probe_count)"
@@ -271,10 +273,12 @@ soak_pack_seed_journal "$SBX_V1"
 N4_PORT="$(soak_pack_free_port)" || exit 1
 N4_LOG="$WORKDIR/n4.probes.log"
 if soak_pack_start_fake_daemon "version-aware" "$N4_PORT" "$N4_LOG" "$WORKDIR/n4.ready" "$SBX" "2.0.0-sbx"; then
+    # The promote is EXPECTED to exit 1 (the auto-rollback route) — the
+    # rc capture must be errexit-safe under `set -e`.
+    N4_RC=0
     N4_OUT="$(HOME="$SOAK_PACK_FAKE_HOME" TARGET=sandbox INSTALL_DIR="$SBX" PORT="$N4_PORT" \
         VERSION="$SBX_V2" LIVEZ_BUDGET_S=6 READYZ_BUDGET_S=6 ENSEMBLE_PROMOTE_SOAK_S=0 \
-        bash "$FAKE_REPO/scripts/upgrade/promote.sh" sandbox 2>&1)"
-    N4_RC=$?
+        bash "$FAKE_REPO/scripts/upgrade/promote.sh" sandbox 2>&1)" || N4_RC=$?
     soak_pack_stop_fake_daemon
     printf '%s\n' "$N4_OUT" > "$WORKDIR/n4.out"
     if [ "$N4_RC" = "1" ]; then

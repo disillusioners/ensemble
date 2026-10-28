@@ -491,6 +491,18 @@ def _promote_txn_live() -> bool:
     LAZY import — ``daemon.services.promote_txn_hold`` pulls the tools
     package in lazily, and this module must stay importable from
     anywhere without creating a cycle.
+
+    FAIL-OPEN (council-adjudicated; NOT changed by the tidy round —
+    advisory A5 in the lane's adjudication note): if the predicate
+    cannot be consulted at all (an exception), this returns False —
+    "no live promote txn" — so the journal write PROCEEDS instead of
+    being buffered forever. The reason is the asymmetry: the MCP
+    state transition is DEFERRABLE OBSERVABILITY, not correctness, and
+    a permanently-suppressed buffer hides the operator's signal for
+    the rest of the boot; the predicate's own two-read hysteresis
+    bounds its side. The write's residual exposure on this path is the
+    same one the C4 rule accepts whenever the predicate is genuinely
+    not-live.
     """
     try:
         from daemon.services import promote_txn_hold

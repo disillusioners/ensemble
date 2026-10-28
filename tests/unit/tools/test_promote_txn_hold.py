@@ -225,6 +225,65 @@ class TestHoldDeferral:
 # ── seam 1 — the boot auto-continue pass ──────────────────────────────
 
 
+class TestReleaseFailureRetention:
+    """F4 — a failed release is RETAINED, never dropped."""
+
+    async def test_a_raising_handler_does_not_lose_the_candidate(self, scratch_install):
+        """A raising seam handler must not DROP the candidate.
+
+        The lane's own contract is "DEFERS, never drops": a release that
+        FAILS must be retried on the next driver pass, not silently
+        abandoned.
+        """
+        async def _boom(candidates):
+            raise RuntimeError("the seam handler failed")
+
+        hold.register_release_handler("seam-under-test", _boom)
+        candidate = hold.defer_resume("seam-under-test", {"k": 1})
+        assert hold.pending_count() == 1
+
+        await hold._release_candidates([candidate])
+
+        assert hold.pending_count() == 1, (
+            "a raising release handler must NOT lose the candidate — the "
+            "hold DEFERS, never drops"
+        )
+        assert hold._DEFERRED["seam-under-test"][0] is candidate, (
+            "the RETAINED candidate must be the SAME object"
+        )
+
+    async def test_the_removal_is_by_identity_not_value_equality(self, scratch_install):
+        """Two field-EQUAL candidates must not collide on removal.
+
+        ``DeferredCandidate`` is a dataclass, so two candidates with the
+        same fields compare EQUAL — a value-based ``not in`` removal
+        would drop the wrong one.
+        """
+        async def _handler(candidates):
+            return None
+
+        hold.register_release_handler("seam-under-test", _handler)
+        first = hold.defer_resume("seam-under-test", {"k": 1})
+        second = hold.defer_resume("seam-under-test", {"k": 1})
+        # Force the value-equality collision (the timestamps differ by
+        # default).
+        second.deferred_at = first.deferred_at
+        assert first == second, (
+            "the two candidates must compare EQUAL — that is exactly the "
+            "collision a value-based removal had"
+        )
+        assert first is not second
+        assert hold.pending_count() == 2
+
+        await hold._release_candidates([first])
+
+        assert hold.pending_count() == 1, (
+            "releasing ONE of two field-equal candidates must not remove "
+            "the other (the removal is by identity)"
+        )
+        assert hold._DEFERRED["seam-under-test"][0] is second
+
+
 class _FakeTask:
     def __init__(self, task_id: str, instance_id: str, work_id: str):
         self.id = task_id

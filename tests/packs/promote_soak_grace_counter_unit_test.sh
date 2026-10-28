@@ -27,7 +27,7 @@
 #
 # Internal watchdog: 120s (unit-type limit per the test-pack skill).
 
-set -u
+set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT" || { echo "FAIL: cannot cd to repo root"; echo "RESULT: FAIL"; exit 1; }
@@ -255,9 +255,10 @@ run_scenario() {
     # in S11/S12 against the shipped default.
     GRACE_EXTENSION_CAP_S=2
     GRACE_EXTENSION_CAP_S_INT=2
-    local rc
-    gate_soak 300 "v-test" > "$WORKDIR/out.txt" 2>&1
-    rc=$?
+    local rc=0
+    # The soak is EXPECTED to fail in some scenarios — the rc capture
+    # must be errexit-safe under `set -e`.
+    gate_soak 300 "v-test" > "$WORKDIR/out.txt" 2>&1 || rc=$?
     # NON-VACUITY: the scripted stream must actually have been consumed.
     if [ "$_SCRIPT_CALLS" -lt 2 ]; then
         _report "$name" 0 "the scripted probe stream was NOT consumed (calls=${_SCRIPT_CALLS}) — vacuous run"

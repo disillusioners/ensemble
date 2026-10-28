@@ -22,6 +22,17 @@ module implements it verbatim:
 * The hold **DEFERS, never drops**; human-initiated resumes are NOT
   gated.
 
+FAIL-OPEN POSTURE (council-adjudicated; NOT changed by the tidy round
+— see advisory A6 in the lane's adjudication note): the predicate
+FAILS OPEN where the alternative would starve the resume set — an
+UNRESOLVABLE install root releases the hold, and a STALE heartbeat
+releases it post-boot. The reason is the asymmetry of the two
+failures: a stuck hold starves resumes (the worse failure), while the
+fail-open exposure is bounded by the TWO-CONSECUTIVE-FALSE-reads
+hysteresis and the driver's 5 s tick — a single torn/unreadable read
+does NOT release. One read DOES release in the fail-open cases, and
+that is the disclosed, accepted trade-off.
+
 READ-ONLY BY CONSTRUCTION: this module only READS
 ``<install_dir>/releases/state.json``. It never writes, never splices
 and never locks the journal (the read-only pin asserts zero journal
@@ -243,6 +254,22 @@ def evaluate_promote_txn() -> tuple[bool, bool]:
     A torn / unreadable read yields ``(False, False)`` — never a
     release on a single bad read (the two-read hysteresis is the second
     line of defence).
+
+    FAIL-OPEN POSTURE (council-adjudicated; NOT changed by the tidy
+    round — advisory A6 in the lane's adjudication note). The
+    predicate is fail-open where the alternative would starve the
+    resume set, and fail-closed on a single torn read:
+
+    * an UNRESOLVABLE install root ⇒ ``(False, True)`` — the hold
+      RELEASES. Fail-open is deliberate: an unreadable journal must
+      not hold resumes indefinitely (a stuck hold starves the resume
+      set — the worse failure). The two-read hysteresis and the
+      driver's 5 s tick bound the exposure.
+    * a TORN / unreadable ``state.json`` ⇒ ``(False, False)`` — that
+      ONE read does not release; the release needs TWO CONSECUTIVE
+      FALSE reads at least one driver tick apart.
+    * a STALE heartbeat post-boot ⇒ release authorized (fail-open on
+      stale: a crashed promote releases rather than freezing resumes).
     """
     install_dir = _resolve_install_root()
     if install_dir is None:
@@ -438,20 +465,42 @@ def _expired_candidates() -> list[DeferredCandidate]:
 
 
 async def _release_candidates(candidates: list[DeferredCandidate]) -> None:
-    """Release a specific set of candidates through their OWN seams."""
+    """Release a specific set of candidates through their OWN seams.
+
+    The lane's contract is "DEFERS, never drops", and this function
+    honours it for every RELEASE that was actually ATTEMPTED:
+
+    * the removal is by IDENTITY (``id()``), never by VALUE equality —
+      ``DeferredCandidate`` is a dataclass, so two candidates with the
+      same fields compare EQUAL and a value-based ``not in`` could drop
+      the WRONG one;
+    * a candidate whose seam handler RAISES is RETAINED (requeued) and
+      ERROR-logged — a failed release is retried on the next driver
+      pass, never silently abandoned.
+
+    ONE disclosed exception remains (advisory A8 in the lane's
+    adjudication note): a seam with NO registered handler cannot be
+    released at all, so its candidates are dropped — LOUDLY, at
+    WARNING. That case is not a "failed release" but a "no release
+    path"; retaining them forever would park the resumes without
+    bound while the driver never drains.
+    """
     by_seam: dict[str, list[DeferredCandidate]] = {}
     for cand in candidates:
         by_seam.setdefault(cand.seam, []).append(cand)
     for seam, seam_candidates in by_seam.items():
         remaining = _DEFERRED.get(seam, [])
-        keep = [c for c in remaining if c not in seam_candidates]
+        # Remove by IDENTITY (F4b) — a value-based ``not in`` would
+        # treat two field-equal candidates as the same one.
+        releasing_ids = {id(c) for c in seam_candidates}
+        keep = [c for c in remaining if id(c) not in releasing_ids]
         _DEFERRED[seam] = keep
         handler = _RELEASE_HANDLERS.get(seam)
         if handler is None:
             logger.warning(
                 "[PROMOTE_HOLD] no release handler for seam=%s — %d "
                 "candidates could not be released (they are dropped, NOT "
-                "silently re-dispatched)",
+                "silently re-dispatched) [disclosed advisory A8]",
                 seam, len(seam_candidates),
             )
             continue
@@ -463,8 +512,15 @@ async def _release_candidates(candidates: list[DeferredCandidate]) -> None:
             )
         except Exception:  # noqa: BLE001 — one seam's failure never blocks another
             logger.exception(
-                "[PROMOTE_HOLD] release handler for seam=%s failed", seam
+                "[PROMOTE_HOLD] release handler for seam=%s failed — the "
+                "candidate(s) are RETAINED for the next driver pass (the "
+                "hold DEFERS, never drops)",
+                seam,
             )
+            # F4a: requeue the candidates the failing handler did not
+            # release — a failed release must be RETRIED, never dropped.
+            retained = _DEFERRED.setdefault(seam, [])
+            retained.extend(seam_candidates)
 
 
 async def release_deferred() -> None:

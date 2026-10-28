@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[2]
 
 
@@ -99,3 +101,67 @@ def test_api_wiring_no_mcp_in_probe_construction():
                  if "make_" in ln and "probe" in ln.lower() and "mcp" in ln.lower()
                  and not ln.strip().startswith("#")]
     assert not offending, offending
+
+
+async def test_the_buffered_transition_count_reaches_the_payload_through_the_orchestrator():
+    """F2: the count must survive the ORCHESTRATOR (the live path).
+
+    The orchestrator accepted ``mcp_buffered_transitions`` and never
+    forwarded it to the composite builder — so
+    ``detail.mcp_buffered_transitions`` was DEAD in production while
+    the constructor-level coverage looked green (the "true in unit,
+    dead in production" family). This pin drives
+    ``refresh_readiness_composite`` — the LIVE path — not the
+    constructor.
+    """
+    from daemon.services.readiness import refresh_readiness_composite
+
+    composite = await refresh_readiness_composite(
+        db_probe=lambda: True,
+        queue_probe=lambda: None,
+        services_ok=True,
+        queue_freshness_threshold_seconds=300.0,
+        mcp_servers={"context7": {"state": "ok"}},
+        mcp_buffered_transitions=7,
+    )
+    payload = composite.to_payload()
+    assert payload["detail"]["mcp_buffered_transitions"] == 7, (
+        "the buffered-transition count must reach the payload through the "
+        "orchestrator — the constructor-level coverage bypasses the very "
+        "drop that made the key dead in production"
+    )
+    # The advisory map still rides along on the same path.
+    assert payload["detail"]["mcp"]["context7"]["state"] == "ok"
+
+
+async def test_a_grace_observation_exception_does_not_abort_the_tick():
+    """F5: an observe exception must not abort the readiness tick.
+
+    A bug in the NEW grace code would otherwise break the EXISTING
+    readiness reporting — the most safety-critical surface in this
+    commission — and leave the composite STALE. The guard fails toward
+    the pre-grace behaviour (no grace for that observation) and NEVER
+    toward suppressing readiness: the component readings and the reasons
+    still ride the composite.
+    """
+    from daemon.services.readiness import refresh_readiness_composite
+
+    class _ExplodingTracker:
+        def observe(self, **kwargs):
+            raise RuntimeError("the grace tracker exploded")
+
+    composite = await refresh_readiness_composite(
+        db_probe=lambda: True,
+        queue_probe=lambda: None,
+        services_ok=True,
+        queue_freshness_threshold_seconds=300.0,
+        grace_tracker=_ExplodingTracker(),
+    )
+    payload = composite.to_payload()
+    assert payload["status"] == "ready", (
+        "the tick must complete with the real component readings"
+    )
+    assert payload["components"]["database"] is True
+    assert payload["detail"]["reasons"] == []
+    # No grace for this observation (the pre-grace behaviour).
+    assert payload["detail"]["grace"]["grace_active"] is False

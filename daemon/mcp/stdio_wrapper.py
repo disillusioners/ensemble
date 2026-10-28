@@ -438,7 +438,13 @@ class TaskScopedContextManager:
                         type(exc).__name__, exc,
                     )
                 try:
-                    await self._reap_orphans()
+                    # SYNCHRONOUS by design (the method is a plain
+                    # function on purpose — it runs from ``finally``
+                    # blocks, where an await is not possible). The
+                    # ``await`` here was a one-token bug: it raised a
+                    # TypeError on EVERY close-watchdog activation and
+                    # the spurious WARNING below fired every time.
+                    self._reap_orphans()
                 except Exception as exc:  # pragma: no cover — best effort
                     logger.warning(
                         "TaskScopedContextManager orphan reap failed: %s: %s",

@@ -43,7 +43,7 @@
 #
 # Internal watchdog: 900s (this pack boots a REAL daemon).
 
-set -u
+set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT" || { echo "FAIL: cannot cd to repo root"; echo "RESULT: FAIL"; exit 1; }
@@ -65,8 +65,13 @@ WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/soak-grace-burst.XXXXXX")" || {
 }
 CHILD_PID=""
 cleanup() {
-    [ -n "$CHILD_PID" ] && kill "$CHILD_PID" 2>/dev/null
-    [ -n "$CHILD_PID" ] && wait "$CHILD_PID" 2>/dev/null
+    # The child may already be gone — errexit-safe under `set -e` (and
+    # the scratch DB MUST still be dropped: a failing `[ -n ]` test
+    # would abort the trap before the cleanup).
+    if [ -n "$CHILD_PID" ]; then
+        kill "$CHILD_PID" 2>/dev/null || true
+        wait "$CHILD_PID" 2>/dev/null || true
+    fi
     soak_pack_drop_scratch_db
     # SOAK_PACK_KEEP=1 keeps the workdir (the child's log + the report)
     # for post-mortem inspection — the default is a full cleanup.
@@ -187,9 +192,10 @@ run_stream() {  # run_stream <name> <expected_rc> <cap> <spec...>
     ADAPTIVE_SOAK_CONSECUTIVE=3
     ADAPTIVE_SOAK_CADENCE_S=1
     GRACE_EXTENSION_CAP_S=2; GRACE_EXTENSION_CAP_S_INT=2
-    local rc
-    gate_soak 300 "v-test" > "$WORKDIR/${name}.out" 2>&1
-    rc=$?
+    local rc=0
+    # The soak is EXPECTED to fail in some scenarios — the rc capture
+    # must be errexit-safe under `set -e`.
+    gate_soak 300 "v-test" > "$WORKDIR/${name}.out" 2>&1 || rc=$?
     if [ "$_SCRIPT_CALLS" -lt 2 ]; then
         soak_pack_report "$name" 0 "the scripted stream was NOT consumed (calls=${_SCRIPT_CALLS}) — vacuous"
         return
@@ -299,15 +305,19 @@ ADAPTIVE_SOAK_CONSECUTIVE=3
 ADAPTIVE_SOAK_CADENCE_S=15
 PORT="$BURST_PORT"
 SOAK_T0="$(date +%s)"
-gate_soak 300 "v-test" > "$WORKDIR/soak.out" 2>&1
-SOAK_RC=$?
+# The soak's rc is ASSERTED by the pack (a healthy burst returns 0) —
+# the capture must be errexit-safe under `set -e`.
+SOAK_RC=0
+gate_soak 300 "v-test" > "$WORKDIR/soak.out" 2>&1 || SOAK_RC=$?
 SOAK_T1="$(date +%s)"
 SOAK_ELAPSED=$(( SOAK_T1 - SOAK_T0 ))
 
 # Give the child a moment to flush its last samples, then stop it.
 sleep 3
-kill "$CHILD_PID" 2>/dev/null
-wait "$CHILD_PID" 2>/dev/null
+# The child may already be gone (the daemon exits on its own after the
+# soak) — both calls are errexit-safe under `set -e`.
+kill "$CHILD_PID" 2>/dev/null || true
+wait "$CHILD_PID" 2>/dev/null || true
 CHILD_PID=""
 
 if [ "$SOAK_RC" = "0" ]; then
