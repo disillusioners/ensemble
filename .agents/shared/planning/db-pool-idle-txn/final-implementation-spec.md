@@ -185,6 +185,8 @@ Each row: **`file:line@base` → exact change → verification.** "AC" = the acc
 
 QUALIFICATION (2026-10-28, plan-owner-ratified): this attribution is PARTIAL — the `tasks`→`task` relation error was one of TWO roots. `_read_store_census`'s `n_live_tup`-from-`pg_class` defect is a second, pre-existing root (R-10; owner = the wedge-capture lane). F5 does NOT close the aborted-cascade.
 
+**F5-b leg scope (plan-owner-ratified 2026-10-28):** the G2.6 leg asserts the two F5-owned reads DIRECTLY on one connection and does **NOT** exercise the store-census path; the census path's real-PG failure is R-10 (pre-existing at base; owner = the wedge-capture lane).
+
 ### F1 — the audit record *(D-11)*
 
 | # | Where | Exact change | Verify |

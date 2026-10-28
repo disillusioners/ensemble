@@ -240,54 +240,55 @@ The round-1 record stated "(b) the Phase-0 measurements (none exist yet — BASE
 
 ## §8 NOTE — the plan-owner ruling amendments (2026-10-28): line-anchor drift, findings UNCHANGED
 
-**What changed (and what did NOT).** The plan owner ruled eleven **documentation** amendments into the lane's plan set — no code, no test file: contract `final-implementation-spec.md` — **F8.10** (the D-33:94 narrowing + the strict-False carrier consumer), **F6.9** (the `RETURNING` / anchor-scoped re-resolve loser signal), the **F5 attribution qualification**, the **F1 `borrow_census.py` ship-intent** line, and **§6.4.6** (the xfail canary's expected gate result); `plan-overview.md` — the **§12 R-10 + R-11** routed rows and **three** F5-attribution qualification lines (§1, §3.4, §3.5); `decisions.md` — the **D-52** qualification line; `expected-collected.md` — the **row-18 xfail footnote** (placed at the file END). **No verified row in this file was edited** — this section is the ADDED record. The amendments INSERT lines into four artifacts, so **every recorded line anchor in those files moved**; the FINDINGS are unchanged.
+**What changed (and what did NOT).** The plan owner ruled **fourteen** **documentation** amendments into the lane's plan set across two rounds — no code, no test file. **Round 1** (commit `bcd8e5e57`): contract `final-implementation-spec.md` — **F8.10** (the D-33:94 narrowing + the strict-False carrier consumer), **F6.9** (the `RETURNING` / anchor-scoped re-resolve loser signal), the **F5 attribution qualification**, the **F1 `borrow_census.py` ship-intent** line, and **§6.4.6** (the xfail canary's expected gate result); `plan-overview.md` — the **§12 R-10 + R-11** routed rows and **three** F5-attribution qualification lines (§1, §3.4, §3.5); `decisions.md` — the **D-52** qualification line; `expected-collected.md` — the **row-18 xfail footnote** (placed at the file END). **Round 2** (this pass — the plan owner ruled the §4 / SC7 F5-cascade-closure claims IN SCOPE): `plan-overview.md` — the **§4 per-fix table's attached NOTE row** on the **F** row and the **SC7 attached qualification**; `final-implementation-spec.md` — the **F5-b leg scope** line. **No verified row in this file was edited** — this section is the ADDED record. The amendments INSERT lines into the artifacts, so **every recorded line anchor in those files moved**; the FINDINGS are unchanged.
 
-**Re-verification (the drift is mechanical, not substantive).** All **98** verification commands recorded in this file were re-run against the amended artifacts. **38 outputs changed: 37 are PURE LINE-NUMBER SHIFTS** (byte-identical content at a new line) and **1 is a benign count delta** (`grep -c TBD expected-collected.md` **38 → 39** — the row-18 footnote quotes the `TBD (R-1)` literal once; **no count cell was altered** and all 35 cells still read `TBD (R-1)`). Every absolute-line `sed -n 'Np'` window quoted by a row below was re-checked: **the quoted line still exists, uniquely, at the new line**. The W-11 pin (`G-consistency`) re-runs GREEN — **7 collected, 6 passed, 1 xfailed** (the single strict-xfail AC-id canary: the EXPECTED result per contract §6.4.6), **0 failed** ⇒ the §5 pin inventory (**46**), the §6.2a ladder (**17**), the sentinel-pair census (**1/1 + 0/0 × 6**) and the pack-inventory set-equality are all **UNCHANGED**.
+**Re-verification (the drift is mechanical, not substantive).** All **98** verification commands recorded in this file were re-run against the amended artifacts, **twice** — once for the first amendment round (commit `bcd8e5e57`) and once for the second (the F5-cascade-closure qualifications). The **cumulative** accounting from the pre-amendment baseline to the current tree: **38 of 98 outputs changed = 27 PURE LINE-NUMBER SHIFTS + 10 ABSOLUTE-LINE `sed` WINDOWS + 1 COUNT DELTA.** (Round 1 alone: 38 changed = 27 + 10 + 1. Round 2 alone: **25 changed = 20 pure shifts + 5 absolute-line windows + 0 count delta** — no new count delta in round 2.) The three buckets mean: **(a)** a `grep -n` output whose content is byte-identical and only its line prefix moved; **(b)** an absolute-line `sed -n 'Np'` window that now prints a *different* line — **every one of the 10 was re-checked individually and the originally quoted line still exists, uniquely, at the new line** (table below); **(c)** `grep -c TBD expected-collected.md` **38 → 39** — the row-18 footnote quotes the `TBD (R-1)` literal once; **no count cell was altered** and all 35 cells still read `TBD (R-1)`. **CORRECTION to the first round's note (recorded here, not silently):** that note bucketed the outputs as "37 pure shifts + 1 count delta" — the **correct** bucketing is the 27 / 10 / 1 split above; the substance is unchanged (**0 finding changes**, and the 10 windows were already individually re-verified). The W-11 pin (`G-consistency`) re-runs GREEN — **7 collected, 6 passed, 1 xfailed** (the single strict-xfail AC-id canary: the EXPECTED result per contract §6.4.6), **0 failed** ⇒ the §5 pin inventory (**46**), the §6.2a ladder (**17**), the sentinel-pair census (**1/1 + 0/0 × 6**) and the pack-inventory set-equality are all **UNCHANGED**.
 
 **One recorded command does not re-run from the plan dir — a PATH quirk, not a finding change.** The **Δ4** row's command is compound: `sed -n '209p' BASELINE.md > a.txt; sed -n '186p' RESULTS > b.txt; diff a.txt b.txt`. Its `RESULTS` is a **relative** path that does **not** resolve from this planning dir (the canonical RESULTS file is `.agents/tester/RESULTS/2026-10-28-dbpool-phase0-baseline.md`), so a re-run from here produces an empty `b.txt` and a NON-empty diff. Re-run with the canonical path → **0 differences (IDENTICAL)** and the recorded sha256 `ca5b4b948876a7a866c3eccc696d9a5352f9800e31903b48475751011eb56d23` reproduced for BOTH files ⇒ **the Δ4 FINDING holds**. (The two scratch files the command writes were created in this planning dir by that re-run and were **removed**; nothing was left behind.)
 
-**The cumulative shift rules (mechanically re-derivable from the diff).**
-- `final-implementation-spec.md` (**697 → 705**, +8): **+1** after old :90 · **+2** after old :157 · **+4** after old :183 · **+6** after old :189 · **+8** after old :601.
-- `plan-overview.md` (**514 → 522**, +8): **+2** after old :17 · **+4** after old :96 · **+6** after old :119 · **+8** after old :371.
-- `decisions.md` (**665 → 667**, +2): **+2** after old :601 — **D-52's own heading stays at :592** (the qualification line is added after its block).
-- `expected-collected.md` (**91 → 95**, +4): **+4** after old :90 — the footnote is at the file END, so **the table and the Δ8 reconciliation block (:78-84) keep their lines**.
+**The cumulative shift rules (mechanically re-derivable from the diff) — original baseline → NOW (both rounds).**
+- `final-implementation-spec.md` (**697 → 707**, +10): **+1** after old :90 · **+2** after old :157 · **+6** after old :183 (round 1's F5 qualification +2 and round 2's F5-b scope line +2) · **+8** after old :189 · **+10** after old :601.
+- `plan-overview.md` (**514 → 524**, +10): **+2** after old :17 · **+4** after old :96 · **+6** after old :119 · **+7** after old :129 (round 2's §4 F-row NOTE row) · **+8** after old :291 (round 2's SC7 qualification) · **+10** after old :371.
+- `decisions.md` (**665 → 667**, +2): **+2** after old :601 — **D-52's own heading stays at :592** (the qualification line is added after its block). **Round 2 changed nothing in this file.**
+- `expected-collected.md` (**91 → 95**, +4): **+4** after old :90 — the footnote is at the file END, so **the table and the Δ8 reconciliation block (:78-84) keep their lines**. **Round 2 changed nothing in this file.**
 
-**Anchor drift (recorded anchor → anchor now) — the rows whose cited line moved:**
+**Anchor drift (recorded anchor → anchor NOW) — the rows whose cited line moved:** *the "r1" column is the value after the first amendment round (`bcd8e5e57`); "NOW" is after the second round.*
 
-| Row | Recorded anchor (OLD) | Anchor NOW |
-|---|---|---|
-| **ST-1** | `plan-overview.md:116` | `plan-overview.md:120` |
-| **FM-C3** | `final-implementation-spec.md:236` | `final-implementation-spec.md:242` |
-| **FM-C9** | `final-implementation-spec.md:169` | `final-implementation-spec.md:171` |
-| **PD-11** | `plan-overview.md:278` | `plan-overview.md:284` |
-| **Δ1** | `final-implementation-spec.md:351` / `:502` | `final-implementation-spec.md:357` / `:508` |
-| **Δ2** | `decisions.md:647` / `plan-overview.md:371` | `decisions.md:649` / `plan-overview.md:377` |
-| **Δ3** | `final-implementation-spec.md:163` / `:333` / `:474` | `final-implementation-spec.md:165` / `:339` / `:480` |
-| **Δ6** | `decisions.md:657` | `decisions.md:659` |
-| **Δ7** | `final-implementation-spec.md:198` | `final-implementation-spec.md:204` |
-| **CF-3** | `decisions.md:632` / `:644` | `decisions.md:634` / `:646` |
-| **CF-7** | `final-implementation-spec.md:535` | `final-implementation-spec.md:541` |
+| Row | Recorded anchor (OLD) | after r1 | Anchor NOW |
+|---|---|---|---|
+| **ST-1** | `plan-overview.md:116` | :120 | :120 |
+| **FM-C3** | `final-implementation-spec.md:236` | :242 | **:244** |
+| **FM-C9** | `final-implementation-spec.md:169` | :171 | :171 |
+| **PD-11** | `plan-overview.md:278` | :284 | **:285** |
+| **Δ1** | `final-implementation-spec.md:351` / `:502` | :357 / :508 | **:359 / :510** |
+| **Δ2** | `decisions.md:647` / `plan-overview.md:371` | :649 / :377 | **:649 / :379** |
+| **Δ3** | `final-implementation-spec.md:163` / `:333` / `:474` | :165 / :339 / :480 | **:165 / :341 / :482** |
+| **Δ6** | `decisions.md:657` | :659 | :659 |
+| **Δ7** | `final-implementation-spec.md:198` | :204 | **:206** |
+| **CF-3** | `decisions.md:632` / `:644` | :634 / :646 | :634 / :646 |
+| **CF-7** | `final-implementation-spec.md:535` | :541 | **:543** |
 
-**D-record headers quoted in the recorded command outputs:** `decisions.md` **D-54 :612 → :614** · **D-58 :647 → :649** · **D-59 :657 → :659** (D-29..D-52 are all before the insertion point and are UNCHANGED).
+**D-record headers quoted in the recorded command outputs:** `decisions.md` **D-52 :592 — UNCHANGED** · **D-54 :612 → :614** · **D-58 :647 → :649** · **D-59 :657 → :659** (D-29..D-52 are all before the insertion point and are UNCHANGED; round 2 changed nothing in `decisions.md`).
 
 **Absolute-line `sed` windows quoted by a row — the quoted line still exists, uniquely, at the new line:**
 
-| Row | Recorded command | Quoted line now |
-|---|---|---|
-| **Δ6** | `sed -n '121p' final-implementation-spec.md` | :122 |
-| **FM-DR-25** | `sed -n '139p' final-implementation-spec.md` | :140 |
-| **Δ7** | `sed -n '194p' final-implementation-spec.md` | :200 |
-| **FM-DR-26** | `sed -n '278p' final-implementation-spec.md` | :284 |
-| **FM-DR-21** | `sed -n '561,569p' final-implementation-spec.md` | :567 |
-| **FM-DR-36** | `sed -n '660,665p' final-implementation-spec.md` | :668 |
-| **PD-11** | `sed -n '78p' plan-overview.md` | :80 |
-| **Δ7** | `sed -n '135p' plan-overview.md` | :141 |
-| **Δ6** | `sed -n '310p' plan-overview.md` | :316 |
-| **Δ7** | `sed -n '363p' plan-overview.md` | :369 |
-| **Δ8** | `sed -n '80,84p' expected-collected.md` | **:80 — UNCHANGED** (the footnote is at the file end) |
+| Row | Recorded command | after r1 | Quoted line NOW |
+|---|---|---|---|
+| **Δ6** | `sed -n '121p' final-implementation-spec.md` | :122 | :122 |
+| **FM-DR-25** | `sed -n '139p' final-implementation-spec.md` | :140 | :140 |
+| **Δ7** | `sed -n '194p' final-implementation-spec.md` | :200 | **:202** |
+| **FM-DR-26** | `sed -n '278p' final-implementation-spec.md` | :284 | **:286** |
+| **FM-DR-21** | `sed -n '561,569p' final-implementation-spec.md` | :567 | **:569** |
+| **FM-DR-36** | `sed -n '660,665p' final-implementation-spec.md` | :668 | **:670** |
+| **PD-11** | `sed -n '78p' plan-overview.md` | :80 | :80 |
+| **Δ7** | `sed -n '135p' plan-overview.md` | :141 | **:142** |
+| **Δ6** | `sed -n '310p' plan-overview.md` | :316 | **:318** |
+| **Δ7** | `sed -n '363p' plan-overview.md` | :369 | **:371** |
+| **Δ8** | `sed -n '80,84p' expected-collected.md` | :80 | **:80 — UNCHANGED** (the footnote is at the file end) |
 
-**Rows whose quoted command OUTPUT changed (pure line-number shift, content identical):** **ST-1** · **FM-C3** · **FM-C11** · **PD-6** · **PD-9** · **PD-10** · **PD-11** · **FM-DR-2** · **FM-DR-3** · **FM-DR-6** · **FM-DR-8** · **FM-DR-11** · **FM-DR-12** · **FM-DR-13** · **FM-DR-16** · **FM-DR-18** · **FM-DR-21** · **FM-DR-22** · **FM-DR-23** · **FM-DR-25** · **FM-DR-26** · **FM-DR-36** · **Δ1** · **Δ2** · **Δ3** · **Δ6** · **Δ7** (27 rows). Plus the three rows whose **anchor cell** moved with no quoted-output change: **FM-C9** · **CF-3** · **CF-7**. **30 rows touched; 0 findings changed; 0 rows edited.**
+**Rows whose recorded anchor or quoted command OUTPUT moved (content identical — 30 rows; round 2 moved the same 30, none new):** **ST-1** · **FM-C3** · **FM-C9** · **FM-C11** · **PD-6** · **PD-9** · **PD-10** · **PD-11** · **FM-DR-2** · **FM-DR-3** · **FM-DR-6** · **FM-DR-8** · **FM-DR-11** · **FM-DR-12** · **FM-DR-13** · **FM-DR-16** · **FM-DR-18** · **FM-DR-21** · **FM-DR-22** · **FM-DR-23** · **FM-DR-25** · **FM-DR-26** · **FM-DR-36** · **CF-3** · **CF-7** · **Δ1** · **Δ2** · **Δ3** · **Δ6** · **Δ7**. **0 findings changed; 0 verified rows edited.**
 
 | ID | Note | Status |
 |---|---|---|
-| **NOTE-1** | **Plan-owner ruling amendments of 2026-10-28 (docs only) shifted the line anchors recorded in §0-§7 above.** Every one of the **98** recorded verification commands was re-run: **37 pure line-number shifts, 1 benign count delta** (`grep -c TBD` 38 → 39, caused by the row-18 footnote quoting the `TBD (R-1)` literal — **no count cell altered**), **0 finding changes**, **0 verified rows edited**. The W-11 pin re-runs **GREEN — 7 collected, 6 passed, 1 xfailed** (the single strict-xfail AC-id canary = the EXPECTED result, contract §6.4.6). The 46-pin inventory, the 17-row ladder, the sentinel census and the pack-inventory set-equality are UNCHANGED. The old→new anchor map, the cumulative shift rules and the absolute-line `sed` re-checks are the tables above. | **CLOSED — drift recorded, findings intact** |
+| **NOTE-1** | **Plan-owner ruling amendments of 2026-10-28, ROUND 1 (docs only) shifted the line anchors recorded in §0-§7 above.** Every one of the **98** recorded verification commands was re-run: **27 pure line-number shifts + 10 absolute-line `sed` windows (each re-checked — the originally quoted line still exists, uniquely, at the new line) + 1 count delta** (`grep -c TBD` 38 → 39, caused by the row-18 footnote quoting the `TBD (R-1)` literal — **no count cell altered**), **0 finding changes**, **0 verified rows edited**. *(This row's first version said "37 pure shifts + 1 count delta" — the correct bucketing is the 27 / 10 / 1 split above; the substance is unchanged and the 10 windows were individually re-verified in round 1.)* The W-11 pin re-runs **GREEN — 7 collected, 6 passed, 1 xfailed** (the single strict-xfail AC-id canary = the EXPECTED result, contract §6.4.6). The 46-pin inventory, the 17-row ladder, the sentinel census and the pack-inventory set-equality are UNCHANGED. | **CLOSED — drift recorded, findings intact** |
+| **NOTE-2** | **Plan-owner ruling amendments of 2026-10-28, ROUND 2 (docs only) — the F5-cascade-closure qualifications now IN SCOPE** (the §4 per-fix **F** row's attached NOTE, the **SC7** attached qualification, and the contract's **F5-b leg scope** line). Round 2 inserted **4 lines** (`plan-overview.md` +1 after :129, +2 after :291; `final-implementation-spec.md` +2 after :183 — in the round-1 frame) and changed **nothing** in `decisions.md` or `expected-collected.md`. Re-run of all **98** recorded commands: **25 outputs changed = 20 pure line-number shifts + 5 absolute-line `sed` windows + 0 count delta**; **every one of the 10 windows was re-checked individually and each originally quoted line still exists, uniquely, at its new line** (table above). **0 finding changes, 0 verified rows edited.** The cumulative accounting from the pre-amendment baseline is **38 changed = 27 pure shifts + 10 absolute-line windows + 1 count delta** (`grep -c TBD` 38 → 39, from the round-1 footnote — **no count cell altered**). The cumulative shift rules and the old→new anchor map above are stated **for both rounds**; the "after r1" column preserves the round-1 values so the round-2 delta is visible. The W-11 pin re-runs **GREEN — 7 collected, 6 passed, 1 xfailed** (exactly 1 xfail = the AC-id canary). | **CLOSED — drift recorded, findings intact** |
