@@ -69,7 +69,8 @@ Plantable mutations:
   assertions RED.
 
 Run (house form — scratch PG, per-variable env scrub, marker
-override)::
+override; the ``PG_TEST_USER`` role needs CREATEDB — the pack
+creates and drops its own scratch database per D-23)::
 
     cd /home/nea/ensemble-src-wt-dbpool-idletxn && \
     env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD \
@@ -459,16 +460,23 @@ class TestF7aResidenceMetric:
             assert held, "F7-a: precondition — the held backend is visible"
             row = held[0]
             xact_age_s = float(row["xact_age_s"])
-            frozen_value_s = float(row["state_age_s"])
+            # The FROZEN expression is ``state_change − xact_start``
+            # (D-48): both endpoints are set when the last statement
+            # completed, so the value NEVER grows during the hold —
+            # this backend shows the same sub-budget value a healthy
+            # one would.
+            frozen_value_s = (
+                row["state_change"] - row["xact_start"]
+            ).total_seconds()
             assert xact_age_s > DBPOOL_IDLE_IN_TXN_RESIDENCE_BUDGET_S, (
                 "F7-a: xact_age_s must exceed the budget on the held "
                 f"backend (observed {xact_age_s}s)"
             )
             assert frozen_value_s <= DBPOOL_IDLE_IN_TXN_RESIDENCE_BUDGET_S, (
-                "F7-a: the control's precondition broke — state_age grew "
-                "with the hold (a statement ran during the dwell); the "
-                "frozen-metric vacuity cannot be demonstrated in this "
-                f"run (state_age={frozen_value_s}s)"
+                "F7-a: the control's precondition broke — the frozen "
+                "expression GREW with the hold (a statement ran during "
+                "the dwell); the frozen-metric vacuity cannot be "
+                f"demonstrated in this run (frozen={frozen_value_s}s)"
             )
         finally:
             conn.rollback()

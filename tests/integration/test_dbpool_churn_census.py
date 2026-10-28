@@ -53,7 +53,8 @@ metric only.
 Plantable mutation: hold 2 manager slots across the churn cycle ⇒
 ``pool.checkedout()`` does not return to baseline ⇒ RED.
 
-Run (house form)::
+Run (house form; the ``PG_TEST_USER`` role needs CREATEDB — the pack
+creates and drops its own scratch database per D-23)::
 
     cd /home/nea/ensemble-src-wt-dbpool-idletxn && \
     env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD \
@@ -108,7 +109,7 @@ CENSUS_SCOPE_SITES: tuple[tuple[str, str], ...] = (
     ("daemon/repositories/factory.py", "sqlite"),
     ("daemon/repositories/factory.py", "create_engine"),
     ("daemon/repositories/factory.py", "pool_size=5"),
-    ("daemon/tools/ens_db_tools.py", "pool_size=2"),
+    ("daemon/tools/ens_db_tools.py", "REPAIR_POOL_SIZE"),
     ("daemon/tools/ens_db_tools.py", "NullPool"),
     ("daemon/services/vacuum_engine.py", "NullPool"),
     ("daemon/services/db_pool_manager.py", "create_pool"),
@@ -270,6 +271,10 @@ class TestF7eOccupancy:
         try:
             for round_id in range(3):
                 _churn_round(engine, round_id=round_id)
+                # A realistic inter-burst gap (resume bursts are not
+                # back-to-back) — also guarantees the 250 ms sampler
+                # catches the window (non-vacuity).
+                time.sleep(0.35)
         finally:
             stop.set()
             sampler.join(timeout=5)
