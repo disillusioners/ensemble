@@ -1,0 +1,2075 @@
+
+===== T5a FIX-SITE BEHAVIOR — ens_db_tools explicit BEGIN =====
+{
+  "a1_ddl_statement_fails": {
+    "fail_at": "statement",
+    "begin_ok": true,
+    "inner_except": "ProgrammingError: (psycopg.errors.UndefinedTable) relation \"no_such_table_phase0\" does not exist\nLINE 1: SEL",
+    "explicit_rollback_ran": true,
+    "backend_pid": 2325979,
+    "in_transaction_at_close": false,
+    "pg_state_before_close": "idle",
+    "pg_state_after_close": "idle",
+    "pg_last_query_after_close": ";",
+    "xact_start_after_close": null,
+    "still_in_pool": true,
+    "next_borrower_ok": true,
+    "next_borrower_error": null
+  },
+  "a2_rollback_itself_fails": {
+    "fail_at": "rollback",
+    "begin_ok": true,
+    "outer_except": "RuntimeError: simulated rollback failure",
+    "explicit_rollback_ran": false,
+    "backend_pid": 2325979,
+    "in_transaction_at_close": true,
+    "pg_state_before_close": "idle in transaction",
+    "pg_state_after_close": "idle",
+    "pg_last_query_after_close": "ROLLBACK",
+    "xact_start_after_close": null,
+    "still_in_pool": true,
+    "next_borrower_ok": true,
+    "next_borrower_error": null
+  },
+  "a3_begin_itself_fails": {
+    "fail_at": "begin",
+    "outer_except": "InternalError: (psycopg.errors.InFailedSqlTransaction) current transaction is aborted, commands ignored until end of transaction block\n",
+    "explicit_rollback_ran": false,
+    "backend_pid": 2325979,
+    "in_transaction_at_close": true,
+    "pg_state_before_close": "idle in transaction (aborted)",
+    "pg_state_after_close": "idle",
+    "pg_last_query_after_close": "ROLLBACK",
+    "xact_start_after_close": null,
+    "still_in_pool": true,
+    "next_borrower_ok": true,
+    "next_borrower_error": null
+  },
+  "a4_pool_reset_on_return": {
+    "abort_error": "ProgrammingError",
+    "in_transaction_before_close": true,
+    "pg_state_before_close": "idle in transaction (aborted)",
+    "pg_state_after_close": "idle",
+    "still_in_pool": true,
+    "next_borrower_ok": true,
+    "pool_reset_on_return": "ResetStyle.reset_rollback"
+  },
+  "a5_wedge_capture_one_shot_cascade": {
+    "application_name": "wedge-capture",
+    "steps": [
+      {
+        "step": "executing-turns (uses 'tasks')",
+        "ok": false,
+        "error": "UndefinedTable: relation \"tasks\" does not exist\nLINE 1: SELECT t.work_id FROM tasks t WHERE t.status='running' LIMIT...\n                "
+      },
+      {
+        "step": "store census",
+        "ok": false,
+        "error": "InFailedSqlTransaction: current transaction is aborted, commands ignored until end of transaction block"
+      },
+      {
+        "step": "resume history",
+        "ok": false,
+        "error": "InFailedSqlTransaction: current transaction is aborted, commands ignored until end of transaction block"
+      }
+    ],
+    "reproduces_incident_journal_quote": true
+  }
+}
+
+===== T5b READINESS PROBE TIMEOUT RETENTION =====
+{
+  "b1_fast_SELECT_1": {
+    "budget_s": 0.5,
+    "statement": "SELECT 1",
+    "probe_pid": 2325977,
+    "probe_completed": true,
+    "timeout_fired": false,
+    "timeout_at_s": 0.0058,
+    "retention_samples": [
+      {
+        "t_s": 0.0022,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.0546,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.107,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.1589,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.2106,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.2624,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.3143,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.3663,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.4182,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.4699,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.5218,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.5736,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.6253,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.6769,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.7283,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.7799,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.8318,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.8844,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.9362,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.9879,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.0396,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.0914,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.1431,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.1948,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.2464,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.2985,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.3505,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.4028,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.4548,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.5063,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.5581,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.6102,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.6625,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.7145,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.767,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.8191,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.8713,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.9234,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.9753,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.0272,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.0792,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.131,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.1833,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.2353,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.2875,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.3397,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.3916,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.4441,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.4961,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.5481,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.6005,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.6527,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.7044,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.7561,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.8078,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.8594,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.9112,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.9629,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.0148,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.067,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.1192,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.1712,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.2233,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.2754,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.3275,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.3799,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.4321,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.4841,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.5364,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.5887,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.6411,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.693,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.7447,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.7968,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.8492,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.9014,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.9537,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.0059,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.0577,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.1097,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.1618,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.2141,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.2663,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.3185,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.3706,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.4226,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.4746,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.5263,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.5784,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.6308,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.6831,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.7351,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.787,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.8387,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.8908,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.943,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.9951,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.0473,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.0993,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.1511,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.2033,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.2554,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.3075,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.3597,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.4119,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.4642,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.5162,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.5684,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.6206,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.6726,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.7245,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.7765,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.8285,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.8811,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.933,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.9849,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.0367,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.0884,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.1403,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.1922,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.244,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.2955,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.347,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.3984,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.4501,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.5018,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.5535,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.6053,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.6572,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.7092,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.7612,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.8134,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.8652,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.9172,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.9689,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.0209,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.0731,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.1252,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.1773,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.2291,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.2812,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.3333,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.3853,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.4374,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.4892,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.5412,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.5929,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.6453,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.6971,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.7495,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.8014,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.8532,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.9054,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.9573,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      }
+    ],
+    "idle_in_txn_observed": false,
+    "max_t_idle_in_txn_s": 0.0,
+    "total_held_s": 0.0,
+    "checkedout_at_timeout": 0,
+    "checkedout_final": 0
+  },
+  "b2_slow_pg_sleep_5s": {
+    "budget_s": 0.5,
+    "statement": "SELECT pg_sleep(5)",
+    "probe_pid": 2325977,
+    "probe_completed": false,
+    "timeout_fired": true,
+    "timeout_at_s": 0.5017,
+    "retention_samples": [
+      {
+        "t_s": 0.0019,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.0541,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.1066,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.1589,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.211,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.2628,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.3144,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.3665,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.4183,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.47,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.5218,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.5737,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.6257,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.6775,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.7296,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.7814,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.8334,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.8855,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.9378,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 0.99,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.042,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.0943,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.1465,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.1988,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.251,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.304,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.3559,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.4079,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.4596,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.5117,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.564,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.6161,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.6681,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.7204,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.7723,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.8243,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.8763,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.9283,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 1.9806,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.0328,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.085,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.137,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.1889,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.2409,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.2927,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.3446,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.3964,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.448,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.5001,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.5523,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.6047,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.6564,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.708,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.7598,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.8115,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.8634,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.915,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 2.9669,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.019,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.0713,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.1235,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.1763,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.2288,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.2806,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.3327,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.3846,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.4366,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.4885,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.5404,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.5921,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.6438,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.6957,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.7474,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.7992,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.8514,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.9035,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 3.9558,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.0079,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.06,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.1119,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.164,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.2158,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.2677,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.3195,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.3713,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.4231,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.4747,
+        "checkedout": 1,
+        "pg_state": "active",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.5275,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.58,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.6324,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.6849,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.7369,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.7893,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.8412,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.8933,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.9456,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 4.9978,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.0503,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.1029,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.1549,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.2068,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.2586,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.3107,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.3628,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.4146,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.4663,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.5181,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.5698,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.6218,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.6737,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.7255,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.7771,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.8289,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.8806,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.9324,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 5.9843,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.036,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.088,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.1398,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.1916,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.2432,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.2949,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.3466,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.3983,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.45,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.5017,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.5535,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.6052,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.657,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.7087,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.7602,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.8119,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.8635,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.9154,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 6.9671,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.019,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.0708,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.1227,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.1747,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.2266,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.2784,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.3302,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.382,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.4338,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.4857,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.5374,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.5893,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.6411,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.6928,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.7446,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.7962,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.848,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.8997,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      },
+      {
+        "t_s": 7.9515,
+        "checkedout": 0,
+        "pg_state": "idle",
+        "pg_present": true
+      }
+    ],
+    "idle_in_txn_observed": false,
+    "max_t_idle_in_txn_s": 0.0,
+    "total_held_s": 0.0,
+    "checkedout_at_timeout": 1,
+    "checkedout_final": 0
+  },
+  "b3_checkout_starvation": {
+    "budget_s": 0.5,
+    "holders": 15,
+    "checkedout_with_holders": 15,
+    "probe_completed": false,
+    "timeout_fired": true,
+    "timeout_at_s": 0.5012,
+    "checkedout_right_after_timeout": 15,
+    "post_release_samples": [
+      {
+        "t_s": 0.0,
+        "checkedout": 0
+      },
+      {
+        "t_s": 0.0507,
+        "checkedout": 0
+      },
+      {
+        "t_s": 0.1011,
+        "checkedout": 0
+      },
+      {
+        "t_s": 0.1515,
+        "checkedout": 0
+      },
+      {
+        "t_s": 0.2018,
+        "checkedout": 0
+      },
+      {
+        "t_s": 0.2522,
+        "checkedout": 0
+      },
+      {
+        "t_s": 0.3026,
+        "checkedout": 0
+      },
+      {
+        "t_s": 0.353,
+        "checkedout": 0
+      },
+      {
+        "t_s": 0.4034,
+        "checkedout": 0
+      },
+      {
+        "t_s": 0.4538,
+        "checkedout": 0
+      },
+      {
+        "t_s": 0.5041,
+        "checkedout": 0
+      },
+      {
+        "t_s": 0.5546,
+        "checkedout": 0
+      }
+    ],
+    "checkedout_final": 0,
+    "verdict": "the abandoned probe thread was a POOL WAITER, not a holder: checkedout() did not exceed the holder count at the timeout"
+  }
+}
+
+===== T5c MISSION MINT — trigger identification =====
+{
+  "c1_first_mint": {
+    "anchor": "anchor-mint-1",
+    "mode": "first",
+    "ok": true,
+    "mission_id": "3c835079-ce33-4d04-b975-a7a8ae4aa9df",
+    "rung": 3
+  },
+  "c2_second_mint_same_anchor": {
+    "anchor": "anchor-mint-1",
+    "mode": "second-same-anchor",
+    "ok": true,
+    "mission_id": "3c835079-ce33-4d04-b975-a7a8ae4aa9df",
+    "rung": 1
+  },
+  "c3_mint_different_anchor": {
+    "anchor": "anchor-mint-2",
+    "mode": "different-anchor",
+    "ok": true,
+    "mission_id": "a00c4629-f03b-41fa-ae51-9bf9fd9f03aa",
+    "rung": 3
+  },
+  "c4_concurrent_same_anchor_8_way": {
+    "errors": [
+      "IntegrityError: (psycopg.errors.UniqueViolation) duplicate key value violates unique constraint \"ux_mission_records_anchor_open\"\nDETAIL:  Key (anchor_instan",
+      "IntegrityError: (psycopg.errors.UniqueViolation) duplicate key value violates unique constraint \"ux_mission_records_anchor_open\"\nDETAIL:  Key (anchor_instan",
+      "IntegrityError: (psycopg.errors.UniqueViolation) duplicate key value violates unique constraint \"ux_mission_records_anchor_open\"\nDETAIL:  Key (anchor_instan",
+      "IntegrityError: (psycopg.errors.UniqueViolation) duplicate key value violates unique constraint \"ux_mission_records_anchor_open\"\nDETAIL:  Key (anchor_instan",
+      "IntegrityError: (psycopg.errors.UniqueViolation) duplicate key value violates unique constraint \"ux_mission_records_anchor_open\"\nDETAIL:  Key (anchor_instan",
+      "IntegrityError: (psycopg.errors.UniqueViolation) duplicate key value violates unique constraint \"ux_mission_records_anchor_open\"\nDETAIL:  Key (anchor_instan",
+      "IntegrityError: (psycopg.errors.UniqueViolation) duplicate key value violates unique constraint \"ux_mission_records_anchor_open\"\nDETAIL:  Key (anchor_instan"
+    ],
+    "error_count": 7,
+    "unique_violation_count": 7
+  },
+  "c4b_deterministic_concurrent_race": {
+    "threads": 6,
+    "error_count": 5,
+    "unique_violation_count": 5,
+    "sample_errors": [
+      "IntegrityError: (psycopg.errors.UniqueViolation) duplicate key value violates unique constraint \"ux_mission_records_anchor_open\"\nDETAIL:  Key (anchor_instance_id)=(anchor-race2",
+      "IntegrityError: (psycopg.errors.UniqueViolation) duplicate key value violates unique constraint \"ux_mission_records_anchor_open\"\nDETAIL:  Key (anchor_instance_id)=(anchor-race2",
+      "IntegrityError: (psycopg.errors.UniqueViolation) duplicate key value violates unique constraint \"ux_mission_records_anchor_open\"\nDETAIL:  Key (anchor_instance_id)=(anchor-race2"
+    ],
+    "verdict": "a CONCURRENT double-mint for the SAME anchor is the trigger; the sequential path is idempotent (c2)"
+  },
+  "c5_caller_session_poisoning": {
+    "mint_error": "IntegrityError: (psycopg.errors.UniqueViolation) duplicate key value violates unique constraint \"ux_mission_records_anchor_open\"\nDETAIL:  Key (anchor_instan",
+    "caller_session_usable_after": false,
+    "caller_session_error": "PendingRollbackError: This Session's transaction has been rolled back due to a previous exception during flush. To begin a new transaction with this Session, first issue Session.roll"
+  }
+}
