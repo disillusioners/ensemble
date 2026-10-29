@@ -518,7 +518,7 @@ the registry under load before 200+ more series land on it.
   echoed in its HELP text (`:1012-1016`); `alist` is
   migration-only). **Narrowed until the write path is instrumented (A6/A7):** only `op="aget"`
   fires in production today; `aput`/`aput_writes` bypass `time_saver_op` and run through
-  `daemon/checkpoint_adapter.py:377-379`. **After the write-path seam lands, re-derive the `op`
+  `daemon/checkpoint_adapter.py:617`/`:621`. **After the write-path seam lands, re-derive the `op`
   enum from observed call sites rather than inheriting the legacy HELP text
   (`checkpoint_metrics.py:1011`).** Buckets §8.11.
 - **Source:** **reuse — do not duplicate** (CR-3). The observation sites already exist:
