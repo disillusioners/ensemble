@@ -43,6 +43,19 @@
 # harness DB (test-strategy.md §1.0). NEVER ensemble_prod.
 set -uo pipefail
 
+# T-M3: every temp HOME is registered and removed by the EXIT trap —
+# a 17-row --run previously leaked 18+ /tmp/tmp.* dirs per invocation.
+# _new_home sets the NEW_HOME GLOBAL (not an echo-helper: a
+# `HOME="$(_new_home)"` substitution runs in a subshell, the array
+# append would be lost, and the dir would leak anyway).
+_TMP_HOMES=()
+NEW_HOME=""
+_new_home() {
+  NEW_HOME=$(mktemp -d)
+  _TMP_HOMES+=("$NEW_HOME")
+}
+trap '_rc=$?; for d in "${_TMP_HOMES[@]:-}"; do [ -n "$d" ] && rm -rf "$d"; done; exit $_rc' EXIT
+
 WORKTREE=/home/nea/ensemble-src-wt-dbpool-idletxn
 PY=/home/nea/ensemble-src/.venv/bin/python
 PLAN_DIR="$WORKTREE/.agents/shared/planning/db-pool-idle-txn"
@@ -59,13 +72,25 @@ elif [ -n "$MODE" ] && [ "$MODE" != "check" ]; then
 fi
 
 FAILED=0
+# T-H1: matched-row counter — an unmatched ROW_FILTER (typo'd/renamed/
+# not-yet-added gate id) previously made every row early-return and the
+# script printed LADDER: OK / exit 0 having executed ZERO gates.
+MATCHED=0
 
 # ── the expected count for one expected-collected.md row (Δ1: a TBD
 #    cell is FATAL here — the ladder never invents a number) ─────────
 expected_for_row() {
   local row="$1"
   local cell
-  cell=$(grep -E "^\| ${row} \|" "$EXPECTED_FILE" | head -1 \
+  # T-L1: a MISSING artifact is not a missing/TBD ROW — stat first so
+  # the FATAL names the actual defect.
+  if [ ! -f "$EXPECTED_FILE" ]; then
+    echo "FATAL: expected-collected.md is MISSING at $EXPECTED_FILE — cannot look up row ${row} (is the plan dir mounted?)" >&2
+    return 1
+  fi
+  # T-L2: escape the row id's dots (G1.1's '.' matched any char in ERE).
+  local row_ere="${row//./\\.}"
+  cell=$(grep -E "^\| ${row_ere} \|" "$EXPECTED_FILE" | head -1 \
     | awk -F'|' '{gsub(/^ +| +$/, "", $6); print $6}')
   if ! [[ "$cell" =~ ^[0-9]+$ ]]; then
     echo "FATAL: expected-collected.md row ${row} is '${cell:-MISSING}' (TBD / R-1 not landed) — the gate cannot assert its count and therefore cannot pass (Δ1/DR-23)" >&2
@@ -81,9 +106,28 @@ fence_env() {
 
 # ── interpreter certification (first step of every gate) ─────────────
 certify() {
-  (cd "$WORKTREE" && env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD \
-     -u POSTGRES_HOST -u POSTGRES_PORT -u DAEMON_PORT HOME="$(mktemp -d)" \
+  # T-M2: printing the resolved daemon.__file__ without asserting it
+  # certified nothing — an import that resolves to the SHARED checkout
+  # (any cwd other than the worktree) still printed a plausible path
+  # and exited 0. Assert the prefix (the cd is load-bearing, DR-16).
+  local resolved rc
+  _new_home
+  resolved=$(cd "$WORKTREE" && env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD \
+     -u POSTGRES_HOST -u POSTGRES_PORT -u DAEMON_PORT HOME="$NEW_HOME" \
      "$PY" -c "import daemon,pytest; print(daemon.__file__, pytest.__version__)")
+  rc=$?
+  echo "$resolved"
+  if [ "$rc" -ne 0 ]; then
+    echo "FATAL: interpreter certification failed (rc=$rc)" >&2
+    return 1
+  fi
+  case "$resolved" in
+    "$WORKTREE"/*) return 0 ;;
+    *)
+      echo "FATAL: daemon resolved OUTSIDE the worktree — first line must start with $WORKTREE/ (got: ${resolved%%$'\n'*})" >&2
+      return 1
+      ;;
+  esac
 }
 
 # ── one ladder row ─────────────────────────────────────────────────────
@@ -102,6 +146,7 @@ run_row() {
   if [ -n "$ROW_FILTER" ] && [ "$ROW_FILTER" != "$gate_id" ]; then
     return 0
   fi
+  MATCHED=$((MATCHED + 1))
 
   echo "── $label ──────────────────────────────────────────────"
 
@@ -136,10 +181,11 @@ run_row() {
   # ERRORS-ONLY outcome (no FAILED line in the tail) can no longer
   # print RUN-PASS. The grep below is the belt: it additionally
   # recognises an errors-only summary line.
+  _new_home
   summary=$(cd "$WORKTREE" && \
     env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD \
         -u POSTGRES_HOST -u POSTGRES_PORT -u DAEMON_PORT \
-    HOME="$(mktemp -d)" \
+    HOME="$NEW_HOME" \
     "$PY" -m pytest "$@" "${marker_args[@]}" -q --tb=short 2>&1 | tail -3)
   run_rc=$?
   echo "$summary"
@@ -168,6 +214,7 @@ certify || exit 1
 
 # ── G0 — Phase-0 precondition (artifact check, not a pytest row) ──────
 if { [ -z "$ROW_FILTER" ] || [ "$ROW_FILTER" = "G0" ]; }; then
+  MATCHED=$((MATCHED + 1))
   echo "── G0 ──────────────────────────────────────────────"
   ok=1
   # BASELINE.md exists, is reviewed, and both provisional literals are
@@ -245,8 +292,12 @@ if [ -z "$ROW_FILTER" ]; then
   echo "TESTER-OWNED (not executed here): whole-tree default-collected corpus, base vs HEAD, with base_collected/head_collected reconciled against the sum of the declared EXPECTED_COLLECTED_* (row 35 of expected-collected.md); collected > 0 on BOTH sides; mismatch = FATAL. The byte-comm instrument is the tester lane's."
 fi
 
+if [ -n "$ROW_FILTER" ] && [ "$MATCHED" -eq 0 ]; then
+  echo "LADDER: FATAL — no gate row matched '${ROW_FILTER}' (typo'd/renamed/not-yet-added id?); ZERO gates were executed" >&2
+  exit 1
+fi
 if [ "$FAILED" = 1 ]; then
   echo "LADDER: FAILED" >&2
   exit 1
 fi
-echo "LADDER: OK (mode=${MODE})"
+echo "LADDER: OK (mode=${MODE}, rows matched=${MATCHED})"
