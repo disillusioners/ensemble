@@ -129,14 +129,26 @@ run_row() {
   # zero-skips asserted on the marked classes.
   local marker_args=()
   [ -n "$marker" ] && marker_args=(--override-ini="addopts=" -m "$marker")
-  local summary
+  local summary run_rc
+  # W-5 (code-review council): capture the pipeline's exit status —
+  # under this script's `set -o pipefail` the command substitution's
+  # status carries PYTEST's exit code through the tail, so an
+  # ERRORS-ONLY outcome (no FAILED line in the tail) can no longer
+  # print RUN-PASS. The grep below is the belt: it additionally
+  # recognises an errors-only summary line.
   summary=$(cd "$WORKTREE" && \
     env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD \
         -u POSTGRES_HOST -u POSTGRES_PORT -u DAEMON_PORT \
     HOME="$(mktemp -d)" \
     "$PY" -m pytest "$@" "${marker_args[@]}" -q --tb=short 2>&1 | tail -3)
+  run_rc=$?
   echo "$summary"
-  if echo "$summary" | grep -qE "^[0-9]+ failed|FAILED"; then
+  if [ "$run_rc" -ne 0 ]; then
+    echo "$label: RUN-FAILED (pytest exit=$run_rc)" >&2
+    FAILED=1
+    return 0
+  fi
+  if echo "$summary" | grep -qE "^[0-9]+ failed|FAILED|[0-9]+ error"; then
     echo "$label: RUN-FAILED" >&2
     FAILED=1
     return 0
