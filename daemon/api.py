@@ -150,6 +150,7 @@ from daemon.routers import (
     resources_router,         # /api/resources (resource-cost-control P1: live + history + self-cost)
     mcps_gateway_read_router, # /api/mcps-gateway/{machines,sessions,audit} (Phase C: the OAuth read lane)
     wedge_capture_router,    # /api/wedge-captures (wedge-capture: the capture evidence store)
+    metrics_router,         # /api/metrics (checkpoint read instrumentation surface)
 )
 from daemon.routers.workspace import router as workspace_router
 from daemon.routers.plane import router as plane_router  # /api/plane (Phase 3: plane-integration-revival — sync retry endpoint)
@@ -5020,6 +5021,12 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
     # scope cage in tests/unit/test_router_scope_manifest.py) — an
     # undeclared mount fails both loudly.
     api_router.include_router(wedge_capture_router)      # /api/wedge-captures
+    # The daemon's metric surface (checkpoint read-path plan,
+    # Track-1 item 4) — ONE endpoint rendering the existing
+    # metric registry as Prometheus text-exposition. Untagged ⇒
+    # OAuth2-protected by default (auth ON); the family is declared
+    # in the router manifest cages (class + scope).
+    api_router.include_router(metrics_router)           # /api/metrics
     # Phase 3 / plane-integration-revival — POST /api/plane/sync/{project_id}.
     # The router is mounted BEFORE the SPA catch-all (the catch-all
     # only fires for unmatched paths; the prefix /api/plane is owned
@@ -5230,6 +5237,10 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
             detail = {
                 "reasons": ["readiness composite not yet computed"],
                 "queue_max_age_seconds": None,
+                # The composite was never computed ⇒ the age was never
+                # determined. The label says so (an absent age must
+                # never read as "fresh").
+                "queue_max_age_seconds_reason": "unknown",
                 "checked_at": None,
                 "inflight_turns": None,
                 # ── A1 (soak-gate-mcp-warmup) ─────────────────────────

@@ -36,6 +36,12 @@ THE READS
 * the checkpoint-store census — ``pg_stat_user_tables`` drift
   (``n_live_tup`` / ``reltuples``) plus the relation sizes;
 * the resume history — the tasks carrying ``auto_continued_at``;
+* the ACTIVITY CENSUS (plan Track-1 item 6) — ``pg_stat_activity``
+  grouped by state (total backends = the sum, per-state
+  oldest-transaction age), with a capped per-backend detail list for
+  the incident family's bucket — ``idle in transaction`` — carrying
+  each backend's transaction age (``now() - xact_start``, seconds)
+  and the age of the OLDEST idle-in-txn backend;
 * the boot epoch.
 
 ``msg_count`` is NOT cheaply available in the application DB (the
@@ -83,6 +89,19 @@ STATUS_ERROR = "error"
 #: How many executing turns to report (the payload is a SUMMARY, not
 #: a dump — the capture must stay small).
 MAX_EXECUTING_TURNS = 50
+
+#: How many idle-in-transaction backends to report INDIVIDUALLY (the
+#: same summary-not-dump discipline as ``MAX_EXECUTING_TURNS``; the
+#: grouped census and the total cover the rest).
+MAX_IDLE_IN_TXN_BACKENDS = 20
+
+#: The ``pg_stat_activity`` state bucket the 2026-10-28 incident
+#: family cares about most (idle-in-transaction connection leaks).
+IDLE_IN_TXN_STATE = "idle in transaction"
+
+#: The bucket name a ``NULL`` ``pg_stat_activity.state`` renders under
+#: (background workers / auxiliary processes carry no state).
+UNKNOWN_STATE_BUCKET = "unknown"
 
 #: The checkpoint-store tables the census looks at.
 CHECKPOINT_TABLES = ("checkpoints", "checkpoint_blobs", "checkpoint_writes", "checkpoint_migrations")
@@ -232,7 +251,8 @@ def capture_db_snapshot(
             budget_s=budget_s,
             connect_timeout_s=connect_timeout_s,
             statement_timeout_ms=statement_timeout_ms,
-            statements=3,
+            # 3 application reads + 2 census statements (item 6).
+            statements=5,
         )
     )
     if budget_s is not None and scaled is None:
@@ -243,6 +263,7 @@ def capture_db_snapshot(
             "executing_turns": [],
             "executing_turns_count": 0,
             "checkpoint_store_census": {},
+            "activity_census": {},
             "resume_history": [],
         }
     if scaled is not None:
@@ -254,6 +275,7 @@ def capture_db_snapshot(
         "executing_turns": [],
         "executing_turns_count": 0,
         "checkpoint_store_census": {},
+        "activity_census": {},
         "resume_history": [],
     }
 
@@ -282,6 +304,7 @@ def capture_db_snapshot(
                 _read_executing_turns(cursor)
             )
             payload["checkpoint_store_census"] = _read_store_census(cursor)
+            payload["activity_census"] = _read_activity_census(cursor)
             payload["resume_history"] = _read_resume_history(cursor)
     except Exception as exc:  # noqa: BLE001
         payload["status"] = STATUS_ERROR
@@ -375,6 +398,112 @@ def _read_store_census(cursor: Any) -> dict[str, Any]:
     census["checkpoints_rows"] = census.get("checkpoints", {}).get("n_live_tup")
     census["checkpoint_blobs_rows"] = census.get("checkpoint_blobs", {}).get("n_live_tup")
     census["checkpoint_blobs_bytes"] = census.get("checkpoint_blobs", {}).get("total_bytes")
+    return census
+
+
+def _read_activity_census(cursor: Any) -> dict[str, Any]:
+    """The idle-in-transaction census — ``pg_stat_activity`` (item 6 / B).
+
+    The 2026-10-28 incident family is idle-in-transaction connection
+    leaks (73-99s checkpoint ``aget``s + ``VACUUM FULL`` ACCESS
+    EXCLUSIVE windows); a wedge capture that did not count backends
+    could not see that shape. The census answers it:
+
+    * ``total_backends`` — every row in ``pg_stat_activity`` (the sum
+      of the per-state counts);
+    * ``by_state`` — backends grouped by ``state`` (``NULL`` states —
+      background/auxiliary processes — bucket under
+      ``UNKNOWN_STATE_BUCKET``), each with the age of the state's
+      OLDEST open transaction (seconds, server-side
+      ``now() - xact_start``);
+    * ``idle_in_transaction`` — the incident bucket's own block: the
+      backend count, the oldest transaction age, and a capped
+      per-backend detail list (pid / usename / application_name /
+      backend_type / xact_start / state_change / xact age).
+
+    HARD CONSTRAINT honored by construction: both statements run on
+    the CURSOR THIS FUNCTION IS HANDED — the capture's own one-shot
+    connection. A wedge-time census must never open extra pool
+    connections (that is the amplification the capture exists to
+    diagnose).
+
+    Fail-open per statement (same discipline as the other reads): a
+    statement-1 failure degrades the whole census to
+    ``status="failed:<ExcName>"``; a statement-2 failure keeps the
+    grouped census and degrades only the detail list.
+    """
+    # ── statement 1: the grouped census ─────────────────────────
+    by_state: dict[str, int] = {}
+    oldest_per_state: dict[str, float | None] = {}
+    try:
+        cursor.execute(
+            """
+            SELECT CASE WHEN state IS NULL THEN %s ELSE state END,
+                   COUNT(*)::int,
+                   MAX(EXTRACT(EPOCH FROM (now() - xact_start)))
+                       ::double precision
+              FROM pg_stat_activity
+             GROUP BY 1
+            """,
+            (UNKNOWN_STATE_BUCKET,),
+        )
+        for state, backends, oldest_age_s in cursor.fetchall():
+            bucket = str(state)
+            by_state[bucket] = int(backends)
+            oldest_per_state[bucket] = (
+                float(oldest_age_s) if oldest_age_s is not None else None
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Wedge-capture: activity census failed: %s", exc)
+        return {"status": f"failed:{type(exc).__name__}"}
+
+    census: dict[str, Any] = {
+        "status": STATUS_OK,
+        "total_backends": int(sum(by_state.values())),
+        "by_state": by_state,
+    }
+    idle_block: dict[str, Any] = {
+        "count": int(by_state.get(IDLE_IN_TXN_STATE, 0)),
+        "oldest_xact_age_seconds": oldest_per_state.get(IDLE_IN_TXN_STATE),
+    }
+
+    # ── statement 2: the idle-in-txn detail (capped) ────────────
+    try:
+        cursor.execute(
+            """
+            SELECT pid, usename, application_name, backend_type,
+                   xact_start, state_change,
+                   EXTRACT(EPOCH FROM (now() - xact_start))
+                       ::double precision
+              FROM pg_stat_activity
+             WHERE state = %s
+             ORDER BY xact_start ASC NULLS LAST
+             LIMIT %s
+            """,
+            (IDLE_IN_TXN_STATE, MAX_IDLE_IN_TXN_BACKENDS),
+        )
+        rows = cursor.fetchall()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Wedge-capture: idle-in-txn detail failed: %s", exc)
+        idle_block["backends"] = []
+        idle_block["backends_status"] = f"failed:{type(exc).__name__}"
+        census["idle_in_transaction"] = idle_block
+        return census
+
+    idle_block["backends"] = [
+        {
+            "pid": int(row[0]),
+            "usename": row[1],
+            "application_name": row[2],
+            "backend_type": row[3],
+            "xact_start": _iso(row[4]),
+            "state_change": _iso(row[5]),
+            "xact_age_seconds": float(row[6]) if row[6] is not None else None,
+        }
+        for row in rows
+    ]
+    idle_block["backends_truncated"] = len(rows) >= MAX_IDLE_IN_TXN_BACKENDS
+    census["idle_in_transaction"] = idle_block
     return census
 
 
@@ -544,7 +673,9 @@ __all__ = [
     "CAPTURE_CONNECT_TIMEOUT_S",
     "CAPTURE_STATEMENT_TIMEOUT_MS",
     "CHECKPOINT_TABLES",
+    "IDLE_IN_TXN_STATE",
     "MAX_EXECUTING_TURNS",
+    "MAX_IDLE_IN_TXN_BACKENDS",
     "ROW_STATUS_FAILED",
     "ROW_STATUS_OK",
     "SKIPPED_BUDGET_REASON",

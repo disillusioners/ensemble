@@ -3632,10 +3632,35 @@ class InstanceManager:
         # is called, but fall back to a default SQLite config for safety so
         # tests calling ``manager.initialize()`` directly still work.
         if self._ensemble_config is not None:
-            self._checkpointer = await get_checkpointer(self._ensemble_config)
+            # Checkpoint-pool sizing knobs (plan Track-1 item 5 —
+            # severed-knob repair D5): thread the ladder-resolved values
+            # EXPLICITLY. The ensemble.json EnsembleConfig passed below
+            # carries NO .limits, so the checkpointer factory cannot read
+            # the knobs off it (the former getattr() read inside
+            # create_postgres_checkpointer was severed: every tier
+            # silently degraded to the default). ``self.config`` is the
+            # YAML Config whose limits were boot-applied
+            # (apply_db_settings_overrides ran before InstanceManager
+            # construction) — same read shape as the manager engine pool
+            # threading in the ctor (create_postgres_engine) and
+            # pool_orchestrator.py's worker-pool resolution.
+            self._checkpointer = await get_checkpointer(
+                self._ensemble_config,
+                checkpoint_pool_max_size=self.config.limits.checkpoint_pool_max_size,
+                checkpoint_pool_timeout_s=self.config.limits.checkpoint_pool_timeout_s,
+            )
         else:
             from daemon.ensemble_config import EnsembleConfig
-            self._checkpointer = await get_checkpointer(EnsembleConfig())
+            # R-b: the SAME checkpoint-pool knobs are threaded here. The
+            # fallback branch used to call the factory with NO kwargs, so
+            # it silently fell back to the factory defaults (10 / 5.0)
+            # and DROPPED the ladder-resolved values — the fallback was
+            # a knob-severed twin of the primary branch.
+            self._checkpointer = await get_checkpointer(
+                EnsembleConfig(),
+                checkpoint_pool_max_size=self.config.limits.checkpoint_pool_max_size,
+                checkpoint_pool_timeout_s=self.config.limits.checkpoint_pool_timeout_s,
+            )
         # NEW: Set event loop for CompletionRegistry (thread-safe notification)
         self._completion_registry.set_event_loop(self._loop)
         # NEW: Schedule periodic stale cleanup (every 10 minutes)
@@ -12544,6 +12569,22 @@ class InstanceManager:
     async def _has_checkpoint(self, instance_id: str) -> bool:
         """Check if a checkpoint exists for this instance.
 
+        Track-1 quick-win (checkpoint read-path plan, item 2): this
+        used to run a FULL ``self.checkpointer.raw_saver.aget(config)``
+        — deserializing the entire checkpoint (checkpoint + channel
+        values + blobs) and taking the saver's single ``asyncio.Lock``
+        — just to answer a yes/no question. It now issues an EXISTS
+        probe through the checkpoint adapter's direct-SQL surface
+        (``has_checkpoint``), which on PostgreSQL runs on the
+        adapter's SEPARATE asyncpg pool and therefore never touches
+        the saver's lock and never decodes a payload.
+
+        The BOOLEAN SEMANTICS ARE UNCHANGED: a row found in the root
+        namespace (``checkpoint_ns = ''`` — LangGraph's default for a
+        config carrying only ``thread_id``) means "has checkpoint",
+        exactly as the saver lookup did. Fail-soft on error is also
+        unchanged: any exception still yields False.
+
         Args:
             instance_id: The instance ID to check.
 
@@ -12551,36 +12592,12 @@ class InstanceManager:
             True if checkpoint exists, False otherwise.
         """
         try:
-            config = {"configurable": {"thread_id": instance_id}}
-            state = await self.checkpointer.raw_saver.aget(config)
-            result = state is not None
-            channel_values = state.get("channel_values", {}) if state else {}
-            msg_count = len(channel_values.get("messages", []))
-            logger.info(f"[RESUME] instance={instance_id[:8]} has_checkpoint={result}, msg_count={msg_count}")
+            result = await self.checkpointer.has_checkpoint(instance_id)
+            logger.info(f"[RESUME] instance={instance_id[:8]} has_checkpoint={result}")
             return result
         except Exception as e:
             logger.info(f"[RESUME] instance={instance_id[:8]} has_checkpoint=False, exception={type(e).__name__}")
             return False
-
-    async def _get_message_count(self, instance_id: str) -> int:
-        """Get the number of messages in the instance's checkpoint/state.
-
-        Args:
-            instance_id: The instance ID to check.
-
-        Returns:
-            Number of messages in the current state.
-        """
-        try:
-            config = {"configurable": {"thread_id": instance_id}}
-            state = await self.checkpointer.raw_saver.aget(config)
-            if state:
-                channel_values = state.get("channel_values", {})
-                messages = channel_values.get("messages", [])
-                return len(messages) if messages else 0
-            return 0
-        except Exception:
-            return 0
 
     def cancel(self, message_id: str, reason: CancellationReason) -> bool:
         """Request cancellation of a specific message.

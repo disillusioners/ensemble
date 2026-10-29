@@ -48,15 +48,23 @@ Design invariants (phase1-plan.md §C3, Hard Constraint 6):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
 
 from daemon.checkpoint_adapter import PostgresCheckpointerAdapter
 from daemon.checkpoint_perf import log_blob_prune
 from daemon.constants import (
     CHECKPOINT_BLOB_PRUNE_MAX_REFS_PER_THREAD,
+    VACUUM_IDLE_IN_TXN_TIMEOUT_MS,
+    VACUUM_LOCK_TIMEOUT_MS,
+    VACUUM_STATEMENT_TIMEOUT_MS,
 )
+from daemon.services.vacuum_engine import create_vacuum_engine
 
 logger = logging.getLogger(__name__)
 
@@ -403,3 +411,384 @@ async def prune_unreferenced_blobs(
         # the retention prune that already ran, or the next cycle's ops).
         logger.error("Reference-aware blob prune failed: %s", e)
         return summary
+
+
+# ── Post-prune statistics refresh (ANALYZE) ─────────────────────────────────
+#
+# WHY: a destructive prune DELETEs rows from the three checkpoint tables.
+# PG's planner statistics (``pg_statistic``) then describe a table that no
+# longer exists; until the next autovacuum/ANALYZE lands, the planner is
+# working from a row-count/selectivity picture that no longer matches the
+# table. The read-path audit measured that class of plan regression on the
+# pinned latest-checkpoint SELECT (the 8.56 ms-vs-0.064 ms gap). HONESTY:
+# the 8.56 ms state was NOT reproducible at audit time (autovacuum had
+# already analyzed; the live plan was an index scan) — the pathology is
+# EPISODIC, so this ANALYZE is PREVENTION, not a repair of an
+# always-on regression. The companion half of the same plan (psycopg3
+# ``prepare_threshold=None``, so the server never serves a cached generic
+# plan) lives at the saver-pool construction site in
+# ``daemon/persistence.py``.
+#
+# WHERE: the DEDICATED per-cycle autocommit engine — the SAME shape the
+# VACUUM lane uses (``daemon/services/vacuum_engine.py``: a NullPool engine
+# derived from the daemon's shared engine, ``autocommit=True``, the daemon's
+# UTC session frame, bounded statement/lock/idle timeouts). Deliberately
+# NOT the hot psycopg saver pool (the checkpoint read path) and deliberately
+# NOT the adapter's shared asyncpg pool — that pool also serves the read
+# path, and borrowing a connection from it for an ANALYZE would compete
+# with the very reads this lane protects.
+#
+# WHEN: ONLY when the run ACTUALLY deleted rows. The steady state of the
+# sweep is a no-op (every (thread, ns) pair already inside its retention
+# cap); a no-op sweep must not pay for an ANALYZE.
+#
+# FAILURE: log-and-continue, per table. An ANALYZE failure must never fail
+# the prune that preceded it.
+
+#: The three checkpoint tables whose planner statistics are refreshed after
+#: a destructive prune. Same order as the VACUUM FULL lane's table order
+#: (``daemon/services/maintenance.py::_VACUUM_FULL_TABLES``).
+ANALYZE_TARGET_TABLES: tuple[str, ...] = (
+    "checkpoints",
+    "checkpoint_blobs",
+    "checkpoint_writes",
+)
+
+
+@dataclass
+class AnalyzeOutcome:
+    """Outcome of one post-prune ANALYZE sweep.
+
+    ``ran`` is True only when the sweep actually reached the server (an
+    engine was built and the tables were visited). ``skipped_reason``
+    explains a non-run: ``no_rows_deleted`` (the steady-state no-op
+    sweep), ``no_shared_engine`` / ``not_postgresql`` (nothing to run
+    against), ``engine_build_failed``.
+
+    ``deleted_rows`` and ``deleted_threads`` are SEPARATE units (R-e):
+    rows are rows (checkpoints + writes + blobs), threads are threads
+    (Op A's orphaned thread sweep). They are never summed into one
+    number.
+    """
+
+    ran: bool = False
+    skipped_reason: str | None = None
+    deleted_rows: int = 0
+    deleted_threads: int = 0
+    analyzed_tables: list[str] = field(default_factory=list)
+    failed_tables: list[str] = field(default_factory=list)
+    duration_ms: int = 0
+
+
+def _analyze_one_table(engine: Engine, table_name: str) -> None:
+    """Run ``ANALYZE <table>`` on the dedicated autocommit engine.
+
+    Synchronous — the caller wraps it in ``asyncio.to_thread`` so the
+    event loop is never blocked (ANALYZE samples rows and can hold its
+    lock for a while on a large table). The table name comes from the
+    module-level :data:`ANALYZE_TARGET_TABLES` allow-list: PG has no
+    parameter binding for identifiers, so the interpolation is safe by
+    construction — no caller-supplied string ever reaches the SQL.
+    """
+    with engine.connect() as conn:
+        conn.execute(text(f"ANALYZE {table_name}"))
+
+
+async def analyze_checkpoint_tables_after_prune(
+    shared_engine: Engine | None,
+    *,
+    deleted_rows: int,
+    deleted_threads: int = 0,
+    statement_ms: int = VACUUM_STATEMENT_TIMEOUT_MS,
+    lock_ms: int = VACUUM_LOCK_TIMEOUT_MS,
+    idle_ms: int = VACUUM_IDLE_IN_TXN_TIMEOUT_MS,
+) -> AnalyzeOutcome:
+    """Refresh planner statistics on the three checkpoint tables.
+
+    Call this at the END of a destructive prune path with the number of
+    rows the run actually deleted. The ANALYZE fires ONLY when
+    ``deleted_rows > 0`` — a no-op sweep returns immediately without
+    building an engine or touching the DB.
+
+    Never raises: engine-build failures and per-table ANALYZE failures
+    are logged and swallowed (an ANALYZE failure must never fail the
+    prune that preceded it).
+
+    Args:
+        shared_engine: the daemon's shared SQLAlchemy engine — only its
+            URL/dialect are read (the sweep runs on its OWN per-cycle
+            engine). ``None`` ⇒ the sweep is skipped with a WARNING.
+        deleted_rows: rows actually deleted by this run (checkpoints +
+            writes + blobs). ``0`` ⇒ skip, UNLESS ``deleted_threads`` is
+            non-zero (see below).
+        deleted_threads: THREADS removed by the orphan sweep — a
+            DIFFERENT unit from rows (R-e: the two are never summed into
+            one number). An orphaned thread always removes at least one
+            ``checkpoints`` row, so a non-zero thread count is a
+            lower-bound proof that SOMETHING was deleted ⇒ the gate
+            fires on it too.
+        statement_ms / lock_ms / idle_ms: per-statement timeouts for the
+            dedicated engine (defaults = the plain-VACUUM(ANALYZE) lane's
+            magnitudes).
+
+    Returns:
+        An :class:`AnalyzeOutcome` describing what ran.
+    """
+    outcome = AnalyzeOutcome(
+        deleted_rows=max(0, int(deleted_rows or 0)),
+        deleted_threads=max(0, int(deleted_threads or 0)),
+    )
+
+    # ── Gate 1: did this run actually delete anything? ────────────────────
+    if outcome.deleted_rows <= 0 and outcome.deleted_threads <= 0:
+        outcome.skipped_reason = "no_rows_deleted"
+        logger.debug(
+            "[CheckpointPerf] post-prune ANALYZE skipped: no rows "
+            "deleted in this run (deleted_rows=0)"
+        )
+        return outcome
+
+    # ── Gate 2: is there a PostgreSQL engine to run against? ──────────────
+    if shared_engine is None:
+        outcome.skipped_reason = "no_shared_engine"
+        logger.warning(
+            "[CheckpointPerf] post-prune ANALYZE skipped: no shared "
+            "engine wired — planner statistics stay stale for this "
+            "cycle (deleted_rows=%d)",
+            outcome.deleted_rows,
+        )
+        return outcome
+    if shared_engine.dialect.name != "postgresql":
+        outcome.skipped_reason = "not_postgresql"
+        logger.warning(
+            "[CheckpointPerf] post-prune ANALYZE skipped: shared engine "
+            "dialect is %r, not postgresql — planner statistics stay "
+            "stale for this cycle (deleted_rows=%d)",
+            shared_engine.dialect.name,
+            outcome.deleted_rows,
+        )
+        return outcome
+
+    # ── Build the dedicated per-cycle autocommit engine ───────────────────
+    try:
+        engine = create_vacuum_engine(
+            shared_engine,
+            statement_ms=statement_ms,
+            lock_ms=lock_ms,
+            idle_ms=idle_ms,
+        )
+    except Exception as exc:  # noqa: BLE001 — never fatal to the prune
+        outcome.skipped_reason = "engine_build_failed"
+        logger.warning(
+            "[CheckpointPerf] post-prune ANALYZE skipped: dedicated "
+            "engine build failed (%s: %s) — planner statistics stay "
+            "stale for this cycle (never fatal to the prune)",
+            type(exc).__name__,
+            exc,
+        )
+        return outcome
+
+    outcome.ran = True
+    t0 = time.perf_counter()
+    try:
+        for table in ANALYZE_TARGET_TABLES:
+            try:
+                await asyncio.to_thread(_analyze_one_table, engine, table)
+                outcome.analyzed_tables.append(table)
+            except Exception as exc:  # noqa: BLE001 — per-table isolation
+                outcome.failed_tables.append(table)
+                logger.warning(
+                    "[CheckpointPerf] post-prune ANALYZE failed for table "
+                    "%s (%s: %s) — continuing (statistics refresh is "
+                    "best-effort; never fatal to the prune)",
+                    table,
+                    type(exc).__name__,
+                    exc,
+                )
+    finally:
+        # Per-cycle engine — ALWAYS disposed (NullPool + dispose in
+        # ``finally``), exactly like the VACUUM lane's engines.
+        try:
+            engine.dispose()
+        except Exception:  # noqa: BLE001 — disposal is best-effort
+            logger.debug(
+                "[CheckpointPerf] post-prune ANALYZE engine dispose "
+                "failed (non-fatal)",
+                exc_info=True,
+            )
+    outcome.duration_ms = int((time.perf_counter() - t0) * 1000)
+    logger.info(
+        "[CheckpointPerf] op=post_prune_analyze deleted_rows=%d "
+        "deleted_threads=%d analyzed=%d failed=%d duration_ms=%d",
+        outcome.deleted_rows,
+        outcome.deleted_threads,
+        len(outcome.analyzed_tables),
+        len(outcome.failed_tables),
+        outcome.duration_ms,
+    )
+    return outcome
+
+
+# ── Blob byte census (plan Track-1 item 4) ───────────────────────────────────
+#
+# WHY: the read-amplification audit measured where the checkpoint
+# storage mass actually lives (the ``messages`` channel carried ~99.6 %
+# of the bytes) — a LIVE measurement, not an inference. The census
+# makes that measurement REPEATABLE: one cheap aggregate per
+# maintenance cycle, landing in ``maintenance_runs.summary_json`` (the
+# reliable channel — the maintenance cycle's own skip line WAS DEBUG,
+# so a grep-based audit was a FALSE-NEGATIVE channel; that line is
+# INFO since plan Track-1 item 8, but the audit row stays the
+# authoritative channel).
+#
+# WHY ``pg_column_size`` AND NOT ``octet_length``: ``pg_column_size``
+# reports the STORED size of the datum (compressed / TOAST-external
+# sizes included) WITHOUT detoasting the value, so the aggregate stays
+# a heap scan on a multi-GB table. ``octet_length(blob)`` would fetch
+# every TOASTed value — a full read of the table's payload bytes on
+# each cycle. The number is therefore the STORED size, not the logical
+# payload size; the difference is the compression/TOAST overhead.
+#
+# WHERE: the DEDICATED per-cycle autocommit engine (the same shape the
+# post-prune ANALYZE lane above uses) — NEVER the hot psycopg saver
+# pool and NEVER the adapter's shared asyncpg pool (both serve the
+# checkpoint read path this census is meant to protect).
+#
+# FAILURE: never raises. A census that cannot be taken is reported as
+# ``ran=False`` + a ``skipped_reason`` — the cycle that preceded it
+# must never fail because of an observation.
+
+
+#: The aggregate — one row per blob channel.
+_BLOB_BYTES_BY_CHANNEL_SQL = (
+    "SELECT channel, COUNT(*) AS rows, "
+    "COALESCE(SUM(pg_column_size(blob)), 0) AS bytes "
+    "FROM checkpoint_blobs "
+    "GROUP BY channel "
+    "ORDER BY bytes DESC"
+)
+
+
+@dataclass
+class BlobBytesCensus:
+    """The per-channel blob byte census of one maintenance cycle.
+
+    ``ran`` is True only when the aggregate actually reached the server.
+    ``skipped_reason`` explains a non-run: ``no_shared_engine`` /
+    ``not_postgresql`` (nothing to run against) or
+    ``engine_build_failed`` / ``query_failed`` (the observation failed
+    — the cycle that preceded it is unaffected).
+    """
+
+    ran: bool = False
+    skipped_reason: str | None = None
+    rows: int = 0
+    total_bytes: int = 0
+    by_channel: dict[str, int] = field(default_factory=dict)
+    duration_ms: int = 0
+
+
+def _collect_blob_bytes_sync(engine: Engine) -> tuple[int, int, dict[str, int]]:
+    """Run the per-channel aggregate. Returns ``(rows, bytes, by_channel)``."""
+    with engine.connect() as conn:
+        rows = conn.execute(text(_BLOB_BYTES_BY_CHANNEL_SQL)).fetchall()
+    by_channel: dict[str, int] = {}
+    total = 0
+    count = 0
+    for row in rows:
+        channel = row[0]
+        channel_rows = int(row[1] or 0)
+        channel_bytes = int(row[2] or 0)
+        by_channel[str(channel)] = channel_bytes
+        total += channel_bytes
+        count += channel_rows
+    return count, total, by_channel
+
+
+async def collect_blob_bytes_by_channel(
+    shared_engine: Engine | None,
+    *,
+    statement_ms: int = VACUUM_STATEMENT_TIMEOUT_MS,
+    lock_ms: int = VACUUM_LOCK_TIMEOUT_MS,
+    idle_ms: int = VACUUM_IDLE_IN_TXN_TIMEOUT_MS,
+) -> BlobBytesCensus:
+    """Measure the checkpoint blob storage mass per channel.
+
+    Never raises: a failed census is reported as ``ran=False`` plus a
+    ``skipped_reason``.
+
+    Args:
+        shared_engine: the daemon's shared SQLAlchemy engine — only its
+            URL/dialect are read (the census runs on its OWN per-cycle
+            engine). ``None`` ⇒ skipped with ``no_shared_engine``.
+        statement_ms / lock_ms / idle_ms: per-statement timeouts for the
+            dedicated engine (the VACUUM lane's magnitudes).
+
+    Returns:
+        A :class:`BlobBytesCensus`.
+    """
+    outcome = BlobBytesCensus()
+    if shared_engine is None:
+        outcome.skipped_reason = "no_shared_engine"
+        logger.warning(
+            "[CheckpointPerf] blob byte census skipped: no shared engine "
+            "wired — the per-channel storage breakdown is unavailable "
+            "this cycle"
+        )
+        return outcome
+    if shared_engine.dialect.name != "postgresql":
+        outcome.skipped_reason = "not_postgresql"
+        logger.warning(
+            "[CheckpointPerf] blob byte census skipped: shared engine "
+            "dialect is %r, not postgresql — the per-channel storage "
+            "breakdown is unavailable this cycle",
+            shared_engine.dialect.name,
+        )
+        return outcome
+    try:
+        engine = create_vacuum_engine(
+            shared_engine,
+            statement_ms=statement_ms,
+            lock_ms=lock_ms,
+            idle_ms=idle_ms,
+        )
+    except Exception as exc:  # noqa: BLE001 — never fatal to the cycle
+        outcome.skipped_reason = "engine_build_failed"
+        logger.warning(
+            "[CheckpointPerf] blob byte census skipped: dedicated engine "
+            "build failed (%s: %s) — the per-channel storage breakdown is "
+            "unavailable this cycle",
+            type(exc).__name__,
+            exc,
+        )
+        return outcome
+
+    t0 = time.perf_counter()
+    try:
+        rows, total, by_channel = await asyncio.to_thread(
+            _collect_blob_bytes_sync, engine
+        )
+        outcome.ran = True
+        outcome.rows = rows
+        outcome.total_bytes = total
+        outcome.by_channel = by_channel
+    except Exception as exc:  # noqa: BLE001 — never fatal to the cycle
+        outcome.skipped_reason = "query_failed"
+        logger.warning(
+            "[CheckpointPerf] blob byte census failed (%s: %s) — the "
+            "per-channel storage breakdown is unavailable this cycle "
+            "(the cleanup cycle itself is unaffected)",
+            type(exc).__name__,
+            exc,
+        )
+    finally:
+        try:
+            engine.dispose()
+        except Exception:  # noqa: BLE001 — disposal is best-effort
+            logger.debug(
+                "[CheckpointPerf] blob byte census engine dispose failed "
+                "(non-fatal)",
+                exc_info=True,
+            )
+    outcome.duration_ms = int((time.perf_counter() - t0) * 1000)
+    return outcome

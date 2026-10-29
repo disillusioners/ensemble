@@ -269,7 +269,11 @@ class TestAutoCycleWiring:
         """Case 14 — wired job: row ``auto/running → succeeded`` with
         summary; ``triggered_by='system'``; ``env_flags_json`` stamped
         (the raw dual-arm state + ``destructive_override: False``)."""
-        adapter = _mock_adapter()
+        # The pair list carries ONE pair with 3 versions — inside the
+        # retention cap, so nothing is deleted (the row-lifecycle
+        # assertions below hold) but the census has a REAL worst-pair
+        # version count to assert (Track-1 item 4).
+        adapter = _mock_adapter(all_pairs=[("t-1", "", 3)])
         job, _lock = _wired_job(runs_repo, adapter)
         # [AM-2 counterpart pin, reviewer cheap fix] behavioral twin of
         # the MANUAL-ONLY AST pin: the AUTO path must NEVER route
@@ -296,15 +300,36 @@ class TestAutoCycleWiring:
             "destructive": True,
         }
         # summary_json carries the FROZEN shape.
+        #
+        # Track-1 item 4 (checkpoint read-path plan): the shape gained
+        # ONE ADDITIVE key — ``version_census`` — the per-cycle
+        # checkpoint version census. The census MUST ride the audit
+        # row: the maintenance cycle's own skip line is DEBUG, so a
+        # grep-based starvation audit is a FALSE-NEGATIVE channel (the
+        # Phase-2 audit's finding). The change is ADDITIVE — no key is
+        # renamed or removed; the four frozen keys keep their shape.
         summary = row.summary_json
         assert set(summary.keys()) == {
             "checkpoint_rows",
             "writes",
             "blobs",
             "duration_ms",
+            "version_census",
         }
         assert summary["checkpoint_rows"]["deleted"] == 0  # no excess staged
         assert summary["blobs"]["destructive"] is False
+        # The census block itself — the version half is derived from
+        # the prune pass' own scan (the mock adapter's pair counts).
+        census = summary["version_census"]
+        assert census["ran"] is True
+        assert census["max_versions"] == 3
+        assert census["excess_pairs"] == 0
+        assert census["scanned_pairs"] == 1
+        assert census["version_threshold"] == 3
+        # No shared engine in this harness ⇒ the per-channel blob
+        # breakdown is skipped, and the block SAYS so (an absent
+        # breakdown must never read as "zero bytes").
+        assert census["blob_skipped_reason"] == "no_shared_engine"
 
     async def test_execute_auto_skips_when_gate_held(
         self, runs_repo, caplog

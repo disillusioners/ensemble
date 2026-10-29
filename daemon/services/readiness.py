@@ -36,6 +36,7 @@ from sqlalchemy import text as sa_text
 from sqlalchemy.engine import Engine
 
 from daemon._redact import redact_exc_str
+from daemon.checkpoint_metrics import checkpoint_leak_signal_total
 from daemon.constants import (
     CHECKPOINT_SENTINEL_CHANNEL,
     CHECKPOINT_SENTINEL_CHECKPOINT_ID,
@@ -97,6 +98,35 @@ READINESS_COMPONENT_NAMES: tuple[str, ...] = (
     "services",
     "checkpoint_saver",
 )
+
+# ── The queue-age provenance vocabulary ──────────────────────────────────────
+#
+# WHY: ``queue_max_age_seconds`` is ``None`` for THREE different facts,
+# and the payload used to render all three as the same bare ``null``
+# next to a ``queue_freshness: true`` component — so every consumer
+# read "no age" as "fresh". The facts are:
+#
+#   1. the probe ANSWERED and there was no RUNNING task to age
+#      (the empty set — freshness is VACUOUS, not measured);
+#   2. the probe TIMED OUT (no answer — the age was never determined);
+#   3. the probe FAILED (raised — the age was never determined).
+#
+# The rendered label says WHICH, so an absent age never reads as
+# "fresh". The vocabulary deliberately reuses the wedge-capture
+# collector's words where the two surfaces overlap (``empty`` /
+# ``probe_timeout`` — ``daemon/services/wedge_capture/collector.py``);
+# ``measured`` and ``unknown`` are the /readyz additions.
+
+#: A real age was computed (the probe answered with a number).
+QUEUE_AGE_REASON_MEASURED = "measured"
+#: The probe answered; no RUNNING task had a post-epoch heartbeat (the
+#: empty set — or every RUNNING task was stop-frozen pre-boot). The
+#: freshness verdict is vacuous: there was nothing to age.
+QUEUE_AGE_REASON_EMPTY = "empty"
+#: The probe did not answer (timed out) — the age was never determined.
+QUEUE_AGE_REASON_PROBE_TIMEOUT = "probe_timeout"
+#: The probe FAILED (raised) — the age was never determined.
+QUEUE_AGE_REASON_UNKNOWN = "unknown"
 
 #: The GRACE SCOPE published in ``detail.grace.scope`` — the only scope
 #: today ("load"). Boot age and burst state are published CONTEXT, never
@@ -255,6 +285,16 @@ class ReadinessComposite:
         queue_max_age_seconds: age of the newest RUNNING heartbeat in
             seconds, computed SQL-side; None when no RUNNING tasks
             exist (or all RUNNING tasks are stop-frozen pre-boot).
+        queue_max_age_seconds_reason: WHY the age is (or is not)
+            there — ``measured`` (a real age), ``empty`` (the probe
+            answered; the RUNNING set was empty — the freshness verdict
+            is VACUOUS, not a measurement), ``probe_timeout`` (the
+            probe did not answer) or ``unknown`` (the probe failed).
+            An absent age is therefore NEVER rendered as an
+            unqualified "fresh" — the label says which of the three
+            "no age" facts it is. ``None`` on a hand-built composite
+            ⇒ derived at render time (an age ⇒ ``measured``; no age ⇒
+            ``empty``).
         checked_at: UTC timestamp captured at refresh start — the
             composite may be served for up to one refresh interval
             after this moment.
@@ -285,6 +325,10 @@ class ReadinessComposite:
     checkpoint_saver: bool = True
     reasons: list[str] = field(default_factory=list)
     queue_max_age_seconds: Optional[float] = None
+    # WHY the age is (or is not) there — see the QUEUE_AGE_REASON_*
+    # vocabulary. ``None`` ⇒ derived at render time (an age ⇒
+    # "measured"; no age ⇒ "empty" — the legacy empty-set reading).
+    queue_max_age_seconds_reason: Optional[str] = None
     checked_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     forced_degraded: bool = False
     inflight_turns: Optional[int] = None
@@ -364,6 +408,25 @@ class ReadinessComposite:
             and not self.forced_degraded
         )
 
+    def queue_age_reason(self) -> str:
+        """The rendered provenance of ``queue_max_age_seconds``.
+
+        The explicit field (set by the refresh path, which KNOWS what
+        the probe did) wins. A hand-built composite (no field) derives
+        it: an age ⇒ ``measured``; no age ⇒ ``empty`` (the legacy
+        empty-set reading).
+
+        Never returns "fresh": an absent age is one of three facts —
+        the set was empty, the probe timed out, or the probe failed —
+        and the label says which.
+        """
+        explicit = self.queue_max_age_seconds_reason
+        if explicit:
+            return explicit
+        if self.queue_max_age_seconds is not None:
+            return QUEUE_AGE_REASON_MEASURED
+        return QUEUE_AGE_REASON_EMPTY
+
     def to_payload(self, *, draining: bool = False) -> dict:
         """Serialize to the ``ReadyzResponse`` body shape.
 
@@ -389,6 +452,14 @@ class ReadinessComposite:
             "detail": {
                 "reasons": list(self.reasons),
                 "queue_max_age_seconds": self.queue_max_age_seconds,
+                # WHY the age is (or is not) there. An absent age used
+                # to render as a bare ``null`` next to
+                # ``queue_freshness: true`` — every consumer read it as
+                # "fresh". The label names the fact: "measured" (a real
+                # age), "empty" (the RUNNING set was empty — the
+                # verdict is vacuous), "probe_timeout" / "unknown" (the
+                # age was never determined).
+                "queue_max_age_seconds_reason": self.queue_age_reason(),
                 "checked_at": self.checked_at.isoformat(),
                 "inflight_turns": self.inflight_turns,
             },
@@ -722,6 +793,11 @@ class GraceTracker:
             pool_state_sqlalchemy=pool_state_sqlalchemy,
             max_streak=max_streak,
         )
+        # Plan Track-1 item 6: the alerting consumer rides the emission
+        # here — it gates on ``detected`` itself, so non-firing ticks
+        # are a no-op. The emission is UNCHANGED: the verdict dict, the
+        # grace conjunction and their semantics/frequency are untouched.
+        consume_leak_signal(leak)
 
         # ── 3. degraded episode bookkeeping ────────────────────────
         degraded = [c for c in degraded_components if c]
@@ -983,6 +1059,50 @@ class GraceTracker:
         )
 
 
+# ── the leak-signal CONSUMER (plan Track-1 item 6) ─────────────────
+def consume_leak_signal(leak: Optional[dict]) -> None:
+    """Alerting consumer for one tick's leak-predicate verdict.
+
+    The emission (``GraceTracker._evaluate_leak`` →
+    ``GraceObservation.leak_signal`` → ``/readyz`` ``detail.leak_signal``)
+    already existed — but nothing consumed it at alertable severity and
+    nothing counted it, so the 2026-10-28 idle-in-transaction incident
+    family produced leak signals nobody saw. This consumer closes that
+    gap without touching the emission:
+
+    * ONE ``logger.warning`` per fire, carrying the signal's context.
+      The reason token names the pool identity (both pool arms are the
+      oracle psycopg pool; the streak arm fires only when the pool
+      objects are UNAVAILABLE — §4.4 S9), and ``streak`` /
+      ``checkedout_rising`` carry the corroborating context.
+    * ONE monotonic increment of ``checkpoint_leak_signal_total``
+      (rendered by ``GET /api/metrics`` — always, even at 0).
+
+    FAIL-OPEN: any consumer failure is swallowed at debug — the
+    emitter's verdict, the grace conjunction and the composite are
+    untouched (the same discipline as the read instrumentation's
+    ``checkpoint_read_measurement_errors_total`` tripwire). Non-firing
+    ticks (``detected`` falsy / non-dict) return without logging or
+    counting.
+    """
+    try:
+        if not isinstance(leak, dict) or not leak.get("detected"):
+            return
+        checkpoint_leak_signal_total.inc()
+        logger.warning(
+            "Checkpoint pool LEAK SIGNAL: reason=%s streak=%s "
+            "checkedout_rising=%s",
+            leak.get("reason"),
+            leak.get("streak"),
+            leak.get("checkedout_rising"),
+        )
+    except Exception as exc:  # noqa: BLE001 — the emitter must never break
+        logger.debug(
+            "Leak-signal consumer failed: %s — the emitter is unaffected",
+            redact_exc_str(exc),
+        )
+
+
 def compute_readiness_composite(
     *,
     database_ok: bool,
@@ -1009,6 +1129,7 @@ def compute_readiness_composite(
     burst_signals: Optional[dict] = None,
     mcp_servers: Optional[dict] = None,
     mcp_buffered_transitions: Optional[int] = None,
+    queue_max_age_seconds_reason: Optional[str] = None,
 ) -> ReadinessComposite:
     """Assemble a composite from component outcomes.
 
@@ -1037,6 +1158,12 @@ def compute_readiness_composite(
     ``detail.mcp``) and NEVER enters ``ready``/``reasons``/``components``
     — a degraded or quarantined MCP server must not take the readiness
     gate down with it.
+
+    ``queue_max_age_seconds_reason`` is the rendered provenance of the
+    age (see the ``QUEUE_AGE_REASON_*`` vocabulary): it says WHY the
+    age is (or is not) there, so an absent age never reads as
+    "fresh". It is ADVISORY — it never enters ``ready``/``reasons``/
+    ``components`` (the verdict is unchanged by it).
     """
     reasons: list[str] = list(extra_reasons or [])
     if not database_ok:
@@ -1067,6 +1194,7 @@ def compute_readiness_composite(
         checkpoint_saver=checkpoint_saver_ok,
         reasons=reasons,
         queue_max_age_seconds=queue_max_age_seconds,
+        queue_max_age_seconds_reason=queue_max_age_seconds_reason,
         checked_at=checked_at or datetime.now(timezone.utc),
         inflight_turns=inflight_turns,
         auth_dependency_status=auth_dependency_status,
@@ -1308,7 +1436,7 @@ async def refresh_readiness_composite(
     elif not database_ok and db_class in (None, FAILURE_CLASS_OK):
         db_class = FAILURE_CLASS_UNKNOWN
 
-    queue_timed_out, queue_raw, _queue_guard_class = await _guarded(
+    queue_timed_out, queue_raw, queue_guard_class = await _guarded(
         queue_probe, QUEUE_PROBE_TIMEOUT_S, None
     )
 
@@ -1351,11 +1479,17 @@ async def refresh_readiness_composite(
 
     inflight_turns: Optional[int] = None
     extra_reasons: list[str] = []
+    # WHY the age is (or is not) there — the rendered provenance. An
+    # absent age is one of three facts (empty set / probe timeout /
+    # probe failure) and the payload used to render all three as a
+    # bare ``null`` next to ``queue_freshness: true`` — i.e. "fresh".
+    queue_age_reason: str = QUEUE_AGE_REASON_UNKNOWN
     if queue_timed_out:
         # Distinguish "no RUNNING tasks" (None → fresh) from "never
         # got an answer" (timeout → degraded, age unknown).
         queue_max_age_seconds = None
         fresh = False
+        queue_age_reason = QUEUE_AGE_REASON_PROBE_TIMEOUT
         extra_reasons.append("queue_freshness: queue probe timed out")
     else:
         if isinstance(queue_raw, QueueProbeResult):
@@ -1369,6 +1503,18 @@ async def refresh_readiness_composite(
             queue_max_age_seconds,
             threshold_seconds=queue_freshness_threshold_seconds,
         )
+        if queue_guard_class == FAILURE_CLASS_HARD_COMPONENT_RED:
+            # The probe RAISED — the age was never determined. (The
+            # historical empty-set default left the age None next to a
+            # "fresh" component: the render now says "unknown".)
+            queue_age_reason = QUEUE_AGE_REASON_UNKNOWN
+        elif queue_max_age_seconds is not None:
+            queue_age_reason = QUEUE_AGE_REASON_MEASURED
+        else:
+            # The probe answered; the RUNNING set was empty (or every
+            # RUNNING task was stop-frozen pre-boot) — the verdict is
+            # VACUOUS, not a measurement.
+            queue_age_reason = QUEUE_AGE_REASON_EMPTY
     if ckpt_extra_reason:
         extra_reasons.append(ckpt_extra_reason)
 
@@ -1433,6 +1579,7 @@ async def refresh_readiness_composite(
         queue_fresh_ok=fresh,
         services_ok=services_ok,
         queue_max_age_seconds=queue_max_age_seconds,
+        queue_max_age_seconds_reason=queue_age_reason,
         checked_at=checked_at,
         extra_reasons=extra_reasons,
         inflight_turns=inflight_turns,

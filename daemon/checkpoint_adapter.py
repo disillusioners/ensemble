@@ -46,7 +46,19 @@ except ImportError:
 from daemon._redact import redact_exc_str
 # P2 T3 charge seam (resource-cost-control): stdlib-only module, no
 # import-cycle risk — see daemon/services/resource_monitor/charge.py.
-from daemon.services.resource_monitor.charge import note_checkpoint_read
+from daemon.services.resource_monitor.charge import (
+    bounded_deep_size,
+    is_enabled as _charge_enabled,
+    note_checkpoint_read,
+)
+# Track-1 item 4 (read instrumentation): the metric registry is
+# stdlib-only (no daemon imports) and the perf helper module depends
+# on it — no import-cycle risk.
+from daemon.checkpoint_metrics import checkpoint_read_measurement_errors_total
+from daemon.checkpoint_perf import (
+    checkpoint_perf_logs_enabled,
+    log_checkpoint_read,
+)
 from daemon.constants import (
     CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE,
     CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES,
@@ -166,19 +178,238 @@ def _charge_instance_from_args(args: tuple, kwargs: dict) -> Optional[str]:
     return None
 
 
-def _charge_checkpoint_read(args: tuple, kwargs: dict, result: Any) -> None:
+def _shared_payload_size(result: Any) -> tuple[Optional[int], Optional[BaseException]]:
+    """ONE bounded deep-size walk for BOTH read consumers (M-2).
+
+    The read path has TWO consumers of the decoded payload's size:
+
+    * the resource-charge seam (``note_checkpoint_read``), which charges
+      the bytes to the instance's resource budget;
+    * the read instrumentation (``log_checkpoint_read``), which records
+      the bytes + rows in the metric registry.
+
+    Both used to run their OWN ``bounded_deep_size`` walk over the SAME
+    payload — two O(payload) walks per read, ON THE EVENT LOOP. This
+    helper performs the walk ONCE and hands the number to both.
+
+    Returns:
+        ``(size, error)`` — ``size`` is the measured byte count (``0``
+        for a MISS — a miss is a read with no payload), or ``None`` when
+        the walk FAILED. ``error`` is the exception that broke the walk
+        (``None`` on success). The walk NEVER raises out: the caller
+        counts the failure in the fail-open tripwire.
+    """
+    if result is None:
+        return 0, None
+    try:
+        size, _nodes, _partial = bounded_deep_size(result)
+        return size, None
+    except Exception as exc:  # noqa: BLE001 — fail-open by contract
+        return None, exc
+
+
+def _charge_checkpoint_read(
+    args: tuple,
+    kwargs: dict,
+    result: Any,
+    *,
+    size: Optional[int] = None,
+) -> None:
     """Charge a decoded checkpoint READ payload to the requesting
     instance (P2 T3). Fires ONCE per successful outer call — the retry
     wrapper (``_call_with_retry``) has already settled when this runs,
     so a transient connection retry NEVER double-charges (AC1). All
     failure modes are swallowed inside the charge module: observability
-    must never break the read path (R1)."""
+    must never break the read path (R1).
+
+    ``size`` — the PRE-COMPUTED deep size (M-2: ONE walk, two
+    consumers). ``None`` means the shared walk FAILED ⇒ nothing is
+    charged (there is no number to charge) and the tripwire already
+    counted the failure.
+    """
     if result is None:
         return
     instance_id = _charge_instance_from_args(args, kwargs)
     if instance_id is None:
         return
-    note_checkpoint_read(instance_id, result)
+    if size is None:
+        # The shared walk failed — the tripwire owns the failure
+        # signal; the charge is skipped (there is no size to charge).
+        return
+    note_checkpoint_read(instance_id, result, size=size)
+
+
+# ── Read instrumentation (plan Track-1 item 4) ─────────────────────────────
+#
+# The read-amplification audit's ONE adopted fix: measure BYTES and ROWS
+# per read at the PROXY chokepoint (the seam every daemon read surface
+# traverses — see the architecture recommendation §4.1). The measurement
+# is FAIL-OPEN by construction: it runs AFTER the read settled, it
+# never touches the result, and every failure inside it is swallowed —
+# the read result is ALWAYS returned as-is.
+#
+# WHAT "ROWS" MEANS HERE (honest labelling): the server's row counter
+# is not observable at this seam, so the count is DERIVED from the
+# returned structure:
+#
+#   * 1 — the checkpoint row itself;
+#   * +1 per channel value that is NOT a primitive — the PG saver
+#     inlines primitives (``None``/``str``/``int``/``float``/``bool``)
+#     in the checkpoint row and stores everything else as a SEPARATE
+#     blob row (``langgraph/checkpoint/postgres/aio.py`` aput: "inline
+#     primitive values in checkpoint table / others are stored in blobs
+#     table");
+#   * +1 per pending write — each pending write is its own row.
+#
+# WHAT "BYTES" MEANS HERE: the DECODED payload size, estimated with the
+# bounded deep-size walk (the SAME estimator the resource-monitor
+# charge seam uses on this very payload). It is NOT the wire size — the
+# serializer's framing overhead is not included.
+#
+# ONE WALK, TWO CONSUMERS (M-2): the walk happens ONCE per read, at
+# the proxy chokepoint (:func:`_observe_read`), and the resulting
+# number is handed to BOTH the charge seam and the instrumentation.
+# The payload is never walked twice for the same read.
+
+
+def _derive_read_rows(op: str, result: Any) -> int:
+    """Derive the number of rows a settled read returned.
+
+    See the block comment above for the derivation rules. Never raises
+    for an unexpected shape: an unreadable payload yields 0 (the
+    measurement is advisory).
+    """
+    if result is None:
+        return 0
+    checkpoint: Any = None
+    pending_writes: Any = None
+    if op == "aget_tuple":
+        # CheckpointTuple(config, checkpoint, metadata, parent_config,
+        # pending_writes) — a NamedTuple, so attribute access is the
+        # canonical read (the tuple is NOT unpacked here: a foreign
+        # shape must not raise).
+        checkpoint = getattr(result, "checkpoint", None)
+        pending_writes = getattr(result, "pending_writes", None)
+    else:
+        checkpoint = result
+    rows = 0
+    if isinstance(checkpoint, dict):
+        rows += 1  # the checkpoint row
+        channel_values = checkpoint.get("channel_values")
+        if isinstance(channel_values, dict):
+            for value in channel_values.values():
+                if value is None or isinstance(value, (str, int, float, bool)):
+                    continue  # inlined in the checkpoint row — no blob row
+                rows += 1  # one blob row
+    if isinstance(pending_writes, (list, tuple)):
+        rows += len(pending_writes)
+    return rows
+
+
+def _record_read_measurement_error(op: str, exc: BaseException) -> None:
+    """Count a measurement failure — the FAIL-OPEN tripwire.
+
+    The measurement never breaks a read, so this counter is the ONLY
+    signal that the instrumentation itself stopped working. The counter
+    increment is itself guarded: a broken metric registry must not
+    turn into a broken read.
+    """
+    try:
+        checkpoint_read_measurement_errors_total.inc()
+    except Exception:  # noqa: BLE001 — the tripwire must never raise
+        logger.warning(
+            "[CheckpointPerf] read instrumentation counter update failed "
+            "(op=%s) — the failure counter itself is unavailable",
+            op,
+            exc_info=True,
+        )
+    logger.warning(
+        "[CheckpointPerf] read instrumentation failed (op=%s): %s: %s — "
+        "the read itself was NOT affected (fail-open)",
+        op,
+        type(exc).__name__,
+        exc,
+    )
+
+
+def _observe_read(op: str, args: tuple, kwargs: dict, result: Any) -> None:
+    """Observe ONE settled read: ONE size walk, BOTH consumers (M-2).
+
+    The read path has two consumers of the decoded payload's size — the
+    resource-charge seam (per-instance byte budget) and the read
+    instrumentation (bytes + rows in the metric registry). Both used to
+    run their OWN bounded deep-size walk over the SAME payload: two
+    O(payload) walks per read, ON THE EVENT LOOP.
+
+    This seam walks the payload ONCE and hands the number to both.
+
+    THE KILL-SWITCH: ``CHECKPOINT_PERF_LOGS=0`` turns the
+    instrumentation OFF (the recording is skipped — see
+    :func:`daemon.checkpoint_perf.log_checkpoint_read`). When the
+    resource monitor is ALSO off, NOTHING needs the size ⇒ the walk is
+    skipped entirely (no O(payload) work on the hot path). The charge
+    seam is INDEPENDENT of the perf kill-switch: it keeps working
+    (and keeps walking) while the monitor is enabled.
+    """
+    charge_on = _charge_enabled()
+    perf_on = checkpoint_perf_logs_enabled()
+    if not charge_on and not perf_on:
+        # Nobody needs the size — the walk is pure waste.
+        return
+    size, size_error = _shared_payload_size(result)
+    if charge_on:
+        _charge_checkpoint_read(args, kwargs, result, size=size)
+    if perf_on:
+        _measure_checkpoint_read(
+            op, args, kwargs, result, bytes_=size, size_error=size_error
+        )
+
+
+def _measure_checkpoint_read(
+    op: str,
+    args: tuple,
+    kwargs: dict,
+    result: Any,
+    *,
+    bytes_: Optional[int] = None,
+    size_error: Optional[BaseException] = None,
+) -> None:
+    """Measure ONE settled checkpoint read (bytes + rows) — FAIL-OPEN.
+
+    Called from the proxy forwarders AFTER the retry wrapper settled, so
+    a transient connection retry is measured ONCE (the same
+    once-per-outer-call contract the charge seam follows).
+
+    ``bytes_`` — the PRE-COMPUTED deep size of the payload (M-2: the
+    walk happens ONCE per read and is SHARED with the charge seam; this
+    function never walks the payload itself). ``None`` means the shared
+    walk failed — ``size_error`` then carries the exception, and the
+    failure is counted in the tripwire (never raised).
+
+    NEVER raises: every failure is counted in
+    ``checkpoint_read_measurement_errors_total`` and swallowed. The read
+    result is never inspected destructively — the payload is only
+    measured.
+    """
+    try:
+        if size_error is not None:
+            raise size_error
+        if result is None:
+            # A MISS is still a read (a DB round trip that returned no
+            # checkpoint): count it with zero bytes / zero rows.
+            bytes_ = 0
+            rows = 0
+        else:
+            bytes_ = max(0, int(bytes_ or 0))
+            rows = _derive_read_rows(op, result)
+        thread_id = _charge_instance_from_args(args, kwargs) or ""
+    except Exception as exc:  # noqa: BLE001 — fail-open by contract
+        _record_read_measurement_error(op, exc)
+        return
+    try:
+        log_checkpoint_read(op, thread_id, bytes_=bytes_, rows=rows)
+    except Exception as exc:  # noqa: BLE001 — fail-open by contract
+        _record_read_measurement_error(op, exc)
 
 
 def _wrap_saver_with_connection_retry(saver: Any) -> Any:
@@ -364,14 +595,23 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
         async def aget(self, *args, **kwargs):
             # P2 T3 charge seam: decoded payload charged AFTER the retry
             # wrapper settles ⇒ transient retry charges ONCE (AC1).
+            # Track-1 item 4: read instrumentation (bytes + rows) at the
+            # proxy chokepoint. FAIL-OPEN — a measurement failure never
+            # breaks or slows the read; the result is returned as-is.
+            #
+            # M-2: ONE bounded deep-size walk per read, SHARED by both
+            # consumers (the charge seam + the instrumentation). The walk
+            # used to run TWICE over the SAME payload (twice the
+            # O(payload) work, on the event loop).
             result = await self._call_with_retry("aget", args, kwargs)
-            _charge_checkpoint_read(args, kwargs, result)
+            _observe_read("aget", args, kwargs, result)
             return result
 
         async def aget_tuple(self, *args, **kwargs):
-            # P2 T3 charge seam: same once-per-outer-call contract.
+            # P2 T3 charge seam: same once-per-outer-call contract; the
+            # SAME single shared walk (M-2).
             result = await self._call_with_retry("aget_tuple", args, kwargs)
-            _charge_checkpoint_read(args, kwargs, result)
+            _observe_read("aget_tuple", args, kwargs, result)
             return result
 
         async def aput(self, *args, **kwargs):
@@ -585,6 +825,38 @@ class CheckpointerAdapter(ABC):
 
         Used by maintenance.py Operation D (_prune_thread_checkpoints)
         to determine which checkpoints to keep.
+        """
+
+    @abstractmethod
+    async def has_checkpoint(self, thread_id: str) -> bool:
+        """Existence probe for the ROOT namespace — bounded, decode-free.
+
+        Track-1 quick-win (checkpoint read-path plan, item 2). Answers
+        exactly one question — "does a checkpoint row exist for this
+        thread?" — with an existence query instead of a FULL saver
+        read.
+
+        Why this exists on the adapter surface (and not on the saver):
+        the saver's read path takes the saver's single ``asyncio.Lock``
+        and deserializes the ENTIRE checkpoint (checkpoint + channel
+        values + blobs) before the caller can look at one field of it.
+        The PostgreSQL adapter already owns a SEPARATE asyncpg pool
+        for direct SQL, so the probe runs there and never touches the
+        saver lock.
+
+        Namespace semantics are IDENTICAL to the saver lookup it
+        replaces: LangGraph resolves
+        ``config["configurable"].get("checkpoint_ns", "")`` — i.e. the
+        ROOT namespace — and returns "no checkpoint" when no
+        ``checkpoints`` row matches. This probe is therefore scoped to
+        the root namespace only.
+
+        Args:
+            thread_id: The instance id (LangGraph thread_id).
+
+        Returns:
+            True iff a checkpoint row exists for ``thread_id`` in the
+            root namespace.
         """
 
     @abstractmethod
@@ -834,6 +1106,26 @@ class SqliteCheckpointerAdapter(CheckpointerAdapter):
             )
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
+
+    async def has_checkpoint(self, thread_id: str) -> bool:
+        """SQLite mirror of :meth:`PostgresCheckpointerAdapter.has_checkpoint`.
+
+        Same root-namespace semantics (``checkpoint_ns = ''`` — the
+        LangGraph default for a config carrying only ``thread_id``).
+
+        SQLite has no second connection pool: every other helper in
+        this adapter runs on the saver's own connection under the
+        saver's lock, so this one does the same. The off-lock win is
+        PostgreSQL-only by construction — the SQLite saver is a single
+        serialized connection and there is nothing to bypass.
+        """
+        async with self._saver.lock:
+            cursor = await self._saver.conn.execute(
+                "SELECT 1 FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ? LIMIT 1",
+                (thread_id, ""),
+            )
+            row = await cursor.fetchone()
+            return row is not None
 
     async def delete_checkpoints_excluding(
         self, thread_id: str, checkpoint_ns: str, keep_ids: set[str]
@@ -1131,6 +1423,44 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
                 limit,
             )
             return [row["checkpoint_id"] for row in rows]
+
+    async def has_checkpoint(self, thread_id: str) -> bool:
+        """Existence probe on the SEPARATE asyncpg pool — NO saver lock.
+
+        Track-1 quick-win (checkpoint read-path plan, item 2). The
+        retry-path existence check used to run a FULL
+        ``raw_saver.aget(config)``: that (a) took the saver's single
+        ``asyncio.Lock`` — serializing every other checkpoint read
+        behind it — and (b) deserialized the ENTIRE checkpoint
+        (checkpoint + channel values + blobs) only for the caller to
+        look at one boolean.
+
+        This probe answers the SAME question with a bounded existence
+        query on the adapter's own asyncpg pool (``self._pool`` — the
+        pool every other direct-SQL helper in this class already
+        uses). It therefore never touches the saver's lock and never
+        materialises a payload.
+
+        Semantics are IDENTICAL to the saver lookup it replaces:
+        LangGraph's ``aget_tuple`` resolves
+        ``config["configurable"].get("checkpoint_ns", "")`` — i.e. the
+        ROOT namespace — and reports "no checkpoint" when no
+        ``checkpoints`` row matches. The ``checkpoint_ns = ''`` literal
+        below IS that root-namespace default (pinned, not bound: this
+        probe has exactly one supported namespace).
+
+        NOTE (resource-cost-control charge seam): the saver read path
+        charges the DECODED payload to the requesting instance
+        (``_charge_checkpoint_read``). This probe decodes no payload,
+        so it is deliberately NOT charged — charging a non-payload
+        would corrupt the checkpoint read-cost metric.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT 1 FROM checkpoints WHERE thread_id = $1 AND checkpoint_ns = '' LIMIT 1",
+                thread_id,
+            )
+        return row is not None
 
     async def delete_checkpoints_excluding(
         self, thread_id: str, checkpoint_ns: str, keep_ids: set[str]

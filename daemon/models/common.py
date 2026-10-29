@@ -167,6 +167,11 @@ class ReadyzResponse(BaseModel):
         description=(
             "Diagnostics: reasons (list of degraded reasons), "
             "queue_max_age_seconds (None when no RUNNING tasks), "
+            "queue_max_age_seconds_reason (WHY the age is (or is not) "
+            "there: 'measured' (a real age), 'empty' (the RUNNING set "
+            "was empty — the verdict is vacuous), 'probe_timeout' / "
+            "'unknown' (the age was never determined). An absent age is "
+            "NEVER an unqualified 'fresh'.), "
             "checked_at (ISO timestamp of the last composite refresh), "
             "inflight_turns (ADVISORY integer — RUNNING tasks with fresh "
             "heartbeats, i.e. alive-and-working turns; None when unknown. "
