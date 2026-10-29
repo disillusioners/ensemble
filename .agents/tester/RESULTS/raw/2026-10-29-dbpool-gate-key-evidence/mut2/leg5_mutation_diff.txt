@@ -1,0 +1,13 @@
+--- /tmp/tdbp-mut2/leg5_churn_pristine.py	2026-10-29 09:19:42.379219201 +0000
++++ tests/integration/test_dbpool_churn_census.py	2026-10-29 09:19:42.468219016 +0000
+@@ -251,6 +251,10 @@
+     def test_churn_returns_occupancy_to_baseline(self, scratch_db):
+         engine = scratch_db.engine
+         baseline = engine.pool.checkedout()
++        # [MUTATION PLANT — F7-e] hold 2 manager slots across the churn
++        held = [engine.connect() for _ in range(2)]
++        for conn in held:
++            conn.execute(text("SELECT 1"))  # autobegin: occupy a slot
+         samples: list[tuple[int, dict[str, int]]] = []
+         stop = threading.Event()
+ 

@@ -1,0 +1,238 @@
+[j5e] daemon resolves to /home/nea/ensemble-src-wt-tdbp-j5c/daemon/__init__.py
+[j5e] side=head scratch_db=dbpool_j5e_head_99fb4077 N=3.0min fetch_delay=2.0s f3_dwell=1.0s
+{
+  "side": "head",
+  "scratch_db": "dbpool_j5e_head_99fb4077",
+  "run_start_iso": "2026-10-29T05:23:57.842530+00:00",
+  "N_minutes": 3.0,
+  "rounds": 53,
+  "sampler_period_s": 1.0,
+  "baseline_checkedout_median": 0,
+  "baseline_checkedout_all": [
+    0,
+    0,
+    0
+  ],
+  "final_checkedout": 0,
+  "final_repair_checkedout": 0,
+  "returns_to_baseline": true,
+  "peak_occupancy_mgr": 1,
+  "peak_occupancy_repair": 1,
+  "mgr_xact_age_s_stats": {
+    "n": 3,
+    "max": 0.0092,
+    "p95": 0.0092,
+    "median": 0.0015
+  },
+  "xact_age_s_by_application": {
+    "ensemble-manager": {
+      "n": 3,
+      "max": 0.0092,
+      "p95": 0.0092,
+      "median": 0.0015
+    }
+  },
+  "three_state_bucket_max_15s": {
+    "0": {
+      "idle_no_xact": 2,
+      "idle_in_transaction": 1,
+      "idle_in_transaction_aborted": 0,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 1,
+      "phases": [
+        "R1_churn",
+        "R2_reconcile",
+        "R3_f3",
+        "baseline"
+      ]
+    },
+    "1": {
+      "idle_no_xact": 2,
+      "idle_in_transaction": 0,
+      "idle_in_transaction_aborted": 0,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 0,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "2": {
+      "idle_no_xact": 2,
+      "idle_in_transaction": 0,
+      "idle_in_transaction_aborted": 0,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 0,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "3": {
+      "idle_no_xact": 2,
+      "idle_in_transaction": 1,
+      "idle_in_transaction_aborted": 0,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 1,
+      "phases": [
+        "R1_churn",
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "4": {
+      "idle_no_xact": 2,
+      "idle_in_transaction": 0,
+      "idle_in_transaction_aborted": 0,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 0,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "5": {
+      "idle_no_xact": 2,
+      "idle_in_transaction": 0,
+      "idle_in_transaction_aborted": 0,
+      "active": 1,
+      "other": 0,
+      "mgr_checkedout": 1,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "6": {
+      "idle_no_xact": 2,
+      "idle_in_transaction": 0,
+      "idle_in_transaction_aborted": 0,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 0,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "7": {
+      "idle_no_xact": 2,
+      "idle_in_transaction": 0,
+      "idle_in_transaction_aborted": 0,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 0,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "8": {
+      "idle_no_xact": 2,
+      "idle_in_transaction": 0,
+      "idle_in_transaction_aborted": 0,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 0,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "9": {
+      "idle_no_xact": 2,
+      "idle_in_transaction": 0,
+      "idle_in_transaction_aborted": 0,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 1,
+      "phases": [
+        "R1_churn",
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "10": {
+      "idle_no_xact": 2,
+      "idle_in_transaction": 0,
+      "idle_in_transaction_aborted": 0,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 0,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "11": {
+      "idle_no_xact": 2,
+      "idle_in_transaction": 0,
+      "idle_in_transaction_aborted": 0,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 0,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "12": {
+      "idle_no_xact": 2,
+      "idle_in_transaction": 0,
+      "idle_in_transaction_aborted": 0,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 0,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3",
+        "settle"
+      ]
+    }
+  },
+  "f8_fetch_window_bursts_n": 53,
+  "f8_window_idle_in_txn_max": 0,
+  "f8_cycle_samples_idle_in_txn_max": 0,
+  "f3_dwell_bursts_n": 53,
+  "f3_dwell_idle_in_txn_family_max": 0,
+  "f3_in_transaction_at_dwell_rounds": [],
+  "errors_n": 0,
+  "errors_first5": [],
+  "final_census": [
+    {
+      "pid": 2976243,
+      "application_name": "ensemble-manager",
+      "state": "idle",
+      "wait_event_type": "Client",
+      "wait_event": "ClientRead",
+      "xact_start": null,
+      "query_start": "2026-10-29 05:27:03.082277+00:00",
+      "state_change": "2026-10-29 05:27:03.083294+00:00",
+      "backend_start": "2026-10-29 05:23:58.092861+00:00",
+      "last_query": "COMMIT",
+      "xact_age_s": null,
+      "state_age_s": 6.366435
+    },
+    {
+      "pid": 2976316,
+      "application_name": "ensemble-repair",
+      "state": "idle",
+      "wait_event_type": "Client",
+      "wait_event": "ClientRead",
+      "xact_start": null,
+      "query_start": "2026-10-29 05:27:03.095844+00:00",
+      "state_change": "2026-10-29 05:27:03.095860+00:00",
+      "backend_start": "2026-10-29 05:24:04.763540+00:00",
+      "last_query": ";",
+      "xact_age_s": null,
+      "state_age_s": 6.353869
+    }
+  ],
+  "teardown": "scratch db dropped; engines disposed"
+}
+[j5e] wrote /tmp/tdbp-j5c/raw/head_j5e_full.json

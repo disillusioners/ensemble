@@ -1,0 +1,87 @@
+......................................................F................. [ 18%]
+........................................................................ [ 36%]
+........................................................................ [ 54%]
+........................................................................ [ 72%]
+........................................................................ [ 90%]
+........................................                                 [100%]
+=========================== short test summary info ============================
+FAILED tests/unit/test_wedge_capture_boot_record.py::TestA18HybridStatic::test_the_site_count_is_unchanged_vs_the_base_revision
+1 failed, 399 passed in 15.79s
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-5758fd09-823b-4f7b-b501-0ffea6590575/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-5758fd09-823b-4f7b-b501-0ffea6590575/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-5758fd09-823b-4f7b-b501-0ffea6590575/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-5758fd09-823b-4f7b-b501-0ffea6590575/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-1db89abd-3509-476a-8096-90f5ff4c0db3/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-1db89abd-3509-476a-8096-90f5ff4c0db3/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-1db89abd-3509-476a-8096-90f5ff4c0db3/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-1db89abd-3509-476a-8096-90f5ff4c0db3/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-e15b552b-a316-4ce1-9d8f-c77ee998faf3/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-e15b552b-a316-4ce1-9d8f-c77ee998faf3/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-e15b552b-a316-4ce1-9d8f-c77ee998faf3/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-e15b552b-a316-4ce1-9d8f-c77ee998faf3/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-bed03b11-589e-4174-a4d4-7436874c8f67/test_an_enabled_boot_leaves_a_0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-bed03b11-589e-4174-a4d4-7436874c8f67/test_an_enabled_boot_leaves_a_0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:96: PytestWarning: (rm_rf) error removing /tmp/pytest-of-nea/garbage-bed03b11-589e-4174-a4d4-7436874c8f67/test_an_enabled_boot_leaves_a_0/data
+<class 'OSError'>: [Errno 39] Directory not empty: '/tmp/pytest-of-nea/garbage-bed03b11-589e-4174-a4d4-7436874c8f67/test_an_enabled_boot_leaves_a_0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:96: PytestWarning: (rm_rf) error removing /tmp/pytest-of-nea/garbage-bed03b11-589e-4174-a4d4-7436874c8f67/test_an_enabled_boot_leaves_a_0
+<class 'OSError'>: [Errno 39] Directory not empty: '/tmp/pytest-of-nea/garbage-bed03b11-589e-4174-a4d4-7436874c8f67/test_an_enabled_boot_leaves_a_0'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:96: PytestWarning: (rm_rf) error removing /tmp/pytest-of-nea/garbage-bed03b11-589e-4174-a4d4-7436874c8f67
+<class 'OSError'>: [Errno 39] Directory not empty: '/tmp/pytest-of-nea/garbage-bed03b11-589e-4174-a4d4-7436874c8f67'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-70c958c7-2820-4dea-9f59-515ce1f3fb0b/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-70c958c7-2820-4dea-9f59-515ce1f3fb0b/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-70c958c7-2820-4dea-9f59-515ce1f3fb0b/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-70c958c7-2820-4dea-9f59-515ce1f3fb0b/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-b6ec23d9-f32d-4d18-9c59-ad719daed592/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-b6ec23d9-f32d-4d18-9c59-ad719daed592/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-b6ec23d9-f32d-4d18-9c59-ad719daed592/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-b6ec23d9-f32d-4d18-9c59-ad719daed592/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-783adb8d-c546-4c66-ac08-2201cc4c32da/test_an_enabled_boot_leaves_a_0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-783adb8d-c546-4c66-ac08-2201cc4c32da/test_an_enabled_boot_leaves_a_0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-783adb8d-c546-4c66-ac08-2201cc4c32da/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-783adb8d-c546-4c66-ac08-2201cc4c32da/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-8380e9d5-f320-453e-8ab9-105d080bc137/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-8380e9d5-f320-453e-8ab9-105d080bc137/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-8380e9d5-f320-453e-8ab9-105d080bc137/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-8380e9d5-f320-453e-8ab9-105d080bc137/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-539e5011-503e-47be-bfc2-140525898f86/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-539e5011-503e-47be-bfc2-140525898f86/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-539e5011-503e-47be-bfc2-140525898f86/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-539e5011-503e-47be-bfc2-140525898f86/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-0cd7676a-4319-4335-b091-13a2b8df20bd/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-0cd7676a-4319-4335-b091-13a2b8df20bd/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-0cd7676a-4319-4335-b091-13a2b8df20bd/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-0cd7676a-4319-4335-b091-13a2b8df20bd/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-c38e4595-570f-4a8a-a5ac-0dcd21063ba5/test_an_enabled_boot_leaves_a_0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-c38e4595-570f-4a8a-a5ac-0dcd21063ba5/test_an_enabled_boot_leaves_a_0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-c38e4595-570f-4a8a-a5ac-0dcd21063ba5/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-c38e4595-570f-4a8a-a5ac-0dcd21063ba5/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-4cfd25cb-7827-4cf3-a1a0-c5226f7b9d04/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-4cfd25cb-7827-4cf3-a1a0-c5226f7b9d04/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-4cfd25cb-7827-4cf3-a1a0-c5226f7b9d04/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-4cfd25cb-7827-4cf3-a1a0-c5226f7b9d04/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(

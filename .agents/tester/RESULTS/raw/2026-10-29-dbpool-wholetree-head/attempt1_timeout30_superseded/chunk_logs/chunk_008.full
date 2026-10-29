@@ -1,0 +1,249 @@
+........................................................................ [ 18%]
+........................................................................ [ 36%]
+........F.F............................................................. [ 54%]
+.........................F.....F.............................FFFFFF..FFF [ 72%]
+..................................................F..................... [ 90%]
+........................................                                 [100%]
+=============================== warnings summary ===============================
+tests/job_queue/test_vgap_greens.py: 10 warnings
+tests/job_queue/test_vgap_wd_resume_renotify.py: 12 warnings
+tests/job_queue/test_w1_retry_child_lineage_conjunct.py: 9 warnings
+tests/job_queue/test_watcher_loss_terminal_strand.py: 4 warnings
+tests/job_queue/test_work_notifier_defect1b_pin.py: 4 warnings
+tests/message_queue_redesign/test_atomic_dequeue.py: 75 warnings
+tests/message_queue_redesign/test_atomic_status_transitions.py: 52 warnings
+tests/message_queue_redesign/test_clear_all_preserve_in_flight.py: 20 warnings
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+tests/message_queue_redesign/test_atomic_status_transitions.py::TestRetryAtomic::test_retry_concurrent_double_call_only_one_increments
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/threadexception.py:58: PytestUnhandledThreadExceptionWarning: Exception in thread Thread-511 (worker)
+  
+  Traceback (most recent call last):
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 1145, in _commit_impl
+      self.engine.dialect.do_commit(self.connection)
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py", line 715, in do_commit
+      dbapi_connection.commit()
+      ~~~~~~~~~~~~~~~~~~~~~~~^^
+  sqlite3.OperationalError: cannot commit transaction - SQL statements in progress
+  
+  The above exception was the direct cause of the following exception:
+  
+  Traceback (most recent call last):
+    File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+      self.run()
+      ~~~~~~~~^^
+    File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+      self._target(*self._args, **self._kwargs)
+      ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/nea/ensemble-src-wt-tdbp-gate/tests/message_queue_redesign/test_atomic_status_transitions.py", line 455, in worker
+      results[idx] = message_repo.retry(msg.message_id)
+                     ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+    File "/home/nea/ensemble-src-wt-tdbp-gate/daemon/repositories/message_queue/repository.py", line 889, in retry
+      with self.engine.begin() as conn:
+           ~~~~~~~~~~~~~~~~~^^
+    File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/contextlib.py", line 148, in __exit__
+      next(self.gen)
+      ~~~~^^^^^^^^^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 3258, in begin
+      with conn.begin():
+           ~~~~~~~~~~^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/util.py", line 147, in __exit__
+      with util.safe_reraise():
+           ~~~~~~~~~~~~~~~~~^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/util/langhelpers.py", line 121, in __exit__
+      raise exc_value.with_traceback(exc_tb)
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/util.py", line 145, in __exit__
+      self.commit()
+      ~~~~~~~~~~~^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 2640, in commit
+      self._do_commit()
+      ~~~~~~~~~~~~~~~^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 2745, in _do_commit
+      self._connection_commit_impl()
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 2716, in _connection_commit_impl
+      self.connection._commit_impl()
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 1147, in _commit_impl
+      self._handle_dbapi_exception(e, None, None, None, None)
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 2363, in _handle_dbapi_exception
+      raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 1145, in _commit_impl
+      self.engine.dialect.do_commit(self.connection)
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py", line 715, in do_commit
+      dbapi_connection.commit()
+      ~~~~~~~~~~~~~~~~~~~~~~~^^
+  sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) cannot commit transaction - SQL statements in progress
+  (Background on this error at: https://sqlalche.me/e/20/e3q8)
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnhandledThreadExceptionWarning(msg))
+
+tests/message_queue_redesign/test_atomic_status_transitions.py::TestUpdateActivityAtomic::test_update_activity_concurrent_does_not_clobber_terminal_status
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/threadexception.py:58: PytestUnhandledThreadExceptionWarning: Exception in thread Thread-518 (activity_worker)
+  
+  Traceback (most recent call last):
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 1145, in _commit_impl
+      self.engine.dialect.do_commit(self.connection)
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py", line 715, in do_commit
+      dbapi_connection.commit()
+      ~~~~~~~~~~~~~~~~~~~~~~~^^
+  sqlite3.OperationalError: cannot commit transaction - SQL statements in progress
+  
+  The above exception was the direct cause of the following exception:
+  
+  Traceback (most recent call last):
+    File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+      self.run()
+      ~~~~~~~~^^
+    File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+      self._target(*self._args, **self._kwargs)
+      ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/nea/ensemble-src-wt-tdbp-gate/tests/message_queue_redesign/test_atomic_status_transitions.py", line 545, in activity_worker
+      results["activity"] = message_repo.update_activity(msg.message_id)
+                            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+    File "/home/nea/ensemble-src-wt-tdbp-gate/daemon/repositories/message_queue/repository.py", line 982, in update_activity
+      with self.engine.begin() as conn:
+           ~~~~~~~~~~~~~~~~~^^
+    File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/contextlib.py", line 148, in __exit__
+      next(self.gen)
+      ~~~~^^^^^^^^^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 3258, in begin
+      with conn.begin():
+           ~~~~~~~~~~^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/util.py", line 147, in __exit__
+      with util.safe_reraise():
+           ~~~~~~~~~~~~~~~~~^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/util/langhelpers.py", line 121, in __exit__
+      raise exc_value.with_traceback(exc_tb)
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/util.py", line 145, in __exit__
+      self.commit()
+      ~~~~~~~~~~~^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 2640, in commit
+      self._do_commit()
+      ~~~~~~~~~~~~~~~^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 2745, in _do_commit
+      self._connection_commit_impl()
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 2716, in _connection_commit_impl
+      self.connection._commit_impl()
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 1147, in _commit_impl
+      self._handle_dbapi_exception(e, None, None, None, None)
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 2363, in _handle_dbapi_exception
+      raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 1145, in _commit_impl
+      self.engine.dialect.do_commit(self.connection)
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py", line 715, in do_commit
+      dbapi_connection.commit()
+      ~~~~~~~~~~~~~~~~~~~~~~~^^
+  sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) cannot commit transaction - SQL statements in progress
+  (Background on this error at: https://sqlalche.me/e/20/e3q8)
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnhandledThreadExceptionWarning(msg))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/job_queue/test_terminal_write_census.py::TestTerminalWriteCensus::test_every_terminal_write_site_is_classified
+FAILED tests/job_queue/test_terminal_write_census.py::TestTerminalWriteCensus::test_hooked_entries_point_at_live_notify_calls
+FAILED tests/job_queue/test_watcher_repository_concurrent.py::TestSequentialAddWatch::test_first_call_inserts
+FAILED tests/job_queue/test_watcher_repository_concurrent.py::TestConcurrentAddWatch::test_concurrent_threads_default_events_single_row
+FAILED tests/manager/test_phase4_metrics_trigger_init.py::TestPhase4SkillRepositories::test_phase4_repos_initialized_when_config_present
+FAILED tests/manager/test_phase4_metrics_trigger_init.py::TestPhase4SkillRepositories::test_phase4_repos_none_when_skill_evolution_disabled
+FAILED tests/manager/test_phase4_metrics_trigger_init.py::TestPhase4SkillServices::test_metrics_and_trigger_services_initialized
+FAILED tests/manager/test_phase4_metrics_trigger_init.py::TestPhase4SkillServices::test_metrics_service_has_correct_dependencies
+FAILED tests/manager/test_phase4_metrics_trigger_init.py::TestPhase4SkillServices::test_trigger_engine_has_correct_dependencies
+FAILED tests/manager/test_phase4_metrics_trigger_init.py::TestPhase4SkillServices::test_services_none_when_skill_evolution_disabled
+FAILED tests/manager/test_skill_service_init.py::test_skill_services_initialized_when_config_present
+FAILED tests/manager/test_skill_service_init.py::test_skill_services_none_when_skill_evolution_disabled
+FAILED tests/manager/test_skill_service_init.py::test_skill_services_have_correct_dependencies
+FAILED tests/message_queue_redesign/test_atomic_status_transitions.py::TestUpdateActivityAtomic::test_update_activity_concurrent_does_not_clobber_terminal_status
+14 failed, 386 passed, 188 warnings in 105.34s (0:01:45)
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-ef3038e5-7fb9-4c6b-b174-4a84c0f038f3/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-ef3038e5-7fb9-4c6b-b174-4a84c0f038f3/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-ef3038e5-7fb9-4c6b-b174-4a84c0f038f3/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-ef3038e5-7fb9-4c6b-b174-4a84c0f038f3/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-bbbd6cd6-9ea4-4988-a964-313ce3ec1a71/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-bbbd6cd6-9ea4-4988-a964-313ce3ec1a71/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-bbbd6cd6-9ea4-4988-a964-313ce3ec1a71/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-bbbd6cd6-9ea4-4988-a964-313ce3ec1a71/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-9b970985-9ff5-4895-b3fb-e5588d36310c/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-9b970985-9ff5-4895-b3fb-e5588d36310c/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-9b970985-9ff5-4895-b3fb-e5588d36310c/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-9b970985-9ff5-4895-b3fb-e5588d36310c/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-58b88fd1-2368-4796-8cd4-899da64af4a1/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-58b88fd1-2368-4796-8cd4-899da64af4a1/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-58b88fd1-2368-4796-8cd4-899da64af4a1/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-58b88fd1-2368-4796-8cd4-899da64af4a1/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-7b9764e5-fbdc-4cbb-a2d1-112bfe24cc54/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-7b9764e5-fbdc-4cbb-a2d1-112bfe24cc54/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-7b9764e5-fbdc-4cbb-a2d1-112bfe24cc54/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-7b9764e5-fbdc-4cbb-a2d1-112bfe24cc54/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-ac80cd5e-f3a0-4ee5-bdc0-22ff6cdc85fb/test_an_enabled_boot_leaves_a_0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-ac80cd5e-f3a0-4ee5-bdc0-22ff6cdc85fb/test_an_enabled_boot_leaves_a_0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:96: PytestWarning: (rm_rf) error removing /tmp/pytest-of-nea/garbage-ac80cd5e-f3a0-4ee5-bdc0-22ff6cdc85fb/test_an_enabled_boot_leaves_a_0/data
+<class 'OSError'>: [Errno 39] Directory not empty: '/tmp/pytest-of-nea/garbage-ac80cd5e-f3a0-4ee5-bdc0-22ff6cdc85fb/test_an_enabled_boot_leaves_a_0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:96: PytestWarning: (rm_rf) error removing /tmp/pytest-of-nea/garbage-ac80cd5e-f3a0-4ee5-bdc0-22ff6cdc85fb/test_an_enabled_boot_leaves_a_0
+<class 'OSError'>: [Errno 39] Directory not empty: '/tmp/pytest-of-nea/garbage-ac80cd5e-f3a0-4ee5-bdc0-22ff6cdc85fb/test_an_enabled_boot_leaves_a_0'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:96: PytestWarning: (rm_rf) error removing /tmp/pytest-of-nea/garbage-ac80cd5e-f3a0-4ee5-bdc0-22ff6cdc85fb
+<class 'OSError'>: [Errno 39] Directory not empty: '/tmp/pytest-of-nea/garbage-ac80cd5e-f3a0-4ee5-bdc0-22ff6cdc85fb'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-7b3bc345-7f7f-42c0-8679-4427cb4da91d/test_an_enabled_boot_leaves_a_0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-7b3bc345-7f7f-42c0-8679-4427cb4da91d/test_an_enabled_boot_leaves_a_0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-7b3bc345-7f7f-42c0-8679-4427cb4da91d/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-7b3bc345-7f7f-42c0-8679-4427cb4da91d/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-a93e790c-ab3d-47be-8e26-adcb25f5f638/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-a93e790c-ab3d-47be-8e26-adcb25f5f638/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-a93e790c-ab3d-47be-8e26-adcb25f5f638/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-a93e790c-ab3d-47be-8e26-adcb25f5f638/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-e3b78073-d85d-4e33-a41a-3591fdbfb8d6/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-e3b78073-d85d-4e33-a41a-3591fdbfb8d6/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-e3b78073-d85d-4e33-a41a-3591fdbfb8d6/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-e3b78073-d85d-4e33-a41a-3591fdbfb8d6/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-e334d776-e5de-4b4d-bead-4b1920c55a09/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-e334d776-e5de-4b4d-bead-4b1920c55a09/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-e334d776-e5de-4b4d-bead-4b1920c55a09/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-e334d776-e5de-4b4d-bead-4b1920c55a09/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-151b2fbf-2062-4aa2-a103-289aa897ad06/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-151b2fbf-2062-4aa2-a103-289aa897ad06/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-151b2fbf-2062-4aa2-a103-289aa897ad06/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-151b2fbf-2062-4aa2-a103-289aa897ad06/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-f35e3857-8631-4d90-93e1-a29b714700a6/test_an_enabled_boot_leaves_a_0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-f35e3857-8631-4d90-93e1-a29b714700a6/test_an_enabled_boot_leaves_a_0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-f35e3857-8631-4d90-93e1-a29b714700a6/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-f35e3857-8631-4d90-93e1-a29b714700a6/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records'
+  warnings.warn(

@@ -1,0 +1,21 @@
+{
+  "daemon_file": "/home/nea/ensemble-src-wt-tdbp-j5a/daemon/__init__.py",
+  "capacity_const": 15,
+  "checkedout_holders": 15,
+  "thread_terminated_within_bound": true,
+  "thread_join_elapsed_s": 0.00062,
+  "probe_outcome": {
+    "error": "TimeoutError",
+    "error_repr": "TimeoutError('readiness probe admission refused: manager pool at configured capacity (15/15)')",
+    "elapsed_s": 8.4e-05
+  },
+  "checkedout_right_after": 15,
+  "pool_waiters_right_after": -1,
+  "checkedout_after_release": 0,
+  "below_capacity": {
+    "verdict": true,
+    "failure_class": null,
+    "elapsed_s": 0.002453,
+    "checkedout_after": 0
+  }
+}

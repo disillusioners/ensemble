@@ -1,5 +1,20 @@
 # Test Packs
 
+## db-pool idle-in-transaction FUNCTIONAL GATE (`fix/db-pool-idle-txn` @ `4cc63574a`, base `19fc11c8b`; gate branch `tester/dbpool-functional-gate` @ `c89e3470c`) — ❌ **FAIL (one gate: G3.5)** (2026-10-29)
+
+> Full record: `.agents/tester/RESULTS/2026-10-29-dbpool-functional-gate.md`. **Verdict: FAIL — G3.5 net-new reds = 0 violated: 11 deterministic net-new regressions, ONE root cause** (`daemon/services/readiness.py:1512` — the lane's F4-A admission pre-check calls `pool.checkedout()` unconditionally; StaticPool (real sqlite pool) / FakeEngine crash → probe caught-and-warned → composite `database=False`; 3/3 RED isolated at HEAD, 3/3 GREEN isolated at BASE; minimal repro recorded). **Everything else PASS**: R-1 fill 35/35 (`47ff2f5ff`), Δ3 measured+set (`8cc538a71`, 0.25 s = worst 0.021607 s ×10), ladder **17/17 rows PASS** (`LADDER: OK`, 155 tests 0 failed 0 skipped, exactly-1-xfail satisfied), 9 mutation legs RED→GREEN digest-verified, J5 six base-vs-HEAD scenarios PASS, live boundary SUPPORTED, count identity 30,975 ↔ 31,084 (+109, closes exactly). Lane-owner fix surface + re-verification recipe in the record.
+
+| Pack | Invocation | Scope | Last Run | Status |
+|---|---|---|---|---|
+| `dbpool_gate_ladder` | `tests/packs/dbpool_gate_ladder.sh --run` (instrument re-pointed to the gate worktree @ `e30ab1890`; expected-collected.md filled @ `47ff2f5ff`+`c89e3470c`) | the 17-row canonical ladder (G0..G3.4 executed; G1.5/G3.5 tester-owned) | 2026-10-29 @ `c89e3470c` | ✅ PASS 17/17 (155 tests, 0 failed, 0 skipped, 1 xfail by design) |
+| `dbpool_wholetree_base` / `dbpool_wholetree_head` | house-recipe chunked corpus runs (both `--ignore`s, `ENSEMBLE_SELF_ENV=dev`, `--timeout=120`, 400-id chunks ×78, `timeout 1500` each) | G1.5/G3.5 dual-leg byte-comm | 2026-10-29 @ `19fc11c8b` / `c89e3470c` | ✅ count identity PASS · ❌ FAILED-set comm: 342 shared / **15 HEAD-only** (11 net-new after 3×-isolated classification + 4 order/load artifacts) / 4 BASE-only (3 flaky-at-base + 1 pre-existing context-dependent) |
+| `dbpool_delta3_measure` / `_apply` | fenced real-code driver on scratch PG :5444 + pin re-proofs | J2 Δ3 (post-F8 legitimate-hold measurement; constant set 0.25) | 2026-10-29 | ✅ PASS (holds invariant to fetch duration; 4/4 proof legs green) |
+| `dbpool_j5a/j5b/j5c` | Phase-0-harness + real-code drivers, base-vs-HEAD, scratch PG :5441-:5443 | J5 six symptom scenarios (M-R3 hold, wedge cascade, F6 double-mint, F4 starvation, F7 churn, pool knobs) | 2026-10-29 | ✅ PASS 6/6 (J5(f) brief correction + R-10 disclosure recorded) |
+| `dbpool_mut1` / `dbpool_mut2` | plant→RED→restore→GREEN in scratch worktrees @ `c89e3470c` | J4 mutation re-proof: A1 carrier, T-M7, W-4, T-H1, F8-a, F4-a, F7-a-static (+F7-e, F7-b-static bonus) | 2026-10-29 | ✅ PASS 9/9 legs, zero findings against any pin |
+| `dbpool_classify` | 3×-isolated per side (house rule) on the 19 comm-diff ids | net-new classification | 2026-10-29 | 🔴 11 NET-NEW (one root cause) / 4 order-load / 0 flaky / 0 environment |
+
+---
+
 ## mission-records PR1 release gate (`feature/mission-records-pr1` @ `0428c936e`, base `7af1d2632` = origin/latest) — ❌ **FAIL → back to dev** (2026-10-25)
 
 > Full record: `.agents/tester/RESULTS/2026-10-25-mission-records-pr1-verification.md`. Ad-hoc pack set (registered ad-hoc per the v0.27.6 precedent; script materialization deferred to the post-fix delta pass). **Verdict: FAIL — 1 production defect** (send_message commission rows minted-then-rolled-back: caller-owned `WriteGuardSession` never commits; PG-proven repro A/B/A2; SQLite masks the class) **+ 6 deterministic test-side reds** (stale 3-tuple unpacks vs the branch's widened 4-tuple `upsert_batch` items; production correct via `*rest`). All migration (fresh+existing PG), focused-pack, facade-guard, mutation, and SQLite-integration gates PASS; 2 E2E reds base-attributed (M3 `settled` vocabulary drift, `05618c55c`) → 2 QUARANTINE.md rows added.

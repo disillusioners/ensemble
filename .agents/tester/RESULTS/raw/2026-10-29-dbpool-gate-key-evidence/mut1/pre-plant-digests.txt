@@ -1,0 +1,3 @@
+78bb883fc3eb7e67b2a1ca420abf80c6596e21ab53ae0d459cb523bff4933100  daemon/manager.py
+d9ca54b441fbd1eca3116ee9601770c14fe1f67c868fb24cb3af4c53e4b5c609  daemon/services/mission_record_service.py
+0c1e25fed664fb6e651def494749766d9a3899704251291eaa46ccea6ed1ccc4  daemon/repositories/factory.py

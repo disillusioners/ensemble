@@ -1,0 +1,11 @@
+--- /tmp/tdbp-mut2/leg1/ladder_baseline.sh	2026-10-29 09:13:28.199769406 +0000
++++ /tmp/tdbp-mut2/leg1/ladder_mutated.sh	2026-10-29 09:13:50.977619707 +0000
+@@ -75,7 +75,7 @@
+ # T-H1: matched-row counter — an unmatched ROW_FILTER (typo'd/renamed/
+ # not-yet-added gate id) previously made every row early-return and the
+ # script printed LADDER: OK / exit 0 having executed ZERO gates.
+-MATCHED=0
++MATCHED=1
+ 
+ # ── the expected count for one expected-collected.md row (Δ1: a TBD
+ #    cell is FATAL here — the ladder never invents a number) ─────────

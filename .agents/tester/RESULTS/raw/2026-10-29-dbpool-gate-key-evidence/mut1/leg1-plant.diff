@@ -1,0 +1,22 @@
+diff --git a/daemon/manager.py b/daemon/manager.py
+index b9649bae6..5ce40f47b 100644
+--- a/daemon/manager.py
++++ b/daemon/manager.py
+@@ -11223,7 +11223,7 @@ class InstanceManager:
+                 # ``... is not None`` expression) and never None, so
+                 # False/True are the only non-unknown values.
+                 if (
+-                    live_carrier_exists is False
++                    not live_carrier_exists
+                     and not db_dead_parent
+                     and self._is_parent_alive(parent_row)
+                 ):
+@@ -12046,7 +12046,7 @@ class InstanceManager:
+                 # ``... is not None`` expression) and never None, so
+                 # False/True are the only non-unknown values.
+                 if (
+-                    live_carrier_exists is False
++                    not live_carrier_exists
+                     and not db_dead_parent
+                     and self._is_parent_alive(parent_row)
+                 ):

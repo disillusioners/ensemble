@@ -1,0 +1,34 @@
+{
+  "daemon_file": "/home/nea/ensemble-src-wt-tdbp-j5a-base/daemon/__init__.py",
+  "cwd": "/home/nea/ensemble-src-wt-tdbp-j5a-base",
+  "runtime_pool_config": {
+    "pool_size": 5,
+    "max_overflow": 10,
+    "pool_pre_ping": true,
+    "pool_recycle": -1,
+    "pool_timeout": 30.0,
+    "reset_on_return": "ResetStyle.reset_rollback",
+    "url": "postgresql+psycopg://dbpool_g5a:***@127.0.0.1:5441/dbpool_g5a?connect_timeout=10"
+  },
+  "aborted_txn_probe": {
+    "borrower1_pid": 2976089,
+    "abort_error": "DataError",
+    "in_transaction_before_return": true,
+    "pg_state_before_return": {
+      "state": "idle in transaction (aborted)",
+      "wait_event_type": "Client",
+      "last_query": "SELECT 1/0"
+    },
+    "pg_txn_status_before_return": 3,
+    "pg_state_after_return": {
+      "state": "idle",
+      "wait_event_type": "Client",
+      "last_query": "ROLLBACK"
+    },
+    "borrower2_pid_same_backend": true,
+    "in_transaction_fresh_borrow": false,
+    "pg_txn_status_fresh_borrow": 0,
+    "fresh_statement_ok": true,
+    "fresh_statement_error": null
+  }
+}

@@ -1,0 +1,4 @@
+dbpool_g3
+postgres
+template0
+template1
