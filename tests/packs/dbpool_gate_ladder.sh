@@ -56,7 +56,7 @@ _new_home() {
 }
 trap '_rc=$?; for d in "${_TMP_HOMES[@]:-}"; do [ -n "$d" ] && rm -rf "$d"; done; exit $_rc' EXIT
 
-WORKTREE=/home/nea/ensemble-src-wt-dbpool-idletxn
+WORKTREE=/home/nea/ensemble-src-wt-tdbp-gate
 PY=/home/nea/ensemble-src/.venv/bin/python
 PLAN_DIR="$WORKTREE/.agents/shared/planning/db-pool-idle-txn"
 EXPECTED_FILE="$PLAN_DIR/expected-collected.md"

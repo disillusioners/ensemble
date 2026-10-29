@@ -38,7 +38,7 @@ trap '_rc=$?; rm -rf "$_TMP_HOME"; exit $_rc' EXIT
 EXPECTED="$1"; MARKER="$2"; shift 2
 case "$EXPECTED" in ''|*[!0-9]*)
   echo "FATAL: EXPECTED is not an integer (TBD cell?) for: $*" >&2; exit 1;; esac
-WORKTREE=/home/nea/ensemble-src-wt-dbpool-idletxn
+WORKTREE=/home/nea/ensemble-src-wt-tdbp-gate
 # T-L1: a MISSING expected-collected.md is the artifact-level defect —
 # stat before anything else so the FATAL names it (this fence receives
 # the count as an argument, but the artifact is the count's authority).
