@@ -10898,8 +10898,16 @@ class InstanceManager:
 
                 from .repositories.instance.models import Instance
                 child_row = session.get(Instance, child_instance_id)
+                child_row_missing = child_row is None
                 child_agent_id = (
-                    child_row.agent_id if child_row is not None else None
+                    None if child_row_missing else child_row.agent_id
+                )
+                # W-1 (code-review council): a MISSING child Instance row
+                # skips the content fetch (base parity — the helpers did
+                # ``if child_row is not None:``); the ``"agent"``
+                # fallback applies ONLY to row-present/agent_id-NULL.
+                fetch_agent_id: str | None = (
+                    None if child_row_missing else (child_agent_id or "agent")
                 )
                 # Sub-shape decision — same gating as the async twin:
                 # the carrier check runs only when the P0 snapshot
@@ -10953,7 +10961,7 @@ class InstanceManager:
             if needs_content_fetch:
                 content = self._fetch_subshape_a_content_sync(
                     child_instance_id=child_instance_id,
-                    child_agent_id=child_agent_id or "agent",
+                    child_agent_id=fetch_agent_id,
                 )
 
             with self._session_scope() as session:
@@ -11273,7 +11281,7 @@ class InstanceManager:
         self,
         *,
         child_instance_id: str,
-        child_agent_id: str,
+        child_agent_id: str | None,
     ) -> str:
         """Sync content-fetch seam for sub-shape (a) — sweep path.
 
@@ -11293,7 +11301,13 @@ class InstanceManager:
 
         F8.4 (db-pool-idle-txn lane, DR-26): the signature carries
         ``child_agent_id`` — resolved by the caller in the P0
-        read-decide scope. The bridge's call shape and its 8.0 s
+        read-decide scope. W-1 base-parity contract:
+        ``child_agent_id=None`` means the child Instance row is
+        MISSING and the fetch is SKIPPED (the ``if child_agent_id:``
+        guard) — content stays empty, matching base's
+        ``if child_row is not None:`` shape; the ``"agent"`` fallback
+        applies only to row-present/agent_id-NULL. The bridge's call
+        shape and its 8.0 s
         timeout are PRESERVED; only its POSITION changed — the
         helper is invoked from the reconcile's P1 phase, OUTSIDE
         any held manager-engine session scope (the P0 scope is
@@ -11343,7 +11357,7 @@ class InstanceManager:
         self,
         *,
         child_instance_id: str,
-        child_agent_id: str,
+        child_agent_id: str | None,
     ) -> str:
         """Async content-fetch seam for sub-shape (a) — router path.
 
@@ -11363,6 +11377,10 @@ class InstanceManager:
         ``child_agent_id`` — resolved by the caller in the P0
         read-decide scope — and this helper performs the fetch
         with **NO manager-engine session open anywhere** (the
+        W-1 base-parity contract: ``child_agent_id=None`` means the
+        child Instance row is MISSING and the fetch is SKIPPED
+        (the ``if child_agent_id:`` guard) — content stays empty,
+        matching base's ``if child_row is not None:`` shape;
         checkpoint read rides the P2 saver pool; the caller's
         manager-engine scope is closed before this runs and only
         re-opens for the P2 write). Callers MUST NOT invoke this
@@ -11679,8 +11697,16 @@ class InstanceManager:
 
                 from .repositories.instance.models import Instance
                 child_row = session.get(Instance, child_instance_id)
+                child_row_missing = child_row is None
                 child_agent_id = (
-                    child_row.agent_id if child_row is not None else None
+                    None if child_row_missing else child_row.agent_id
+                )
+                # W-1 (code-review council): a MISSING child Instance row
+                # skips the content fetch (base parity — the helpers did
+                # ``if child_row is not None:``); the ``"agent"``
+                # fallback applies ONLY to row-present/agent_id-NULL.
+                fetch_agent_id: str | None = (
+                    None if child_row_missing else (child_agent_id or "agent")
                 )
                 # Sub-shape decision: (a) needs the P1 content fetch;
                 # (c) needs the pre-scope carrier check — gated on the
@@ -11744,7 +11770,7 @@ class InstanceManager:
                     content = await asyncio.wait_for(
                         self._fetch_subshape_a_content_async(
                             child_instance_id=child_instance_id,
-                            child_agent_id=child_agent_id or "agent",
+                            child_agent_id=fetch_agent_id,
                         ),
                         timeout=8.0,
                     )

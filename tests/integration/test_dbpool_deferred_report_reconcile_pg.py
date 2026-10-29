@@ -85,7 +85,7 @@ from daemon.services import child_reports as child_reports_mod
 pytestmark = [pytest.mark.integration]
 
 #: The pack-local declared collected count (NEW packs only).
-EXPECTED_COLLECTED = 6
+EXPECTED_COLLECTED = 7
 
 _PG_HOST = os.environ.get("PG_TEST_HOST", "localhost")
 _PG_PORT = int(os.environ.get("PG_TEST_PORT", "5432"))
@@ -764,4 +764,71 @@ class TestF8CarrierDimensionNoSecondCarrier:
         assert result is None or result.get("shape") != "c_revival", (
             f"F8 carrier dimension (route B): the reconcile took the "
             f"c_revival path with an UNKNOWN carrier flag: {result!r}"
+        )
+
+
+class TestW1MissingChildRowSkipsTheContentFetch:
+    """W-1 — a MISSING child Instance row skips the content fetch (base
+    parity).
+
+    At base the helpers did ``child_row = session.get(Instance, …);
+    if child_row is not None:`` — a missing child row left the content
+    EMPTY (no checkpoint fetch). The F8 restructuring moved the
+    Instance read to P0 and the caller passed
+    ``child_agent_id or "agent"``, conflating a MISSING row with
+    row-present/agent_id-NULL — so a deleted/missing child row
+    performed a checkpoint fetch base skipped.
+
+    The fix (W-1): the caller passes ``fetch_agent_id`` — ``None``
+    when the P0 Instance read found NO row (the helper's
+    ``if child_agent_id:`` guard then skips the fetch, content stays
+    ``""``); the ``"agent"`` fallback applies ONLY to
+    row-present/agent_id-NULL.
+
+    This pin drives the REAL caller path (the holder's bound
+    ``_reconcile_deferred_report_async``) — the helper is NOT stubbed:
+    the reconcile calls the real fetch seam, and the seam's own guard
+    must skip it.
+
+    Plantable mutation: replant ``or "agent"`` at the caller (or pass
+    a truthy agent id for a missing row) ⇒ the fetch RUNS ⇒ the
+    created message content is non-empty ⇒ RED.
+    """
+
+    @pytest.mark.timeout(120)
+    def test_missing_child_row_leaves_the_content_empty(self, engine):
+        parent_id = _seed_instance(
+            engine,
+            instance_id=f"parent-{uuid.uuid4().hex[:6]}",
+            status=InstanceStatus.WAITING_CHILDREN.value,
+        )
+        # NO child Instance row is seeded — the row is MISSING.
+        child_id = f"child-{uuid.uuid4().hex[:6]}"
+        injection_id = f"inj-{uuid.uuid4().hex[:8]}"
+        _seed_injection(
+            engine, injection_id=injection_id, parent_id=parent_id, child_id=child_id
+        )
+
+        holder = _build_holder(engine)
+        result = asyncio.run(
+            holder._reconcile_deferred_report_async(
+                child_instance_id=child_id,
+                child_message_id="child-msg-f8",
+                injection_id=injection_id,
+                source="f8-pin",
+            )
+        )
+
+        assert result is not None and result["shape"] == "null_marker_first", (
+            f"W-1: the reconcile did not create the artefacts: {result!r}"
+        )
+        with SQLModelSession(engine) as session:
+            injection = session.get(ReportInjection, injection_id)
+            message = session.get(MessageQueue, injection.report_message_id)
+        assert message is not None, "W-1: the message row is missing"
+        assert message.content == "", (
+            "W-1: a MISSING child Instance row must SKIP the content "
+            "fetch (base parity — content stays empty); got "
+            f"{message.content!r} — the fetch ran under a placeholder "
+            "agent id"
         )
