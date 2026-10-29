@@ -1,0 +1,33 @@
+2026-10-29 18:23:18.748 UTC [3749572] LOG:  starting PostgreSQL 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit
+2026-10-29 18:23:18.748 UTC [3749572] LOG:  listening on IPv4 address "127.0.0.1", port 5461
+2026-10-29 18:23:18.752 UTC [3749572] LOG:  listening on Unix socket "/tmp/sv3-boot/sock/.s.PGSQL.5461"
+2026-10-29 18:23:18.761 UTC [3749576] LOG:  database system was shut down at 2026-10-29 18:23:18 UTC
+2026-10-29 18:23:18.774 UTC [3749572] LOG:  database system is ready to accept connections
+2026-10-29 18:24:22.133 UTC [3750645] ERROR:  relation "app_settings" does not exist at character 131
+2026-10-29 18:24:22.133 UTC [3750645] STATEMENT:  SELECT app_settings.key, app_settings.value_json, app_settings.value_type, app_settings.updated_by, app_settings.updated_at 
+	FROM app_settings
+2026-10-29 18:24:23.812 UTC [3750648] ERROR:  column "status" does not exist at character 61
+2026-10-29 18:24:23.812 UTC [3750648] STATEMENT:  UPDATE job_queue_items SET admission_state = 'queued' WHERE status = 'pending' AND admission_state = 'queued'
+2026-10-29 18:24:23.815 UTC [3750648] ERROR:  column "status" does not exist at character 61
+2026-10-29 18:24:23.815 UTC [3750648] STATEMENT:  UPDATE job_queue_items SET admission_state = 'active' WHERE status IN ('processing', 'paused') AND admission_state = 'queued'
+2026-10-29 18:24:23.818 UTC [3750648] ERROR:  column "status" does not exist at character 85
+2026-10-29 18:24:23.818 UTC [3750648] STATEMENT:  UPDATE job_queue_items SET admission_state = 'done', terminal_reason = status WHERE status = 'completed' AND admission_state = 'queued'
+2026-10-29 18:24:23.820 UTC [3750648] ERROR:  column "status" does not exist at character 85
+2026-10-29 18:24:23.820 UTC [3750648] STATEMENT:  UPDATE job_queue_items SET admission_state = 'done', terminal_reason = status WHERE status = 'failed' AND admission_state = 'queued'
+2026-10-29 18:24:23.822 UTC [3750648] ERROR:  column "status" does not exist at character 85
+2026-10-29 18:24:23.822 UTC [3750648] STATEMENT:  UPDATE job_queue_items SET admission_state = 'done', terminal_reason = status WHERE status = 'cancelled' AND admission_state = 'queued'
+2026-10-29 18:24:23.824 UTC [3750648] ERROR:  column "status" does not exist at character 59
+2026-10-29 18:24:23.824 UTC [3750648] STATEMENT:  UPDATE job_queue_items SET admission_state = 'dead' WHERE status = 'dead_letter' AND admission_state = 'queued'
+2026-10-29 18:24:23.826 UTC [3750648] ERROR:  column "error_message" does not exist at character 118
+2026-10-29 18:24:23.826 UTC [3750648] STATEMENT:  UPDATE job_queue_items SET terminal_reason = 'failed' WHERE admission_state = 'done' AND terminal_reason IS NULL AND error_message IS NOT NULL AND error_message != ''
+2026-10-29 18:28:18.787 UTC [3749573] LOG:  checkpoint starting: time
+2026-10-29 18:29:20.268 UTC [3749573] LOG:  checkpoint complete: wrote 637 buffers (3.9%); 0 WAL file(s) added, 0 removed, 0 recycled; write=61.466 s, sync=0.006 s, total=61.481 s; sync files=21, longest=0.002 s, average=0.001 s; distance=6792 kB, estimate=6792 kB; lsn=0/1B95AD8, redo lsn=0/1B91A60
+2026-10-29 18:29:20.269 UTC [3749573] LOG:  checkpoint starting: immediate force wait
+2026-10-29 18:29:20.284 UTC [3749573] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.005 s, sync=0.003 s, total=0.016 s; sync files=2, longest=0.002 s, average=0.002 s; distance=16 kB, estimate=6115 kB; lsn=0/1B95B88, redo lsn=0/1B95B50
+2026-10-29 18:29:20.427 UTC [3749572] LOG:  received fast shutdown request
+2026-10-29 18:29:20.431 UTC [3749572] LOG:  aborting any active transactions
+2026-10-29 18:29:20.437 UTC [3749572] LOG:  background worker "logical replication launcher" (PID 3749579) exited with exit code 1
+2026-10-29 18:29:20.437 UTC [3749573] LOG:  shutting down
+2026-10-29 18:29:20.439 UTC [3749573] LOG:  checkpoint starting: shutdown immediate
+2026-10-29 18:29:20.451 UTC [3749573] LOG:  checkpoint complete: wrote 5 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.003 s, sync=0.003 s, total=0.014 s; sync files=5, longest=0.002 s, average=0.001 s; distance=2 kB, estimate=5504 kB; lsn=0/1B964E0, redo lsn=0/1B964E0
+2026-10-29 18:29:20.468 UTC [3749572] LOG:  database system is shut down

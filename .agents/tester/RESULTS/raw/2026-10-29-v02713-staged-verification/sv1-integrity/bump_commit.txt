@@ -1,0 +1,6 @@
+b1183a637 chore(release): bump version to 0.27.13
+ daemon/__init__.py | 2 +-
+ pyproject.toml     | 2 +-
+ tests/test_api.py  | 2 +-
+ uv.lock            | 2 +-
+ 4 files changed, 4 insertions(+), 4 deletions(-)

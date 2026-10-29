@@ -1,0 +1,9 @@
+{
+  "git_head": "b1183a637649f94c23b94dfc745df44381dc54ab",
+  "git_head_short": "b1183a637649",
+  "git_dirty": false,
+  "build_at": "2026-10-29T17:59:31Z",
+  "build_tool": "pyinstaller:ensemble.spec",
+  "artifact_sha256": "b935096359dc929b3557fb38e5257aa2693b36b5c53b1c3e1cd72ca58878423a",
+  "artifact_path": "dist/ensemble-prod"
+}

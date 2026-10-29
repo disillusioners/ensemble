@@ -1,0 +1,17 @@
+                                                   List of databases
+    Name    |   Owner    | Encoding | Locale Provider | Collate |  Ctype  | ICU Locale | ICU Rules | Access privileges 
+------------+------------+----------+-----------------+---------+---------+------------+-----------+-------------------
+ dbpool_sv4 | dbpool_sv4 | UTF8     | libc            | C.UTF-8 | C.UTF-8 |            |           | 
+ postgres   | nea        | UTF8     | libc            | C.UTF-8 | C.UTF-8 |            |           | 
+ template0  | nea        | UTF8     | libc            | C.UTF-8 | C.UTF-8 |            |           | =c/nea           +
+            |            |          |                 |         |         |            |           | nea=CTc/nea
+ template1  | nea        | UTF8     | libc            | C.UTF-8 | C.UTF-8 |            |           | =c/nea           +
+            |            |          |                 |         |         |            |           | nea=CTc/nea
+(4 rows)
+
+                              List of roles
+ Role name  |                         Attributes                         
+------------+------------------------------------------------------------
+ dbpool_sv4 | Create DB
+ nea        | Superuser, Create role, Create DB, Replication, Bypass RLS
+

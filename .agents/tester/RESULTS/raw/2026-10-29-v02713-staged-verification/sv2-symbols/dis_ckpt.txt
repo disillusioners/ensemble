@@ -1,0 +1,368 @@
+===== daemon.persistence::.create_postgres_checkpointer (co_filename=daemon/persistence.py) =====
+ 175            RETURN_GENERATOR
+                POP_TOP
+        L1:     RESUME                   0
+
+ 222    L2:     NOP
+
+ 223    L3:     LOAD_SMALL_INT           0
+                LOAD_CONST               1 (None)
+                IMPORT_NAME              0 (asyncpg)
+                STORE_FAST               1 (asyncpg)
+
+ 224            LOAD_SMALL_INT           0
+                LOAD_CONST               2 (('AsyncPostgresSaver',))
+                IMPORT_NAME              1 (langgraph.checkpoint.postgres.aio)
+                IMPORT_FROM              2 (AsyncPostgresSaver)
+                STORE_FAST               2 (AsyncPostgresSaver)
+                POP_TOP
+
+ 225            LOAD_SMALL_INT           0
+                LOAD_CONST               3 (('dict_row',))
+                IMPORT_NAME              3 (psycopg.rows)
+                IMPORT_FROM              4 (dict_row)
+                STORE_FAST               3 (dict_row)
+                POP_TOP
+
+ 226            LOAD_SMALL_INT           0
+                LOAD_CONST               1 (None)
+                IMPORT_NAME              5 (psycopg)
+                STORE_FAST               4 (psycopg)
+
+ 227            LOAD_SMALL_INT           0
+                LOAD_CONST               4 (('AsyncConnectionPool',))
+                IMPORT_NAME              6 (psycopg_pool)
+                IMPORT_FROM              7 (AsyncConnectionPool)
+                STORE_FAST               5 (AsyncConnectionPool)
+                POP_TOP
+
+ 234    L4:     LOAD_GLOBAL             19 (_build_pg_connection_string + NULL)
+                LOAD_FAST                0 (config)
+                CALL                     1
+                STORE_FAST               7 (conn_string)
+
+ 235            LOAD_GLOBAL             20 (logger)
+                LOAD_ATTR               23 (info + NULL|self)
+
+ 236            LOAD_CONST               6 ('Creating PostgreSQL checkpointer for ')
+                LOAD_FAST                0 (config)
+                LOAD_ATTR               24 (postgres)
+                LOAD_ATTR               26 (host)
+                FORMAT_SIMPLE
+                LOAD_CONST               7 (':')
+
+ 237            LOAD_FAST                0 (config)
+                LOAD_ATTR               24 (postgres)
+                LOAD_ATTR               28 (port)
+                FORMAT_SIMPLE
+                LOAD_CONST               8 ('/')
+                LOAD_FAST                0 (config)
+                LOAD_ATTR               24 (postgres)
+                LOAD_ATTR               30 (db)
+                FORMAT_SIMPLE
+
+ 236            BUILD_STRING             6
+
+ 235            CALL                     1
+                POP_TOP
+
+ 246            LOAD_GLOBAL             33 (getattr + NULL)
+                LOAD_FAST                0 (config)
+                LOAD_CONST               9 ('limits')
+                LOAD_CONST               1 (None)
+                CALL                     3
+                STORE_FAST               8 (limits_cfg)
+
+ 247            LOAD_GLOBAL             35 (int + NULL)
+
+ 248            LOAD_GLOBAL             33 (getattr + NULL)
+
+ 249            LOAD_FAST                8 (limits_cfg)
+
+ 250            LOAD_CONST              10 ('checkpoint_pool_max_size')
+
+ 251            LOAD_GLOBAL             36 (CHECKPOINT_POOL_MAX_SIZE_DEFAULT)
+
+ 248            CALL                     3
+
+ 247            CALL                     1
+                STORE_FAST               9 (checkpoint_pool_max_size)
+
+ 254            LOAD_GLOBAL             39 (float + NULL)
+
+ 255            LOAD_GLOBAL             33 (getattr + NULL)
+
+ 256            LOAD_FAST                8 (limits_cfg)
+
+ 257            LOAD_CONST              11 ('checkpoint_pool_timeout_s')
+
+ 258            LOAD_GLOBAL             40 (CHECKPOINT_POOL_TIMEOUT_S_DEFAULT)
+
+ 255            CALL                     3
+
+ 254            CALL                     1
+                STORE_FAST              10 (checkpoint_pool_timeout_s)
+
+ 261            LOAD_GLOBAL             20 (logger)
+                LOAD_ATTR               23 (info + NULL|self)
+
+ 262            LOAD_CONST              12 ('Checkpoint pool sizing: max_size=%s timeout_s=%s (limits.checkpoint_pool_max_size / limits.checkpoint_pool_timeout_s)')
+
+ 264            LOAD_FAST                9 (checkpoint_pool_max_size)
+
+ 265            LOAD_FAST               10 (checkpoint_pool_timeout_s)
+
+ 261            CALL                     3
+                POP_TOP
+
+ 272            LOAD_CONST               1 (None)
+                STORE_FAST              11 (saver_pool)
+
+ 273    L5:     NOP
+
+ 334    L6:     LOAD_FAST                5 (AsyncConnectionPool)
+                PUSH_NULL
+
+ 335            LOAD_FAST                7 (conn_string)
+
+ 336            LOAD_CONST              13 (False)
+
+ 337            LOAD_SMALL_INT           1
+
+ 338            LOAD_FAST                9 (checkpoint_pool_max_size)
+
+ 339            LOAD_FAST               10 (checkpoint_pool_timeout_s)
+
+ 340            LOAD_FAST                5 (AsyncConnectionPool)
+                LOAD_ATTR               42 (check_connection)
+
+ 341            LOAD_CONST              14 (3600)
+
+ 342            LOAD_CONST              15 (600)
+
+ 343            LOAD_CONST              16 (300)
+
+ 345            LOAD_CONST              17 ('autocommit')
+                LOAD_CONST              18 (True)
+
+ 346            LOAD_CONST              19 ('prepare_threshold')
+                LOAD_SMALL_INT           0
+
+ 347            LOAD_CONST              20 ('row_factory')
+                LOAD_FAST                3 (dict_row)
+
+ 344            BUILD_MAP                3
+
+ 334            LOAD_CONST              21 (('conninfo', 'open', 'min_size', 'max_size', 'timeout', 'check', 'max_lifetime', 'max_idle', 'reconnect_timeout', 'kwargs'))
+                CALL_KW                 10
+                STORE_FAST              11 (saver_pool)
+
+ 350            LOAD_FAST               11 (saver_pool)
+                LOAD_ATTR               45 (open + NULL|self)
+                CALL                     0
+                GET_AWAITABLE            0
+                LOAD_CONST               1 (None)
+        L7:     SEND                     3 (to L10)
+        L8:     YIELD_VALUE              1
+        L9:     RESUME                   3
+                JUMP_BACKWARD_NO_INTERRUPT 5 (to L7)
+       L10:     END_SEND
+                POP_TOP
+
+ 356            LOAD_FAST                2 (AsyncPostgresSaver)
+                PUSH_NULL
+                LOAD_FAST               11 (saver_pool)
+                LOAD_CONST              22 (('conn',))
+                CALL_KW                  1
+                STORE_FAST              12 (saver)
+
+ 357            LOAD_FAST               12 (saver)
+                LOAD_ATTR               47 (setup + NULL|self)
+                CALL                     0
+                GET_AWAITABLE            0
+                LOAD_CONST               1 (None)
+       L11:     SEND                     3 (to L14)
+       L12:     YIELD_VALUE              1
+       L13:     RESUME                   3
+                JUMP_BACKWARD_NO_INTERRUPT 5 (to L11)
+       L14:     END_SEND
+                POP_TOP
+
+ 390            LOAD_GLOBAL             19 (_build_pg_connection_string + NULL)
+                LOAD_FAST                0 (config)
+                CALL                     1
+                STORE_FAST              13 (adapter_pool_dsn)
+
+ 391            LOAD_FAST                1 (asyncpg)
+                LOAD_ATTR               49 (create_pool + NULL|self)
+
+ 392            LOAD_FAST               13 (adapter_pool_dsn)
+
+ 393            LOAD_SMALL_INT           1
+
+ 394            LOAD_FAST                9 (checkpoint_pool_max_size)
+
+ 396            LOAD_CONST              23 ('application_name')
+                LOAD_GLOBAL             50 (CHECKPOINT_ADAPTER_APPLICATION_NAME)
+
+ 395            BUILD_MAP                1
+
+ 391            LOAD_CONST              24 (('min_size', 'max_size', 'server_settings'))
+                CALL_KW                  4
+                GET_AWAITABLE            0
+                LOAD_CONST               1 (None)
+       L15:     SEND                     3 (to L18)
+       L16:     YIELD_VALUE              1
+       L17:     RESUME                   3
+                JUMP_BACKWARD_NO_INTERRUPT 5 (to L15)
+       L18:     END_SEND
+                STORE_FAST              14 (pool)
+
+ 414   L19:     LOAD_SMALL_INT           0
+                LOAD_CONST              25 (('PostgresCheckpointerAdapter',))
+                IMPORT_NAME             28 (daemon.checkpoint_adapter)
+                IMPORT_FROM             29 (PostgresCheckpointerAdapter)
+                STORE_FAST              15 (PostgresCheckpointerAdapter)
+                POP_TOP
+
+ 416            LOAD_FAST               15 (PostgresCheckpointerAdapter)
+                PUSH_NULL
+                LOAD_FAST_LOAD_FAST    206 (saver, pool)
+                CALL                     2
+                STORE_FAST              16 (adapter)
+
+ 417            LOAD_GLOBAL             20 (logger)
+                LOAD_ATTR               23 (info + NULL|self)
+
+ 418            LOAD_CONST              26 ('PostgreSQL checkpointer adapter ready (saver=AsyncPostgresSaver(pool=AsyncConnectionPool), adapter_pool=asyncpg.Pool)')
+
+ 417            CALL                     1
+                POP_TOP
+
+ 422            LOAD_FAST               16 (adapter)
+                RETURN_VALUE
+
+  --   L20:     PUSH_EXC_INFO
+
+ 228            LOAD_GLOBAL             16 (ImportError)
+                CHECK_EXC_MATCH
+                POP_JUMP_IF_FALSE       18 (to L23)
+                NOT_TAKEN
+                STORE_FAST               6 (e)
+
+ 229   L21:     LOAD_GLOBAL             17 (ImportError + NULL)
+
+ 230            LOAD_CONST               5 ('PostgreSQL checkpoint support requires optional dependencies. Install postgres support: pip install ensemble[postgres]')
+
+ 229            CALL                     1
+
+ 232            LOAD_FAST                6 (e)
+
+ 229            RAISE_VARARGS            2
+
+  --   L22:     LOAD_CONST               1 (None)
+                STORE_FAST               6 (e)
+                DELETE_FAST              6 (e)
+                RERAISE                  1
+
+ 228   L23:     RERAISE                  0
+
+  --   L24:     COPY                     3
+                POP_EXCEPT
+                RERAISE                  1
+
+ 350   L25:     CLEANUP_THROW
+       L26:     JUMP_BACKWARD_NO_INTERRUPT 151 (to L10)
+
+ 357   L27:     CLEANUP_THROW
+       L28:     JUMP_BACKWARD_NO_INTERRUPT 120 (to L14)
+
+ 391   L29:     CLEANUP_THROW
+       L30:     JUMP_BACKWARD_NO_INTERRUPT 76 (to L18)
+
+  --   L31:     PUSH_EXC_INFO
+
+ 399            LOAD_GLOBAL             52 (Exception)
+                CHECK_EXC_MATCH
+                POP_JUMP_IF_FALSE       51 (to L45)
+                NOT_TAKEN
+                POP_TOP
+
+ 404            LOAD_FAST               11 (saver_pool)
+                POP_JUMP_IF_NONE        45 (to L44)
+                NOT_TAKEN
+
+ 405   L32:     NOP
+
+ 406   L33:     LOAD_FAST               11 (saver_pool)
+                LOAD_ATTR               55 (close + NULL|self)
+                CALL                     0
+                GET_AWAITABLE            0
+                LOAD_CONST               1 (None)
+       L34:     SEND                     4 (to L38)
+       L35:     YIELD_VALUE              1
+       L36:     RESUME                   3
+                JUMP_BACKWARD_NO_INTERRUPT 5 (to L34)
+       L37:     CLEANUP_THROW
+       L38:     END_SEND
+                POP_TOP
+
+ 409   L39:     RAISE_VARARGS            0
+
+  --   L40:     PUSH_EXC_INFO
+
+ 407            LOAD_GLOBAL             52 (Exception)
+                CHECK_EXC_MATCH
+                POP_JUMP_IF_FALSE        4 (to L42)
+                NOT_TAKEN
+                POP_TOP
+
+ 408   L41:     POP_EXCEPT
+
+ 409            RAISE_VARARGS            0
+
+ 407   L42:     RERAISE                  0
+
+  --   L43:     COPY                     3
+                POP_EXCEPT
+                RERAISE                  1
+
+ 409   L44:     RAISE_VARARGS            0
+
+ 399   L45:     RERAISE                  0
+
+  --   L46:     COPY                     3
+                POP_EXCEPT
+                RERAISE                  1
+       L47:     CALL_INTRINSIC_1         3 (INTRINSIC_STOPITERATION_ERROR)
+                RERAISE                  1
+ExceptionTable:
+  L1 to L2 -> L47 [0] lasti
+  L3 to L4 -> L20 [0]
+  L4 to L5 -> L47 [0] lasti
+  L6 to L8 -> L31 [0]
+  L8 to L9 -> L25 [2]
+  L9 to L12 -> L31 [0]
+  L12 to L13 -> L27 [2]
+  L13 to L16 -> L31 [0]
+  L16 to L17 -> L29 [2]
+  L17 to L19 -> L31 [0]
+  L19 to L20 -> L47 [0] lasti
+  L20 to L21 -> L24 [1] lasti
+  L21 to L22 -> L22 [1] lasti
+  L22 to L24 -> L24 [1] lasti
+  L24 to L25 -> L47 [0] lasti
+  L25 to L26 -> L31 [0]
+  L27 to L28 -> L31 [0]
+  L29 to L30 -> L31 [0]
+  L31 to L32 -> L46 [1] lasti
+  L33 to L35 -> L40 [1]
+  L35 to L36 -> L37 [3]
+  L36 to L39 -> L40 [1]
+  L39 to L40 -> L46 [1] lasti
+  L40 to L41 -> L43 [2] lasti
+  L41 to L42 -> L46 [1] lasti
+  L42 to L43 -> L43 [2] lasti
+  L43 to L46 -> L46 [1] lasti
+  L46 to L47 -> L47 [0] lasti
+

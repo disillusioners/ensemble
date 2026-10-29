@@ -1,0 +1,1336 @@
+===== daemon.manager::.InstanceManager._reconcile_deferred_report (co_filename=daemon/manager.py) =====
+10821            RESUME                   0
+
+10861            LOAD_SMALL_INT           1
+                 LOAD_CONST               1 (('MessageQueue', 'MessageStatus', 'MessageType'))
+                 IMPORT_NAME              0 (repositories.message_queue.models)
+                 IMPORT_FROM              1 (MessageQueue)
+                 STORE_FAST               5 (MessageQueue)
+                 IMPORT_FROM              2 (MessageStatus)
+                 STORE_FAST               6 (MessageStatus)
+                 IMPORT_FROM              3 (MessageType)
+                 STORE_FAST               7 (MessageType)
+                 POP_TOP
+
+10866            LOAD_SMALL_INT           1
+                 LOAD_CONST               2 (('ReportInjection', 'ReportInjectionState'))
+                 IMPORT_NAME              4 (repositories.report_injection.models)
+                 IMPORT_FROM              5 (ReportInjection)
+                 STORE_FAST               8 (ReportInjection)
+                 IMPORT_FROM              6 (ReportInjectionState)
+                 STORE_FAST               9 (ReportInjectionState)
+                 POP_TOP
+
+10870            LOAD_SMALL_INT           1
+                 LOAD_CONST               3 (('Task', 'TaskStatus', 'TaskType'))
+                 IMPORT_NAME              7 (repositories.task.models)
+                 IMPORT_FROM              8 (Task)
+                 STORE_FAST              10 (Task)
+                 IMPORT_FROM              9 (TaskStatus)
+                 STORE_FAST              11 (TaskStatus)
+                 IMPORT_FROM             10 (TaskType)
+                 STORE_FAST              12 (TaskType)
+                 POP_TOP
+
+10885            LOAD_FAST_BORROW         0 (self)
+                 LOAD_ATTR               22 (_write_guard)
+                 COPY                     1
+                 LOAD_SPECIAL             1 (__exit__)
+                 SWAP                     2
+                 SWAP                     3
+                 LOAD_SPECIAL             0 (__enter__)
+                 CALL                     0
+         L1:     POP_TOP
+
+10886            LOAD_FAST_BORROW         0 (self)
+                 LOAD_ATTR               25 (_session_scope + NULL|self)
+                 CALL                     0
+                 COPY                     1
+                 LOAD_SPECIAL             1 (__exit__)
+                 SWAP                     2
+                 SWAP                     3
+                 LOAD_SPECIAL             0 (__enter__)
+                 CALL                     0
+         L2:     STORE_FAST              13 (session)
+
+10888            LOAD_FAST_BORROW        13 (session)
+                 LOAD_ATTR               27 (get + NULL|self)
+                 LOAD_FAST_BORROW_LOAD_FAST_BORROW 131 (ReportInjection, injection_id)
+                 CALL                     2
+                 STORE_FAST              14 (inj)
+
+10889            LOAD_FAST_BORROW        14 (inj)
+                 POP_JUMP_IF_NOT_NONE    55 (to L5)
+                 NOT_TAKEN
+
+10890            LOAD_GLOBAL             28 (logger)
+                 LOAD_ATTR               31 (info + NULL|self)
+
+10891            LOAD_CONST               5 ('[')
+                 LOAD_FAST_BORROW         4 (source)
+                 FORMAT_SIMPLE
+                 LOAD_CONST               6 ('] reconcile: injection row ')
+
+10892            LOAD_FAST_BORROW         3 (injection_id)
+                 LOAD_CONST               7 (slice(None, 8, None))
+                 BINARY_OP               26 ([])
+                 FORMAT_SIMPLE
+                 LOAD_CONST               8 ('... gone (concurrent delete?)')
+
+10891            BUILD_STRING             5
+
+10890            CALL                     1
+                 POP_TOP
+
+10894            NOP
+
+10886    L3:     LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+
+10885    L4:     LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+                 LOAD_CONST               4 (None)
+                 RETURN_VALUE
+
+10900    L5:     LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               32 (state)
+
+10901            LOAD_FAST_BORROW         9 (ReportInjectionState)
+                 LOAD_ATTR               34 (INJECTED)
+                 LOAD_ATTR               36 (value)
+
+10902            LOAD_FAST_BORROW         9 (ReportInjectionState)
+                 LOAD_ATTR               38 (TASK_DELIVERED)
+                 LOAD_ATTR               36 (value)
+
+10900            BUILD_TUPLE              2
+                 CONTAINS_OP              0 (in)
+                 POP_JUMP_IF_FALSE       68 (to L8)
+                 NOT_TAKEN
+
+10904            LOAD_GLOBAL             28 (logger)
+                 LOAD_ATTR               31 (info + NULL|self)
+
+10905            LOAD_CONST               5 ('[')
+                 LOAD_FAST_BORROW         4 (source)
+                 FORMAT_SIMPLE
+                 LOAD_CONST               9 ('] reconcile: injection ')
+
+10906            LOAD_FAST_BORROW         3 (injection_id)
+                 LOAD_CONST               7 (slice(None, 8, None))
+                 BINARY_OP               26 ([])
+                 FORMAT_SIMPLE
+                 LOAD_CONST              10 ('... already terminal (')
+
+10907            LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               32 (state)
+                 FORMAT_SIMPLE
+                 LOAD_CONST              11 ('); skipping')
+
+10905            BUILD_STRING             7
+
+10904            CALL                     1
+                 POP_TOP
+
+10909            NOP
+
+10886    L6:     LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+
+10885    L7:     LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+                 LOAD_CONST               4 (None)
+                 RETURN_VALUE
+
+10911    L8:     LOAD_SMALL_INT           1
+                 LOAD_CONST              12 (('Instance',))
+                 IMPORT_NAME             20 (repositories.instance.models)
+                 IMPORT_FROM             21 (Instance)
+                 STORE_FAST              15 (Instance)
+                 POP_TOP
+
+10912            LOAD_FAST_BORROW        13 (session)
+                 LOAD_ATTR               27 (get + NULL|self)
+                 LOAD_FAST_BORROW_LOAD_FAST_BORROW 241 (Instance, child_instance_id)
+                 CALL                     2
+                 STORE_FAST              16 (child_row)
+
+10913            LOAD_FAST_BORROW        16 (child_row)
+                 LOAD_CONST               4 (None)
+                 IS_OP                    0 (is)
+                 STORE_FAST              17 (child_row_missing)
+
+10915            LOAD_FAST_BORROW        17 (child_row_missing)
+                 TO_BOOL
+                 POP_JUMP_IF_FALSE        3 (to L9)
+                 NOT_TAKEN
+                 LOAD_CONST               4 (None)
+                 JUMP_FORWARD            11 (to L10)
+         L9:     LOAD_FAST_BORROW        16 (child_row)
+                 LOAD_ATTR               44 (agent_id)
+
+10914   L10:     STORE_FAST              18 (child_agent_id)
+
+10922            LOAD_FAST_BORROW        17 (child_row_missing)
+                 TO_BOOL
+                 POP_JUMP_IF_FALSE        3 (to L13)
+        L11:     NOT_TAKEN
+        L12:     LOAD_CONST               4 (None)
+                 JUMP_FORWARD            11 (to L16)
+        L13:     LOAD_FAST               18 (child_agent_id)
+                 COPY                     1
+                 TO_BOOL
+                 POP_JUMP_IF_TRUE         3 (to L16)
+        L14:     NOT_TAKEN
+        L15:     POP_TOP
+                 LOAD_CONST              13 ('agent')
+
+10921   L16:     STORE_FAST              19 (fetch_agent_id)
+
+10930            LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               46 (report_message_id)
+                 LOAD_CONST               4 (None)
+                 IS_OP                    0 (is)
+                 STORE_FAST              20 (needs_content_fetch)
+
+10932            LOAD_FAST_BORROW        20 (needs_content_fetch)
+                 TO_BOOL
+                 POP_JUMP_IF_FALSE        3 (to L19)
+        L17:     NOT_TAKEN
+        L18:     LOAD_CONST               4 (None)
+                 JUMP_FORWARD            11 (to L20)
+        L19:     LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               46 (report_message_id)
+
+10931   L20:     STORE_FAST              21 (report_message_id_pre)
+
+10934            LOAD_CONST              14 (False)
+                 STORE_FAST              22 (carrier_check_needed)
+
+10935            LOAD_FAST_BORROW        21 (report_message_id_pre)
+                 POP_JUMP_IF_NONE       153 (to L24)
+                 NOT_TAKEN
+
+10936            LOAD_FAST_BORROW        13 (session)
+                 LOAD_ATTR               49 (exec + NULL|self)
+
+10937            LOAD_GLOBAL             51 (select + NULL)
+                 LOAD_FAST_BORROW        10 (Task)
+                 CALL                     1
+
+10938            LOAD_ATTR               53 (where + NULL|self)
+                 LOAD_FAST_BORROW        10 (Task)
+                 LOAD_ATTR               54 (message_id)
+                 LOAD_FAST_BORROW        21 (report_message_id_pre)
+                 COMPARE_OP              72 (==)
+                 CALL                     1
+
+10936            CALL                     1
+
+10939            LOAD_ATTR               57 (first + NULL|self)
+                 CALL                     0
+
+10936            STORE_FAST              23 (_task_pre)
+
+10940            LOAD_FAST_BORROW        13 (session)
+                 LOAD_ATTR               49 (exec + NULL|self)
+
+10941            LOAD_GLOBAL             51 (select + NULL)
+                 LOAD_FAST_BORROW         5 (MessageQueue)
+                 CALL                     1
+
+10942            LOAD_ATTR               53 (where + NULL|self)
+                 LOAD_FAST_BORROW         5 (MessageQueue)
+                 LOAD_ATTR               54 (message_id)
+                 LOAD_FAST_BORROW        21 (report_message_id_pre)
+                 COMPARE_OP              72 (==)
+                 CALL                     1
+
+10940            CALL                     1
+
+10943            LOAD_ATTR               57 (first + NULL|self)
+                 CALL                     0
+
+10940            STORE_FAST              24 (_msg_pre)
+
+10945            LOAD_FAST_BORROW        23 (_task_pre)
+                 LOAD_CONST               4 (None)
+                 IS_OP                    1 (is not)
+                 COPY                     1
+                 TO_BOOL
+                 POP_JUMP_IF_FALSE        5 (to L23)
+        L21:     NOT_TAKEN
+        L22:     POP_TOP
+                 LOAD_FAST_BORROW        24 (_msg_pre)
+                 LOAD_CONST               4 (None)
+                 IS_OP                    1 (is not)
+
+10944   L23:     STORE_FAST              22 (carrier_check_needed)
+
+10886   L24:     LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+
+10953   L25:     LOAD_GLOBAL             59 (getattr + NULL)
+                 LOAD_FAST_BORROW         0 (self)
+                 LOAD_CONST              15 ('_f8_p0_p2_seam_hook')
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 STORE_FAST              25 (seam_hook)
+
+10954            LOAD_FAST_BORROW        25 (seam_hook)
+                 POP_JUMP_IF_NONE         9 (to L26)
+                 NOT_TAKEN
+
+10955            LOAD_FAST_BORROW        25 (seam_hook)
+                 PUSH_NULL
+                 LOAD_FAST_BORROW         3 (injection_id)
+                 CALL                     1
+                 POP_TOP
+
+10964   L26:     LOAD_CONST               4 (None)
+                 STORE_FAST              26 (live_carrier_exists)
+
+10965            LOAD_FAST_CHECK         22 (carrier_check_needed)
+                 TO_BOOL
+                 POP_JUMP_IF_FALSE       19 (to L29)
+        L27:     NOT_TAKEN
+
+10966   L28:     LOAD_FAST_BORROW         0 (self)
+                 LOAD_ATTR               61 (_has_live_process_report_carrier + NULL|self)
+
+10967            LOAD_FAST_CHECK         21 (report_message_id_pre)
+
+10966            LOAD_CONST              16 (('message_id',))
+                 CALL_KW                  1
+                 STORE_FAST              26 (live_carrier_exists)
+
+10976   L29:     LOAD_CONST              17 ('[No response content]')
+                 STORE_FAST              27 (content)
+
+10977            LOAD_FAST_CHECK         20 (needs_content_fetch)
+                 TO_BOOL
+                 POP_JUMP_IF_FALSE       20 (to L32)
+        L30:     NOT_TAKEN
+
+10978   L31:     LOAD_FAST_BORROW         0 (self)
+                 LOAD_ATTR               63 (_fetch_subshape_a_content_sync + NULL|self)
+
+10979            LOAD_FAST_BORROW         1 (child_instance_id)
+
+10980            LOAD_FAST_CHECK         19 (fetch_agent_id)
+
+10978            LOAD_CONST              18 (('child_instance_id', 'child_agent_id'))
+                 CALL_KW                  2
+                 STORE_FAST              27 (content)
+
+10983   L32:     LOAD_FAST_BORROW         0 (self)
+                 LOAD_ATTR               25 (_session_scope + NULL|self)
+                 CALL                     0
+                 COPY                     1
+                 LOAD_SPECIAL             1 (__exit__)
+                 SWAP                     2
+                 SWAP                     3
+                 LOAD_SPECIAL             0 (__enter__)
+                 CALL                     0
+        L33:     STORE_FAST              13 (session)
+
+10987            LOAD_FAST_BORROW        13 (session)
+                 LOAD_ATTR               27 (get + NULL|self)
+                 LOAD_FAST_BORROW_LOAD_FAST_BORROW 131 (ReportInjection, injection_id)
+                 CALL                     2
+                 STORE_FAST              14 (inj)
+
+10988            LOAD_FAST_BORROW        14 (inj)
+                 POP_JUMP_IF_NOT_NONE    55 (to L36)
+                 NOT_TAKEN
+
+10989            LOAD_GLOBAL             28 (logger)
+                 LOAD_ATTR               31 (info + NULL|self)
+
+10990            LOAD_CONST               5 ('[')
+                 LOAD_FAST_BORROW         4 (source)
+                 FORMAT_SIMPLE
+                 LOAD_CONST               6 ('] reconcile: injection row ')
+
+10991            LOAD_FAST_BORROW         3 (injection_id)
+                 LOAD_CONST               7 (slice(None, 8, None))
+                 BINARY_OP               26 ([])
+                 FORMAT_SIMPLE
+                 LOAD_CONST              19 ('... gone at P2 (concurrent delete?); skipping')
+
+10990            BUILD_STRING             5
+
+10989            CALL                     1
+                 POP_TOP
+
+10994            NOP
+
+10983   L34:     LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+
+10885   L35:     LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+                 LOAD_CONST               4 (None)
+                 RETURN_VALUE
+
+10998   L36:     LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               32 (state)
+
+10999            LOAD_FAST_BORROW         9 (ReportInjectionState)
+                 LOAD_ATTR               34 (INJECTED)
+                 LOAD_ATTR               36 (value)
+
+11000            LOAD_FAST_BORROW         9 (ReportInjectionState)
+                 LOAD_ATTR               38 (TASK_DELIVERED)
+                 LOAD_ATTR               36 (value)
+
+10998            BUILD_TUPLE              2
+                 CONTAINS_OP              0 (in)
+                 POP_JUMP_IF_FALSE       68 (to L39)
+                 NOT_TAKEN
+
+11002            LOAD_GLOBAL             28 (logger)
+                 LOAD_ATTR               31 (info + NULL|self)
+
+11003            LOAD_CONST               5 ('[')
+                 LOAD_FAST_BORROW         4 (source)
+                 FORMAT_SIMPLE
+                 LOAD_CONST               9 ('] reconcile: injection ')
+
+11004            LOAD_FAST_BORROW         3 (injection_id)
+                 LOAD_CONST               7 (slice(None, 8, None))
+                 BINARY_OP               26 ([])
+                 FORMAT_SIMPLE
+                 LOAD_CONST              20 ('... escalated to terminal (')
+
+11005            LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               32 (state)
+                 FORMAT_SIMPLE
+                 LOAD_CONST              21 (') between P0 and P2; skipping')
+
+11003            BUILD_STRING             7
+
+11002            CALL                     1
+                 POP_TOP
+
+11007            NOP
+
+10983   L37:     LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+
+10885   L38:     LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+                 LOAD_CONST               4 (None)
+                 RETURN_VALUE
+
+11017   L39:     LOAD_SMALL_INT           1
+                 LOAD_CONST              22 (('InstanceStatus',))
+                 IMPORT_NAME             20 (repositories.instance.models)
+                 IMPORT_FROM             32 (InstanceStatus)
+                 STORE_FAST              28 (InstanceStatus)
+                 POP_TOP
+
+11018            LOAD_FAST_BORROW        13 (session)
+                 LOAD_ATTR               27 (get + NULL|self)
+                 LOAD_FAST_CHECK         15 (Instance)
+                 LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               66 (parent_instance_id)
+                 CALL                     2
+                 STORE_FAST              29 (parent_row)
+
+11020            LOAD_FAST_BORROW        29 (parent_row)
+                 LOAD_CONST               4 (None)
+                 IS_OP                    0 (is)
+                 COPY                     1
+                 TO_BOOL
+                 POP_JUMP_IF_TRUE        36 (to L42)
+        L40:     NOT_TAKEN
+        L41:     POP_TOP
+
+11021            LOAD_FAST_BORROW        29 (parent_row)
+                 LOAD_ATTR               68 (status)
+                 LOAD_FAST_BORROW        28 (InstanceStatus)
+                 LOAD_ATTR               70 (TERMINATED)
+                 LOAD_ATTR               36 (value)
+                 COMPARE_OP              72 (==)
+
+11019   L42:     STORE_FAST              30 (db_dead_parent)
+
+11027            LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               46 (report_message_id)
+                 POP_JUMP_IF_NOT_NONE    45 (to L45)
+                 NOT_TAKEN
+
+11028            LOAD_FAST_BORROW         0 (self)
+                 LOAD_ATTR               73 (_create_subshape_a_artifacts + NULL|self)
+
+11029            LOAD_FAST_BORROW        13 (session)
+
+11030            LOAD_FAST_BORROW        14 (inj)
+
+11031            LOAD_FAST_BORROW         1 (child_instance_id)
+
+11032            LOAD_FAST_BORROW         2 (child_message_id)
+
+11033            LOAD_FAST_BORROW         3 (injection_id)
+
+11034            LOAD_FAST_BORROW         4 (source)
+
+11035            LOAD_FAST_BORROW        27 (content)
+
+11028            LOAD_CONST              23 (('session', 'inj', 'child_instance_id', 'child_message_id', 'injection_id', 'source', 'content'))
+                 CALL_KW                  7
+
+10983   L43:     SWAP                     3
+                 SWAP                     2
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+
+10885   L44:     SWAP                     3
+                 SWAP                     2
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+                 RETURN_VALUE
+
+11039   L45:     LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               46 (report_message_id)
+                 STORE_FAST              31 (report_message_id)
+
+11041            LOAD_FAST_BORROW        13 (session)
+                 LOAD_ATTR               49 (exec + NULL|self)
+
+11042            LOAD_GLOBAL             51 (select + NULL)
+                 LOAD_FAST_BORROW        10 (Task)
+                 CALL                     1
+
+11043            LOAD_ATTR               53 (where + NULL|self)
+                 LOAD_FAST_BORROW        10 (Task)
+                 LOAD_ATTR               54 (message_id)
+                 LOAD_FAST_BORROW        31 (report_message_id)
+                 COMPARE_OP              72 (==)
+                 CALL                     1
+
+11041            CALL                     1
+
+11044            LOAD_ATTR               57 (first + NULL|self)
+                 CALL                     0
+
+11041            STORE_FAST              32 (existing_task)
+
+11045            LOAD_FAST_BORROW        13 (session)
+                 LOAD_ATTR               49 (exec + NULL|self)
+
+11046            LOAD_GLOBAL             51 (select + NULL)
+                 LOAD_FAST_BORROW         5 (MessageQueue)
+                 CALL                     1
+
+11047            LOAD_ATTR               53 (where + NULL|self)
+                 LOAD_FAST_BORROW         5 (MessageQueue)
+                 LOAD_ATTR               54 (message_id)
+                 LOAD_FAST_BORROW        31 (report_message_id)
+                 COMPARE_OP              72 (==)
+                 CALL                     1
+
+11045            CALL                     1
+
+11048            LOAD_ATTR               57 (first + NULL|self)
+                 CALL                     0
+
+11045            STORE_FAST              33 (existing_message)
+
+11050            LOAD_FAST_BORROW        33 (existing_message)
+                 EXTENDED_ARG             2
+                 POP_JUMP_IF_NOT_NONE   588 (to L62)
+                 NOT_TAKEN
+
+11054            LOAD_FAST_BORROW        30 (db_dead_parent)
+                 TO_BOOL
+                 POP_JUMP_IF_FALSE      236 (to L55)
+        L46:     NOT_TAKEN
+
+11060   L47:     LOAD_FAST               13 (session)
+                 LOAD_ATTR               75 (add + NULL|self)
+
+11061            LOAD_FAST                5 (MessageQueue)
+                 PUSH_NULL
+
+11062            LOAD_FAST               31 (report_message_id)
+
+11063            LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               66 (parent_instance_id)
+
+11064            LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               76 (content)
+                 COPY                     1
+                 TO_BOOL
+                 POP_JUMP_IF_TRUE         3 (to L50)
+        L48:     NOT_TAKEN
+        L49:     POP_TOP
+                 LOAD_CONST              24 ('[Reconstructed report]')
+
+11066   L50:     LOAD_CONST              25 ('internal_report:')
+
+11067            LOAD_FAST_BORROW         1 (child_instance_id)
+                 FORMAT_SIMPLE
+                 LOAD_CONST              26 (':')
+                 LOAD_FAST_BORROW         2 (child_message_id)
+                 FORMAT_SIMPLE
+
+11066            BUILD_STRING             4
+
+11069            LOAD_FAST_BORROW         7 (MessageType)
+                 LOAD_ATTR               78 (COMPLETION_REPORT)
+                 LOAD_ATTR               36 (value)
+
+11070            LOAD_FAST_BORROW         6 (MessageStatus)
+                 LOAD_ATTR               80 (FAILED)
+                 LOAD_ATTR               36 (value)
+
+11071            LOAD_SMALL_INT           0
+
+11072            LOAD_GLOBAL             83 (now_utc_naive + NULL)
+                 CALL                     0
+
+11061            LOAD_CONST              27 (('message_id', 'instance_id', 'content', 'source', 'type', 'status', 'priority', 'enqueued_at'))
+                 CALL_KW                  8
+
+11060            CALL                     1
+                 POP_TOP
+
+11075            LOAD_GLOBAL             28 (logger)
+                 LOAD_ATTR               31 (info + NULL|self)
+
+11076            LOAD_CONST               5 ('[')
+                 LOAD_FAST                4 (source)
+                 FORMAT_SIMPLE
+                 LOAD_CONST              28 ('] reconcile (sub-shape b, message-only): dead-parent skip — recreated message marked FAILED, no PROCESS_REPORT Task created. parent=')
+
+11079            LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               66 (parent_instance_id)
+                 LOAD_CONST               7 (slice(None, 8, None))
+                 BINARY_OP               26 ([])
+                 FORMAT_SIMPLE
+                 LOAD_CONST              29 ('..., parent_status=')
+
+11080            LOAD_FAST_BORROW        29 (parent_row)
+                 TO_BOOL
+                 POP_JUMP_IF_FALSE       13 (to L51)
+                 NOT_TAKEN
+                 LOAD_FAST_BORROW        29 (parent_row)
+                 LOAD_ATTR               68 (status)
+                 JUMP_FORWARD             1 (to L52)
+        L51:     LOAD_CONST              30 ('missing')
+        L52:     FORMAT_SIMPLE
+                 LOAD_CONST              31 (', child=')
+
+11081            LOAD_FAST_BORROW         1 (child_instance_id)
+                 LOAD_CONST               7 (slice(None, 8, None))
+                 BINARY_OP               26 ([])
+                 FORMAT_SIMPLE
+                 LOAD_CONST              32 ('...')
+
+11076            BUILD_STRING             9
+
+11075            CALL                     1
+                 POP_TOP
+
+11083            LOAD_FAST_BORROW        13 (session)
+                 LOAD_ATTR               85 (commit + NULL|self)
+                 CALL                     0
+                 POP_TOP
+
+11085            LOAD_CONST              33 ('shape')
+                 LOAD_CONST              34 ('dead_parent_skip')
+
+11086            LOAD_CONST              35 ('report_message_id')
+                 LOAD_FAST_BORROW        31 (report_message_id)
+
+11084            BUILD_MAP                2
+
+10983   L53:     SWAP                     3
+                 SWAP                     2
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+
+10885   L54:     SWAP                     3
+                 SWAP                     2
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+                 RETURN_VALUE
+
+11088   L55:     LOAD_FAST               13 (session)
+                 LOAD_ATTR               75 (add + NULL|self)
+
+11089            LOAD_FAST                5 (MessageQueue)
+                 PUSH_NULL
+
+11090            LOAD_FAST               31 (report_message_id)
+
+11091            LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               66 (parent_instance_id)
+
+11092            LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               76 (content)
+                 COPY                     1
+                 TO_BOOL
+                 POP_JUMP_IF_TRUE         3 (to L58)
+        L56:     NOT_TAKEN
+        L57:     POP_TOP
+                 LOAD_CONST              24 ('[Reconstructed report]')
+
+11094   L58:     LOAD_CONST              25 ('internal_report:')
+
+11095            LOAD_FAST_BORROW         1 (child_instance_id)
+                 FORMAT_SIMPLE
+                 LOAD_CONST              26 (':')
+                 LOAD_FAST_BORROW         2 (child_message_id)
+                 FORMAT_SIMPLE
+
+11094            BUILD_STRING             4
+
+11097            LOAD_FAST_BORROW         7 (MessageType)
+                 LOAD_ATTR               78 (COMPLETION_REPORT)
+                 LOAD_ATTR               36 (value)
+
+11098            LOAD_FAST_BORROW         6 (MessageStatus)
+                 LOAD_ATTR               86 (READY)
+                 LOAD_ATTR               36 (value)
+
+11099            LOAD_SMALL_INT           0
+
+11100            LOAD_GLOBAL             83 (now_utc_naive + NULL)
+                 CALL                     0
+
+11089            LOAD_CONST              27 (('message_id', 'instance_id', 'content', 'source', 'type', 'status', 'priority', 'enqueued_at'))
+                 CALL_KW                  8
+
+11088            CALL                     1
+                 POP_TOP
+
+11103            LOAD_FAST_BORROW        32 (existing_task)
+                 POP_JUMP_IF_NOT_NONE   113 (to L59)
+                 NOT_TAKEN
+
+11104            LOAD_FAST_BORROW        13 (session)
+                 LOAD_ATTR               75 (add + NULL|self)
+
+11105            LOAD_FAST_BORROW        10 (Task)
+                 PUSH_NULL
+
+11106            LOAD_FAST_BORROW        12 (TaskType)
+                 LOAD_ATTR               88 (PROCESS_REPORT)
+                 LOAD_ATTR               36 (value)
+
+11107            LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               66 (parent_instance_id)
+
+11108            LOAD_FAST_BORROW        31 (report_message_id)
+
+11109            LOAD_FAST_BORROW        11 (TaskStatus)
+                 LOAD_ATTR               90 (PENDING)
+                 LOAD_ATTR               36 (value)
+
+11110            LOAD_GLOBAL             92 (datetime)
+                 LOAD_ATTR               94 (now)
+                 PUSH_NULL
+                 LOAD_GLOBAL             96 (timezone)
+                 LOAD_ATTR               98 (utc)
+                 CALL                     1
+
+11105            LOAD_CONST              36 (('task_type', 'instance_id', 'message_id', 'status', 'created_at'))
+                 CALL_KW                  5
+
+11104            CALL                     1
+                 POP_TOP
+
+11113   L59:     LOAD_GLOBAL             28 (logger)
+                 LOAD_ATTR               31 (info + NULL|self)
+
+11114            LOAD_CONST               5 ('[')
+                 LOAD_FAST_BORROW         4 (source)
+                 FORMAT_SIMPLE
+                 LOAD_CONST              37 ('] reconcile (sub-shape b, message-only): recreated message + task parent=')
+
+11116            LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               66 (parent_instance_id)
+                 LOAD_CONST               7 (slice(None, 8, None))
+                 BINARY_OP               26 ([])
+                 FORMAT_SIMPLE
+                 LOAD_CONST              38 ('..., child=')
+
+11117            LOAD_FAST_BORROW         1 (child_instance_id)
+                 LOAD_CONST               7 (slice(None, 8, None))
+                 BINARY_OP               26 ([])
+                 FORMAT_SIMPLE
+                 LOAD_CONST              39 ('...; notify_work()')
+
+11114            BUILD_STRING             7
+
+11113            CALL                     1
+                 POP_TOP
+
+11124            LOAD_FAST_BORROW        13 (session)
+                 LOAD_ATTR               85 (commit + NULL|self)
+                 CALL                     0
+                 POP_TOP
+
+11134            LOAD_FAST_BORROW         0 (self)
+                 LOAD_ATTR              101 (_notify_all_pools + NULL|self)
+                 CALL                     0
+                 POP_TOP
+
+11136            LOAD_CONST              33 ('shape')
+                 LOAD_CONST              40 ('message_only_recreate')
+
+11137            LOAD_CONST              35 ('report_message_id')
+                 LOAD_FAST_BORROW        31 (report_message_id)
+
+11135            BUILD_MAP                2
+
+10983   L60:     SWAP                     3
+                 SWAP                     2
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+
+10885   L61:     SWAP                     3
+                 SWAP                     2
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+                 RETURN_VALUE
+
+11140   L62:     LOAD_FAST_BORROW        32 (existing_task)
+                 EXTENDED_ARG             1
+                 POP_JUMP_IF_NOT_NONE   444 (to L72)
+                 NOT_TAKEN
+
+11142            LOAD_FAST_BORROW        30 (db_dead_parent)
+                 TO_BOOL
+                 POP_JUMP_IF_FALSE      211 (to L69)
+        L63:     NOT_TAKEN
+
+11151   L64:     LOAD_FAST_BORROW        13 (session)
+                 LOAD_ATTR              103 (execute + NULL|self)
+
+11152            LOAD_GLOBAL            105 (sa_update + NULL)
+                 LOAD_FAST_BORROW         8 (ReportInjection)
+                 CALL                     1
+
+11153            LOAD_ATTR               53 (where + NULL|self)
+                 LOAD_FAST_BORROW         8 (ReportInjection)
+                 LOAD_ATTR              106 (injection_id)
+                 LOAD_FAST_BORROW         3 (injection_id)
+                 COMPARE_OP              72 (==)
+                 CALL                     1
+
+11154            LOAD_ATTR              109 (values + NULL|self)
+
+11155            LOAD_FAST_BORROW         9 (ReportInjectionState)
+                 LOAD_ATTR               80 (FAILED)
+                 LOAD_ATTR               36 (value)
+
+11154            LOAD_CONST              41 (('state',))
+                 CALL_KW                  1
+
+11151            CALL                     1
+                 POP_TOP
+
+11158            LOAD_GLOBAL             28 (logger)
+                 LOAD_ATTR               31 (info + NULL|self)
+
+11159            LOAD_CONST               5 ('[')
+                 LOAD_FAST                4 (source)
+                 FORMAT_SIMPLE
+                 LOAD_CONST              42 ('] reconcile (sub-shape b, task-only): dead-parent skip — message already in DB, no PROCESS_REPORT Task created, injection row marked state=failed. parent=')
+
+11163            LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               66 (parent_instance_id)
+                 LOAD_CONST               7 (slice(None, 8, None))
+                 BINARY_OP               26 ([])
+                 FORMAT_SIMPLE
+                 LOAD_CONST              29 ('..., parent_status=')
+
+11164            LOAD_FAST_BORROW        29 (parent_row)
+                 TO_BOOL
+                 POP_JUMP_IF_FALSE       13 (to L65)
+                 NOT_TAKEN
+                 LOAD_FAST_BORROW        29 (parent_row)
+                 LOAD_ATTR               68 (status)
+                 JUMP_FORWARD             1 (to L66)
+        L65:     LOAD_CONST              30 ('missing')
+        L66:     FORMAT_SIMPLE
+                 LOAD_CONST              31 (', child=')
+
+11165            LOAD_FAST_BORROW         1 (child_instance_id)
+                 LOAD_CONST               7 (slice(None, 8, None))
+                 BINARY_OP               26 ([])
+                 FORMAT_SIMPLE
+                 LOAD_CONST              32 ('...')
+
+11159            BUILD_STRING             9
+
+11158            CALL                     1
+                 POP_TOP
+
+11167            LOAD_FAST_BORROW        13 (session)
+                 LOAD_ATTR               85 (commit + NULL|self)
+                 CALL                     0
+                 POP_TOP
+
+11169            LOAD_CONST              33 ('shape')
+                 LOAD_CONST              34 ('dead_parent_skip')
+
+11170            LOAD_CONST              35 ('report_message_id')
+                 LOAD_FAST_BORROW        31 (report_message_id)
+
+11168            BUILD_MAP                2
+
+10983   L67:     SWAP                     3
+                 SWAP                     2
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+
+10885   L68:     SWAP                     3
+                 SWAP                     2
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+                 RETURN_VALUE
+
+11172   L69:     LOAD_FAST_BORROW        13 (session)
+                 LOAD_ATTR               75 (add + NULL|self)
+
+11173            LOAD_FAST_BORROW        10 (Task)
+                 PUSH_NULL
+
+11174            LOAD_FAST_BORROW        12 (TaskType)
+                 LOAD_ATTR               88 (PROCESS_REPORT)
+                 LOAD_ATTR               36 (value)
+
+11175            LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               66 (parent_instance_id)
+
+11176            LOAD_FAST_BORROW        31 (report_message_id)
+
+11177            LOAD_FAST_BORROW        11 (TaskStatus)
+                 LOAD_ATTR               90 (PENDING)
+                 LOAD_ATTR               36 (value)
+
+11178            LOAD_GLOBAL             92 (datetime)
+                 LOAD_ATTR               94 (now)
+                 PUSH_NULL
+                 LOAD_GLOBAL             96 (timezone)
+                 LOAD_ATTR               98 (utc)
+                 CALL                     1
+
+11173            LOAD_CONST              36 (('task_type', 'instance_id', 'message_id', 'status', 'created_at'))
+                 CALL_KW                  5
+
+11172            CALL                     1
+                 POP_TOP
+
+11181            LOAD_GLOBAL             28 (logger)
+                 LOAD_ATTR               31 (info + NULL|self)
+
+11182            LOAD_CONST               5 ('[')
+                 LOAD_FAST_BORROW         4 (source)
+                 FORMAT_SIMPLE
+                 LOAD_CONST              43 ('] reconcile (sub-shape b, task-only): created task parent=')
+
+11184            LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               66 (parent_instance_id)
+                 LOAD_CONST               7 (slice(None, 8, None))
+                 BINARY_OP               26 ([])
+                 FORMAT_SIMPLE
+                 LOAD_CONST              38 ('..., child=')
+
+11185            LOAD_FAST_BORROW         1 (child_instance_id)
+                 LOAD_CONST               7 (slice(None, 8, None))
+                 BINARY_OP               26 ([])
+                 FORMAT_SIMPLE
+                 LOAD_CONST              39 ('...; notify_work()')
+
+11182            BUILD_STRING             7
+
+11181            CALL                     1
+                 POP_TOP
+
+11189            LOAD_FAST_BORROW        13 (session)
+                 LOAD_ATTR               85 (commit + NULL|self)
+                 CALL                     0
+                 POP_TOP
+
+11197            LOAD_FAST_BORROW         0 (self)
+                 LOAD_ATTR              101 (_notify_all_pools + NULL|self)
+                 CALL                     0
+                 POP_TOP
+
+11199            LOAD_CONST              33 ('shape')
+                 LOAD_CONST              44 ('task_only_create')
+
+11200            LOAD_CONST              35 ('report_message_id')
+                 LOAD_FAST_BORROW        31 (report_message_id)
+
+11198            BUILD_MAP                2
+
+10983   L70:     SWAP                     3
+                 SWAP                     2
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+
+10885   L71:     SWAP                     3
+                 SWAP                     2
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+                 RETURN_VALUE
+
+11238   L72:     LOAD_FAST_BORROW        26 (live_carrier_exists)
+                 LOAD_CONST              14 (False)
+                 IS_OP                    0 (is)
+                 EXTENDED_ARG             1
+                 POP_JUMP_IF_FALSE      293 (to L83)
+                 NOT_TAKEN
+
+11239            LOAD_FAST_BORROW        30 (db_dead_parent)
+                 TO_BOOL
+                 EXTENDED_ARG             1
+                 POP_JUMP_IF_TRUE       284 (to L83)
+        L73:     NOT_TAKEN
+
+11240   L74:     LOAD_FAST_BORROW         0 (self)
+                 LOAD_ATTR              111 (_is_parent_alive + NULL|self)
+                 LOAD_FAST_BORROW        29 (parent_row)
+                 CALL                     1
+                 TO_BOOL
+                 EXTENDED_ARG             1
+                 POP_JUMP_IF_FALSE      260 (to L83)
+        L75:     NOT_TAKEN
+
+11247   L76:     LOAD_SMALL_INT           1
+                 LOAD_CONST               3 (('Task', 'TaskStatus', 'TaskType'))
+                 IMPORT_NAME              7 (repositories.task.models)
+                 IMPORT_FROM              8 (Task)
+                 STORE_FAST              34 (_TaskRevival)
+                 IMPORT_FROM              9 (TaskStatus)
+                 STORE_FAST              35 (_TaskStatusRevival)
+                 IMPORT_FROM             10 (TaskType)
+                 STORE_FAST              36 (_TaskTypeRevival)
+                 POP_TOP
+
+11252            LOAD_FAST_BORROW        34 (_TaskRevival)
+                 PUSH_NULL
+
+11253            LOAD_FAST_BORROW        36 (_TaskTypeRevival)
+                 LOAD_ATTR               88 (PROCESS_REPORT)
+                 LOAD_ATTR               36 (value)
+
+11254            LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               66 (parent_instance_id)
+
+11255            LOAD_FAST_BORROW        31 (report_message_id)
+
+11256            LOAD_FAST_BORROW        35 (_TaskStatusRevival)
+                 LOAD_ATTR               90 (PENDING)
+                 LOAD_ATTR               36 (value)
+
+11257            LOAD_GLOBAL             92 (datetime)
+                 LOAD_ATTR               94 (now)
+                 PUSH_NULL
+                 LOAD_GLOBAL             96 (timezone)
+                 LOAD_ATTR               98 (utc)
+                 CALL                     1
+
+11252            LOAD_CONST              36 (('task_type', 'instance_id', 'message_id', 'status', 'created_at'))
+                 CALL_KW                  5
+                 STORE_FAST              37 (fresh_task)
+
+11259            LOAD_FAST_BORROW        13 (session)
+                 LOAD_ATTR               75 (add + NULL|self)
+                 LOAD_FAST_BORROW        37 (fresh_task)
+                 CALL                     1
+                 POP_TOP
+
+11260            LOAD_GLOBAL             28 (logger)
+                 LOAD_ATTR              113 (warning + NULL|self)
+
+11261            LOAD_CONST               5 ('[')
+                 LOAD_FAST                4 (source)
+                 FORMAT_SIMPLE
+                 LOAD_CONST              45 ('] reconcile (sub-shape c, c_revival): no live carrier for message ')
+
+11263            LOAD_FAST_BORROW        31 (report_message_id)
+                 LOAD_CONST               7 (slice(None, 8, None))
+                 BINARY_OP               26 ([])
+                 FORMAT_SIMPLE
+                 LOAD_CONST              46 ('... on alive parent ')
+
+11264            LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               66 (parent_instance_id)
+                 LOAD_CONST               7 (slice(None, 8, None))
+                 BINARY_OP               26 ([])
+                 FORMAT_SIMPLE
+                 LOAD_CONST              47 ('...; enqueued fresh PROCESS_REPORT task + notify_work(). sub_shape=c_revival, parent_status=')
+
+11268            LOAD_FAST_BORROW        29 (parent_row)
+                 TO_BOOL
+                 POP_JUMP_IF_FALSE       13 (to L79)
+        L77:     NOT_TAKEN
+        L78:     LOAD_FAST_BORROW        29 (parent_row)
+                 LOAD_ATTR               68 (status)
+                 JUMP_FORWARD             1 (to L80)
+        L79:     LOAD_CONST              30 ('missing')
+        L80:     FORMAT_SIMPLE
+
+11261            BUILD_STRING             8
+
+11260            CALL                     1
+                 POP_TOP
+
+11274            LOAD_FAST_BORROW        13 (session)
+                 LOAD_ATTR               85 (commit + NULL|self)
+                 CALL                     0
+                 POP_TOP
+
+11279            LOAD_FAST_BORROW         0 (self)
+                 LOAD_ATTR              101 (_notify_all_pools + NULL|self)
+                 CALL                     0
+                 POP_TOP
+
+11281            LOAD_CONST              33 ('shape')
+                 LOAD_CONST              48 ('c_revival')
+
+11282            LOAD_CONST              35 ('report_message_id')
+                 LOAD_FAST_BORROW        31 (report_message_id)
+
+11280            BUILD_MAP                2
+
+10983   L81:     SWAP                     3
+                 SWAP                     2
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+
+10885   L82:     SWAP                     3
+                 SWAP                     2
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+                 RETURN_VALUE
+
+11285   L83:     LOAD_GLOBAL             28 (logger)
+                 LOAD_ATTR               31 (info + NULL|self)
+
+11286            LOAD_CONST               5 ('[')
+                 LOAD_FAST_BORROW         4 (source)
+                 FORMAT_SIMPLE
+                 LOAD_CONST              49 ('] reconcile (sub-shape c, both-exist): delivery only parent=')
+
+11288            LOAD_FAST_BORROW        14 (inj)
+                 LOAD_ATTR               66 (parent_instance_id)
+                 LOAD_CONST               7 (slice(None, 8, None))
+                 BINARY_OP               26 ([])
+                 FORMAT_SIMPLE
+                 LOAD_CONST              38 ('..., child=')
+
+11289            LOAD_FAST_BORROW         1 (child_instance_id)
+                 LOAD_CONST               7 (slice(None, 8, None))
+                 BINARY_OP               26 ([])
+                 FORMAT_SIMPLE
+                 LOAD_CONST              32 ('...')
+
+11286            BUILD_STRING             7
+
+11285            CALL                     1
+                 POP_TOP
+
+11292            LOAD_CONST              33 ('shape')
+                 LOAD_CONST              50 ('delivery_only')
+
+11293            LOAD_CONST              35 ('report_message_id')
+                 LOAD_FAST_BORROW        31 (report_message_id)
+
+11291            BUILD_MAP                2
+
+10983   L84:     SWAP                     3
+                 SWAP                     2
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+
+10885   L85:     SWAP                     3
+                 SWAP                     2
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+                 RETURN_VALUE
+
+10886   L86:     PUSH_EXC_INFO
+                 WITH_EXCEPT_START
+                 TO_BOOL
+                 POP_JUMP_IF_TRUE         2 (to L87)
+                 NOT_TAKEN
+                 RERAISE                  2
+        L87:     POP_TOP
+        L88:     POP_EXCEPT
+                 POP_TOP
+                 POP_TOP
+                 POP_TOP
+                 EXTENDED_ARG             7
+                 JUMP_BACKWARD_NO_INTERRUPT 2032 (to L25)
+
+   --   L89:     COPY                     3
+                 POP_EXCEPT
+                 RERAISE                  1
+
+10983   L90:     PUSH_EXC_INFO
+                 WITH_EXCEPT_START
+                 TO_BOOL
+                 POP_JUMP_IF_TRUE         2 (to L91)
+                 NOT_TAKEN
+                 RERAISE                  2
+        L91:     POP_TOP
+        L92:     POP_EXCEPT
+                 POP_TOP
+                 POP_TOP
+                 POP_TOP
+                 JUMP_FORWARD             3 (to L94)
+
+   --   L93:     COPY                     3
+                 POP_EXCEPT
+                 RERAISE                  1
+
+10983   L94:     NOP
+
+10885            LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 LOAD_CONST               4 (None)
+                 CALL                     3
+                 POP_TOP
+                 LOAD_CONST               4 (None)
+                 RETURN_VALUE
+        L95:     PUSH_EXC_INFO
+                 WITH_EXCEPT_START
+                 TO_BOOL
+                 POP_JUMP_IF_TRUE         2 (to L96)
+                 NOT_TAKEN
+                 RERAISE                  2
+        L96:     POP_TOP
+        L97:     POP_EXCEPT
+                 POP_TOP
+                 POP_TOP
+                 POP_TOP
+                 LOAD_CONST               4 (None)
+                 RETURN_VALUE
+
+   --   L98:     COPY                     3
+                 POP_EXCEPT
+                 RERAISE                  1
+ExceptionTable:
+  L1 to L2 -> L95 [2] lasti
+  L2 to L3 -> L86 [4] lasti
+  L3 to L4 -> L95 [2] lasti
+  L5 to L6 -> L86 [4] lasti
+  L6 to L7 -> L95 [2] lasti
+  L8 to L11 -> L86 [4] lasti
+  L12 to L14 -> L86 [4] lasti
+  L15 to L17 -> L86 [4] lasti
+  L18 to L21 -> L86 [4] lasti
+  L22 to L24 -> L86 [4] lasti
+  L24 to L27 -> L95 [2] lasti
+  L28 to L30 -> L95 [2] lasti
+  L31 to L33 -> L95 [2] lasti
+  L33 to L34 -> L90 [4] lasti
+  L34 to L35 -> L95 [2] lasti
+  L36 to L37 -> L90 [4] lasti
+  L37 to L38 -> L95 [2] lasti
+  L39 to L40 -> L90 [4] lasti
+  L41 to L43 -> L90 [4] lasti
+  L43 to L44 -> L95 [2] lasti
+  L45 to L46 -> L90 [4] lasti
+  L47 to L48 -> L90 [4] lasti
+  L49 to L53 -> L90 [4] lasti
+  L53 to L54 -> L95 [2] lasti
+  L55 to L56 -> L90 [4] lasti
+  L57 to L60 -> L90 [4] lasti
+  L60 to L61 -> L95 [2] lasti
+  L62 to L63 -> L90 [4] lasti
+  L64 to L67 -> L90 [4] lasti
+  L67 to L68 -> L95 [2] lasti
+  L69 to L70 -> L90 [4] lasti
+  L70 to L71 -> L95 [2] lasti
+  L72 to L73 -> L90 [4] lasti
+  L74 to L75 -> L90 [4] lasti
+  L76 to L77 -> L90 [4] lasti
+  L78 to L81 -> L90 [4] lasti
+  L81 to L82 -> L95 [2] lasti
+  L83 to L84 -> L90 [4] lasti
+  L84 to L85 -> L95 [2] lasti
+  L86 to L88 -> L89 [6] lasti
+  L88 to L90 -> L95 [2] lasti
+  L90 to L92 -> L93 [6] lasti
+  L92 to L94 -> L95 [2] lasti
+  L95 to L97 -> L98 [4] lasti
+

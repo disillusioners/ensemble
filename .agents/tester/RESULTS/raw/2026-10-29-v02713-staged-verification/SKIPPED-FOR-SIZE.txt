@@ -1,0 +1,86 @@
+SKIPPED-FOR-SIZE / SKIPPED-BY-POLICY — v0.27.13 staged-verification bundle
+=======================================================================
+Bundle: .agents/tester/RESULTS/raw/2026-10-29-v02713-staged-verification/
+Full copies of every item below remain on disk at the "LOCATION" column.
+
+Policy applied: text evidence only. NO binaries, NO extracted PYZ payloads,
+NO npm caches, NO worktrees. Threshold: 5 MiB per file (5,242,880 bytes);
+bulk directories skipped regardless of per-file size.
+
+--------------------------------------------------------------------------------
+1) SKIPPED — extracted PYZ payloads (binary; > 5 MiB each)
+   SIZE      SHA256
+   31087045  44fa2e06c4429fc63108c4af56221af09cdcd025f1aadf36639cd5097e6d6621
+     LOCATION: /tmp/sv2-symbols/pyz.bin
+     WHAT    : the STAGED v0.27.13 PYZ (extracted from the staged binary)
+     NOTE    : re-extracted from the staged artifact and byte-identical to this
+               file (sha 44fa2e06… == the copy the gate ran against), so the
+               bundle's gate output is reproducible from the artifact alone.
+
+   31087045  44fa2e06c4429fc63108c4af56221af09cdcd025f1aadf36639cd5097e6d6621
+     LOCATION: /tmp/sv2-symbols/pyz_native.bin
+     WHAT    : the NATIVE-reader extraction of the same PYZ (identical bytes)
+
+   31012757  7f70232a1c13feca4a24928a34e045bf3987d4bcfd5e76d216cd526213bf4309
+     LOCATION: /tmp/sv2-symbols/pyz_v02711.bin
+     WHAT    : CONTROL artifact — v0.27.11 PYZ (lane base 19fc11c8b)
+     NOTE    : the positive control for the F3 'BEGIN'-literal removal.
+
+   31014030  a9fbcfc70dd6f96e9402b8612ca30e56453363abead8959462417354ff898d22
+     LOCATION: /tmp/sv2-symbols/pyz_v02712.bin
+     WHAT    : CONTROL artifact — v0.27.12 PYZ (79bf44936)
+
+   31014030  a9fbcfc70dd6f96e9402b8612ca30e56453363abead8959462417354ff898d22
+     LOCATION: /tmp/sv2-symbols-control/pyz.bin
+     WHAT    : duplicate copy of the v0.27.12 control PYZ (same sha)
+
+   31012757  7f70232a1c13feca4a24928a34e045bf3987d4bcfd5e76d216cd526213bf4309
+     LOCATION: /tmp/sv2-symbols-control2/pyz.bin
+     WHAT    : duplicate copy of the v0.27.11 control PYZ (same sha)
+
+--------------------------------------------------------------------------------
+2) SKIPPED — extracted module tree (bulk; per-file size would qualify, tree is bulk)
+   FILES 5   TOTAL_BYTES 24800
+     LOCATION: /tmp/sv2-symbols/carchive_daemon/
+     WHAT    : the 5 daemon.migrations.* modules extracted from the CArchive
+               (daemon__migrations____init__.py, __checkpoint_migrator.py,
+               __data_migrator.py, __models.py, __runner.py) — decompiled-source
+               side product of the CArchive reader, NOT part of the 8 lane claims.
+
+--------------------------------------------------------------------------------
+3) SKIPPED — the boot-smoke arena binary copy (> 5 MiB; binaries excluded)
+   81099288  b935096359dc929b3557fb38e5257aa2693b36b5c53b1c3e1cd72ca58878423a
+     LOCATION: /tmp/sv3-boot/releases/v0.27.13/ensemble-prod
+     WHAT    : the copy of the staged binary that the SV3 boot smoke executed.
+     NOTE    : sha256 == the STAGED DISK binary at
+               /home/nea/agents-ensemble/releases/v0.27.13/ensemble-prod
+               == manifest binary_sha256 == binary sidecar artifact_sha256
+               == b935096359dc929b3557fb38e5257aa2693b36b5c53b1c3e1cd72ca58878423a
+               (re-verified at bundle-assembly time; 81,099,288 bytes).
+     WHY     : the arena LAYOUT matters as much as the bytes — the binary's
+               path-derived install_dir resolves into /tmp/sv3-boot/releases,
+               which is what kept the boot smoke off the live promote journal
+               (see sv3-boot/evidence/livez.body + teardown-unit.txt).
+
+--------------------------------------------------------------------------------
+4) SKIPPED — npm cache produced by the boot smoke (bulk; not evidence)
+   FILES 6973   TOTAL_BYTES 85567067   (of which _cacache: 413 files / 44322333 B)
+     LOCATION: /tmp/sv3-boot/fakehome/.npm/
+     WHAT    : the npm registry cache the built-in context7 MCP pulled into the
+               FENCED fake HOME during the boot smoke (the boot-smoke
+               disclosure #1 in the verdict record). Not evidence; it is the
+               residue of an external call the harness could not prevent.
+
+--------------------------------------------------------------------------------
+5) SKIPPED — runtime scratch of the boot smoke (not evidence)
+   2423339 bytes   LOCATION: /tmp/sv3-boot/work/   (daemon CWD: config.yaml, data/, log/, agents/)
+        0 bytes   LOCATION: /tmp/sv3-boot/sock/    (empty)
+
+--------------------------------------------------------------------------------
+NOTES
+-----
+* The bundle contains NO binary, NO extracted PYZ, NO npm cache and NO worktree.
+* Every file that IS in the bundle is text and is hashed in MANIFEST.sha256.
+* MANIFEST.sha256 covers every file of the bundle except MANIFEST.sha256 itself.
+* The staged release dir and the staging worktree were read-only throughout;
+  nothing under releases/** or /home/nea/ensemble-src-wt-stage-v02713 was written.

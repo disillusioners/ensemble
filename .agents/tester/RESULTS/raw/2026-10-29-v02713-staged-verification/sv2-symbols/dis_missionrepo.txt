@@ -1,0 +1,123 @@
+===== daemon.repositories.mission_record.repository:: (co_filename=daemon/repositories/mission_record/repository.py) =====
+  0           RESUME                   0
+
+  1           LOAD_CONST               0 ("SYNC repository for the mission-record tables (Proposal B PR1).\n\nThe single-writer data plane behind :mod:`daemon.services.mission_record_service`.\nMirrors the ``dependency_bus`` repository conventions: SYNC methods on a\nshared ``sqlalchemy.Engine``, guarded ``UPDATE ... WHERE <state>``\ntransitions (the ``dependency_watchers`` PENDING→FIRED exactly-once\nshape), and no enforced FKs (application code is the only writer).\n\nPR1 contract: **mints write, NOTHING reads for decisions.** The only\nreaders in PR1 are the service's own resolution ladder (rung lookups\nfor minting) and the tests. Every gate / census / anchor / routing read\nstays legacy until the PR2/PR3 flips.\n\nTimestamps: TEXT columns carry UTC ISO digits (``now_utc_iso`` family);\nthere are no naive-datetime columns on these tables, so the\n``now_utc_naive()`` bind discipline does not apply here.\n")
+              STORE_NAME               0 (__doc__)
+
+ 19           LOAD_SMALL_INT           0
+              LOAD_CONST               1 (('annotations',))
+              IMPORT_NAME              1 (__future__)
+              IMPORT_FROM              2 (annotations)
+              STORE_NAME               2 (annotations)
+              POP_TOP
+
+ 21           LOAD_SMALL_INT           0
+              LOAD_CONST               2 (None)
+              IMPORT_NAME              3 (logging)
+              STORE_NAME               3 (logging)
+
+ 22           LOAD_SMALL_INT           0
+              LOAD_CONST               2 (None)
+              IMPORT_NAME              4 (uuid)
+              STORE_NAME               4 (uuid)
+
+ 23           LOAD_SMALL_INT           0
+              LOAD_CONST               3 (('TYPE_CHECKING', 'Any'))
+              IMPORT_NAME              5 (typing)
+              IMPORT_FROM              6 (TYPE_CHECKING)
+              STORE_NAME               6 (TYPE_CHECKING)
+              IMPORT_FROM              7 (Any)
+              STORE_NAME               7 (Any)
+              POP_TOP
+
+ 25           LOAD_SMALL_INT           0
+              LOAD_CONST               4 (('text', 'update'))
+              IMPORT_NAME              8 (sqlalchemy)
+              IMPORT_FROM              9 (text)
+              STORE_NAME               9 (text)
+              IMPORT_FROM             10 (update)
+              STORE_NAME              10 (update)
+              POP_TOP
+
+ 26           LOAD_SMALL_INT           0
+              LOAD_CONST               5 (('IntegrityError',))
+              IMPORT_NAME             11 (sqlalchemy.exc)
+              IMPORT_FROM             12 (IntegrityError)
+              STORE_NAME              12 (IntegrityError)
+              POP_TOP
+
+ 27           LOAD_SMALL_INT           0
+              LOAD_CONST               6 (('Session', 'select'))
+              IMPORT_NAME             13 (sqlmodel)
+              IMPORT_FROM             14 (Session)
+              STORE_NAME              14 (Session)
+              IMPORT_FROM             15 (select)
+              STORE_NAME              15 (select)
+              POP_TOP
+
+ 29           LOAD_SMALL_INT           1
+              LOAD_CONST               7 (('OPEN_EPOCH_STATUS_SQL', 'CommissionState', 'MissionCommission', 'MissionProvenance', 'MissionRecord', 'MissionStatus', '_utc_now_iso'))
+              IMPORT_NAME             16 (models)
+              IMPORT_FROM             17 (OPEN_EPOCH_STATUS_SQL)
+              STORE_NAME              17 (OPEN_EPOCH_STATUS_SQL)
+              IMPORT_FROM             18 (CommissionState)
+              STORE_NAME              18 (CommissionState)
+              IMPORT_FROM             19 (MissionCommission)
+              STORE_NAME              19 (MissionCommission)
+              IMPORT_FROM             20 (MissionProvenance)
+              STORE_NAME              20 (MissionProvenance)
+              IMPORT_FROM             21 (MissionRecord)
+              STORE_NAME              21 (MissionRecord)
+              IMPORT_FROM             22 (MissionStatus)
+              STORE_NAME              22 (MissionStatus)
+              IMPORT_FROM             23 (_utc_now_iso)
+              STORE_NAME              23 (_utc_now_iso)
+              POP_TOP
+
+ 39           LOAD_NAME                6 (TYPE_CHECKING)
+              TO_BOOL
+              POP_JUMP_IF_FALSE        7 (to L1)
+              NOT_TAKEN
+
+ 40           LOAD_SMALL_INT           0
+              LOAD_CONST               8 (('Engine',))
+              IMPORT_NAME              8 (sqlalchemy)
+              IMPORT_FROM             24 (Engine)
+              STORE_NAME              24 (Engine)
+              POP_TOP
+
+ 42   L1:     LOAD_NAME                3 (logging)
+              LOAD_ATTR               50 (getLogger)
+              PUSH_NULL
+              LOAD_NAME               26 (__name__)
+              CALL                     1
+              STORE_NAME              27 (logger)
+
+ 45           LOAD_BUILD_CLASS
+              PUSH_NULL
+              LOAD_CONST               9 (<code object MissionEpochConflictError at 0x7f0e1481ce00, file "daemon/repositories/mission_record/repository.py", line 45>)
+              MAKE_FUNCTION
+              LOAD_CONST              10 ('MissionEpochConflictError')
+              LOAD_NAME               12 (IntegrityError)
+              CALL                     3
+              STORE_NAME              28 (MissionEpochConflictError)
+
+ 66           LOAD_BUILD_CLASS
+              PUSH_NULL
+              LOAD_CONST              11 (<code object MissionRecordError at 0x7f0e14828030, file "daemon/repositories/mission_record/repository.py", line 66>)
+              MAKE_FUNCTION
+              LOAD_CONST              12 ('MissionRecordError')
+              LOAD_NAME               29 (RuntimeError)
+              CALL                     3
+              STORE_NAME              30 (MissionRecordError)
+
+ 76           LOAD_BUILD_CLASS
+              PUSH_NULL
+              LOAD_CONST              13 (<code object MissionRecordRepository at 0xd428890, file "daemon/repositories/mission_record/repository.py", line 76>)
+              MAKE_FUNCTION
+              LOAD_CONST              14 ('MissionRecordRepository')
+              CALL                     2
+              STORE_NAME              31 (MissionRecordRepository)
+              LOAD_CONST               2 (None)
+              RETURN_VALUE
+

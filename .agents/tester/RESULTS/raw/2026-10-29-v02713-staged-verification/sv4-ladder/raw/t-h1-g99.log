@@ -1,0 +1,3 @@
+# db-pool gate ladder — interpreter certification
+/home/nea/ensemble-src-wt-stage-v02713/daemon/__init__.py 9.0.2
+LADDER: FATAL — no gate row matched 'G9.9' (typo'd/renamed/not-yet-added id?); ZERO gates were executed

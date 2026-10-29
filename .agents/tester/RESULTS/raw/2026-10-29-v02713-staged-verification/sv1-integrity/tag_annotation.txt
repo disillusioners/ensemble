@@ -1,0 +1,21 @@
+v0.27.13 — db-pool idle-in-transaction lane + metrics-collection (WS-B)
+
+Composition: fix/db-pool-idle-txn (69 lane commits over 19fc11c8b:
+F2/F3/F4-A/F4-B/F5/F6/F8/F8.5/F1 audit/Δ3/F9.1 + R1/R2/R3 semantics
+re-derivations; 12-file code surface, 0 new .sql) + tester
+dbpool-functional-gate evidence (R-1 fill 35/35, Δ3 = 0.25 s measured,
+CLEARED-FOR-SWEEP-STAGE lane-caused=0) + the already-in-latest WS-A
+(resource-monitor) and WS-B (metrics-collection) threads.
+
+Sweep: M1 68a35a8aa (lane into latest), M2 ce32a0962 (tester evidence
+sweep; PACKS.md keep-both), bump b1183a637.
+
+rollback_safe adjudication (STANDING RULE): migration delta vs live
+v0.27.12 is EMPTY (115 == 115 embedded .sql, zero diff, 115 distinct
+prefixes) => ENSEMBLE_ROLLBACK_SAFE=1 legitimate: no schema mutation
+ships; the live v0.27.12 binary stays compatible on rollback. All
+payload changes are daemon code/tests/docs.
+
+NO promote performed — the user's 3-factor nonce ceremony owns the
+flip. Staged from ensemble-src-wt-stage-v02713 (sidecars retained).
+

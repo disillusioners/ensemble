@@ -1,0 +1,35 @@
+interpreter: 3.14.7 marshal MAGIC: 2b0e0d0a
+PyInstaller: 6.19.0 (native reader)
+
+=== NATIVE reader: CArchiveReader(binary).open_embedded_archive('PYZ.pyz') ===
+archive type: CArchiveReader entries: 947
+embedded archive type: ZlibArchiveReader
+native PYZ module count: 4632
+
+=== CUSTOM reader: car.PYZ(pyz.bin) ===
+custom PYZ pymagic: 2b0e0d0a == running MAGIC: MATCH
+custom PYZ module count: 4632
+
+=== TOC KEY SET ===
+native keys: 4632 custom keys: 4632
+key sets identical: True
+native-only: 0 []
+custom-only: 0 []
+
+=== TOC TUPLES (per shared key) ===
+shared keys: 4632 | differing TOC tuples: 0
+
+=== CODE OBJECT EQUALITY (marshal.dumps) — 9 key daemon modules ===
+  daemon.services.readiness: native_len=73005 custom_len=73005 identical=True sha_native=fc9d507bb24215b0 sha_custom=fc9d507bb24215b0
+  daemon.manager: native_len=510956 custom_len=510956 identical=True sha_native=70e4ab2247f68907 sha_custom=70e4ab2247f68907
+  daemon.constants: native_len=30063 custom_len=30063 identical=True sha_native=1419bf9d749b889b sha_custom=1419bf9d749b889b
+  daemon.repositories.factory: native_len=50311 custom_len=50311 identical=True sha_native=167b27b9ef33c581 sha_custom=167b27b9ef33c581
+  daemon.persistence: native_len=38527 custom_len=38527 identical=True sha_native=8967959bf2fcfb0d sha_custom=8967959bf2fcfb0d
+  daemon.repositories.mission_record.repository: native_len=48015 custom_len=48015 identical=True sha_native=8b4d5b57da684bc5 sha_custom=8b4d5b57da684bc5
+  daemon.services.mission_record_service: native_len=73183 custom_len=73183 identical=True sha_native=8515f5445e5f8e39 sha_custom=8515f5445e5f8e39
+  daemon.tools.ens_db_tools: native_len=69432 custom_len=69432 identical=True sha_native=bc32270cab48e850 sha_custom=bc32270cab48e850
+  daemon.services.skill_evolution_service: native_len=91144 custom_len=91144 identical=True sha_native=dd09e2f75a542919 sha_custom=dd09e2f75a542919
+all 9 key modules byte-identical across readers: True
+
+=== VERDICT ===
+READER CROSS-VALIDATION: PASS (keyset_equal=True, toc_tuple_diffs=0, code_identical=True)

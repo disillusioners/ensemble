@@ -1,0 +1,16 @@
+# sv4-fence.sh is a LANE-AUTHORED scratch wrapper (no repo counterpart).
+# The 'original' below is RECONSTRUCTED by substituting the pre-re-point value
+# (SV4_WORKTREE=/home/nea/ensemble-src-wt-tdbp-gate -> .../ensemble-src-wt-stage-v02713),
+# i.e. the single documented edit, nothing else.
+
+--- /tmp/sv4-fence.ORIGINAL.reconstructed	2026-10-29 19:09:18.306802513 +0000
++++ /tmp/sv4-ladder/sv4-fence.sh	2026-10-29 18:22:50.527830853 +0000
+@@ -17,7 +17,7 @@
+ # EXACT-name scratch-DB allowlist and refuses anything undeclared.
+ export PG_TEST_ALLOWED_DBS=dbpool_sv4
+ export ENSEMBLE_SELF_ENV=dev
+-export SV4_WORKTREE=/home/nea/ensemble-src-wt-tdbp-gate
++export SV4_WORKTREE=/home/nea/ensemble-src-wt-stage-v02713
+ export SV4_PY=/home/nea/ensemble-src/.venv/bin/python
+ 
+ sv4_env() {

@@ -1,0 +1,515 @@
+===== daemon.tools.ens_db_tools::._dry_run_sqlite_safe (co_filename=daemon/tools/ens_db_tools.py) =====
+1422            RESUME                   0
+
+1457            LOAD_FAST_BORROW         4 (nonce_store)
+                LOAD_ATTR                1 (mint + NULL|self)
+                LOAD_FAST_BORROW_LOAD_FAST_BORROW 83 (current_instance_id, target_label)
+                CALL                     2
+                STORE_FAST              10 (nonce_record)
+
+1459            BUILD_LIST               0
+                STORE_FAST              11 (preview_lines)
+
+1469            LOAD_GLOBAL              3 (_statement_is_vacuum_analyze + NULL)
+                LOAD_FAST_BORROW         1 (sql)
+                CALL                     1
+                TO_BOOL
+                POP_JUMP_IF_FALSE      235 (to L8)
+                NOT_TAKEN
+
+1470            LOAD_FAST_BORROW         1 (sql)
+                LOAD_ATTR                5 (strip + NULL|self)
+                CALL                     0
+                LOAD_ATTR                7 (rstrip + NULL|self)
+                LOAD_CONST               1 (';')
+                CALL                     1
+                LOAD_ATTR                5 (strip + NULL|self)
+                CALL                     0
+                STORE_FAST              12 (cleaned)
+
+1476            LOAD_CONST               2 ('')
+                STORE_FAST              13 (target_token)
+
+1477            LOAD_FAST_BORROW        12 (cleaned)
+                LOAD_ATTR                9 (upper + NULL|self)
+                CALL                     0
+                STORE_FAST              14 (rest)
+
+1478            LOAD_CONST              34 (('VACUUM (ANALYZE)', 'VACUUM', 'ANALYZE'))
+                GET_ITER
+        L1:     FOR_ITER                75 (to L4)
+                STORE_FAST              15 (kw)
+
+1479            LOAD_FAST_BORROW        14 (rest)
+                LOAD_ATTR               11 (startswith + NULL|self)
+                LOAD_FAST_BORROW        15 (kw)
+                LOAD_CONST               3 (' ')
+                BINARY_OP                0 (+)
+                CALL                     1
+                TO_BOOL
+                POP_JUMP_IF_FALSE       33 (to L2)
+                NOT_TAKEN
+
+1480            LOAD_FAST_BORROW        14 (rest)
+                LOAD_GLOBAL             13 (len + NULL)
+                LOAD_FAST_BORROW        15 (kw)
+                CALL                     1
+                LOAD_CONST               4 (None)
+                BINARY_SLICE
+                LOAD_ATTR               15 (lstrip + NULL|self)
+                CALL                     0
+                STORE_FAST              14 (rest)
+
+1481            LOAD_FAST               14 (rest)
+                STORE_FAST              13 (target_token)
+
+1482            POP_TOP
+                JUMP_FORWARD            14 (to L5)
+
+1483    L2:     LOAD_FAST_BORROW_LOAD_FAST_BORROW 239 (rest, kw)
+                COMPARE_OP              88 (bool(==))
+                POP_JUMP_IF_TRUE         3 (to L3)
+                NOT_TAKEN
+                JUMP_BACKWARD           73 (to L1)
+
+1484    L3:     LOAD_CONST               2 ('')
+                STORE_FAST              13 (target_token)
+
+1485            POP_TOP
+                JUMP_FORWARD             2 (to L5)
+
+1478    L4:     END_FOR
+                POP_ITER
+
+1486    L5:     LOAD_FAST_BORROW        11 (preview_lines)
+                LOAD_ATTR               17 (append + NULL|self)
+
+1487            LOAD_CONST               5 ('DRY-RUN MAINTENANCE — recognized autocommit maintenance command')
+
+1486            CALL                     1
+                POP_TOP
+
+1489            LOAD_FAST               11 (preview_lines)
+                LOAD_ATTR               17 (append + NULL|self)
+
+1490            LOAD_CONST               6 ('  target_table: ')
+                LOAD_FAST_BORROW        13 (target_token)
+                CONVERT_VALUE            2 (repr)
+                FORMAT_SIMPLE
+                BUILD_STRING             2
+
+1491            LOAD_FAST_BORROW        13 (target_token)
+                TO_BOOL
+                POP_JUMP_IF_TRUE         3 (to L6)
+                NOT_TAKEN
+                LOAD_CONST               7 (' (whole database)')
+                JUMP_FORWARD             1 (to L7)
+        L6:     LOAD_CONST               2 ('')
+
+1490    L7:     BINARY_OP                0 (+)
+
+1489            CALL                     1
+                POP_TOP
+
+1493            LOAD_FAST_BORROW        11 (preview_lines)
+                LOAD_ATTR               17 (append + NULL|self)
+
+1494            LOAD_CONST               8 ('  no transactional preview applicable — autocommit maintenance command (PG forbids VACUUM inside a transaction block, 25001)')
+
+1493            CALL                     1
+                POP_TOP
+
+1498            LOAD_FAST_BORROW        11 (preview_lines)
+                LOAD_ATTR               17 (append + NULL|self)
+
+1499            LOAD_CONST               9 ('  confirm-path executes on a dedicated autocommit engine (per-invocation, NullPool, dispose() in finally)')
+
+1498            CALL                     1
+                POP_TOP
+                JUMP_FORWARD           223 (to L23)
+
+1503    L8:     NOP
+
+1504    L9:     LOAD_FAST_BORROW         2 (sql_class)
+                LOAD_CONST              10 ('DDL')
+                COMPARE_OP              88 (bool(==))
+                POP_JUMP_IF_FALSE       62 (to L14)
+                NOT_TAKEN
+
+1510   L10:     NOP
+
+1511   L11:     LOAD_FAST_BORROW         0 (session)
+                LOAD_ATTR               19 (execute + NULL|self)
+                LOAD_GLOBAL             21 (text + NULL)
+                LOAD_FAST_BORROW         1 (sql)
+                CALL                     1
+                CALL                     1
+                POP_TOP
+
+1512            LOAD_FAST_BORROW        11 (preview_lines)
+                LOAD_ATTR               17 (append + NULL|self)
+
+1513            LOAD_CONST              11 ('DRY-RUN DDL EXECUTED INSIDE ROLLBACK-ONLY TRANSACTION — no commit')
+
+1512            CALL                     1
+                POP_TOP
+
+1525   L12:     LOAD_FAST_BORROW         0 (session)
+                LOAD_ATTR               31 (rollback + NULL|self)
+                CALL                     0
+                POP_TOP
+       L13:     JUMP_FORWARD           154 (to L23)
+
+1526   L14:     LOAD_FAST_BORROW         2 (sql_class)
+                LOAD_CONST              16 ('DML')
+                COMPARE_OP              88 (bool(==))
+                POP_JUMP_IF_FALSE      126 (to L21)
+                NOT_TAKEN
+
+1530   L15:     NOP
+
+1531   L16:     LOAD_FAST_BORROW         0 (session)
+                LOAD_ATTR               19 (execute + NULL|self)
+                LOAD_GLOBAL             21 (text + NULL)
+                LOAD_FAST_BORROW         1 (sql)
+                CALL                     1
+                CALL                     1
+                STORE_FAST              17 (result)
+
+1532            LOAD_GLOBAL             33 (_rows_to_dicts + NULL)
+                LOAD_FAST_BORROW        17 (result)
+                CALL                     1
+                STORE_FAST              18 (previews)
+
+1533            LOAD_FAST_BORROW        11 (preview_lines)
+                LOAD_ATTR               17 (append + NULL|self)
+
+1534            LOAD_CONST              17 ('DRY-RUN DML EXECUTED INSIDE ROLLBACK-ONLY TRANSACTION — projected affected rows (first ')
+
+1535            LOAD_GLOBAL             34 (DRY_RUN_PREVIEW_ROWS)
+                FORMAT_SIMPLE
+                LOAD_CONST              18 ('):')
+
+1534            BUILD_STRING             3
+
+1533            CALL                     1
+                POP_TOP
+
+1537            LOAD_GLOBAL             37 (enumerate + NULL)
+                LOAD_FAST_BORROW        18 (previews)
+                LOAD_SMALL_INT           1
+                CALL                     2
+                GET_ITER
+       L17:     FOR_ITER                29 (to L18)
+                UNPACK_SEQUENCE          2
+                STORE_FAST              19 (i)
+                STORE_FAST              20 (row)
+
+1538            LOAD_FAST_BORROW        11 (preview_lines)
+                LOAD_ATTR               17 (append + NULL|self)
+                LOAD_CONST              19 ('  [')
+                LOAD_FAST_BORROW        19 (i)
+                FORMAT_SIMPLE
+                LOAD_CONST              20 ('] ')
+                LOAD_FAST_BORROW        20 (row)
+                FORMAT_SIMPLE
+                BUILD_STRING             4
+                CALL                     1
+                POP_TOP
+                JUMP_BACKWARD           31 (to L17)
+
+1537   L18:     END_FOR
+                POP_ITER
+
+1547   L19:     LOAD_FAST_BORROW         0 (session)
+                LOAD_ATTR               31 (rollback + NULL|self)
+                CALL                     0
+                POP_TOP
+       L20:     JUMP_FORWARD            22 (to L23)
+
+1549   L21:     LOAD_FAST_BORROW        11 (preview_lines)
+                LOAD_ATTR               17 (append + NULL|self)
+
+1550            LOAD_CONST              22 ('DRY-RUN: sql_class=')
+                LOAD_FAST_BORROW         2 (sql_class)
+                FORMAT_SIMPLE
+                LOAD_CONST              23 (' — preview skipped (only DDL/DML produce meaningful dry-run output)')
+                BUILD_STRING             3
+
+1549            CALL                     1
+                POP_TOP
+       L22:     NOP
+
+1559   L23:     LOAD_FAST_BORROW        11 (preview_lines)
+                LOAD_ATTR               17 (append + NULL|self)
+                LOAD_CONST               2 ('')
+                CALL                     1
+                POP_TOP
+
+1560            LOAD_FAST_BORROW        11 (preview_lines)
+                LOAD_ATTR               17 (append + NULL|self)
+
+1561            LOAD_CONST              25 ('Repository-methods-first rule (architect §3.4): if a service method exists for this class (DLQ replay → DeadLetterService.replay_from_dlq; watcher re-arm → DependencyWatcherRepository.rearm_cancelled; sentinel heal → _insert_deferred_marker; any job_state_machine transition), prefer the repository over raw SQL.')
+
+1560            CALL                     1
+                POP_TOP
+
+1571            LOAD_GLOBAL             39 (_write_audit_outcome + NULL)
+
+1572            LOAD_FAST_BORROW         7 (repair_engine)
+
+1573            LOAD_FAST_BORROW_LOAD_FAST_BORROW 89 (current_instance_id, agent_id)
+
+1574            LOAD_FAST_BORROW_LOAD_FAST_BORROW 18 (sql, sql_class)
+                LOAD_FAST_BORROW         6 (sql_hash)
+
+1575            LOAD_FAST_BORROW         3 (target_label)
+
+1576            LOAD_FAST_BORROW        10 (nonce_record)
+                LOAD_ATTR               40 (nonce)
+
+1577            LOAD_FAST_BORROW        10 (nonce_record)
+                LOAD_ATTR               42 (expires_at)
+
+1578            LOAD_CONST              26 ('previewed')
+
+1579            LOAD_CONST               4 (None)
+
+1571            LOAD_CONST              27 (('nonce', 'ttl_expires_at', 'outcome', 'error_message'))
+                CALL_KW                 11
+                POP_TOP
+
+1582            LOAD_FAST_BORROW        10 (nonce_record)
+                LOAD_ATTR               40 (nonce)
+                STORE_FAST              21 (nonce)
+
+1583            LOAD_FAST_BORROW        11 (preview_lines)
+                LOAD_ATTR               17 (append + NULL|self)
+                LOAD_CONST               2 ('')
+                CALL                     1
+                POP_TOP
+
+1584            LOAD_FAST_BORROW        11 (preview_lines)
+                LOAD_ATTR               17 (append + NULL|self)
+
+1585            LOAD_CONST              28 ('CONFIRM NONCE: ')
+                LOAD_FAST_BORROW        21 (nonce)
+                FORMAT_SIMPLE
+                LOAD_CONST              29 ('  (TTL 5min, single-use, action-bound target=')
+
+1586            LOAD_FAST_BORROW         3 (target_label)
+                CONVERT_VALUE            2 (repr)
+                FORMAT_SIMPLE
+                LOAD_CONST              30 (' instance=')
+                LOAD_FAST_BORROW         5 (current_instance_id)
+                FORMAT_SIMPLE
+                LOAD_CONST              31 (')')
+
+1585            BUILD_STRING             7
+
+1584            CALL                     1
+                POP_TOP
+
+1588            LOAD_FAST_BORROW        11 (preview_lines)
+                LOAD_ATTR               17 (append + NULL|self)
+
+1589            LOAD_CONST              32 ('To commit, re-call with: confirm=True, nonce=<above>, target_label=<above>, dry_run=False')
+
+1588            CALL                     1
+                POP_TOP
+
+1592            LOAD_CONST              33 ('\n')
+                LOAD_ATTR               45 (join + NULL|self)
+                LOAD_FAST_BORROW        11 (preview_lines)
+                CALL                     1
+                RETURN_VALUE
+
+  --   L24:     PUSH_EXC_INFO
+
+1515            LOAD_GLOBAL             22 (Exception)
+                CHECK_EXC_MATCH
+                POP_JUMP_IF_FALSE       71 (to L28)
+                NOT_TAKEN
+                STORE_FAST              16 (exc)
+
+1516   L25:     LOAD_FAST               11 (preview_lines)
+                LOAD_ATTR               17 (append + NULL|self)
+
+1517            LOAD_CONST              12 ('DRY-RUN DDL FAILED (')
+                LOAD_GLOBAL             25 (type + NULL)
+                LOAD_FAST               16 (exc)
+                CALL                     1
+                LOAD_ATTR               26 (__name__)
+                FORMAT_SIMPLE
+                LOAD_CONST              13 ('): ')
+
+1518            LOAD_GLOBAL             29 (str + NULL)
+                LOAD_FAST               16 (exc)
+                CALL                     1
+                LOAD_CONST              14 (slice(None, 200, None))
+                BINARY_OP               26 ([])
+                FORMAT_SIMPLE
+                LOAD_CONST              15 (' — fix the SQL and re-run.')
+
+1517            BUILD_STRING             5
+
+1516            CALL                     1
+                POP_TOP
+       L26:     POP_EXCEPT
+                LOAD_CONST               4 (None)
+                STORE_FAST              16 (exc)
+                DELETE_FAST             16 (exc)
+                EXTENDED_ARG             1
+                JUMP_BACKWARD_NO_INTERRUPT 412 (to L12)
+
+  --   L27:     LOAD_CONST               4 (None)
+                STORE_FAST              16 (exc)
+                DELETE_FAST             16 (exc)
+                RERAISE                  1
+
+1515   L28:     RERAISE                  0
+
+  --   L29:     COPY                     3
+                POP_EXCEPT
+                RERAISE                  1
+       L30:     PUSH_EXC_INFO
+
+1525            LOAD_FAST                0 (session)
+                LOAD_ATTR               31 (rollback + NULL|self)
+                CALL                     0
+                POP_TOP
+                RERAISE                  0
+
+  --   L31:     COPY                     3
+                POP_EXCEPT
+                RERAISE                  1
+       L32:     PUSH_EXC_INFO
+
+1539            LOAD_GLOBAL             22 (Exception)
+                CHECK_EXC_MATCH
+                POP_JUMP_IF_FALSE       71 (to L36)
+                NOT_TAKEN
+                STORE_FAST              16 (exc)
+
+1540   L33:     LOAD_FAST               11 (preview_lines)
+                LOAD_ATTR               17 (append + NULL|self)
+
+1541            LOAD_CONST              21 ('DRY-RUN DML FAILED (')
+                LOAD_GLOBAL             25 (type + NULL)
+                LOAD_FAST               16 (exc)
+                CALL                     1
+                LOAD_ATTR               26 (__name__)
+                FORMAT_SIMPLE
+                LOAD_CONST              13 ('): ')
+
+1542            LOAD_GLOBAL             29 (str + NULL)
+                LOAD_FAST               16 (exc)
+                CALL                     1
+                LOAD_CONST              14 (slice(None, 200, None))
+                BINARY_OP               26 ([])
+                FORMAT_SIMPLE
+                LOAD_CONST              15 (' — fix the SQL and re-run.')
+
+1541            BUILD_STRING             5
+
+1540            CALL                     1
+                POP_TOP
+       L34:     POP_EXCEPT
+                LOAD_CONST               4 (None)
+                STORE_FAST              16 (exc)
+                DELETE_FAST             16 (exc)
+                EXTENDED_ARG             1
+                JUMP_BACKWARD_NO_INTERRUPT 385 (to L19)
+
+  --   L35:     LOAD_CONST               4 (None)
+                STORE_FAST              16 (exc)
+                DELETE_FAST             16 (exc)
+                RERAISE                  1
+
+1539   L36:     RERAISE                  0
+
+  --   L37:     COPY                     3
+                POP_EXCEPT
+                RERAISE                  1
+       L38:     PUSH_EXC_INFO
+
+1547            LOAD_FAST                0 (session)
+                LOAD_ATTR               31 (rollback + NULL|self)
+                CALL                     0
+                POP_TOP
+                RERAISE                  0
+
+  --   L39:     COPY                     3
+                POP_EXCEPT
+                RERAISE                  1
+       L40:     PUSH_EXC_INFO
+
+1553            LOAD_GLOBAL             22 (Exception)
+                CHECK_EXC_MATCH
+                POP_JUMP_IF_FALSE       70 (to L44)
+                NOT_TAKEN
+                STORE_FAST              16 (exc)
+
+1554   L41:     LOAD_FAST               11 (preview_lines)
+                LOAD_ATTR               17 (append + NULL|self)
+
+1555            LOAD_CONST              24 ('DRY-RUN WRAPPER ERROR (')
+                LOAD_GLOBAL             25 (type + NULL)
+                LOAD_FAST               16 (exc)
+                CALL                     1
+                LOAD_ATTR               26 (__name__)
+                FORMAT_SIMPLE
+                LOAD_CONST              13 ('): ')
+                LOAD_GLOBAL             29 (str + NULL)
+                LOAD_FAST               16 (exc)
+                CALL                     1
+                LOAD_CONST              14 (slice(None, 200, None))
+                BINARY_OP               26 ([])
+                FORMAT_SIMPLE
+                BUILD_STRING             4
+
+1554            CALL                     1
+                POP_TOP
+       L42:     POP_EXCEPT
+                LOAD_CONST               4 (None)
+                STORE_FAST              16 (exc)
+                DELETE_FAST             16 (exc)
+                EXTENDED_ARG             1
+                JUMP_BACKWARD_NO_INTERRUPT 450 (to L23)
+
+  --   L43:     LOAD_CONST               4 (None)
+                STORE_FAST              16 (exc)
+                DELETE_FAST             16 (exc)
+                RERAISE                  1
+
+1553   L44:     RERAISE                  0
+
+  --   L45:     COPY                     3
+                POP_EXCEPT
+                RERAISE                  1
+ExceptionTable:
+  L9 to L10 -> L40 [0]
+  L11 to L12 -> L24 [0]
+  L12 to L13 -> L40 [0]
+  L14 to L15 -> L40 [0]
+  L16 to L19 -> L32 [0]
+  L19 to L20 -> L40 [0]
+  L21 to L22 -> L40 [0]
+  L24 to L25 -> L29 [1] lasti
+  L25 to L26 -> L27 [1] lasti
+  L26 to L27 -> L30 [0]
+  L27 to L29 -> L29 [1] lasti
+  L29 to L30 -> L30 [0]
+  L30 to L31 -> L31 [1] lasti
+  L31 to L32 -> L40 [0]
+  L32 to L33 -> L37 [1] lasti
+  L33 to L34 -> L35 [1] lasti
+  L34 to L35 -> L38 [0]
+  L35 to L37 -> L37 [1] lasti
+  L37 to L38 -> L38 [0]
+  L38 to L39 -> L39 [1] lasti
+  L39 to L40 -> L40 [0]
+  L40 to L41 -> L45 [1] lasti
+  L41 to L42 -> L43 [1] lasti
+  L43 to L45 -> L45 [1] lasti
+

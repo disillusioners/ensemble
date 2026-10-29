@@ -1,0 +1,6 @@
+Running as unit: sv3-v02713-boot.service; invocation ID: 2fa9266b43f44f39bf2a4b51ace231ad
+systemd-run rc=0
+MainPID=3750516
+ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/sv3-v02713-boot.service
+ActiveState=active
+SubState=running

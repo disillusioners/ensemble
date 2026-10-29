@@ -1,0 +1,72 @@
+===== daemon.services.readiness::._refuse_pool_admission_at_capacity (co_filename=daemon/services/readiness.py) =====
+1541           RESUME                   0
+
+1578           LOAD_GLOBAL              1 (getattr + NULL)
+               LOAD_FAST_BORROW         0 (engine)
+               LOAD_CONST               1 ('pool')
+               LOAD_CONST               2 (None)
+               CALL                     3
+               STORE_FAST               1 (pool)
+
+1579           LOAD_FAST_BORROW         1 (pool)
+               POP_JUMP_IF_NOT_NONE     3 (to L1)
+               NOT_TAKEN
+
+1580           LOAD_CONST               2 (None)
+               RETURN_VALUE
+
+1581   L1:     LOAD_GLOBAL              1 (getattr + NULL)
+               LOAD_FAST_BORROW         1 (pool)
+               LOAD_CONST               3 ('checkedout')
+               LOAD_CONST               2 (None)
+               CALL                     3
+               STORE_FAST               2 (checkedout)
+
+1582           LOAD_FAST_BORROW         2 (checkedout)
+               POP_JUMP_IF_NOT_NONE     3 (to L2)
+               NOT_TAKEN
+
+1586           LOAD_CONST               2 (None)
+               RETURN_VALUE
+
+1587   L2:     LOAD_GLOBAL              3 (_manager_pool_effective_capacity + NULL)
+               LOAD_FAST_BORROW         1 (pool)
+               CALL                     1
+               STORE_FAST               3 (capacity)
+
+1588           LOAD_FAST_BORROW         3 (capacity)
+               POP_JUMP_IF_NOT_NONE     3 (to L3)
+               NOT_TAKEN
+
+1591           LOAD_CONST               2 (None)
+               RETURN_VALUE
+
+1592   L3:     LOAD_FAST_BORROW         2 (checkedout)
+               PUSH_NULL
+               CALL                     0
+               STORE_FAST               4 (in_use)
+
+1593           LOAD_FAST_BORROW_LOAD_FAST_BORROW 67 (in_use, capacity)
+               COMPARE_OP             188 (bool(>=))
+               POP_JUMP_IF_FALSE       19 (to L4)
+               NOT_TAKEN
+
+1594           LOAD_GLOBAL              5 (TimeoutError + NULL)
+
+1595           LOAD_CONST               4 ('readiness probe admission refused: manager pool at effective capacity (')
+
+1596           LOAD_FAST_BORROW         4 (in_use)
+               FORMAT_SIMPLE
+               LOAD_CONST               5 ('/')
+               LOAD_FAST_BORROW         3 (capacity)
+               FORMAT_SIMPLE
+               LOAD_CONST               6 (')')
+
+1595           BUILD_STRING             5
+
+1594           CALL                     1
+               RAISE_VARARGS            1
+
+1593   L4:     LOAD_CONST               2 (None)
+               RETURN_VALUE
+

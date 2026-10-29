@@ -1,0 +1,19 @@
+PASS  1 MANAGER_POOL_CONFIGURED_CAPACITY
+      daemon.services.readiness module body: LOAD_SMALL_INT 25 -> STORE_NAME MANAGER_POOL_CONFIGURED_CAPACITY (source line 165)
+PASS  2 _manager_pool_effective_capacity
+      module body STORE_NAME _manager_pool_effective_capacity (code obj line 1501); called from r._refuse_pool_admission_at_capacity (line 1587)
+PASS  3 MissionEpochConflictError
+      repository module: LOAD_BUILD_CLASS + LOAD_CONST 'MissionEpochConflictError' + LOAD_NAME IntegrityError -> STORE_NAME (line 45); service module: IMPORT_NAME repositories.mission_record.repository + IMPORT_FROM MissionEpochConflictError -> STORE_NAME (line 132)
+PASS  4 F3 BEGIN literal absent
+      exact-const 'BEGIN' in compiled daemon surface: 0 hits (582 modules); CONTROL v0.27.11(base 19fc11c8b): 1 hit in ['daemon.tools.ens_db_tools']
+PASS  5 strict live_carrier_exists is False
+      2 sites with IS_OP 0 (is): ['m.InstanceManager._reconcile_deferred_report', 'm.InstanceManager._reconcile_deferred_report_async']
+PASS  6 budget 0.25 / no -1.0 sentinel
+      daemon.constants: LOAD_CONST 0.25 -> STORE_NAME MANAGER_ENGINE_LEGITIMATE_HOLD_BUDGET_S (line 394); bindings of that target to a non-0.25 value: 0 []
+PASS  7 pool knobs
+      create_engine KW_NAMES [('fac.create_postgres_engine', ('echo', 'pool_size', 'max_overflow', 'pool_pre_ping', 'pool_reset_on_return', 'pool_recycle', 'pool_timeout', 'connect_args'))]; 'rollback' value const at [('fac.create_postgres_engine', 'rollback')]; constants RECYCLE=3600 TIMEOUT=30
+PASS  8 application_name trio + D-17
+      {'ensemble-manager': ['daemon.constants'], 'ensemble-checkpoint-adapter': ['daemon.persistence'], 'ensemble-repair': ['daemon.tools.ens_db_tools']}; PG_SESSION_CONNECT_ARGS window=[('LOAD_CONST', 'options'), ('LOAD_CONST', '-c timezone=UTC'), ('BUILD_MAP', 1)] (BUILD_MAP 1); 'application_name' at factory MODULE level: 0; inside function: [('fac.create_postgres_engine', 'application_name')]
+
+======================================================================
+CONSOLIDATED GATE: 8/8 PASS

@@ -1,0 +1,20 @@
+# diff -u tests/packs/dbpool_gate_ladder.sh  <repo original, at gate-worktree HEAD 648d9bd87>
+#      vs /tmp/sv4-ladder/dbpool_gate_ladder.sh  <re-pointed copy used for the v0.27.13 run>
+# Only the 2 documented re-point lines may differ.
+
+--- tests/packs/dbpool_gate_ladder.sh	2026-10-29 06:00:42.918594989 +0000
++++ /tmp/sv4-ladder/dbpool_gate_ladder.sh	2026-10-29 18:22:23.320960050 +0000
+@@ -56,11 +56,11 @@
+ }
+ trap '_rc=$?; for d in "${_TMP_HOMES[@]:-}"; do [ -n "$d" ] && rm -rf "$d"; done; exit $_rc' EXIT
+ 
+-WORKTREE=/home/nea/ensemble-src-wt-tdbp-gate
++WORKTREE=/home/nea/ensemble-src-wt-stage-v02713
+ PY=/home/nea/ensemble-src/.venv/bin/python
+ PLAN_DIR="$WORKTREE/.agents/shared/planning/db-pool-idle-txn"
+ EXPECTED_FILE="$PLAN_DIR/expected-collected.md"
+-FENCE="$WORKTREE/tests/packs/dbpool_collected_fence.sh"
++FENCE=/tmp/sv4-ladder/dbpool_collected_fence.sh
+ 
+ MODE="${1:-check}"
+ ROW_FILTER=""

@@ -1,0 +1,5 @@
+/home/nea/agents-ensemble/releases/v0.27.13/plugins/opendesign/copy_freely/design-templates/html-ppt/scripts
+/home/nea/agents-ensemble/releases/v0.27.13/plugins/opendesign/copy_freely/design-templates/last30days/scripts
+/home/nea/agents-ensemble/releases/v0.27.13/plugins/opendesign/copy_freely/design-templates/open-design-landing-deck/scripts
+/home/nea/agents-ensemble/releases/v0.27.13/plugins/opendesign/copy_freely/design-templates/open-design-landing/scripts
+/home/nea/agents-ensemble/releases/v0.27.13/plugins/opendesign/copy_freely/design-templates/hyperframes/scripts

@@ -1,0 +1,146 @@
+===== daemon.services.readiness::.make_db_probe (co_filename=daemon/services/readiness.py) =====
+  --           MAKE_CELL                0 (engine)
+
+1612           RESUME                   0
+
+1625           LOAD_CONST               1 (<code object __annotate__ at 0x78448cc45b60, file "daemon/services/readiness.py", line 1625>)
+               MAKE_FUNCTION
+               LOAD_FAST_BORROW         0 (engine)
+               BUILD_TUPLE              1
+               LOAD_CONST               2 (<code object _probe at 0x2c1c1030, file "daemon/services/readiness.py", line 1625>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE   8 (closure)
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_FAST               1 (_probe)
+
+1657           LOAD_FAST_BORROW         1 (_probe)
+               RETURN_VALUE
+
+===== daemon.services.readiness::.make_db_probe.__annotate__ (co_filename=daemon/services/readiness.py) =====
+1625           RESUME                   0
+               LOAD_FAST_BORROW         0 (format)
+               LOAD_SMALL_INT           2
+               COMPARE_OP             132 (>)
+               POP_JUMP_IF_FALSE        3 (to L1)
+               NOT_TAKEN
+               LOAD_COMMON_CONSTANT     1 (NotImplementedError)
+               RAISE_VARARGS            1
+       L1:     LOAD_CONST               1 ('return')
+               LOAD_CONST               2 ('tuple[bool, Optional[str]]')
+               BUILD_MAP                1
+               RETURN_VALUE
+
+===== daemon.services.readiness::.make_db_probe._probe (co_filename=daemon/services/readiness.py) =====
+  --           COPY_FREE_VARS           1
+
+1625           RESUME                   0
+
+1627           LOAD_GLOBAL              1 (_refuse_pool_admission_at_capacity + NULL)
+               LOAD_DEREF               2 (engine)
+               CALL                     1
+               POP_TOP
+
+1628           LOAD_DEREF               2 (engine)
+               LOAD_ATTR                3 (connect + NULL|self)
+               CALL                     0
+               COPY                     1
+               LOAD_SPECIAL             1 (__exit__)
+               SWAP                     2
+               SWAP                     3
+               LOAD_SPECIAL             0 (__enter__)
+               CALL                     0
+       L1:     STORE_FAST               0 (conn)
+
+1637           LOAD_GLOBAL              5 (getattr + NULL)
+               LOAD_DEREF               2 (engine)
+               LOAD_CONST               0 ('url')
+               LOAD_CONST               1 (None)
+               CALL                     3
+               STORE_FAST               1 (_engine_url)
+
+1639           LOAD_FAST_BORROW         1 (_engine_url)
+               POP_JUMP_IF_NONE        80 (to L4)
+               NOT_TAKEN
+
+1640           LOAD_FAST_BORROW         1 (_engine_url)
+               LOAD_ATTR                7 (get_backend_name + NULL|self)
+               CALL                     0
+               LOAD_ATTR                9 (startswith + NULL|self)
+               LOAD_CONST               2 ('postgres')
+               CALL                     1
+               TO_BOOL
+               POP_JUMP_IF_FALSE       43 (to L4)
+       L2:     NOT_TAKEN
+
+1642   L3:     LOAD_FAST_BORROW         0 (conn)
+               LOAD_ATTR               11 (execute + NULL|self)
+
+1643           LOAD_GLOBAL             13 (sa_text + NULL)
+
+1644           LOAD_CONST               3 ('SET LOCAL statement_timeout = ')
+
+1645           LOAD_GLOBAL             15 (_probe_statement_timeout_ms + NULL)
+               LOAD_GLOBAL             16 (DB_PROBE_TIMEOUT_S)
+               CALL                     1
+               FORMAT_SIMPLE
+
+1644           BUILD_STRING             2
+
+1643           CALL                     1
+
+1642           CALL                     1
+               POP_TOP
+
+1648   L4:     LOAD_FAST_BORROW         0 (conn)
+               LOAD_ATTR               11 (execute + NULL|self)
+               LOAD_GLOBAL             13 (sa_text + NULL)
+               LOAD_CONST               4 ('SELECT 1')
+               CALL                     1
+               CALL                     1
+               POP_TOP
+
+1653           LOAD_GLOBAL             19 (hasattr + NULL)
+               LOAD_FAST_BORROW         0 (conn)
+               LOAD_CONST               5 ('rollback')
+               CALL                     2
+               TO_BOOL
+               POP_JUMP_IF_FALSE       17 (to L5)
+               NOT_TAKEN
+
+1654           LOAD_FAST_BORROW         0 (conn)
+               LOAD_ATTR               21 (rollback + NULL|self)
+               CALL                     0
+               POP_TOP
+
+1628   L5:     LOAD_CONST               1 (None)
+               LOAD_CONST               1 (None)
+               LOAD_CONST               1 (None)
+               CALL                     3
+               POP_TOP
+
+1655           LOAD_CONST               6 ((True, None))
+               RETURN_VALUE
+
+1628   L6:     PUSH_EXC_INFO
+               WITH_EXCEPT_START
+               TO_BOOL
+               POP_JUMP_IF_TRUE         2 (to L7)
+               NOT_TAKEN
+               RERAISE                  2
+       L7:     POP_TOP
+       L8:     POP_EXCEPT
+               POP_TOP
+               POP_TOP
+               POP_TOP
+
+1655           LOAD_CONST               6 ((True, None))
+               RETURN_VALUE
+
+  --   L9:     COPY                     3
+               POP_EXCEPT
+               RERAISE                  1
+ExceptionTable:
+  L1 to L2 -> L6 [2] lasti
+  L3 to L5 -> L6 [2] lasti
+  L6 to L8 -> L9 [4] lasti
+

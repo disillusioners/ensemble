@@ -1,0 +1,552 @@
+===== daemon.services.readiness:: (co_filename=daemon/services/readiness.py) =====
+  --           MAKE_CELL                0 (__conditional_annotations__)
+
+   0           RESUME                   0
+
+   1           BUILD_SET                0
+               STORE_NAME               0 (__conditional_annotations__)
+               SETUP_ANNOTATIONS
+               LOAD_CONST               0 ('Readiness composite for the /readyz probe (Auto-Restart Phase 1, ADR-003).\n\nCanonical home for readiness *computation*: a pure dataclass plus pure\nfunctions that take injected callables, and thin engine-bound probe\nfactories. ``daemon/api.py`` only wires these into the background\nrefresher task and the HTTP handler — no probe logic lives there. The\ninjected-callable seam is what lets tests exercise the composite\nwithout a full app or a live database.\n\nContract (ADR-003): the HTTP handler is an O(1) memory read of the\nlast composite; the ONLY database toucher for readiness is the\nbackground refresher running at ``readiness_refresh_interval_seconds``\n(default 10s). Liveness (``/livez``) never consults this module.\n\nSCOPE NOTE (why this module is large): four readiness concerns are\nCANONICAL RESIDENTS here and must evolve together — the A1\nfailure-CLASS table (soak-gate-mcp-warmup, requirements §4.0), the\nclass-gated grace + leak state machine (``GraceTracker`` /\n``GraceObservation``, §4.3-§4.4), the P1/P2 pool-state samplers\n(advisory SQLAlchemy + oracle psycopg), and the ADR-003 composite\nitself. They share one failure-class vocabulary and one\nobservation-relative clock; the size is cohesion, not accretion —\ndo not split the class table away from its consumers.\n')
+               STORE_NAME               1 (__doc__)
+
+  26           LOAD_SMALL_INT           0
+               LOAD_CONST               1 (('annotations',))
+               IMPORT_NAME              2 (__future__)
+               IMPORT_FROM              3 (annotations)
+               STORE_NAME               3 (annotations)
+               POP_TOP
+
+  28           LOAD_SMALL_INT           0
+               LOAD_CONST               2 (None)
+               IMPORT_NAME              4 (asyncio)
+               STORE_NAME               4 (asyncio)
+
+  29           LOAD_SMALL_INT           0
+               LOAD_CONST               2 (None)
+               IMPORT_NAME              5 (logging)
+               STORE_NAME               5 (logging)
+
+  30           LOAD_SMALL_INT           0
+               LOAD_CONST               3 (('dataclass', 'field'))
+               IMPORT_NAME              6 (dataclasses)
+               IMPORT_FROM              7 (dataclass)
+               STORE_NAME               7 (dataclass)
+               IMPORT_FROM              8 (field)
+               STORE_NAME               8 (field)
+               POP_TOP
+
+  31           LOAD_SMALL_INT           0
+               LOAD_CONST               4 (('TimeoutError',))
+               IMPORT_NAME              9 (concurrent.futures)
+               IMPORT_FROM             10 (TimeoutError)
+               STORE_NAME              11 (FuturesTimeout)
+               POP_TOP
+
+  32           LOAD_SMALL_INT           0
+               LOAD_CONST               5 (('datetime', 'timedelta', 'timezone'))
+               IMPORT_NAME             12 (datetime)
+               IMPORT_FROM             12 (datetime)
+               STORE_NAME              12 (datetime)
+               IMPORT_FROM             13 (timedelta)
+               STORE_NAME              13 (timedelta)
+               IMPORT_FROM             14 (timezone)
+               STORE_NAME              14 (timezone)
+               POP_TOP
+
+  33           LOAD_SMALL_INT           0
+               LOAD_CONST               6 (('Any', 'Callable', 'NamedTuple', 'Optional'))
+               IMPORT_NAME             15 (typing)
+               IMPORT_FROM             16 (Any)
+               STORE_NAME              16 (Any)
+               IMPORT_FROM             17 (Callable)
+               STORE_NAME              17 (Callable)
+               IMPORT_FROM             18 (NamedTuple)
+               STORE_NAME              18 (NamedTuple)
+               IMPORT_FROM             19 (Optional)
+               STORE_NAME              19 (Optional)
+               POP_TOP
+
+  35           LOAD_SMALL_INT           0
+               LOAD_CONST               7 (('text',))
+               IMPORT_NAME             20 (sqlalchemy)
+               IMPORT_FROM             21 (text)
+               STORE_NAME              22 (sa_text)
+               POP_TOP
+
+  36           LOAD_SMALL_INT           0
+               LOAD_CONST               8 (('Engine',))
+               IMPORT_NAME             23 (sqlalchemy.engine)
+               IMPORT_FROM             24 (Engine)
+               STORE_NAME              24 (Engine)
+               POP_TOP
+
+  38           LOAD_SMALL_INT           0
+               LOAD_CONST               9 (('redact_exc_str',))
+               IMPORT_NAME             25 (daemon._redact)
+               IMPORT_FROM             26 (redact_exc_str)
+               STORE_NAME              26 (redact_exc_str)
+               POP_TOP
+
+  39           LOAD_SMALL_INT           0
+               LOAD_CONST              10 (('CHECKPOINT_SENTINEL_CHANNEL', 'CHECKPOINT_SENTINEL_CHECKPOINT_ID', 'CHECKPOINT_SENTINEL_TASK_ID', 'CHECKPOINT_SENTINEL_THREAD_ID', 'CHECKPOINT_SENTINEL_VALUE', 'READINESS_GRACE_HORIZON_S', 'READINESS_LEAK_TICK_THRESHOLD'))
+               IMPORT_NAME             27 (daemon.constants)
+               IMPORT_FROM             28 (CHECKPOINT_SENTINEL_CHANNEL)
+               STORE_NAME              28 (CHECKPOINT_SENTINEL_CHANNEL)
+               IMPORT_FROM             29 (CHECKPOINT_SENTINEL_CHECKPOINT_ID)
+               STORE_NAME              29 (CHECKPOINT_SENTINEL_CHECKPOINT_ID)
+               IMPORT_FROM             30 (CHECKPOINT_SENTINEL_TASK_ID)
+               STORE_NAME              30 (CHECKPOINT_SENTINEL_TASK_ID)
+               IMPORT_FROM             31 (CHECKPOINT_SENTINEL_THREAD_ID)
+               STORE_NAME              31 (CHECKPOINT_SENTINEL_THREAD_ID)
+               IMPORT_FROM             32 (CHECKPOINT_SENTINEL_VALUE)
+               STORE_NAME              32 (CHECKPOINT_SENTINEL_VALUE)
+               IMPORT_FROM             33 (READINESS_GRACE_HORIZON_S)
+               STORE_NAME              33 (READINESS_GRACE_HORIZON_S)
+               IMPORT_FROM             34 (READINESS_LEAK_TICK_THRESHOLD)
+               STORE_NAME              34 (READINESS_LEAK_TICK_THRESHOLD)
+               POP_TOP
+
+  48           LOAD_SMALL_INT           0
+               LOAD_CONST              11 (('BOOT_EPOCH_FLOOR',))
+               IMPORT_NAME             35 (daemon.services.boot_epoch)
+               IMPORT_FROM             36 (BOOT_EPOCH_FLOOR)
+               STORE_NAME              36 (BOOT_EPOCH_FLOOR)
+               POP_TOP
+
+  50           LOAD_NAME                5 (logging)
+               LOAD_ATTR               74 (getLogger)
+               PUSH_NULL
+               LOAD_NAME               38 (__name__)
+               CALL                     1
+               STORE_NAME              39 (logger)
+
+  64           LOAD_CONST              12 ('probe_timeout')
+               STORE_NAME              40 (FAILURE_CLASS_PROBE_TIMEOUT)
+
+  65           LOAD_CONST              13 ('pool_busy')
+               STORE_NAME              41 (FAILURE_CLASS_POOL_BUSY)
+
+  66           LOAD_CONST              14 ('queue_stale')
+               STORE_NAME              42 (FAILURE_CLASS_QUEUE_STALE)
+
+  67           LOAD_CONST              15 ('read_timeout')
+               STORE_NAME              43 (FAILURE_CLASS_READ_TIMEOUT)
+
+  70           LOAD_CONST              16 ('boot_incomplete')
+               STORE_NAME              44 (FAILURE_CLASS_BOOT_INCOMPLETE)
+
+  71           LOAD_CONST              17 ('identity_mismatch')
+               STORE_NAME              45 (FAILURE_CLASS_IDENTITY_MISMATCH)
+
+  72           LOAD_CONST              18 ('hard_component_red')
+               STORE_NAME              46 (FAILURE_CLASS_HARD_COMPONENT_RED)
+
+  73           LOAD_CONST              19 ('not_serving')
+               STORE_NAME              47 (FAILURE_CLASS_NOT_SERVING)
+
+  74           LOAD_CONST              20 ('pool_leak')
+               STORE_NAME              48 (FAILURE_CLASS_POOL_LEAK)
+
+  75           LOAD_CONST              21 ('unknown')
+               STORE_NAME              49 (FAILURE_CLASS_UNKNOWN)
+
+  79           LOAD_CONST              22 ('ok')
+               STORE_NAME              50 (FAILURE_CLASS_OK)
+
+  83           LOAD_NAME               51 (frozenset)
+               PUSH_NULL
+
+  85           LOAD_NAME               40 (FAILURE_CLASS_PROBE_TIMEOUT)
+
+  86           LOAD_NAME               41 (FAILURE_CLASS_POOL_BUSY)
+
+  87           LOAD_NAME               42 (FAILURE_CLASS_QUEUE_STALE)
+
+  88           LOAD_NAME               43 (FAILURE_CLASS_READ_TIMEOUT)
+
+  84           BUILD_SET                4
+
+  83           CALL                     1
+               STORE_NAME              52 (GRACE_ELIGIBLE_FAILURE_CLASSES)
+               LOAD_CONST              23 ('frozenset[str]')
+               LOAD_NAME               53 (__annotations__)
+               LOAD_CONST              24 ('GRACE_ELIGIBLE_FAILURE_CLASSES')
+               STORE_SUBSCR
+
+  94           LOAD_CONST             111 (('database', 'queue_freshness', 'services', 'checkpoint_saver'))
+               STORE_NAME              54 (READINESS_COMPONENT_NAMES)
+               LOAD_CONST              25 ('tuple[str, ...]')
+               LOAD_NAME               53 (__annotations__)
+               LOAD_CONST              26 ('READINESS_COMPONENT_NAMES')
+               STORE_SUBSCR
+
+ 104           LOAD_CONST              27 ('load')
+               STORE_NAME              55 (READINESS_GRACE_SCOPE_LOAD)
+
+ 124           LOAD_CONST              28 (0.5)
+               STORE_NAME              56 (DB_PROBE_TIMEOUT_S)
+               LOAD_CONST              29 ('float')
+               LOAD_NAME               53 (__annotations__)
+               LOAD_CONST              30 ('DB_PROBE_TIMEOUT_S')
+               STORE_SUBSCR
+
+ 133           LOAD_CONST              31 (1.0)
+               STORE_NAME              57 (CHECKPOINT_SAVER_PROBE_TIMEOUT_S)
+               LOAD_CONST              29 ('float')
+               LOAD_NAME               53 (__annotations__)
+               LOAD_CONST              32 ('CHECKPOINT_SAVER_PROBE_TIMEOUT_S')
+               STORE_SUBSCR
+
+ 138           LOAD_CONST              33 (2.0)
+               STORE_NAME              58 (QUEUE_PROBE_TIMEOUT_S)
+               LOAD_CONST              29 ('float')
+               LOAD_NAME               53 (__annotations__)
+               LOAD_CONST              34 ('QUEUE_PROBE_TIMEOUT_S')
+               STORE_SUBSCR
+
+ 165           LOAD_SMALL_INT          25
+               STORE_NAME              59 (MANAGER_POOL_CONFIGURED_CAPACITY)
+               LOAD_CONST              35 ('int')
+               LOAD_NAME               53 (__annotations__)
+               LOAD_CONST              36 ('MANAGER_POOL_CONFIGURED_CAPACITY')
+               STORE_SUBSCR
+
+ 171           LOAD_CONST              37 ('running')
+               STORE_NAME              60 (TASK_STATUS_RUNNING)
+
+ 192           LOAD_CONST              38 ('ENSEMBLE_READINESS_FORCE_DEGRADED')
+               STORE_NAME              61 (READINESS_FORCE_DEGRADED_ENV)
+
+ 194           LOAD_NAME               51 (frozenset)
+               PUSH_NULL
+
+ 195           BUILD_SET                0
+               LOAD_CONST             112 (frozenset({'yes', 'degraded', 'true', '1', 'on'}))
+               SET_UPDATE               1
+
+ 194           CALL                     1
+               STORE_NAME              62 (_FORCED_DEGRADED_VALUES)
+
+ 239           LOAD_NAME               22 (sa_text)
+               PUSH_NULL
+
+ 240           LOAD_CONST              39 ('SELECT EXTRACT(EPOCH FROM (now() - MAX(CASE WHEN last_heartbeat_at >= :boot_epoch THEN last_heartbeat_at END))) FROM task WHERE status = :status_running')
+
+ 239           CALL                     1
+               STORE_NAME              63 (_QUEUE_MAX_AGE_SQL_POSTGRES)
+
+ 244           LOAD_NAME               22 (sa_text)
+               PUSH_NULL
+
+ 245           LOAD_CONST              40 ("SELECT (julianday('now') - julianday(MAX(CASE WHEN last_heartbeat_at >= :boot_epoch THEN last_heartbeat_at END))) * 86400.0 FROM task WHERE status = :status_running")
+
+ 244           CALL                     1
+               STORE_NAME              64 (_QUEUE_MAX_AGE_SQL_SQLITE)
+
+ 266           LOAD_NAME               22 (sa_text)
+               PUSH_NULL
+
+ 267           LOAD_CONST              41 ("SELECT COUNT(CASE WHEN last_heartbeat_at >= now() - (:fresh_threshold_secs * interval '1 second') AND last_heartbeat_at >= :boot_epoch THEN 1 END) FROM task WHERE status = :status_running")
+
+ 266           CALL                     1
+               STORE_NAME              65 (_INFLIGHT_COUNT_SQL_POSTGRES)
+
+ 271           LOAD_NAME               22 (sa_text)
+               PUSH_NULL
+
+ 272           LOAD_CONST              42 ("SELECT COUNT(CASE WHEN julianday(last_heartbeat_at) >= julianday('now') - :fresh_threshold_secs / 86400.0 AND last_heartbeat_at >= :boot_epoch THEN 1 END) FROM task WHERE status = :status_running")
+
+ 271           CALL                     1
+               STORE_NAME              66 (_INFLIGHT_COUNT_SQL_SQLITE)
+
+ 278           LOAD_NAME                7 (dataclass)
+
+ 279           LOAD_BUILD_CLASS
+               PUSH_NULL
+               LOAD_CONST              43 (<code object ReadinessComposite at 0x229edea0, file "daemon/services/readiness.py", line 278>)
+               MAKE_FUNCTION
+               LOAD_CONST              44 ('ReadinessComposite')
+               CALL                     2
+
+ 278           CALL                     0
+
+ 279           STORE_NAME              67 (ReadinessComposite)
+
+ 515           LOAD_CONST              45 (<code object __annotate__ at 0x73e3a424fe30, file "daemon/services/readiness.py", line 515>)
+               MAKE_FUNCTION
+               LOAD_CONST              46 (<code object evaluate_queue_freshness at 0x73e3a411eaf0, file "daemon/services/readiness.py", line 515>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME              68 (evaluate_queue_freshness)
+
+ 538           LOAD_CONST              47 (<code object __annotate__ at 0x73e3a41443f0, file "daemon/services/readiness.py", line 538>)
+               MAKE_FUNCTION
+               LOAD_CONST              48 (<code object resolve_psycopg_pool at 0x73e3a4387c30, file "daemon/services/readiness.py", line 538>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME              69 (resolve_psycopg_pool)
+
+ 563           LOAD_CONST              49 (<code object __annotate__ at 0x73e3a41444e0, file "daemon/services/readiness.py", line 563>)
+               MAKE_FUNCTION
+               LOAD_CONST              50 (<code object sample_sqlalchemy_pool_state at 0x73e3a3f04030, file "daemon/services/readiness.py", line 563>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME              70 (sample_sqlalchemy_pool_state)
+
+ 590           LOAD_CONST              51 (<code object __annotate__ at 0x73e3a41446c0, file "daemon/services/readiness.py", line 590>)
+               MAKE_FUNCTION
+               LOAD_CONST              52 (<code object sample_psycopg_pool_state at 0x22a4e3f0, file "daemon/services/readiness.py", line 590>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME              71 (sample_psycopg_pool_state)
+
+ 629           LOAD_NAME                7 (dataclass)
+               PUSH_NULL
+               LOAD_CONST              53 (True)
+               LOAD_CONST              54 (('frozen',))
+               CALL_KW                  1
+
+ 630           LOAD_BUILD_CLASS
+               PUSH_NULL
+               LOAD_CONST              55 (<code object GraceObservation at 0x73e3a4387db0, file "daemon/services/readiness.py", line 629>)
+               MAKE_FUNCTION
+               LOAD_CONST              56 ('GraceObservation')
+               CALL                     2
+
+ 629           CALL                     0
+
+ 630           STORE_NAME              72 (GraceObservation)
+
+ 659           LOAD_BUILD_CLASS
+               PUSH_NULL
+               LOAD_CONST              57 (<code object GraceTracker at 0x73e3a42dc1c0, file "daemon/services/readiness.py", line 659>)
+               MAKE_FUNCTION
+               LOAD_CONST              58 ('GraceTracker')
+               CALL                     2
+               STORE_NAME              73 (GraceTracker)
+
+1024           LOAD_CONST              59 ('checked_at')
+
+1030           LOAD_CONST               2 (None)
+
+1024           LOAD_CONST              60 ('extra_reasons')
+
+1031           LOAD_CONST               2 (None)
+
+1024           LOAD_CONST              61 ('inflight_turns')
+
+1032           LOAD_CONST               2 (None)
+
+1024           LOAD_CONST              62 ('checkpoint_saver_ok')
+
+1033           LOAD_CONST              53 (True)
+
+1024           LOAD_CONST              63 ('auth_dependency_status')
+
+1034           LOAD_CONST               2 (None)
+
+1024           LOAD_CONST              64 ('component_classes')
+
+1035           LOAD_CONST               2 (None)
+
+1024           LOAD_CONST              65 ('first_seen_degraded')
+
+1036           LOAD_CONST               2 (None)
+
+1024           LOAD_CONST              66 ('failure_streak')
+
+1037           LOAD_CONST               2 (None)
+
+1024           LOAD_CONST              67 ('pool_state_sqlalchemy')
+
+1038           LOAD_CONST               2 (None)
+
+1024           LOAD_CONST              68 ('pool_state_psycopg')
+
+1039           LOAD_CONST               2 (None)
+
+1024           LOAD_CONST              69 ('leak_signal')
+
+1040           LOAD_CONST               2 (None)
+
+1024           LOAD_CONST              70 ('grace_active')
+
+1041           LOAD_CONST              71 (False)
+
+1024           LOAD_CONST              72 ('grace_reason')
+
+1042           LOAD_CONST               2 (None)
+
+1024           LOAD_CONST              73 ('grace_expires_at')
+
+1043           LOAD_CONST               2 (None)
+
+1024           LOAD_CONST              74 ('grace_scope')
+
+1044           LOAD_CONST               2 (None)
+
+1024           LOAD_CONST              75 ('grace_holds')
+
+1045           LOAD_SMALL_INT           0
+
+1024           LOAD_CONST              76 ('resume_hold')
+
+1046           LOAD_CONST               2 (None)
+
+1024           LOAD_CONST              77 ('burst_signals')
+
+1047           LOAD_CONST               2 (None)
+
+1024           LOAD_CONST              78 ('mcp_servers')
+
+1048           LOAD_CONST               2 (None)
+
+1024           LOAD_CONST              79 ('mcp_buffered_transitions')
+
+1049           LOAD_CONST               2 (None)
+
+1024           BUILD_MAP               20
+               LOAD_CONST              80 (<code object __annotate__ at 0x73e3a4130c00, file "daemon/services/readiness.py", line 1024>)
+               MAKE_FUNCTION
+               LOAD_CONST              81 (<code object compute_readiness_composite at 0x229a02a0, file "daemon/services/readiness.py", line 1024>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   2 (kwdefaults)
+               STORE_NAME              74 (compute_readiness_composite)
+
+1132           LOAD_CONST             113 (('component_classes', 'first_seen_degraded', 'failure_streak', 'pool_state_sqlalchemy', 'pool_state_psycopg', 'leak_signal', 'grace_active', 'grace_reason', 'grace_expires_at', 'grace_scope', 'grace_holds', 'resume_hold', 'burst_signals', 'mcp_servers', 'mcp_buffered_transitions'))
+               STORE_NAME              75 (_A1_COMPOSITE_FIELD_NAMES)
+
+1154           LOAD_CONST              82 (<code object __annotate__ at 0x73e3a4145110, file "daemon/services/readiness.py", line 1154>)
+               MAKE_FUNCTION
+               LOAD_CONST              83 (<code object _a1_composite_fields at 0x73e3a411ed30, file "daemon/services/readiness.py", line 1154>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME              76 (_a1_composite_fields)
+
+1161           LOAD_CONST              84 (<code object __annotate__ at 0x73e3a4145200, file "daemon/services/readiness.py", line 1161>)
+               MAKE_FUNCTION
+               LOAD_CONST              85 (<code object forced_degradation_active at 0x73e3a42f2fb0, file "daemon/services/readiness.py", line 1161>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME              77 (forced_degradation_active)
+
+1174           LOAD_CONST              86 (<code object __annotate__ at 0x73e3a42f8e30, file "daemon/services/readiness.py", line 1174>)
+               MAKE_FUNCTION
+               LOAD_CONST              87 (<code object apply_forced_degradation at 0x22a1dcc0, file "daemon/services/readiness.py", line 1174>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME              78 (apply_forced_degradation)
+
+1217           LOAD_CONST              88 ('now')
+
+1223           LOAD_CONST               2 (None)
+
+1217           LOAD_CONST              89 ('checkpoint_saver_probe')
+
+1224           LOAD_CONST               2 (None)
+
+1217           LOAD_CONST              63 ('auth_dependency_status')
+
+1225           LOAD_CONST               2 (None)
+
+1217           LOAD_CONST              90 ('grace_tracker')
+
+1226           LOAD_CONST               2 (None)
+
+1217           LOAD_CONST              91 ('sqlalchemy_pool')
+
+1227           LOAD_CONST               2 (None)
+
+1217           LOAD_CONST              92 ('psycopg_pool')
+
+1228           LOAD_CONST               2 (None)
+
+1217           LOAD_CONST              76 ('resume_hold')
+
+1229           LOAD_CONST               2 (None)
+
+1217           LOAD_CONST              77 ('burst_signals')
+
+1230           LOAD_CONST               2 (None)
+
+1217           LOAD_CONST              78 ('mcp_servers')
+
+1231           LOAD_CONST               2 (None)
+
+1217           LOAD_CONST              79 ('mcp_buffered_transitions')
+
+1232           LOAD_CONST               2 (None)
+
+1217           BUILD_MAP               10
+               LOAD_CONST              93 (<code object __annotate__ at 0x73e3a42f3210, file "daemon/services/readiness.py", line 1217>)
+               MAKE_FUNCTION
+               LOAD_CONST              94 (<code object refresh_readiness_composite at 0x22a4baf0, file "daemon/services/readiness.py", line 1217>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   2 (kwdefaults)
+               STORE_NAME              79 (refresh_readiness_composite)
+
+1501           LOAD_CONST              95 (<code object __annotate__ at 0x73e3a41456b0, file "daemon/services/readiness.py", line 1501>)
+               MAKE_FUNCTION
+               LOAD_CONST              96 (<code object _manager_pool_effective_capacity at 0x73e3a4393870, file "daemon/services/readiness.py", line 1501>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME              80 (_manager_pool_effective_capacity)
+
+1541           LOAD_CONST              97 (<code object __annotate__ at 0x73e3a4145890, file "daemon/services/readiness.py", line 1541>)
+               MAKE_FUNCTION
+               LOAD_CONST              98 (<code object _refuse_pool_admission_at_capacity at 0x73e3a41628d0, file "daemon/services/readiness.py", line 1541>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME              81 (_refuse_pool_admission_at_capacity)
+
+1600           LOAD_CONST              99 (<code object __annotate__ at 0x73e3a4145980, file "daemon/services/readiness.py", line 1600>)
+               MAKE_FUNCTION
+               LOAD_CONST             100 (<code object _probe_statement_timeout_ms at 0x73e3a4138690, file "daemon/services/readiness.py", line 1600>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME              82 (_probe_statement_timeout_ms)
+
+1612           LOAD_CONST             101 (<code object __annotate__ at 0x73e3a4145a70, file "daemon/services/readiness.py", line 1612>)
+               MAKE_FUNCTION
+               LOAD_CONST             102 (<code object make_db_probe at 0x73e3a4145c50, file "daemon/services/readiness.py", line 1612>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME              83 (make_db_probe)
+
+1660           LOAD_CONST             103 (<code object __annotate__ at 0x73e3a4145d40, file "daemon/services/readiness.py", line 1660>)
+               MAKE_FUNCTION
+               LOAD_CONST             104 (<code object make_checkpoint_saver_probe at 0x22a0bee0, file "daemon/services/readiness.py", line 1660>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME              84 (make_checkpoint_saver_probe)
+
+1875           LOAD_BUILD_CLASS
+               PUSH_NULL
+               LOAD_CONST             105 (<code object QueueProbeResult at 0x73e3a42fac30, file "daemon/services/readiness.py", line 1875>)
+               MAKE_FUNCTION
+               LOAD_CONST             106 ('QueueProbeResult')
+               LOAD_NAME               18 (NamedTuple)
+               CALL                     3
+               STORE_NAME              85 (QueueProbeResult)
+
+1892           LOAD_CONST             107 ('boot_epoch')
+
+1895           LOAD_CONST               2 (None)
+
+1892           LOAD_CONST             108 ('freshness_threshold_seconds')
+
+1896           LOAD_CONST               2 (None)
+
+1892           BUILD_MAP                2
+               LOAD_CONST             109 (<code object __annotate__ at 0x73e3a42fab30, file "daemon/services/readiness.py", line 1892>)
+               MAKE_FUNCTION
+               LOAD_CONST             110 (<code object make_queue_probe at 0x73e3a413a340, file "daemon/services/readiness.py", line 1892>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   2 (kwdefaults)
+               STORE_NAME              86 (make_queue_probe)
+               LOAD_CONST               2 (None)
+               RETURN_VALUE
+

@@ -1,0 +1,12 @@
+=== live state.json baseline (read-only) ===
+c745b9dfbfab6cb5d250b87d0faf3580fe2ec62fcbfec9c53b15e55af35ce144  /home/nea/agents-ensemble/releases/state.json
+25160 bytes, mtime 2026-10-29 16:54:40.933062440 +0000
+=== current symlink ===
+=== live livez (read-only GET) ===
+{"status":"alive","uptime_seconds":57572.29599261284,"version":"0.27.12"}
+=== live unit props (read-only) ===
+MainPID=2865182
+NRestarts=0
+ActiveEnterTimestamp=Thu 2026-10-29 02:23:42 UTC
+=== live unit cgroup ===
+ControlGroup=/system.slice/ensemble-main.service

@@ -1,0 +1,15 @@
+# diff -u tests/packs/dbpool_collected_fence.sh  <repo original>
+#      vs /tmp/sv4-ladder/dbpool_collected_fence.sh  <re-pointed copy>
+# Only the 1 documented re-point line may differ.
+
+--- tests/packs/dbpool_collected_fence.sh	2026-10-29 06:00:42.923595027 +0000
++++ /tmp/sv4-ladder/dbpool_collected_fence.sh	2026-10-29 18:22:23.325960212 +0000
+@@ -38,7 +38,7 @@
+ EXPECTED="$1"; MARKER="$2"; shift 2
+ case "$EXPECTED" in ''|*[!0-9]*)
+   echo "FATAL: EXPECTED is not an integer (TBD cell?) for: $*" >&2; exit 1;; esac
+-WORKTREE=/home/nea/ensemble-src-wt-tdbp-gate
++WORKTREE=/home/nea/ensemble-src-wt-stage-v02713
+ # T-L1: a MISSING expected-collected.md is the artifact-level defect —
+ # stat before anything else so the FATAL names it (this fence receives
+ # the count as an argument, but the artifact is the count's authority).

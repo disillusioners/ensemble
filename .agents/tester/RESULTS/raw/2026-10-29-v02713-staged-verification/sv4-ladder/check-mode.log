@@ -1,0 +1,55 @@
+# db-pool gate ladder — interpreter certification
+/home/nea/ensemble-src-wt-stage-v02713/daemon/__init__.py 9.0.2
+── G0 ──────────────────────────────────────────────
+G0: PASS (BASELINE.md present; both literals resolved — idle-in-txn DISABLED per D-47; the state_change−xact_start metric withdrawn, xact_age_s recorded per D-48)
+── G1.1 ──────────────────────────────────────────────
+COLLECTED-OK count=9 expected=9
+G1.1: FENCE-OK (collect-only mode; --run executes)
+── G1.2 ──────────────────────────────────────────────
+COLLECTED-OK count=8 expected=8
+G1.2: FENCE-OK (collect-only mode; --run executes)
+── G1.3 ──────────────────────────────────────────────
+COLLECTED-OK count=6 expected=6
+G1.3: FENCE-OK (collect-only mode; --run executes)
+── G1.4 ──────────────────────────────────────────────
+COLLECTED-OK count=40 expected=40
+G1.4: FENCE-OK (collect-only mode; --run executes)
+── G2.1 ──────────────────────────────────────────────
+COLLECTED-OK count=36 expected=36
+G2.1: FENCE-OK (collect-only mode; --run executes)
+── G2.2 ──────────────────────────────────────────────
+COLLECTED-OK count=6 expected=6
+G2.2: FENCE-OK (collect-only mode; --run executes)
+── G2.3 ──────────────────────────────────────────────
+COLLECTED-OK count=6 expected=6
+G2.3: FENCE-OK (collect-only mode; --run executes)
+── G2.4 ──────────────────────────────────────────────
+COLLECTED-OK count=23 expected=23
+G2.4: FENCE-OK (collect-only mode; --run executes)
+── G2.5 [postgres] ──────────────────────────────────────────────
+COLLECTED-OK count=5 expected=5
+G2.5 [postgres]: FENCE-OK (collect-only mode; --run executes)
+── G2.5 [integration — marker split of the canonical row] ──────────────────────────────────────────────
+COLLECTED-OK count=9 expected=9
+G2.5 [integration — marker split of the canonical row]: FENCE-OK (collect-only mode; --run executes)
+── G2.6 ──────────────────────────────────────────────
+COLLECTED-OK count=3 expected=3
+G2.6: FENCE-OK (collect-only mode; --run executes)
+── G3.1 ──────────────────────────────────────────────
+COLLECTED-OK count=3 expected=3
+G3.1: FENCE-OK (collect-only mode; --run executes)
+── G3.2 [integration] ──────────────────────────────────────────────
+COLLECTED-OK count=7 expected=7
+G3.2 [integration]: FENCE-OK (collect-only mode; --run executes)
+── G3.2 [unit static twins — marker split of the canonical row] ──────────────────────────────────────────────
+COLLECTED-OK count=7 expected=7
+G3.2 [unit static twins — marker split of the canonical row]: FENCE-OK (collect-only mode; --run executes)
+── G3.3 ──────────────────────────────────────────────
+COLLECTED-OK count=12 expected=12
+G3.3: FENCE-OK (collect-only mode; --run executes)
+── G3.4 ──────────────────────────────────────────────
+COLLECTED-OK count=5 expected=5
+G3.4: FENCE-OK (collect-only mode; --run executes)
+── G1.5 / G3.5 ─────────────────────────────────────
+TESTER-OWNED (not executed here): whole-tree default-collected corpus, base vs HEAD, with base_collected/head_collected reconciled against the sum of the declared EXPECTED_COLLECTED_* (row 35 of expected-collected.md); collected > 0 on BOTH sides; mismatch = FATAL. The byte-comm instrument is the tester lane's.
+LADDER: OK (mode=check, rows matched=17)

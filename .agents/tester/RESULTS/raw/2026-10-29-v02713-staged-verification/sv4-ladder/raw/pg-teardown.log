@@ -1,0 +1,46 @@
+=== TEARDOWN 2026-10-29T18:34:16Z ===
+--- DROP DATABASE ---
+DROP DATABASE
+--- DROP ROLE ---
+ERROR:  permission denied to drop role
+DETAIL:  Only roles with the CREATEROLE attribute and the ADMIN option on the target roles may drop roles.
+--- POST-DROP VERIFY (as bootstrap superuser nea) ---
+  datname  
+-----------
+ postgres
+ template0
+ template1
+(3 rows)
+
+  rolname   
+------------
+ dbpool_sv4
+(1 row)
+
+ dbpool_sv4_db_rows 
+--------------------
+                  0
+(1 row)
+
+--- DROP ROLE (as bootstrap superuser nea) ---
+DROP ROLE
+--- POST-DROP VERIFY ---
+ dbpool_sv4_role_rows 
+----------------------
+                    0
+(1 row)
+
+ dbpool_sv4_db_rows 
+--------------------
+                  0
+(1 row)
+
+                             List of roles
+ Role name |                         Attributes                         
+-----------+------------------------------------------------------------
+ nea       | Superuser, Create role, Create DB, Replication, Bypass RLS
+
+--- connection attempt as the dropped role (must FAIL) ---
+psql: error: connection to server at "127.0.0.1", port 5462 failed: FATAL:  role "dbpool_sv4" does not exist
+waiting for server to shut down.... done
+server stopped

@@ -1,0 +1,315 @@
+Oct 29 18:24:12.739928 ensemble-vm systemd[1039]: Started sv3-v02713-boot.service - SV3 isolated boot smoke - staged v0.27.13 binary (copy in scratch arena).
+Oct 29 18:24:16.169308 ensemble-vm ensemble-prod[3750530]: [Config] allowed_models default applied: ['agentic', 'coding', 'coding2', 'vision', 'img-gen', 'decision'] — the shipped default is used because neither OPENAI_SELECTABLE_MODELS nor the legacy OPENAI_ALLOWED_MODELS env var is set. ``vision`` is included so the designer-agent vision-guard resolves daemon-wide; ``img-gen`` is the default purpose-id for the image-generation tool; ``decision`` is reserved for the decision-purpose consumer family. Set OPENAI_SELECTABLE_MODELS to override this list (comma-separated or JSON array). To silence this WARNING, set the env var explicitly — even to your current default value — and restart.
+Oct 29 18:24:19.746615 ensemble-vm ensemble-prod[3750530]: 18:24:19 - daemon.config - INFO - [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+Oct 29 18:24:19.746615 ensemble-vm ensemble-prod[3750530]: 18:24:19 - daemon.config - INFO - [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+Oct 29 18:24:19.747634 ensemble-vm ensemble-prod[3750530]: 18:24:19 - daemon.config - INFO - [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+Oct 29 18:24:19.747634 ensemble-vm ensemble-prod[3750530]: 18:24:19 - daemon.config - INFO - [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+Oct 29 18:24:19.747634 ensemble-vm ensemble-prod[3750530]: 18:24:19 - daemon.config - INFO - [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+Oct 29 18:24:19.747634 ensemble-vm ensemble-prod[3750530]: 18:24:19 - daemon.config - INFO - [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+Oct 29 18:24:19.747634 ensemble-vm ensemble-prod[3750530]: 18:24:19 - daemon.config - INFO - [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+Oct 29 18:24:19.748224 ensemble-vm ensemble-prod[3750530]: 18:24:19 - daemon.api - INFO - Starting Ensemble v0.27.13
+Oct 29 18:24:20.169075 ensemble-vm ensemble-prod[3750530]: 18:24:20 - daemon.api - INFO - remote-hands gateway is DISABLED (MCPS_GATEWAY_ENABLED) — the route /api/mcps-gateway/ws is not registered
+Oct 29 18:24:20.606940 ensemble-vm ensemble-prod[3750530]: 18:24:20 - daemon.api - INFO - [Auth] route classes tagged (public/module-lane/protected)
+Oct 29 18:24:20.659746 ensemble-vm ensemble-prod[3750530]: 18:24:20 - daemon.config - INFO - [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+Oct 29 18:24:20.660164 ensemble-vm ensemble-prod[3750530]: 18:24:20 - daemon.config - INFO - [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+Oct 29 18:24:20.660164 ensemble-vm ensemble-prod[3750530]: 18:24:20 - daemon.config - INFO - [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+Oct 29 18:24:20.660164 ensemble-vm ensemble-prod[3750530]: 18:24:20 - daemon.config - INFO - [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+Oct 29 18:24:20.660654 ensemble-vm ensemble-prod[3750530]: 18:24:20 - daemon.config - INFO - [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+Oct 29 18:24:20.660654 ensemble-vm ensemble-prod[3750530]: 18:24:20 - daemon.config - INFO - [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+Oct 29 18:24:20.660654 ensemble-vm ensemble-prod[3750530]: 18:24:20 - daemon.config - INFO - [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+Oct 29 18:24:20.661177 ensemble-vm ensemble-prod[3750530]: 18:24:20 - daemon.api - INFO - Starting Ensemble v0.27.13
+Oct 29 18:24:21.131264 ensemble-vm ensemble-prod[3750530]: 18:24:21 - daemon.api - INFO - remote-hands gateway is DISABLED (MCPS_GATEWAY_ENABLED) — the route /api/mcps-gateway/ws is not registered
+Oct 29 18:24:21.681783 ensemble-vm ensemble-prod[3750530]: 18:24:21 - daemon.api - INFO - [Auth] route classes tagged (public/module-lane/protected)
+Oct 29 18:24:21.682422 ensemble-vm ensemble-prod[3750530]: INFO:     Started server process [3750530]
+Oct 29 18:24:21.682584 ensemble-vm ensemble-prod[3750530]: INFO:     Waiting for application startup.
+Oct 29 18:24:21.800434 ensemble-vm ensemble-prod[3750530]: 18:24:21 - daemon.ensemble_config - INFO - Loaded ensemble config: database=postgres
+Oct 29 18:24:21.910908 ensemble-vm ensemble-prod[3750530]: 18:24:21 - daemon.config - INFO - [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+Oct 29 18:24:21.911214 ensemble-vm ensemble-prod[3750530]: 18:24:21 - daemon.config - INFO - [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+Oct 29 18:24:21.911370 ensemble-vm ensemble-prod[3750530]: 18:24:21 - daemon.config - INFO - [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+Oct 29 18:24:21.911681 ensemble-vm ensemble-prod[3750530]: 18:24:21 - daemon.config - INFO - [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+Oct 29 18:24:21.911938 ensemble-vm ensemble-prod[3750530]: 18:24:21 - daemon.config - INFO - [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+Oct 29 18:24:21.912252 ensemble-vm ensemble-prod[3750530]: 18:24:21 - daemon.config - INFO - [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+Oct 29 18:24:21.912526 ensemble-vm ensemble-prod[3750530]: 18:24:21 - daemon.config - INFO - [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+Oct 29 18:24:21.913403 ensemble-vm ensemble-prod[3750530]: 18:24:21 - daemon.repositories.factory - INFO - Creating PostgreSQL engine: 127.0.0.1:5461/dbpool_sv3boot
+Oct 29 18:24:21.913610 ensemble-vm ensemble-prod[3750530]: 18:24:21 - daemon.repositories.factory - INFO - MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS DISABLED — no trustworthy Phase-0 measurement
+Oct 29 18:24:21.913800 ensemble-vm ensemble-prod[3750530]: 18:24:21 - daemon.repositories.factory - INFO - Manager engine pool sizing: pool_size=15 (limits.manager_pool_size; default tier 15, floor = default)
+Oct 29 18:24:22.134540 ensemble-vm ensemble-prod[3750530]: 18:24:22 - daemon.services.settings_service - INFO - [Settings] app_settings table absent (first boot or pre-migration) — no db overrides; lower tiers active
+Oct 29 18:24:22.135952 ensemble-vm ensemble-prod[3750530]: 18:24:22 - daemon.services.settings_service - INFO - [Settings] applied 0 db override(s)
+Oct 29 18:24:22.136412 ensemble-vm ensemble-prod[3750530]: 18:24:22 - daemon - INFO - [TmpImages] ready: dir=data/tmp_images count=0 max_bytes=1073741824
+Oct 29 18:24:22.136529 ensemble-vm ensemble-prod[3750530]: 18:24:22 - daemon - INFO - [Config] reasoning_echo_disabled_models=[] (models matching these patterns will NOT echo reasoning_content; all others echo)
+Oct 29 18:24:22.136637 ensemble-vm ensemble-prod[3750530]: 18:24:22 - daemon - INFO - [Config] default_streaming=True (clean_llm_config injects streaming=True when callers don't pass an explicit flag; OPENAI_STREAMING env var controls it)
+Oct 29 18:24:22.136743 ensemble-vm ensemble-prod[3750530]: 18:24:22 - daemon - INFO - [Config] default_request_gzip=False (clean_llm_config attaches gzip httpx clients when True; OPENAI_REQUEST_GZIP env var controls it)
+Oct 29 18:24:22.136872 ensemble-vm ensemble-prod[3750530]: 18:24:22 - daemon - INFO - [Config] default_request_timeout=610s (clean_llm_config injects it when a site omits request_timeout — tightening ∞→610s; OPENAI_REQUEST_TIMEOUT controls it)
+Oct 29 18:24:22.137034 ensemble-vm ensemble-prod[3750530]: 18:24:22 - daemon - INFO - [Config] empty_degenerate_reinvoke_cap=3 (router stops re-invoking on reasoning-only/<think>-only empties at the cap)
+Oct 29 18:24:22.137121 ensemble-vm ensemble-prod[3750530]: 18:24:22 - daemon.sources.credentials - WARNING - No SYSTEM_ENCRYPTION_KEY provided, credentials will be stored unencrypted
+Oct 29 18:24:22.137350 ensemble-vm ensemble-prod[3750530]: 18:24:22 - daemon.manager - INFO - Context compaction enabled: threshold=0.8, recent_window=10, min_window=3
+Oct 29 18:24:22.137470 ensemble-vm ensemble-prod[3750530]: 18:24:22 - daemon.manager - INFO - [InstanceCache] effective: ttl_hours=6 max_entries=64 (ttl source=default; restart-required)
+Oct 29 18:24:22.137770 ensemble-vm ensemble-prod[3750530]: 18:24:22 - daemon.repositories.factory - INFO - Creating PostgreSQL engine: 127.0.0.1:5461/dbpool_sv3boot
+Oct 29 18:24:22.137891 ensemble-vm ensemble-prod[3750530]: 18:24:22 - daemon.repositories.factory - INFO - MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS DISABLED — no trustworthy Phase-0 measurement
+Oct 29 18:24:22.138095 ensemble-vm ensemble-prod[3750530]: 18:24:22 - daemon.repositories.factory - INFO - Manager engine pool sizing: pool_size=15 (limits.manager_pool_size; default tier 15, floor = default)
+Oct 29 18:24:23.588205 ensemble-vm ensemble-prod[3750530]: 18:24:23 - daemon.migrations.runner - INFO - Skipping migrations for non-SQLite database (schema evolution handled by EnsembleManager._ensure_postgres_columns)
+Oct 29 18:24:23.840178 ensemble-vm ensemble-prod[3750530]: 18:24:23 - daemon.manager - INFO - _ensure_postgres_columns: drift_events index ensure complete (ix_drift_events_plugin, ix_drift_events_plugin_divergence, ix_drift_events_observed_at — CREATE INDEX IF NOT EXISTS is idempotent)
+Oct 29 18:24:23.859161 ensemble-vm ensemble-prod[3750530]: 18:24:23 - daemon.manager - INFO - _ensure_postgres_columns: resource_monitor boolean repair complete (applied=[], already_ok=['resource_instance_sample.estimated=boolean', 'resource_limit_policy.enabled=boolean', 'resource_limit_policy.user_gated=boolean'], unrecognised=[], missing=[])
+Oct 29 18:24:23.864016 ensemble-vm ensemble-prod[3750530]: 18:24:23 - daemon.manager - INFO - _ensure_postgres_columns: checkpoint trio autovacuum reloptions ensure complete (applied=0, already_set=0, table_missing=3)
+Oct 29 18:24:23.972466 ensemble-vm ensemble-prod[3750530]: 18:24:23 - daemon.manager - INFO - mission_records: mode resolved (mode=dry)
+Oct 29 18:24:24.009511 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.services.mission_record_service - INFO - mission_records backfill: scanning 0 committed non-dry instance_nudge audit rows (dry_run=True)
+Oct 29 18:24:24.009836 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.services.mission_record_service - INFO - mission_records backfill: done scanned=0 minted_epochs=0 minted_commissions=0 skipped_terminal=0 skipped_no_actor=0 skipped_missing_instance_row=0 (dry_run=True)
+Oct 29 18:24:24.012405 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.services.secret_service - WARNING - [SecretCipher] SYSTEM_ENCRYPTION_KEY is not set — SecretService will refuse all wrap/unwrap calls. Set the env var to enable secret storage.
+Oct 29 18:24:24.013025 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.repositories.instance.repository - INFO - Cascade lineage mode resolved: permanent (env ENSEMBLE_CASCADE_LINEAGE=<unset>); permanent enumeration uses instances.parent_id, hierarchy fallback uses instance_hierarchy. Restart required to flip.
+Oct 29 18:24:24.013317 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.repositories.instance.repository - INFO - Governor recursion guard resolved: enabled (env LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED=<unset>); refuses governor spawn when parent chain already contains ≥ K governors (K from LIMITS_MAX_GOVERNOR_ANCESTORS, default 1). Restart required to flip.
+Oct 29 18:24:24.013541 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.services.context_messages - INFO - Ambient KV freshness ENABLED (per-turn fresh)
+Oct 29 18:24:24.013729 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.services.report_integrity_guard - INFO - Report-integrity (b) terminal-waiting guard resolved: DISABLED (default — log-only mode: the [ReportIntegrityGuard] soak log still fires at completion stamps; no notice is ever injected) (env WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED=<unset>). Restart required to flip. See docs/setup.md (WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED).
+Oct 29 18:24:24.133244 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.config - INFO - [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+Oct 29 18:24:24.133566 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.config - INFO - [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+Oct 29 18:24:24.133765 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.config - INFO - [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+Oct 29 18:24:24.134018 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.config - INFO - [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+Oct 29 18:24:24.134267 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.config - INFO - [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+Oct 29 18:24:24.134560 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.config - INFO - [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+Oct 29 18:24:24.134754 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.config - INFO - [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+Oct 29 18:24:24.143640 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.services.attestation_resolver - INFO - Leader completion attestation resolved: mode=enforce window=3 deny_bound=3 attestation_enabled=true llm_judge_enabled=true llm_judge_model=sv3-smoke llm_judge_timeout_s=180.0 N_le_min_recent_window=PASS (env ENSEMBLE_LEADER_ATTESTATION_MODE=<unset>, ENSEMBLE_LEADER_ATTESTATION_WINDOW=<unset>, ENSEMBLE_LEADER_ATTESTATION_DENY_BOUND=<unset>, ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_ENABLED=<unset>, ENSEMBLE_LEADER_ATTESTATION_LLM_JUDGE_TIMEOUT_S=<unset>). Restart required to flip. See docs/setup.md (ENSEMBLE_LEADER_ATTESTATION_MODE).
+Oct 29 18:24:24.146366 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.sources.dispatcher - INFO - ResponseDispatcher initialized with subscriber_id=response_dispatcher
+Oct 29 18:24:24.162428 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.manager - INFO - G7: created partial unique index ux_blueprint_one_core (one core per project, active rows)
+Oct 29 18:24:24.186445 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.manager - INFO - [/compact] registered /compact command (availability predicate unpopulated — O-B6)
+Oct 29 18:24:24.186863 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.manager - INFO - Bootstrapping 3 built-in MCP servers...
+Oct 29 18:24:24.223610 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.repositories.mcp_server.repository - INFO - Created MCP server: id=d7d49798-ad0d-4ee8-b8a8-bb4d778f1aa7, name=webfetch
+Oct 29 18:24:24.224900 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.manager - INFO - Created built-in MCP server: webfetch
+Oct 29 18:24:24.243119 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.repositories.mcp_server.repository - INFO - Created MCP server: id=bced799b-2fc5-44c7-80a7-c79b784a78f2, name=context7
+Oct 29 18:24:24.244063 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.manager - INFO - Created built-in MCP server: context7
+Oct 29 18:24:24.244492 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.manager - INFO - Builtin 'plane' skipped — missing environment configuration (see server definition docs)
+Oct 29 18:24:24.252660 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.manager - INFO - Built-in MCP server bootstrap complete
+Oct 29 18:24:24.276787 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=datacenter (description=updated, schema_doc=updated)
+Oct 29 18:24:24.292587 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=server (description=updated, schema_doc=updated)
+Oct 29 18:24:24.306864 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=rack (description=updated, schema_doc=updated)
+Oct 29 18:24:24.320445 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=k8s_cluster (description=updated, schema_doc=updated)
+Oct 29 18:24:24.332769 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=k8s_node (description=updated, schema_doc=updated)
+Oct 29 18:24:24.344676 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=network (description=updated, schema_doc=updated)
+Oct 29 18:24:24.360664 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=load_balancer (description=updated, schema_doc=updated)
+Oct 29 18:24:24.376681 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=database (description=updated, schema_doc=updated)
+Oct 29 18:24:24.389686 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.repositories.infra.repository - INFO - Upserted infra asset type: name=storage (description=updated, schema_doc=updated)
+Oct 29 18:24:24.390502 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.repositories.infra.repository - INFO - Bootstrapped infra asset types: 9 total, 9 new, 0 updated
+Oct 29 18:24:24.390825 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.manager - INFO - Seeded 9 new infra asset types (0 updated) on startup
+Oct 29 18:24:24.391519 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.manager - INFO - Plugin registry boot-scan: 0 plugin(s) (none), 0 plugin-skill(s)
+Oct 29 18:24:24.399670 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.manager - INFO - BlueprintMatcher not initialized — BLUEPRINT_EMBEDDING_MODEL not set
+Oct 29 18:24:24.416411 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.manager - INFO - MCP warm-up pool initialized: 2 server(s) registered, warmup running in background
+Oct 29 18:24:24.444920 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.persistence - INFO - Creating PostgreSQL checkpointer for localhost:5432/ensemble
+Oct 29 18:24:24.445297 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.persistence - INFO - Checkpoint pool sizing: max_size=10 timeout_s=5.0 (limits.checkpoint_pool_max_size / limits.checkpoint_pool_timeout_s)
+Oct 29 18:24:24.518335 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.mcp.init_guard - WARNING - MCP server 'webfetch' degraded (class=init_failed, attempts=1/3)
+Oct 29 18:24:24.520715 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.mcp.init_guard - WARNING - MCP state-transition journal write failed (server=webfetch state=degraded): journal absent at /tmp/sv3-boot/releases/state.json
+Oct 29 18:24:24.562341 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.mcp.warmup_pool - ERROR - Failed to create pooled connection for 'webfetch': FileNotFoundError: [Errno 2] No such file or directory
+Oct 29 18:24:24.562341 ensemble-vm ensemble-prod[3750530]: Traceback (most recent call last):
+Oct 29 18:24:24.562341 ensemble-vm ensemble-prod[3750530]:   File "daemon/mcp/warmup_pool.py", line 612, in _create_pooled_connection
+Oct 29 18:24:24.562341 ensemble-vm ensemble-prod[3750530]:   File "daemon/mcp/stdio_wrapper.py", line 352, in __aenter__
+Oct 29 18:24:24.562341 ensemble-vm ensemble-prod[3750530]:   File "daemon/mcp/stdio_wrapper.py", line 570, in _run
+Oct 29 18:24:24.562341 ensemble-vm ensemble-prod[3750530]:   File "contextlib.py", line 214, in __aenter__
+Oct 29 18:24:24.562341 ensemble-vm ensemble-prod[3750530]:   File "mcp/client/stdio/__init__.py", line 124, in stdio_client
+Oct 29 18:24:24.562341 ensemble-vm ensemble-prod[3750530]:   File "mcp/client/stdio/__init__.py", line 251, in _create_platform_compatible_process
+Oct 29 18:24:24.562341 ensemble-vm ensemble-prod[3750530]:   File "anyio/_core/_subprocesses.py", line 190, in open_process
+Oct 29 18:24:24.562341 ensemble-vm ensemble-prod[3750530]:   File "anyio/_backends/_asyncio.py", line 2601, in open_process
+Oct 29 18:24:24.562341 ensemble-vm ensemble-prod[3750530]:   File "asyncio/subprocess.py", line 224, in create_subprocess_exec
+Oct 29 18:24:24.562341 ensemble-vm ensemble-prod[3750530]:   File "uvloop/loop.pyx", line 2841, in subprocess_exec
+Oct 29 18:24:24.562341 ensemble-vm ensemble-prod[3750530]:   File "uvloop/loop.pyx", line 2799, in __subprocess_run
+Oct 29 18:24:24.562341 ensemble-vm ensemble-prod[3750530]:   File "uvloop/handles/process.pyx", line 611, in uvloop.loop.UVProcessTransport.new
+Oct 29 18:24:24.562341 ensemble-vm ensemble-prod[3750530]:   File "uvloop/handles/process.pyx", line 112, in uvloop.loop.UVProcess._init
+Oct 29 18:24:24.562341 ensemble-vm ensemble-prod[3750530]: FileNotFoundError: [Errno 2] No such file or directory
+Oct 29 18:24:24.564936 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.mcp.warmup_pool - ERROR - Failed to warm up pool for 'webfetch' (0/1 connections created)
+Oct 29 18:24:24.655529 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.persistence - INFO - PostgreSQL checkpointer adapter ready (saver=AsyncPostgresSaver(pool=AsyncConnectionPool), adapter_pool=asyncpg.Pool)
+Oct 29 18:24:24.669756 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.registry - WARNING - Agents directory does not exist: /tmp/sv3-boot/releases/v0.27.13/agents
+Oct 29 18:24:24.813506 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.repositories.skill.repository - INFO - Created skill trigger: id=782d5d15-6773-47ac-aac8-1ff318158e08, name=low_completion_rate, project_id=None
+Oct 29 18:24:24.924877 ensemble-vm ensemble-prod[3750530]: 18:24:24 - daemon.repositories.skill.repository - INFO - Created skill trigger: id=c0b3968f-d8b4-4908-8a17-1e6f084a3a9f, name=high_fallback_rate, project_id=None
+Oct 29 18:24:25.051020 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.repositories.skill.repository - INFO - Created skill trigger: id=0d07fec9-d7b1-4360-9366-32182d45901d, name=consecutive_failures, project_id=None
+Oct 29 18:24:25.109459 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.repositories.skill.repository - INFO - Created skill trigger: id=498db787-622e-4bd6-8696-d9e3eeed35bf, name=periodic_scan, project_id=None
+Oct 29 18:24:25.121030 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.repositories.skill.repository - INFO - Created skill trigger: id=9b11ee6e-18aa-4bb4-82f0-955c8a8b7cc2, name=task_count_scan, project_id=None
+Oct 29 18:24:25.134035 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.repositories.skill.repository - INFO - Created skill trigger: id=4b45df4b-f72b-4193-ae32-17d8d3865b0d, name=low_usefulness, project_id=None
+Oct 29 18:24:25.144727 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.repositories.skill.repository - INFO - Created skill trigger: id=b525fa49-df8a-44ed-9286-8a6e8bd01252, name=drift_event_observed, project_id=None
+Oct 29 18:24:25.192621 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.skill_trigger_seed - INFO - Seeded default skill triggers: project_id=None, inserted=7
+Oct 29 18:24:25.203774 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.manager - INFO - Skill trigger seed (Phase 4): 7 new default triggers inserted
+Oct 29 18:24:25.226896 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.maintenance_boot_sweep - INFO - maintenance boot sweep: 0 interrupted run(s) in section=checkpoint-cleanup
+Oct 29 18:24:25.227331 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.maintenance - INFO - Maintenance service started
+Oct 29 18:24:25.228948 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.manager - WARNING - Skill bank seeding (Phase 3) failed: [Errno 2] No such file or directory: '/tmp/sv3-boot/releases/v0.27.13/agents'
+Oct 29 18:24:25.229953 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.manager - INFO - SessionManager initialized with PostgreSQL checkpointer (localhost:5432/ensemble)
+Oct 29 18:24:25.234525 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.boot_epoch - INFO - Boot epoch captured (DB clock): 2026-10-29T18:24:25.231442
+Oct 29 18:24:25.252452 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.message_queue_boot_recovery - INFO - [HardReboot] MQ boot pass: reset=0
+Oct 29 18:24:25.258523 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.config - INFO - [CriticalNotes:state] tiered=true projects_with_pins=0/0 total_pinned=0 (gating active when projects_with_pins>=1 per §4.2 #8; projects without pins fall back to render-all)
+Oct 29 18:24:25.259211 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.main_loop_bridge - INFO - MainLoopBridge: event loop set to <uvloop.Loop running=True closed=False debug=False>
+Oct 29 18:24:25.264596 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.stale_task_recovery - INFO - Running startup crash recovery (no grace period)...
+Oct 29 18:24:25.282842 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.stale_task_recovery - INFO - Startup recovery complete: 0 tasks recovered
+Oct 29 18:24:25.285558 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.stale_task_recovery - INFO - StaleTaskRecovery started: threshold=10min, interval=60s, grace=30s, max_retries=3
+Oct 29 18:24:25.290798 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.stale_pause_sweep - INFO - StalePauseSweepService started: interval=300s, age_bound=7200s, batch_cap=100
+Oct 29 18:24:25.297965 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.report_delivery_recovery - INFO - ReportDeliveryRecoveryService started: interval=300s, age_bound=10min, batch_cap=100, retry=1min, lanes=[deferred=True, no_row_backstop=True, pending_age=True, recovery_retry=True, orphan=True, stuck_wake=True, mission_reconciliation=True]
+Oct 29 18:24:25.299078 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.worker_pool - INFO - Starting WorkerPool with 5 workers...
+Oct 29 18:24:25.300665 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.worker_pool - INFO - Worker worker-0 started
+Oct 29 18:24:25.302169 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.worker_pool - INFO - Worker worker-1 started
+Oct 29 18:24:25.304856 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.worker_pool - INFO - Worker worker-2 started
+Oct 29 18:24:25.317030 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.worker_pool - INFO - Worker worker-3 started
+Oct 29 18:24:25.320368 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.worker_pool - INFO - Worker worker-4 started
+Oct 29 18:24:25.334238 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.worker_pool - INFO - WorkerPool started: 5 workers
+Oct 29 18:24:25.359576 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.worker_pool - INFO - Starting WorkerPool with 2 workers...
+Oct 29 18:24:25.366116 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.worker_pool - INFO - Worker chat-worker-0 started
+Oct 29 18:24:25.376091 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.worker_pool - INFO - Worker chat-worker-1 started
+Oct 29 18:24:25.377416 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.worker_pool - INFO - WorkerPool started: 2 workers
+Oct 29 18:24:25.382341 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.pool_orchestrator - INFO - ChatSourceWorkerPool started: workers=2, prefixes=telegram:,slack:,discord:
+Oct 29 18:24:25.407830 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.report_delivery_recovery - INFO - RDRS lane 2: post-wipe recovery (no-row backstop; F-2 wedge closure per durability-f1-f2 / phase2 task 2.8)
+Oct 29 18:24:25.937305 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon - INFO - question-packs rehydrated: 0
+Oct 29 18:24:25.938191 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.api - INFO - P3/decision-f deferred DELETE_PHASE: no doomed ids (operator gate QUEUE_DISCARD_ON_STARTUP may be off, or no rows matched the doomed predicate; DELETE no-ops)
+Oct 29 18:24:25.966122 ensemble-vm ensemble-prod[3750530]: 18:24:25 - daemon.services.report_delivery_recovery - INFO - RDRS lane 7: mission_reconciliation admitted 0 outstanding commission(s) (mode=dry, ttl=21600s, batch_cap=100)
+Oct 29 18:24:26.055871 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.services.report_delivery_recovery - INFO - RDRS lane 2: post-wipe recovery (no-row backstop; F-2 wedge closure per durability-f1-f2 / phase2 task 2.8)
+Oct 29 18:24:26.145875 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.services.report_delivery_recovery - INFO - RDRS lane 7: mission_reconciliation admitted 0 outstanding commission(s) (mode=dry, ttl=21600s, batch_cap=100)
+Oct 29 18:24:26.906365 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.registry - INFO - AgentRegistry.discover_custom_agents: registered 0 custom agent(s)
+Oct 29 18:24:26.906713 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.api - INFO - [Startup] custom-agent discovery: registered 0
+Oct 29 18:24:26.907546 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.api - INFO - [Startup] Prompt-artifact drift check skipped: no agents root resolved
+Oct 29 18:24:26.907857 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.api - INFO - WorkResolverService constructed and wired to InstanceManager
+Oct 29 18:24:26.908191 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.api - INFO - Phase 2 Batch 2: watcher_repo + work_resolver wired to TaskProcessor / WorkerPool / StaleTaskRecovery
+Oct 29 18:24:26.908581 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.api - INFO - RetryScheduler disabled (job_retry_scheduler_enabled is not set)
+Oct 29 18:24:26.908792 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.manager - INFO - JobQueueService wired into SourceRegistry for scheduler routing
+Oct 29 18:24:26.909129 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.manager - INFO - SkillJobDispatcher wired to manager (evolution_lane_enabled=False, fix_cooldown_seconds=1800)
+Oct 29 18:24:26.909471 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.manager - INFO - JobQueueService connected to SessionManager
+Oct 29 18:24:26.909644 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.manager - INFO - JobQueueMgmtService connected to SessionManager
+Oct 29 18:24:26.909905 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.services.job_recovery_service - INFO - Starting job recovery — checking PROCESSING jobs...
+Oct 29 18:24:26.910666 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.services.stale_pause_sweep - INFO - stale-pause sweep: candidates=0 resumed=0 (cutoff=2026-10-29T16:24:26.051461+00:00, age_bound=7200s)
+Oct 29 18:24:26.925902 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.services.job_recovery_service - INFO - Job recovery complete: 0 recovered, 0 alive, 0 total
+Oct 29 18:24:26.926249 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.api - INFO - Job recovery: {'recovered': 0, 'alive': 0, 'total': 0}
+Oct 29 18:24:26.934977 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.services.job_recovery_service - INFO - Pattern-f1 orphan-ACTIVE-JobItem recovery ENABLED (default; set ENSEMBLE_ORPHAN_F1_ENABLED=0 to disable — restart required to flip)
+Oct 29 18:24:26.935272 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.services.job_recovery_service - INFO - Pattern-g defer-self-witness autopromote ENABLED (default; ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED unset or set to a truthy value) — matched deferred PENDING tasks in the self-witness blind-spot will be unstuck by flipping task.is_deferred=false on the drift cadence. Set ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED=0 (or 00/-0/0./0x0/false/no/off) + restart to disable the bounded unstick
+Oct 29 18:24:26.935597 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.api - INFO - Drift reconciler started: interval=300s, min_pending_age=300s, min_orphan_age=900s, f1_tree_activity_max_age=900s
+Oct 29 18:24:26.937311 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.services.eligible_pending_sweep - INFO - EligiblePendingSweepService started: interval=90s, min_pending_age=60s
+Oct 29 18:24:26.938192 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.api - INFO - EligiblePendingSweepService started: interval=90s (default 90s), min_pending_age=60s (default 60s)
+Oct 29 18:24:26.938818 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.services.orphan_watcher_sweep - INFO - OrphanWatcherSweepService started: interval=90s
+Oct 29 18:24:26.939161 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.api - INFO - OrphanWatcherSweepService started: interval=90s (default 90s), grace=30s (default 30s)
+Oct 29 18:24:26.940413 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.services.job_lock_sweep - INFO - JobLockSweepService started: interval=90s (default 90s)
+Oct 29 18:24:26.940624 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.api - INFO - JobLockSweepService started: interval=90s (default 90s)
+Oct 29 18:24:26.941954 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.services.watch_reconcile_sweep - INFO - WatchReconcileSweepService started: interval=300s (default 300s)
+Oct 29 18:24:26.942267 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.api - INFO - WatchReconcileSweepService started: interval=300s (default 300s)
+Oct 29 18:24:26.945307 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.api - INFO - MissionStrandHealer started: interval=300s (default 300s)
+Oct 29 18:24:26.947098 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.services.tmp_image_cleanup_service - INFO - TmpImageCleanupService started: interval=3600s retention=30d
+Oct 29 18:24:26.947409 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon - INFO - [TmpImages] cleanup service started: interval=3600s retention=30d
+Oct 29 18:24:26.948384 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon - WARNING - [LiveViews] passcode substrate init failed (uniform 404 on the public lane, direct lane unaffected): ViewPasscodeCipherUnavailable: ViewPasscodeCipher unavailable: SYSTEM_ENCRYPTION_KEY is not set. The live-view passcode substrate is unavailable until the env var is set.
+Oct 29 18:24:26.948636 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon - INFO - [LiveViews] subsystem ready: enabled=True roots=['designer-artifact', 'planning', 'reports', 'tmp-images']
+Oct 29 18:24:26.950151 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.services.plane_sync_watchdog_service - INFO - PlaneSyncWatchdogService started: interval=300s backoff_base=60s backoff_max=1800s max_attempts=5
+Oct 29 18:24:26.950450 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon - INFO - [PlaneSync] watchdog started: interval=300s backoff_base=60s backoff_max=1800s max_attempts=5
+Oct 29 18:24:26.954042 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.api - INFO - Waiting-children watchdog started: interval=3600s, hang_threshold=3600s
+Oct 29 18:24:26.954480 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.api - INFO - Long-tool-nudge scanner started: interval=60s, default_threshold=900s
+Oct 29 18:24:26.960277 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.services.llm_stream_watchdog - INFO - [StreamWatchdog] loop started: threshold=45s interval=1.0s registry=0 live stream(s)
+Oct 29 18:24:26.960649 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.api - INFO - [StreamWatchdog] started: threshold=45s
+Oct 29 18:24:26.971712 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.services.resource_monitor.facade - INFO - resource-monitor started: sample_s=30 flush_s=60 retention=(2880, 336, 180)
+Oct 29 18:24:26.972122 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.api - INFO - [ResourceMonitor] started
+Oct 29 18:24:26.990064 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.services.metrics_listener - INFO - [MetricsListener] started on 127.0.0.1:9798
+Oct 29 18:24:26.998478 ensemble-vm ensemble-prod[3750530]: 18:24:26 - daemon.services.metrics_census - INFO - [MetricsCensus] started: interval=15s application_name=ensemble-metrics-census
+Oct 29 18:24:27.007519 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.manager - INFO - DeadLetterService connected to InstanceManager
+Oct 29 18:24:27.008851 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.services.job_feedback_observer - INFO - JobFeedbackObserver started
+Oct 29 18:24:27.009161 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.api - INFO - JobFeedbackObserver started
+Oct 29 18:24:27.051284 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.services.plane_sync_watchdog_service - INFO - PlaneSyncWatchdogService: Plane sync not configured (PLANE_BASE_URL / PLANE_API_KEY not set) — watchdog no-op (no re-drives; projects in error/drift will recover on next activation)
+Oct 29 18:24:27.051284 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.services.waiting_children_watchdog - INFO - [Watchdog] Starting periodic loop: interval=3600s, hang_threshold=3600s
+Oct 29 18:24:27.063631 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.services.long_tool_nudge - INFO - [LongToolNudge] Starting periodic loop: interval=60s default_threshold=900s
+Oct 29 18:24:27.086877 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.services.dependency_bus - INFO - bus start: warmed=0 pending watchers, recovered=0 fired-but-unsent watchers, swept=0 orphan pending watcher(s)
+Oct 29 18:24:27.087127 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.services.dependency_bus - INFO - DependencyBus registered
+Oct 29 18:24:27.087390 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.api - INFO - DependencyBus started (recovered=0 FIRED-but-unsent watchers)
+Oct 29 18:24:27.211204 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.api - INFO - System default project bootstrapped: 71931ae0-0f25-5fbf-853b-2a78cc978d7e
+Oct 29 18:24:27.212393 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.services.job_processor - INFO - JobProcessor started
+Oct 29 18:24:27.212810 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.api - INFO - JobProcessor started
+Oct 29 18:24:27.213259 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.services.job_processor - INFO - JobProcessor: JobFeedbackObserver wired (MESSAGE jobs route through observer — sole dispatch path post-Phase-D)
+Oct 29 18:24:27.213726 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.api - INFO - JobFeedbackObserver wired into JobProcessor
+Oct 29 18:24:27.215798 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.manager - INFO - JobFeedbackObserver wired into InstanceManager
+Oct 29 18:24:27.215798 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.api - INFO - JobFeedbackObserver wired into InstanceManager (report_lane=ON)
+Oct 29 18:24:27.215798 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.manager - INFO - NotificationBroadcaster connected to InstanceManager
+Oct 29 18:24:27.265794 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.api - INFO - Auto-provisioned system queues for 1 projects
+Oct 29 18:24:27.266391 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.sources.cleanup - INFO - SourceCleanup started (interval: 21600s)
+Oct 29 18:24:27.266745 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.sources.dispatcher - INFO - Starting ResponseDispatcher
+Oct 29 18:24:27.267168 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.sources.registry - INFO - Loading and scheduling auto-start for enabled adapters...
+Oct 29 18:24:27.277206 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.sources.registry - INFO - Scheduled auto-start for 0 adapters (delayed 60.0s)
+Oct 29 18:24:27.277616 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.manager - INFO - Message sources system started
+Oct 29 18:24:27.278296 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon - INFO - [Readiness] Refresher started: interval=10s, queue_freshness_threshold=120s
+Oct 29 18:24:27.289490 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon - INFO - [KbKeys] module key store ready (active_keys=0)
+Oct 29 18:24:27.294281 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon - WARNING - [KbKeys] key store EMPTY — /api/mcp/kb and /api/mcp/kb/sse are in bootstrap pass-through (requests NOT key-gated). Mint the first key via POST /api/mcp/kb/keys to activate the guard; probe posture via GET /api/mcp/kb/keys/guard-status.
+Oct 29 18:24:27.305804 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.tools.upgrade_journal - WARNING - upgrade_journal: close_stale_restart_arm journal read FAILED (leaving any stale arm untouched): journal absent at /tmp/sv3-boot/releases/state.json
+Oct 29 18:24:27.306452 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.services.upgrade_journal_sweep - WARNING - UpgradeJournalSweepService: grace pass journal_read FAILED (torn): journal absent at /tmp/sv3-boot/releases/state.json — continuing (no abandons on this tick)
+Oct 29 18:24:27.306954 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.services.upgrade_journal_sweep - WARNING - UpgradeJournalSweepService: journal torn at boot sweep: journal absent at /tmp/sv3-boot/releases/state.json — errors=1, continuing (next tick retries)
+Oct 29 18:24:27.307485 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.api - INFO - UpgradeJournalSweepService wake boot sweep: UpgradeJournalSweepService.WakeSweepResult(pending_at_start=0, pending_at_end=0, delivered=0, abandoned=0, errors=1, coalesce_overflows=0)
+Oct 29 18:24:27.328014 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.api - INFO - AutoContinue boot pass: ContinueResult(candidates=0, scheduled=0, skipped_no_checkpoint=0, skipped_resume_refused=0, skipped_kill_switch=0, skipped_no_boot_epoch=0, skipped_multi_task_instance=0, errors=0, duration_seconds=0.012375312973745167, auto_continue_mode='on', auto_continue_raw_env='1', deferred_pipeline_busy=0, deferred_work_ids=[])
+Oct 29 18:24:27.348560 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.services.auto_continue_boot_pass - INFO - [BOOT_CONTINUE] orphan-sweep summary: candidates=0 scheduled=0 skipped_no_checkpoint=0 skipped_resume_refused=0 skipped_kill_switch=0 skipped_no_boot_epoch=0 errors=0 duration_s=0.019 boot_epoch=2026-10-29T18:24:25.231442 mode=on
+Oct 29 18:24:27.361521 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.services.stale_pause_sweep - INFO - stale-pause sweep: candidates=0 resumed=0 (cutoff=2026-10-29T16:24:27.350432+00:00, age_bound=7200s)
+Oct 29 18:24:27.361784 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.api - INFO - Stale-pause boot sweep: {'candidates': 0, 'resumed': 0, 'skipped_protected': 0, 'errors': 0, 'instances': []}
+Oct 29 18:24:27.362289 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.services.upgrade_journal_sweep - INFO - UpgradeJournalSweepService started: interval=90s (default 90s), reaper_timeout=660s (default 660s), install_dir=/tmp/sv3-boot
+Oct 29 18:24:27.389081 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.wedge_capture.watchdog - INFO - Wedge-capture watchdog started: dir=/tmp/sv3-boot/work/data/wedge-captures interval=1.0s cpu>=95.0%/30.0s lag>=5.00s/15.0s concentration>=85.0%/30.0s cooldown=300.0s deadline=20.0s
+Oct 29 18:24:27.389491 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.api - INFO - UpgradeJournalSweepService started: interval=90s (default 90s), reaper_timeout=660s (default 660s), install_dir=/tmp/sv3-boot
+Oct 29 18:24:27.395731 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.services.upgrade_journal_sweep - WARNING - UpgradeJournalSweepService: pending_actions GC tick failed: JournalTorn: journal absent at /tmp/sv3-boot/releases/state.json — next tick will retry
+Oct 29 18:24:27.412859 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.services.upgrade_journal_sweep - WARNING - UpgradeJournalSweepService: grace pass journal_read FAILED (torn): journal absent at /tmp/sv3-boot/releases/state.json — continuing (no abandons on this tick)
+Oct 29 18:24:27.413456 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.services.upgrade_journal_sweep - WARNING - UpgradeJournalSweepService: journal torn at boot sweep: journal absent at /tmp/sv3-boot/releases/state.json — errors=1, continuing (next tick retries)
+Oct 29 18:24:27.436205 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.api - INFO - [ServiceTool] reconcile_boot_sweep alive=0 reaped=0 errors=0
+Oct 29 18:24:27.437168 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.api - INFO - ServiceReconciliationService started: interval=90s
+Oct 29 18:24:27.447620 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.api - INFO - VS Code proxy mounted at /vscode
+Oct 29 18:24:27.454870 ensemble-vm ensemble-prod[3750530]: 18:24:27 - daemon.api - INFO - Skills router wired: store=True search=True metrics=True evolution=True triggers=True dispatcher=True usage_repo=True
+Oct 29 18:24:27.455730 ensemble-vm ensemble-prod[3750530]: 18:24:27 - mcp.server.streamable_http_manager - INFO - StreamableHTTP session manager started
+Oct 29 18:24:27.456745 ensemble-vm ensemble-prod[3750530]: INFO:     Application startup complete.
+Oct 29 18:24:27.458373 ensemble-vm ensemble-prod[3750530]: INFO:     Uvicorn running on http://0.0.0.0:9783 (Press CTRL+C to quit)
+Oct 29 18:24:36.882038 ensemble-vm ensemble-prod[3750922]: Context7 Documentation MCP Server v4.4.4 running on stdio
+Oct 29 18:24:36.989128 ensemble-vm ensemble-prod[3750530]: 18:24:36 - daemon.mcp.warmup_pool - INFO - Warmed up pool for 'context7' (1/1 connections)
+Oct 29 18:24:36.989966 ensemble-vm ensemble-prod[3750530]: 18:24:36 - daemon.mcp.warmup_pool - INFO - MCP warmup complete: 2 server(s) ready
+Oct 29 18:24:36.990263 ensemble-vm ensemble-prod[3750530]: 18:24:36 - daemon.manager - INFO - MCP warm-up pool ready: {'webfetch': {'available': 0, 'pool_size': 1, 'healthy': False}, 'context7': {'available': 1, 'pool_size': 1, 'healthy': True}}
+Oct 29 18:24:36.990728 ensemble-vm ensemble-prod[3750530]: 18:24:36 - daemon.mcp.warmup_pool - INFO - Started MCP health check loop (interval=60s)
+Oct 29 18:24:37.080836 ensemble-vm ensemble-prod[3750530]: 18:24:37 - daemon.mcp.connection_manager - ERROR - Failed to connect MCP server: [Errno 2] No such file or directory
+Oct 29 18:24:37.081400 ensemble-vm ensemble-prod[3750530]: 18:24:37 - daemon.services.mcp_service - WARNING - Schema discovery: no session for MCP server 'webfetch' on attempt 1 — retrying once
+Oct 29 18:24:38.648032 ensemble-vm ensemble-prod[3750530]: 18:24:38 - daemon.mcp.connection_manager - ERROR - Failed to connect MCP server: [Errno 2] No such file or directory
+Oct 29 18:24:38.649020 ensemble-vm ensemble-prod[3750530]: 18:24:38 - daemon.services.mcp_service - WARNING - Schema discovery: no session for MCP server 'webfetch' after 2 attempt(s)
+Oct 29 18:24:38.649020 ensemble-vm ensemble-prod[3750530]: 18:24:38 - daemon.services.mcp_service - WARNING - Schema discovery returned no tools for MCP server 'webfetch' — result NOT cached; next lookup will retry discovery
+Oct 29 18:24:38.649388 ensemble-vm ensemble-prod[3750530]: 18:24:38 - daemon.services.mcp_service - INFO - eager_warm_schemas: primed 1/2 MCP server schema(s) (context7: 2 tool(s), webfetch: 0 tools)
+Oct 29 18:24:57.054960 ensemble-vm ensemble-prod[3750530]: 18:24:57 - daemon.services.job_recovery_service - INFO - reconcile_drift_states: complete — reconciled=0, details=0
+Oct 29 18:24:57.069730 ensemble-vm ensemble-prod[3750530]: 18:24:57 - daemon.services.job_recovery_service - INFO - reconcile_drift_states: complete — reconciled=0, details=0
+Oct 29 18:25:25.237981 ensemble-vm ensemble-prod[3750530]: 18:25:25 - daemon.services.maintenance - INFO - Starting checkpoint cleanup job
+Oct 29 18:25:25.245937 ensemble-vm ensemble-prod[3750530]: 18:25:25 - daemon.services.maintenance - INFO - pinned_subtree_terminal_count=0 (sum of terminal descendants under pinned roots; P1 polarity change now visible)
+Oct 29 18:25:25.364871 ensemble-vm ensemble-prod[3750530]: 18:25:25 - daemon.checkpoint_perf - INFO - [CheckpointPerf] op=prune threads=0 deleted=0 duration_ms=0 (no excess threads)
+Oct 29 18:25:25.365304 ensemble-vm ensemble-prod[3750530]: 18:25:25 - daemon.checkpoint_perf - INFO - [CheckpointPerf] op=prune-exit threads=0 deleted=0 duration_ms=5
+Oct 29 18:25:25.366785 ensemble-vm ensemble-prod[3750530]: 18:25:25 - daemon.services.maintenance - INFO - Checkpoint cleanup job completed
+Oct 29 18:25:25.394627 ensemble-vm ensemble-prod[3750530]: 18:25:25 - daemon.services.maintenance - INFO - Maintenance job 'checkpoint_cleanup' completed successfully
+Oct 29 18:25:25.420043 ensemble-vm ensemble-prod[3750530]: 18:25:25 - daemon.services.vacuum_maintenance - INFO - vacuum_maintenance: no tables exceeded dead-tuple threshold (min=1000, scale=0.0500); cycle idle
+Oct 29 18:25:25.420543 ensemble-vm ensemble-prod[3750530]: 18:25:25 - daemon.services.vacuum_maintenance - INFO - vacuum_maintenance cycle complete: qualified=0 vacuumed=0 skipped=0 duration_ms=18
+Oct 29 18:25:25.431505 ensemble-vm ensemble-prod[3750530]: 18:25:25 - daemon.services.maintenance - INFO - Maintenance job 'vacuum_maintenance' completed successfully
+Oct 29 18:25:25.465962 ensemble-vm ensemble-prod[3750530]: 18:25:25 - daemon.services.maintenance - INFO - Maintenance job 'skill_metric_scan' completed successfully
+Oct 29 18:25:25.486730 ensemble-vm ensemble-prod[3750530]: 18:25:25 - daemon.services.maintenance - INFO - Maintenance job 'skill_orphan_sweep' completed successfully
+Oct 29 18:25:25.566932 ensemble-vm ensemble-prod[3750530]: 18:25:25 - daemon.services.maintenance - INFO - Maintenance job 'blueprint_daily_scan' completed successfully
+Oct 29 18:25:25.579651 ensemble-vm ensemble-prod[3750530]: 18:25:25 - daemon.manager - INFO - malloc_trim: glibc heap trimmed — free pages returned to OS
+Oct 29 18:25:25.579924 ensemble-vm ensemble-prod[3750530]: 18:25:25 - daemon.services.maintenance - INFO - Maintenance job 'malloc_trim' completed successfully
+Oct 29 18:25:25.586774 ensemble-vm ensemble-prod[3750530]: 18:25:25 - daemon.services.maintenance - INFO - Maintenance job 'dependency_bus_lock_reap' completed successfully
+Oct 29 18:25:37.126039 ensemble-vm ensemble-prod[3750530]: 18:25:37 - daemon.mcp.warmup_pool - WARNING - Failed to replenish pool for webfetch: [Errno 2] No such file or directory
+Oct 29 18:25:37.126039 ensemble-vm ensemble-prod[3750530]: Traceback (most recent call last):
+Oct 29 18:25:37.126039 ensemble-vm ensemble-prod[3750530]:   File "daemon/mcp/warmup_pool.py", line 987, in _replenish
+Oct 29 18:25:37.126039 ensemble-vm ensemble-prod[3750530]:   File "daemon/mcp/warmup_pool.py", line 612, in _create_pooled_connection
+Oct 29 18:25:37.126039 ensemble-vm ensemble-prod[3750530]:   File "daemon/mcp/stdio_wrapper.py", line 352, in __aenter__
+Oct 29 18:25:37.126039 ensemble-vm ensemble-prod[3750530]:   File "daemon/mcp/stdio_wrapper.py", line 570, in _run
+Oct 29 18:25:37.126039 ensemble-vm ensemble-prod[3750530]:   File "contextlib.py", line 214, in __aenter__
+Oct 29 18:25:37.126039 ensemble-vm ensemble-prod[3750530]:   File "mcp/client/stdio/__init__.py", line 124, in stdio_client
+Oct 29 18:25:37.126039 ensemble-vm ensemble-prod[3750530]:   File "mcp/client/stdio/__init__.py", line 251, in _create_platform_compatible_process
+Oct 29 18:25:37.126039 ensemble-vm ensemble-prod[3750530]:   File "anyio/_core/_subprocesses.py", line 190, in open_process
+Oct 29 18:25:37.126039 ensemble-vm ensemble-prod[3750530]:   File "anyio/_backends/_asyncio.py", line 2601, in open_process
+Oct 29 18:25:37.126039 ensemble-vm ensemble-prod[3750530]:   File "asyncio/subprocess.py", line 224, in create_subprocess_exec
+Oct 29 18:25:37.126039 ensemble-vm ensemble-prod[3750530]:   File "uvloop/loop.pyx", line 2841, in subprocess_exec
+Oct 29 18:25:37.126039 ensemble-vm ensemble-prod[3750530]:   File "uvloop/loop.pyx", line 2799, in __subprocess_run
+Oct 29 18:25:37.126039 ensemble-vm ensemble-prod[3750530]:   File "uvloop/handles/process.pyx", line 611, in uvloop.loop.UVProcessTransport.new
+Oct 29 18:25:37.126039 ensemble-vm ensemble-prod[3750530]:   File "uvloop/handles/process.pyx", line 112, in uvloop.loop.UVProcess._init
+Oct 29 18:25:37.126039 ensemble-vm ensemble-prod[3750530]: FileNotFoundError: [Errno 2] No such file or directory
+Oct 29 18:25:57.415168 ensemble-vm ensemble-prod[3750530]: 18:25:57 - daemon.services.upgrade_journal_sweep - WARNING - UpgradeJournalSweepService: pending_actions GC tick failed: JournalTorn: journal absent at /tmp/sv3-boot/releases/state.json — next tick will retry
+Oct 29 18:25:57.416692 ensemble-vm ensemble-prod[3750530]: 18:25:57 - daemon.services.upgrade_journal_sweep - WARNING - UpgradeJournalSweepService: grace pass journal_read FAILED (torn): journal absent at /tmp/sv3-boot/releases/state.json — continuing (no abandons on this tick)
+Oct 29 18:25:57.416692 ensemble-vm ensemble-prod[3750530]: 18:25:57 - daemon.services.upgrade_journal_sweep - WARNING - UpgradeJournalSweepService: journal torn at boot sweep: journal absent at /tmp/sv3-boot/releases/state.json — errors=1, continuing (next tick retries)
+Oct 29 18:26:37.216311 ensemble-vm ensemble-prod[3750530]: 18:26:37 - daemon.sources.circuit_breaker - WARNING - Circuit OPEN after 3 failures
+Oct 29 18:26:37.217496 ensemble-vm ensemble-prod[3750530]: 18:26:37 - daemon.mcp.init_guard - WARNING - MCP server 'webfetch' QUARANTINED for this boot (class=init_failed, attempts=3, threshold=3) — recovery probe after 300s
+Oct 29 18:26:37.218730 ensemble-vm ensemble-prod[3750530]: 18:26:37 - daemon.mcp.init_guard - WARNING - MCP state-transition journal write failed (server=webfetch state=quarantined): journal absent at /tmp/sv3-boot/releases/state.json
+Oct 29 18:26:37.257322 ensemble-vm ensemble-prod[3750530]: 18:26:37 - daemon.mcp.warmup_pool - WARNING - Failed to replenish pool for webfetch: [Errno 2] No such file or directory
+Oct 29 18:26:37.257322 ensemble-vm ensemble-prod[3750530]: Traceback (most recent call last):
+Oct 29 18:26:37.257322 ensemble-vm ensemble-prod[3750530]:   File "daemon/mcp/warmup_pool.py", line 987, in _replenish
+Oct 29 18:26:37.257322 ensemble-vm ensemble-prod[3750530]:   File "daemon/mcp/warmup_pool.py", line 612, in _create_pooled_connection
+Oct 29 18:26:37.257322 ensemble-vm ensemble-prod[3750530]:   File "daemon/mcp/stdio_wrapper.py", line 352, in __aenter__
+Oct 29 18:26:37.257322 ensemble-vm ensemble-prod[3750530]:   File "daemon/mcp/stdio_wrapper.py", line 570, in _run
+Oct 29 18:26:37.257322 ensemble-vm ensemble-prod[3750530]:   File "contextlib.py", line 214, in __aenter__
+Oct 29 18:26:37.257322 ensemble-vm ensemble-prod[3750530]:   File "mcp/client/stdio/__init__.py", line 124, in stdio_client
+Oct 29 18:26:37.257322 ensemble-vm ensemble-prod[3750530]:   File "mcp/client/stdio/__init__.py", line 251, in _create_platform_compatible_process
+Oct 29 18:26:37.257322 ensemble-vm ensemble-prod[3750530]:   File "anyio/_core/_subprocesses.py", line 190, in open_process
+Oct 29 18:26:37.257322 ensemble-vm ensemble-prod[3750530]:   File "anyio/_backends/_asyncio.py", line 2601, in open_process
+Oct 29 18:26:37.257322 ensemble-vm ensemble-prod[3750530]:   File "asyncio/subprocess.py", line 224, in create_subprocess_exec
+Oct 29 18:26:37.257322 ensemble-vm ensemble-prod[3750530]:   File "uvloop/loop.pyx", line 2841, in subprocess_exec
+Oct 29 18:26:37.257322 ensemble-vm ensemble-prod[3750530]:   File "uvloop/loop.pyx", line 2799, in __subprocess_run
+Oct 29 18:26:37.257322 ensemble-vm ensemble-prod[3750530]:   File "uvloop/handles/process.pyx", line 611, in uvloop.loop.UVProcessTransport.new
+Oct 29 18:26:37.257322 ensemble-vm ensemble-prod[3750530]:   File "uvloop/handles/process.pyx", line 112, in uvloop.loop.UVProcess._init
+Oct 29 18:26:37.257322 ensemble-vm ensemble-prod[3750530]: FileNotFoundError: [Errno 2] No such file or directory
+Oct 29 18:27:27.418757 ensemble-vm ensemble-prod[3750530]: 18:27:27 - daemon.services.upgrade_journal_sweep - WARNING - UpgradeJournalSweepService: pending_actions GC tick failed: JournalTorn: journal absent at /tmp/sv3-boot/releases/state.json — next tick will retry
+Oct 29 18:27:27.421043 ensemble-vm ensemble-prod[3750530]: 18:27:27 - daemon.services.upgrade_journal_sweep - WARNING - UpgradeJournalSweepService: grace pass journal_read FAILED (torn): journal absent at /tmp/sv3-boot/releases/state.json — continuing (no abandons on this tick)
+Oct 29 18:27:27.421043 ensemble-vm ensemble-prod[3750530]: 18:27:27 - daemon.services.upgrade_journal_sweep - WARNING - UpgradeJournalSweepService: journal torn at boot sweep: journal absent at /tmp/sv3-boot/releases/state.json — errors=1, continuing (next tick retries)
+Oct 29 18:27:37.261364 ensemble-vm ensemble-prod[3750530]: 18:27:37 - daemon.mcp.warmup_pool - INFO - MCP server 'webfetch' is quarantined for this boot — no recovery probe is due yet (it fires once the 300s recovery window elapses; no daemon restart needed)

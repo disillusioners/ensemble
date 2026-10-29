@@ -1,0 +1,1382 @@
+===== daemon.constants:: (co_filename=daemon/constants.py) =====
+  --           MAKE_CELL                0 (__conditional_annotations__)
+
+   0           RESUME                   0
+
+   1           LOAD_CONST             100 (<code object __annotate__ at 0x3a09ac0, file "daemon/constants.py", line 1>)
+               MAKE_FUNCTION
+               STORE_NAME             193 (__annotate__)
+               BUILD_SET                0
+               STORE_NAME               0 (__conditional_annotations__)
+               LOAD_CONST               0 ('Named constants for the agents-ensemble daemon.\n\nAll magic numbers in the codebase are consolidated here for discoverability\nand maintainability. Constants are organized by category.\n\nLeaf-module invariant: this module imports NOTHING. Constants are raw\nPython literals (strings, ints, floats, frozensets, dicts) so consumers\ncan ``from daemon.constants import …`` without pulling in a dependency\nchain. If you find yourself reaching for an import here, hoist the value\ninto a non-constants module and reference it from there.\n')
+               STORE_NAME               1 (__doc__)
+
+  16           LOAD_SMALL_INT          10
+               STORE_NAME               2 (DEFAULT_PAGE_LIMIT)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT           0
+               SET_ADD                  1
+               POP_TOP
+
+  17           LOAD_SMALL_INT          50
+               STORE_NAME               3 (DEFAULT_JOB_LIST_LIMIT)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT           1
+               SET_ADD                  1
+               POP_TOP
+
+  18           LOAD_SMALL_INT         100
+               STORE_NAME               4 (DEFAULT_SCHEDULE_EXECUTIONS_LIMIT)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT           2
+               SET_ADD                  1
+               POP_TOP
+
+  19           LOAD_SMALL_INT         100
+               STORE_NAME               5 (MAX_PAGE_LIMIT)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT           3
+               SET_ADD                  1
+               POP_TOP
+
+  20           LOAD_SMALL_INT         100
+               STORE_NAME               6 (MAX_JOB_LIST_LIMIT)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT           4
+               SET_ADD                  1
+               POP_TOP
+
+  21           LOAD_CONST               1 (1000)
+               STORE_NAME               7 (MAX_SCHEDULE_EXECUTION_LIMIT)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT           5
+               SET_ADD                  1
+               POP_TOP
+
+  22           LOAD_CONST               2 (4096)
+               STORE_NAME               8 (MAX_CREDENTIALS_SIZE)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT           6
+               SET_ADD                  1
+               POP_TOP
+
+  23           LOAD_CONST               3 (500)
+               STORE_NAME               9 (MAX_ERROR_LEN)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT           7
+               SET_ADD                  1
+               POP_TOP
+
+  24           LOAD_CONST               1 (1000)
+               STORE_NAME              10 (MAX_CHAT_LOCKS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT           8
+               SET_ADD                  1
+               POP_TOP
+
+  33           LOAD_CONST             101 (8388608)
+               STORE_NAME              11 (DISCORD_FILE_MAX_BYTES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT           9
+               SET_ADD                  1
+               POP_TOP
+
+  34           LOAD_CONST             102 (10485760)
+               STORE_NAME              12 (TELEGRAM_PHOTO_MAX_BYTES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          10
+               SET_ADD                  1
+               POP_TOP
+
+  35           LOAD_CONST             103 (52428800)
+               STORE_NAME              13 (TELEGRAM_DOCUMENT_MAX_BYTES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          11
+               SET_ADD                  1
+               POP_TOP
+
+  36           LOAD_CONST             104 (1073741824)
+               STORE_NAME              14 (SLACK_FILE_MAX_BYTES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          12
+               SET_ADD                  1
+               POP_TOP
+
+  37           LOAD_CONST               4 (4000)
+               STORE_NAME              15 (INITIAL_COMMENT_MAX)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          13
+               SET_ADD                  1
+               POP_TOP
+
+  38           LOAD_NAME               16 (frozenset)
+               PUSH_NULL
+               BUILD_SET                0
+               LOAD_CONST             105 (frozenset({'image/webp', 'image/gif', 'image/png', 'image/jpeg'}))
+               SET_UPDATE               1
+               CALL                     1
+               STORE_NAME              17 (CHART_IMAGE_MIME_WHITELIST)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          14
+               SET_ADD                  1
+               POP_TOP
+
+  43           LOAD_SMALL_INT          30
+               STORE_NAME              18 (SSE_TIMEOUT_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          15
+               SET_ADD                  1
+               POP_TOP
+
+  44           LOAD_SMALL_INT          30
+               STORE_NAME              19 (SSE_PING_INTERVAL)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          16
+               SET_ADD                  1
+               POP_TOP
+
+  45           LOAD_SMALL_INT          50
+               STORE_NAME              20 (SSE_QUEUE_MAXSIZE)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          17
+               SET_ADD                  1
+               POP_TOP
+
+  46           LOAD_SMALL_INT           2
+               STORE_NAME              21 (EVENT_STREAM_POLL_INTERVAL)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          18
+               SET_ADD                  1
+               POP_TOP
+
+  56           LOAD_CONST               5 (1800)
+               STORE_NAME              22 (STUCK_HEARTBEAT_AFTER_SECONDS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          19
+               SET_ADD                  1
+               POP_TOP
+
+  62           LOAD_SMALL_INT           3
+               STORE_NAME              23 (STUCK_HEARTBEAT_ESCALATION_INDEX)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          20
+               SET_ADD                  1
+               POP_TOP
+
+  65           LOAD_CONST               6 (610)
+               STORE_NAME              24 (REQUEST_TIMEOUT_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          21
+               SET_ADD                  1
+               POP_TOP
+
+  66           LOAD_SMALL_INT          60
+               STORE_NAME              25 (INSTANCE_TIMEOUT_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          22
+               SET_ADD                  1
+               POP_TOP
+
+  67           LOAD_CONST               7 (300)
+               STORE_NAME              26 (GRAPH_TIMEOUT_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          23
+               SET_ADD                  1
+               POP_TOP
+
+  68           LOAD_CONST               7 (300)
+               STORE_NAME              27 (TASK_TIMEOUT_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          24
+               SET_ADD                  1
+               POP_TOP
+
+  69           LOAD_CONST               7 (300)
+               STORE_NAME              28 (SHUTDOWN_TIMEOUT_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          25
+               SET_ADD                  1
+               POP_TOP
+
+  70           LOAD_SMALL_INT          10
+               STORE_NAME              29 (BOOT_DB_TIMEOUT_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          26
+               SET_ADD                  1
+               POP_TOP
+
+  71           LOAD_SMALL_INT          60
+               STORE_NAME              30 (CIRCUIT_BREAKER_RECOVERY_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          27
+               SET_ADD                  1
+               POP_TOP
+
+  72           LOAD_SMALL_INT           5
+               STORE_NAME              31 (SSE_LOCK_RELEASE_TIMEOUT)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          28
+               SET_ADD                  1
+               POP_TOP
+
+  73           LOAD_SMALL_INT          10
+               STORE_NAME              32 (GIT_TIMEOUT_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          29
+               SET_ADD                  1
+               POP_TOP
+
+  76           LOAD_SMALL_INT           3
+               STORE_NAME              33 (DEFAULT_RETRY_COUNT)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          30
+               SET_ADD                  1
+               POP_TOP
+
+  77           LOAD_SMALL_INT           3
+               STORE_NAME              34 (MAX_RETRY_COUNT)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          31
+               SET_ADD                  1
+               POP_TOP
+
+  78           LOAD_SMALL_INT          10
+               STORE_NAME              35 (LLM_TRANSIENT_RETRIES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          32
+               SET_ADD                  1
+               POP_TOP
+
+  79           LOAD_SMALL_INT           3
+               STORE_NAME              36 (LLM_TIMEOUT_RETRIES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          33
+               SET_ADD                  1
+               POP_TOP
+
+  80           LOAD_SMALL_INT          60
+               STORE_NAME              37 (BACKOFF_BASE_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          34
+               SET_ADD                  1
+               POP_TOP
+
+  81           LOAD_CONST               8 (3600)
+               STORE_NAME              38 (BACKOFF_MAX_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          35
+               SET_ADD                  1
+               POP_TOP
+
+  82           LOAD_CONST               9 (2.0)
+               STORE_NAME              39 (BACKOFF_MULTIPLIER)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          36
+               SET_ADD                  1
+               POP_TOP
+
+  83           LOAD_SMALL_INT           5
+               STORE_NAME              40 (CIRCUIT_BREAKER_THRESHOLD)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          37
+               SET_ADD                  1
+               POP_TOP
+
+  91           LOAD_SMALL_INT           5
+               STORE_NAME              41 (WORKER_POOL_SIZE)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          38
+               SET_ADD                  1
+               POP_TOP
+
+  92           LOAD_CONST              10 (3.0)
+               STORE_NAME              42 (WORKER_WAIT_TIMEOUT)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          39
+               SET_ADD                  1
+               POP_TOP
+
+  93           LOAD_SMALL_INT          60
+               STORE_NAME              43 (WORKER_STALE_CHECK_INTERVAL)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          40
+               SET_ADD                  1
+               POP_TOP
+
+  94           LOAD_SMALL_INT          10
+               STORE_NAME              44 (STALE_TASK_CANCEL_GRACE_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          41
+               SET_ADD                  1
+               POP_TOP
+
+  95           LOAD_CONST              11 (5.0)
+               STORE_NAME              45 (ACTIVITY_UPDATE_INTERVAL)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          42
+               SET_ADD                  1
+               POP_TOP
+
+ 103           LOAD_SMALL_INT           2
+               STORE_NAME              46 (CHAT_WORKER_POOL_SIZE)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          43
+               SET_ADD                  1
+               POP_TOP
+
+ 116           LOAD_CONST              12 ('completed (gate escalated — unverified)')
+               STORE_NAME              47 (COMPLETION_GATE_ESCALATED_DISPLAY)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          44
+               SET_ADD                  1
+               POP_TOP
+
+ 144           LOAD_CONST             106 (('telegram:', 'slack:', 'discord:'))
+               STORE_NAME              48 (CHAT_SOURCE_PREFIXES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          45
+               SET_ADD                  1
+               POP_TOP
+
+ 147           LOAD_CONST             107 ((30, 30))
+               STORE_NAME              49 (TELEGRAM_RATE_LIMIT)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          46
+               SET_ADD                  1
+               POP_TOP
+
+ 148           LOAD_CONST             108 ((100, 100))
+               STORE_NAME              50 (WEBHOOK_RATE_LIMIT)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          47
+               SET_ADD                  1
+               POP_TOP
+
+ 149           LOAD_CONST             109 ((10, 20))
+               STORE_NAME              51 (WHATSAPP_RATE_LIMIT)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          48
+               SET_ADD                  1
+               POP_TOP
+
+ 152           LOAD_SMALL_INT           5
+               STORE_NAME              52 (DB_POOL_SIZE)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          49
+               SET_ADD                  1
+               POP_TOP
+
+ 153           LOAD_SMALL_INT          10
+               STORE_NAME              53 (DB_MAX_OVERFLOW)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          50
+               SET_ADD                  1
+               POP_TOP
+
+ 154           LOAD_SMALL_INT          30
+               STORE_NAME              54 (DB_BUSY_TIMEOUT_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          51
+               SET_ADD                  1
+               POP_TOP
+
+ 155           LOAD_SMALL_INT           1
+               STORE_NAME              55 (CHECKPOINT_INTERVAL)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          52
+               SET_ADD                  1
+               POP_TOP
+
+ 156           LOAD_SMALL_INT         168
+               STORE_NAME              56 (CHECKPOINT_TTL_HOURS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          53
+               SET_ADD                  1
+               POP_TOP
+
+ 157           LOAD_SMALL_INT          24
+               STORE_NAME              57 (CHECKPOINT_CLEANUP_INTERVAL_HOURS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          54
+               SET_ADD                  1
+               POP_TOP
+
+ 165           LOAD_CONST              13 (120.0)
+               STORE_NAME              58 (READINESS_GRACE_HORIZON_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          55
+               SET_ADD                  1
+               POP_TOP
+
+ 175           LOAD_SMALL_INT           3
+               STORE_NAME              59 (READINESS_LEAK_TICK_THRESHOLD)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          56
+               SET_ADD                  1
+               POP_TOP
+
+ 197           LOAD_SMALL_INT          10
+               STORE_NAME              60 (CHECKPOINT_POOL_MAX_SIZE_DEFAULT)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          57
+               SET_ADD                  1
+               POP_TOP
+
+ 205           LOAD_CONST              11 (5.0)
+               STORE_NAME              61 (CHECKPOINT_POOL_TIMEOUT_S_DEFAULT)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          58
+               SET_ADD                  1
+               POP_TOP
+
+ 264           LOAD_SMALL_INT          15
+               STORE_NAME              62 (MANAGER_POOL_SIZE_DEFAULT)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          59
+               SET_ADD                  1
+               POP_TOP
+
+ 274           LOAD_CONST              14 ('__ensemble_readiness_probe__')
+               STORE_NAME              63 (CHECKPOINT_SENTINEL_THREAD_ID)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          60
+               SET_ADD                  1
+               POP_TOP
+
+ 275           LOAD_CONST              14 ('__ensemble_readiness_probe__')
+               STORE_NAME              64 (CHECKPOINT_SENTINEL_CHECKPOINT_ID)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          61
+               SET_ADD                  1
+               POP_TOP
+
+ 276           LOAD_CONST              14 ('__ensemble_readiness_probe__')
+               STORE_NAME              65 (CHECKPOINT_SENTINEL_TASK_ID)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          62
+               SET_ADD                  1
+               POP_TOP
+
+ 277           LOAD_CONST              14 ('__ensemble_readiness_probe__')
+               STORE_NAME              66 (CHECKPOINT_SENTINEL_CHANNEL)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          63
+               SET_ADD                  1
+               POP_TOP
+
+ 278           LOAD_CONST              15 ('readiness-probe')
+               STORE_NAME              67 (CHECKPOINT_SENTINEL_VALUE)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          64
+               SET_ADD                  1
+               POP_TOP
+
+ 288           LOAD_CONST              16 ('ensemble-manager')
+               STORE_NAME              68 (MANAGER_ENGINE_APPLICATION_NAME)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          65
+               SET_ADD                  1
+               POP_TOP
+
+ 297           LOAD_CONST               8 (3600)
+               STORE_NAME              69 (MANAGER_ENGINE_POOL_RECYCLE_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          66
+               SET_ADD                  1
+               POP_TOP
+
+ 301           LOAD_SMALL_INT          30
+               STORE_NAME              70 (MANAGER_ENGINE_POOL_TIMEOUT_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          67
+               SET_ADD                  1
+               POP_TOP
+
+ 307           LOAD_CONST              17 (60000)
+               STORE_NAME              71 (MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          68
+               SET_ADD                  1
+               POP_TOP
+
+ 383           LOAD_CONST              18 (0.05)
+               STORE_NAME              72 (DBPOOL_IDLE_IN_TXN_RESIDENCE_BUDGET_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          69
+               SET_ADD                  1
+               POP_TOP
+
+ 394           LOAD_CONST              19 (0.25)
+               STORE_NAME              73 (MANAGER_ENGINE_LEGITIMATE_HOLD_BUDGET_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          70
+               SET_ADD                  1
+               POP_TOP
+
+ 411           LOAD_CONST               3 (500)
+               STORE_NAME              74 (MAX_INSTANCE_HISTORY)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          71
+               SET_ADD                  1
+               POP_TOP
+
+ 412           LOAD_SMALL_INT          15
+               STORE_NAME              75 (MAINTENANCE_CHECK_INTERVAL_MINUTES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          72
+               SET_ADD                  1
+               POP_TOP
+
+ 413           LOAD_SMALL_INT          24
+               STORE_NAME              76 (IDEMPOTENCY_KEY_TTL_HOURS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          73
+               SET_ADD                  1
+               POP_TOP
+
+ 422           LOAD_CONST              20 (<code object __annotate__ at 0x752453dc6120, file "daemon/constants.py", line 422>)
+               MAKE_FUNCTION
+               LOAD_CONST              21 (<code object _boot_read_bool_env at 0x752453938ab0, file "daemon/constants.py", line 422>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME              77 (_boot_read_bool_env)
+
+ 428           LOAD_CONST              22 (<code object __annotate__ at 0x75245393ce00, file "daemon/constants.py", line 428>)
+               MAKE_FUNCTION
+               LOAD_CONST              23 (<code object _boot_read_int_env at 0x75245413b930, file "daemon/constants.py", line 428>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME              78 (_boot_read_int_env)
+
+ 438           LOAD_NAME               77 (_boot_read_bool_env)
+               PUSH_NULL
+
+ 439           LOAD_CONST              24 ('MAINTENANCE_ENDPOINTS_ENABLED')
+               LOAD_CONST              25 ('1')
+
+ 438           CALL                     2
+               STORE_NAME              79 (MAINTENANCE_ENDPOINTS_ENABLED)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          74
+               SET_ADD                  1
+               POP_TOP
+
+ 441           LOAD_NAME               78 (_boot_read_int_env)
+               PUSH_NULL
+
+ 442           LOAD_CONST              26 ('MAINTENANCE_DRY_RUN_FRESH_SECONDS')
+               LOAD_CONST               7 (300)
+
+ 441           CALL                     2
+               STORE_NAME              80 (MAINTENANCE_DRY_RUN_FRESH_SECONDS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          75
+               SET_ADD                  1
+               POP_TOP
+
+ 444           LOAD_CONST              27 ('')
+               STORE_NAME              81 (MAINTENANCE_TRUSTED_ORIGINS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          76
+               SET_ADD                  1
+               POP_TOP
+
+ 450           LOAD_CONST              27 ('')
+               STORE_NAME              82 (MAINTENANCE_ALLOWED_HOSTS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          77
+               SET_ADD                  1
+               POP_TOP
+
+ 461           LOAD_SMALL_INT           1
+               STORE_NAME              83 (CHECKPOINT_MAX_PER_THREAD_FLOOR)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          78
+               SET_ADD                  1
+               POP_TOP
+
+ 488           LOAD_CONST              28 (100000)
+               STORE_NAME              84 (CHECKPOINT_BLOB_PRUNE_MAX_REFS_PER_THREAD)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          79
+               SET_ADD                  1
+               POP_TOP
+
+ 496           LOAD_SMALL_INT           3
+               STORE_NAME              85 (CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          80
+               SET_ADD                  1
+               POP_TOP
+
+ 509           LOAD_CONST               1 (1000)
+               STORE_NAME              86 (CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          81
+               SET_ADD                  1
+               POP_TOP
+
+ 549           LOAD_CONST              29 (True)
+               STORE_NAME              87 (VACUUM_ENABLED)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          82
+               SET_ADD                  1
+               POP_TOP
+
+ 550           LOAD_SMALL_INT          24
+               STORE_NAME              88 (VACUUM_INTERVAL_HOURS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          83
+               SET_ADD                  1
+               POP_TOP
+
+ 556           LOAD_CONST               1 (1000)
+               STORE_NAME              89 (VACUUM_DEAD_TUP_MIN)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          84
+               SET_ADD                  1
+               POP_TOP
+
+ 557           LOAD_CONST              18 (0.05)
+               STORE_NAME              90 (VACUUM_DEAD_TUP_SCALE_FRACTION)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          85
+               SET_ADD                  1
+               POP_TOP
+
+ 563           LOAD_CONST             110 (600000)
+               STORE_NAME              91 (VACUUM_STATEMENT_TIMEOUT_MS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          86
+               SET_ADD                  1
+               POP_TOP
+
+ 564           LOAD_CONST             111 (45000)
+               STORE_NAME              92 (VACUUM_LOCK_TIMEOUT_MS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          87
+               SET_ADD                  1
+               POP_TOP
+
+ 565           LOAD_CONST              17 (60000)
+               STORE_NAME              93 (VACUUM_IDLE_IN_TXN_TIMEOUT_MS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          88
+               SET_ADD                  1
+               POP_TOP
+
+ 570           LOAD_CONST             112 (3600000)
+               STORE_NAME              94 (VACUUM_FULL_STATEMENT_TIMEOUT_MS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          89
+               SET_ADD                  1
+               POP_TOP
+
+ 571           LOAD_CONST             113 (300000)
+               STORE_NAME              95 (VACUUM_FULL_LOCK_TIMEOUT_MS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          90
+               SET_ADD                  1
+               POP_TOP
+
+ 572           LOAD_CONST             114 (120000)
+               STORE_NAME              96 (VACUUM_FULL_IDLE_IN_TXN_TIMEOUT_MS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          91
+               SET_ADD                  1
+               POP_TOP
+
+ 575           LOAD_SMALL_INT         100
+               STORE_NAME              97 (GRAPH_RECURSION_LIMIT)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          92
+               SET_ADD                  1
+               POP_TOP
+
+ 576           LOAD_SMALL_INT          10
+               STORE_NAME              98 (RECENT_WINDOW_SIZE)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          93
+               SET_ADD                  1
+               POP_TOP
+
+ 577           LOAD_SMALL_INT           3
+               STORE_NAME              99 (MIN_RECENT_WINDOW)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          94
+               SET_ADD                  1
+               POP_TOP
+
+ 580           LOAD_CONST              30 (0.8)
+               STORE_NAME             100 (COMPACTION_THRESHOLD)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          95
+               SET_ADD                  1
+               POP_TOP
+
+ 581           LOAD_CONST              31 (0.4)
+               STORE_NAME             101 (COMPACTION_TARGET_RATIO)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          96
+               SET_ADD                  1
+               POP_TOP
+
+ 582           LOAD_SMALL_INT          10
+               STORE_NAME             102 (MIN_MESSAGES_BEFORE_COMPACTION)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          97
+               SET_ADD                  1
+               POP_TOP
+
+ 583           LOAD_CONST              32 (0.6)
+               STORE_NAME             103 (SUMMARIZATION_CHUNK_THRESHOLD)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          98
+               SET_ADD                  1
+               POP_TOP
+
+ 586           LOAD_CONST               7 (300)
+               STORE_NAME             104 (OBSERVER_HEALTH_CHECK_INTERVAL_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT          99
+               SET_ADD                  1
+               POP_TOP
+
+ 589           LOAD_CONST              33 ('__system_default__')
+               STORE_NAME             105 (SYSTEM_DEFAULT_PROJECT_NAME)
+
+ 590           LOAD_CONST              34 (None)
+               STORE_NAME             106 (SYSTEM_DEFAULT_PROJECT_ID)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         100
+               SET_ADD                  1
+               POP_TOP
+
+ 597           LOAD_CONST              35 ('blueprint_active')
+               STORE_NAME             107 (BLUEPRINT_ACTIVE_METADATA_KEY)
+
+ 604           LOAD_CONST              36 ('user_timezone')
+               STORE_NAME             108 (USER_TIMEZONE_METADATA_KEY)
+
+ 611           LOAD_CONST              37 (1.0)
+               STORE_NAME             109 (SCHEDULER_SEMAPHORE_TIMEOUT_S)
+
+ 612           LOAD_CONST              38 (10.0)
+               STORE_NAME             110 (SCHEDULER_MANUAL_SEMAPHORE_TIMEOUT_S)
+
+ 613           LOAD_CONST              39 (30.0)
+               STORE_NAME             111 (SCHEDULER_GRACE_PERIOD_S)
+
+ 614           LOAD_CONST              11 (5.0)
+               STORE_NAME             112 (SCHEDULER_ERROR_RETRY_S)
+
+ 615           LOAD_CONST              40 (0.5)
+               STORE_NAME             113 (SCHEDULER_DRAIN_CHECK_S)
+
+ 616           LOAD_SMALL_INT           1
+               STORE_NAME             114 (SCHEDULER_DEFAULT_MAX_CONCURRENT)
+
+ 617           LOAD_SMALL_INT           5
+               STORE_NAME             115 (SCHEDULER_DEFAULT_PRIORITY)
+
+ 622           LOAD_SMALL_INT          30
+               STORE_NAME             116 (VSCODE_STARTUP_TIMEOUT_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         101
+               SET_ADD                  1
+               POP_TOP
+
+ 623           LOAD_SMALL_INT           2
+               STORE_NAME             117 (VSCODE_HEALTH_CHECK_INTERVAL_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         102
+               SET_ADD                  1
+               POP_TOP
+
+ 624           LOAD_CONST             115 (4194304)
+               STORE_NAME             118 (VSCODE_LOG_BUFFER_LIMIT)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         103
+               SET_ADD                  1
+               POP_TOP
+
+ 625           LOAD_SMALL_INT           5
+               STORE_NAME             119 (VSCODE_STOP_GRACE_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         104
+               SET_ADD                  1
+               POP_TOP
+
+ 626           LOAD_CONST              41 ('vscode-user-data')
+               STORE_NAME             120 (VSCODE_DEFAULT_USER_DATA_DIR)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         105
+               SET_ADD                  1
+               POP_TOP
+
+ 627           LOAD_CONST              42 ('vscode-server.pid')
+               STORE_NAME             121 (VSCODE_PID_FILENAME)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         106
+               SET_ADD                  1
+               POP_TOP
+
+ 628           LOAD_CONST              43 (0.2)
+               STORE_NAME             122 (VSCODE_PORT_DETECTION_POLL_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         107
+               SET_ADD                  1
+               POP_TOP
+
+ 629           LOAD_SMALL_INT          10
+               STORE_NAME             123 (VSCODE_HEALTH_TIMEOUT_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         108
+               SET_ADD                  1
+               POP_TOP
+
+ 634           LOAD_CONST              44 ('editor_preference')
+               STORE_NAME             124 (EDITOR_METADATA_KEY)
+
+ 635           LOAD_CONST              45 ('builtin')
+               STORE_NAME             125 (EDITOR_DEFAULT)
+
+ 636           LOAD_CONST              45 ('builtin')
+               LOAD_CONST              46 ('vscode')
+               BUILD_LIST               2
+               STORE_NAME             126 (EDITOR_OPTIONS)
+
+ 648           LOAD_CONST              47 ('snapshot_create_enabled')
+               STORE_NAME             127 (SNAPSHOT_CREATE_METADATA_KEY)
+
+ 652           LOAD_NAME               16 (frozenset)
+               PUSH_NULL
+               BUILD_SET                0
+               LOAD_CONST             116 (frozenset({'yes', '1', 'on', 'true'}))
+               SET_UPDATE               1
+               CALL                     1
+               STORE_NAME             128 (SNAPSHOT_CREATE_ENABLED_VALUES)
+
+ 657           LOAD_CONST              48 ('default_agent_versions')
+               STORE_NAME             129 (DEFAULT_AGENT_VERSIONS_METADATA_KEY)
+
+ 677           LOAD_CONST              49 ('ENSEMBLE_MISSION_COMMISSION_TTL_SECONDS')
+               STORE_NAME             130 (MISSION_COMMISSION_TTL_ENV)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         109
+               SET_ADD                  1
+               POP_TOP
+
+ 678           LOAD_CONST             117 (21600)
+               STORE_NAME             131 (DEFAULT_MISSION_COMMISSION_TTL_SECONDS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         110
+               SET_ADD                  1
+               POP_TOP
+
+ 684           LOAD_CONST             118 (('worker_terminal_no_report', 'ttl_expired_not_live', 'worker_row_missing'))
+               STORE_NAME             132 (MISSION_COMMISSION_ABANDON_REASONS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         111
+               SET_ADD                  1
+               POP_TOP
+
+ 709           LOAD_CONST              50 ('plane_project_id')
+               STORE_NAME             133 (PLANE_PROJECT_ID_METADATA_KEY)
+
+ 710           LOAD_CONST              51 ('plane_sync_state')
+               STORE_NAME             134 (PLANE_SYNC_STATE_METADATA_KEY)
+
+ 711           LOAD_CONST              52 ('plane_synced_at')
+               STORE_NAME             135 (PLANE_SYNCED_AT_METADATA_KEY)
+
+ 712           LOAD_CONST              53 ('plane_last_attempt')
+               STORE_NAME             136 (PLANE_LAST_ATTEMPT_METADATA_KEY)
+
+ 713           LOAD_CONST              54 ('plane_attempt_count')
+               STORE_NAME             137 (PLANE_ATTEMPT_COUNT_METADATA_KEY)
+
+ 714           LOAD_CONST              55 ('plane_last_error')
+               STORE_NAME             138 (PLANE_LAST_ERROR_METADATA_KEY)
+
+ 734           LOAD_CONST              56 ('linked')
+               STORE_NAME             139 (PLANE_SYNC_STATE_LINKED)
+
+ 735           LOAD_CONST              57 ('syncing')
+               STORE_NAME             140 (PLANE_SYNC_STATE_SYNCING)
+
+ 736           LOAD_CONST              58 ('drift')
+               STORE_NAME             141 (PLANE_SYNC_STATE_DRIFT)
+
+ 737           LOAD_CONST              59 ('error')
+               STORE_NAME             142 (PLANE_SYNC_STATE_ERROR)
+
+ 738           LOAD_CONST              60 ('synced')
+               STORE_NAME             143 (PLANE_SYNC_STATE_SYNCED_ALIAS)
+
+ 740           LOAD_NAME               16 (frozenset)
+               PUSH_NULL
+
+ 741           LOAD_NAME              139 (PLANE_SYNC_STATE_LINKED)
+
+ 742           LOAD_NAME              140 (PLANE_SYNC_STATE_SYNCING)
+
+ 743           LOAD_NAME              141 (PLANE_SYNC_STATE_DRIFT)
+
+ 744           LOAD_NAME              142 (PLANE_SYNC_STATE_ERROR)
+
+ 745           LOAD_NAME              143 (PLANE_SYNC_STATE_SYNCED_ALIAS)
+
+ 740           BUILD_SET                5
+               CALL                     1
+               STORE_NAME             144 (PLANE_SYNC_STATES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         112
+               SET_ADD                  1
+               POP_TOP
+
+ 753           LOAD_NAME               16 (frozenset)
+               PUSH_NULL
+
+ 754           LOAD_NAME              142 (PLANE_SYNC_STATE_ERROR)
+
+ 755           LOAD_NAME              141 (PLANE_SYNC_STATE_DRIFT)
+
+ 753           BUILD_SET                2
+               CALL                     1
+               STORE_NAME             145 (PLANE_SYNC_STATES_RETRYABLE)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         113
+               SET_ADD                  1
+               POP_TOP
+
+ 761           LOAD_CONST              39 (30.0)
+               STORE_NAME             146 (PLANE_SYNC_COOLDOWN_S)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         114
+               SET_ADD                  1
+               POP_TOP
+
+ 773           LOAD_CONST               7 (300)
+               STORE_NAME             147 (PLANE_SYNC_WATCHDOG_INTERVAL_SECONDS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         115
+               SET_ADD                  1
+               POP_TOP
+
+ 781           LOAD_SMALL_INT          60
+               STORE_NAME             148 (PLANE_SYNC_WATCHDOG_BACKOFF_BASE_SECONDS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         116
+               SET_ADD                  1
+               POP_TOP
+
+ 782           LOAD_CONST               5 (1800)
+               STORE_NAME             149 (PLANE_SYNC_WATCHDOG_BACKOFF_MAX_SECONDS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         117
+               SET_ADD                  1
+               POP_TOP
+
+ 793           LOAD_SMALL_INT           5
+               STORE_NAME             150 (PLANE_SYNC_WATCHDOG_MAX_ATTEMPTS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         118
+               SET_ADD                  1
+               POP_TOP
+
+ 799           LOAD_CONST              61 ('active')
+               LOAD_CONST              61 ('active')
+
+ 800           LOAD_CONST              62 ('paused')
+               LOAD_CONST              63 ('hold')
+
+ 801           LOAD_CONST              64 ('archived')
+               LOAD_CONST              65 ('cancelled')
+
+ 802           LOAD_CONST              66 ('completed')
+               LOAD_CONST              66 ('completed')
+
+ 798           BUILD_MAP                4
+               STORE_NAME             151 (PLANE_STATUS_MAP)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         119
+               SET_ADD                  1
+               POP_TOP
+
+ 817           LOAD_CONST              67 ('PAUSE_TOCTOU')
+               STORE_NAME             152 (DEFERRED_REASON_PAUSE_TOCTOU)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         120
+               SET_ADD                  1
+               POP_TOP
+
+ 818           LOAD_CONST              68 ('PENDING_MESSAGES')
+               STORE_NAME             153 (DEFERRED_REASON_PENDING_MESSAGES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         121
+               SET_ADD                  1
+               POP_TOP
+
+ 819           LOAD_CONST              69 ('IDEMPOTENCY_SKIP')
+               STORE_NAME             154 (DEFERRED_REASON_IDEMPOTENCY_SKIP)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         122
+               SET_ADD                  1
+               POP_TOP
+
+ 820           LOAD_CONST              70 ('RESUME_ROUTER')
+               STORE_NAME             155 (DEFERRED_REASON_RESUME_ROUTER)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         123
+               SET_ADD                  1
+               POP_TOP
+
+ 870           LOAD_NAME               16 (frozenset)
+               PUSH_NULL
+
+ 871           LOAD_CONST              71 ('running')
+
+ 870           BUILD_SET                1
+               CALL                     1
+               STORE_NAME             156 (INJECTION_ELIGIBLE_STATUSES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         124
+               SET_ADD                  1
+               POP_TOP
+
+ 919           LOAD_CONST              72 ('slack')
+               LOAD_NAME               16 (frozenset)
+               PUSH_NULL
+               BUILD_SET                0
+               LOAD_CONST             119 (frozenset({'reply_chat_id', 'agent', 'force_new_instance', 'slack', 'command'}))
+               SET_UPDATE               1
+               CALL                     1
+
+ 926           LOAD_CONST              73 ('discord')
+               LOAD_NAME               16 (frozenset)
+               PUSH_NULL
+               BUILD_SET                0
+               LOAD_CONST             120 (frozenset({'discord', 'force_new_instance', 'agent', 'command'}))
+               SET_UPDATE               1
+               CALL                     1
+
+ 932           LOAD_CONST              74 ('telegram')
+               LOAD_NAME               16 (frozenset)
+               PUSH_NULL
+               BUILD_SET                0
+               LOAD_CONST             121 (frozenset({'telegram', 'reply_chat_id', 'agent', 'force_new_instance', 'command'}))
+               SET_UPDATE               1
+               CALL                     1
+
+ 918           BUILD_MAP                3
+               STORE_NAME             157 (ROUTING_ENVELOPE_KEYS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         125
+               SET_ADD                  1
+               POP_TOP
+
+ 971           LOAD_NAME               16 (frozenset)
+               PUSH_NULL
+               BUILD_SET                0
+               LOAD_CONST             122 (frozenset({'completed', 'terminated', 'error', 'failed'}))
+               SET_UPDATE               1
+               CALL                     1
+               STORE_NAME             158 (TERMINAL_INSTANCE_STATUSES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         126
+               SET_ADD                  1
+               POP_TOP
+
+ 986           LOAD_CONST              62 ('paused')
+               STORE_NAME             159 (INSTANCE_STATUS_PAUSED)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         127
+               SET_ADD                  1
+               POP_TOP
+
+1029           LOAD_NAME               16 (frozenset)
+               PUSH_NULL
+               BUILD_SET                0
+               LOAD_CONST             123 (frozenset({'paused', 'idle', 'queued', 'running', 'waiting_children'}))
+               SET_UPDATE               1
+               CALL                     1
+               STORE_NAME             160 (ALIVE_INSTANCE_STATUSES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         128
+               SET_ADD                  1
+               POP_TOP
+
+1072           LOAD_NAME               16 (frozenset)
+               PUSH_NULL
+               BUILD_SET                0
+               LOAD_CONST             124 (frozenset({'pending', 'running', 'paused', 'processing'}))
+               SET_UPDATE               1
+               CALL                     1
+               STORE_NAME             161 (NON_TERMINAL_TASK_STATUSES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         129
+               SET_ADD                  1
+               POP_TOP
+
+1225           LOAD_NAME               16 (frozenset)
+               PUSH_NULL
+               BUILD_SET                0
+               LOAD_CONST             125 (frozenset({'internal_agent:', 'api_resume_fallback', 'agent:', 'internal_chart_reuse:', 'auto-scan', 'internal_error_report:', 'auto_dispatch_fallback', 'instance_ops:', 'scheduler', 'internal_report:', 'skill_metric_scan', 'cascade_resume', 'admin-endpoint', 'skill_evolution', 'experience:', 'internal_invoke_and_wait:', 'system:', 'blueprint-sidecar:', 'explore:', 'watchover_next_command'}))
+               SET_UPDATE               1
+               CALL                     1
+               STORE_NAME             162 (RESERVED_SOURCE_PREFIXES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         130
+               SET_ADD                  1
+               POP_TOP
+
+1260           LOAD_CONST              77 (<code object __annotate__ at 0x75245393c690, file "daemon/constants.py", line 1260>)
+               MAKE_FUNCTION
+               LOAD_CONST              78 (<code object is_reserved_source at 0x752453704030, file "daemon/constants.py", line 1260>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME             163 (is_reserved_source)
+
+1345           LOAD_CONST             126 (('internal_report:', 'internal_error_report:', 'internal_agent:', 'system:', 'instance_ops:', 'agent:', 'explore:', 'experience:', 'blueprint-sidecar:', 'cascade_resume', 'auto_dispatch_fallback', 'watchover_next_command', 'skill_metric_scan', 'skill_evolution', 'admin-endpoint', 'auto-scan'))
+               STORE_NAME             164 (INTERNAL_STAMPED_SOURCE_PREFIXES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         131
+               SET_ADD                  1
+               POP_TOP
+
+1367           LOAD_CONST              79 (<code object __annotate__ at 0x75245393eef0, file "daemon/constants.py", line 1367>)
+               MAKE_FUNCTION
+               LOAD_CONST              80 (<code object is_internal_stamped_source at 0x7524537041e0, file "daemon/constants.py", line 1367>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME             165 (is_internal_stamped_source)
+
+1427           LOAD_CONST             127 (('internal_agent:', 'instance_ops:', 'agent:', 'explore:', 'experience:', 'blueprint-sidecar:'))
+               STORE_NAME             166 (INTERNAL_AGENT_TYPED_SOURCE_PREFIXES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         132
+               SET_ADD                  1
+               POP_TOP
+
+1437           LOAD_CONST             128 (('system:',))
+               STORE_NAME             167 (INTERNAL_SYSTEM_TYPED_SOURCE_PREFIXES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         133
+               SET_ADD                  1
+               POP_TOP
+
+1440           LOAD_NAME               16 (frozenset)
+               PUSH_NULL
+               BUILD_SET                0
+               LOAD_CONST             129 (frozenset({'auto_dispatch_fallback', 'skill_metric_scan', 'auto-scan', 'cascade_resume', 'watchover_next_command', 'admin-endpoint', 'skill_evolution'}))
+               SET_UPDATE               1
+               CALL                     1
+               STORE_NAME             168 (INTERNAL_AGENT_TYPED_EXACT_SOURCES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         134
+               SET_ADD                  1
+               POP_TOP
+
+1452           LOAD_CONST              75 ('internal_report:')
+               STORE_NAME             169 (INTERNAL_REPORT_SOURCE_PREFIX)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         135
+               SET_ADD                  1
+               POP_TOP
+
+1456           LOAD_CONST              76 ('internal_error_report:')
+               STORE_NAME             170 (INTERNAL_ERROR_REPORT_SOURCE_PREFIX)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         136
+               SET_ADD                  1
+               POP_TOP
+
+1465           LOAD_NAME              169 (INTERNAL_REPORT_SOURCE_PREFIX)
+
+1466           LOAD_NAME              170 (INTERNAL_ERROR_REPORT_SOURCE_PREFIX)
+
+1464           BUILD_TUPLE              2
+               STORE_NAME             171 (INTERNAL_REPORT_TYPED_SOURCE_PREFIXES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         137
+               SET_ADD                  1
+               POP_TOP
+
+1492           LOAD_CONST              81 (<code object __annotate__ at 0x75245393f000, file "daemon/constants.py", line 1492>)
+               MAKE_FUNCTION
+               LOAD_CONST              82 (<code object is_chat_source at 0x7524540f2a70, file "daemon/constants.py", line 1492>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME             172 (is_chat_source)
+
+1547           LOAD_CONST              83 ('retry_budget_exhausted')
+               STORE_NAME             173 (RETRY_BUDGET_EXHAUSTED_MARKER)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         138
+               SET_ADD                  1
+               POP_TOP
+
+1571           LOAD_CONST              84 ('[REPORT SANITY: zero tool-call evidence in source history]')
+               STORE_NAME             174 (REPORT_SANITY_MARKER)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         139
+               SET_ADD                  1
+               POP_TOP
+
+1579           LOAD_SMALL_INT           1
+               STORE_NAME             175 (SANITY_FLAG_VERSION)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         140
+               SET_ADD                  1
+               POP_TOP
+
+1586           LOAD_CONST              85 ('report_integrity_junk_report_total')
+               STORE_NAME             176 (REPORT_INTEGRITY_JUNK_REPORT_TOTAL)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         141
+               SET_ADD                  1
+               POP_TOP
+
+1609           LOAD_NAME               16 (frozenset)
+               PUSH_NULL
+
+1610           BUILD_SET                0
+               LOAD_CONST             130 (frozenset({'explorer', 'watcher', 'wanderer'}))
+               SET_UPDATE               1
+
+1609           CALL                     1
+               STORE_NAME             177 (REPORT_REPAIR_EXCLUDED_AGENTS)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         142
+               SET_ADD                  1
+               POP_TOP
+
+1646           LOAD_CONST              86 ('WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED')
+
+1645           STORE_NAME             178 (WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         143
+               SET_ADD                  1
+               POP_TOP
+
+1657           LOAD_CONST              87 ('WC_REPORT_INTEGRITY_A_PREMATURE_TURN_GUARD_ENABLED')
+
+1656           STORE_NAME             179 (WC_REPORT_INTEGRITY_A_PREMATURE_TURN_GUARD_ENABLED)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         144
+               SET_ADD                  1
+               POP_TOP
+
+1691           LOAD_CONST              88 ('ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED')
+
+1690           STORE_NAME             180 (ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         145
+               SET_ADD                  1
+               POP_TOP
+
+1697           LOAD_CONST              89 ('ENSEMBLE_AMBIENT_KV_FRESH')
+               STORE_NAME             181 (ENSEMBLE_AMBIENT_KV_FRESH)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         146
+               SET_ADD                  1
+               POP_TOP
+
+1711           LOAD_CONST              90 ('ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX')
+               STORE_NAME             182 (ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         147
+               SET_ADD                  1
+               POP_TOP
+
+1734           LOAD_CONST              91 ('system:read')
+               STORE_NAME             183 (AUTH_SCOPE_SYSTEM_READ)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         148
+               SET_ADD                  1
+               POP_TOP
+
+1735           LOAD_CONST              92 ('mcp:read')
+               STORE_NAME             184 (AUTH_SCOPE_MCP_READ)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         149
+               SET_ADD                  1
+               POP_TOP
+
+1736           LOAD_CONST              93 ('instances:read')
+               STORE_NAME             185 (AUTH_SCOPE_INSTANCES_READ)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         150
+               SET_ADD                  1
+               POP_TOP
+
+1737           LOAD_CONST              94 ('instances:write')
+               STORE_NAME             186 (AUTH_SCOPE_INSTANCES_WRITE)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         151
+               SET_ADD                  1
+               POP_TOP
+
+1738           LOAD_CONST              95 ('jobs:read')
+               STORE_NAME             187 (AUTH_SCOPE_JOBS_READ)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         152
+               SET_ADD                  1
+               POP_TOP
+
+1739           LOAD_CONST              96 ('jobs:write')
+               STORE_NAME             188 (AUTH_SCOPE_JOBS_WRITE)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         153
+               SET_ADD                  1
+               POP_TOP
+
+1740           LOAD_CONST              97 ('messages:write')
+               STORE_NAME             189 (AUTH_SCOPE_MESSAGES_WRITE)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         154
+               SET_ADD                  1
+               POP_TOP
+
+1741           LOAD_CONST              98 ('sources:write')
+               STORE_NAME             190 (AUTH_SCOPE_SOURCES_WRITE)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         155
+               SET_ADD                  1
+               POP_TOP
+
+1742           LOAD_CONST              99 ('auth:admin')
+               STORE_NAME             191 (AUTH_SCOPE_AUTH_ADMIN)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         156
+               SET_ADD                  1
+               POP_TOP
+
+1746           LOAD_NAME              183 (AUTH_SCOPE_SYSTEM_READ)
+
+1747           LOAD_NAME              184 (AUTH_SCOPE_MCP_READ)
+
+1748           LOAD_NAME              185 (AUTH_SCOPE_INSTANCES_READ)
+
+1749           LOAD_NAME              186 (AUTH_SCOPE_INSTANCES_WRITE)
+
+1750           LOAD_NAME              187 (AUTH_SCOPE_JOBS_READ)
+
+1751           LOAD_NAME              188 (AUTH_SCOPE_JOBS_WRITE)
+
+1752           LOAD_NAME              189 (AUTH_SCOPE_MESSAGES_WRITE)
+
+1753           LOAD_NAME              190 (AUTH_SCOPE_SOURCES_WRITE)
+
+1754           LOAD_NAME              191 (AUTH_SCOPE_AUTH_ADMIN)
+
+1745           BUILD_TUPLE              9
+               STORE_NAME             192 (AUTH_KNOWN_SCOPES)
+               LOAD_NAME                0 (__conditional_annotations__)
+               LOAD_SMALL_INT         157
+               SET_ADD                  1
+               POP_TOP
+               LOAD_CONST              34 (None)
+               RETURN_VALUE
+

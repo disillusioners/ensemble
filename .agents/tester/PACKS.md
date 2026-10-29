@@ -1,5 +1,18 @@
 # Test Packs
 
+## v0.27.13 STAGED VERIFICATION (dbpool lane + v0.27.12 release delta + semantics fixes) — ✅ **STAGED-VERIFIED PASS-WITH-NOTES — CEREMONY-READY** (2026-10-29)
+
+> Full record: `.agents/tester/RESULTS/2026-10-29-v02713-staged-verification.md`; bundle `.agents/tester/RESULTS/raw/2026-10-29-v02713-staged-verification/` (MANIFEST sha-pinned). Artifact `/home/nea/agents-ensemble/releases/v0.27.13` (binary sha `b9350963…` 4-way). **Integrity 8/8** (5361/5361 manifest re-hash 0 mismatches; 3 tree-hashes reproduced; tag `abee408fc`→`b1183a637` pushed+annotated; 115 embedded .sql / 115 prefixes / zero migration delta; PROMPT-BASELINE 161/161; live fence untouched, state.json byte-identical). **Lane content 8/8 at BYTECODE level** (capacity 25 + `_manager_pool_effective_capacity`; `MissionEpochConflictError`; F3 `text("BEGIN")` ABSENT with a one-way positive control on the lane-base binary; strict-False carrier via `IS_OP 0`; Δ3 = 0.25 (no sentinel binding); pool knobs `pool_reset_on_return='rollback'`/recycle 3600/timeout 30; application_name trio present + absent from the shared constant). **Boot smoke green** (arena-local install_dir ⇒ live journal never bound; banner/livez/readyz 0.27.13; pool_state sqlalchemy {0/15/−6}; cgroup-isolated transient unit; SIGTERM-only teardown; live 0.27.12 untouched). **Ladder 17/17 from the staged SOURCE worktree** (release dir is source-less; 3 copy-only re-point edits disclosed) — G1.4 exactly-1-xfail, zero skips. **Affected packs 5/5 + 1/1.** No promote/rollback/flip/restart performed.
+
+| Pack | Invocation | Scope | Last Run | Status |
+|---|---|---|---|---|
+| `v02713_staged_integrity` | read-only re-hash (4-way sha, sidecars, 5361 manifest entries, 3 tree-hashes, tag local+remote+annotation, embedded .sql census) | artifact integrity + rollback posture | 2026-10-29 @ `b1183a637` | ✅ PASS 8/8, 0 discrepancies |
+| `v02713_staged_symbols` | CArchive→PYZ→marshal→`dis` (2 reader implementations cross-validated) | lane content at bytecode level | 2026-10-29 | ✅ PASS 8/8 |
+| `v02713_staged_boot` | scratch arena + systemd-run transient unit + scratch PG :5461 | isolated boot + live fence | 2026-10-29 | ✅ PASS (2 disclosures: built-in MCP npm fetch; webfetch graceful degradation) |
+| `v02713_staged_ladder` | /tmp re-pointed ladder+fence copies → staging worktree + scratch PG :5462 | 17 ladder rows + census 5/5 + version assert | 2026-10-29 | ✅ PASS 17/17 (+2/2 affected packs) |
+
+---
+
 ## db-pool idle-in-transaction FUNCTIONAL GATE (`fix/db-pool-idle-txn` @ `441a1657d`, base `19fc11c8b`; gate branch `tester/dbpool-functional-gate` @ merge `3d835d8dd`) — ✅ **LANE VERDICT: PASS-WITH-NOTES — CLEARED FOR DOCS → MERGE → STAGE** (2026-10-29; original gate FAIL on G3.5 superseded by the post-`441a1657d` re-verification)
 
 > Full record: `.agents/tester/RESULTS/2026-10-29-dbpool-functional-gate.md` (original gate + RE-VERIFICATION section). **Original verdict: FAIL — G3.5: 11 deterministic net-new regressions, one root cause** (`readiness.py:1512` F4-A pre-check vs non-QueuePool engines). **Lane owner fix `441a1657d`** (shape guards; real comparison + constant untouched; DO-NOT fence greps zero) merged as `3d835d8dd`; surgical re-run ALL GREEN: the 11 ids ×3 = 33/33; StaticPool path cited + repro green; ladder rows G2.5/G2.6/G3.1-G3.4 + G1.4 exactly-1-xfail re-proven; F4-a mutation RED→GREEN on the merged tree (behavioral assertion included); whole-tree re-run arithmetic fingerprint **exactly +11 passed / −11 failed**, comm: the 11 GONE, 0 disclosed artifacts recurred, 2 new HEAD-only ids = class-a pre-existing flakes (3×-isolated both sides). **Net-new reds = 0 ⇒ G3.5 PASSES. Notes = the standing disclosure ledger (non-blocking).**

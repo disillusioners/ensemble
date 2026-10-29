@@ -1,0 +1,14 @@
+PGDATA=/tmp/sv3-pgdata-hN4G29
+=== drop db + role (scratch only) ===
+DROP DATABASE
+DROP ROLE
+=== residual census (db + role must be 0) ===
+0|0
+=== pg_ctl stop ===
+waiting for server to shut down.... done
+server stopped
+=== rm PGDATA ===
+ls: cannot access '/tmp/sv3-pgdata-hN4G29': No such file or directory
+PGDATA removed
+=== port 5461 free? ===
+port 5461 FREE

@@ -1,0 +1,4 @@
+GET 1: status=ready comps=True pool(sa)={'checkedout': 0, 'size': 15, 'overflow': -6} grace=False leak=False
+GET 2: status=ready comps=True pool(sa)={'checkedout': 0, 'size': 15, 'overflow': -6} grace=False leak=False
+GET 3: status=ready comps=True pool(sa)={'checkedout': 0, 'size': 15, 'overflow': -6} grace=False leak=False
+{"status":"alive","uptime_seconds":225.2748086452484,"version":"0.27.13"}

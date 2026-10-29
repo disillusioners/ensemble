@@ -1,0 +1,63 @@
+2026-10-29 18:22:01.141 UTC [3748219] LOG:  starting PostgreSQL 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit
+2026-10-29 18:22:01.142 UTC [3748219] LOG:  listening on IPv4 address "127.0.0.1", port 5462
+2026-10-29 18:22:01.145 UTC [3748219] LOG:  listening on Unix socket "/tmp/sv4-pg/sock/.s.PGSQL.5462"
+2026-10-29 18:22:01.162 UTC [3748223] LOG:  database system was shut down at 2026-10-29 18:21:57 UTC
+2026-10-29 18:22:01.175 UTC [3748219] LOG:  database system is ready to accept connections
+2026-10-29 18:27:01.256 UTC [3748221] LOG:  checkpoint starting: time
+2026-10-29 18:28:30.362 UTC [3755189] ERROR:  there is no unique or exclusion constraint matching the ON CONFLICT specification
+2026-10-29 18:28:30.362 UTC [3755189] STATEMENT:  INSERT INTO mission_records (mission_id, anchor_instance_id, epoch_seq, founding_source, status, attestation_bypassed, created_at, provenance) VALUES ($1::VARCHAR, $2::VARCHAR, $3::INTEGER, $4::VARCHAR, $5::VARCHAR, $6, $7::VARCHAR, $8::VARCHAR) ON CONFLICT (anchor_instance_id) WHERE status = 'open' DO NOTHING RETURNING mission_records.mission_id
+2026-10-29 18:28:39.133 UTC [3748221] LOG:  checkpoint complete: wrote 974 buffers (5.9%); 1 WAL file(s) added, 0 removed, 0 recycled; write=97.486 s, sync=0.312 s, total=97.878 s; sync files=2491, longest=0.003 s, average=0.001 s; distance=4532 kB, estimate=4532 kB; lsn=0/1C934F8, redo lsn=0/195C9B0
+2026-10-29 18:28:43.351 UTC [3755640] ERROR:  relation "task" does not exist
+2026-10-29 18:28:43.351 UTC [3755640] STATEMENT:  LOCK TABLE task IN ACCESS EXCLUSIVE MODE
+2026-10-29 18:28:48.108 UTC [3755655] ERROR:  canceling statement due to statement timeout
+2026-10-29 18:28:48.108 UTC [3755655] STATEMENT:  SELECT EXTRACT(EPOCH FROM (now() - MAX(CASE WHEN last_heartbeat_at >= $1 THEN last_heartbeat_at END))) FROM task WHERE status = $2
+2026-10-29 18:28:52.908 UTC [3755734] ERROR:  canceling statement due to statement timeout
+2026-10-29 18:28:52.908 UTC [3755734] STATEMENT:  SELECT EXTRACT(EPOCH FROM (now() - MAX(CASE WHEN last_heartbeat_at >= $1 THEN last_heartbeat_at END))) FROM task WHERE status = $2
+2026-10-29 18:29:20.530 UTC [3756348] ERROR:  column c.n_live_tup does not exist at character 91
+2026-10-29 18:29:20.530 UTC [3756348] STATEMENT:  
+	            SELECT c.relname,
+	                   c.reltuples::bigint,
+	                   c.n_live_tup::bigint,
+	                   pg_total_relation_size(c.oid)
+	              FROM pg_class c
+	              JOIN pg_namespace n ON n.oid = c.relnamespace
+	             WHERE n.nspname = current_schema()
+	               AND c.relname = ANY($1)
+	            
+2026-10-29 18:29:20.553 UTC [3756348] ERROR:  current transaction is aborted, commands ignored until end of transaction block
+2026-10-29 18:29:20.553 UTC [3756348] STATEMENT:  
+	            SELECT work_id, instance_id, auto_continued_at, started_at
+	              FROM task
+	             WHERE auto_continued_at IS NOT NULL
+	             ORDER BY auto_continued_at DESC
+	             LIMIT $1
+	            
+2026-10-29 18:29:21.318 UTC [3756361] ERROR:  column c.n_live_tup does not exist at character 91
+2026-10-29 18:29:21.318 UTC [3756361] STATEMENT:  
+	            SELECT c.relname,
+	                   c.reltuples::bigint,
+	                   c.n_live_tup::bigint,
+	                   pg_total_relation_size(c.oid)
+	              FROM pg_class c
+	              JOIN pg_namespace n ON n.oid = c.relnamespace
+	             WHERE n.nspname = current_schema()
+	               AND c.relname = ANY($1)
+	            
+2026-10-29 18:29:21.319 UTC [3756361] ERROR:  current transaction is aborted, commands ignored until end of transaction block
+2026-10-29 18:29:21.319 UTC [3756361] STATEMENT:  
+	            SELECT work_id, instance_id, auto_continued_at, started_at
+	              FROM task
+	             WHERE auto_continued_at IS NOT NULL
+	             ORDER BY auto_continued_at DESC
+	             LIMIT $1
+	            
+2026-10-29 18:29:35.564 UTC [3748221] LOG:  checkpoint starting: immediate force wait
+2026-10-29 18:29:36.011 UTC [3748221] LOG:  checkpoint complete: wrote 508 buffers (3.1%); 0 WAL file(s) added, 0 removed, 1 recycled; write=0.021 s, sync=0.252 s, total=0.448 s; sync files=2360, longest=0.002 s, average=0.001 s; distance=12951 kB, estimate=12951 kB; lsn=0/2602828, redo lsn=0/26027F0
+2026-10-29 18:29:51.115 UTC [3748221] LOG:  checkpoint starting: immediate force wait
+2026-10-29 18:29:51.128 UTC [3748221] LOG:  checkpoint complete: wrote 13 buffers (0.1%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.004 s, sync=0.003 s, total=0.014 s; sync files=11, longest=0.002 s, average=0.001 s; distance=4321 kB, estimate=12088 kB; lsn=0/2A3AC60, redo lsn=0/2A3AC28
+2026-10-29 18:34:16.889 UTC [3748221] LOG:  checkpoint starting: immediate force wait
+2026-10-29 18:34:16.903 UTC [3748221] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.004 s, sync=0.003 s, total=0.015 s; sync files=3, longest=0.002 s, average=0.001 s; distance=559 kB, estimate=10935 kB; lsn=0/2AC6B58, redo lsn=0/2AC6B20
+2026-10-29 18:34:17.199 UTC [3761646] ERROR:  permission denied to drop role
+2026-10-29 18:34:17.199 UTC [3761646] DETAIL:  Only roles with the CREATEROLE attribute and the ADMIN option on the target roles may drop roles.
+2026-10-29 18:34:17.199 UTC [3761646] STATEMENT:  DROP ROLE dbpool_sv4;
+2026-10-29 18:34:32.476 UTC [3761892] FATAL:  role "dbpool_sv4" does not exist

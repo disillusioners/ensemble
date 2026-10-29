@@ -1,0 +1,9 @@
+{
+  "git_head": "b1183a637649f94c23b94dfc745df44381dc54ab",
+  "git_head_short": "b1183a637649",
+  "git_dirty": false,
+  "build_at": "2026-10-29T17:57:02Z",
+  "build_tool": "npm run build:frontend",
+  "artifact_sha256": "5531cbe4da0c026d0fdcf7f10ea348f7c20f6abd9e5d703912a4805ad1bb0ddd",
+  "artifact_path": "frontend/dist/frontend/browser/index.html"
+}

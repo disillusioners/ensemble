@@ -1,0 +1,184 @@
+===== daemon.tools.ens_db_tools::._build_repair_engine (co_filename=daemon/tools/ens_db_tools.py) =====
+583           RESUME                   0
+
+606           LOAD_FAST_BORROW         0 (shared_engine)
+              LOAD_ATTR                0 (url)
+              LOAD_ATTR                3 (render_as_string + NULL|self)
+              LOAD_CONST               1 (True)
+              LOAD_CONST               2 (('hide_password',))
+              CALL_KW                  1
+
+607           LOAD_FAST_BORROW         0 (shared_engine)
+              LOAD_ATTR                0 (url)
+              LOAD_ATTR                5 (get_backend_name + NULL|self)
+              CALL                     0
+
+605           BUILD_TUPLE              2
+              STORE_FAST               1 (cache_key)
+
+609           LOAD_GLOBAL              6 (_REPAIR_ENGINE_CACHE)
+              LOAD_ATTR                9 (get + NULL|self)
+              LOAD_FAST_BORROW         1 (cache_key)
+              CALL                     1
+              STORE_FAST               2 (cached)
+
+610           LOAD_FAST_BORROW         2 (cached)
+              POP_JUMP_IF_NONE         3 (to L1)
+              NOT_TAKEN
+
+611           LOAD_FAST_BORROW         2 (cached)
+              RETURN_VALUE
+
+613   L1:     LOAD_FAST_BORROW         0 (shared_engine)
+              LOAD_ATTR                0 (url)
+              LOAD_ATTR                5 (get_backend_name + NULL|self)
+              CALL                     0
+              LOAD_ATTR               11 (startswith + NULL|self)
+              LOAD_CONST               3 ('postgres')
+              CALL                     1
+              STORE_FAST               3 (is_pg)
+
+614           LOAD_FAST_BORROW         0 (shared_engine)
+              LOAD_ATTR                0 (url)
+              LOAD_ATTR                3 (render_as_string + NULL|self)
+              LOAD_CONST               4 (False)
+              LOAD_CONST               2 (('hide_password',))
+              CALL_KW                  1
+              STORE_FAST               4 (url)
+
+615           LOAD_GLOBAL             13 (dict + NULL)
+
+616           LOAD_GLOBAL             14 (REPAIR_POOL_SIZE)
+
+617           LOAD_GLOBAL             16 (REPAIR_POOL_MAX_OVERFLOW)
+
+618           LOAD_CONST               1 (True)
+
+619           LOAD_GLOBAL             18 (REPAIR_POOL_RECYCLE_S)
+
+620           LOAD_GLOBAL             20 (REPAIR_POOL_TIMEOUT_S)
+
+625           LOAD_CONST               5 ('rollback')
+
+615           LOAD_CONST               6 (('pool_size', 'max_overflow', 'pool_pre_ping', 'pool_recycle', 'pool_timeout', 'pool_reset_on_return'))
+              CALL_KW                  6
+              STORE_FAST               5 (kwargs)
+
+627           LOAD_FAST_BORROW         3 (is_pg)
+              TO_BOOL
+              POP_JUMP_IF_FALSE       50 (to L2)
+              NOT_TAKEN
+
+639           LOAD_CONST               7 ('options')
+
+640           LOAD_CONST               8 ('-c statement_timeout=')
+              LOAD_GLOBAL             22 (REPAIR_STATEMENT_TIMEOUT_MS)
+              FORMAT_SIMPLE
+              LOAD_CONST               9 (' -c lock_timeout=')
+
+641           LOAD_GLOBAL             24 (REPAIR_LOCK_TIMEOUT_MS)
+              FORMAT_SIMPLE
+              LOAD_CONST              10 (' -c idle_in_transaction_session_timeout=')
+
+643           LOAD_GLOBAL             26 (REPAIR_IDLE_IN_TXN_TIMEOUT_MS)
+              FORMAT_SIMPLE
+              LOAD_CONST              11 (' ')
+
+644           LOAD_GLOBAL             28 (PG_SESSION_CONNECT_ARGS)
+              LOAD_CONST               7 ('options')
+              BINARY_OP               26 ([])
+              FORMAT_SIMPLE
+
+640           BUILD_STRING             8
+
+650           LOAD_CONST              12 ('application_name')
+              LOAD_GLOBAL             30 (REPAIR_ENGINE_APPLICATION_NAME)
+
+638           BUILD_MAP                2
+              LOAD_FAST_BORROW         5 (kwargs)
+              LOAD_CONST              13 ('connect_args')
+              STORE_SUBSCR
+              JUMP_FORWARD             7 (to L3)
+
+655   L2:     LOAD_CONST              14 ('check_same_thread')
+              LOAD_CONST               4 (False)
+              BUILD_MAP                1
+              LOAD_FAST_BORROW         5 (kwargs)
+              LOAD_CONST              13 ('connect_args')
+              STORE_SUBSCR
+
+657   L3:     LOAD_GLOBAL             33 (create_engine + NULL)
+              LOAD_FAST_BORROW         4 (url)
+              BUILD_TUPLE              1
+              BUILD_MAP                0
+              LOAD_FAST_BORROW         5 (kwargs)
+              DICT_MERGE               1
+              CALL_FUNCTION_EX
+              STORE_FAST               6 (repair_engine)
+
+658           LOAD_FAST_BORROW         3 (is_pg)
+              TO_BOOL
+              POP_JUMP_IF_TRUE        30 (to L4)
+              NOT_TAKEN
+
+660           LOAD_GLOBAL             34 (event)
+              LOAD_ATTR               36 (listens_for)
+              PUSH_NULL
+              LOAD_FAST_BORROW         6 (repair_engine)
+              LOAD_CONST              15 ('connect')
+              CALL                     2
+
+661           LOAD_CONST              16 (<code object _set_sqlite_pragma at 0x7f68f5d3ea70, file "daemon/tools/ens_db_tools.py", line 660>)
+              MAKE_FUNCTION
+
+660           CALL                     0
+
+661           STORE_FAST               7 (_set_sqlite_pragma)
+
+669   L4:     LOAD_FAST_BORROW         6 (repair_engine)
+              LOAD_GLOBAL              6 (_REPAIR_ENGINE_CACHE)
+              LOAD_FAST_BORROW         1 (cache_key)
+              STORE_SUBSCR
+
+670           LOAD_FAST_BORROW         6 (repair_engine)
+              RETURN_VALUE
+
+===== daemon.tools.ens_db_tools::._build_repair_engine._set_sqlite_pragma (co_filename=daemon/tools/ens_db_tools.py) =====
+660           RESUME                   0
+
+662           LOAD_FAST_BORROW         0 (dbapi_conn)
+              LOAD_ATTR                1 (cursor + NULL|self)
+              CALL                     0
+              STORE_FAST               2 (cursor)
+
+663           LOAD_FAST_BORROW         2 (cursor)
+              LOAD_ATTR                3 (execute + NULL|self)
+              LOAD_CONST               0 ('PRAGMA journal_mode=WAL')
+              CALL                     1
+              POP_TOP
+
+664           LOAD_FAST_BORROW         2 (cursor)
+              LOAD_ATTR                3 (execute + NULL|self)
+              LOAD_CONST               1 ('PRAGMA busy_timeout=30000')
+              CALL                     1
+              POP_TOP
+
+665           LOAD_FAST_BORROW         2 (cursor)
+              LOAD_ATTR                3 (execute + NULL|self)
+              LOAD_CONST               2 ('PRAGMA synchronous=NORMAL')
+              CALL                     1
+              POP_TOP
+
+666           LOAD_FAST_BORROW         2 (cursor)
+              LOAD_ATTR                3 (execute + NULL|self)
+              LOAD_CONST               3 ('PRAGMA foreign_keys=ON')
+              CALL                     1
+              POP_TOP
+
+667           LOAD_FAST_BORROW         2 (cursor)
+              LOAD_ATTR                5 (close + NULL|self)
+              CALL                     0
+              POP_TOP
+              LOAD_CONST               4 (None)
+              RETURN_VALUE
+

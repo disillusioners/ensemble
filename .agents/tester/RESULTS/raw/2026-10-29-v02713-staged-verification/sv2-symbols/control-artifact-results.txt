@@ -1,0 +1,18 @@
+=== STAGED  v0.27.13 (b1183a637) ===
+    source pyz : /tmp/sv2-symbols/pyz.bin
+    daemon.* modules scanned : 582
+    exact-const 'BEGIN' hits : 0
+
+=== CONTROL v0.27.12 (79bf44936) ===
+    source pyz : /tmp/sv2-symbols/pyz_v02712.bin
+    daemon.* modules scanned : 579
+    exact-const 'BEGIN' hits : 1
+      EXACT-HIT daemon.tools.ens_db_tools | daemon.tools.ens_db_tools::._dry_run_sqlite_safe | const[11] (doc-pos=False) | 'BEGIN'
+
+=== CONTROL v0.27.11 (19fc11c8b) ===
+    source pyz : /tmp/sv2-symbols/pyz_v02711.bin
+    daemon.* modules scanned : 579
+    exact-const 'BEGIN' hits : 1
+      EXACT-HIT daemon.tools.ens_db_tools | daemon.tools.ens_db_tools::._dry_run_sqlite_safe | const[11] (doc-pos=False) | 'BEGIN'
+
+CONTROL VERDICT: staged=0 hits AND both older releases >=1 hit => the 'BEGIN'-absent observation is NON-VACUOUS.

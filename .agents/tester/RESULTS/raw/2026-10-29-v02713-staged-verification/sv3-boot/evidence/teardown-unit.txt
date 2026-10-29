@@ -1,0 +1,21 @@
+=== STOP (systemctl --user stop = SIGTERM only) ===
+stop rc=0
+=== post-stop unit state ===
+MainPID=0
+Result=success
+ActiveState=inactive
+SubState=dead
+=== unit not found? ===
+inactive
+=== cgroup path present? ===
+ls: cannot access '/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/sv3-v02713-boot.service': No such file or directory
+cgroup GONE (expected after unit teardown)
+=== port 9783 free? ===
+port 9783 FREE
+=== any lingering unit processes? (pid-scoped, no name kill) ===
+pid 3750516 gone
+pid 3750530 gone
+pid 3750705 gone
+pid 3750921 gone
+pid 3750922 gone
+pid 3752927 STILL ALIVE: npm exec @upstash/context7-mcp             

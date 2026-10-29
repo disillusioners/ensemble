@@ -1,0 +1,90 @@
+18:26:46 # db-pool gate ladder — interpreter certification
+18:26:47 /home/nea/ensemble-src-wt-stage-v02713/daemon/__init__.py 9.0.2
+18:26:47 ── G0 ──────────────────────────────────────────────
+18:26:47 G0: PASS (BASELINE.md present; both literals resolved — idle-in-txn DISABLED per D-47; the state_change−xact_start metric withdrawn, xact_age_s recorded per D-48)
+18:26:47 ── G1.1 ──────────────────────────────────────────────
+18:26:52 COLLECTED-OK count=9 expected=9
+18:26:57 .........                                                                [100%]
+18:26:57 9 passed in 0.47s
+18:26:57 G1.1: PASS (count=9 asserted from expected-collected.md rows 6)
+18:26:57 ── G1.2 ──────────────────────────────────────────────
+18:27:02 COLLECTED-OK count=8 expected=8
+18:27:09 ........                                                                 [100%]
+18:27:09 8 passed in 0.89s
+18:27:09 G1.2: PASS (count=8 asserted from expected-collected.md rows 10)
+18:27:09 ── G1.3 ──────────────────────────────────────────────
+18:27:14 COLLECTED-OK count=6 expected=6
+18:27:20 ......                                                                   [100%]
+18:27:20 6 passed in 0.37s
+18:27:20 G1.3: PASS (count=6 asserted from expected-collected.md rows 11)
+18:27:20 ── G1.4 ──────────────────────────────────────────────
+18:27:25 COLLECTED-OK count=40 expected=40
+18:27:35 ...................................x....                                 [100%]
+18:27:35 39 passed, 1 xfailed in 4.91s
+18:27:35 G1.4: PASS (count=40 asserted from expected-collected.md rows 7,8,9,16,18)
+18:27:35 ── G2.1 ──────────────────────────────────────────────
+18:27:40 COLLECTED-OK count=36 expected=36
+18:27:47 /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-7bba2f00-edd5-4f1c-8834-f69a3fb3cc51/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records:
+18:27:47 <class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-7bba2f00-edd5-4f1c-8834-f69a3fb3cc51/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records'
+18:27:47   warnings.warn(
+18:27:47 G2.1: PASS (count=36 asserted from expected-collected.md rows 1,2,5)
+18:27:47 ── G2.2 ──────────────────────────────────────────────
+18:27:52 COLLECTED-OK count=6 expected=6
+18:27:57 ......                                                                   [100%]
+18:27:57 6 passed in 0.35s
+18:27:57 G2.2: PASS (count=6 asserted from expected-collected.md rows 3)
+18:27:57 ── G2.3 ──────────────────────────────────────────────
+18:28:02 COLLECTED-OK count=6 expected=6
+18:28:07 ......                                                                   [100%]
+18:28:07 6 passed in 0.36s
+18:28:07 G2.3: PASS (count=6 asserted from expected-collected.md rows 4)
+18:28:07 ── G2.4 ──────────────────────────────────────────────
+18:28:13 COLLECTED-OK count=23 expected=23
+18:28:18 /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-d9954c73-a87a-4af0-9510-c1ac3921671a/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+18:28:18 <class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-d9954c73-a87a-4af0-9510-c1ac3921671a/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+18:28:18   warnings.warn(
+18:28:18 G2.4: PASS (count=23 asserted from expected-collected.md rows 1)
+18:28:18 ── G2.5 [postgres] ──────────────────────────────────────────────
+18:28:23 COLLECTED-OK count=5 expected=5
+18:28:34 .....                                                                    [100%]
+18:28:34 5 passed in 6.51s
+18:28:34 G2.5 [postgres]: PASS (count=5 asserted from expected-collected.md rows 20,21)
+18:28:34 ── G2.5 [integration — marker split of the canonical row] ──────────────────────────────────────────────
+18:28:38 COLLECTED-OK count=9 expected=9
+18:29:09 .........                                                                [100%]
+18:29:09 9 passed in 25.52s
+18:29:09 G2.5 [integration — marker split of the canonical row]: PASS (count=9 asserted from expected-collected.md rows 23,26)
+18:29:09 ── G2.6 ──────────────────────────────────────────────
+18:29:15 COLLECTED-OK count=3 expected=3
+18:29:24 ...                                                                      [100%]
+18:29:24 3 passed in 4.15s
+18:29:24 G2.6: PASS (count=3 asserted from expected-collected.md rows 22)
+18:29:24 ── G3.1 ──────────────────────────────────────────────
+18:29:29 COLLECTED-OK count=3 expected=3
+18:29:38 ...                                                                      [100%]
+18:29:38 3 passed in 3.77s
+18:29:38 G3.1: PASS (count=3 asserted from expected-collected.md rows 25)
+18:29:38 ── G3.2 [integration] ──────────────────────────────────────────────
+18:29:43 COLLECTED-OK count=7 expected=7
+18:29:53 .......                                                                  [100%]
+18:29:53 7 passed in 5.04s
+18:29:53 G3.2 [integration]: PASS (count=7 asserted from expected-collected.md rows 24)
+18:29:53 ── G3.2 [unit static twins — marker split of the canonical row] ──────────────────────────────────────────────
+18:29:58 COLLECTED-OK count=7 expected=7
+18:30:03 .......                                                                  [100%]
+18:30:03 7 passed in 0.39s
+18:30:03 G3.2 [unit static twins — marker split of the canonical row]: PASS (count=7 asserted from expected-collected.md rows 15,14)
+18:30:03 ── G3.3 ──────────────────────────────────────────────
+18:30:09 COLLECTED-OK count=12 expected=12
+18:30:18 ............                                                             [100%]
+18:30:18 12 passed in 4.23s
+18:30:18 G3.3: PASS (count=12 asserted from expected-collected.md rows 12,13,14)
+18:30:18 ── G3.4 ──────────────────────────────────────────────
+18:30:23 COLLECTED-OK count=5 expected=5
+18:30:45 .....                                                                    [100%]
+18:30:45 5 passed in 17.39s
+18:30:45 G3.4: PASS (count=5 asserted from expected-collected.md rows 17)
+18:30:45 ── G1.5 / G3.5 ─────────────────────────────────────
+18:30:45 TESTER-OWNED (not executed here): whole-tree default-collected corpus, base vs HEAD, with base_collected/head_collected reconciled against the sum of the declared EXPECTED_COLLECTED_* (row 35 of expected-collected.md); collected > 0 on BOTH sides; mismatch = FATAL. The byte-comm instrument is the tester lane's.
+18:30:45 LADDER: OK (mode=--run, rows matched=17)
+LADDER_PIPESTATUS0=0

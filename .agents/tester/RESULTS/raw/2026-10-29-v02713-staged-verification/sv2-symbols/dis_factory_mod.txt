@@ -1,0 +1,563 @@
+===== daemon.repositories.factory:: (co_filename=daemon/repositories/factory.py) =====
+  --           MAKE_CELL                0 (__conditional_annotations__)
+
+   0           RESUME                   0
+
+   1           BUILD_SET                0
+               STORE_NAME               0 (__conditional_annotations__)
+               SETUP_ANNOTATIONS
+               LOAD_CONST               0 ('Simple factory for creating repository instances.')
+               STORE_NAME               1 (__doc__)
+
+   3           LOAD_SMALL_INT           0
+               LOAD_CONST               1 (('annotations',))
+               IMPORT_NAME              2 (__future__)
+               IMPORT_FROM              3 (annotations)
+               STORE_NAME               3 (annotations)
+               POP_TOP
+
+   5           LOAD_SMALL_INT           0
+               LOAD_CONST               2 (None)
+               IMPORT_NAME              4 (logging)
+               STORE_NAME               4 (logging)
+
+   6           LOAD_SMALL_INT           0
+               LOAD_CONST               3 (('dataclass',))
+               IMPORT_NAME              5 (dataclasses)
+               IMPORT_FROM              6 (dataclass)
+               STORE_NAME               6 (dataclass)
+               POP_TOP
+
+   7           LOAD_SMALL_INT           0
+               LOAD_CONST               4 (('Path',))
+               IMPORT_NAME              7 (pathlib)
+               IMPORT_FROM              8 (Path)
+               STORE_NAME               8 (Path)
+               POP_TOP
+
+   8           LOAD_SMALL_INT           0
+               LOAD_CONST               5 (('TYPE_CHECKING',))
+               IMPORT_NAME              9 (typing)
+               IMPORT_FROM             10 (TYPE_CHECKING)
+               STORE_NAME              10 (TYPE_CHECKING)
+               POP_TOP
+
+  10           LOAD_SMALL_INT           0
+               LOAD_CONST               6 (('Engine', 'create_engine', 'event'))
+               IMPORT_NAME             11 (sqlalchemy)
+               IMPORT_FROM             12 (Engine)
+               STORE_NAME              12 (Engine)
+               IMPORT_FROM             13 (create_engine)
+               STORE_NAME              13 (create_engine)
+               IMPORT_FROM             14 (event)
+               STORE_NAME              14 (event)
+               POP_TOP
+
+  11           LOAD_SMALL_INT           0
+               LOAD_CONST               7 (('URL',))
+               IMPORT_NAME             15 (sqlalchemy.engine)
+               IMPORT_FROM             16 (URL)
+               STORE_NAME              16 (URL)
+               POP_TOP
+
+  12           LOAD_SMALL_INT           0
+               LOAD_CONST               8 (('Session', 'SQLModel'))
+               IMPORT_NAME             17 (sqlmodel)
+               IMPORT_FROM             18 (Session)
+               STORE_NAME              18 (Session)
+               IMPORT_FROM             19 (SQLModel)
+               STORE_NAME              19 (SQLModel)
+               POP_TOP
+
+  14           LOAD_SMALL_INT           0
+               LOAD_CONST               9 (('BOOT_DB_TIMEOUT_S', 'MANAGER_ENGINE_APPLICATION_NAME', 'MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS', 'MANAGER_ENGINE_POOL_RECYCLE_S', 'MANAGER_ENGINE_POOL_TIMEOUT_S', 'MANAGER_POOL_SIZE_DEFAULT'))
+               IMPORT_NAME             20 (daemon.constants)
+               IMPORT_FROM             21 (BOOT_DB_TIMEOUT_S)
+               STORE_NAME              21 (BOOT_DB_TIMEOUT_S)
+               IMPORT_FROM             22 (MANAGER_ENGINE_APPLICATION_NAME)
+               STORE_NAME              22 (MANAGER_ENGINE_APPLICATION_NAME)
+               IMPORT_FROM             23 (MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS)
+               STORE_NAME              23 (MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS)
+               IMPORT_FROM             24 (MANAGER_ENGINE_POOL_RECYCLE_S)
+               STORE_NAME              24 (MANAGER_ENGINE_POOL_RECYCLE_S)
+               IMPORT_FROM             25 (MANAGER_ENGINE_POOL_TIMEOUT_S)
+               STORE_NAME              25 (MANAGER_ENGINE_POOL_TIMEOUT_S)
+               IMPORT_FROM             26 (MANAGER_POOL_SIZE_DEFAULT)
+               STORE_NAME              26 (MANAGER_POOL_SIZE_DEFAULT)
+               POP_TOP
+
+  23           LOAD_SMALL_INT           1
+               LOAD_CONST              10 (('SQLModelProjectRepository',))
+               IMPORT_NAME             27 (project.repository)
+               IMPORT_FROM             28 (SQLModelProjectRepository)
+               STORE_NAME              28 (SQLModelProjectRepository)
+               POP_TOP
+
+  24           LOAD_SMALL_INT           1
+               LOAD_CONST              11 (('SQLModelInstanceRepository',))
+               IMPORT_NAME             29 (instance.repository)
+               IMPORT_FROM             30 (SQLModelInstanceRepository)
+               STORE_NAME              30 (SQLModelInstanceRepository)
+               POP_TOP
+
+  25           LOAD_SMALL_INT           1
+               LOAD_CONST              12 (('SQLModelMessageQueueRepository',))
+               IMPORT_NAME             31 (message_queue.repository)
+               IMPORT_FROM             32 (SQLModelMessageQueueRepository)
+               STORE_NAME              32 (SQLModelMessageQueueRepository)
+               POP_TOP
+
+  26           LOAD_SMALL_INT           1
+               LOAD_CONST              13 (('SQLModelSourceRepository',))
+               IMPORT_NAME             33 (source.repository)
+               IMPORT_FROM             34 (SQLModelSourceRepository)
+               STORE_NAME              34 (SQLModelSourceRepository)
+               POP_TOP
+
+  27           LOAD_SMALL_INT           1
+               LOAD_CONST              14 (('JobRepository',))
+               IMPORT_NAME             35 (job_queue.repository)
+               IMPORT_FROM             36 (JobRepository)
+               STORE_NAME              36 (JobRepository)
+               POP_TOP
+
+  28           LOAD_SMALL_INT           1
+               LOAD_CONST              15 (('JobQueueRepository',))
+               IMPORT_NAME             37 (job_queue.queue_repository)
+               IMPORT_FROM             38 (JobQueueRepository)
+               STORE_NAME              38 (JobQueueRepository)
+               POP_TOP
+
+  29           LOAD_SMALL_INT           1
+               LOAD_CONST              16 (('SQLModelMcpServerRepository',))
+               IMPORT_NAME             39 (mcp_server.repository)
+               IMPORT_FROM             40 (SQLModelMcpServerRepository)
+               STORE_NAME              40 (SQLModelMcpServerRepository)
+               POP_TOP
+
+  30           LOAD_SMALL_INT           1
+               LOAD_CONST              17 (('DbConnectionRepository',))
+               IMPORT_NAME             41 (db_connection.repository)
+               IMPORT_FROM             42 (DbConnectionRepository)
+               STORE_NAME              42 (DbConnectionRepository)
+               POP_TOP
+
+  31           LOAD_SMALL_INT           1
+               LOAD_CONST              18 (('SQLModelInfraRepository',))
+               IMPORT_NAME             43 (infra.repository)
+               IMPORT_FROM             44 (SQLModelInfraRepository)
+               STORE_NAME              44 (SQLModelInfraRepository)
+               POP_TOP
+
+  32           LOAD_SMALL_INT           1
+               LOAD_CONST              19 (('SharedMetaKVRepository',))
+               IMPORT_NAME             45 (shared_meta_kv.repository)
+               IMPORT_FROM             46 (SharedMetaKVRepository)
+               STORE_NAME              46 (SharedMetaKVRepository)
+               POP_TOP
+
+  33           LOAD_SMALL_INT           1
+               LOAD_CONST              20 (('SharedMetaKV',))
+               IMPORT_NAME             47 (shared_meta_kv.models)
+               IMPORT_FROM             48 (SharedMetaKV)
+               STORE_NAME              48 (SharedMetaKV)
+               POP_TOP
+
+  34           LOAD_SMALL_INT           1
+               LOAD_CONST              21 (('SkillABTestRepository', 'SkillEmbeddingRepository', 'SkillLineageRepository', 'SkillRepository', 'SkillTriggerRepository', 'SkillUsageRepository'))
+               IMPORT_NAME             49 (skill.repository)
+               IMPORT_FROM             50 (SkillABTestRepository)
+               STORE_NAME              50 (SkillABTestRepository)
+               IMPORT_FROM             51 (SkillEmbeddingRepository)
+               STORE_NAME              51 (SkillEmbeddingRepository)
+               IMPORT_FROM             52 (SkillLineageRepository)
+               STORE_NAME              52 (SkillLineageRepository)
+               IMPORT_FROM             53 (SkillRepository)
+               STORE_NAME              53 (SkillRepository)
+               IMPORT_FROM             54 (SkillTriggerRepository)
+               STORE_NAME              54 (SkillTriggerRepository)
+               IMPORT_FROM             55 (SkillUsageRepository)
+               STORE_NAME              55 (SkillUsageRepository)
+               POP_TOP
+
+  42           LOAD_SMALL_INT           1
+               LOAD_CONST              22 (('SkillBankRepository',))
+               IMPORT_NAME             56 (skill.skill_bank_repository)
+               IMPORT_FROM             57 (SkillBankRepository)
+               STORE_NAME              57 (SkillBankRepository)
+               POP_TOP
+
+  43           LOAD_SMALL_INT           1
+               LOAD_CONST              23 (('MessageMetadataRepository',))
+               IMPORT_NAME             58 (message_metadata.repository)
+               IMPORT_FROM             59 (MessageMetadataRepository)
+               STORE_NAME              59 (MessageMetadataRepository)
+               POP_TOP
+
+  44           LOAD_SMALL_INT           1
+               LOAD_CONST              24 (('BlueprintRepository',))
+               IMPORT_NAME             60 (blueprint.repository)
+               IMPORT_FROM             61 (BlueprintRepository)
+               STORE_NAME              61 (BlueprintRepository)
+               POP_TOP
+
+  45           LOAD_SMALL_INT           1
+               LOAD_CONST              25 (('BlueprintEmbeddingRepository', 'create_blueprint_embedding_repository'))
+               IMPORT_NAME             62 (blueprint.embedding_repository)
+               IMPORT_FROM             63 (BlueprintEmbeddingRepository)
+               STORE_NAME              63 (BlueprintEmbeddingRepository)
+               IMPORT_FROM             64 (create_blueprint_embedding_repository)
+               STORE_NAME              65 (_create_blueprint_embedding_repository)
+               POP_TOP
+
+  49           LOAD_SMALL_INT           1
+               LOAD_CONST              26 (('BlueprintPendingRepository', 'create_blueprint_pending_repository'))
+               IMPORT_NAME             66 (blueprint.pending_repository)
+               IMPORT_FROM             67 (BlueprintPendingRepository)
+               STORE_NAME              67 (BlueprintPendingRepository)
+               IMPORT_FROM             68 (create_blueprint_pending_repository)
+               STORE_NAME              69 (_create_blueprint_pending_repository)
+               POP_TOP
+
+  61           LOAD_SMALL_INT           1
+               LOAD_CONST              27 (('PromptVersionRepository',))
+               IMPORT_NAME             70 (prompt_version.repository)
+               IMPORT_FROM             71 (PromptVersionRepository)
+               STORE_NAME              71 (PromptVersionRepository)
+               POP_TOP
+
+  72           LOAD_SMALL_INT           1
+               LOAD_CONST              28 (('CustomAgentConfig', 'CustomAgentConfigRepository'))
+               IMPORT_NAME             72 (custom_agent_configs)
+               IMPORT_FROM             73 (CustomAgentConfig)
+               STORE_NAME              73 (CustomAgentConfig)
+               IMPORT_FROM             74 (CustomAgentConfigRepository)
+               STORE_NAME              74 (CustomAgentConfigRepository)
+               POP_TOP
+
+  84           LOAD_SMALL_INT           1
+               LOAD_CONST              29 (('InstanceOpsAudit',))
+               IMPORT_NAME             75 (instance_ops.models)
+               IMPORT_FROM             76 (InstanceOpsAudit)
+               STORE_NAME              76 (InstanceOpsAudit)
+               POP_TOP
+
+  95           LOAD_SMALL_INT           1
+               LOAD_CONST              30 (('NotifyAudit',))
+               IMPORT_NAME             77 (notify_audit.models)
+               IMPORT_FROM             78 (NotifyAudit)
+               STORE_NAME              78 (NotifyAudit)
+               POP_TOP
+
+  97           LOAD_NAME               10 (TYPE_CHECKING)
+               TO_BOOL
+               POP_JUMP_IF_FALSE        7 (to L1)
+               NOT_TAKEN
+
+  98           LOAD_SMALL_INT           0
+               LOAD_CONST              31 (('EnsembleConfig',))
+               IMPORT_NAME             79 (daemon.ensemble_config)
+               IMPORT_FROM             80 (EnsembleConfig)
+               STORE_NAME              80 (EnsembleConfig)
+               POP_TOP
+
+ 100   L1:     LOAD_NAME                4 (logging)
+               LOAD_ATTR              162 (getLogger)
+               PUSH_NULL
+               LOAD_NAME               82 (__name__)
+               CALL                     1
+               STORE_NAME              83 (logger)
+
+ 103           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              32 (<code object __annotate__ at 0x7c595954fe30, file "daemon/repositories/factory.py", line 103>)
+               MAKE_FUNCTION
+               LOAD_CONST              33 (<code object create_mcp_server_repository at 0x7c5959987930, file "daemon/repositories/factory.py", line 103>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME              84 (create_mcp_server_repository)
+
+ 133           LOAD_NAME                6 (dataclass)
+
+ 134           LOAD_BUILD_CLASS
+               PUSH_NULL
+               LOAD_CONST              34 (<code object DatabaseConfig at 0x7c5959942c30, file "daemon/repositories/factory.py", line 133>)
+               MAKE_FUNCTION
+               LOAD_CONST              35 ('DatabaseConfig')
+               CALL                     2
+
+ 133           CALL                     0
+
+ 134           STORE_NAME              85 (DatabaseConfig)
+
+ 168           LOAD_CONST              36 (<code object __annotate__ at 0x7c5959444120, file "daemon/repositories/factory.py", line 168>)
+               MAKE_FUNCTION
+               LOAD_CONST              37 (<code object create_engine_from_config at 0x17cf68e0, file "daemon/repositories/factory.py", line 168>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME              86 (create_engine_from_config)
+
+ 259           LOAD_CONST              38 ('options')
+               LOAD_CONST              39 ('-c timezone=UTC')
+               BUILD_MAP                1
+               STORE_NAME              87 (PG_SESSION_CONNECT_ARGS)
+               LOAD_CONST              40 ('dict[str, str]')
+               LOAD_NAME               88 (__annotations__)
+               LOAD_CONST              41 ('PG_SESSION_CONNECT_ARGS')
+               STORE_SUBSCR
+
+ 278           LOAD_CONST              42 (False)
+               STORE_NAME              89 (MANAGER_ENGINE_IDLE_IN_TXN_BACKSTOP_ENABLED)
+
+ 281           LOAD_CONST              43 (<code object __annotate__ at 0x7c5959444300, file "daemon/repositories/factory.py", line 281>)
+               MAKE_FUNCTION
+               LOAD_CONST              44 (<code object _manager_pg_session_options at 0x7c5959434ab0, file "daemon/repositories/factory.py", line 281>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME              90 (_manager_pg_session_options)
+
+ 300           LOAD_CONST              38 ('options')
+               LOAD_NAME               90 (_manager_pg_session_options)
+               PUSH_NULL
+               CALL                     0
+
+ 299           BUILD_MAP                1
+               STORE_NAME              91 (MANAGER_PG_SESSION_CONNECT_ARGS)
+               LOAD_CONST              40 ('dict[str, str]')
+               LOAD_NAME               88 (__annotations__)
+               LOAD_CONST              45 ('MANAGER_PG_SESSION_CONNECT_ARGS')
+               STORE_SUBSCR
+
+ 306           LOAD_NAME               26 (MANAGER_POOL_SIZE_DEFAULT)
+
+ 304           BUILD_TUPLE              1
+               LOAD_CONST              46 (<code object __annotate__ at 0x7c59595f4d30, file "daemon/repositories/factory.py", line 304>)
+               MAKE_FUNCTION
+               LOAD_CONST              47 (<code object create_postgres_engine at 0x17d0fc30, file "daemon/repositories/factory.py", line 304>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME              92 (create_postgres_engine)
+
+ 467           LOAD_CONST              48 (<code object __annotate__ at 0x7c59594445d0, file "daemon/repositories/factory.py", line 467>)
+               MAKE_FUNCTION
+               LOAD_CONST              49 (<code object _add_agent_id_column at 0x17d0b8e0, file "daemon/repositories/factory.py", line 467>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME              93 (_add_agent_id_column)
+
+ 520           LOAD_CONST              50 (<code object __annotate__ at 0x7c59594446c0, file "daemon/repositories/factory.py", line 520>)
+               MAKE_FUNCTION
+               LOAD_CONST              51 (<code object run_migrations at 0x17d197c0, file "daemon/repositories/factory.py", line 520>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               STORE_NAME              94 (run_migrations)
+
+ 602           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              52 (<code object __annotate__ at 0x7c59595f4c30, file "daemon/repositories/factory.py", line 602>)
+               MAKE_FUNCTION
+               LOAD_CONST              53 (<code object create_project_repository at 0x7c5959987db0, file "daemon/repositories/factory.py", line 602>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME              95 (create_project_repository)
+
+ 636           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              54 (<code object __annotate__ at 0x7c59595f4a30, file "daemon/repositories/factory.py", line 636>)
+               MAKE_FUNCTION
+               LOAD_CONST              55 (<code object create_instance_repository at 0x7c5959428630, file "daemon/repositories/factory.py", line 636>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME              96 (create_instance_repository)
+
+ 670           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              56 (<code object __annotate__ at 0x7c59595f4e30, file "daemon/repositories/factory.py", line 670>)
+               MAKE_FUNCTION
+               LOAD_CONST              57 (<code object create_message_queue_repository at 0x7c59594287b0, file "daemon/repositories/factory.py", line 670>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME              97 (create_message_queue_repository)
+
+ 704           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              58 (<code object __annotate__ at 0x7c59595f6d30, file "daemon/repositories/factory.py", line 704>)
+               MAKE_FUNCTION
+               LOAD_CONST              59 (<code object create_source_repository at 0x7c5959428930, file "daemon/repositories/factory.py", line 704>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME              98 (create_source_repository)
+
+ 738           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              60 (<code object __annotate__ at 0x7c59595f6c30, file "daemon/repositories/factory.py", line 738>)
+               MAKE_FUNCTION
+               LOAD_CONST              61 (<code object create_db_connection_repository at 0x7c5959428ab0, file "daemon/repositories/factory.py", line 738>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME              99 (create_db_connection_repository)
+
+ 773           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              62 (<code object __annotate__ at 0x7c59595f6b30, file "daemon/repositories/factory.py", line 773>)
+               MAKE_FUNCTION
+               LOAD_CONST              63 (<code object create_job_repository at 0x7c5959428c30, file "daemon/repositories/factory.py", line 773>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME             100 (create_job_repository)
+
+ 807           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              64 (<code object __annotate__ at 0x7c59595f6a30, file "daemon/repositories/factory.py", line 807>)
+               MAKE_FUNCTION
+               LOAD_CONST              65 (<code object create_job_queue_repository at 0x7c5959428db0, file "daemon/repositories/factory.py", line 807>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME             101 (create_job_queue_repository)
+
+ 837           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              66 (<code object __annotate__ at 0x7c59595f7d30, file "daemon/repositories/factory.py", line 837>)
+               MAKE_FUNCTION
+               LOAD_CONST              67 (<code object create_infra_repository at 0x7c5959428f30, file "daemon/repositories/factory.py", line 837>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME             102 (create_infra_repository)
+
+ 884           LOAD_CONST              97 ((False,))
+               LOAD_CONST              68 (<code object __annotate__ at 0x7c59595f7e30, file "daemon/repositories/factory.py", line 884>)
+               MAKE_FUNCTION
+               LOAD_CONST              69 (<code object create_shared_meta_kv_repository at 0x7c595957b370, file "daemon/repositories/factory.py", line 884>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME             103 (create_shared_meta_kv_repository)
+
+ 923           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              70 (<code object __annotate__ at 0x7c5959204030, file "daemon/repositories/factory.py", line 923>)
+               MAKE_FUNCTION
+               LOAD_CONST              71 (<code object create_skill_repository at 0x7c59594290b0, file "daemon/repositories/factory.py", line 923>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME             104 (create_skill_repository)
+
+ 966           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              72 (<code object __annotate__ at 0x7c5959204130, file "daemon/repositories/factory.py", line 966>)
+               MAKE_FUNCTION
+               LOAD_CONST              73 (<code object create_blueprint_repository at 0x7c5959429230, file "daemon/repositories/factory.py", line 966>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME             105 (create_blueprint_repository)
+
+1004           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              74 (<code object __annotate__ at 0x7c5959204230, file "daemon/repositories/factory.py", line 1004>)
+               MAKE_FUNCTION
+               LOAD_CONST              75 (<code object create_blueprint_embedding_repository at 0x7c59594293b0, file "daemon/repositories/factory.py", line 1004>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME              64 (create_blueprint_embedding_repository)
+
+1034           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              76 (<code object __annotate__ at 0x7c5959204330, file "daemon/repositories/factory.py", line 1034>)
+               MAKE_FUNCTION
+               LOAD_CONST              77 (<code object create_blueprint_pending_repository at 0x7c5959429530, file "daemon/repositories/factory.py", line 1034>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME              68 (create_blueprint_pending_repository)
+
+1069           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              78 (<code object __annotate__ at 0x7c5959204430, file "daemon/repositories/factory.py", line 1069>)
+               MAKE_FUNCTION
+               LOAD_CONST              79 (<code object create_skill_lineage_repository at 0x7c59594296b0, file "daemon/repositories/factory.py", line 1069>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME             106 (create_skill_lineage_repository)
+
+1103           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              80 (<code object __annotate__ at 0x7c5959204530, file "daemon/repositories/factory.py", line 1103>)
+               MAKE_FUNCTION
+               LOAD_CONST              81 (<code object create_skill_usage_repository at 0x7c5959429830, file "daemon/repositories/factory.py", line 1103>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME             107 (create_skill_usage_repository)
+
+1137           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              82 (<code object __annotate__ at 0x7c5959204630, file "daemon/repositories/factory.py", line 1137>)
+               MAKE_FUNCTION
+               LOAD_CONST              83 (<code object create_skill_trigger_repository at 0x7c59594299b0, file "daemon/repositories/factory.py", line 1137>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME             108 (create_skill_trigger_repository)
+
+1174           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              84 (<code object __annotate__ at 0x7c5959204730, file "daemon/repositories/factory.py", line 1174>)
+               MAKE_FUNCTION
+               LOAD_CONST              85 (<code object create_skill_embedding_repository at 0x7c5959429b30, file "daemon/repositories/factory.py", line 1174>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME             109 (create_skill_embedding_repository)
+
+1212           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              86 (<code object __annotate__ at 0x7c5959204830, file "daemon/repositories/factory.py", line 1212>)
+               MAKE_FUNCTION
+               LOAD_CONST              87 (<code object create_skill_ab_test_repository at 0x7c5959429cb0, file "daemon/repositories/factory.py", line 1212>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME             110 (create_skill_ab_test_repository)
+
+1250           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              88 (<code object __annotate__ at 0x7c5959204930, file "daemon/repositories/factory.py", line 1250>)
+               MAKE_FUNCTION
+               LOAD_CONST              89 (<code object create_skill_bank_repository at 0x7c5959429e30, file "daemon/repositories/factory.py", line 1250>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME             111 (create_skill_bank_repository)
+
+1289           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              90 (<code object __annotate__ at 0x7c5959204a30, file "daemon/repositories/factory.py", line 1289>)
+               MAKE_FUNCTION
+               LOAD_CONST              91 (<code object create_message_metadata_repository at 0x7c5959429fb0, file "daemon/repositories/factory.py", line 1289>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME             112 (create_message_metadata_repository)
+
+1349           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              92 (<code object __annotate__ at 0x7c5959204b30, file "daemon/repositories/factory.py", line 1349>)
+               MAKE_FUNCTION
+               LOAD_CONST              93 (<code object create_prompt_version_repository at 0x7c595942a130, file "daemon/repositories/factory.py", line 1349>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME             113 (create_prompt_version_repository)
+
+1400           LOAD_CONST              96 ((None, None, True))
+               LOAD_CONST              94 (<code object __annotate__ at 0x7c5959204c30, file "daemon/repositories/factory.py", line 1400>)
+               MAKE_FUNCTION
+               LOAD_CONST              95 (<code object create_custom_agent_config_repository at 0x7c595942a2b0, file "daemon/repositories/factory.py", line 1400>)
+               MAKE_FUNCTION
+               SET_FUNCTION_ATTRIBUTE  16 (annotate)
+               SET_FUNCTION_ATTRIBUTE   1 (defaults)
+               STORE_NAME             114 (create_custom_agent_config_repository)
+
+1444           LOAD_NAME              100 (create_job_repository)
+               STORE_NAME             115 (create_task_repository)
+
+1447           BUILD_LIST               0
+               LOAD_CONST              98 (('DatabaseConfig', 'create_engine_from_config', 'create_project_repository', 'create_instance_repository', 'create_message_queue_repository', 'create_source_repository', 'create_db_connection_repository', 'create_job_repository', 'create_job_queue_repository', 'create_mcp_server_repository', 'create_infra_repository', 'create_shared_meta_kv_repository', 'create_skill_repository', 'create_skill_lineage_repository', 'create_skill_usage_repository', 'create_skill_trigger_repository', 'create_skill_embedding_repository', 'create_skill_ab_test_repository', 'create_skill_bank_repository', 'create_message_metadata_repository', 'create_prompt_version_repository', 'create_custom_agent_config_repository', 'run_migrations'))
+               LIST_EXTEND              1
+               STORE_NAME             116 (__all__)
+               LOAD_CONST               2 (None)
+               RETURN_VALUE
+

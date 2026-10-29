@@ -1,0 +1,166 @@
+===== daemon.repositories.factory::.create_postgres_engine (co_filename=daemon/repositories/factory.py) =====
+304           RESUME                   0
+
+343           LOAD_SMALL_INT           0
+              LOAD_CONST               1 (None)
+              IMPORT_NAME              0 (os)
+              STORE_FAST               2 (os)
+
+345           LOAD_FAST_BORROW         0 (config)
+              LOAD_ATTR                2 (postgres)
+              STORE_FAST               3 (pg)
+
+346           LOAD_FAST_BORROW         2 (os)
+              LOAD_ATTR                4 (environ)
+              LOAD_ATTR                7 (get + NULL|self)
+              LOAD_CONST               2 ('POSTGRES_HOST')
+              LOAD_FAST_BORROW         3 (pg)
+              LOAD_ATTR                8 (host)
+              CALL                     2
+              STORE_FAST               4 (host)
+
+347           LOAD_FAST_BORROW         2 (os)
+              LOAD_ATTR                4 (environ)
+              LOAD_ATTR                7 (get + NULL|self)
+              LOAD_CONST               3 ('POSTGRES_PORT')
+              LOAD_GLOBAL             11 (str + NULL)
+              LOAD_FAST_BORROW         3 (pg)
+              LOAD_ATTR               12 (port)
+              CALL                     1
+              CALL                     2
+              STORE_FAST               5 (port)
+
+348           LOAD_FAST_BORROW         2 (os)
+              LOAD_ATTR                4 (environ)
+              LOAD_ATTR                7 (get + NULL|self)
+              LOAD_CONST               4 ('POSTGRES_DB')
+              LOAD_FAST_BORROW         3 (pg)
+              LOAD_ATTR               14 (db)
+              CALL                     2
+              STORE_FAST               6 (db)
+
+349           LOAD_FAST_BORROW         2 (os)
+              LOAD_ATTR                4 (environ)
+              LOAD_ATTR                7 (get + NULL|self)
+              LOAD_CONST               5 ('POSTGRES_USER')
+              LOAD_FAST_BORROW         3 (pg)
+              LOAD_ATTR               16 (user)
+              CALL                     2
+              STORE_FAST               7 (user)
+
+350           LOAD_FAST_BORROW         2 (os)
+              LOAD_ATTR                4 (environ)
+              LOAD_ATTR                7 (get + NULL|self)
+              LOAD_CONST               6 ('POSTGRES_PASSWORD')
+              LOAD_FAST_BORROW         3 (pg)
+              LOAD_ATTR               18 (password)
+              CALL                     2
+              STORE_FAST               8 (password)
+
+376           LOAD_GLOBAL             20 (URL)
+              LOAD_ATTR               22 (create)
+              PUSH_NULL
+
+377           LOAD_CONST               7 ('postgresql+psycopg')
+
+378           LOAD_FAST_BORROW         7 (user)
+
+379           LOAD_FAST_BORROW         8 (password)
+
+380           LOAD_FAST_BORROW         4 (host)
+
+381           LOAD_FAST_BORROW         5 (port)
+
+382           LOAD_FAST_BORROW         6 (db)
+
+390           LOAD_CONST               8 ('application_name')
+              LOAD_GLOBAL             24 (MANAGER_ENGINE_APPLICATION_NAME)
+
+394           LOAD_CONST               9 ('connect_timeout')
+              LOAD_GLOBAL             11 (str + NULL)
+              LOAD_GLOBAL             26 (BOOT_DB_TIMEOUT_S)
+              CALL                     1
+
+383           BUILD_MAP                2
+
+376           LOAD_CONST              10 (('drivername', 'username', 'password', 'host', 'port', 'database', 'query'))
+              CALL_KW                  7
+
+396           LOAD_ATTR               29 (render_as_string + NULL|self)
+              LOAD_CONST              11 (False)
+              LOAD_CONST              12 (('hide_password',))
+              CALL_KW                  1
+
+376           STORE_FAST               9 (url)
+
+398           LOAD_GLOBAL             30 (logger)
+              LOAD_ATTR               33 (info + NULL|self)
+
+399           LOAD_CONST              13 ('Creating PostgreSQL engine: ')
+              LOAD_FAST_BORROW         4 (host)
+              FORMAT_SIMPLE
+              LOAD_CONST              14 (':')
+              LOAD_FAST_BORROW         5 (port)
+              FORMAT_SIMPLE
+              LOAD_CONST              15 ('/')
+              LOAD_FAST_BORROW         6 (db)
+              FORMAT_SIMPLE
+              BUILD_STRING             6
+
+398           CALL                     1
+              POP_TOP
+
+402           LOAD_GLOBAL             34 (MANAGER_ENGINE_IDLE_IN_TXN_BACKSTOP_ENABLED)
+              TO_BOOL
+              POP_JUMP_IF_TRUE        22 (to L1)
+              NOT_TAKEN
+
+405           LOAD_GLOBAL             30 (logger)
+              LOAD_ATTR               33 (info + NULL|self)
+
+406           LOAD_CONST              16 ('MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS DISABLED — no trustworthy Phase-0 measurement')
+
+405           CALL                     1
+              POP_TOP
+
+424   L1:     LOAD_GLOBAL             30 (logger)
+              LOAD_ATTR               33 (info + NULL|self)
+
+425           LOAD_CONST              17 ('Manager engine pool sizing: pool_size=%s (limits.manager_pool_size; default tier %s, floor = default)')
+
+427           LOAD_FAST_BORROW         1 (manager_pool_size)
+
+428           LOAD_GLOBAL             36 (MANAGER_POOL_SIZE_DEFAULT)
+
+424           CALL                     3
+              POP_TOP
+
+431           LOAD_GLOBAL             39 (create_engine + NULL)
+
+432           LOAD_FAST_BORROW         9 (url)
+
+433           LOAD_CONST              11 (False)
+
+434           LOAD_FAST_BORROW         1 (manager_pool_size)
+
+435           LOAD_SMALL_INT          10
+
+436           LOAD_CONST              18 (True)
+
+450           LOAD_CONST              19 ('rollback')
+
+451           LOAD_GLOBAL             40 (MANAGER_ENGINE_POOL_RECYCLE_S)
+
+452           LOAD_GLOBAL             42 (MANAGER_ENGINE_POOL_TIMEOUT_S)
+
+462           LOAD_GLOBAL             45 (dict + NULL)
+              LOAD_GLOBAL             46 (MANAGER_PG_SESSION_CONNECT_ARGS)
+              CALL                     1
+
+431           LOAD_CONST              20 (('echo', 'pool_size', 'max_overflow', 'pool_pre_ping', 'pool_reset_on_return', 'pool_recycle', 'pool_timeout', 'connect_args'))
+              CALL_KW                  9
+              STORE_FAST              10 (engine)
+
+464           LOAD_FAST_BORROW        10 (engine)
+              RETURN_VALUE
+
