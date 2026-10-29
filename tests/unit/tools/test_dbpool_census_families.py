@@ -24,7 +24,9 @@ pin and ``audit-findings.md`` are one triangle):
   unmeasurable — the false-clean the tidier found). The implemented F
   detector (psycopg.connect / raw_connection / getconn / putconn)
   finds **F=1**: the ONE-SHOT ``psycopg.connect`` in
-  ``daemon/services/wedge_capture/db_capture.py:195`` — which the
+  ``daemon/services/wedge_capture/db_capture.py`` (the
+  ``return psycopg.connect(`` call — line numbers drift with upstream
+  merges, so the pin names the FILE and the STATEMENT) — which the
   contract already records as CLEAN (F5.3: *"a one-shot
   psycopg.connect with close() in finally ⇒ no pool, so it cannot
   leak"*). The pin names that site explicitly.
@@ -70,7 +72,9 @@ import subprocess
 from pathlib import Path
 
 #: The pack-local declared collected count (NEW packs only).
-EXPECTED_COLLECTED = 4
+#: 4 -> 5 (2026-10-29 merge-semantics fix): the R3 re-point added the
+#: path-existence leg — see FOLD-MAP NOTE-6.
+EXPECTED_COLLECTED = 5
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCANNER_PATH = _REPO_ROOT / "scripts" / "audit" / "borrow_census.py"
@@ -87,18 +91,38 @@ AST_BASELINE_TOTAL = 780
 #: The ONE family-F site — the audited-clean one-shot psycopg.connect
 #: (contract F5.3: it closes in a finally, holds no pool, cannot leak).
 #: Named explicitly so a SECOND raw-psycopg borrow is a loud failure.
-FAMILY_F_SITES = ("daemon/services/wedge_capture/db_capture.py:195",)
+#: Path-only (no line number): the line drifts with every upstream
+#: merge, and the pin's MEANING is "this file holds the one audited
+#: raw-psycopg borrow" (the statement text is asserted separately).
+FAMILY_F_SITES = ("daemon/services/wedge_capture/db_capture.py",)
 
 #: The §7.2 / §3.2 pattern cross-check constants.
 PATTERN_BASELINE = {"A": 439, "B": 175, "C": 4, "F": 0}
 
 #: The four named manual-borrow sites (audit-method §6.3) — the
 #: scanner-independent primary assertion.
+#:
+#: RE-POINTED (2026-10-29 merge-semantics fix): the pin was keyed on
+#: bare ``file:line`` literals, so the upstream merge's +12-line shift
+#: in ``daemon/manager.py`` (2782 -> 2794) turned it RED. The pin is
+#: now keyed on (PATH, STATEMENT) — the borrow itself — which is
+#: drift-robust AND stricter: the STATEMENT must match, so a borrow
+#: that was rewritten in place cannot hide behind a re-pointed line
+#: number. The audit record keeps the line numbers for the reader.
 FAMILY_C_SITES = (
-    "daemon/manager.py:2782",
-    "daemon/repositories/auth_bootstrap/repository.py:93",
-    "daemon/repositories/auth_bootstrap/repository.py:161",
-    "daemon/services/child_reports.py:2594",
+    ("daemon/manager.py", "session = Session(self._engine)"),
+    (
+        "daemon/repositories/auth_bootstrap/repository.py",
+        "session = Session(engine)",
+    ),
+    (
+        "daemon/repositories/auth_bootstrap/repository.py",
+        "session = Session(self._engine)",
+    ),
+    (
+        "daemon/services/child_reports.py",
+        "session = Session(self._manager._engine)",
+    ),
 )
 
 _GNU_GREP_TRAP_NOTE = (
@@ -172,15 +196,35 @@ class TestGAstCensusFamilies:
 
     def test_family_c_is_exactly_the_four_named_sites(self):
         _counts, family_c, _errs = _run_scan()
-        observed_sites = sorted(f"{rel}:{line}" for rel, line, _text in family_c)
+        # Keyed on (PATH, STATEMENT) — not on a bare line number (an
+        # upstream merge shifts lines; the statement is the audited
+        # site). The scanner truncates the statement at 90 chars, which
+        # none of the four reaches.
+        observed_sites = sorted((rel, text) for rel, _line, text in family_c)
         expected_sites = sorted(FAMILY_C_SITES)
         assert observed_sites == expected_sites, (
             "G-A (§7.2 PRIMARY, scanner-independent): the manual-borrow "
-            "family C must be EXACTLY the four named file:line sites. "
-            f"expected {expected_sites}, observed {observed_sites} — a "
-            "5th manual borrow must be audited individually before the "
-            "lane may proceed"
+            "family C must be EXACTLY the four named (path, statement) "
+            f"sites. expected {expected_sites}, observed "
+            f"{observed_sites} — a 5th manual borrow must be audited "
+            "individually before the lane may proceed"
         )
+
+    def test_the_named_family_c_sites_still_exist_at_their_paths(self):
+        """The (path, statement) pin above is only as good as the paths:
+        this leg asserts each named path still EXISTS and still carries
+        its statement — so a moved/renamed file cannot silently drop
+        out of the comparison."""
+        for rel, statement in FAMILY_C_SITES:
+            path = _REPO_ROOT / rel
+            assert path.exists(), (
+                f"G-A: the named family-C site path {rel} no longer exists"
+            )
+            body = path.read_text()
+            assert statement in body, (
+                f"G-A: the named family-C site {rel} no longer carries "
+                f"{statement!r}"
+            )
 
     def test_pattern_cross_check_reproduces_the_baseline(self):
         for family, pattern in (
@@ -213,8 +257,9 @@ class TestGAstCensusFamilies:
             f"observed {counts.get('F', 0)}; a new raw pool checkout "
             "requires individual audit"
         )
-        with open(_REPO_ROOT / "daemon/services/wedge_capture/db_capture.py") as fh:
-            db_capture = fh.read()
+        db_capture = (
+            _REPO_ROOT / "daemon/services/wedge_capture/db_capture.py"
+        ).read_text()
         assert "psycopg.connect(" in db_capture, (
             "G-A: the named family-F site is gone — re-audit the raw "
             "psycopg borrow before re-baselining"
