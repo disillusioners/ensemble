@@ -32,9 +32,9 @@ from daemon.checkpoint_perf import (
     time_saver_op,
 )
 from daemon.checkpoint_metrics import (
-    checkpoint_list_total,
+    ensemble_checkpoint_list_total as checkpoint_list_total,
+    ensemble_checkpoint_op_seconds as saver_op_latency_seconds,
     reset_for_tests as reset_metrics_for_tests,
-    saver_op_latency_seconds,
 )
 
 

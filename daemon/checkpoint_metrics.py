@@ -924,16 +924,20 @@ def register_summary(
 # The legacy names are DEPRECATED ALIASES of these canonical metrics:
 # a second exposition of the SAME series, never a second measurement.
 
-checkpoint_list_total = register_counter(
+#: The canonical counter handle (the canonical metric name is
+#: ``ensemble_checkpoint_list_total``).
+ensemble_checkpoint_list_total = register_counter(
     "ensemble_checkpoint_list_total",
     help=(
         "Cumulative number of saver.alist(…) invocations observed on the "
         "live message-API path. Expected normal value: 0 (post-PR3 read flip)."
     ),
 )
-checkpoint_list_total.alias_names = ["message_api_checkpoint_list_total"]
+ensemble_checkpoint_list_total.alias_names = ["message_api_checkpoint_list_total"]
 
-saver_op_latency_seconds = register_histogram(
+#: The canonical histogram handle (the canonical metric name is
+#: ``ensemble_checkpoint_op_seconds``).
+ensemble_checkpoint_op_seconds = register_histogram(
     "ensemble_checkpoint_op_seconds",
     label_keys=("op",),
     buckets=CHECKPOINT_OP_BUCKETS,
@@ -943,7 +947,14 @@ saver_op_latency_seconds = register_histogram(
         "adelete, alist (migration-only). Buckets are Prometheus-style."
     ),
 )
-saver_op_latency_seconds.alias_names = ["message_api_saver_op_latency_seconds"]
+ensemble_checkpoint_op_seconds.alias_names = ["message_api_saver_op_latency_seconds"]
+
+# Legacy PYTHON symbol names — the same objects under their historical
+# names.  ``daemon/checkpoint_perf.py`` imports these two names and the
+# collectors stay wired; the DEPRECATED part is the exposition NAME
+# (the alias), not the Python symbol.
+checkpoint_list_total = ensemble_checkpoint_list_total
+saver_op_latency_seconds = ensemble_checkpoint_op_seconds
 
 # F0.2 — canonical registry family.
 _cap_metric = register_counter(
@@ -1045,7 +1056,10 @@ def _render_metric(
     lines.append(f"# TYPE {name} {_prom_type(metric.kind)}")
     data = snapshot or {}
     if metric.kind in ("counter", "gauge"):
-        if not data and not metric.label_keys:
+        if not data and not metric.label_keys and not contended:
+            # A no-label counter with no series still reports its real
+            # value (0).  Under contention the value is UNKNOWN — never
+            # render a zero for "I have no data" (catalog §0.11).
             lines.append(f"{name} 0")
         for key, series in sorted(data.items()):
             labels = dict(key)
@@ -1160,6 +1174,8 @@ __all__ = [
     "RESERVED_LABEL_VALUE",
     "VOCABULARY_VERSION",
     "checkpoint_list_total",
+    "ensemble_checkpoint_list_total",
+    "ensemble_checkpoint_op_seconds",
     "known_label_keys",
     "register_counter",
     "register_gauge",
