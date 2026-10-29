@@ -85,6 +85,14 @@ RESERVED_LABEL_VALUE = "other"
 DEFAULT_PUBLISHER_CADENCE_SECONDS = 15.0
 DEFAULT_CARDINALITY_CAP = 2000
 
+#: The per-family try-acquire budget of a render (milliseconds) and the
+#: render-wide budget (seconds).  The per-family budget bounds one
+#: contended family; the render-wide budget bounds the WHOLE scrape so
+#: many contended families can never stretch it (RK-5: the render never
+#: blocks).
+RENDER_TRY_ACQUIRE_SECONDS = 0.05
+RENDER_TOTAL_BUDGET_SECONDS = 0.25
+
 _publisher_cadence_provider: Callable[[], float] = lambda: DEFAULT_PUBLISHER_CADENCE_SECONDS
 _cardinality_cap_provider: Callable[[], int] = lambda: DEFAULT_CARDINALITY_CAP
 
@@ -1048,10 +1056,11 @@ def _render_metric(
     metric: Metric,
     snapshot: Optional[dict[tuple[tuple[str, str], ...], dict[str, Any]]],
     contended: bool,
+    reason: str = "lock_contended",
 ) -> list[str]:
     lines: list[str] = []
     if contended:
-        lines.append(f"# {name} unavailable: lock_contended")
+        lines.append(f"# {name} unavailable: {reason}")
     lines.append(f"# HELP {name} {metric.help}")
     lines.append(f"# TYPE {name} {_prom_type(metric.kind)}")
     data = snapshot or {}
@@ -1125,8 +1134,23 @@ def render_metrics() -> str:
     lines: list[str] = []
     with _METRICS_LOCK:
         metrics = list(_METRICS)
+    deadline = time.monotonic() + RENDER_TOTAL_BUDGET_SECONDS
     for metric in metrics:
-        acquired = metric._lock.acquire(timeout=0.05)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            # The render-wide budget is spent — serve the last published
+            # snapshot instead of blocking any further.
+            lines.extend(
+                _render_metric(
+                    metric.name,
+                    metric,
+                    metric._published,
+                    True,
+                    "render_budget_exhausted",
+                )
+            )
+            continue
+        acquired = metric._lock.acquire(timeout=min(RENDER_TRY_ACQUIRE_SECONDS, remaining))
         if acquired:
             try:
                 # The lock is held, so the live state is a consistent

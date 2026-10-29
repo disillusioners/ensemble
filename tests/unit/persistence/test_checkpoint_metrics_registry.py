@@ -223,6 +223,23 @@ class TestWedgedWriter:
             rendered = render_metrics()
         assert "ensemble_test_wedged_snapshot_counter 7" in rendered
 
+    def test_many_wedged_families_still_render_within_the_budget(self, clean_registry):
+        """The render-wide budget bounds the WHOLE scrape (RK-5)."""
+        wedged = [register_counter(f"ensemble_test_budget_{i}") for i in range(10)]
+        for counter in wedged:
+            counter.inc()
+        started = time.monotonic()
+        for counter in wedged:
+            counter.lock.acquire()
+        try:
+            rendered = render_metrics()
+        finally:
+            for counter in wedged:
+                counter.lock.release()
+        elapsed = time.monotonic() - started
+        assert elapsed < 1.0, f"render blocked for {elapsed:.3f}s on many wedged families"
+        assert "unavailable:" in rendered
+
     def test_other_families_still_render_while_one_is_wedged(self, clean_registry):
         """One wedged family does not stall the others."""
         wedged = register_counter("ensemble_test_wedged_only")
