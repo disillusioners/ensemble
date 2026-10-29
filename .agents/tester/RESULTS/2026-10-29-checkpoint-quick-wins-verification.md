@@ -185,3 +185,45 @@ No daemon (8079/8088/8092/4199/**9798** all empty throughout). Foreign `install-
 
 ## LANDING VERDICT: ✅ **SHIP** — `e356d3657` → `latest`
 Zero branch-caused failures anywhere in this gate; both defect families found are proven pre-existing on `latest` by execution; every behavioral claim re-proved independently; no side effects.
+
+---
+
+# TEST GATE — PR-1 checkpoint read-cache SUBSTRATE @ `ada12ffb9` (base `f05d8e599`) — ❌ **NO-SHIP (one-line test fix)**
+
+**Scope:** full verification, read-only. 4 workers (G1 identity+reds+PR-2 risk · G2 invariant mutations · G3 eviction+counters · G4 regression+20k-node sweep). Import proof enforced on every run (`CQ_IMPORT_PROOF_HARD_GATE inside_cwd_tree=True`); porcelain was **EMPTY** at gate start.
+
+## The blocker — 5 branch-caused reds (verified at source by the tester, A/B-proven by G4, independently corroborated by the review council)
+`tests/unit/tools/test_saver_probe_contention_class.py::TestSaverProbeContentionClass` ×5 — `TypeError: _FakeSaver.aget_tuple() got an unexpected keyword argument 'cache_bypass'`.
+**Mechanism (first-hand):** the diff adds `cache_bypass=True` at `daemon/services/readiness.py:1956`; it updated ONE test double (`tests/test_readiness_checkpoint_saver.py` → `aget_tuple(self, config, **kwargs)`) but MISSED the second (`tests/unit/tools/test_saver_probe_contention_class.py:69` → `aget_tuple(self, config)`), whose file is **untouched by the diff**. **A/B:** base `f05d8e599` = 8 passed / HEAD = 5 failed + 3 passed. **Fix (one line, test-side):** add `**kwargs` to that double's `aget_tuple`. Same bug class as the quick-wins T-1 blocker: *a new kwarg at a shared call site requires updating EVERY test double that pins the old signature*.
+
+## Everything else GREEN
+- **Item 1 OFF-IDENTITY-CONFIRMED:** base/HEAD-unset/HEAD-=0 → **identical 7-node failing set**, normalized-identical signatures, exact **+52 green** delta (implementer's 243→295 was a narrower pack; G1's wider 362→414 reconciles). All 7 reds PRE-EXISTING: 6 × readiness probe tuple-vs-bare-bool drift (prior lane's enrichment, pins never followed); 1 × armed-absence alist guard — red on the proxy's PRE-EXISTING K2 forwarder delegation (base:680 → HEAD:890, lineno drift only).
+- **Item 2 INVARIANTS-BITE (12/13):** hooks, ordering (per-forwarder resolution; skipped invalidation also fires the production post-write backstop), LRU-32 + the exact `>` comparison, the 64 MB budget, shallow-copy (GET-side and PUT-side separately), both vacuity self-checks, both control directions. **The one that doesn't (M3):** drifting the PRODUCTION anti-join DELETE into constant+concat with **identical runtime SQL** took the site out of the detector's reach with **all 52 tests green** — the BinOp-concat control pins a synthetic copy, not production. Also: `wrapper_attrs` is a whole-file scan → the `adelete_thread` leg is over-pinned (satisfied by the SQLite adapter class, not the proxy); the "7 sites" claim asserts only ≥1; the 4 PG + 3 SQLite HOOK claims are pinned only by the behavior pack (deleting a hook left 10/10 AST invariants green).
+- **Item 3 INVALIDATION-COMPLETE (37/37):** 12/12 proxy write forwarders, 4/4 PG raw-SQL DELETE sites, SQLite twin (both shapes) all evict; invalidate-BEFORE-delegate proven with a delegate-time observer; post-write emptiness with no backstop ERROR; readiness bypass counts neither hit nor miss and does not populate; bystander thread's entry survives (correctly scoped); no cross-ns bleed; 7/7 documented containers independently copied. MINOR: `config["configurable"]` (2nd level) is shared — live-consumer risk assessed nil; consider copying one level deeper.
+- **Item 4 COUNTERS:** canonical+alias render equal; reset clears; **OFF = observable all-misses**; **a HIT still charges** (registry `checkpoint_bytes` +2026 on the hit; the size is the stored PUT-time value, not a re-walk). Default-OFF re-proven by execution; the env var appears in no `.env`.
+- **Item 5 (the sweep):** 20,043 nodes / 32 chunks. 147 failing: **OURS 5** · PRE-EXISTING 103 (every file re-run at base, identical node sets, 0 base-only) · ENVIRONMENTAL-PG 29 (`InvalidSchemaName`; proven via merge-untouched `test_smoke.py`; note the brief's second signature `UndefinedTable` did NOT appear) · KNOWN-STANDING 8 (planner-meta ×2 + readiness ×6, all base-leg-cited) · ORDERING 2 (both shapes). Metrics auth matrix all 5 cells green, render-spy 0-on-refusal/1-on-grant, no-leak greps clean; the NEW cache counters render 0.0 = the correct default-OFF observable state.
+- **Item 6:** no daemon; no DB writes (code-only PR); audit file restored byte-identically to baseline (`881e133a…`/346/82602) after +37..67 kms_issue rows — 100% attributed to the gate's OWN 5 writer files (each verified by re-run); base worktree + scratch removed cleanly; HEAD unmoved; **final porcelain EMPTY**.
+
+## PR-2 alist-guard risk (G1, premise corrected by source)
+Unlike `adelete`, `alist` HAS a deliberate K2 forwarder (MRO fall-through defect; pregel consumes it via `async for`). PR-2 needs no new one, and the cache targets `aget_tuple`/`aget` while readiness bypasses → **the guard cannot newly bite PR-2**; it is already red for an orthogonal reason. Resolve the standing red OUTSIDE this lane before PR-5 flips defaults (scoped allowlist + vacuity companion + implement the promised-but-missing text-grep second pass — the AST scan is `getattr`-evadable).
+
+## Follow-ups (non-blocking)
+1. 🔴 the 5-red one-line test-double fix (the blocker).
+2. 🟠 M3: re-point the BinOp-concat control at the PRODUCTION anti-join site + pin the count 7.
+3. 🟠 scope `wrapper_attrs` to the `_SaverRetryProxy` class body (the `adelete_thread` leg is vacuous).
+4. 🟠 add an AST invariant for the 7 `invalidate_cached_reads` seams (currently behavior-pack-only).
+5. 🟢 copy `config["configurable"]` one level deeper, or document the 1-level limit.
+
+## VERDICT: ❌ **NO-SHIP for `ada12ffb9` → latest** — land the one-line test-double fix and re-run the 5 nodes (everything else is green).
+
+---
+
+# RE-GATE — PR-1 fix pass @ `b18e13016` — ✅ **SHIP**
+
+C1 **fixed** (8/8 at HEAD and base, solo and grouped; one-file test-only `**kwargs` hunk, verified verbatim + re-run by the tester). OFF-vs-base identity **held**: HEAD failing set == BASE failing set, node-id-identical, **zero new / zero disappeared** (9 = 6 readiness + 2 planner-meta + 1 alist; the alist red pre-existing — same node/assertion, lineno `:680`→`:911` only). The "314P/exactly-7" claim is a **scope artifact**: the read-path scope is 7; the specified pack measures 640P/577P reconciling **exactly by +63 new tests**, all green. `=0` ≡ unset proven.
+
+**Fix-pass regressions all bite (8 mutations, 0 vacuous):** F1 bypass-removed → 3 red; F4 AFTER-half removed at one seam → exactly that leg reds (**per-seam resolution**); F2 charge-basis revert → red with the measured over-charge **2.65×** (matches the ~2.7× claim) — nuance: the pin's "miss" leg is actually a HIT, so hit-vs-miss equality is asserted by proxy (still discriminating; noted for the author). Invariant pack **13/13**; **M3** census 8≠7 reds; **M4** closes the prior gate's over-pin (dual-scan probe: OLD whole-file scan GREEN/vacuous, NEW class-scoped RED); **M5** closes the prior "10 old invariants stayed green under a deleted hook" (under the same mutation only the 2 new M5 tests red).
+
+6-file regression green; ordering pair both shapes both legs; base worktree + scratch removed; audit file untouched (`881e133a…`/346/82602); porcelain = the one sanctioned RESULTS entry; no daemon.
+
+**VERDICT: ✅ SHIP — `b18e13016` → latest.** (Non-blocking note for the author: the F2 pin's miss leg is a proxy assertion.)
