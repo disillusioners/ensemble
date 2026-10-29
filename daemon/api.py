@@ -2287,6 +2287,146 @@ async def lifespan(app: FastAPI):
             exc_info=True,
         )
 
+    # ── Metrics exposition listener (metrics-collection P0 T1/T2/T11) ────
+    # A SEPARATE localhost-bound (127.0.0.1 only) listener on its own
+    # port — NEVER a route on this app (CR-2: this app binds 0.0.0.0
+    # with permissive CORS). Boot placement (A13): AFTER the resource
+    # monitor and the llm_stream_watchdog. The import lives ON THE
+    # LIFESPAN PATH (A27 — the PyInstaller analyzer must see it; it is
+    # NOT at daemon/api.py module top level).
+    #
+    # DEGRADATION: a bind failure (or any boot failure) disables the
+    # listener and logs it — the daemon CONTINUES (the
+    # ``daemon/api.py:2282-2287`` pattern). The kill-switch DEFAULTS
+    # OFF: nothing is exposed until an operator says so.
+    try:
+        from daemon.services import metrics_gate
+        from daemon.services.metrics_listener import (
+            MetricsListener,
+            ensure_f0_1_registered,
+        )
+
+        # The F0.1 exposition families (the registry is the pinned
+        # API). A registry that predates them must NOT stop the socket
+        # from binding — the listener degrades to an exposition without
+        # the F0.1 families.
+        try:
+            ensure_f0_1_registered()
+        except Exception as metrics_f0_1_registration_exc:
+            logger.error(
+                "[Metrics] F0.1 family registration FAILED — the "
+                "exposition will lack ensemble_metrics_up / "
+                "ensemble_metrics_scrape_requests_total / "
+                "ensemble_metrics_exposition_seconds: %s",
+                metrics_f0_1_registration_exc,
+                exc_info=True,
+            )
+
+        # The managed tier of the kill-switch (the boot-resolved value —
+        # the DB override > env > yaml > default ladder already ran in
+        # ``apply_db_settings_overrides``).
+        _metrics_managed_enabled = bool(
+            getattr(config.limits, "metrics_enabled", False)
+        )
+        metrics_gate.set_managed_metrics_enabled(_metrics_managed_enabled)
+
+        def _metrics_managed_provider() -> bool:
+            """The LIVE managed tier (the DB override row, else the
+            boot-resolved value).
+
+            Read on the listener's own thread at a bounded cadence —
+            the census sampler must NEVER consume a pool slot for a
+            boolean. A read failure falls back to the boot value.
+            """
+            try:
+                from daemon.services.settings_service import SettingsService
+
+                overrides = SettingsService(engine=manager.engine).get_overrides()
+                if "limits.metrics_enabled" in overrides:
+                    return bool(overrides["limits.metrics_enabled"])
+            except Exception:  # noqa: BLE001 — fail back to the boot value
+                pass
+            return _metrics_managed_enabled
+
+        metrics_gate.set_managed_metrics_provider(_metrics_managed_provider)
+        # The ONE boot log line: the env is unset while the managed key
+        # is on — the state must never be mysterious.
+        metrics_gate.log_deferral_once()
+
+        _metrics_listener = MetricsListener(
+            port=int(getattr(config.limits, "metrics_listener_port", 9798)),
+        )
+        if _metrics_listener.start():
+            app.state.metrics_listener = _metrics_listener
+        else:
+            app.state.metrics_listener = None
+    except Exception as metrics_listener_boot_exc:
+        app.state.metrics_listener = None
+        logger.error(
+            "[Metrics] listener DISABLED — boot failed: %s",
+            metrics_listener_boot_exc,
+            exc_info=True,
+        )
+
+    # ── PostgreSQL census sampler (metrics-collection P0 T7/T10) ──────
+    # A DEDICATED daemon thread on its own NON-POOLED connection — it
+    # must never consume a pool slot (the census detects the failure
+    # mode a pooled probe would create). Started ALONGSIDE the metrics
+    # listener, after the resource monitor.
+    try:
+        from daemon.services.metrics_census import CensusSampler, resolve_dsn
+
+        _census_dsn: str | None = None
+        try:
+            if getattr(ensemble_config, "is_postgres", False):
+                _census_dsn = resolve_dsn(manager.engine)
+        except Exception:  # noqa: BLE001 — a missing DSN ⇒ no census
+            _census_dsn = None
+        if _census_dsn:
+            _metrics_census = CensusSampler(
+                interval_s=int(
+                    getattr(config.limits, "metrics_census_interval_s", 15)
+                ),
+                dsn=_census_dsn,
+            )
+            _metrics_census.start()
+            app.state.metrics_census = _metrics_census
+        else:
+            app.state.metrics_census = None
+            logger.info(
+                "[Metrics] PostgreSQL census not started — no PostgreSQL DSN"
+            )
+    except Exception as metrics_census_boot_exc:
+        app.state.metrics_census = None
+        logger.error(
+            "[Metrics] PostgreSQL census DISABLED — boot failed: %s",
+            metrics_census_boot_exc,
+            exc_info=True,
+        )
+
+    # Registry providers (metrics-collection P0 T5): the publisher
+    # cadence and the HARD cardinality cap are read from the managed
+    # keys at scrape/observation time. A registry that predates these
+    # hooks must not break the boot — the listeners degrade instead.
+    try:
+        from daemon import checkpoint_metrics as cm
+
+        cm.set_publisher_cadence_provider(
+            lambda: int(
+                getattr(config.limits, "metrics_scrape_interval_hint_s", 15)
+            )
+        )
+        cm.set_cardinality_cap_provider(
+            lambda: int(
+                getattr(config.limits, "metrics_cardinality_cap", 2000)
+            )
+        )
+    except Exception as metrics_registry_provider_exc:
+        logger.warning(
+            "[Metrics] registry provider wiring failed: %s",
+            metrics_registry_provider_exc,
+        )
+
     # Reconcile terminal watches — notify watchers for jobs that already reached terminal state
     reconciled = await job_queue_service.reconcile_terminal_watches()
     if reconciled > 0:
@@ -3462,6 +3602,38 @@ async def lifespan(app: FastAPI):
                 wedge_join_exc,
             )
     app.state.wedge_capture_watchdog = None
+
+    # ── Metrics exposition listener stop (metrics-collection P0 T1) ─────
+    # Drain order: AFTER the resource-monitor stop and the wedge-capture
+    # stop. The listener's own ``stop()`` is DETACHED (stop event →
+    # ``shutdown()`` → join → close on a daemon thread) — the event loop
+    # is NEVER blocked on a join (the house precedent:
+    # ``daemon/api.py:3411-3433``).
+    _metrics_listener = getattr(app.state, "metrics_listener", None)
+    if _metrics_listener is not None:
+        try:
+            _metrics_listener.stop()
+        except Exception as metrics_listener_stop_exc:  # noqa: BLE001
+            logger.warning(
+                "[Metrics] listener stop failed: %s",
+                metrics_listener_stop_exc,
+            )
+    app.state.metrics_listener = None
+
+    # ── PostgreSQL census stop (metrics-collection P0 T7/T10) ──────────
+    # Drain order: with/after the listener stop, after the resource
+    # monitor + wedge-capture stops. The sampler's own ``stop()`` is
+    # DETACHED — the event loop is never blocked on a join.
+    _metrics_census = getattr(app.state, "metrics_census", None)
+    if _metrics_census is not None:
+        try:
+            _metrics_census.stop()
+        except Exception as metrics_census_stop_exc:  # noqa: BLE001
+            logger.warning(
+                "[Metrics] census stop failed: %s",
+                metrics_census_stop_exc,
+            )
+    app.state.metrics_census = None
 
     # Batch A — A3 (2026-09-11): stop the eligible-PENDING sweep.
     # The service exposes ``stop()`` which cancels + awaits the
