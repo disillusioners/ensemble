@@ -1,10 +1,11 @@
 # Decisions: v2 Metrics Collection — reviewer-facing finding → resolution map
-### (v2 council round §A–§H + **v3 architecture round §I–§M**)
+### (v2 council round §A–§H + **v3 architecture round §I–§M** + **correction round §N–§O**)
 
 Date: 2026-10-29 · Author: plan-decisions worker (fallback channel, no skill)
 v3 round: plan-decisions worker (WS-B wave 3) · 2026-10-29
+Correction round (WS-B wave 3 FINAL): plan-decisions worker · 2026-10-29 · §N (Item A — macOS/WS-A) + §O (Item B — partition unification)
 Status: **Ready for review** — this document is the reviewer's entry point.
-Companions: `plan-overview.md` (393 lines), `metric-catalog.md` (1187 lines) and
+Companions: `plan-overview.md` (411 lines), `metric-catalog.md` (1339 lines) and
 `architecture-recommendation.md` (697 lines) in this directory. Every row below points
 **into** those files; no row asserts anything that they do not already contain.
 
@@ -47,6 +48,7 @@ sibling files before its row was written (§I); the five were resolved against t
 was corrected (§L). §I carries **28 rows** — the reviewer's count check — and §M carries the
 companions, counts, waiver additions, the v3 edit ledger and the consistency-sweep result.
 **v3 edits E35–E78 (44)**; **one new open item (H-12)**.
+**Correction round (WS-B wave 3 FINAL).** §N records the macOS/WS-A root-cause correction (leader-supplied facts, wave 1): prod is macOS, the resource tier was dark because of a **dead producer** (no `/proc` on Darwin), the "flusher binds bool→INTEGER 42804" framing is **refuted** (C22→C35), and the A1–A5 resolution rows. §O records the leader-sanctioned G-20/H-12 partition unification (wave 2): one canonical partition, the full F0.1–F22 → phase 1:1 table, 533 daemon-origin series, and the 42/42 task-row completion pass. §G closes G-20 and adds the platform-fact limitation rows; §H/§M are refreshed for the correction round.
 
 ---
 
@@ -167,7 +169,9 @@ Every entry below is traceable to `plan-overview.md` or `metric-catalog.md`; not
 | **G-17** | **The tool-category label set is derived at runtime (49 + a reserved `other`), never hand-listed** — the closed list is deliberately **not** written out. | `metric-catalog.md` §8.6 (runtime source `get_tool_categories()`, `daemon/tools/_tool_registry.py:1598`; 49 distinct across 254 `register_tool_category(` sites, re-verified in this worktree by the v3 round) + the §8 opening rule ("every closed vocabulary is derived from code, never hand-listed") + §0.5 (folded values counted in `ensemble_metrics_invalid_label_total{metric,label}`) + F20 (the `other` fallback) + §11 C27; `plan-overview.md` §4 P1a (the tool-call family) | A hand-written list is the drift class the architect falsified (37/38 claimed vs 49 in-tree). The **derivation** is the contract; a cross-check test pins the annex to `get_tool_categories()` at P0. A tool whose category is not in the runtime-derived set folds to `other` and is counted — never silently inflating cardinality. |
 | **G-18** | **Prometheus storage loss is unrecoverable** — v2 runs a **single local TSDB** (30 d raw / 90 d downsample), so a host loss takes the whole alerting history with it. | `plan-overview.md` §4 P2 Risks row 4 (RK-16) + §2 (retention sentence) + §4 P2 exit criteria; `metric-catalog.md` §10.0 (the Prometheus TSDB row of the restart-loss table: "all history lost — remote_write to a durable store, out of v2 scope") | **Accepted for v2** (architect's Q2 default — see §K Q2). The deploy target is host binaries (decision 1), which makes host loss the dominant scenario — but the deferral is explicit, recorded as **RK-16**, and `remote_write` is named as a **separate project**, not a v2 task. Idiom B/C families survive a Prometheus storage loss via their durable backing store (PG tables / journal files). |
 | **G-19** | **`ensemble_turn_duration_seconds` is anchored, with a drop-condition** — the tap measures its own latency (including its `asyncio.to_thread(upsert_batch)` DB write), which would be DB-write latency mislabelled as turn duration. | `metric-catalog.md` F20 (the "Anchor pair specified" paragraph — entry-tap timestamp → node-return timestamp, carried on the §8.13 carrier) + §11 C31; `plan-overview.md` §4 P1a task 6 | The architect allowed "specify the anchor pair **or** drop the family". v3 **specifies** the pair (entry-tap → node-return) and keeps a **drop-condition**: a source with no entry-tap counterpart contributes **no observation** (absent ≠ zero) and the family is dropped for that source rather than shipped mislabelled. The family therefore keeps its 14 series in the ≤2k proof. |
-| **G-20** | **The plan's §4 phase lists and the catalog's §1/§7 ship phases use two different partitions** (pre-existing v2, not wave-induced). | `plan-overview.md` §4 (four work-package phase sections) vs `metric-catalog.md` §1 (the Phase column) + §7 (the per-phase roll-up) — enumerated in **§M.6** and carried as open item **H-12** | The **catalog's §1/§7 phase column is authoritative** for the ≤2k roll-up and for "which phase must complete before a family ships"; the plan's §4 headings are **work-package** labels (the subsystem whose instrumentation lands there). v3 fixed the one **wave-induced** divergence (F22's minimal textfile writer ships in P1b per A25 — now annotated in both files) and **deferred** the 35 pre-existing ones: realigning them means restructuring four plan sections (headings, goals, task tables, exit criteria, risks, coupling map, day-estimates) — a **structural** change outside the amendment round's mandate, and one that would silently change the plan's schedule. Carried as an explicit, enumerated open item rather than a silent divergence. |
+| **G-20** | ~~**The plan's §4 phase lists and the catalog's §1/§7 ship phases use two different partitions** (pre-existing v2, not wave-induced).~~ — **RESOLVED by §O (Item B, wave 2)**: the partition is now unified (one canonical partition, F0.1–F22 → phase 1:1, zero exceptions; catalog §7 states the convention; plan §4 family lists align). See §O. | `plan-overview.md` §4 (four work-package phase sections) vs `metric-catalog.md` §1 (the Phase column) + §7 (the per-phase roll-up) — **unified** per §O; the historical divergence is recorded in §O's census (15 split + 4 catalog-only = 19 discrepancies) and the "36 families" v3-audit figure is corrected (not reproducible at family granularity) | **RESOLVED (§O).** The catalog's §1/§7 phase column is authoritative for the ≤2k roll-up and for "which phase must complete before a family ships"; the plan's §4 headings are work-package labels (the subsystem whose instrumentation lands there). The intra-family phased-rollout convention (task-level early-ship note, family phase = completion phase) is stated in catalog §7. F22's minimal textfile writer ships in P1b per A25 (task-level carve-out). All 42 plan task rows resolve to their own phase (§O). |
+| **G-21** | **T3 per-child RSS/CPU attribution on macOS is a decided non-goal (A2)** — per-child families/values are dark on Darwin; no partial per-child data ships on macOS; a future per-pid Darwin story is a new, separately-scoped decision. | `plan-overview.md` §11 (Non-goals, A2 non-goal) + §2 (deploy target, macOS) + §6 (dark-families matrix, non-Linux host row); `metric-catalog.md` §13.4 (non-goal — decided, implement as decided) + §13.1 (per-child T3 row) + §13.2 (F2/F3 notes) | **Ratified by the planner under mission authority "make it an explicit decision"** (available for leader override). Rationale: the Darwin ps-based reader (`feature/resource-monitor-flusher-fix@53547b915`) is a coarse **daemon/process-level** view (`_read_darwin_daemon_snapshot`), not a per-pid sampler; `read_child_snapshot` has **no** Darwin fallback; per-pid sampling has no Darwin path even post-merge. Promising per-child on macOS would ship a silently-empty series (the J-class defect). |
+| **G-22** | **Platform-field nuances (WS-A correction):** (a) `hw_peak_kb` IS supplied on Darwin post-merge via `ru_maxrss` (cross-platform, not Linux-only — the "Linux-only" label sometimes attached to hw-peak is wrong for the post-merge reader); (b) `anon_kb` degrades to the `rss_kb` proxy on Darwin (not `None`), making `coverage_pct` rss-denominated and not comparable to Linux anon-based coverage; (c) `swap_kb` is **unwired on every platform today** (column exists, no reader populates it — NULL on both). | `metric-catalog.md` §13.1 (field-level split table: hw_peak_kb, anon_kb, swap_kb rows) + §13.2 (F0.3 notes) + §13.3 (coverage_pct semantics); `plan-overview.md` §3 (platform support summary) + §6 (non-Linux host row) | These are **documented degradations, not defects** — the consumer-visible shape changes are pinned (§13.3) so a Darwin host never silently renders a Linux-shaped payload. `pid_map` census-moment figures differ (46,448 vs the commit's 45,575) — same climbing counter, different observation moment; no action. |
 | **G-16** | **`plan-overview.md` §1 incident table names three metrics the catalog does not ship** (`ensemble_db_pool_connections{pool,state}`, `ensemble_db_pool_checkout_seconds{pool}`, `ensemble_pg_leaked_txn_rows{site}`). | `plan-overview.md` §1 (not edited — §1 is outside this task's permitted edit scope). | The catalog's equivalents are `ensemble_db_pool_native{pool,quantity}` + F5's two gauges, and `ensemble_pg_leaked_txn{site}`; **no** checkout-latency family ships in v2 (the checkout seam is deferred — CR-4). Carried as open item **H-3** with the corrected names. |
 
 ---
@@ -187,20 +191,21 @@ Every entry below is traceable to `plan-overview.md` or `metric-catalog.md`; not
 | MINOR fixed / split / waived | 8 / 1 / 1 | 8 / 1 / 1 | ✅ |
 | Leader-ratified decisions (§E) | 5 | 5 | ✅ |
 | Reuse ledger rows (§F) | 18 (R1 … R18), **none "rebuilt instead"** | 18 | ✅ |
-| Waiver / limitation register entries (§G) | 20 (G-1 … G-16 + v3's G-17 … G-20) | 20 | ✅ |
+| Waiver / limitation register entries (§G) | 22 (G-1 … G-16 + v3's G-17 … G-20, of which G-20 **closed** by §O; + correction round's G-21, G-22) | 22 | ✅ |
 | Catalog §12 open items carried | 6 of 6 (→ G-2, G-3, G-4, G-5, G-6, G-7) | 6 of 6 | ✅ |
 | Plan §12 open questions carried | 4 of 4 (→ G-8) | 4 of 4 | ✅ |
 | Cross-file alignment edits — pass 1 | 21 (E1–E21) on 4 §4 family-list lines + 5 §8 alert rows | 21 | ✅ |
 | Cross-file alignment edits — pass 2 (alignment pass) | 13 (E22–E34) across `plan-overview.md`, `metric-catalog.md`, `decisions.md` | 13 | ✅ |
 | **Total alignment edits** | **34** | **34** | ✅ |
-| Open items H-1…H-11 | 11, all **CLOSED** (closure table below) | 11 closed | ✅ |
 | **v3 — architect amendment rows (§I)** | **28** (canonical §10 numbering 1–28) | **28** | ✅ |
 | **v3 — architect critical-finding rows (§J)** | **5** | **5** | ✅ |
 | **v3 — open-question resolutions (§K)** | **2** (Q1, Q2) | **2** | ✅ |
 | **v3 — record correction (§L)** | **1** (CR-3 reuse story) | **1** | ✅ |
 | **v3 — cross-file edits** | **44** (E35–E78) | **44** | ✅ |
 | Open items H-1…H-11 | 11, all **CLOSED** (closure table below) | 11 closed | ✅ |
-| **v3 — open items** | 1 (**H-12**, phase-partition divergence) — **DEFERRED** (structural) | 1 | ✅ |
+| **v3 — open items** | 1 (**H-12**, phase-partition divergence) — **RESOLVED by §O (Item B)**: partition unified, 1:1, zero exceptions | 1 | ✅ |
+| **Correction round (§N/§O)** | Item A platform/WS-A correction (A1–A5) + Item B partition unification (B) | 2 items | ✅ |
+| **Correction-round verification** | 7 checks (alert table 15/15 incl. 2 histogram suffixes; plan §4 family lists 69/69; task rows 42/42; family→phase 1:1 zero exceptions; series 533 reconcile; 5 decisions + 28 amendments + WS-A BLOCKS + C22→C35 + platform §13; all citations verified) | 7/7 | ✅ |
 
 Every finding id from the council review appears exactly once: 5 CRITICAL, 16 MAJOR, 10 MINOR
 (5+16+10 = 31). No finding is silently merged into another row.
@@ -310,6 +315,7 @@ choices, not drift).
 | 2 — alignment pass | `ad3a331716823998dee567cb6dfbad700b59c854` | `cec78e0e881665450e1ca38c8bf555d915f4d54c` | the H-1…H-11 closure (edits E22–E34 + this document's refreshed §H) |
 | 3 — architect doc (WS-B step 2) | `c0f0694396d118e26fb7b40946005cc8bac8c4d4` | `ad3a331716823998dee567cb6dfbad700b59c854` | `architecture-recommendation.md` — the **read-only input** to the v3 round (697 lines; §10's 28 amendments, §11's Q1/Q2, Appendix A's verification log). It is a companion, **not** edited by v3 |
 | 4 — **v3 (this one)** | **HEAD of `feature/metrics-collection`** — a commit cannot contain its own sha, so it is reported verbatim in the task report and retrieved with `git rev-parse HEAD` | `c0f0694396d118e26fb7b40946005cc8bac8c4d4` | **waves 1+2** (amendments 1–28 applied across plan-overview + metric-catalog, uncommitted until now) **+ the v3 verification/fix pass** (the amendments that were missing or thin — see §I's `applied-with-adjustment` rows and §M's edit ledger E35–E76) **+ this document's §I–§M** |
+| 5 — **correction round (this one)** | **HEAD of `feature/metrics-collection`** — sha reported in the task report, retrieved with `git rev-parse HEAD` | 51bbfc000 (v3) | **§N (Item A — macOS/WS-A correction) + §O (Item B — partition unification)** + §G closure (G-20) + §G additions (G-21/G-22) + §H/§M refresh + the final verification sweep; edits path-limited to the three planning files |
 
 - **Committed paths (passes 1, 2 and 4 — path-limited):** `.agents/shared/planning/metrics-collection/`
   — exactly `plan-overview.md`, `metric-catalog.md`, `decisions.md`. **Pass 3** adds only
@@ -503,9 +509,9 @@ stands.
 
 | File | Lines | Role | In the v3 commit? |
 |---|---|---|---|
-| `plan-overview.md` | **393** | the phase plan (P0/P1a/P1b/P1c/P2), the alert table, the managed keys, the degradation contract | **yes** |
-| `metric-catalog.md` | **1187** | the per-family spec + the 8 vocabulary annexes + the census annex + the corrections log | **yes** |
-| `decisions.md` | **686** | the reviewer-facing map (v2 §A–§H, v3 §I–§M) | **yes** |
+| `plan-overview.md` | **411** | the phase plan (P0/P1a/P1b/P1c/P2), the alert table, the managed keys, the degradation contract | **yes** |
+| `metric-catalog.md` | **1339** | the per-family spec + the 8 vocabulary annexes + the census annex + the corrections log + §13 platform matrix | **yes** |
+| `decisions.md` | **898** | the reviewer-facing map (v2 §A–§H, v3 §I–§M, correction round §N–§O) | **yes** |
 | `architecture-recommendation.md` | **697** | the architect's review — the **input** to v3 (§0 verdict, §10 the 28 amendments, §11 Q1/Q2, Appendix A the verification log). **Read-only for v3** — committed separately at `c0f06943` and **unmodified** | **no** — must not appear in the v3 commit |
 
 ### M.2 Counts
@@ -521,7 +527,9 @@ stands.
 | Open-question resolutions (§K) | **2** (Q1, Q2) — architect's defaults adopted |
 | Record corrections (§L) | **1** (CR-3 reuse story) |
 | Cross-file edits | **34** (v2: E1–E34) + **44** (v3: E35–E78) = **78** |
-| Open items | **11 closed** (H-1…H-11) + **1 deferred** (H-12, §M.6) |
+| Open items | **11 closed** (H-1…H-11) + **H-12 RESOLVED by §O** (partition unified) |
+| Correction round (§N/§O) | Item A platform/WS-A (A1–A5) + Item B partition unification (B) — 2 items recorded |
+| Waiver / limitation register (§G) | **22** (G-1…G-16 + G-17…G-20 [G-20 closed] + G-21/G-22) |
 | Catalog §12 open items carried / plan §12 open questions carried | 6 of 6 / 4 of 4 |
 
 ### M.3 §G additions in v3
@@ -531,6 +539,9 @@ stands.
 | **G-17** | Tool-category label set is runtime-derived (49 + reserved `other`), never hand-listed | derivation is the contract; the closed list is deliberately not written out |
 | **G-18** | Single local Prometheus TSDB — host-storage loss is unrecoverable (RK-16) | accepted for v2; `remote_write` is a separate project |
 | **G-19** | `ensemble_turn_duration_seconds` anchored (entry-tap → node-return) with a per-source drop-condition | the anchor pair is specified; a source that cannot be anchored contributes no observation |
+| **G-20** | Plan §4 work-package phase lists vs catalog §1/§7 ship phases — two partitions | **RESOLVED by §O (Item B)** — partition unified, 1:1, zero exceptions |
+| **G-21** | T3 per-child RSS/CPU attribution on macOS is a decided non-goal (A2) | per-child dark on Darwin; future per-pid Darwin story is a new, separately-scoped decision |
+| **G-22** | Platform-field nuances: hw_peak cross-platform (ru_maxrss), anon proxy (rss_kb), swap_kb unwired everywhere | documented degradations, consumer-visible shape pinned (§13.3) |
 | **G-20** | Plan §4 work-package phase lists vs catalog §1/§7 ship phases — two partitions | the catalog is authoritative for the roll-up; the 35 pre-existing divergences are enumerated and **deferred** (structural) |
 
 ### M.4 The series roll-up, reconciled (v2 → v3)
@@ -640,11 +651,11 @@ never-exported / hard cap), **A11** (alias mechanics), **A16** (the four P0 test
 | **E77** | `decisions.md` §B MA-7 row | the same unescaped PromQL pipes escaped | rendering (same defect as E74) |
 | **E78** | `decisions.md` §M.2 counts table | one row had 3 cells in a 2-column table | rendering |
 
-**New open item H-12 — DEFERRED (structural).**
+**New open item H-12 — RESOLVED (structural, §O).**
 
 | # | Open item | Detail | Status |
 |---|---|---|---|
-| **H-12** | The plan's §4 phase lists and the catalog's §1/§7 ship phases use **two different partitions** (36 families). | The catalog's partition is the dependency-graph one (P1a = runtime/pools/census · P1b = checkpoint/jobs/sweeps/instances · P1c = LLM/MCP/compaction/journal · P2 = exporters); the plan's §4 headings are work-package labels (P1a = "Runtime & resource spine" · P1b = "Persistence, pools & checkpoint" · P1c = "Jobs, instances, sweeps & MCP" · P2 = "Exporters, textfile, journal twin…"). The divergence is **pre-existing v2** — the identical 36-name set is present at `cec78e0e8`, so **no wave introduced it** — and it is **not** one of the 28 amendments. v3 fixed the **one wave-induced** instance (F22's P1b split, E70) and **deferred** the rest: realigning them means restructuring four plan sections (headings, goals, task tables, exit criteria, risks, coupling map, day-estimates) and would silently change the plan's schedule — a **structural** change outside the amendment round's mandate. Recorded as **G-20** so the divergence is explicit rather than silent. | **DEFERRED** — carried to the next planning round |
+| **H-12** | The plan's §4 phase lists and the catalog's §1/§7 ship phases use **two different partitions** (historically cited as "36 families"; correction-round census at family granularity found 15 split + 4 catalog-only = 19 discrepancies — see §O.2). | The catalog's partition is the dependency-graph one (P1a = runtime/pools/census · P1b = checkpoint/jobs/sweeps/instances · P1c = LLM/MCP/compaction/journal · P2 = exporters); the plan's §4 headings are work-package labels. The divergence was pre-existing v2 (identical set at `cec78e0e8`). **Correction round (Item B) unified the partition** (§O): one canonical partition, 1:1, zero exceptions; F0.1–F22 → P0/P1a/P1b/P1c/P2; 42/42 task rows resolve to their own phase. Amendments (A22/A23/A25/A26) and the P0-core/P0-spine split preserved. Recorded as **G-20 (closed)**. | **RESOLVED** — §O (Item B) |
 
 ### M.7 Consistency-sweep result (STEP 5)
 
@@ -652,7 +663,7 @@ never-exported / hard cap), **A11** (alias mechanics), **A16** (the four P0 test
 |---|---|
 | **Name check** — plan §8 alert table → catalog §1 | **15 tokens, 15 resolve** (13 canonical names + 2 histogram suffixes `_bucket` / `_count` of `ensemble_checkpoint_op_seconds`). **0 unresolved.** Re-run after wave 1's tool-category change and wave 2's phase move. |
 | **Name check** — plan §4 family lists → catalog §1 | **48 names, 48 resolve** to a catalog §1 family. **0 uncatalogued** (v2's 8 uncatalogued names stayed dropped — H-7 holds). |
-| **Phase placements** — plan §4 vs catalog §1/§7 | ⚠️ **36 families differ** — **pre-existing v2** (identical set at `cec78e0e8`), **not** wave-induced. The one wave-induced instance (F22 → P1b, prescribed by A25) is fixed and annotated. The other 35 are **deferred** as **H-12 / G-20** (structural — see §M.6). |
+| **Phase placements** — plan §4 vs catalog §1/§7 | ✅ **0 discrepancies (unified)** — correction round (Item B) unified the partition (§O): 1:1, zero exceptions; F0.1–F22 → P0/P1a/P1b/P1c/P2. Historical "36 families differ" (§M.7) is superseded by §O.2's 19-discrepancy census (15 split + 4 catalog-only) — recorded honestly, not hidden. |
 | **Series roll-up** | ✅ reconciled — 26 + 62 + 223 + 222 = **533** daemon-origin; shell 5; exporter ≈67; grand ≈605; headroom **1 467** (§M.4). |
 | **Exporter-origin** | ✅ ≈67, measured separately, outside the daemon budget; the ≤2k proof covers daemon-origin only. |
 | **The 5 ratified decisions (§E)** | ✅ unchanged **in substance**: (1) host binaries / VM compose, **k8s out** (no manifest ships); (2) journal metrics via the Python twin `daemon/tools/upgrade_journal.py` (`scripts/upgrade/` observed, never edited); (3) the separate **127.0.0.1:9798** listener (never a route on the main app; bind failure ⇒ disabled); (4) **Prometheus for alerting vs the PG tier for per-instance views**; (5) the **dependency-free renderer** + **Prometheus classic text exposition**. The v3 round deepened decisions 3, 4 and 5 (topology, retention ladder, freeze rules) **without reversing** any of them. |
@@ -668,6 +679,7 @@ never-exported / hard cap), **A11** (alias mechanics), **A16** (the four P0 test
 | 2 — alignment pass | `ad3a331716823998dee567cb6dfbad700b59c854` | `cec78e0e881665450e1ca38c8bf555d915f4d54c` | the H-1…H-11 closure (E22–E34) + §H refreshed |
 | 3 — architect doc (WS-B step 2) | `c0f0694396d118e26fb7b40946005cc8bac8c4d4` | `ad3a331716823998dee567cb6dfbad700b59c854` | `architecture-recommendation.md` — the read-only input to v3 |
 | 4 — **v3 (this commit)** | **HEAD** — a commit cannot contain its own sha; it is reported verbatim in the task report and retrieved with `git rev-parse HEAD` | `c0f0694396d118e26fb7b40946005cc8bac8c4d4` | **waves 1+2** (amendments 1–28 across plan + catalog, uncommitted until now) **+ the v3 verification/fix pass** (E35–E76) **+ §I–§M** |
+| 5 — **correction round (this commit)** | **HEAD** — sha reported in the task report, retrieved with `git rev-parse HEAD` | 51bbfc000 (v3) | **§N (Item A) + §O (Item B)** + §G closure/additions + §H/§M refresh + final verification sweep; path-limited to the three planning files |
 
 - **Committed paths (this commit, path-limited):** exactly
   `.agents/shared/planning/metrics-collection/plan-overview.md`,
@@ -684,3 +696,203 @@ git rev-parse HEAD                 # the v3 commit (≠ c0f06943, ≠ ad3a33171,
 git show --stat --oneline HEAD     # exactly three planning files, nothing else
 git status --short                 # clean
 ```
+---
+
+## N. Item A — macOS/WS-A root-cause correction (leader-supplied facts, wave 1)
+
+**Status.** RESOLVED and recorded. Wave 1 (Item A) applied the platform/WS-A correction across
+`plan-overview.md` and `metric-catalog.md` (uncommitted until the correction-round commit). This
+section records what it did, with file:line anchors into the post-wave-1 files. The earlier
+"flusher binds bool→INTEGER 42804, window rolls back" hypothesis is **REFUTED** (catalog §11 C22
+annotated SUPERSEDED; C35 records the refutation). No code changes in this round — markdown only.
+
+### N.1 The deployment fact
+
+- **Prod host is macOS.** The prod daemon is a macOS host binary (not a dev-box aside) — `plan-overview.md`
+  §2 ("The PROD host is macOS (WS-A correction, 2026-10-29)"), §3 (platform support summary), §6
+  (non-Linux host row, "PROD IS macOS"), §11 (non-goals, A2), `metric-catalog.md` §13 (platform
+  matrix), §13.3/§13.4.
+- **Since v0.25.0 the prod daemon received ZERO rows** in `resource_daemon_bucket` (T1) and
+  `resource_instance_sample` (T2) — `proc_readers` returned `None` on every Darwin tick (no `/proc`,
+  no `/sys/fs/cgroup`) → the sampler skipped every tick → the flusher had nothing to write.
+- **Live signature (prod, 2026-10-29):** samples climbing, `flush {batches:1139, bytes:0, errors:0}`
+  = **"produced nothing", NOT "write failed"**. `resource_pid_map` (T3) climbed to 45,575 rows
+  (WS-A commit-time figure) / 46,448 (census moment) from the **spawn path** — **masking the
+  outage** rather than refuting it. `metric-catalog.md` §13 (opening paragraph), §11 C35.
+- The fix: `feature/resource-monitor-flusher-fix@53547b915` (Darwin ps-based reader, engaged **only**
+  when the proc root is ABSENT **and** the host is Darwin; corrected counters `missed_samples`/
+  `ticks_skipped` parity; skips excluded from `counters.ticks`; one-shot WARNING) merges to latest
+  **before P0 executes**. `plan-overview.md` §4 P0 task 8, P0 risk 1, P0-spine split (L121–L138);
+  `metric-catalog.md` F0.3, §11 C35.
+
+### N.2 The REFUTED hypothesis (do not re-introduce)
+
+- "flusher binds bool→INTEGER 42804, window rolls back" — **REFUTED.** Prod `estimated` column is
+  `boolean NOT NULL` (`daemon/models/resource_monitor.py:231-233`); the bind at `flusher.py:770` is
+  correct; the rollback amplifier was already fixed (`7be1b40bf` per-tier SAVEPOINT +
+  `69cea24ea` `flush.errors`). The 42804 reading was a historical incident (the `flusher.py:790-806`
+  docstring), not a live defect. `metric-catalog.md` §11 C22 (annotated SUPERSEDED) and C35
+  (REFUTED, with the bind-audit test reference).
+- **Catalog annotation:** C22 → "SUPERSEDED by C35 (2026-10-29): REFUTED"; C35 records the
+  producer-side root cause. `plan-overview.md` §1 incident table + §6 (resource-spine-dark row) +
+  §9 R5 carry the corrected framing.
+
+### N.3 Resolution rows A1–A5 (each with anchors)
+
+| # | Item | Resolution | Anchors |
+|---|---|---|---|
+| **A1** | Platform matrix — prod is macOS stated everywhere it matters | PROD-is-macOS stated in plan §2 (deploy target), §3 (platform support summary), §6 (non-Linux host row, "PROD IS macOS"), §11 (non-goals, A2); catalog §13 (platform matrix), §13.1 (field split), §13.2 (per-family), §13.3 (payload shape), §13.4 (non-goal). | `plan-overview.md` L38, L68, L315, L402; `metric-catalog.md` L1249–L1339 |
+| **A2** | T3 per-child attribution = explicit **Non-Goal** (decided, implement as decided) | Per-child stays `/proc`-only even after the WS-A merge; the Darwin reader is daemon/process-level, not per-pid; no partial per-child data ships on macOS. Recorded as the planner's ratified decision under mission authority ("make it an explicit decision"), rationale: per-pid sampling has no Darwin path even post-merge; promising per-child on macOS would ship a silently-empty series (the J-class defect). Available for leader override. | `plan-overview.md` §11 (L402); `metric-catalog.md` §13.4 (L1330–L1339); §13.1 (per-child T3 row); §13.2 (F2/F3) |
+| **A3** | WS-A merge dependency in the P0-spine exit criterion — **BLOCKS** semantics | The 4-table gate (`resource_daemon_bucket`, `resource_instance_sample`, `resource_pid_map`, `resource_limit_policy`) **BLOCKS** if `feature/resource-monitor-flusher-fix@53547b915` is not merged — it does not silently pass and does not downgrade. P0-core ships independently (A22 split). | `plan-overview.md` §4 P0 task 8 (L104), P0-spine split (L121–L138), P0 risk 1 (L147); `metric-catalog.md` F0.3 (L278–L284), §11 C35 |
+| **A4** | Refutation purged from plan/catalog (C22→C35) | The 42804 framing is purged from the live text: C22 annotated SUPERSEDED, C35 records the refutation; plan §1/§6/§9 R5 carry the corrected producer-side framing. Historical/refuted mentions with pointers are correct and expected. | `metric-catalog.md` §11 C22 (L1209), C35 (L1222); `plan-overview.md` L14, L28, L38, L309, L371 |
+| **A5** | Canonical-counters rule (catalog F0.3) | The spine's counters — including the new skipped-sample counters (`missed_samples`/`ticks_skipped`) — are **THE** source; no parallel counters. Sweep found none proposed. | `metric-catalog.md` F0.3 (L278–L284), §13 (opening, L1258–L1266); `plan-overview.md` §6 (non-Linux host row, L315) |
+
+### N.4 Verified fact-nuances (encode, don't hide)
+
+Wave 1 verified three nuances against the leader's description (and one extra). They are recorded
+here so a reviewer cannot be surprised by them:
+
+1. **`hw_peak_kb` IS supplied on Darwin post-merge** via `ru_maxrss` (BYTES→KB) — cross-platform,
+   not Linux-only. The "Linux-only" label sometimes attached to hw-peak is wrong for the post-merge
+   reader. `metric-catalog.md` §13.1 (hw_peak_kb row).
+2. **`anon_kb` degrades to the `rss_kb` proxy on Darwin** (not `None`) — `coverage_pct` becomes an
+   rss-denominated ratio, directionally useful but not comparable to Linux anon-based coverage.
+   `metric-catalog.md` §13.1 (anon_kb row).
+3. **`pid_map` census-moment figures differ** (46,448 vs the commit's 45,575) — same climbing
+   counter, different observation moment; no action required.
+4. **`swap_kb` is unwired on every platform today** — the T1 column exists (`models/resource_monitor.py:124`)
+   but no reader populates it; NULL on both Linux and Darwin. `metric-catalog.md` §13.1 (swap_kb row).
+
+### N.5 §G impact
+
+- G-20 is **closed** by §O (Item B) — see §O and the G-20 row (now marked resolved).
+- G-21 (T3 per-child non-goal, A2) and G-22 (platform-field nuances) are **added** to §G.
+- No other §G entries change.
+
+---
+
+## O. Item B — G-20/H-12 partition unification (LEADER-SANCTIONED structural change, wave 2)
+
+**Status.** RESOLVED and recorded. Wave 2 (Item B) performed the leader-sanctioned structural
+change: one canonical partition, every family in exactly one phase, with the schedule intent, the 28
+amendments and the P0-core/P0-spine split preserved. The change landed in `plan-overview.md` and
+`metric-catalog.md` (uncommitted until the correction-round commit). This section records the
+sanction, the census, the choice, the full 1:1 table, the counts, and the task-row completion pass.
+
+### O.1 Sanction and requirement
+
+- **Sanction:** leader-sanctioned structural change (wave 2, Item B) — "make it an explicit
+  decision" authority extended to the partition.
+- **Requirement:** one canonical partition; every family in **exactly one phase**; schedule intent
+  preserved; the 28 amendments (§I) preserved; the P0-core/P0-spine split (A22) preserved;
+  amendments win over both partitions where they touch phasing (A22/A23/A25/A26).
+- **Canonical home of the convention:** `metric-catalog.md` §7 — "Intra-family phased rollouts —
+  convention (G-20/H-12 unification): A family maps to exactly one phase (1:1, zero exceptions).
+  When a family needs an early, partial ship, the carve-out is a **task-level early-ship note
+  inside the owning phase's task list** — never the family occupying two phases. The family's phase
+  is the phase in which it **completes** (F22 = P2)."
+
+### O.2 Census (pre-unification) — honest correction of the v3 figure
+
+The v3 audit recorded H-12 as "**36 families differ**" (`decisions.md` §M.7 / G-20). That figure is
+**not reproducible at family granularity** — it was a count of (family, phase-cell) mismatches
+including duplicate/ambiguous rows, not of distinct families. The correction-round census at family
+granularity found:
+
+- **15 families split** across the plan's phase lists (of which **3 appeared in more than one plan
+  phase**), plus **4 catalog-only families absent from the plan lists** = **19 discrepancies**.
+- The 28 amendments (§I) and the P0-core/P0-spine split (A22) are preserved.
+- **No wave introduced the divergence** — the identical 19-discrepancy set is present at `cec78e0e8`
+  (pre-wave); the divergence is pre-existing v2, not wave-induced. Wave 2 fixed it.
+
+This is recorded honestly rather than silently: the "36 families" figure in §M.7 / G-20 is
+superseded by this census. (G-20's row is marked resolved.)
+
+### O.3 Choice: canonical = the catalog partition
+
+- **Canonical partition:** the catalog's §1/§7 phase column —
+  **P0 = F0.1–F0.4 · P1a = F1–F6 · P1b = F7–F13 · P1c = F14–F21 · P2 = F22**.
+- **Rationale:**
+  1. It matches **MA-11's dependency order** already recorded in frozen decisions.md §C (MA-11):
+     registry → pools/census → checkpoint/jobs/sweeps/instances → LLM/MCP/compaction/journal →
+     exporters. The catalog partition IS that order.
+  2. The **plan §4 family lists + task rows were the drift source** (they used work-package labels:
+     "Runtime & resource spine" / "Persistence, pools & checkpoint" / "Jobs, instances, sweeps &
+     MCP" / "Exporters, textfile, journal twin…"), not the dependency order.
+  3. Amendments win over both partitions where they touch phasing: A22 (P0-core/P0-spine), A23
+     (thread-naming + census execution-home in P0), A25 (F22 minimal writer → P1b), A26 (alert
+     authoring depends on referenced families).
+- **The plan's §4 headings remain work-package labels** (the subsystem whose instrumentation lands
+  there) — they are NOT relabelled to the dependency order; only the family→phase mapping is
+  canonicalised. This keeps the plan's schedule and day-estimates untouched.
+
+### O.4 Full 1:1 reconciliation table (family → phase, zero exceptions)
+
+| Family | Phase | Family | Phase |
+|---|---|---|---|
+| F0.1 | P0 | F12 | P1b |
+| F0.2 | P0 | F13 | P1b |
+| F0.3 | P0 | F14 | P1c |
+| F0.4 | P0 | F15 | P1c |
+| F1 | P1a | F16 | P1c |
+| F2 | P1a | F17 | P1c |
+| F3 | P1a | F18 | P1c |
+| F4 | P1a | F19 | P1c |
+| F5 | P1a | F20 | P1c |
+| F6 | P1a | F21 | P1c |
+| F7 | P1b | F22 | P2 |
+| F8 | P1b | | |
+| F9 | P1b | | |
+| F10 | P1b | | |
+| F11 | P1b | | |
+
+**23 families, 23 phase cells, zero exceptions.** F22's P1b partial ship is a **task-level
+carve-out** (A25 — minimal textfile writer in P1b so BashSpin has a data source before the P2
+alert rules land); the family **completes** in P2. This is the single carve-out convention,
+stated in catalog §7.
+
+### O.5 Per-phase series counts (one-line reconciliation)
+
+| Phase | Families | Daemon-origin series |
+|---|---|---|
+| P0 | F0.1–F0.4 | 26 |
+| P1a | F1–F6 | 62 |
+| P1b | F7–F13 | 223 |
+| P1c | F14–F21 | 222 |
+| **Daemon total** | F0.1–F21 | **533** |
+| Shell-origin (textfile) | F22 | 5 |
+| Exporter-origin (node/postgres) | F22 | ≈67 |
+| **Grand total** | | **≈605** |
+| **Budget** | ≤2 000 | ≈27 % consumed, headroom **1 467** |
+
+**Reconciliation: 26 + 62 + 223 + 222 = 533 daemon-origin** (headroom 1 467; counting basis stated
+in catalog §7 — F7's range cell `22→33` taken at today value 22; +11 arrives with the P1b byte
+wiring). Counting basis: catalog §7 ("§7 counts the §1 row values, with the one range cell (F7)
+taken at its today value 22").
+
+### O.6 Task-row completion pass
+
+- **42/42 plan task rows resolve to their own phase** (zero cross-phase rows), with three
+  documented exceptions/notes:
+  1. **F22/A25 early-ship** — the minimal textfile writer task sits in P1b while the family
+     completes in P2 (task-level carve-out, not a phase violation).
+  2. **CR-4 note** — moved P1b→P1a (the checkout-latency histogram is retired; the note lives with
+     the pool family in P1a).
+  3. **P2 heading/tasks/exit-criteria** — the journal twin is **P1c** (F21), not P2; P2's
+     journal references were dropped so P2 holds only the exporter/textfile work (F22).
+- **Wake-producer task row verification (per the correction-round check):** the two producers
+  (`worker_pool.py:1381-1386` + `graph.py:7319`, with the live turn-end consumer) sit in **P1b**
+  (F13, task 9) — confirmed. The F14 hook task sits in **P1c** (task 1) — confirmed.
+- Plan §4 family lists: **69/69 tokens resolve** to catalog §1 families (0 uncatalogued, 0
+  duplicates) post-unification.
+
+### O.7 §H/§M impact
+
+- H-12 is **RESOLVED** (no longer deferred) — the partition is unified.
+- §M.6's "36 families differ — pre-existing v2" line is superseded by O.2's 19-discrepancy
+  census; the historical note is retained for audit but marked superseded.
+- §M.7 consistency-sweep "Phase placements" row is updated to "0 discrepancies (unified)".
+
+---
+
+*End of decisions.md (correction round §N–§O appended).*

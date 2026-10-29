@@ -4,7 +4,8 @@
 **Scope** the **daemon-origin** metric surface; exporter-origin series are §6, outside the ≤2k
 daemon budget; skill-metrics (`/api/skills/{id}/metrics`) is a **non-goal**, not catalogued ·
 **Verified against** worktree `agents-ensemble-wt-metrics-v2` @ `feature/metrics-collection`
-(tip `9bbef71c1`) — every `file:line` was read there; corrections to v1 and to the inventory
+(tip `51bbfc000`; WS-A platform-factual correction round applied same day — §13, §11 C35) —
+every `file:line` was read there; corrections to v1 and to the inventory
 digest are logged in §11 · **Compat** Prometheus scrape model + Grafana, **Prometheus classic text exposition format**
 (NOT OpenMetrics — MA-16 corrects the v1 mislabel); m9 —
 VictoriaMetrics/Mimir **dropped**, no compatibility asserted for an untested stack.
@@ -193,6 +194,12 @@ dependency is off emits **no series** (absent ≠ zero) unless its contract says
 byte wiring (catalog G-5). Row sums: P0 26 + P1a 62 + P1b 223 + P1c **222** = **533**. The
 tool-category change (F20 57 → 69 = +12) moved P1c 210 → 222 and the daemon total 521 → **533**.
 
+**Platform note (WS-A correction, 2026-10-29).** Every series count above is
+platform-independent — the platform support matrix (§13) changes **which fields render** on
+macOS-Darwin vs Linux, never **how many series exist**. The prod deployment host is macOS, so the
+spine-derived families (F0.3 etc.) are dark in prod until `feature/resource-monitor-flusher-fix@53547b915`
+merges; see §13 for the per-family field split and the consumer-visible effects.
+
 ---
 
 ## 2. P0 — Foundation
@@ -248,19 +255,56 @@ the registry under load before 200+ more series land on it.
   `FlusherCounters` (`flusher.py:161`). `resource_limit_policy` accepts zero rows **by design**
   (`daemon/routers/resources.py:1095`) ⇒ its gauge renders `1` (accepting) while its row counter
   stays `0` — the two answer different questions and the asymmetry is deliberate.
+- **CANONICAL-COUNTERS RULE (WS-A correction, 2026-10-29).** The resource spine's own counters —
+  including the corrected skipped-sample counters — are the **canonical source for
+  skipped/daemon-resource facts**; no parallel counters are introduced by the metrics work. Any
+  `/metrics` family that needs a "samples skipped / spine healthy" fact **reads the spine's
+  counters and never re-measures**. The exact names, verified at
+  `feature/resource-monitor-flusher-fix@53547b915` (`daemon/services/resource_monitor/sampler.py`,
+  `SamplerCounters`): `counters.ticks` = ticks that **PRODUCED a sample** (surfaced as the
+  `samples` field of `/api/resources/self-cost`); `counters.missed_samples` = ticks skipped for
+  overrun **or any structural read failure** (the documented contract, previously violated — only
+  the overrun path bumped it); `counters.ticks_skipped` = the same skip set, in parity with
+  `missed_samples`; a skipped sample is **excluded from `counters.ticks`**; the first structural
+  read failure logs **one one-shot WARNING** (`_no_snapshot_warned` guard, `_missing_table_warned`
+  precedent). Flusher side: `FlusherCounters` (`flush.batches` / `flush.bytes` / `flush.errors`)
+  remain the canonical write-side facts. No planned family in this catalog proposes its own
+  skipped-sample counter (the existing `skipped` vocabulary values — sweep row outcome §8.4, wake
+  outcome `skipped_busy_instance` §8.1, prune `skipped_non_postgres` §8.9 — are different domains,
+  not sample-skip counters); if one is ever proposed, it is replaced by a reference to the spine's.
 - **Phase** P0 · **Owner** developer · **Series estimate** 4 + 4 = **8**.
 - **Degradation:** resource monitor disabled (`RESOURCE_MONITOR_ENABLED=false`,
   `daemon/config.py:854`) ⇒ **both metrics render no series** and the spine-derived families
-  render nothing.
-- **P0 exit criterion:** **all four tables accepting rows.** The per-instance tier is broken by
-  the `estimated` column's `INTEGER`/`BOOLEAN` mismatch (PG SQLSTATE 42804, `DatatypeMismatch`),
-  raised every flush window and rolling back all four tables through the shared
-  `engine.begin()`. The flusher still binds a Python `bool` at
-  `daemon/services/resource_monitor/flusher.py:770`; the runtime correction is
-  `daemon/manager.py:7341` `_ensure_postgres_columns` (the migration
-  `daemon/migrations/versions/20261019_120822_alter_resource_monitor_booleans.sql` is the audit
-  document — the PG migration runner is a NO-OP). **F0.3 does not report green until the spine
-  writes land on real PostgreSQL and the 4-table census is non-zero.**
+  render nothing. Platform dimension (catalog §13): on the **macOS prod host before the WS-A
+  merge**, the monitor runs but the sampler produced no rows (`proc_readers` returned `None` on
+  every tick), so both metrics read `0`-producing — the gate below BLOCKS, not passes. After the
+  merge the Darwin ps-based fallback restores the producer and the gate can go green (daemon-level
+  fields only; per-child stays dark — A2 non-goal, §13).
+- **P0 exit criterion:** **all four tables accepting rows** — and the producer precondition is
+  the WS-A merge: this gate is satisfied only on a tree that carries
+  **`feature/resource-monitor-flusher-fix@53547b915`** ("restore the dark resource-telemetry tier
+  (the macOS /proc gap)"), which merges to latest **before P0 executes**. If that branch is **not
+  merged, this gate BLOCKS** — it does not silently pass and does not downgrade to a warning
+  (MA-3; plan §4 P0-spine). **Factual correction (supersedes the earlier text, see §11 C35):** the
+  v3 framing that the per-instance tier was "broken by the `estimated` column's
+  `INTEGER`/`BOOLEAN` mismatch (PG SQLSTATE 42804) rolling back all four tables through the shared
+  `engine.begin()`, with the flusher still binding a Python `bool` at
+  `daemon/services/resource_monitor/flusher.py:770`" is **REFUTED**. The prod column is
+  `boolean NOT NULL` (`daemon/models/resource_monitor.py:231-233`,
+  `Column("estimated", Boolean, nullable=False)`), the `bool(...)` bind at `flusher.py:770` is
+  **correct** against it (the WS-A bind-audit test,
+  `tests/postgres/test_resource_monitor_flusher_bind_pg.py` @ 53547b915, asserts every
+  flusher-bound column against the live `information_schema` type and round-trips a real bool
+  into the real boolean column), and the window-rollback amplifier was already fixed
+  (`7be1b40bf` per-tier SAVEPOINT + `69cea24ea` `flush.errors` surfacing; the historical 42804
+  account in the `flusher.py:790-806` docstring is exactly that — history). The **real** reason the
+  tier was dark: **a dead PRODUCER on macOS** — the prod daemon runs on Darwin, where there is no
+  `/proc` and no cgroup v2, so `proc_readers` returned `None` on every tick, the sampler skipped
+  every tick, and the flusher had nothing to write. Live signature (prod, 2026-10-29):
+  samples climbing, `flush {batches:1139, bytes:0, errors:0}` — **"produced nothing", not "write
+  failed"** — while `resource_pid_map` kept climbing (45,575 rows at commit time) because it is fed
+  by the spawn path, **masking the outage**. **F0.3 does not report green until the spine writes
+  land on real PostgreSQL and the 4-table census is non-zero.**
 
 ### F0.4 — Vocabulary freeze marker
 
@@ -316,6 +360,12 @@ the registry under load before 200+ more series land on it.
   both fold into `other`.
 - **Phase** P1a · **Owner** developer · **Series estimate** 11 + 11 = **22**.
 - **Degradation:** wedge capture off ⇒ the sampler does not run ⇒ **F2 renders no series**.
+  **Platform dimension (WS-A correction, catalog §13):** the wedge sampler is **`/proc`-only** —
+  WS-A's Darwin fallback lives in `resource_monitor/proc_readers.py` (`_read_platform_daemon_snapshot`
+  @ `53547b915`) and the WS-A commit touches nothing under `wedge_capture/`; per-thread jiffies
+  (`/proc/self/task/<tid>/stat`, `:151`) have no portable fallback. On the **macOS prod host F2 is
+  therefore dark today and stays dark after the WS-A merge** — thread-CPU attribution is a
+  Linux-host capability, not a WS-A deliverable (dev-box degradation and prod coincide here).
 
 ### F3 — Wedge-capture counters
 
@@ -818,6 +868,13 @@ unbounded risks in v1 are explicitly closed: per-instance compaction occupancy i
 leak site is a 6-value fixed map; the MCP roster is capped at 5 values. If every label
 combination in the catalog were live at once the total would be ≈1 113 — still inside budget.
 
+**Intra-family phased rollouts — convention (G-20/H-12 unification).** A family maps to
+**exactly one phase** in the table above (1:1, zero exceptions). When a family needs an early,
+partial ship (e.g. F22's minimal textfile writer in P1b ahead of the full exporter work in P2
+per A25), the carve-out is expressed as a **task-level early-ship note inside the owning
+phase's task list** — never as the family occupying two phases. The family's phase is the phase
+in which it **completes** (F22 = P2). Per-phase counts below are computed on that basis.
+
 **Phase split (F22).** The **minimal** textfile writer (`ensemble_process_cpu_seconds`) ships in
 **P1b** (A25) so BashSpin has a data source before the P2 alert rules land; the **family**
 completes in P2 (full exporter/textfile work). This is a deliberate phase split inside one
@@ -1149,7 +1206,7 @@ a reset-on-restart counter is restated:
 | C19 | `instance_fleet_summary` = richest live stats, agent-tool only | **confirmed** — an alias of `fleet_capacity_summary` (`daemon/tools/instance_read.py:1152`), agent-tool only | `daemon/tools/instance_read.py:1152-1164` |
 | C20 | `long_tool_nudge.py:955` | the module is `daemon/services/long_tool_nudge.py`, not `daemon/tools/` | `daemon/services/long_tool_nudge.py` |
 | C21 | GII throttle dict at `manager.py:1470` | **confirmed** — `self._gii_throttle: dict[str, int] = {}` | `daemon/manager.py:1470` |
-| C22 | per-instance tier broken by bool→INTEGER 42804 | **confirmed** — the flusher still binds `bool(...)` at `flusher.py:770`; the audit doc is `daemon/migrations/versions/20261019_120822_alter_resource_monitor_booleans.sql`, the **runtime** fix is `daemon/manager.py:7341` `_ensure_postgres_columns` (PG migration runner is a NO-OP) | as cited |
+| C22 | per-instance tier broken by bool→INTEGER 42804 | ~~**confirmed**~~ — **SUPERSEDED by C35 (2026-10-29): REFUTED.** The `estimated` column in prod is `boolean NOT NULL` (`daemon/models/resource_monitor.py:231-233`), the `bool(...)` bind at `flusher.py:770` is correct against it, and the window-rollback amplifier was already fixed (`7be1b40bf` per-tier SAVEPOINT + `69cea24ea` `flush.errors`). The 42804 reading was a historical incident (the `flusher.py:790-806` docstring), not a live defect; the real cause of the dark tier is the macOS dead producer (C35) | as cited + `feature/resource-monitor-flusher-fix@53547b915` |
 | C23 | `lag_probe` dark when `ENSEMBLE_WEDGE_CAPTURE_ENABLED` off | **confirmed** — the probe is driven from the watchdog thread | `daemon/services/wedge_capture/lag_probe.py:124-134` |
 | C24 | the tool-call family instruments graph internals | **reversed** by m7 — it instruments the `message_tap.py` per-turn seam | `daemon/services/message_tap.py:234` |
 | C25 | VictoriaMetrics / Mimir are compatible targets | **dropped** (m9) — only stock Prometheus + Grafana is claimed | — |
@@ -1162,6 +1219,7 @@ a reset-on-restart counter is restated:
 | C32 | `ensemble_checkpoint_op_seconds{op="aput"}` declared | **cannot fire** — write path bypasses `time_saver_op`; instrument `checkpoint_adapter.py` charge seam (`:371-374` → `aput`/`aput_writes` `:377-379`) or narrow enum | `daemon/checkpoint_adapter.py:377-379` |
 | C33 | `ensemble_metrics_registry_measurements` ambiguity | **clarified** — counts measurements, not series | `daemon/checkpoint_metrics.py:304` |
 | C34 | census statement/connect timeouts unspecified | **set** — 5 s / 3 s; execution home = dedicated daemon thread; self-exclusion = census only; blank `pg_stat_activity.query` lands in `other` | `daemon/services/wedge_capture/db_capture.py` |
+| C35 | the resource tier's darkness was caused by the flusher (`bool`→`INTEGER` 42804 every window, all four tables rolled back through the shared `engine.begin()`; runtime fix pending at `flusher.py:770` / `manager.py:7341`) | **REFUTED (2026-10-29, WS-A correction round).** Prod facts: the `estimated` column is `boolean NOT NULL` (`daemon/models/resource_monitor.py:231-233`); the bind is correct (bind-audit test @ `feature/resource-monitor-flusher-fix@53547b915` checks every flusher column against live `information_schema` + round-trips a real bool); the rollback amplifier was already fixed (`7be1b40bf` per-tier SAVEPOINT, `69cea24ea` `flush.errors` surfacing). **Real cause — a dead PRODUCER on macOS:** the prod daemon is a macOS binary; Darwin has no `/proc` and no `/sys/fs/cgroup`, so `proc_readers` returned `None` every tick → the sampler skipped every tick → the flusher had nothing to write. Live signature: samples climbing, `flush {batches:1139, bytes:0, errors:0}` = "produced nothing", NOT "write failed"; `resource_pid_map` climbed (45,575 rows at commit time) from the spawn path, **masking the outage**. Fix = the WS-A branch: Darwin ps-based reader (engaged ONLY when the proc root is ABSENT and the host is Darwin) + corrected sampler counters (`missed_samples`/`ticks_skipped` parity, skips excluded from `counters.ticks`, one-shot WARNING) + 7 unit / 6 real-PG tests. Merges to latest BEFORE P0 executes. Platform consequences: catalog §13; per-child T3 stays `/proc`-only (§13.4 non-goal) | `feature/resource-monitor-flusher-fix@53547b915` (`proc_readers.py`, `sampler.py`, `tests/postgres/test_resource_monitor_flusher_bind_pg.py`); prod census 2026-10-29 |
 
 ---
 
@@ -1185,3 +1243,97 @@ a reset-on-restart counter is restated:
 6. **`ensemble_sweep_rows_total{lane,outcome}` is per-lane in practice** (most lanes emit 2–3
    of the 6 outcomes). The shared enum is fixed; the live combination count (≈30) is what the
    series estimate uses.
+
+---
+
+## 13. Platform support matrix — Linux vs macOS-Darwin (WS-A correction, 2026-10-29)
+
+**Why this section exists (the corrected fact).** The resource_monitor spine was **100% dark on
+this deployment's prod host (macOS)**. Since v0.25.0 the prod daemon (a macOS host binary) received
+**ZERO rows** in `resource_daemon_bucket` (T1) and `resource_instance_sample` (T2):
+`proc_readers` returned `None` on every tick (no `/proc`, no `/sys/fs/cgroup` on Darwin) → the
+sampler skipped every tick → the flusher had nothing to write. Live signature (prod, 2026-10-29):
+samples climbing, `flush {batches:1139, bytes:0, errors:0}` — **"produced nothing", NOT "write
+failed"**. Only `resource_pid_map` (T3) climbed (45,575 rows at WS-A commit time) because it is fed
+by the spawn path — **masking the outage**. The fix is the parallel workstream
+**`feature/resource-monitor-flusher-fix@53547b915`** (merges to latest **before P0 executes**): a
+**Darwin ps-based reader** (`_read_platform_daemon_snapshot` → `_read_darwin_daemon_snapshot`,
+`daemon/services/resource_monitor/proc_readers.py`) engaged **ONLY when the proc root is ABSENT and
+the host is Darwin** (an existing-but-unreadable proc root keeps the historical `None` contract;
+Linux `/proc` stays authoritative), plus the corrected sampler counters (F0.3 canonical-counters
+rule: `missed_samples` / `ticks_skipped` parity, skipped samples excluded from `counters.ticks`,
+one-shot WARNING). The earlier "flusher binds bool → INTEGER 42804, window rolls back" hypothesis
+is **REFUTED** — see §11 C35.
+
+**Reader verification (in-tree @ 53547b915).** The Darwin fallback supplies, at the **daemon
+level only** (`DaemonProcSnapshot`): `rss_kb`/`vsize_kb` via `ps -o rss=,vsz=` (Darwin reports KB),
+`threads` via `ps -M`, `fds` via `/dev/fd`, `cpu_user_usec`/`cpu_sys_usec` via
+`resource.getrusage(RUSAGE_SELF)`, `hw_peak_kb` via `ru_maxrss` (BYTES on Darwin, ÷1024),
+`anon_kb=rss_kb` (degraded proxy — Darwin exposes no private-anonymous counter), `pss_kb=None`
+(no `smaps_rollup`). It is **not** a per-pid sampler: `read_child_snapshot` has **no** Darwin
+fallback, so per-child (T3) attribution stays `/proc`-only even after the merge (A2 non-goal
+below). `read_cgroup_snapshot` returns `None` without a cgroup v2 root — all cgroup fields stay
+Linux-only.
+
+### 13.1 Field-level split (the spine's own fields)
+
+| Field (spine schema) | Linux | macOS-Darwin (post-WS-A) | Consumer-visible effect |
+|---|---|---|---|
+| daemon `rss_kb`, `vsize_kb` | `/proc/self/{statm,status}` | `ps -o rss=,vsz=` (KB) | cross-platform post-merge |
+| daemon `cpu_user_usec`/`cpu_sys_usec` | `/proc/self/stat` jiffies | `getrusage(RUSAGE_SELF)` | cross-platform post-merge |
+| daemon `threads`, `fds` | `/proc/self/{status,fd}` | `ps -M`, `/dev/fd` | cross-platform post-merge |
+| daemon `hw_peak_kb` | `status.VmHWM` | `ru_maxrss` (BYTES→KB) | cross-platform post-merge — **present on both** (the "Linux-only" label sometimes attached to hw-peak is wrong for the post-merge reader) |
+| daemon `anon_kb` | true private-anon (`VmData`, PSS-refined) | **degraded proxy** `anon_kb=rss_kb` | `coverage_pct = min(1.0, attributed/anon_bytes)` (`sampler.py:505-517`) becomes an **rss-denominated** ratio on Darwin — directionally useful, not comparable to Linux anon-based coverage |
+| daemon `pss_kb` | `smaps_rollup` (1/10 cadence, env-gated) | **Linux-only** — always `None` | any PSS-derived view renders the no-data contract on Darwin |
+| `swap_kb` (T1 column, `models/resource_monitor.py:124`) | reserved — **no reader populates it today** | NULL (same as Linux today) | column exists on both; unwired everywhere |
+| cgroup memory (`current_mb`, `peak_mb`, `anon_mb`, `file_mb`, `slab_mb`) | cgroup v2 | **Linux-only** — `read_cgroup_snapshot` → `None` | cgroup-derived views render nothing on Darwin; sampler degrades to daemon-only |
+| cgroup cpu (`usage_usec`, `throttled_usec`, `nr_throttled`) | cgroup v2 | **Linux-only** | same |
+| per-child T3 (`child_rss_kb`, `child_cpu_user_usec`, `cpu_share_usec_est`, attribution rows in `resource_pid_map`) | `/proc/<pid>/{stat,status}` via `read_child_snapshot` | **Linux-only, permanently** (A2 non-goal — no Darwin fallback by design) | see 13.2 |
+
+### 13.2 Per-family matrix (every family, F0.1–F22)
+
+| Family | Scope | Notes (fields / consumer-visible effect) |
+|---|---|---|
+| F0.1 exposition listener | **cross-platform** | pure stdlib socket — no `/proc` dependency; boots and serves on Darwin |
+| F0.2 registry measurements | **cross-platform** | registry is in-process |
+| F0.3 spine health gate | **dark in prod TODAY → live after WS-A merge** | gate BLOCKS until `feature/resource-monitor-flusher-fix@53547b915` is merged; post-merge the gauge/counter work on Darwin with daemon-level fields only |
+| F0.4 vocabulary version | **cross-platform** | |
+| F1 loop lag | **cross-platform** | lag probe is in-process timing, not `/proc` |
+| F2 thread CPU/count | **Linux-only — dark on macOS prod today AND after the merge** | wedge sampler is `/proc`-only; WS-A touches nothing under `wedge_capture/`; per-thread jiffies have no portable fallback |
+| F3 wedge capture counters | **cross-platform** (triggers), F1-dependent | capture *content* on macOS lacks thread-level detail (F2 side); the counters themselves fire |
+| F4/F5 DB pools | **cross-platform** | psycopg pool state |
+| F6 PG census | **cross-platform** | SQL against `pg_stat_activity` |
+| F7–F9 checkpoint / readiness | **cross-platform** | registry + PG |
+| F10–F13 jobs / workers / sweeps / instances | **cross-platform** | |
+| F14–F16 LLM | **cross-platform** | |
+| F17–F18 MCP / gateway | **cross-platform** | |
+| F19 compaction | **cross-platform** | |
+| F20 turn/tool seam | **cross-platform** | message_tap |
+| F21 journal/upgrade twin | **cross-platform** | file-backed |
+| F22 textfile + exporters | **cross-platform** (host) | node_exporter runs on macOS for host CPU/mem; the textfile writer is shell-side |
+
+### 13.3 `/api/resources/live` and `/api/resources/history` payload shape on Darwin
+
+- **Pre-merge (prod today):** the monitor is *enabled with an empty ring* — `/live` renders the
+  live card with `pid: null`, no cpu series (`_cpu_pct_from_rows` has no rows), and `/history`
+  returns the empty-points shape (`_empty_history_shape` carries `resolution_used` + `truncated`;
+  D11 never-503). This is the "monitor green, data absent" masking state.
+- **Post-merge (after 53547b915):** both endpoints return real points with **daemon-level fields
+  populated** (rss/vsize/cpu/threads/fds/hw-peak) and **cgroup + PSS + per-child blocks absent**
+  (§13.1). `coverage_pct` semantics change denominator as described in §13.1 (rss-based on
+  Darwin). T3 `resource_pid_map` keeps behaving as today (spawn-path-fed) — it is NOT the sampler's
+  per-child view on Darwin.
+- **Dev-box degradation:** a Linux dev box renders the FULL shape; a macOS dev box post-merge
+  renders the same coarse shape as prod. Windows is not a supported host for the reader (the
+  fallback is Darwin-guarded; other non-Linux hosts keep the `None` contract and stay dark).
+
+### 13.4 Non-goal — T3 per-child RSS/CPU attribution on macOS (DECIDED, implement as decided)
+
+**Per-child (T3) RSS/CPU attribution stays `/proc`-only** (`read_child_snapshot` /
+`resource_pid_map`) **even after the WS-A fix** — the Darwin ps-based reader is a **coarse
+daemon/process-level view, not a per-pid sampler**, and must not be silently promised to grow into
+one. Consequences, stated plainly: per-child families/values are **dark on Darwin**; the
+`coverage_pct` denominator on Darwin is the degraded rss proxy (§13.1) and per-child attribution
+contributes nothing to it on macOS; **no partial per-child data ships on macOS** — the absence is
+the honest contract, not a defect to be backfilled later. Any future per-pid Darwin story is a new,
+separately-scoped decision.
