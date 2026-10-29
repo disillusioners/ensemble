@@ -98,8 +98,18 @@ DEFAULT_CARDINALITY_CAP = 2000
 RENDER_TRY_ACQUIRE_SECONDS = 0.05
 RENDER_TOTAL_BUDGET_SECONDS = 0.25
 
-_publisher_cadence_provider: Callable[[], float] = lambda: DEFAULT_PUBLISHER_CADENCE_SECONDS
-_cardinality_cap_provider: Callable[[], int] = lambda: DEFAULT_CARDINALITY_CAP
+def _default_publisher_cadence_provider() -> float:
+    """The default publisher cadence (15 s — the scrape-interval hint)."""
+    return DEFAULT_PUBLISHER_CADENCE_SECONDS
+
+
+def _default_cardinality_cap_provider() -> int:
+    """The default hard cardinality cap (2000 series per metric)."""
+    return DEFAULT_CARDINALITY_CAP
+
+
+_publisher_cadence_provider: Callable[[], float] = _default_publisher_cadence_provider
+_cardinality_cap_provider: Callable[[], int] = _default_cardinality_cap_provider
 
 
 def set_publisher_cadence_provider(fn: Callable[[], float]) -> None:

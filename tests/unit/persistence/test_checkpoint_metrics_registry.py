@@ -47,12 +47,17 @@ from daemon.checkpoint_metrics import (
 
 @pytest.fixture(autouse=True)
 def _restore_providers():
-    """Restore the cadence/cap providers after every test."""
-    original_cadence = cm._publisher_cadence_provider
-    original_cap = cm._cardinality_cap_provider
+    """Restore the DEFAULT cadence/cap providers around every test.
+
+    The providers are process-global (the api lifespan wires the managed
+    keys into them), so each test starts from — and leaves behind — the
+    module defaults.
+    """
+    cm._publisher_cadence_provider = cm._default_publisher_cadence_provider
+    cm._cardinality_cap_provider = cm._default_cardinality_cap_provider
     yield
-    cm._publisher_cadence_provider = original_cadence
-    cm._cardinality_cap_provider = original_cap
+    cm._publisher_cadence_provider = cm._default_publisher_cadence_provider
+    cm._cardinality_cap_provider = cm._default_cardinality_cap_provider
 
 
 @pytest.fixture()
@@ -416,6 +421,7 @@ class TestPublisherCadence:
     def test_default_cadence_is_15_seconds(self):
         assert cm.DEFAULT_PUBLISHER_CADENCE_SECONDS == 15.0
         assert cm._publisher_cadence() == 15.0
+        assert cm._default_publisher_cadence_provider() == 15.0
 
     def test_cadence_provider_is_installable(self):
         set_publisher_cadence_provider(lambda: 0.0)
