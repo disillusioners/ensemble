@@ -1955,14 +1955,26 @@ class InstanceMessagingService:
             )
 
     async def _has_checkpoint(self, instance_id: str) -> bool:
-        """Check if a checkpoint exists for this instance."""
+        """Check if a checkpoint exists for this instance.
+
+        Track-1 item 2 (retry path): the existence check used to run a
+        FULL saver read (``self._checkpointer.aget(config)``) — taking
+        the saver's single ``asyncio.Lock`` and deserializing the whole
+        checkpoint — to answer one boolean. It now uses the checkpoint
+        adapter's EXISTS probe (``has_checkpoint``), which on
+        PostgreSQL runs on the adapter's separate asyncpg pool and never
+        touches the saver lock. Boolean semantics and the fail-soft
+        contract are unchanged.
+
+        The probe lives on the ADAPTER, so it is reached through the
+        manager (``self._manager._checkpointer``) — the service's own
+        ``_checkpointer`` property returns the RAW SAVER, which has no
+        ``has_checkpoint``.
+        """
         try:
-            config = {"configurable": {"thread_id": instance_id}}
-            state = await self._checkpointer.aget(config)
-            result = state is not None
-            channel_values = state.get("channel_values", {}) if state else {}
-            msg_count = len(channel_values.get("messages", []))
-            logger.info(f"[RESUME] instance={instance_id[:8]} has_checkpoint={result}, msg_count={msg_count}")
+            adapter = self._manager._checkpointer
+            result = await adapter.has_checkpoint(instance_id)
+            logger.info(f"[RESUME] instance={instance_id[:8]} has_checkpoint={result}")
             return result
         except Exception as e:
             logger.info(f"[RESUME] instance={instance_id[:8]} has_checkpoint=False, exception={type(e).__name__}")

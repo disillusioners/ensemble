@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -54,6 +54,7 @@ from daemon.checkpoint_adapter import (
     SqliteCheckpointerAdapter,
 )
 from daemon.manager import InstanceManager
+from daemon.services.instance_messaging import InstanceMessagingService
 
 # The EXACT SQL text the PostgreSQL probe must issue. Pinned verbatim
 # (including the single spaces) — the unit test asserts equality, not
@@ -320,6 +321,88 @@ class TestManagerHasCheckpointProbe:
         result = await manager._has_checkpoint("inst-1")
 
         assert result is False
+
+
+# ── 5. retry-path probe: InstanceMessagingService._has_checkpoint ──────────
+
+
+class _StubAdapterWithBothSurfaces:
+    """Adapter stand-in exposing BOTH the probe and the raw saver read.
+
+    The retry-path conversion is only meaningful if the service uses the
+    adapter's EXISTS probe — the raw saver (which carries the saver's
+    single lock and the full deserialization) must never be touched.
+    """
+
+    def __init__(self, exists: bool = True, raises: Exception | None = None):
+        self.exists = exists
+        self.raises = raises
+        self.probe_calls: list[str] = []
+        self.has_checkpoint = AsyncMock(side_effect=self._probe)
+        self.raw_saver = SimpleNamespace(
+            aget=AsyncMock(
+                side_effect=AssertionError(
+                    "raw saver aget must not be called by the retry-path probe"
+                )
+            )
+        )
+
+    async def _probe(self, thread_id: str) -> bool:
+        self.probe_calls.append(thread_id)
+        if self.raises is not None:
+            raise self.raises
+        return self.exists
+
+
+def _service_with_adapter(adapter) -> InstanceMessagingService:
+    """Real ``InstanceMessagingService`` over a mocked manager facade."""
+    manager = MagicMock()
+    manager._checkpointer = adapter
+    return InstanceMessagingService(
+        manager=manager,
+        cancellation_service=MagicMock(),
+    )
+
+
+class TestRetryPathHasCheckpointProbe:
+    """The retry path probes the adapter — it never reads the raw saver.
+
+    ``InstanceMessagingService._has_checkpoint`` is consulted on the
+    RETRY path (``instance_messaging.py:5087``) to decide whether the
+    interrupted turn resumes from its checkpoint or starts fresh. It
+    used to answer that with a FULL saver read; it now answers it with
+    the adapter's EXISTS probe.
+    """
+
+    async def test_retry_path_calls_probe_and_never_the_raw_saver(self):
+        adapter = _StubAdapterWithBothSurfaces(exists=True)
+        svc = _service_with_adapter(adapter)
+
+        result = await svc._has_checkpoint("inst-1")
+
+        assert result is True
+        assert adapter.probe_calls == ["inst-1"]
+        adapter.raw_saver.aget.assert_not_called()
+
+    async def test_retry_path_probe_no_row_returns_false(self):
+        adapter = _StubAdapterWithBothSurfaces(exists=False)
+        svc = _service_with_adapter(adapter)
+
+        result = await svc._has_checkpoint("inst-1")
+
+        assert result is False
+        assert adapter.probe_calls == ["inst-1"]
+        adapter.raw_saver.aget.assert_not_called()
+
+    async def test_retry_path_probe_failure_is_fail_soft_false(self):
+        """Unchanged contract: a probe failure yields False, never raises."""
+        adapter = _StubAdapterWithBothSurfaces(raises=RuntimeError("pool exhausted"))
+        svc = _service_with_adapter(adapter)
+
+        result = await svc._has_checkpoint("inst-1")
+
+        assert result is False
+        adapter.raw_saver.aget.assert_not_called()
 
 
 # ── 4. dead-code proof: the manager's message-count helper is gone ─────────
