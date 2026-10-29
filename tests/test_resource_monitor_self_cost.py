@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 import statistics
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -351,20 +352,33 @@ def test_sampler_rss_delta_under_20mb(synthetic_tree, escape_guard):
     runtime alarm/throttle knob) — this asserts the subsystem's
     own footprint during a run.
 
-    RSS is read via ``resource.getrusage(RUSAGE_SELF).ru_maxrss``
-    (kB on Linux). Note ru_maxrss is a HIGH-WATER mark, so the
-    delta is a conservative upper bound on the sampler's growth.
+    RSS is read via ``resource.getrusage(RUSAGE_SELF).ru_maxrss``.
+    Note ru_maxrss is a HIGH-WATER mark, so the delta is a
+    conservative upper bound on the sampler's growth.
+
+    PLATFORM SHAPE (the daemon's deployment host is macOS):
+    ``ru_maxrss`` is reported in KILOBYTES on Linux but in BYTES on
+    Darwin. The raw value was therefore divided by 1024 and labelled
+    "MB" on BOTH platforms, which on macOS measured GIGABYTES and
+    failed the 20 MB floor as soon as the process peak grew by 20 KB
+    (the assertion was effectively "the peak must not move at all").
+    The value is now normalized to KB first.
     """
     import resource as _resource
+
+    def _maxrss_kb() -> float:
+        raw = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+        # Darwin reports BYTES; Linux reports KB.
+        return raw / 1024.0 if sys.platform == "darwin" else float(raw)
 
     proc_root, cgroup_root = synthetic_tree
     ring = TierRing(tier="raw", maxlen=8192)  # a large ring
     sampler = _make_sampler(proc_root, cgroup_root, ring)
 
-    before_kb = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+    before_kb = _maxrss_kb()
     for _ in range(200):
         sampler.run_once()
-    after_kb = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+    after_kb = _maxrss_kb()
 
     delta_mb = (after_kb - before_kb) / 1024.0
     # ru_maxrss is a high-water mark ⇒ delta >= 0 always. The floor

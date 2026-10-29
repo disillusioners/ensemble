@@ -18,6 +18,17 @@ Architecture §2.1 (binding):
     synthetic fixture trees (T9 / T10 hermetic + fenced).
   * cgroup v1 / absent ⇒ ``cgroup`` is ``None`` in the payload
     (degrade to daemon-only sampling), NEVER a crash.
+  * **PORTABLE HOST FALLBACK** — the daemon's deployment host is
+    macOS, which has NO ``/proc`` and NO cgroup v2. On such a host the
+    ``/proc`` readers cannot answer at all, so
+    :func:`read_daemon_snapshot` falls back to a portable self-snapshot
+    (``ps`` + ``resource.getrusage`` + ``/dev/fd``) — see
+    :func:`_read_platform_daemon_snapshot`. Without that fallback the
+    sampler produced ZERO rows and the flusher wrote ZERO DB rows: the
+    whole resource-telemetry tier stayed dark while every counter
+    climbed. The fallback engages ONLY when the proc root is ABSENT
+    and the host is Darwin, so the ``/proc`` path stays authoritative
+    on Linux and the injected-fixture tests stay hermetic.
 
 This module is read-only: it never touches the DB. The flusher
 thread (T6) owns persistence; the sampler thread (T5) calls
@@ -29,9 +40,17 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
+import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+try:  # pragma: no cover - POSIX-only module (the daemon is macOS/Linux)
+    import resource as _resource_mod
+except ImportError:  # pragma: no cover - Windows has no ``resource``
+    _resource_mod = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -335,12 +354,189 @@ def _parse_status_kb(text: str) -> dict[str, int]:
     return out
 
 
+# ── Portable (non-/proc) host fallback ─────────────────────────────────────
+#
+# The daemon's deployment host is macOS: there is NO ``/proc`` and NO
+# cgroup v2 tree. The ``/proc`` readers above are the AUTHORITATIVE
+# source on Linux, but on a host without ``/proc`` they cannot produce
+# a snapshot at all — ``read_proc_snapshot`` returned ``None``, the
+# sampler wrote NO ring row, and therefore the flusher wrote NO DB
+# row: the entire resource-telemetry tier stayed dark while every
+# counter still climbed (``samples`` up, ``flush.errors == 0``).
+#
+# The fallback is deliberately NARROW:
+#
+#   * it engages ONLY when the proc root is ABSENT — an EXISTING but
+#     unreadable proc root keeps the historical ``None`` contract, so
+#     the injected-fixture tests stay hermetic (they build a real
+#     directory tree under ``tmp_path``);
+#   * it engages ONLY on Darwin — on Linux ``/proc`` is present and
+#     remains authoritative; a missing ``/proc`` there is a genuinely
+#     broken host and must NOT be papered over;
+#   * it NEVER changes the ``/proc`` code path when ``/proc`` exists.
+#
+# Data sources (the module's "NO psutil — zero new deps" rule holds):
+#
+#   * RSS / VSZ  — ``ps -o rss=,vsz= -p <pid>`` (Darwin reports KB).
+#   * threads    — ``ps -M -p <pid>`` (one line per thread + header).
+#   * fds        — ``/dev/fd`` (Darwin exposes the process's own
+#     descriptor list there).
+#   * CPU        — ``resource.getrusage(RUSAGE_SELF)`` (utime/stime).
+#   * peak RSS   — ``resource.getrusage().ru_maxrss`` (BYTES on Darwin).
+#
+# Cost: two short ``ps`` forks per sampler tick (~7 ms). The tick
+# interval is 15-60 s and the sampler self-cost budget is 1 % of that
+# interval (>= 150 ms), so the fallback stays far inside the budget.
+
+_PS_TIMEOUT_S = 5.0
+
+
+def _run_ps(args: list[str]) -> Optional[str]:
+    """Run ``ps`` with the given args. Returns stripped stdout or None.
+
+    Fail-soft by contract: a missing ``ps`` binary, a non-zero exit
+    code, an empty stdout, or a timeout all return ``None`` — the
+    caller degrades instead of raising into the sampler tick.
+    """
+    try:
+        completed = subprocess.run(
+            ["ps", *args],
+            capture_output=True,
+            text=True,
+            timeout=_PS_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    out = (completed.stdout or "").strip()
+    return out or None
+
+
+def _darwin_memory_kb(pid: int) -> Optional[tuple[int, int]]:
+    """``(rss_kb, vsize_kb)`` from ``ps`` — None when unavailable."""
+    out = _run_ps(["-o", "rss=,vsz=", "-p", str(pid)])
+    if out is None:
+        return None
+    parts = out.split()
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[0]), int(parts[1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _darwin_thread_count(pid: int) -> int:
+    """Thread count from ``ps -M`` (one line per thread + a header).
+
+    Falls back to ``threading.active_count()`` (the Python-visible
+    thread count) when ``ps`` is unavailable — an approximation is
+    better than a zero for a monitoring column.
+    """
+    out = _run_ps(["-M", "-p", str(pid)])
+    if out is None:
+        return threading.active_count()
+    lines = [line for line in out.splitlines() if line.strip()]
+    if len(lines) <= 1:
+        # Header only — ``ps`` saw no thread rows. Fall back to the
+        # Python-visible count rather than reporting zero.
+        return max(1, threading.active_count())
+    return len(lines) - 1
+
+
+def _darwin_fd_count() -> int:
+    """Open-descriptor count from ``/dev/fd``.
+
+    ``/dev/fd`` lists the CURRENT process's descriptors. The listing
+    itself holds one descriptor open while it is read, so one is
+    subtracted — the count is approximate by exactly that one.
+    """
+    try:
+        return max(0, len(os.listdir("/dev/fd")) - 1)
+    except OSError:
+        return 0
+
+
+def _read_darwin_daemon_snapshot(
+    pid: int,
+    *,
+    pss_kb: Optional[int] = None,
+) -> Optional[DaemonProcSnapshot]:
+    """Self-snapshot for a macOS host (no ``/proc``).
+
+    Returns ``None`` when the required sources are unavailable — the
+    sampler then treats the tick as a structural read failure (and
+    counts it, so the blind spot is visible instead of silent).
+    """
+    memory = _darwin_memory_kb(pid)
+    if memory is None:
+        return None
+    rss_kb, vsize_kb = memory
+
+    if _resource_mod is None:  # pragma: no cover - POSIX-only host
+        return None
+    usage = _resource_mod.getrusage(_resource_mod.RUSAGE_SELF)
+    cpu_user_usec = int(usage.ru_utime * 1_000_000)
+    cpu_sys_usec = int(usage.ru_stime * 1_000_000)
+    # Darwin's ``ru_maxrss`` is in BYTES (Linux reports KB).
+    hw_peak_kb = int(usage.ru_maxrss / 1024)
+
+    return DaemonProcSnapshot(
+        pid=pid,
+        rss_kb=rss_kb,
+        vsize_kb=vsize_kb,
+        # Darwin exposes no private-anonymous counter; the Linux reader
+        # degrades the same way (``anon_kb = VmData or rss_kb``).
+        anon_kb=rss_kb,
+        hw_peak_kb=hw_peak_kb,
+        threads=_darwin_thread_count(pid),
+        fds=_darwin_fd_count(),
+        cpu_user_usec=cpu_user_usec,
+        cpu_sys_usec=cpu_sys_usec,
+        # Darwin has no PSS (no ``smaps_rollup``).
+        pss_kb=pss_kb,
+    )
+
+
+def _read_platform_daemon_snapshot(
+    proc_root: Path,
+    pid: int,
+    *,
+    pss_kb: Optional[int] = None,
+) -> Optional[DaemonProcSnapshot]:
+    """Fallback for hosts WITHOUT ``/proc``. None when not applicable.
+
+    Two guards, both load-bearing:
+
+    * ``proc_root.exists()`` — an existing-but-unreadable proc root
+      keeps the historical ``None`` contract. That is what the
+      injected-fixture tests rely on (they build a synthetic tree, so
+      the fallback must never reach for the REAL host process).
+    * ``sys.platform != "darwin"`` — on Linux ``/proc`` is
+      authoritative; its absence is a broken host, not a platform
+      difference, and must stay visible.
+    """
+    if proc_root.exists():
+        return None
+    if sys.platform != "darwin":
+        return None
+    return _read_darwin_daemon_snapshot(pid, pss_kb=pss_kb)
+
+
 def read_daemon_snapshot(
     proc_root: Path,
     *,
     pss_kb: Optional[int] = None,
 ) -> Optional[DaemonProcSnapshot]:
     """Read ``/proc/self/{stat,statm,status}``. Returns None on failure.
+
+    On a host with NO ``/proc`` (macOS — the daemon's deployment host)
+    the ``/proc`` readers cannot answer; the portable fallback
+    (:func:`_read_platform_daemon_snapshot`) supplies the snapshot so
+    the sampler keeps producing rows. Without it the whole
+    resource-telemetry tier is dark (no ring row ⇒ no DB row).
 
     Args:
         proc_root: The /proc root (injectable for tests).
@@ -350,7 +546,7 @@ def read_daemon_snapshot(
     pid = os.getpid()
     stat = _read_proc_stat(proc_root, pid)
     if stat is None:
-        return None
+        return _read_platform_daemon_snapshot(proc_root, pid, pss_kb=pss_kb)
 
     # Find the daemon's proc entry — ``self`` symlink preferred, fall
     # back to literal pid dir. Children are NEVER read from ``self``

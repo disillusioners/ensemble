@@ -136,9 +136,14 @@ class SamplerCounters:
     # EMA decay weight (0 < alpha < 1). Higher = more responsive to
     # the latest tick; 0.3 matches a 3-tick moving window.
     ema_alpha: float = 0.3
-    # Total ticks run since thread start.
+    # Ticks that PRODUCED a sample since thread start. A tick that
+    # overran, or whose platform read failed, is NOT counted here —
+    # it lands in ``ticks_skipped`` / ``missed_samples`` instead, so
+    # this counter (surfaced as the ``samples`` field of
+    # ``/api/resources/self-cost``) never over-reports.
     ticks: int = 0
-    # Skipped (overrun) ticks.
+    # Skipped ticks — an overrun OR a structural read failure (any tick
+    # that produced no sample).
     ticks_skipped: int = 0
     # ``missed_samples`` counter — bumped every time we skip a tick
     # for overrun or for any structural read failure.
@@ -284,6 +289,12 @@ class Sampler:
         # Hysteresis counter for re-promotion.
         self._clean_ticks = 0
 
+        # F3-style one-shot guard: the first structural read failure
+        # logs the cause once; later failures stay silent (one clear
+        # line ties the degradation to its cause — the flusher's
+        # ``_missing_table_warned`` precedent).
+        self._no_snapshot_warned = False
+
     # ── Public lifecycle ───────────────────────────────────────────────
 
     def start(self) -> None:
@@ -317,12 +328,15 @@ class Sampler:
         Tick semantics (D4 / D12):
 
           1. Measure ``tick_t`` with ``time.monotonic`` budget.
-          2. If ``tick_t > interval``: skip + ``missed_samples++`` +
+          2. If the platform read produced NO snapshot: skip +
+             ``missed_samples++`` + ``ticks_skipped++`` + return
+             ``None``. The tick is NOT counted as a sample.
+          3. If ``tick_t > interval``: skip + ``missed_samples++`` +
              demote one ladder level. Return ``None``.
-          3. Otherwise: read /proc + cgroup (subject to ladder level),
+          4. Otherwise: read /proc + cgroup (subject to ladder level),
              update EMA tick cost, write the row into the ring,
              re-promote after N clean ticks (hysteresis).
-          4. If EMA tick cost > ``self_cpu_budget_pct`` % of
+          5. If EMA tick cost > ``self_cpu_budget_pct`` % of
              ``effective_interval_s``: double interval + disable
              deep scans.
         """
@@ -356,6 +370,39 @@ class Sampler:
             pss_kb=pss_kb,
             child_pids=child_pids,
         )
+
+        if snap is None:
+            # Structural read failure — THIS TICK PRODUCED NO SAMPLE.
+            #
+            # The counter contract (``SamplerCounters.missed_samples``:
+            # "bumped every time we skip a tick for overrun or for any
+            # structural read failure") was previously VIOLATED here:
+            # only the overrun path bumped it. A host whose platform
+            # reader could not answer therefore reported a
+            # HEALTHY-looking tick count (``samples`` climbing) while
+            # every single sample was silently dropped — no ring row,
+            # so no DB row, so the whole resource-telemetry tier stayed
+            # DARK with ``flush.errors == 0`` and ``flush.batches``
+            # climbing. The counter now records the drop, and the
+            # ``missed_samples`` column it feeds lands in T1 so the
+            # database carries the honest count.
+            #
+            # ``counters.ticks`` is NOT incremented — same semantics as
+            # the overrun path: a tick that produced no sample is not a
+            # tick. The ``/self-cost`` ``samples`` field therefore
+            # counts real samples and ``ticks_skipped`` counts drops.
+            with self._lock:
+                self.counters.missed_samples += 1
+                self.counters.ticks_skipped += 1
+            if not self._no_snapshot_warned:
+                self._no_snapshot_warned = True
+                logger.warning(
+                    "resource-monitor sampler: no daemon snapshot "
+                    "(platform read failed) — samples are being dropped; "
+                    "the resource-telemetry tier stays empty until the "
+                    "platform reader recovers",
+                )
+            return None
 
         # P2 T10 — attribution sampling (registry children walk +
         # charge snapshot + the 1/tick deep-scan reconcile). Runs

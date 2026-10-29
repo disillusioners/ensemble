@@ -331,7 +331,19 @@ class TestFlusherBatching:
         Minutes wrap within the hour (0..59) and hours roll over so
         large ``n`` values stay parseable (e.g. n=612 needs more
         than one hour).
+
+        The base DATE is derived from NOW on purpose: the flusher runs
+        the raw-tier retention sweep in the SAME window as the write
+        (``DELETE ... WHERE bucket_ts < now - raw_minutes``, 48h by
+        default), so a hard-coded calendar date silently EXPIRES — the
+        raw tier is swept away before the assertion runs and the pack
+        fails for a reason that has nothing to do with the flusher.
+        The date used to be pinned to ``2026-10-18`` and the pack
+        started failing on 2026-10-20, 11 days after it was written.
         """
+        base_day = (
+            datetime.now(timezone.utc) - timedelta(hours=2)
+        ).strftime("%Y-%m-%d")
         total_ticks = base_minute * 2
         for i in range(n):
             tick = total_ticks + i
@@ -341,7 +353,7 @@ class TestFlusherBatching:
             ring.append(
                 {
                     "bucket_ts": (
-                        f"2026-10-18 {hour:02d}:{minute:02d}:{second:02d}"
+                        f"{base_day} {hour:02d}:{minute:02d}:{second:02d}"
                     ),
                     "interval_s": 30,
                     "rss_kb": 100000 + i,
