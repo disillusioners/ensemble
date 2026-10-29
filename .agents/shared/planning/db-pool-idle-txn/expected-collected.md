@@ -39,41 +39,41 @@ HOME="$(mktemp -d)" \
 
 | # | Pack file | Class | Ladder row(s) | Expected collected at base `19fc11c8b` |
 |---|---|---|---|---|
-| 1 | `tests/unit/repositories/test_pg_engine_utc_session.py` | default (EXISTING) | G2.1, G2.4 | `10` |
-| 2 | `tests/unit/tools/test_dbpool_pool_attribution.py` | default (NEW) | G2.1 | `5` |
-| 3 | `tests/unit/tools/test_dbpool_repair_engine_isolation.py` | default (NEW) | G2.2 | `6` |
-| 4 | `tests/unit/tools/test_dbpool_p2_immutability.py` | default (NEW) | G2.3 | `6` |
-| 5 | `tests/unit/tools/test_dbpool_honesty_blocks.py` | default (NEW) | G2.1 | `8` |
-| 6 | `tests/unit/tools/test_dbpool_txn_hygiene.py` | default (NEW) | G1.1 | `9` |
-| 7 | `tests/unit/tools/test_dbpool_probe_bound.py` | default (NEW) | G1.4 | `13` |
-| 8 | `tests/unit/tools/test_dbpool_probe_failure_class.py` | default (NEW) | G1.4 | `3` |
-| 9 | `tests/unit/tools/test_readyz_grace_detail.py` | default (EXISTING) | G1.4 | `7` |
-| 10 | `tests/unit/tools/test_dbpool_mission_mint.py` | default (NEW) | G1.2 | `8` |
-| 11 | `tests/unit/tools/test_dbpool_wedge_capture_static.py` | default (NEW) | G1.3 | `6` |
-| 12 | `tests/unit/tools/test_dbpool_probe_retention_static.py` | default (NEW) | G3.3 | `4` |
-| 13 | `tests/unit/tools/test_dbpool_occupancy_static.py` | default (NEW) | G3.3 | `4` |
-| 14 | `tests/unit/tools/test_dbpool_residence_static.py` | default (NEW) | G3.2, G3.3 | `4` |
-| 15 | `tests/unit/tools/test_dbpool_guard_pack_selfcheck.py` | default (NEW) | G3.2 | `3` |
-| 16 | `tests/unit/tools/test_dbpool_fix_site_static.py` | default (NEW) | G1.4 | `6` |
-| 17 | `tests/unit/tools/test_dbpool_census_families.py` | default (NEW) | G3.4 | `4` |
-| 18 | `tests/unit/tools/test_dbpool_consistency_pin.py` | default (NEW) | G1.4 | `8` |
-| 19 | `tests/unit/tools/test_dbpool_audit_record.py` | default (NEW) | — (F1-a) | `6` |
-| 20 | `tests/postgres/test_dbpool_mission_mint_pg.py` | postgres (NEW) | G2.5 | `3` |
-| 21 | `tests/postgres/test_dbpool_probe_starvation_pg.py` | postgres (NEW) | G2.5 | `2` |
-| 22 | `tests/postgres/test_dbpool_wedge_capture_pg.py` | postgres (NEW) | G2.6 | `3` |
-| 23 | `tests/integration/test_dbpool_probe_bound_pg.py` | integration (NEW) | G2.5 | `2` |
-| 24 | `tests/integration/test_db_pool_idle_in_transaction_guard.py` | integration (NEW) | G3.2 | `7` |
-| 25 | `tests/integration/test_dbpool_churn_census.py` | integration (NEW) | G3.1 | `3` |
-| 26 | `tests/integration/test_dbpool_deferred_report_reconcile_pg.py` | integration (NEW) | G2.5 | `7` |
-| 27 | `tests/unit/tools/test_readiness_failure_class.py` | default (EXISTING, DO-NOT-TOUCH) | Class 4a | `30` |
-| 28 | `tests/unit/tools/test_readyz_grace_detail.py` | default (EXISTING, DO-NOT-TOUCH) | Class 4a / G1.4 | `7` *(same file as row 9 — one measurement, two consumers)* |
-| 29 | `tests/unit/tools/test_saver_probe_contention_class.py` | default (EXISTING, DO-NOT-TOUCH) | Class 4a | `8` |
-| 30 | `tests/unit/tools/test_promote_txn_hold.py` | default (EXISTING, DO-NOT-TOUCH) | Class 4a | `14` |
-| 31 | `tests/unit/tools/test_checkpoint_pool_config.py` | default (EXISTING, DO-NOT-TOUCH) | Class 4a | `12` |
-| 32 | `tests/unit/test_readiness_mcp_independence.py` | default (EXISTING, DO-NOT-TOUCH) | Class 4a | `6` |
-| 33 | `tests/integration/test_checkpoint_pool_burst_shapes.py` | integration (EXISTING, DO-NOT-TOUCH) | Class 4b | `3` |
-| 34 | `tests/integration/test_checkpoint_pool_ghost_waiters.py` | integration (EXISTING, DO-NOT-TOUCH) | Class 4b | `2` |
-| 35 | **whole-tree default-collected corpus** | default | **G1.5 / G3.5** | `30975` — the total `base_collected`; reconcile against the sum of rows 1–34 |
+| 1 | `tests/unit/repositories/test_pg_engine_utc_session.py` | default (EXISTING) | G2.1, G2.4 | 10 |
+| 2 | `tests/unit/tools/test_dbpool_pool_attribution.py` | default (NEW) | G2.1 | 5 |
+| 3 | `tests/unit/tools/test_dbpool_repair_engine_isolation.py` | default (NEW) | G2.2 | 6 |
+| 4 | `tests/unit/tools/test_dbpool_p2_immutability.py` | default (NEW) | G2.3 | 6 |
+| 5 | `tests/unit/tools/test_dbpool_honesty_blocks.py` | default (NEW) | G2.1 | 8 |
+| 6 | `tests/unit/tools/test_dbpool_txn_hygiene.py` | default (NEW) | G1.1 | 9 |
+| 7 | `tests/unit/tools/test_dbpool_probe_bound.py` | default (NEW) | G1.4 | 13 |
+| 8 | `tests/unit/tools/test_dbpool_probe_failure_class.py` | default (NEW) | G1.4 | 3 |
+| 9 | `tests/unit/tools/test_readyz_grace_detail.py` | default (EXISTING) | G1.4 | 7 |
+| 10 | `tests/unit/tools/test_dbpool_mission_mint.py` | default (NEW) | G1.2 | 8 |
+| 11 | `tests/unit/tools/test_dbpool_wedge_capture_static.py` | default (NEW) | G1.3 | 6 |
+| 12 | `tests/unit/tools/test_dbpool_probe_retention_static.py` | default (NEW) | G3.3 | 4 |
+| 13 | `tests/unit/tools/test_dbpool_occupancy_static.py` | default (NEW) | G3.3 | 4 |
+| 14 | `tests/unit/tools/test_dbpool_residence_static.py` | default (NEW) | G3.2, G3.3 | 4 |
+| 15 | `tests/unit/tools/test_dbpool_guard_pack_selfcheck.py` | default (NEW) | G3.2 | 3 |
+| 16 | `tests/unit/tools/test_dbpool_fix_site_static.py` | default (NEW) | G1.4 | 6 |
+| 17 | `tests/unit/tools/test_dbpool_census_families.py` | default (NEW) | G3.4 | 4 |
+| 18 | `tests/unit/tools/test_dbpool_consistency_pin.py` | default (NEW) | G1.4 | 8 |
+| 19 | `tests/unit/tools/test_dbpool_audit_record.py` | default (NEW) | — (F1-a) | 6 |
+| 20 | `tests/postgres/test_dbpool_mission_mint_pg.py` | postgres (NEW) | G2.5 | 3 |
+| 21 | `tests/postgres/test_dbpool_probe_starvation_pg.py` | postgres (NEW) | G2.5 | 2 |
+| 22 | `tests/postgres/test_dbpool_wedge_capture_pg.py` | postgres (NEW) | G2.6 | 3 |
+| 23 | `tests/integration/test_dbpool_probe_bound_pg.py` | integration (NEW) | G2.5 | 2 |
+| 24 | `tests/integration/test_db_pool_idle_in_transaction_guard.py` | integration (NEW) | G3.2 | 7 |
+| 25 | `tests/integration/test_dbpool_churn_census.py` | integration (NEW) | G3.1 | 3 |
+| 26 | `tests/integration/test_dbpool_deferred_report_reconcile_pg.py` | integration (NEW) | G2.5 | 7 |
+| 27 | `tests/unit/tools/test_readiness_failure_class.py` | default (EXISTING, DO-NOT-TOUCH) | Class 4a | 30 |
+| 28 | `tests/unit/tools/test_readyz_grace_detail.py` | default (EXISTING, DO-NOT-TOUCH) | Class 4a / G1.4 | 7 *(same file as row 9 — one measurement, two consumers)* |
+| 29 | `tests/unit/tools/test_saver_probe_contention_class.py` | default (EXISTING, DO-NOT-TOUCH) | Class 4a | 8 |
+| 30 | `tests/unit/tools/test_promote_txn_hold.py` | default (EXISTING, DO-NOT-TOUCH) | Class 4a | 14 |
+| 31 | `tests/unit/tools/test_checkpoint_pool_config.py` | default (EXISTING, DO-NOT-TOUCH) | Class 4a | 12 |
+| 32 | `tests/unit/test_readiness_mcp_independence.py` | default (EXISTING, DO-NOT-TOUCH) | Class 4a | 6 |
+| 33 | `tests/integration/test_checkpoint_pool_burst_shapes.py` | integration (EXISTING, DO-NOT-TOUCH) | Class 4b | 3 |
+| 34 | `tests/integration/test_checkpoint_pool_ghost_waiters.py` | integration (EXISTING, DO-NOT-TOUCH) | Class 4b | 2 |
+| 35 | **whole-tree default-collected corpus** | default | **G1.5 / G3.5** | 30975 — the total `base_collected`; reconcile against the sum of rows 1–34 |
 
 **The whole-tree reconciliation (G1.5 / G3.5):** `base_collected` (row 35) must equal the sum of the declared `EXPECTED_COLLECTED_*` for the default-collected corpus (rows 1–19 + 27–32, de-duplicated — row 28 is the same file as row 9 and counts once). A **mismatch is FATAL**, not a rounding note.
 
@@ -88,7 +88,7 @@ HOME="$(mktemp -d)" \
 
 ---
 
-**Footnote — row 18 (`tests/unit/tools/test_dbpool_consistency_pin.py`):** this pack carries ONE strict-xfail canary — the AC-id cross-artifact check of the W-11 scanner (contract §6.4.2 check 3). Expected gate result: EXACTLY 1 xfail — the AC-id cross-artifact canary; 0 xfails (drift silently closed without the marker's removal) or 2+ xfails = FAIL. **Row 18's collected-count cell is UNCHANGED** — it still reads `TBD (R-1)`, and the fence's Δ1 cell parser must keep seeing that literal. This footnote is placed at the END of the file (not inside the table) so that the `| 18 |` row's cell positions and the reconciliation block's line anchors are untouched.
+**Footnote — row 18 (`tests/unit/tools/test_dbpool_consistency_pin.py`):** this pack carries ONE strict-xfail canary — the AC-id cross-artifact check of the W-11 scanner (contract §6.4.2 check 3). Expected gate result: EXACTLY 1 xfail — the AC-id cross-artifact canary; 0 xfails (drift silently closed without the marker's removal) or 2+ xfails = FAIL. **Row 18's collected-count cell is UNCHANGED** — it read `TBD (R-1)` until R-1 landed 2026-10-29 (now filled), and the fence's Δ1 cell parser must keep seeing that literal. This footnote is placed at the END of the file (not inside the table) so that the `| 18 |` row's cell positions and the reconciliation block's line anchors are untouched.
 
 ---
 
