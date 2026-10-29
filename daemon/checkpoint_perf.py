@@ -236,11 +236,17 @@ def log_checkpoint_read(
     retry never double-counts (the same once-per-outer-call contract
     the charge seam follows).
 
-    METRIC SIDE-EFFECTS ARE ALWAYS RECORDED — the operator's
-    measurement surface is independent of log volume (the same rule
-    :func:`log_saver_op` follows: suppressing the log line must not
-    starve the histogram). The ``[CheckpointPerf]`` line itself is
-    gated by ``CHECKPOINT_PERF_LOGS``.
+    THE KILL-SWITCH GATES THE WHOLE RECORDING (M-2): with
+    ``CHECKPOINT_PERF_LOGS=0`` NOTHING is recorded — not the log line
+    and NOT the metric series. (The saver-op lane
+    :func:`log_saver_op` records its histogram even when the log line is
+    suppressed; the READ lane deliberately does NOT. Rationale: the
+    read counters are a DIAGNOSTIC surface, and the read seam's cost is
+    an O(payload) walk + five metric updates on the hot path — the
+    operator's kill-switch must be able to turn the whole seam off,
+    not just its log line. The resource budget is accounted by the
+    CHARGE seam, which is independent of this switch and keeps working
+    while the resource monitor is enabled.)
 
     The recorded series:
 
@@ -257,17 +263,18 @@ def log_checkpoint_read(
     ``bytes_=0`` / ``rows=0`` so "reads per message" and "bytes per
     read" stay honest ratios.
     """
+    if not _logs_enabled():
+        # The kill-switch disables the whole recording (metrics AND
+        # log line) — see the docstring.
+        return
     bytes_ = max(0, int(bytes_))
     rows = max(0, int(rows))
     bucket = read_size_bucket_label(bytes_)
-    # Metric records FIRST and unconditionally (see the docstring).
     checkpoint_read_ops_total.inc(op=op)
     checkpoint_read_bytes_total.inc(bytes_, op=op)
     checkpoint_read_rows_total.inc(rows, op=op)
     checkpoint_read_size_bucket_hits_total.inc(op=op, bucket=bucket)
     checkpoint_read_size_bytes.labels(op=op).observe(bytes_)
-    if not _logs_enabled():
-        return
     logger.info(
         f"[CheckpointPerf] op=read_size "
         f"thread={thread_id[:8] if thread_id else '?'} "

@@ -464,11 +464,17 @@ class AnalyzeOutcome:
     explains a non-run: ``no_rows_deleted`` (the steady-state no-op
     sweep), ``no_shared_engine`` / ``not_postgresql`` (nothing to run
     against), ``engine_build_failed``.
+
+    ``deleted_rows`` and ``deleted_threads`` are SEPARATE units (R-e):
+    rows are rows (checkpoints + writes + blobs), threads are threads
+    (Op A's orphaned thread sweep). They are never summed into one
+    number.
     """
 
     ran: bool = False
     skipped_reason: str | None = None
     deleted_rows: int = 0
+    deleted_threads: int = 0
     analyzed_tables: list[str] = field(default_factory=list)
     failed_tables: list[str] = field(default_factory=list)
     duration_ms: int = 0
@@ -492,6 +498,7 @@ async def analyze_checkpoint_tables_after_prune(
     shared_engine: Engine | None,
     *,
     deleted_rows: int,
+    deleted_threads: int = 0,
     statement_ms: int = VACUUM_STATEMENT_TIMEOUT_MS,
     lock_ms: int = VACUUM_LOCK_TIMEOUT_MS,
     idle_ms: int = VACUUM_IDLE_IN_TXN_TIMEOUT_MS,
@@ -511,7 +518,15 @@ async def analyze_checkpoint_tables_after_prune(
         shared_engine: the daemon's shared SQLAlchemy engine — only its
             URL/dialect are read (the sweep runs on its OWN per-cycle
             engine). ``None`` ⇒ the sweep is skipped with a WARNING.
-        deleted_rows: rows actually deleted by this run. ``0`` ⇒ skip.
+        deleted_rows: rows actually deleted by this run (checkpoints +
+            writes + blobs). ``0`` ⇒ skip, UNLESS ``deleted_threads`` is
+            non-zero (see below).
+        deleted_threads: THREADS removed by the orphan sweep — a
+            DIFFERENT unit from rows (R-e: the two are never summed into
+            one number). An orphaned thread always removes at least one
+            ``checkpoints`` row, so a non-zero thread count is a
+            lower-bound proof that SOMETHING was deleted ⇒ the gate
+            fires on it too.
         statement_ms / lock_ms / idle_ms: per-statement timeouts for the
             dedicated engine (defaults = the plain-VACUUM(ANALYZE) lane's
             magnitudes).
@@ -519,10 +534,13 @@ async def analyze_checkpoint_tables_after_prune(
     Returns:
         An :class:`AnalyzeOutcome` describing what ran.
     """
-    outcome = AnalyzeOutcome(deleted_rows=max(0, int(deleted_rows or 0)))
+    outcome = AnalyzeOutcome(
+        deleted_rows=max(0, int(deleted_rows or 0)),
+        deleted_threads=max(0, int(deleted_threads or 0)),
+    )
 
     # ── Gate 1: did this run actually delete anything? ────────────────────
-    if outcome.deleted_rows <= 0:
+    if outcome.deleted_rows <= 0 and outcome.deleted_threads <= 0:
         outcome.skipped_reason = "no_rows_deleted"
         logger.debug(
             "[CheckpointPerf] post-prune ANALYZE skipped: no rows "
@@ -601,8 +619,9 @@ async def analyze_checkpoint_tables_after_prune(
     outcome.duration_ms = int((time.perf_counter() - t0) * 1000)
     logger.info(
         "[CheckpointPerf] op=post_prune_analyze deleted_rows=%d "
-        "analyzed=%d failed=%d duration_ms=%d",
+        "deleted_threads=%d analyzed=%d failed=%d duration_ms=%d",
         outcome.deleted_rows,
+        outcome.deleted_threads,
         len(outcome.analyzed_tables),
         len(outcome.failed_tables),
         outcome.duration_ms,
@@ -617,8 +636,10 @@ async def analyze_checkpoint_tables_after_prune(
 # of the bytes) — a LIVE measurement, not an inference. The census
 # makes that measurement REPEATABLE: one cheap aggregate per
 # maintenance cycle, landing in ``maintenance_runs.summary_json`` (the
-# reliable channel — the maintenance cycle's own skip line is DEBUG,
-# so a grep-based audit is a FALSE-NEGATIVE channel).
+# reliable channel — the maintenance cycle's own skip line WAS DEBUG,
+# so a grep-based audit was a FALSE-NEGATIVE channel; that line is
+# INFO since plan Track-1 item 8, but the audit row stays the
+# authoritative channel).
 #
 # WHY ``pg_column_size`` AND NOT ``octet_length``: ``pg_column_size``
 # reports the STORED size of the datum (compressed / TOAST-external

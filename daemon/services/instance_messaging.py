@@ -1967,12 +1967,12 @@ class InstanceMessagingService:
         contract are unchanged.
 
         The probe lives on the ADAPTER, so it is reached through the
-        manager (``self._manager._checkpointer``) — the service's own
-        ``_checkpointer`` property returns the RAW SAVER, which has no
-        ``has_checkpoint``.
+        manager's PUBLIC ``checkpointer`` property (the adapter
+        instance) — the service's own ``_checkpointer`` property
+        returns the RAW SAVER, which has no ``has_checkpoint``.
         """
         try:
-            adapter = self._manager._checkpointer
+            adapter = self._manager.checkpointer
             result = await adapter.has_checkpoint(instance_id)
             logger.info(f"[RESUME] instance={instance_id[:8]} has_checkpoint={result}")
             return result

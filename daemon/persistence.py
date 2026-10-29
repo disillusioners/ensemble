@@ -353,15 +353,22 @@ async def create_postgres_checkpointer(
                 # (documented in ``psycopg.Connection``): ``None``
                 # DISABLES prepared statements entirely, so every
                 # execution is planned fresh by the server (custom
-                # plan). The previous value ``0`` meant "prepare on
-                # first execution" — the statement then lives in the
-                # per-connection statement cache and, after the
-                # server's 5-execution threshold, PG may serve it from
-                # the cached GENERIC plan instead of planning it
-                # afresh. That cached generic plan is the mechanism
-                # the read-path audit attributed the 8.56 ms-vs-0.064
-                # ms regression class to (parameterized checkpoint
-                # reads — the pinned latest-checkpoint SELECT).
+                # plan). The PREVIOUS value was ``0`` — NOT psycopg3's
+                # default of ``5``: ``0`` means "prepare IMMEDIATELY on
+                # the first execution", while the psycopg default ``5``
+                # means "prepare only after the statement text has been
+                # executed five times". Preparation is PER-DISTINCT-
+                # STATEMENT-TEXT (the same query executed 4 times
+                # prepares ONE statement; three DIFFERENT statement
+                # texts prepare three). With the old ``0``, the
+                # statement lived in the per-connection statement cache
+                # and, after the server's 5-execution threshold, PG may
+                # serve it from the cached GENERIC plan instead of
+                # planning it afresh. That cached generic plan is the
+                # mechanism the read-path audit attributed the 8.56
+                # ms-vs-0.064 ms regression class to (parameterized
+                # checkpoint reads — the pinned latest-checkpoint
+                # SELECT).
                 # HONESTY: the 8.56 ms state was NOT reproducible on
                 # prod at audit time (autovacuum had analyzed; the live
                 # plan was an index scan) — the pathology is EPISODIC,
@@ -371,17 +378,19 @@ async def create_postgres_checkpointer(
                 # planner's statistics are never stale) lives in
                 # ``daemon/services/checkpoint_prune.py``.
                 #
-                # MEASURED COST (dev DB A/B, plan Track-1 item 3):
+                # MEASURED COST (dev DB A/B, plan Track-1 item 3 — the
+                # TESTER's measured numbers are AUTHORITATIVE):
                 # disabling the statement cache costs a re-parse per
-                # execution. On the dev DB (9 checkpoint rows) the
-                # pinned SELECT's median wall time went 0.96 ms
-                # (prepare_threshold=0) → 1.40 ms (None) — about
-                # +0.4 ms per read — while BOTH arms picked the SAME
-                # plan (no generic-plan divergence at that size). On a
-                # table where execution dominates planning, the
-                # relative overhead shrinks; the trade is parse time
-                # for plan freshness, and the pool keeps its exclusive
-                # per-connection checkout either way.
+                # execution. Measured +0.229…+0.254 ms per read, 95 %
+                # CI [+0.220, +0.261], across 4 repetitions with varied
+                # leg order — the cost is LOAD-DEPENDENT (it scales
+                # with how much of the read time is planning rather
+                # than execution). BOTH arms picked the SAME plan (no
+                # generic-plan divergence at that size; 0 non-timing
+                # EXPLAIN leaf differences across 10 EXPLAINs per leg).
+                # The trade is parse time for plan freshness, and the
+                # pool keeps its exclusive per-connection checkout
+                # either way.
                 "prepare_threshold": None,
                 "row_factory": dict_row,
             },

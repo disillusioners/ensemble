@@ -639,11 +639,12 @@ class VacuumFullResult:
 # where does its storage mass live?
 #
 # WHY IT LANDS IN ``maintenance_runs.summary_json``: the maintenance
-# cycle's own "skipping checkpoint_cleanup: system not idle" line is
-# logger.DEBUG — invisible at prod INFO — so a grep-based starvation
-# audit is a FALSE-NEGATIVE channel (the Phase-2 audit's finding). The
-# audit row is the reliable channel: it is written on EVERY terminal
-# cycle and is queryable after the fact.
+# cycle's own "Skipping <job>: system not idle" line WAS logger.DEBUG
+# — invisible at prod INFO — so a grep-based starvation audit was a
+# FALSE-NEGATIVE channel (the Phase-2 audit's finding). That line is
+# logger.INFO since plan Track-1 item 8, so the log channel works
+# again — but the audit row REMAINS the reliable channel: it is written
+# on EVERY terminal cycle and is queryable after the fact.
 #
 # HONESTY — what each number is:
 #
@@ -673,7 +674,11 @@ class CheckpointVersionCensus:
     ran: bool = False
     #: WHY the per-channel blob breakdown is missing (``None`` when it
     #: was taken): ``no_shared_engine`` / ``not_postgresql`` /
-    #: ``engine_build_failed`` / ``query_failed``.
+    #: ``engine_build_failed`` / ``query_failed`` — the reasons the
+    #: blob-byte census itself reports when it could not run — plus
+    #: ``census_failed``, the reason THIS census records when the
+    #: collection RAISED (the census wrapper caught the exception; the
+    #: breakdown is unavailable, NOT zero).
     blob_skipped_reason: str | None = None
     backend: str = "postgres"
     max_versions: int = 0
@@ -1810,7 +1815,7 @@ class CheckpointCleanupJob:
             blobs_summary: the Op E (reference-aware blob prune) summary
                 — its ``total_deleted`` counter is the actual row count.
             deleted_threads: number of orphaned threads swept by Op A.
-                A thread count, not a row count — it is a lower-bound
+                A THREAD count, not a row count — it is a lower-bound
                 proxy used ONLY for the "did anything get deleted?"
                 gate (an orphaned thread always removes at least one
                 ``checkpoints`` row).
@@ -1818,15 +1823,22 @@ class CheckpointCleanupJob:
         Returns:
             The :class:`AnalyzeOutcome` (also useful for tests).
         """
+        # R-e: the two units are SEPARATE — the row counts (checkpoints
+        # + writes + blobs) and the thread count (Op A's orphaned
+        # threads) are different quantities and must not be summed into
+        # one number. The gate still fires when EITHER is non-zero (an
+        # orphaned thread always removes at least one checkpoints row),
+        # but each number is now reported in its own unit.
         deleted_rows = (
             int(getattr(rows_summary, "deleted_checkpoints", 0) or 0)
             + int(getattr(rows_summary, "deleted_writes", 0) or 0)
             + int(getattr(blobs_summary, "total_deleted", 0) or 0)
-            + int(deleted_threads or 0)
         )
+        deleted_threads = int(deleted_threads or 0)
         return await analyze_checkpoint_tables_after_prune(
             self._shared_engine,
             deleted_rows=deleted_rows,
+            deleted_threads=deleted_threads,
         )
 
     async def _compute_row_prune_dry_run(

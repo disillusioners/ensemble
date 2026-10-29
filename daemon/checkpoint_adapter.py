@@ -48,13 +48,17 @@ from daemon._redact import redact_exc_str
 # import-cycle risk — see daemon/services/resource_monitor/charge.py.
 from daemon.services.resource_monitor.charge import (
     bounded_deep_size,
+    is_enabled as _charge_enabled,
     note_checkpoint_read,
 )
 # Track-1 item 4 (read instrumentation): the metric registry is
 # stdlib-only (no daemon imports) and the perf helper module depends
 # on it — no import-cycle risk.
 from daemon.checkpoint_metrics import checkpoint_read_measurement_errors_total
-from daemon.checkpoint_perf import log_checkpoint_read
+from daemon.checkpoint_perf import (
+    checkpoint_perf_logs_enabled,
+    log_checkpoint_read,
+)
 from daemon.constants import (
     CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE,
     CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES,
@@ -174,19 +178,65 @@ def _charge_instance_from_args(args: tuple, kwargs: dict) -> Optional[str]:
     return None
 
 
-def _charge_checkpoint_read(args: tuple, kwargs: dict, result: Any) -> None:
+def _shared_payload_size(result: Any) -> tuple[Optional[int], Optional[BaseException]]:
+    """ONE bounded deep-size walk for BOTH read consumers (M-2).
+
+    The read path has TWO consumers of the decoded payload's size:
+
+    * the resource-charge seam (``note_checkpoint_read``), which charges
+      the bytes to the instance's resource budget;
+    * the read instrumentation (``log_checkpoint_read``), which records
+      the bytes + rows in the metric registry.
+
+    Both used to run their OWN ``bounded_deep_size`` walk over the SAME
+    payload — two O(payload) walks per read, ON THE EVENT LOOP. This
+    helper performs the walk ONCE and hands the number to both.
+
+    Returns:
+        ``(size, error)`` — ``size`` is the measured byte count (``0``
+        for a MISS — a miss is a read with no payload), or ``None`` when
+        the walk FAILED. ``error`` is the exception that broke the walk
+        (``None`` on success). The walk NEVER raises out: the caller
+        counts the failure in the fail-open tripwire.
+    """
+    if result is None:
+        return 0, None
+    try:
+        size, _nodes, _partial = bounded_deep_size(result)
+        return size, None
+    except Exception as exc:  # noqa: BLE001 — fail-open by contract
+        return None, exc
+
+
+def _charge_checkpoint_read(
+    args: tuple,
+    kwargs: dict,
+    result: Any,
+    *,
+    size: Optional[int] = None,
+) -> None:
     """Charge a decoded checkpoint READ payload to the requesting
     instance (P2 T3). Fires ONCE per successful outer call — the retry
     wrapper (``_call_with_retry``) has already settled when this runs,
     so a transient connection retry NEVER double-charges (AC1). All
     failure modes are swallowed inside the charge module: observability
-    must never break the read path (R1)."""
+    must never break the read path (R1).
+
+    ``size`` — the PRE-COMPUTED deep size (M-2: ONE walk, two
+    consumers). ``None`` means the shared walk FAILED ⇒ nothing is
+    charged (there is no number to charge) and the tripwire already
+    counted the failure.
+    """
     if result is None:
         return
     instance_id = _charge_instance_from_args(args, kwargs)
     if instance_id is None:
         return
-    note_checkpoint_read(instance_id, result)
+    if size is None:
+        # The shared walk failed — the tripwire owns the failure
+        # signal; the charge is skipped (there is no size to charge).
+        return
+    note_checkpoint_read(instance_id, result, size=size)
 
 
 # ── Read instrumentation (plan Track-1 item 4) ─────────────────────────────
@@ -215,6 +265,11 @@ def _charge_checkpoint_read(args: tuple, kwargs: dict, result: Any) -> None:
 # bounded deep-size walk (the SAME estimator the resource-monitor
 # charge seam uses on this very payload). It is NOT the wire size — the
 # serializer's framing overhead is not included.
+#
+# ONE WALK, TWO CONSUMERS (M-2): the walk happens ONCE per read, at
+# the proxy chokepoint (:func:`_observe_read`), and the resulting
+# number is handed to BOTH the charge seam and the instrumentation.
+# The payload is never walked twice for the same read.
 
 
 def _derive_read_rows(op: str, result: Any) -> int:
@@ -277,12 +332,59 @@ def _record_read_measurement_error(op: str, exc: BaseException) -> None:
     )
 
 
-def _measure_checkpoint_read(op: str, args: tuple, kwargs: dict, result: Any) -> None:
+def _observe_read(op: str, args: tuple, kwargs: dict, result: Any) -> None:
+    """Observe ONE settled read: ONE size walk, BOTH consumers (M-2).
+
+    The read path has two consumers of the decoded payload's size — the
+    resource-charge seam (per-instance byte budget) and the read
+    instrumentation (bytes + rows in the metric registry). Both used to
+    run their OWN bounded deep-size walk over the SAME payload: two
+    O(payload) walks per read, ON THE EVENT LOOP.
+
+    This seam walks the payload ONCE and hands the number to both.
+
+    THE KILL-SWITCH: ``CHECKPOINT_PERF_LOGS=0`` turns the
+    instrumentation OFF (the recording is skipped — see
+    :func:`daemon.checkpoint_perf.log_checkpoint_read`). When the
+    resource monitor is ALSO off, NOTHING needs the size ⇒ the walk is
+    skipped entirely (no O(payload) work on the hot path). The charge
+    seam is INDEPENDENT of the perf kill-switch: it keeps working
+    (and keeps walking) while the monitor is enabled.
+    """
+    charge_on = _charge_enabled()
+    perf_on = checkpoint_perf_logs_enabled()
+    if not charge_on and not perf_on:
+        # Nobody needs the size — the walk is pure waste.
+        return
+    size, size_error = _shared_payload_size(result)
+    if charge_on:
+        _charge_checkpoint_read(args, kwargs, result, size=size)
+    if perf_on:
+        _measure_checkpoint_read(
+            op, args, kwargs, result, bytes_=size, size_error=size_error
+        )
+
+
+def _measure_checkpoint_read(
+    op: str,
+    args: tuple,
+    kwargs: dict,
+    result: Any,
+    *,
+    bytes_: Optional[int] = None,
+    size_error: Optional[BaseException] = None,
+) -> None:
     """Measure ONE settled checkpoint read (bytes + rows) — FAIL-OPEN.
 
     Called from the proxy forwarders AFTER the retry wrapper settled, so
     a transient connection retry is measured ONCE (the same
     once-per-outer-call contract the charge seam follows).
+
+    ``bytes_`` — the PRE-COMPUTED deep size of the payload (M-2: the
+    walk happens ONCE per read and is SHARED with the charge seam; this
+    function never walks the payload itself). ``None`` means the shared
+    walk failed — ``size_error`` then carries the exception, and the
+    failure is counted in the tripwire (never raised).
 
     NEVER raises: every failure is counted in
     ``checkpoint_read_measurement_errors_total`` and swallowed. The read
@@ -290,13 +392,15 @@ def _measure_checkpoint_read(op: str, args: tuple, kwargs: dict, result: Any) ->
     measured.
     """
     try:
+        if size_error is not None:
+            raise size_error
         if result is None:
             # A MISS is still a read (a DB round trip that returned no
             # checkpoint): count it with zero bytes / zero rows.
             bytes_ = 0
             rows = 0
         else:
-            bytes_, _nodes, _partial = bounded_deep_size(result)
+            bytes_ = max(0, int(bytes_ or 0))
             rows = _derive_read_rows(op, result)
         thread_id = _charge_instance_from_args(args, kwargs) or ""
     except Exception as exc:  # noqa: BLE001 — fail-open by contract
@@ -491,20 +595,23 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
         async def aget(self, *args, **kwargs):
             # P2 T3 charge seam: decoded payload charged AFTER the retry
             # wrapper settles ⇒ transient retry charges ONCE (AC1).
-            result = await self._call_with_retry("aget", args, kwargs)
-            _charge_checkpoint_read(args, kwargs, result)
             # Track-1 item 4: read instrumentation (bytes + rows) at the
             # proxy chokepoint. FAIL-OPEN — a measurement failure never
             # breaks or slows the read; the result is returned as-is.
-            _measure_checkpoint_read("aget", args, kwargs, result)
+            #
+            # M-2: ONE bounded deep-size walk per read, SHARED by both
+            # consumers (the charge seam + the instrumentation). The walk
+            # used to run TWICE over the SAME payload (twice the
+            # O(payload) work, on the event loop).
+            result = await self._call_with_retry("aget", args, kwargs)
+            _observe_read("aget", args, kwargs, result)
             return result
 
         async def aget_tuple(self, *args, **kwargs):
-            # P2 T3 charge seam: same once-per-outer-call contract.
+            # P2 T3 charge seam: same once-per-outer-call contract; the
+            # SAME single shared walk (M-2).
             result = await self._call_with_retry("aget_tuple", args, kwargs)
-            _charge_checkpoint_read(args, kwargs, result)
-            # Track-1 item 4: same fail-open contract as ``aget``.
-            _measure_checkpoint_read("aget_tuple", args, kwargs, result)
+            _observe_read("aget_tuple", args, kwargs, result)
             return result
 
         async def aput(self, *args, **kwargs):

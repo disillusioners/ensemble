@@ -3651,7 +3651,16 @@ class InstanceManager:
             )
         else:
             from daemon.ensemble_config import EnsembleConfig
-            self._checkpointer = await get_checkpointer(EnsembleConfig())
+            # R-b: the SAME checkpoint-pool knobs are threaded here. The
+            # fallback branch used to call the factory with NO kwargs, so
+            # it silently fell back to the factory defaults (10 / 5.0)
+            # and DROPPED the ladder-resolved values — the fallback was
+            # a knob-severed twin of the primary branch.
+            self._checkpointer = await get_checkpointer(
+                EnsembleConfig(),
+                checkpoint_pool_max_size=self.config.limits.checkpoint_pool_max_size,
+                checkpoint_pool_timeout_s=self.config.limits.checkpoint_pool_timeout_s,
+            )
         # NEW: Set event loop for CompletionRegistry (thread-safe notification)
         self._completion_registry.set_event_loop(self._loop)
         # NEW: Schedule periodic stale cleanup (every 10 minutes)

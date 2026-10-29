@@ -32,7 +32,7 @@ Public API (consumed by the integration coder — sampler/facade lane):
                  ``charge.set_enabled(False)`` at shutdown.
   Seams:         ``note_message_append(instance_id, obj)``
                  ``note_message_replace(instance_id, new_obj, old_obj)``
-                 ``note_checkpoint_read(instance_id, payload)``
+                 ``note_checkpoint_read(instance_id, payload, *, size=None)``
   Deep scan:     ``set_deep_bytes(instance_id, deep_bytes, partial_walk=)``
                  (+ the shared ``bounded_deep_size`` walker)
   Sampling:      ``snapshot_instance(iid)`` / ``snapshot_all()`` /
@@ -445,22 +445,33 @@ def note_message_replace(
     _registry.add_message_bytes(instance_id, new_size - old_size)
 
 
-def note_checkpoint_read(instance_id: str, payload: Any) -> None:
+def note_checkpoint_read(
+    instance_id: str, payload: Any, *, size: int | None = None
+) -> None:
     """Seam primitive (D3): charge the decoded checkpoint-read payload
     size. The caller (``_SaverRetryProxy`` read methods) invokes this
     ONCE per successful outer call, after the retry wrapper has
-    settled — a transient connection retry never double-charges."""
+    settled — a transient connection retry never double-charges.
+
+    ``size`` — the PRE-COMPUTED deep size of ``payload``. The proxy
+    read path computes the bounded deep size ONCE and hands the SAME
+    number to both consumers (this seam + the read instrumentation),
+    so the payload is walked once per read, not twice (M-2). When
+    ``size`` is omitted (a legacy caller that has no pre-computed
+    value), the walker runs here — the seam stays self-sufficient.
+    """
     if not _registry._enabled or not instance_id or payload is None:
         return
-    try:
-        size, _nodes, _partial = bounded_deep_size(payload)
-    except Exception:
-        logger.warning(
-            "resource-charge: checkpoint sizing failed (instance %.8s)",
-            instance_id,
-            exc_info=True,
-        )
-        return
+    if size is None:
+        try:
+            size, _nodes, _partial = bounded_deep_size(payload)
+        except Exception:
+            logger.warning(
+                "resource-charge: checkpoint sizing failed (instance %.8s)",
+                instance_id,
+                exc_info=True,
+            )
+            return
     _registry.add_checkpoint_bytes(instance_id, size)
 
 
