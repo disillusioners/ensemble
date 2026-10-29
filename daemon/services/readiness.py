@@ -1949,7 +1949,11 @@ def make_checkpoint_saver_probe(
             sentinel_initialized = True
         # Read-only tick. None is HEALTHY (no row ≠ broken path);
         # only an exception (or the outer timeout) degrades.
-        await saver.aget_tuple(sentinel_read_config)
+        # ``cache_bypass=True`` (read-cache plan §4.1): the sentinel
+        # must exercise the REAL production path (retry proxy + lock
+        # + charge), skipping ONLY the cache layer — a cache hit would
+        # prove the cache healthy, not the checkpoint path.
+        await saver.aget_tuple(sentinel_read_config, cache_bypass=True)
 
     def _saver_lock_held() -> bool:
         """The NON-BLOCKING saver-lock observation (D1a).
