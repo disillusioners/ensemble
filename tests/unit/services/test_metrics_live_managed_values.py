@@ -142,6 +142,43 @@ def test_a_resolver_failure_keeps_the_last_known_values():
     ) == 5000
 
 
+def test_a_raising_derivation_leaves_the_cache_and_the_handler_consistent():
+    """L-NEW-F1 — the three cache writes commit ATOMICALLY.
+
+    A provider whose gate value explodes on ``bool()`` fails WHILE the
+    store is being prepared: the cache must keep the OLD values AND
+    the handler must keep the OLD gate value (never a half-written
+    cache where the values are new and the flag is old).
+    """
+
+    class _Explosive:
+        def __bool__(self) -> bool:
+            raise RuntimeError("boom")
+
+    # The boot fallback: the gate is ON and the cache is empty.
+    metrics_gate.set_managed_metrics_enabled(True)
+    metrics_gate.set_managed_metrics_provider(
+        metrics_gate.build_managed_values_provider(
+            lambda: {metrics_gate.MANAGED_KEY: _Explosive()}
+        )
+    )
+
+    # ``now=None`` ⇒ the real monotonic clock: the refresh is NOT
+    # short-circuited by the TTL window (a synthetic stamp would be
+    # older than the boot seed and the read would never happen).
+    snapshot = metrics_gate.refresh_managed_values(now=None, ttl_s=0.0)
+
+    # The OLD snapshot is returned, the cache still holds the OLD
+    # values, and the handler still sees the OLD gate value — the
+    # cache and the handler are CONSISTENT (both old).
+    assert snapshot == {}
+    assert metrics_gate.managed_values_snapshot() == {}
+    assert metrics_gate.metrics_enabled() is True
+    assert metrics_gate.live_managed_value(metrics_gate.MANAGED_KEY, False) is (
+        False
+    )
+
+
 def test_the_provider_read_is_pure_no_io():
     """The registry consults its providers under a metric's own lock —
     the provider must never do I/O."""

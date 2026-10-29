@@ -431,12 +431,21 @@ def refresh_managed_values(
         _refreshing = True
     try:
         values = dict(provider() or {})
+        # L-NEW-F1 — derive the gate's value BEFORE touching the cache:
+        # a raising derivation must not leave a half-written cache (the
+        # values rebound while the gate's flag still holds the old
+        # value). The three writes below then commit ATOMICALLY under
+        # the lock: the cache and the gate's flag are always the same
+        # generation.
+        enabled = (
+            bool(values[MANAGED_KEY]) if MANAGED_KEY in values else None
+        )
         with _lock:
             _managed_values = values
-            if MANAGED_KEY in values:
+            if enabled is not None:
                 # The kill-switch's DB tier — when the DB has no override
                 # row the BOOT fallback stays in force.
-                _managed_enabled = bool(values[MANAGED_KEY])
+                _managed_enabled = enabled
             _managed_refreshed_at = stamp
         return values
     except Exception as exc:  # noqa: BLE001 — never raise into the caller
@@ -448,8 +457,9 @@ def refresh_managed_values(
         )
         return current_values
     finally:
-        # ONE reset path (H1): the single-flight flag is cleared in
-        # exactly one place, so no failure between two reset sites can
+        # ONE release site in the refresh path (plus the test seam in
+        # ``reset_for_tests``): the single-flight flag is cleared here
+        # and nowhere else, so no failure between two reset sites can
         # leave the flag LATCHED (a latched flag would stall every
         # later refresh).
         with _lock:

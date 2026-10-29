@@ -16,7 +16,8 @@ One autouse fixture, one reset path: the env var is unset, the gate is
 reset before AND after every test in this directory.  The fixture is
 autouse and ORDER-INDEPENDENT: it touches only the metrics gate's own
 state, so it cannot couple two tests (and it makes them MORE isolated,
-not less).
+not less).  This paragraph is the canonical statement of that contract
+— the fixture below does not repeat it.
 
 THE SOCKET DOUBLES LIVE HERE — ONCE
 ------------------------------------
@@ -29,6 +30,8 @@ file descriptor that would never be readable.
 """
 
 from __future__ import annotations
+
+from collections.abc import Iterator
 
 import pytest
 
@@ -86,18 +89,22 @@ class FakeSocketFactory:
 
 @pytest.fixture
 def fake_socket_factory() -> type[FakeSocketFactory]:
-    """The socket-factory double (shared — never copy it per module)."""
+    """The socket-factory double (shared — never copy it per module).
+
+    Provisioned for P1a (the P1a legs request it); the P0 legs use the
+    class directly.
+    """
     return FakeSocketFactory
 
 
 @pytest.fixture(autouse=True)
-def _clean_metrics_gate(monkeypatch: pytest.MonkeyPatch):
+def _clean_metrics_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
     """Every metrics test starts (and ends) from a pristine gate.
 
-    The env var is UNSET and ``metrics_gate.reset_for_tests()`` clears
-    the gate's process-global state before AND after the test.  The
-    fixture is order-independent: it touches only the metrics gate's
-    own state.
+    See the module docstring above for the contract (one reset path,
+    order-independent).
     """
     monkeypatch.delenv(metrics_gate.ENV_VAR, raising=False)
     metrics_gate.reset_for_tests()

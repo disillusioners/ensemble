@@ -196,9 +196,14 @@ class _HeaderLookup(Protocol):
     ``self.headers``). The live carrier's ``get`` is CASE-INSENSITIVE;
     the dict's is not — the header names below are spelled in the
     canonical form.
+
+    The lookup is POSITIONAL-ONLY (``/``): ``dict.get`` takes no
+    keyword arguments and ``HTTPMessage.get`` spells its second
+    parameter ``failobj`` — a positional-only protocol is satisfied by
+    both (the parameter names never have to agree).
     """
 
-    def get(self, name: str, default: Any = None) -> Any: ...
+    def get(self, name: str, default: Any = None, /) -> Any: ...
 
 
 def origin_is_trusted(headers: _HeaderLookup) -> bool:

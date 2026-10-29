@@ -335,8 +335,8 @@ class CensusSampler:
         from daemon.services import metrics_gate
 
         # A PURE read — the census never refreshes the managed tier
-        # (that is the listener's job; the census must not touch the
-        # DB for a boolean).
+        # (that is the refresher thread's job; the census must not touch
+        # the DB for a boolean).
         return metrics_gate.metrics_enabled()
 
     # ─── the census ───────────────────────────────────────────────────

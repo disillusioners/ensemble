@@ -2297,7 +2297,7 @@ async def lifespan(app: FastAPI):
     #
     # DEGRADATION: a bind failure (or any boot failure) disables the
     # listener and logs it — the daemon CONTINUES (the resource-monitor
-    # boot degradation block below is the pattern). The kill-switch
+    # boot degradation block above is the pattern). The kill-switch
     # DEFAULTS OFF: nothing is exposed until an operator says so.
     try:
         from daemon.services import metrics_gate

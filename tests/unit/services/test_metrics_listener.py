@@ -30,11 +30,6 @@ from daemon.services import metrics_listener as ml
 from tests.unit.services.conftest import FakeSocketFactory
 
 
-# ─── the fake socket (NO real bind, ever) ──────────────────────────────────
-# The socket doubles are SHARED (tests/unit/services/conftest.py) — a
-# module that copies them is a module that will drift.
-
-
 # ─── leg (a): the injectable socket factory ───────────────────────────────
 
 
