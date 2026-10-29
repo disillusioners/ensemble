@@ -16,8 +16,11 @@ What this pin asserts:
 * the abandoned ``to_thread`` future **returns**;
 * the connection is **returned to the pool** —
   ``engine.pool.checkedout()`` returns to baseline within the bound;
-* the backend row is **EXPECTED TO PERSIST** in ``pg_stat_activity``
-  with ``state = 'idle'``.
+* the backend row **PERSISTS** in ``pg_stat_activity`` with
+  ``state = 'idle'`` — the persistence leg is **implemented and
+  asserted** (T-H3, option (b)): the probe's backend row is fetched
+  and its state checked (D-05's stated observable). The pack's
+  ``EXPECTED_COLLECTED = 2`` counts this leg as the second test.
 
 The ``"row gone from pg_stat_activity"`` assertion is **NOT** part of
 this pin — that signature belongs to the engine-level
@@ -68,6 +71,10 @@ _PG_URL = (
     f"postgresql+psycopg://{_PG_USER}:{_PG_PASSWORD}"
     f"@{_PG_HOST}:{_PG_PORT}/{_PG_DB}"
 )
+
+#: The probe engine's distinctive application_name — it binds the
+#: persistence census to the PROBE's backend row.
+_PROBE_APPLICATION_NAME = "dbpool-f4b-probe"
 
 
 @pytest.fixture(scope="module")
@@ -191,6 +198,88 @@ class TestF4bStatementBound:
         finally:
             stop.set()
             holder.join(timeout=5)
+            engine.dispose()
+
+
+    def test_the_backend_row_persists_in_the_idle_state(self, pg_url):
+        """T-H3 (option (b)) — the PERSISTENCE leg, implemented and
+        asserted: after the server cancels the blocked statement, the
+        probe's backend row is STILL in ``pg_stat_activity`` with
+        ``state = 'idle'`` (the connection returned to the pool; the
+        BACKEND is alive).
+
+        The row-gone signature belongs to the engine-level
+        ``idle_in_transaction_session_timeout`` — which this lane does
+        NOT install (D-47: defined but not applied) — so the row MUST
+        persist here.
+        """
+        engine = create_engine(
+            pg_url,
+            poolclass=QueuePool,
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,
+            # A DISTINCTIVE application_name binds the census to the
+            # PROBE's backend (the query text cannot — the probe's last
+            # statement is its own ROLLBACK, D-07).
+            connect_args={"application_name": _PROBE_APPLICATION_NAME},
+        )
+        # A DEDICATED census engine: the census must not reuse the
+        # probe's pooled backend (that would overwrite its last query
+        # and hide the row we assert on).
+        census_engine = create_engine(pg_url, pool_pre_ping=True, future=True)
+        stop = threading.Event()
+        holder = threading.Thread(
+            target=_hold_lock_on_task, args=(pg_url, stop), daemon=True
+        )
+        holder.start()
+        try:
+            time.sleep(0.75)
+
+            probe = make_queue_probe(engine)
+            outcome: dict = {}
+            worker = threading.Thread(
+                target=lambda: outcome.update(_call(probe)), daemon=True
+            )
+            worker.start()
+            worker.join(timeout=QUEUE_PROBE_TIMEOUT_S * 4)
+            assert outcome.get("error") is not None, (
+                "F4-b (persistence leg): the probe did not fail — the "
+                "statement was not cancelled, so there is no post-"
+                "cancellation backend state to assert"
+            )
+
+            # Let the connection return to the pool (the backend stays).
+            deadline = time.monotonic() + 10
+            while engine.pool.checkedout() > 0 and time.monotonic() < deadline:
+                time.sleep(0.1)
+
+            with census_engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        "select pid, state from pg_stat_activity "
+                        "where datname = current_database() "
+                        "and pid <> pg_backend_pid() "
+                        "and application_name = :app"
+                    ),
+                    {"app": _PROBE_APPLICATION_NAME},
+                ).all()
+            assert rows, (
+                "F4-b (persistence leg): the probe's backend row is GONE "
+                "from pg_stat_activity — the row-gone signature belongs "
+                "to the engine-level idle_in_transaction_session_timeout, "
+                "which this lane does NOT install (D-47)"
+            )
+            states = {row[1] for row in rows}
+            assert states == {"idle"}, (
+                f"F4-b (persistence leg): the backend row persisted but "
+                f"its state was {sorted(states)} — expected 'idle' (the "
+                "connection returned to the pool; the backend is alive)"
+            )
+        finally:
+            stop.set()
+            holder.join(timeout=5)
+            census_engine.dispose()
             engine.dispose()
 
 
