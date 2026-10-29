@@ -11,6 +11,8 @@ Branch: feature/metrics-collection @ 9bbef71c1 (worktree agents-ensemble-wt-metr
 
 **Corrected "Why" (per checkpoint-bench-20261029.md).** The v1 narrative attributed the 17 s checkpoint INSERTs to raw write throughput on Postgres-on-Longhorn. The bench REJECTED that: writes are fast (28 ms/full PUT, 78 PUT/s concurrent, max 254 ms over 6 min sustained; fsync cost ≈2.4 ms). The 17 s event was a stall/contention artifact (WAL-checkpoint window — checkpointer averages 2.3 min write time per checkpoint, 15% forced; or pool contention), not storage throughput. **The real bottleneck is the read path**: cold 1–2.5 MB blob reads cost 1–2.4 s each (scatter of ~2 KB TOAST chunks over Longhorn) because (a) shared_buffers=160 MB vs a 13 GB TOAST, (b) TOAST ~10× bloated with dead chunks from pruned-but-never-reclaimed versions, (c) every checkpoint read is a fresh cache-miss storm. Hence the story is **read latency + TOAST bloat + shared_buffers**, not write throughput. Metric design follows: `ensemble_checkpoint_op_seconds` (CR-3: buckets extended top ≥120 s so 73–99 s reads do not collapse into +Inf) + `ensemble_checkpoint_blobs_table_bytes` (CheckpointBloat alert) + slow-op ledger (existing) as the CheckpointSlow source. Write-side "slow" is now expected to be rare; the metric exists to catch the stall/contention artifact, not throughput.
 
+**Write-side restatement (A6/A7).** The checkpoint write path (`aput`/`aput_writes`) runs through `daemon/checkpoint_adapter.py:377-379` and bypasses `time_saver_op`, so `ensemble_checkpoint_op_seconds{op="aput"}` cannot fire today. The declared `op` enum is narrowed to the observable set (`aget`) until the adapter's existing charge seam (`_charge_checkpoint_read`, `:371-374`) is extended to `aput`/`aput_writes` in P1b (own risk row — it touches the write path under stress). Write-side "slow" is expected to be rare; the metric catches the stall/contention artifact, not throughput (registry wired to collectors, exposition unwired — see metric-catalog.md CR-3 record correction).
+
 **Incident → metric table (corrected).**
 
 | Incident (real) | By-hand diagnosis | Metric that replaces it | Alert |
@@ -33,7 +35,7 @@ Branch: feature/metrics-collection @ 9bbef71c1 (worktree agents-ensemble-wt-metr
 
 **Out of scope (explicit).** Distributed tracing/APM; per-request HTTP histograms; log aggregation pipelines; synthetic canaries; high-cardinality per-instance breakdowns beyond fixed vocabularies (`site`/`lane`/`server`/status/tier); skill-metrics lane `/api/skills/{id}/metrics` (m5 — already has its own surface, `/api/skills/{id}/metrics`; re-surfacing in /metrics would duplicate and double-count); VictoriaMetrics/Mimir compat claim (m9 — dropped unless tested; target is Prometheus+Grafana); k8s deploy (CR-5).
 
-**Deploy target (RATIFIED, decision 1).** Host binaries / VM compose. k8s is explicitly out-of-scope and is a separate project — the v1 reference to `infranstructure/k8s/` (misspelled and absent in both trees) is withdrawn; no k8s manifests ship in this plan. Retention: 30 d raw / 90 d 5 m-downsampled (plenty at this scale).
+**Deploy target (RATIFIED, decision 1).** Host binaries / VM compose. k8s is explicitly out-of-scope and is a separate project — the v1 reference to `infranstructure/k8s/` (misspelled and absent in both trees) is withdrawn; no k8s manifests ship in this plan. Retention: Prometheus 30 d raw / 90 d 5 m-downsampled; a **Prometheus process restart preserves history (WAL replay)** — only **storage loss** destroys it. PG tiers (resource_monitor) are separate: 48 h raw / 14 d minute-rollup / 180 d hour-rollup (see §3 PG retention ladder).
 
 **Cardinality budget (MA-10).** Daemon-origin ≤2 k series (holds: ~450–600). Stock exporters (node_exporter, postgres_exporter) are measured separately and are NOT counted against the daemon budget; an AC asserts the split.
 
@@ -47,9 +49,23 @@ Branch: feature/metrics-collection @ 9bbef71c1 (worktree agents-ensemble-wt-metr
 
 **Dependency-free renderer (decision 5 + MA-16, REAFFIRMED loudly).** The v1 Gap-5/A-8 `no-prometheus_client` decision is REAFFIRMED, not silently superseded. The renderer stays dependency-free (no `prometheus_client`, no OTel). Exposition is **Prometheus classic text exposition format** (NOT OpenMetrics — MA-16 corrects the v1 mislabel). The existing `checkpoint_metrics.py` registry (Counter + Histogram + `render_metrics()`) generalizes into the central registry (CR-3); no new dependency is introduced. The supersession is named here so reviewers see it is a deliberate reaffirmation, not an oversight.
 
-**Off-loop discipline (non-negotiable).** Metric collection never adds event-loop work: background threads, atomic counters, samplers off-loop (existing lag probe + wedge watchdog are the templates). One `/proc` dialect (reuse `resource_monitor/proc_readers.py`, sampler.py already imports it). Per-request ENSEMBLE_METRICS_ENABLED read (MA-1).
+**Registry locking contract (A9, CR-1 mitigation).** Per-metric locks only — **no global registry lock** (one wedged writer must not stall all families). Writers update a family's own state under its own short lock and atomically swap a published pointer (plain assignment, atomic under the GIL); render uses **non-blocking try-acquire** (bounded wait) and on contention serves the **last published snapshot** plus a `# <family> unavailable: lock_contended` comment line. Bucket counts are stored **non-cumulative** and accumulated at render, so `Histogram.observe` is O(1). This is what makes `/metrics` survive a wedged writer instead of hanging.
+
+**Off-loop discipline (restated, A28).** The blanket "never adds event-loop work" claim is literally false — every increment is loop or executor-thread work. The accurate rule: **no blocking work, no I/O, no logging, and no per-chunk work on the event loop**, plus **≤1 `time.perf_counter()` read per observation window**. Background threads, atomic counters, samplers stay off-loop (existing lag probe + wedge watchdog are the templates); one `/proc` dialect (reuse `resource_monitor/proc_readers.py`, sampler.py already imports it); per-request `ENSEMBLE_METRICS_ENABLED` read (MA-1). Metric increments inside `message_tap` must sit **within the tap's existing `try/except`** (`daemon/services/message_tap.py:308-309`) so a metric error cannot produce per-turn WARNING noise. Per-turn cost budget: ≈4 µs added work per tool-round turn (8 counter incs + 2 histogram observes) against a multi-second turn — **<0.01%**; the tap's own DB write exceeds any metric cost by 3–4 orders of magnitude.
 
 **Textfile collector (R18, genuinely new).** House bash scripts (launcher/promote/stage) append/rewrite `*.prom` files in `$INSTALL_DIR/data/metrics/` (node_exporter textfile collector). Catches the bash spins in-daemon metrics cannot see. Journal metrics via python twin `daemon/tools/upgrade_journal.py` (decision 2 — never touch `scripts/upgrade/`).
+
+**Listener thread/loop topology (A12, CR-1 mitigation).** The listener owns a **dedicated daemon thread** running stdlib `http.server.ThreadingHTTPServer` bound to `127.0.0.1` on its own port, started from the FastAPI lifespan (Option A). A shared-main-event-loop listener is **REJECTED** — it inherits the CR-1 failure (the scrape dies exactly when the daemon wedges). **Render-never-blocks:** per-metric locks only (no global registry lock); render uses non-blocking try-acquire (bounded wait, e.g. 50 ms) and on contention serves the **last published snapshot** plus a `# <family> unavailable: lock_contended` comment line; writers update a family's own state under its own short lock and atomically swap a published pointer (plain assignment, atomic under the GIL) — copy-on-publish. **GIL split:** an **I/O-bound wedge survives** (I/O releases the GIL) but a **CPU-spin wedge does not** (the spin holds the GIL continuously) — so CR-1's out-of-process witnesses (node_exporter textfile, `up==0`/`absent()`, `scrape_duration_seconds`) remain **MANDATORY**, not optional. CR-3 reuse story: the registry is **wired to collectors, exposition unwired** — only `render_metrics()` is unwired in production (`checkpoint_perf.py:28-30` imports the singletons, observes `:190`/`:198`, increments `:233`).
+
+**Boot/teardown lifecycle (A13).** Boot placement, inside the FastAPI **lifespan**: start after `resource_monitor` (`daemon/api.py:2241-2288`) and after `llm_stream_watchdog` (`daemon/api.py:2212-2226`); a bind failure degrades the listener to **disabled + logged**, mirroring `daemon/api.py:2282-2287` (never abort boot — decision 3). Teardown order: stop event → `server.shutdown()` → `join(timeout=5)` → close, **after** `resource_monitor` stop (`daemon/api.py:3411-3433`) and wedge-capture stop (`daemon/api.py:3435-3464`); the thread is `daemon=True` so a wedged join cannot hang shutdown.
+
+**Storage-split boundary rule (A18).** Per-instance attribution = **PG-only via `/api/resources/*`**; every daemon-origin `/metrics` family is **aggregate**; **no daemon-origin family carries a per-instance label**. Enforced in catalog §8 as a cardinality rule (not just stated).
+
+**PG retention ladder (A19).** resource_monitor PG tiers: raw **48 h** (`retention_raw_minutes=2880`), minute-rollup **14 d** (`retention_minute_hours=336`), hour-rollup **180 d** (`retention_hour_days=180`) — `daemon/config.py:818-888`. Interplay rule: any quantity visible on both sides is governed by **Prometheus for alerting (30 d+)** and by **PG for per-instance API views**; questions beyond Prometheus's 90 d window are answered from PG's 180 d hour-rollup tier. Prometheus side: 30 d raw / 90 d 5 m-downsampled.
+
+**Two-sampler consistency (A20).** The wedge-capture sampler and the resource-monitor sampler read `/proc` independently — one shared reader module (`resource_monitor/proc_readers.py`), two independent loops. They are **not** required to agree byte-for-byte; consistency is eventual within one resource-monitor sample interval. Stated so a future reader does not "fix" a non-bug.
+
+**Freeze rules (A27).** Import the listener on the **lifespan path** (not `daemon/api.py` module top level) so the PyInstaller analyzer pulls it. Register aliases at **registry-construction time** (not lazily) so a cold start still emits the deprecated names for the remainder of their one-release window.
 
 ## 4. Phases
 
@@ -65,6 +81,8 @@ Branch: feature/metrics-collection @ 9bbef71c1 (worktree agents-ensemble-wt-metr
 
 P0 is on the critical path for all; P1a/b/c can run in parallel after P0 lands (loose coupling between them).
 
+**Coupling note (A26):** P2 **alert authoring** depends on the referenced families' completion (e.g. `SweepHotLoop` depends on the `lane` vocabulary pinned in P1a/b/c); **dashboards may be drafted earlier**. The coupling map marks P0↔P2 as "loose" for the textfile dir only; the alert dependency is the tight part.
+
 ### P0 — Foundation (owner: devops; ~2–3 days)
 
 Goals: listener + security; kill-switch; registry generalization; census discipline; resource-spine health gate; vocabularies enumerated.
@@ -74,14 +92,16 @@ Metric families added (names only): none new — P0 builds the plumbing. (Existi
 Tasks:
 | # | Task | Depends On | Acceptance |
 |---|------|------------|------------|
-| 1 | Stand up localhost-bound /metrics listener (127.0.0.1:<port>) | none | Port binds loopback only; main port 9797 returns 404 for /metrics |
+| 1 | Stand up localhost-bound /metrics listener (127.0.0.1:<port>) | none | Port binds loopback only; main port 9797 returns 404 for /metrics. **Boot placement (A13):** inside the FastAPI lifespan, after `resource_monitor` (`daemon/api.py:2241-2288`) and `llm_stream_watchdog` (`:2212-2226`); bind failure → disabled + logged (`:2282-2287`), never abort boot. Teardown: stop event → `shutdown()` → `join(timeout=5)` after resource_monitor stop (`:3411-3433`) and wedge-capture stop (`:3435-3464`); `daemon=True` thread. |
 | 2 | Wire origin guard (maintenance_origin_guard.py pattern) for browser access | 1 | Browser scrape from non-loopback origin returns 403 origin_not_trusted |
-| 3 | Implement ENSEMBLE_METRICS_ENABLED per-request read, default OFF | 1 | Kill-switch flips without restart; /metrics returns empty-shape 200 when off |
+| 3 | Implement ENSEMBLE_METRICS_ENABLED per-request read, default OFF | 1 | Kill-switch flips without restart; /metrics returns empty-shape 200 when off. **Semantics (A14):** truthy set = `{1, true, yes}` case-insensitive; everything else OFF (fail closed — `ture`/`on`/`enabled`/`0`/empty → OFF). Layering: env explicit-OFF always wins; env UNSET defers to the managed-key chain (unset + managed key on ⇒ ON; unset + default ⇒ OFF); explicit env ON overrides the managed-key default. One boot log line when env unset while managed key on. Per-request env read stays (~50–100 ns, no syscall; no TTL cache). |
 | 4 | Generalize checkpoint_metrics.py registry into central registry (Counter/Gauge/Histogram + render); extend checkpoint buckets top ≥120 s | none | render() emits all registered families; 73–99 s read lands in finite bucket |
 | 5 | Register managed keys (§5) with bounds mirroring pydantic Fields | 4 | len(MANAGED_KEYS) census updated; bounds validated at write time |
 | 6 | Enumerate vocabularies fully (MA-12) | none | Doc lists 10 instance statuses, 7 sweep lanes, MCP DB-row-bounded server list, version-label policy |
 | 7 | Census discipline: dedicated non-pooled connection, ≥15 s cadence, application_name='ensemble-metrics-census', fragment→site map, statement_timeout | none | Integration test asserts non-pooled connection usage |
 | 8 | Resource-spine health gate: "4 tables accepting rows" (depends on WS-A flusher.py:770 fix) | none | resource_daemon_bucket, resource_instance_sample, resource_pid_map, resource_limit_policy all accept rows |
+| 9 | Name worker threads at construction (`worker_pool.py:253`: `name=f"worker-{lane}-{worker_id}"`) so F2 thread groups are honest from first render | none | `ensemble_thread_cpu_seconds{thread_group="worker_pool"/"chat_worker_pool"}` no longer folds into `other` (A23; moves cost out of a P1a rework cycle) |
+| 10 | Census execution-home: dedicated daemon thread (`CensusSampler`, `daemon=True`, `time.monotonic` tick) — not the listener thread, not the event loop (A23; catalog §9.1) | none | Census survives a wedge; statement_timeout 5 s / connect_timeout 3 s (catalog §9.1) |
 
 Exit criteria:
 - `/metrics` reachable only on 127.0.0.1:<port>; main port 9797 returns 404 for /metrics; origin guard wired.
@@ -91,8 +111,20 @@ Exit criteria:
 - "4 tables accepting rows" exit criterion for resource spine (MA-3).
 - Census discipline in place (MA-13).
 - Managed keys registered (§5) with bounds mirroring pydantic Fields (R9).
+- **Versioned vocabulary-amendment procedure (A24):** label NAMES + closed enums pinned to
+  current code at P0; any vocabulary change bumps `ensemble_metrics_vocabulary_version`; a
+  bump that changes a literal label VALUE appearing in shipped PromQL is a **breaking alert
+  change** and needs a stated compatibility rule (catalog §8 rule + F0.4).
 
-Test plan: unit tests for registry render + bucket extension; integration test for listener bind (asserts 127.0.0.1 only); kill-switch flip test; resource-spine "4 tables accepting rows" gate test; census connection test (asserts non-pooled).
+**P0 exit-criteria split (A22).** **P0-core** (ships independently): listener, registry,
+kill-switch, census discipline, vocabularies, managed keys. **P0-spine** (the "4 tables
+accepting rows" gate): owned by the parallel `rm-flusher-fix` worktree (WS-A) and tracked as a
+**separate gate** — P0 risk 1's "P0 can ship without the resource spine" is reconciled with the
+exit criterion (no contradiction). The gate criteria itself is unchanged:
+`resource_daemon_bucket`, `resource_instance_sample`, `resource_pid_map`,
+`resource_limit_policy` all accept rows.
+
+Test plan: unit tests for registry render + bucket extension; integration test for listener bind (asserts 127.0.0.1 only); kill-switch flip test; resource-spine "4 tables accepting rows" gate test; census connection test (asserts non-pooled). **Plus (A16):** origin-guard 403 (handler-level request through the guard; non-loopback origin → 403 `origin_not_trusted`); bind-failure degradation (inject a failing bind → listener disabled + logged, boot continues); wedged-writer simulation (acquire a metric's lock in the test thread, then render → scrape still returns within 100 ms, family skipped with `lock_contended`); kill-switch typo parsing (`ENSEMBLE_METRICS_ENABLED=ture` → OFF). **Harness:** injectable socket factory (ephemeral port 0 or no socket) so no test needs a real port; `render_metrics()` stays pure/port-free.
 
 Owner role: devops (infra/listener) + backend (registry/census).
 
@@ -113,11 +145,11 @@ Tasks:
 | # | Task | Depends On | Acceptance |
 |---|------|------------|------------|
 | 1 | Export lag probe as `ensemble_loop_lag_seconds` histogram (reuse, no duplicate) | P0-4 | p50/p95 gauges + documented dependency when wedge-capture off (MA-4) |
-| 2 | Thread-CPU sampler reuse + bucketing into ~8 groups (MA-2) | P0-4 | sampler.py reused; one /proc dialect; groups bounded |
+| 2 | Thread-CPU sampler reuse + bucketing into **11 groups** (MA-2; catalog F2 / §8.2) | P0-4 | sampler.py reused; one /proc dialect; groups bounded |
 | 3 | Wedge-capture counter hook | P0-1 | counter increments on trigger; the shell textfile writer ships in **P2** (catalog F22 — external sampler owner) |
-| 4 | LLM tokens/cost + real outcome enum + stall count at watchdog abort site (MA-8) | P0-4 | truncation-undercount caveat documented (graph.py:3876–3910) |
+| 4 | LLM tokens/cost + real outcome enum + stall count at watchdog abort site (MA-8) | P0-4 | truncation-undercount caveat documented (graph.py:3876–3910). **Observation site (A2):** hook the **terminal-usage branch `daemon/graph.py:3776-3784`** (the `len(choices) == 0` path that carries the token counts and returns early) — NOT `:3811-3812` (non-terminal, per-chunk) — plus a **per-call dedupe**; rule: **terminal-chunk only, never per-chunk** |
 | 5 | Compaction pressure hooks at compaction.py:1128 (m6) | P0-4 | compaction_fired_total{rung} fires on L1/L2/L3 |
-| 6 | Tool-call perf via message_tap.py seam (m7) | P0-4 | volume + latency per tool; not graph internals |
+| 6 | Tool-call perf via message_tap.py seam (m7) | P0-4 | volume per tool **category** (runtime-derived set + reserved `other`); **not** graph internals. **Counting unit + anchor (A5):** `ensemble_turn_events_total{source}` counts **one `tap_node_return` invocation** (stated on the HELP text); `ensemble_turn_duration_seconds` is anchored at the **entry-tap timestamp → node-return timestamp** pair (NOT the tap's own latency, which includes its `asyncio.to_thread(upsert_batch)` DB write) — **no per-tool latency histogram ships** (catalog F20) |
 | 7 | Lifecycle counters (spawn/revive/pause/fan-in) (m8) | P0-4 | revive-on-send_message captured (lost-wakes class) |
 
 Exit criteria: every family renders; thread-CPU reuses sampler.py (one /proc dialect); LLM tokens reconcile with truncation-undercount caveat; compaction hooks fire on the 3 rungs; tool-call seam is message_tap.py; cardinality census passes.
@@ -129,15 +161,15 @@ Owner role: backend.
 Risks (P1a):
 | # | Risk | Impact | Likelihood | Mitigation |
 |---|------|--------|------------|------------|
-| 1 | LLM token undercount on length-cap (graph.py:3760–3812) | Medium | High | Document caveat in metric help; reconcile against usage_metadata where available |
-| 2 | Thread-CPU bucketing churns cardinality | Medium | Medium | Fixed ~8 groups; unit test pins group set |
+| 1 | LLM token undercount on length-cap (graph.py:3760–3812; the terminal-usage branch :3776-3784 per A2) | Medium | High | Document caveat in metric help; reconcile against usage_metadata where available |
+| 2 | Thread-CPU bucketing churns cardinality | Medium | Medium | Fixed **11 groups** (catalog F2 / §8.2); unit test pins group set |
 | 3 | Compaction hook overhead on hot path | Low | Medium | Atomic counter increment only; no I/O on loop |
 
 ### P1b — Persistence, pools & checkpoint (owner: backend; ~3–4 days)
 
 Goals: DB pools, Postgres census, checkpoint store, readiness, maintenance, snapshots.
 
-Metric families added (names only — canonical names per metric-catalog.md §1; an uncatalogued name is **not shipped** in v2 — see decisions.md §H H-7): `ensemble_db_pool_native{pool,quantity}` + `ensemble_db_pool_checked_out{pool}` + `ensemble_db_pool_waiting_clients{pool}` (derived vs native kept apart — catalog F4/F5), `ensemble_db_pool_requests_errors_total{pool,kind}` (superset, CR-4 — the checkout-latency histogram is retired, see decisions.md §B CR-4), `ensemble_pg_backends{state}`, `ensemble_pg_idle_in_txn_oldest_seconds`, `ensemble_pg_leaked_txn{site}`, `ensemble_checkpoint_op_seconds{op}`, `ensemble_checkpoint_op_bytes{op}`, `ensemble_checkpoint_blobs_table_bytes`, `ensemble_checkpoint_versions_per_thread` (p95 gauge), `ensemble_readiness_probe_total{component,outcome}`, `ensemble_readiness_grace_active`.
+Metric families added (names only — canonical names per metric-catalog.md §1; an uncatalogued name is **not shipped** in v2 — see decisions.md §H H-7): `ensemble_db_pool_native{pool,quantity}` + `ensemble_db_pool_checked_out{pool}` + `ensemble_db_pool_waiting_clients{pool}` (derived vs native kept apart — catalog F4/F5), `ensemble_db_pool_requests_errors_total{pool,kind}` (superset, CR-4 — the checkout-latency histogram is retired, see decisions.md §B CR-4), `ensemble_pg_backends{state}`, `ensemble_pg_idle_in_txn_oldest_seconds`, `ensemble_pg_leaked_txn{site}`, `ensemble_checkpoint_op_seconds{op}`, `ensemble_checkpoint_op_bytes{op}`, `ensemble_checkpoint_blobs_table_bytes`, `ensemble_checkpoint_versions_per_thread` (p95 gauge), `ensemble_readiness_probe_total{component,outcome}`, `ensemble_readiness_grace_active`. **Plus (A25):** `ensemble_process_cpu_seconds{name}` (minimal textfile — only the BashSpin data source; full exporter/textfile work stays in P2, catalog F22).
 
 Note (CR-4): the checkout-timeout counter is **retired** (see decisions.md §B CR-4) — psycopg_pool 3.3.1 exposes no native timeout counter (`requests_errors` is a superset counting every waiting exception plus TooManyRequests). PoolExhausted is rebased on `ensemble_db_pool_requests_errors_total`. Instrumenting daemon's own checkout call sites is deferred to a follow-up; the superset + documented caveat ships in v2.
 
@@ -150,8 +182,10 @@ Tasks:
 | 4 | Blob table size + versions-per-thread p95 gauge (R7) | P0-4 | maintenance.py VACUUM_FULL_TABLE_BYTES_SQL source |
 | 5 | Readiness probe outcome counters preserving 11-class taxonomy (MA-5) | P0-4 | labels = 11 failure classes; grace on /readyz; no re-probe |
 | 6 | Maintenance + snapshot usage counters | P0-4 | /api/snapshots/metrics source; maintenance_runs TTL note (no TTL today) |
+| 7 | Minimal textfile writer (`ensemble_process_cpu_seconds`) — only the BashSpin data source (A25) | P0-1 | Textfile gauge present before P2 alert rules land; full exporter work stays in P2 |
+| 8 | Instrument the checkpoint **write** path at the existing charge seam (A6/A7) | P0-4 | Extend `checkpoint_adapter.py` `_charge_checkpoint_read` (`:371-374`) to `aput`/`aput_writes` (`:377-379`) — the seam already exists; the write path then reaches the family. Until it lands the declared `op` enum stays narrowed to `aget`; **after** it lands the `op` enum is **re-derived from observed call sites**, not inherited from the legacy HELP text (`checkpoint_metrics.py:281-290`). Risk row 4 carries the risk |
 
-Exit criteria: checkpoint buckets extended top ≥120 s (CR-3); CheckpointSlow rebased on bucket-extended histogram + slow-op ledger; census on dedicated connection; readiness labels preserve 11-class taxonomy (readiness.py:56–79) with grace on /readyz (no re-probe).
+Exit criteria: checkpoint buckets extended top ≥120 s (CR-3); CheckpointSlow rebased on bucket-extended histogram + slow-op ledger; census on dedicated connection; readiness labels preserve 11-class taxonomy (readiness.py:64–79; grace subset :83-89, components :94-99) with grace on /readyz (no re-probe).
 
 Test plan: fault-injection for CheckpointSlow (simulate 73–99 s read → alert fires; with old buckets it would not); census dedicated-connection test; readiness FalseDegraded pure PromQL test.
 
@@ -163,6 +197,7 @@ Risks (P1b):
 | 1 | Census query amplifies pool pressure if mis-wired | High | Low | Dedicated connection enforced by integration test; statement_timeout |
 | 2 | Readiness labels drift from 11-class taxonomy | Medium | Medium | Import constants from readiness.py; unit test pins class set |
 | 3 | Blob table size query cost on 14 GB table | Low | Medium | pg_relation_size (cheap) not full scan; 15 s cadence |
+| 4 | Checkpoint write-path instrumentation (Q1, A6) — extend `checkpoint_adapter.py` `_charge_checkpoint_read` (`:371-374`) to `aput`/`aput_writes` (`:377-379`) in P1b with its own risk row; touches the checkpoint write path under stress during the incidents this plan exists to diagnose | Medium | Medium | Until it lands, the declared `op` enum stays narrowed to the observable set (`aget`); write-side incident mapping restated in §1 (writes are a stall/contention artifact, not throughput); "registry wired to collectors, exposition unwired" (CR-3) |
 
 ### P1c — Jobs, instances, sweeps & MCP (owner: backend; ~2–3 days)
 
@@ -177,12 +212,12 @@ Tasks:
 | 2 | Claim-latency instrumented at the seam (m3) | P0-4 | histogram populated; seam named in code comment |
 | 3 | Worker utilization from worker_pool.py get_stats (R10) | P0-4 | busy/total gauges per pool |
 | 4 | Heartbeat age (max) with cadence/source documented (m4) | P0-4 | max age gauge; source + cadence in metric help |
-| 5 | Waiting-children count + max age + wake-turns counter (m1 producer named) | P0-4 | Carrier-Threading: producer computed once, carried on ProcessingContext, threaded kw-only |
+| 5 | Waiting-children count + max age + wake-turns counter (m1 producer named) | P0-4 | Carrier-Threading, **two producers** (A3): (a) the claim path `daemon/services/worker_pool.py:1381-1386`, (b) the episode seam `daemon/graph.py:7319` `_detect_fresh_episode_reset` — each computed **once**, each carried on `ProcessingContext`, threaded keyword-only. **Consumer (A4):** a **live turn-end consumer increments the counter; the renderer only reads the accumulated counter** (the per-message carrier dies with the message, so a scrape-time renderer cannot read it) |
 | 6 | Instance status counts (10 values) | P0-4 | vocabulary pinned by unit test |
-| 7 | Sweep cycle duration + rows with actual interval (MA-6) | P0-4 | rate(..._cycle_seconds_count[5m]) basis |
+| 7 | Sweep cycle duration + rows with actual interval (MA-6) | P0-4 | `rate(ensemble_sweep_cycles_total{lane="rdrs_mission_reconciliation"}[5m]) * 300 > 2` basis — the cycle metric is a **gauge**, so no `_count` series exists (catalog F12 / §10.2) |
 | 8 | MCP server state + failure counters (DB-row-bounded) | P0-4 | server list from DB rows, not config |
 
-Exit criteria: queue depth reads admission_state (m3); claim-latency instrumented at the seam (m3 — name it); heartbeat-age has cadence/source documented (m4); wake counters have a named producer per Carrier-Threading rule (m1); sweep hot-loop alert via rate(..._cycle_seconds_count[5m]) (MA-6); MCP server list DB-row-bounded.
+Exit criteria: queue depth reads admission_state (m3); claim-latency instrumented at the seam (m3 — name it); heartbeat-age has cadence/source documented (m4); wake counters have **two named producers** per the Carrier-Threading rule (m1; A3 — claim path + episode seam) and a **live turn-end consumer** increments the counter while the renderer only reads the accumulated value (A4); sweep hot-loop alert via `rate(ensemble_sweep_cycles_total{lane="rdrs_mission_reconciliation"}[5m]) * 300 > 2` (MA-6 — the gauge form; no `_count` series exists); MCP server list DB-row-bounded.
 
 Test plan: fault-injection for SweepHotLoop (8 s vs 300 s); LostWake (parked >30 min); incident-replay per row.
 
@@ -191,7 +226,7 @@ Owner role: backend.
 Risks (P1c):
 | # | Risk | Impact | Likelihood | Mitigation |
 |---|------|--------|------------|------------|
-| 1 | m1 producer not identifiable → counter never increments | High | Medium | Name canonical producer in P1c task; Carrier-Threading discipline check in review |
+| 1 | m1 producer not identifiable → counter never increments | High | Medium | Name **both** canonical producers in the P1c task (claim path `worker_pool.py:1381-1386` + episode seam `graph.py:7319`); Carrier-Threading discipline check in review; the counter is incremented by a **live turn-end consumer**, never by the exposition renderer |
 | 2 | Wake counters double-count on revive | Medium | Medium | Idempotency on (instance, wake_id); unit test |
 | 3 | MCP server list unbounded if DB rows grow | Low | Low | DB-row-bounded by construction; cap documented |
 
@@ -199,7 +234,7 @@ Risks (P1c):
 
 Goals: node_exporter + postgres_exporter + textfile wiring + journal python twin + dashboards + alerts + 2-week burn-in.
 
-Metric families added (names only): textfile `ensemble_journal_file_bytes`, `ensemble_journal_history_entries`, `ensemble_journal_op_seconds` + `ensemble_journal_ops_total{op}` (the op label lives on the counter — catalog F21), `ensemble_upgrade_phase_seconds{phase}`, `ensemble_upgrade_release_current{version}`; host CPU%/disk await/util/load/mem (node_exporter); PG rollups/table sizes/WAL/autovacuum/dead tuples (postgres_exporter).
+Metric families added (names only): textfile `ensemble_journal_file_bytes`, `ensemble_journal_history_entries`, `ensemble_journal_op_seconds` + `ensemble_journal_ops_total{op}` (the op label lives on the counter — catalog F21), `ensemble_upgrade_phase_seconds{phase}`, `ensemble_upgrade_release_current{version}`; host CPU%/disk await/util/load/mem (node_exporter); PG rollups/table sizes/WAL/autovacuum/dead tuples (postgres_exporter). (Note: `ensemble_process_cpu_seconds{name}` moved to P1b per A25; full exporter/textfile work remains here.)
 
 Tasks:
 | # | Task | Depends On | Acceptance |
@@ -208,7 +243,7 @@ Tasks:
 | 2 | Journal metrics via python twin daemon/tools/upgrade_journal.py (decision 2) | P0-1 | Never touches scripts/upgrade/; ties to releases/state.json (MA-14) |
 | 3 | Deploy node_exporter + postgres_exporter | P0-1 | Both scrape targets healthy |
 | 4 | Dashboards: Overview / DB+pools / Checkpoint+storage | P0-1 | All families graphed |
-| 5 | Deploy all alert rules with for: clauses | P0-4 | promtool check rules passes |
+| 5 | Deploy all alert rules with for: clauses | P0-4 | promtool check rules passes. **Dependency (A26):** alert authoring depends on the referenced families' completion (e.g. SweepHotLoop depends on the `lane` vocabulary pinned in P1a/b/c); dashboards may be drafted earlier. |
 | 6 | 2-week burn-in review scheduled | P0-1 | Review ticket created |
 
 Exit criteria: textfile collector wired into launcher/promote/stage (out-of-process, crash-safe); journal metrics via python twin daemon/tools/upgrade_journal.py (decision 2; never touch scripts/upgrade/); dashboards (Overview / DB+pools / Checkpoint+storage); all alert rules deployed with for: clauses; 2-week burn-in review scheduled; journal metrics tied to releases/state.json (MA-14 — incident was entry-count O(n²), not bytes; example exposition corrected).
@@ -223,6 +258,7 @@ Risks (P2):
 | 1 | Textfile staleness if writer crashes | Medium | Medium | node_exporter textfile mtime alert; writer heartbeat |
 | 2 | postgres_exporter query load on PG | Low | Medium | Custom queries only for top-N; default queries otherwise |
 | 3 | Alert fatigue during burn-in | Medium | High | Start with page-worthy rules only; tune during 2-week review |
+| 4 | Prometheus storage loss is unrecoverable (RK-16, Q2) — single local TSDB; a host loss takes the entire alerting history | Low | Low | Accepted for v2 as a known limitation; remote_write to a durable store is a separate project, explicitly out of scope; record as RK-16 in the risk register |
 
 ## 5. Kill-switch & managed keys
 
@@ -238,7 +274,7 @@ Risks (P2):
 | `limits.metrics_census_interval_s` | int | 15 | ge=15 | Yes | Dedicated PG census cadence. |
 | `limits.metrics_sampler_interval_s` | int | 10 | ge=1, le=60 | Yes | /proc sampler cadence. |
 | `limits.metrics_textfile_dir` | str | `$INSTALL_DIR/data/metrics` | — | Yes | Textfile collector dir. |
-| `limits.metrics_cardinality_cap` | int | 2000 | ge=100, le=10000 | No | Soft cap; warn on breach. |
+| `limits.metrics_cardinality_cap` | int | 2000 | ge=100, le=10000 | No | **Hard** cap (A10): observe beyond the cap is rejected (not warned); paired with `ensemble_metrics_invalid_label_total{metric,label}` for folded values. |
 
 All entries follow the registry's value_type + ge/le/gt validation truth (Ruling 1); managed keys require a registry entry + nothing else.
 
@@ -255,8 +291,27 @@ All entries follow the registry's value_type + ge/le/gt validation truth (Ruling
 | WS-A spine broken (flusher 42804 not fixed) | `ensemble_resource_*` per-instance attribution; "4 tables accepting rows" gate fails → P0 exit blocked | All other families; resource_monitor HTTP views degrade to empty shape |
 | PG census connection unavailable | `ensemble_pg_*` | Everything else (census is isolated, non-pooled) |
 | Kill-switch flipped mid-scrape | Current scrape completes with whatever was cached; next scrape empty | Textfile/exporters unaffected |
+| Env **unset** but managed key `limits.metrics_enabled=true` (A14) | **Not dark** — env-unset is not a statement of intent, so the managed-key chain decides (ON). One boot log line: "`ENSEMBLE_METRICS_ENABLED` unset; deferring to `limits.metrics_enabled`" | Textfile/exporters unaffected |
+| A writer holds a metric lock → render cannot try-acquire (A9) | That family only: `# <family> unavailable: lock_contended` + the **last published snapshot** (other families render normally) | Textfile/exporters unaffected |
+| **CPU-spin wedge** (GIL held continuously) | The listener thread is starved — it cannot serve; no in-daemon series are exported at all | **Out-of-process only:** external liveness `up==0`/`absent()`, `scrape_duration_seconds`, node_exporter textfile, postgres_exporter, wedge-capture artifacts (CR-1 witnesses are **mandatory**, not optional) |
+| **Non-Linux host** (`/proc` absent — macOS/Windows dev box) | `ensemble_thread_cpu_seconds` / `ensemble_thread_count` (F2) and the resource-spine families (F0.3) — `read_proc_snapshot` returns `None` | The **listener still boots** (pure stdlib socket, no `/proc` dependency) — every other family renders |
 
 ## 7. Never-exported list
+
+Explicit categories never exported, enforced **executably (A10)** in three tiers plus defence in
+depth:
+
+1. **Registration-time enum pin** — `register_histogram(name, label_keys, allowed_values={...})`
+   rejects a wrong label *key* at registration (raises; mirrors `checkpoint_metrics.py:206-211`).
+2. **Observe-time reserved bucket** — a wrong label *value* folds to `other` and is counted in
+   `ensemble_metrics_invalid_label_total{metric,label}`.
+3. **Render-time allowlist predicate** — per-family label-name allowlist + per-label value
+   membership (defence in depth; also the hook for this list).
+
+Plus: **hard** cardinality cap (`limits.metrics_cardinality_cap` — hard per §5: observe beyond the cap is
+rejected, not warned),
+name regex `^ensemble_[a-z0-9_]+$`, label-value charset gate (no `=`, `,`, `"`, newline), and a
+poisoned-registry defence-in-depth test.
 
 Explicit categories never exported (enforced at render time):
 - No free-form SQL strings (census `site` is a fixed 6-value enum — 5 named sites + the `other` residual; query text never appears).
@@ -283,7 +338,7 @@ Every rule with valid PromQL, each mapped to the incident it replays. for: claus
 | JournalWalkRisk | `ensemble_journal_file_bytes > 200000 or ensemble_journal_history_entries > 1000` | 5m | O(n²) bash journal walk (99.9% spins) |
 | SweepHotLoop (MA-6) | `rate(ensemble_sweep_cycles_total{lane="rdrs_mission_reconciliation"}[5m]) * 300 > 2` | 5m | 8 s vs 300 s configured hot loop |
 | LostWake | `ensemble_waiting_children_max_age_seconds > 1800` | 5m | Parked lanes (lost wakes after restarts) |
-| BashSpin (MA-7) | `ensemble_process_cpu_seconds{name=~"promote_sh|stage_sh|launcher"} > 0.9` | 5m | 99.9% bash spins (direct comparison on the textfile per-tick gauge; spinning bash cannot self-report — external sampler owner = textfile collector writer) |
+| BashSpin (MA-7) | `ensemble_process_cpu_seconds{name=~"promote_sh\|stage_sh\|launcher"} > 0.9` | 5m | 99.9% bash spins (direct comparison on the textfile per-tick gauge; spinning bash cannot self-report — external sampler owner = textfile collector writer) |
 | FalseDegraded (MA-5) | `rate(ensemble_readiness_probe_total{outcome="timeout"}[5m]) > 0.1 and ensemble_pg_backends{state="active"} < 3` | 5m | P2 deadline false-negative (pure PromQL; grace already on /readyz — do not re-probe) |
 | WedgeCaptureFired | `increase(ensemble_wedge_capture_total[5m]) > 0` | 0m | Sustained CPU / loop-lag / concentration wedge |
 
@@ -302,7 +357,7 @@ for-for clauses are mandatory on every rule; 0m rules are event-style (fire on f
 - R9 MANAGED_KEYS registry (settings_service.py:190) — bounds pattern for new metrics keys.
 - R10 `worker_pool.py` `get_stats` (:1518, incl. wakeup_efficiency) — worker utilization source.
 - R11 `db_capture.py` census discipline — `application_name` + fragment→site map + statement_timeout (MA-13).
-- R12 collector.py A2 vocab (pool_checked_out derived, requests_errors superset) — pool honesty (m2).
+- R12 collector.py's own "A2" vocabulary (pool_checked_out derived, requests_errors superset) — pool honesty (m2). *(This is the collector's vocabulary name, not an amendment reference.)*
 - R13 `ens_db_tools.py:1157` pool status seam — resolves to catalog F4's single pool-status family `ensemble_db_pool_native{pool,quantity}` (no second `ensemble_db_pool_status` metric is shipped).
 - R14 MCP health surfaces — **server state** from the per-boot quarantine registry (`mcp/init_guard.py:145-147`, published read-only at `/readyz` → `detail.mcp`); **gateway session state** from the MCPS MachineStore (`services/mcps_gateway/store.py:79`,`:103` → sessions / tombstones / audit).
 - R15 sweep interval registry (300 s / 90 s) — SweepHotLoop baseline.

@@ -1,10 +1,18 @@
 # Decisions: v2 Metrics Collection — reviewer-facing finding → resolution map
+### (v2 council round §A–§H + **v3 architecture round §I–§M**)
 
 Date: 2026-10-29 · Author: plan-decisions worker (fallback channel, no skill)
+v3 round: plan-decisions worker (WS-B wave 3) · 2026-10-29
 Status: **Ready for review** — this document is the reviewer's entry point.
-Companions: `plan-overview.md` (338 lines) and `metric-catalog.md` (992 lines) in this
-directory. Every row below points **into** those two files; no row asserts anything that
-the two files do not already contain.
+Companions: `plan-overview.md` (393 lines), `metric-catalog.md` (1187 lines) and
+`architecture-recommendation.md` (697 lines) in this directory. Every row below points
+**into** those files; no row asserts anything that they do not already contain.
+
+**Two rounds live in this file.** §A–§H is the **v2 council round** (31 findings from the
+2-model council review), preserved as written — it is history and is annotated, never
+rewritten. §I–§M is the **v3 architecture round**: the 28 numbered amendments of
+`architecture-recommendation.md` §10, the five architect-critical findings, the two
+open-question answers, the CR-3 record correction, and the updated companions/counts.
 
 Code citations in this document are the **corrected** references from
 `metric-catalog.md` §11 (corrections log C1–C26), re-verified in the worktree
@@ -31,6 +39,15 @@ item and known limitation; §H carries the row counts, the cross-file name-consi
 result (**34 alignment edits E1–E34 across two passes**; all **11 open items H-1…H-11 are
 CLOSED**), and both commits.
 
+**v3 round (WS-B wave 3).** The architect's `architecture-recommendation.md` §10 enumerates
+**28 required amendments**, and §0/§9 flag **5 findings that would have shipped a
+well-formed but EMPTY series**. Every one of the 28 was **materially verified** in the two
+sibling files before its row was written (§I); the five were resolved against the code
+(§J). Two open questions were answered with the architect's defaults (§K). One v2 record
+was corrected (§L). §I carries **28 rows** — the reviewer's count check — and §M carries the
+companions, counts, waiver additions, the v3 edit ledger and the consistency-sweep result.
+**v3 edits E35–E78 (44)**; **one new open item (H-12)**.
+
 ---
 
 ## B. CRITICAL findings (5/5 resolved)
@@ -39,7 +56,7 @@ CLOSED**), and both commits.
 |---|---|---|---|---|
 | **CR-1** | Wedged daemon cannot export its own `/metrics` on the main port (event-loop starvation **is** the incident; livez/readyz timed out 25–30 s Oct-26/28; no external liveness alert). | `/metrics` is explicitly **not** a witness for its own wedge. Witnesses live out-of-process: external liveness `up==0` / `absent()` on the scrape target, `scrape_duration_seconds` as a starvation precursor, a node_exporter **textfile `*.prom`** directory written by an out-of-process writer, node_exporter + postgres_exporter, and the wedge-capture artifacts (`threads.csv`, `lag.json`, `readyz.json`) already produced by the capture path. | `plan-overview.md` §1 incident table ("Wedged daemon cannot export own /metrics" row) + §3 "Out-of-process witnesses (CR-1)" + §4 P2 T1/T3 + §8 `ExternalLivenessDown` + `ScrapeDurationHigh`; `metric-catalog.md` F22 (shell-origin textfile, 5 series) + F3 (`ensemble_wedge_capture_total{reason}`) + §7 (exporter-origin ≈67 counted separately) | **resolved** |
 | **CR-2** | `:9797/metrics` landed on the main app public port with zero auth / bind / gating (host binds `0.0.0.0` — `daemon/config.py:566`; `AuthConfig.enabled` defaults False — `daemon/config.py:3524`; CORS falls back to `*` — `daemon/api.py:4693`). | A **separate localhost-bound listener** (`127.0.0.1` only, own port, managed key `limits.metrics_listener_port` default 9798) — never a route on `daemon/api.py`. An explicit **never-exported list** is enforced at render time. On/off is decided in P0: kill-switch default **OFF**. A bind failure degrades the listener to *disabled*, never a boot abort. | `plan-overview.md` §3 "Separate localhost-bound /metrics listener (decision 3 + CR-2)" + §4 P0 T1/T2/T3 + §5 (managed keys) + §7 (never-exported list) + §6; `metric-catalog.md` §0.7 (listener contract) + F0.1 (greenfield seam `daemon/services/metrics_listener.py`, degradation) + F0.4 | **resolved** |
-| **CR-3** | Duplicated the live checkpoint histogram, and **no bucket set** existed for any of the 5 histograms (existing buckets stop at `10.0` — `daemon/checkpoint_metrics.py:59-62`), so 17 s writes / 73–99 s reads landed in `+Inf` and p95 collapsed to 10.0 (CheckpointSlow spurious forever). | `daemon/checkpoint_metrics.py` (top-level) becomes the **single canonical registry**; bucket sets are stated **once** for all **7** histograms with the checkpoint top extended to `300.0` s (≥120 s satisfied); **one measurement, one name** — the two legacy `message_api_*` names are re-registered under canonical `ensemble_*` names with a one-release deprecated alias; the existing bounded **slow-op ledger** (`daemon/checkpoint_perf.py:91`, `MAXLEN=128`) is the CheckpointSlow source — no parallel detector. | `plan-overview.md` §4 P0 T4 + P0 exit criteria + §8 `CheckpointSlow` + §10 AC9 + §1 (corrected "Why" — read path, not write throughput); `metric-catalog.md` §0.2 + §0.3 + §0.4 + F7 (observation sites `daemon/checkpoint_perf.py:190,:198`) + §8.11 (bucket annex) + §10.2 + §11 C1/C4 | **resolved** |
+| **CR-3** | Duplicated the live checkpoint histogram, and **no bucket set** existed for any of the 5 histograms (existing buckets stop at `10.0` — `daemon/checkpoint_metrics.py:59-62`), so 17 s writes / 73–99 s reads landed in `+Inf` and p95 collapsed to 10.0 (CheckpointSlow spurious forever). | `daemon/checkpoint_metrics.py` (top-level) becomes the **single canonical registry**; bucket sets are stated **once** for all **7** histograms with the checkpoint top extended to `300.0` s (≥120 s satisfied); **one measurement, one name** — the two legacy `message_api_*` names are re-registered under canonical `ensemble_*` names with a one-release deprecated alias; the existing bounded **slow-op ledger** (`daemon/checkpoint_perf.py:91`, `MAXLEN=128`) is the CheckpointSlow source — no parallel detector. | `plan-overview.md` §4 P0 T4 + P0 exit criteria + §8 `CheckpointSlow` + §10 AC9 + §1 (corrected "Why" — read path, not write throughput); `metric-catalog.md` §0.2 + §0.3 + §0.4 + F7 (observation sites `daemon/checkpoint_perf.py:190,:198`) + §8.11 (bucket annex) + §10.2 + §11 C1/C4 | **resolved** — ⚠️ **v3 record correction: see §L** (the reuse story is "registry wired to collectors, exposition unwired", not "unwired registry") |
 | **CR-4** | `ensemble_db_pool_checkout_timeouts_total{pool}` has **no available source** — psycopg_pool 3.3.1 exposes no timeout counter (`daemon/services/wedge_capture/collector.py:24-26` states it verbatim: `pool_checkout_timeouts` is ALWAYS `None`, reason `not_exposed_by_psycopg_pool_3.3.1`; `requests_errors` is a documented **superset**). | The timeout name is **retired**. v2 ships `ensemble_db_pool_requests_errors_total{pool,kind}` as the **documented superset** (not a timeout count) and **rebases** PoolExhausted onto it. The `kind` label is **reserved** (`unclassified` only today) so the checkout-seam follow-up can split it later **without a breaking label change**. The SQLAlchemy manager pool has no `requests_errors` equivalent ⇒ `pool="manager"` renders no series (an absence, not a gap). | `plan-overview.md` §1 incident table + §4 P1b "Note (CR-4)" + §8 `PoolExhausted` + §10 AC10; `metric-catalog.md` F4 (a/b/c/d) + §8.9 (kind set) + §10.2 (restated alert) + §11 C12 + §12 open item 1 | **resolved** |
 | **CR-5** | P0 deploy rested on a **nonexistent** `infranstructure/k8s/` (misspelled and absent in both trees). | Deploy target is **host binaries / VM compose** (leader-ratified, decision 1). k8s is **explicitly out of scope — a separate project**; the v1 reference is withdrawn and **no k8s manifest ships** with this plan. | `plan-overview.md` §2 "Deploy target (RATIFIED, decision 1)" + §2 "Out of scope (explicit)" + §11 (Non-goals) + §4 P2 (exporters on the host); `metric-catalog.md` F22 + §6 (host + PostgreSQL exporters, no k8s) | **resolved** |
 
@@ -55,7 +72,7 @@ CLOSED**), and both commits.
 | **MA-4** | The lag-probe is a **300-sample rolling window with a computed p95**, not a Prometheus histogram, and it is **dark** when `ENSEMBLE_WEDGE_CAPTURE_ENABLED` is off. | Export the **computed quantiles as gauges** (`stat` ∈ p50/p95/max) — not a histogram; v1's `histogram_quantile(..._bucket)` expression is invalid (no `_bucket` series exists). The dark dependency is documented on the HELP text, and the alert is paired with a sample-count guard so it cannot fire on a half-full window. | `plan-overview.md` §4 P1a T1 + §6 dark-families row + §12 OQ-1 + §8 `LoopStarved` (expr corrected, see §H); `metric-catalog.md` F1 (window `:59`, p95 `:115`, p50 `:116`, max `:114`) + §10.2 + §11 C5 | **resolved** |
 | **MA-5** | Readiness labels collapsed the normative **11-class** taxonomy; grace is **already** on `/readyz`, so re-probing would duplicate work. | The 11-class taxonomy is preserved verbatim (`daemon/services/readiness.py:64-79`; grace subset `:83-89`; components `:94-99`). The family **reads the published `/readyz` composite** and never re-probes; the grace-eligible subset is published on the HELP text, not as a label. FalseDegraded is expressed in **pure PromQL**. | `plan-overview.md` §4 P1b T5 + P1b exit criteria + §8 `FalseDegraded`; `metric-catalog.md` F9 + §8.3 (11 + 4 + 4 values) + §10.2 + §11 C6 | **resolved** |
 | **MA-6** | `SweepHotLoop` referenced an undefined `ensemble_sweep_cycles_total`; the proposed `rate(..._cycle_seconds_count[5m])` is invalid because the cycle metric is a **gauge**. | The counter `ensemble_sweep_cycles_total{lane}` ships and the alert is stated as `rate(ensemble_sweep_cycles_total{lane="rdrs_mission_reconciliation"}[5m]) * 300 > 2`. The `lane` label is **13 values** (7 RDRS lanes + 6 standalone sweep services) and each lane's **configured interval is published on the HELP text**, so actual-vs-configured needs no second metric. Per-tick `orphan_released` is accumulated into a cumulative counter (doc drift at `daemon/services/job_queue_service.py:828-837`). | `plan-overview.md` §4 P1c T7 + P1c exit criteria + §8 `SweepHotLoop` (expr corrected, see §H); `metric-catalog.md` F12 + §8.4 (lane 13 / outcome 6) + §10.2 + §11 C14/C17 | **resolved** |
-| **MA-7** | `BashSpin` compared a **cumulative-CPU gauge** to 0.9 ⇒ fires forever; and a spinning bash process **cannot self-report** from inside the daemon. | The textfile gauge is compared **directly** (`ensemble_process_cpu_seconds{name=~"promote_sh|stage_sh|launcher"} > 0.9`) — no `rate()` over a per-tick delta gauge. The measurement owner is the **external** writer: the shell scripts rewrite `*.prom` in `$INSTALL_DIR/data/metrics/`, and node_exporter's textfile collector reads them. The value is a per-tick delta, so "always > 0.9" now means "a real spin". | `plan-overview.md` §3 "Textfile collector (R18)" + §4 P2 T1 + §8 `BashSpin` (expr corrected, see §H); `metric-catalog.md` F22 (gauge semantics + `name` vocabulary) + §10.2 | **resolved** |
+| **MA-7** | `BashSpin` compared a **cumulative-CPU gauge** to 0.9 ⇒ fires forever; and a spinning bash process **cannot self-report** from inside the daemon. | The textfile gauge is compared **directly** (`ensemble_process_cpu_seconds{name=~"promote_sh\|stage_sh\|launcher"} > 0.9`) — no `rate()` over a per-tick delta gauge. The measurement owner is the **external** writer: the shell scripts rewrite `*.prom` in `$INSTALL_DIR/data/metrics/`, and node_exporter's textfile collector reads them. The value is a per-tick delta, so "always > 0.9" now means "a real spin". | `plan-overview.md` §3 "Textfile collector (R18)" + §4 P2 T1 + §8 `BashSpin` (expr corrected, see §H); `metric-catalog.md` F22 (gauge semantics + `name` vocabulary) + §10.2 | **resolved** |
 | **MA-8** | LLM tokens/cost were absent, and an `ok`/`failover`/`error` split **collapses the 4-layer retry model**. | `ensemble_llm_tokens_total{direction}` (input/output) with the truncation/undercount caveat made **visible** by `ensemble_llm_token_usage_missing_total`; `ensemble_llm_request_total{outcome}` carries the **real 8-value outcome enum** derived from the 4-layer ladder (L1 tenacity per-category retry → L2 failover to backup → L3 reset to primary → L4 attempt ceiling), with the layer mapping tabulated; stall counts are taken at the **watchdog abort site** (`daemon/services/llm_stream_watchdog.py:456`). The latency histogram deliberately carries **no** outcome label (splitting it would cost 8 × 14 = 112 series). | `plan-overview.md` §4 P1a T4 + P1a risk 1 + §4 P1b family list; `metric-catalog.md` F14 + F15 + F16 + §8.12 (ladder table) + §8.10 + §11 C8/C11 | **resolved** |
 | **MA-9** | AC1/AC3 were **untestable** ("fires within 5 min" / "<1% CPU"). | AC1 is decomposed into **fault-injection fixtures per alert, per phase**, plus a per-incident-row replay acceptance; AC2 is a **measurable method** — daemon CPU delta ≤1 % measured via `/api/resources/self-cost` under a 15 s scrape; AC7 repeats the replay as an independent criterion. | `plan-overview.md` §10 AC1/AC2/AC7 + §4 P1a/P1b/P1c/P2 "Test plan" lines + §5 `limits.metrics_scrape_interval_hint_s`; `metric-catalog.md` §0.10 (owner roles: developer / devops / reviewer / tester) + each family's Owner field | **resolved** |
 | **MA-10** | The ≤2k series cap **holds for daemon-origin** but stock exporters breach 2k on their own. | The budget is restated as **daemon-origin ≤ 2 k** (actual **521**, 26 % consumed) with **stock exporters measured separately** (≈67) and explicitly excluded from the daemon budget. The roll-up table is the proof, and an AC asserts the split. | `plan-overview.md` §2 "Cardinality budget (MA-10)" + §10 AC3 + §4 P1a exit criteria (cardinality census) + §7 never-exported; `metric-catalog.md` §1 (521 / 526 / ≈593) + §7 (the ≤2k proof) + F22 (exporter-origin counted separately) | **resolved** |
@@ -104,7 +121,7 @@ CLOSED**), and both commits.
 
 | R | What it is | Where v2 builds on it (catalog family / overview row) |
 |---|---|---|
-| **R1** | `daemon/checkpoint_metrics.py:273-315` — the registry + renderer (`render_metrics()` at `:304`) | `metric-catalog.md` **F0.2** (`render_metrics()` *becomes* the registry renderer; the two singletons at `:273`/`:281` become registry-registered instances under canonical names) + **F7**; `plan-overview.md` §9 R1 |
+| **R1** | `daemon/checkpoint_metrics.py:273-315` — the registry + renderer (`render_metrics()` at `:304`) | `metric-catalog.md` **F0.2** (`render_metrics()` *becomes* the registry renderer; the two singletons at `:273`/`:281` become registry-registered instances under canonical names) + **F7**; `plan-overview.md` §9 R1 — ⚠️ **v3 record correction: see §L** (the singletons DO have a production consumer; only `render_metrics()` is unwired) |
 | **R2** | `daemon/checkpoint_perf.py:190,:198` + the bounded slow-op ledger (`:91`, `MAXLEN=128`, default 5 000 ms cut) | `metric-catalog.md` **F7** (both observation sites already exist — *reuse, do not duplicate*; the ledger **is** the CheckpointSlow source, no parallel detector) + §8.11 (buckets) + §10.2; `plan-overview.md` §9 R2 |
 | **R3** | `wedge_capture/lag_probe.py` — 300-sample rolling window (`MAX_LAG_SAMPLES=300` at `:59`), computed p95 `:115` / p50 `:116` / max `:114` | `metric-catalog.md` **F1** (computed quantiles exported as gauges; dark when wedge-capture is off) + §10.2 + §11 C5; `plan-overview.md` §9 R3 |
 | **R4** | `wedge_capture/sampler.py` — the ONE `/proc` walker (reuses `resource_monitor/proc_readers.py`) | `metric-catalog.md` **F2** (post-process bucketing into 11 groups; never a second sampler) + §8.2; `plan-overview.md` §9 R4 |
@@ -147,6 +164,10 @@ Every entry below is traceable to `plan-overview.md` or `metric-catalog.md`; not
 | **G-13** | **The leak-site map is a closed set with an `other` residual.** | `metric-catalog.md` §9.2 (`other` = "the residual bucket — **never dropped**, so the census total always equals the sum") + F6 + §8.9 (6 site values). | `sum(ensemble_pg_leaked_txn) == ensemble_pg_backends{state="idle_in_transaction"}` must hold at all times; a growing `other` is the **signal** to extend the map through a deliberate, reviewed change rather than an automatic label drift. |
 | **G-14** | ~~Catalog header said "OpenMetrics text"~~ — **CLOSED in the alignment pass (H-1)**: the header now reads "**Prometheus classic text exposition format** (NOT OpenMetrics — MA-16 corrects the v1 mislabel)", matching `plan-overview.md` §3 and the MA-16 resolution. | `metric-catalog.md` header (compat line) — edited; `plan-overview.md` §3. | The catalog's substantive position was already unambiguous (§0.2 forbids `prometheus_client`/OTel; the renderer is the existing classic-text `render_metrics()`) — only the wording drifted. Now the wording matches the decision, so a reader cannot re-import the OpenMetrics mislabel. |
 | **G-15** | ~~F0.1's series estimate mentioned an `ensemble_metrics_up{component}` info split~~ — **CLOSED in the alignment pass (H-2)**: the split is dropped, `ensemble_metrics_up` is a single no-label scalar, and the family entry, the §1 summary row and the §7 roll-up now agree (F0.1 = 16 series; daemon-origin total 521). | `metric-catalog.md` F0.1 + §1 + §7 — edited. | The no-label shape was already the catalog's dominant reading (name line, Labels line "No other labels", degradation semantics, and no `component` vocabulary anywhere in §8); the stray `{component}` parenthetical was the outlier. Dropping it removes an unbounded-label risk and makes the ≤2k proof arithmetically true end to end. |
+| **G-17** | **The tool-category label set is derived at runtime (49 + a reserved `other`), never hand-listed** — the closed list is deliberately **not** written out. | `metric-catalog.md` §8.6 (runtime source `get_tool_categories()`, `daemon/tools/_tool_registry.py:1598`; 49 distinct across 254 `register_tool_category(` sites, re-verified in this worktree by the v3 round) + the §8 opening rule ("every closed vocabulary is derived from code, never hand-listed") + §0.5 (folded values counted in `ensemble_metrics_invalid_label_total{metric,label}`) + F20 (the `other` fallback) + §11 C27; `plan-overview.md` §4 P1a (the tool-call family) | A hand-written list is the drift class the architect falsified (37/38 claimed vs 49 in-tree). The **derivation** is the contract; a cross-check test pins the annex to `get_tool_categories()` at P0. A tool whose category is not in the runtime-derived set folds to `other` and is counted — never silently inflating cardinality. |
+| **G-18** | **Prometheus storage loss is unrecoverable** — v2 runs a **single local TSDB** (30 d raw / 90 d downsample), so a host loss takes the whole alerting history with it. | `plan-overview.md` §4 P2 Risks row 4 (RK-16) + §2 (retention sentence) + §4 P2 exit criteria; `metric-catalog.md` §10.0 (the Prometheus TSDB row of the restart-loss table: "all history lost — remote_write to a durable store, out of v2 scope") | **Accepted for v2** (architect's Q2 default — see §K Q2). The deploy target is host binaries (decision 1), which makes host loss the dominant scenario — but the deferral is explicit, recorded as **RK-16**, and `remote_write` is named as a **separate project**, not a v2 task. Idiom B/C families survive a Prometheus storage loss via their durable backing store (PG tables / journal files). |
+| **G-19** | **`ensemble_turn_duration_seconds` is anchored, with a drop-condition** — the tap measures its own latency (including its `asyncio.to_thread(upsert_batch)` DB write), which would be DB-write latency mislabelled as turn duration. | `metric-catalog.md` F20 (the "Anchor pair specified" paragraph — entry-tap timestamp → node-return timestamp, carried on the §8.13 carrier) + §11 C31; `plan-overview.md` §4 P1a task 6 | The architect allowed "specify the anchor pair **or** drop the family". v3 **specifies** the pair (entry-tap → node-return) and keeps a **drop-condition**: a source with no entry-tap counterpart contributes **no observation** (absent ≠ zero) and the family is dropped for that source rather than shipped mislabelled. The family therefore keeps its 14 series in the ≤2k proof. |
+| **G-20** | **The plan's §4 phase lists and the catalog's §1/§7 ship phases use two different partitions** (pre-existing v2, not wave-induced). | `plan-overview.md` §4 (four work-package phase sections) vs `metric-catalog.md` §1 (the Phase column) + §7 (the per-phase roll-up) — enumerated in **§M.6** and carried as open item **H-12** | The **catalog's §1/§7 phase column is authoritative** for the ≤2k roll-up and for "which phase must complete before a family ships"; the plan's §4 headings are **work-package** labels (the subsystem whose instrumentation lands there). v3 fixed the one **wave-induced** divergence (F22's minimal textfile writer ships in P1b per A25 — now annotated in both files) and **deferred** the 35 pre-existing ones: realigning them means restructuring four plan sections (headings, goals, task tables, exit criteria, risks, coupling map, day-estimates) — a **structural** change outside the amendment round's mandate, and one that would silently change the plan's schedule. Carried as an explicit, enumerated open item rather than a silent divergence. |
 | **G-16** | **`plan-overview.md` §1 incident table names three metrics the catalog does not ship** (`ensemble_db_pool_connections{pool,state}`, `ensemble_db_pool_checkout_seconds{pool}`, `ensemble_pg_leaked_txn_rows{site}`). | `plan-overview.md` §1 (not edited — §1 is outside this task's permitted edit scope). | The catalog's equivalents are `ensemble_db_pool_native{pool,quantity}` + F5's two gauges, and `ensemble_pg_leaked_txn{site}`; **no** checkout-latency family ships in v2 (the checkout seam is deferred — CR-4). Carried as open item **H-3** with the corrected names. |
 
 ---
@@ -166,13 +187,20 @@ Every entry below is traceable to `plan-overview.md` or `metric-catalog.md`; not
 | MINOR fixed / split / waived | 8 / 1 / 1 | 8 / 1 / 1 | ✅ |
 | Leader-ratified decisions (§E) | 5 | 5 | ✅ |
 | Reuse ledger rows (§F) | 18 (R1 … R18), **none "rebuilt instead"** | 18 | ✅ |
-| Waiver / limitation register entries (§G) | 16 (G-1 … G-16) | 16 | ✅ |
+| Waiver / limitation register entries (§G) | 20 (G-1 … G-16 + v3's G-17 … G-20) | 20 | ✅ |
 | Catalog §12 open items carried | 6 of 6 (→ G-2, G-3, G-4, G-5, G-6, G-7) | 6 of 6 | ✅ |
 | Plan §12 open questions carried | 4 of 4 (→ G-8) | 4 of 4 | ✅ |
 | Cross-file alignment edits — pass 1 | 21 (E1–E21) on 4 §4 family-list lines + 5 §8 alert rows | 21 | ✅ |
 | Cross-file alignment edits — pass 2 (alignment pass) | 13 (E22–E34) across `plan-overview.md`, `metric-catalog.md`, `decisions.md` | 13 | ✅ |
 | **Total alignment edits** | **34** | **34** | ✅ |
 | Open items H-1…H-11 | 11, all **CLOSED** (closure table below) | 11 closed | ✅ |
+| **v3 — architect amendment rows (§I)** | **28** (canonical §10 numbering 1–28) | **28** | ✅ |
+| **v3 — architect critical-finding rows (§J)** | **5** | **5** | ✅ |
+| **v3 — open-question resolutions (§K)** | **2** (Q1, Q2) | **2** | ✅ |
+| **v3 — record correction (§L)** | **1** (CR-3 reuse story) | **1** | ✅ |
+| **v3 — cross-file edits** | **44** (E35–E78) | **44** | ✅ |
+| Open items H-1…H-11 | 11, all **CLOSED** (closure table below) | 11 closed | ✅ |
+| **v3 — open items** | 1 (**H-12**, phase-partition divergence) — **DEFERRED** (structural) | 1 | ✅ |
 
 Every finding id from the council review appears exactly once: 5 CRITICAL, 16 MAJOR, 10 MINOR
 (5+16+10 = 31). No finding is silently merged into another row.
@@ -273,24 +301,27 @@ choices, not drift).
 
 ### H.3 Commit
 
-**Two path-limited commits, both on `feature/metrics-collection` (worktree
+**Four path-limited commits, all on `feature/metrics-collection` (worktree
 `agents-ensemble-wt-metrics-v2`):**
 
 | Pass | Commit | Base | Content |
 |---|---|---|---|
 | 1 — original v2 plan | `cec78e0e881665450e1ca38c8bf555d915f4d54c` | `9bbef71c1f357d00f2a1dbd62e5c8057fb1620f1` | the three planning files as first authored (plan-overview + metric-catalog + decisions), plus the 21 pass-1 alignment edits |
-| 2 — alignment pass (this one) | **HEAD of `feature/metrics-collection`** — a commit cannot contain its own sha, so it is reported verbatim in the task report and retrieved with `git rev-parse HEAD` | `cec78e0e881665450e1ca38c8bf555d915f4d54c` | the H-1…H-11 closure (edits E22–E34 + this document's refreshed §H) |
+| 2 — alignment pass | `ad3a331716823998dee567cb6dfbad700b59c854` | `cec78e0e881665450e1ca38c8bf555d915f4d54c` | the H-1…H-11 closure (edits E22–E34 + this document's refreshed §H) |
+| 3 — architect doc (WS-B step 2) | `c0f0694396d118e26fb7b40946005cc8bac8c4d4` | `ad3a331716823998dee567cb6dfbad700b59c854` | `architecture-recommendation.md` — the **read-only input** to the v3 round (697 lines; §10's 28 amendments, §11's Q1/Q2, Appendix A's verification log). It is a companion, **not** edited by v3 |
+| 4 — **v3 (this one)** | **HEAD of `feature/metrics-collection`** — a commit cannot contain its own sha, so it is reported verbatim in the task report and retrieved with `git rev-parse HEAD` | `c0f0694396d118e26fb7b40946005cc8bac8c4d4` | **waves 1+2** (amendments 1–28 applied across plan-overview + metric-catalog, uncommitted until now) **+ the v3 verification/fix pass** (the amendments that were missing or thin — see §I's `applied-with-adjustment` rows and §M's edit ledger E35–E76) **+ this document's §I–§M** |
 
-- **Committed paths (both passes, path-limited):** `.agents/shared/planning/metrics-collection/`
-  — exactly `plan-overview.md`, `metric-catalog.md`, `decisions.md`. Nothing outside that
-  directory is in either commit; the pre-existing stashes were not touched; **nothing was pushed**.
+- **Committed paths (passes 1, 2 and 4 — path-limited):** `.agents/shared/planning/metrics-collection/`
+  — exactly `plan-overview.md`, `metric-catalog.md`, `decisions.md`. **Pass 3** adds only
+  `architecture-recommendation.md`. Nothing outside that directory is in any commit; the
+  pre-existing stashes were not touched; **nothing was pushed**.
 - **Verify:**
 
 ```bash
-git rev-parse HEAD                 # the alignment-pass commit (≠ cec78e0e8, ≠ 9bbef71c1)
+git rev-parse HEAD                 # the v3 commit (≠ c0f06943, ≠ ad3a33171, ≠ cec78e0e8)
 git show --stat --oneline HEAD     # exactly three planning files, nothing else
-git show --stat --oneline cec78e0e881665450e1ca38c8bf555d915f4d54c   # pass 1 — same three files
-git log --oneline -3
+git show --stat --oneline c0f0694396d118e26fb7b40946005cc8bac8c4d4   # pass 3 — architecture-recommendation.md only
+git log --oneline -4
 ```
 
 ### H.4 Sign-off checklist for the reviewer
@@ -306,5 +337,350 @@ git log --oneline -3
 7. ☐ §H.1 — row counts (5 / 16 / 10 / 5 / 18 / 16) match the tables above.
 8. ☐ §H.2 — the 34 alignment edits (E1–E21 pass 1, E22–E34 pass 2) are present across the
    three files, and the 11 items (H-1…H-11) are **CLOSED** per the §H.2.1 closure table.
-9. ☐ §H.3 — both commits contain exactly the three planning files; the tree is clean; nothing
-   outside the planning directory changed; nothing was pushed.
+9. ☐ §H.3 — all four commits are path-limited to the planning directory; the v3 commit contains
+   exactly the three planning files (the architect doc is **not** in it); the tree is clean;
+   nothing outside the planning directory changed; nothing was pushed.
+10. ☐ **§I** — 28 rows, one per canonical §10 amendment (1–28), grouped A–G; every row's
+    *implemented at* cell opens the named anchor in `plan-overview.md` / `metric-catalog.md`.
+11. ☐ **§J** — the 5 architect-critical findings; for each, confirm the empty-series defect is
+    closed at the cited code anchor.
+12. ☐ **§K** — Q1 and Q2 answered with the architect's defaults, each recorded where it lives
+    in the plan (§4 P1b risk 4 / §4 P2 risk 4).
+13. ☐ **§L** — the CR-3 record correction is stated, and §B CR-3 / §F R1 point at it.
+14. ☐ **§M** — companions, counts, §G additions G-17…G-20, the E35–E76 edit ledger, and the
+    consistency-sweep result.
+
+---
+
+## I. v3 architecture round — the 28 amendments (canonical §10 numbering)
+
+**Source.** `architecture-recommendation.md` §10 "LIST OF REQUIRED PLAN AMENDMENTS", numbered
+**1–28**, grouped **A–G**. The numbering below is that canonical one — **not** the draft
+"A1…A20" labels used inside the architect's prose (those are a *different* scheme; see §M.5
+for the label normalization that reconciled the two files with the canonical numbering).
+
+**How each row was produced.** Every amendment was **materially verified** against the two
+sibling files **and** the worktree code before its row was written: the claimed anchor was
+opened, the substance was confirmed, and the code citations the architect gave were
+re-verified in `agents-ensemble-wt-metrics-v2`. Where the substance was **missing or thin**,
+the amendment was **implemented first** (v3 has merge authority over both files) and the row
+says so — `applied-with-adjustment` names what changed. **No amendment is waived; no row is
+missing.** Count: **28**.
+
+### I.A — Metric catalog: vocabularies and families (§10 group A, amendments 1–8)
+
+| # | Prescription (architect §10) | HOW resolved in v3 | Implemented at (verified anchor) | Status |
+|---|---|---|---|---|
+| **1** | §8.6 / F20 / §1 / §7 — the tool-category vocabulary is **49**, not 37/38. Derive it at runtime from `get_tool_categories()`; add the omitted values plus a reserved `other`; update the F20 series estimate and the §1/§7 totals. Apply the same rule to every §8 vocabulary: **derived from code, never hand-listed.** | The vocabulary is **re-derived from code** — `get_tool_categories()` (`daemon/tools/_tool_registry.py:1598`) is the source. v3 **re-counted it independently**: **49 distinct categories across 254 `register_tool_category(` sites** (the architect's figure — confirmed). The label set is the runtime-derived set **+ a reserved `other`** (50 values); a tool outside the set folds to `other` and is counted in `ensemble_metrics_invalid_label_total{metric,label}`. The rule was **generalized**: §8 now opens with "every closed vocabulary in this annex is DERIVED FROM CODE, never hand-listed", citing the sweep-lane 7→13 drift as the precedent class. F20's estimate moved **57 → 69**; the §1 total and the §7 roll-up were re-based (see §M.4). | `metric-catalog.md` §8.6 (L891) · §8 opening rule (L832) · F20 labels (L711) + series estimate (L728–L733) · §1 F20 row (L184) + §1 totals (L188) + reconciliation basis (L191) · §7 roll-up (L804–L815) · §11 C27 (L1157); `plan-overview.md` §4 P1a family list (L142) | **applied** |
+| **2** | F14 — change the observation site from `graph.py:3811-3812` to the **terminal-usage branch `:3776-3784`** (or the aggregated call site `:9176-9179`); mandate a **per-call dedupe**; add the "terminal-chunk only, never per-chunk" rule. | Both files now name the hook: `daemon/graph.py:3776-3784` (the `len(choices) == 0` path that carries the token counts and **returns early**), with `:9176-9179` as the aggregated alternative; `:3811-3812` is explicitly named as the **non-terminal, per-chunk** path that must **not** be hooked. A **per-call dedupe** is mandated (some OpenAI-compatible backends attach `usage` to every chunk ⇒ double counting). The rule "**terminal-chunk only, never per-chunk**" is stated verbatim. *v3 addition:* wave 2 carried this **catalog-only**; v3 added the **plan-side carrier** (P1a task 4) so the plan cannot be implemented from the stale hook. | `metric-catalog.md` F14 Source (L606) + §1 F14 row (L178) + §11 C28 (L1158); `plan-overview.md` §4 P1a task 4 (L150) + P1a risk 1 (L164) | **applied** |
+| **3** | §8.13 + m1 — split the wake-outcome producer into (a) the `worker_pool.py` claim path and (b) the `graph.py:7319` episode seam; each computed once, each carried. | §8.13 now names **both** producers and the outcomes each can yield — (a) the claim path (`daemon/services/worker_pool.py:1381-1386`) yields `empty_claim`, `skipped_busy_instance`, `timeout_wake`, `claimed`, `notifications_sent`, `workers_woken_by_timeout`; (b) the episode seam (`daemon/graph.py:7319` `_detect_fresh_episode_reset`) yields `fresh_episode_reset`, `stale_episode`, `no_op_resume`. Each is computed **once** and carried on the same `ProcessingContext` carrier; neither re-derives from partial signals. *v3 addition:* the plan's P1c task / exit criteria / risk row named only **one** producer — v3 named both in all three. | `metric-catalog.md` §8.13 (L978) + producer (a) (L982) + producer (b) (L985) + §11 C29 (L1159); `plan-overview.md` §4 P1c task 5 (L215) + exit criteria (L220) + risk 1 (L229) | **applied** |
+| **4** | §8.13 + m1 — replace "the exposition renderer reads the carried value and increments" with "**a live turn-end consumer increments the counter; the renderer only reads the accumulated counter**". | §8.13's consumer bullet is rewritten to that contract, with the reason stated (the carrier field lives on `ProcessingContext` and **dies with the message**; the renderer runs at scrape time and sees only the registry) and the blueprint's rule preserved verbatim — "**consumer-seam re-derivation is forbidden**". Mirrored in the plan's P1c task, exit criteria and risk row (v3 addition). | `metric-catalog.md` §8.13 consumer (L993) + §11 C29 (L1159); `plan-overview.md` §4 P1c task 5 (L215) + exit criteria (L220) + risk 1 (L229) | **applied** |
+| **5** | F20 — define the counting unit ("one `tap_node_return` invocation") on the HELP text; specify the anchor pair for `ensemble_turn_duration_seconds` **or** drop that family; specify the tool→category lookup with an `other` fallback. | The counting unit is stated ("**one `tap_node_return` invocation**" — the tap fires at 5 sites and N+1 times per turn with N tool rounds; the `source` vocabulary is itself node-oriented, so "turn" is not misread as one-per-turn). The anchor pair is now **specified** — the elapsed time between the **entry tap** (`user_message_entry`, `message_tap.py:120-124`) and the **node-return tap**, carried on the §8.13 carrier and **never re-derived** at the consumer — with a **drop-condition**: a source with no entry-tap counterpart contributes **no observation** (absent ≠ zero) and the family is dropped for that source rather than shipped mislabelled. The tool→category lookup states the `other` fallback. *v3 additions:* the anchor was left as an unresolved "either/or" and the plan's P1a task 6 still said "latency **per tool**" (a per-tool latency histogram that does **not** ship) — both corrected. | `metric-catalog.md` F20 (L715–L733; anchor paragraph L728) + §11 C31 (L1161); `plan-overview.md` §4 P1a task 6 (L152) | **applied-with-adjustment** — the amendment allowed "specify the anchor pair **or** drop the family"; v3 specifies the pair and keeps a per-source drop-condition (the family keeps its 14 series). Recorded as **G-19**. |
+| **6** | F7 + plan §1 — add a **task** to instrument the checkpoint write path at the existing `checkpoint_adapter.py` charge seam (`aput`/`aput_writes`); until it lands, narrow the declared `op` enum to the observable set and restate the write-side incident mapping. | The `op` enum is **narrowed to `aget`** in both files (catalog F7's label bullet; plan §1's write-side restatement), §1's write-side incident mapping is restated (writes are a stall/contention artifact, not throughput), **and a task now exists**: plan §4 **P1b task 8** extends `_charge_checkpoint_read` (`:371-374`) to `aput`/`aput_writes` (`:377-379`) — the seam **already exists**, so this is a wiring task, not a new instrument. The **risk row** (P1b risk 4) is the Q1 carrier (see §K). *v3 addition:* wave 2 carried only the risk row, not the task the amendment asks for. | `metric-catalog.md` F7 labels (L417) + write-path task (L435) + §11 C32 (L1162); `plan-overview.md` §1 write-side restatement (L14) + §4 P1b task 8 (L186) + P1b risk 4 (L200) | **applied** |
+| **7** | F7 / §0.4 / §8.11 — after the write-path seam lands, re-derive the checkpoint `op` enum from **observed call sites** rather than inheriting the legacy HELP text (`:281-290`). | Stated in the catalog's F7 entry ("After the write-path seam lands, re-derive the `op` enum from observed call sites rather than inheriting the legacy HELP text") and carried into the new plan task 8's acceptance. §8.9 still shows the legacy **4-value** set with its source citation (`checkpoint_metrics.py:281-290`) — it is the **inherited** set, explicitly marked re-derivable, not a frozen contract. | `metric-catalog.md` F7 (L417–L421) + §8.9 checkpoint op (L927); `plan-overview.md` §4 P1b task 8 (L186) | **applied** |
+| **8** | F0.2 — clarify that `ensemble_metrics_registry_measurements` counts **measurements**, not series, so dashboards cannot conflate it with the 521-series budget. | F0.2 carries an explicit clarification bullet: it counts **measurements** (registered measurement objects), **NOT** series, with the ≤2 k budget warning inline — and the CR-3 correction (registry wired to collectors) alongside it. | `metric-catalog.md` F0.2 (L232) + §11 C33 (L1163) | **applied** |
+
+### I.B — Registry mechanics (catalog §0.2 / plan §3) (§10 group B, amendments 9–11)
+
+| # | Prescription (architect §10) | HOW resolved in v3 | Implemented at (verified anchor) | Status |
+|---|---|---|---|---|
+| **9** | §0.2 + plan §3 — adopt the locking contract: per-metric locks (no global registry lock), **non-blocking render snapshot** (try-acquire → last-good published snapshot + `lock_contended` comment line), and **non-cumulative bucket counts** accumulated at render (O(1) observe). | All three clauses are in **both** files: per-metric locks only (no global registry lock — one wedged writer must not stall 26 families); render uses **non-blocking try-acquire** (bounded wait, e.g. 50 ms) and on contention serves the **last published snapshot** plus `# <family> unavailable: lock_contended`; writers update their family's state under its own short lock and atomically swap a published pointer (plain assignment, atomic under the GIL) — copy-on-publish; bucket counts are stored **non-cumulative** and accumulated at render, so `Histogram.observe` is O(1). *v3 addition:* the contract now **names the defect it fixes** — `render_metrics()` reaches series through the per-object getters (`.get()`), each of which takes that object's `threading.Lock`, so a wedged writer would make the **scrape hang** (the CR-1 failure mode inside the CR-1 mitigation). | `metric-catalog.md` §0.2 (L32, incl. the defect clause); `plan-overview.md` §3 locking contract (L52) + §6 matrix row (L295) + §4 P0 test plan (L127, wedged-writer simulation) | **applied** |
+| **10** | §0.5 + plan §7 — make the never-exported list **executable**: registration-time enum pin, observe-time reserved bucket + `ensemble_metrics_invalid_label_total{metric,label}`, render-time allowlist predicate, **hard** cardinality cap, name regex `^ensemble_[a-z0-9_]+$`, label-value charset gate; add the poisoned-registry defence-in-depth test. | The three enforcement tiers are written out in **both** files (registration-time enum pin raising on a wrong label key; observe-time fold-to-`other` counted in `ensemble_metrics_invalid_label_total{metric,label}`; render-time allowlist predicate as the §7 hook), plus the **hard** cap, the name regex, the charset gate (no `=`, `,`, `"`, newline) and the poisoned-registry test. *v3 fix:* plan §7 still said the cap was "currently soft — make hard" while plan §5 already said **hard** — v3 reconciled the two (§7 now cites §5's hard cap). | `metric-catalog.md` §0.5 (L85–L99); `plan-overview.md` §7 (L301–L311) + §5 managed keys (L277) | **applied** |
+| **11** | §0.3 / CR-3 — specify alias mechanics: dual exposition of one series, one-shot deprecation log, removal procedure with a Prometheus `absent()` guard, and migration of the four test files that reference the legacy names. | §0.3 carries all four mechanics: the alias is a **second exposition of the same series** (never a second measurement); a **deprecation log line at first emission, once per process**; a removal procedure with a documented `absent()` guard ("one release + one burn-in", or a recording rule); the legacy names are **alias-only, never canonical** (they violate the `^ensemble_` rule); and the **four test files** referencing `message_api_checkpoint_list_total` / `message_api_saver_op_latency_seconds` are named for migration. Aliases are registered at **registry-construction time** so a cold start still emits them (amendment 27). | `metric-catalog.md` §0.3 (L61–L78) + §0.2 freeze rules (L45); `plan-overview.md` §3 freeze rules (L68) | **applied** |
+
+### I.C — Listener + kill-switch (plan §3/§4/§5/§6, catalog §0.7/§0.8) (§10 group C, amendments 12–16)
+
+| # | Prescription (architect §10) | HOW resolved in v3 | Implemented at (verified anchor) | Status |
+|---|---|---|---|---|
+| **12** | §3 / catalog §0.7 — state the listener's **thread/loop topology** (dedicated thread, own socket, stdlib `http.server`) and the **render-never-blocks** rule; state the GIL split (I/O-bound wedge survives; **CPU-spin wedge does not** → CR-1's out-of-process witnesses remain mandatory). | The topology is stated as **Option A**: a **dedicated daemon thread** running stdlib `http.server.ThreadingHTTPServer` bound to `127.0.0.1`, started from the FastAPI lifespan; a shared-main-event-loop listener is **REJECTED** (it inherits the CR-1 failure). The render-never-blocks contract is restated in the same paragraph, and the **GIL split** is stated with its consequence: an I/O-bound wedge survives, a CPU-spin wedge does **not**, so CR-1's out-of-process witnesses (node_exporter textfile, `up==0`/`absent()`, `scrape_duration_seconds`) remain **mandatory**, not optional. | `plan-overview.md` §3 topology (L58) + §6 matrix CPU-spin row (L296); `metric-catalog.md` §0.7 (L116–L127) | **applied** |
+| **13** | §4 P0 T1 — specify boot placement (inside the lifespan, after `resource_monitor` `api.py:2241-2288` and `llm_stream_watchdog` `:2212-2226`), bind-failure degradation (mirror `api.py:2282-2287`), and teardown order (stop event → `shutdown()` → `join(timeout=5)`, `daemon=True` thread). | All three are in plan §3 **and** in P0 task 1's acceptance: boot inside the **FastAPI lifespan**, after `resource_monitor` (`daemon/api.py:2241-2288`) and after `llm_stream_watchdog` (`:2212-2226`); a bind failure degrades the listener to **disabled + logged**, mirroring `daemon/api.py:2282-2287` (never abort boot — decision 3); teardown = stop event → `server.shutdown()` → `join(timeout=5)` → close, **after** the resource-monitor stop (`:3411-3433`) and the wedge-capture stop (`:3435-3464`), on a `daemon=True` thread so a wedged join cannot hang shutdown. | `plan-overview.md` §3 boot/teardown (L60) + §4 P0 task 1 (L95) | **applied** |
+| **14** | §4 P0 T3 / §5 / catalog §0.8 — specify the **truthy set** (`{1,true,yes}`, case-insensitive; everything else OFF) and the layering rule: **env explicit-OFF always wins; env UNSET defers to the managed-key chain**; add the boot log line. | The truthy set is fail-closed and exhaustive ("`ture`", `on`, `enabled`, `0`, empty → OFF"); the layering table is written out (unset + managed key on ⇒ **ON**; unset + default ⇒ OFF; explicit env OFF always wins; explicit env ON overrides the managed-key default); the **one boot log line** is quoted verbatim ("`ENSEMBLE_METRICS_ENABLED` unset; deferring to `limits.metrics_enabled`"); and the per-request read stays (measured ~50–100 ns, dict-backed, no syscall — **no TTL cache**, which would defeat the emergency-off purpose). | `plan-overview.md` §4 P0 task 3 (L97) + §6 matrix row (L294) + §5 kill-switch (L265); `metric-catalog.md` §0.8 (L132–L139) | **applied** |
+| **15** | §6 — extend the dark-families matrix with: **env-unset-but-managed-key-on**, **`lock_contended`**, **CPU-spin wedge** (→ external witnesses), and **non-Linux host** (`/proc` absent ⇒ F2 + F0.3 dark, listener still live). | **v3 addition — the four rows were absent from the wave-1/2 result.** All four are now in the plan §6 matrix: env-unset + managed-key-on ⇒ **not dark** (the managed-key chain decides; one boot log line); a writer holding a metric lock ⇒ **that family only** is skipped with `# <family> unavailable: lock_contended` + the last published snapshot; a **CPU-spin wedge** ⇒ the listener thread is starved, so **only** the out-of-process witnesses remain; a **non-Linux host** ⇒ F2 + F0.3 dark (`read_proc_snapshot` returns `None`) while **the listener still boots** and every other family renders. | `plan-overview.md` §6 dark-families matrix (L294–L297) | **applied** (v3 — rows were missing) |
+| **16** | §4 P0 test plan — add the **four missing tests**: origin-guard 403, bind-failure degradation, wedged-writer simulation, kill-switch typo parsing; specify the **injectable-socket harness** so no test requires a real port. | The four tests are written into P0's test plan with their assertions: origin-guard 403 (handler-level request, non-loopback origin → 403 `origin_not_trusted`); bind-failure degradation (inject a failing bind → listener disabled + logged, **boot continues**); **wedged-writer simulation** (acquire a metric's lock in the test thread, then render → the scrape still returns **within 100 ms**, the family is skipped with `lock_contended`); kill-switch typo parsing (`ENSEMBLE_METRICS_ENABLED=ture` → OFF). **Harness:** an injectable socket factory (ephemeral port 0, or no socket) so no test needs a real port, and `render_metrics()` stays pure/port-free. | `plan-overview.md` §4 P0 test plan (L127) | **applied** |
+
+### I.D — Census (catalog §9, plan §4 P1b) (§10 group D, amendment 17)
+
+| # | Prescription (architect §10) | HOW resolved in v3 | Implemented at (verified anchor) | Status |
+|---|---|---|---|---|
+| **17** | §9 — add: **dedicated daemon-thread execution home**; `statement_timeout = 5 s` / `connect_timeout = 3 s`; **self-exclusion of `ensemble-metrics-census` only** (wedge-capture rows counted under `other`); **SQL-side** `CASE`/`LIKE` matching in one round trip with **six per-site unit tests**; the **sustained (5-minute)** `other`-growth signal; and an honest note that blank `pg_stat_activity.query` (extended protocol) lands in `other`. | All six elements are in the catalog's census annex: §9.1's connection table carries the transport (direct `psycopg.connect`, no pool), `application_name`, **5 s / 3 s** timeouts, the **dedicated daemon thread** `CensusSampler` (not the listener thread, not the event loop — it would die in a wedge), the self-exclusion rule (**only** the census's own connection; `wedge-capture` rows counted under `other`, because excluding them would transiently break the sum-ties invariant), the ≥15 s cadence and the never-raises failure posture; §9.5 states **server-side** `CASE`/`LIKE` matching with **one unit test per site (6)** and the honest residual risk (blank `pg_stat_activity.query` under the extended protocol lands in `other` — the sum still ties, the attribution under-counts); §9.6 states the **sustained 5-minute** `other`-growth signal (a single-tick spike is an incident-correlated capture, not drift). The plan carries the execution-home task (P0 task 10). | `metric-catalog.md` §9.1 (L1005–L1021; timeouts L1013/L1014; execution home L1015; self-exclusion L1016) + §9.5 (L1043) + §9.6 (L1051) + §11 C34 (L1164); `plan-overview.md` §4 P0 task 10 (L104) | **applied** |
+
+### I.E — Storage split + durability (plan §3, catalog §10) (§10 group E, amendments 18–21)
+
+| # | Prescription (architect §10) | HOW resolved in v3 | Implemented at (verified anchor) | Status |
+|---|---|---|---|---|
+| **18** | §3 — state the boundary as a **rule**: per-instance attribution = PG-only via `/api/resources/*`; every daemon-origin `/metrics` family is **aggregate**; **no daemon-origin family carries a per-instance label** (add to catalog §8 as a cardinality rule). | The rule is stated in plan §3 and **enforced** as a cardinality rule at the head of the catalog's §8 vocabulary annex (so it is a rule, not prose). Both name the same three clauses: per-instance attribution = PG-only via `/api/resources/*`; every daemon-origin family is aggregate; no daemon-origin family carries a per-instance label. | `plan-overview.md` §3 boundary rule (L62); `metric-catalog.md` §8 cardinality rule (L834) | **applied** |
+| **19** | §3 / §9 R5 — state the **PG retention ladder** (raw 48 h / minute 14 d / hour 180 d; `config.py:818-888`) and the **interplay rule** (Prometheus governs alerting and 30 d+; PG governs per-instance views; >90 d answered from the 180 d tier). | Plan §3 states the full ladder with the config citations (`retention_raw_minutes=2880`, `retention_minute_hours=336`, `retention_hour_days=180` — `daemon/config.py:818-888`) **and** the interplay rule; plan §2's retention sentence now distinguishes the two tiers (Prometheus 30 d raw / 90 d downsample; PG 48 h / 14 d / 180 d) and states that a Prometheus **process** restart preserves history (WAL replay) while **storage** loss does not. | `plan-overview.md` §3 retention ladder (L64) + §2 (L38); `metric-catalog.md` §10.0 (L1068–L1079) | **applied** |
+| **20** | §3 — add the **two-sampler consistency rule** (wedge sampler vs resource-monitor sampler read `/proc` independently; eventual consistency within one sample interval). | Plan §3 states it: one shared reader module (`resource_monitor/proc_readers.py`), **two independent loops**, **not** required to agree byte-for-byte, consistency eventual within one resource-monitor sample interval — "stated so a future reader does not 'fix' a non-bug". | `plan-overview.md` §3 two-sampler consistency (L66) | **applied** |
+| **21** | catalog §10 — add the **three-scenario restart-loss table** and state that a Prometheus *process* restart preserves history (WAL replay) while *storage* loss does not. | Catalog §10.0 carries the table (3 scenarios × the A/B/C idioms + the Prometheus TSDB row) and the sentence "A Prometheus **process** restart is **not** a history loss (WAL replay); only **storage** loss is." The mitigation column states `remote_write` to a durable store is out of v2 scope (RK-16 → §G G-18). | `metric-catalog.md` §10.0 (L1068–L1079); `plan-overview.md` §2 (L38) | **applied** |
+
+### I.F — Phasing (plan §4) (§10 group F, amendments 22–26)
+
+| # | Prescription (architect §10) | HOW resolved in v3 | Implemented at (verified anchor) | Status |
+|---|---|---|---|---|
+| **22** | §4 P0 exit criteria — split into **P0-core** (listener, registry, kill-switch, census discipline, vocabularies, managed keys) and **P0-spine** (the 4-table gate, owned by the WS-A `rm-flusher-fix` worktree); resolve the contradiction with P0 risk 1. | Plan §4 carries the split: **P0-core** ships independently; **P0-spine** is the "4 tables accepting rows" gate, owned by the parallel `rm-flusher-fix` worktree (WS-A) and tracked as a **separate gate** — reconciling P0 risk 1's "P0 can ship without the resource spine" with the exit criterion. The **gate criteria survive verbatim** inside the split: `resource_daemon_bucket`, `resource_instance_sample`, `resource_pid_map`, `resource_limit_policy` all accept rows. | `plan-overview.md` §4 P0 exit-criteria split (L119–L125) + P0 risk 1 (L134) + catalog F0.3 exit criterion (L255–L263) | **applied** |
+| **23** | §4 P0 — add the **worker-thread-naming** task (`worker_pool.py:253`) so F2 is honest from first render; add the **census execution-home** task. | Both are P0 tasks with acceptance criteria: task 9 names worker threads at construction (`name=f"worker-{lane}-{worker_id}"`; the lane vocabulary `default`/`chat` at `worker_pool.py:207`) so `thread_group="worker_pool"`/`"chat_worker_pool"` no longer folds into `other`; task 10 gives the census its execution home (dedicated daemon thread, `CensusSampler`, `daemon=True`, `time.monotonic` tick — not the listener thread, not the event loop) with `statement_timeout` 5 s / `connect_timeout` 3 s. | `plan-overview.md` §4 P0 tasks 9–10 (L103–L104) + catalog F2 prerequisite (L307–L313) | **applied** |
+| **24** | §4 P0 exit criteria / F0.4 — add the **versioned vocabulary-amendment procedure** (bump `ensemble_metrics_vocabulary_version`); state that a vocabulary bump changing a literal label value in shipped PromQL is a **breaking alert change**. | Both sides carry it: plan §4's P0 exit criteria (label **names** + closed enums pinned to current code at P0; any vocabulary change bumps `ensemble_metrics_vocabulary_version`; a bump that changes a literal label **value** appearing in shipped PromQL is a breaking alert change and needs a stated compatibility rule) and catalog F0.4 (the freeze marker family + the same rule, paired with the plan). | `plan-overview.md` §4 P0 exit criteria (L114–L117); `metric-catalog.md` F0.4 (L256–L274) | **applied** |
+| **25** | §4 P2 T1 — move the **minimal textfile writer** to **P1b** so BashSpin has a data source before the P2 alert rules land. | The **minimal** writer (`ensemble_process_cpu_seconds`) is now a P1b family + P1b task 7 ("only the BashSpin data source"); P2 keeps the full exporter/textfile work and says so explicitly ("`ensemble_process_cpu_seconds{name}` moved to P1b per A25"). *v3 addition:* the **catalog** now records the phase split on the F22 family entry and under the §7 roll-up table, so the plan's P1b placement no longer contradicts the catalog's F22 phase cell (this was the one **wave-induced** phase divergence — see §M.6 / H-12). | `plan-overview.md` §4 P1b family list (L172) + P1b task 7 (L185) + P2 note (L237); `metric-catalog.md` F22 phase (L790) + §7 phase-split note (L821) | **applied** |
+| **26** | §4 P2 T5 — state that **alert authoring depends on the referenced families' completion** (dashboards may be drafted earlier). | Stated twice: the §4 coupling note (P2 alert authoring depends on the referenced families' completion — e.g. `SweepHotLoop` depends on the `lane` vocabulary pinned in P1a/b/c; **dashboards may be drafted earlier**; the coupling map marks P0↔P2 "loose" for the textfile dir only) and P2 task 5's acceptance. | `plan-overview.md` §4 coupling note (L84) + P2 task 5 (L246) | **applied** |
+
+### I.G — Cross-cutting (§10 group G, amendments 27–28)
+
+| # | Prescription (architect §10) | HOW resolved in v3 | Implemented at (verified anchor) | Status |
+|---|---|---|---|---|
+| **27** | catalog §0.2 / plan §3 — add the **freeze rules**: import the listener on the **lifespan path** (not `api.py` module top level); register aliases at **registry-construction time** so a cold start emits them. | Both rules are stated in both files: the listener is imported on the **lifespan path** (not `daemon/api.py` module top level) so the PyInstaller analyzer pulls it; aliases are registered at **registry-construction time** (not lazily) so a cold start still emits the deprecated names for the remainder of their one-release window. | `plan-overview.md` §3 freeze rules (L68); `metric-catalog.md` §0.2 freeze rules (L45) | **applied** |
+| **28** | plan §4 P0 T4 / catalog §0.2 — restate the off-loop discipline as "**no blocking work, no I/O, no logging, no per-chunk work on the event loop**" + ≤1 clock read per window; state that metric increments inside `message_tap` must sit within the tap's existing `try/except`. | The blanket "never adds event-loop work" claim is retracted in both files and replaced by the four-part rule plus "**≤1 `time.perf_counter()` read per observation window**"; the `message_tap` rule names the tap's existing `try/except` (`daemon/services/message_tap.py:308-309`) so a metric error cannot produce per-turn WARNING noise; both files carry the measured budget (≈4 µs added work per tool-round turn = 8 counter incs + 2 histogram observes, **< 0.01 %** of a multi-second turn; the tap's own DB write exceeds any metric cost by 3–4 orders of magnitude). | `plan-overview.md` §3 off-loop discipline (L54); `metric-catalog.md` §0.2 off-loop discipline (L50–L59) | **applied** |
+
+**§I count check:** group A = 8 (1–8) · B = 3 (9–11) · C = 5 (12–16) · D = 1 (17) · E = 4 (18–21) ·
+F = 5 (22–26) · G = 2 (27–28) → **28 rows, no gaps, no merges, none waived.**
+
+---
+
+## J. The five architect-critical findings — defects that ship a well-formed but EMPTY series
+
+These are the architect's §0/§9 headline findings: **each would have shipped a series that
+looks right and contains nothing**, and **no phase exit criterion would catch it**. Each was
+re-verified against the worktree code before the row was written. Status: **5/5 resolved**.
+
+| # | Finding (architect) | Why it would ship silently wrong | HOW resolved in v3 | Final anchor (verified in-tree) | Status |
+|---|---|---|---|---|---|
+| **J-1** | **F14's cited hook misses the terminal usage chunk** — the family would ship zero/near-zero. | The catalog cited `daemon/graph.py:3811-3812` as where `usage_metadata` is attached. That is the **non-terminal** path, reached only when the chunk also carries choices. A terminal usage chunk (the shape that carries the actual token counts) takes the `len(choices) == 0` branch, is attached through the **constructor**, and **returns early** — so a counter hooked only at the cited line never fires. Worse, the cited line is **per-chunk** (the converter runs per chunk) — the opposite of the plan's hot-path rule. | The observation site is now the **terminal-usage branch `daemon/graph.py:3776-3784`** (or the aggregated call site `:9176-9179`), with a mandatory **per-call dedupe** (some OpenAI-compatible backends put `usage` on every chunk ⇒ double counting) and the explicit rule "**terminal-chunk only, never per-chunk**". Both the catalog family entry **and** the plan's P1a task now carry it. | Verified in-tree: `graph.py:3776` = `if len(choices) == 0:` → constructor attach `:3778-3780` → `return generation_chunk` **`:3784`**; `graph.py:3811-3812` = the non-terminal `message_chunk.usage_metadata = usage_metadata`. Plan: `metric-catalog.md` F14 (L606) + §1 F14 row (L178) + C28 (L1158); `plan-overview.md` §4 P1a task 4 (L150) | **resolved** |
+| **J-2** | **`ensemble_wake_turns_total` never counts** — the LostWake alert would be blind. | §8.13's consumer was "the exposition renderer reads the carried value and increments" — but the carrier field lives on `ProcessingContext` and **dies with the message**; the renderer runs at **scrape time** and sees only the registry. And the named producer could yield **at most 2 of the 7** outcomes (the other five live at different seams). | **Two producers**, each computed **once** and carried: (a) the **claim path** `daemon/services/worker_pool.py:1381-1386`, (b) the **episode seam** `daemon/graph.py:7319` `_detect_fresh_episode_reset`. The consumer is now "**a live turn-end consumer increments the counter; the renderer only reads the accumulated counter**" — with the blueprint's "consumer-seam re-derivation is forbidden" rule preserved. The plan's P1c task/exit/risk now name both producers and the consumer. | Verified in-tree: `worker_pool.py:1381-1386` = the four claim-path counters (`notifications_sent`, `empty_claim_attempts`, `workers_woken_by_timeout`, `claims_skipped_due_to_busy_instance`); `graph.py:7319` = `def _detect_fresh_episode_reset(...)`. Plan: `metric-catalog.md` §8.13 (L978, L982, L985, L993) + C29 (L1159); `plan-overview.md` §4 P1c task 5 (L215) + exit (L220) + risk 1 (L229) | **resolved** |
+| **J-3** | **The tool-category closed enum is falsified** — 37/38 claimed vs **49** verified. | The catalog stated the 37-value list was "the complete set of `register_tool_category(...)` calls". Under a closed-enum registry an unregistered value either **raises at observe** (F20 breaks) or **silently inflates cardinality** past the series budget — and the budget itself was computed from the falsified list. | The vocabulary is **derived at runtime** from `get_tool_categories()` (`daemon/tools/_tool_registry.py:1598`), with a **reserved `other`** for the tool→category lookup (a tool outside the set folds to `other` and is counted in `ensemble_metrics_invalid_label_total{metric,label}`), plus a cross-check test. The lesson was **generalized**: §8 now opens with "every closed vocabulary is derived from code, never hand-listed" (the sweep-lane 7→13 drift is cited as the precedent class). v3 **re-counted independently**: **49 distinct categories across 254 sites** — the architect's figure confirmed. | Verified in-tree: `daemon/tools/_tool_registry.py:1598` = `def get_tool_categories(...)`; 254 `register_tool_category(` sites; 49 distinct names (re-counted by the v3 round). Plan: `metric-catalog.md` §8.6 (L891) + §8 rule (L832) + F20 (L711, L728) + C27 (L1157) | **resolved** |
+| **J-4** | **`ensemble_checkpoint_op_seconds{op="aput"}` can never fire** — the declared `op` enum over-promises. | `time_saver_op` has exactly **one** non-test caller — `daemon/persistence.py:509` (`aget`). The checkpoint **write** path runs through `daemon/checkpoint_adapter.py:377-379` (`aput` → `scrub_saver_write_args` → `_call_with_retry`) and never touches `checkpoint_perf`, so the family would declare four `op` values and emit one. | The `op` enum is **narrowed to the observable set** (`aget`) until the **existing** charge seam is extended: `checkpoint_adapter.py` already carries `_charge_checkpoint_read(...)` (`:371-374`) on `aget_tuple` — extending it to `aput`/`aput_writes` is a **wiring** task, not a new instrument. That task now exists (**P1b task 8**) with its **own risk row** (P1b risk 4 — the Q1 default, §K). Plan §1's write-side incident mapping is restated (writes are a stall/contention artifact, not throughput). | Verified in-tree: `persistence.py:509` = `await time_saver_op("aget", ...)` — the only `time_saver_op(` call site; `checkpoint_adapter.py:371-374` = `_charge_checkpoint_read(args, kwargs, result)`; `:377-379` = `aput` → `scrub_saver_write_args` → `_call_with_retry` (**no** charge). Plan: `metric-catalog.md` F7 (L417, L435) + C32 (L1162); `plan-overview.md` §1 (L14) + P1b task 8 (L186) + risk 4 (L200) | **resolved** |
+| **J-5** | **Render can block on a wedged writer** — CR-1 reproduced inside the CR-1 mitigation. | `daemon/checkpoint_metrics.py` holds a **per-object** `threading.Lock` (`Counter` `:79`, `Histogram` `:182`), and `render_metrics()` (`:304`) reaches series through `.get()` (`:95-104`, `:224-248`), which **takes that lock**. A wedged thread holding one metric's lock would make the **scrape hang** — the exact failure the listener exists to avoid. | The locking contract: **per-metric locks only, no global registry lock** (one wedged writer must not stall all families); **render never blocks** — non-blocking **try-acquire** (bounded wait, e.g. 50 ms) → serve the **last published snapshot** + `# <family> unavailable: lock_contended`; **copy-on-publish** (writers swap a published pointer — a plain assignment, atomic under the GIL); **non-cumulative bucket counts** accumulated at render so `observe` is O(1). v3 also added the **defect-naming clause** (the contract now states what it fixes) and the matrix row + the wedged-writer test. | Verified in-tree: `checkpoint_metrics.py:79` / `:182` = the per-object `threading.Lock`; the getters take it under `with self._lock:` (`:95-104`, `:224-248`); `:304` = `render_metrics()`. Plan: `metric-catalog.md` §0.2 (L32); `plan-overview.md` §3 (L52) + §6 matrix (L295) + P0 test plan (L127) | **resolved** |
+
+---
+
+## K. Leader decisions — the architect's two open questions (Q1/Q2)
+
+Both were resolved by the **planner, adopting the architect's stated defaults** (the architect
+framed both as "genuinely the leader's call" and supplied an actionable default for each;
+per the WS-B v3 mission instruction the planner adopts those defaults).
+
+| # | Question (architect §11) | Architect's default (rationale) | **v3 answer (as recorded)** | Where it lives |
+|---|---|---|---|---|
+| **Q1** | **Checkpoint write-path instrumentation — how much write-path risk is acceptable?** A5 offers two shapes: extend the existing `checkpoint_adapter.py` charge seam to `aput`/`aput_writes` (small, but it touches the checkpoint **write** path — the path under stress during the very incidents this plan exists to diagnose), or narrow the family to the observable `aget` set and restate the write-side incident mapping in §1. | *"Default: instrument the adapter seam in P1b with its own risk row — the read path is where the incident actually lives (the plan's corrected §1 'Why'), but an unobservable write path is a hole an operator will trust wrongly."* | **ADOPTED — extend the existing `checkpoint_adapter.py` charge seam to `aput`/`aput_writes`, instrumented in P1b with its own risk row.** The seam already exists (`_charge_checkpoint_read`, `:371-374`), so this is wiring, not a new instrument; but it touches the write path under stress, so it is carried as a **P1b task (task 8) with a dedicated risk row (P1b risk 4)** — Medium/Medium, mitigated by keeping the declared `op` enum narrowed to `aget` until the seam lands. | `plan-overview.md` §4 **P1b task 8** (L186) + **P1b risks row 4** (L200) + §1 write-side restatement (L14); `metric-catalog.md` F7 write-path task (L435) + C32 (L1162) |
+| **Q2** | **Prometheus storage-loss exposure.** v2 assumes a single local Prometheus (30 d raw / 90 d downsample); a host loss takes the entire alerting history with it, and no durable remote store is in scope. | *"Default: accept for v2 and record it as a known limitation (RK-16); remote_write is a separate project. Confirm that deferral is acceptable, since the deploy target (host binaries) makes host loss the dominant scenario."* | **ADOPTED — accept a single local Prometheus TSDB for v2; host-storage loss is recorded as a known limitation (RK-16); `remote_write` to a durable store is a separate project, explicitly out of scope for v2.** The limitation is carried in three places so it cannot be lost: the P2 risk row, the catalog's §10.0 mitigation column, and the §G register (G-18). The deploy target (host binaries — decision 1) is what makes host loss the dominant scenario, which is why the deferral is recorded rather than left implicit. | `plan-overview.md` §4 **P2 risks row 4** (L261) + §2 retention (L38); `metric-catalog.md` §10.0 (L1068–L1079); `decisions.md` **§G G-18** |
+
+---
+
+## L. Record correction (CR-3 reuse story) — the dispatch brief's claim was wrong
+
+**The claim that was wrong.** The dispatch brief (and v2's `decisions.md` §F R1 / §B CR-3
+wording) said `checkpoint_metrics.py`'s singletons have **"zero non-test callers"** — i.e. an
+unwired registry.
+
+**The truth (architect Appendix A #4, re-verified by v3 in-tree).** The two singletons **DO**
+have a production consumer:
+
+- `daemon/checkpoint_perf.py:28-30` — **imports** `checkpoint_list_total` and
+  `saver_op_latency_seconds` from `daemon/checkpoint_metrics.py`;
+- `daemon/checkpoint_perf.py:190` and `:198` — **observe** into the histogram on the log-gated
+  and ungated paths;
+- `daemon/checkpoint_perf.py:233` — **increments** `checkpoint_list_total`.
+
+**Only `render_metrics()` itself is unwired** (zero non-test callers in production — the sole
+test caller is `tests/unit/persistence/test_checkpoint_perf_logging.py:1063`).
+
+**The v3 wording, used everywhere from here on:** **"registry wired to collectors, exposition
+unwired."** Not "unwired registry". The two halves are different facts and the catalog now
+states both.
+
+**Where the corrected wording appears (v3):** `metric-catalog.md` §0.2 (L26–L30), §0.2's
+off-loop paragraph (L53–L59), F0.2 (L232–L238) and §11 **C30** (L1160); `plan-overview.md` §3
+listener paragraph (L58) and §1's write-side restatement (L14). The §11 corrections log records
+the claim and the correction side by side.
+
+**v2 history is annotated, not rewritten:** §B's **CR-3** row and §F's **R1** row each carry a
+one-line pointer to this section (`⚠️ v3 record correction: see §L`); their original wording
+stands.
+
+---
+
+## M. v3 companions, counts, waiver additions, edit ledger and consistency-sweep result
+
+### M.1 Companions (4 files)
+
+| File | Lines | Role | In the v3 commit? |
+|---|---|---|---|
+| `plan-overview.md` | **393** | the phase plan (P0/P1a/P1b/P1c/P2), the alert table, the managed keys, the degradation contract | **yes** |
+| `metric-catalog.md` | **1187** | the per-family spec + the 8 vocabulary annexes + the census annex + the corrections log | **yes** |
+| `decisions.md` | **686** | the reviewer-facing map (v2 §A–§H, v3 §I–§M) | **yes** |
+| `architecture-recommendation.md` | **697** | the architect's review — the **input** to v3 (§0 verdict, §10 the 28 amendments, §11 Q1/Q2, Appendix A the verification log). **Read-only for v3** — committed separately at `c0f06943` and **unmodified** | **no** — must not appear in the v3 commit |
+
+### M.2 Counts
+
+| Artifact | Count |
+|---|---|
+| Council findings (v2 §B/§C/§D) | **31** (5 CRITICAL + 16 MAJOR + 10 MINOR) — unchanged |
+| Leader-ratified decisions (§E) | **5** — unchanged in substance |
+| Reuse ledger rows (§F) | **18** — unchanged |
+| Waiver / limitation register (§G) | **20** (16 + v3's G-17…G-20) |
+| Architect amendments (§I) | **28** (canonical §10 1–28, groups A–G) — **none waived** |
+| Architect critical findings (§J) | **5** — all resolved |
+| Open-question resolutions (§K) | **2** (Q1, Q2) — architect's defaults adopted |
+| Record corrections (§L) | **1** (CR-3 reuse story) |
+| Cross-file edits | **34** (v2: E1–E34) + **44** (v3: E35–E78) = **78** |
+| Open items | **11 closed** (H-1…H-11) + **1 deferred** (H-12, §M.6) |
+| Catalog §12 open items carried / plan §12 open questions carried | 6 of 6 / 4 of 4 |
+
+### M.3 §G additions in v3
+
+| # | Waived / limited | One-line |
+|---|---|---|
+| **G-17** | Tool-category label set is runtime-derived (49 + reserved `other`), never hand-listed | derivation is the contract; the closed list is deliberately not written out |
+| **G-18** | Single local Prometheus TSDB — host-storage loss is unrecoverable (RK-16) | accepted for v2; `remote_write` is a separate project |
+| **G-19** | `ensemble_turn_duration_seconds` anchored (entry-tap → node-return) with a per-source drop-condition | the anchor pair is specified; a source that cannot be anchored contributes no observation |
+| **G-20** | Plan §4 work-package phase lists vs catalog §1/§7 ship phases — two partitions | the catalog is authoritative for the roll-up; the 35 pre-existing divergences are enumerated and **deferred** (structural) |
+
+### M.4 The series roll-up, reconciled (v2 → v3)
+
+| | v2 (`cec78e0e8` + `ad3a33171`) | v3 | Why |
+|---|---|---|---|
+| P0 | 26 | 26 | — |
+| P1a | 62 | 62 | — |
+| P1b | 223 | 223 | — |
+| P1c | 210 | **222** | **F20 57 → 69** (tool categories 37 → 49 + reserved `other` = +12) |
+| **Daemon-origin total** | **521** | **533** | 521 + 12 |
+| Shell-origin (textfile) | 5 | 5 | — |
+| Exporter-origin | ≈67 | ≈67 | measured separately, outside the daemon budget |
+| **Grand total on the Prometheus server** | ≈593 | **≈605** | — |
+| **Budget** | ≤2 000, 26 % consumed, headroom 1 479 | ≤2 000, **≈27 %**, headroom **1 467** | 2 000 − 533 |
+
+**Basis (now stated in the catalog, so the proof is checkable):** §7 counts the §1 row values,
+with the one **range** cell (**F7** `22→33`) taken at its **today** value **22** — the bytes
+histogram's +11 arrives with the P1b byte wiring. Row sums: 26 + 62 + 223 + 222 = **533**.
+
+> ⚠️ **A v3 correction to the wave-2 hand-off.** The wave-1/2 result carried the daemon-origin
+> total as **534** with P1c = 223. The §1 rows sum to **222** for P1c (F14 3 + F15 23 + F16 5 +
+> F17 40 + F18 9 + F19 7 + F20 69 + F21 66), so **534 was off by one** — a `210 + 12 = 222`
+> slip in the hand-off arithmetic, not a substantive disagreement (the headroom moves by one
+> series and the percentage does not move). v3 reconciles the roll-up to **533 / 222 / ≈605 /
+> headroom 1 467** and records the basis so a reviewer can recompute it in one line.
+
+### M.5 Label normalization (STEP 3) — 20 relabels, E35–E54
+
+The two files mixed **three** label schemes: the architect's canonical §10 numbering (1–28),
+the architect's own **draft** "A1…A20" labels used inside its prose (a *different* numbering
+— e.g. its draft "A15" = the listener topology, whose canonical number is **12**), and the
+council ids (CR-1/MA-1/m1). Every inline `A<n>` was **content-matched** to the canonical §10
+numbering and relabelled to `A<n>` where **n is the §10 number**. **Relabel only — no content
+changes.** These already matched and were **left alone**: **A1** (tool-category derivation),
+**A2** (F14 terminal hook), **A3/A4** (producer split / live consumer), **A5** (F20 counting
+unit), **A8** (measurements ≠ series), **A9** (locking contract), **A10** (executable
+never-exported / hard cap), **A11** (alias mechanics), **A16** (the four P0 tests), **A18**
+(the boundary rule in catalog §8), **A22** (P0-core/P0-spine), **A24** (vocabulary amendment),
+**A25** (textfile → P1b), **A26** (alert-authoring dependency), **A28** (off-loop discipline).
+
+| # | File · location | Before | After | Canonical §10 |
+|---|---|---|---|---|
+| **E35** | plan §1 write-side restatement | `A5/A6` | `A6/A7` | #6 write path + #7 op re-derive |
+| **E36** | plan §3 off-loop discipline | `A6/A28` | `A28` | #28 |
+| **E37** | plan §3 listener topology | `A15` | `A12` | #12 |
+| **E38** | plan §3 boot/teardown lifecycle | `A15` | `A13` | #13 |
+| **E39** | plan §3 storage-split boundary rule | `A10` | `A18` | #18 |
+| **E40** | plan §3 PG retention ladder | `A11` | `A19` | #19 |
+| **E41** | plan §3 two-sampler consistency | `A12` | `A20` | #20 |
+| **E42** | plan §3 freeze rules | `A14` | `A27` | #27 |
+| **E43** | plan §4 P0 task 1 (boot placement) | `A15` | `A13` | #13 |
+| **E44** | plan §4 P0 task 3 (kill-switch semantics) | `A16` | `A14` | #14 |
+| **E45** | plan §4 P0 task 9 (thread naming) | `A18` | `A23` | #23 |
+| **E46** | plan §4 P0 task 10 (census execution home) | `A17` | `A23` | #23 |
+| **E47** | plan §4 P1b risk 4 (write-path risk row) | `A5/A6` | `A6` | #6 |
+| **E48** | catalog §0.2 freeze rules | `A14/A27` | `A27` | #27 |
+| **E49** | catalog §0.2 off-loop discipline | `A6/A28` | `A28` | #28 |
+| **E50** | catalog §0.7 thread/loop topology | `A15` | `A12` | #12 |
+| **E51** | catalog §0.8 truthiness & layering | `A16` | `A14` | #14 |
+| **E52** | catalog F7 (op enum narrowing) | `A5/A6` | `A6/A7` | #6 + #7 |
+| **E53** | catalog F7 (write-path task) | `A5/A6` | `A6/A7` | #6 + #7 |
+| **E54** | catalog §10.0 restart-loss scenarios | `A13/A21` | `A21` | #21 |
+
+> **Not an amendment label:** plan §9 **R12**'s "collector.py **A2** vocabulary" is the
+> wedge-capture collector's *own* vocabulary name (see §F R12), not an amendment reference —
+> left untouched on purpose.
+
+### M.6 Content fixes and drift fixes, E55–E78 (24 edit sites) + the new open item H-12
+
+**Amendment-driven fixes (the amendment was thin or missing — v3 implemented it first).**
+
+| # | File · location | Fix | Amendment |
+|---|---|---|---|
+| **E55** | plan §4 P1a task 4 | the F14 **terminal-usage hook** (`graph.py:3776-3784`) + per-call dedupe + "terminal-chunk only" — the plan had no hook at all (wave 2 was catalog-only) | #2 |
+| **E56** | plan §4 P1a task 6 | F20 counting unit + the **anchor pair**; removed "latency **per tool**" (no per-tool latency histogram ships) | #5 |
+| **E57** | plan §4 P1a task 2 | thread groups "~8" → **11** (catalog F2 / §8.2) | consistency |
+| **E58** | plan §4 P1a risk 2 | thread groups "~8" → **11** | consistency |
+| **E59** | plan §4 P1b **new task 8** | the checkpoint **write-path** instrumentation task (the risk row alone was not "a task") | #6/#7 |
+| **E60** | plan §4 P1c task 5 | **two producers** + the **live turn-end consumer** (the plan named one producer and the renderer-as-consumer) | #3/#4 |
+| **E61** | plan §4 P1c exit criteria | same | #3/#4 |
+| **E62** | plan §4 P1c risk 1 | same | #3/#4 |
+| **E63** | plan §6 dark-families matrix | the **four missing rows** (env-unset+managed-key-on, `lock_contended`, CPU-spin wedge, non-Linux host) | #15 |
+| **E64** | plan §7 | the cardinality cap is **hard** (§7 said "currently soft — make hard" while §5 said hard) | #10 |
+| **E65** | catalog §1 F14 row | the stale source citation `graph.py:3760-3812` → `graph.py:3776-3784` (terminal-usage branch) | #2 |
+| **E66** | catalog F20 | the anchor pair **specified** (was an unresolved "either/or") | #5 |
+| **E67** | catalog §0.2 | the locking contract now **names the defect it fixes** (the `.get()` lock path → the scrape hangs) | #9 |
+| **E68** | catalog §1 totals + §7 roll-up | the arithmetic reconciled to **533 / 222 / ≈605 / headroom 1 467** (+ the basis note) | §M.4 |
+
+**Pre-existing drift found by the v3 consistency sweep (not wave-induced).**
+
+| # | File · location | Fix | Why |
+|---|---|---|---|
+| **E69** | catalog §7 | the **duplicated stale paragraph** (F20 "tool calls 57" / "≈1 100") removed — wave 2 had prepended the corrected paragraph without deleting the old one | the roll-up must say one thing |
+| **E70** | catalog F22 + §7 | the **F22 phase split** recorded (minimal writer in P1b per A25; family completes in P2) | the one wave-induced phase divergence |
+| **E71** | plan §4 P1c task 7 + exit criteria | the **invalid** sweep expression `rate(..._cycle_seconds_count[5m])` → `rate(ensemble_sweep_cycles_total{lane="rdrs_mission_reconciliation"}[5m]) * 300 > 2` (the cycle metric is a **gauge**; no `_count` series exists) — the §8 alert table had been fixed in v2, these two lines had not | the alert expression must reference a catalog-real series |
+| **E72** | plan §4 P1b exit criteria | `readiness.py:56–79` → **`:64-79`** (grace subset `:83-89`, components `:94-99`) — the same correction v2 applied at §9 R8 (E27) | stale citation |
+| **E73** | plan §4 P1a risk 1 | the LLM-token risk now names the **terminal-usage branch** (`:3776-3784`) | #2 |
+| **E74** | plan §8 alert table — the `BashSpin` row | the PromQL regex `promote_sh\|stage_sh\|launcher` had **unescaped pipes**, which split the markdown table cell (a pre-existing v2 rendering defect — the v2 pass escaped the same expression in `decisions.md` E20 but not in the plan's alert table); the pipes are now escaped | rendering |
+| **E75** | plan §9 R12 | "collector.py **A2** vocab" → "collector.py's own '**A2**' vocabulary … *(not an amendment reference)*" — so no reviewer can mistake it for amendment **#2** | label hygiene |
+| **E76** | catalog §0.8 | "the **A4-knob** lesson" → "the A4-knob lesson — *a managed-key-knob lesson, not an amendment reference*" (same hygiene) | label hygiene |
+
+**This document's own v3 edits (E77–E78).**
+
+| # | File · location | Fix | Why |
+|---|---|---|---|
+| **E77** | `decisions.md` §B MA-7 row | the same unescaped PromQL pipes escaped | rendering (same defect as E74) |
+| **E78** | `decisions.md` §M.2 counts table | one row had 3 cells in a 2-column table | rendering |
+
+**New open item H-12 — DEFERRED (structural).**
+
+| # | Open item | Detail | Status |
+|---|---|---|---|
+| **H-12** | The plan's §4 phase lists and the catalog's §1/§7 ship phases use **two different partitions** (36 families). | The catalog's partition is the dependency-graph one (P1a = runtime/pools/census · P1b = checkpoint/jobs/sweeps/instances · P1c = LLM/MCP/compaction/journal · P2 = exporters); the plan's §4 headings are work-package labels (P1a = "Runtime & resource spine" · P1b = "Persistence, pools & checkpoint" · P1c = "Jobs, instances, sweeps & MCP" · P2 = "Exporters, textfile, journal twin…"). The divergence is **pre-existing v2** — the identical 36-name set is present at `cec78e0e8`, so **no wave introduced it** — and it is **not** one of the 28 amendments. v3 fixed the **one wave-induced** instance (F22's P1b split, E70) and **deferred** the rest: realigning them means restructuring four plan sections (headings, goals, task tables, exit criteria, risks, coupling map, day-estimates) and would silently change the plan's schedule — a **structural** change outside the amendment round's mandate. Recorded as **G-20** so the divergence is explicit rather than silent. | **DEFERRED** — carried to the next planning round |
+
+### M.7 Consistency-sweep result (STEP 5)
+
+| Check | Result |
+|---|---|
+| **Name check** — plan §8 alert table → catalog §1 | **15 tokens, 15 resolve** (13 canonical names + 2 histogram suffixes `_bucket` / `_count` of `ensemble_checkpoint_op_seconds`). **0 unresolved.** Re-run after wave 1's tool-category change and wave 2's phase move. |
+| **Name check** — plan §4 family lists → catalog §1 | **48 names, 48 resolve** to a catalog §1 family. **0 uncatalogued** (v2's 8 uncatalogued names stayed dropped — H-7 holds). |
+| **Phase placements** — plan §4 vs catalog §1/§7 | ⚠️ **36 families differ** — **pre-existing v2** (identical set at `cec78e0e8`), **not** wave-induced. The one wave-induced instance (F22 → P1b, prescribed by A25) is fixed and annotated. The other 35 are **deferred** as **H-12 / G-20** (structural — see §M.6). |
+| **Series roll-up** | ✅ reconciled — 26 + 62 + 223 + 222 = **533** daemon-origin; shell 5; exporter ≈67; grand ≈605; headroom **1 467** (§M.4). |
+| **Exporter-origin** | ✅ ≈67, measured separately, outside the daemon budget; the ≤2k proof covers daemon-origin only. |
+| **The 5 ratified decisions (§E)** | ✅ unchanged **in substance**: (1) host binaries / VM compose, **k8s out** (no manifest ships); (2) journal metrics via the Python twin `daemon/tools/upgrade_journal.py` (`scripts/upgrade/` observed, never edited); (3) the separate **127.0.0.1:9798** listener (never a route on the main app; bind failure ⇒ disabled); (4) **Prometheus for alerting vs the PG tier for per-instance views**; (5) the **dependency-free renderer** + **Prometheus classic text exposition**. The v3 round deepened decisions 3, 4 and 5 (topology, retention ladder, freeze rules) **without reversing** any of them. |
+| **WS-A "4 tables accepting rows" gate** | ✅ survives **verbatim** inside the P0-spine split — `resource_daemon_bucket`, `resource_instance_sample`, `resource_pid_map`, `resource_limit_policy` all accept rows (plan §4, L119–L125; catalog F0.3 exit criterion). |
+| **Alert expressions** | ✅ every §8 expression references a catalog-real series; the one stale expression in plan §4 (the gauge `_count` form) is fixed (E71). |
+| **Code anchors** | ✅ every architect citation re-verified in-tree: `graph.py:3776-3784` / `:3811-3812` · `worker_pool.py:1381-1386` / `:253` / `:45` · `graph.py:7319` · `checkpoint_adapter.py:371-374` / `:377-379` · `checkpoint_perf.py:28-30` / `:190` / `:198` / `:233` · `persistence.py:509` · `checkpoint_metrics.py:59-63` / `:79` / `:182` / `:304` · `message_tap.py:234` / `:302-306` / `:308-309` · `readiness.py:64-79` · `config.py:818-888` · `api.py:2212-2226` / `:2241-2288` / `:2282-2287` / `:3411-3433` / `:3435-3464` · `_tool_registry.py:1598` (49 categories / 254 sites re-counted). |
+
+### M.8 Commits
+
+| Pass | Commit | Base | Content |
+|---|---|---|---|
+| 1 — original v2 plan | `cec78e0e881665450e1ca38c8bf555d915f4d54c` | `9bbef71c1f357d00f2a1dbd62e5c8057fb1620f1` | the three planning files as first authored + the 21 pass-1 alignment edits |
+| 2 — alignment pass | `ad3a331716823998dee567cb6dfbad700b59c854` | `cec78e0e881665450e1ca38c8bf555d915f4d54c` | the H-1…H-11 closure (E22–E34) + §H refreshed |
+| 3 — architect doc (WS-B step 2) | `c0f0694396d118e26fb7b40946005cc8bac8c4d4` | `ad3a331716823998dee567cb6dfbad700b59c854` | `architecture-recommendation.md` — the read-only input to v3 |
+| 4 — **v3 (this commit)** | **HEAD** — a commit cannot contain its own sha; it is reported verbatim in the task report and retrieved with `git rev-parse HEAD` | `c0f0694396d118e26fb7b40946005cc8bac8c4d4` | **waves 1+2** (amendments 1–28 across plan + catalog, uncommitted until now) **+ the v3 verification/fix pass** (E35–E76) **+ §I–§M** |
+
+- **Committed paths (this commit, path-limited):** exactly
+  `.agents/shared/planning/metrics-collection/plan-overview.md`,
+  `.agents/shared/planning/metrics-collection/metric-catalog.md`,
+  `.agents/shared/planning/metrics-collection/decisions.md`.
+  **`architecture-recommendation.md` must NOT appear** — it is already committed (`c0f06943`)
+  and unmodified.
+- Nothing outside that directory is in the commit; the pre-existing stashes were **not touched**;
+  **nothing was pushed**.
+- **Verify:**
+
+```bash
+git rev-parse HEAD                 # the v3 commit (≠ c0f06943, ≠ ad3a33171, ≠ cec78e0e8)
+git show --stat --oneline HEAD     # exactly three planning files, nothing else
+git status --short                 # clean
+```
