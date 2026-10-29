@@ -35,14 +35,6 @@ BOOT_CADENCE = 15
 BOOT_CAP = 2000
 
 
-@pytest.fixture(autouse=True)
-def _clean_gate(monkeypatch):
-    monkeypatch.delenv(metrics_gate.ENV_VAR, raising=False)
-    metrics_gate.reset_for_tests()
-    yield
-    metrics_gate.reset_for_tests()
-
-
 def _install(resolver_values: dict) -> tuple:
     """Install the live resolver + the two registry providers."""
     provider = metrics_gate.build_managed_values_provider(

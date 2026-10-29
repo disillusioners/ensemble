@@ -27,78 +27,19 @@ import pytest
 
 from daemon.services import metrics_gate
 from daemon.services import metrics_listener as ml
+from tests.unit.services.conftest import FakeSocketFactory
 
 
 # ─── the fake socket (NO real bind, ever) ──────────────────────────────────
-
-
-class _FakeSocket:
-    """A socket stand-in — ``bind``/``listen`` are recorded, not called.
-
-    ``fileno()`` raises on purpose: the stdlib selector cannot register
-    it, so the serve loop exits immediately instead of spinning on a
-    file descriptor that would never be readable.
-    """
-
-    def __init__(self, host: str = "127.0.0.1", port: int = 0) -> None:
-        self.host = host
-        self.port = port
-        self.bound_to: tuple[str, int] | None = None
-        self.listened = False
-        self.closed = False
-        self.bind_error: Exception | None = None
-
-    def setsockopt(self, *_args: object) -> None:
-        return
-
-    def bind(self, address: tuple[str, int]) -> None:
-        if self.bind_error is not None:
-            raise self.bind_error
-        self.bound_to = address
-
-    def getsockname(self) -> tuple[str, int]:
-        return (self.host, self.port)
-
-    def listen(self, _backlog: int) -> None:
-        self.listened = True
-
-    def close(self) -> None:
-        self.closed = True
-
-    def fileno(self) -> int:
-        raise OSError("fake socket has no file descriptor")
-
-
-class _FakeSocketFactory:
-    """Records the (host, port) the listener asked for."""
-
-    def __init__(self, *, bind_error: Exception | None = None) -> None:
-        self.calls: list[tuple[str, int]] = []
-        self.sockets: list[_FakeSocket] = []
-        self._bind_error = bind_error
-
-    def __call__(self, host: str, port: int) -> _FakeSocket:
-        self.calls.append((host, port))
-        sock = _FakeSocket(host=host, port=port)
-        if self._bind_error is not None:
-            sock.bind_error = self._bind_error
-        self.sockets.append(sock)
-        return sock
-
-
-@pytest.fixture(autouse=True)
-def _clean_gate(monkeypatch):
-    monkeypatch.delenv(metrics_gate.ENV_VAR, raising=False)
-    metrics_gate.reset_for_tests()
-    yield
-    metrics_gate.reset_for_tests()
+# The socket doubles are SHARED (tests/unit/services/conftest.py) — a
+# module that copies them is a module that will drift.
 
 
 # ─── leg (a): the injectable socket factory ───────────────────────────────
 
 
 def test_listener_uses_the_injected_socket_factory():
-    factory = _FakeSocketFactory()
+    factory = FakeSocketFactory()
     listener = ml.MetricsListener(port=0, socket_factory=factory)
     assert listener.start() is True
     try:
@@ -126,7 +67,7 @@ def test_no_real_socket_is_ever_bound(monkeypatch):
             return super().bind(*args, **kwargs)
 
     monkeypatch.setattr(socket, "socket", _TrackingSocket)
-    factory = _FakeSocketFactory()
+    factory = FakeSocketFactory()
     listener = ml.MetricsListener(port=0, socket_factory=factory)
     assert listener.start() is True
     try:
@@ -142,7 +83,7 @@ def test_no_real_socket_is_ever_bound(monkeypatch):
 
 
 def test_listener_binds_loopback_only():
-    factory = _FakeSocketFactory()
+    factory = FakeSocketFactory()
     listener = ml.MetricsListener(port=0, socket_factory=factory)
     assert listener.start() is True
     try:
@@ -192,14 +133,14 @@ def test_main_app_has_no_metrics_route():
     ],
 )
 def test_non_loopback_origin_is_refused(origin):
-    listener = ml.MetricsListener(port=0, socket_factory=_FakeSocketFactory())
+    listener = ml.MetricsListener(port=0, socket_factory=FakeSocketFactory())
     response = listener.build_response("/metrics", {"Origin": origin})
     assert response.status == 403
     assert b"origin_not_trusted" in response.body
 
 
 def test_non_loopback_referer_is_refused():
-    listener = ml.MetricsListener(port=0, socket_factory=_FakeSocketFactory())
+    listener = ml.MetricsListener(port=0, socket_factory=FakeSocketFactory())
     response = listener.build_response(
         "/metrics", {"Referer": "http://evil.example.com/page"}
     )
@@ -218,21 +159,21 @@ def test_non_loopback_referer_is_refused():
     ],
 )
 def test_loopback_origin_is_allowed(origin):
-    listener = ml.MetricsListener(port=0, socket_factory=_FakeSocketFactory())
+    listener = ml.MetricsListener(port=0, socket_factory=FakeSocketFactory())
     response = listener.build_response("/metrics", {"Origin": origin})
     assert response.status == 200
 
 
 def test_programmatic_scraper_without_origin_is_allowed():
     """No Origin and no Referer ⇒ allowed (curl / Prometheus)."""
-    listener = ml.MetricsListener(port=0, socket_factory=_FakeSocketFactory())
+    listener = ml.MetricsListener(port=0, socket_factory=FakeSocketFactory())
     response = listener.build_response("/metrics", {})
     assert response.status == 200
 
 
 def test_origin_guard_refusal_is_not_counted_as_a_scrape():
     """A refused request never reaches the exposition path."""
-    listener = ml.MetricsListener(port=0, socket_factory=_FakeSocketFactory())
+    listener = ml.MetricsListener(port=0, socket_factory=FakeSocketFactory())
     response = listener.build_response(
         "/metrics", {"Origin": "http://evil.example.com"}
     )
@@ -243,7 +184,7 @@ def test_origin_guard_refusal_is_not_counted_as_a_scrape():
 
 
 def test_bind_failure_disables_the_listener_and_logs(caplog):
-    factory = _FakeSocketFactory(bind_error=OSError("address in use"))
+    factory = FakeSocketFactory(bind_error=OSError("address in use"))
     listener = ml.MetricsListener(port=9798, socket_factory=factory)
     with caplog.at_level(logging.WARNING, logger=ml.logger.name):
         assert listener.start() is False
@@ -264,7 +205,7 @@ def test_bind_failure_does_not_raise():
 
 
 def test_bind_failure_leaves_the_stop_path_safe():
-    factory = _FakeSocketFactory(bind_error=OSError("address in use"))
+    factory = FakeSocketFactory(bind_error=OSError("address in use"))
     listener = ml.MetricsListener(port=9798, socket_factory=factory)
     assert listener.start() is False
     # stop() on a never-started listener is a no-op (no exception).
@@ -276,7 +217,7 @@ def test_bind_failure_leaves_the_stop_path_safe():
 
 def test_switch_off_serves_an_empty_200(monkeypatch):
     monkeypatch.setenv(metrics_gate.ENV_VAR, "0")
-    listener = ml.MetricsListener(port=0, socket_factory=_FakeSocketFactory())
+    listener = ml.MetricsListener(port=0, socket_factory=FakeSocketFactory())
     response = listener.build_response("/metrics", {})
     assert response.status == 200
     assert response.body == b""
@@ -285,14 +226,14 @@ def test_switch_off_serves_an_empty_200(monkeypatch):
 
 def test_switch_off_never_serves_503(monkeypatch):
     monkeypatch.setenv(metrics_gate.ENV_VAR, "0")
-    listener = ml.MetricsListener(port=0, socket_factory=_FakeSocketFactory())
+    listener = ml.MetricsListener(port=0, socket_factory=FakeSocketFactory())
     for _ in range(5):
         assert listener.build_response("/metrics", {}).status == 200
 
 
 def test_switch_off_body_has_no_series(monkeypatch):
     monkeypatch.setenv(metrics_gate.ENV_VAR, "0")
-    listener = ml.MetricsListener(port=0, socket_factory=_FakeSocketFactory())
+    listener = ml.MetricsListener(port=0, socket_factory=FakeSocketFactory())
     body = listener.build_response("/metrics", {}).body.decode()
     assert "ensemble_metrics_up" not in body
     assert "#" not in body
@@ -303,7 +244,7 @@ def test_empty_render_is_fast(monkeypatch):
     import time
 
     monkeypatch.setenv(metrics_gate.ENV_VAR, "0")
-    listener = ml.MetricsListener(port=0, socket_factory=_FakeSocketFactory())
+    listener = ml.MetricsListener(port=0, socket_factory=FakeSocketFactory())
     listener.build_response("/metrics", {})  # warm
     started = time.perf_counter()
     listener.build_response("/metrics", {})
@@ -313,7 +254,7 @@ def test_empty_render_is_fast(monkeypatch):
 
 def test_unknown_route_is_404(monkeypatch):
     monkeypatch.setenv(metrics_gate.ENV_VAR, "1")
-    listener = ml.MetricsListener(port=0, socket_factory=_FakeSocketFactory())
+    listener = ml.MetricsListener(port=0, socket_factory=FakeSocketFactory())
     response = listener.build_response("/not-metrics", {})
     assert response.status == 404
     assert response.outcome == ""
@@ -380,7 +321,7 @@ def test_a_raising_render_does_not_leak_the_exception_message(monkeypatch):
 
     secret = "postgresql://user:hunter2@db/prod SELECT * FROM secrets"
     monkeypatch.setenv(metrics_gate.ENV_VAR, "1")
-    listener = ml.MetricsListener(port=0, socket_factory=_FakeSocketFactory())
+    listener = ml.MetricsListener(port=0, socket_factory=FakeSocketFactory())
 
     def _boom() -> str:
         raise RuntimeError(secret)
@@ -402,7 +343,7 @@ def test_the_error_body_is_bounded_for_a_long_exception_type(monkeypatch):
     from daemon import checkpoint_metrics as cm
 
     monkeypatch.setenv(metrics_gate.ENV_VAR, "1")
-    listener = ml.MetricsListener(port=0, socket_factory=_FakeSocketFactory())
+    listener = ml.MetricsListener(port=0, socket_factory=FakeSocketFactory())
 
     class _VeryLongNameError(Exception):
         pass
@@ -438,7 +379,7 @@ def test_a_loopback_host_is_accepted(host):
 
 def test_metrics_route_tolerates_a_query_string(monkeypatch):
     monkeypatch.setenv(metrics_gate.ENV_VAR, "0")
-    listener = ml.MetricsListener(port=0, socket_factory=_FakeSocketFactory())
+    listener = ml.MetricsListener(port=0, socket_factory=FakeSocketFactory())
     response = listener.build_response("/metrics?collect=all", {})
     assert response.status == 200
 
@@ -447,7 +388,7 @@ def test_metrics_route_tolerates_a_query_string(monkeypatch):
 
 
 def test_stop_is_detached_and_never_blocks_the_caller():
-    factory = _FakeSocketFactory()
+    factory = FakeSocketFactory()
     listener = ml.MetricsListener(port=0, socket_factory=factory)
     assert listener.start() is True
     shutdown = listener.stop()

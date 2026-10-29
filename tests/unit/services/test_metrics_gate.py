@@ -22,15 +22,6 @@ import pytest
 from daemon.services import metrics_gate
 
 
-@pytest.fixture(autouse=True)
-def _clean_gate(monkeypatch):
-    """Every test starts from a pristine gate + an UNSET env."""
-    monkeypatch.delenv(metrics_gate.ENV_VAR, raising=False)
-    metrics_gate.reset_for_tests()
-    yield
-    metrics_gate.reset_for_tests()
-
-
 # ─── case (i): env explicitly set ──────────────────────────────────────────
 
 

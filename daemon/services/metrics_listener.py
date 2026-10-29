@@ -14,10 +14,12 @@ THE SHAPE (plan §3 / §4 P0 T1, catalog §0.7, arch §1 Option A)
   listener on the main loop inherits the CR-1 failure it exists to
   mitigate) and NOT the census thread;
 * **bind failure ⇒ disabled + logged, boot CONTINUES** (the
-  ``daemon/api.py:2282-2287`` degradation pattern);
+  resource-monitor boot degradation block in the lifespan — the
+  ``except Exception as resource_monitor_boot_exc`` pattern);
 * teardown: stop event → ``shutdown()`` → **detached** join → close
-  (the ``daemon/api.py:3411-3433`` house precedent — never a blocking
-  join on the event loop thread).
+  (the resource-monitor stop block in the lifespan — the house
+  detached-join precedent, never a blocking join on the event loop
+  thread).
 
 TESTABILITY (arch §8.3)
 ------------------------
@@ -60,7 +62,7 @@ import threading
 import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Callable, Mapping
+from typing import Any, Callable, Protocol
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -186,7 +188,20 @@ def _host_is_localhost(host: str) -> bool:
     return isinstance(ip, ipaddress.IPv4Address) and ip.is_loopback
 
 
-def origin_is_trusted(headers: Mapping[str, str]) -> bool:
+class _HeaderLookup(Protocol):
+    """The header carrier the listener reads.
+
+    Both carriers the listener meets satisfy it: a plain ``dict`` (the
+    unit legs) and ``http.client.HTTPMessage`` (the live handler's
+    ``self.headers``). The live carrier's ``get`` is CASE-INSENSITIVE;
+    the dict's is not — the header names below are spelled in the
+    canonical form.
+    """
+
+    def get(self, name: str, default: Any = None) -> Any: ...
+
+
+def origin_is_trusted(headers: _HeaderLookup) -> bool:
     """The browser-origin guard (T2).
 
     Rule order (fail-closed at the end), mirroring
@@ -401,10 +416,15 @@ class MetricsListener:
     # ─── the request path (PURE — no socket, no thread) ────────────────
 
     def build_response(
-        self, path: str, headers: Mapping[str, str] | None = None
+        self, path: str, headers: _HeaderLookup | None = None
     ) -> MetricsResponse:
-        """Build the response for one request (the testable core)."""
-        headers = headers or {}
+        """Build the response for one request (the testable core).
+
+        ``headers`` is the live handler's ``self.headers`` (an
+        ``http.client.HTTPMessage``) or a plain dict in the unit legs —
+        see :class:`_HeaderLookup`.
+        """
+        headers = headers if headers is not None else {}
         route = (path or "").split("?", 1)[0]
         if route.endswith("/") and route != "/":
             route = route.rstrip("/")
@@ -528,8 +548,9 @@ class MetricsListener:
 
         The stop event is set, then ``shutdown()`` + the join + the
         close all happen on a DETACHED daemon thread (the house
-        precedent: ``daemon/api.py:3411-3433``). The returned thread is
-        the detached shutdown thread (tests may join it).
+        precedent: the resource-monitor stop block in the lifespan).
+        The returned thread is the detached shutdown thread (tests may
+        join it).
         """
         self._stop_event.set()
         server = self._server

@@ -475,7 +475,8 @@ class CensusSampler:
         """Stop the sampler — DETACHED (never blocks the event loop).
 
         The stop event is set and the join happens on a DETACHED daemon
-        thread (the house precedent: ``daemon/api.py:3411-3433``).
+        thread (the house precedent: the resource-monitor stop block
+        in the lifespan).
         """
         self._stop_event.set()
         thread = self._thread

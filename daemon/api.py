@@ -2296,9 +2296,9 @@ async def lifespan(app: FastAPI):
     # NOT at daemon/api.py module top level).
     #
     # DEGRADATION: a bind failure (or any boot failure) disables the
-    # listener and logs it — the daemon CONTINUES (the
-    # ``daemon/api.py:2282-2287`` pattern). The kill-switch DEFAULTS
-    # OFF: nothing is exposed until an operator says so.
+    # listener and logs it — the daemon CONTINUES (the resource-monitor
+    # boot degradation block below is the pattern). The kill-switch
+    # DEFAULTS OFF: nothing is exposed until an operator says so.
     try:
         from daemon.services import metrics_gate
         from daemon.services.metrics_listener import (
@@ -3616,8 +3616,8 @@ async def lifespan(app: FastAPI):
     # Drain order: AFTER the resource-monitor stop and the wedge-capture
     # stop. The listener's own ``stop()`` is DETACHED (stop event →
     # ``shutdown()`` → join → close on a daemon thread) — the event loop
-    # is NEVER blocked on a join (the house precedent:
-    # ``daemon/api.py:3411-3433``).
+    # is NEVER blocked on a join (the house precedent: the
+    # resource-monitor stop block above).
     _metrics_listener = getattr(app.state, "metrics_listener", None)
     if _metrics_listener is not None:
         try:

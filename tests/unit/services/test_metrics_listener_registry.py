@@ -30,11 +30,17 @@ from daemon.services import metrics_listener as ml
 
 
 @pytest.fixture(autouse=True)
-def _registry(monkeypatch):
-    """Publish on every render (the cadence provider is the pinned API)
-    and register the F0.1 families once per process."""
-    monkeypatch.delenv(metrics_gate.ENV_VAR, raising=False)
-    metrics_gate.reset_for_tests()
+def _registry(_clean_metrics_gate, monkeypatch):
+    """The REGISTRY-specific steps only.
+
+    The gate reset (the env var + ``metrics_gate.reset_for_tests()``)
+    is the SHARED fixture's job (``tests/unit/services/conftest.py`` —
+    the autouse ``_clean_metrics_gate``), which this fixture depends on
+    explicitly. What stays here is what is genuinely registry-specific:
+    publish on every render (the cadence provider is the pinned API),
+    the F0.1 registration (once per process) and the registry's own
+    series reset.
+    """
     cm.set_publisher_cadence_provider(lambda: 0.0)
     ml.ensure_f0_1_registered()
     # The registry is process-global — clear the series so each leg
@@ -42,7 +48,6 @@ def _registry(monkeypatch):
     cm.reset_for_tests()
     yield
     cm.reset_for_tests()
-    metrics_gate.reset_for_tests()
 
 
 def _listener() -> ml.MetricsListener:

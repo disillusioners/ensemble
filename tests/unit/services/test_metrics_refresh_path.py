@@ -32,14 +32,6 @@ import pytest
 from daemon.services import metrics_gate
 
 
-@pytest.fixture(autouse=True)
-def _clean_gate(monkeypatch):
-    monkeypatch.delenv(metrics_gate.ENV_VAR, raising=False)
-    metrics_gate.reset_for_tests()
-    yield
-    metrics_gate.reset_for_tests()
-
-
 class _CountingProvider:
     """A provider that COUNTS its calls (and can block)."""
 

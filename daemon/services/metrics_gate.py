@@ -125,8 +125,9 @@ DEFER_LOG_MESSAGE = (
 )
 
 #: How long a cached managed-key value stays fresh. The managed tier is
-#: DB-backed; the refresh rides the listener's dedicated thread so the
-#: census sampler never touches a pool slot for a boolean.
+#: DB-backed; the refresh rides the REFRESHER thread (never a request
+#: thread), so the census sampler never touches a pool slot for a
+#: boolean.
 MANAGED_REFRESH_TTL_S = 5.0
 
 _lock = threading.Lock()
@@ -180,7 +181,7 @@ def env_explicit_enabled() -> bool | None:
     return raw.lower() in TRUTHY_VALUES
 
 
-# ─── managed-key tier (DB-backed; refreshed by the listener thread) ────────
+# ─── managed-key tier (DB-backed; refreshed by the refresher thread) ──────
 
 
 def set_managed_metrics_enabled(value: bool) -> None:
@@ -220,8 +221,8 @@ def set_managed_metrics_provider(
     """Install the live managed-values provider (boot wiring / test seam).
 
     The provider returns the CURRENT DB tier of the managed-key ladder
-    (``{key: value}``). It may hit the DB; the caller (the listener
-    thread) owns that cost.
+    (``{key: value}``). It may hit the DB; the REFRESHER thread owns
+    that cost (the request path only signals it).
     """
     global _managed_provider
     with _lock:
@@ -430,6 +431,14 @@ def refresh_managed_values(
         _refreshing = True
     try:
         values = dict(provider() or {})
+        with _lock:
+            _managed_values = values
+            if MANAGED_KEY in values:
+                # The kill-switch's DB tier — when the DB has no override
+                # row the BOOT fallback stays in force.
+                _managed_enabled = bool(values[MANAGED_KEY])
+            _managed_refreshed_at = stamp
+        return values
     except Exception as exc:  # noqa: BLE001 — never raise into the caller
         logger.warning(
             "[Metrics] managed-key refresh failed (%s: %s) — keeping the "
@@ -437,39 +446,14 @@ def refresh_managed_values(
             type(exc).__name__,
             exc,
         )
+        return current_values
+    finally:
+        # ONE reset path (H1): the single-flight flag is cleared in
+        # exactly one place, so no failure between two reset sites can
+        # leave the flag LATCHED (a latched flag would stall every
+        # later refresh).
         with _lock:
             _refreshing = False
-        return current_values
-    with _lock:
-        _managed_values = values
-        if MANAGED_KEY in values:
-            # The kill-switch's DB tier — when the DB has no override
-            # row the BOOT fallback stays in force.
-            _managed_enabled = bool(values[MANAGED_KEY])
-        _managed_refreshed_at = stamp
-        _refreshing = False
-    return values
-    stamp = time.monotonic() if now is None else now
-    if stamp - refreshed_at < ttl_s:
-        return current_values
-    try:
-        values = dict(provider() or {})
-    except Exception as exc:  # noqa: BLE001 — never raise into the caller
-        logger.warning(
-            "[Metrics] managed-key refresh failed (%s: %s) — keeping the "
-            "last known values",
-            type(exc).__name__,
-            exc,
-        )
-        return current_values
-    with _lock:
-        _managed_values = values
-        if MANAGED_KEY in values:
-            # The kill-switch's DB tier — when the DB has no override
-            # row the BOOT fallback stays in force.
-            _managed_enabled = bool(values[MANAGED_KEY])
-        _managed_refreshed_at = stamp
-    return values
 
 
 def refresh_managed_metrics_enabled(
