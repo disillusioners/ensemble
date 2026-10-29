@@ -79,6 +79,7 @@ run_leg() {
     POSTGRES_DB="$SCRATCH_DB" POSTGRES_USER="$SCRATCH_ROLE" POSTGRES_PASSWORD="$SCRATCH_PW" \
     PG_TEST_HOST="$PG_HOST" PG_TEST_PORT="$PG_PORT" \
     PG_TEST_DB="$SCRATCH_DB" PG_TEST_USER="$SCRATCH_ROLE" PG_TEST_PASSWORD="$SCRATCH_PW" \
+    PG_TEST_ALLOWED_DBS="$SCRATCH_DB" \
     ENSEMBLE_MISSION_RECORDS="$mode_env" \
     "${PYTHON_BIN:-/home/nea/ensemble-src/.venv/bin/python}" -m pytest "$target" \
     --override-ini="addopts=" -m postgres -q --tb=short -p no:cacheprovider \

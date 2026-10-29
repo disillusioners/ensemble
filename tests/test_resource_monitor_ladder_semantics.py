@@ -135,6 +135,54 @@ class TestLinuxFacingLadderSemantics:
         # The drops are still RECORDED — the ladder just does not move.
         assert s.counters.ticks == 0
 
+    def test_a_slow_failed_read_does_not_demote_the_ladder(
+        self, tree, monkeypatch
+    ):
+        """A SLOW failing read must not demote the ladder either.
+
+        THIS IS THE LEG THAT IS RED AT THE BASE COMMIT (9bbef71c1).
+
+        The leg above (an INSTANT failing read) proves NOTHING about the
+        A/B: the mocked read returns immediately, the tick cost is
+        ~0 ms, the OVERRUN branch is never reached, and the assertion
+        therefore holds on EVERY revision — including the base, which
+        DID demote on a failed read. The divergence only shows up when
+        the failing read is SLOW enough to exceed the tick-cost budget:
+
+          * BASE: the read → overrun → demote path had NO early return
+            for a failed read, so a slow failing read DEMOTED the
+            ladder (base ``sampler.py``: read → :373 overrun → :381
+            demote).
+          * REVISION: the guard sits BETWEEN the read and the overrun
+            check (the failed-read branch returns before the overrun
+            branch), so a failed read never reaches the demotion.
+
+        The release note's A/B attribution is therefore TRUE (the base
+        demoted on a failed read); only the "pinned by a test" clause
+        was false — this leg is the pin.
+        """
+        monkeypatch.setattr(
+            sampler_mod, "read_proc_snapshot", lambda *a, **k: None
+        )
+        clock = {"t": 0.0}
+
+        def slow_failing_read_clock():
+            # > the 30 s tick budget: the read itself exceeded the
+            # interval, so the OVERRUN branch is genuinely reached.
+            clock["t"] += 31.0
+            return clock["t"]
+
+        s, _ring = self._sampler(tree, clock=slow_failing_read_clock)
+        assert s.run_once() is None
+        assert s.counters.ladder_level == LADDER_DEFAULT, (
+            "a slow failed platform read must NOT demote the ladder "
+            f"(got {s.counters.ladder_level!r})"
+        )
+        # The drop is still recorded — the ladder just does not move.
+        assert s.counters.ticks_skipped == 1
+        assert s.counters.missed_samples == 1
+        assert s.counters.ticks == 0
+
     def test_an_overrun_still_demotes_the_ladder(self, tree):
         """The contrast: the COST-driven demotion is unchanged.
 

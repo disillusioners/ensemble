@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import contextmanager
+from typing import Optional
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -72,6 +73,188 @@ PG_USER = os.environ.get("PG_TEST_USER", "ensemble")
 PG_PASSWORD = os.environ.get("PG_TEST_PASSWORD", "ensemble_dev")
 
 PG_URL = f"postgresql+psycopg://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# The scratch-DB fence (G5 — moved here from the resource-monitor module)
+# ─────────────────────────────────────────────────────────────────────────
+#
+# WHY THIS FENCE LIVES IN THE SHARED CONFTEST: the shared
+# ``pg_engine`` fixture runs ``SQLModel.metadata.drop_all(engine)`` on
+# the TARGET database at session setup (see below). A fence that only
+# existed inside ONE module left every OTHER module of this lane
+# unguarded — an ad-hoc ``pytest tests/postgres/`` run dropped every
+# table of the conftest's default target (``ensemble_test``) with no
+# guard at all. The fence is now a session-scoped DEPENDENCY of the
+# shared ``pg_engine``, so it runs BEFORE the engine exists, i.e.
+# before any SQL (and before the ``drop_all``) can reach the target.
+#
+# THE RULES (in order — the first refusal wins):
+#
+#   1. FORBIDDEN NAMES — refused unconditionally. ``ensemble_prod``,
+#      ``ensemble_dev`` and ``ensemble_prod_test`` are LIVE databases
+#      (or live-shaped); nothing can add them to the allowlist.
+#   2. ALLOWLIST — the target name must be an EXACT member of
+#      ``ALLOWED_SCRATCH_DBS`` (or of the exact names a pack declared
+#      through ``PG_TEST_ALLOWED_DBS``). EXACT-name membership only:
+#      NEVER a substring / prefix / pattern heuristic — a name like
+#      ``ensemble_prod_test`` is NOT scratch.
+#   3. OWNERSHIP — a REJECTION-side signal only, never an acceptance
+#      rule. A scratch database whose owner role ALSO owns a live
+#      database is refused (it is co-owned with production). ACCEPTING
+#      A DATABASE BY OWNERSHIP IS FORBIDDEN: in this deployment the
+#      ``ensemble`` role owns ``ensemble_prod`` / ``ensemble_dev``, so
+#      an ownership-based acceptance rule would ADMIT PRODUCTION.
+
+#: The EXACT set of database names the PostgreSQL lane may touch.
+ALLOWED_SCRATCH_DBS = frozenset(
+    {
+        # The conftest's own default — the existing lane's sanctioned
+        # throwaway (``admittable_work_pg_test.sh``,
+        # ``pg_pending_watchers_probe_test.sh``,
+        # ``wanderer_completion_pg_test.sh``,
+        # ``c2_pg_manager_unit_test.sh`` and the attestation lane all
+        # export ``PG_TEST_DB=ensemble_test``).
+        "ensemble_test",
+        "ensemble_dev_test_only",
+        "ensemble_test_only",
+        # The resource-monitor flusher pack's OWN throwaway database
+        # (created and dropped by the pack script).
+        "ensemble_test_only_rmflusher",
+        # The throwaway names the repo's own PG packs create (the
+        # ladder pack's private cluster and the stage-3 attestation
+        # pack's cluster). Both are created by a pack and dropped with
+        # it; they are here because the shared fixture — and therefore
+        # this fence — runs against them.
+        "ensemble_rl_p1",
+        "ensemble_test_stage3",
+    }
+)
+
+#: The names that are ALWAYS refused — whatever else is declared.
+FORBIDDEN_DB_NAMES = frozenset(
+    {
+        "ensemble_prod",
+        "ensemble_dev",
+        "ensemble_prod_test",
+    }
+)
+
+#: The shared legacy throwaways whose owner role ALSO owns a live
+#: database in this deployment (the ``ensemble`` role owns
+#: ``ensemble_prod`` / ``ensemble_dev`` and the legacy scratch DBs).
+#: They are allowlisted BY EXACT NAME and are the ONLY exemption from
+#: the ownership rejection — the rejection exists to catch a
+#: PRODUCTION-OWNED database smuggled into the allowlist, not to
+#: second-guess the repo's own sanctioned throwaways.
+CO_OWNED_LEGACY_THROW_AWAYS = frozenset({"ensemble_test", "ensemble_test_only"})
+
+#: The env var a pack uses to declare the EXACT name of a throwaway
+#: database it created itself (the name cannot be hardcoded when the
+#: pack generates a random one). EXACT names only — a comma-separated
+#: list of database names, never a pattern. A declared name can never
+#: widen the set past ``FORBIDDEN_DB_NAMES`` (checked below).
+ALLOWED_DBS_ENV = "PG_TEST_ALLOWED_DBS"
+
+
+def _effective_pg_test_db() -> str:
+    """The database the shared ``pg_engine`` will touch."""
+    return (os.environ.get("PG_TEST_DB") or PG_DB).strip()
+
+
+def _env_declared_dbs() -> set[str]:
+    """The exact database names a pack declared via ``PG_TEST_ALLOWED_DBS``."""
+    raw = os.environ.get(ALLOWED_DBS_ENV) or ""
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def _database_owner(db_name: str) -> Optional[str]:
+    """The owner role of ``db_name`` (None when unknown).
+
+    ``None`` means UNKNOWN — the database does not exist, or the
+    catalog could not be read (an unreachable server, a missing
+    privilege). The ownership rejection treats "unknown" as
+    "cannot refuse" (it never accepts on ownership, so an unknown
+    owner cannot widen the allowlist).
+    """
+    url = (
+        f"postgresql+psycopg://{PG_USER}:{PG_PASSWORD}"
+        f"@{PG_HOST}:{PG_PORT}/postgres"
+    )
+    try:
+        engine = create_engine(url, pool_pre_ping=True, future=True)
+        try:
+            with engine.connect() as conn:
+                row = conn.execute(
+                    text(
+                        "SELECT pg_get_userbyid(datdba) FROM pg_database "
+                        "WHERE datname = :n"
+                    ),
+                    {"n": db_name},
+                ).first()
+        finally:
+            engine.dispose()
+    except Exception as exc:  # pragma: no cover - environment-dependent
+        logger.warning(
+            "PG fence: could not read the owner of %r (%s: %s) — the "
+            "ownership rejection is skipped for this run",
+            db_name,
+            type(exc).__name__,
+            str(exc)[:120],
+        )
+        return None
+    return None if row is None else str(row[0])
+
+
+def _refuse(message: str) -> None:
+    raise RuntimeError(f"refused: {message}")
+
+
+def check_scratch_db_fence() -> None:
+    """THE FENCE — fail-closed, and it runs BEFORE the target is touched.
+
+    Raises ``RuntimeError`` when the target database is not a
+    sanctioned scratch database. Called by the session-scoped
+    ``pg_scratch_db_fence`` fixture, which the shared ``pg_engine``
+    depends on — so the ordering is a property of the fixture graph,
+    not of fixture-resolution luck.
+    """
+    db = _effective_pg_test_db()
+    if db in FORBIDDEN_DB_NAMES:
+        _refuse(
+            f"PG_TEST_DB={db!r} is a LIVE database "
+            f"(forbidden set: {sorted(FORBIDDEN_DB_NAMES)}) — the shared "
+            "pg_engine drops every table of the target at session setup, "
+            "so it only ever runs against a sanctioned scratch database"
+        )
+    declared = _env_declared_dbs()
+    forbidden_declared = declared & FORBIDDEN_DB_NAMES
+    if forbidden_declared:
+        _refuse(
+            f"{ALLOWED_DBS_ENV} declares the live database(s) "
+            f"{sorted(forbidden_declared)} — a live database can never be "
+            "declared into the allowlist"
+        )
+    allowed = set(ALLOWED_SCRATCH_DBS) | declared
+    if db not in allowed:
+        _refuse(
+            f"PG_TEST_DB={db!r} is not in the hard scratch allowlist "
+            f"{sorted(allowed)} (EXACT-name membership — no substring "
+            "heuristic)"
+        )
+    # OWNERSHIP — a REJECTION-side signal only.
+    if db in CO_OWNED_LEGACY_THROW_AWAYS:
+        return
+    owner = _database_owner(db)
+    if owner is None:
+        return
+    for live in sorted(FORBIDDEN_DB_NAMES):
+        if _database_owner(live) == owner:
+            _refuse(
+                f"the owner role {owner!r} of the scratch database "
+                f"{db!r} also owns the live database {live!r} — a "
+                "scratch database must not be co-owned with production"
+            )
 
 
 # Auto-apply the ``postgres`` marker to every test collected in this
@@ -157,12 +340,30 @@ def _probe_postgres(url: str) -> Engine | None:
 
 
 @pytest.fixture(scope="session")
-def pg_engine():
+def pg_scratch_db_fence():
+    """The scratch-DB fence — the FIRST thing that runs in this lane.
+
+    It is an explicit DEPENDENCY of the shared ``pg_engine`` fixture,
+    so pytest creates it BEFORE the engine exists — i.e. before any
+    SQL (and before the session-scoped ``drop_all``) can reach the
+    target database. See :func:`check_scratch_db_fence` for the rules.
+    """
+    check_scratch_db_fence()
+    return True
+
+
+@pytest.fixture(scope="session")
+def pg_engine(pg_scratch_db_fence):
     """Session-scoped PostgreSQL engine.
 
     Skips the entire module if PostgreSQL is unreachable. Creates the full
     SQLModel schema on setup and drops it on teardown so the test database
     is left clean.
+
+    The ``pg_scratch_db_fence`` dependency is what makes the
+    ``drop_all`` below safe: the fence refuses a live (or
+    non-allowlisted) target BEFORE the engine — and therefore the
+    ``drop_all`` — exists.
     """
     engine = _probe_postgres(PG_URL)
     if engine is None:

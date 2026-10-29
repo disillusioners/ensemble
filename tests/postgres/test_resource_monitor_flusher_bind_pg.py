@@ -39,18 +39,16 @@ key entirely.
 
 Fence discipline (HARD ALLOWLIST, and it runs BEFORE any DDL):
 
-  * The allowlist is the repo's own hard set — ``{"ensemble_dev_test_only",
-    "ensemble_test_only"}`` — with NO substring/name heuristic (a name
-    like ``ensemble_prod_test`` is NOT scratch and is refused).
-  * The fence runs BEFORE the target database is touched. This module
-    OVERRIDES the shared ``tests/postgres/conftest.py`` ``pg_engine``
-    fixture: the shared one performs ``SQLModel.metadata.drop_all`` on
-    the TARGET database at session setup, so a fence that ran inside a
-    test body would refuse AFTER the tables of a live database were
-    already gone. The override puts the allowlist check on the only
-    code path that reaches the database, and the explicit
-    ``_scratch_db_fence`` dependency makes the ORDERING a property of
-    the fixture graph rather than of fixture-resolution luck.
+  * The allowlist is the repo's own hard set — EXACT-name membership,
+    NO substring/name heuristic (a name like ``ensemble_prod_test`` is
+    NOT scratch and is refused).
+  * The fence is a session-scoped DEPENDENCY of the SHARED
+    ``tests/postgres/conftest.py`` ``pg_engine`` — it runs before the
+    engine exists, i.e. before any SQL (and before the session-scoped
+    ``drop_all`` that fixture performs on the target) can reach the
+    database. The fence used to live in THIS module (as a
+    module-level ``pg_engine`` override), which left every OTHER
+    module of the lane unguarded — that cross-module hazard is closed.
 
 Run with the REGISTERED pack script (never by hand — the script owns
 the env and the marker flags)::
@@ -61,14 +59,12 @@ the env and the marker flags)::
 from __future__ import annotations
 
 import ast
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
-from sqlmodel import SQLModel
 
 from daemon.models.resource_monitor import (
     ResourceDaemonBucket,
@@ -79,6 +75,7 @@ from daemon.models.resource_monitor import (
 from daemon.services.resource_monitor import Flusher, RetentionPolicy, TierRing
 from daemon.services.resource_monitor import flusher as flusher_mod
 from daemon.services.resource_monitor import proc_readers as proc_readers_mod
+from daemon.services.resource_monitor import sampler as sampler_mod
 from daemon.services.resource_monitor.proc_readers import (
     DaemonProcSnapshot,
     ProcSnapshot,
@@ -87,45 +84,32 @@ from daemon.services.resource_monitor.sampler import (
     DEGRADED_SENTINEL_INTERVAL_S,
     Sampler,
 )
-from tests.postgres.conftest import PG_URL, _probe_postgres
+from tests.postgres import conftest as pg_conftest
+from tests.postgres.conftest import (
+    ALLOWED_SCRATCH_DBS,
+    FORBIDDEN_DB_NAMES,
+    check_scratch_db_fence,
+)
 
 pytestmark = pytest.mark.postgres
 
+
 # ─────────────────────────────────────────────────────────────────────────
-# Scratch-DB fence — the repo's HARD allowlist
+# Scratch-DB fence — the SHARED one (moved into tests/postgres/conftest.py)
 # ─────────────────────────────────────────────────────────────────────────
 #
-# The same set the resource-monitor unit suites fence on
-# (``tests/test_resource_monitor_sampler.py`` and siblings). NO
-# substring heuristic: the previous shape accepted any name containing
-# "test" or "scratch", which would have admitted ``ensemble_prod_test``.
-
-_ALLOWED_SCRATCH_DBS = frozenset(
-    {"ensemble_dev_test_only", "ensemble_test_only"}
-)
-
-
-def _effective_pg_test_db() -> str:
-    return (os.environ.get("PG_TEST_DB") or "").strip()
-
-
-def _tripwire_check() -> None:
-    """Fail-closed guard — raises BEFORE any SQL reaches the database.
-
-    This is the fence the module docstring promises. It is wired as an
-    explicit DEPENDENCY of this module's ``pg_engine`` fixture, so it
-    runs before the engine exists — i.e. before the session-scoped
-    ``drop_all`` that the shared conftest fixture performs on the
-    target database.
-    """
-    db = _effective_pg_test_db()
-    if db not in _ALLOWED_SCRATCH_DBS:
-        raise RuntimeError(
-            f"refused: PG_TEST_DB={db!r} is not in the hard scratch "
-            f"allowlist {sorted(_ALLOWED_SCRATCH_DBS)} — this module "
-            "drops every table of the target database at session "
-            "setup, so it only runs against a sanctioned scratch DB"
-        )
+# The fence used to live HERE, in a module-level ``pg_engine`` override
+# that shadowed the shared conftest fixture. The hazard was
+# CROSS-MODULE: the override fenced THIS module only, while an ad-hoc
+# ``pytest tests/postgres/`` run instantiated the conftest's
+# session-scoped ``pg_engine`` — which runs ``SQLModel.metadata
+# .drop_all`` against the conftest's default target WITHOUT any fence.
+#
+# The fence is now a session-scoped DEPENDENCY of the SHARED
+# ``pg_engine`` (``tests/postgres/conftest.py``): it runs before the
+# engine exists, i.e. before any SQL and before the ``drop_all``, for
+# EVERY module of the lane. The hard allowlist is EXACT-name
+# membership — no substring / prefix heuristic.
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -202,6 +186,45 @@ _EXPECTED_PG_TYPES: dict[str, dict[str, str]] = {
         "cpu_user_usec": "bigint",
     },
 }
+
+#: The EXPECTED bound-column SET per table — HARDCODED, never derived.
+#:
+#: m8: the AST audit (B7a) detects an ADDED column (the derived set
+#: grows and the expected-type map has no entry for it) but a REMOVED
+#: column simply DROPS OUT of the derived set — the audit stayed green
+#: (proved: removing ``pss_kb`` from the flusher's bind list left the
+#: audit passing). The expected set is therefore compared for EQUALITY
+#: against the derived set, so a removal fails too.
+_EXPECTED_BOUND_COLUMNS: dict[str, frozenset[str]] = {
+    "resource_daemon_bucket": frozenset(
+        {
+            "anon_kb", "attributed_bytes", "bucket_ts", "cg_anon_kb",
+            "cg_current_kb", "cg_file_kb", "cg_peak_kb", "cg_slab_kb",
+            "child_rss_total_kb", "coverage_pct", "cpu_sys_usec",
+            "cpu_user_usec", "fds", "hw_peak_kb", "interval_s",
+            "missed_samples", "pss_kb", "rss_kb", "sample_cost_ms",
+            "sampler_lag_ms", "swap_kb", "threads", "unattributed_kb",
+            "vsize_kb",
+        }
+    ),
+    "resource_instance_sample": frozenset(
+        {
+            "agent_id", "all_state_messages_len", "bucket_ts",
+            "charged_bytes", "child_cpu_user_usec", "child_rss_kb",
+            "cpu_share_usec_est", "deep_bytes", "estimated",
+            "graph_cache_present", "in_flight_tasks", "instance_id",
+            "scan_kind", "status",
+        }
+    ),
+    "resource_pid_map": frozenset(
+        {
+            "agent_id", "command", "cpu_user_usec", "detail", "exit_code",
+            "exit_kind", "exited_at", "instance_id", "kind", "parent_pid",
+            "peak_rss_kb", "pgid", "pid", "spawned_at", "start_time",
+        }
+    ),
+}
+
 
 #: SQLAlchemy type class -> the ``information_schema`` type PG reports.
 _SA_TYPE_TO_PG = {
@@ -344,6 +367,25 @@ def _sampler_row() -> dict:
     return row
 
 
+def _snapshot() -> ProcSnapshot:
+    """A synthetic daemon snapshot (the platform read is mocked)."""
+    return ProcSnapshot(
+        daemon=DaemonProcSnapshot(
+            pid=4242,
+            rss_kb=1_000_000,
+            vsize_kb=2_000_000,
+            anon_kb=600_000,
+            hw_peak_kb=1_100_000,
+            threads=8,
+            fds=256,
+            cpu_user_usec=10_000_000,
+            cpu_sys_usec=2_000_000,
+            pss_kb=900_000,
+        ),
+        cgroup=None,
+    )
+
+
 def _instance_row(
     *,
     estimated: bool | None = True,
@@ -414,47 +456,6 @@ def darwin_host(monkeypatch):
 # ─────────────────────────────────────────────────────────────────────────
 
 
-@pytest.fixture(scope="session")
-def _scratch_db_fence():
-    """The HARD-allowlist fence — the FIRST thing that runs.
-
-    It is an explicit DEPENDENCY of this module's ``pg_engine``
-    fixture, so pytest creates it BEFORE the engine exists — i.e.
-    before any SQL (and before the session-scoped ``drop_all``) can
-    reach the target database.
-    """
-    _tripwire_check()
-    return True
-
-
-@pytest.fixture(scope="session")
-def pg_engine(_scratch_db_fence):
-    """The scratch engine — OVERRIDES the shared conftest fixture.
-
-    WHY THE OVERRIDE: the shared ``tests/postgres/conftest.py``
-    ``pg_engine`` runs ``SQLModel.metadata.drop_all(engine)`` on the
-    TARGET database at session setup. A fence that ran inside a test
-    body — or inside a function-scoped fixture that depends on
-    ``pg_engine`` — refuses AFTER the tables of a live database are
-    already gone. Overriding the fixture puts the allowlist check on
-    the only code path that touches the database; the explicit
-    ``_scratch_db_fence`` dependency makes the ordering a property of
-    the fixture graph rather than of fixture-resolution luck.
-    """
-    engine = _probe_postgres(PG_URL)
-    if engine is None:
-        pytest.skip(f"PostgreSQL not available at {PG_URL}")
-    SQLModel.metadata.drop_all(engine)
-    SQLModel.metadata.create_all(engine)
-    try:
-        yield engine
-    finally:
-        try:
-            SQLModel.metadata.drop_all(engine)
-        finally:
-            engine.dispose()
-
-
 @pytest.fixture
 def scratch_engine(pg_engine):
     """Fresh schema for the four resource_monitor tables."""
@@ -482,6 +483,48 @@ def scratch_engine(pg_engine):
 
 
 class TestBindPathAgainstRealColumnTypes:
+    def test_the_shared_fence_guards_the_shared_pg_engine(self):
+        """G5 — the fence is a DEPENDENCY of the SHARED fixture.
+
+        The shared ``tests/postgres/conftest.py`` ``pg_engine`` runs
+        ``SQLModel.metadata.drop_all`` on the TARGET database at
+        session setup. The fence must therefore be a session-scoped
+        dependency of THAT fixture — a module-local override (the
+        previous shape) left every other module of the lane
+        unguarded.
+        """
+        import inspect
+        import os
+
+        params = tuple(
+            inspect.signature(pg_conftest.pg_engine).parameters
+        )
+        assert "pg_scratch_db_fence" in params, (
+            "the shared pg_engine does NOT depend on the scratch fence — "
+            f"its declared dependencies are {params!r}"
+        )
+        # The allowlist is EXACT-name membership and the live names are
+        # refused unconditionally.
+        assert FORBIDDEN_DB_NAMES >= {
+            "ensemble_prod",
+            "ensemble_dev",
+            "ensemble_prod_test",
+        }
+        assert not (ALLOWED_SCRATCH_DBS & FORBIDDEN_DB_NAMES), (
+            "a live database is in the allowlist"
+        )
+        # The fence itself is callable and refuses a live name.
+        original = os.environ.get("PG_TEST_DB")
+        try:
+            os.environ["PG_TEST_DB"] = "ensemble_prod"
+            with pytest.raises(RuntimeError):
+                check_scratch_db_fence()
+        finally:
+            if original is None:
+                os.environ.pop("PG_TEST_DB", None)
+            else:
+                os.environ["PG_TEST_DB"] = original
+
     def test_the_bound_column_list_is_derived_from_the_flusher_source(self):
         """The audited list IS the flusher's list (no hand-copy).
 
@@ -503,6 +546,26 @@ class TestBindPathAgainstRealColumnTypes:
         assert "estimated" in bound["resource_instance_sample"]
         assert "graph_cache_present" in bound["resource_instance_sample"]
         assert "peak_rss_kb" in bound["resource_pid_map"]
+
+    def test_the_bound_column_set_matches_the_hardcoded_expected_set(self):
+        """m8 — a REMOVED column must fail the audit too.
+
+        The AST-derived set grows when the flusher binds a NEW column
+        (the expected-type map then has no entry for it) but a REMOVED
+        column simply drops OUT of the derived set — the audit stayed
+        green (proved: removing ``pss_kb`` left the audit passing).
+        The hardcoded expected SET is compared for EQUALITY.
+        """
+        bound = _flusher_bound_columns()
+        assert bound == {
+            table: set(cols)
+            for table, cols in _EXPECTED_BOUND_COLUMNS.items()
+        }, (
+            "the flusher's bound-column set drifted from the hardcoded "
+            "expected set — a column was ADDED or REMOVED:\n"
+            f"  derived: { {k: sorted(v) for k, v in bound.items()} }\n"
+            f"  expected: { {k: sorted(v) for k, v in _EXPECTED_BOUND_COLUMNS.items()} }"
+        )
 
     def test_every_bound_column_matches_the_hardcoded_pg_type(
         self, scratch_engine
@@ -928,6 +991,185 @@ class TestSamplerToFlusherToRealPg:
         assert missed == 1
         # The sentinel is NOT a sample tier — it must not reach the
         # minute/hour roll-up.
+        assert tiers == [0], (
+            f"the degraded sentinel polluted the sample tiers: {tiers!r}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# G3 — the sampler stamps bucket_ts: a multi-tick window lands MULTIPLE
+#      rows (and the sentinel carries the count as of its OWN drop)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _stamp_sequence(monkeypatch, stamps: list[str]) -> None:
+    """Pin the sampler's ``bucket_ts`` stamp to a fixed sequence."""
+    it = iter(stamps)
+
+    def _next() -> str:
+        try:
+            return next(it)
+        except StopIteration:  # pragma: no cover - defensive
+            return stamps[-1]
+
+    monkeypatch.setattr(sampler_mod, "_bucket_ts_now", _next)
+
+
+class TestSamplerStampedBucketTs:
+    """The pre-fix behaviour was ONE row per flush window.
+
+    The flusher stamped ``bucket_ts`` at DRAIN time, so every row
+    drained in one window shared one ``(bucket_ts, interval_s)`` key
+    and the ``ON CONFLICT (bucket_ts, interval_s) DO NOTHING`` insert
+    swallowed all but the first — with ``flush.errors == 0`` and no
+    log. These legs prove the sampler-side stamp against REAL
+    PostgreSQL (the ON CONFLICT clause is real here — a SQLite run
+    would not exercise the same grammar).
+    """
+
+    def test_a_multi_tick_window_lands_multiple_distinct_rows(
+        self, scratch_engine, monkeypatch
+    ):
+        ring = TierRing(tier="raw", maxlen=16)
+        instance_ring = TierRing(tier="instance", maxlen=16)
+        monkeypatch.setattr(
+            sampler_mod,
+            "read_proc_snapshot",
+            lambda *a, **k: _snapshot(),
+        )
+        _stamp_sequence(
+            monkeypatch,
+            [
+                "2026-10-29 12:00:01",
+                "2026-10-29 12:00:02",
+                "2026-10-29 12:00:03",
+            ],
+        )
+        sampler = Sampler(
+            sample_seconds=30,
+            self_cpu_budget_pct=1.0,
+            self_rss_budget_mb=50,
+            detail_level="minimal",
+            proc_root=_ABSENT_PROC_ROOT,
+            cgroup_root="/nonexistent-cgroup-root-for-tests",
+            ring=ring,
+            instance_ring=instance_ring,
+        )
+        for _ in range(3):
+            assert sampler.run_once() is not None
+
+        flusher = _flusher(scratch_engine, ring, instance_ring)
+        flusher.run_once()
+        assert flusher.counters.errors == 0
+
+        with scratch_engine.connect() as c:
+            rows = c.execute(
+                text(
+                    "SELECT bucket_ts FROM resource_daemon_bucket "
+                    "WHERE interval_s = 30 ORDER BY bucket_ts"
+                )
+            ).fetchall()
+        assert len(rows) == 3, (
+            "the raw tier collapsed a three-sample window into "
+            f"{len(rows)} row(s) — the drain-time bucket_ts stamp is back "
+            "(the ON CONFLICT DO NOTHING swallowed the rest)"
+        )
+        assert [r[0] for r in rows] == [
+            "2026-10-29 12:00:01",
+            "2026-10-29 12:00:02",
+            "2026-10-29 12:00:03",
+        ]
+
+    def test_each_sentinel_carries_the_count_as_of_its_own_drop(
+        self, scratch_engine, monkeypatch
+    ):
+        """G1/T-1 — the running total AS OF THE FIRST DROP, per row.
+
+        The first sentinel of a window carries ``missed_samples = 1``
+        (the count at the FIRST drop), NOT the window's total. The
+        window's TRUE drop count is ``MAX(missed_samples)`` over the
+        window's rows.
+        """
+        ring = TierRing(tier="raw", maxlen=16)
+        instance_ring = TierRing(tier="instance", maxlen=16)
+        monkeypatch.setattr(
+            sampler_mod, "read_proc_snapshot", lambda *a, **k: None
+        )
+        _stamp_sequence(
+            monkeypatch,
+            [f"2026-10-29 12:30:{i:02d}" for i in range(1, 5)],
+        )
+        sampler = Sampler(
+            sample_seconds=30,
+            self_cpu_budget_pct=1.0,
+            self_rss_budget_mb=50,
+            detail_level="minimal",
+            proc_root=_ABSENT_PROC_ROOT,
+            cgroup_root="/nonexistent-cgroup-root-for-tests",
+            ring=ring,
+            instance_ring=instance_ring,
+        )
+        for _ in range(4):
+            assert sampler.run_once() is None
+        assert sampler.counters.missed_samples == 4
+
+        flusher = _flusher(scratch_engine, ring, instance_ring)
+        flusher.run_once()
+        assert flusher.counters.errors == 0
+
+        with scratch_engine.connect() as c:
+            sentinels = c.execute(
+                text(
+                    "SELECT bucket_ts, missed_samples "
+                    "FROM resource_daemon_bucket WHERE interval_s = 0 "
+                    "ORDER BY bucket_ts"
+                )
+            ).fetchall()
+        assert len(sentinels) == 4, (
+            "the four drops of one window collapsed into "
+            f"{len(sentinels)} row(s) — the drop evidence is lost"
+        )
+        assert [int(r[1]) for r in sentinels] == [1, 2, 3, 4]
+        # THE RECOVERY PATH: the window's TRUE count is the MAX.
+        assert max(int(r[1]) for r in sentinels) == 4
+
+    def test_the_sentinel_rows_do_not_pollute_the_sample_tiers(
+        self, scratch_engine, monkeypatch
+    ):
+        """The sentinel keeps its own tier; the roll-up ignores it."""
+        ring = TierRing(tier="raw", maxlen=16)
+        instance_ring = TierRing(tier="instance", maxlen=16)
+        monkeypatch.setattr(
+            sampler_mod, "read_proc_snapshot", lambda *a, **k: None
+        )
+        _stamp_sequence(
+            monkeypatch,
+            [f"2026-10-29 12:45:{i:02d}" for i in range(1, 3)],
+        )
+        sampler = Sampler(
+            sample_seconds=30,
+            self_cpu_budget_pct=1.0,
+            self_rss_budget_mb=50,
+            detail_level="minimal",
+            proc_root=_ABSENT_PROC_ROOT,
+            cgroup_root="/nonexistent-cgroup-root-for-tests",
+            ring=ring,
+            instance_ring=instance_ring,
+        )
+        for _ in range(2):
+            assert sampler.run_once() is None
+        flusher = _flusher(scratch_engine, ring, instance_ring)
+        flusher.run_once()
+        with scratch_engine.connect() as c:
+            tiers = [
+                int(r[0])
+                for r in c.execute(
+                    text(
+                        "SELECT DISTINCT interval_s "
+                        "FROM resource_daemon_bucket"
+                    )
+                ).fetchall()
+            ]
         assert tiers == [0], (
             f"the degraded sentinel polluted the sample tiers: {tiers!r}"
         )

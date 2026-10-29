@@ -61,6 +61,36 @@ from .sampler import DEGRADED_SENTINEL_INTERVAL_S
 logger = logging.getLogger(__name__)
 
 
+#: The RAW tier's ``interval_s`` RANGE.
+#:
+#: The raw tier's discriminator is the EFFECTIVE sampling interval
+#: (``config.sample_seconds`` — default 30, range 15..60, plus the
+#: self-throttle doublings), NOT a fixed 30. The retention sweep used
+#: to be hard-coded to ``interval_s = 30``: at a 15 s configuration the
+#: raw rows were NEVER swept (unbounded raw-row growth) and the
+#: history "raw" resolution returned no points.
+#:
+#: The range is ``0 < interval_s < 60``:
+#:
+#:   * the MINUTE tier is ``interval_s = 60`` and the HOUR tier is
+#:     ``interval_s = 3600`` — both OUTSIDE the range, so the raw
+#:     sweep can never erase them (review F1: a tier-blind raw sweep
+#:     erased the 14-day minute and 180-day hour tiers);
+#:   * the DEGRADED SENTINEL is ``interval_s = 0`` — also OUTSIDE the
+#:     range, so the raw sweep does NOT swallow it; the sentinel keeps
+#:     its OWN sweep (the sixth DELETE).
+#:
+#: KNOWN LIMIT (documented, not a defect): an effective sampling
+#: interval of exactly 60 makes the raw row and the minute roll-up
+#: share the ``interval_s = 60`` discriminator — an inherent ambiguity
+#: of the stacked-tier schema (deviation #1). Such raw rows are swept
+#: by the MINUTE sweep (14 d) instead of the raw cutoff (48 h); they
+#: are never lost early. Carrying the effective interval in its own
+#: column needs a NEW COLUMN (DDL) — owned by the metrics-collection
+#: lane, NOT by this repair.
+RAW_TIER_INTERVAL_PREDICATE = "interval_s > 0 AND interval_s < 60"
+
+
 def is_missing_relation_error(exc: BaseException) -> bool:
     """True when ``exc`` is a RELATION-missing error (first-boot benign).
 
@@ -289,9 +319,14 @@ class Flusher:
         # if the buffer is over capacity).
         drained = self.raw_ring.drain()
         for row in drained:
-            # Stamp the bucket_ts on entry — the sampler writes the
-            # row without a timestamp; the flusher stamps it on
-            # admission. Naive-UTC (D9).
+            # The sampler stamps ``bucket_ts`` at SAMPLE time (T1 fix:
+            # the drain-time stamp made every row of a window share ONE
+            # ``(bucket_ts, interval_s)`` key, so all but the first
+            # were swallowed by the ON CONFLICT DO NOTHING insert —
+            # silently, with ``flush.errors == 0``). The ``setdefault``
+            # is now a NO-OP for sampler rows and stays only as the
+            # fallback for a row that arrives without a timestamp.
+            # Naive-UTC (D9).
             row = dict(row)
             row.setdefault("bucket_ts", self._now_utc_naive().strftime(
                 "%Y-%m-%d %H:%M:%S"
@@ -371,8 +406,21 @@ class Flusher:
                 # hour (180 d) rows (review F1). T2 instance rows are
                 # raw-only (no roll-down) — swept at the raw cutoff
                 # with no interval discrimination (§2.5 raw tier).
+                # T3: the raw tier's discriminator is the EFFECTIVE
+                # sampling interval (15..60 by configuration, plus the
+                # self-throttle doublings), not a fixed 30 — the sweep
+                # used to be hard-coded to ``interval_s = 30``, so at a
+                # 15 s configuration the raw rows were NEVER swept.
+                # The predicate covers the raw RANGE
+                # (``0 < interval_s < 60``) and therefore excludes the
+                # minute tier (60), the hour tier (3600) AND the
+                # DEGRADED SENTINEL (0) — the sentinel keeps its own
+                # sweep below.
                 swept["raw"] = self._sweep(
-                    conn, "resource_daemon_bucket", raw_cut, interval_s=30
+                    conn,
+                    "resource_daemon_bucket",
+                    raw_cut,
+                    extra_predicate=RAW_TIER_INTERVAL_PREDICATE,
                 )
                 # B1: the DEGRADED SENTINEL rows live in the raw tier
                 # with ``interval_s = 0`` (the tier discriminator every
@@ -620,7 +668,11 @@ class Flusher:
         ``resource_daemon_bucket`` table) — without it a lower tier's
         cutoff would erase higher-tier rows (review F1). ``None``
         sweeps the whole table (raw-only tables such as T2
-        ``resource_instance_sample``).
+        ``resource_instance_sample``) UNLESS ``extra_predicate``
+        narrows it — the raw tier now sweeps with
+        ``extra_predicate=RAW_TIER_INTERVAL_PREDICATE`` (the raw
+        RANGE ``0 < interval_s < 60``) because its discriminator is
+        the effective sampling interval, not a fixed 30.
 
         ``extra_predicate`` is AND-ed onto the WHERE for tables that
         need a structural guard beyond the timestamp cutoff. The
@@ -870,7 +922,7 @@ class Flusher:
         """
         nested = conn.begin_nested()
         try:
-            conn.execute(text(sql), params)
+            result = conn.execute(text(sql), params)
         except Exception as exc:
             nested.rollback()
             if is_missing_relation_error(exc):
@@ -916,7 +968,20 @@ class Flusher:
             self.counters.errors += 1
             return 0
         nested.commit()
-        return len(params)
+        # G6: the flush counters must report the rows that were REALLY
+        # written, not the rows that were ATTEMPTED. The stacked-tier
+        # INSERT is idempotent (``ON CONFLICT (bucket_ts, interval_s)
+        # DO NOTHING`` / ``INSERT OR IGNORE``), so a duplicate key is
+        # silently skipped — ``len(params)`` counted it as a write and
+        # the flush counters OVER-REPORTED. ``rowcount`` is the number
+        # of rows the statement actually inserted (PostgreSQL reports
+        # the post-ON-CONFLICT count; SQLite reports the number of
+        # rows actually changed). A driver that cannot report a
+        # rowcount (-1) falls back to ``len(params)``.
+        affected = getattr(result, "rowcount", -1)
+        if affected is None or affected < 0:
+            return len(params)
+        return int(affected)
 
     def _dialect_insert(
         self, table: str, columns: list[str], *, idempotent: bool
