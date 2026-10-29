@@ -263,7 +263,14 @@ class TestHonestGet:
             spec = MANAGED_KEYS[entry["key"]]
             assert entry["value"] == spec.default  # boot-applied truth
             assert entry["source"] == "default"
-            assert entry["requires_restart"] is True
+            # The restart flag is PER-KEY (the registry's truth). It
+            # used to be uniformly True — the metrics-collection P0
+            # knobs introduced the first live-apply (no-restart) keys
+            # (``limits.metrics_enabled`` — the per-request
+            # kill-switch; ``limits.metrics_scrape_interval_hint_s``;
+            # ``limits.metrics_cardinality_cap``), so the entry now
+            # mirrors the registry instead of a blanket True.
+            assert entry["requires_restart"] is spec.requires_restart
             assert entry["divergent"] is False
         assert payload["restart_required"] is False
 

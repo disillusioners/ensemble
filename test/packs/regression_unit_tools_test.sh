@@ -14,6 +14,12 @@
 #     (pre-existing access_memory 'Access denied' family — see QUARANTINE.md
 #     2026-08-20; this partition covers that file's scope.)
 #
+#   - tests/unit/tools/test_upgrade_executor_systemd_service.py::TestDetectorContract::test_swallowed_exception_classifies_unavailable_not_legacy
+#     (QUARANTINE.md 2026-10-22 — SESSION-ABORTER: patches pathlib.Path.exists
+#     GLOBALLY → pytest's own machinery raises → INTERNALERROR rc=3 kills the
+#     whole session and silently drops unrun items. QUARANTINE mandates
+#     isolating this node alone via --deselect.)
+#
 # Pre-existing failure families MUST RUN and be adjudicated from failure
 # inventory, NOT deselected: watchover cascade, sqlite migration 20260714,
 # httpx pollution, subdirs-sweep, proxy_phase1, slash_commands, injection_api,
@@ -38,6 +44,7 @@ timeout 280s uv run pytest \
   --deselect tests/unit/tools/test_archive_lifecycle.py::TestAccessMemoryArchive::test_access_archive_invalid_format_sanitized \
   --deselect tests/unit/tools/test_archive_lifecycle.py::TestAccessMemoryArchive::test_access_archive_nonexistent_returns_not_found \
   --deselect tests/unit/tools/test_archive_lifecycle.py::TestAccessMemoryArchive::test_access_normal_file_still_works \
+  --deselect tests/unit/tools/test_upgrade_executor_systemd_service.py::TestDetectorContract::test_swallowed_exception_classifies_unavailable_not_legacy \
   2>&1 || EXIT_CODE=$?
 if [ $EXIT_CODE -eq 124 ]; then
   echo "RESULT: TIMEOUT"

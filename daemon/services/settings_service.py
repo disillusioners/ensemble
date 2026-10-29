@@ -76,6 +76,14 @@ the prose counts here had gone stale in the parent (said SIX while
 the checkpoint A4 pair had already landed → 8); with this key the
 registry carries NINE managed keys. ``len(MANAGED_KEYS)`` is the
 authoritative census; this prose is history, not truth.
+
+v1.3 (2026-10-29, metrics-collection P0): adds the SEVEN metrics
+knobs (``limits.metrics_enabled`` / ``limits.metrics_listener_port`` /
+``limits.metrics_scrape_interval_hint_s`` /
+``limits.metrics_census_interval_s`` / ``limits.metrics_sampler_interval_s``
+/ ``limits.metrics_textfile_dir`` / ``limits.metrics_cardinality_cap``)
+— the registry now carries SIXTEEN entries. ``len(MANAGED_KEYS)`` is
+the authoritative census; this prose is history, not truth.
 """
 
 from __future__ import annotations
@@ -179,11 +187,13 @@ class ManagedKeySpec:
 #: the two instance-graph cache bounding keys (resource-cost-control
 #: O3, 2026-10-18) plus ``limits.chart_render_concurrency`` (resource-
 #: cost-control O2, 2026-10-18). Landed since, without a prose census
-#: bump: the checkpoint A4 pair (soak-gate-mcp-warmup) and
-#: ``limits.manager_pool_size`` (devops incident fix item #7) — the
-#: registry now carries NINE entries. Adding keys later is a registry
-#: entry + nothing else (the ladder, CRUD, API and FE render generically
-#: off the registry); ``len(MANAGED_KEYS)`` is the authoritative census.
+#: bump: the checkpoint A4 pair (soak-gate-mcp-warmup),
+#: ``limits.manager_pool_size`` (devops incident fix item #7) and the
+#: SEVEN metrics-collection knobs (metrics-collection P0, 2026-10-29) —
+#: the registry now carries SIXTEEN entries. Adding keys later is a
+#: registry entry + nothing else (the ladder, CRUD, API and FE render
+#: generically off the registry); ``len(MANAGED_KEYS)`` is the
+#: authoritative census.
 #: The registry default MUST mirror the backing pydantic Field default —
 #: chain: ``daemon.constants`` → ``LimitsConfig`` Field → this registry
 #: default (ONE truth).
@@ -446,6 +456,148 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
             "override > env var LIMITS_CHART_RENDER_CONCURRENCY > "
             "config.yaml literal > default; changes require a daemon "
             "restart."
+        ),
+    ),
+    # ── metrics collection (metrics-collection P0 — plan §5) ────────────
+    # SEVEN knobs. Each registry default MIRRORS the backing pydantic
+    # Field default EXACTLY (ONE truth — the A4-knob lesson) and each
+    # bound mirrors the Field's ge/le.
+    "limits.metrics_enabled": ManagedKeySpec(
+        key="limits.metrics_enabled",
+        config_path="limits.metrics_enabled",
+        env_var="LIMITS_METRICS_ENABLED",
+        value_type="bool",
+        # Mirrors LimitsConfig.metrics_enabled Field(default=False).
+        default=False,
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "Metrics kill-switch (the managed tier; mirrors the "
+            "authoritative per-request env var ENSEMBLE_METRICS_ENABLED). "
+            "OFF ⇒ /metrics serves an empty 200 and the samplers stop "
+            "ticking. Effective precedence: DB override > env var "
+            "LIMITS_METRICS_ENABLED > config.yaml literal > default. "
+            "Takes effect WITHOUT a restart."
+        ),
+    ),
+    "limits.metrics_listener_port": ManagedKeySpec(
+        key="limits.metrics_listener_port",
+        config_path="limits.metrics_listener_port",
+        env_var="LIMITS_METRICS_LISTENER_PORT",
+        value_type="int",
+        # Mirrors LimitsConfig.metrics_listener_port
+        # Field(default=9798, ge=1024, le=65535).
+        default=9798,
+        ge=1024,
+        le=65535,
+        requires_restart=True,
+        sensitive=False,
+        description=(
+            "Port for the localhost-bound (127.0.0.1 only) /metrics "
+            "exposition listener. Boot-applied (the socket is bound "
+            "once); a bind failure disables the listener and the daemon "
+            "continues. Effective precedence: DB override > env var "
+            "LIMITS_METRICS_LISTENER_PORT > config.yaml literal > "
+            "default."
+        ),
+    ),
+    "limits.metrics_scrape_interval_hint_s": ManagedKeySpec(
+        key="limits.metrics_scrape_interval_hint_s",
+        config_path="limits.metrics_scrape_interval_hint_s",
+        env_var="LIMITS_METRICS_SCRAPE_INTERVAL_HINT_S",
+        value_type="int",
+        # Mirrors LimitsConfig.metrics_scrape_interval_hint_s
+        # Field(default=15, ge=5, le=300).
+        default=15,
+        ge=5,
+        le=300,
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "Advisory scrape-interval hint (seconds) — the registry's "
+            "publisher cadence (the bounded staleness of a published "
+            "snapshot). Prometheus' own scrape_interval wins. Effective "
+            "precedence: DB override > env var "
+            "LIMITS_METRICS_SCRAPE_INTERVAL_HINT_S > config.yaml literal "
+            "> default."
+        ),
+    ),
+    "limits.metrics_census_interval_s": ManagedKeySpec(
+        key="limits.metrics_census_interval_s",
+        config_path="limits.metrics_census_interval_s",
+        env_var="LIMITS_METRICS_CENSUS_INTERVAL_S",
+        value_type="int",
+        # Mirrors LimitsConfig.metrics_census_interval_s
+        # Field(default=15, ge=15, le=300).
+        default=15,
+        ge=15,
+        le=300,
+        requires_restart=True,
+        sensitive=False,
+        description=(
+            "PostgreSQL census cadence (seconds) on its own dedicated "
+            "NON-POOLED connection. Floor 15 s (never faster than the "
+            "resource monitor). Boot-applied. Effective precedence: DB "
+            "override > env var LIMITS_METRICS_CENSUS_INTERVAL_S > "
+            "config.yaml literal > default."
+        ),
+    ),
+    "limits.metrics_sampler_interval_s": ManagedKeySpec(
+        key="limits.metrics_sampler_interval_s",
+        config_path="limits.metrics_sampler_interval_s",
+        env_var="LIMITS_METRICS_SAMPLER_INTERVAL_S",
+        value_type="int",
+        # Mirrors LimitsConfig.metrics_sampler_interval_s
+        # Field(default=10, ge=1, le=60).
+        default=10,
+        ge=1,
+        le=60,
+        requires_restart=True,
+        sensitive=False,
+        description=(
+            "Host-side sampler cadence (seconds) for the /proc-style "
+            "samplers. Boot-applied. Effective precedence: DB override > "
+            "env var LIMITS_METRICS_SAMPLER_INTERVAL_S > config.yaml "
+            "literal > default."
+        ),
+    ),
+    "limits.metrics_textfile_dir": ManagedKeySpec(
+        key="limits.metrics_textfile_dir",
+        config_path="limits.metrics_textfile_dir",
+        env_var="LIMITS_METRICS_TEXTFILE_DIR",
+        value_type="str",
+        # Mirrors LimitsConfig.metrics_textfile_dir
+        # Field(default="$INSTALL_DIR/data/metrics").
+        default="$INSTALL_DIR/data/metrics",
+        requires_restart=True,
+        sensitive=False,
+        description=(
+            "Textfile collector directory for the out-of-process "
+            "sampler's *.prom files. The literal $INSTALL_DIR token is "
+            "resolved by the exporter that writes the files. Boot-"
+            "applied. Effective precedence: DB override > env var "
+            "LIMITS_METRICS_TEXTFILE_DIR > config.yaml literal > default."
+        ),
+    ),
+    "limits.metrics_cardinality_cap": ManagedKeySpec(
+        key="limits.metrics_cardinality_cap",
+        config_path="limits.metrics_cardinality_cap",
+        env_var="LIMITS_METRICS_CARDINALITY_CAP",
+        value_type="int",
+        # Mirrors LimitsConfig.metrics_cardinality_cap
+        # Field(default=2000, ge=100, le=10000).
+        default=2000,
+        ge=100,
+        le=10000,
+        requires_restart=False,
+        sensitive=False,
+        description=(
+            "HARD cardinality cap on the metric registry: observations "
+            "beyond the cap are REJECTED (not warned) and counted. Read "
+            "per observation — takes effect WITHOUT a restart. Effective "
+            "precedence: DB override > env var "
+            "LIMITS_METRICS_CARDINALITY_CAP > config.yaml literal > "
+            "default."
         ),
     ),
 }
