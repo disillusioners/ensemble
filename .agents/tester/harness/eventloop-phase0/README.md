@@ -30,10 +30,14 @@ bash .agents/tester/harness/eventloop-phase0/run_all.sh --profile=smoke  # ~5 mi
 bash .agents/tester/harness/eventloop-phase0/run_all.sh --profile=full   # ~20 min
 ```
 
-Outputs land in `raw/` (`BASELINE.json`, `run_<profile>.log`,
+Outputs land in `raw/` (`BASELINE.<profile>.json`, `run_<profile>.out`,
 `faulthandler_*.txt`, per-run workdirs incl. the wedge-capture
-artifacts). The committed copies are the ones the baseline report
-cites.
+artifacts). The per-run JSON report is PROFILE-SUFFIXED
+(`BASELINE.full.json` / `BASELINE.smoke.json`) — a `--profile=smoke`
+re-run can never overwrite the committed full-scale baseline. The
+committed evidence set is `BASELINE.full.json` + `run_full.out` +
+`evidence/`; the smoke outputs (`BASELINE.smoke.json`,
+`run_smoke.out`) are gitignored transient re-run artifacts.
 
 ## The daemon child
 

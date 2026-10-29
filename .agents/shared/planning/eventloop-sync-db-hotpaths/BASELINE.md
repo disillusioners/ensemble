@@ -4,7 +4,7 @@
 `origin/latest` == the v0.27.13 bump commit). **Harness:**
 `.agents/tester/harness/eventloop-phase0/` — `run_all.sh --profile=full`,
 **34/34 fences PASS, exit 0** (smoke re-run PASS before it). **Raw record:**
-`…/eventloop-phase0/raw/BASELINE.json` (full schema) + `raw/run_full.out` +
+`…/eventloop-phase0/raw/BASELINE.full.json` (full schema) + `raw/run_full.out` +
 `raw/evidence/` (5 wedge-captures incl. the 4 narrow-pin stacks + the
 faulthandler dump). This document carries the headline numbers; the JSON is
 authoritative.
@@ -179,8 +179,9 @@ bash .agents/tester/harness/eventloop-phase0/run_all.sh --profile=full    # ~18 
 
 Additive-only: overlay at BASE via
 `git checkout fix/eventloop-sync-db-hotpaths -- .agents/tester/harness/eventloop-phase0`.
-Exit 0 = all fences green. Outputs: `raw/BASELINE.json` (stable schema),
-`raw/run_<profile>.log`, `raw/evidence/`.
+Exit 0 = all fences green. Outputs: `raw/BASELINE.<profile>.json` (stable
+schema; PROFILE-SUFFIXED — a smoke re-run cannot overwrite the committed
+full baseline), `raw/run_<profile>.out`, `raw/evidence/`.
 
 ## Disclosures / open questions
 

@@ -258,6 +258,69 @@ def formula_table(per_shape: dict, seed_result, fences: Fences) -> dict:
     return table
 
 
+ORPHAN_LOOKUP_SHAPE = "SELECT instances"
+#: statement_shape() of the jobs-enrichment orphan `_lookup_instance`
+#: single-row lookups: verb SELECT, table set EXACTLY {instances} (the
+#: joined instances endpoints render other table sets and are NOT this
+#: N+1).  See child.statement_shape.
+
+
+def jobs_time_share(profile_result: dict, tag_prefixes: tuple[str, ...]) -> dict:
+    """Precomputed §6 time-share: orphan `_lookup_instance` vs all statements.
+
+    One rule for BOTH aggregation windows, so future readers never
+    re-derive (and never disagree about) the filter — the committed
+    full baseline was hand-derived as 92.3% (page window) vs
+    89.6–89.9% per-request (badge window) from the same data.
+
+    Window = the N4 per-request bookkeeping of ONE profile result,
+    restricted to tags starting with ``tag_prefixes`` (empty tuple =
+    every tag).  Share = orphan-lookup total_s / window total_s.
+    ``per_request_share_{min,max}`` reproduces the per-request spread.
+    """
+    per_req = (profile_result.get("n4") or {}).get("per_request") or {}
+    by_shape: dict[str, dict[str, float]] = {}
+    per_request_shares: list[float] = []
+    for tag, v in per_req.items():
+        if tag_prefixes and not tag.startswith(tag_prefixes):
+            continue
+        req_total = 0.0
+        req_orphan = 0.0
+        for sh, sv in (v.get("by_shape") or {}).items():
+            e = by_shape.setdefault(sh, {"count": 0, "total_s": 0.0})
+            e["count"] += sv.get("count", 0)
+            e["total_s"] += sv.get("total_s", 0.0)
+            req_total += sv.get("total_s", 0.0)
+            if sh == ORPHAN_LOOKUP_SHAPE:
+                req_orphan += sv.get("total_s", 0.0)
+        if req_total > 0:
+            per_request_shares.append(req_orphan / req_total)
+    total_s = sum(e["total_s"] for e in by_shape.values())
+    orphan = by_shape.get(ORPHAN_LOOKUP_SHAPE, {"count": 0, "total_s": 0.0})
+
+    def _share(num: float) -> float | None:
+        return round(num / total_s, 4) if total_s else None
+
+    return {
+        "by_shape": {
+            sh: {"count": e["count"], "total_s": round(e["total_s"], 4),
+                 "share": _share(e["total_s"])}
+            for sh, e in sorted(by_shape.items(),
+                                key=lambda kv: -kv[1]["total_s"])
+        },
+        "total_s": round(total_s, 4),
+        "orphan_lookup_shape": ORPHAN_LOOKUP_SHAPE,
+        "orphan_lookup_count": orphan["count"],
+        "orphan_lookup_total_s": round(orphan["total_s"], 4),
+        "orphan_lookup_share": _share(orphan["total_s"]),
+        "per_request_share_min": round(min(per_request_shares), 4)
+        if per_request_shares else None,
+        "per_request_share_max": round(max(per_request_shares), 4)
+        if per_request_shares else None,
+        "requests_in_window": len(per_request_shares),
+    }
+
+
 def capture_assertion(capture_root: Path, fences: Fences, report: dict) -> None:
     """N2 — the stack-pin positive control at BASE.
 
@@ -521,6 +584,46 @@ async def main(profile: str) -> int:
             ),
         }
 
+        # ── precomputed §6 jobs time-share (windows labeled) ────────
+        # The orphan `_lookup_instance` N+1's share of statement time,
+        # precomputed into the run JSON so readers never re-derive it
+        # (the baseline narrative's 92.3% page vs 89.6–89.9% badge
+        # spread came from hand-derived filters on the same data).
+        # Per-leg badge sub-windows: the recent(10) leg is the one the
+        # narrative's "89.9% in the badge window" cites; the active leg
+        # sits far lower (active/queued jobs are on real instances —
+        # fewer orphan misses).
+        report["jobs_time_share"] = {
+            "definition": (
+                "share = orphan `_lookup_instance` statement seconds "
+                f"(shape '{ORPHAN_LOOKUP_SHAPE}': SELECT over exactly the "
+                "instances table) / ALL statement seconds in the window; "
+                "both windows computed by main.jobs_time_share()"
+            ),
+            "page_window": {
+                "window": "the §6 jobs_page profile (all its requests)",
+                **jobs_time_share(jobs, ()),
+            },
+            "badge_window": {
+                "window": "the §4 badge composite, jobs legs only "
+                          "(jobs_active_badge + jobs_recent_badge)",
+                **jobs_time_share(
+                    badge, ("jobs_active_badge", "jobs_recent_badge")
+                ),
+            },
+            "badge_window_recent_legs": {
+                "window": "§4 badge, jobs_recent_badge legs only — the leg "
+                          "the baseline narrative's '89.9% in the badge "
+                          "window' cites",
+                **jobs_time_share(badge, ("jobs_recent_badge",)),
+            },
+            "badge_window_active_legs": {
+                "window": "§4 badge, jobs_active_badge legs only "
+                          "(active/queued jobs sit on real instances)",
+                **jobs_time_share(badge, ("jobs_active_badge",)),
+            },
+        }
+
         # ── phase 7: capture phase (badge + home until capture) ─────
         print("[phase] capture phase (badge + home concurrently, tightened knobs)")
         cap_s = 90 if smoke else 240
@@ -552,8 +655,12 @@ async def main(profile: str) -> int:
         report["fences"] = fences.results
         report["finished_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         report["verdict"] = "PASS" if fences.all_ok else "FAIL"
-        write_json(raw_dir / "BASELINE.json", report)
-        print(f"\n[report] {raw_dir / 'BASELINE.json'} — verdict {report['verdict']}")
+        # PROFILE-SUFFIXED so a --profile=smoke re-run can never
+        # overwrite the committed full-scale baseline (BASELINE.full.json):
+        # smoke output lands at BASELINE.smoke.json (gitignored).
+        out_path = raw_dir / f"BASELINE.{profile}.json"
+        write_json(out_path, report)
+        print(f"\n[report] {out_path} — verdict {report['verdict']}")
         return 0 if fences.all_ok else 1
 
     finally:

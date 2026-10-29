@@ -1,5 +1,9 @@
 # bulky per-run workdirs (fake-home, scratch data trees) stay local;
-# the committed evidence set is BASELINE.json + run logs + evidence/
+# the committed evidence set is BASELINE.full.json + run_full.out +
+# evidence/.  Smoke-profile outputs are transient re-run artifacts
+# (a smoke re-run must leave the tree clean):
 run-*/
 bootprobe/
 run_smoke.log
+run_smoke.out
+BASELINE.smoke.json
