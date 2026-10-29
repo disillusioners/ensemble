@@ -55,6 +55,7 @@ the routing logic itself (only for the KeyError not-found path).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import subprocess
 from pathlib import Path
@@ -3625,14 +3626,17 @@ class TestPaginationAndCaps:
     # -----------------------------------------------------------------
     # Pre-merge security-council batch W4 — input upper-bound clamps
     # (silent, not errors) + limit=0 semantics + negative-value
-    # errors. The truncation-warning copy "(<= 100)" is now literally
-    # true against the working cap.
+    # errors. The truncation-warning copy "(<= 25)" is now literally
+    # true against the working cap (Track-1 quick-win: hard clamp
+    # lowered 100 → 25; the DEFAULT max_instances=20 is unchanged).
     # -----------------------------------------------------------------
 
     @pytest.mark.timeout(10)
-    async def test_max_instances_clamped_to_100(self):
-        """W4: ``max_instances=500`` is silently clamped to 100; the
-        cap-slice still fires (asserted via get_messages call count)."""
+    async def test_max_instances_clamped_to_25(self):
+        """W4: ``max_instances=500`` is silently clamped to 25; the
+        cap-slice still fires (asserted via get_messages call count).
+        Track-1 quick-win (checkpoint read-path plan item 1): the hard
+        clamp is 25 (was 100)."""
         subtree = ["parent-instance"] + [f"i-{i:03d}" for i in range(199)]
         # Pre-populate ALL 200 so a broken cap would yield 200 calls.
         messages = {
@@ -3643,9 +3647,9 @@ class TestPaginationAndCaps:
 
         await tool.coroutine(max_instances=500)
 
-        # Clamp fired: 100 reads, NOT 200.
-        assert manager.get_messages.call_count == 100, (
-            f"W4: max_instances=500 must clamp to 100; got "
+        # Clamp fired: 25 reads, NOT 200.
+        assert manager.get_messages.call_count == 25, (
+            f"W4: max_instances=500 must clamp to 25; got "
             f"{manager.get_messages.call_count}"
         )
 
@@ -4129,6 +4133,143 @@ class TestPerformanceFixture:
         ), (
             f"S1: caller must be first in working_set; got "
             f"{manager.get_messages.call_args_list[0].args!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# h2. Concurrent per-instance fetch invariants (checkpoint read-path
+#     plan Track-1 quick-win item 1): the read loop is asyncio.gather
+#     + Semaphore(5); the sequential invariants MUST be preserved.
+# ---------------------------------------------------------------------------
+
+
+class TestSubtreeConcurrentFetchInvariants:
+    """Track-1 quick-win (checkpoint read-path plan item 1): the
+    per-instance fetch loop runs CONCURRENTLY (asyncio.gather bounded
+    by Semaphore(5)) while preserving the historical sequential
+    invariants exactly:
+
+      * pin: ``_SUBTREE_MAX_INSTANCES_CAP == 25`` (was 100; the tool's
+        DEFAULT ``max_instances=20`` is unchanged);
+      * (a) EXACTLY ONE ``get_messages`` read per working-set instance
+        — no extra reads, no skipped instances, no duplicates;
+      * (b) deterministic result order — identical to the sequential
+        walk (caller FIRST, then lexicographic by ``instance_id``);
+        proven via a globally-paginated window whose membership is
+        order-sensitive;
+      * (c) the concurrent path is real (peak in-flight reads > 1)
+        and the Semaphore(5) bound holds (peak <= 5).
+    """
+
+    def test_subtree_max_instances_cap_pinned_to_25(self):
+        """Pin: the hard clamp constant is 25 (Track-1 quick-win lowered
+        100 → 25). Same-PR pin update — if you bumped the cap, update
+        this pin AND the truncation-warning copy "(<= 25)" together."""
+        from daemon.tools.instance import _SUBTREE_MAX_INSTANCES_CAP
+
+        assert _SUBTREE_MAX_INSTANCES_CAP == 25, (
+            f"Cap pin violated: _SUBTREE_MAX_INSTANCES_CAP="
+            f"{_SUBTREE_MAX_INSTANCES_CAP!r}, expected 25. If this is an "
+            "intentional cap bump, update the pin test AND the "
+            "truncation-warning copy in subtree_messages together."
+        )
+
+    @pytest.mark.timeout(10)
+    async def test_concurrent_fetch_one_read_per_instance_and_order(self):
+        """The concurrent fetch path preserves one-read-per-instance
+        (a), deterministic caller-first/lexicographic order (b), and
+        the Semaphore(5) concurrency bound (c)."""
+        iids = ["parent-instance"] + [f"i-{i:03d}" for i in range(9)]
+        # Two messages per instance; global pagination (limit=5 of 20
+        # collected) makes the window membership ORDER-SENSITIVE:
+        # caller-first + lexicographic ⇒ the window is caller's 2 +
+        # i-000's 2 + i-001's FIRST message.
+        messages_by_iid = {
+            iid: [
+                _assistant_msg(f"m-{iid}-first", iid=iid,
+                               ts=f"2026-08-26T00:{i:02d}:01Z"),
+                _assistant_msg(f"m-{iid}-second", iid=iid,
+                               ts=f"2026-08-26T00:{i:02d}:02Z"),
+            ]
+            for i, iid in enumerate(iids)
+        }
+        manager = _make_subtree_manager(
+            subtree_ids=iids, messages_by_iid=messages_by_iid
+        )
+
+        # Track in-flight reads to prove (b) concurrency is real and
+        # the Semaphore(5) bound is honored.
+        in_flight = 0
+        peak = 0
+
+        async def _tracked_get_messages(iid):
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0.001)  # yield so siblings interleave
+            in_flight -= 1
+            return list(messages_by_iid.get(iid, []))
+
+        manager.get_messages = AsyncMock(side_effect=_tracked_get_messages)
+
+        tool = _get_subtree_messages_tool(manager)
+        result = await tool.coroutine(limit=5)
+
+        # (a) EXACTLY one read per working-set instance — 10 instances,
+        # 10 calls, no duplicates, no skips.
+        assert manager.get_messages.call_count == len(iids), (
+            f"Expected EXACTLY {len(iids)} get_messages calls (one per "
+            f"working-set instance); got {manager.get_messages.call_count}."
+        )
+        called_iids = [c.args[0] for c in manager.get_messages.call_args_list]
+        assert len(called_iids) == len(set(called_iids)), (
+            f"Duplicate reads detected: {called_iids}"
+        )
+        assert set(called_iids) == set(iids), (
+            f"Skipped/extra instances: called={sorted(called_iids)} "
+            f"expected={sorted(iids)}"
+        )
+
+        # (b) Deterministic order — the paginated window contains
+        # EXACTLY the first 5 messages of the sequential collection
+        # order (caller-first, then lexicographic): caller's both
+        # messages, i-000's both, i-001's FIRST only. If gather did
+        # NOT preserve argument order, i-c's or later children's
+        # messages would leak into / be dropped from the window.
+        expected_in_window = [
+            "m-parent-instance-first",
+            "m-parent-instance-second",
+            "m-i-000-first",
+            "m-i-000-second",
+            "m-i-001-first",
+        ]
+        excluded_from_window = [
+            "m-i-001-second",
+            "m-i-002-first",
+            "m-i-009-first",
+        ]
+        for msg_id in expected_in_window:
+            assert msg_id in result, (
+                f"Order violation: {msg_id} missing from the paginated "
+                f"window (expected sequential caller-first/lexicographic "
+                f"collection order)."
+            )
+        for msg_id in excluded_from_window:
+            assert msg_id not in result, (
+                f"Order violation: {msg_id} leaked into the paginated "
+                f"window (collection order is not the sequential "
+                f"caller-first/lexicographic order)."
+            )
+
+        # (c) Concurrent path is real AND bounded: peak in-flight
+        # reads > 1 proves gather (not sequential); peak <= 5 proves
+        # the Semaphore(5) bound.
+        assert peak > 1, (
+            f"Fetch path is NOT concurrent (peak in-flight={peak}); "
+            "gather is not interleaving reads."
+        )
+        assert peak <= 5, (
+            f"Semaphore(5) bound exceeded: peak in-flight={peak}."
         )
 
 
