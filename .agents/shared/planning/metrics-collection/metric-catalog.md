@@ -5,7 +5,8 @@
 daemon budget; skill-metrics (`/api/skills/{id}/metrics`) is a **non-goal**, not catalogued ·
 **Verified against** worktree `agents-ensemble-wt-metrics-v2` @ `feature/metrics-collection`
 (tip `9bbef71c1`) — every `file:line` was read there; corrections to v1 and to the inventory
-digest are logged in §11 · **Compat** Prometheus scrape model + Grafana, OpenMetrics text; m9 —
+digest are logged in §11 · **Compat** Prometheus scrape model + Grafana, **Prometheus classic text exposition format**
+(NOT OpenMetrics — MA-16 corrects the v1 mislabel); m9 —
 VictoriaMetrics/Mimir **dropped**, no compatibility asserted for an untested stack.
 
 ---
@@ -73,7 +74,7 @@ dependency is off emits **no series** (absent ≠ zero) unless its contract says
 
 | # | Family — canonical names | Type | Phase | Source | Series |
 |---|---|---|---|---|---|
-| F0.1 | `ensemble_metrics_up`, `ensemble_metrics_scrape_requests_total`, `ensemble_metrics_exposition_seconds` | gauge/counter/hist | P0 | greenfield (listener seam) | 17 |
+| F0.1 | `ensemble_metrics_up`, `ensemble_metrics_scrape_requests_total`, `ensemble_metrics_exposition_seconds` | gauge/counter/hist | P0 | greenfield (listener seam) | 16 |
 | F0.2 | `ensemble_metrics_registry_measurements` | gauge | P0 | reuse `checkpoint_metrics.py:304` | 1 |
 | F0.3 | `ensemble_resource_spine_tables_accepting_rows`, `ensemble_resource_spine_rows_written_total` | gauge/counter | P0 | reuse (resource_monitor spine) | 8 |
 | F0.4 | `ensemble_metrics_vocabulary_version` | gauge | P0 | greenfield (freeze marker) | 1 |
@@ -100,7 +101,7 @@ dependency is off emits **no series** (absent ≠ zero) unless its contract says
 | F21 | `ensemble_journal_file_bytes`, `ensemble_journal_history_entries`, `ensemble_journal_op_seconds`, `ensemble_journal_ops_total`, `ensemble_upgrade_phase_seconds`, `ensemble_upgrade_phase_total`, `ensemble_upgrade_release_current`, `ensemble_upgrade_journal_events_total` | gauge×3/hist/counter×3/gauge | P1c | reuse `tools/upgrade_journal.py` | 66 |
 | F22 | `ensemble_process_cpu_seconds` + host/PG exporter series | gauge | P2 | greenfield (textfile + off-the-shelf) | 5 shell / ~67 exporter |
 
-**Daemon-origin total: 522** (F0.1→F21) + **5 shell-origin** = **527**. Exporter-origin ≈67 (§6).
+**Daemon-origin total: 521** (F0.1→F21) + **5 shell-origin** = **526**. Exporter-origin ≈67 (§6).
 **Budget ≤2k — 26 % consumed.**
 
 ---
@@ -124,7 +125,9 @@ the registry under load before 200+ more series land on it.
   `prometheus_client` / OTel import — no exposition endpoint exists at all. The listener is a
   separate app on its own bound port (CR-2), never a route on `daemon/api.py`'s app.
 - **Phase** P0 · **Owner** developer (implement), devops (port + scrape config) ·
-  **Series estimate** 1 + 2 + 13 + 1 (the `ensemble_metrics_up{component}` info split) = **17**.
+  **Series estimate** 1 + 2 + 13 = **16** (`ensemble_metrics_up` is a single **no-label** scalar —
+  the earlier `{component}` info split is dropped, so the family entry and the §1 summary row
+  agree; see decisions.md §H H-2).
 - **Degradation:** kill-switch OFF ⇒ `ensemble_metrics_up` = `0`; the scrape counter still
   increments `outcome="ok"` (the scrape happened, the body was empty); **every other family
   renders no series**. The exposition histogram records the empty render, so the operator sees
@@ -667,16 +670,16 @@ the registry under load before 200+ more series land on it.
 
 | Phase | Families | Daemon-origin series |
 |---|---|---|
-| P0 | F0.1–F0.4 | 27 |
+| P0 | F0.1–F0.4 | 26 |
 | P1a | F1–F6 | 62 |
 | P1b | F7–F13 | 223 |
 | P1c | F14–F21 | 210 |
-| **Daemon total** | **F0.1–F21** | **522** |
+| **Daemon total** | **F0.1–F21** | **521** |
 | Shell-origin (textfile) | F22 | 5 |
 | Exporter-origin (node/postgres) | F22 | ≈67 |
-| **Grand total on the Prometheus server** | | **≈594** |
+| **Grand total on the Prometheus server** | | **≈593** |
 
-**522 daemon-origin series against a ≤2 000 budget — 26 % consumed; headroom 1 478.** The four
+**521 daemon-origin series against a ≤2 000 budget — 26 % consumed; headroom 1 479.** The four
 largest families (F12 sweeps 69, F21 journal 66, F20 tool calls 57, F9 readiness 53) are each
 **bounded, enumerated** label sets, so growth there is bounded by construction. The three
 unbounded risks in v1 are explicitly closed: per-instance compaction occupancy is a max; the

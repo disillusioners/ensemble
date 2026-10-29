@@ -28,7 +28,8 @@ of `plan-overview.md` or to a family/annex of `metric-catalog.md`. The count is 
 leader-ratified decisions (§E) and the 18 reuse rows (§F) are cross-checked against
 `plan-overview.md` §2/§3/§9 and `metric-catalog.md` §1/§2–§6. §G carries every waived
 item and known limitation; §H carries the row counts, the cross-file name-consistency
-result (21 alignment edits E1–E21 + 11 open items H-1…H-11), and the commit.
+result (**34 alignment edits E1–E34 across two passes**; all **11 open items H-1…H-11 are
+CLOSED**), and both commits.
 
 ---
 
@@ -57,7 +58,7 @@ result (21 alignment edits E1–E21 + 11 open items H-1…H-11), and the commit.
 | **MA-7** | `BashSpin` compared a **cumulative-CPU gauge** to 0.9 ⇒ fires forever; and a spinning bash process **cannot self-report** from inside the daemon. | The textfile gauge is compared **directly** (`ensemble_process_cpu_seconds{name=~"promote_sh|stage_sh|launcher"} > 0.9`) — no `rate()` over a per-tick delta gauge. The measurement owner is the **external** writer: the shell scripts rewrite `*.prom` in `$INSTALL_DIR/data/metrics/`, and node_exporter's textfile collector reads them. The value is a per-tick delta, so "always > 0.9" now means "a real spin". | `plan-overview.md` §3 "Textfile collector (R18)" + §4 P2 T1 + §8 `BashSpin` (expr corrected, see §H); `metric-catalog.md` F22 (gauge semantics + `name` vocabulary) + §10.2 | **resolved** |
 | **MA-8** | LLM tokens/cost were absent, and an `ok`/`failover`/`error` split **collapses the 4-layer retry model**. | `ensemble_llm_tokens_total{direction}` (input/output) with the truncation/undercount caveat made **visible** by `ensemble_llm_token_usage_missing_total`; `ensemble_llm_request_total{outcome}` carries the **real 8-value outcome enum** derived from the 4-layer ladder (L1 tenacity per-category retry → L2 failover to backup → L3 reset to primary → L4 attempt ceiling), with the layer mapping tabulated; stall counts are taken at the **watchdog abort site** (`daemon/services/llm_stream_watchdog.py:456`). The latency histogram deliberately carries **no** outcome label (splitting it would cost 8 × 14 = 112 series). | `plan-overview.md` §4 P1a T4 + P1a risk 1 + §4 P1b family list; `metric-catalog.md` F14 + F15 + F16 + §8.12 (ladder table) + §8.10 + §11 C8/C11 | **resolved** |
 | **MA-9** | AC1/AC3 were **untestable** ("fires within 5 min" / "<1% CPU"). | AC1 is decomposed into **fault-injection fixtures per alert, per phase**, plus a per-incident-row replay acceptance; AC2 is a **measurable method** — daemon CPU delta ≤1 % measured via `/api/resources/self-cost` under a 15 s scrape; AC7 repeats the replay as an independent criterion. | `plan-overview.md` §10 AC1/AC2/AC7 + §4 P1a/P1b/P1c/P2 "Test plan" lines + §5 `limits.metrics_scrape_interval_hint_s`; `metric-catalog.md` §0.10 (owner roles: developer / devops / reviewer / tester) + each family's Owner field | **resolved** |
-| **MA-10** | The ≤2k series cap **holds for daemon-origin** but stock exporters breach 2k on their own. | The budget is restated as **daemon-origin ≤ 2 k** (actual **522**, 26 % consumed) with **stock exporters measured separately** (≈67) and explicitly excluded from the daemon budget. The roll-up table is the proof, and an AC asserts the split. | `plan-overview.md` §2 "Cardinality budget (MA-10)" + §10 AC3 + §4 P1a exit criteria (cardinality census) + §7 never-exported; `metric-catalog.md` §1 (522 / 527 / ≈594) + §7 (the ≤2k proof) + F22 (exporter-origin counted separately) | **resolved** |
+| **MA-10** | The ≤2k series cap **holds for daemon-origin** but stock exporters breach 2k on their own. | The budget is restated as **daemon-origin ≤ 2 k** (actual **521**, 26 % consumed) with **stock exporters measured separately** (≈67) and explicitly excluded from the daemon budget. The roll-up table is the proof, and an AC asserts the split. | `plan-overview.md` §2 "Cardinality budget (MA-10)" + §10 AC3 + §4 P1a exit criteria (cardinality census) + §7 never-exported; `metric-catalog.md` §1 (521 / 526 / ≈593) + §7 (the ≤2k proof) + F22 (exporter-origin counted separately) | **resolved** |
 | **MA-11** | "P1 in 2–4 days" was **not credible** — one phase for every subsystem. | P1 is **split into P1a / P1b / P1c**, each with its own owner role, dependency map, per-task acceptance, exit criteria, risk table and test plan. The order is **forced by the dependency graph** (registry → pools/census → checkpoint/jobs/sweeps/instances → LLM/MCP/compaction/journal → exporters), not by calendar. | `plan-overview.md` §4 (coupling map + P1a + P1b + P1c) + §5; `metric-catalog.md` §2.1 (why the partition is forced) + §3/§4/§5 (per-phase family sections) | **resolved** |
 | **MA-12** | Ellipses violated the fixed-vocabulary rule (instance status 10 values, sweep lanes, MCP roster, version-label churn). | Every label set is **written out in full** in one place — the vocabulary annex (§8.1–§8.10) — each with the `file:line` it was verified against; family entries reference the annex by number. A **vocabulary freeze marker** (`ensemble_metrics_vocabulary_version`) pins the revision. The version label lives only on the release gauge (OQ-3). | `plan-overview.md` §4 P0 T6 + P0 exit criteria + §7 + §12 OQ-3; `metric-catalog.md` §0.5 + §8.1–§8.10 + F0.4 + §11 C13/C14 + §12 open item 5 | **resolved** |
 | **MA-13** | Leaked-txn **site attribution was asserted, not derived**, and daemon connections carry an **empty `application_name`**. | A **closed fragment→site map** (6 values incl. the `other` residual, so the sum always ties to `ensemble_pg_backends{state="idle_in_transaction"}`) plus the `db_capture.py` discipline: dedicated **non-pooled** connection, `application_name='ensemble-metrics-census'`, `statement_timeout`, `connect_timeout`, self-exclusion of the census's own connection, ≥15 s cadence, never-raises. Read-only: it never touches `pg_stat_activity` and never terminates a backend. | `plan-overview.md` §1 "Leak story (P1 pool poisoned)" + §4 P0 T7 + P1b T2 + P1b risk 1; `metric-catalog.md` F6 + §9.1 + §9.2 + §9.3 + §9.4 | **resolved** |
@@ -116,7 +117,7 @@ result (21 alignment edits E1–E21 + 11 open items H-1…H-11), and the commit.
 | **R11** | `wedge_capture/db_capture.py` census discipline (`application_name`, `statement_timeout`, `connect_timeout`, driver-stripped DSN, never-raises) | `metric-catalog.md` **F6** + **§9.1** (the census inherits that discipline on a dedicated non-pooled connection) + §9.4 (complementary to the readiness leak oracle, not duplicate); `plan-overview.md` §9 R11 |
 | **R12** | `wedge_capture/collector.py` A2 vocabulary (`checked_out` derived at `:19-20`, `requests_waiting` native at `:23`, `pool_checkout_timeouts` ALWAYS `None` at `:24-26`, `pool_requests_errors` at `:29`) | `metric-catalog.md` **F5** (derived vs native kept apart) + **F4** (the `kind` vocabulary + the CR-4 superset semantics) + §8.9 + §11 C12; `plan-overview.md` §9 R12 |
 | **R13** | `daemon/tools/ens_db_tools.py:1157` — the pool-status seam | `metric-catalog.md` **F4** (pool status is already published at `/readyz` → `detail.pool_state`; the family reads that shape — one status source, not two) + §11 C12; `plan-overview.md` §9 R13. *Note:* the catalog collapses both reads into F4 — §H H-7 |
-| **R14** | The MCP **MachineStore** roster (gateway sessions/tombstones) and the per-boot MCP **quarantine registry** | `metric-catalog.md` **F18** (`mcps_gateway/store.py:79`/`:103` → sessions, tombstones, audit) + **F17** (`mcp/init_guard.py:145-147` → server state, read from `/readyz` `detail.mcp`, never re-probed) + §8.5 (bounded 5-value roster); `plan-overview.md` §9 R14 (the plan's pointer conflates the two — §H H-12) |
+| **R14** | The MCP **MachineStore** roster (gateway sessions/tombstones) and the per-boot MCP **quarantine registry** | `metric-catalog.md` **F18** (`mcps_gateway/store.py:79`/`:103` → sessions, tombstones, audit) + **F17** (`mcp/init_guard.py:145-147` → server state, read from `/readyz` `detail.mcp`, never re-probed) + §8.5 (bounded 5-value roster); `plan-overview.md` §9 R14 (the plan's pointer conflated the two — §H H-10, now **CLOSED**: the plan §9 R14 row is split into the two correct references (see §H.2 E28) |
 | **R15** | The sweep interval registry (300 s / 90 s configured intervals) | `metric-catalog.md` **F12** (13 lanes, each lane's configured interval published on the HELP text so actual-vs-configured needs no second metric) + §8.4 + §10.2; `plan-overview.md` §9 R15 |
 | **R16** | The `MAINTENANCE_ENDPOINTS_ENABLED` gating pattern (a kill-switch analog) | `metric-catalog.md` §0.8 (kill-switch contract: per-request read, default OFF, registry keeps accumulating) + **F0.1**; `plan-overview.md` §5 + §9 R16 |
 | **R17** | `daemon/services/message_tap.py` — the per-turn seam (`tap_node_return` at `:234`) | `metric-catalog.md` **F20** (tool-call + turn-performance families instrument *this* seam, not graph internals) + §8.6 + §8.10 + §11 C24; `plan-overview.md` §9 R17 |
@@ -144,8 +145,8 @@ Every entry below is traceable to `plan-overview.md` or `metric-catalog.md`; not
 | **G-11** | **Queue-item durations are not derivable.** | `metric-catalog.md` F10 + §11 C15 (`job_queue_items` carries only `created_at` as a TEXT ISO string — `daemon/repositories/job_queue/models.py:220`, `:357`; no `started_at`/`completed_at`). | No duration family is claimed for queue items. Claiming one would require a schema change (a migration on existing data) that this plan does not authorize — so the metric is **absent by design** rather than wrong. |
 | **G-12** | **`pool="manager"` renders no series for `ensemble_db_pool_requests_errors_total`.** | `metric-catalog.md` F4 (the SQLAlchemy manager pool raises `TimeoutError` on checkout and has **no** `requests_errors` equivalent) + §8.9. | An **absence, not a gap**: the manager pool's checkout failures are observable through the readiness composite, not through a psycopg-shaped counter. The family must not invent a parallel counter for it. |
 | **G-13** | **The leak-site map is a closed set with an `other` residual.** | `metric-catalog.md` §9.2 (`other` = "the residual bucket — **never dropped**, so the census total always equals the sum") + F6 + §8.9 (6 site values). | `sum(ensemble_pg_leaked_txn) == ensemble_pg_backends{state="idle_in_transaction"}` must hold at all times; a growing `other` is the **signal** to extend the map through a deliberate, reviewed change rather than an automatic label drift. |
-| **G-14** | **Known cross-file wording drift (catalog, not edited):** the catalog header still says "OpenMetrics text" while `plan-overview.md` §3 and MA-16 settle on **Prometheus classic text exposition (NOT OpenMetrics)**. | `metric-catalog.md` header (compat line) vs `plan-overview.md` §3. | The catalog's **substantive** position is unambiguous — §0.2 forbids `prometheus_client`/OTel and the renderer is the existing classic-text `render_metrics()` — so the name-consistency check (alert table + §4 family lists vs §1) is unaffected. But the header sentence is wrong and **the catalog was not edited** (this task's edit permission covers `plan-overview.md` only) → carried as open item **H-1**. |
-| **G-15** | **Known catalog nit (not edited):** F0.1's series estimate mentions an `ensemble_metrics_up{component}` info split while the same family's name line says "no labels". | `metric-catalog.md` F0.1. | Cosmetic and confined to one family; no alert and no family list depends on the `component` label, so the consistency check is unaffected → carried as open item **H-2**. |
+| **G-14** | ~~Catalog header said "OpenMetrics text"~~ — **CLOSED in the alignment pass (H-1)**: the header now reads "**Prometheus classic text exposition format** (NOT OpenMetrics — MA-16 corrects the v1 mislabel)", matching `plan-overview.md` §3 and the MA-16 resolution. | `metric-catalog.md` header (compat line) — edited; `plan-overview.md` §3. | The catalog's substantive position was already unambiguous (§0.2 forbids `prometheus_client`/OTel; the renderer is the existing classic-text `render_metrics()`) — only the wording drifted. Now the wording matches the decision, so a reader cannot re-import the OpenMetrics mislabel. |
+| **G-15** | ~~F0.1's series estimate mentioned an `ensemble_metrics_up{component}` info split~~ — **CLOSED in the alignment pass (H-2)**: the split is dropped, `ensemble_metrics_up` is a single no-label scalar, and the family entry, the §1 summary row and the §7 roll-up now agree (F0.1 = 16 series; daemon-origin total 521). | `metric-catalog.md` F0.1 + §1 + §7 — edited. | The no-label shape was already the catalog's dominant reading (name line, Labels line "No other labels", degradation semantics, and no `component` vocabulary anywhere in §8); the stray `{component}` parenthetical was the outlier. Dropping it removes an unbounded-label risk and makes the ≤2k proof arithmetically true end to end. |
 | **G-16** | **`plan-overview.md` §1 incident table names three metrics the catalog does not ship** (`ensemble_db_pool_connections{pool,state}`, `ensemble_db_pool_checkout_seconds{pool}`, `ensemble_pg_leaked_txn_rows{site}`). | `plan-overview.md` §1 (not edited — §1 is outside this task's permitted edit scope). | The catalog's equivalents are `ensemble_db_pool_native{pool,quantity}` + F5's two gauges, and `ensemble_pg_leaked_txn{site}`; **no** checkout-latency family ships in v2 (the checkout seam is deferred — CR-4). Carried as open item **H-3** with the corrected names. |
 
 ---
@@ -168,7 +169,10 @@ Every entry below is traceable to `plan-overview.md` or `metric-catalog.md`; not
 | Waiver / limitation register entries (§G) | 16 (G-1 … G-16) | 16 | ✅ |
 | Catalog §12 open items carried | 6 of 6 (→ G-2, G-3, G-4, G-5, G-6, G-7) | 6 of 6 | ✅ |
 | Plan §12 open questions carried | 4 of 4 (→ G-8) | 4 of 4 | ✅ |
-| Cross-file alignment edits applied to `plan-overview.md` | 21 (E1–E21) on 4 §4 family-list lines + 5 §8 alert rows | 21 | ✅ |
+| Cross-file alignment edits — pass 1 | 21 (E1–E21) on 4 §4 family-list lines + 5 §8 alert rows | 21 | ✅ |
+| Cross-file alignment edits — pass 2 (alignment pass) | 13 (E22–E34) across `plan-overview.md`, `metric-catalog.md`, `decisions.md` | 13 | ✅ |
+| **Total alignment edits** | **34** | **34** | ✅ |
+| Open items H-1…H-11 | 11, all **CLOSED** (closure table below) | 11 closed | ✅ |
 
 Every finding id from the council review appears exactly once: 5 CRITICAL, 16 MAJOR, 10 MINOR
 (5+16+10 = 31). No finding is silently merged into another row.
@@ -177,32 +181,31 @@ Every finding id from the council review appears exactly once: 5 CRITICAL, 16 MA
 
 Scope per spec: every metric name in **`plan-overview.md` §8 alert table** and **§4 family
 lists**, checked against **`metric-catalog.md` §1 Summary table** (modulo `_bucket`/`_count`/
-`_sum` histogram suffixes and Prometheus built-ins). The check was run programmatically
+`_sum` histogram suffixes and Prometheus built-ins). The check is run **programmatically**
 (regex extraction of `ensemble_*` tokens from the §8 table body and the four §4
-`Metric families added (names only…)` lines, then a set-diff against the 82 canonical names in
+`Metric families added (names only…)` lines, then a set-diff against the canonical names in
 catalog §1) — not by eye.
 
-**Extraction result**
+**Extraction result — after the alignment pass (pass 2)**
 
-| Source | Tokens | Distinct names | Resolve to catalog §1 | Do not resolve | Notes |
-|---|---|---|---|---|---|
-| §4 P0 family list (L72) | 0 | 0 | — | — | names only the two **pre-migration aliases** `message_api_checkpoint_list_total` / `message_api_saver_op_latency_seconds` — by design (catalog §0.3 / F7), kept as-is |
-| §4 P1a family list (L110) | 17 | 17 | 16 | 1 | 1 annotated "proposed — not catalogued" |
-| §4 P1b family list (L140) | 18 | 17 | 14 | 4 | 4 annotated "proposed / deferred — not catalogued" |
-| §4 P1c family list (L171) | 18 | 18 | 14 | 4 | 3 annotated + 1 **retired** name kept in prose to document its replacement |
-| §4 P2 family list (L202) | 6 | 6 | 6 | 0 | — |
-| **§4 totals** | **59** | **57** | **50** | **9** | before the edits: 54 tokens / 37 resolved / **17 unresolved** |
-| §8 alert table (13 rows; 11 reference daemon series) | 15 distinct series tokens | — | **13** | 2 | the 2 are the **legitimate** histogram suffixes `_bucket` / `_count` of the real histogram `ensemble_checkpoint_op_seconds`; **0 unresolved** |
+| Source | Tokens | Resolve to catalog §1 | Do not resolve | Δ vs pass 1 |
+|---|---|---|---|---|
+| §4 P0 family list (L72) | 0 `ensemble_*` | — | — | unchanged (the two pre-migration `message_api_*` aliases stay by design — catalog §0.3 / F7) |
+| §4 P1a family list | 15 | 15 | 0 | 17 → 15 (the P2-owned textfile family and the uncatalogued GII throttle were dropped) |
+| §4 P1b family list | 13 | 13 | 0 | 18 → 13 (checkout-latency name retired; 3 uncatalogued names dropped) |
+| §4 P1c family list | 14 | 14 | 0 | 18 → 14 (3 uncatalogued names dropped; the retired event-total vocabulary is referenced only in a parenthetical) |
+| §4 P2 family list | 6 | 6 | 0 | unchanged |
+| **§4 totals** | **48** | **48** | **0** | was 59 / 50 / 9 → **unresolved 9 → 0** |
+| §1 incident table | 27 tokens (25 distinct) | 27 | 0 | was 3 unresolved (`ensemble_db_pool_connections`, `ensemble_db_pool_checkout_seconds`, `ensemble_pg_leaked_txn_rows`) → **unresolved 3 → 0** |
+| §8 alert table (13 rows; 11 reference daemon series) | 15 distinct series tokens | 13 + 2 legitimate histogram suffixes | 0 | unchanged (0 unresolved) |
 
-**Catalog internal consistency:** verified consistent — each family's detail section reconciles
-with §1 (F7 `22→33`, F10 `20→21`, F15 `22→23`, F20 `56→57`, F21 `65→66` — each difference is
-explicitly reconciled in the catalog text), the §7 roll-up sums to the §1 total
-(`27 + 62 + 223 + 210 = 522` daemon-origin), and §8.11's **7** histogram bucket sets match the
-**7** histograms declared across F0.1 / F7 / F10 / F15 / F20 / F21. Two cosmetic nits were found
-(G-14, G-15) — neither is a missing-name inconsistency, so **the catalog was not edited**.
+**Catalog internal consistency:** verified consistent after H-2 — each family's detail section
+reconciles with §1 (F7 `22→33`, F10 `20→21`, F15 `22→23`, F20 `56→57`, F21 `65→66` — each
+difference explicitly reconciled in the catalog text), the §7 roll-up sums to the §1 total
+(`26 + 62 + 223 + 210 = 521` daemon-origin), and §8.11's **7** histogram bucket sets match the
+**7** histograms declared across F0.1 / F7 / F10 / F15 / F20 / F21.
 
-**Edits made to `plan-overview.md` (name / label / expression alignment only — permitted scope:
-the §8 alert table + the §4 family lists). No other section of the file was touched.**
+**Edits — pass 1 (E1–E21, name / label / expression alignment in `plan-overview.md`)**
 
 | # | Location | Before | After | Driver |
 |---|---|---|---|---|
@@ -211,16 +214,16 @@ the §8 alert table + the §4 family lists). No other section of the file was to
 | **E3** | §4 P1a family list | `ensemble_tool_call_duration_seconds{tool}` | `ensemble_turn_duration_seconds` (catalog F20 — the per-turn seam; a per-tool latency histogram is NOT shipped) | m7 — a per-tool latency histogram would cost 37 × 14 = 518 series |
 | **E4** | §4 P1a family list | `ensemble_resource_*` (RSS/PSS/anon/swap/threads/fds/cumulative-CPU-usec, cgroup v2, per-child, per-instance) | `ensemble_resource_spine_tables_accepting_rows{table}` + `ensemble_resource_spine_rows_written_total{table}` (catalog F0.3 — the spine health gate; per-instance attribution stays in the resource_monitor PG tier) | MA-3 — F0.3 is the only catalogued resource family |
 | **E5** | §4 P1a family list | `ensemble_spawn_total`, `ensemble_revive_total`, `ensemble_pause_total`, `ensemble_fanin_total` | `ensemble_instance_lifecycle_total{event}` (catalog F13 — 7 events, incl. revive-on-`send_message`) | m8 |
-| **E6** | §4 P1a family list | `ensemble_gii_throttle_active` | kept, annotated **"proposed — not catalogued"** (tracked in H-7) | no catalog equivalent exists; intent preserved, not silently dropped |
-| **E7** | §4 P1a family list | `ensemble_process_cpu_seconds{name}` (textfile) | kept, annotated with the phase note (catalog F22 assigns the family to **P2**) | see H-8 |
+| **E6** | §4 P1a family list | `ensemble_gii_throttle_active` | annotated as uncatalogued in pass 1; **dropped in pass 2** (E29) | no catalog equivalent exists |
+| **E7** | §4 P1a family list | `ensemble_process_cpu_seconds{name}` (textfile) | annotated with a phase note in pass 1; **moved to P2 in pass 2** (E30) | H-8 — catalog F22 owns the family in P2 |
 | **E8** | §4 P1b family list | `ensemble_db_pool_connections{pool,state}` | `ensemble_db_pool_native{pool,quantity}` + `ensemble_db_pool_checked_out{pool}` + `ensemble_db_pool_waiting_clients{pool}` | m2 — catalog F4 + F5 (derived vs native kept apart) |
-| **E9** | §4 P1b family list | `ensemble_db_pool_checkout_seconds{pool}` | kept, annotated **"deferred — not catalogued; the checkout seam is instrumented in a follow-up"** | CR-4 — no checkout-latency family ships in v2 |
+| **E9** | §4 P1b family list | `ensemble_db_pool_checkout_seconds{pool}` | annotated as deferred in pass 1; **retired in pass 2** (E29) | CR-4 — no checkout-latency family ships in v2 |
 | **E10** | §4 P1b family list | `ensemble_db_pool_requests_errors_total{pool}` | `ensemble_db_pool_requests_errors_total{pool,kind}` | CR-4 — catalog F4's label set |
 | **E11** | §4 P1b family list | `ensemble_pg_leaked_txn_rows{site}` | `ensemble_pg_leaked_txn{site}` | MA-13 — catalog F6 / §8.9 (6 site values) |
-| **E12** | §4 P1b family list | `ensemble_maintenance_runs_total{operation,outcome}`, `ensemble_snapshot_usage_total{outcome}`, `ensemble_db_pool_status{pool}` | kept, annotated **"proposed — not catalogued"**; `ensemble_db_pool_status` flagged not to ship beside `ensemble_db_pool_native` | MA-3 / R6 / R13 — no catalog family exists |
+| **E12** | §4 P1b family list | `ensemble_maintenance_runs_total{operation,outcome}`, `ensemble_snapshot_usage_total{outcome}`, `ensemble_db_pool_status{pool}` | annotated as uncatalogued in pass 1; **dropped in pass 2** (E29) | no catalog family exists |
 | **E13** | §4 P1c family list | `ensemble_job_queue_depth{state}` | `ensemble_job_queue_depth{admission_state}` | m3 — catalog F10 / §8.10 (the `AdmissionState` enum is the sole write authority) |
-| **E14** | §4 P1c family list | `ensemble_message_queue_depth`, `ensemble_message_queue_oldest_age_seconds`, `ensemble_skill_usage_duration_seconds` | kept, annotated **"proposed — not catalogued"** (the skill item is the durable `skill_usage_records` table — **not** the m5 non-goal lane) | no catalog family exists |
-| **E15** | §4 P1c family list | `ensemble_event_total{kind}` | `ensemble_turn_events_total{source}` + `ensemble_instance_lifecycle_total{event}` (the retired name is kept in the prose to document the replacement) | MA-12 / OQ-4 — catalog F20 + F13 already cover per-event counting (see H-11) |
+| **E14** | §4 P1c family list | `ensemble_message_queue_depth`, `ensemble_message_queue_oldest_age_seconds`, `ensemble_skill_usage_duration_seconds` | annotated as uncatalogued in pass 1; **dropped in pass 2** (E29) | no catalog family exists |
+| **E15** | §4 P1c family list | `ensemble_event_total{kind}` | `ensemble_turn_events_total{source}` + `ensemble_instance_lifecycle_total{event}` | MA-12 / OQ-4 — catalog F20 + F13 already cover per-event counting (see H-11) |
 | **E16** | §4 P2 family list | `ensemble_journal_op_seconds{op}` | `ensemble_journal_op_seconds` + `ensemble_journal_ops_total{op}` (the `op` label lives on the counter) | catalog F21 — the 26-value op vocabulary is on the counter, not the histogram |
 | **E17** | §8 — `LoopStarved` | `histogram_quantile(0.95, rate(ensemble_loop_lag_seconds_bucket[5m])) > 2` | `ensemble_loop_lag_seconds{stat="p95"} > 2 and ensemble_loop_lag_samples > 150` | MA-4 — catalog F1: **no `_bucket` series exists** (300-sample rolling window, not a histogram) + §10.2 |
 | **E18** | §8 — `CheckpointSlow` | `histogram_quantile(0.95, rate(ensemble_checkpoint_op_seconds_bucket[10m])) > 5` | `histogram_quantile(0.95, rate(ensemble_checkpoint_op_seconds_bucket{op="aget"}[10m])) > 5 and increase(ensemble_checkpoint_op_seconds_count[10m]) > 0` | CR-3 + G-9 — catalog §10.2 (bucket extension + the restart-safe pairing) |
@@ -228,56 +231,66 @@ the §8 alert table + the §4 family lists). No other section of the file was to
 | **E20** | §8 — `BashSpin` | `rate(ensemble_process_cpu_seconds{name=~"promote_sh\|stage_sh\|launcher"}[5m]) > 0.9` | `ensemble_process_cpu_seconds{name=~"promote_sh\|stage_sh\|launcher"} > 0.9` | MA-7 — the textfile value is a per-tick delta gauge; `rate()` over it is meaningless (catalog F22, §10.2) |
 | **E21** | §8 — `PoolExhausted` | `increase(ensemble_db_pool_requests_errors_total{pool=~"manager\|checkpoint"}[5m]) > 0` | `increase(ensemble_db_pool_requests_errors_total{pool="checkpoint"}[5m]) > 0` (+ the "manager renders no series" note in the incident column) | CR-4 + G-12 — the manager pool has no `requests_errors` equivalent, so the old label set implied a series that never exists |
 
-**Edit accounting:** **21 edit sites** (E1–E21) across **4 lines** of §4 family lists and
-**5 rows** of the §8 alert table = **23 dispositions**: **8 substitutions** to catalog
-equivalents (E1, E3, E4, E5, E8, E11, E15, E16 — which resolve 9 previously-uncatalogued
-tokens), **4 annotation sites covering 8 uncatalogued names** (E6, E9, E12, E14 — each marked
-"proposed / deferred — not catalogued" inline), **5 label-name corrections** (E1, E2, E10,
-E13, E16 — label sets corrected to the catalog's), **5 alert-expression corrections**
-(E17–E21), **1 informational note** (E7). Net effect on the §4 family lists: unresolved
-tokens **17 → 9**, of which 8 are deliberately annotated and 1 is the retired
-`ensemble_event_total{kind}` kept in prose to document its replacement.
-**No other section of `plan-overview.md` was modified**; `metric-catalog.md` was **not** modified.
+**Edits — pass 2 (alignment pass, E22–E34: closes H-1…H-11)**
 
-**Open items carried forward** (not fixed here — each with the corrected value, so the next plan
-revision is a mechanical sweep):
+| # | Location | Before | After | Closes |
+|---|---|---|---|---|
+| **E22** | `plan-overview.md` §1 incident table — "Pool checkout timeouts / exhaustion" row | `ensemble_db_pool_connections{pool,state}` + `ensemble_db_pool_checkout_seconds{pool}` + `ensemble_db_pool_requests_errors_total{pool}` | `ensemble_db_pool_native{pool,quantity}` + `ensemble_db_pool_checked_out{pool}` + `ensemble_db_pool_waiting_clients{pool}` + `ensemble_db_pool_requests_errors_total{pool,kind}` (superset, CR-4 — no native checkout-timeout counter exists) | H-3 |
+| **E23** | `plan-overview.md` §1 incident table — "P1 pool poisoned" row + leak-story paragraph | `ensemble_pg_leaked_txn_rows{site}`; site list `begin`/`instances_list`/`parent_lookup`/`queue_count`/`other` | `ensemble_pg_leaked_txn{site}`; the catalog's **closed 6-value site set** (`instance_read`/`instance_parent_lookup`/`job_queue_read`/`checkpoint_saver`/`agent_db_tool`/`other`, with `other` never dropped so the census total ties) | H-3, H-9 |
+| **E24** | `plan-overview.md` §7 never-exported list | "census `site` is a fixed **5**-value enum"; "sweep lane **7**-value" | "census `site` is a fixed **6**-value enum — 5 named sites + the `other` residual"; "`site` (6-value), `lane` (13-value), `server` (5-value), status 10-value" | H-9 |
+| **E25** | `plan-overview.md` §9 R3 | "p95 at **:185**" | "p95 at **:115**, p50 :116, max :114; window :59; :185 is `snapshot_histogram()`" | H-4 |
+| **E26** | `plan-overview.md` §9 R7 | "`maintenance.py` VACUUM_FULL_TABLE_BYTES_SQL (**~:533**)" | "`maintenance.py:531-536` … sums **three** relations (`checkpoints` + `checkpoint_writes` + `checkpoint_blobs`; there is **no** single-table blob-size query) … a split-out of that one round trip" | H-5 |
+| **E27** | `plan-overview.md` §9 R8 | "readiness.py 11-class taxonomy (**:56-79**)" | "readiness.py 11-class taxonomy (**:64-79**; grace subset :83-89, components :94-99)" | H-6 |
+| **E28** | `plan-overview.md` §9 R13 / R14 | R13 → `ensemble_db_pool_status`; R14 → "MCP MachineStore roster — MCP server state source" | R13 → resolves to catalog F4's single pool-status family `ensemble_db_pool_native{pool,quantity}` (no second pool-status metric); R14 → **split**: server state from the per-boot quarantine registry (`mcp/init_guard.py:145-147`, published at `/readyz` → `detail.mcp`) and gateway session state from the MCPS MachineStore (`services/mcps_gateway/store.py:79`,`:103`) | H-10 (+ H-7 in-class for R13) |
+| **E29** | `plan-overview.md` §4 family lists (P1a/P1b/P1c) + preamble ×3 | 8 uncatalogued names annotated in-line (`ensemble_gii_throttle_active`, `ensemble_db_pool_checkout_seconds{pool}`, `ensemble_maintenance_runs_total`, `ensemble_snapshot_usage_total`, `ensemble_db_pool_status`, `ensemble_message_queue_depth`, `ensemble_message_queue_oldest_age_seconds`, `ensemble_skill_usage_duration_seconds`) + the retired `ensemble_event_total{kind}` | **every uncatalogued name dropped** — an uncatalogued name is not shipped in v2; the two deliberately retired names survive only as parentheticals: "the checkout-latency histogram is retired, see decisions.md §B CR-4" and "the greenfield event-total vocabulary is retired, see decisions.md §H H-11". The 8 dropped signals are recorded in the closure table below as **deferred — they need a catalog family before they can ship**. | H-7 |
+| **E30** | `plan-overview.md` §4 P1a family list + P1a task 3 | `ensemble_process_cpu_seconds{name}` listed in P1a; task 3 = "Wedge-capture counter hook **+ textfile process CPU**" | the textfile family removed from P1a (catalog F22 assigns it to **P2**); task 3 = "Wedge-capture counter hook … the shell textfile writer ships in **P2** (catalog F22 — external sampler owner)" | H-8 |
+| **E31** | `plan-overview.md` §4 P1b task 1 + the CR-4 note | "DB pool gauges **+ checkout histogram** (wrap both pools)"; "Note (CR-4): `ensemble_db_pool_checkout_timeouts_total{pool}` is NOT shipped" | "DB pool gauges — native quantities + derived checked-out/waiting (both pools) … the checkout-latency histogram is (retired, see decisions.md §B CR-4)"; "Note (CR-4): the checkout-timeout counter is **retired** (see decisions.md §B CR-4) — psycopg_pool 3.3.1 exposes no native timeout counter" — the retired name is no longer written as a live metric | H-7 |
+| **E32** | `plan-overview.md` §12 OQ-4 | "OQ-4: `ensemble_event_total{kind}` requires a new event-kind vocabulary; confirm with the events subsystem owner before P1c. (Greenfield.)" | "OQ-4 (**RESOLVED 2026-10-29**): **no new event-kind vocabulary is required** — per-event counting is already covered by `ensemble_turn_events_total{source}` (catalog F20) + `ensemble_instance_lifecycle_total{event}` (catalog F13); the events-subsystem owner confirms those two vocabularies at the P1c review" | H-11 |
+| **E33** | `metric-catalog.md` header (compat line) | "Prometheus scrape model + Grafana, **OpenMetrics text**" | "Prometheus scrape model + Grafana, **Prometheus classic text exposition format** (NOT OpenMetrics — MA-16 corrects the v1 mislabel)" | H-1 |
+| **E34** | `metric-catalog.md` F0.1 entry + §1 summary row + §1 total + §7 roll-up | F0.1 estimate "1 + 2 + 13 + 1 (the `ensemble_metrics_up{component}` info split) = **17**" vs the same entry's "(gauge, **no labels**)"; §1 row = 17; §1 total 522/527; §7 P0 27, daemon 522, grand ≈594, headroom 1 478 | **shape = no labels** (the family's own name line, Labels line "No other labels", degradation semantics, and the absence of any `component` vocabulary in §8 all agree); F0.1 estimate "1 + 2 + 13 = **16**"; §1 row = 16; §1 total **521 / 526**; §7 P0 **26**, daemon **521**, grand **≈593**, headroom **1 479** | H-2 (+ the arithmetic cascade that keeps the ≤2k proof true) |
 
-| # | Open item | Corrected / recommended value |
-|---|---|---|
-| **H-1** | Catalog header says "OpenMetrics text" | Should read "Prometheus classic text exposition (NOT OpenMetrics)" — matches plan §3 and MA-16. Catalog edit required; out of this task's edit scope (catalog not edited) |
-| **H-2** | Catalog F0.1's series estimate mentions `ensemble_metrics_up{component}` | Should read `ensemble_metrics_up` (no labels), matching the same family's name line and §1 |
-| **H-3** | Plan §1 incident table names `ensemble_db_pool_connections{pool,state}`, `ensemble_db_pool_checkout_seconds{pool}`, `ensemble_pg_leaked_txn_rows{site}` | `ensemble_db_pool_native{pool,quantity}` + `ensemble_db_pool_checked_out{pool}` + `ensemble_db_pool_waiting_clients{pool}`; **no** checkout-latency family in v2; `ensemble_pg_leaked_txn{site}`. (§1 is outside this task's permitted edit scope) |
-| **H-4** | Plan §9 R3 cites the lag-probe p95 at `:185` | p95 is at `daemon/services/wedge_capture/lag_probe.py:115` (p50 `:116`, max `:114`, window `:59`); `:185` is `snapshot_histogram()` (catalog §11 C5) |
-| **H-5** | Plan §9 R7 cites `maintenance.py` at `~:533` | `daemon/services/maintenance.py:531-536` sums **three** relations; there is **no** single-table `checkpoint_blobs` size query (catalog §11 C9) |
-| **H-6** | Plan §9 R8 cites the readiness taxonomy at `:56-79` | the 11 constants run `daemon/services/readiness.py:64-79` (grace subset `:83-89`, components `:94-99`) (catalog §11 C6) |
-| **H-7** | Plan §4 **task tables** still reference names the catalog does not ship (a checkout histogram in P1b T1; `ensemble_event_total` in P1c; and the 8 names left annotated in the family lists) | Align to catalog F4/F5/F10/F13/F20/F21 and to the corrected sweep expression `rate(ensemble_sweep_cycles_total{lane=…}[5m]) * 300 > 2`; either add a catalog family for each uncatalogued name or drop it. The task-table rows are outside this task's permitted edit scope (§8 + §4 family lists only) |
-| **H-8** | Plan §4 P1a lists `ensemble_process_cpu_seconds` (textfile) while catalog F22 assigns it to **P2** | Phase-assignment drift, not a name drift: the textfile *writer* + the node_exporter collector land in P2 (plan P2 T1). Recorded, not edited |
-| **H-9** | Plan §7 never-exported list says the census `site` is a "fixed **5**-value enum" and "sweep lane **7**-value" | 6 site values (5 real + the `other` residual — catalog §8.9/§9.2) and **13** sweep lanes (7 RDRS + 6 standalone — catalog §8.4). §7 is outside the permitted edit scope |
-| **H-10** | Plan §9 R14 points at the MCP MachineStore roster as the MCP **server state** source | The catalog splits them: **F17** = per-boot quarantine registry (`daemon/mcp/init_guard.py:145-147`, published at `/readyz` `detail.mcp`) for server state; **F18** = `mcps_gateway/store.py:79`/`:103` MachineStore for gateway sessions/tombstones/audit |
-| **H-11** | Plan §12 OQ-4 asks the events-subsystem owner to confirm an `ensemble_event_total{kind}` vocabulary | **No new vocabulary is required**: the catalog's `ensemble_turn_events_total{source}` (5 tap constants) + `ensemble_instance_lifecycle_total{event}` (7) already cover the intent (E15). The owner confirmation reduces to a review of those two vocabularies |
+**Edit accounting:** **34 edit sites** in total — 21 in pass 1 (E1–E21) and 13 in pass 2
+(E22–E34). Pass 2 closed every remaining drift: `plan-overview.md` and `metric-catalog.md` now
+agree on **every** metric name, label set and code reference in the reviewed scope, and the
+only remaining discrepancies are the recorded waivers in §G (which are deliberate design
+choices, not drift).
 
-**H.2 note on scope discipline:** the cross-file check found drift in sections this task is
-**not** permitted to edit (§1, §7, §9, the §4 task tables) plus two catalog nits. Those are
-recorded above with their corrected values rather than silently fixed, so the next plan revision
-is a mechanical sweep and no drift is hidden.
+### H.2.1 Closure table — H-1 … H-11 (all CLOSED)
+
+| # | Open item (as raised in pass 1) | Fix applied | Where | Status |
+|---|---|---|---|---|
+| **H-1** | Catalog header says "OpenMetrics text" | Replaced with "**Prometheus classic text exposition format** (NOT OpenMetrics — MA-16 corrects the v1 mislabel)" — now matches plan §3 and the MA-16 resolution | `metric-catalog.md` header (compat line) — edit E33 | **CLOSED** |
+| **H-2** | F0.1's series estimate (`ensemble_metrics_up{component}`) contradicts the same family's "no labels" claim; §1 row and §7 roll-up disagreed with the family entry | **Shape picked: no labels** (name line, Labels line "No other labels", degradation semantics and the absence of any `component` vocabulary in §8 all agree; the `{component}` parenthetical was the outlier). F0.1 estimate → `1 + 2 + 13 = 16`; §1 row → 16; §1 total 522/527 → **521/526**; §7 P0 27 → **26**, daemon 522 → **521**, grand ≈594 → **≈593**, headroom 1 478 → **1 479** (cascade keeps the ≤2k proof true) | `metric-catalog.md` F0.1 + §1 + §7 — edit E34 | **CLOSED** |
+| **H-3** | Plan §1 incident table named `ensemble_db_pool_connections{pool,state}`, `ensemble_db_pool_checkout_seconds{pool}`, `ensemble_pg_leaked_txn_rows{site}` | Pool row → `ensemble_db_pool_native{pool,quantity}` + `ensemble_db_pool_checked_out{pool}` + `ensemble_db_pool_waiting_clients{pool}` + `ensemble_db_pool_requests_errors_total{pool,kind}` (superset, CR-4 — no native checkout-timeout counter exists); leak row → `ensemble_pg_leaked_txn{site}`; leak-story prose → the catalog's closed 6-value site set | `plan-overview.md` §1 — edits E22, E23 | **CLOSED** |
+| **H-4** | Plan §9 R3 cited the lag-probe p95 at `:185` | "p95 at **:115**, p50 :116, max :114; window :59; :185 is `snapshot_histogram()`" | `plan-overview.md` §9 R3 — edit E25 | **CLOSED** |
+| **H-5** | Plan §9 R7 cited `maintenance.py` at `~:533` as a single-table blob query | "`maintenance.py:531-536` … sums **three** relations (`checkpoints` + `checkpoint_writes` + `checkpoint_blobs`; there is **no** single-table blob-size query) … a split-out of that one round trip" | `plan-overview.md` §9 R7 — edit E26 | **CLOSED** |
+| **H-6** | Plan §9 R8 cited the readiness taxonomy at `:56-79` | "11-class taxonomy (**:64-79**; grace subset :83-89, components :94-99)" | `plan-overview.md` §9 R8 — edit E27 | **CLOSED** |
+| **H-7** | Plan §4 task tables + family lists referenced the retired checkout histogram, `ensemble_event_total` and 8 uncatalogued names | Task 1 → "DB pool gauges — native quantities + derived checked-out/waiting … the checkout-latency histogram is (retired, see decisions.md §B CR-4)"; the CR-4 note now states "the checkout-timeout counter is **retired**" without writing the name; the family lists lost all 8 uncatalogued names (an uncatalogued name is **not shipped** in v2) and the retired event-total vocabulary survives only as a parenthetical | `plan-overview.md` §4 (P1a/P1b/P1c family lists + task tables) + preamble — edits E29, E31 | **CLOSED** — the 8 dropped signals (`ensemble_gii_throttle_active`, `ensemble_maintenance_runs_total`, `ensemble_snapshot_usage_total`, `ensemble_db_pool_status`, `ensemble_message_queue_depth`, `ensemble_message_queue_oldest_age_seconds`, `ensemble_skill_usage_duration_seconds`, and the checkout-latency histogram) are **deferred**: each needs a catalog family (F-number + vocabulary annex entry) before it can ship, and the reuse map's R6/R13 now point at the catalog families that replace them |
+| **H-8** | Plan §4 P1a listed `ensemble_process_cpu_seconds` (textfile) while catalog F22 assigns the family to P2 | Removed from the P1a family list; P1a task 3 is now the wedge-capture counter hook only, with "the shell textfile writer ships in **P2** (catalog F22 — external sampler owner)" | `plan-overview.md` §4 P1a — edit E30 | **CLOSED** |
+| **H-9** | Plan §7 said the census `site` is a "5-value" enum and "sweep lane 7-value" | "census `site` is a fixed **6**-value enum — 5 named sites + the `other` residual"; "`site` (6-value), `lane` (13-value), `server` (5-value), status 10-value" | `plan-overview.md` §7 (+ the §1 leak-story site list) — edits E23, E24 | **CLOSED** |
+| **H-10** | Plan §9 R14 conflated catalog F17 (quarantine registry / server state) with F18 (MCPS MachineStore) | R14 split into two correct references: **server state** from the per-boot quarantine registry (`mcp/init_guard.py:145-147`, published read-only at `/readyz` → `detail.mcp`) and **gateway session state** from the MCPS MachineStore (`services/mcps_gateway/store.py:79`,`:103` → sessions/tombstones/audit). R13 (in-class) now resolves to F4's single pool-status family | `plan-overview.md` §9 R13 / R14 — edit E28 | **CLOSED** |
+| **H-11** | Plan §12 OQ-4 asked for a new `ensemble_event_total{kind}` vocabulary | OQ-4 recorded as **RESOLVED 2026-10-29**: no new event-kind vocabulary is required — `ensemble_turn_events_total{source}` (catalog F20) + `ensemble_instance_lifecycle_total{event}` (catalog F13) cover per-event counting; the events-subsystem owner confirms those two vocabularies at the P1c review | `plan-overview.md` §12 OQ-4 — edit E32 | **CLOSED** |
 
 ### H.3 Commit
 
-- **Base (pre-commit HEAD):** `9bbef71c1f357d00f2a1dbd62e5c8057fb1620f1`
-- **Branch:** `feature/metrics-collection` · **Worktree:** `agents-ensemble-wt-metrics-v2`
-- **Committed paths (path-limited):** `.agents/shared/planning/metrics-collection/` — exactly
-  `plan-overview.md`, `metric-catalog.md`, `decisions.md`. Nothing outside that directory is in
-  the commit; the pre-existing stashes were not touched; nothing was pushed.
-- **Assigned sha:** a commit cannot contain its own sha, so the sha of the commit carrying this
-  document is reported verbatim in the task report and is retrievable with
-  `git rev-parse HEAD` on `feature/metrics-collection` (the branch HEAD moves off the base
-  above). Verify the file set with `git show --stat --oneline HEAD`.
-- **Reviewer commands:**
+**Two path-limited commits, both on `feature/metrics-collection` (worktree
+`agents-ensemble-wt-metrics-v2`):**
+
+| Pass | Commit | Base | Content |
+|---|---|---|---|
+| 1 — original v2 plan | `cec78e0e881665450e1ca38c8bf555d915f4d54c` | `9bbef71c1f357d00f2a1dbd62e5c8057fb1620f1` | the three planning files as first authored (plan-overview + metric-catalog + decisions), plus the 21 pass-1 alignment edits |
+| 2 — alignment pass (this one) | **HEAD of `feature/metrics-collection`** — a commit cannot contain its own sha, so it is reported verbatim in the task report and retrieved with `git rev-parse HEAD` | `cec78e0e881665450e1ca38c8bf555d915f4d54c` | the H-1…H-11 closure (edits E22–E34 + this document's refreshed §H) |
+
+- **Committed paths (both passes, path-limited):** `.agents/shared/planning/metrics-collection/`
+  — exactly `plan-overview.md`, `metric-catalog.md`, `decisions.md`. Nothing outside that
+  directory is in either commit; the pre-existing stashes were not touched; **nothing was pushed**.
+- **Verify:**
 
 ```bash
-git rev-parse HEAD                 # must differ from 9bbef71c1f357d00f2a1dbd62e5c8057fb1620f1
+git rev-parse HEAD                 # the alignment-pass commit (≠ cec78e0e8, ≠ 9bbef71c1)
 git show --stat --oneline HEAD     # exactly three planning files, nothing else
-git show --stat --oneline HEAD -- .agents/shared/planning/metrics-collection/
+git show --stat --oneline cec78e0e881665450e1ca38c8bf555d915f4d54c   # pass 1 — same three files
+git log --oneline -3
 ```
 
 ### H.4 Sign-off checklist for the reviewer
@@ -291,6 +304,7 @@ git show --stat --oneline HEAD -- .agents/shared/planning/metrics-collection/
    row reads "rebuilt instead").
 6. ☐ §G — 16 register entries; confirm each is traceable to the two files.
 7. ☐ §H.1 — row counts (5 / 16 / 10 / 5 / 18 / 16) match the tables above.
-8. ☐ §H.2 — the 21 alignment edits (E1–E21) are present in `plan-overview.md` and the 11 open
-   items (H-1…H-11) are accepted (or scheduled for the next revision).
-9. ☐ §H.3 — the commit contains exactly the three planning files.
+8. ☐ §H.2 — the 34 alignment edits (E1–E21 pass 1, E22–E34 pass 2) are present across the
+   three files, and the 11 items (H-1…H-11) are **CLOSED** per the §H.2.1 closure table.
+9. ☐ §H.3 — both commits contain exactly the three planning files; the tree is clean; nothing
+   outside the planning directory changed; nothing was pushed.

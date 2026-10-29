@@ -15,17 +15,17 @@ Branch: feature/metrics-collection @ 9bbef71c1 (worktree agents-ensemble-wt-metr
 
 | Incident (real) | By-hand diagnosis | Metric that replaces it | Alert |
 |---|---|---|---|
-| P1 pool poisoned by leaked `idle in transaction` conns (Oct 26+28, recurring) | manual `pg_stat_activity` census + fingerprinting | `ensemble_pg_backends{state}` + `ensemble_pg_idle_in_txn_oldest_seconds` + `ensemble_pg_leaked_txn_rows{site}` | PoolLeak |
+| P1 pool poisoned by leaked `idle in transaction` conns (Oct 26+28, recurring) | manual `pg_stat_activity` census + fingerprinting | `ensemble_pg_backends{state}` + `ensemble_pg_idle_in_txn_oldest_seconds` + `ensemble_pg_leaked_txn{site}` | PoolLeak |
 | Event-loop starvation → livez/readyz 25–30 s timeouts, CPU 116–134% | manual `/proc` thread deltas, wedge-capture forensics | loop-lag histogram (exported from existing lag probe) + `ensemble_thread_cpu_seconds{thread_group}` + `ensemble_wedge_capture_total{reason}` + textfile `ensemble_process_cpu_seconds{name}` (catches bash spins the in-daemon metrics cannot see) | LoopStarved, BashSpin, external liveness (CR-1) |
 | Checkpoint reads 73–99 s (14 GB table, TOAST 10× bloat, shared_buffers 160 MB) | manual pg table-size math + query watching | `ensemble_checkpoint_op_seconds{op}` (extended buckets) + `ensemble_checkpoint_op_bytes{op}` + `ensemble_checkpoint_blobs_table_bytes` + `ensemble_checkpoint_versions_per_thread` (p95 gauge) | CheckpointSlow, CheckpointBloat |
 | Readiness false-degraded (P2 deadline 5 s < 17 s reads) while daemon healthy | reading `psycopg_pool.PoolTimeout` tracebacks in journals | `ensemble_readiness_probe_total{component,outcome}` + `ensemble_readiness_grace_active` (Pure PromQL FalseDegraded) | FalseDegraded |
 | `state.json` O(n²) bash journal walk (promote + launcher both spun at 99.9%) | noticing a bash process eating a core with no fds | textfile `ensemble_journal_file_bytes`, `ensemble_journal_history_entries`, `ensemble_journal_op_seconds` + `ensemble_upgrade_phase_seconds` | JournalWalkRisk |
 | Mission-reconciliation sweep hot loop (every ~8 s vs 300 s configured) | counting log lines per minute | `ensemble_sweep_cycle_seconds{lane}` + `ensemble_sweep_rows_total{lane,outcome}` | SweepHotLoop |
 | Lanes parked in `waiting_children` forever (lost wakes after restarts) | recursive parent_id tree walks | `ensemble_waiting_children_count` + `ensemble_waiting_children_max_age_seconds` + `ensemble_wake_turns_total{outcome}` | LostWake |
-| Pool checkout timeouts / exhaustion | grep `PoolTimeout` | `ensemble_db_pool_connections{pool,state}` + `ensemble_db_pool_checkout_seconds{pool}` + `ensemble_db_pool_requests_errors_total{pool}` (superset, CR-4) | PoolExhausted |
+| Pool checkout timeouts / exhaustion | grep `PoolTimeout` | `ensemble_db_pool_native{pool,quantity}` + `ensemble_db_pool_checked_out{pool}` + `ensemble_db_pool_waiting_clients{pool}` + `ensemble_db_pool_requests_errors_total{pool,kind}` (superset, CR-4 — no native checkout-timeout counter exists) | PoolExhausted |
 | Wedged daemon cannot export own /metrics (event-loop starvation) | livez/readyz timed out 25–30 s Oct-26/28; no external liveness alert | out-of-process witnesses: `up==0`/`absent()` external liveness + `scrape_duration_seconds` alert + textfile `*.prom` dir + node_exporter + postgres_exporter + wedge-capture artifacts (threads.csv/lag.json/readyz.json) | ExternalLivenessDown, ScrapeDurationHigh (CR-1) |
 
-**Leak story (P1 pool poisoned).** Recurring `idle in transaction` connections from sites `begin` / `instances_list` / `parent_lookup` / `queue_count` / `other` (fixed label set — no unbounded query strings). Census runs on a dedicated non-pooled connection at ≥15 s cadence (never through P1/P2 — a probe consuming pool slots is the failure mode it detects). Per-site attribution requires a fragment→site map + `application_name='ensemble-metrics-census'` + db_capture.py discipline + `statement_timeout` (MA-13: leaked-txn site attribution asserted not derived; daemon connections carry empty application_name).
+**Leak story (P1 pool poisoned).** Recurring `idle in transaction` connections attributed to a **closed 6-value site set** — `instance_read` / `instance_parent_lookup` / `job_queue_read` / `checkpoint_saver` / `agent_db_tool` / `other` (the `other` residual is never dropped, so the census total always equals the sum — metric-catalog.md §8.9/§9.2; no unbounded query strings). Census runs on a dedicated non-pooled connection at ≥15 s cadence (never through P1/P2 — a probe consuming pool slots is the failure mode it detects). Per-site attribution requires a fragment→site map + `application_name='ensemble-metrics-census'` + db_capture.py discipline + `statement_timeout` (MA-13: leaked-txn site attribution asserted not derived; daemon connections carry empty application_name).
 
 ## 2. Scope & deploy target
 
@@ -107,14 +107,14 @@ Risks (P0):
 
 Goals: export the runtime metrics that catch wedges, LLM, compaction, tools, lifecycle.
 
-Metric families added (names only — canonical names per metric-catalog.md §1; a name that is not catalogued is marked "proposed — not catalogued" and is tracked in decisions.md §H H-7): `ensemble_loop_lag_seconds` (exported from existing lag probe — no duplicate), `ensemble_thread_cpu_seconds{thread_group}`, `ensemble_wedge_capture_total{reason}`, `ensemble_process_cpu_seconds{name}` (textfile; catalog F22 assigns this family to P2 — decisions.md §H H-8), `ensemble_llm_tokens_total{direction}`, `ensemble_llm_request_total{outcome}` + `ensemble_llm_request_seconds` (the latency histogram carries no outcome label — catalog F15), `ensemble_llm_stream_stalls_total`, `ensemble_compaction_fired_total{rung}`, `ensemble_compaction_occupancy_ratio` (at compaction.py:1128 hooks), `ensemble_tool_calls_total{category}`, `ensemble_turn_duration_seconds` (catalog F20 — the per-turn seam; a per-tool latency histogram is NOT shipped), `ensemble_gii_throttle_active` (proposed — not catalogued), `ensemble_resource_spine_tables_accepting_rows{table}` + `ensemble_resource_spine_rows_written_total{table}` (catalog F0.3 — the spine health gate; per-instance attribution stays in the resource_monitor PG tier), `ensemble_wake_turns_total{outcome}`, `ensemble_instance_lifecycle_total{event}` (catalog F13 — 7 events, incl. revive-on-send_message).
+Metric families added (names only — canonical names per metric-catalog.md §1; an uncatalogued name is **not shipped** in v2 — see decisions.md §H H-7): `ensemble_loop_lag_seconds` (exported from existing lag probe — no duplicate), `ensemble_thread_cpu_seconds{thread_group}`, `ensemble_wedge_capture_total{reason}`, `ensemble_llm_tokens_total{direction}`, `ensemble_llm_request_total{outcome}` + `ensemble_llm_request_seconds` (the latency histogram carries no outcome label — catalog F15), `ensemble_llm_stream_stalls_total`, `ensemble_compaction_fired_total{rung}`, `ensemble_compaction_occupancy_ratio` (at compaction.py:1128 hooks), `ensemble_tool_calls_total{category}`, `ensemble_turn_duration_seconds` (catalog F20 — the per-turn seam; a per-tool latency histogram is NOT shipped), `ensemble_resource_spine_tables_accepting_rows{table}` + `ensemble_resource_spine_rows_written_total{table}` (catalog F0.3 — the spine health gate; per-instance attribution stays in the resource_monitor PG tier), `ensemble_wake_turns_total{outcome}`, `ensemble_instance_lifecycle_total{event}` (catalog F13 — 7 events, incl. revive-on-send_message).
 
 Tasks:
 | # | Task | Depends On | Acceptance |
 |---|------|------------|------------|
 | 1 | Export lag probe as `ensemble_loop_lag_seconds` histogram (reuse, no duplicate) | P0-4 | p50/p95 gauges + documented dependency when wedge-capture off (MA-4) |
 | 2 | Thread-CPU sampler reuse + bucketing into ~8 groups (MA-2) | P0-4 | sampler.py reused; one /proc dialect; groups bounded |
-| 3 | Wedge-capture counter hook + textfile process CPU | P0-1 | counter increments on trigger; textfile written out-of-process |
+| 3 | Wedge-capture counter hook | P0-1 | counter increments on trigger; the shell textfile writer ships in **P2** (catalog F22 — external sampler owner) |
 | 4 | LLM tokens/cost + real outcome enum + stall count at watchdog abort site (MA-8) | P0-4 | truncation-undercount caveat documented (graph.py:3876–3910) |
 | 5 | Compaction pressure hooks at compaction.py:1128 (m6) | P0-4 | compaction_fired_total{rung} fires on L1/L2/L3 |
 | 6 | Tool-call perf via message_tap.py seam (m7) | P0-4 | volume + latency per tool; not graph internals |
@@ -137,14 +137,14 @@ Risks (P1a):
 
 Goals: DB pools, Postgres census, checkpoint store, readiness, maintenance, snapshots.
 
-Metric families added (names only — canonical names per metric-catalog.md §1; a name that is not catalogued is marked "proposed — not catalogued" and is tracked in decisions.md §H H-7): `ensemble_db_pool_native{pool,quantity}` + `ensemble_db_pool_checked_out{pool}` + `ensemble_db_pool_waiting_clients{pool}` (derived vs native kept apart — catalog F4/F5), `ensemble_db_pool_checkout_seconds{pool}` (deferred — not catalogued; the checkout seam is instrumented in a follow-up, see the CR-4 note below), `ensemble_db_pool_requests_errors_total{pool,kind}` (superset, CR-4), `ensemble_pg_backends{state}`, `ensemble_pg_idle_in_txn_oldest_seconds`, `ensemble_pg_leaked_txn{site}`, `ensemble_checkpoint_op_seconds{op}`, `ensemble_checkpoint_op_bytes{op}`, `ensemble_checkpoint_blobs_table_bytes`, `ensemble_checkpoint_versions_per_thread` (p95 gauge), `ensemble_readiness_probe_total{component,outcome}`, `ensemble_readiness_grace_active`, `ensemble_maintenance_runs_total{operation,outcome}` (proposed — not catalogued), `ensemble_snapshot_usage_total{outcome}` (proposed — not catalogued; source /api/snapshots/metrics), `ensemble_db_pool_status{pool}` (proposed — not catalogued; do NOT ship beside `ensemble_db_pool_native` — catalog F4 is the single pool-status family).
+Metric families added (names only — canonical names per metric-catalog.md §1; an uncatalogued name is **not shipped** in v2 — see decisions.md §H H-7): `ensemble_db_pool_native{pool,quantity}` + `ensemble_db_pool_checked_out{pool}` + `ensemble_db_pool_waiting_clients{pool}` (derived vs native kept apart — catalog F4/F5), `ensemble_db_pool_requests_errors_total{pool,kind}` (superset, CR-4 — the checkout-latency histogram is retired, see decisions.md §B CR-4), `ensemble_pg_backends{state}`, `ensemble_pg_idle_in_txn_oldest_seconds`, `ensemble_pg_leaked_txn{site}`, `ensemble_checkpoint_op_seconds{op}`, `ensemble_checkpoint_op_bytes{op}`, `ensemble_checkpoint_blobs_table_bytes`, `ensemble_checkpoint_versions_per_thread` (p95 gauge), `ensemble_readiness_probe_total{component,outcome}`, `ensemble_readiness_grace_active`.
 
-Note (CR-4): `ensemble_db_pool_checkout_timeouts_total{pool}` is NOT shipped — psycopg_pool 3.3.1 exposes no native timeout counter (`requests_errors` is a superset counting every waiting exception plus TooManyRequests). PoolExhausted is rebased on `ensemble_db_pool_requests_errors_total`. Instrumenting daemon's own checkout call sites is deferred to a follow-up; the superset + documented caveat ships in v2.
+Note (CR-4): the checkout-timeout counter is **retired** (see decisions.md §B CR-4) — psycopg_pool 3.3.1 exposes no native timeout counter (`requests_errors` is a superset counting every waiting exception plus TooManyRequests). PoolExhausted is rebased on `ensemble_db_pool_requests_errors_total`. Instrumenting daemon's own checkout call sites is deferred to a follow-up; the superset + documented caveat ships in v2.
 
 Tasks:
 | # | Task | Depends On | Acceptance |
 |---|------|------------|------------|
-| 1 | DB pool gauges + checkout histogram (wrap both pools) | P0-4 | pool=manager/checkpoint; state vocabulary fixed |
+| 1 | DB pool gauges — native quantities + derived checked-out/waiting (both pools) | P0-4 | pool=manager/checkpoint; native-quantity vocabulary fixed; the checkout-latency histogram is (retired, see decisions.md §B CR-4) |
 | 2 | Postgres census on dedicated connection (MA-13) | P0-7 | idle-in-txn oldest age + per-site leak rows |
 | 3 | Checkpoint op latency/bytes histograms (extended buckets) | P0-4 | 73–99 s read finite; slow-op ledger feeds CheckpointSlow |
 | 4 | Blob table size + versions-per-thread p95 gauge (R7) | P0-4 | maintenance.py VACUUM_FULL_TABLE_BYTES_SQL source |
@@ -168,7 +168,7 @@ Risks (P1b):
 
 Goals: job queue, workers, heartbeat, waiting-children, instance status, sweeps, MCP health.
 
-Metric families added (names only — canonical names per metric-catalog.md §1; a name that is not catalogued is marked "proposed — not catalogued" and is tracked in decisions.md §H H-7): `ensemble_job_queue_depth{admission_state}` (reads admission_state), `ensemble_job_claim_latency_seconds`, `ensemble_workers_busy{pool}`, `ensemble_workers_total{pool}`, `ensemble_task_heartbeat_age_seconds` (max), `ensemble_waiting_children_count`, `ensemble_waiting_children_max_age_seconds`, `ensemble_instance_status_count{status}` (10 values), `ensemble_sweep_cycle_seconds{lane}`, `ensemble_sweep_rows_total{lane,outcome}`, `ensemble_mcp_server_state{server,state}`, `ensemble_mcp_failures_total{server,kind}`, `ensemble_message_queue_depth` (proposed — not catalogued), `ensemble_message_queue_oldest_age_seconds` (proposed — not catalogued), `ensemble_skill_usage_duration_seconds` (proposed — not catalogued; durable exception, skill_usage_records — distinct from the m5 skill-metrics non-goal lane), `ensemble_turn_events_total{source}` + `ensemble_instance_lifecycle_total{event}` (catalog F20/F13 — replaces the greenfield `ensemble_event_total{kind}` vocabulary; see decisions.md §H H-11).
+Metric families added (names only — canonical names per metric-catalog.md §1; an uncatalogued name is **not shipped** in v2 — see decisions.md §H H-7): `ensemble_job_queue_depth{admission_state}` (reads admission_state), `ensemble_job_claim_latency_seconds`, `ensemble_workers_busy{pool}`, `ensemble_workers_total{pool}`, `ensemble_task_heartbeat_age_seconds` (max), `ensemble_waiting_children_count`, `ensemble_waiting_children_max_age_seconds`, `ensemble_instance_status_count{status}` (10 values), `ensemble_sweep_cycle_seconds{lane}`, `ensemble_sweep_rows_total{lane,outcome}`, `ensemble_mcp_server_state{server,state}`, `ensemble_mcp_failures_total{server,kind}`, `ensemble_turn_events_total{source}` + `ensemble_instance_lifecycle_total{event}` (catalog F20/F13 — the greenfield event-total vocabulary is retired, see decisions.md §H H-11).
 
 Tasks:
 | # | Task | Depends On | Acceptance |
@@ -259,10 +259,10 @@ All entries follow the registry's value_type + ge/le/gt validation truth (Ruling
 ## 7. Never-exported list
 
 Explicit categories never exported (enforced at render time):
-- No free-form SQL strings (census `site` is a fixed 5-value enum; query text never appears).
+- No free-form SQL strings (census `site` is a fixed 6-value enum — 5 named sites + the `other` residual; query text never appears).
 - No secrets / tokens / credentials / API keys (including KMS handles, bearer tokens, OAuth secrets).
 - No unbounded strings: no instance IDs as labels, no thread IDs, no user content, no file paths, no error messages beyond a bounded reason-code enum.
-- No high-cardinality per-instance breakdowns beyond fixed vocabularies (`site`, `lane`, `server`, status 10-value, sweep lane 7-value, tier, pool, op, outcome, component).
+- No high-cardinality per-instance breakdowns beyond fixed vocabularies (`site` (6-value), `lane` (13-value), `server` (5-value), status 10-value, tier, pool, op, outcome, component).
 - No PII (user IDs, emails, IPs).
 - No raw checkpoint bytes / blob content / message bodies.
 - No per-request data (per-request HTTP histograms are a non-goal).
@@ -293,18 +293,18 @@ for-for clauses are mandatory on every rule; 0m rules are event-style (fire on f
 
 - R1 `checkpoint_metrics.py:273-315` registry + renderer (generalize into central registry; CR-3).
 - R2 `checkpoint_perf.py:190,198` + slow-op ledger (128-deque RAM) — CheckpointSlow source; one-measurement-one-name.
-- R3 `lag_probe.py` (300-sample rolling window, p95 at :185) — export computed quantiles as gauges; dark when wedge-capture off (MA-4).
+- R3 `lag_probe.py` (300-sample rolling window at :59; p95 at **:115**, p50 :116, max :114; :185 is `snapshot_histogram()`) — export computed quantiles as gauges; dark when wedge-capture off (MA-4).
 - R4 `wedge_capture/sampler.py` (reuses `resource_monitor/proc_readers.py`; one /proc dialect) — post-process bucketing for `thread_cpu_seconds{thread_group}` (MA-2).
 - R5 `resource_monitor` spine (sampler 30 s, ring 48 h, flusher 60 s, retention sweep; 4 tables) — post-WS-A (flusher.py:770 fix) (MA-3).
 - R6 `/api/resources/*` + `maintenance` + `/api/snapshots/metrics` surfaces — /metrics is a view over same services.
-- R7 `maintenance.py` VACUUM_FULL_TABLE_BYTES_SQL (~:533) — blob table size source for `ensemble_checkpoint_blobs_table_bytes`.
-- R8 `readiness.py` 11-class taxonomy (:56-79) + grace on /readyz — preserve labels, no re-probe (MA-5).
+- R7 `maintenance.py:531-536` VACUUM_FULL_TABLE_BYTES_SQL — sums **three** relations (`checkpoints` + `checkpoint_writes` + `checkpoint_blobs`; there is **no** single-table blob-size query) — blob table size source for `ensemble_checkpoint_blobs_table_bytes` (a split-out of that one round trip).
+- R8 `readiness.py` 11-class taxonomy (**:64-79**; grace subset :83-89, components :94-99) + grace on /readyz — preserve labels, no re-probe (MA-5).
 - R9 MANAGED_KEYS registry (settings_service.py:190) — bounds pattern for new metrics keys.
 - R10 `worker_pool.py` `get_stats` (:1518, incl. wakeup_efficiency) — worker utilization source.
 - R11 `db_capture.py` census discipline — `application_name` + fragment→site map + statement_timeout (MA-13).
 - R12 collector.py A2 vocab (pool_checked_out derived, requests_errors superset) — pool honesty (m2).
-- R13 `ens_db_tools.py:1157` pool status seam — `ensemble_db_pool_status`.
-- R14 MCP MachineStore roster — MCP server state source.
+- R13 `ens_db_tools.py:1157` pool status seam — resolves to catalog F4's single pool-status family `ensemble_db_pool_native{pool,quantity}` (no second `ensemble_db_pool_status` metric is shipped).
+- R14 MCP health surfaces — **server state** from the per-boot quarantine registry (`mcp/init_guard.py:145-147`, published read-only at `/readyz` → `detail.mcp`); **gateway session state** from the MCPS MachineStore (`services/mcps_gateway/store.py:79`,`:103` → sessions / tombstones / audit).
 - R15 sweep interval registry (300 s / 90 s) — SweepHotLoop baseline.
 - R16 `MAINTENANCE_ENDPOINTS_ENABLED` gating pattern — kill-switch analog.
 - R17 `message_tap.py` per-turn seam — tool-call perf source (m7, not graph internals).
@@ -333,6 +333,6 @@ Distributed tracing / APM; per-request HTTP histograms; log aggregation pipeline
 - OQ-1: Should `ensemble_loop_lag_seconds` remain a histogram or be exported as gauges (p50/p95) given the lag probe's 300-sample rolling window is not a Prometheus histogram? (MA-4 — recommend gauges + document dependency; decide in P0.)
 - OQ-2: Does the textfile dir live under `$INSTALL_DIR/data/metrics/` or a dedicated mount? (P0 decision; affects node_exporter textfile collector config.)
 - OQ-3: Version label policy — include `version` label on every series or only on `ensemble_upgrade_release_current`? (MA-12 — recommend only on the release gauge to avoid churn; decide in P0.)
-- OQ-4: `ensemble_event_total{kind}` requires a new event-kind vocabulary; confirm with the events subsystem owner before P1c. (Greenfield.)
+- OQ-4 (**RESOLVED 2026-10-29**): **no new event-kind vocabulary is required** — per-event counting is already covered by `ensemble_turn_events_total{source}` (catalog F20 — the 5 `SOURCE_*` tap constants) + `ensemble_instance_lifecycle_total{event}` (catalog F13 — the 7 lifecycle events). The events-subsystem owner confirms those two vocabularies at the P1c review; no greenfield family is added. See decisions.md §H H-11.
 
 (All other review items are resolved by the ratified decisions and the phase exit criteria above.)
