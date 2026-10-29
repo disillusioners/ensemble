@@ -41,7 +41,6 @@ from __future__ import annotations
 import threading
 import time
 
-import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import QueuePool
 

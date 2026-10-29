@@ -20,7 +20,7 @@ resolves to an existing constant in ``daemon/constants.py``.
 | call-site                                      | budget constant (daemon.constants)                    | derivation |
 |------------------------------------------------|-------------------------------------------------------|------------|
 | guard read/write cycle (this pack)             | ``DBPOOL_IDLE_IN_TXN_RESIDENCE_BUDGET_S``             | 62.5x the measured MAX healthy residence (0.0008 s, n=40 — ``BASELINE.md`` T2(d)); > 3 orders above p95 (0.0007 s) |
-| churn census cycle (``test_dbpool_churn_census.py``) | ``DBPOOL_IDLE_IN_TXN_RESIDENCE_BUDGET_S``        | the DEFAULT budget — same derivation |
+| churn census cycle (``test_dbpool_churn_census.py``) | — (none; REPORTED only)                             | the churn pack does NOT budget-judge its cycle: the residence budget assertion lives in THIS pack alone; the churn pack reports peak ``xact_age_s`` as a DISCLOSURE and asserts only the occupancy half (checkedout back to baseline — Deferred #5 reconciliation: the old row over-claimed) |
 | deferred-report reconcile P2 (``daemon/manager.py``) | ``MANAGER_ENGINE_LEGITIMATE_HOLD_BUDGET_S``     | NOT-DERIVABLE at pin-writing (Δ3(iii)/DR-11 — the real fetch latency is unmeasured); measured post-F8 by the TESTER; scoped OUT while the sentinel is negative — never guessed |
 
 ── THE MEASURED INVARIANT (D-48/DR-35 — both halves, co-equal) ──
@@ -88,7 +88,6 @@ import os
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any
 
 import pytest
 from sqlalchemy import create_engine, text

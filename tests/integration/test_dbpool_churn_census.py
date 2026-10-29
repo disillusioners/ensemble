@@ -80,9 +80,9 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlmodel import Session as SQLModelSession
 
-from daemon.constants import DBPOOL_IDLE_IN_TXN_RESIDENCE_BUDGET_S
 from daemon.ensemble_config import EnsembleConfig, PostgresConfig
 from daemon.repositories.factory import create_postgres_engine
+from daemon.services.readiness import MANAGER_POOL_CONFIGURED_CAPACITY
 
 pytestmark = [pytest.mark.integration]
 
@@ -300,15 +300,15 @@ class TestF7eOccupancy:
         peak_occupancy = max(s[0] for s in samples)
         peak_census = max(sum(s[1].values()) for s in samples)
         final_report = scratch_db.three_state()
-        assert peak_census <= 15, (
+        assert peak_census <= MANAGER_POOL_CONFIGURED_CAPACITY, (
             f"F7-e: the census reported {peak_census} backends in the "
             "scratch DB at peak — above the manager pool's configured "
-            "capacity (15)"
+            f"capacity ({MANAGER_POOL_CONFIGURED_CAPACITY})"
         )
         # Reported, bounded — NEVER asserted == 0 (P-10): pooled-but-
         # open connections legitimately sit 'idle' with no transaction
         # after the churn; that is occupancy the census REPORTS.
-        assert sum(final_report.values()) <= 15, (
+        assert sum(final_report.values()) <= MANAGER_POOL_CONFIGURED_CAPACITY, (
             f"F7-e: the post-churn census is out of bound: "
             f"{final_report}"
         )

@@ -282,9 +282,15 @@ MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS: int = 60_000
 # engine's legitimate hold on the REAL fetch path (a booted daemon +
 # a real checkpoint store — not modelled, not a single-sample failure
 # shape). The post-F8 re-measurement (F8-b's BASE-vs-HEAD comparison)
-# is the candidate figure (DR-11). Enablement = append the clause to
-# the template in ``factory.py`` (UTC first, idle-in-txn second,
-# value taken from THIS constant). If the backstop is EVER enabled, a
+# is the candidate figure (DR-11). Enablement = FLIP THE FLAG in
+# ``daemon/repositories/factory.py``
+# (``MANAGER_ENGINE_IDLE_IN_TXN_BACKSTOP_ENABLED = True``) — the
+# operative one-edit site (the factory's template renders the clause
+# from THIS constant, UTC first, idle-in-txn second, iff the flag is
+# True; the boot log line follows the same flag). Editing the template
+# alone is NOT enablement: with the flag left False the boot log still
+# says DISABLED while an unconditional clause would misreport the
+# ship state — never edit one without the other. If the backstop is EVER enabled, a
 # ``SET LOCAL statement_timeout = 0`` carve-out inside
 # ``daemon/manager.py::_ensure_postgres_columns`` becomes MANDATORY
 # (leader OQ-3: that path runs FULL TABLE REWRITEs under ACCESS

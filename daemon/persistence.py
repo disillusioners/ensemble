@@ -372,13 +372,16 @@ async def create_postgres_checkpointer(config: EnsembleConfig) -> CheckpointerAd
         # are DIFFERENT semantics and are deliberately NOT wired here).
         #
         # F2.6 (db-pool-idle-txn, D-49/D-36): pool attribution. The
-        # asyncpg pool takes ``application_name`` via asyncpg's OWN
+        # asyncpg pool's ``application_name`` rides asyncpg's OWN
         # ``server_settings`` channel (measured to land — BASELINE.md
-        # T3c) on a DSN built SEPARATELY from the shared
-        # ``conn_string`` variable — the shared string also feeds the
-        # P2 psycopg ORACLE pool above, whose conninfo is pinned
-        # byte-identical (T2.7/AC18); a shared DSN cannot separate the
-        # two pools (measured, BASELINE.md:325-338). The adapter pool
+        # T3c) — 100% of the attribution comes from server_settings;
+        # the DSN VALUE itself is byte-identical to the shared
+        # ``conn_string`` (same builder, same config/env — the alias
+        # below exists for READER clarity, not conninfo isolation).
+        # The shared conninfo stays pinned byte-identical because it
+        # also feeds the P2 psycopg ORACLE pool above (T2.7/AC18);
+        # attribution needs no DSN separation since server_settings is
+        # per-pool (measured, BASELINE.md:325-338). The adapter pool
         # opens explicit ``conn.transaction()`` blocks (its backends
         # sit idle-in-transaction between statements with no
         # server-side reap) — the HOLD itself is ROUTED to the

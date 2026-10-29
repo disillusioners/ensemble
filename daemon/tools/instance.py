@@ -1347,7 +1347,7 @@ async def _register_child_completion_watcher(
         return None
     try:
         _follow_up = FollowUp(
-                target_instance_id=parent_instance_id,
+            target_instance_id=parent_instance_id,
             message=(
                 f"[dependency_bus] child {child_instance_id} "
                 f"completed for message {message_id}"

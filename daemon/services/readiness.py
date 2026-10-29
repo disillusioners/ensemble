@@ -1548,8 +1548,10 @@ def make_db_probe(engine: Engine) -> Callable[[], tuple[bool, Optional[str]]]:
         with engine.connect() as conn:
             # F4-B — probe-scoped statement bound, FIRST statement
             # (it opens the autobegun transaction that scopes the
-            # setting). PG-only, exactly the ens_db_tools.py:787-797
-            # house idiom; SQLite does not support SET LOCAL.
+            # setting). PG-only, the same house idiom as the per-tx
+            # bound in ens_db_repair_postgres_select (see
+            # SELECT_TX_STATEMENT_TIMEOUT_MS in daemon/tools/ens_db_tools.py);
+            # SQLite does not support SET LOCAL.
             if engine.url.get_backend_name().startswith("postgres"):
                 conn.execute(
                     sa_text(
@@ -1840,8 +1842,10 @@ def make_queue_probe(
         with engine.connect() as conn:
             # F4-B — probe-scoped statement bound, FIRST statement
             # (it opens the autobegun transaction that scopes the
-            # setting). PG-only, exactly the ens_db_tools.py:787-797
-            # house idiom; SQLite does not support SET LOCAL.
+            # setting). PG-only, the same house idiom as the per-tx
+            # bound in ens_db_repair_postgres_select (see
+            # SELECT_TX_STATEMENT_TIMEOUT_MS in daemon/tools/ens_db_tools.py);
+            # SQLite does not support SET LOCAL.
             if engine.url.get_backend_name().startswith("postgres"):
                 conn.execute(
                     sa_text(

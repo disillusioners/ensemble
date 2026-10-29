@@ -520,10 +520,11 @@ class MissionRecordService:
         NOTHING``): the upsert's ``RETURNING mission_id`` is the LOSER
         SIGNAL (the winner gets one returned row, the loser none), and
         the loser re-resolves the winning row via the anchor-scoped
-        probe. ``rowcount`` is not a usable signal here — psycopg3
-        reports ``rowcount = -1`` ("unknown") for ``INSERT ... ON
-        CONFLICT DO NOTHING``, so the affected-row count is not
-        available on that path. When ``founding_message_id``
+        probe. (``rowcount`` is not a usable loser signal — the
+        psycopg3 ``rowcount = -1`` derivation lives in the repository's
+        ``insert_mission`` docstring, the canonical home; see
+        :meth:`MissionRecordRepository.insert_mission`.) When
+        ``founding_message_id``
         is set, the pre-insert ``(anchor, founding_message_id)`` probe
         below additionally short-circuits the sequential duplicate
         without a round-trip to the constraint.

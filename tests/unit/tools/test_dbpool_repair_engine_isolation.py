@@ -45,7 +45,6 @@ Run (house form)::
 """
 from __future__ import annotations
 
-import daemon.repositories.factory as factory_mod
 import daemon.tools.ens_db_tools as ens_db_tools
 from daemon.repositories.factory import PG_SESSION_CONNECT_ARGS
 from daemon.tools.ens_db_tools import (

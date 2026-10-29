@@ -53,13 +53,22 @@ _FALSE_PREMISE = "connect/execute timeout releases"
 
 
 def _function_source(path: Path, name: str) -> str:
-    """The source of one module-level function (incl. closures)."""
+    """The source of one module-level function (incl. closures).
+
+    T-M15: RAISES on miss — the previous silent ``""`` return disarmed
+    the ABSENCE assertions (a renamed/moved target made
+    ``"..." not in source`` go GREEN vacuously)."""
     src = path.read_text()
     tree = ast.parse(src)
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name == name:
-            return ast.get_source_segment(src, node) or ""
-    return ""
+            segment = ast.get_source_segment(src, node)
+            assert segment is not None, (
+                f"AST failed to yield a source segment for {name!r} "
+                f"in {path} — the reader is stale"
+            )
+            return segment
+    raise AssertionError(f"function {name} not found in {path}")
 
 
 class TestF7bStaticProbeRetentionTwin:

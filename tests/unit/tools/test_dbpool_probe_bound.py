@@ -82,7 +82,9 @@ def _function_source(path: Path, name: str) -> str:
     tree = ast.parse(source)
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
-            return ast.get_source_segment(source, node) or ""
+            segment = ast.get_source_segment(source, node)
+            assert segment is not None, "AST yielded no segment — reader stale"
+            return segment
     raise AssertionError(f"function {name} not found in {path}")
 
 
@@ -94,7 +96,9 @@ def _probe_body_source(name: str) -> str:
         if isinstance(node, ast.FunctionDef) and node.name == name:
             for inner in ast.walk(node):
                 if isinstance(inner, ast.FunctionDef) and inner.name == "_probe":
-                    return ast.get_source_segment(source, inner) or ""
+                    segment = ast.get_source_segment(source, inner)
+                    assert segment is not None, "AST yielded no segment — reader stale"
+                    return segment
     raise AssertionError(f"probe closure _probe not found in {name}")
 
 

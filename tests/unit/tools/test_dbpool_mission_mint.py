@@ -98,7 +98,9 @@ def _function_source(path: Path, name: str) -> str:
     tree = ast.parse(source)
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == name:
-            return ast.get_source_segment(source, node) or ""
+            segment = ast.get_source_segment(source, node)
+            assert segment is not None, "AST yielded no segment — reader stale"
+            return segment
     raise AssertionError(f"function {name} not found in {path}")
 
 

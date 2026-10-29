@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
 
 from daemon.services.readiness import (
     FAILURE_CLASS_HARD_COMPONENT_RED,
