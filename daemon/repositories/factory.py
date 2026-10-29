@@ -442,8 +442,11 @@ def create_postgres_engine(
         # a pinned invariant); pool_recycle mirrors REPAIR_POOL_RECYCLE_S;
         # pool_timeout is the library default, pinned so it cannot
         # drift (D-15: deliberately NOT lowered — see
-        # daemon/constants.py). Sizing (5/10) is unchanged: the soak
-        # lane's A4 sizing lives on the P2 pools, not this engine.
+        # daemon/constants.py). Sizing is NOT pinned here: the pool
+        # size is the CONFIG-DRIVEN ``manager_pool_size`` (the
+        # ``limits.manager_pool_size`` ladder; default tier 15, floor
+        # 15, ceiling 30) with ``max_overflow`` 10 — the soak lane's
+        # A4 sizing lives on the P2 pools, not this engine.
         pool_reset_on_return="rollback",
         pool_recycle=MANAGER_ENGINE_POOL_RECYCLE_S,
         pool_timeout=MANAGER_ENGINE_POOL_TIMEOUT_S,
