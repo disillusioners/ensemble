@@ -261,7 +261,7 @@ class MaintenanceService:
             # DB call in ``asyncio.to_thread`` to keep the event loop responsive
             # under SQLite WAL write contention.
             if not await self._is_idle():
-                logger.debug(f"Skipping {job.name}: system not idle")
+                logger.info(f"Skipping {job.name}: system not idle")
                 continue
 
             try:
