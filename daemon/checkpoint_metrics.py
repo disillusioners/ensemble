@@ -63,6 +63,7 @@ import logging
 import re
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 logger = logging.getLogger("daemon.checkpoint_metrics")
@@ -252,17 +253,13 @@ TOOL_CATEGORY_ARTIFACT_RELPATH = ".agents/shared/metrics/tool-categories.json"
 TOOL_CATEGORY_RESERVED = RESERVED_LABEL_VALUE
 
 
-def _repo_root() -> "Path":
+def _repo_root() -> Path:
     """The repository root (the directory that owns ``daemon/``)."""
-    from pathlib import Path
-
     return Path(__file__).resolve().parents[1]
 
 
-def tool_category_artifact_path() -> "Path":
+def tool_category_artifact_path() -> Path:
     """Absolute path of the committed tool-category artifact."""
-    from pathlib import Path
-
     return _repo_root() / TOOL_CATEGORY_ARTIFACT_RELPATH
 
 

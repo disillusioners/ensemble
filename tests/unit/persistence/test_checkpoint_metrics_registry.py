@@ -31,7 +31,6 @@ from daemon import checkpoint_metrics as cm
 from daemon.checkpoint_metrics import (
     CHECKPOINT_OP_BUCKETS,
     DEFAULT_LATENCY_BUCKETS,
-    RESERVED_LABEL_VALUE,
     VOCABULARY_VERSION,
     checkpoint_list_total,
     register_counter,
