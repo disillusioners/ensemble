@@ -134,3 +134,54 @@ Comment correction A/B-proven (stale "+0.4 ms / 0.96→1.40" present at `67f9f1b
 2. `find … -exec rm -rf {} +` leaves `.pyc` behind (4210 in one case); `-print0 | xargs -0 rm -rf` required.
 3. Read-only psql bumps DB-dir mtime — table counts are the write-evidence, not mtimes.
 4. Blueprint's "`pytest_sessionstart` prints `daemon.__file__`" claim remains stale (recorded in gate 1).
+
+---
+
+# FINAL LANDING GATE @ `e356d3657` — ✅ SHIP (merge into latest)
+
+**Tree:** `feature/checkpoint-quick-wins` @ `e356d36577a74a978fa823539bacf1e0b2286f37`. Merge chain: `a86b38c0a` (our `3a1ba1ee2` + their WS-B `bf673fdbe`=latest) + 3 gate-fix commits (`cef870a1c`, `6b7cf8979`, `e356d3657`).
+
+## 1. Merge integrity — PASS
+`api.py` carries BOTH wirings (our `metrics_router` import :153 + mount :5029; their lifespan `metrics_gate`/`MetricsListener` :2304-2362). **0 conflict markers** across the touched daemon files; `py_compile` clean.
+
+## 2. Registry semantics — PASS (103/103 independent checks; developer's gate-B tests NOT used as evidence)
+(a) canonical≡alias = the SAME series: no `Metric` registered under an alias; identical sample sets for all 7 counters + 3 histogram sub-names; LIVE identity (increment canonical → alias moves 1→2); **`is`-identity holds for all 9 historical Python symbols** (pre-existing callers unaffected). (b) `reset_for_tests()` clears our 7 + theirs (11 seeded series → 0; **0 stale series_keys** across 13 families; route body zeroed). (c) **14/14** = 7 canonical + 7 alias of the re-homed family; the endpoint renders the WHOLE shared registry (**22 `# TYPE` families**). (d) integral vocabulary intact — `65536/131072/262144/524288/1048576/8388608/+Inf`, no scientific notation, no `.0`. (e) `_format_le` re-run by me against BOTH parents' pre-merge `f"{value:g}"`: **DEFAULT_LATENCY_BUCKETS 13 / CHECKPOINT_OP_BUCKETS 17 / EXPOSITION_BUCKETS 11 → 0 diffs each**; integral bounds render as plain integers through the actual exposition path. (f) join-by-label: histogram `le` set == bucket-hits `bucket` set, per-bound string equality, alias side identical.
+
+## 3. Auth matrix — PASS (34/34) · 🟡 one NEW finding
+Real `create_app()` + TestClient: (a) 401 `AUTH_REQUIRED` (browser-shape → 302 login redirect); (b) 403 `SCOPE_INSUFFICIENT required:["maintenance:read"]`; (c) 200 Prometheus, 18 non-zero families incl. BOTH `ensemble_checkpoint_read_ops_total{op="aget"} 1` and the alias; (d) 503 `AUTH_NOT_CONFIGURED`, body 88 B, **no `checkpoint`/`ensemble_`/`# HELP`/`# TYPE`**; (e) 503. Gate order proven two ways (source `:137→:138`; runtime spy = **0 render calls on refusal, exactly 1 on grant**).
+**🟡 FINDING (WS-B's design, NOT merge-caused, OFF by default):** the `MetricsListener` is a separate stdlib server on **127.0.0.1:9798** — not an app route (`GET /metrics` on the app → 404; `/api/metrics` keeps its gate). Its only guard is a browser-origin check (**no `Origin`/`Referer` ⇒ ALLOW**, so curl/Prometheus always pass). The socket binds **even when the kill-switch is OFF** (switch gates only the body: OFF → 200 empty; ON → 200 with the whole 8,438-B registry, checkpoint metrics present, unauthenticated, loopback-only; non-loopback bind refused in the constructor). ⇒ enabling `ENSEMBLE_METRICS_ENABLED`/`limits.metrics_enabled` publishes the internal checkpoint counters on loopback:9798 with zero auth. Surface to the WS-B owner.
+
+## 4. One-walk invariant — PASS (29/29)
+2×2 = **1 / 1 / 1 / 0** (counting wrapper in all 3 referencing modules). Same number reaches both consumers (shared walk 1137 = charge `size=1137` = `ensemble_checkpoint_read_bytes_total` 1137 = charge-registry 1137 = independent re-walk 1137). No second consumer: all `bounded_deep_size` call sites enumerated; `git diff 3a1ba1ee2 e356d3657` over the size seam = **0 lines**.
+
+## 5. Packs + A/B
+- **PACK A** (developer's 17): **398/398** both legs, identical node-sets, 0 marker-deselected.
+- **PACK B** (prior targeted 14): 405 census → 403 P / **2 F** = the standing planner-meta pair only; ordering-pollution pair proven both shapes again (whole-file 2F/22P, class-scoped 14P).
+- **PACK C** (new PG census): **2 deterministic defects D1/D2 — proven PRE-EXISTING-ON-LATEST by execution** (F5: 6 legs; shape (b) byte-identical 0-line diff; **zero verdict differences**). D1 = the shared conftest fence intercepts the child run before the module-local fence → `FENCE_MARKER` unreachable in any env. D2 = the pack's scratch DB missing from the shared `ALLOWED_SCRATCH_DBS` → 10 ERROR → green-at-zero FAIL. Isolation: `PG_TEST_ALLOWED_DBS` export → 1 failed (=D1) / **9 passed against real PG** — the census module itself is healthy. **Not merge-caused; raise as a separate pre-existing-defect ticket on latest.**
+- **Resource-monitor lane:** **277/277**; 0 PG residue; `charge.py`↔`sampler.py` seam green.
+- **knowledge_tools ×2:** byte-identical at all 4 commits (`bf673fdbe`/`3a1ba1ee2`/`a86b38c0a`/`e356d3657`) — stale pins of the retired tool-level model-forwarding contract (migration `1a40bc56b` 2026-09-26, ancestor of both parents). Not a production bug.
+- **F1 wide sweep:** 4,087 nodes → 14 reds, **A/B-proven identical on BOTH parents** (`git archive` legs, no worktree), all 14 fail solo → deterministic; **zero new reds from the merge**. NOTE: `api.py` is now **5,416** lines (5,235 at pre-merge tip) — the standing `<1600` size-census debt worsens with the WS-B merge.
+
+## 6. Live dev-DB — STILL-HOLDS
+ANALYZE both branches + threads-only cell re-proved (spy engine; `checkpoint_prune.py` blob-identical to the prior gate). TOAST reloptions persist verbatim ×3, parents clean, **all fingerprints identical across the whole session** (no concurrent OID rotation this time). `prepare_threshold=None` reaches the real connection; census **0** (shipped) vs **1** (old `0`) with same-session `backend_pid` proof; EXPLAIN 14-leaf trees **identical, 0 non-timing leaf diffs**. Prior latency numbers uncontradicted.
+**Landscape fact:** `latest` does NOT contain the ANALYZE lane — the landing merge is what carries it in (expected; that is the point of landing).
+
+## 7. No side effects — CLEAN
+No daemon (8079/8088/8092/4199/**9798** all empty throughout). Foreign `install-audit.jsonl`: 27 `kms_issue` rows appended by OUR F1 sweeps (3×9 batches @ 18:00/18:09/18:12Z; cause `tests/unit/services/test_kms_lite.py` + `test_key_hardening.py`; 0 non-kms) → **restored byte-identically** to the 382/91206/`807143b4` baseline; `git diff` back to the foreign workstream's original **36/0**. All throwaway worktrees removed cleanly (`fin-ab`, `fin-pgab`); `git worktree list` clean of them. HEAD unchanged; no commits/pushes by the gate.
+
+## Harness incidents (disclosed)
+1. **The proof plugin was overwritten mid-gate by a concurrent agent** (F5 replaced `/tmp/cq-gate/cq_proof.py` with a print-only version, losing the hard-fail raise). All runs still pasted `inside_cwd_tree=true`, so the collected evidence holds; the **hard gate has been restored** (appended, preserving F5's extra diagnostics). F2b's earlier wrong-tree catch proves the raise matters.
+2. F1 initially used bare `python3 -m pytest` (system 3.14); it re-ran **every** set through the house scrubbed wrapper with identical results. Self-corrected and disclosed.
+3. F1 disclosed 4 self-inflicted probe FAILs it found and fixed (probe bugs, not product defects).
+4. F2b caught a **wrong-tree run** via the proof (bash `cd` binding in a parallel shell) and re-ran it correctly; also flagged **ambient `POSTGRES_DB=ensemble_prod` (live prod)** reaching bare pack scripts that bypass the scrubbed wrapper — proven non-load-bearing (PG harness reads `PG_TEST_*` only) and all three bare packs re-run scrubbed green.
+
+## Follow-ups (all non-blocking; NONE introduced by this merge)
+1. 🔴→`latest` **D1/D2** pre-existing PG-census defects (separate ticket on latest; fixes: add `ensemble_metrics_census_pack` to the shared `ALLOWED_SCRATCH_DBS` or have the pack export `PG_TEST_ALLOWED_DBS`; align D1's `FENCE_MARKER` with the shared fence's actual refusal text — or bypass the shared fence in the child).
+2. 🟠 MetricsListener unauthenticated loopback:9798 surface when enabled (WS-B owner).
+3. 🟠 CHANGELOG has 0 occurrences of `ensemble_checkpoint_*` (metric names + alias shape undocumented — completeness).
+4. 🟠 stale `architecture-recommendation.md:315/:532` anchors (pre-dates this delta; came in with the WS-B doc).
+5. 🟢 `api.py` now 5,416 lines vs the `<1600` pin (standing re-baseline debt).
+6. 🟢 endpoint-scope wording ("renders the whole registry") — not re-verified this gate.
+
+## LANDING VERDICT: ✅ **SHIP** — `e356d3657` → `latest`
+Zero branch-caused failures anywhere in this gate; both defect families found are proven pre-existing on `latest` by execution; every behavioral claim re-proved independently; no side effects.
