@@ -1,0 +1,14 @@
+=== g7 probe (expect rc=3 INTERNALERROR sys.exit(0)) 2026-10-29T12:02:53Z
+g7 RC=3
+INTERNALERROR>     sys.exit(0)
+INTERNALERROR>     ~~~~~~~~^^^
+INTERNALERROR> SystemExit: 0
+
+no tests ran in 0.52s
+=== e2e-hybrid probe (expect rc=2 :8079 refused) 2026-10-29T12:02:57Z
+e2e-hybrid RC=2
+
+=========================== short test summary info ============================
+ERROR tests/e2e/test_context_injection_hybrid.py - requests.exceptions.Connec...
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.40s

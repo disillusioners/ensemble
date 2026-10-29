@@ -1,0 +1,100 @@
+=== FM4 whole-tree leg — merged tree 6947cc2b8 — aggregate summary ===
+worktree: /home/nea/ensemble-src-wt-tdbp-fmwt
+interpreter: /home/nea/ensemble-src/.venv/bin/python (pytest 9.0.2)
+census: 31150 collected (of 32259; 1109 deselected) — house --ignore x2 at census
+ids_executed: 31150   accounted(p+f+e+s+xf+xp): 31150   delta: 0
+
+--- execution totals (sum of per-chunk -q summaries) ---
+  passed    : 30505
+  failed    : 316
+  errors    : 27
+  skipped   : 296
+  xfailed   : 6
+  xpassed   : 0
+  warnings  : 4481
+
+--- failed/error set ---
+  unique ids: 343   kinds: {'FAILED': 316, 'ERROR': 27}   UNPARSED: 0
+  sha256(failed.fmwt.txt): 2e97872fe44372b3e543fe76068c8816728c9b1942b9ba98bac2e8eb70cae76d
+  sha256(ids.fmwt.txt): e14a8c0bf648deaf0236055f1b69ab4887dbb33c7d0cba82ea5edc6f07cc1020
+  sha256(collect.fmwt.txt): f4901292f67a6c4eb72d1baeaadf96a0b22fb5a9a63e4bac2b5dc0420bfaed36
+
+--- 78 chunk attempt rows; sum of chunk walls: 7121s = 1.98h ---
+  chunk_000    rc=1    wall=  962s ids=400  7 failed, 391 passed, 2 skipped, 36 warnings in 953.37s (0:15:53)
+  chunk_001    rc=1    wall=  218s ids=400  20 failed, 379 passed, 21 warnings, 1 error in 209.93s (0:03:29)
+  chunk_002    rc=1    wall=  213s ids=400  9 failed, 380 passed, 11 skipped, 150 warnings in 205.95s (0:03:25)
+  chunk_003    rc=1    wall=  143s ids=400  3 failed, 384 passed, 10 skipped, 314 warnings, 3 errors in 136.83s (0:02:16)
+  chunk_004    rc=1    wall=   80s ids=400  10 failed, 371 passed, 19 skipped, 88 warnings in 74.31s (0:01:14)
+  chunk_005    rc=1    wall=   33s ids=400  3 failed, 397 passed, 16 warnings in 27.31s
+  chunk_006    rc=1    wall=   64s ids=400  1 failed, 399 passed, 1177 warnings in 58.66s
+  chunk_007    rc=0    wall=   74s ids=400  381 passed, 19 skipped, 137 warnings in 68.19s (0:01:08)
+  chunk_008    rc=1    wall=  103s ids=400  14 failed, 386 passed, 188 warnings in 97.78s (0:01:37)
+  chunk_009    rc=1    wall=   54s ids=400  3 failed, 384 passed, 13 skipped, 1178 warnings in 48.85s
+  chunk_010    rc=1    wall=  771s ids=400  3 failed, 392 passed, 5 skipped, 132 warnings in 763.40s (0:12:43)
+  chunk_011    rc=1    wall=   34s ids=400  5 failed, 381 passed, 14 skipped, 54 warnings in 28.20s
+  chunk_012    rc=1    wall=   35s ids=400  10 failed, 390 passed, 1 warning in 28.97s
+  chunk_013    rc=1    wall=   75s ids=400  14 failed, 352 passed, 34 skipped, 10 warnings in 69.43s (0:01:09)
+  chunk_014    rc=0    wall=   44s ids=400  400 passed, 9 warnings in 37.93s
+  chunk_015    rc=1    wall=   38s ids=400  2 failed, 398 passed, 24 warnings in 32.84s
+  chunk_016    rc=1    wall=   69s ids=400  16 failed, 370 passed, 14 skipped, 63 warnings in 61.06s (0:01:01)
+  chunk_017    rc=1    wall=   78s ids=400  11 failed, 389 passed, 3 warnings in 72.62s (0:01:12)
+  chunk_018    rc=0    wall=   20s ids=400  383 passed, 17 skipped, 2 warnings in 14.19s
+  chunk_019    rc=1    wall=  115s ids=400  48 failed, 310 passed, 42 skipped, 12 warnings in 107.93s (0:01:47)
+  chunk_020    rc=0    wall=  156s ids=400  400 passed in 150.08s (0:02:30)
+  chunk_021    rc=1    wall=  160s ids=400  1 failed, 399 passed, 1 warning in 153.18s (0:02:33)
+  chunk_022    rc=1    wall=   48s ids=400  7 failed, 383 passed, 10 skipped, 55 warnings in 42.57s
+  chunk_023    rc=0    wall=   40s ids=400  400 passed, 9 warnings in 34.52s
+  chunk_024    rc=1    wall=   16s ids=400  2 failed, 393 passed, 5 xfailed in 11.73s
+  chunk_025    rc=1    wall=   21s ids=400  30 failed, 362 passed, 8 skipped, 13 warnings in 15.45s
+  chunk_026    rc=0    wall=   14s ids=400  400 passed, 42 warnings in 9.40s
+  chunk_027    rc=1    wall=  106s ids=400  8 failed, 380 passed, 12 skipped, 27 warnings in 99.69s (0:01:39)
+  chunk_028    rc=1    wall=  100s ids=400  5 failed, 395 passed, 16 warnings in 94.43s (0:01:34)
+  chunk_029    rc=0    wall=   42s ids=400  400 passed in 37.47s
+  chunk_030    rc=1    wall=   32s ids=400  4 failed, 394 passed, 2 errors in 27.11s
+  chunk_031    rc=0    wall=  151s ids=400  400 passed in 145.03s (0:02:25)
+  chunk_032    rc=0    wall=   86s ids=400  400 passed in 80.36s (0:01:20)
+  chunk_033    rc=1    wall=  104s ids=400  1 failed, 399 passed, 25 warnings in 96.35s (0:01:36)
+  chunk_034    rc=1    wall=   55s ids=400  3 failed, 397 passed, 21 warnings in 49.16s
+  chunk_035    rc=1    wall=   21s ids=400  7 failed, 393 passed, 26 warnings in 16.19s
+  chunk_036    rc=0    wall=   24s ids=400  400 passed, 1 warning in 18.58s
+  chunk_037    rc=0    wall=   69s ids=400  400 passed in 63.34s (0:01:03)
+  chunk_038    rc=0    wall=   54s ids=400  400 passed in 48.86s
+  chunk_039    rc=1    wall=   92s ids=400  2 failed, 398 passed, 21 warnings in 86.26s (0:01:26)
+  chunk_040    rc=1    wall=   72s ids=400  2 failed, 398 passed, 114 warnings in 65.75s (0:01:05)
+  chunk_041    rc=0    wall=   36s ids=400  400 passed in 30.55s
+  chunk_042    rc=0    wall=   24s ids=400  400 passed in 18.95s
+  chunk_043    rc=0    wall=   76s ids=400  400 passed, 1 warning in 70.53s (0:01:10)
+  chunk_044    rc=1    wall=   32s ids=400  1 failed, 382 passed, 20 warnings, 17 errors in 26.43s
+  chunk_045    rc=1    wall=   66s ids=400  20 failed, 380 passed, 2 warnings in 58.93s
+  chunk_046    rc=1    wall=   52s ids=400  394 passed, 2 skipped, 4 errors in 45.04s
+  chunk_047    rc=0    wall=   34s ids=400  398 passed, 2 skipped, 4 warnings in 28.54s
+  chunk_048    rc=1    wall=  126s ids=400  11 failed, 389 passed, 17 warnings in 120.06s (0:02:00)
+  chunk_049    rc=0    wall=   96s ids=400  400 passed, 1 warning in 90.19s (0:01:30)
+  chunk_050    rc=0    wall=   47s ids=400  400 passed in 41.71s
+  chunk_051    rc=1    wall=   99s ids=400  1 failed, 399 passed, 6 warnings in 92.03s (0:01:32)
+  chunk_052    rc=1    wall=   21s ids=400  4 failed, 394 passed, 2 skipped in 15.42s
+  chunk_053    rc=0    wall=   68s ids=400  400 passed in 62.58s (0:01:02)
+  chunk_054    rc=0    wall=   83s ids=400  400 passed in 77.20s (0:01:17)
+  chunk_055    rc=0    wall=  197s ids=400  399 passed, 1 skipped, 12 warnings in 191.42s (0:03:11)
+  chunk_056    rc=0    wall=  119s ids=400  400 passed, 1 warning in 112.51s (0:01:52)
+  chunk_057    rc=1    wall=   31s ids=400  1 failed, 382 passed, 17 skipped, 85 warnings in 25.57s
+  chunk_058    rc=1    wall=   27s ids=400  3 failed, 397 passed in 21.39s
+  chunk_059    rc=1    wall=  108s ids=400  6 failed, 374 passed, 20 skipped, 129 warnings in 101.57s (0:01:41)
+  chunk_060    rc=1    wall=  267s ids=400  2 failed, 393 passed, 5 skipped, 63 warnings in 260.34s (0:04:20)
+  chunk_061    rc=0    wall=   62s ids=400  400 passed in 55.98s
+  chunk_062    rc=0    wall=   19s ids=400  400 passed in 15.00s
+  chunk_063    rc=0    wall=   48s ids=400  400 passed in 43.34s
+  chunk_064    rc=1    wall=   48s ids=400  1 failed, 388 passed, 11 skipped, 44 warnings in 42.27s
+  chunk_065    rc=0    wall=   26s ids=400  400 passed in 20.58s
+  chunk_066    rc=1    wall=   22s ids=400  1 failed, 399 passed in 16.40s
+  chunk_067    rc=1    wall=   88s ids=400  1 failed, 398 passed, 1 xfailed, 9 warnings in 82.91s (0:01:22)
+  chunk_068    rc=1    wall=   39s ids=400  3 failed, 393 passed, 4 skipped in 33.38s
+  chunk_069    rc=1    wall=   72s ids=400  2 failed, 398 passed, 50 warnings in 66.60s (0:01:06)
+  chunk_070    rc=1    wall=  111s ids=400  2 failed, 398 passed in 105.38s (0:01:45)
+  chunk_071    rc=0    wall=   68s ids=400  400 passed, 1 warning in 60.44s (0:01:00)
+  chunk_072    rc=0    wall=    8s ids=400  400 passed in 3.62s
+  chunk_073    rc=0    wall=    9s ids=400  400 passed in 4.05s
+  chunk_074    rc=1    wall=    9s ids=400  5 failed, 395 passed in 3.59s
+  chunk_075    rc=0    wall=   70s ids=400  399 passed, 1 skipped, 3 warnings in 64.39s (0:01:04)
+  chunk_076    rc=1    wall=   57s ids=400  1 failed, 398 passed, 1 skipped, 1 warning in 51.44s
+  chunk_077    rc=0    wall=   70s ids=350  350 passed, 54 warnings in 63.02s (0:01:03)

@@ -1,0 +1,15 @@
+--- /tmp/tdbp-mut2/leg4_guard_pristine.py	2026-10-29 09:17:55.060495214 +0000
++++ tests/integration/test_db_pool_idle_in_transaction_guard.py	2026-10-29 09:17:55.146494948 +0000
+@@ -206,9 +206,10 @@
+     if budget_s < 0:
+         return []  # NOT-DERIVABLE — scoped out (Δ3(iii))
+     return [
+-        (row["pid"], float(row["xact_age_s"]))
++        (row["pid"], float(row["state_change"] - row["xact_start"]))
+         for row in rows
+-        if row["xact_age_s"] is not None and float(row["xact_age_s"]) > budget_s
++        if row["state_change"] is not None
++        and float(row["state_change"] - row["xact_start"]) > budget_s
+     ]
+ 
+ 

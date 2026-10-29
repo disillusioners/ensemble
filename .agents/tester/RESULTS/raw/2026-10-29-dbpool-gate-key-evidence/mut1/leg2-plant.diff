@@ -1,0 +1,13 @@
+diff --git a/daemon/services/mission_record_service.py b/daemon/services/mission_record_service.py
+index a30fa1ad0..652bbe23f 100644
+--- a/daemon/services/mission_record_service.py
++++ b/daemon/services/mission_record_service.py
+@@ -554,7 +554,7 @@ class MissionRecordService:
+         )
+         try:
+             return self._repo.insert_mission(record, session=session)
+-        except MissionEpochConflictError:
++        except IntegrityError:
+             # The repository's CONFLICT guard — the one shape the belt
+             # may re-resolve (a genuine open-epoch conflict whose
+             # anchor-scoped re-resolve found no winner INSIDE the

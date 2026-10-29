@@ -66,7 +66,16 @@ def test_connect_timeout_bound_is_set_on_the_engine(no_pg_env, monkeypatch):
         # the URL query — a top-level create_engine(connect_timeout=...)
         # kwarg is rejected by the psycopg dialect.
         url = str(captured["args"][0])
-        assert url.endswith(f"?connect_timeout={BOOT_DB_TIMEOUT_S}")
+        # Amended (db-pool-idle-txn F2/D-49, 2026-10-28): the query now
+        # also carries the manager engine's application_name (the
+        # CONNINFO attribution channel); connect_timeout stays the
+        # query's LAST entry so the boot bound remains the URL's tail.
+        from daemon.constants import MANAGER_ENGINE_APPLICATION_NAME
+
+        assert url.endswith(
+            f"application_name={MANAGER_ENGINE_APPLICATION_NAME}"
+            f"&connect_timeout={BOOT_DB_TIMEOUT_S}"
+        )
         assert engine.url.query["connect_timeout"] == str(BOOT_DB_TIMEOUT_S)
         # The UTC session option rides alongside it, untouched.
         assert captured["kwargs"]["connect_args"] == {"options": "-c timezone=UTC"}
@@ -226,8 +235,15 @@ def test_special_char_password_keeps_the_bound_and_the_target(
         url = engine.url
         # The bound survived the special characters.
         assert url.query["connect_timeout"] == str(BOOT_DB_TIMEOUT_S)
+        # Amended (db-pool-idle-txn F2/D-49): the query's tail is the
+        # application_name + connect_timeout pair (application_name was
+        # added to the query dict by the F2 attribution change;
+        # connect_timeout remains LAST).
+        from daemon.constants import MANAGER_ENGINE_APPLICATION_NAME
+
         assert str(captured["args"][0]).endswith(
-            f"?connect_timeout={BOOT_DB_TIMEOUT_S}"
+            f"application_name={MANAGER_ENGINE_APPLICATION_NAME}"
+            f"&connect_timeout={BOOT_DB_TIMEOUT_S}"
         )
         # The target is the INTENDED one — host, port, database.
         assert url.host == "127.0.0.1"

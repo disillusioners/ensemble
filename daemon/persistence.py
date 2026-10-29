@@ -56,6 +56,15 @@ from daemon.ensemble_config import EnsembleConfig
 logger = logging.getLogger(__name__)
 
 
+# ── asyncpg checkpoint-adapter pool attribution (db-pool-idle-txn, F2.6) ────
+# The adapter pool's ``application_name``, delivered via asyncpg's OWN
+# ``server_settings`` channel on a DSN built separately from the shared
+# ``conn_string`` (see ``create_postgres_checkpointer``). Attribution
+# only — the adapter's idle-in-transaction HOLD is routed to the
+# follow-up DB-pool commission (D-58).
+CHECKPOINT_ADAPTER_APPLICATION_NAME = "ensemble-checkpoint-adapter"
+
+
 # ── row_absent WARNING emission gate (Phase-5 review fix F7) ─────────────────
 #
 # The ``row_absent`` WARNING in :func:`get_instance_messages` fires when the
@@ -333,9 +342,18 @@ async def create_postgres_checkpointer(
         # ``timeout`` is ``limits.checkpoint_pool_timeout_s`` — the
         # psycopg 30.0s library default (the ghost-waiter lifetime of an
         # abandoned readiness probe) is thereby bounded. HONESTY
-        # (decisions §3d D4): sizing does NOT cure the leak — the
-        # confirmed leak is on the OTHER pool. Full arithmetic, honesty
-        # wording and the precedence ladder: see daemon/constants.py
+        # (db-pool-idle-txn, F2.7/D-21): sizing
+        # does NOT cure the underlying pool problem — the manager engine's
+        # idle-in-transaction RETENTION / TRANSACTION-HYGIENE class is
+        # REPAIRED by fix/db-pool-idle-txn (2026-10-28); its
+        # DWELL / OCCUPANCY class is NOT REPAIRED (the recurrence
+        # precondition — sync DB work on the event loop and the BFS
+        # depth-loop span — is NOT removed), and the engine-level
+        # backstop MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS ships DEFINED
+        # BUT NOT APPLIED (DISABLED — the manager engine has NO
+        # server-side idle-in-txn reap; the daemon logs the DISABLED
+        # line at boot). Full wording, disclosed limits and the
+        # enablement mechanism: see daemon/constants.py
         # (CHECKPOINT_POOL_MAX_SIZE_DEFAULT) — the single canonical home.
         saver_pool = AsyncConnectionPool(
             conninfo=conn_string,
@@ -418,10 +436,31 @@ async def create_postgres_checkpointer(
         # no asyncpg equivalent (asyncpg's ``create_pool`` takes
         # ``max_inactive_connection_lifetime`` / ``command_timeout``, which
         # are DIFFERENT semantics and are deliberately NOT wired here).
+        #
+        # F2.6 (db-pool-idle-txn, D-49/D-36): pool attribution. The
+        # asyncpg pool's ``application_name`` rides asyncpg's OWN
+        # ``server_settings`` channel (measured to land — BASELINE.md
+        # T3c) — 100% of the attribution comes from server_settings;
+        # the DSN VALUE itself is byte-identical to the shared
+        # ``conn_string`` (same builder, same config/env — the alias
+        # below exists for READER clarity, not conninfo isolation).
+        # The shared conninfo stays pinned byte-identical because it
+        # also feeds the P2 psycopg ORACLE pool above (T2.7/AC18);
+        # attribution needs no DSN separation since server_settings is
+        # per-pool (measured, BASELINE.md:325-338). The adapter pool
+        # opens explicit ``conn.transaction()`` blocks (its backends
+        # sit idle-in-transaction between statements with no
+        # server-side reap) — the HOLD itself is ROUTED to the
+        # follow-up DB-pool commission (D-58); this lane ships
+        # attribution only.
+        adapter_pool_dsn = _build_pg_connection_string(config)
         pool = await asyncpg.create_pool(
-            conn_string,
+            adapter_pool_dsn,
             min_size=1,
             max_size=checkpoint_pool_max_size,
+            server_settings={
+                "application_name": CHECKPOINT_ADAPTER_APPLICATION_NAME,
+            },
         )
     except Exception:
         # If any step in resource setup fails, close the saver pool

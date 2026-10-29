@@ -1,0 +1,16 @@
+=== HEAD ISOLATED ×3 MATRIX (all 15) ===
+amnesty_epoch_boundary_is_inclusive: failed MISSING MISSING
+test_amnesty_mixed_set_max_uses_only_post_boot_beats: failed failed failed
+test_amnesty_pre_boot_beat_is_invisible_to_freshness: failed failed failed
+test_composite_carries_inflight_advisory_without_affecting_status: failed failed failed
+test_inflight_turns_counts_fresh_post_boot_beats_only: failed failed failed
+test_inflight_turns_zero_on_all_frozen_and_none_without_threshold: failed failed failed
+test_periodic_refresh_loop_applies_drill_knob_between_ticks: failed failed failed
+test_periodic_refresh_loop_populates_state_and_stops: failed failed failed
+test_signal_preservation_post_boot_stale_still_degrades: failed failed failed
+promote_commits: failed failed failed
+stale_continuously: failed failed failed
+complete_concurrent: passed passed passed
+auth_p99: passed passed passed
+multi_worker_notif: passed passed passed
+real_spawn_env: passed passed passed

@@ -1,0 +1,165 @@
+........................................................................ [ 18%]
+........................................................................ [ 36%]
+..........F............................................................. [ 54%]
+........................................................................ [ 72%]
+........................................................................ [ 90%]
+........................................                                 [100%]
+=============================== warnings summary ===============================
+tests/unit/test_pause_resume_terminate_tree_fix_p1.py: 40 warnings
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_calculates_expired_instances_correctly
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/test_paused_instance_ttl.py:191: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    almost_expired_time = (datetime.utcnow() - timedelta(seconds=ttl_seconds - 1)).isoformat()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_calculates_expired_instances_correctly
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/test_paused_instance_ttl.py:194: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    diff_under_ttl = (datetime.utcnow() - cached_at).total_seconds()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_calculates_expired_instances_correctly
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/test_paused_instance_ttl.py:198: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    just_expired_time = (datetime.utcnow() - timedelta(seconds=ttl_seconds + 1)).isoformat()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_calculates_expired_instances_correctly
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/test_paused_instance_ttl.py:201: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    diff_over_ttl = (datetime.utcnow() - cached_at).total_seconds()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_calculates_expired_instances_correctly
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/test_paused_instance_ttl.py:205: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    long_expired_time = (datetime.utcnow() - timedelta(hours=48)).isoformat()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_calculates_expired_instances_correctly
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/test_paused_instance_ttl.py:208: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    diff_long_expired = (datetime.utcnow() - cached_at).total_seconds()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_releases_expired_paused_instances
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/test_paused_instance_ttl.py:230: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expired_time = (datetime.utcnow() - timedelta(seconds=ttl_seconds + 60)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_skips_recent_paused_instances
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/test_paused_instance_ttl.py:267: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    recent_time = (datetime.utcnow() - timedelta(seconds=ttl_seconds - 600)).isoformat()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_skips_recent_paused_instances
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/test_paused_instance_ttl.py:273: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    diff = (datetime.utcnow() - cached_at).total_seconds()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_skips_recent_paused_instances_with_explicit_time
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/test_paused_instance_ttl.py:301: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    recent_time = (datetime.utcnow() - timedelta(minutes=10)).isoformat()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_skips_instances_not_in_memory
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/test_paused_instance_ttl.py:327: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expired_time = (datetime.utcnow() - timedelta(hours=5)).isoformat()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_handles_invalid_updated_at
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/test_paused_instance_ttl.py:350: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    (datetime.utcnow() - timedelta(hours=2)).isoformat()
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_handles_multiple_instances
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/test_paused_instance_ttl.py:391: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expired_time1 = (datetime.utcnow() - timedelta(seconds=ttl_seconds + 300)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_handles_multiple_instances
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/test_paused_instance_ttl.py:392: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expired_time2 = (datetime.utcnow() - timedelta(seconds=ttl_seconds + 600)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_handles_multiple_instances
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/test_paused_instance_ttl.py:393: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    recent_time = (datetime.utcnow() - timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_releases_expired_by_status[completed]
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_releases_expired_by_status[error]
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_releases_expired_by_status[terminated]
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_releases_expired_by_status[failed]
+tests/unit/test_paused_instance_ttl.py::TestCleanupCachedInstances::test_cleanup_releases_expired_by_status[paused]
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/test_paused_instance_ttl.py:449: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expired_time = (datetime.utcnow() - timedelta(hours=25)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+
+tests/unit/test_paused_instance_ttl.py::TestPausedAtField::test_paused_at_cleared_on_resume
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/test_paused_instance_ttl.py:805: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    mock_meta.paused_at = datetime.utcnow().isoformat()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/test_phase4_manager_decomposition.py::TestFacadeDelegationPattern::test_manager_terminate_instance_delegates_to_lifecycle_service
+1 failed, 399 passed, 61 warnings in 17.86s
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-bb6d48c5-f33d-4b4c-8154-5eefba9e10ff/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-bb6d48c5-f33d-4b4c-8154-5eefba9e10ff/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-bb6d48c5-f33d-4b4c-8154-5eefba9e10ff/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-bb6d48c5-f33d-4b4c-8154-5eefba9e10ff/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-e102b01e-79e0-4980-aba5-5d1e7c180bc1/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-e102b01e-79e0-4980-aba5-5d1e7c180bc1/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-e102b01e-79e0-4980-aba5-5d1e7c180bc1/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-e102b01e-79e0-4980-aba5-5d1e7c180bc1/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-1dd183b1-84a0-4ed9-bea3-d5a71a8416af/test_an_enabled_boot_leaves_a_0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-1dd183b1-84a0-4ed9-bea3-d5a71a8416af/test_an_enabled_boot_leaves_a_0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:96: PytestWarning: (rm_rf) error removing /tmp/pytest-of-nea/garbage-1dd183b1-84a0-4ed9-bea3-d5a71a8416af/test_an_enabled_boot_leaves_a_0/data
+<class 'OSError'>: [Errno 39] Directory not empty: '/tmp/pytest-of-nea/garbage-1dd183b1-84a0-4ed9-bea3-d5a71a8416af/test_an_enabled_boot_leaves_a_0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:96: PytestWarning: (rm_rf) error removing /tmp/pytest-of-nea/garbage-1dd183b1-84a0-4ed9-bea3-d5a71a8416af/test_an_enabled_boot_leaves_a_0
+<class 'OSError'>: [Errno 39] Directory not empty: '/tmp/pytest-of-nea/garbage-1dd183b1-84a0-4ed9-bea3-d5a71a8416af/test_an_enabled_boot_leaves_a_0'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:96: PytestWarning: (rm_rf) error removing /tmp/pytest-of-nea/garbage-1dd183b1-84a0-4ed9-bea3-d5a71a8416af
+<class 'OSError'>: [Errno 39] Directory not empty: '/tmp/pytest-of-nea/garbage-1dd183b1-84a0-4ed9-bea3-d5a71a8416af'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-22625216-c036-440f-820f-f6751f8c5946/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-22625216-c036-440f-820f-f6751f8c5946/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-22625216-c036-440f-820f-f6751f8c5946/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-22625216-c036-440f-820f-f6751f8c5946/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-4621dd99-7688-4cdb-92b1-b08087a3d073/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-4621dd99-7688-4cdb-92b1-b08087a3d073/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-4621dd99-7688-4cdb-92b1-b08087a3d073/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-4621dd99-7688-4cdb-92b1-b08087a3d073/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-5787618e-e2c5-425b-9476-8c0c952428e1/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-5787618e-e2c5-425b-9476-8c0c952428e1/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-5787618e-e2c5-425b-9476-8c0c952428e1/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-5787618e-e2c5-425b-9476-8c0c952428e1/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-4eff72db-9d6c-4a33-a04a-8237b7fa2ccc/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-4eff72db-9d6c-4a33-a04a-8237b7fa2ccc/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-4eff72db-9d6c-4a33-a04a-8237b7fa2ccc/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-4eff72db-9d6c-4a33-a04a-8237b7fa2ccc/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-8fcaa9bd-e535-4456-a9e7-5652133484ab/test_an_enabled_boot_leaves_a_0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-8fcaa9bd-e535-4456-a9e7-5652133484ab/test_an_enabled_boot_leaves_a_0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-8fcaa9bd-e535-4456-a9e7-5652133484ab/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-8fcaa9bd-e535-4456-a9e7-5652133484ab/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-bacd1660-0aa3-49b3-a556-e281a483eb8a/test_an_enabled_boot_leaves_a_0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-bacd1660-0aa3-49b3-a556-e281a483eb8a/test_an_enabled_boot_leaves_a_0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-bacd1660-0aa3-49b3-a556-e281a483eb8a/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-bacd1660-0aa3-49b3-a556-e281a483eb8a/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-7e9fdd30-1e50-4bfa-a910-16937d201f74/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-7e9fdd30-1e50-4bfa-a910-16937d201f74/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-7e9fdd30-1e50-4bfa-a910-16937d201f74/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-7e9fdd30-1e50-4bfa-a910-16937d201f74/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-92a1fca7-a070-4890-b1bb-3b1270c55def/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-92a1fca7-a070-4890-b1bb-3b1270c55def/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-92a1fca7-a070-4890-b1bb-3b1270c55def/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-92a1fca7-a070-4890-b1bb-3b1270c55def/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-b1e43009-687e-4c06-a7fa-d2a6209f1639/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-b1e43009-687e-4c06-a7fa-d2a6209f1639/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-b1e43009-687e-4c06-a7fa-d2a6209f1639/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-b1e43009-687e-4c06-a7fa-d2a6209f1639/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(

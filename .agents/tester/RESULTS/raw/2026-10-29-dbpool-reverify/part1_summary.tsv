@@ -1,0 +1,34 @@
+idx	id	attempt	status	rc	summary_line	runtime_s
+1	tests/test_health_probes.py::test_amnesty_epoch_boundary_is_inclusive	att1	P	0	1 passed, 6 warnings in 0.33s	4
+1	tests/test_health_probes.py::test_amnesty_epoch_boundary_is_inclusive	att2	P	0	1 passed, 6 warnings in 0.32s	5
+1	tests/test_health_probes.py::test_amnesty_epoch_boundary_is_inclusive	att3	P	0	1 passed, 6 warnings in 0.31s	4
+2	tests/test_health_probes.py::test_amnesty_mixed_set_max_uses_only_post_boot_beats	att1	P	0	1 passed, 7 warnings in 0.31s	4
+2	tests/test_health_probes.py::test_amnesty_mixed_set_max_uses_only_post_boot_beats	att2	P	0	1 passed, 7 warnings in 0.35s	5
+2	tests/test_health_probes.py::test_amnesty_mixed_set_max_uses_only_post_boot_beats	att3	P	0	1 passed, 7 warnings in 0.34s	4
+3	tests/test_health_probes.py::test_amnesty_pre_boot_beat_is_invisible_to_freshness	att1	P	0	1 passed, 5 warnings in 0.34s	5
+3	tests/test_health_probes.py::test_amnesty_pre_boot_beat_is_invisible_to_freshness	att2	P	0	1 passed, 5 warnings in 0.32s	4
+3	tests/test_health_probes.py::test_amnesty_pre_boot_beat_is_invisible_to_freshness	att3	P	0	1 passed, 5 warnings in 0.32s	4
+4	tests/test_health_probes.py::test_composite_carries_inflight_advisory_without_affecting_status	att1	P	0	1 passed, 10 warnings in 0.39s	5
+4	tests/test_health_probes.py::test_composite_carries_inflight_advisory_without_affecting_status	att2	P	0	1 passed, 10 warnings in 0.35s	5
+4	tests/test_health_probes.py::test_composite_carries_inflight_advisory_without_affecting_status	att3	P	0	1 passed, 10 warnings in 0.38s	4
+5	tests/test_health_probes.py::test_inflight_turns_counts_fresh_post_boot_beats_only	att1	P	0	1 passed, 20 warnings in 0.33s	5
+5	tests/test_health_probes.py::test_inflight_turns_counts_fresh_post_boot_beats_only	att2	P	0	1 passed, 20 warnings in 0.33s	4
+5	tests/test_health_probes.py::test_inflight_turns_counts_fresh_post_boot_beats_only	att3	P	0	1 passed, 20 warnings in 0.32s	4
+6	tests/test_health_probes.py::test_inflight_turns_zero_on_all_frozen_and_none_without_threshold	att1	P	0	1 passed, 6 warnings in 0.35s	4
+6	tests/test_health_probes.py::test_inflight_turns_zero_on_all_frozen_and_none_without_threshold	att2	P	0	1 passed, 6 warnings in 0.33s	5
+6	tests/test_health_probes.py::test_inflight_turns_zero_on_all_frozen_and_none_without_threshold	att3	P	0	1 passed, 6 warnings in 0.32s	4
+7	tests/test_health_probes.py::test_periodic_refresh_loop_applies_drill_knob_between_ticks	att1	P	0	1 passed in 3.22s	8
+7	tests/test_health_probes.py::test_periodic_refresh_loop_applies_drill_knob_between_ticks	att2	P	0	1 passed in 3.15s	8
+7	tests/test_health_probes.py::test_periodic_refresh_loop_applies_drill_knob_between_ticks	att3	P	0	1 passed in 3.02s	8
+8	tests/test_health_probes.py::test_periodic_refresh_loop_populates_state_and_stops	att1	P	0	1 passed in 2.85s	8
+8	tests/test_health_probes.py::test_periodic_refresh_loop_populates_state_and_stops	att2	P	0	1 passed in 3.45s	8
+8	tests/test_health_probes.py::test_periodic_refresh_loop_populates_state_and_stops	att3	P	0	1 passed in 2.96s	8
+9	tests/test_health_probes.py::test_signal_preservation_post_boot_stale_still_degrades	att1	P	0	1 passed, 5 warnings in 0.32s	4
+9	tests/test_health_probes.py::test_signal_preservation_post_boot_stale_still_degrades	att2	P	0	1 passed, 5 warnings in 0.34s	5
+9	tests/test_health_probes.py::test_signal_preservation_post_boot_stale_still_degrades	att3	P	0	1 passed, 5 warnings in 0.34s	4
+10	tests/e2e/test_promote_stop_frozen_amnesty_e2e.py::TestPromoteStopFrozenAmnestyE2E::test_promote_commits_with_busy_daemon	att1	P	0	1 passed, 10 warnings in 1.86s	6
+10	tests/e2e/test_promote_stop_frozen_amnesty_e2e.py::TestPromoteStopFrozenAmnestyE2E::test_promote_commits_with_busy_daemon	att2	P	0	1 passed, 10 warnings in 1.93s	7
+10	tests/e2e/test_promote_stop_frozen_amnesty_e2e.py::TestPromoteStopFrozenAmnestyE2E::test_promote_commits_with_busy_daemon	att3	P	0	1 passed, 10 warnings in 1.85s	6
+11	tests/e2e/test_promote_stop_frozen_amnesty_e2e.py::TestPromoteStopFrozenAmnestyE2E::test_stale_while_continuously_up_still_degrades	att1	P	0	1 passed, 7 warnings in 0.73s	5
+11	tests/e2e/test_promote_stop_frozen_amnesty_e2e.py::TestPromoteStopFrozenAmnestyE2E::test_stale_while_continuously_up_still_degrades	att2	P	0	1 passed, 7 warnings in 0.85s	5
+11	tests/e2e/test_promote_stop_frozen_amnesty_e2e.py::TestPromoteStopFrozenAmnestyE2E::test_stale_while_continuously_up_still_degrades	att3	P	0	1 passed, 7 warnings in 0.71s	6

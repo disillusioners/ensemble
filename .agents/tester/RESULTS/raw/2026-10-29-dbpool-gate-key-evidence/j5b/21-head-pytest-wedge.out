@@ -1,0 +1,33 @@
+=========== LEG 1: wedge PG pack (Class-2) ===========
+...                                                                      [100%]
+==================================== PASSES ====================================
+_ TestF5bWedgeCaptureReadPath.test_executing_turns_read_returns_the_running_row _
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.wedge_capture.db_capture:db_capture.py:366 Wedge-capture: store census failed: column c.n_live_tup does not exist
+LINE 4:                    c.n_live_tup::bigint,
+                           ^
+WARNING  daemon.wedge_capture.db_capture:db_capture.py:396 Wedge-capture: resume-history read failed: current transaction is aborted, commands ignored until end of transaction block
+_ TestF5bWedgeCaptureReadPath.test_subsequent_read_not_the_f5_cascade_signature _
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.wedge_capture.db_capture:db_capture.py:366 Wedge-capture: store census failed: column c.n_live_tup does not exist
+LINE 4:                    c.n_live_tup::bigint,
+                           ^
+WARNING  daemon.wedge_capture.db_capture:db_capture.py:396 Wedge-capture: resume-history read failed: current transaction is aborted, commands ignored until end of transaction block
+=========================== short test summary info ============================
+PASSED tests/postgres/test_dbpool_wedge_capture_pg.py::TestF5bWedgeCaptureReadPath::test_executing_turns_read_returns_the_running_row
+PASSED tests/postgres/test_dbpool_wedge_capture_pg.py::TestF5bWedgeCaptureReadPath::test_subsequent_read_not_the_f5_cascade_signature
+PASSED tests/postgres/test_dbpool_wedge_capture_pg.py::TestF5bWedgeCaptureReadPath::test_both_f5_reads_on_one_connection_return_their_rows
+3 passed in 4.87s
+leg1_rc=0
+=========== LEG 2: wedge static pack (default) ===========
+......                                                                   [100%]
+==================================== PASSES ====================================
+=========================== short test summary info ============================
+PASSED tests/unit/tools/test_dbpool_wedge_capture_static.py::TestF5cNoTasksTable::test_no_sql_literal_references_a_tasks_table
+PASSED tests/unit/tools/test_dbpool_wedge_capture_static.py::TestF5cNoTasksTable::test_the_two_read_sites_target_the_task_table
+PASSED tests/unit/tools/test_dbpool_wedge_capture_static.py::TestF5cNoTasksTable::test_module_docstring_names_the_task_table
+PASSED tests/unit/tools/test_dbpool_wedge_capture_static.py::TestF5dStoreCensusUntouched::test_census_query_keeps_its_pg_catalog_join
+PASSED tests/unit/tools/test_dbpool_wedge_capture_static.py::TestF5dStoreCensusUntouched::test_census_query_is_in_its_own_function
+PASSED tests/unit/tools/test_dbpool_wedge_capture_static.py::TestF5dStoreCensusUntouched::test_census_and_fixed_queries_are_distinct_statements
+6 passed in 0.37s
+leg2_rc=0

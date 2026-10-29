@@ -213,14 +213,19 @@ CHECKPOINT_POOL_TIMEOUT_S_DEFAULT: float = 5.0
 #
 # HONESTY (decisions §3d D4 — the CANONICAL wording for the whole A4
 # knob set; every other home carries only a pointer here): sizing does
-# NOT cure the pool leak. The confirmed leak is on the OTHER pool (P1 —
-# the SQLAlchemy manager engine, pool_size=5 / max_overflow=10); the
-# checkpoint saver's own P2 pool is sized with headroom against the
-# concurrent-writer arithmetic and a bounded acquisition deadline, and
-# neither change repairs a pool that is being poisoned underneath it —
-# the SQLAlchemy-side idle-in-transaction leak is a SEPARATE defect
-# owned by a follow-up commission. The readiness detail publishes BOTH
-# pools' state (detail.pool_state) so the poison is VISIBLE rather than
+# NOT cure the pool problem. The P2 checkpoint saver's own pool is
+# sized with headroom against the concurrent-writer arithmetic and a
+# bounded acquisition deadline, and neither change repairs a pool that
+# is being starved underneath it. As of the db-pool-idle-txn lane
+# (fix/db-pool-idle-txn, 2026-10-28) the manager engine's
+# idle-in-transaction RETENTION / TRANSACTION-HYGIENE class is
+# REPAIRED (F8/F3/F6/F5); its DWELL / OCCUPANCY class is NOT
+# REPAIRED and the engine-level backstop
+# MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS ships DEFINED BUT NOT
+# APPLIED (DISABLED) — full wording, disclosed limits and the
+# enablement mechanism: see the "Manager-engine pool hardening"
+# section below. The readiness detail publishes BOTH pools' state
+# (detail.pool_state) so the starvation is VISIBLE rather than
 # inferred from timeouts.
 
 # ── Manager engine pool sizing (devops incident fix item #7) ────────────
@@ -278,6 +283,137 @@ CHECKPOINT_SENTINEL_CHECKPOINT_ID: str = "__ensemble_readiness_probe__"
 CHECKPOINT_SENTINEL_TASK_ID: str = "__ensemble_readiness_probe__"
 CHECKPOINT_SENTINEL_CHANNEL: str = "__ensemble_readiness_probe__"
 CHECKPOINT_SENTINEL_VALUE: str = "readiness-probe"
+
+# ── Manager-engine pool hardening (db-pool-idle-txn, F2 / D-14/D-47/D-49) ─────
+# Answers the 2026-10-26 incident (pool poisoned by leaked
+# idle-in-transaction connections; see
+# ``.agents/shared/incident-20261026-db-pool-idle-in-transaction.md``
+# and the lane's planning set under
+# ``.agents/shared/planning/db-pool-idle-txn/``). Canonical home for
+# the manager engine's knob VALUES (D-18); the options-string assembly
+# stays in ``daemon/repositories/factory.py``.
+MANAGER_ENGINE_APPLICATION_NAME: str = "ensemble-manager"
+# Attribution rides the CONNINFO channel (D-49): the value goes into
+# the engine's OWN ``URL.create(...)`` query dict in ``factory.py`` —
+# NEVER into the shared ``-c options`` string. Measured
+# (``BASELINE.md`` T3): the conninfo parameter BEATS ``options=-c``,
+# and within one options string the LAST ``-c`` wins — the shared UTC
+# constant is interpolated LAST into the repair engine's options
+# string, so a name placed there would be overridden AND the repair
+# engine would report the manager's name.
+MANAGER_ENGINE_POOL_RECYCLE_S: int = 3_600
+# Precedent: ``REPAIR_POOL_RECYCLE_S`` (``daemon/tools/ens_db_tools.py``)
+# — the only in-repo pool_recycle before this lane. Bounds exposure to
+# server-side/credential churn; ~15 reconnects/hour is negligible.
+MANAGER_ENGINE_POOL_TIMEOUT_S: int = 30
+# The SQLAlchemy library default, pinned EXPLICITLY so it cannot drift
+# (D-15): deliberately NOT lowered — lowering it converts ordinary
+# manager-pool contention into TimeoutError for every daemon caller
+# (500s under exactly the incident's conditions). F4-A's admission
+# pre-check (``daemon/services/readiness.py``) is the probe-side bound.
+MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS: int = 60_000
+# ⚠ DEFINED BUT NOT APPLIED — the engine-level idle-in-txn backstop
+# ships DISABLED (D-47). The rendered manager options string OMITS the
+# ``idle_in_transaction_session_timeout`` clause while this backstop
+# is disabled, and the daemon logs at boot:
+# ``MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS DISABLED — no trustworthy
+# Phase-0 measurement``.
+# WHY NOT APPLIED (measured, ``BASELINE.md``): the bound's own rule
+# (≥ 4 × measured max legitimate hold, floor 30 s) cannot be sized
+# safely — the max legit hold is model-injected (1059.877 ms,
+# ``raw/t1_mr3_hold.py``) so 4× = 4.24 s and the 30 s floor dominates,
+# coinciding EXACTLY with the legitimate ``pool_timeout`` wait; and
+# the server TERMINATES the backend on this timeout
+# (``raw/t2_stat_activity.out:137-140``) — a behavioural change with
+# no measured safety margin.
+# ENABLEMENT (one edit): applied iff ``BASELINE.md`` (or a successor
+# measurement) records a TRUSTWORTHY measurement of the manager
+# engine's legitimate hold on the REAL fetch path (a booted daemon +
+# a real checkpoint store — not modelled, not a single-sample failure
+# shape). The post-F8 re-measurement (F8-b's BASE-vs-HEAD comparison)
+# is the candidate figure (DR-11). Enablement = FLIP THE FLAG in
+# ``daemon/repositories/factory.py``
+# (``MANAGER_ENGINE_IDLE_IN_TXN_BACKSTOP_ENABLED = True``) — the
+# operative one-edit site (the factory's template renders the clause
+# from THIS constant, UTC first, idle-in-txn second, iff the flag is
+# True; the boot log line follows the same flag). Editing the template
+# alone is NOT enablement: with the flag left False the boot log still
+# says DISABLED while an unconditional clause would misreport the
+# ship state — never edit one without the other. If the backstop is EVER enabled, a
+# ``SET LOCAL statement_timeout = 0`` carve-out inside
+# ``daemon/manager.py::_ensure_postgres_columns`` becomes MANDATORY
+# (leader OQ-3: that path runs FULL TABLE REWRITEs under ACCESS
+# EXCLUSIVE locks in ONE transaction). NO engine-level
+# ``statement_timeout`` exists or may be added (D-31/C-3) — a 30 s
+# cap on the boot DDL path means the daemon does not boot on a
+# steady-state no-op path.
+
+# HONESTY (db-pool-idle-txn, F2.7/D-21/A9-v/D-47 — supersedes the
+# former unfixed-defect wording above, which named a follow-up
+# commission as the owner of a class this lane repaired): the lane ``fix/db-pool-idle-txn`` (2026-10-28) REPAIRED the
+# RETENTION / TRANSACTION-HYGIENE class of the manager-engine
+# idle-in-transaction problem — F8 removed the borrow-then-await
+# hold, F3 dropped the repair-tool dry-run BEGIN, F6 made the boot
+# mint idempotent, F5 fixed the wedge-capture table name. The
+# DWELL / OCCUPANCY class is NOT REPAIRED: the recurrence
+# precondition — SYNC DB WORK ON THE EVENT LOOP
+# (``daemon/routers/instances.py``, ``daemon/routers/queues.py``) and
+# the BFS depth-loop transaction span
+# (``daemon/repositories/instance/repository.py``) — is NOT removed
+# by that lane, and the daemon can still hold 15/15 manager slots
+# under the same load. The engine-level backstop
+# ``MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS`` ships DEFINED BUT NOT
+# APPLIED (DISABLED — see its block above): the manager engine has
+# NO server-side idle-in-txn reap. Disclosed limits (never read as
+# measured facts): the real ``_fetch_subshape_a_content_async``
+# latency and the real ``_get_last_assistant_message`` python-side
+# cost were NOT measured (modelled stand-ins); the incident-window
+# mint overlap is INFERRED; the Phase-0 ``pool_timeout`` stall was
+# measured at 3 s (a harness override), not the 30 s default; and
+# F4-A's admission pre-check leaves a residual — a checkout that
+# loses the pre-check race may still strand a probe thread for up to
+# ``MANAGER_ENGINE_POOL_TIMEOUT_S`` (30 s).
+
+# ── DB-pool residence budgets (db-pool-idle-txn, F7 / Δ3 / D-48/DR-35) ─────
+# The F7 regression guard's residence invariant compares each
+# backend's ``xact_age_s = now() - xact_start`` against **the hold
+# budget of the operation that opened it** — never a pool-wide
+# literal, never the WITHDRAWN 2.0 s placeholder (DR-35: 2.0 s would
+# false-red a healthy daemon — the sync twin's legitimate dwell is
+# unconditionally >= 8 s, measured 8011.119 ms in BASELINE.md T1).
+# The one call-site -> budget-constant declaration table lives in
+# the F7 pack header
+# (``tests/integration/test_db_pool_idle_in_transaction_guard.py``);
+# ``tests/unit/tools/test_dbpool_residence_static.py`` (F7-a-static)
+# asserts every row of that table resolves to a constant that exists
+# HERE (reachability).
+DBPOOL_IDLE_IN_TXN_RESIDENCE_BUDGET_S: float = 0.05
+# The DEFAULT per-call-site hold budget, for sites that declare no
+# tighter budget. DERIVED post-F8 at pin-writing by the TESTER (Δ3
+# measure-then-set, discharged 2026-10-29 — derivation + provenance
+# in the block below the constant). Supersedes the pre-measurement
+# placeholder derivation "62.5x the Phase-0 guard-cycle max healthy
+# residence (0.0008 s)" — that derivation belongs to
+# DBPOOL_IDLE_IN_TXN_RESIDENCE_BUDGET_S (F7 pack header row 1). A
+# re-derivation (with raw evidence) must update the value, this
+# comment and the F7 pack header row in the SAME change — never
+# silently edit the number.
+MANAGER_ENGINE_LEGITIMATE_HOLD_BUDGET_S: float = 0.25
+# DERIVED — the Δ3(i)/D-47/DR-11 NOT-DERIVABLE sentinel is resolved:
+# worst measured post-F8 legitimate manager-engine hold × 10, rounded
+# up. Anchors: worst 0.021607 s / p95 0.019867 s — deferred-report
+# reconcile P2 sub-shape (a), the heaviest write scope, n=20/leg over
+# 7 legs, holds INVARIANT to fetch duration 0.05→2.0 s post-F8.
+# Provenance: measured post-F8 at pin-writing (NOT Phase-0); scratch
+# PG16 127.0.0.1:5444, lane HEAD 4cc63574a, 2026-10-29; raw evidence
+# in .agents/tester/RESULTS/raw/2026-10-29-dbpool-delta3/. Margins:
+# 12.6× above the worst measured p95, 7.6× above the worst warm-up
+# outlier (0.0329 s), 4× below the guard's shortest deliberate-leak
+# dwell (1.0 s), 8–32× below the F8-b-class mutation dwell (2.0 s) —
+# a re-introduced borrow-then-await REDs immediately. This is the
+# PER-OPERATION hold budget F7's residence invariant compares against
+# — NOT a pool-wide reap threshold (the engine-level backstop above
+# stays DISABLED).
 
 MAX_INSTANCE_HISTORY: int = 500  # Max terminal instances to keep checkpoint data for
 MAINTENANCE_CHECK_INTERVAL_MINUTES: int = 15  # Maintenance service check interval

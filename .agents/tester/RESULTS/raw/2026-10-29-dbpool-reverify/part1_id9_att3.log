@@ -1,0 +1,12 @@
+.                                                                        [100%]
+=============================== warnings summary ===============================
+tests/test_health_probes.py::test_signal_preservation_post_boot_stale_still_degrades
+tests/test_health_probes.py::test_signal_preservation_post_boot_stale_still_degrades
+tests/test_health_probes.py::test_signal_preservation_post_boot_stale_still_degrades
+tests/test_health_probes.py::test_signal_preservation_post_boot_stale_still_degrades
+tests/test_health_probes.py::test_signal_preservation_post_boot_stale_still_degrades
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 5 warnings in 0.34s

@@ -1,0 +1,92 @@
+# db-pool gate ladder — interpreter certification
+/home/nea/ensemble-src-wt-tdbp-gate/daemon/__init__.py 9.0.2
+── G0 ──────────────────────────────────────────────
+G0: PASS (BASELINE.md present; both literals resolved — idle-in-txn DISABLED per D-47; the state_change−xact_start metric withdrawn, xact_age_s recorded per D-48)
+── G1.1 ──────────────────────────────────────────────
+COLLECTED-OK count=9 expected=9
+.........                                                                [100%]
+9 passed in 0.52s
+G1.1: PASS (count=9 asserted from expected-collected.md rows 6)
+── G1.2 ──────────────────────────────────────────────
+COLLECTED-OK count=8 expected=8
+........                                                                 [100%]
+8 passed in 0.91s
+G1.2: PASS (count=8 asserted from expected-collected.md rows 10)
+── G1.3 ──────────────────────────────────────────────
+COLLECTED-OK count=6 expected=6
+......                                                                   [100%]
+6 passed in 0.44s
+G1.3: PASS (count=6 asserted from expected-collected.md rows 11)
+── G1.4 ──────────────────────────────────────────────
+COLLECTED-OK count=40 expected=40
+...................................x....                                 [100%]
+39 passed, 1 xfailed in 4.84s
+G1.4: PASS (count=40 asserted from expected-collected.md rows 7,8,9,16,18)
+── G2.1 ──────────────────────────────────────────────
+COLLECTED-OK count=36 expected=36
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-bd84812b-8997-45e5-8a7c-d39d5c596434/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-bd84812b-8997-45e5-8a7c-d39d5c596434/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+G2.1: PASS (count=36 asserted from expected-collected.md rows 1,2,5)
+── G2.2 ──────────────────────────────────────────────
+COLLECTED-OK count=6 expected=6
+......                                                                   [100%]
+6 passed in 0.40s
+G2.2: PASS (count=6 asserted from expected-collected.md rows 3)
+── G2.3 ──────────────────────────────────────────────
+COLLECTED-OK count=6 expected=6
+......                                                                   [100%]
+6 passed in 0.42s
+G2.3: PASS (count=6 asserted from expected-collected.md rows 4)
+── G2.4 ──────────────────────────────────────────────
+COLLECTED-OK count=23 expected=23
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-6762afac-5d3e-4a44-9cff-2e0c260054d0/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-6762afac-5d3e-4a44-9cff-2e0c260054d0/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+G2.4: PASS (count=23 asserted from expected-collected.md rows 1)
+── G2.5 [postgres] ──────────────────────────────────────────────
+COLLECTED-OK count=5 expected=5
+ERROR tests/postgres/test_dbpool_probe_starvation_pg.py::TestF4fStarvationShape::test_probe_takes_no_connection_under_starvation
+ERROR tests/postgres/test_dbpool_probe_starvation_pg.py::TestF4fStarvationShape::test_probe_still_works_below_capacity
+5 errors in 0.43s
+G2.5 [postgres]: RUN-FAILED (pytest exit=1)
+── G2.5 [integration — marker split of the canonical row] ──────────────────────────────────────────────
+COLLECTED-OK count=9 expected=9
+.........                                                                [100%]
+9 passed in 25.58s
+G2.5 [integration — marker split of the canonical row]: PASS (count=9 asserted from expected-collected.md rows 23,26)
+── G2.6 ──────────────────────────────────────────────
+COLLECTED-OK count=3 expected=3
+ERROR tests/postgres/test_dbpool_wedge_capture_pg.py::TestF5bWedgeCaptureReadPath::test_subsequent_read_not_the_f5_cascade_signature
+ERROR tests/postgres/test_dbpool_wedge_capture_pg.py::TestF5bWedgeCaptureReadPath::test_both_f5_reads_on_one_connection_return_their_rows
+3 errors in 0.38s
+G2.6: RUN-FAILED (pytest exit=1)
+── G3.1 ──────────────────────────────────────────────
+COLLECTED-OK count=3 expected=3
+...                                                                      [100%]
+3 passed in 3.61s
+G3.1: PASS (count=3 asserted from expected-collected.md rows 25)
+── G3.2 [integration] ──────────────────────────────────────────────
+COLLECTED-OK count=7 expected=7
+.......                                                                  [100%]
+7 passed in 4.96s
+G3.2 [integration]: PASS (count=7 asserted from expected-collected.md rows 24)
+── G3.2 [unit static twins — marker split of the canonical row] ──────────────────────────────────────────────
+COLLECTED-OK count=7 expected=7
+.......                                                                  [100%]
+7 passed in 0.45s
+G3.2 [unit static twins — marker split of the canonical row]: PASS (count=7 asserted from expected-collected.md rows 15,14)
+── G3.3 ──────────────────────────────────────────────
+COLLECTED-OK count=12 expected=12
+............                                                             [100%]
+12 passed in 4.05s
+G3.3: PASS (count=12 asserted from expected-collected.md rows 12,13,14)
+── G3.4 ──────────────────────────────────────────────
+COLLECTED-OK count=5 expected=5
+.....                                                                    [100%]
+5 passed in 17.64s
+G3.4: PASS (count=5 asserted from expected-collected.md rows 17)
+── G1.5 / G3.5 ─────────────────────────────────────
+TESTER-OWNED (not executed here): whole-tree default-collected corpus, base vs HEAD, with base_collected/head_collected reconciled against the sum of the declared EXPECTED_COLLECTED_* (row 35 of expected-collected.md); collected > 0 on BOTH sides; mismatch = FATAL. The byte-comm instrument is the tester lane's.
+LADDER: FAILED
+LADDER_EXIT=1

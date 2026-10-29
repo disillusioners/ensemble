@@ -1,0 +1,416 @@
+{
+  "attempt": "2 (--timeout=120, ENSEMBLE_SELF_ENV=dev \u2014 method-matched to BASE leg)",
+  "chunks_total": 78,
+  "chunks_ok": 78,
+  "chunks_ok_split": 0,
+  "chunks_unresolved": 0,
+  "unresolved_id_lists": [],
+  "totals": {
+    "failed": 330,
+    "passed": 30425,
+    "skipped": 296,
+    "warnings": 4320,
+    "error": 27,
+    "warning": 7,
+    "xfailed": 6
+  },
+  "accounted_pfe_s_xf_xp": 31091,
+  "expected_ids": 31084,
+  "failed_error_unique": 357,
+  "failed_unique": 330,
+  "error_unique": 27,
+  "sha256_failed_head_txt": "6f11c05188bb379b7fd9108227e34d516c975be36693fbde4c5a1a32518a901c",
+  "sha256_collect_head_txt": "16861342988036a82794da2e43b259a16fa9862b2a90866f5253867bfbc47264",
+  "per_chunk": [
+    {
+      "chunk": "chunk_000",
+      "status": "OK",
+      "tally": "9 failed, 389 passed, 2 skipped, 25 warnings in 360.04s (0:06:00)"
+    },
+    {
+      "chunk": "chunk_001",
+      "status": "OK",
+      "tally": "20 failed, 379 passed, 21 warnings, 1 error in 207.37s (0:03:27)"
+    },
+    {
+      "chunk": "chunk_002",
+      "status": "OK",
+      "tally": "9 failed, 380 passed, 11 skipped, 150 warnings in 206.68s (0:03:26)"
+    },
+    {
+      "chunk": "chunk_003",
+      "status": "OK",
+      "tally": "3 failed, 384 passed, 10 skipped, 314 warnings, 3 errors in 139.97s (0:02:19)"
+    },
+    {
+      "chunk": "chunk_004",
+      "status": "OK",
+      "tally": "10 failed, 371 passed, 19 skipped, 88 warnings in 74.73s (0:01:14)"
+    },
+    {
+      "chunk": "chunk_005",
+      "status": "OK",
+      "tally": "3 failed, 397 passed, 16 warnings in 28.87s"
+    },
+    {
+      "chunk": "chunk_006",
+      "status": "OK",
+      "tally": "1 failed, 399 passed, 1177 warnings in 59.40s"
+    },
+    {
+      "chunk": "chunk_007",
+      "status": "OK",
+      "tally": "381 passed, 19 skipped, 137 warnings in 68.21s (0:01:08)"
+    },
+    {
+      "chunk": "chunk_008",
+      "status": "OK",
+      "tally": "14 failed, 386 passed, 188 warnings in 97.33s (0:01:37)"
+    },
+    {
+      "chunk": "chunk_009",
+      "status": "OK",
+      "tally": "3 failed, 384 passed, 13 skipped, 1178 warnings in 47.29s"
+    },
+    {
+      "chunk": "chunk_010",
+      "status": "OK",
+      "tally": "4 failed, 391 passed, 5 skipped, 13 warnings in 713.14s (0:11:53)"
+    },
+    {
+      "chunk": "chunk_011",
+      "status": "OK",
+      "tally": "5 failed, 381 passed, 14 skipped, 54 warnings in 31.05s"
+    },
+    {
+      "chunk": "chunk_012",
+      "status": "OK",
+      "tally": "10 failed, 390 passed, 1 warning in 27.26s"
+    },
+    {
+      "chunk": "chunk_013",
+      "status": "OK",
+      "tally": "14 failed, 352 passed, 34 skipped, 10 warnings in 67.52s (0:01:07)"
+    },
+    {
+      "chunk": "chunk_014",
+      "status": "OK",
+      "tally": "400 passed, 9 warnings in 39.45s"
+    },
+    {
+      "chunk": "chunk_015",
+      "status": "OK",
+      "tally": "2 failed, 398 passed, 24 warnings in 31.84s"
+    },
+    {
+      "chunk": "chunk_016",
+      "status": "OK",
+      "tally": "25 failed, 361 passed, 14 skipped, 46 warnings in 66.86s (0:01:06)"
+    },
+    {
+      "chunk": "chunk_017",
+      "status": "OK",
+      "tally": "11 failed, 389 passed, 3 warnings in 73.25s (0:01:13)"
+    },
+    {
+      "chunk": "chunk_018",
+      "status": "OK",
+      "tally": "383 passed, 17 skipped, 2 warnings in 14.39s"
+    },
+    {
+      "chunk": "chunk_019",
+      "status": "OK",
+      "tally": "49 failed, 309 passed, 42 skipped, 12 warnings in 112.75s (0:01:52)"
+    },
+    {
+      "chunk": "chunk_020",
+      "status": "OK",
+      "tally": "400 passed in 150.20s (0:02:30)"
+    },
+    {
+      "chunk": "chunk_021",
+      "status": "OK",
+      "tally": "1 failed, 399 passed, 1 warning in 153.66s (0:02:33)"
+    },
+    {
+      "chunk": "chunk_022",
+      "status": "OK",
+      "tally": "6 failed, 384 passed, 10 skipped, 55 warnings in 35.22s"
+    },
+    {
+      "chunk": "chunk_023",
+      "status": "OK",
+      "tally": "1 failed, 399 passed, 9 warnings in 35.29s"
+    },
+    {
+      "chunk": "chunk_024",
+      "status": "OK",
+      "tally": "2 failed, 393 passed, 5 xfailed in 11.70s"
+    },
+    {
+      "chunk": "chunk_025",
+      "status": "OK",
+      "tally": "30 failed, 362 passed, 8 skipped, 13 warnings in 16.89s"
+    },
+    {
+      "chunk": "chunk_026",
+      "status": "OK",
+      "tally": "400 passed, 42 warnings in 12.55s"
+    },
+    {
+      "chunk": "chunk_027",
+      "status": "OK",
+      "tally": "14 failed, 374 passed, 12 skipped, 32 warnings in 103.39s (0:01:43)"
+    },
+    {
+      "chunk": "chunk_028",
+      "status": "OK",
+      "tally": "400 passed, 11 warnings in 94.62s (0:01:34)"
+    },
+    {
+      "chunk": "chunk_029",
+      "status": "OK",
+      "tally": "400 passed in 37.01s"
+    },
+    {
+      "chunk": "chunk_030",
+      "status": "OK",
+      "tally": "4 failed, 394 passed, 2 errors in 58.45s"
+    },
+    {
+      "chunk": "chunk_031",
+      "status": "OK",
+      "tally": "400 passed in 118.13s (0:01:58)"
+    },
+    {
+      "chunk": "chunk_032",
+      "status": "OK",
+      "tally": "400 passed in 95.99s (0:01:35)"
+    },
+    {
+      "chunk": "chunk_033",
+      "status": "OK",
+      "tally": "4 failed, 396 passed, 44 warnings in 101.65s (0:01:41)"
+    },
+    {
+      "chunk": "chunk_034",
+      "status": "OK",
+      "tally": "400 passed, 3 warnings in 22.87s"
+    },
+    {
+      "chunk": "chunk_035",
+      "status": "OK",
+      "tally": "7 failed, 393 passed, 26 warnings in 20.56s"
+    },
+    {
+      "chunk": "chunk_036",
+      "status": "OK",
+      "tally": "400 passed, 1 warning in 16.85s"
+    },
+    {
+      "chunk": "chunk_037",
+      "status": "OK",
+      "tally": "400 passed in 75.56s (0:01:15)"
+    },
+    {
+      "chunk": "chunk_038",
+      "status": "OK",
+      "tally": "400 passed in 34.97s"
+    },
+    {
+      "chunk": "chunk_039",
+      "status": "OK",
+      "tally": "2 failed, 398 passed, 35 warnings in 80.17s (0:01:20)"
+    },
+    {
+      "chunk": "chunk_040",
+      "status": "OK",
+      "tally": "2 failed, 398 passed, 100 warnings in 66.36s (0:01:06)"
+    },
+    {
+      "chunk": "chunk_041",
+      "status": "OK",
+      "tally": "400 passed in 29.96s"
+    },
+    {
+      "chunk": "chunk_042",
+      "status": "OK",
+      "tally": "400 passed in 8.10s"
+    },
+    {
+      "chunk": "chunk_043",
+      "status": "OK",
+      "tally": "400 passed, 1 warning in 64.10s (0:01:04)"
+    },
+    {
+      "chunk": "chunk_044",
+      "status": "OK",
+      "tally": "1 failed, 382 passed, 20 warnings, 17 errors in 16.40s"
+    },
+    {
+      "chunk": "chunk_045",
+      "status": "OK",
+      "tally": "20 failed, 380 passed, 2 warnings in 53.79s"
+    },
+    {
+      "chunk": "chunk_046",
+      "status": "OK",
+      "tally": "394 passed, 2 skipped, 4 errors in 43.09s"
+    },
+    {
+      "chunk": "chunk_047",
+      "status": "OK",
+      "tally": "398 passed, 2 skipped, 6 warnings in 34.32s"
+    },
+    {
+      "chunk": "chunk_048",
+      "status": "OK",
+      "tally": "11 failed, 389 passed, 16 warnings in 106.43s (0:01:46)"
+    },
+    {
+      "chunk": "chunk_049",
+      "status": "OK",
+      "tally": "400 passed, 1 warning in 82.49s (0:01:22)"
+    },
+    {
+      "chunk": "chunk_050",
+      "status": "OK",
+      "tally": "400 passed in 104.62s (0:01:44)"
+    },
+    {
+      "chunk": "chunk_051",
+      "status": "OK",
+      "tally": "4 failed, 396 passed, 6 warnings in 26.74s"
+    },
+    {
+      "chunk": "chunk_052",
+      "status": "OK",
+      "tally": "1 failed, 397 passed, 2 skipped in 14.67s"
+    },
+    {
+      "chunk": "chunk_053",
+      "status": "OK",
+      "tally": "400 passed in 115.35s (0:01:55)"
+    },
+    {
+      "chunk": "chunk_054",
+      "status": "OK",
+      "tally": "400 passed in 25.22s"
+    },
+    {
+      "chunk": "chunk_055",
+      "status": "OK",
+      "tally": "399 passed, 1 skipped, 12 warnings in 232.89s (0:03:52)"
+    },
+    {
+      "chunk": "chunk_056",
+      "status": "OK",
+      "tally": "383 passed, 17 skipped, 25 warnings in 73.61s (0:01:13)"
+    },
+    {
+      "chunk": "chunk_057",
+      "status": "OK",
+      "tally": "1 failed, 399 passed, 61 warnings in 18.02s"
+    },
+    {
+      "chunk": "chunk_058",
+      "status": "OK",
+      "tally": "3 failed, 397 passed, 35 warnings in 56.80s"
+    },
+    {
+      "chunk": "chunk_059",
+      "status": "OK",
+      "tally": "6 failed, 374 passed, 20 skipped, 94 warnings in 57.01s"
+    },
+    {
+      "chunk": "chunk_060",
+      "status": "OK",
+      "tally": "1 failed, 394 passed, 5 skipped, 46 warnings in 331.40s (0:05:31)"
+    },
+    {
+      "chunk": "chunk_061",
+      "status": "OK",
+      "tally": "400 passed in 28.41s"
+    },
+    {
+      "chunk": "chunk_062",
+      "status": "OK",
+      "tally": "400 passed in 15.21s"
+    },
+    {
+      "chunk": "chunk_063",
+      "status": "OK",
+      "tally": "400 passed in 39.31s"
+    },
+    {
+      "chunk": "chunk_064",
+      "status": "OK",
+      "tally": "1 failed, 388 passed, 11 skipped, 44 warnings in 41.86s"
+    },
+    {
+      "chunk": "chunk_065",
+      "status": "OK",
+      "tally": "400 passed in 22.12s"
+    },
+    {
+      "chunk": "chunk_066",
+      "status": "OK",
+      "tally": "1 failed, 399 passed in 16.53s"
+    },
+    {
+      "chunk": "chunk_067",
+      "status": "OK",
+      "tally": "1 failed, 398 passed, 1 xfailed, 9 warnings in 86.02s (0:01:26)"
+    },
+    {
+      "chunk": "chunk_068",
+      "status": "OK",
+      "tally": "3 failed, 393 passed, 4 skipped in 27.41s"
+    },
+    {
+      "chunk": "chunk_069",
+      "status": "OK",
+      "tally": "2 failed, 398 passed, 50 warnings in 68.93s (0:01:08)"
+    },
+    {
+      "chunk": "chunk_070",
+      "status": "OK",
+      "tally": "2 failed, 398 passed, 1 warning in 123.22s (0:02:03)"
+    },
+    {
+      "chunk": "chunk_071",
+      "status": "OK",
+      "tally": "400 passed in 36.15s"
+    },
+    {
+      "chunk": "chunk_072",
+      "status": "OK",
+      "tally": "400 passed in 3.32s"
+    },
+    {
+      "chunk": "chunk_073",
+      "status": "OK",
+      "tally": "2 failed, 398 passed in 3.87s"
+    },
+    {
+      "chunk": "chunk_074",
+      "status": "OK",
+      "tally": "3 failed, 397 passed in 6.28s"
+    },
+    {
+      "chunk": "chunk_075",
+      "status": "OK",
+      "tally": "1 failed, 398 passed, 1 skipped, 3 warnings in 81.74s (0:01:21)"
+    },
+    {
+      "chunk": "chunk_076",
+      "status": "OK",
+      "tally": "1 failed, 398 passed, 1 skipped, 1 warning in 43.38s"
+    },
+    {
+      "chunk": "chunk_077",
+      "status": "OK",
+      "tally": "284 passed, 54 warnings in 49.05s"
+    }
+  ]
+}

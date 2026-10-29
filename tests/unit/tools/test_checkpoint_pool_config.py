@@ -152,8 +152,14 @@ class TestCheckpointPoolConstruction:
         assert "timeout=checkpoint_pool_timeout_s," in source
         # The old hard-coded size is gone.
         assert "max_size=5," not in source
-        # The honesty clause (decisions §3d D4) is recorded in the source.
-        assert "does NOT cure the leak" in source
+        # The honesty clause is recorded in the source. AMENDED
+        # (db-pool-idle-txn, F2.7/T2.11/AC22, 2026-10-28): the honesty
+        # wording was contract-refreshed ("does NOT cure the leak — the
+        # confirmed leak is on the OTHER pool" → "does NOT cure the
+        # underlying pool problem" + the repaired/not-repaired class
+        # statements); the assertion keeps its intent — a honesty
+        # clause IS recorded in the construction source.
+        assert "does NOT cure the underlying pool problem" in source
 
     def test_the_asyncpg_pool_takes_the_size_knob(self):
         import inspect

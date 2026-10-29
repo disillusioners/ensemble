@@ -1,0 +1,7 @@
+tests/unit/tools/test_dbpool_probe_bound.py::TestF4aAdmissionPreCheck::test_a_raised_pool_size_keeps_the_overflow_slots_servable PASSED [ 16%]
+tests/unit/tools/test_dbpool_probe_bound.py::TestF4aAdmissionPreCheck::test_an_unresolvable_capacity_never_refuses PASSED [ 33%]
+tests/unit/tools/test_dbpool_probe_bound.py::TestF4aAdmissionPreCheck::test_at_capacity_the_probe_refuses_synchronously PASSED [ 50%]
+tests/unit/tools/test_dbpool_probe_bound.py::TestF4aAdmissionPreCheck::test_below_capacity_the_precheck_does_not_refuse PASSED [ 66%]
+tests/unit/tools/test_dbpool_probe_bound.py::TestF4aCapacityEquality::test_the_refusal_threshold_is_derived_from_the_pool PASSED [ 83%]
+tests/unit/tools/test_dbpool_probe_failure_class.py::TestF4cTimeoutStaysProbeTimeout::test_f4a_refusal_lands_on_probe_timeout PASSED [100%]
+============================== 6 passed in 0.44s ===============================

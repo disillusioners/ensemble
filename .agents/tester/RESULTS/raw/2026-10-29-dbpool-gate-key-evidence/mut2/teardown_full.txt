@@ -1,0 +1,26 @@
+=== TEARDOWN 2: drop database dbpool_mut2 (over TCP) ===
+DROP DATABASE
+=== TEARDOWN 3: drop role dbpool_mut2 ===
+DROP ROLE
+=== TEARDOWN 4: verify no db / role remain ===
+ remaining_non_template_dbs 
+----------------------------
+                          1
+(1 row)
+
+ remaining_roles 
+-----------------
+               0
+(1 row)
+
+=== TEARDOWN 5: pg_ctl stop ===
+waiting for server to shut down.... done
+server stopped
+=== TEARDOWN 6: rm -rf PGDATA ===
+ls: cannot access '/tmp/tdbp-mut2/pgdata': No such file or directory
+PGDATA removed: /tmp/tdbp-mut2/pgdata
+=== TEARDOWN 7: port 5447 must be closed ===
+PORT 5447 CLOSED
+=== TEARDOWN 8: pg_isready must refuse ===
+127.0.0.1:5447 - no response
+(pg_isready exit non-zero = server down)

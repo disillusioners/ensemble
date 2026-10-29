@@ -1,0 +1,156 @@
+=== dbpool-idle-txn whole-tree BASE leg — aggregate summary ===
+base_commit            : 19fc11c8b52239813fd91327ee0c1961c5b6fc87 (detached)
+worktree               : /home/nea/ensemble-src-wt-tdbp-base-wt
+interpreter            : /home/nea/ensemble-src/.venv/bin/python (pytest 9.0.2)
+census command         : pytest --collect-only -q --ignore=tests/packs/g7_unique_index_smoke_test.py --ignore=tests/e2e/test_context_injection_hybrid.py
+base_collected         : 30975   (of 32022; 1047 deselected by default addopts)
+ids_executed           : 30975
+accounted (p+f+e+s+xf+xpx): 30975   (delta vs ids_executed: 0)
+
+--- execution totals (sum of per-chunk -q summaries) ---
+  passed    : 30328
+  failed    : 319
+  errors    : 27
+  skipped   : 296
+  xfailed   : 5
+  xpassed   : 0
+  warnings  : 4414
+  deselected: 1047   (default addopts -m 'not integration and not postgres and not slow and not conformance')
+
+--- failed/error set ---
+  unique ids          : 346
+  kinds               : {'FAILED': 319, 'ERROR': 27}
+  UNPARSED extractions: 0
+  sha256(failed.base.txt)  : b06a5f80432ded5b98ff880e56235b08beb660a82f1fefb4cbc1b43b8839db15
+  sha256(collect.base.txt) : a192f2b4eb7cb475a522d038af5c048b09698f00f9a82d88fab6e684e65500d3
+  sha256(ids.base.txt)     : 2b26e08bcccce3b38b67943613b4589a6fab73fc1b7e617ccaf7004a67bd4484
+  sha256(excluded_specials.base.txt): a6bd11da4c16deac0d3ca5b2831de1f7c5cbd9c4bdcd92280e0e5272e7073508
+
+--- chunks: 79 attempt rows (1 killed attempt excluded from totals) ---
+  aa     rc=1    wall=  486s ids=400  NO-SUMMARY(killed-attempt)
+  aa     rc=1    wall= 1077s ids=400  7 failed, 391 passed, 2 skipped, 36 warnings in 1067.39s (0:17:47)
+  ab     rc=1    wall=  212s ids=400  21 failed, 378 passed, 21 warnings, 1 error in 204.87s (0:03:24)
+  ac     rc=1    wall=  208s ids=400  9 failed, 380 passed, 11 skipped, 150 warnings in 200.73s (0:03:20)
+  ad     rc=1    wall=  141s ids=400  3 failed, 384 passed, 10 skipped, 314 warnings, 3 errors in 135.57s (0:02:15)
+  ae     rc=1    wall=   80s ids=400  10 failed, 371 passed, 19 skipped, 88 warnings in 74.65s (0:01:14)
+  af     rc=1    wall=   32s ids=400  3 failed, 397 passed, 16 warnings in 27.27s
+  ag     rc=1    wall=   65s ids=400  1 failed, 399 passed, 1177 warnings in 59.23s
+  ah     rc=0    wall=   73s ids=400  381 passed, 19 skipped, 137 warnings in 66.95s (0:01:06)
+  ai     rc=1    wall=  102s ids=400  13 failed, 387 passed, 184 warnings in 97.22s (0:01:37)
+  aj     rc=1    wall=   53s ids=400  3 failed, 384 passed, 13 skipped, 1178 warnings in 47.39s
+  ak     rc=1    wall=  715s ids=400  3 failed, 392 passed, 5 skipped, 65 warnings in 708.47s (0:11:48)
+  al     rc=1    wall=   36s ids=400  5 failed, 381 passed, 14 skipped, 54 warnings in 28.77s
+  am     rc=1    wall=   32s ids=400  11 failed, 389 passed, 1 warning in 27.27s
+  an     rc=1    wall=   73s ids=400  14 failed, 352 passed, 34 skipped, 10 warnings in 67.01s (0:01:07)
+  ao     rc=0    wall=   44s ids=400  400 passed, 9 warnings in 38.36s
+  ap     rc=1    wall=   37s ids=400  2 failed, 398 passed, 24 warnings in 31.76s
+  aq     rc=1    wall=   67s ids=400  16 failed, 370 passed, 14 skipped, 63 warnings in 61.39s (0:01:01)
+  ar     rc=1    wall=   80s ids=400  11 failed, 389 passed, 3 warnings in 74.01s (0:01:14)
+  as     rc=0    wall=   19s ids=400  383 passed, 17 skipped, 2 warnings in 13.68s
+  at     rc=1    wall=  112s ids=400  49 failed, 309 passed, 42 skipped, 12 warnings in 105.20s (0:01:45)
+  au     rc=0    wall=  157s ids=400  400 passed in 150.85s (0:02:30)
+  av     rc=1    wall=  160s ids=400  1 failed, 399 passed, 1 warning in 153.09s (0:02:33)
+  aw     rc=1    wall=   41s ids=400  6 failed, 384 passed, 10 skipped, 55 warnings in 35.65s
+  ax     rc=1    wall=   39s ids=400  1 failed, 399 passed, 9 warnings in 34.20s
+  ay     rc=1    wall=   18s ids=400  2 failed, 393 passed, 5 xfailed in 12.55s
+  az     rc=1    wall=   21s ids=400  30 failed, 362 passed, 8 skipped, 13 warnings in 16.16s
+  ba     rc=0    wall=   19s ids=400  400 passed, 42 warnings in 12.75s
+  bb     rc=1    wall=  109s ids=400  13 failed, 375 passed, 12 skipped, 32 warnings in 103.60s (0:01:43)
+  bc     rc=0    wall=   99s ids=400  400 passed, 11 warnings in 93.79s (0:01:33)
+  bd     rc=0    wall=   42s ids=400  400 passed in 37.27s
+  be     rc=1    wall=   62s ids=400  4 failed, 394 passed, 2 errors in 55.86s
+  bf     rc=0    wall=  121s ids=400  400 passed in 114.89s (0:01:54)
+  bg     rc=0    wall=  100s ids=400  400 passed in 93.66s (0:01:33)
+  bh     rc=1    wall=  109s ids=400  4 failed, 396 passed, 44 warnings in 102.49s (0:01:42)
+  bi     rc=0    wall=   27s ids=400  400 passed, 3 warnings in 21.73s
+  bj     rc=1    wall=   26s ids=400  7 failed, 393 passed, 26 warnings in 20.58s
+  bk     rc=0    wall=   22s ids=400  400 passed, 1 warning in 15.76s
+  bl     rc=0    wall=   85s ids=400  400 passed in 79.63s (0:01:19)
+  bm     rc=0    wall=   44s ids=400  400 passed in 38.04s
+  bn     rc=1    wall=   84s ids=400  2 failed, 398 passed, 43 warnings in 78.25s (0:01:18)
+  bo     rc=1    wall=   71s ids=400  3 failed, 397 passed, 92 warnings in 65.27s (0:01:05)
+  bp     rc=0    wall=   35s ids=400  400 passed in 28.44s
+  bq     rc=0    wall=   14s ids=400  400 passed in 9.18s
+  br     rc=0    wall=   72s ids=400  400 passed, 1 warning in 65.85s (0:01:05)
+  bs     rc=1    wall=   22s ids=400  5 failed, 378 passed, 21 warnings, 17 errors in 15.52s
+  bt     rc=1    wall=   57s ids=400  16 failed, 383 passed, 1 error in 50.66s
+  bu     rc=1    wall=   51s ids=400  395 passed, 2 skipped, 3 errors in 44.46s
+  bv     rc=0    wall=   39s ids=400  398 passed, 2 skipped, 6 warnings in 33.52s
+  bw     rc=1    wall=  107s ids=400  11 failed, 389 passed, 16 warnings in 101.06s (0:01:41)
+  bx     rc=0    wall=   97s ids=400  400 passed, 1 warning in 90.68s (0:01:30)
+  by     rc=0    wall=  111s ids=400  400 passed in 105.24s (0:01:45)
+  bz     rc=1    wall=   29s ids=400  4 failed, 396 passed, 6 warnings in 22.71s
+  ca     rc=1    wall=   24s ids=400  1 failed, 397 passed, 2 skipped in 19.11s
+  cb     rc=0    wall=  121s ids=400  400 passed in 115.25s (0:01:55)
+  cc     rc=0    wall=   28s ids=400  400 passed in 22.84s
+  cd     rc=0    wall=  244s ids=400  399 passed, 1 skipped, 12 warnings in 237.78s (0:03:57)
+  ce     rc=0    wall=   81s ids=400  383 passed, 17 skipped, 25 warnings in 74.67s (0:01:14)
+  cf     rc=1    wall=   24s ids=400  1 failed, 399 passed, 61 warnings in 18.80s
+  cg     rc=1    wall=   66s ids=400  3 failed, 397 passed, 36 warnings in 59.61s
+  ch     rc=1    wall=   66s ids=400  6 failed, 374 passed, 20 skipped, 94 warnings in 60.28s (0:01:00)
+  ci     rc=1    wall=  307s ids=400  2 failed, 393 passed, 5 skipped, 63 warnings in 299.19s (0:04:59)
+  cj     rc=0    wall=   31s ids=400  400 passed in 25.88s
+  ck     rc=0    wall=   20s ids=400  400 passed in 14.40s
+  cl     rc=0    wall=   48s ids=400  400 passed in 42.74s
+  cm     rc=1    wall=   52s ids=400  1 failed, 388 passed, 11 skipped, 44 warnings in 44.74s
+  cn     rc=0    wall=   27s ids=400  400 passed in 21.84s
+  co     rc=1    wall=   21s ids=400  1 failed, 399 passed in 15.22s
+  cp     rc=1    wall=   84s ids=400  1 failed, 397 passed, 2 skipped, 9 warnings in 76.82s (0:01:16)
+  cq     rc=1    wall=   13s ids=400  3 failed, 395 passed, 2 skipped in 7.64s
+  cr     rc=1    wall=  112s ids=400  2 failed, 398 passed, 50 warnings in 105.95s (0:01:45)
+  cs     rc=1    wall=  125s ids=400  2 failed, 398 passed, 1 warning in 119.88s (0:01:59)
+  ct     rc=0    wall=   10s ids=400  400 passed in 4.50s
+  cu     rc=0    wall=    9s ids=400  400 passed in 3.74s
+  cv     rc=1    wall=    9s ids=400  2 failed, 398 passed in 3.30s
+  cw     rc=1    wall=   22s ids=400  3 failed, 397 passed in 16.98s
+  cx     rc=1    wall=   82s ids=400  1 failed, 398 passed, 1 skipped, 4 warnings in 76.40s (0:01:16)
+  cy     rc=0    wall=   34s ids=400  399 passed, 1 skipped in 28.90s
+  cz     rc=0    wall=   48s ids=175  175 passed, 54 warnings in 41.38s
+
+--- wall time (sum of chunk walls): 7056s = 1.96h ---
+--- splits/hangs ---
+  hangs: NONE (no singleton chunk died without a session summary)
+  splits: NONE (no chunk was killed in any attempt)
+
+=== KNOWN-RED CONFIRMATIONS ===
+  [1] g7_unique_index_smoke_test.py -> NOT in failed.base (house-recipe excluded file).
+      Recorded in excluded_specials.base.txt: rc=3, INTERNALERROR "SystemExit: 0" at g7:121 (module-level sys.exit(0)).
+      VERBATIM: INTERNALERROR>   File ".../tests/packs/g7_unique_index_smoke_test.py", line 121, in <module>
+                 INTERNALERROR>     sys.exit(0)
+                 INTERNALERROR> SystemExit: 0
+                 no tests ran in 0.51s
+  [1b] tests/e2e/test_context_injection_hybrid.py -> excluded_specials.base.txt: rc=2, collection ERROR
+      "ERROR tests/e2e/test_context_injection_hybrid.py - requests.exceptions.Connec..." (:8079 refused, no dev daemon).
+  [2] SEAL TRIPWIRE -> CONFIRMED RED in failed.base.txt:
+      tests/test_chart_image_delivery_e2e.py::TestPhaseDDoesNotModifySealedArtifacts::test_phase_d_does_not_modify_sealed_artifacts
+      (the SEALED_SHA_BASELINES sealed-artifact tripwire; known stale-seal debt class at base).
+      NOTE: tests/test_resource_pid_registry.py contains NO seal test and is GREEN at base (0 hits in failed set).
+      6 other registry-NAMED reds also present (base truth, see failed.base.txt):
+        tests/test_spawn_team_members.py::TestTeamMembersRegistryParsing (x3: leader/planner/developer team-member parses)
+        tests/unit/tools/test_instance_tools.py::TestRegistration::test_planner_and_tester_resolve_subtree_messages_via_registry
+        tests/integration/test_long_tool_nudge_graph_smoke.py::test_wired_tools_node_registry_identity_is_the_module_singleton
+
+=== METHOD DEVIATIONS (disclosed) ===
+  D-1 per-test timeout 120s (house soak-lane recipe) instead of the original dispatch's literal 60s.
+     WHY: at --timeout=60, tests/integration/test_attestation_ledger_reset.py::test_attested_allow_resets_and_next_mission_starts_clean
+     (a slow LLM-judge test) was killed by pytest-timeout thread-method, which os._exit(1)s the whole process -> chunk_aa
+     attempt-1 died with NO session summary (lost evidence, not a verdict). Empirically that single test COMPLETES in 51s wall at
+     --timeout=120 (no timeout banner). The R-1 correction binds this leg to the disclosed soak-lane recipe, which specifies
+     --timeout=120 for exactly this class. Chunk aa was re-run whole under 120s (1077s).
+  D-2 census + execution corpus use the two house-recipe --ignore files (correction section 1).
+  D-3 ENSEMBLE_SELF_ENV=dev added to the fence (house recipe: ambient 'live' hard-aborts the T12 family).
+  D-4 fence = per-variable scrub (POSTGRES_DB/USER/PASSWORD/HOST/PORT + DAEMON_PORT). Ambient POSTGRES_* WERE present in this
+     shell and were scrubbed per-variable (env -u POSTGRES_* alone would have been a silent no-op).
+
+=== SIDE EFFECT OBSERVED (test writes into the checkout) ===
+  daemon/services/install_audit.py writes KMS audit rows to <workdir>/.agents/shared/planning/designer-agent/install-audit.jsonl
+  (workdir-relative; the documented CWD foot-gun family). 29 rows were appended during this run (ts 2026-10-29T06:43:59Z /
+  06:59:11Z, chunk-window aligned). EVIDENCE PRESERVED:
+    SIDE-EFFECT-install-audit.patch and SIDE-EFFECT-install-audit.jsonl.after (same dir as this file);
+  the worktree file was RESTORED to HEAD (git checkout --) so the scratch worktree is clean; nothing was committed.
+
+=== ATTEMPT HISTORY ===
+  chunk aa attempt-1 (--timeout=60): rc=1, 486s, NO SESSION SUMMARY -> killed by pytest-timeout thread-method os._exit(1).
+  chunk aa attempt-2 (--timeout=120): rc=1, 1077s, 7 failed / 391 passed / 2 skipped -> EVIDENCE (counted).
+  chunks ab..cz: 77/77 completed on first pass, ZERO kills, ZERO splits, ZERO hangs.
+  Total corpus wall (sum of chunk walls): see the totals block above; driver ran 2026-10-29T05:58Z -> 07:27Z.

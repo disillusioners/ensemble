@@ -1,0 +1,17 @@
+=== TEARDOWN (mandatory) — cluster /tmp/dbpool-pg.sqd3oP on 127.0.0.1:5442 ===
+DROP DATABASE
+ERROR:  role "dbpool_g5b" cannot be dropped because some objects depend on it
+DETAIL:  privileges for schema public
+waiting for server to shut down.... done
+server stopped
+PG STOPPED
+PGDATA REMOVED: /tmp/dbpool-pg.sqd3oP
+--- post-teardown verification:
+PGDATA gone
+127.0.0.1:5442 - no response
+port 5442 free
+--- residual dbpool-pg.* dirs in /tmp:
+/tmp/dbpool-pg.AjF73F
+/tmp/dbpool-pg.DFLsvj
+/tmp/dbpool-pg.mGtFIU
+/tmp/dbpool-pg.t1yi3T

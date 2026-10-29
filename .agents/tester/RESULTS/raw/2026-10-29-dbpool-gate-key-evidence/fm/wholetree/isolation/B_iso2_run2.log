@@ -1,0 +1,4 @@
+F                                                                        [100%]
+=========================== short test summary info ============================
+FAILED tests/test_resource_monitor_platform_fallback.py::TestSelfThrottleLatch::test_the_throttle_latch_is_released_when_the_ema_recovers
+1 failed in 0.23s

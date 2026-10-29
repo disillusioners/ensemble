@@ -1,0 +1,1 @@
+15f187a76d4122d59fe2b86be4ee1be83cff83dcc13be7595af1303d51bb685f  daemon/manager.py

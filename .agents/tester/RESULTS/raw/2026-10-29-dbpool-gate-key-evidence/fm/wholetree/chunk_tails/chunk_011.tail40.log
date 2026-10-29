@@ -1,0 +1,40 @@
+
+tests/services/test_instance_lifecycle_terminate.py::test_terminate_bounded_await_graph_task_unwinds_within_timeout
+tests/services/test_instance_lifecycle_terminate.py::test_terminate_bounded_await_graph_task_times_out_at_5s
+tests/services/test_instance_lifecycle_terminate.py::test_terminate_parallel_cascade_with_3_children_each_2s
+tests/services/test_instance_lifecycle_terminate.py::test_terminate_cascade_logs_failed_children_as_warnings
+tests/services/test_instance_lifecycle_terminate.py::test_terminate_calls_notify_all_on_dispatch_bus
+tests/services/test_instance_lifecycle_terminate.py::test_terminate_notify_all_is_noop_when_dispatch_bus_missing
+tests/services/test_instance_lifecycle_terminate.py::test_terminate_cascade_log_contains_trigger_delete
+tests/services/test_instance_lifecycle_terminate.py::test_terminate_summary_log_has_all_fields
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlmodel/orm/session.py:75: SAWarning: The engine provided as bind produced a connection that is already in a transaction. This is usually caused by a core event, such as 'engine_connect', that has left a transaction open. The effective join transaction mode used by this session is 'create_savepoint'. To silence this warning, do not leave transactions open
+    results = super().execute(
+
+tests/services/test_instance_messaging_queue_routing.py::TestEnqueueMessageJobQueueIdResolution::test_nonexistent_queue_id_falls_back_to_default
+tests/services/test_instance_messaging_queue_routing.py::TestEnqueueMessageJobQueueIdResolution::test_repo_get_error_falls_back_to_default
+tests/services/test_instance_messaging_skill_injection.py::TestMetaTagParentDispatchGate::test_meta_tag_not_stripped_for_none_source
+  /home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/unittest/mock.py:2253: RuntimeWarning: coroutine 'InstanceMessagingService._maybe_store_initiative_message' was never awaited
+    def __init__(self, name, parent):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/services/test_instance_messaging_queue_routing.py::TestEnqueueMessageJobQueuedSnapshot::test_capacity_snapshot[1-1-True]
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/sql/type_api.py:975: RuntimeWarning: coroutine 'InstanceMessagingService._maybe_store_initiative_message' was never awaited
+    def _dialect_info(self, dialect: Dialect) -> _TypeMemoDict:
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/services/test_instance_messaging_queue_routing.py::TestMessageRouteQueueIdForwarding::test_router_forwards_queue_id_to_enqueue_message_job
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pydantic/type_adapter.py:347: RuntimeWarning: coroutine 'InstanceMessagingService._maybe_store_initiative_message' was never awaited
+    return getattr(type_, '__pydantic_config__', None)
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/repositories/test_turn_reconciler.py::TestJobQueueItems::test_missing_task_sets_admission_done_orphan_reason
+FAILED tests/repositories/test_turn_reconciler.py::TestJobLocks::test_missing_task_deletes_lock
+FAILED tests/repositories/test_turn_reconciler.py::TestJobWatchers::test_hard_deleted_task_watcher_deleted
+FAILED tests/services/test_instance_messaging_queue_routing.py::TestEnqueueMessageJobQueueIdResolution::test_manager_wrapper_forwards_queue_id
+FAILED tests/services/test_instance_messaging_queue_routing.py::TestMessageRouteQueueIdForwarding::test_router_forwards_queue_id_to_enqueue_message_job
+5 failed, 381 passed, 14 skipped, 54 warnings in 28.20s

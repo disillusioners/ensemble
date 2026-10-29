@@ -1,0 +1,143 @@
+[j5e] daemon resolves to /home/nea/ensemble-src-wt-tdbp-j5c-base/daemon/__init__.py
+[j5e] side=base scratch_db=dbpool_j5e_base_72a923b6 N=0.2min fetch_delay=2.0s f3_dwell=1.0s
+{
+  "side": "base",
+  "scratch_db": "dbpool_j5e_base_72a923b6",
+  "run_start_iso": "2026-10-29T05:18:52.814059+00:00",
+  "N_minutes": 0.2,
+  "rounds": 4,
+  "sampler_period_s": 1.0,
+  "baseline_checkedout_median": 0,
+  "baseline_checkedout_all": [
+    0,
+    0,
+    0
+  ],
+  "final_checkedout": 0,
+  "final_repair_checkedout": 0,
+  "returns_to_baseline": true,
+  "peak_occupancy_mgr": 1,
+  "peak_occupancy_repair": 1,
+  "mgr_xact_age_s_stats": {
+    "n": 8,
+    "max": 1.9605,
+    "p95": 1.9605,
+    "median": 1.1639
+  },
+  "xact_age_s_by_application": {
+    "(none)": {
+      "n": 8,
+      "max": 1.9605,
+      "p95": 1.9605,
+      "median": 1.1639
+    }
+  },
+  "three_state_bucket_max_15s": {
+    "0": {
+      "idle_no_xact": 3,
+      "idle_in_transaction": 1,
+      "idle_in_transaction_aborted": 1,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 1,
+      "phases": [
+        "R1_churn",
+        "R2_reconcile",
+        "R3_f3",
+        "baseline"
+      ]
+    },
+    "1": {
+      "idle_no_xact": 3,
+      "idle_in_transaction": 1,
+      "idle_in_transaction_aborted": 1,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 1,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3",
+        "settle"
+      ]
+    }
+  },
+  "f8_fetch_window_bursts_n": 4,
+  "f8_window_idle_in_txn_max": 1,
+  "f8_cycle_samples_idle_in_txn_max": 1,
+  "f3_dwell_bursts_n": 4,
+  "f3_dwell_idle_in_txn_family_max": 1,
+  "f3_in_transaction_at_dwell_rounds": [
+    {
+      "rnd": 1,
+      "leg": "R3",
+      "f3_pid": 2972526,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 2,
+      "leg": "R3",
+      "f3_pid": 2972527,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 3,
+      "leg": "R3",
+      "f3_pid": 2972526,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 4,
+      "leg": "R3",
+      "f3_pid": 2972527,
+      "in_transaction_at_dwell": true
+    }
+  ],
+  "errors_n": 0,
+  "errors_first5": [],
+  "final_census": [
+    {
+      "pid": 2972420,
+      "application_name": "",
+      "state": "idle",
+      "wait_event_type": "Client",
+      "wait_event": "ClientRead",
+      "xact_start": null,
+      "query_start": "2026-10-29 05:19:09.823481+00:00",
+      "state_change": "2026-10-29 05:19:09.824856+00:00",
+      "backend_start": "2026-10-29 05:18:53.051761+00:00",
+      "last_query": "COMMIT",
+      "xact_age_s": null,
+      "state_age_s": 6.36467
+    },
+    {
+      "pid": 2972526,
+      "application_name": "",
+      "state": "idle",
+      "wait_event_type": "Client",
+      "wait_event": "ClientRead",
+      "xact_start": null,
+      "query_start": "2026-10-29 05:19:09.836238+00:00",
+      "state_change": "2026-10-29 05:19:09.836283+00:00",
+      "backend_start": "2026-10-29 05:18:59.534132+00:00",
+      "last_query": "ROLLBACK",
+      "xact_age_s": null,
+      "state_age_s": 6.353243
+    },
+    {
+      "pid": 2972527,
+      "application_name": "",
+      "state": "idle",
+      "wait_event_type": "Client",
+      "wait_event": "ClientRead",
+      "xact_start": null,
+      "query_start": "2026-10-29 05:19:10.838381+00:00",
+      "state_change": "2026-10-29 05:19:10.838437+00:00",
+      "backend_start": "2026-10-29 05:18:59.562583+00:00",
+      "last_query": "ROLLBACK",
+      "xact_age_s": null,
+      "state_age_s": 5.351089
+    }
+  ],
+  "teardown": "scratch db dropped; engines disposed"
+}
+[j5e] wrote /tmp/tdbp-j5c/raw/smoke_base2.json

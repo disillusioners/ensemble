@@ -1,0 +1,80 @@
+driver start 2026-10-29T14:51:02Z chunks=78 params=--timeout=120 ENSEMBLE_SELF_ENV=dev house-ignores-at-census
+OK   chunk_000 rc=1 962s ids=400 [7 failed, 391 passed, 2 skipped, 36 warnings in 953.37s (0:15:53)] [1/78] 15:07:04
+OK   chunk_001 rc=1 218s ids=400 [20 failed, 379 passed, 21 warnings, 1 error in 209.93s (0:03:29)] [2/78] 15:10:42
+OK   chunk_002 rc=1 213s ids=400 [9 failed, 380 passed, 11 skipped, 150 warnings in 205.95s (0:03:25)] [3/78] 15:14:15
+OK   chunk_003 rc=1 143s ids=400 [3 failed, 384 passed, 10 skipped, 314 warnings, 3 errors in 136.83s (0:02:16)] [4/78] 15:16:38
+OK   chunk_004 rc=1 80s ids=400 [10 failed, 371 passed, 19 skipped, 88 warnings in 74.31s (0:01:14)] [5/78] 15:17:58
+OK   chunk_005 rc=1 33s ids=400 [3 failed, 397 passed, 16 warnings in 27.31s] [6/78] 15:18:31
+OK   chunk_006 rc=1 64s ids=400 [1 failed, 399 passed, 1177 warnings in 58.66s] [7/78] 15:19:35
+OK   chunk_007 rc=0 74s ids=400 [381 passed, 19 skipped, 137 warnings in 68.19s (0:01:08)] [8/78] 15:20:49
+OK   chunk_008 rc=1 103s ids=400 [14 failed, 386 passed, 188 warnings in 97.78s (0:01:37)] [9/78] 15:22:32
+OK   chunk_009 rc=1 54s ids=400 [3 failed, 384 passed, 13 skipped, 1178 warnings in 48.85s] [10/78] 15:23:26
+OK   chunk_010 rc=1 771s ids=400 [3 failed, 392 passed, 5 skipped, 132 warnings in 763.40s (0:12:43)] [11/78] 15:36:17
+OK   chunk_011 rc=1 34s ids=400 [5 failed, 381 passed, 14 skipped, 54 warnings in 28.20s] [12/78] 15:36:51
+OK   chunk_012 rc=1 35s ids=400 [10 failed, 390 passed, 1 warning in 28.97s] [13/78] 15:37:26
+OK   chunk_013 rc=1 75s ids=400 [14 failed, 352 passed, 34 skipped, 10 warnings in 69.43s (0:01:09)] [14/78] 15:38:41
+OK   chunk_014 rc=0 44s ids=400 [400 passed, 9 warnings in 37.93s] [15/78] 15:39:25
+OK   chunk_015 rc=1 38s ids=400 [2 failed, 398 passed, 24 warnings in 32.84s] [16/78] 15:40:03
+OK   chunk_016 rc=1 69s ids=400 [16 failed, 370 passed, 14 skipped, 63 warnings in 61.06s (0:01:01)] [17/78] 15:41:12
+OK   chunk_017 rc=1 78s ids=400 [11 failed, 389 passed, 3 warnings in 72.62s (0:01:12)] [18/78] 15:42:30
+OK   chunk_018 rc=0 20s ids=400 [383 passed, 17 skipped, 2 warnings in 14.19s] [19/78] 15:42:50
+OK   chunk_019 rc=1 115s ids=400 [48 failed, 310 passed, 42 skipped, 12 warnings in 107.93s (0:01:47)] [20/78] 15:44:45
+OK   chunk_020 rc=0 156s ids=400 [400 passed in 150.08s (0:02:30)] [21/78] 15:47:21
+OK   chunk_021 rc=1 160s ids=400 [1 failed, 399 passed, 1 warning in 153.18s (0:02:33)] [22/78] 15:50:01
+OK   chunk_022 rc=1 48s ids=400 [7 failed, 383 passed, 10 skipped, 55 warnings in 42.57s] [23/78] 15:50:49
+OK   chunk_023 rc=0 40s ids=400 [400 passed, 9 warnings in 34.52s] [24/78] 15:51:30
+OK   chunk_024 rc=1 16s ids=400 [2 failed, 393 passed, 5 xfailed in 11.73s] [25/78] 15:51:46
+OK   chunk_025 rc=1 21s ids=400 [30 failed, 362 passed, 8 skipped, 13 warnings in 15.45s] [26/78] 15:52:07
+OK   chunk_026 rc=0 14s ids=400 [400 passed, 42 warnings in 9.40s] [27/78] 15:52:21
+OK   chunk_027 rc=1 106s ids=400 [8 failed, 380 passed, 12 skipped, 27 warnings in 99.69s (0:01:39)] [28/78] 15:54:07
+OK   chunk_028 rc=1 100s ids=400 [5 failed, 395 passed, 16 warnings in 94.43s (0:01:34)] [29/78] 15:55:47
+OK   chunk_029 rc=0 42s ids=400 [400 passed in 37.47s] [30/78] 15:56:29
+OK   chunk_030 rc=1 32s ids=400 [4 failed, 394 passed, 2 errors in 27.11s] [31/78] 15:57:01
+OK   chunk_031 rc=0 151s ids=400 [400 passed in 145.03s (0:02:25)] [32/78] 15:59:32
+OK   chunk_032 rc=0 86s ids=400 [400 passed in 80.36s (0:01:20)] [33/78] 16:00:58
+OK   chunk_033 rc=1 104s ids=400 [1 failed, 399 passed, 25 warnings in 96.35s (0:01:36)] [34/78] 16:02:42
+OK   chunk_034 rc=1 55s ids=400 [3 failed, 397 passed, 21 warnings in 49.16s] [35/78] 16:03:37
+OK   chunk_035 rc=1 21s ids=400 [7 failed, 393 passed, 26 warnings in 16.19s] [36/78] 16:03:58
+OK   chunk_036 rc=0 24s ids=400 [400 passed, 1 warning in 18.58s] [37/78] 16:04:22
+OK   chunk_037 rc=0 69s ids=400 [400 passed in 63.34s (0:01:03)] [38/78] 16:05:31
+OK   chunk_038 rc=0 54s ids=400 [400 passed in 48.86s] [39/78] 16:06:25
+OK   chunk_039 rc=1 92s ids=400 [2 failed, 398 passed, 21 warnings in 86.26s (0:01:26)] [40/78] 16:07:57
+OK   chunk_040 rc=1 72s ids=400 [2 failed, 398 passed, 114 warnings in 65.75s (0:01:05)] [41/78] 16:09:09
+OK   chunk_041 rc=0 36s ids=400 [400 passed in 30.55s] [42/78] 16:09:45
+OK   chunk_042 rc=0 24s ids=400 [400 passed in 18.95s] [43/78] 16:10:09
+OK   chunk_043 rc=0 76s ids=400 [400 passed, 1 warning in 70.53s (0:01:10)] [44/78] 16:11:25
+OK   chunk_044 rc=1 32s ids=400 [1 failed, 382 passed, 20 warnings, 17 errors in 26.43s] [45/78] 16:11:57
+OK   chunk_045 rc=1 66s ids=400 [20 failed, 380 passed, 2 warnings in 58.93s] [46/78] 16:13:03
+OK   chunk_046 rc=1 52s ids=400 [394 passed, 2 skipped, 4 errors in 45.04s] [47/78] 16:13:55
+OK   chunk_047 rc=0 34s ids=400 [398 passed, 2 skipped, 4 warnings in 28.54s] [48/78] 16:14:29
+OK   chunk_048 rc=1 126s ids=400 [11 failed, 389 passed, 17 warnings in 120.06s (0:02:00)] [49/78] 16:16:35
+OK   chunk_049 rc=0 96s ids=400 [400 passed, 1 warning in 90.19s (0:01:30)] [50/78] 16:18:11
+OK   chunk_050 rc=0 47s ids=400 [400 passed in 41.71s] [51/78] 16:18:58
+OK   chunk_051 rc=1 99s ids=400 [1 failed, 399 passed, 6 warnings in 92.03s (0:01:32)] [52/78] 16:20:37
+OK   chunk_052 rc=1 21s ids=400 [4 failed, 394 passed, 2 skipped in 15.42s] [53/78] 16:20:58
+OK   chunk_053 rc=0 68s ids=400 [400 passed in 62.58s (0:01:02)] [54/78] 16:22:06
+OK   chunk_054 rc=0 83s ids=400 [400 passed in 77.20s (0:01:17)] [55/78] 16:23:29
+OK   chunk_055 rc=0 197s ids=400 [399 passed, 1 skipped, 12 warnings in 191.42s (0:03:11)] [56/78] 16:26:46
+OK   chunk_056 rc=0 119s ids=400 [400 passed, 1 warning in 112.51s (0:01:52)] [57/78] 16:28:45
+OK   chunk_057 rc=1 31s ids=400 [1 failed, 382 passed, 17 skipped, 85 warnings in 25.57s] [58/78] 16:29:16
+OK   chunk_058 rc=1 27s ids=400 [3 failed, 397 passed in 21.39s] [59/78] 16:29:43
+OK   chunk_059 rc=1 108s ids=400 [6 failed, 374 passed, 20 skipped, 129 warnings in 101.57s (0:01:41)] [60/78] 16:31:31
+OK   chunk_060 rc=1 267s ids=400 [2 failed, 393 passed, 5 skipped, 63 warnings in 260.34s (0:04:20)] [61/78] 16:35:58
+OK   chunk_061 rc=0 62s ids=400 [400 passed in 55.98s] [62/78] 16:37:00
+OK   chunk_062 rc=0 19s ids=400 [400 passed in 15.00s] [63/78] 16:37:20
+OK   chunk_063 rc=0 48s ids=400 [400 passed in 43.34s] [64/78] 16:38:08
+OK   chunk_064 rc=1 48s ids=400 [1 failed, 388 passed, 11 skipped, 44 warnings in 42.27s] [65/78] 16:38:56
+OK   chunk_065 rc=0 26s ids=400 [400 passed in 20.58s] [66/78] 16:39:22
+OK   chunk_066 rc=1 22s ids=400 [1 failed, 399 passed in 16.40s] [67/78] 16:39:44
+OK   chunk_067 rc=1 88s ids=400 [1 failed, 398 passed, 1 xfailed, 9 warnings in 82.91s (0:01:22)] [68/78] 16:41:12
+OK   chunk_068 rc=1 39s ids=400 [3 failed, 393 passed, 4 skipped in 33.38s] [69/78] 16:41:51
+OK   chunk_069 rc=1 72s ids=400 [2 failed, 398 passed, 50 warnings in 66.60s (0:01:06)] [70/78] 16:43:04
+OK   chunk_070 rc=1 111s ids=400 [2 failed, 398 passed in 105.38s (0:01:45)] [71/78] 16:44:55
+OK   chunk_071 rc=0 68s ids=400 [400 passed, 1 warning in 60.44s (0:01:00)] [72/78] 16:46:03
+OK   chunk_072 rc=0 8s ids=400 [400 passed in 3.62s] [73/78] 16:46:11
+OK   chunk_073 rc=0 9s ids=400 [400 passed in 4.05s] [74/78] 16:46:20
+OK   chunk_074 rc=1 9s ids=400 [5 failed, 395 passed in 3.59s] [75/78] 16:46:29
+OK   chunk_075 rc=0 70s ids=400 [399 passed, 1 skipped, 3 warnings in 64.39s (0:01:04)] [76/78] 16:47:39
+OK   chunk_076 rc=1 57s ids=400 [1 failed, 398 passed, 1 skipped, 1 warning in 51.44s] [77/78] 16:48:36
+OK   chunk_077 rc=0 70s ids=350 [350 passed, 54 warnings in 63.02s (0:01:03)] [78/78] 16:49:46
+driver done 2026-10-29T16:49:46Z total_wall=7124s

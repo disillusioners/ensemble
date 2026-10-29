@@ -182,6 +182,16 @@ REPAIR_POOL_MAX_OVERFLOW = 3
 REPAIR_POOL_RECYCLE_S = 3600
 REPAIR_POOL_TIMEOUT_S = 10
 
+# The repair engine's pool attribution (db-pool-idle-txn, F2.5/D-49).
+# Rides the CONNINFO channel (a psycopg3 connect_args kwarg merged
+# into the conninfo), NOT the ``-c options`` literal — measured
+# (BASELINE.md T3): the conninfo parameter BEATS ``options=-c``, and
+# the shared UTC constant is interpolated LAST into the options
+# string, so a name placed there would be overridden (measured:
+# ``repair_engine_reports_manager_name: true``). The conninfo channel
+# is override-proof, not merely last-wins-correct.
+REPAIR_ENGINE_APPLICATION_NAME = "ensemble-repair"
+
 # PG connect_args timeouts (architect §3.1).
 REPAIR_STATEMENT_TIMEOUT_MS = 60_000
 REPAIR_LOCK_TIMEOUT_MS = 10_000
@@ -608,6 +618,11 @@ def _build_repair_engine(shared_engine: Engine) -> Engine:
         pool_pre_ping=True,
         pool_recycle=REPAIR_POOL_RECYCLE_S,
         pool_timeout=REPAIR_POOL_TIMEOUT_S,
+        # F2.5 (db-pool-idle-txn): pin the reset invariant explicitly —
+        # "an aborted connection is never handed out" (the library
+        # default applies it; an implicit default is not a pinned
+        # invariant). The ONLY knob addition in this lane.
+        pool_reset_on_return="rollback",
     )
     if is_pg:
         # The UTC session option rides the SAME libpq ``options``
@@ -615,7 +630,11 @@ def _build_repair_engine(shared_engine: Engine) -> Engine:
         # engine factory's ``PG_SESSION_CONNECT_ARGS`` so the repair
         # path's SQL-side ``now()`` readers evaluate in the same frame
         # the naive-UTC digit writers stamp (B2/B3 class-closing fix,
-        # daemon/repositories/factory.py).
+        # daemon/repositories/factory.py). The literal below is
+        # BYTE-IDENTICAL to its pre-F2 form (D-17): the shared
+        # constant is interpolated LAST and nothing is appended — the
+        # engine's ``application_name`` rides the conninfo parameter
+        # (its own connect_args key), never this string.
         kwargs["connect_args"] = {
             "options": (
                 f"-c statement_timeout={REPAIR_STATEMENT_TIMEOUT_MS} "
@@ -624,6 +643,11 @@ def _build_repair_engine(shared_engine: Engine) -> Engine:
                 f"{REPAIR_IDLE_IN_TXN_TIMEOUT_MS} "
                 f"{PG_SESSION_CONNECT_ARGS['options']}"
             ),
+            # D-49: attribution via the CONNINFO channel (psycopg3
+            # merges connect_args kwargs into the conninfo) — the
+            # override-proof channel; a later-appended shared constant
+            # cannot flip it.
+            "application_name": REPAIR_ENGINE_APPLICATION_NAME,
         }
     else:
         # SQLite — mirror the shared engine's pragmas (WAL + busy_timeout)
@@ -959,8 +983,9 @@ def create_ens_db_tools(
 
         Returns:
             On dry-run: preview markdown (row-count projection +
-            first ~100 affected-row preview; DDL preview is a
-            ``BEGIN; <DDL>; ROLLBACK;`` wrapper).
+            first ~100 affected-row preview; DDL preview runs inside a
+            rollback-only transaction — execute, then unconditional
+            ROLLBACK — never a commit).
             On commit: confirmation message with ``repair_log.id``.
             On refusal: structured error string naming the rule
             violated (class-name-only surface).
@@ -1073,9 +1098,11 @@ def create_ens_db_tools(
                             session, sql, repair_engine
                         )
 
-                    # DDL dry-run wrapper: BEGIN; <DDL>; ROLLBACK.
-                    # DML dry-run wrapper: BEGIN; <SQL>; ROLLBACK after
-                    # capturing the row-count projection + first ~100 rows.
+                    # DDL dry-run wrapper: execute, then unconditional
+                    # ROLLBACK (autobegin — no explicit BEGIN).
+                    # DML dry-run wrapper: execute + row-count
+                    # projection + first ~100 rows, then the same
+                    # unconditional ROLLBACK.
                     if dry_run:
                         return _dry_run_sqlite_safe(
                             session, sql, sql_class, target_label,
@@ -1404,7 +1431,8 @@ def _dry_run_sqlite_safe(
     manager: Any,
     agent_id: str,
 ) -> str:
-    """Dry-run wrapper — BEGIN; <SQL>; ROLLBACK (DDL) or with row-count
+    """Dry-run wrapper — rollback-only transaction (execute, then
+    unconditional ROLLBACK; DDL) or the same wrapper with row-count
     + first-100 preview (DML). Always writes a ``previewed`` audit row
     outside the rolled-back tx (so the dry-run does NOT roll back its
     own audit row). Mints a confirm nonce bound to
@@ -1412,7 +1440,7 @@ def _dry_run_sqlite_safe(
 
     Maintenance commands (VACUUM / ANALYZE — allow-listed by
     :func:`_statement_is_vacuum_analyze`) NEVER enter the
-    BEGIN/ROLLBACK wrapper. PG refuses them inside an explicit
+    transactional wrapper. PG refuses them inside an explicit
     transaction (``25001 — VACUUM cannot be executed inside a
     transaction block``); running them through the standard wrapper
     deterministically raises that error and would leak a misleading
@@ -1431,7 +1459,7 @@ def _dry_run_sqlite_safe(
     preview_lines: list[str] = []
 
     # ── Maintenance-command short-circuit (FIX-1) ───────────────────
-    # VACUUM / ANALYZE bypass the BEGIN/ROLLBACK wrapper. They
+    # VACUUM / ANALYZE bypass the transactional dry-run wrapper. They
     # would fail PG 25001 if forced into the wrapper, and there is
     # no row-count projection that applies. The dry-run only needs
     # to admit the grammar check already cleared it, name the
@@ -1474,37 +1502,49 @@ def _dry_run_sqlite_safe(
     else:
         try:
             if sql_class == "DDL":
-                # Dry-run the DDL — wrapped in BEGIN/ROLLBACK so it does
-                # NOT commit.
-                session.execute(text("BEGIN"))
+                # Dry-run the DDL — SQLAlchemy autobegins the
+                # transaction on the execute below; the unconditional
+                # ROLLBACK in the ``finally`` is what guarantees it
+                # does NOT commit (no explicit BEGIN — the rollback
+                # carries the no-commit property, D-01/D-02).
                 try:
                     session.execute(text(sql))
-                    preview_lines.append("DRY-RUN DDL EXECUTED INSIDE BEGIN/ROLLBACK — no commit")
+                    preview_lines.append(
+                        "DRY-RUN DDL EXECUTED INSIDE ROLLBACK-ONLY TRANSACTION — no commit"
+                    )
                 except Exception as exc:
                     preview_lines.append(
                         f"DRY-RUN DDL FAILED ({type(exc).__name__}): "
                         f"{str(exc)[:200]} — fix the SQL and re-run."
                     )
-                session.rollback()
+                finally:
+                    # Runs on SQL-success, SQL-error AND when the
+                    # rollback itself raises — the only shape that
+                    # covers every exit path (D-02). No conditionals
+                    # near the rollback path (C2).
+                    session.rollback()
             elif sql_class == "DML":
-                # DML dry-run — same wrapper + row-count projection.
-                session.execute(text("BEGIN"))
+                # DML dry-run — same rollback-only wrapper + row-count
+                # projection (the projection stays INSIDE the try,
+                # before the rollback).
                 try:
                     result = session.execute(text(sql))
                     previews = _rows_to_dicts(result)
                     preview_lines.append(
-                        f"DRY-RUN DML EXECUTED INSIDE BEGIN/ROLLBACK — projected "
+                        f"DRY-RUN DML EXECUTED INSIDE ROLLBACK-ONLY TRANSACTION — projected "
                         f"affected rows (first {DRY_RUN_PREVIEW_ROWS}):"
                     )
                     for i, row in enumerate(previews, 1):
                         preview_lines.append(f"  [{i}] {row}")
-                    session.rollback()
                 except Exception as exc:
-                    session.rollback()
                     preview_lines.append(
                         f"DRY-RUN DML FAILED ({type(exc).__name__}): "
                         f"{str(exc)[:200]} — fix the SQL and re-run."
                     )
+                finally:
+                    # Same unconditional shape as the DDL branch —
+                    # every exit path rolls back (D-02).
+                    session.rollback()
             else:
                 preview_lines.append(
                     f"DRY-RUN: sql_class={sql_class} — preview skipped "

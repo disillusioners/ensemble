@@ -1,0 +1,23 @@
+=== R11 Part 3 scratch PG TEARDOWN 2026-10-29T12:04:25Z ===
+--- drop db (as owner-capable superuser over TCP) ---
+dropdb rc=0
+ datname 
+---------
+(0 rows)
+
+--- drop role ---
+DROP ROLE
+ rolname 
+---------
+(0 rows)
+
+--- stop server ---
+waiting for server to shut down.... done
+server stopped
+--- port free check ---
+PORT 5449 FREE (no listener)
+--- rm PGDATA + sock dir ---
+55M	/tmp/tdbp-r11/pgdata
+4.0K	/tmp/tdbp-r11/sock
+PGDATA REMOVED
+SOCKDIR REMOVED

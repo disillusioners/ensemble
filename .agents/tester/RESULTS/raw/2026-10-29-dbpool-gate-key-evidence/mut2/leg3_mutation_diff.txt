@@ -1,0 +1,10 @@
+--- /tmp/tdbp-mut2/leg3_readiness_pristine.py	2026-10-29 09:16:41.664752172 +0000
++++ daemon/services/readiness.py	2026-10-29 09:16:41.767751767 +0000
+@@ -1544,7 +1544,6 @@
+ 
+     def _probe() -> tuple[bool, Optional[str]]:
+         # F4-A — admission pre-check BEFORE the blocking checkout.
+-        _refuse_pool_admission_at_capacity(engine)
+         with engine.connect() as conn:
+             # F4-B — probe-scoped statement bound, FIRST statement
+             # (it opens the autobegun transaction that scopes the

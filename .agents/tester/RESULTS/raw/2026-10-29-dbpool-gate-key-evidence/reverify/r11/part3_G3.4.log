@@ -1,0 +1,8 @@
+# db-pool gate ladder — interpreter certification
+/home/nea/ensemble-src-wt-tdbp-gate/daemon/__init__.py 9.0.2
+── G3.4 ──────────────────────────────────────────────
+COLLECTED-OK count=4 expected=4
+....                                                                     [100%]
+4 passed in 17.23s
+G3.4: PASS (count=4 asserted from expected-collected.md rows 17)
+LADDER: OK (mode=--run, rows matched=1)

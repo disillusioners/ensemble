@@ -1,0 +1,264 @@
+........................................................................ [ 18%]
+.................F.........................................F............ [ 36%]
+........................................................................ [ 54%]
+........................................................................ [ 72%]
+........................................................................ [ 90%]
+........................................                                 [100%]
+=============================== warnings summary ===============================
+tests/unit/services/test_resume_cascade_drift_guard.py::test_d_no_jobitem_task_flips_pending
+tests/unit/services/test_resume_cascade_drift_guard.py::test_e_soft_deleted_jobitem_task_flips_pending
+tests/unit/services/test_resume_cascade_drift_guard.py::test_f_message_type_jobitem_task_flips_pending
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+tests/unit/services/test_terminate_downside_row_drain.py::test_terminate_drains_up_and_down_side_rows
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/services/test_terminate_downside_row_drain.py:207: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    await _cancel_bus_watchers_for(manager, terminated, "terminate_instance")
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_terminate_downside_row_drain.py::test_revive_after_terminate_mid_session_gate_clear
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/services/test_terminate_downside_row_drain.py:310: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    await _cancel_bus_watchers_for(manager, terminated, "terminate_instance")
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_terminate_downside_row_drain.py::test_composition_is_exactly_once_safe
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/services/test_terminate_downside_row_drain.py:405: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    await _cancel_bus_watchers_for(manager, terminated, "terminate_instance")
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_terminate_path_coverage_fire_with_outcome.py::test_terminate_flow_lands_fired_with_outcome
+tests/unit/services/test_title_generation_trigger.py::TestCompletionPath1RootInstance::test_root_instance_completion_triggers_title_generation
+tests/unit/services/test_title_generation_trigger.py::TestInstanceMessagingTriggerTitleGeneration::test_enqueue_triggers_title_on_idle_to_running_with_human_message
+tests/unit/services/test_title_generation_trigger.py::TestInstanceMessagingTriggerTitleGeneration::test_enqueue_triggers_for_completion_report_on_idle_to_running
+tests/unit/services/test_title_generation_trigger.py::TestMaybeTriggerTitleGenerationMethod::test_maybe_trigger_logs_debug_message
+tests/unit/services/test_title_think_stripping.py::test_title_with_think_block_strips_reasoning
+  /home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/unittest/mock.py:2253: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    def __init__(self, name, parent):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_title_generation_trigger.py::TestTriggerTitleGenerationMethod::test_message_with_empty_content_still_triggers
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_result.py:31: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    def __init__(
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_title_generation_trigger.py::TestCompletionPath2ToolInvocation::test_tool_invocation_completion_triggers_title_generation
+tests/unit/services/test_title_generation_trigger.py::TestCompletionPath3RegularChild::test_regular_child_completion_triggers_title_generation
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestDeferOutcomesNotForceEmitted::test_defer_outcome_not_force_emitted[root_completed]
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlmodel/orm/session.py:75: SAWarning: The engine provided as bind produced a connection that is already in a transaction. This is usually caused by a core event, such as 'engine_connect', that has left a transaction open. The effective join transaction mode used by this session is 'create_savepoint'. To silence this warning, do not leave transactions open
+    results = super().execute(
+
+tests/unit/services/test_title_generation_trigger.py::TestInstanceMessagingTriggerTitleGeneration::test_enqueue_triggers_for_completion_report_on_idle_to_running
+tests/unit/services/test_title_generation_trigger.py::TestMaybeTriggerTitleGenerationMethod::test_maybe_trigger_logs_debug_message
+tests/unit/services/test_title_think_stripping.py::test_title_with_think_block_strips_reasoning
+  /home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/unittest/mock.py:2253: RuntimeWarning: coroutine 'InstanceMessagingService._maybe_store_initiative_message' was never awaited
+    def __init__(self, name, parent):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_title_generation_trigger.py::TestInstanceMessagingTriggerTitleGeneration::test_concurrent_enqueue_messages_both_trigger
+  /home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/unittest/mock.py:458: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    new = type(cls.__name__, bases, {'__doc__': cls.__doc__})
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_title_generation_trigger.py::TestInstanceMessagingTriggerTitleGeneration::test_concurrent_enqueue_messages_both_trigger
+  /home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/unittest/mock.py:458: RuntimeWarning: coroutine 'InstanceMessagingService._maybe_store_initiative_message' was never awaited
+    new = type(cls.__name__, bases, {'__doc__': cls.__doc__})
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestTargetShapeForceEmits::test_target_shape_force_emits_idempotency_skip
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/services/test_vgap_b4_backstop_behavior.py:448: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    row = session.query(DependencyWatcher).filter(
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestTargetShapeForceEmits::test_target_shape_force_emits_completed_but_not_emitted
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/services/test_vgap_b4_backstop_behavior.py:502: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    row = session.query(DependencyWatcher).filter(
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestConcurrentDoubleFireSingleEmit::test_concurrent_double_fire_single_emit
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/services/test_vgap_b4_backstop_behavior.py:566: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    row = session.query(DependencyWatcher).filter(/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:33: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+  gc.collect()
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:33: RuntimeWarning: coroutine 'InstanceMessagingService._maybe_store_initiative_message' was never awaited
+  gc.collect()
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestConcurrentDoubleFireSingleEmit::test_concurrent_double_fire_single_emit
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/services/test_vgap_b4_backstop_behavior.py:578: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    fired_count = session.query(DependencyWatcher).filter(
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestDeferOutcomesNotForceEmitted::test_defer_outcome_not_force_emitted[dead_parent_skip]
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestDeferOutcomesNotForceEmitted::test_defer_outcome_not_force_emitted[deferred_pause]
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestDeferOutcomesNotForceEmitted::test_defer_outcome_not_force_emitted[deferred_waiting_children]
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestDeferOutcomesNotForceEmitted::test_defer_outcome_not_force_emitted[root_completed]
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestDeferOutcomesNotForceEmitted::test_defer_outcome_not_force_emitted[root_waiting_children]
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestDeferOutcomesNotForceEmitted::test_defer_outcome_not_force_emitted[tool_invocation_completed]
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/services/test_vgap_b4_backstop_behavior.py:695: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    row = session.query(DependencyWatcher).filter(
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestDeferOutcomesNotForceEmitted::test_defer_outcome_not_force_emitted[instance_not_found]
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/services/test_vgap_b4_backstop_behavior.py:659: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    count = session.query(DependencyWatcher).count()
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestLegitimateIdempotencySkipDefer::test_skip_when_no_parent
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/services/test_vgap_b4_backstop_behavior.py:752: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    count = session.query(DependencyWatcher).count()
+
+tests/unit/services/test_vgap_b4_backstop_behavior.py::TestLegitimateIdempotencySkipDefer::test_skip_when_instance_not_completed
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/unit/services/test_vgap_b4_backstop_behavior.py:793: DeprecationWarning: 
+          🚨 You probably want to use `session.exec()` instead of `session.query()`.
+  
+          `session.exec()` is SQLModel's own short version with increased type
+          annotations.
+  
+          Or otherwise you might want to use `session.execute()` instead of
+          `session.query()`.
+          
+    row = session.query(DependencyWatcher).filter(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/services/test_scheduling_service.py::TestUserTimezoneRung::test_user_setting_rung_covers_once_anchor_site
+FAILED tests/unit/services/test_service_tool_manager.py::test_stop_pid_already_dead_returns_pid_dead
+2 failed, 398 passed, 34 warnings in 80.90s (0:01:20)
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-ba931d21-586b-45ce-b0e5-bbc618301c68/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-ba931d21-586b-45ce-b0e5-bbc618301c68/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-ba931d21-586b-45ce-b0e5-bbc618301c68/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-ba931d21-586b-45ce-b0e5-bbc618301c68/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-d9c90b64-f5ea-4b89-8ce8-1c2e13f768fc/test_an_enabled_boot_leaves_a_0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-d9c90b64-f5ea-4b89-8ce8-1c2e13f768fc/test_an_enabled_boot_leaves_a_0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-d9c90b64-f5ea-4b89-8ce8-1c2e13f768fc/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-d9c90b64-f5ea-4b89-8ce8-1c2e13f768fc/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-c39c8458-2dda-444d-a7ce-c5f259eeefee/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-c39c8458-2dda-444d-a7ce-c5f259eeefee/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-c39c8458-2dda-444d-a7ce-c5f259eeefee/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-c39c8458-2dda-444d-a7ce-c5f259eeefee/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-aab8d8e0-2bf1-425d-bbd3-7d7914410acb/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-aab8d8e0-2bf1-425d-bbd3-7d7914410acb/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-aab8d8e0-2bf1-425d-bbd3-7d7914410acb/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-aab8d8e0-2bf1-425d-bbd3-7d7914410acb/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-073c25a3-a4c6-41c5-bc07-de7d1cde3129/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-073c25a3-a4c6-41c5-bc07-de7d1cde3129/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-073c25a3-a4c6-41c5-bc07-de7d1cde3129/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-073c25a3-a4c6-41c5-bc07-de7d1cde3129/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-18e8aae2-5040-4459-8f17-6b6df43d03d4/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-18e8aae2-5040-4459-8f17-6b6df43d03d4/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-18e8aae2-5040-4459-8f17-6b6df43d03d4/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-18e8aae2-5040-4459-8f17-6b6df43d03d4/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-42003c27-80bc-4ad0-a6c2-7d8d5085f051/test_an_enabled_boot_leaves_a_0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-42003c27-80bc-4ad0-a6c2-7d8d5085f051/test_an_enabled_boot_leaves_a_0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-42003c27-80bc-4ad0-a6c2-7d8d5085f051/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-42003c27-80bc-4ad0-a6c2-7d8d5085f051/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-d2e88d5d-7a3c-4283-af7e-f2f074fa5fb3/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-d2e88d5d-7a3c-4283-af7e-f2f074fa5fb3/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-d2e88d5d-7a3c-4283-af7e-f2f074fa5fb3/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-d2e88d5d-7a3c-4283-af7e-f2f074fa5fb3/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-6df3fcb9-c247-404a-aaa7-3095728fa502/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-6df3fcb9-c247-404a-aaa7-3095728fa502/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-6df3fcb9-c247-404a-aaa7-3095728fa502/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-6df3fcb9-c247-404a-aaa7-3095728fa502/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-20a108c6-d130-42d4-a539-64f35aac8063/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-20a108c6-d130-42d4-a539-64f35aac8063/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-20a108c6-d130-42d4-a539-64f35aac8063/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-20a108c6-d130-42d4-a539-64f35aac8063/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-54239c41-af59-47a0-86a5-c497cabc107f/test_an_enabled_boot_leaves_a_0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-54239c41-af59-47a0-86a5-c497cabc107f/test_an_enabled_boot_leaves_a_0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:96: PytestWarning: (rm_rf) error removing /tmp/pytest-of-nea/garbage-54239c41-af59-47a0-86a5-c497cabc107f/test_an_enabled_boot_leaves_a_0/data
+<class 'OSError'>: [Errno 39] Directory not empty: '/tmp/pytest-of-nea/garbage-54239c41-af59-47a0-86a5-c497cabc107f/test_an_enabled_boot_leaves_a_0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:96: PytestWarning: (rm_rf) error removing /tmp/pytest-of-nea/garbage-54239c41-af59-47a0-86a5-c497cabc107f/test_an_enabled_boot_leaves_a_0
+<class 'OSError'>: [Errno 39] Directory not empty: '/tmp/pytest-of-nea/garbage-54239c41-af59-47a0-86a5-c497cabc107f/test_an_enabled_boot_leaves_a_0'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:96: PytestWarning: (rm_rf) error removing /tmp/pytest-of-nea/garbage-54239c41-af59-47a0-86a5-c497cabc107f
+<class 'OSError'>: [Errno 39] Directory not empty: '/tmp/pytest-of-nea/garbage-54239c41-af59-47a0-86a5-c497cabc107f'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-e0b2c5e9-d462-48dd-b4c2-d7f9d3d02614/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-e0b2c5e9-d462-48dd-b4c2-d7f9d3d02614/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-e0b2c5e9-d462-48dd-b4c2-d7f9d3d02614/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-e0b2c5e9-d462-48dd-b4c2-d7f9d3d02614/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(

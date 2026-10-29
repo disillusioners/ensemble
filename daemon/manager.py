@@ -10894,8 +10894,22 @@ class InstanceManager:
         )
         from .repositories.task.models import Task, TaskStatus, TaskType
 
+        # ── db-pool-idle-txn F8.4 (D-33): P0/P1/P2 scope split ────────────
+        # Same shape as the async sibling: no manager-engine
+        # transaction open across the cross-thread bridge (DR-26 —
+        # the bridge's call shape and 8.0 s timeout are PRESERVED;
+        # only its POSITION changed: it now runs in P1, OUTSIDE any
+        # held manager-engine session scope) and none across the
+        # nested-session carrier check (F8.4). W-2 (code-review
+        # council): ``_write_guard`` is held ONCE around the whole body
+        # (P0+P1+P2) — base parity; base held it once, so a
+        # ``pause_writes()`` arriving mid-reconcile could never raise
+        # here. The SESSIONS stay split (the transaction split is F8's
+        # requirement, not the guard split): no manager-engine
+        # transaction is open across any await.
         with self._write_guard:
             with self._session_scope() as session:
+                # ── P0: read-decide scope ──
                 inj = session.get(ReportInjection, injection_id)
                 if inj is None:
                     logger.info(
@@ -10919,17 +10933,112 @@ class InstanceManager:
                     )
                     return None
 
+                from .repositories.instance.models import Instance
+                child_row = session.get(Instance, child_instance_id)
+                child_row_missing = child_row is None
+                child_agent_id = (
+                    None if child_row_missing else child_row.agent_id
+                )
+                # W-1 (code-review council): a MISSING child Instance row
+                # skips the content fetch (base parity — the helpers did
+                # ``if child_row is not None:``); the ``"agent"``
+                # fallback applies ONLY to row-present/agent_id-NULL.
+                fetch_agent_id: str | None = (
+                    None if child_row_missing else (child_agent_id or "agent")
+                )
+                # Sub-shape decision: (a) needs the P1 content fetch;
+                # (c) needs the pre-scope carrier check — gated on the
+                # P0-observed (c)-reachability (message AND task both
+                # present), mirroring the original in-scope call
+                # conditions exactly so (b)-shape reconciles do not
+                # pay a needless second session checkout.
+                needs_content_fetch = inj.report_message_id is None
+                report_message_id_pre = (
+                    None if needs_content_fetch else inj.report_message_id
+                )
+                carrier_check_needed = False
+                if report_message_id_pre is not None:
+                    _task_pre = session.exec(
+                        select(Task)
+                        .where(Task.message_id == report_message_id_pre)
+                    ).first()
+                    _msg_pre = session.exec(
+                        select(MessageQueue)
+                        .where(MessageQueue.message_id == report_message_id_pre)
+                    ).first()
+                    carrier_check_needed = (
+                        _task_pre is not None and _msg_pre is not None
+                    )
+
+            # ── F8.6a / DR-10 — TEST-ONLY P0→P2 seam hook ────────────────────
+            # Never set on any production path; the F8-c pin installs it to
+            # flip the injection row to a terminal state at the exact race
+            # point (after P0's scope closed, before P2's scope opens) and
+            # assert NO artefacts are created.
+            seam_hook = getattr(self, "_f8_p0_p2_seam_hook", None)
+            if seam_hook is not None:  # pragma: no cover — test-only seam
+                seam_hook(injection_id)
+
+            # ── F8.3 / F8.4 — carrier check OUTSIDE any held manager-engine scope ──
+            # The callee opens its OWN manager-engine session
+            # (``_has_live_process_report_carrier``); called inside the
+            # held scope its checkout wait (bounded by pool_timeout=30 s)
+            # would park the outer backend idle-in-txn. Computed BEFORE
+            # the P2 scope opens; keyed on the P0-observed
+            # report_message_id (write-once per row lifecycle).
+            live_carrier_exists: bool | None = None
+            if carrier_check_needed:
+                live_carrier_exists = self._has_live_process_report_carrier(
+                    message_id=report_message_id_pre
+                )
+
+            # ── P1: content fetch — NO manager-engine transaction open ───────
+            # Sync content-fetch seam — correct for the SWEEP path (caller
+            # runs on a non-loop ``threading.Thread``). The router path uses
+            # :meth:`_reconcile_deferred_report_async` which ``await``s
+            # directly (no ``run_coroutine_threadsafe(...).result(...)``
+            # from the loop thread → no self-block).
+            content = "[No response content]"
+            if needs_content_fetch:
+                content = self._fetch_subshape_a_content_sync(
+                    child_instance_id=child_instance_id,
+                    child_agent_id=fetch_agent_id,
+                )
+
+            with self._session_scope() as session:
+                # ── P2: write scope ──
+                # F8.7 — RE-READ ``inj`` (the P0 row is detached after
+                # the P0 scope closed).
+                inj = session.get(ReportInjection, injection_id)
+                if inj is None:
+                    logger.info(
+                        f"[{source}] reconcile: injection row "
+                        f"{injection_id[:8]}... gone at P2 "
+                        f"(concurrent delete?); skipping"
+                    )
+                    return None
+
+                # F8.6 — RE-ASSERT the terminal guard against the
+                # RE-READ row (the concurrent-escalation trap).
+                if inj.state in (
+                    ReportInjectionState.INJECTED.value,
+                    ReportInjectionState.TASK_DELIVERED.value,
+                ):
+                    logger.info(
+                        f"[{source}] reconcile: injection "
+                        f"{injection_id[:8]}... escalated to terminal "
+                        f"({inj.state}) between P0 and P2; skipping"
+                    )
+                    return None
+
                 # Phase 1 / T8 (e) dead-parent guard (plan
-                # ``.agents/shared/planning/pause-resume-terminate-tree-fix/``).
-                # Read the parent Instance row ONCE so all three
-                # sub-shapes can consult it without re-querying. The
-                # predicate mirrors the T8 (a) enqueue seam check
+                # ``.agents/shared/planning/pause-resume-terminate-tree-fix/``)
+                # — RE-ASSERTED in P2 against the re-read row (F8.6).
+                # The predicate mirrors the T8 (a) enqueue seam check
                 # exactly (``parent is None or parent.status ==
                 # TERMINATED``). Best-effort: a missing parent row
                 # (``None``) is treated as dead-parent (the d14cbde5-
-                # class signature). The variable is bound to the
-                # enclosing ``_reconcile_deferred_report`` scope so
-                # the sub-shape (b) branches can consult it.
+                # class signature).
                 from .repositories.instance.models import InstanceStatus
                 parent_row = session.get(Instance, inj.parent_instance_id)
                 db_dead_parent = (
@@ -10937,23 +11046,10 @@ class InstanceManager:
                     or parent_row.status == InstanceStatus.TERMINATED.value
                 )
 
-                # Sub-shape (a): marker-first Site 1.
+                # Sub-shape (a): marker-first Site 1 — re-derived from
+                # the RE-READ row (a concurrent artifact creator between
+                # P0 and P2 falls through to (b)/(c) below).
                 if inj.report_message_id is None:
-                    # Fetch the child's last assistant content
-                    # (pre-Phase 2 C3 fix pattern: outside the
-                    # transaction; best-effort).
-                    #
-                    # Sync content-fetch seam — correct for the
-                    # SWEEP path (caller runs on a non-loop
-                    # ``threading.Thread``). The router path uses
-                    # :meth:`_reconcile_deferred_report_async`
-                    # which ``await``s directly (no
-                    # ``run_coroutine_threadsafe(...).result(...)``
-                    # from the loop thread → no self-block).
-                    content = self._fetch_subshape_a_content_sync(
-                        child_instance_id=child_instance_id,
-                        session=session,
-                    )
                     return self._create_subshape_a_artifacts(
                         session=session,
                         inj=inj,
@@ -11144,11 +11240,27 @@ class InstanceManager:
                 # deliver). The F2 dead-parent guard above already
                 # short-circuits on dead parents; we re-check here so
                 # the revival is bounded to alive parents only.
-                live_carrier_exists = self._has_live_process_report_carrier(
-                    message_id=report_message_id
-                )
+                # F8.3/F8.4 (db-pool-idle-txn): the carrier check ran
+                # BEFORE this scope opened (the pre-computed
+                # ``live_carrier_exists`` above) — the callee opens its
+                # OWN manager-engine session, so running it inside this
+                # held scope parks the outer backend idle-in-txn across
+                # the callee's checkout wait.
+                #
+                # STRICT CONSUMER (A1 fix, db-pool-idle-txn): the flag is
+                # consumed as ``is False`` — the check MUST have run and
+                # MUST have reported "no live carrier". ``None`` means
+                # UNKNOWN (the P0 snapshot did not reach the (c) shape,
+                # so the check never ran) and must NEVER trigger a
+                # revival: a revival would enqueue a SECOND carrier for
+                # a message that may already have a live one (duplicate
+                # delivery). Fail-safe: unknown ⇒ no revival.
+                # ``_has_live_process_report_carrier`` returns a real
+                # bool (``-> bool``; its only return is the
+                # ``... is not None`` expression) and never None, so
+                # False/True are the only non-unknown values.
                 if (
-                    not live_carrier_exists
+                    live_carrier_exists is False
                     and not db_dead_parent
                     and self._is_parent_alive(parent_row)
                 ):
@@ -11210,7 +11322,7 @@ class InstanceManager:
         self,
         *,
         child_instance_id: str,
-        session,
+        child_agent_id: str | None,
     ) -> str:
         """Sync content-fetch seam for sub-shape (a) — sweep path.
 
@@ -11228,22 +11340,39 @@ class InstanceManager:
         :meth:`_fetch_subshape_a_content_async` instead, which
         ``await``s directly on the loop.
 
+        F8.4 (db-pool-idle-txn lane, DR-26): the signature carries
+        ``child_agent_id`` — resolved by the caller in the P0
+        read-decide scope. W-1 base-parity contract:
+        ``child_agent_id=None`` means the child Instance row is
+        MISSING and the fetch is SKIPPED (the ``if child_agent_id:``
+        guard) — content stays empty, matching base's
+        ``if child_row is not None:`` shape; the ``"agent"`` fallback
+        applies only to row-present/agent_id-NULL. The bridge's call
+        shape and its 8.0 s
+        timeout are PRESERVED; only its POSITION changed — the
+        helper is invoked from the reconcile's P1 phase, OUTSIDE
+        any held manager-engine session scope (the P0 scope is
+        closed before this runs). Callers MUST NOT invoke this
+        from inside a manager-engine session scope (F8-a).
+
         POST-DEEP-REVIEW (W3, 2026-08-20): timeout aligned with
         the sweep ``stop()`` thread-join budget. The prior 15s
         timeout could orphan the daemon thread on shutdown — the
         join would expire mid-.result(). 8s leaves a 2s headroom
         for the join; a content fetch that exceeds the budget
-        falls back to ``"[No response content]"`` and the row
-        is re-tried next cycle.
+        falls back to ``"[No response content]"`` and the row is
+        DELIVERED with it (base-parity degraded delivery — nothing
+        re-fetches the content later).
 
         Returns:
-            The child's last assistant content, or
-            ``"[No response content]"`` on missing/empty/failure.
+            The child's last assistant content, ``""`` when the child
+            Instance row is MISSING (the fetch is skipped — the W-1
+            base-parity contract above), or
+            ``"[No response content]"`` on an empty/failed fetch.
         """
         content = ""
         try:
-            child_row = session.get(Instance, child_instance_id)
-            if child_row is not None:
+            if child_agent_id:
                 from .services.child_reports import (
                     ChildReportsService,
                 )
@@ -11255,7 +11384,7 @@ class InstanceManager:
                     ChildReportsService._get_last_assistant_message(
                         self._child_reports_service,
                         child_instance_id,
-                        child_row.agent_id or "agent",
+                        child_agent_id,
                     ),
                     loop,
                 ).result(timeout=8.0) or "[No response content]"
@@ -11272,7 +11401,7 @@ class InstanceManager:
         self,
         *,
         child_instance_id: str,
-        session,
+        child_agent_id: str | None,
     ) -> str:
         """Async content-fetch seam for sub-shape (a) — router path.
 
@@ -11288,14 +11417,28 @@ class InstanceManager:
         :meth:`_fetch_subshape_a_content_sync` from a worker /
         daemon thread instead.
 
+        F8.2 (db-pool-idle-txn lane): the signature carries
+        ``child_agent_id`` — resolved by the caller in the P0
+        read-decide scope — and this helper performs the fetch
+        with **NO manager-engine session open anywhere** (the
+        W-1 base-parity contract: ``child_agent_id=None`` means the
+        child Instance row is MISSING and the fetch is SKIPPED
+        (the ``if child_agent_id:`` guard) — content stays empty,
+        matching base's ``if child_row is not None:`` shape;
+        checkpoint read rides the P2 saver pool; the caller's
+        manager-engine scope is closed before this runs and only
+        re-opens for the P2 write). Callers MUST NOT invoke this
+        from inside a manager-engine session scope (F8-a).
+
         Returns:
-            The child's last assistant content, or
-            ``"[No response content]"`` on missing/empty/failure.
+            The child's last assistant content, ``""`` when the child
+            Instance row is MISSING (the fetch is skipped — the W-1
+            base-parity contract above), or
+            ``"[No response content]"`` on an empty/failed fetch.
         """
         content = ""
         try:
-            child_row = session.get(Instance, child_instance_id)
-            if child_row is not None:
+            if child_agent_id:
                 from .services.child_reports import (
                     ChildReportsService,
                 )
@@ -11303,7 +11446,7 @@ class InstanceManager:
                     await ChildReportsService._get_last_assistant_message(
                         self._child_reports_service,
                         child_instance_id,
-                        child_row.agent_id or "agent",
+                        child_agent_id,
                     )
                 ) or "[No response content]"
         except Exception as exc:
@@ -11522,11 +11665,20 @@ class InstanceManager:
 
         Used by the ROUTER path
         (:meth:`_handle_recover_deferred_report_async`) which
-        runs ON the manager's event loop. Sub-shape (a) fetches
-        content via :meth:`_fetch_subshape_a_content_async`
-        (direct ``await``, no cross-thread bridge). Sub-shapes
-        (b) + (c) are unchanged from the sync variant — both
-        shapes only do synchronous DB writes, no async helpers.
+        runs ON the manager's event loop.
+
+        db-pool-idle-txn F8 (D-33): the body is a P0/P1/P2 scope
+        split — NO manager-engine transaction is open across any
+        ``await``. P0 (read-decide) reads the injection row, the
+        child's agent_id and the sub-shape decision, then CLOSES;
+        the sub-shape (c) carrier check (F8.3) and the sub-shape
+        (a) content fetch via :meth:`_fetch_subshape_a_content_async`
+        (direct ``await``, no cross-thread bridge) run with NO
+        manager-engine session held; P2 (write) re-opens the scope,
+        RE-READS the injection row (F8.7), RE-ASSERTS the terminal +
+        dead-parent guards against the fresh row (F8.6), and writes
+        in ONE transaction. Sub-shape (b)/(c) reads live entirely
+        inside P2 — synchronous DB writes only.
 
         Artifact creation is shared with the sync variant via
         :meth:`_create_subshape_a_artifacts` so router and
@@ -11549,8 +11701,23 @@ class InstanceManager:
         )
         from .repositories.task.models import Task, TaskStatus, TaskType
 
+        # ── db-pool-idle-txn F8 (D-33): P0/P1/P2 scope split ──────────────
+        # No manager-engine transaction may be open across an ``await``.
+        # P0 reads everything the await-bearing phases need and CLOSES;
+        # the awaits (carrier check, content fetch) run with no
+        # manager-engine session held; P2 re-opens the scope, RE-READS
+        # the injection row and RE-ASSERTS both guards against the
+        # fresh row (a concurrent escalation between P0 and P2 must
+        # not produce double delivery), then writes in ONE transaction.
+        # W-2 (code-review council): ``_write_guard`` is held ONCE
+        # around the whole body (P0+P1+P2) — base parity; base held it
+        # once, so a ``pause_writes()`` arriving mid-reconcile could
+        # never raise here. The SESSIONS stay split (the transaction
+        # split is F8's requirement, not the guard split): no
+        # manager-engine transaction is open across any await.
         with self._write_guard:
             with self._session_scope() as session:
+                # ── P0: read-decide scope ──
                 inj = session.get(ReportInjection, injection_id)
                 if inj is None:
                     logger.info(
@@ -11574,38 +11741,139 @@ class InstanceManager:
                     )
                     return None
 
-                # F2 fix: dead-parent guard in the ASYNC variant.
-                # The sync ``_reconcile_deferred_report`` reads the
-                # parent Instance row ONCE and consults
-                # ``db_dead_parent`` to short-circuit sub-shape (b)/(c)
-                # into the ``dead_parent_skip`` shape instead of
-                # recreating PENDING artefacts. Pre-F2, the async
-                # variant recreated ``MessageStatus.READY`` message
-                # rows + INSERTed PENDING ``process_report`` Tasks
-                # unconditionally — a dead parent reached via the
-                # router re-created the permanently-unclaimable
-                # PENDING row (the B4-tail livelock class, exactly).
-                # Read the parent row HERE so the sub-shape (b) and
-                # (c) branches below can consult it; the predicate
-                # mirrors the sync sibling + the T8 (a) enqueue seam
-                # exactly (``parent is None or parent.status ==
-                # TERMINATED``).
-                from .repositories.instance.models import Instance, InstanceStatus
+                from .repositories.instance.models import Instance
+                child_row = session.get(Instance, child_instance_id)
+                child_row_missing = child_row is None
+                child_agent_id = (
+                    None if child_row_missing else child_row.agent_id
+                )
+                # W-1 (code-review council): a MISSING child Instance row
+                # skips the content fetch (base parity — the helpers did
+                # ``if child_row is not None:``); the ``"agent"``
+                # fallback applies ONLY to row-present/agent_id-NULL.
+                fetch_agent_id: str | None = (
+                    None if child_row_missing else (child_agent_id or "agent")
+                )
+                # Sub-shape decision: (a) needs the P1 content fetch;
+                # (c) needs the pre-scope carrier check — gated on the
+                # P0-observed (c)-reachability (message AND task both
+                # present), mirroring the original in-scope call
+                # conditions exactly so (b)-shape reconciles do not
+                # pay a needless second session checkout.
+                needs_content_fetch = inj.report_message_id is None
+                report_message_id_pre = (
+                    None if needs_content_fetch else inj.report_message_id
+                )
+                carrier_check_needed = False
+                if report_message_id_pre is not None:
+                    _task_pre = session.exec(
+                        select(Task)
+                        .where(Task.message_id == report_message_id_pre)
+                    ).first()
+                    _msg_pre = session.exec(
+                        select(MessageQueue)
+                        .where(MessageQueue.message_id == report_message_id_pre)
+                    ).first()
+                    carrier_check_needed = (
+                        _task_pre is not None and _msg_pre is not None
+                    )
+
+            # ── F8.6a / DR-10 — TEST-ONLY P0→P2 seam hook ────────────────────
+            # Never set on any production path; the F8-c pin installs it to
+            # flip the injection row to a terminal state at the exact race
+            # point (after P0's scope closed, before P2's scope opens) and
+            # assert NO artefacts are created.
+            seam_hook = getattr(self, "_f8_p0_p2_seam_hook", None)
+            if seam_hook is not None:  # pragma: no cover — test-only seam
+                seam_hook(injection_id)
+
+            # ── F8.3 / F8.4 — carrier check OUTSIDE any held manager-engine scope ──
+            # The callee opens its OWN manager-engine session
+            # (``_has_live_process_report_carrier``); called inside the
+            # held scope its checkout wait (bounded by pool_timeout=30 s)
+            # would park the outer backend idle-in-txn. Computed BEFORE
+            # the P2 scope opens; keyed on the P0-observed
+            # report_message_id (write-once per row lifecycle).
+            live_carrier_exists: bool | None = None
+            if carrier_check_needed:
+                live_carrier_exists = await asyncio.to_thread(
+                    self._has_live_process_report_carrier,
+                    message_id=report_message_id_pre,
+                )
+
+            # ── P1: content fetch — NO manager-engine transaction open ───────
+            content = "[No response content]"
+            if needs_content_fetch:
+                # Await directly — do NOT use
+                # ``run_coroutine_threadsafe(...).result(...)``
+                # from the loop thread (would self-block). F8-e: the fetch
+                # is BOUNDED (asyncio.wait_for) — the async twin's hold
+                # must never be unbounded (the sync twin's bound is the
+                # same 8.0 s, the sweep ``stop()`` join budget — W3). A
+                # budget-exceeding fetch degrades to the fallback content
+                # and the row is DELIVERED with it (base-parity degraded
+                # delivery — nothing re-fetches the content later).
+                try:
+                    content = await asyncio.wait_for(
+                        self._fetch_subshape_a_content_async(
+                            child_instance_id=child_instance_id,
+                            child_agent_id=fetch_agent_id,
+                        ),
+                        timeout=8.0,
+                    )
+                except TimeoutError:
+                    logger.warning(
+                        f"reconcile: async content fetch exceeded the 8.0s "
+                        f"budget child={child_instance_id[:8]}... — using "
+                        f"fallback content"
+                    )
+                    content = "[No response content]"
+
+            with self._session_scope() as session:
+                # ── P2: write scope ──
+                # F8.7 — RE-READ ``inj``: the P0 row is detached after
+                # the P0 scope closed; the write path must use a fresh
+                # row.
+                inj = session.get(ReportInjection, injection_id)
+                if inj is None:
+                    logger.info(
+                        f"[{source}] reconcile: injection row "
+                        f"{injection_id[:8]}... gone at P2 "
+                        f"(concurrent delete?); skipping"
+                    )
+                    return None
+
+                # F8.6 — RE-ASSERT the terminal guard against the
+                # RE-READ row. The P0 snapshot is exactly the
+                # double-delivery trap: a concurrent escalation between
+                # P0's close and P2's open must be caught HERE.
+                if inj.state in (
+                    ReportInjectionState.INJECTED.value,
+                    ReportInjectionState.TASK_DELIVERED.value,
+                ):
+                    logger.info(
+                        f"[{source}] reconcile: injection "
+                        f"{injection_id[:8]}... escalated to terminal "
+                        f"({inj.state}) between P0 and P2; skipping"
+                    )
+                    return None
+
+                # F2 fix: dead-parent guard in the ASYNC variant —
+                # RE-ASSERTED in P2 against the re-read row (F8.6).
+                # The predicate mirrors the sync sibling + the T8 (a)
+                # enqueue seam exactly (``parent is None or
+                # parent.status == TERMINATED``).
+                from .repositories.instance.models import InstanceStatus
                 parent_row = session.get(Instance, inj.parent_instance_id)
                 db_dead_parent = (
                     parent_row is None
                     or parent_row.status == InstanceStatus.TERMINATED.value
                 )
 
-                # Sub-shape (a): marker-first Site 1.
+                # Sub-shape (a): marker-first Site 1 — re-derived from
+                # the RE-READ row (a concurrent artifact creator between
+                # P0 and P2 falls through to (b)/(c) below).
                 if inj.report_message_id is None:
-                    # Await directly — do NOT use
-                    # ``run_coroutine_threadsafe(...).result(...)``
-                    # from the loop thread (would self-block).
-                    content = await self._fetch_subshape_a_content_async(
-                        child_instance_id=child_instance_id,
-                        session=session,
-                    )
                     return self._create_subshape_a_artifacts(
                         session=session,
                         inj=inj,
@@ -11782,18 +12050,40 @@ class InstanceManager:
 
                 # Sub-shape (c) — both exist. Normally the natural
                 # path delivers; HOWEVER this is also the wedge-fix
-                # carrier-revival seam (async variant — see sync
-                # sibling for the full rationale). The async path
-                # off-loads the live-carrier query to a thread so we
-                # do not block the event loop on a session-bound
-                # SQLModelSession (``list_pending_tasks_older_than``
-                # and friends use the same off-load pattern).
-                live_carrier_exists = await asyncio.to_thread(
-                    self._has_live_process_report_carrier,
-                    message_id=report_message_id,
-                )
+                # carrier-revival seam. When the existing process_report
+                # Task has been CANCELLED (e.g. by a pre-fix Pattern (d)
+                # false-positive) and the parent is alive in
+                # ``WAITING_CHILDREN``, the message sits READY in the
+                # queue with no carrier to deliver it — the parent
+                # never wakes. Detect this sub-shape (c) wedge and
+                # enqueue a fresh carrier + ``notify_work()``.
+                # Idempotent: if any live (PENDING/RUNNING) carrier
+                # already exists for the message, the wedge is NOT
+                # active — skip silently (the existing carrier will
+                # deliver). The F2 dead-parent guard above already
+                # short-circuits on dead parents; we re-check here so
+                # the revival is bounded to alive parents only.
+                # F8.3/F8.4 (db-pool-idle-txn): the carrier check ran
+                # BEFORE this scope opened (the pre-computed
+                # ``live_carrier_exists`` above) — the callee opens its
+                # OWN manager-engine session, so running it inside this
+                # held scope parks the outer backend idle-in-txn across
+                # the callee's checkout wait.
+                #
+                # STRICT CONSUMER (A1 fix, db-pool-idle-txn): the flag is
+                # consumed as ``is False`` — the check MUST have run and
+                # MUST have reported "no live carrier". ``None`` means
+                # UNKNOWN (the P0 snapshot did not reach the (c) shape,
+                # so the check never ran) and must NEVER trigger a
+                # revival: a revival would enqueue a SECOND carrier for
+                # a message that may already have a live one (duplicate
+                # delivery). Fail-safe: unknown ⇒ no revival.
+                # ``_has_live_process_report_carrier`` returns a real
+                # bool (``-> bool``; its only return is the
+                # ``... is not None`` expression) and never None, so
+                # False/True are the only non-unknown values.
                 if (
-                    not live_carrier_exists
+                    live_carrier_exists is False
                     and not db_dead_parent
                     and self._is_parent_alive(parent_row)
                 ):

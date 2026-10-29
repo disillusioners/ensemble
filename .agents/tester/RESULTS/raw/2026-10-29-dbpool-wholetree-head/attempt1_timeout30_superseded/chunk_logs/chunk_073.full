@@ -1,0 +1,10 @@
+........................................................................ [ 18%]
+........................................................................ [ 36%]
+........................................................................ [ 54%]
+........................................................................ [ 72%]
+.................................................F...................... [ 90%]
+..F.....................................                                 [100%]
+=========================== short test summary info ============================
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_no_bare_md_filename_tokens_in_prompts[workflow.md11]
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_no_bare_md_filename_tokens_in_prompts[workflow.md17]
+2 failed, 398 passed in 2.10s

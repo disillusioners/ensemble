@@ -1,0 +1,13 @@
+...F........................F........................................... [ 18%]
+........................................................................ [ 36%]
+................................................F......................F [ 54%]
+F....................................................................... [ 72%]
+........................................................................ [ 90%]
+........................................                                 [100%]
+=========================== short test summary info ============================
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_no_bare_md_filename_tokens_in_prompts[workflow.md11]
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_no_bare_md_filename_tokens_in_prompts[workflow.md17]
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_no_bare_md_filename_tokens_in_prompts[install-mermaid-cli.md]
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_odd_fence_count_fails[rule.md3]
+FAILED tests/unit/tools/test_prompt_section_reference_integrity.py::test_odd_fence_count_fails[workflow.md3]
+5 failed, 395 passed in 3.59s

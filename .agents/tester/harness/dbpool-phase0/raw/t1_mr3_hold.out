@@ -1,0 +1,397 @@
+
+===== T1 L4b GENUINE OVER-SUBSCRIPTION (15-slot pool, pool_timeout=3s) =====
+{
+  "holders_created": 15,
+  "pool_slots": 15,
+  "holder_creation_error": "TimeoutError: QueuePool limit of size 5 overflow 10 reached, connection timed out, timeout 3.00 (Background on this error at: https://sqlalche.me/e/20/3o7r)",
+  "mr3_borrow_error": "TimeoutError: QueuePool limit of size 5 overflow 10 reached, connection timed out, timeout 3.00 (Background on this error at: https://sqlalche.me/e/20/3o7r)",
+  "mr3_borrow_wait_ms": 3001.116,
+  "record": {},
+  "note": "the M-R3 borrow is the 16th; the 30s (base) / 3s (this regime) pool_timeout bounds the wait"
+}
+
+===== T1 L6 SYNC TWIN (session scope held across the 8s bridge) =====
+{
+  "pid": 2325214,
+  "checkedout_before_bridge": 1,
+  "bridge_exception": "TimeoutError",
+  "bridge_ms": 8000.32,
+  "pg_state_during_bridge": "idle in transaction",
+  "pg_last_query_during_bridge": "SELECT instance_id, project_id, agent_id, status FROM phase0_instances WHERE instance_id = $1",
+  "checkedout_during_bridge": 1,
+  "hold_total_ms": 8011.119
+}
+
+===== T1 M-R3 HOLD DISTRIBUTION (all durations in ms) =====
+[
+  {
+    "regime": "L0 no-load",
+    "iters": 30,
+    "hold_total_ms": {
+      "n": 30,
+      "min_ms": 5.929,
+      "median_ms": 7.121,
+      "p95_ms": 8.475,
+      "max_ms": 21.654,
+      "mean_ms": 7.727
+    },
+    "await_ms": {
+      "n": 30,
+      "min_ms": 2.134,
+      "median_ms": 2.692,
+      "p95_ms": 3.713,
+      "max_ms": 7.95,
+      "mean_ms": 3.002
+    },
+    "iteration_wall_ms": {
+      "n": 30,
+      "min_ms": 5.977,
+      "median_ms": 7.158,
+      "p95_ms": 8.51,
+      "max_ms": 165.881,
+      "mean_ms": 12.57
+    },
+    "loop_scheduling_delay_ms": {
+      "n": 0
+    },
+    "pg_state_during_await_counts": {
+      "idle in transaction": 30
+    },
+    "same_conn_across_suspension_all": true,
+    "in_transaction_after_await_all": true,
+    "peak_engine_pool_checkedout": 1
+  },
+  {
+    "regime": "L1 pool-pressure(8)",
+    "iters": 30,
+    "hold_total_ms": {
+      "n": 30,
+      "min_ms": 36.123,
+      "median_ms": 46.471,
+      "p95_ms": 49.977,
+      "max_ms": 55.307,
+      "mean_ms": 46.433
+    },
+    "await_ms": {
+      "n": 30,
+      "min_ms": 2.976,
+      "median_ms": 3.686,
+      "p95_ms": 4.171,
+      "max_ms": 4.806,
+      "mean_ms": 3.7
+    },
+    "iteration_wall_ms": {
+      "n": 30,
+      "min_ms": 36.156,
+      "median_ms": 46.52,
+      "p95_ms": 50.026,
+      "max_ms": 55.356,
+      "mean_ms": 46.482
+    },
+    "loop_scheduling_delay_ms": {
+      "n": 0
+    },
+    "pg_state_during_await_counts": {
+      "idle in transaction": 30
+    },
+    "same_conn_across_suspension_all": true,
+    "in_transaction_after_await_all": true,
+    "peak_engine_pool_checkedout": 9
+  },
+  {
+    "regime": "L2 loop-peg(chunk=20000)",
+    "iters": 30,
+    "hold_total_ms": {
+      "n": 30,
+      "min_ms": 26.225,
+      "median_ms": 52.385,
+      "p95_ms": 61.927,
+      "max_ms": 73.601,
+      "mean_ms": 42.766
+    },
+    "await_ms": {
+      "n": 30,
+      "min_ms": 23.418,
+      "median_ms": 47.693,
+      "p95_ms": 57.148,
+      "max_ms": 68.094,
+      "mean_ms": 38.563
+    },
+    "iteration_wall_ms": {
+      "n": 30,
+      "min_ms": 26.244,
+      "median_ms": 52.426,
+      "p95_ms": 61.989,
+      "max_ms": 73.674,
+      "mean_ms": 42.805
+    },
+    "loop_scheduling_delay_ms": {
+      "n": 269,
+      "min_ms": 2.49,
+      "median_ms": 5.123,
+      "p95_ms": 10.572,
+      "max_ms": 14.26,
+      "mean_ms": 4.732
+    },
+    "pg_state_during_await_counts": {
+      "idle in transaction": 30
+    },
+    "same_conn_across_suspension_all": true,
+    "in_transaction_after_await_all": true,
+    "peak_engine_pool_checkedout": 1
+  },
+  {
+    "regime": "L3 pressure(8)+loop-peg",
+    "iters": 30,
+    "hold_total_ms": {
+      "n": 30,
+      "min_ms": 55.233,
+      "median_ms": 78.846,
+      "p95_ms": 100.525,
+      "max_ms": 114.502,
+      "mean_ms": 79.735
+    },
+    "await_ms": {
+      "n": 30,
+      "min_ms": 28.379,
+      "median_ms": 40.657,
+      "p95_ms": 53.847,
+      "max_ms": 67.851,
+      "mean_ms": 41.878
+    },
+    "iteration_wall_ms": {
+      "n": 30,
+      "min_ms": 55.27,
+      "median_ms": 78.888,
+      "p95_ms": 100.575,
+      "max_ms": 114.554,
+      "mean_ms": 79.782
+    },
+    "loop_scheduling_delay_ms": {
+      "n": 2251,
+      "min_ms": 2.471,
+      "median_ms": 3.998,
+      "p95_ms": 7.335,
+      "max_ms": 153.138,
+      "mean_ms": 5.623
+    },
+    "pg_state_during_await_counts": {
+      "idle in transaction": 30
+    },
+    "same_conn_across_suspension_all": true,
+    "in_transaction_after_await_all": true,
+    "peak_engine_pool_checkedout": 9
+  },
+  {
+    "regime": "L4 pool OVER-subscribed(20) [pool_timeout=3s]",
+    "iters": 4,
+    "hold_total_ms": {
+      "n": 4,
+      "min_ms": 10.275,
+      "median_ms": 11.22,
+      "p95_ms": 12.502,
+      "max_ms": 12.502,
+      "mean_ms": 11.304
+    },
+    "await_ms": {
+      "n": 4,
+      "min_ms": 3.577,
+      "median_ms": 3.782,
+      "p95_ms": 4.018,
+      "max_ms": 4.018,
+      "mean_ms": 3.789
+    },
+    "iteration_wall_ms": {
+      "n": 4,
+      "min_ms": 10.36,
+      "median_ms": 11.272,
+      "p95_ms": 12.559,
+      "max_ms": 12.559,
+      "mean_ms": 11.366
+    },
+    "loop_scheduling_delay_ms": {
+      "n": 0
+    },
+    "pg_state_during_await_counts": {
+      "idle in transaction": 4
+    },
+    "same_conn_across_suspension_all": true,
+    "in_transaction_after_await_all": true,
+    "peak_engine_pool_checkedout": 1
+  },
+  {
+    "regime": "L5 loop-peg + 1.0s fetch tail",
+    "iters": 15,
+    "hold_total_ms": {
+      "n": 15,
+      "min_ms": 1027.955,
+      "median_ms": 1029.887,
+      "p95_ms": 1033.342,
+      "max_ms": 1059.877,
+      "mean_ms": 1032.257
+    },
+    "await_ms": {
+      "n": 15,
+      "min_ms": 1024.659,
+      "median_ms": 1026.527,
+      "p95_ms": 1029.802,
+      "max_ms": 1055.757,
+      "mean_ms": 1028.763
+    },
+    "iteration_wall_ms": {
+      "n": 15,
+      "min_ms": 1027.981,
+      "median_ms": 1029.913,
+      "p95_ms": 1033.37,
+      "max_ms": 1059.903,
+      "mean_ms": 1032.285
+    },
+    "loop_scheduling_delay_ms": {
+      "n": 7009,
+      "min_ms": 1.908,
+      "median_ms": 2.087,
+      "p95_ms": 2.569,
+      "max_ms": 7.111,
+      "mean_ms": 2.207
+    },
+    "pg_state_during_await_counts": {
+      "idle in transaction": 15
+    },
+    "same_conn_across_suspension_all": true,
+    "in_transaction_after_await_all": true,
+    "peak_engine_pool_checkedout": 1
+  },
+  {
+    "regime": "L4b over-subscribed(16th borrow)",
+    "iters": 1,
+    "hold_total_ms": {
+      "n": 1,
+      "min_ms": 0.0,
+      "median_ms": 0.0,
+      "p95_ms": 0.0,
+      "max_ms": 0.0,
+      "mean_ms": 0.0
+    },
+    "await_ms": {
+      "n": 1,
+      "min_ms": 0.0,
+      "median_ms": 0.0,
+      "p95_ms": 0.0,
+      "max_ms": 0.0,
+      "mean_ms": 0.0
+    },
+    "iteration_wall_ms": {
+      "n": 1,
+      "min_ms": 3001.497,
+      "median_ms": 3001.497,
+      "p95_ms": 3001.497,
+      "max_ms": 3001.497,
+      "mean_ms": 3001.497
+    },
+    "loop_scheduling_delay_ms": {
+      "n": 0
+    },
+    "pg_state_during_await_counts": {
+      "null": 1
+    },
+    "same_conn_across_suspension_all": false,
+    "in_transaction_after_await_all": false,
+    "peak_engine_pool_checkedout": 0,
+    "borrow_error": "TimeoutError: QueuePool limit of size 5 overflow 10 reached, connection timed out, timeout 3.00 (Background on this error at: https://sqlalche.me/e/20/3o7r)"
+  },
+  {
+    "regime": "L6 sync-twin(8s bridge, inner never completes)",
+    "iters": 1,
+    "hold_total_ms": {
+      "n": 1,
+      "min_ms": 8011.119,
+      "median_ms": 8011.119,
+      "p95_ms": 8011.119,
+      "max_ms": 8011.119,
+      "mean_ms": 8011.119
+    },
+    "await_ms": {
+      "n": 1,
+      "min_ms": 8000.32,
+      "median_ms": 8000.32,
+      "p95_ms": 8000.32,
+      "max_ms": 8000.32,
+      "mean_ms": 8000.32
+    },
+    "iteration_wall_ms": {
+      "n": 1,
+      "min_ms": 8011.119,
+      "median_ms": 8011.119,
+      "p95_ms": 8011.119,
+      "max_ms": 8011.119,
+      "mean_ms": 8011.119
+    },
+    "loop_scheduling_delay_ms": {
+      "n": 0
+    },
+    "pg_state_during_await_counts": {
+      "idle in transaction": 1
+    },
+    "same_conn_across_suspension_all": true,
+    "in_transaction_after_await_all": true,
+    "peak_engine_pool_checkedout": 1
+  }
+]
+
+===== T1 FLIP CONDITION (hold < 2s) =====
+{
+  "flip_condition": "NOT MET",
+  "flip_condition_text": "hold < 2000ms  -> CONDITION NOT MET (F8 stands)",
+  "worst_max_hold_ms": 8011.119,
+  "no_load_median_hold_ms": 7.121,
+  "per_regime": {
+    "L0 no-load": {
+      "median_hold_ms": 7.121,
+      "max_hold_ms": 21.654,
+      "median_await_ms": 2.692,
+      "median_loop_delay_ms": null
+    },
+    "L1 pool-pressure(8)": {
+      "median_hold_ms": 46.471,
+      "max_hold_ms": 55.307,
+      "median_await_ms": 3.686,
+      "median_loop_delay_ms": null
+    },
+    "L2 loop-peg(chunk=20000)": {
+      "median_hold_ms": 52.385,
+      "max_hold_ms": 73.601,
+      "median_await_ms": 47.693,
+      "median_loop_delay_ms": 5.123
+    },
+    "L3 pressure(8)+loop-peg": {
+      "median_hold_ms": 78.846,
+      "max_hold_ms": 114.502,
+      "median_await_ms": 40.657,
+      "median_loop_delay_ms": 3.998
+    },
+    "L4 pool OVER-subscribed(20) [pool_timeout=3s]": {
+      "median_hold_ms": 11.22,
+      "max_hold_ms": 12.502,
+      "median_await_ms": 3.782,
+      "median_loop_delay_ms": null
+    },
+    "L5 loop-peg + 1.0s fetch tail": {
+      "median_hold_ms": 1029.887,
+      "max_hold_ms": 1059.877,
+      "median_await_ms": 1026.527,
+      "median_loop_delay_ms": 2.087
+    },
+    "L4b over-subscribed(16th borrow)": {
+      "median_hold_ms": 0.0,
+      "max_hold_ms": 0.0,
+      "median_await_ms": 0.0,
+      "median_loop_delay_ms": null
+    },
+    "L6 sync-twin(8s bridge, inner never completes)": {
+      "median_hold_ms": 8011.119,
+      "max_hold_ms": 8011.119,
+      "median_await_ms": 8000.32,
+      "median_loop_delay_ms": null
+    }
+  }
+}
