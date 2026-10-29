@@ -167,7 +167,12 @@ def _build_pg_connection_string(config: EnsembleConfig) -> str:
     return f"postgresql://{quote_plus(user)}:{quote_plus(password)}@{host}:{port}/{db}"
 
 
-async def create_postgres_checkpointer(config: EnsembleConfig) -> CheckpointerAdapter:
+async def create_postgres_checkpointer(
+    config: EnsembleConfig,
+    *,
+    checkpoint_pool_max_size: int = CHECKPOINT_POOL_MAX_SIZE_DEFAULT,
+    checkpoint_pool_timeout_s: float = CHECKPOINT_POOL_TIMEOUT_S_DEFAULT,
+) -> CheckpointerAdapter:
     """Create a PostgreSQL-backed CheckpointerAdapter.
 
     This function performs LAZY imports of the optional PostgreSQL dependencies
@@ -195,6 +200,16 @@ async def create_postgres_checkpointer(config: EnsembleConfig) -> CheckpointerAd
     Args:
         config: Ensemble configuration containing ``postgres`` connection
                 details. Env vars override file values for credential rotation.
+        checkpoint_pool_max_size: The psycopg saver-pool ``max_size`` (and
+                the adapter asyncpg pool's ``max_size``). Keyword-only,
+                default = ``CHECKPOINT_POOL_MAX_SIZE_DEFAULT``. Resolved by
+                the BOOT CALLER (``InstanceManager.initialize``) from the
+                full YAML ``Config.limits`` — see the sizing block below
+                for why this function does not read ``limits`` itself.
+        checkpoint_pool_timeout_s: The psycopg saver-pool acquisition
+                ``timeout`` in seconds. Keyword-only, default =
+                ``CHECKPOINT_POOL_TIMEOUT_S_DEFAULT``. Same boot-caller
+                resolution as ``checkpoint_pool_max_size``.
 
     Returns:
         A ``PostgresCheckpointerAdapter`` ready to be used by LangGraph and
@@ -232,32 +247,37 @@ async def create_postgres_checkpointer(config: EnsembleConfig) -> CheckpointerAd
         f"{config.postgres.port}/{config.postgres.db}"
     )
 
-    # ── Checkpoint pool sizing knobs (soak-gate-mcp-warmup, A4) ────────
-    # Resolved ONCE here from the already-loaded ``EnsembleConfig`` (the
-    # 4-tier ladder — DB > env > yaml > default — is applied by the
-    # settings resolver before this point). Read defensively so a config
-    # object built without the ``limits`` section still yields the
-    # documented default tier instead of raising at pool construction.
-    limits_cfg = getattr(config, "limits", None)
-    checkpoint_pool_max_size = int(
-        getattr(
-            limits_cfg,
-            "checkpoint_pool_max_size",
-            CHECKPOINT_POOL_MAX_SIZE_DEFAULT,
-        )
-    )
-    checkpoint_pool_timeout_s = float(
-        getattr(
-            limits_cfg,
-            "checkpoint_pool_timeout_s",
-            CHECKPOINT_POOL_TIMEOUT_S_DEFAULT,
-        )
-    )
+    # ── Checkpoint pool sizing knobs (soak-gate-mcp-warmup, A4; plan
+    # Track-1 item 5 — severed-knob repair, D5) ─────────────────────────
+    # The knobs arrive as EXPLICIT keyword-only kwargs resolved by the
+    # boot caller (``InstanceManager.initialize``) from the FULL YAML
+    # ``Config.limits`` — the boot-applied carrier of the 4-tier ladder
+    # (DB > env > yaml > default). This function deliberately does NOT
+    # read ``limits`` off ``config``: ``EnsembleConfig`` (this function's
+    # argument) has NO ``limits`` field, so the former
+    # ``getattr(config, "limits", None)`` read here was SEVERED (plan D5)
+    # — every tier silently degraded to the defaults below. Same explicit
+    # threading shape as the manager engine pool
+    # (``manager.py`` → ``create_postgres_engine``, factory.py).
+    #
+    # HONESTY — which half of the knob pair matters (plan §5.1/D2): the
+    # TIMEOUT is the valuable half. The saver's single ``asyncio.Lock``
+    # (langgraph ``aio.py:59``) is acquired BEFORE pool checkout and held
+    # across the whole cursor block, so checkpoint I/O is serialized to
+    # concurrency=1 regardless of ``max_size`` — a larger pool buys
+    # ~nothing under this saver; what the timeout buys is a fail-fast
+    # checkout under incident load instead of the psycopg 30 s library
+    # default (the ghost-waiter lifetime of an abandoned readiness
+    # probe).
     logger.info(
-        "Checkpoint pool sizing: max_size=%s timeout_s=%s "
-        "(limits.checkpoint_pool_max_size / limits.checkpoint_pool_timeout_s)",
+        "Checkpoint pool sizing applied: max_size=%s timeout_s=%s "
+        "(explicit kwargs; boot caller resolves "
+        "limits.checkpoint_pool_max_size / limits.checkpoint_pool_timeout_s "
+        "from the YAML Config; default tier %s/%s)",
         checkpoint_pool_max_size,
         checkpoint_pool_timeout_s,
+        CHECKPOINT_POOL_MAX_SIZE_DEFAULT,
+        CHECKPOINT_POOL_TIMEOUT_S_DEFAULT,
     )
 
     # Both the saver (psycopg) and the adapter's asyncpg pool are long-lived
@@ -423,7 +443,12 @@ async def create_postgres_checkpointer(config: EnsembleConfig) -> CheckpointerAd
 # ── Public Factory ───────────────────────────────────────────────────────────
 
 
-async def get_checkpointer(config: EnsembleConfig) -> CheckpointerAdapter:
+async def get_checkpointer(
+    config: EnsembleConfig,
+    *,
+    checkpoint_pool_max_size: int = CHECKPOINT_POOL_MAX_SIZE_DEFAULT,
+    checkpoint_pool_timeout_s: float = CHECKPOINT_POOL_TIMEOUT_S_DEFAULT,
+) -> CheckpointerAdapter:
     """Create a checkpointer adapter for the configured database backend.
 
     Dispatches to the appropriate backend based on ``config.database``:
@@ -448,6 +473,15 @@ async def get_checkpointer(config: EnsembleConfig) -> CheckpointerAdapter:
         config: Loaded ``EnsembleConfig`` selecting the database backend.
                 When ``config.is_postgres`` is True the PostgreSQL path is
                 used; otherwise the SQLite path is used.
+        checkpoint_pool_max_size: Keyword-only passthrough to
+                ``create_postgres_checkpointer`` (default =
+                ``CHECKPOINT_POOL_MAX_SIZE_DEFAULT``). The boot caller
+                (``InstanceManager.initialize``) resolves it from the full
+                YAML ``Config.limits``.
+        checkpoint_pool_timeout_s: Keyword-only passthrough to
+                ``create_postgres_checkpointer`` (default =
+                ``CHECKPOINT_POOL_TIMEOUT_S_DEFAULT``). Same boot-caller
+                resolution.
 
     Returns:
         A ``CheckpointerAdapter`` (concrete type depends on the backend).
@@ -457,7 +491,11 @@ async def get_checkpointer(config: EnsembleConfig) -> CheckpointerAdapter:
                      PostgreSQL dependencies are not installed.
     """
     if config.is_postgres:
-        return await create_postgres_checkpointer(config)
+        return await create_postgres_checkpointer(
+            config,
+            checkpoint_pool_max_size=checkpoint_pool_max_size,
+            checkpoint_pool_timeout_s=checkpoint_pool_timeout_s,
+        )
 
     # SQLite path — config.sqlite.checkpoints_db is the file path.
     db_path = Path(config.sqlite.checkpoints_db)

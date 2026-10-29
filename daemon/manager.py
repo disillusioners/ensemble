@@ -3632,7 +3632,23 @@ class InstanceManager:
         # is called, but fall back to a default SQLite config for safety so
         # tests calling ``manager.initialize()`` directly still work.
         if self._ensemble_config is not None:
-            self._checkpointer = await get_checkpointer(self._ensemble_config)
+            # Checkpoint-pool sizing knobs (plan Track-1 item 5 —
+            # severed-knob repair D5): thread the ladder-resolved values
+            # EXPLICITLY. The ensemble.json EnsembleConfig passed below
+            # carries NO .limits, so the checkpointer factory cannot read
+            # the knobs off it (the former getattr() read inside
+            # create_postgres_checkpointer was severed: every tier
+            # silently degraded to the default). ``self.config`` is the
+            # YAML Config whose limits were boot-applied
+            # (apply_db_settings_overrides ran before InstanceManager
+            # construction) — same read shape as the manager engine pool
+            # threading in the ctor (create_postgres_engine) and
+            # pool_orchestrator.py's worker-pool resolution.
+            self._checkpointer = await get_checkpointer(
+                self._ensemble_config,
+                checkpoint_pool_max_size=self.config.limits.checkpoint_pool_max_size,
+                checkpoint_pool_timeout_s=self.config.limits.checkpoint_pool_timeout_s,
+            )
         else:
             from daemon.ensemble_config import EnsembleConfig
             self._checkpointer = await get_checkpointer(EnsembleConfig())
