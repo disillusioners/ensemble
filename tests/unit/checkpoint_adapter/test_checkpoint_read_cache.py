@@ -895,6 +895,44 @@ class TestCountersAndCharge:
         assert charged[0][1] == miss_size
         assert charged[1][1] == miss_size  # stored size == walked size
 
+    def test_aget_hit_charges_the_aget_miss_basis_not_the_tuple_basis(
+        self, monkeypatch
+    ):
+        """Fix pass F2: the aget hit's charge basis is the CHECKPOINT
+        DICT (what an aget miss walks), NOT the stored tuple size —
+        the tuple walk (config+metadata+pending_writes) measured ~2.7×
+        the aget basis and would over-charge every aget hit."""
+        monkeypatch.setenv("CHECKPOINT_READ_CACHE_ENABLED", "1")
+        import daemon.checkpoint_adapter as ca
+        from daemon.services.resource_monitor.charge import bounded_deep_size
+
+        charged: list[int] = []
+        monkeypatch.setattr(
+            ca,
+            "note_checkpoint_read",
+            lambda instance_id, result, size=None: charged.append(size),
+        )
+        monkeypatch.setattr(ca, "_charge_enabled", lambda: True)
+        proxy, saver = _make_proxy()
+        cfg = _config()
+        # aget misses never populate (only aget_tuple does) — prime the
+        # cache first so the aget read below is a HIT.
+        asyncio.run(proxy.aget_tuple(cfg))
+        charged.clear()
+        miss_result = asyncio.run(proxy.aget(dict(cfg)))  # miss: walks checkpoint dict
+        hit_result = asyncio.run(proxy.aget(dict(cfg)))  # hit: walks projection
+
+        checkpoint_basis = bounded_deep_size(miss_result)[0]
+        stored, _size = proxy._read_cache.get("thread-1", "")
+        tuple_basis = bounded_deep_size(stored)[0]
+        # The asymmetry premise: the tuple basis IS bigger (that's the
+        # 2.7× over-charge this test pins against regressing).
+        assert tuple_basis > checkpoint_basis
+        # Miss and hit charge the SAME basis (the checkpoint dict).
+        assert charged[0] == checkpoint_basis
+        assert charged[1] == checkpoint_basis
+        assert charged[1] != tuple_basis
+
 
 # ── Readiness sentinel (plan §4.3.D + §4.1 bypass) ───────────────────────────
 

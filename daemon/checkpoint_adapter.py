@@ -714,28 +714,44 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
             kwargs: dict,
             served: Any,
             thread_id: str,
-            size: int,
+            size: Optional[int],
             t0: float,
         ) -> None:
             """One HIT: counter + structured line + CHARGE (§4.4).
 
             The payload was still materialized and decoded once (at
             PUT time), so the resource charge keeps its baseline —
-            never silently uncharged. The precomputed ``size`` is
-            handed to ``_observe_read`` so a hit does NOT re-walk the
-            payload (M-2: one walk per materialization).
+            never silently uncharged.
+
+            CHARGE-BASIS SYMMETRY (fix pass F2): ``size`` is the
+            PRE-COMPUTED size of the artifact the MISS path would have
+            walked — for ``aget_tuple`` hits that is the STORED TUPLE
+            size (an aget_tuple miss walks the fresh tuple), handed in
+            so the hit does NOT re-walk (M-2). For ``aget`` hits the
+            miss basis is the CHECKPOINT DICT, not the tuple — the
+            stored tuple size (config + metadata + pending_writes
+            included) measured ~2.7× larger; the aget call site
+            therefore passes ``size=None`` and this seam walks the
+            SERVED PROJECTION — the exact basis an aget miss charges.
+            A ``None`` return from ``_observe_read`` (charge and perf
+            both off — nobody walked) falls back to the passed size
+            for the log line only.
             """
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             _inc_cache_metric(ensemble_checkpoint_cache_hit_total, op)
+            walked = _observe_read(op, args, kwargs, served, size=size)
             try:
-                log_cache_hit(thread_id, elapsed_ms, bytes_=size)
+                log_cache_hit(
+                    thread_id,
+                    elapsed_ms,
+                    bytes_=walked if walked is not None else (size or 0),
+                )
             except Exception:  # noqa: BLE001 — fail-open observability
                 logger.warning(
                     "[CheckpointPerf] cache-hit log line failed (op=%s)",
                     op,
                     exc_info=True,
                 )
-            _observe_read(op, args, kwargs, served, size=size)
 
         async def aget(self, *args, **kwargs):
             # P2 T3 charge seam: decoded payload charged AFTER the retry
@@ -765,10 +781,15 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
                     t0 = time.perf_counter()
                     hit = self._read_cache.get(*key)
                     if hit is not None:
-                        cached, size = hit
+                        cached, _tuple_size = hit
+                        # F2 charge-basis symmetry: an aget MISS charges
+                        # the walked CHECKPOINT DICT, not the tuple — so
+                        # the hit walks the served projection (size=None)
+                        # instead of charging the stored tuple size
+                        # (~2.7× the aget basis, measured).
                         self._serve_cache_hit(
                             "aget", args, kwargs, cached.checkpoint,
-                            key[0], size, t0,
+                            key[0], None, t0,
                         )
                         return cached.checkpoint
                 _inc_cache_metric(ensemble_checkpoint_cache_miss_total, "aget")
