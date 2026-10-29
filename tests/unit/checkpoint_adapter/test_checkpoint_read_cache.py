@@ -702,6 +702,73 @@ class TestRawSqlDeleteSiteInvalidation:
         assert len(proxy._read_cache) == 0
 
 
+class TestRawSqlGhostVector:
+    """Fix pass F4: the racing re-put between the BEFORE-half invalidate
+    and the DELETE COMMIT must be cleared by the AFTER-half re-invalidate
+    — otherwise the cache holds a no-TTL ghost of deleted state."""
+
+    @pytest.mark.parametrize(
+        "drive",
+        [
+            pytest.param(
+                lambda adapter: asyncio.run(
+                    adapter.delete_checkpoints_excluding("thread-1", "", {"k"})
+                ),
+                id="delete_checkpoints_excluding",
+            ),
+            pytest.param(
+                lambda adapter: asyncio.run(
+                    adapter.delete_writes_excluding("thread-1", "", {"k"})
+                ),
+                id="delete_writes_excluding",
+            ),
+            pytest.param(
+                lambda adapter: asyncio.run(adapter.adelete_thread("thread-1")),
+                id="adapter_adelete_thread",
+            ),
+            pytest.param(
+                lambda adapter: asyncio.run(
+                    adapter.delete_blobs_anti_join("thread-1", "")
+                ),
+                id="delete_blobs_anti_join",
+            ),
+        ],
+    )
+    def test_racing_reput_during_delete_is_cleared(self, monkeypatch, drive):
+        from daemon.checkpoint_read_cache import CheckpointReadCache
+
+        monkeypatch.setenv("CHECKPOINT_READ_CACHE_ENABLED", "1")
+        adapter, proxy = _make_pg_adapter()
+
+        real_invalidate = CheckpointReadCache.invalidate
+        calls = {"n": 0}
+
+        def _spy_invalidate(cache_self, thread_id: str) -> None:
+            calls["n"] += 1
+            real_invalidate(cache_self, thread_id)
+            if calls["n"] == 1:
+                # The BEFORE-half just fired. Simulate the racing read
+                # that lands BETWEEN the invalidate and the DELETE
+                # COMMIT: it misses the (now-empty) cache, fetches the
+                # still-undeleted row, and PUTS it back.
+                cache_self.put(
+                    thread_id, "", _make_tuple(_config(thread_id)), size=10
+                )
+
+        monkeypatch.setattr(CheckpointReadCache, "invalidate", _spy_invalidate)
+
+        drive(adapter)
+
+        assert calls["n"] >= 2, (
+            f"only {calls['n']} invalidate call(s) — the AFTER-half "
+            "re-invalidate is missing (ghost vector open)"
+        )
+        assert not proxy._read_cache.thread_cached("thread-1"), (
+            "a re-put entry survived the DELETE — the cache now holds a "
+            "ghost of deleted state"
+        )
+
+
 # ── Bounds (plan §4.7) ───────────────────────────────────────────────────────
 
 

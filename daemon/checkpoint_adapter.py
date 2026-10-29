@@ -1750,12 +1750,19 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
                 checkpoint_ns,
                 list(keep_ids),
             )
-            # asyncpg.execute returns "DELETE n" where n is count
-            if result:
-                parts = result.split()
-                if len(parts) >= 2:
-                    return int(parts[1])
-            return 0
+        # Read-cache re-invalidation, seam 1/4 AFTER-half (fix pass F4):
+        # the await point between the BEFORE-half and the DELETE COMMIT
+        # lets a racing aget_tuple re-put an entry for a row this DELETE
+        # then removes — a no-TTL ghost of deleted state. Mirrors the
+        # proxy's double protection (invalidate-before + post-write
+        # emptiness): the AFTER-half closes the window.
+        invalidate_cached_reads(self._saver, [thread_id])
+        # asyncpg.execute returns "DELETE n" where n is count
+        if result:
+            parts = result.split()
+            if len(parts) >= 2:
+                return int(parts[1])
+        return 0
 
     async def delete_writes_excluding(
         self, thread_id: str, checkpoint_ns: str, keep_ids: set[str]
@@ -1783,11 +1790,14 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
                 checkpoint_ns,
                 list(keep_ids),
             )
-            if result:
-                parts = result.split()
-                if len(parts) >= 2:
-                    return int(parts[1])
-            return 0
+        # AFTER-half (fix pass F4) — closes the racing re-put window,
+        # same as seam 1.
+        invalidate_cached_reads(self._saver, [thread_id])
+        if result:
+            parts = result.split()
+            if len(parts) >= 2:
+                return int(parts[1])
+        return 0
 
     async def count_writes_excluding(
         self, thread_id: str, checkpoint_ns: str, keep_ids: set[str]
@@ -1847,6 +1857,10 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
                     "DELETE FROM checkpoints WHERE thread_id = $1",
                     thread_id,
                 )
+        # AFTER-half (fix pass F4) — the three-statement transaction has
+        # THREE await points a racing read could interleave on; the
+        # post-commit re-invalidate drops whatever it re-put.
+        invalidate_cached_reads(self._saver, [thread_id])
 
     async def find_excess_checkpoint_groups(
         self, max_per_thread: int
@@ -2215,6 +2229,12 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
         # staleness is possible on the sanctioned path.
         self.last_pair_stop_reason = stop_reason
         self.last_pair_chunks_skipped = chunks_skipped
+        # Read-cache re-invalidation, seam 4/4 AFTER-half (fix pass F4):
+        # the chunk loop's awaits span the whole pair deletion — a racing
+        # aget_tuple could have re-put the thread's entry mid-loop; the
+        # post-loop invalidate closes the window (the BEFORE-half at
+        # entry covered only the loop's start).
+        invalidate_cached_reads(self._saver, [thread_id])
         return (total_deleted, total_bytes_freed)
 
     async def _delete_blobs_anti_join_chunk(
