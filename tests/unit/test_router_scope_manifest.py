@@ -160,13 +160,13 @@ PINNED_SCOPE_MANIFEST: dict[str, frozenset[str] | str] = {
     "/api/mcps-gateway": "mcp:read|*",
     # checkpoint read-path plan / Track-1 item 4 — the /api/metrics
     # family mounts ONE route (GET "" — the metric registry rendered as
-    # Prometheus text-exposition). The route carries NO @require_scope
-    # decoration (an observe-only surface, the same posture as the
-    # /api/resources family above), so the family manifests the
-    # wildcard D9 posture. In auth-ON the route is OAuth2-PROTECTED by
-    # default (untagged ⇒ protected); in auth-OFF it is open, like the
-    # other observe-only diagnostic families.
-    "/api/metrics": "*",
+    # Prometheus text-exposition). M-1: the route carries the EXISTING
+    # ``maintenance:read`` scope (the /api/wedge-captures precedent —
+    # deliberate scope REUSE, no new scope minted): the metric registry
+    # holds INTERNAL counters, so the family is scope-pinned (NOT the
+    # wildcard) and the route ALSO refuses in auth-OFF (503
+    # AUTH_NOT_CONFIGURED — the prompts-family fail-closed gate).
+    "/api/metrics": "maintenance:read",
 }
 
 #: The wildcard sentinel as stored in the manifest.
@@ -299,6 +299,11 @@ class TestSourceMatchTarget:
         cage reflects this with the /api/metrics family pinned in the
         manifest above (the /api/metrics endpoint renders the metric
         registry as Prometheus text-exposition).
+
+        M-1 (review gate) re-pinned the /api/metrics family from the
+        wildcard to ``maintenance:read`` — the route now carries the
+        scope, so the family manifests that scope (not ``*``). That
+        added ONE decorated route to the census below (107 → 108).
         """
         source = API_PY.read_text()
         matches = re.findall(r"api_router\.include_router\(", source)
@@ -335,7 +340,9 @@ class TestScopeManifestCage:
         /api/mcps-gateway/{machines,sessions,audit} — every one
         @require_scope("mcp:read")-decorated) + the 4 wedge-capture
         routes (GET "" (list), GET /status, POST /capture, GET
-        /{capture_id} — every one @require_scope decorated) = 107
+        /{capture_id} — every one @require_scope decorated) + the 1
+        /api/metrics route (GET "" — the metric registry surface, now
+        scope-decorated with ``maintenance:read``) = 108
         declared routes. A drift is a decoration added/removed without
         a manifest row change.
 
@@ -372,6 +379,10 @@ class TestScopeManifestCage:
         /api/wedge-captures family entry declares that scope (NOT a
         wildcard): the routes DO carry an explicit scope, so the
         wildcard would be less precise than reality.
+
+        M-1 (review gate) added ONE decorated route under /api/metrics
+        (GET "" — the metric registry surface, now carrying
+        ``maintenance:read``), growing the cage count 107 → 108.
         """
         declared = [
             r
@@ -380,8 +391,8 @@ class TestScopeManifestCage:
             and getattr(r, "path", "").startswith("/api/")
             and _route_required_scopes(r) is not None
         ]
-        assert len(declared) == 107, (
-            f"declared-route census drifted: {len(declared)} (pinned 107)"
+        assert len(declared) == 108, (
+            f"declared-route census drifted: {len(declared)} (pinned 108)"
         )
 
     def test_manifest_entries_valid(self):

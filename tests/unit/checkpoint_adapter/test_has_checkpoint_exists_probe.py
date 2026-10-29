@@ -355,9 +355,19 @@ class _StubAdapterWithBothSurfaces:
 
 
 def _service_with_adapter(adapter) -> InstanceMessagingService:
-    """Real ``InstanceMessagingService`` over a mocked manager facade."""
+    """Real ``InstanceMessagingService`` over a mocked manager facade.
+
+    R-c: the service reaches the adapter through the manager's PUBLIC
+    ``checkpointer`` property (the private reach-through is gone). The
+    stub therefore exposes the PUBLIC name — a bare MagicMock would
+    auto-fabricate an unrelated attribute for it and the probe would
+    never be called (the failure would look like a silent False). The
+    private attribute is set too, mirroring the real facade (whose
+    ``checkpointer`` property returns ``_checkpointer``).
+    """
     manager = MagicMock()
     manager._checkpointer = adapter
+    manager.checkpointer = adapter
     return InstanceMessagingService(
         manager=manager,
         cancellation_service=MagicMock(),
@@ -408,31 +418,41 @@ class TestRetryPathHasCheckpointProbe:
 # ── 4. dead-code proof: the manager's message-count helper is gone ─────────
 
 
-# The dead helper's name is spelled in parts on purpose: this file must
-# NOT match the repo-wide dead-code grep that serves as the deletion
-# proof for the symbol, otherwise the proof greps this test file
-# instead of the codebase.
-_DEAD_HELPER_NAME = "_get_" + "message_count"
+class TestMessageCountHelperRemoved:
+    """No message-count helper survives on EITHER class.
 
+    The helper performed a FULL saver read to count messages — the
+    same deserialization cost the EXISTS probe removes. It had ZERO
+    callers repo-wide (grep evidence in the item report), so it was
+    deleted in this item; the instance no longer exists on the manager
+    facade (nor on the messaging service).
 
-class TestGetMessageCountRemoved:
-    """``InstanceManager``'s message-count helper was dead code.
-
-    It performed a FULL saver read to count messages — the same
-    deserialization cost the EXISTS probe removes. It had ZERO callers
-    repo-wide (grep evidence in the item report), so it was deleted in
-    this item; the instance no longer exists on the manager facade.
+    RENAME-PROOF (R-d): the assertion scans the LIVE attribute surface
+    for ANY attribute whose name mentions BOTH "message" and "count".
+    The previous pin checked ONE spelling via ``hasattr`` + a
+    module-source grep — a helper renamed to, say, ``_count_messages``
+    would have kept that pin green while the dead code lived on, and
+    the source grep constrained exactly one string. The pattern below
+    survives a rename: it fails for any message-count helper, whatever
+    it is called.
     """
 
-    def test_manager_has_no_message_count_helper(self):
-        manager = InstanceManager.__new__(InstanceManager)
-        assert not hasattr(manager, _DEAD_HELPER_NAME)
-
-    def test_module_source_has_no_message_count_helper(self):
-        from daemon import manager as manager_module
-
-        source = open(manager_module.__file__, encoding="utf-8").read()
-        assert _DEAD_HELPER_NAME not in source
+    @pytest.mark.parametrize(
+        "cls",
+        [InstanceManager, InstanceMessagingService],
+        ids=lambda cls: cls.__name__,
+    )
+    def test_no_message_count_helper_on_the_class(self, cls):
+        offenders = sorted(
+            name
+            for name in dir(cls)
+            if "message" in name.lower() and "count" in name.lower()
+        )
+        assert not offenders, (
+            f"{cls.__name__} must carry NO message-count helper — found "
+            f"{offenders}. The helper was deleted as dead code; a rename "
+            "must not smuggle it back (this assertion is rename-proof)."
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -88,6 +88,24 @@ class TestVersionCensus:
         summary = result.to_summary_dict()
         assert "version_census" in summary
         census = summary["version_census"]
+        # F2: the census block's KEY SET is pinned EXACTLY — the keys
+        # are the contract the audit-row consumers read. A dropped or
+        # renamed key fails here (the previous pin only checked a few
+        # VALUES, so a census that stopped reporting half its fields
+        # stayed green).
+        assert set(census.keys()) == {
+            "ran",
+            "blob_skipped_reason",
+            "backend",
+            "max_versions",
+            "excess_pairs",
+            "version_threshold",
+            "scanned_pairs",
+            "blob_rows",
+            "blob_bytes_total",
+            "blob_bytes_by_channel",
+            "captured_at",
+        }
         # The version half — the worst pair's version count (PRE-prune).
         assert census["max_versions"] == 546
         # The prune pass' own excess count (pairs over the cap).
@@ -111,9 +129,18 @@ class TestVersionCensus:
             "daemon.services.maintenance.collect_blob_bytes_by_channel",
             AsyncMock(return_value=BlobBytesCensus()),
         ):
-            await job.run_checkpoint_prunes(destructive=True)
+            result = await job.run_checkpoint_prunes(destructive=True)
         # Exactly ONE pair scan for the whole cycle.
         assert adapter.find_all_thread_ns_pairs.await_count == 1
+        # F2: the scan pin is TIED TO THE CENSUS — the scan count alone
+        # constrains nothing (the scan pre-exists the census), so the
+        # census must report the scan's OWN numbers. Deleting the census
+        # (or its version half) now fails HERE, not only in the sibling
+        # test.
+        census = result.to_summary_dict()["version_census"]
+        assert census["scanned_pairs"] == 1
+        assert census["max_versions"] == 7
+        assert census["excess_pairs"] == 0
 
     @pytest.mark.asyncio
     async def test_blob_skip_is_reported_not_hidden(self):

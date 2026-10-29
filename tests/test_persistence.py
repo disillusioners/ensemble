@@ -33,6 +33,10 @@ from daemon.persistence import (
     get_instance_messages,
     create_postgres_checkpointer,
 )
+from daemon.constants import (
+    CHECKPOINT_POOL_MAX_SIZE_DEFAULT,
+    CHECKPOINT_POOL_TIMEOUT_S_DEFAULT,
+)
 from daemon.ensemble_config import EnsembleConfig
 
 
@@ -78,7 +82,16 @@ class TestGetCheckpointer:
             new=AsyncMock(return_value=MagicMock(name="pg_adapter")),
         ) as mock_create:
             adapter = await get_checkpointer(config)
-            mock_create.assert_awaited_once_with(config)
+            # The checkpointer-pool knobs are forwarded EXPLICITLY
+            # (plan Track-1 item 5): ``get_checkpointer`` passes both
+            # kw-only values down to the factory, so the assertion pins
+            # the forwarding (the sibling ``prepare_threshold``
+            # assertion in this file pins the factory's own kwargs).
+            mock_create.assert_awaited_once_with(
+                config,
+                checkpoint_pool_max_size=CHECKPOINT_POOL_MAX_SIZE_DEFAULT,
+                checkpoint_pool_timeout_s=CHECKPOINT_POOL_TIMEOUT_S_DEFAULT,
+            )
             assert adapter is not None
 
 

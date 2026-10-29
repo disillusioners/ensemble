@@ -58,20 +58,55 @@ class TestQueueAgeRender:
         composite = _composite(None)
         detail = composite.to_payload()["detail"]
         assert detail["queue_max_age_seconds"] is None
-        assert detail["queue_max_age_seconds_reason"] == QUEUE_AGE_REASON_EMPTY
+        # The LITERAL vocabulary, not the constant: comparing the render
+        # against the imported constant only proves the constant equals
+        # itself — it constrains nothing. The wire value is pinned here.
+        assert detail["queue_max_age_seconds_reason"] == "empty"
         # The label is never "fresh".
         assert detail["queue_max_age_seconds_reason"] != "fresh"
 
     def test_measured_age_renders_measured(self):
         detail = _composite(12.5).to_payload()["detail"]
         assert detail["queue_max_age_seconds"] == 12.5
-        assert detail["queue_max_age_seconds_reason"] == QUEUE_AGE_REASON_MEASURED
+        assert detail["queue_max_age_seconds_reason"] == "measured"
 
     def test_the_verdict_is_untouched_by_the_render(self):
         composite = _composite(None)
         assert composite.ready is True
         assert composite.queue_freshness is True
         assert composite.to_payload()["components"]["queue_freshness"] is True
+
+
+class TestReasonVocabulary:
+    """THE vocabulary — pinned EXACTLY, as literals (F1).
+
+    The four reason labels are a WIRE contract (the payload is read by
+    consumers that branch on the string). Asserting the render against
+    the imported constant proved only that the constant equals itself,
+    so the vocabulary was effectively UNPINNED: renaming a constant
+    (and its value) together kept every test green.
+
+    This class pins the literals, and pins that the four are DISTINCT
+    (a copy-paste that collapsed two reasons would otherwise be
+    invisible).
+    """
+
+    def test_the_four_reason_literals(self):
+        assert QUEUE_AGE_REASON_MEASURED == "measured"
+        assert QUEUE_AGE_REASON_EMPTY == "empty"
+        assert QUEUE_AGE_REASON_PROBE_TIMEOUT == "probe_timeout"
+        assert QUEUE_AGE_REASON_UNKNOWN == "unknown"
+
+    def test_the_four_reasons_are_distinct(self):
+        reasons = {
+            QUEUE_AGE_REASON_MEASURED,
+            QUEUE_AGE_REASON_EMPTY,
+            QUEUE_AGE_REASON_PROBE_TIMEOUT,
+            QUEUE_AGE_REASON_UNKNOWN,
+        }
+        assert len(reasons) == 4
+        # The vocabulary is EXACTLY these four — no fifth spelling.
+        assert reasons == {"measured", "empty", "probe_timeout", "unknown"}
 
 
 class TestRefreshProvenance:
@@ -88,7 +123,7 @@ class TestRefreshProvenance:
         assert composite.queue_max_age_seconds is None
         assert (
             composite.to_payload()["detail"]["queue_max_age_seconds_reason"]
-            == QUEUE_AGE_REASON_EMPTY
+            == "empty"
         )
 
     @pytest.mark.asyncio
@@ -102,7 +137,7 @@ class TestRefreshProvenance:
         assert composite.queue_max_age_seconds == 12.5
         assert (
             composite.to_payload()["detail"]["queue_max_age_seconds_reason"]
-            == QUEUE_AGE_REASON_MEASURED
+            == "measured"
         )
 
     @pytest.mark.asyncio
@@ -123,7 +158,7 @@ class TestRefreshProvenance:
         assert composite.queue_max_age_seconds is None
         assert (
             composite.to_payload()["detail"]["queue_max_age_seconds_reason"]
-            == QUEUE_AGE_REASON_UNKNOWN
+            == "unknown"
         )
 
     @pytest.mark.asyncio
@@ -141,7 +176,7 @@ class TestRefreshProvenance:
         assert composite.queue_max_age_seconds is None
         assert (
             composite.to_payload()["detail"]["queue_max_age_seconds_reason"]
-            == QUEUE_AGE_REASON_PROBE_TIMEOUT
+            == "probe_timeout"
         )
         # The verdict is unchanged (the timeout still degrades).
         assert composite.queue_freshness is False

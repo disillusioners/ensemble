@@ -140,8 +140,10 @@ PINNED_MANIFEST_AUTH_ON: dict[str, frozenset[str]] = {
     # explicit class tag (no public probe / module-lane / protected
     # decoration) — the family classifies protected-default ("pd"), the
     # D3.7 legacy posture, declared HERE. Untagged ⇒ OAuth2-protected
-    # when auth is ON; open in the auth-OFF local mode (the same
-    # posture as the other observe-only diagnostic families).
+    # when auth is ON (401 for an unauthenticated caller); M-1 added the
+    # ``maintenance:read`` SCOPE declaration (the scope cage, not this
+    # one) and the auth-OFF 503 fail-closed gate, so the route is NOT
+    # open in the auth-OFF local mode any more.
     "/api/metrics": frozenset({"pd"}),
     "/api/webhooks": frozenset({"module_lane"}),  # FR-40 module lane
     "/api/work": frozenset({"pd"}),

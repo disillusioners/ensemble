@@ -97,6 +97,24 @@ PRE_FEATURE_API_ROUTER_LIST: tuple[str, ...] = (
     "workspace_router",     # /api/workspace
     "recovery_router",      # /api/recovery
     "maintenance_router",   # /api/maintenance
+    # wedge-capture (2026-10-22) — the capture-evidence store family.
+    # Added to THIS pin in the checkpoint quick-wins fix pass: the
+    # 2026-10-22 wedge-capture lane grew the router set but never
+    # updated this census, so the pin was ALREADY stale/red at base
+    # (actual 36 vs pinned 35) — a pre-existing failure this pin now
+    # closes. The rationale the guard demands, for this addition:
+    #   (a) it is NOT an HTTP endpoint for the wake — it is the
+    #       capture-evidence read/capture surface, and it adds no wake
+    #       path;
+    #   (b) it is registered UNCONDITIONALLY, so the OFF-state route
+    #       table grows by this one family — accepted here for the
+    #       same reason the metrics family below is accepted.
+    "wedge_capture_router", # /api/wedge-captures
+    # checkpoint read-path plan / Track-1 item 4 — the metric registry
+    # surface (Prometheus text-exposition). Added to THIS pin in the
+    # same fix pass (same reasoning: not a wake endpoint; registered
+    # unconditionally).
+    "metrics_router",       # /api/metrics
     "plane_router",         # /api/plane
     "tmp_images_router",    # /api/tmp_images
     "prompts_router",       # /api/prompts (agent-prompt-immutability Phase B T5)
@@ -104,9 +122,9 @@ PRE_FEATURE_API_ROUTER_LIST: tuple[str, ...] = (
     # unconditional set, both registered ONLY under `if auth_enabled:`
     # in daemon/api.py (OFF-state route table untouched, G3.2).
     # Accounting matches tests/unit/test_router_scope_manifest.py
-    # (35 textual include_router matches = 32 unconditional + these
+    # (37 textual include_router matches = 34 unconditional + these
     # 2 auth-ON-gated families + the 1 gateway-flag-gated WebSocket
-    # mount). The guard's intent is UNCHANGED: an unauthorized 36th
+    # mount). The guard's intent is UNCHANGED: an unauthorized 38th
     # mount still fails this test loudly.
     "mcp_kb_keys_router",   # /api/mcp/kb/keys (OAuth2 human lane)
     "auth_router",          # /api/auth/*
@@ -123,7 +141,7 @@ PRE_FEATURE_API_ROUTER_LIST: tuple[str, ...] = (
     #       kill switch governs the TRANSPORT (the WebSocket route
     #       below), not the read view;
     #   (c) the accompanying census — the textual include_router count
-    #       in tests/unit/test_router_scope_manifest.py (35 = 32
+    #       in tests/unit/test_router_scope_manifest.py (37 = 34
     #       unconditional + 2 auth-ON-gated + 1 gateway-flag-gated
     #       (WS)) and the route-family manifest in
     #       tests/integration/test_router_class_manifest.py — was
@@ -142,8 +160,11 @@ PRE_FEATURE_API_ROUTER_LIST: tuple[str, ...] = (
     #       tests/unit/test_router_scope_manifest.py (33 -> 34) and the
     #       route-family manifest in
     #       tests/integration/test_router_class_manifest.py — is updated
-    #       in the SAME commit.
-    # The guard's intent is UNCHANGED: an unauthorized 36th mount still
+    #       in the SAME commit. (DISCLAIMER, added by the checkpoint
+    #       quick-wins fix pass: the scope cage's count was NOT updated
+    #       in that commit — the census drifted, and this file's pin
+    #       stayed stale until the fix pass below.)
+    # The guard's intent is UNCHANGED: an unauthorized 38th mount still
     # fails this test loudly.
     "mcp_gateway_router",   # /api/mcps-gateway/ws (WebSocket, kill-switch gated)
 )

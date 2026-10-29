@@ -204,6 +204,86 @@ class TestSizeHistogram:
         )
 
 
+class TestKillSwitch:
+    """``CHECKPOINT_PERF_LOGS=0`` turns the WHOLE read recording off (M-2).
+
+    The read counters are a DIAGNOSTIC surface: with the kill-switch
+    off, neither the log line NOR the metric series is recorded, and
+    the hot path does not pay the O(payload) walk at all (when the
+    resource-charge seam is off too).
+    """
+
+    def test_kill_switch_suppresses_every_metric_record(self, monkeypatch):
+        monkeypatch.setenv("CHECKPOINT_PERF_LOGS", "0")
+        log_checkpoint_read("aget", "t-1", bytes_=1234, rows=2)
+        assert metrics.checkpoint_read_ops_total.get(op="aget") == 0
+        assert metrics.checkpoint_read_bytes_total.get(op="aget") == 0
+        assert metrics.checkpoint_read_rows_total.get(op="aget") == 0
+        assert metrics.checkpoint_read_size_bytes.get_count(op="aget") == 0
+        assert (
+            metrics.checkpoint_read_size_bucket_hits_total.get(
+                op="aget", bucket="65536"
+            )
+            == 0
+        )
+
+    def test_kill_switch_on_keeps_recording(self, monkeypatch):
+        monkeypatch.setenv("CHECKPOINT_PERF_LOGS", "1")
+        log_checkpoint_read("aget", "t-1", bytes_=1234, rows=2)
+        assert metrics.checkpoint_read_ops_total.get(op="aget") == 1
+        assert metrics.checkpoint_read_bytes_total.get(op="aget") == 1234
+
+    def test_kill_switch_off_skips_the_payload_walk(self, monkeypatch):
+        """With the kill-switch off and the charge seam off, NOTHING needs
+        the payload size ⇒ the O(payload) walk is skipped entirely."""
+        calls: list = []
+
+        def _counting_walk(obj, **kwargs):
+            calls.append(obj)
+            return 1, 1, False
+
+        monkeypatch.setenv("CHECKPOINT_PERF_LOGS", "0")
+        monkeypatch.setattr(
+            "daemon.checkpoint_adapter._charge_enabled", lambda: False
+        )
+        monkeypatch.setattr(
+            "daemon.checkpoint_adapter.bounded_deep_size", _counting_walk
+        )
+        proxy = _wrap_saver_with_connection_retry(_FakeSaver(_checkpoint()))
+        result = asyncio.run(proxy.aget(CONFIG))
+        assert result is not None
+        assert calls == [], (
+            "the payload must NOT be walked when no consumer needs the "
+            "size (the kill-switch is off and the charge seam is off)"
+        )
+        assert metrics.checkpoint_read_ops_total.get(op="aget") == 0
+
+    def test_charge_seam_is_independent_of_the_kill_switch(self, monkeypatch):
+        """The CHARGE seam keeps working while the perf kill-switch is off
+        — the resource budget is not a diagnostic surface. The size is
+        therefore still measured (ONCE) and handed to the charge."""
+        calls: list = []
+
+        def _counting_walk(obj, **kwargs):
+            calls.append(obj)
+            return 1234, 1, False
+
+        monkeypatch.setenv("CHECKPOINT_PERF_LOGS", "0")
+        monkeypatch.setattr(
+            "daemon.checkpoint_adapter._charge_enabled", lambda: True
+        )
+        monkeypatch.setattr(
+            "daemon.checkpoint_adapter.bounded_deep_size", _counting_walk
+        )
+        proxy = _wrap_saver_with_connection_retry(_FakeSaver(_checkpoint()))
+        result = asyncio.run(proxy.aget(CONFIG))
+        assert result is not None
+        # Exactly ONE walk (M-2 — the payload is never walked twice).
+        assert len(calls) == 1
+        # …and the instrumentation recorded NOTHING (the kill-switch).
+        assert metrics.checkpoint_read_ops_total.get(op="aget") == 0
+
+
 class TestCounterWiring:
     """``reset_for_tests()`` + ``render_metrics()`` cover the new surface."""
 

@@ -141,6 +141,31 @@ class TestPostPruneAnalyzeHelper:
         assert engine.disposed is False
 
     @pytest.mark.asyncio
+    async def test_thread_only_deletion_still_fires_the_gate(
+        self, fake_builder
+    ):
+        """R-e: the gate reads BOTH units — a thread-only deletion (Op A
+        swept an orphaned thread) still proves that SOMETHING was
+        deleted, so the statistics refresh runs. The two units stay
+        SEPARATE in the outcome (``deleted_rows`` counts rows only).
+        """
+        calls, engine = fake_builder
+        outcome = await analyze_checkpoint_tables_after_prune(
+            _pg_engine(), deleted_rows=0, deleted_threads=1
+        )
+        assert outcome.ran is True
+        assert outcome.skipped_reason is None
+        # The units are reported separately — the thread count never
+        # inflates the row count.
+        assert outcome.deleted_rows == 0
+        assert outcome.deleted_threads == 1
+        assert engine.statements == [
+            "ANALYZE checkpoints",
+            "ANALYZE checkpoint_blobs",
+            "ANALYZE checkpoint_writes",
+        ]
+
+    @pytest.mark.asyncio
     async def test_analyze_failure_is_swallowed_per_table(
         self, monkeypatch
     ):
@@ -233,7 +258,12 @@ class TestJobWiring:
             rows_summary=rows, blobs_summary=blobs, deleted_threads=1
         )
         assert seen["shared_engine"] is shared
-        assert seen["kwargs"]["deleted_rows"] == 7
+        # R-e: the two units are SEPARATE — the ROW counters (2 + 1 + 3)
+        # are forwarded as ``deleted_rows`` and the THREAD count (1) as
+        # ``deleted_threads``. The old pin summed them into one number
+        # (7), which mixed two units in the ANALYZE gate.
+        assert seen["kwargs"]["deleted_rows"] == 6
+        assert seen["kwargs"]["deleted_threads"] == 1
 
     @pytest.mark.asyncio
     async def test_no_deletes_forward_zero(self, monkeypatch):
@@ -252,3 +282,4 @@ class TestJobWiring:
             blobs_summary=BlobPruneSummary(),
         )
         assert seen["kwargs"]["deleted_rows"] == 0
+        assert seen["kwargs"]["deleted_threads"] == 0
