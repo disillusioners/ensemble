@@ -35,12 +35,59 @@ Coverage:
 
 from __future__ import annotations
 
+import re
 import warnings
 
 from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 
 from daemon import checkpoint_metrics as metrics
+
+#: The canonical name → deprecated alias pairs of the checkpoint quick-wins
+#: family.  The registry re-homed the family under ``ensemble_checkpoint_*``
+#: canonical names (the registry's frozen ``^ensemble_`` rule); the
+#: historical names ride as deprecated ALIASES — a second EXPOSITION of the
+#: same series, never a second measurement.
+_CANONICAL_ALIAS_PAIRS: tuple[tuple[str, str], ...] = (
+    ("ensemble_checkpoint_read_ops_total", "checkpoint_read_ops_total"),
+    ("ensemble_checkpoint_read_rows_total", "checkpoint_read_rows_total"),
+    ("ensemble_checkpoint_read_bytes_total", "checkpoint_read_bytes_total"),
+    (
+        "ensemble_checkpoint_read_size_bucket_hits_total",
+        "checkpoint_read_size_bucket_hits_total",
+    ),
+    (
+        "ensemble_checkpoint_read_measurement_errors_total",
+        "checkpoint_read_measurement_errors_total",
+    ),
+    ("ensemble_checkpoint_leak_signal_total", "checkpoint_leak_signal_total"),
+    ("ensemble_checkpoint_read_size_bytes", "checkpoint_read_size_bytes"),
+)
+
+#: The histogram member of the family above renders under three sub-names
+#: (``_bucket`` / ``_count`` / ``_sum``), never under the bare name.
+_HISTOGRAM_SUFFIXES: tuple[str, ...] = ("_bucket", "_count", "_sum")
+
+#: A Prometheus text-exposition sample line.
+_SAMPLE_RE = re.compile(r"^([A-Za-z_:][A-Za-z0-9_:]*)(\{.*\})?\s+(\S+)$")
+
+
+def _exposition_samples(body: str) -> dict[str, dict[str, float]]:
+    """Parse the exposition body into ``{metric_name: {label_set: value}}``."""
+    out: dict[str, dict[str, float]] = {}
+    for line in body.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        match = _SAMPLE_RE.match(line)
+        if not match:
+            continue
+        name, labels, value = match.group(1), match.group(2) or "", match.group(3)
+        try:
+            numeric = float(value)
+        except ValueError:
+            continue
+        out.setdefault(name, {})[labels] = numeric
+    return out
 
 
 def _app(*, auth_on: bool = True, scopes: tuple[str, ...] = ("maintenance:read",)) -> FastAPI:
@@ -151,6 +198,55 @@ class TestMetricsRoute:
             assert 'checkpoint_read_bytes_total{op="aget"} 4096' in body
             assert "checkpoint_read_size_bytes_bucket" in body
             assert "checkpoint_read_measurement_errors_total" in body
+        finally:
+            metrics.reset_for_tests()
+
+    def test_the_body_exposes_canonical_and_alias_pairs_with_equal_values(self):
+        """The re-homing shows BOTH names, carrying the SAME value.
+
+        The registry re-homed this family under ``ensemble_checkpoint_*``
+        canonical names; the historical names ride as DEPRECATED ALIASES —
+        a second EXPOSITION of the same series, never a second measurement.
+        A scraper reading either name must see the same number, so the
+        body is pinned for the PAIR, not just for the presence of a name:
+        a COPY would double-count, a silent alias would blank the
+        historical dashboards.
+        """
+        metrics.reset_for_tests()
+        try:
+            metrics.checkpoint_read_ops_total.inc(op="aget")
+            metrics.checkpoint_read_rows_total.inc(7, op="aget")
+            metrics.checkpoint_read_bytes_total.inc(4096, op="aget")
+            metrics.checkpoint_read_size_bucket_hits_total.inc(
+                op="aget", bucket="65536"
+            )
+            metrics.checkpoint_read_measurement_errors_total.inc()
+            metrics.checkpoint_leak_signal_total.inc()
+            metrics.checkpoint_read_size_bytes.labels(op="aget").observe(4096)
+
+            body = _client().get("/api/metrics").text
+            samples = _exposition_samples(body)
+            for canonical, alias in _CANONICAL_ALIAS_PAIRS:
+                if canonical.endswith("_read_size_bytes"):
+                    # A histogram renders under three sub-names.
+                    for suffix in _HISTOGRAM_SUFFIXES:
+                        canonical_samples = samples.get(canonical + suffix, {})
+                        alias_samples = samples.get(alias + suffix, {})
+                        assert canonical_samples, f"{canonical}{suffix} must render"
+                        assert alias_samples, f"{alias}{suffix} must render"
+                        assert canonical_samples == alias_samples, (
+                            f"{alias}{suffix} must carry the SAME values as "
+                            f"{canonical}{suffix} in the scrape body"
+                        )
+                    continue
+                canonical_samples = samples.get(canonical, {})
+                alias_samples = samples.get(alias, {})
+                assert canonical_samples, f"{canonical} must render in the body"
+                assert alias_samples, f"{alias} must render in the body"
+                assert canonical_samples == alias_samples, (
+                    f"{alias} must carry the SAME values as {canonical} in the "
+                    f"scrape body — a copy would double-count"
+                )
         finally:
             metrics.reset_for_tests()
 

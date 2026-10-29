@@ -18,12 +18,17 @@ Coverage:
     * a measurement failure never breaks the read + the tripwire fires;
     * the size histogram's log2 buckets (64 KiB → 8 MiB);
     * ``reset_for_tests()`` zeroes the new metrics and
-      ``render_metrics()`` renders their names.
+      ``render_metrics()`` renders their names;
+    * the CANONICAL/ALIAS double exposition — one measurement, two names,
+      the SAME value at the same instant (the metrics-collection WS-B
+      re-homing moved this family under ``ensemble_checkpoint_*``
+      canonical names with the historical names as deprecated aliases).
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 from collections import namedtuple
 from typing import Any
 
@@ -323,3 +328,169 @@ class TestCounterWiring:
         assert 'checkpoint_read_rows_total{op="aget"} 2' in rendered
         assert 'checkpoint_read_bytes_total{op="aget"} 1234' in rendered
         assert 'checkpoint_read_size_bytes_count{op="aget"} 1' in rendered
+
+
+# ── the canonical/alias double exposition ────────────────────────────────────
+#
+# The metrics-collection WS-B catch-up merge re-homed this family INTO the
+# canonical registry under ``ensemble_checkpoint_*`` names: the registry's
+# frozen ``^ensemble_`` naming rule does not admit the historical
+# ``checkpoint_read_*`` names as canonical.  The historical names ride as
+# DEPRECATED ALIASES — a second EXPOSITION of the SAME series, never a
+# second measurement (the FR-5 legacy pair's pattern, reused).
+#
+# The distinction is load-bearing and the three outcomes are materially
+# different, so the pins must distinguish them:
+#
+#   * a COPY      — two independent counters, both incremented ⇒ the
+#                   exposition DOUBLE-COUNTS (every read counted twice);
+#   * a SILENT
+#     ALIAS       — only the canonical name renders ⇒ the historical
+#                   dashboards go blank with no deprecation trail;
+#   * the contract — ONE measurement, TWO names, the SAME value at the
+#                   same instant.
+#
+# Asserting only "both strings exist" cannot tell the first from the
+# third, so these pins compare the VALUES numerically.
+
+#: The 7 metrics of this family: canonical name → (historical alias, kind).
+_FAMILY: tuple[tuple[str, str, str], ...] = (
+    ("ensemble_checkpoint_read_ops_total", "checkpoint_read_ops_total", "counter"),
+    ("ensemble_checkpoint_read_rows_total", "checkpoint_read_rows_total", "counter"),
+    ("ensemble_checkpoint_read_bytes_total", "checkpoint_read_bytes_total", "counter"),
+    (
+        "ensemble_checkpoint_read_size_bucket_hits_total",
+        "checkpoint_read_size_bucket_hits_total",
+        "counter",
+    ),
+    (
+        "ensemble_checkpoint_read_measurement_errors_total",
+        "checkpoint_read_measurement_errors_total",
+        "counter",
+    ),
+    ("ensemble_checkpoint_leak_signal_total", "checkpoint_leak_signal_total", "counter"),
+    ("ensemble_checkpoint_read_size_bytes", "checkpoint_read_size_bytes", "histogram"),
+)
+
+#: A Prometheus text-exposition sample line.
+_SAMPLE_RE = re.compile(r"^([A-Za-z_:][A-Za-z0-9_:]*)(\{.*\})?\s+(\S+)$")
+
+
+def _exposition_samples(body: str) -> dict[str, dict[str, float]]:
+    """Parse the exposition into ``{metric_name: {label_set: value}}``."""
+    out: dict[str, dict[str, float]] = {}
+    for line in body.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        match = _SAMPLE_RE.match(line)
+        if not match:
+            continue
+        name, labels, value = match.group(1), match.group(2) or "", match.group(3)
+        try:
+            numeric = float(value)
+        except ValueError:
+            continue
+        out.setdefault(name, {})[labels] = numeric
+    return out
+
+
+class TestCanonicalAliasDoubleExposition:
+    """ONE measurement, TWO names, the SAME value (never a copy)."""
+
+    def test_each_metric_exposes_exactly_one_deprecated_alias(self):
+        for canonical, alias, kind in _FAMILY:
+            metric = getattr(metrics, canonical)
+            assert metric.kind == kind, f"{canonical} must stay a {kind}"
+            assert list(metric.alias_names) == [
+                alias
+            ], f"{canonical} must expose exactly the historical name {alias}"
+
+    def test_the_historical_symbol_is_the_canonical_object(self):
+        """The Python symbol names were KEPT — the deprecation is the NAME."""
+        for canonical, alias, _kind in _FAMILY:
+            assert getattr(metrics, alias) is getattr(metrics, canonical), (
+                f"{alias} must be the SAME object as {canonical} — a copy "
+                f"would double-count every read"
+            )
+
+    def test_one_increment_moves_both_expositions(self):
+        """Incrementing the HISTORICAL symbol moves the canonical series.
+
+        This is the anti-COPY assertion: with two independent counters the
+        alias would stay at 0 (or the canonical would).
+        """
+        metrics.checkpoint_read_ops_total.inc(op="aget")
+        assert metrics.ensemble_checkpoint_read_ops_total.get(op="aget") == 1
+
+        metrics.ensemble_checkpoint_read_ops_total.inc(op="aget")
+        assert metrics.checkpoint_read_ops_total.get(op="aget") == 2
+
+    def test_the_alias_tracks_the_canonical_value_numerically(self):
+        """Same label-set ⇒ SAME value in the rendered exposition."""
+        metrics.checkpoint_read_ops_total.inc(op="aget")
+        metrics.checkpoint_read_rows_total.inc(7, op="aget")
+        metrics.checkpoint_read_bytes_total.inc(4096, op="aget")
+        metrics.checkpoint_read_size_bucket_hits_total.inc(
+            op="aget", bucket="65536"
+        )
+        metrics.checkpoint_read_measurement_errors_total.inc()
+        metrics.checkpoint_leak_signal_total.inc()
+        metrics.checkpoint_read_size_bytes.labels(op="aget").observe(4096)
+
+        samples = _exposition_samples(metrics.render_metrics())
+        for canonical, alias, kind in _FAMILY:
+            if kind == "histogram":
+                # A histogram renders three sub-names; compare all of them.
+                for suffix in ("_bucket", "_count", "_sum"):
+                    canonical_samples = samples.get(canonical + suffix, {})
+                    alias_samples = samples.get(alias + suffix, {})
+                    assert canonical_samples, f"{canonical}{suffix} must render"
+                    assert alias_samples, f"{alias}{suffix} must render"
+                    assert canonical_samples == alias_samples, (
+                        f"{alias}{suffix} must carry the SAME values as "
+                        f"{canonical}{suffix} — a copy would drift"
+                    )
+            else:
+                canonical_samples = samples.get(canonical, {})
+                alias_samples = samples.get(alias, {})
+                assert canonical_samples, f"{canonical} must render"
+                assert alias_samples, f"{alias} must render"
+                assert canonical_samples == alias_samples, (
+                    f"{alias} must carry the SAME values as {canonical} — "
+                    f"a copy would drift"
+                )
+
+    def test_the_registry_holds_one_series_per_label_combination(self):
+        """One measurement ⇒ ONE series, exposed under TWO names."""
+        metrics.checkpoint_read_ops_total.inc(op="aget")
+        metric = metrics.ensemble_checkpoint_read_ops_total
+        assert len(metric.series_keys()) == 1, (
+            "the canonical + alias exposition must not create a second series"
+        )
+
+    def test_the_bucket_label_key_is_registered(self):
+        """The ``bucket`` label key is part of the registry's closed enum."""
+        assert "bucket" in metrics.known_label_keys()
+        metric = metrics.ensemble_checkpoint_read_size_bucket_hits_total
+        assert set(metric.label_keys) == {"op", "bucket"}
+        assert metric.allowed_values["bucket"] == metrics._READ_SIZE_BUCKET_LABELS
+
+    def test_the_alias_histogram_renders_the_same_bucket_vocabulary(self):
+        """The alias histogram's ``le=`` labels equal the canonical's."""
+        metrics.checkpoint_read_size_bytes.labels(op="aget").observe(100 * 1024)
+        samples = _exposition_samples(metrics.render_metrics())
+        canonical_le = {
+            labels
+            for labels in samples.get(
+                "ensemble_checkpoint_read_size_bytes_bucket", {}
+            )
+        }
+        alias_le = {
+            labels
+            for labels in samples.get("checkpoint_read_size_bytes_bucket", {})
+        }
+        assert canonical_le
+        assert canonical_le == alias_le, (
+            "the alias histogram must expose the SAME bucket labels — the "
+            "join-by-label surface (read_size_bucket_label) depends on it"
+        )
