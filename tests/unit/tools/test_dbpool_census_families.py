@@ -7,21 +7,46 @@ scanner lives at ``scripts/audit/borrow_census.py`` — the §3.1
 materialisation note assigns that path to the phase-3 implementer).
 
 What this pin asserts: the borrow-site census over ``daemon/``
-reproduces the §7.2 **AST baseline** exactly — family
-**A=613** (the AST scanner's A, COMBINED A+B per audit-method §5 —
-``SQLModelSession`` with-borrows hit the session-call branch first,
-so the scanner's B is structurally 0), pattern-scan **B=175**,
-**C=4** at the four named manual-borrow sites, **D=148**, **E=14**,
-**F=0**; the scanner-independent total is **779**; and the retired
-**≈689** aggregate stays NON-CANONICAL (DR-6 — never cited as the
-census figure).
+reproduces the **executed instrument's** family counts exactly —
+**A=438**, **B=175**, **C=4** at the four named manual-borrow sites,
+**D=148**, **E=14**, **F=1** — and the total **780**.
 
-Diff-gate semantics (audit-method §7.2/§7.3): any family count delta
-is a FAILURE until classified per §7.3 — the diff IS the failing
-step (the scanner always exits 0). The lane's own Phase-1/2 changes
-were verified borrow-neutral: the re-run at the Phase-3 tree
-reproduces every baseline constant with ZERO delta, so no §7.3
-classification table is required for this lane.
+**Reconciliation with the audit artifact** (T-H2; the instrument, this
+pin and ``audit-findings.md`` are one triangle):
+
+* The artifact's **A=613** is the AST scanner's **A+B COMBINED**
+  (audit-method §5.2 says so verbatim: *"the AST scanner's A also
+  counts SQLModelSession"*). The fixed instrument SPLITS the two
+  families, so **438 + 175 = 613** — the artifact's A is reproduced
+  exactly, now as two families.
+* The artifact's **F=0** was a **SCANNER GAP, not a tree fact**: the
+  published §3.1 source had no F branch at all (F was structurally
+  unmeasurable — the false-clean the tidier found). The implemented F
+  detector (psycopg.connect / raw_connection / getconn / putconn)
+  finds **F=1**: the ONE-SHOT ``psycopg.connect`` in
+  ``daemon/services/wedge_capture/db_capture.py:195`` — which the
+  contract already records as CLEAN (F5.3: *"a one-shot
+  psycopg.connect with close() in finally ⇒ no pool, so it cannot
+  leak"*). The pin names that site explicitly.
+* Consequently the total is **780**, not the artifact's 779: the
+  difference is exactly the one F site the old instrument could not
+  see. Nothing else moved.
+
+**Base vs HEAD (audit-method §7.2 diff gate):** the SAME fixed
+instrument run at base ``19fc11c8b`` yields the IDENTICAL numbers
+(A=438 / B=175 / C=4 / D=148 / E=14 / F=1 / total 780) ⇒ the lane
+added **ZERO** borrow sites — the delta is empty, so no §7.3
+classification table is required. Any family count delta from here on
+is a FAILURE until classified per §7.3 — the diff IS the failing step.
+
+The **§3.2 pattern cross-check** (grep) keeps its own vocabulary —
+its F pattern (``raw_connection(|getconn(|putconn(``) does not name
+plain ``psycopg.connect``, so the pattern F stays 0 while the AST F
+is 1. That divergence is the same PATTERN-DEPENDENT class the
+audit records for D and E (§5.2); the AST is canonical.
+
+The retired **≈689** aggregate stays NON-CANONICAL (DR-6 — never
+cited as the census figure).
 
 Plantable mutation: any new borrow site in ``daemon/`` (a new manual
 session assignment, a raw pool checkout, a ``sessionmaker``) ⇒ the
@@ -51,10 +76,19 @@ EXPECTED_COLLECTED = 4
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCANNER_PATH = _REPO_ROOT / "scripts" / "audit" / "borrow_census.py"
 
-#: The §7.2 AST baseline constants (measured at base ``19fc11c8b``;
-#: the scanner's A is the COMBINED A+B — audit-method §5).
-AST_BASELINE = {"A": 613, "B": 0, "C": 4, "D": 148, "E": 14, "F": 0}
-AST_BASELINE_TOTAL = 779
+#: The EXECUTED instrument's family counts (T-H2: B and F are measured,
+#: not structurally zero). Measured with the fixed instrument at base
+#: ``19fc11c8b`` AND at HEAD — the two are IDENTICAL (the lane added
+#: zero borrow sites). The audit artifact's A=613 is this instrument's
+#: A+B COMBINED (438 + 175) and its F=0 was a SCANNER GAP (no F
+#: detector); see the module docstring.
+AST_BASELINE = {"A": 438, "B": 175, "C": 4, "D": 148, "E": 14, "F": 1}
+AST_BASELINE_TOTAL = 780
+
+#: The ONE family-F site — the audited-clean one-shot psycopg.connect
+#: (contract F5.3: it closes in a finally, holds no pool, cannot leak).
+#: Named explicitly so a SECOND raw-psycopg borrow is a loud failure.
+FAMILY_F_SITES = ("daemon/services/wedge_capture/db_capture.py:195",)
 
 #: The §7.2 / §3.2 pattern cross-check constants.
 PATTERN_BASELINE = {"A": 439, "B": 175, "C": 4, "F": 0}
@@ -164,15 +198,27 @@ class TestGAstCensusFamilies:
                 f"({_GNU_GREP_TRAP_NOTE})"
             )
 
-    def test_the_must_remain_zero_rows_and_the_retired_aggregate(self):
+    def test_family_f_is_the_audited_site_and_the_aggregate_stays_non_canonical(self):
+        """Family F is MEASURED now (T-H2) — the ONE audited-clean
+        one-shot psycopg.connect; and DR-6: the ≈689 aggregate stays
+        NON-CANONICAL (it is the figure a reader would otherwise cite)."""
         counts, _family_c, parse_errors = _run_scan()
         assert not parse_errors
-        # §7.2: family F MUST remain 0 (a raw pool checkout is a
-        # manual borrow that must be audited individually).
-        assert counts.get("F", 0) == 0, (
-            "G-A: family F (raw psycopg / raw_connection / getconn / "
-            "putconn) MUST remain 0 — any hit is a manual pool "
-            "checkout requiring individual audit"
+        # T-H2: family F is MEASURED now (the detector exists) — it is
+        # the ONE audited-clean one-shot psycopg.connect. A SECOND raw
+        # psycopg borrow is a manual pool checkout requiring individual
+        # audit (the artifact's F=0 was a scanner gap, not a tree fact).
+        assert counts.get("F", 0) == len(FAMILY_F_SITES), (
+            "G-A: family F drifted — expected exactly "
+            f"{len(FAMILY_F_SITES)} (the audited one-shot psycopg.connect), "
+            f"observed {counts.get('F', 0)}; a new raw pool checkout "
+            "requires individual audit"
+        )
+        with open(_REPO_ROOT / "daemon/services/wedge_capture/db_capture.py") as fh:
+            db_capture = fh.read()
+        assert "psycopg.connect(" in db_capture, (
+            "G-A: the named family-F site is gone — re-audit the raw "
+            "psycopg borrow before re-baselining"
         )
         # §3.3/§7.2: sessionmaker MUST remain 0 — a new sessionmaker
         # changes the session-construction contract tree-wide.

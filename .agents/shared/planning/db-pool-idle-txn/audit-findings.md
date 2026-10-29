@@ -119,6 +119,65 @@ none**, and no over-claim is made beyond the census evidence.
 
 ---
 
+## 6. Addendum — the census instrument re-measured (T-H2, tidier cycle)
+
+The **instrument** (`scripts/audit/borrow_census.py`) was re-verified
+against `audit-method.md` §3.1 and found to be a **false-clean on two
+families**: the published §3.1 source has **no B branch** (every
+`SQLModelSession` with-borrow was counted into A) and **no F branch at
+all** (F was structurally unmeasurable, hence the recorded `F=0`). The
+instrument now implements both detectors and the TOTAL is relabelled
+to the families actually summed.
+
+**Re-measured with the fixed instrument** (same instrument, base
+`19fc11c8b` and HEAD — the two runs are IDENTICAL, so **the lane added
+ZERO borrow sites**; the audit-method §7.2 diff gate is satisfied with
+an empty delta):
+
+| Family | base `19fc11c8b` | HEAD | note |
+|---|---:|---:|---|
+| A (`with Session(...)` / `WriteGuardSession(Session(...))`) | **438** | **438** | |
+| B (`with SQLModelSession(...)`) | **175** | **175** | split out of A |
+| C (non-`with` session assignment) | **4** | **4** | the same four named sites |
+| D (`with engine.connect()` / `.begin()`) | **148** | **148** | |
+| E (`async with pool.acquire()`) | **14** | **14** | |
+| F (raw psycopg / `raw_connection` / `getconn` / `putconn`) | **1** | **1** | the one-shot `psycopg.connect` at `daemon/services/wedge_capture/db_capture.py:195` |
+| **TOTAL (as summed)** | **780** | **780** | |
+
+**How this reconciles with the headline above (no over-claim, no
+fudge):**
+
+1. The headline's **A=613** is the AST scanner's **A+B COMBINED** —
+   `audit-method.md` §5.2 says so verbatim (*"the AST scanner's `A`
+   also counts `SQLModelSession`"*). With the split implemented,
+   **438 + 175 = 613** — the headline's A is reproduced exactly, now as
+   two separately measured families.
+2. The headline's **F=0** was a **SCANNER GAP, not a tree fact**: the
+   published scanner had no F detector, so the family could not be
+   measured at all. The implemented detector finds **F=1** — the ONE
+   audited site, the one-shot `psycopg.connect` in the wedge-capture
+   module, which the contract already records as CLEAN (F5.3: *"a
+   one-shot `psycopg.connect` with `close()` in `finally` ⇒ no pool,
+   so it cannot leak"*). It is a **known, individually-audited,
+   close-guaranteed** site — not a leak and not a new finding.
+3. Consequently the summed total is **780**, one more than the
+   headline's 779 — the difference is **exactly** the one F site the
+   old instrument could not see. Nothing else moved: every other
+   family is identical to the recorded baseline, and the §3.2 pattern
+   cross-check (whose F vocabulary does not name plain
+   `psycopg.connect`) still reports A=439 / B=175 / C=4 / F=0 — the
+   same PATTERN-DEPENDENT divergence the audit records for D and E.
+
+**The census conclusion is unchanged**: every borrow site in the
+measured set is close-guaranteed (the F site included — it closes in a
+`finally` and holds no pool), **0 unclosed borrows**, and the retired
+**≈689** aggregate stays **NON-CANONICAL**.
+
+*Addendum written by the tidier fix cycle (T-H2); the headline above is
+unchanged and remains the record's base baseline.*
+
+---
+
 *Produced by the db-pool-idle-txn lane, Phase 1 task T1.11 (F1.1). The
 method of record is `audit-method.md`; the measured Phase-0 record is
 `BASELINE.md`; the binding change list is `final-implementation-spec.md`.*
