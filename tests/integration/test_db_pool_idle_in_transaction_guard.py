@@ -54,7 +54,7 @@ present (the manager engine carries ``ensemble-manager`` on the
 CONNINFO channel since F2), else by scratch-DB isolation — every
 backend in the scratch database belongs to this test. The census
 scope note (D-50 — the 11 real pool-creation sites + the
-``factory.py:289`` comment false-positive) is documented in the
+``factory.py:352`` comment false-positive) is documented in the
 sibling churn pack's header.
 
 Plantable mutations:
@@ -115,7 +115,7 @@ _PG_PASSWORD = os.environ.get("PG_TEST_PASSWORD", "ensemble_dev")
 #: churn pack's header carries the full 11-site table).
 CENSUS_SCOPE_NOTE = (
     "census scope = EVERY pool-creation site (11 real + 1 comment "
-    "false-positive at factory.py:289 — BASELINE.md T3(a)); the "
+    "false-positive at factory.py:352 — BASELINE.md T3(a)); the "
     "three named engines are the attribution subset, not the boundary"
 )
 

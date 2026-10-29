@@ -23,20 +23,21 @@ real sites** (12 enumerated, 1 comment false-positive), per
 ``ensemble-checkpoint-adapter``) are the ATTRIBUTION SUBSET, not the
 census boundary:
 
-| # | Site (base ``19fc11c8b`` line; marker re-verified at HEAD) | Kind |
+| # | Site (markers re-verified at HEAD after the 2026-10-29 merge; | Kind |
+|   | base ``19fc11c8b`` lines live in ``BASELINE.md`` T3(a)) | |
 |---|---|---|
-| 1 | ``daemon/persistence.py:316`` — ``AsyncConnectionPool`` | P2 saver pool |
-| 2 | ``daemon/persistence.py:355`` — ``asyncpg.create_pool`` | checkpoint adapter |
+| 1 | ``daemon/persistence.py:334`` — ``AsyncConnectionPool`` | P2 saver pool |
+| 2 | ``daemon/persistence.py:391`` — ``asyncpg.create_pool`` | checkpoint adapter |
 | 3 | ``daemon/__main__.py:237`` — ``create_engine`` | boot preflight |
-| 4 | ``daemon/repositories/factory.py:184`` — SQLite | dialect-local |
-| 5 | ``daemon/repositories/factory.py:215`` — dialect-agnostic | config-driven |
-| 6 | ``daemon/repositories/factory.py:323`` — **MANAGER ENGINE** (``pool_size=5``) | the lane's site 1 |
-| 7 | ``daemon/tools/ens_db_tools.py:633`` — repair engine (``pool_size=2``) | 5 slots |
-| 8 | ``daemon/tools/ens_db_tools.py:691`` — vacuum ``NullPool`` | one-shot |
+| 4 | ``daemon/repositories/factory.py:191`` — SQLite | dialect-local |
+| 5 | ``daemon/repositories/factory.py:222`` — dialect-agnostic | config-driven |
+| 6 | ``daemon/repositories/factory.py:431`` — **MANAGER ENGINE** (``pool_size=manager_pool_size`` — config-driven; default tier 15 + overflow 10) | the lane's site 1 |
+| 7 | ``daemon/tools/ens_db_tools.py:657`` — repair engine (``pool_size=2``) | 5 slots |
+| 8 | ``daemon/tools/ens_db_tools.py:719`` — vacuum ``NullPool`` | one-shot |
 | 9 | ``daemon/services/vacuum_engine.py:79`` — vacuum ``NullPool`` | one-shot |
 | 10 | ``daemon/services/db_pool_manager.py:261`` — ``create_pool`` | external DBs |
 | 11 | ``daemon/services/wedge_capture/db_capture.py:195`` — ``psycopg.connect`` | one-shot, NO pool |
-| — | ``daemon/repositories/factory.py:289`` — the COMMENT false-positive | not a site |
+| — | ``daemon/repositories/factory.py:352`` — the COMMENT false-positive | not a site |
 
 Attribution (D-24-amended/D-49): by ``application_name`` where present
 (conninfo channel), else by scratch-DB isolation — every backend in
@@ -108,7 +109,13 @@ CENSUS_SCOPE_SITES: tuple[tuple[str, str], ...] = (
     ("daemon/__main__.py", "create_engine"),
     ("daemon/repositories/factory.py", "sqlite"),
     ("daemon/repositories/factory.py", "create_engine"),
-    ("daemon/repositories/factory.py", "pool_size=5"),
+    # (2026-10-29 merge-semantics fix) the manager engine sizing
+    # marker: the construction is CONFIG-DRIVEN since the
+    # manager-pool-size knob hotfix — ``pool_size=manager_pool_size``
+    # (default tier ``MANAGER_POOL_SIZE_DEFAULT`` = 15 + overflow 10).
+    # The pre-merge marker ``pool_size=5`` no longer exists at the
+    # construction site and would RED on every run.
+    ("daemon/repositories/factory.py", "pool_size=manager_pool_size"),
     ("daemon/tools/ens_db_tools.py", "REPAIR_POOL_SIZE"),
     ("daemon/tools/ens_db_tools.py", "NullPool"),
     ("daemon/services/vacuum_engine.py", "NullPool"),

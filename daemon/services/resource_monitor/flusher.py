@@ -56,8 +56,39 @@ from .rollup import (
     rollup_to_hour,
     rollup_to_minute,
 )
+from .sampler import DEGRADED_SENTINEL_INTERVAL_S
 
 logger = logging.getLogger(__name__)
+
+
+#: The RAW tier's ``interval_s`` RANGE.
+#:
+#: The raw tier's discriminator is the EFFECTIVE sampling interval
+#: (``config.sample_seconds`` — default 30, range 15..60, plus the
+#: self-throttle doublings), NOT a fixed 30. The retention sweep used
+#: to be hard-coded to ``interval_s = 30``: at a 15 s configuration the
+#: raw rows were NEVER swept (unbounded raw-row growth) and the
+#: history "raw" resolution returned no points.
+#:
+#: The range is ``0 < interval_s < 60``:
+#:
+#:   * the MINUTE tier is ``interval_s = 60`` and the HOUR tier is
+#:     ``interval_s = 3600`` — both OUTSIDE the range, so the raw
+#:     sweep can never erase them (review F1: a tier-blind raw sweep
+#:     erased the 14-day minute and 180-day hour tiers);
+#:   * the DEGRADED SENTINEL is ``interval_s = 0`` — also OUTSIDE the
+#:     range, so the raw sweep does NOT swallow it; the sentinel keeps
+#:     its OWN sweep (the sixth DELETE).
+#:
+#: KNOWN LIMIT (documented, not a defect): an effective sampling
+#: interval of exactly 60 makes the raw row and the minute roll-up
+#: share the ``interval_s = 60`` discriminator — an inherent ambiguity
+#: of the stacked-tier schema (deviation #1). Such raw rows are swept
+#: by the MINUTE sweep (14 d) instead of the raw cutoff (48 h); they
+#: are never lost early. Carrying the effective interval in its own
+#: column needs a NEW COLUMN (DDL) — owned by the metrics-collection
+#: lane, NOT by this repair.
+RAW_TIER_INTERVAL_PREDICATE = "interval_s > 0 AND interval_s < 60"
 
 
 def is_missing_relation_error(exc: BaseException) -> bool:
@@ -288,9 +319,14 @@ class Flusher:
         # if the buffer is over capacity).
         drained = self.raw_ring.drain()
         for row in drained:
-            # Stamp the bucket_ts on entry — the sampler writes the
-            # row without a timestamp; the flusher stamps it on
-            # admission. Naive-UTC (D9).
+            # The sampler stamps ``bucket_ts`` at SAMPLE time (T1 fix:
+            # the drain-time stamp made every row of a window share ONE
+            # ``(bucket_ts, interval_s)`` key, so all but the first
+            # were swallowed by the ON CONFLICT DO NOTHING insert —
+            # silently, with ``flush.errors == 0``). The ``setdefault``
+            # is now a NO-OP for sampler rows and stays only as the
+            # fallback for a row that arrives without a timestamp.
+            # Naive-UTC (D9).
             row = dict(row)
             row.setdefault("bucket_ts", self._now_utc_naive().strftime(
                 "%Y-%m-%d %H:%M:%S"
@@ -325,7 +361,7 @@ class Flusher:
         # store. Same for the minute roll-up rows already computed.
         instance_rows: list[dict] = []
         swept = {"raw": 0, "minute": 0, "hour": 0, "instance": 0,
-                 "pid_map": 0}
+                 "pid_map": 0, "degraded": 0}
         minute_rows: list[dict] = []
         hour_rows: list[dict] = []
         # D4 — drained pid-map history (one read per window; the
@@ -339,7 +375,20 @@ class Flusher:
                     # Roll-up is only meaningful when there are rows
                     # to roll. An empty buffer skips the writes (no
                     # transaction content) but the sweep still runs.
-                    minute_rows = rollup_to_minute(self._buffer)
+                    #
+                    # B1: the DEGRADED SENTINEL rows (a tick whose
+                    # platform read failed) carry NO measurement —
+                    # every daemon metric is NULL — so they are NOT
+                    # rolled up. Rolling them in would fold a "no
+                    # sample" marker into the minute/hour tiers and
+                    # make the sample tiers carry phantom buckets.
+                    # They stay in the RAW tier (interval_s = 0), which
+                    # is where the drop evidence belongs.
+                    sample_rows = [
+                        r for r in self._buffer
+                        if r.get("interval_s") != DEGRADED_SENTINEL_INTERVAL_S
+                    ]
+                    minute_rows = rollup_to_minute(sample_rows)
                     hour_rows = rollup_to_hour(minute_rows)
                     rows_written += self._write_raw(conn, self._buffer)
                     # 2. Minute tier — INSERT the roll-up rows.
@@ -357,8 +406,34 @@ class Flusher:
                 # hour (180 d) rows (review F1). T2 instance rows are
                 # raw-only (no roll-down) — swept at the raw cutoff
                 # with no interval discrimination (§2.5 raw tier).
+                # T3: the raw tier's discriminator is the EFFECTIVE
+                # sampling interval (15..60 by configuration, plus the
+                # self-throttle doublings), not a fixed 30 — the sweep
+                # used to be hard-coded to ``interval_s = 30``, so at a
+                # 15 s configuration the raw rows were NEVER swept.
+                # The predicate covers the raw RANGE
+                # (``0 < interval_s < 60``) and therefore excludes the
+                # minute tier (60), the hour tier (3600) AND the
+                # DEGRADED SENTINEL (0) — the sentinel keeps its own
+                # sweep below.
                 swept["raw"] = self._sweep(
-                    conn, "resource_daemon_bucket", raw_cut, interval_s=30
+                    conn,
+                    "resource_daemon_bucket",
+                    raw_cut,
+                    extra_predicate=RAW_TIER_INTERVAL_PREDICATE,
+                )
+                # B1: the DEGRADED SENTINEL rows live in the raw tier
+                # with ``interval_s = 0`` (the tier discriminator every
+                # reader filters on), so they need their OWN sweep —
+                # without it a permanently dark host would grow the
+                # sentinel rows without bound. Same cutoff as the raw
+                # tier (they are stamped with the flush-time
+                # ``bucket_ts``).
+                swept["degraded"] = self._sweep(
+                    conn,
+                    "resource_daemon_bucket",
+                    raw_cut,
+                    interval_s=DEGRADED_SENTINEL_INTERVAL_S,
                 )
                 swept["minute"] = self._sweep(
                     conn, "resource_daemon_bucket", min_cut, interval_s=60
@@ -505,6 +580,14 @@ class Flusher:
         table with a marker. P1 stores minute rows in
         ``resource_daemon_bucket`` with ``interval_s=60`` and a
         raw_count helper — keeps the table count to the spec 4.
+
+        B2: the minute tier also carries ``cg_anon_kb`` (the cgroup
+        v2 ``memory.anon`` value). The anomaly store binds its
+        ``cgroup.anon_kb`` series to that column ONLY — the daemon's
+        own anonymous pool rides the separate ``daemon.anon_kb``
+        series. Without the column in the minute tier the series
+        could not be restored by the boot replay (which reads the
+        minute tier).
         """
         params = [
             {
@@ -515,6 +598,8 @@ class Flusher:
                 "cpu_sys_usec": r.get("cpu_sys_usec"),
                 "missed_samples": r.get("missed_samples", 0),
                 "anon_kb": r.get("anon_kb"),
+                "cg_anon_kb": r.get("cg_anon_mb", 0) * 1024
+                    if r.get("cg_anon_mb") is not None else None,
                 "threads": r.get("threads"),
                 "fds": r.get("fds"),
                 "sample_cost_ms": r.get("sample_cost_ms"),
@@ -528,8 +613,8 @@ class Flusher:
             "resource_daemon_bucket",
             [
                 "bucket_ts", "interval_s", "rss_kb", "cpu_user_usec",
-                "cpu_sys_usec", "missed_samples", "anon_kb", "threads",
-                "fds", "sample_cost_ms", "attributed_bytes",
+                "cpu_sys_usec", "missed_samples", "anon_kb", "cg_anon_kb",
+                "threads", "fds", "sample_cost_ms", "attributed_bytes",
                 "unattributed_kb", "coverage_pct",
             ],
             idempotent=True,
@@ -583,7 +668,11 @@ class Flusher:
         ``resource_daemon_bucket`` table) — without it a lower tier's
         cutoff would erase higher-tier rows (review F1). ``None``
         sweeps the whole table (raw-only tables such as T2
-        ``resource_instance_sample``).
+        ``resource_instance_sample``) UNLESS ``extra_predicate``
+        narrows it — the raw tier now sweeps with
+        ``extra_predicate=RAW_TIER_INTERVAL_PREDICATE`` (the raw
+        RANGE ``0 < interval_s < 60``) because its discriminator is
+        the effective sampling interval, not a fixed 30.
 
         ``extra_predicate`` is AND-ed onto the WHERE for tables that
         need a structural guard beyond the timestamp cutoff. The
@@ -833,7 +922,7 @@ class Flusher:
         """
         nested = conn.begin_nested()
         try:
-            conn.execute(text(sql), params)
+            result = conn.execute(text(sql), params)
         except Exception as exc:
             nested.rollback()
             if is_missing_relation_error(exc):
@@ -879,7 +968,20 @@ class Flusher:
             self.counters.errors += 1
             return 0
         nested.commit()
-        return len(params)
+        # G6: the flush counters must report the rows that were REALLY
+        # written, not the rows that were ATTEMPTED. The stacked-tier
+        # INSERT is idempotent (``ON CONFLICT (bucket_ts, interval_s)
+        # DO NOTHING`` / ``INSERT OR IGNORE``), so a duplicate key is
+        # silently skipped — ``len(params)`` counted it as a write and
+        # the flush counters OVER-REPORTED. ``rowcount`` is the number
+        # of rows the statement actually inserted (PostgreSQL reports
+        # the post-ON-CONFLICT count; SQLite reports the number of
+        # rows actually changed). A driver that cannot report a
+        # rowcount (-1) falls back to ``len(params)``.
+        affected = getattr(result, "rowcount", -1)
+        if affected is None or affected < 0:
+            return len(params)
+        return int(affected)
 
     def _dialect_insert(
         self, table: str, columns: list[str], *, idempotent: bool

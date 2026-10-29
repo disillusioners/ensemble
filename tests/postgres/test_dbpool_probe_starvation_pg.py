@@ -44,6 +44,7 @@ import time
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import QueuePool
 
+from daemon.constants import MANAGER_POOL_SIZE_DEFAULT
 from daemon.services.readiness import (
     MANAGER_POOL_CONFIGURED_CAPACITY,
     make_db_probe,
@@ -52,33 +53,52 @@ from daemon.services.readiness import (
 #: The pack-local declared collected count (NEW packs only).
 EXPECTED_COLLECTED = 2
 
+#: The manager engine's CONFIGURED overflow at the construction site.
+EXPECTED_MAX_OVERFLOW = 10
+
 
 def _starved_engine():
     """An engine whose pool capacity matches the lane-pinned constant."""
     return create_engine(
         "postgresql+psycopg://unused/unused",
         poolclass=QueuePool,
-        pool_size=5,
-        max_overflow=10,
+        pool_size=MANAGER_POOL_SIZE_DEFAULT,
+        max_overflow=EXPECTED_MAX_OVERFLOW,
         connect_args={},
     )
 
 
+def _effective_capacity(engine) -> int:
+    """The engine's EFFECTIVE total capacity (configured size +
+    overflow) — the value the admission pre-check derives."""
+    return engine.pool.size() + engine.pool._max_overflow
+
+
 class TestF4fStarvationShape:
-    """F4-f — under 15 holders the probe refuses without taking a slot."""
+    """F4-f — at the engine's effective capacity the probe refuses
+    without taking a slot."""
 
     def test_probe_takes_no_connection_under_starvation(self, pg_engine):
-        # A REAL engine over the scratch PG, with the lane-pinned
-        # capacity (pool_size 5 + max_overflow 10 = 15).
+        # A REAL engine over the scratch PG, built at the DEFAULT TIER
+        # (pool_size 15 + max_overflow 10 = 25). The capacity is
+        # DERIVED from the engine's own pool (2026-10-29): the manager
+        # pool size is config-driven, so the pre-check's threshold is
+        # the engine's effective capacity, not a fixed number.
         engine = create_engine(
             pg_engine.url.render_as_string(hide_password=False),
             poolclass=QueuePool,
-            pool_size=5,
-            max_overflow=10,
+            pool_size=MANAGER_POOL_SIZE_DEFAULT,
+            max_overflow=EXPECTED_MAX_OVERFLOW,
             pool_pre_ping=True,
         )
         holders: list = []
         try:
+            assert _effective_capacity(engine) == MANAGER_POOL_CONFIGURED_CAPACITY, (
+                "F4-f: the test engine's effective capacity "
+                f"({_effective_capacity(engine)}) does not match the "
+                "lane-pinned default-tier capacity "
+                f"({MANAGER_POOL_CONFIGURED_CAPACITY})"
+            )
             # Hold the pool at its configured capacity — STABLE and
             # QUIESCENT before the probe runs (the D-57 boundary race
             # is a disclosed residual, not a pin failure).

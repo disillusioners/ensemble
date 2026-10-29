@@ -198,3 +198,108 @@ NO live promote performed.
    capture-era A/B `7c9440b3` still open (resolved_at NULL) — cleanup candidate.
 
 **Disposition (user-decided, executed 2026-10-21/22):** commit 660e73453 KEEP (unpushed; two-lens review = correct + sabotage-clean; P1 test-stub fix + security merge conditions logged as follow-ups); agents/wanderer/skill-set.yaml auto_load flip REVERTED via git restore (auto_load is owner-scoped; the observed leak was search-driven — deactivations were the real barrier; fleet convention = own planner auto_load true). DB cleanup + fix sequencing deferred.
+
+## db-pool idle-in-txn lane — implementation landed, gate re-verification pending (2026-10-29)
+
+**Status**: the transaction-hygiene fixes for the 2026-10-26 incident are **landed on the lane
+branch and independently gated — NOT promoted**. The live daemon still runs the pre-fix tree, so
+the incident stays **OPEN** as a symptom class.
+
+- **Branch**: `fix/db-pool-idle-txn` · base `19fc11c8b` (staged v0.27.11 tree) · HEAD `812ceca60`
+  · **82 commits** (incl. this docs commit) · worktree `/home/nea/ensemble-src-wt-dbpool-idletxn` · **not pushed to origin**.
+- **Scope**: **11 daemon files** (+1096/−207), 30 test/script files, **0 new `.sql`** (migration
+  delta vs the live release is EMPTY; `agents/`, `frontend/`, `plugins/` payload trees unchanged).
+- **Plan of record**: `.agents/shared/planning/db-pool-idle-txn/` (BASELINE.md,
+  final-implementation-spec.md, plan-overview.md, code-review.md, tidier-report.md,
+  delta-tidy-verify.md, FOLD-MAP.md, expected-collected.md).
+- **Incident record**: `.agents/shared/incident-20261026-db-pool-idle-in-transaction.md` — the
+  "FIXES LANDED" section records what shipped **and which of the original RCA claims the
+  measurement refuted** (the pool was never exhausted; the `idle in transaction` census is blind to
+  the dominant occupancy shape; the probe does not leak per tick; the "aborted connection handed
+  back out" quote is a same-connection cascade in wedge-capture; the F8 flip condition is NOT met
+  ⇒ F8 stands; OQ-1 closed as a concurrent double-mint).
+
+**What landed** (per-file detail in the incident record):
+
+- `daemon/manager.py` — **F8**: the deferred-report reconcile split into **P0/P1/P2** in both
+  twins; no manager-engine transaction is open across an await; the async fetch is bounded at 8.0 s;
+  the (c) branch consumes the carrier flag **strictly** (`live_carrier_exists is False`, :11226
+  sync / :12049 async at HEAD).
+- `daemon/tools/instance.py` — **F8.5**: the `await _bus.watch(...)` moved out of the
+  `WriteGuardSession` scope.
+- `daemon/tools/ens_db_tools.py` — **F3**: the explicit `text("BEGIN")` deleted in both branches
+  (`grep 'text("BEGIN")' daemon/` → 0) + unconditional `finally`-rollback; the repair engine got its
+  own `connect_args` + explicit `pool_reset_on_return="rollback"`.
+- `daemon/services/readiness.py` — **F4-A** admission pre-check (+ its non-QueuePool shape-guards)
+  and **F4-B** `SET LOCAL statement_timeout`; the probe docstring was corrected.
+- `daemon/repositories/factory.py` — **F2**: explicit knobs (`pool_reset_on_return="rollback"`,
+  `pool_recycle=3600`, `pool_timeout=30`; sizing 5+10 unchanged), conninfo `application_name`,
+  and the engine-level idle-in-txn backstop **defined but DISABLED** with a boot log that says so.
+- `daemon/constants.py` (Δ3 constants + honesty blocks) · `daemon/persistence.py` (asyncpg adapter
+  DSN + `server_settings`) · `daemon/repositories/mission_record/repository.py` +
+  `daemon/services/mission_record_service.py` (**F6** idempotent mint) ·
+  `daemon/services/wedge_capture/db_capture.py` (**F5** `tasks`→`task`) · `daemon/routers/queues.py`
+  (**F9.1**, comment-only).
+
+**Gate record**:
+
+- Code council: **APPROVE-WITH-ADVISORIES, 0 CRITICAL** (`code-review.md`; W-1/W-2 since folded).
+- Quality pass: `tidier-report.md` (6 High / 17 Medium / 14 Low) → `delta-tidy-verify.md`
+  **TESTER-GATE-READY, 0 conditions**.
+- Independent plan approval: `.agents/approver/db-pool-idle-txn-tracking.md` — **APPROVED**, 0
+  blocking.
+- Tester functional gate (`tester/dbpool-functional-gate` @ `148a7b30d`): **VERDICT FAIL on one
+  gate — G3.5, 11 net-new reds, ONE root cause** (the F4-A pre-check crashed on non-QueuePool
+  engines at `readiness.py:1512`). Everything else PASSed: ladder 17/17 (155 tests, 0 failed, 0
+  skipped, exactly 1 xfailed), J1 R-1 35/35, J2 Δ3 measured, J4 mutations 9/9, J5 six
+  base-vs-HEAD scenarios, J6 live boundary untouched, count identity +109 exact.
+  The lane's last commit `441a1657d` fixes exactly that root cause and the F4-a mutation leg was
+  re-proven RED→GREEN on the merged tester tree `3d835d8dd` — **but the re-verification is not yet
+  written up as a RESULTS doc, so the tester's FINAL verdict still reads FAIL pending that
+  write-up.**
+
+**Open blockers** (all lane-side, all resolvable without touching the live daemon):
+
+1. **R-1 — the tester's `expected-collected.md` fill has not landed in the lane tree.** The lane
+   copy still carries the `TBD (R-1)` placeholder (**38 occurrences** — the 35 count cells plus 3
+   prose mentions), so every ladder row FATALs by design on the lane tree; the 35/35 measurement
+   landed on the **tester** branch (`47ff2f5ff`) and must be merged in.
+   (This "R-1" is the **tester's count-fill task**, not the routed R-1 event-loop item below.)
+2. **The Δ3 measured constant (0.25 s) is likewise tester-side only** (`8cc538a71`); the lane tree
+   still ships the sentinel `MANAGER_ENGINE_LEGITIMATE_HOLD_BUDGET_S = -1.0`
+   (`daemon/constants.py:353`), which scopes the F7 residence assertion out.
+3. **The origin/latest merge is DONE** (2026-10-29): merge commit `79bf44936`
+   (parents `aac505291` lane + `69d767b2a` origin/latest — the 9-commit move incl. the
+   manager-pool-size knob hotfix), **3 conflicts resolved as unions**: `daemon/repositories/factory.py`,
+   `tests/unit/repositories/test_pg_engine_utc_session.py`, `.agents/shared/context.md`. The merge's
+   semantic fallout was fixed in the merge-semantics cycle: the hard-coded
+   `MANAGER_POOL_CONFIGURED_CAPACITY = 15` became the DEFAULT-TIER declaration (**25** = 15 pool +
+   10 overflow) with the admission pre-check's refusal threshold DERIVED from the engine's own pool
+   at call time (a static 15 would refuse while overflow slots are servable), and the
+   capacity-equality + sizing pins were re-derived for the config-driven
+   `pool_size=manager_pool_size` construction (`limits.manager_pool_size`, default tier 15,
+   floor 15). The union had also silently dropped one test body (restored). Per §15.3 every anchor
+   must be re-verified before a stage — a stale stage is refused by the L1 tip-identity guard
+   (exit 78), and that refusal must not be overridden.
+4. **The version slot moved:** `v0.27.12` is **taken** (live `current -> releases/v0.27.12`).
+   `v0.27.13` is free as of this note, but the slot is re-derived from the live census at stage
+   time (W9) and is never hard-coded in an artifact.
+
+**Routed out of this lane** (see `plan-overview.md` §12): **R-1** event-loop sync-DB (the dominant
+untreated driver — `daemon/routers/instances.py:476`, `daemon/routers/queues.py:654`), **R-2**
+BFS depth-loop transaction span, **R-3** default-executor ceiling, **R-4/R-7** missed-finalize
+family (a finalize that *fires* now commits; a finalize that *never fires* is untouched),
+**R-9** asyncpg adapter idle-in-txn hold (attribution shipped; the hold is the follow-up's, under
+the D-47 enablement gate), **R-10** wedge-capture store-census defect (`n_live_tup` read from
+`pg_class` instead of `pg_stat_user_tables` — born-broken at base, a SECOND root of the aborted
+cascade that this lane does **not** close), **R-11** `instance.py:1346` unreachable check.
+
+**Promote boundary: STAGE ONLY.** No promote, no daemon restart, no `.env` touch, no production DB
+contact; the live daemon, the live symlink and the promote journal are untouched
+(`state.json`: current `v0.27.12`, previous `v0.27.11`, `in_flight=None`). The promote flip is the
+**user's 3-factor nonce ceremony** — never performed by this lane or by an agent
+(`plan-overview.md` §15.1).
+
+## Manager DB-engine pool knob — LIMITS_MANAGER_POOL_SIZE (2026-10-28, devops incident fix item #7)
+
+Managed knob `limits.manager_pool_size` / env `LIMITS_MANAGER_POOL_SIZE`, ladder **operative end-to-end**: DB > env > yaml > default → boot-apply mutates the YAML Config (`config.limits.manager_pool_size`) → `daemon/manager.py` threads `manager_pool_size=self.config.limits.manager_pool_size` into `create_postgres_engine` (the ensemble.json `EnsembleConfig` has NO `.limits`, so the factory takes the value as an explicit kwarg; other callers default to the constant). Bounds [15, 30] fail-loud (floor 15 = default, ceiling 30 = connection budget 30+10 manager + 2×20 checkpoint = 80 ≤ max_connections 100) — out-of-range values are rejected (422 / ValidationError), never clamped. Activation = next daemon restart (engine built once at boot).

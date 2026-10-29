@@ -85,7 +85,13 @@ from sqlalchemy import text
 # SAME narrowed RELATION-missing matcher as the flusher (the bare
 # "does not exist" substring also matches PG column errors 42703).
 from daemon.services.resource_monitor.flusher import (
+    RAW_TIER_INTERVAL_PREDICATE,
+)
+from daemon.services.resource_monitor.flusher import (
     is_missing_relation_error as _is_missing_relation_error,
+)
+from daemon.services.resource_monitor.sampler import (
+    DEGRADED_SENTINEL_INTERVAL_S,
 )
 from daemon.services import resource_traceback
 from daemon.services.timestamps import to_utc_iso
@@ -224,6 +230,27 @@ def _get_monitor(request: Request) -> Optional[Any]:
     return getattr(request.app.state, "resource_monitor", None)
 
 
+def _sample_rows(monitor: Any) -> list[dict]:
+    """The ring rows that carry a REAL sample.
+
+    The raw ring also carries the DEGRADED SENTINEL rows — the tick
+    whose platform read produced no snapshot (the DB evidence path for
+    a dropped sample, written by the sampler so the flusher carries it
+    into T1). A sentinel carries NO measurement: every daemon metric
+    is NULL and its ``interval_s`` is the degraded marker (0).
+
+    The live views must show the last REAL sample, never a sentinel's
+    NULLs — rendering them would show "0.0 MB RSS" for a daemon whose
+    memory was never measured. The sentinel belongs to the DB
+    evidence path, not to the live view.
+    """
+    rows = monitor.ring.snapshot()
+    return [
+        r for r in rows
+        if r.get("interval_s") != DEGRADED_SENTINEL_INTERVAL_S
+    ]
+
+
 def _cpu_pct_from_rows(rows: list[dict]) -> Optional[float]:
     """Compute daemon cpu_pct from the last two ring rows.
 
@@ -253,6 +280,16 @@ async def get_live(request: Request) -> dict:
     Reads the sampler's ring (the runtime source) and builds the
     §2.8 shape. Degrades to ``_empty_live_shape()`` when the monitor
     is absent / disabled (D11 — never 503).
+
+    NOT A LIVENESS PROBE (R4, disclosed — the behaviour is NOT
+    changed): the ``daemon`` block is built from the sampler's RING,
+    and the flusher DRAINS that ring on every flush window — so in the
+    window between a flush and the next sampler tick the daemon block
+    is ALL-NULL (``pid`` / ``cpu_pct`` / ``rss_mb`` / ``threads`` /
+    ``fds``). On a host whose platform reader never produces a sample
+    (a dark host) the block stays NULL. This endpoint reports the
+    RESOURCE sample, NOT the process's liveness: use the daemon's own
+    ``/livez`` / ``/readyz`` for liveness.
     """
     monitor = _get_monitor(request)
     if monitor is None or not getattr(monitor, "enabled", False):
@@ -262,7 +299,7 @@ async def get_live(request: Request) -> dict:
         return _empty_live_shape()
 
     try:
-        rows = monitor.ring.snapshot()
+        rows = _sample_rows(monitor)
         counters = monitor.sampler_counters
         last = rows[-1] if rows else None
         cpu_pct = _cpu_pct_from_rows(rows)
@@ -387,7 +424,7 @@ def _self_cost_from_monitor(monitor: Any) -> dict:
     """Build the §2.8 /self-cost payload from the monitor."""
     counters = monitor.sampler_counters
     flusher_counters = monitor.flusher_counters
-    rows = monitor.ring.snapshot()
+    rows = _sample_rows(monitor)
     cpu_pct = _cpu_pct_from_rows(rows)
     # buffers_bytes — approximate via ring row count * avg row size;
     # P1 exposes the in-flight flusher buffer + ring byte estimate.
@@ -464,6 +501,36 @@ async def get_history(
 
 def _interval_for_resolution(resolution: str) -> int:
     return {"raw": 30, "minute": 60, "hour": 3600}.get(resolution, 30)
+
+
+def _history_tier_predicate(resolution: str) -> tuple[str, dict]:
+    """Return the ``(sql_fragment, params)`` that selects ONE history tier.
+
+    The MINUTE and HOUR tiers are the ROLL-UP tiers: their discriminator
+    is fixed (``interval_s = 60`` / ``3600``) and they are selected with
+    an equality on the value from :func:`_interval_for_resolution`.
+
+    The RAW tier is different: its discriminator is the EFFECTIVE
+    sampling interval (``config.sample_seconds`` — default 30, range
+    15..60, plus the self-throttle doublings), so a fixed ``interval_s
+    = 30`` equality returned NOTHING at a 15 s configuration (the
+    "raw" resolution came back empty while the raw tier was full). The
+    raw tier is therefore selected by its RANGE ``0 < interval_s <
+    60`` — the same predicate the retention sweep uses
+    (``flusher.RAW_TIER_INTERVAL_PREDICATE``). The range excludes the
+    minute tier (60), the hour tier (3600) and the DEGRADED SENTINEL
+    (0).
+
+    The predicate is NOT ``interval_s IN (30, 60, 3600)`` — that would
+    mix the three tiers into one series.
+    """
+    if resolution == "raw":
+        return (
+            RAW_TIER_INTERVAL_PREDICATE,
+            {},
+        )
+    interval_s = _interval_for_resolution(resolution)
+    return ("interval_s = :interval_s", {"interval_s": interval_s})
 
 
 def _floor_naive_iso(iso: str, bucket_s: int) -> str:
@@ -556,6 +623,7 @@ def _read_history_points(
     stub).
     """
     interval_s = _interval_for_resolution(resolution)
+    tier_sql, tier_params = _history_tier_predicate(resolution)
     instances_active = _read_instances_active(
         engine, resolution, window_seconds
     )
@@ -567,16 +635,18 @@ def _read_history_points(
     )
     sql = (
         "SELECT bucket_ts, cpu_user_usec, cpu_sys_usec, rss_kb, "
-        "cg_current_kb, threads "
+        "cg_current_kb, threads, interval_s "
         "FROM resource_daemon_bucket "
-        "WHERE interval_s = :interval_s AND bucket_ts >= :cutoff "
+        f"WHERE {tier_sql} AND bucket_ts >= :cutoff "
         "ORDER BY bucket_ts ASC"
     )
+    params = {"cutoff": cutoff}
+    params.update(tier_params)
     try:
         with engine.connect() as conn:
             rows = conn.execute(
                 text(sql),
-                {"interval_s": interval_s, "cutoff": cutoff},
+                params,
             ).fetchall()
     except Exception as exc:
         if _is_missing_relation_error(exc):
@@ -586,11 +656,16 @@ def _read_history_points(
     prev_cpu = None
     for r in rows:
         cpu_total = (r[1] or 0) + (r[2] or 0)
+        # The CPU% divisor is the ROW's own interval: the raw tier
+        # carries the effective sampling interval, which is not
+        # necessarily the resolution's nominal 30 s (a 15 s
+        # configuration would otherwise report double the real CPU%).
+        row_interval_s = r[6] if r[6] else interval_s
         point: dict = {
             "t": r[0],
             "daemon_cpu": (
                 round(
-                    ((cpu_total - prev_cpu) / (interval_s * 1_000_000.0))
+                    ((cpu_total - prev_cpu) / (row_interval_s * 1_000_000.0))
                     * 100.0,
                     4,
                 )
