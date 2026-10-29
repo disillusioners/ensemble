@@ -275,10 +275,24 @@ class _MetricsRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 — stdlib naming
         listener = getattr(self.server, "listener", None)
-        if listener is None:  # pragma: no cover — defensive
-            self.send_error(503)
+        if listener is None:
+            # MA-15 — NEVER a 503: a 503 reads as "target DOWN" to
+            # Prometheus and fires the up==0 / absent() alerts
+            # spuriously. A detached listener serves 200 with a
+            # comment line (the degrade contract's shape).
+            self._respond(
+                MetricsResponse(
+                    200,
+                    CONTENT_TYPE,
+                    b"# exposition unavailable: listener_detached\n",
+                    "error",
+                )
+            )
             return
-        response = listener.build_response(self.path, self.headers)
+        self._respond(listener.build_response(self.path, self.headers))
+
+    def _respond(self, response: MetricsResponse) -> None:
+        """Write one response (the single write path)."""
         self.send_response(response.status)
         self.send_header("Content-Type", response.content_type)
         self.send_header("Content-Length", str(len(response.body)))
@@ -357,9 +371,12 @@ class MetricsListener:
             return bool(self._gate_enabled())
         from daemon.services import metrics_gate
 
-        # The managed tier is refreshed HERE (the listener's own thread)
-        # — the census sampler must never touch the DB for a boolean.
-        metrics_gate.refresh_managed_metrics_enabled()
+        # The LIVE managed values are refreshed HERE (the listener's own
+        # thread — never the event loop, never under a metric lock): ONE
+        # DB read per TTL serves every live managed key (the kill-switch,
+        # the publisher cadence, the cardinality cap). The census sampler
+        # must never touch the DB for a boolean.
+        metrics_gate.refresh_managed_values()
         return metrics_gate.metrics_enabled()
 
     # ─── the request path (PURE — no socket, no thread) ────────────────

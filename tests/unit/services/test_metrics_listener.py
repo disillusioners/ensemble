@@ -318,6 +318,44 @@ def test_unknown_route_is_404(monkeypatch):
     assert response.outcome == ""
 
 
+# ─── the detached-listener edge (FIX m8) ───────────────────────────────────
+
+
+def _detached_handler() -> tuple[object, "io.BytesIO"]:
+    """A handler whose server has NO listener attached."""
+    import io
+    import types
+
+    handler = ml._MetricsRequestHandler.__new__(ml._MetricsRequestHandler)
+    handler.server = types.SimpleNamespace(listener=None)
+    handler.request_version = "HTTP/1.1"
+    handler.requestline = "GET /metrics HTTP/1.1"
+    handler.command = "GET"
+    handler.path = "/metrics"
+    buffer = io.BytesIO()
+    handler.wfile = buffer
+    return handler, buffer
+
+
+def test_a_detached_listener_never_serves_503():
+    """MA-15 — a 503 reads as "target DOWN" to Prometheus and fires the
+    up==0 / absent() alerts spuriously. A detached listener serves 200
+    with a comment line."""
+    handler, buffer = _detached_handler()
+    handler.do_GET()
+    raw = buffer.getvalue()
+    assert raw.startswith(b"HTTP/1.1 200")
+    assert b"listener_detached" in raw
+
+
+def test_the_detached_listener_body_is_a_valid_prometheus_comment():
+    handler, buffer = _detached_handler()
+    handler.do_GET()
+    raw = buffer.getvalue()
+    assert b"503" not in raw.split(b"\r\n", 1)[0]
+    assert b"# exposition unavailable: listener_detached" in raw
+
+
 def test_metrics_route_tolerates_a_query_string(monkeypatch):
     monkeypatch.setenv(metrics_gate.ENV_VAR, "0")
     listener = ml.MetricsListener(port=0, socket_factory=_FakeSocketFactory())
