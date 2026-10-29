@@ -43,6 +43,10 @@ plus ``checkpoint_read_measurement_errors_total`` — the FAIL-OPEN
 tripwire: the measurement never breaks a read, so that counter is the
 only signal that the instrumentation itself broke. The measurement seam
 lives in ``daemon/checkpoint_adapter.py`` (the saver retry proxy).
+Item 6 adds the leak-signal CONSUMER counter
+``checkpoint_leak_signal_total`` (plan Track-1 item 6): the readiness
+leak predicate had an emission but no consumer — this is the alertable
+tally, consumed by ``daemon/services/readiness.py`` (fail-open).
 
 Lifecycle / C-14 compliance. Every accessor path is ``except Exception:``
 or narrower — NEVER ``except BaseException:`` (CancelledError must
@@ -466,6 +470,26 @@ checkpoint_read_measurement_errors_total = Counter(
     ),
 )
 
+#: Leak-signal CONSUMER counter (plan Track-1 item 6). The readiness
+#: leak predicate (``GraceTracker._evaluate_leak`` →
+#: ``GraceObservation.leak_signal`` → ``/readyz`` ``detail``) has
+#: published its verdict for every tick since the grace commission,
+#: but nothing alerted on it — the 2026-10-28 idle-in-transaction
+#: incident produced leak signals nobody saw. This is the alertable
+#: tally: ONE increment per readiness tick the predicate reports
+#: ``detected``. Plain (unlabeled) by design: the reason tokens embed
+#: tick counts ("(3 ticks)"), so labeling by reason would explode
+#: series cardinality; the WARN log line carries the reason detail.
+checkpoint_leak_signal_total = Counter(
+    name="checkpoint_leak_signal_total",
+    help=(
+        "Leak-signal fires consumed from the readiness leak predicate. "
+        "One increment per readiness tick the predicate reports "
+        "detected=true. The consumer is FAIL-OPEN: it never affects the "
+        "emitter (the grace verdict and the /readyz detail)."
+    ),
+)
+
 checkpoint_read_size_bytes = Histogram(
     name="checkpoint_read_size_bytes",
     label_keys=("op",),
@@ -514,6 +538,7 @@ def reset_for_tests() -> None:
     checkpoint_read_bytes_total.reset()
     checkpoint_read_size_bucket_hits_total.reset()
     checkpoint_read_measurement_errors_total.reset()
+    checkpoint_leak_signal_total.reset()
     checkpoint_read_size_bytes.reset()
 
 
@@ -541,6 +566,15 @@ def render_metrics() -> str:
     lines.append(f"# HELP {err.name} {err.help}")
     lines.append(f"# TYPE {err.name} counter")
     lines.append(f"{err.name} {err.get()}")
+
+    # The leak-signal consumer counter — also ALWAYS rendered (value 0
+    # included): a healthy daemon shows `checkpoint_leak_signal_total 0`
+    # and any non-zero value is the alertable tally of leak-signal
+    # fires (plan Track-1 item 6).
+    leak = checkpoint_leak_signal_total
+    lines.append(f"# HELP {leak.name} {leak.help}")
+    lines.append(f"# TYPE {leak.name} counter")
+    lines.append(f"{leak.name} {leak.get()}")
 
     # Labeled counters — the read-instrumentation surface. The HELP /
     # TYPE header is ALWAYS emitted (the metric exists even before its

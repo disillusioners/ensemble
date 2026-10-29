@@ -36,6 +36,7 @@ from sqlalchemy import text as sa_text
 from sqlalchemy.engine import Engine
 
 from daemon._redact import redact_exc_str
+from daemon.checkpoint_metrics import checkpoint_leak_signal_total
 from daemon.constants import (
     CHECKPOINT_SENTINEL_CHANNEL,
     CHECKPOINT_SENTINEL_CHECKPOINT_ID,
@@ -792,6 +793,11 @@ class GraceTracker:
             pool_state_sqlalchemy=pool_state_sqlalchemy,
             max_streak=max_streak,
         )
+        # Plan Track-1 item 6: the alerting consumer rides the emission
+        # here — it gates on ``detected`` itself, so non-firing ticks
+        # are a no-op. The emission is UNCHANGED: the verdict dict, the
+        # grace conjunction and their semantics/frequency are untouched.
+        consume_leak_signal(leak)
 
         # ── 3. degraded episode bookkeeping ────────────────────────
         degraded = [c for c in degraded_components if c]
@@ -1050,6 +1056,50 @@ class GraceTracker:
         return all(
             self._checkedout_history[i] < self._checkedout_history[i + 1]
             for i in range(len(self._checkedout_history) - 1)
+        )
+
+
+# ── the leak-signal CONSUMER (plan Track-1 item 6) ─────────────────
+def consume_leak_signal(leak: Optional[dict]) -> None:
+    """Alerting consumer for one tick's leak-predicate verdict.
+
+    The emission (``GraceTracker._evaluate_leak`` →
+    ``GraceObservation.leak_signal`` → ``/readyz`` ``detail.leak_signal``)
+    already existed — but nothing consumed it at alertable severity and
+    nothing counted it, so the 2026-10-28 idle-in-transaction incident
+    family produced leak signals nobody saw. This consumer closes that
+    gap without touching the emission:
+
+    * ONE ``logger.warning`` per fire, carrying the signal's context.
+      The reason token names the pool identity (both pool arms are the
+      oracle psycopg pool; the streak arm fires only when the pool
+      objects are UNAVAILABLE — §4.4 S9), and ``streak`` /
+      ``checkedout_rising`` carry the corroborating context.
+    * ONE monotonic increment of ``checkpoint_leak_signal_total``
+      (rendered by ``GET /api/metrics`` — always, even at 0).
+
+    FAIL-OPEN: any consumer failure is swallowed at debug — the
+    emitter's verdict, the grace conjunction and the composite are
+    untouched (the same discipline as the read instrumentation's
+    ``checkpoint_read_measurement_errors_total`` tripwire). Non-firing
+    ticks (``detected`` falsy / non-dict) return without logging or
+    counting.
+    """
+    try:
+        if not isinstance(leak, dict) or not leak.get("detected"):
+            return
+        checkpoint_leak_signal_total.inc()
+        logger.warning(
+            "Checkpoint pool LEAK SIGNAL: reason=%s streak=%s "
+            "checkedout_rising=%s",
+            leak.get("reason"),
+            leak.get("streak"),
+            leak.get("checkedout_rising"),
+        )
+    except Exception as exc:  # noqa: BLE001 — the emitter must never break
+        logger.debug(
+            "Leak-signal consumer failed: %s — the emitter is unaffected",
+            redact_exc_str(exc),
         )
 
 
