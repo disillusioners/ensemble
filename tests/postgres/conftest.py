@@ -122,11 +122,12 @@ ALLOWED_SCRATCH_DBS = frozenset(
         # (created and dropped by the pack script).
         "ensemble_test_only_rmflusher",
         # The throwaway names the repo's own PG packs create (the
-        # ladder pack's private cluster and the stage-3 attestation
-        # pack's cluster). Both are created by a pack and dropped with
-        # it; they are here because the shared fixture — and therefore
-        # this fence — runs against them.
+        # ladder pack's private cluster and the stage-2 / stage-3
+        # attestation packs' clusters). All are created by a pack and
+        # dropped with it; they are here because the shared fixture —
+        # and therefore this fence — runs against them.
         "ensemble_rl_p1",
+        "ensemble_test_stage2",
         "ensemble_test_stage3",
     }
 )
@@ -339,7 +340,7 @@ def _probe_postgres(url: str) -> Engine | None:
         return None
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="session", autouse=True)
 def pg_scratch_db_fence():
     """The scratch-DB fence — the FIRST thing that runs in this lane.
 
@@ -347,6 +348,7 @@ def pg_scratch_db_fence():
     so pytest creates it BEFORE the engine exists — i.e. before any
     SQL (and before the session-scoped ``drop_all``) can reach the
     target database. See :func:`check_scratch_db_fence` for the rules.
+    It is ALSO autouse, so a module that shadows ``pg_engine`` cannot opt out.
     """
     check_scratch_db_fence()
     return True

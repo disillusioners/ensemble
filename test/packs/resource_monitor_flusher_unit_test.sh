@@ -27,7 +27,7 @@
 # path (a leg that dies mid-run still reports).
 #
 # Exit codes: 0=PASS, 1=FAIL, 124=TIMEOUT.
-set -uo pipefail
+set -euo pipefail
 
 PACK_NAME="resource_monitor_flusher_unit_test"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -56,6 +56,24 @@
 #   collected-count check — GREEN-AT-ZERO IS A FAILURE).
 set -euo pipefail
 
+# The RESULT label is emitted by the EXIT trap (the repo's convention —
+# see PACKS.md), so an UNEXPECTED abort still reports a FAIL. The
+# default is a FAIL: the pack did not run to completion.
+RESULT="FAIL (pack did not run)"
+LOG=""
+ADMIN_USER=""
+
+on_exit() {
+  echo "RESULT: ${RESULT}"
+  if [ -n "${LOG}" ] && [ -f "${LOG}" ]; then
+    rm -f "${LOG}"
+  fi
+  if declare -F cleanup >/dev/null 2>&1; then
+    cleanup
+  fi
+}
+trap on_exit EXIT
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
@@ -66,13 +84,13 @@ cd "$PROJECT_DIR"
 # --- toolchain -----------------------------------------------------------
 for bin in psql createdb dropdb; do
   if ! command -v "$bin" >/dev/null 2>&1; then
-    echo "RESULT: FAIL (required binary '${bin}' is not on PATH — the pack cannot create or drop its own scratch database)"
+    RESULT="FAIL (required binary '${bin}' is not on PATH — the pack cannot create or drop its own scratch database)"
     exit 1
   fi
 done
 
 if [ ! -x ".venv/bin/pytest" ]; then
-  echo "RESULT: FAIL (no .venv/bin/pytest in ${PROJECT_DIR})"
+  RESULT="FAIL (no .venv/bin/pytest in ${PROJECT_DIR})"
   exit 1
 fi
 
@@ -103,7 +121,7 @@ case " ${ALLOWED_DBS} " in
     echo "[fence] scratch database '${SCRATCH_DB}' is in the pack's allowlist"
     ;;
   *)
-    echo "RESULT: FAIL (the pack's scratch database '${SCRATCH_DB}' is not in the allowlist [${ALLOWED_DBS}] — the shared PG fence would refuse it)"
+    RESULT="FAIL (the pack's scratch database '${SCRATCH_DB}' is not in the allowlist [${ALLOWED_DBS}] — the shared PG fence would refuse it)"
     exit 1
     ;;
 esac
@@ -121,7 +139,6 @@ cleanup() {
     -v ON_ERROR_STOP=1 \
     -c "DROP ROLE IF EXISTS \"${SCRATCH_ROLE}\";" >/dev/null 2>&1 || true
 }
-trap cleanup EXIT
 
 # The admin role needs CREATEROLE (to create the pack's dedicated LOGIN)
 # and CREATEDB (to create the database). The candidates are tried in
@@ -132,7 +149,6 @@ if [ -n "${PG_ADMIN_USER:-}" ]; then
 fi
 ADMIN_CANDIDATES+=(postgres "$(whoami)" ensemble)
 
-ADMIN_USER=""
 for cand in "${ADMIN_CANDIDATES[@]}"; do
   if PGPASSWORD="${PG_ADMIN_PASSWORD:-}" psql \
         -h "$PG_HOST" -p "$PG_PORT" -U "$cand" -d postgres -tAc \
@@ -144,7 +160,7 @@ for cand in "${ADMIN_CANDIDATES[@]}"; do
   fi
 done
 if [ -z "$ADMIN_USER" ]; then
-  echo "RESULT: FAIL (no admin role with CREATEROLE+CREATEDB could connect on ${PG_HOST}:${PG_PORT} — set PG_ADMIN_USER / PG_ADMIN_PASSWORD)"
+  RESULT="FAIL (no admin role with CREATEROLE+CREATEDB could connect on ${PG_HOST}:${PG_PORT} — set PG_ADMIN_USER / PG_ADMIN_PASSWORD)"
   exit 1
 fi
 echo "[setup] admin role=${ADMIN_USER}"
@@ -158,20 +174,19 @@ if ! PGPASSWORD="$PG_ADMIN_PASSWORD" psql \
       -v ON_ERROR_STOP=1 \
       -c "CREATE ROLE \"${SCRATCH_ROLE}\" LOGIN PASSWORD '${SCRATCH_PW}';" \
       >/dev/null; then
-  echo "RESULT: FAIL (could not create the scratch role '${SCRATCH_ROLE}' on ${PG_HOST}:${PG_PORT} as '${ADMIN_USER}')"
+  RESULT="FAIL (could not create the scratch role '${SCRATCH_ROLE}' on ${PG_HOST}:${PG_PORT} as '${ADMIN_USER}')"
   exit 1
 fi
 
 if ! PGPASSWORD="$PG_ADMIN_PASSWORD" createdb \
       -h "$PG_HOST" -p "$PG_PORT" -U "$ADMIN_USER" \
       -O "$SCRATCH_ROLE" "$SCRATCH_DB"; then
-  echo "RESULT: FAIL (could not create the scratch database '${SCRATCH_DB}' on ${PG_HOST}:${PG_PORT} as '${ADMIN_USER}')"
+  RESULT="FAIL (could not create the scratch database '${SCRATCH_DB}' on ${PG_HOST}:${PG_PORT} as '${ADMIN_USER}')"
   exit 1
 fi
 echo "[setup] scratch role=${SCRATCH_ROLE} db=${SCRATCH_DB} (created by this pack; dropped in the EXIT trap)"
 
 LOG="$(mktemp -t rm_flusher_bind_pg.XXXXXX)"
-trap 'rm -f "$LOG"; cleanup' EXIT
 
 # Run the leg NON-FATALLY and capture its rc: under `set -euo pipefail`
 # a failing leg would kill the pack at the pytest line itself, leaving
@@ -194,7 +209,7 @@ set -e
 cat "$LOG"
 
 if [ "$RC" -eq 124 ]; then
-  echo "RESULT: TIMEOUT"
+  RESULT="TIMEOUT"
   exit 124
 fi
 
@@ -208,14 +223,14 @@ case "$SUMMARY" in
   *)      PASSED_N="" ;;
 esac
 if [ -z "$PASSED_N" ] || [ "$PASSED_N" -lt 1 ]; then
-  echo "RESULT: FAIL (rc=${RC}, collected-count check: no \"N passed\" N>=1 in summary — collection/selection failure or a fully-skipped module; GREEN-AT-ZERO IS A FAILURE)"
+  RESULT="FAIL (rc=${RC}, collected-count check: no \"N passed\" N>=1 in summary — collection/selection failure or a fully-skipped module; GREEN-AT-ZERO IS A FAILURE)"
   exit 1
 fi
 if [ "$RC" -ne 0 ]; then
-  echo "RESULT: FAIL (rc=${RC}, ${PASSED_N} passed before failure)"
+  RESULT="FAIL (rc=${RC}, ${PASSED_N} passed before failure)"
   exit 1
 fi
 
 echo "[leg ok] ${PASSED_N} passed (rc=${RC})"
-echo "RESULT: PASS"
+RESULT="PASS"
 exit 0

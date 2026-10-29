@@ -33,6 +33,8 @@ FENCE DISCIPLINE: no database connection, no DDL, no live ``/proc``.
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -209,7 +211,9 @@ class TestThePackScript:
     def test_the_pack_script_leaves_no_residue(self):
         """The pack drops its database AND its role in the EXIT trap."""
         script = self._script()
-        assert "trap cleanup EXIT" in script
+        assert "trap on_exit EXIT" in script
+        body = script.split("on_exit() {", 1)[1].split("\n}", 1)[0]
+        assert "cleanup" in body
         assert "DROP ROLE IF EXISTS" in script
         assert "dropdb" in script
 
@@ -223,3 +227,14 @@ class TestThePackScript:
             "the pack's throwaway database is not in the shared allowlist "
             "— the shared fence would refuse it"
         )
+
+
+@pytest.mark.timeout(120)
+def test_a_module_level_pg_engine_override_still_triggers_the_fence():
+    """A module that SHADOWS ``pg_engine`` cannot opt out of the fence."""
+    proc = subprocess.run(
+        f"PG_TEST_DB=ensemble_prod PG_TEST_PORT=5499 \"{sys.executable}\" -m pytest "
+        "tests/postgres/test_attestation_live_descendants_pg_lca.py --override-ini=addopts= -m postgres -q",
+        shell=True, cwd=str(_REPO_ROOT), capture_output=True, text=True, timeout=120,
+    )
+    assert "refused" in proc.stdout, proc.stdout[-2000:]
