@@ -203,6 +203,7 @@ dependency is off emits **no series** (absent ≠ zero) unless its contract says
 | F6 | `ensemble_pg_backends`, `ensemble_pg_idle_in_txn_oldest_seconds`, `ensemble_pg_leaked_txn`, `ensemble_pg_census_last_success_timestamp_seconds` | gauge×4 | P1a | greenfield (census seam, §9) | 15 |
 | F7 | `ensemble_checkpoint_op_seconds`, `ensemble_checkpoint_op_bytes`, `ensemble_checkpoint_slow_ops_total`, `ensemble_checkpoint_list_total` | hist×2/counter×2 | P1b | reuse `checkpoint_perf.py:190`,`:198`,`:91` | 21→31 |
 | F7b | `ensemble_checkpoint_read_ops_total`, `ensemble_checkpoint_read_rows_total`, `ensemble_checkpoint_read_bytes_total`, `ensemble_checkpoint_read_size_bucket_hits_total`, `ensemble_checkpoint_read_measurement_errors_total`, `ensemble_checkpoint_leak_signal_total`, `ensemble_checkpoint_read_size_bytes` | counter×6/hist | P1b | reuse `checkpoint_perf.py:273-277`,`checkpoint_adapter.py:318`,`readiness.py:1091` | 46 |
+| F7c | `ensemble_checkpoint_cache_hit_total`, `ensemble_checkpoint_cache_miss_total` | counter×2 | P1b | greenfield (read-cache proxy seam, read-path plan §4.4) | 2 |
 
 | F8 | `ensemble_checkpoint_blobs_table_bytes`, `ensemble_checkpoint_table_bytes`, `ensemble_checkpoint_versions_per_thread`, `ensemble_checkpoint_prune_runs_total` | gauge×3/counter | P1b | reuse `maintenance.py:531` + greenfield (per-thread) | 9 |
 | F9 | `ensemble_readiness_probe_total`, `ensemble_readiness_grace_active`, `ensemble_readiness_failure_streak`, `ensemble_readiness_component_state` | counter/gauge×3 | P1b | reuse `readiness.py:64-79` | 53 |
@@ -220,15 +221,15 @@ dependency is off emits **no series** (absent ≠ zero) unless its contract says
 | F21 | `ensemble_journal_file_bytes`, `ensemble_journal_history_entries`, `ensemble_journal_op_seconds`, `ensemble_journal_ops_total`, `ensemble_upgrade_phase_seconds`, `ensemble_upgrade_phase_total`, `ensemble_upgrade_release_current`, `ensemble_upgrade_journal_events_total` | gauge×3/hist/counter×3/gauge | P1c | reuse `tools/upgrade_journal.py` | 65 |
 | F22 | `ensemble_process_cpu_seconds` + `ensemble_textfile_last_write_timestamp_seconds` + host/PG exporter series | gauge | P2 | greenfield (textfile + off-the-shelf) | 4 shell / ~67 exporter |
 
-**Daemon-origin total: 580** (F0.1→F21 + F7b) + **4 shell-origin** series (F22) — the
+**Daemon-origin total: 582** (F0.1→F21 + F7b + F7c) + **4 shell-origin** series (F22) — the
 **daemon-budget total**. The certified **grand total on the Prometheus server** is **≈651**: it
 adds the **≈67 exporter-origin** series (§6), which are measured separately and are NOT part of
 the daemon-origin budget (catalog §14.1 → *Grand total on Prometheus server*).
-**Budget ≤2k — ≈29 % consumed (headroom 1 420).**
+**Budget ≤2k — ≈29 % consumed (headroom 1 418).**
 
 *Reconciliation basis:* §7 counts the §1 row values, with the one range cell (**F7**
 `21→31`) taken at its **today** value **21** — the bytes histogram's +10 arrives with the P1b
-byte wiring (catalog G-5). Row sums: P0 28 + P1a 63 + P1b 263 + P1c 226 = 580.
+byte wiring (catalog G-5). Row sums: P0 28 + P1a 63 + P1b 265 + P1c 226 = 582.
 
 *Delta trail (the basis of the 580).* Every delta is stated against the **§1 summary table** —
 the table is what summed to the **prior, retired daemon-origin total (538)**, so a delta quoted
@@ -244,10 +245,11 @@ from a family *detail line* instead would not reconcile. Each item carries its o
 | F21 | 66 | 65 | **−1** | the table cell dropped the v5 rounding (the v5 detail line already read 65). |
 | F7 | 21 | 21 | **0** | the 22→21 decomposition (R-m8) was **already inside** the retired baseline — it is **not** a delta. |
 | F7b | 0 | 46 | **+46** | the checkpoint quick-wins READ family, catalogued **retroactively** (C95): it SHIPPED from the checkpoint read-path quick-wins lane **before this catalog existed**, so it was never inside the retired baseline — it is an addition, not a move. |
-| F22 (shell-origin) | 5 | 4 | −1 | **outside** the daemon-origin budget (NB-8 + B-02(b) freshness gauge) — it moves the **shell-origin line** (the daemon + shell subtotal), not the daemon-origin 580. |
+| F7c | 0 | 2 | **+2** | the read-cache substrate hit/miss counters, added WITH the substrate PR-1 (read-cache plan §4.4) — greenfield names on the saver-retry-proxy seam; shipped default-OFF with the counters emitting all-misses. |
+| F22 (shell-origin) | 5 | 4 | −1 | **outside** the daemon-origin budget (NB-8 + B-02(b) freshness gauge) — it moves the **shell-origin line** (the daemon + shell subtotal), not the daemon-origin total. |
 
-**538 (the retired pre-reconciliation baseline) + 1 (F0.2) − 15 (F10) + 14 (F11) − 2 (F13) − 1 (F15) − 1 (F21) + 46 (F7b) = 580.**
-Headroom vs. the ≤2 000 budget: **1 420**.
+**538 (the retired pre-reconciliation baseline) + 1 (F0.2) − 15 (F10) + 14 (F11) − 2 (F13) − 1 (F15) − 1 (F21) + 46 (F7b) + 2 (F7c) = 582.**
+Headroom vs. the ≤2 000 budget: **1 418**.
 
 **Platform note (WS-A correction, 2026-10-29).** Every series count above is
 platform-independent — the platform support matrix (§13) changes **which fields render** on
@@ -608,6 +610,50 @@ the registry under load before 200+ more series land on it.
   never a scientific-notation form), so the histogram's `le=` label and the bucket-hits
   counter's `bucket=` label are the **same string** for the same bound — the two surfaces join
   by label.
+
+### F7c — Checkpoint read-cache hit/miss counters (read-cache substrate PR-1, plan §4.4)
+
+> **Origin.** Added **with** the read-cache substrate itself (read-cache PR-1 of the locked
+> checkpoint read-path fixes plan §4): the counters are the substrate's **observable-off**
+> contract — the cache ships default-OFF (`CHECKPOINT_READ_CACHE_ENABLED`), and "disabled" is
+> **observable, not silent**: with the switch OFF every non-bypass read increments the miss
+> counter. This family is the **hit-rate companion of F7b**: F7b measures what a read COST
+> (bytes/rows), F7c measures what a read AVOIDED (the saver round trip).
+
+- **Name:** `ensemble_checkpoint_cache_hit_total` (counter) ·
+  `ensemble_checkpoint_cache_miss_total` (counter). **Type:** counter; counter. **Labels:**
+  NONE — deliberately **plain** (unlabeled): hit/miss are the only two states, and keeping them
+  label-free leaves `known_label_keys()` byte-identical (**no VOCABULARY_VERSION bump** — the
+  closed-set freeze of §F0.4 is untouched).
+- **Alias (one measurement, one name — §0.3).** Each metric also renders under its
+  **plan-literal** name as a **deprecated alias** — a **second exposition of the SAME series**,
+  never a second measurement: `checkpoint_cache_hit_total`, `checkpoint_cache_miss_total` (the
+  names read-cache plan §4.4 coined before the WS-B canonical rename). The alias names violate
+  the `^ensemble_` rule and are therefore **alias-only, never canonical**. The Python symbol
+  names were kept for both spellings (`daemon/checkpoint_metrics.py`). A deprecation log line
+  fires once per process per alias name. Bypass reads (`cache_bypass=True` — the readiness
+  sentinel) increment **neither** counter: they are deliberate non-participants, and counting
+  them as misses would make the hit-rate metric meaningless (the sentinel ticks every 10 s).
+- **Source:** **greenfield seam** — the saver retry proxy's read forwarders
+  (`daemon/checkpoint_adapter.py` — `_SaverRetryProxy.aget` / `aget_tuple`, the same universal
+  read chokepoint F7b instruments; the increment sites are the hit/miss branches added by the
+  read-cache wiring, counters registered in `daemon/checkpoint_metrics.py` beside the F7b
+  family). The hit path ALSO emits one `[CheckpointPerf] op=cache_hit` structured line via
+  `daemon.checkpoint_perf.log_cache_hit` (gated by `CHECKPOINT_PERF_LOGS`) — deliberately
+  WITHOUT observing F7's `ensemble_checkpoint_op_seconds` (that histogram's `op` vocabulary is
+  frozen; `cache_hit` would fold to `other` and pollute the invalid-label counter).
+- **Reset semantics:** idiom **A** (§0.6) — in-process registry, **resets on restart**;
+  `reset_for_tests()` clears both counters (both are registered in
+  `daemon/checkpoint_metrics.py`; the reset iterates the whole registry). A `rate()` /
+  `increase()` is required of any alert over these counters (§10.2).
+- **Phase** P1b · **Owner** backend (the checkpoint read-cache lane) · **Series
+  estimate** 2 — two plain counters, one series each. The **alias** expositions add **no**
+  series — they are the same series under a second name.
+- **Degradation:** the counters are **FAIL-OPEN** — a counter failure is swallowed and logged
+  (`_inc_cache_metric`), never breaking the read path. Both counters emit in BOTH switch
+  states (OFF ⇒ all misses — that is the point of the family). The `op=cache_hit` LOG line is
+  additionally gated by `CHECKPOINT_PERF_LOGS=0` (log volume only; the counters record
+  regardless, matching F7's log-vs-metric split).
 
 ### F8 — Checkpoint store size gauges
 

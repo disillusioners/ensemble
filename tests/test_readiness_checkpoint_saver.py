@@ -72,16 +72,18 @@ class _FakeSaver:
         self.conn = conn
         self.aput_writes_calls: list[tuple] = []
         self.aget_tuple_calls: list[Any] = []
+        self.aget_tuple_kwargs: list[dict] = []
         self.aget_tuple_should_raise: Exception | None = None
         self.aget_tuple_should_hang: bool = False
 
     async def aput_writes(self, config, writes, task_id, *args, **kwargs):
         self.aput_writes_calls.append((config, writes, task_id))
 
-    async def aget_tuple(self, config):
+    async def aget_tuple(self, config, **kwargs):
         import asyncio as _aio
 
         self.aget_tuple_calls.append(config)
+        self.aget_tuple_kwargs.append(dict(kwargs))
         if self.aget_tuple_should_raise:
             raise self.aget_tuple_should_raise
         if self.aget_tuple_should_hang:
