@@ -165,6 +165,11 @@ def refresh_managed_metrics_enabled(
         refreshed_at = _managed_refreshed_at
     if provider is None:
         return current
+    # The env tier WINS over the managed chain — when it is explicitly
+    # set the managed value is irrelevant, so the provider is NEVER
+    # called (no DB round trip on the hot path).
+    if env_explicit_enabled() is not None:
+        return current
     stamp = time.monotonic() if now is None else now
     if stamp - refreshed_at < ttl_s:
         return current

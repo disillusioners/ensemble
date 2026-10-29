@@ -744,6 +744,87 @@ class LimitsConfig(BaseSettings):
         ),
     )
 
+    # ── Metrics collection (metrics-collection P0 — plan §5) ────────────
+    # SEVEN managed knobs (the db-backed-settings registry in
+    # ``daemon/services/settings_service.py``). Each default MIRRORS the
+    # registry default EXACTLY — ONE truth (the A4-knob lesson): the
+    # chain is ``daemon.constants`` → this Field → the registry default.
+    # The env names fall out of ``env_prefix="LIMITS_"``.
+    #
+    # The KILL-SWITCH env var ``ENSEMBLE_METRICS_ENABLED`` is a DIFFERENT
+    # variable (the authoritative per-request off-switch, read by
+    # ``daemon/services/metrics_gate.py``); ``limits.metrics_enabled``
+    # is the DB-backed tier of the same switch.
+    metrics_enabled: bool = Field(
+        default=False,
+        description=(
+            "Metrics kill-switch (managed tier; mirrors "
+            "ENSEMBLE_METRICS_ENABLED). OFF ⇒ /metrics serves an empty "
+            "200 and the samplers stop ticking. Read per request — no "
+            "restart needed. Env LIMITS_METRICS_ENABLED."
+        ),
+    )
+    metrics_listener_port: int = Field(
+        default=9798,
+        ge=1024,
+        le=65535,
+        description=(
+            "Port for the localhost-bound (127.0.0.1 only) /metrics "
+            "exposition listener. Boot-applied (the socket is bound once). "
+            "Env LIMITS_METRICS_LISTENER_PORT."
+        ),
+    )
+    metrics_scrape_interval_hint_s: int = Field(
+        default=15,
+        ge=5,
+        le=300,
+        description=(
+            "Advisory scrape-interval hint (seconds) — the registry's "
+            "publisher cadence. Prometheus' own scrape_interval wins. "
+            "Env LIMITS_METRICS_SCRAPE_INTERVAL_HINT_S."
+        ),
+    )
+    metrics_census_interval_s: int = Field(
+        default=15,
+        ge=15,
+        le=300,
+        description=(
+            "PostgreSQL census cadence (seconds) on its own dedicated "
+            "non-pooled connection. Floor 15 s (never faster than the "
+            "resource monitor). Boot-applied. Env "
+            "LIMITS_METRICS_CENSUS_INTERVAL_S."
+        ),
+    )
+    metrics_sampler_interval_s: int = Field(
+        default=10,
+        ge=1,
+        le=60,
+        description=(
+            "/proc-style sampler cadence (seconds) for the host-side "
+            "samplers. Boot-applied. Env LIMITS_METRICS_SAMPLER_INTERVAL_S."
+        ),
+    )
+    metrics_textfile_dir: str = Field(
+        default="$INSTALL_DIR/data/metrics",
+        description=(
+            "Textfile collector directory for the out-of-process "
+            "sampler's *.prom files. The literal $INSTALL_DIR token is "
+            "resolved by the exporter that writes the files (P2). "
+            "Boot-applied. Env LIMITS_METRICS_TEXTFILE_DIR."
+        ),
+    )
+    metrics_cardinality_cap: int = Field(
+        default=2000,
+        ge=100,
+        le=10000,
+        description=(
+            "HARD cardinality cap on the metric registry: observations "
+            "beyond the cap are REJECTED (not warned). Read per "
+            "observation — no restart needed. Env "
+            "LIMITS_METRICS_CARDINALITY_CAP."
+        ),
+    )
+
     # ── Governor recursive-spawn guard (Governor Recursion Guard, 2026-08-30) ──
     # Default ON (matches the locked design decision). The guard refuses to
     # spawn a governor instance when the prospective parent's chain (parent
