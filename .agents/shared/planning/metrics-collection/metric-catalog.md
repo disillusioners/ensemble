@@ -42,6 +42,13 @@ the **last published snapshot** and emits `# <family> unavailable: lock_contende
 counts are stored **non-cumulative** and accumulated at render, so `Histogram.observe` is
 O(1) (~300 ns) instead of the current O(B) cumulative scan (`checkpoint_metrics.py:220-222`,
 ~1394 ns) — the plan's bucket extensions (§8.11) therefore do not scale the hot path.
+**Current anchors (post-WS-B registry — the `checkpoint_metrics.py:NNN` pointers in this paragraph
+describe the PRE-WS-B file, which the registry generalization replaced wholesale):** the
+per-object getter is `Metric.get` (`daemon/checkpoint_metrics.py:741`), each metric's own
+`threading.Lock` is created at `:482` and exposed at `:493-495`, the single-bucket write is
+`_record_bucket` (`:720-727`) and the cumulative accumulation happens at render
+(`get_bucket_counts`, `:780-799`), and the registry-level bookkeeping counters are at
+`:1027-1061`.
 
 **Publisher cadence (R-m5).** Per-increment copy-on-publish is **O(series)** — a writer must not pay that
 on every increment. The registry therefore publishes on a **bounded cadence**: a family sets a dirty
@@ -94,7 +101,7 @@ No second exposition path.
 
 **0.4 Buckets.** Every histogram's bucket set is stated once, in the **bucket-set annex
 (§8.11)**. The checkpoint latency set today spans `0.001 → 10.0` s
-(`daemon/checkpoint_metrics.py:59-63`) — **too short**: the 17 s writes and 73–99 s reads fall
+(`daemon/checkpoint_metrics.py:356-359`) — **too short**: the 17 s writes and 73–99 s reads fall
 into `+Inf` and collapse p95 to 10.0. F7 extends the top to `300.0` s.
 
 **0.5 Labels (MA-12) + executable never-exported enforcement (A10).** Every label value set is
@@ -105,7 +112,7 @@ reference the annex by number.
 **Executable enforcement (three tiers + defence in depth):**
 1. **Registration-time enum pin** — `register_histogram(name, label_keys, allowed_values={...})`
    rejects a wrong label *key* at registration (raises, mirroring today's `KeyError` at
-   `checkpoint_metrics.py:206-211`); cost 0 at runtime.
+   `checkpoint_metrics.py:525-530`); cost 0 at runtime.
 2. **Observe-time reserved bucket** — a wrong label *value* is folded to `other` and counted in
    `ensemble_metrics_invalid_label_total{metric,label}` (~40 ns frozenset membership).
 3. **Render-time allowlist predicate** — per-family label-name allowlist + per-label value
@@ -185,7 +192,7 @@ dependency is off emits **no series** (absent ≠ zero) unless its contract says
 | # | Family — canonical names | Type | Phase | Source | Series |
 |---|---|---|---|---|---|
 | F0.1 | `ensemble_metrics_up`, `ensemble_metrics_scrape_requests_total`, `ensemble_metrics_exposition_seconds` | gauge/counter/hist | P0 | greenfield (listener seam) | 16 |
-| F0.2 | `ensemble_metrics_registry_measurements`, `ensemble_metrics_cap_rejected_total`, `ensemble_metrics_invalid_label_total` | gauge/counter/counter | P0 | reuse `checkpoint_metrics.py:304` | 3 |
+| F0.2 | `ensemble_metrics_registry_measurements`, `ensemble_metrics_cap_rejected_total`, `ensemble_metrics_invalid_label_total` | gauge/counter/counter | P0 | reuse `checkpoint_metrics.py:1392` | 3 |
 | F0.3 | `ensemble_resource_spine_tables_accepting_rows`, `ensemble_resource_spine_rows_written_total` | gauge/counter | P0 | reuse (resource_monitor spine) | 8 |
 | F0.4 | `ensemble_metrics_vocabulary_version` | gauge | P0 | greenfield (freeze marker) | 1 |
 | F1 | `ensemble_loop_lag_seconds`, `ensemble_loop_lag_samples`, `ensemble_loop_lag_overflow_total`, `ensemble_loop_lag_probe_state` | gauge×3/counter | P1a | reuse `wedge_capture/lag_probe.py` | 9 |
@@ -195,6 +202,7 @@ dependency is off emits **no series** (absent ≠ zero) unless its contract says
 | F5 | `ensemble_db_pool_checked_out`, `ensemble_db_pool_waiting_clients` | gauge×2 | P1a | reuse (derived + native, kept apart) | 3 |
 | F6 | `ensemble_pg_backends`, `ensemble_pg_idle_in_txn_oldest_seconds`, `ensemble_pg_leaked_txn`, `ensemble_pg_census_last_success_timestamp_seconds` | gauge×4 | P1a | greenfield (census seam, §9) | 15 |
 | F7 | `ensemble_checkpoint_op_seconds`, `ensemble_checkpoint_op_bytes`, `ensemble_checkpoint_slow_ops_total`, `ensemble_checkpoint_list_total` | hist×2/counter×2 | P1b | reuse `checkpoint_perf.py:190`,`:198`,`:91` | 21→31 |
+| F7b | `ensemble_checkpoint_read_ops_total`, `ensemble_checkpoint_read_rows_total`, `ensemble_checkpoint_read_bytes_total`, `ensemble_checkpoint_read_size_bucket_hits_total`, `ensemble_checkpoint_read_measurement_errors_total`, `ensemble_checkpoint_leak_signal_total`, `ensemble_checkpoint_read_size_bytes` | counter×6/hist | P1b | reuse `checkpoint_perf.py:273-277`,`checkpoint_adapter.py:318`,`readiness.py:1091` | 46 |
 
 | F8 | `ensemble_checkpoint_blobs_table_bytes`, `ensemble_checkpoint_table_bytes`, `ensemble_checkpoint_versions_per_thread`, `ensemble_checkpoint_prune_runs_total` | gauge×3/counter | P1b | reuse `maintenance.py:531` + greenfield (per-thread) | 9 |
 | F9 | `ensemble_readiness_probe_total`, `ensemble_readiness_grace_active`, `ensemble_readiness_failure_streak`, `ensemble_readiness_component_state` | counter/gauge×3 | P1b | reuse `readiness.py:64-79` | 53 |
@@ -212,17 +220,17 @@ dependency is off emits **no series** (absent ≠ zero) unless its contract says
 | F21 | `ensemble_journal_file_bytes`, `ensemble_journal_history_entries`, `ensemble_journal_op_seconds`, `ensemble_journal_ops_total`, `ensemble_upgrade_phase_seconds`, `ensemble_upgrade_phase_total`, `ensemble_upgrade_release_current`, `ensemble_upgrade_journal_events_total` | gauge×3/hist/counter×3/gauge | P1c | reuse `tools/upgrade_journal.py` | 65 |
 | F22 | `ensemble_process_cpu_seconds` + `ensemble_textfile_last_write_timestamp_seconds` + host/PG exporter series | gauge | P2 | greenfield (textfile + off-the-shelf) | 4 shell / ~67 exporter |
 
-**Daemon-origin total: 534** (F0.1→F21) + **4 shell-origin** series (F22) — the **daemon-budget
-total**. The certified **grand total on the Prometheus server** is **≈605**: it adds the
-**≈67 exporter-origin** series (§6), which are measured separately and are NOT part of the
-daemon-origin budget (catalog §14.1 → *Grand total on Prometheus server*).
-**Budget ≤2k — ≈27 % consumed (headroom 1 466).**
+**Daemon-origin total: 580** (F0.1→F21 + F7b) + **4 shell-origin** series (F22) — the
+**daemon-budget total**. The certified **grand total on the Prometheus server** is **≈651**: it
+adds the **≈67 exporter-origin** series (§6), which are measured separately and are NOT part of
+the daemon-origin budget (catalog §14.1 → *Grand total on Prometheus server*).
+**Budget ≤2k — ≈29 % consumed (headroom 1 420).**
 
 *Reconciliation basis:* §7 counts the §1 row values, with the one range cell (**F7**
 `21→31`) taken at its **today** value **21** — the bytes histogram's +10 arrives with the P1b
-byte wiring (catalog G-5). Row sums: P0 28 + P1a 63 + P1b 217 + P1c 226 = 534.
+byte wiring (catalog G-5). Row sums: P0 28 + P1a 63 + P1b 263 + P1c 226 = 580.
 
-*Delta trail (the basis of the 534).* Every delta is stated against the **§1 summary table** —
+*Delta trail (the basis of the 580).* Every delta is stated against the **§1 summary table** —
 the table is what summed to the **prior, retired daemon-origin total (538)**, so a delta quoted
 from a family *detail line* instead would not reconcile. Each item carries its own baseline:
 
@@ -235,10 +243,11 @@ from a family *detail line* instead would not reconcile. Each item carries its o
 | F15 | 23 | 22 | **−1** | the table cell dropped the reserved `3600.0` bucket rounding (the v5 detail line already read 22). |
 | F21 | 66 | 65 | **−1** | the table cell dropped the v5 rounding (the v5 detail line already read 65). |
 | F7 | 21 | 21 | **0** | the 22→21 decomposition (R-m8) was **already inside** the retired baseline — it is **not** a delta. |
-| F22 (shell-origin) | 5 | 4 | −1 | **outside** the daemon-origin budget (NB-8 + B-02(b) freshness gauge) — it moves the **shell-origin line** (the daemon + shell subtotal), not the daemon-origin 534. |
+| F7b | 0 | 46 | **+46** | the checkpoint quick-wins READ family, catalogued **retroactively** (C95): it SHIPPED from the checkpoint read-path quick-wins lane **before this catalog existed**, so it was never inside the retired baseline — it is an addition, not a move. |
+| F22 (shell-origin) | 5 | 4 | −1 | **outside** the daemon-origin budget (NB-8 + B-02(b) freshness gauge) — it moves the **shell-origin line** (the daemon + shell subtotal), not the daemon-origin 580. |
 
-**538 (the retired pre-reconciliation baseline) + 1 (F0.2) − 15 (F10) + 14 (F11) − 2 (F13) − 1 (F15) − 1 (F21) = 534.**
-Headroom vs. the ≤2 000 budget: **1 466**.
+**538 (the retired pre-reconciliation baseline) + 1 (F0.2) − 15 (F10) + 14 (F11) − 2 (F13) − 1 (F15) − 1 (F21) + 46 (F7b) = 580.**
+Headroom vs. the ≤2 000 budget: **1 420**.
 
 **Platform note (WS-A correction, 2026-10-29).** Every series count above is
 platform-independent — the platform support matrix (§13) changes **which fields render** on
@@ -279,7 +288,7 @@ the registry under load before 200+ more series land on it.
 ### F0.2 — Canonical registry generalization
 
 - **Name:** `ensemble_metrics_registry_measurements` (gauge, no labels) · **`ensemble_metrics_cap_rejected_total` (counter, `{metric}`-labeled)** (R-m3 — folded into this family; the hard cap's atomic observe-time rejection count) · **`ensemble_metrics_invalid_label_total` (counter, `{metric,label}`-labeled)** (B-09 — the rejected-value signal for the 3-tier validation: a wrong label *value* folded to `other`). **Type:** gauge; counter; counter. **Labels:** none (measurements) / `metric` (rejected, cap) / `metric` + `label` (invalid label).
-- **Source:** **reuse** — `daemon/checkpoint_metrics.py:304` `render_metrics()` becomes the registry renderer; the two existing singletons (`:273`, `:281`) become registry-registered instances under their canonical names. The rejected counter is emitted by the hard cap's locked check-then-increment path (catalog §0.5, R-m3). The invalid-label counter is emitted by the observe-time reserved-bucket fold path (catalog §0.5 tier 2) when a wrong label *value* is folded to `other`.
+- **Source:** **reuse** — `daemon/checkpoint_metrics.py:1392` `render_metrics()` becomes the registry renderer; the two existing singletons (`:996` and `:1007`) become registry-registered instances under their canonical names. The rejected counter is emitted by the hard cap's locked check-then-increment path (catalog §0.5, R-m3). The invalid-label counter is emitted by the observe-time reserved-bucket fold path (catalog §0.5 tier 2) when a wrong label *value* is folded to `other`.
 - **Clarification (A8):** `ensemble_metrics_registry_measurements` counts **measurements** (registered measurement objects), NOT series — dashboards must not conflate it with the ≤2 k series budget. CR-3 record correction: the registry is **wired to collectors** (`checkpoint_perf.py:28-30` imports the singletons, observes `:190`/`:198`, increments `:233`); only `render_metrics()` itself has zero non-test callers.
 - **Phase** P0 · **Owner** developer; reviewer signs the naming migration · **Series estimate** 1 + 1 + 1 = **3** (the rejected counter is `{metric}`-labeled; estimate assumes a single representative metric hits the cap in the proof; cap rejections are rare by construction. The invalid-label counter is `{metric,label}`-labeled; `{metric}` is the family name from the closed **25-family** set (F0.1–F0.4 = 4 + F1–F21 = 21 → 25; the same set §14.1 quotes as the daemon-origin family count) and `{label}` is the label *key* name from the registry's allowed label-key set (a closed enum, never free text), with a reserved `other` residual — estimate assumes a single representative (metric,label) pair; invalid labels are rare by construction).
 - **Degradation:** always present — a property of the registry, not of a dependency.
@@ -505,12 +514,13 @@ the registry under load before 200+ more series land on it.
   `ensemble_checkpoint_op_bytes{op}` (histogram) · `ensemble_checkpoint_slow_ops_total{op}`
   (counter) · `ensemble_checkpoint_list_total` (counter). **Type:** histogram; histogram;
   counter; counter. **Labels:** `op` ∈ `aget`, `aput`, `adelete`, `alist` (§8.9 — the set
-  declared in the registry HELP text, `daemon/checkpoint_metrics.py:281-290`; `alist` is
+  declared in the registry's `allowed_values` (`daemon/checkpoint_metrics.py:1011`) and
+  echoed in its HELP text (`:1012-1016`); `alist` is
   migration-only). **Narrowed until the write path is instrumented (A6/A7):** only `op="aget"`
   fires in production today; `aput`/`aput_writes` bypass `time_saver_op` and run through
   `daemon/checkpoint_adapter.py:377-379`. **After the write-path seam lands, re-derive the `op`
   enum from observed call sites rather than inheriting the legacy HELP text
-  (`checkpoint_metrics.py:281-290`).** Buckets §8.11.
+  (`checkpoint_metrics.py:1011`).** Buckets §8.11.
 - **Source:** **reuse — do not duplicate** (CR-3). The observation sites already exist:
   `daemon/checkpoint_perf.py:190` (log-gated path) and `:198` (ungated path) both call
   `saver_op_latency_seconds.labels(op=op).observe(...)`; `:191` / `:199` call
@@ -524,7 +534,7 @@ the registry under load before 200+ more series land on it.
   histogram is a **reuse observation, not a new instrument** — but the hot path `time_saver_op`
   (`daemon/checkpoint_perf.py:202`, docstring `:205`) forwards `bytes_=0`, so the bytes histogram is
   **under-reported for `aget`** until P1b wires the real blob byte count.
-- **Write-path instrumentation task (V-6 — distinct write-side hook, do NOT reuse the read seam):** add a **separate** `_charge_checkpoint_write` (its own function, own budget/labels) firing once per successful outer call (same once-per-outer-call contract as `_charge_checkpoint_read`), called from `aput`/`aput_writes` (`checkpoint_adapter.py:377-379`). The read seam `_charge_checkpoint_read` (`daemon/checkpoint_adapter.py:368` — the `aget` charge; `:371-374` — the `aget_tuple` charge) is **not** extended to writes — routing write bytes through the read charge would bill them to the READ budget. **Early-return-on-None for writes (decided):** a `None` result on a write path is an **error, not a skip** — the hook does **not** early-return on `None`; instead it records the failure so a missing write charge is visible. Until it lands, the declared `op` enum stays narrowed to `aget`. Risk row 3 carries the risk. After it lands, re-derive the `op` enum from observed call sites rather than inheriting the legacy HELP text (`checkpoint_metrics.py:281-290`).
+- **Write-path instrumentation task (V-6 — distinct write-side hook, do NOT reuse the read seam):** add a **separate** `_charge_checkpoint_write` (its own function, own budget/labels) firing once per successful outer call (same once-per-outer-call contract as `_charge_checkpoint_read`), called from `aput`/`aput_writes` (`checkpoint_adapter.py:617` / `:621`). The read seam `_charge_checkpoint_read` (`daemon/checkpoint_adapter.py:361` — the **single shared** charge call, reached by **both** read forwarders through `_observe_read` (`:335`; the `aget` forwarder `:607`, the `aget_tuple` forwarder `:614`); the two separate per-forwarder charge sites this entry used to cite were collapsed into one shared call by the read-instrumentation lane's M-2 refactor — see §11 C96) is **not** extended to writes — routing write bytes through the read charge would bill them to the READ budget. **Early-return-on-None for writes (decided):** a `None` result on a write path is an **error, not a skip** — the hook does **not** early-return on `None`; instead it records the failure so a missing write charge is visible. Until it lands, the declared `op` enum stays narrowed to `aget`. Risk row 3 carries the risk. After it lands, re-derive the `op` enum from observed call sites rather than inheriting the legacy HELP text (`checkpoint_metrics.py:1011`).
 - **Phase** P1b · **Owner** developer; reviewer pins the bucket set · **Series estimate** only
   `op="aget"` fires in production (the sole prod call site is `daemon/persistence.py:509`,
   `time_saver_op("aget", ...)`) ⇒ seconds histogram 19, bytes histogram 0 today → 10 after the
@@ -535,6 +545,69 @@ the registry under load before 200+ more series land on it.
   (`daemon/checkpoint_perf.py:187-189` — "Metric records REGARDLESS of the log gate"), so
   `CHECKPOINT_PERF_LOGS=0` does **not** starve the histogram. A non-psycopg backend (SQLite)
   ⇒ the `op` series are absent.
+
+### F7b — Checkpoint READ instrumentation (read-cost family — shipped, catalogued retroactively)
+
+> **Origin (C95).** This family **SHIPPED** from the checkpoint read-path quick-wins lane
+> (`feature/checkpoint-quick-wins`, from §quick-wins + §9 of the locked checkpoint read-path
+> fixes plan) **before this catalog existed** — it is catalogued here **retroactively**, which is
+> why its §1 delta is an **addition** (+46), not a move. It is the **read-side sibling of F7**:
+> F7 measures the **saver-op** lane (write-side latency/bytes), F7b measures the **checkpoint
+> READ** lane (payload size + row count at the saver retry proxy). The two seams stay separate
+> for the same reason F7's V-6 note insists on a distinct write-side hook — routing read bytes
+> through a write budget (or vice versa) would bill one to the other.
+
+- **Name:** `ensemble_checkpoint_read_ops_total{op}` (counter) ·
+  `ensemble_checkpoint_read_rows_total{op}` (counter) ·
+  `ensemble_checkpoint_read_bytes_total{op}` (counter) ·
+  `ensemble_checkpoint_read_size_bucket_hits_total{op,bucket}` (counter) ·
+  `ensemble_checkpoint_read_measurement_errors_total` (counter) ·
+  `ensemble_checkpoint_leak_signal_total` (counter) ·
+  `ensemble_checkpoint_read_size_bytes{op}` (histogram). **Type:** counter; counter; counter;
+  counter; counter; counter; histogram. **Labels:** `op` ∈ `aget`, `aget_tuple` (§8.9 — the
+  checkpoint READ op set); `bucket` ∈ the 9 integral byte bounds of §8.9 (the read-size bucket
+  labels). The two counters that carry no label (`..._measurement_errors_total`,
+  `..._leak_signal_total`) are **plain** by design: the leak reason tokens embed tick counts
+  ("(3 ticks)"), so labeling by reason would explode series cardinality.
+- **Alias (one measurement, one name — §0.3).** Each metric also renders under its **historical**
+  name as a **deprecated alias** — a **second exposition of the SAME series**, never a second
+  measurement: `checkpoint_read_ops_total`, `checkpoint_read_rows_total`,
+  `checkpoint_read_bytes_total`, `checkpoint_read_size_bucket_hits_total`,
+  `checkpoint_read_measurement_errors_total`, `checkpoint_leak_signal_total`,
+  `checkpoint_read_size_bytes`. The alias names violate the `^ensemble_` rule and are therefore
+  **alias-only, never canonical**. The **Python symbol names were kept** (the deprecation is the
+  exposition NAME, not the symbol) — `daemon/checkpoint_perf.py:28-35`,
+  `daemon/checkpoint_adapter.py:57` and `daemon/services/readiness.py:39` import the historical
+  names and are unaffected. A deprecation log line fires once per process per alias name.
+- **Source:** **reuse — do not duplicate.** The observation seam already exists: the saver retry
+  proxy (`daemon/checkpoint_adapter.py:607` — the `aget` forwarder; `:614` — the `aget_tuple`
+  forwarder) calls `_observe_read` (`:335`), which walks the decoded payload **once** and hands
+  the size to **both** consumers (the resource-charge seam and the instrumentation). The
+  recording call site is `daemon/checkpoint_perf.py:273-277` — five metric updates
+  (`:273` ops, `:274` bytes, `:275` rows, `:276` bucket hits, `:277` the size histogram
+  observation). The **fail-open tripwire** is `daemon/checkpoint_adapter.py:318`
+  (`checkpoint_read_measurement_errors_total.inc()`), reached from `_measure_checkpoint_read`
+  (`:368`); the **leak-signal consumer** is `daemon/services/readiness.py:1091`
+  (`checkpoint_leak_signal_total.inc()`), consumed from the readiness leak predicate.
+- **Reset semantics:** idiom **A** (§0.6) — in-process registry, **resets on restart**; the
+  registry's `reset_for_tests()` clears every series of the family (all 7 are registered in
+  `daemon/checkpoint_metrics.py`, so the reset reaches them). A `rate()` / `increase()` is
+  required of any alert over these counters (§10.2).
+- **Phase** P1b · **Owner** backend (the checkpoint read-path quick-wins lane) · **Series
+  estimate** 46 — `op` has 2 values, `bucket` has 9, and the size histogram contributes
+  (8 finite buckets + 2) × 2 ops: `read_ops_total` 2 + `read_rows_total` 2 +
+  `read_bytes_total` 2 + `read_size_bucket_hits_total` (2 × 9) 18 +
+  `read_measurement_errors_total` 1 + `leak_signal_total` 1 + `read_size_bytes`
+  (8 + 2) × 2 ops 20 = **46** (measured against the live registry, not estimated). The
+  **alias** expositions add **no** series — they are the same series under a second name.
+- **Degradation:** the measurement is **FAIL-OPEN** — a measurement failure never breaks or
+  slows the read, and the failure is counted in the tripwire (the measurement is observability,
+  so a silent failure would be a silent observability failure). The whole recording lane is
+  gated by `CHECKPOINT_PERF_LOGS=0` (the kill-switch turns the metric recording off entirely,
+  not just the log line). The **bucket-label vocabulary is integral** (`65536` … `8388608`,
+  never a scientific-notation form), so the histogram's `le=` label and the bucket-hits
+  counter's `bucket=` label are the **same string** for the same bound — the two surfaces join
+  by label.
 
 ### F8 — Checkpoint store size gauges
 
@@ -933,28 +1006,28 @@ WARNING noise on a metric failure (NB-5).
 |---|---|---|
 | P0 | F0.1–F0.4 | 28 |
 | P1a | F1–F6 | 63 |
-| P1b | F7–F13 | 217 |
+| P1b | F7–F13 + F7b | 263 |
 | P1c | F14–F21 | 226 |
-| **Daemon total** | **F0.1–F21** | **534** |
+| **Daemon total** | **F0.1–F21 + F7b** | **580** |
 | Shell-origin (textfile) | F22 | 4 |
 | Exporter-origin (node/postgres) | F22 | ≈67 |
-| **Grand total on the Prometheus server** | | **≈605** |
+| **Grand total on the Prometheus server** | | **≈651** |
 
-**534 daemon-origin series against a ≤2 000 budget — ≈27 % consumed; headroom 1 466.** The four
+**580 daemon-origin series against a ≤2 000 budget — ≈29 % consumed; headroom 1 420.** The four
 largest families (F12 sweeps 69, F21 journal 65, F20 tool calls 75, F9 readiness 53) are each
 **bounded, enumerated** label sets, so growth there is bounded by construction. The three
 unbounded risks in v1 are explicitly closed: per-instance compaction occupancy is a max; the
 leak site is a 6-value fixed map; the MCP roster is capped at 5 values. If every label
-combination in the catalog were live at once the total would be **≈1 114** — still inside
+combination in the catalog were live at once the total would be **≈1 160** — still inside
 budget. (*Provenance:* the v5 fully-wired bound was ≈1 118; it moves by exactly the same
 per-family deltas that moved the daemon total, because each moved family's label structure is
 unchanged by the move — **1 118 + 1 (F0.2) − 15 (F10) + 14 (F11) − 2 (F13) − 1 (F15) − 1
-(F21) = 1 114**. The v5 bound's own derivation was never written down, so the figure is an
-**adjusted bound**, not a re-derived product — see §11 C79.)
-**Delta trail (the basis of the 534):** see the §1 reconciliation table —
+(F21) + 46 (F7b) = 1 160**. The v5 bound's own derivation was never written down, so the figure
+is an **adjusted bound**, not a re-derived product — see §11 C79.)
+**Delta trail (the basis of the 580):** see the §1 reconciliation table —
 **538 (the retired pre-reconciliation baseline) + 1 (F0.2) − 15 (F10) + 14 (F11) − 2 (F13) − 1
-(F15) − 1 (F21) = 534** (F7 = 0 — the 22→21 decomposition was already inside the retired
-baseline; F22 shell 5→4 is outside the daemon-origin budget).
+(F15) − 1 (F21) + 46 (F7b) = 580** (F7 = 0 — the 22→21 decomposition was already inside the
+retired baseline; F22 shell 5→4 is outside the daemon-origin budget).
 
 **Intra-family phased rollouts — convention (G-20/H-12 unification).** A family maps to
 **exactly one phase** in the table above (1:1, zero exceptions). When a family needs an early,
@@ -988,6 +1061,7 @@ were attached to existing tasks (P0 T4/T8/T6) with explicit metric names in thei
 | F5 | P1a | P1a T4 | backend | 3 |
 | F6 | P1a | P1a T5 (+ P0 T7, T10) | backend + devops | 15 |
 | F7 | P1b | P1b T1, T14 (V-6) | backend + devops (PG) | 21→31 |
+| F7b | P1b | **the checkpoint read-path quick-wins lane** — `feature/checkpoint-quick-wins`, from §quick-wins + §9 of the locked checkpoint read-path fixes plan (shipped; **catalogued retroactively**, C95) | backend | 46 |
 | F8 | P1b | P1b T2, T4 | backend + devops (PG) | 9 |
 | F9 | P1b | P1b T3 | backend + devops | 53 |
 | F10 | P1b | P1b T5 | backend + devops (PG) | 6 |
@@ -1005,6 +1079,11 @@ were attached to existing tasks (P0 T4/T8/T6) with explicit metric names in thei
 | F22 | P2 (minimal P1b) | P2 T1, T2, T3, T5 (+ P1b T13) | devops (+ developer writer) | 4 + ~67 |
 
 **Orphan census (V-5):** found 33 series without a task row/owner (F0.1 16 + F18 9 + F0.3 counters 4 + F0.2 1 + F0.4 1 + F7 list/slow 2 — enumerated from the catalog, not trusted blindly); closed 33 by adding/extending task rows above; remaining **0**. Every catalog §1 series now has a task row + owner role.
+
+**One family has no metrics-collection §4 task row — F7b.** It **SHIPPED** from the checkpoint
+read-path quick-wins lane before this catalog existed, so its task/owner reference is the locked
+checkpoint read-path fixes plan (the lane's own §quick-wins + §9), not a §4 task row. The
+invariant is preserved by pointing at that plan, not by minting a retroactive task row.
 
 ## 8. Vocabulary annex
 
@@ -1156,7 +1235,14 @@ pool native quantity (4): `size`, `max`, `available`, `overflow`; pool request-e
 `unknown` (PostgreSQL's `pg_stat_activity.state` domain); PG leak site (6): `instance_read`,
 `instance_parent_lookup`, `job_queue_read`, `checkpoint_saver`, `agent_db_tool`, `other`
 (§9.2); checkpoint op (4): `aget`, `aput`, `adelete`, `alist`
-(`daemon/checkpoint_metrics.py:281-290`); checkpoint table (3): `checkpoints`,
+(`daemon/checkpoint_metrics.py:1011`); **checkpoint READ op (2): `aget`, `aget_tuple`** (the
+read-side op set — the two saver retry-proxy forwarders that are instrumented,
+`daemon/checkpoint_adapter.py:607` and `:614`; the registry's `allowed_values` for the read
+family is `daemon/checkpoint_metrics.py:1117`); **checkpoint read-size bucket label (9)**:
+`65536`, `131072`, `262144`, `524288`, `1048576`, `2097152`, `4194304`, `8388608`, `+Inf` — the
+frozen set `daemon/checkpoint_metrics.py:1109` (`_READ_SIZE_BUCKET_LABELS`, derived from
+`READ_SIZE_BUCKETS` at `:1100`); every member is **integral**, so the label renders as a plain
+integer and is the SAME string as the size histogram's `le=` label for the same bound; checkpoint table (3): `checkpoints`,
 `checkpoint_writes`, `checkpoint_blobs` (`daemon/services/maintenance.py:531-536`); checkpoint
 prune outcome (4): `dry_run`, `executed`, `skipped_non_postgres`, `error`; spine table (4):
 `resource_daemon_bucket`, `resource_instance_sample`, `resource_pid_map`,
@@ -1190,21 +1276,24 @@ table's wider outcome constants at `:55-56` — `denied`, `timeout` — are **no
 F18 label set and fold to the reserved `other` residual under the §0.5 observe-time rule, so
 the family's series count is unchanged).
 
-**8.11 Histogram bucket sets (the seven histograms).** Each is stated once; `_count`/`_sum` are
+**8.11 Histogram bucket sets (the eight histograms).** Each is stated once; `_count`/`_sum` are
 implied.
 
 | Histogram | Buckets (seconds or bytes) | Series |
 |---|---|---|
-| `ensemble_checkpoint_op_seconds` | `0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0` (**top ≥120 s** — CR-3; the existing `daemon/checkpoint_metrics.py:59-63` set stops at 10.0 and is **extended, not replaced**) | 17 + 2 = 19 / op |
+| `ensemble_checkpoint_op_seconds` | `0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0` (**top ≥120 s** — CR-3; the existing `daemon/checkpoint_metrics.py:356-359` set stops at 10.0 and is **extended, not replaced**) | 17 + 2 = 19 / op |
 | `ensemble_checkpoint_op_bytes` | `1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216` | 8 + 2 = 10 / op |
 | `ensemble_job_claim_latency_seconds` | `0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0` | 12 + 2 = 14 |
 | `ensemble_llm_request_seconds` | `0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0` (plus `1800.0`, `3600.0` reserved for slow models) | 12 + 2 = 14 |
 | `ensemble_turn_duration_seconds` | `0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0` | 12 + 2 = 14 |
 | `ensemble_journal_op_seconds` | `0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0` | 11 + 2 = 13 |
 | `ensemble_metrics_exposition_seconds` | `0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0` | 11 + 2 = 13 |
+| `ensemble_checkpoint_read_size_bytes` | `65536, 131072, 262144, 524288, 1048576, 2097152, 4194304, 8388608` (bytes; **every bound is integral**, so the `le=` label renders as a plain integer and is the SAME string as the `bucket=` label of `ensemble_checkpoint_read_size_bucket_hits_total` — the join-by-label surface) | 8 + 2 = 10 / op |
 
 `DEFAULT_LATENCY_BUCKETS` is **not** reused for the LLM or claim-latency histograms — those
-ranges are seconds-to-minutes, not milliseconds.
+ranges are seconds-to-minutes, not milliseconds. The checkpoint read-size set is a **bytes** set
+(log2 from 64 KiB to 8 MiB), not a seconds set; it is **not** derived from
+`DEFAULT_LATENCY_BUCKETS` and is never mixed with the latency families' buckets.
 
 **8.12 The LLM 4-layer retry ladder → the 8-value outcome enum.** The enum in §8.10 is derived
 from the real ladder in `daemon/llm_error_classifier.py`, not invented:
@@ -1345,7 +1434,7 @@ catalog except those read from a durable table.
 
 | Family | Durable? | Note |
 |---|---|---|
-| F7 `ensemble_checkpoint_*` | **No** — in-RAM registry | resets on restart |
+| F7 `ensemble_checkpoint_*`, F7b `ensemble_checkpoint_read_*` | **No** — in-RAM registry | resets on restart |
 | F10 `ensemble_job_queue_items_created_total` | **Partly** — derived from durable `job_queue_items.created_at` (TEXT ISO) | survives restart |
 | F11 `ensemble_worker_pool_*`, `ensemble_workers_busy`, `..._wakeup_efficiency` | **No** — `WorkerPool._stats` is in-RAM | resets on restart |
 | F13 `ensemble_wake_turns_total` | **No** | resets on restart |
@@ -1483,7 +1572,9 @@ a reset-on-restart counter is restated:
 | C91 | §14.5/§14.6 carried a "copies must be updated … wave 2/3" deferral note | **dissolved by M-2:** the ledger is now *referenced, not copied* — §14.6 states the pointer discipline and the deferral is removed | catalog §14.5, §14.6 |
 | C92 | The "claim path" phrase named `worker_pool.py:1381-1386` (the `self._stats` dict literal) as the claim path | **fixed:** `:302` is the **claim CALL**; `:1381-1386` is the `self._stats` dict literal = the source of the four claim-side outcome values (the fifth, `fresh_episode_reset`, comes from the episode seam `graph.py:7319`) | catalog §8.1, §8.13, F11 |
 | C93 | The Prometheus TSDB capacity formula (plan §13.1.6 + the P2 risk row 4) omitted the **scrape-interval** input and did not reproduce its own figure — as written ≈124.4 GB, at the plan's own 15 s hint ≈8.3 GB, and the stated ≈21 GB matched neither (NB-17) | **fixed:** the derivation now states **both** inputs — the **scrape interval (15 s)** and the **series count** — and is self-consistent: `30 d = 2 592 000 s` ÷ 15 s = **172 800 samples per series** × **16 B/sample** × **1.5** (WAL + compaction headroom) = **4 147 200 B per series** × **2 000 series** (the ≤2 k daemon-origin budget RULE — the ceiling the gate is sized against) = **8 294 400 000 B ≈ 8.3 GB**. The **observed** count (the grand total quoted in §14.1) is **≈2.5 GB** at the same interval; the gate uses the budget ceiling so it still holds if the surface grows into its budget, and it stays an **install-blocking** precondition | plan-overview.md §13.1.6 + §4 P2 risk row 4 |
-| C94 | The read seam `_charge_checkpoint_read` was cited at `checkpoint_adapter.py:371-374` only — that range covers the **`aget_tuple`** charge; the **`aget`** charge is at `:368` (NB-16) | **fixed:** both sites are now cited together — `daemon/checkpoint_adapter.py:368` (aget) and `:371-374` (aget_tuple) — in the plan (§1, the P1b T14 task row, the P1b risk row 3, §13.1.1) and in the catalog's F7 Source | plan-overview.md §1/§4/§13.1.1 + catalog F7 |
+| C94 | The read seam `_charge_checkpoint_read` was cited at `checkpoint_adapter.py:371-374` only — that range covers the **`aget_tuple`** charge; the **`aget`** charge is at `:368` (NB-16) | **fixed:** both sites are now cited together — `daemon/checkpoint_adapter.py:368` (aget) and `:371-374` (aget_tuple) — in the plan (§1, the P1b T14 task row, the P1b risk row 3, §13.1.1) and in the catalog's F7 Source. **(Anchor superseded by C96):** the read-instrumentation lane later collapsed those two charge sites into ONE shared call inside `_observe_read`, so the anchors are now `:361` (both forwarders) | plan-overview.md §1/§4/§13.1.1 + catalog F7 |
+| C95 | The **checkpoint quick-wins READ family** (7 metrics, 46 series) **SHIPPED** from the checkpoint read-path quick-wins lane (`feature/checkpoint-quick-wins`) **before this catalog existed** and was **absent from it entirely** — no §1 row, no §4 entry, no §8 vocabulary, no §14 count | **fixed:** catalogued retroactively as **F7b** (the read-side sibling of F7) — §1 summary row (+46), §4 family entry (canonical names, aliases, labels, type, source, reset semantics, owner/origin note, measured series estimate), §7 roll-up + delta trail, §7.1 task/owner row, §8.9 vocabularies (the read `op` set and the 9 integral read-size bucket labels), §8.11 bucket set, §10.1 reset row, and the §14.1/14.2/14.3/14.4 ledger (daemon-origin total **534 → 580**, grand total **≈605 → ≈651**, families **25 → 26**, headroom **1 466 → 1 420**). The series count is **measured** against the live registry, not estimated. The alias expositions add **no** series (they are the same series under a second name) | catalog §1/§4 (F7b)/§7/§7.1/§8.9/§8.11/§10.1/§14 |
+| C96 | The **file:line anchors** this catalog cites into `daemon/checkpoint_metrics.py` and `daemon/checkpoint_adapter.py` were written against the **pre-WS-B** registry file; the WS-B registry generalization **replaced `checkpoint_metrics.py` wholesale** and the read-instrumentation lane **refactored the adapter's read seam**, so a set of anchors no longer resolved | **fixed for the live sections:** every stale anchor in a **live** section was re-anchored against the merged tree — the bucket sets (`checkpoint_metrics.py:356-359`, `:364-368`), the renderer (`:1392`), the per-object getter and the per-metric lock (`:741`, `:482`/`:493-495`), the single-bucket write and the render-time accumulation (`:720-727`, `:780-799`), the registration-time label-key rejection (`:525-530`), the registry singletons and the F7 `op` enum (`:996`, `:1007`, `:1011`), the read family's `op` enum and bucket-label set (`:1117`, `:1109`), the aput/aput_writes forwarders (`checkpoint_adapter.py:617`/`:621`), and F7's read seam (the **single shared** `_charge_checkpoint_read` call at `checkpoint_adapter.py:361` — the two separate per-forwarder charge sites this catalog used to cite were collapsed into one by the read-instrumentation lane's M-2 refactor). **Intentionally NOT rewritten:** (i) §0.2's "before" narrative, whose `checkpoint_metrics.py:95-104`/`:220-222` pointers describe the **pre-WS-B file** — the paragraph now carries an explicit *Current anchors* sentence with the post-WS-B locations; (ii) the §11 correction rows (C1, C4, C33), whose anchors are a **historical record** of the pre-WS-B state — rewriting a correction log's history would falsify it | catalog §0.2, §0.4, §0.5, §1 (F0.2), F0.2, F7, §8.9, §8.11, §11 |
 
 ---
 
@@ -1620,18 +1711,18 @@ The `Scope` column says which document owns the artifact the count describes.
 
 | Value | Quoted number | Scope | Derivation / source |
 |---|---|---|---|
-| Daemon-origin total | **534** | catalog | P0 28 + P1a 63 + P1b 217 + P1c 226 (§7 roll-up) |
+| Daemon-origin total | **580** | catalog | P0 28 + P1a 63 + P1b 263 + P1c 226 (§7 roll-up) |
 | Shell-origin (textfile) | **4** | catalog | F22: 3 process-name series + 1 freshness gauge |
 | Exporter-origin | **≈67** | catalog | node_exporter + postgres_exporter (§6) — measured separately, NOT part of the daemon-origin budget |
-| Grand total on Prometheus server | **≈605** | catalog | 534 + 4 + 67 |
-| Budget | ≤2 000 | catalog (the RULE) | headroom **1 466** (≈27 % consumed) |
-| Daemon-origin families | **25** | catalog | F0.1–F0.4 (4) + F1–F21 (21) — the same set `ensemble_metrics_invalid_label_total{metric}` names (F22 is exporter-origin and counted separately: 26 = 25 daemon-origin + F22) |
-| Fully-wired bound (every label combination live) | **≈1 114** | catalog | the v5 bound ≈1 118 adjusted by the same five per-family deltas (§7) — an adjusted bound, see §11 C79 |
+| Grand total on Prometheus server | **≈651** | catalog | 580 + 4 + 67 |
+| Budget | ≤2 000 | catalog (the RULE) | headroom **1 420** (≈29 % consumed) |
+| Daemon-origin families | **26** | catalog | F0.1–F0.4 (4) + F1–F21 (21) + F7b (1) — the same set `ensemble_metrics_invalid_label_total{metric}` names (F22 is exporter-origin and counted separately: 27 = 26 daemon-origin + F22) |
+| Fully-wired bound (every label combination live) | **≈1 160** | catalog | the v5 bound ≈1 118 adjusted by the same five per-family deltas (§7) + F7b's 46 (C95) — an adjusted bound, see §11 C79 |
 | Shipped alert rules | **14** | plan | 13 original + `TextfileStale` (V-8) — plan §8 |
 | promtool fixture files | **17** | plan | 11 × 1 + 3 × 2 (the V-1 defect/repro pairs) — plan §10 |
 | Alert-rule baselines | **14** | plan | one per rule — plan §8 Baseline column |
 | Risk rows carrying a BACK-OUT | **17** | plan | P0 3 + P1a 2 + P1b 5 + P1c 3 + P2 4 — plan §4 |
-| **Bound cross-check row** — the fully-wired series bound (three DIFFERENT quantities; do not conflate) | catalogued **≈1 114** (the **provenance-disclosed adjusted bound** — **not** re-derived) · **derived catalogued-ceiling 776** (first-principles) · **conservative expanded-label ceiling 1 099** (first-principles) | catalog | **Derivation status — the three are not interchangeable.** (i) The **≈1 114** figure quoted in §7 is the **adjusted** bound: it is the v5 bound moved by the same per-family deltas, and **its own derivation was never written down** (§11 **C79**) ⇒ it is **not reproducible by rule** and is labelled *adjusted* everywhere it appears. (ii) The **derived catalogued-ceiling 776** is **first-principles**: for each of the 25 daemon-origin families (F0.1–F0.4 + F1–F21), each metric's **full label product** over the label sets that metric actually carries (§8, §14.4), times the histogram bucket-series count where §8.11 states one, summed. It reproduces the family ceilings the catalog states explicitly (F7 121, F12 117) and exceeds the catalogued estimate exactly where that estimate assumed a subset (F0.2, F4, F5, F21). (iii) The **conservative expanded-label ceiling 1 099** is the same first-principles sum with every **documented expanded form** substituted (F21's op-partitioned journal histogram — §11 **C81**; F7's fully-wired `/op` form; F12's full lane × outcome product) — the worst case the catalog's own documented variants allow. **Cross-check result:** the derived expanded ceiling and the adjusted bound agree to within **15 series (≈1.4 %)**, so the adjusted bound is **corroborated in magnitude** but remains **not re-derivable** — that residual is the evidence for keeping it labelled *adjusted*. **All three are inside the ≤2 000 budget rule** (headroom 1 224 and 901 against the two derived ceilings); the **certified daemon-origin total in the first row of this table is unchanged**. |
+| **Bound cross-check row** — the fully-wired series bound (three DIFFERENT quantities; do not conflate) | catalogued **≈1 160** (the **provenance-disclosed adjusted bound** — **not** re-derived) · **derived catalogued-ceiling 822** (first-principles) · **conservative expanded-label ceiling 1 145** (first-principles) | catalog | **Derivation status — the three are not interchangeable.** (i) The **≈1 160** figure quoted in §7 is the **adjusted** bound: it is the v5 bound moved by the same per-family deltas, and **its own derivation was never written down** (§11 **C79**) ⇒ it is **not reproducible by rule** and is labelled *adjusted* everywhere it appears. (ii) The **derived catalogued-ceiling 822** is **first-principles**: for each of the 26 daemon-origin families (F0.1–F0.4 + F1–F21 + F7b), each metric's **full label product** over the label sets that metric actually carries (§8, §14.4), times the histogram bucket-series count where §8.11 states one, summed. It reproduces the family ceilings the catalog states explicitly (F7 121, F12 117) and exceeds the catalogued estimate exactly where that estimate assumed a subset (F0.2, F4, F5, F21). (iii) The **conservative expanded-label ceiling 1 145** is the same first-principles sum with every **documented expanded form** substituted (F21's op-partitioned journal histogram — §11 **C81**; F7's fully-wired `/op` form; F12's full lane × outcome product) — the worst case the catalog's own documented variants allow. **Cross-check result:** the derived expanded ceiling and the adjusted bound agree to within **15 series (≈1.3 %)**, so the adjusted bound is **corroborated in magnitude** but remains **not re-derivable** — that residual is the evidence for keeping it labelled *adjusted*. **All three are inside the ≤2 000 budget rule** (headroom 1 178 and 855 against the two derived ceilings); the **certified daemon-origin total in the first row of this table is unchanged**. |
 
 **Reading the bound cross-check row.** The row exists because the fully-wired bound was
 previously quoted in more than one sense with no statement of which sense it was. It is now
@@ -1646,9 +1737,9 @@ three consistently and append a §11 correction entry (the ledger discipline of 
 |---|---|---|---|
 | P0 | F0.1–F0.4 | **28** | F0.1 16 + F0.2 3 + F0.3 8 + F0.4 1 |
 | P1a | F1–F6 | **63** | 9+22+6+8+3+15 |
-| P1b | F7–F13 | **217** | 21+9+53+6+30+69+29 |
+| P1b | F7–F13 + F7b | **263** | 21+9+53+6+30+69+29+46 |
 | P1c | F14–F21 | **226** | 3+22+5+40+9+7+75+65 |
-| **Daemon total** | F0.1–F21 | **534** | |
+| **Daemon total** | F0.1–F21 + F7b | **580** | |
 
 ### 14.3 Per-family series values (changed families flagged)
 
@@ -1665,6 +1756,7 @@ three consistently and append a §11 correction entry (the ledger discipline of 
 | F5 | 3 | unchanged |
 | F6 | 15 | unchanged |
 | F7 | 21→31 | **CHANGED** — today 21 / post byte-wiring 31 (R-m8) |
+| F7b | **46** | **NEW** — the shipped checkpoint quick-wins read family, catalogued retroactively (C95); 46 measured against the live registry |
 | F8 | 9 | unchanged |
 | F9 | 53 | unchanged |
 | F10 | **6** | was 20/21; claim latency moved to F11 (B-08) |
@@ -1698,6 +1790,8 @@ three consistently and append a §11 correction entry (the ledger discipline of 
 | F22 process names | **3** | textfile sampler | `launcher`, `promote_sh`, `stage_sh` (NB-8) |
 | F0.3 spine table | 4 | §8.9 | unchanged |
 | F17 MCP roster | 5 | §8.5 | unchanged |
+| Checkpoint READ op | **2** | `daemon/checkpoint_adapter.py:607` (aget) + `:614` (aget_tuple) — the two instrumented saver retry-proxy forwarders; the registry's `allowed_values` at `daemon/checkpoint_metrics.py:1117` | `aget`, `aget_tuple` |
+| Checkpoint read-size bucket label | **9** | `daemon/checkpoint_metrics.py:1109` (`_READ_SIZE_BUCKET_LABELS`, derived from `READ_SIZE_BUCKETS` at `:1100`) | 8 integral byte bounds + `+Inf`; every member is integral, so the label is the SAME string as the size histogram's `le=` label |
 | F17 MCP state | 4 | init_guard.py:145-147 | unchanged |
 | F17 MCP failure kind | 4 | §8.5 | unchanged |
 | F9 readiness component | 4 | readiness.py:94-99 | unchanged |
@@ -1715,7 +1809,7 @@ three consistently and append a §11 correction entry (the ledger discipline of 
 | F18 gateway audit outcome | 2 | §8.10 | unchanged |
 | F8 checkpoint table | 3 | §8.9 | unchanged |
 | F8 prune outcome | 4 | §8.9 | unchanged |
-| F7 checkpoint op | 4 | checkpoint_metrics.py:281-290 | unchanged |
+| F7 checkpoint op | 4 | checkpoint_metrics.py:1011 | unchanged |
 | F6 PG backend state | 7 | §8.9 | unchanged |
 | F6 leak site | 6 | §9.2 | unchanged |
 | F4 pool name | 2 | §8.9 | unchanged |
@@ -1753,13 +1847,13 @@ three consistently and append a §11 correction entry (the ledger discipline of 
 
 ### 14.5 Places each total appears
 
-- **534 (daemon total):** catalog §1 summary, §7 roll-up, §14.1/14.2. **plan-overview.md and decisions.md do not restate it — they POINT at §14.1** (M-2): every series count, headroom, family count, vocabulary size, rule/fixture/baseline/risk-row count and the daemon-origin total are quoted in §14.1 and referenced from the other documents, never duplicated (the old "copies must be updated … wave 2/3" deferral is dissolved — §11 C91).
+- **580 (daemon total):** catalog §1 summary, §7 roll-up, §14.1/14.2. **plan-overview.md and decisions.md do not restate it — they POINT at §14.1** (M-2): every series count, headroom, family count, vocabulary size, rule/fixture/baseline/risk-row count and the daemon-origin total are quoted in §14.1 and referenced from the other documents, never duplicated (the old "copies must be updated … wave 2/3" deferral is dissolved — §11 C91).
 - **28 (P0):** catalog §1, §7, §14.2.
 - **63 (P1a):** catalog §1, §7, §14.2.
-- **217 (P1b):** catalog §1, §7, §14.2.
+- **263 (P1b):** catalog §1, §7, §14.2.
 - **226 (P1c):** catalog §1, §7, §14.2.
 - **4 (shell):** catalog §1 F22, §6, §7, §14.1.
-- **≈605 (grand total):** catalog §7, §14.1.
+- **≈651 (grand total):** catalog §7, §14.1.
 
 ### 14.6 Cross-doc alignment instruction (M-2 — the ledger is referenced, not copied)
 
