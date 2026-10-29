@@ -86,6 +86,12 @@ VACUUM (ANALYZE) checkpoint_writes;
   **2.3× bloat** (≈ **5.9 GB never reclaimed**, ~35.9 M dead toast tuples),
   **growing with every prune sweep**.
 
+> **Provenance [this PR]** — plan Track-1 item 7 (TOAST reloptions) was applied
+> **DB-only to the dev `ensemble_dev` database** as part of this branch: **no
+> repo change by design** (the DDL is not scripted in the repo), the reloptions
+> were **verified applied**, and the `toast.`-prefixed **parent** form is
+> **required for non-superuser operators** (see Step 2).
+
 ### Read this before running the DDL — only half of it changes behavior
 
 `toast.autovacuum_enabled = on` **is already the PostgreSQL default**;
