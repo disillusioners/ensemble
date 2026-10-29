@@ -49,10 +49,9 @@ v1 registry content: exactly ONE key — ``limits.llm_concurrency``.
 Adding a key = one registry entry + nothing else (the ladder, CRUD,
 API and FE render generically off the registry).
 
-v1.1 union (2026-10-19): registry carries SIX managed keys
-(origin/latest merged into feature/resource-cost-control — union of
-managed-key registries). All six ride the SAME ladder (DB > env >
-yaml > registry default) via the GENERIC resolver:
+v1.1 union (2026-10-19): the union merged SIX managed keys (the
+bulleted list below — the census at that date). All ride the SAME
+ladder (DB > env > yaml > registry default) via the GENERIC resolver:
 
 * ``limits.llm_concurrency`` (db-backed-settings v1; existing).
 * ``limits.worker_pool_size`` (settings-worker-slots lane, 2026-10-18;
@@ -70,6 +69,13 @@ The add-a-key rule stands: registry default mirrors the pydantic
 Field default — chain ``daemon.constants`` → ``LimitsConfig`` Field
 → this registry default (ONE truth). ``effective_max`` is REMOVED
 (D3, settings-worker-slots) — no entry carries it.
+
+v1.2 (2026-10-28): adds ``limits.manager_pool_size`` (devops
+incident fix item #7 — manager-engine pool_size). CENSUS CORRECTION:
+the prose counts here had gone stale in the parent (said SIX while
+the checkpoint A4 pair had already landed → 8); with this key the
+registry carries NINE managed keys. ``len(MANAGED_KEYS)`` is the
+authoritative census; this prose is history, not truth.
 """
 
 from __future__ import annotations
@@ -167,13 +173,17 @@ class ManagedKeySpec:
         return ",".join(parts) if parts else "none"
 
 
-#: The managed-key registry. v1.1 union (2026-10-19): SIX entries —
-#: ``limits.llm_concurrency`` (db-backed-settings v1) plus the two
-#: worker-pool sizes (settings-worker-slots, 2026-10-18) plus the two
-#: instance-graph cache bounding keys (resource-cost-control O3,
-#: 2026-10-18) plus ``limits.chart_render_concurrency`` (resource-cost-
-#: control O2, 2026-10-18). Adding keys later is a registry entry + nothing
-#: else (the ladder, CRUD, API and FE render generically off the registry).
+#: The managed-key registry. v1.1 union (2026-10-19) carried SIX
+#: entries — ``limits.llm_concurrency`` (db-backed-settings v1) plus
+#: the two worker-pool sizes (settings-worker-slots, 2026-10-18) plus
+#: the two instance-graph cache bounding keys (resource-cost-control
+#: O3, 2026-10-18) plus ``limits.chart_render_concurrency`` (resource-
+#: cost-control O2, 2026-10-18). Landed since, without a prose census
+#: bump: the checkpoint A4 pair (soak-gate-mcp-warmup) and
+#: ``limits.manager_pool_size`` (devops incident fix item #7) — the
+#: registry now carries NINE entries. Adding keys later is a registry
+#: entry + nothing else (the ladder, CRUD, API and FE render generically
+#: off the registry); ``len(MANAGED_KEYS)`` is the authoritative census.
 #: The registry default MUST mirror the backing pydantic Field default —
 #: chain: ``daemon.constants`` → ``LimitsConfig`` Field → this registry
 #: default (ONE truth).
@@ -305,6 +315,50 @@ MANAGED_KEYS: dict[str, ManagedKeySpec] = {
             "Precedence: DB override > env var "
             "LIMITS_CHECKPOINT_POOL_TIMEOUT_S > config.yaml literal > "
             "default."
+        ),
+    ),
+    # ── manager engine pool sizing (devops incident fix item #7) ─────────
+    # SQLAlchemy MANAGER-engine pool_size — the PG engine every
+    # repository shares. The engine factory CANNOT read this key off the
+    # ensemble.json EnsembleConfig it receives (that config has no
+    # .limits): the production manager path threads the boot-applied
+    # value EXPLICITLY into create_postgres_engine (daemon/manager.py,
+    # pool_orchestrator read shape); the registry default doubles as the
+    # factory kwarg default for callers with no boot-applied Config.
+    # Mirrors LimitsConfig.manager_pool_size
+    # Field(default=MANAGER_POOL_SIZE_DEFAULT, ge=15, le=30). The engine
+    # is constructed once at boot, so a change requires a daemon restart.
+    #
+    # Bounds + budget rationale: see daemon/constants.py
+    # (MANAGER_POOL_SIZE_DEFAULT) — the single canonical home.
+    # Precedence: DB override > env var LIMITS_MANAGER_POOL_SIZE >
+    # config.yaml literal > default.
+    "limits.manager_pool_size": ManagedKeySpec(
+        key="limits.manager_pool_size",
+        config_path="limits.manager_pool_size",
+        env_var="LIMITS_MANAGER_POOL_SIZE",
+        value_type="int",
+        default=constants.MANAGER_POOL_SIZE_DEFAULT,
+        # FAIL-LOUD bounds [15, 30] — mirror the Field EXACTLY (Ruling 1
+        # — one validation truth). Floor = the default; a below-15 value
+        # is REJECTED (settings API → 422; pydantic env tier unshadowed →
+        # ValidationError crash at load; boot resolver → WARNING + tier
+        # skipped per its uniform fail-open) — never clamped to 15.
+        ge=15,
+        le=30,
+        requires_restart=True,
+        sensitive=False,
+        description=(
+            "SQLAlchemy manager-engine pool_size (the PG engine every "
+            "repository shares; replaces the unconfigured library "
+            "default 5 + max_overflow=10 — the confirmed leaking "
+            "pool). Boot-applied (the engine is constructed once at "
+            "boot). Fail-loud bounds [15, 30]: floor 15 = the default, "
+            "ceiling 30 = the connection budget (30+10 manager + 2×20 "
+            "checkpoint = 80 ≤ max_connections 100). Out-of-range "
+            "values are REJECTED (422 / ValidationError), never "
+            "clamped. Precedence: DB override > env var "
+            "LIMITS_MANAGER_POOL_SIZE > config.yaml literal > default."
         ),
     ),
     # ── O3 instance-graph cache bounding (resource-cost-control, 2026-10-18) ──

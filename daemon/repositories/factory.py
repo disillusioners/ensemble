@@ -17,6 +17,7 @@ from daemon.constants import (
     MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS,
     MANAGER_ENGINE_POOL_RECYCLE_S,
     MANAGER_ENGINE_POOL_TIMEOUT_S,
+    MANAGER_POOL_SIZE_DEFAULT,
 )
 
 from .project.repository import SQLModelProjectRepository
@@ -300,7 +301,10 @@ MANAGER_PG_SESSION_CONNECT_ARGS: dict[str, str] = {
 }
 
 
-def create_postgres_engine(config: "EnsembleConfig") -> Engine:
+def create_postgres_engine(
+    config: "EnsembleConfig",
+    manager_pool_size: int = MANAGER_POOL_SIZE_DEFAULT,
+) -> Engine:
     """Create a SQLAlchemy **sync** engine for PostgreSQL.
 
     Uses the psycopg (sync) driver so the returned engine works with the
@@ -316,6 +320,21 @@ def create_postgres_engine(config: "EnsembleConfig") -> Engine:
         config: EnsembleConfig containing PostgreSQL connection details.
                 ``POSTGRES_*`` environment variables override file values
                 for credential rotation without rewriting ``ensemble.json``.
+                NOTE: ``EnsembleConfig`` is the ensemble.json DB-backend
+                config and carries NO ``.limits`` — the managed-key ladder
+                lives on the YAML app ``Config``, so the resolved pool size
+                CANNOT be read off ``config`` here (that defensive read was
+                the severed-knob defect this kwarg fixes).
+        manager_pool_size: The ladder-resolved ``limits.manager_pool_size``
+                value, threaded EXPLICITLY by callers that hold the
+                boot-applied YAML Config (the manager engine path:
+                ``daemon/manager.py`` passes
+                ``self.config.limits.manager_pool_size`` — the same shape
+                ``pool_orchestrator.py`` uses for the worker pools).
+                Defaults to the registry default tier (the constant), which
+                is the correct value for callers with no boot-applied
+                Config (auth CLI, settings bootstrap throwaway,
+                migration worker).
 
     Returns:
         SQLAlchemy Engine instance ready for ``with engine.connect()`` /
@@ -387,11 +406,32 @@ def create_postgres_engine(config: "EnsembleConfig") -> Engine:
             "MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS DISABLED — "
             "no trustworthy Phase-0 measurement"
         )
+    # ── Manager engine pool sizing (devops incident fix item #7) ────────
+    # The pool size arrives as the EXPLICIT ``manager_pool_size`` kwarg —
+    # threaded from the boot-applied YAML Config by the caller (the
+    # manager reads ``self.config.limits.manager_pool_size`` AFTER
+    # ``apply_db_settings_overrides`` has mutated the field in place, so
+    # the value here already carries the winning ladder tier:
+    # DB > env > yaml > default). It is NOT read off ``config`` — the
+    # ensemble.json ``EnsembleConfig`` has no ``.limits`` (an earlier
+    # defensive read here was dead code: every tier silently degraded to
+    # the default constant). Callers without a boot-applied Config omit
+    # the kwarg and get the default tier.
+    # SQLite guard — structural: this kwarg feed lives ONLY on this
+    # PG-only factory; the SQLite engine branch
+    # (``create_engine_from_config``) constructs without ``pool_size``
+    # and never sees the knob.
+    logger.info(
+        "Manager engine pool sizing: pool_size=%s "
+        "(limits.manager_pool_size; default tier %s, floor = default)",
+        manager_pool_size,
+        MANAGER_POOL_SIZE_DEFAULT,
+    )
 
     engine = create_engine(
         url,
         echo=False,
-        pool_size=5,
+        pool_size=manager_pool_size,
         max_overflow=10,
         pool_pre_ping=True,
         # F2 (db-pool-idle-txn): pin the pool hygiene invariants

@@ -297,3 +297,7 @@ contact; the live daemon, the live symlink and the promote journal are untouched
 (`state.json`: current `v0.27.12`, previous `v0.27.11`, `in_flight=None`). The promote flip is the
 **user's 3-factor nonce ceremony** — never performed by this lane or by an agent
 (`plan-overview.md` §15.1).
+
+## Manager DB-engine pool knob — LIMITS_MANAGER_POOL_SIZE (2026-10-28, devops incident fix item #7)
+
+Managed knob `limits.manager_pool_size` / env `LIMITS_MANAGER_POOL_SIZE`, ladder **operative end-to-end**: DB > env > yaml > default → boot-apply mutates the YAML Config (`config.limits.manager_pool_size`) → `daemon/manager.py` threads `manager_pool_size=self.config.limits.manager_pool_size` into `create_postgres_engine` (the ensemble.json `EnsembleConfig` has NO `.limits`, so the factory takes the value as an explicit kwarg; other callers default to the constant). Bounds [15, 30] fail-loud (floor 15 = default, ceiling 30 = connection budget 30+10 manager + 2×20 checkpoint = 80 ≤ max_connections 100) — out-of-range values are rejected (422 / ValidationError), never clamped. Activation = next daemon restart (engine built once at boot).

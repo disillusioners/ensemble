@@ -331,7 +331,19 @@ class TestFlusherBatching:
         Minutes wrap within the hour (0..59) and hours roll over so
         large ``n`` values stay parseable (e.g. n=612 needs more
         than one hour).
+
+        The base DATE is derived from NOW on purpose: the flusher runs
+        the raw-tier retention sweep in the SAME window as the write
+        (``DELETE ... WHERE bucket_ts < now - raw_minutes``, 48h by
+        default), so a hard-coded calendar date silently EXPIRES — the
+        raw tier is swept away before the assertion runs and the pack
+        fails for a reason that has nothing to do with the flusher.
+        The date used to be pinned to ``2026-10-18`` and the pack
+        started failing on 2026-10-20, 11 days after it was written.
         """
+        base_day = (
+            datetime.now(timezone.utc) - timedelta(hours=2)
+        ).strftime("%Y-%m-%d")
         total_ticks = base_minute * 2
         for i in range(n):
             tick = total_ticks + i
@@ -341,7 +353,7 @@ class TestFlusherBatching:
             ring.append(
                 {
                     "bucket_ts": (
-                        f"2026-10-18 {hour:02d}:{minute:02d}:{second:02d}"
+                        f"{base_day} {hour:02d}:{minute:02d}:{second:02d}"
                     ),
                     "interval_s": 30,
                     "rss_kb": 100000 + i,
@@ -1429,7 +1441,12 @@ class TestPGTxnAbortWindowSurvival:
         # The window continued past the failed raw write: minute/hour
         # inserts ran, and every sweep DELETE executed.
         deletes = [s for s in conn.executed if "DELETE FROM" in s]
-        assert len(deletes) == 5, conn.executed
+        # SIX sweeps: raw (30) + DEGRADED SENTINEL (0) + minute (60) +
+        # hour (3600) + instance + pid_map. The sentinel sweep is the
+        # sixth — the B1 degraded-sentinel rows live in the raw tier
+        # under ``interval_s = 0`` and need their own retention
+        # predicate (they are never touched by the tier sweeps).
+        assert len(deletes) == 6, conn.executed
         assert any("resource_pid_map" in s for s in deletes)
         # The savepoint rollback cleared the PG abort state.
         assert conn.aborted is False
@@ -1437,7 +1454,7 @@ class TestPGTxnAbortWindowSurvival:
 
     def test_sweep_path_tolerated_error_no_longer_kills_the_window(self):
         """Empty-buffer window: the FIRST sweep DELETE hits 42P01;
-        post-fix the remaining 4 sweeps + the pid_map write still
+        post-fix the remaining 5 sweeps + the pid_map write still
         run (pre-fix: the second sweep died 25P02 and the window
         raised)."""
         conn = self._AbortEmulatingConn()
@@ -1446,7 +1463,9 @@ class TestPGTxnAbortWindowSurvival:
         result = flusher.run_once()
         assert result["rows_written"] == 0
         deletes = [s for s in conn.executed if "DELETE FROM" in s]
-        assert len(deletes) == 5, conn.executed
+        # SIX sweeps — see the sibling test for the breakdown (the
+        # sixth is the B1 DEGRADED SENTINEL sweep, interval_s = 0).
+        assert len(deletes) == 6, conn.executed
         assert conn.aborted is False
 
     def test_non_tolerated_error_now_isolated_by_amplifier(self, caplog):
