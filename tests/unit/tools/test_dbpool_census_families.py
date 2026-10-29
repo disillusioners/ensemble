@@ -9,7 +9,7 @@ materialisation note assigns that path to the phase-3 implementer).
 What this pin asserts: the borrow-site census over ``daemon/``
 reproduces the **executed instrument's** family counts exactly —
 **A=438**, **B=175**, **C=4** at the four named manual-borrow sites,
-**D=148**, **E=14**, **F=1** — and the total **780**.
+**D=148**, **E=14**, **F=2** — and the total **781**.
 
 **Reconciliation with the audit artifact** (T-H2; the instrument, this
 pin and ``audit-findings.md`` are one triangle):
@@ -23,15 +23,18 @@ pin and ``audit-findings.md`` are one triangle):
   published §3.1 source had no F branch at all (F was structurally
   unmeasurable — the false-clean the tidier found). The implemented F
   detector (psycopg.connect / raw_connection / getconn / putconn)
-  finds **F=1**: the ONE-SHOT ``psycopg.connect`` in
+  originally found **F=1**: the ONE-SHOT ``psycopg.connect`` in
   ``daemon/services/wedge_capture/db_capture.py`` (the
   ``return psycopg.connect(`` call — line numbers drift with upstream
   merges, so the pin names the FILE and the STATEMENT) — which the
   contract already records as CLEAN (F5.3: *"a one-shot
   psycopg.connect with close() in finally ⇒ no pool, so it cannot
-  leak"*). The pin names that site explicitly.
-* Consequently the total is **780**, not the artifact's 779: the
-  difference is exactly the one F site the old instrument could not
+  leak"*). The pin names that site explicitly. **F is 2 since the
+  2026-10-29 §7.3 re-baseline** (see the re-baseline record below) —
+  the second site is the metrics census's own one-shot connect, same
+  pattern, audited with all four criteria code-cited.
+* Consequently the total is **781**, not the artifact's 779: the
+  difference is exactly the two F sites the old instrument could not
   see. Nothing else moved.
 
 **Base vs HEAD (audit-method §7.2 diff gate):** the SAME fixed
@@ -40,6 +43,43 @@ instrument run at base ``19fc11c8b`` yields the IDENTICAL numbers
 added **ZERO** borrow sites — the delta is empty, so no §7.3
 classification table is required. Any family count delta from here on
 is a FAILURE until classified per §7.3 — the diff IS the failing step.
+
+**§7.3 RE-BASELINE (2026-10-29 — one delta site, audited BENIGN on
+all four criteria; family F 1 → 2, total 780 → 781):** the lane's
+absorption of the WS-B metrics-collection merge (origin/latest
+``bf673fdbe``; lane merge ``04de2d10c``) carried in
+``daemon/services/metrics_census.py`` — a SECOND raw-psycopg site
+(``return psycopg.connect(`` in ``connect_census``, :234). CODE DRIFT
+(not scanner drift — the scanner is unchanged). Classification table
+of one:
+
+* ``daemon/services/metrics_census.py:234`` — family F — **CLEAN** —
+  the census's own dedicated, NON-POOLED one-shot probe connection,
+  the same pattern as the baseline site. All four benign criteria
+  hold, code-cited: **(i) NEVER POOLED** — a direct
+  ``psycopg.connect`` at :234-239 (``connect_census``, :226); the
+  production wiring passes a DSN STRING only (``daemon/api.py:2381``
+  ``resolve_dsn(manager.engine)``, which reads only
+  ``engine.url.render_as_string()`` at ``metrics_census.py:189-205``;
+  the sampler is constructed ``dsn=``-only at ``api.py:2385-2390``) —
+  no pool object anywhere in the path. **(ii) BOUNDED** —
+  ``connect_timeout=3`` s at :236 (constant ``:77``) and
+  ``statement_timeout=5000`` ms set at the site via ``options`` at
+  :238 (constant ``:74``). **(iii) GUARANTEED CLOSED on every path** —
+  the sole production caller ``_query`` (:418-430) holds the
+  connection inside ``try/finally`` with ``conn.close()`` in the
+  ``finally`` (:425-429); a raising ``psycopg.connect`` leaves no
+  connection to close — the same discipline as the baseline site's
+  caller (``wedge_capture/db_capture.py:288-293``). **(iv) NEVER
+  HANDED OUT** — ``conn`` is function-local (:420), closed in the same
+  function, and only ``rows`` leave it (:430); the sampler stores the
+  FACTORY callable, never a connection (:296).
+
+The audited family-F baseline becomes **F=2**
+{``wedge_capture/db_capture.py:195``,
+``daemon/services/metrics_census.py:234``}. **The drift rule STANDS:**
+any THIRD family-F site still REDs until individually audited — this
+re-baseline names exactly one new site, nothing broader.
 
 The **§3.2 pattern cross-check** (grep) keeps its own vocabulary —
 its F pattern (``raw_connection(|getconn(|putconn(``) does not name
@@ -81,20 +121,28 @@ _SCANNER_PATH = _REPO_ROOT / "scripts" / "audit" / "borrow_census.py"
 
 #: The EXECUTED instrument's family counts (T-H2: B and F are measured,
 #: not structurally zero). Measured with the fixed instrument at base
-#: ``19fc11c8b`` AND at HEAD — the two are IDENTICAL (the lane added
-#: zero borrow sites). The audit artifact's A=613 is this instrument's
-#: A+B COMBINED (438 + 175) and its F=0 was a SCANNER GAP (no F
-#: detector); see the module docstring.
-AST_BASELINE = {"A": 438, "B": 175, "C": 4, "D": 148, "E": 14, "F": 1}
-AST_BASELINE_TOTAL = 780
+#: ``19fc11c8b`` AND at HEAD — the two were IDENTICAL (the lane added
+#: zero borrow sites) until the 2026-10-29 §7.3 re-baseline moved F 1→2
+#: (the WS-B metrics-census site, audited benign — module docstring).
+#: The audit artifact's A=613 is this instrument's A+B COMBINED
+#: (438 + 175) and its F=0 was a SCANNER GAP (no F detector); see the
+#: module docstring.
+AST_BASELINE = {"A": 438, "B": 175, "C": 4, "D": 148, "E": 14, "F": 2}
+AST_BASELINE_TOTAL = 781
 
-#: The ONE family-F site — the audited-clean one-shot psycopg.connect
-#: (contract F5.3: it closes in a finally, holds no pool, cannot leak).
-#: Named explicitly so a SECOND raw-psycopg borrow is a loud failure.
-#: Path-only (no line number): the line drifts with every upstream
-#: merge, and the pin's MEANING is "this file holds the one audited
-#: raw-psycopg borrow" (the statement text is asserted separately).
-FAMILY_F_SITES = ("daemon/services/wedge_capture/db_capture.py",)
+#: The TWO family-F sites — audited-clean one-shot psycopg.connect
+#: calls (contract F5.3: closes in a finally, holds no pool, cannot
+#: leak). Named explicitly so a THIRD raw-psycopg borrow is a loud
+#: failure. Path-only (no line number): the line drifts with every
+#: upstream merge, and the pin's MEANING is "this file holds an
+#: audited raw-psycopg borrow" (the statement text is asserted
+#: separately). Site 2 (metrics_census.py) added by the 2026-10-29
+#: §7.3 re-baseline (WS-B, bf673fdbe) — benign on all four criteria;
+#: see the module docstring's re-baseline record.
+FAMILY_F_SITES = (
+    "daemon/services/wedge_capture/db_capture.py",
+    "daemon/services/metrics_census.py",
+)
 
 #: The §7.2 / §3.2 pattern cross-check constants.
 PATTERN_BASELINE = {"A": 439, "B": 175, "C": 4, "F": 0}
@@ -242,28 +290,32 @@ class TestGAstCensusFamilies:
             )
 
     def test_family_f_is_the_audited_site_and_the_aggregate_stays_non_canonical(self):
-        """Family F is MEASURED now (T-H2) — the ONE audited-clean
-        one-shot psycopg.connect; and DR-6: the ≈689 aggregate stays
-        NON-CANONICAL (it is the figure a reader would otherwise cite)."""
+        """Family F is MEASURED now (T-H2) — the TWO audited-clean
+        one-shot psycopg.connect sites (F=2 since the 2026-10-29 §7.3
+        re-baseline — the WS-B metrics-census site); and DR-6: the ≈689
+        aggregate stays NON-CANONICAL (it is the figure a reader would
+        otherwise cite)."""
         counts, _family_c, parse_errors = _run_scan()
         assert not parse_errors
         # T-H2: family F is MEASURED now (the detector exists) — it is
-        # the ONE audited-clean one-shot psycopg.connect. A SECOND raw
-        # psycopg borrow is a manual pool checkout requiring individual
-        # audit (the artifact's F=0 was a scanner gap, not a tree fact).
+        # EXACTLY the audited-clean one-shot psycopg.connect sites
+        # (db_capture + metrics_census, the §7.3 re-baseline record in
+        # the module docstring). A THIRD raw psycopg borrow is a manual
+        # pool checkout requiring individual audit (the artifact's F=0
+        # was a scanner gap, not a tree fact).
         assert counts.get("F", 0) == len(FAMILY_F_SITES), (
             "G-A: family F drifted — expected exactly "
-            f"{len(FAMILY_F_SITES)} (the audited one-shot psycopg.connect), "
+            f"{len(FAMILY_F_SITES)} (the audited one-shot "
+            "psycopg.connect sites), "
             f"observed {counts.get('F', 0)}; a new raw pool checkout "
             "requires individual audit"
         )
-        db_capture = (
-            _REPO_ROOT / "daemon/services/wedge_capture/db_capture.py"
-        ).read_text()
-        assert "psycopg.connect(" in db_capture, (
-            "G-A: the named family-F site is gone — re-audit the raw "
-            "psycopg borrow before re-baselining"
-        )
+        for rel in FAMILY_F_SITES:
+            site_body = (_REPO_ROOT / rel).read_text()
+            assert "psycopg.connect(" in site_body, (
+                f"G-A: the named family-F site {rel} is gone — re-audit "
+                "the raw psycopg borrow before re-baselining"
+            )
         # §3.3/§7.2: sessionmaker MUST remain 0 — a new sessionmaker
         # changes the session-construction contract tree-wide.
         sessionmaker_hits = _pattern_count(r"sessionmaker|async_sessionmaker")
