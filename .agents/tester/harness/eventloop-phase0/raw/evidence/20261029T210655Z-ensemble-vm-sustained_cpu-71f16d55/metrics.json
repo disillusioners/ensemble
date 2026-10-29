@@ -1,0 +1,48 @@
+{
+  "cgroup_memory": {
+    "anon_mb": 1747,
+    "current_mb": 5094,
+    "file_mb": 2781,
+    "peak_mb": 7310,
+    "slab_mb": 550
+  },
+  "gc": [
+    {
+      "collected": 94309,
+      "collections": 5425,
+      "uncollectable": 0
+    },
+    {
+      "collected": 33065,
+      "collections": 493,
+      "uncollectable": 0
+    },
+    {
+      "collected": 116020,
+      "collections": 43,
+      "uncollectable": 0
+    }
+  ],
+  "object_census": null,
+  "pool": {
+    "pool_checked_out": 0,
+    "pool_checkout_timeouts": null,
+    "pool_checkout_timeouts_reason": "not_exposed_by_psycopg_pool_3.3.1",
+    "pool_counters_source": "psycopg_pool.get_stats",
+    "pool_field_reasons": {
+      "pool_requests_errors": "field_absent_in_this_pool_type"
+    },
+    "pool_max": 10,
+    "pool_requests_errors": null,
+    "pool_size_current": 1,
+    "pool_waiting_clients": 0
+  },
+  "process": {
+    "captured_at_monotonic": 913253.801235198,
+    "observer_native_id": 3881766,
+    "pid": 3881536,
+    "thread_count": 33
+  },
+  "rss_kb": 387064,
+  "rss_peak_kb": 391360
+}

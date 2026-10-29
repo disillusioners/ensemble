@@ -1,0 +1,5 @@
+# bulky per-run workdirs (fake-home, scratch data trees) stay local;
+# the committed evidence set is BASELINE.json + run logs + evidence/
+run-*/
+bootprobe/
+run_smoke.log

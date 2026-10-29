@@ -1,0 +1,16 @@
+{
+  "checked_at": "2026-10-29T21:07:36.073899+00:00",
+  "checkpoint_saver": true,
+  "composite_age_s": 1.147311,
+  "database": true,
+  "forced_degraded": false,
+  "inflight_turns": 0,
+  "queue_freshness": true,
+  "queue_max_age_seconds": null,
+  "queue_max_age_seconds_reason": "empty",
+  "ready": true,
+  "reasons": [],
+  "refresh_interval_s": 10.0,
+  "services": true,
+  "stale": false
+}

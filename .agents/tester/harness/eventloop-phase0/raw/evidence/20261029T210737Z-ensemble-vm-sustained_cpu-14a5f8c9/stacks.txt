@@ -1,0 +1,309 @@
+Thread 0x000071cd59ee66c0 [AnyIO worker th] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 369 in wait
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/queue.py", line 199 in get
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/anyio/_backends/_asyncio.py", line 975 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd5aee86c0 [AnyIO worker th] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 369 in wait
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/queue.py", line 199 in get
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/anyio/_backends/_asyncio.py", line 975 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd5a6e76c0 [AnyIO worker th] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 369 in wait
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/queue.py", line 199 in get
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/anyio/_backends/_asyncio.py", line 975 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd5bfea6c0 [asyncio_5] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd5c7eb6c0 [asyncio_4] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Current thread 0x000071cd5efed6c0 [WedgeCaptureWat] (most recent call first):
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/wedge_capture/collector.py", line 125 in collect_stacks
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/wedge_capture/watchdog.py", line 569 in <lambda>
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/wedge_capture/writer.py", line 481 in <lambda>
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/wedge_capture/writer.py", line 586 in _guarded
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/wedge_capture/writer.py", line 480 in write_capture
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/wedge_capture/watchdog.py", line 558 in run_capture
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/wedge_capture/watchdog.py", line 447 in run_once
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/wedge_capture/watchdog.py", line 392 in _run_loop
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd5f7ee6c0 [asyncio_3] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd5ffef6c0 [metrics-census] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 670 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/metrics_census.py", line 453 in _run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd607f06c0 [metrics-listene] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/selectors.py", line 398 in select
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/socketserver.py", line 235 in serve_forever
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/metrics_listener.py", line 547 in _serve
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd60ff16c0 [resource-monito] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 670 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/resource_monitor/flusher.py", line 1052 in _run_loop
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd617f26c0 [resource-monito] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 670 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/resource_monitor/sampler.py", line 1303 in _run_loop
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd61ff36c0 [llm-stream-watc] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 670 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/llm_stream_watchdog.py", line 589 in run_stream_watchdog_loop
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd627f46c0 [asyncio_2] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd62ff56c0 [TaskHeartbeat-1] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 670 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 136 in _run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd637f66c0 [worker-chat-cha] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 1442 in wait_for_work
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 376 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd63ff76c0 [TaskHeartbeat-1] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 670 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 136 in _run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd647f86c0 [TaskHeartbeat-1] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 670 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 136 in _run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd64ff96c0 [worker-chat-cha] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 1442 in wait_for_work
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 376 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd657fa6c0 [TaskHeartbeat-1] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 670 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 136 in _run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd65ffb6c0 [TaskHeartbeat-1] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 670 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 136 in _run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd667fc6c0 [worker-default-] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 1442 in wait_for_work
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 376 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd66ffd6c0 [TaskHeartbeat-1] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 670 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 136 in _run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd677fe6c0 [worker-default-] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 1442 in wait_for_work
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 376 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd67fff6c0 [TaskHeartbeat-1] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 670 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 136 in _run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd6c9176c0 [worker-default-] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 1442 in wait_for_work
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 376 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd6d1186c0 [worker-default-] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 1442 in wait_for_work
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 376 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd6d9196c0 [worker-default-] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 1442 in wait_for_work
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/worker_pool.py", line 376 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd6e11a6c0 [ReportDeliveryR] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 670 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/report_delivery_recovery.py", line 940 in _run_loop
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd6e91b6c0 [StalePauseSweep] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 670 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/stale_pause_sweep.py", line 541 in _run_loop
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd6f11c6c0 [StaleTaskRecove] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 373 in wait
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 670 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/stale_task_recovery.py", line 211 in _run_loop
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd6fa1d6c0 [asyncio_1] (most recent call first):
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/psycopg/connection.py", line 484 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/psycopg/cursor.py", line 113 in execute
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/engine/default.py", line 952 in do_execute
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py", line 1967 in _exec_single_context
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py", line 1846 in _execute_context
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py", line 1641 in _execute_clauseelement
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/sql/elements.py", line 527 in _execute_on_connection
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py", line 1419 in execute
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/orm/context.py", line 306 in orm_execute_statement
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/orm/session.py", line 2249 in _execute_internal
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/orm/session.py", line 2351 in execute
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlmodel/orm/session.py", line 136 in execute
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/orm/loading.py", line 695 in load_on_pk_identity
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/orm/session.py", line 3859 in _get_impl
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/orm/session.py", line 3680 in get
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/repositories/instance/repository.py", line 622 in get
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/work_resolver.py", line 2002 in _lookup_instance
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/work_resolver.py", line 1878 in _job_to_record
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/work_resolver.py", line 1462 in <genexpr>
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/work_resolver.py", line 1461 in list_work
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 73 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 86 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 119 in _worker
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd706ff6c0 [asyncio_0] (most recent call first):
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/concurrent/futures/thread.py", line 116 in _worker
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1024 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1082 in _bootstrap_inner
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/threading.py", line 1044 in _bootstrap
+
+Thread 0x000071cd7f39c740 [python] (most recent call first):
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/psycopg/_connection_base.py", line 476 in _exec_command
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/psycopg/_connection_base.py", line 546 in _start_query
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/psycopg/_cursor_base.py", line 387 in _start_query
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/psycopg/_cursor_base.py", line 204 in _execute_gen
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/psycopg/connection.py", line 484 in wait
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/psycopg/cursor.py", line 113 in execute
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/engine/default.py", line 952 in do_execute
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py", line 1967 in _exec_single_context
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py", line 1846 in _execute_context
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py", line 1641 in _execute_clauseelement
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/sql/elements.py", line 527 in _execute_on_connection
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/engine/base.py", line 1419 in execute
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/orm/context.py", line 306 in orm_execute_statement
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/orm/session.py", line 2249 in _execute_internal
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlalchemy/orm/session.py", line 2351 in execute
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/sqlmodel/orm/session.py", line 75 in exec
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/repositories/instance/repository.py", line 433 in list_child_ids_permanent
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/services/instance_lifecycle.py", line 5115 in list_instances
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/manager.py", line 14787 in list_instances
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/routers/instances.py", line 476 in list_instances
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/fastapi/routing.py", line 313 in run_endpoint_function
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/fastapi/routing.py", line 431 in app
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/fastapi/routing.py", line 105 in app
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/starlette/_exception_handler.py", line 42 in wrapped_app
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/fastapi/routing.py", line 119 in app
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/starlette/routing.py", line 290 in handle
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/starlette/routing.py", line 736 in app
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/starlette/routing.py", line 716 in __call__
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/fastapi/middleware/asyncexitstack.py", line 18 in __call__
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/starlette/_exception_handler.py", line 42 in wrapped_app
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/starlette/middleware/exceptions.py", line 63 in __call__
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/starlette/middleware/cors.py", line 87 in __call__
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/api.py", line 4839 in __call__
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/daemon/middleware/host_capture.py", line 58 in __call__
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.agents/tester/harness/eventloop-phase0/child.py", line 215 in __call__
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/starlette/middleware/errors.py", line 164 in __call__
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/starlette/applications.py", line 107 in __call__
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/fastapi/applications.py", line 1160 in __call__
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/uvicorn/middleware/proxy_headers.py", line 60 in __call__
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.venv/lib/python3.14/site-packages/uvicorn/protocols/http/httptools_impl.py", line 416 in run_asgi
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/events.py", line 94 in _run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/base_events.py", line 2057 in _run_once
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/base_events.py", line 678 in run_forever
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/base_events.py", line 707 in run_until_complete
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/runners.py", line 128 in run
+  File "/home/nea/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/lib/python3.14/asyncio/runners.py", line 205 in run
+  File "/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths/.agents/tester/harness/eventloop-phase0/main.py", line 585 in <module>
