@@ -1505,15 +1505,27 @@ def _refuse_pool_admission_at_capacity(engine: Engine) -> None:
     needed. Residual (disclosed): a checkout that loses the race
     between this pre-check and ``engine.connect()`` can still strand
     the probe thread for up to ``pool_timeout`` = 30 s.
+
+    Shape guard: a pool WITHOUT ``checkedout`` cannot be "at capacity"
+    in the QueuePool sense (StaticPool — SQLAlchemy's REAL sqlite pool,
+    production-shaped; NullPool; test doubles) ⇒ the pre-check SKIPS
+    for such pools — no refusal, no crash, no warning escalation. The
+    manager engine is a QueuePool and keeps the current behavior.
     """
     pool = getattr(engine, "pool", None)
     if pool is None:  # pragma: no cover — defensive (Engine always has one)
         return
-    if pool.checkedout() >= MANAGER_POOL_CONFIGURED_CAPACITY:
+    checkedout = getattr(pool, "checkedout", None)
+    if checkedout is None:
+        # Shape guard — non-QueuePool pools cannot be "at capacity":
+        # skip, never crash (2026-10-29 functional gate: 11 net-new
+        # reds from StaticPool/FakeEngine shapes; see docstring).
+        return
+    if checkedout() >= MANAGER_POOL_CONFIGURED_CAPACITY:
         raise TimeoutError(
             "readiness probe admission refused: manager pool at "
             "configured capacity "
-            f"({pool.checkedout()}/{MANAGER_POOL_CONFIGURED_CAPACITY})"
+            f"({checkedout()}/{MANAGER_POOL_CONFIGURED_CAPACITY})"
         )
 
 
@@ -1552,7 +1564,13 @@ def make_db_probe(engine: Engine) -> Callable[[], tuple[bool, Optional[str]]]:
             # bound in ens_db_repair_postgres_select (see
             # SELECT_TX_STATEMENT_TIMEOUT_MS in daemon/tools/ens_db_tools.py);
             # SQLite does not support SET LOCAL.
-            if engine.url.get_backend_name().startswith("postgres"):
+            # Shape guard: an engine without ``url`` (test doubles) is
+            # not postgres-shaped — the PG-only bound skips for it.
+            _engine_url = getattr(engine, "url", None)
+            if (
+                _engine_url is not None
+                and _engine_url.get_backend_name().startswith("postgres")
+            ):
                 conn.execute(
                     sa_text(
                         "SET LOCAL statement_timeout = "
@@ -1562,8 +1580,10 @@ def make_db_probe(engine: Engine) -> Callable[[], tuple[bool, Optional[str]]]:
             conn.execute(sa_text("SELECT 1"))
             # D-07 — explicit end-of-transaction before the connection
             # returns to the pool (documented no-op when no transaction
-            # is active, SQLAlchemy 2.0.48).
-            conn.rollback()
+            # is active, SQLAlchemy 2.0.48). Shape guard: a connection
+            # without ``rollback`` (test doubles) skips the no-op.
+            if hasattr(conn, "rollback"):
+                conn.rollback()
         return True, None
 
     return _probe
@@ -1846,7 +1866,13 @@ def make_queue_probe(
             # bound in ens_db_repair_postgres_select (see
             # SELECT_TX_STATEMENT_TIMEOUT_MS in daemon/tools/ens_db_tools.py);
             # SQLite does not support SET LOCAL.
-            if engine.url.get_backend_name().startswith("postgres"):
+            # Shape guard: an engine without ``url`` (test doubles) is
+            # not postgres-shaped — the PG-only bound skips for it.
+            _engine_url = getattr(engine, "url", None)
+            if (
+                _engine_url is not None
+                and _engine_url.get_backend_name().startswith("postgres")
+            ):
                 conn.execute(
                     sa_text(
                         "SET LOCAL statement_timeout = "
@@ -1881,8 +1907,10 @@ def make_queue_probe(
                     inflight = None
             # D-07 — explicit end-of-transaction before the connection
             # returns to the pool (documented no-op when no transaction
-            # is active, SQLAlchemy 2.0.48).
-            conn.rollback()
+            # is active, SQLAlchemy 2.0.48). Shape guard: a connection
+            # without ``rollback`` (test doubles) skips the no-op.
+            if hasattr(conn, "rollback"):
+                conn.rollback()
         if value is None:
             return QueueProbeResult(max_age_seconds=None, inflight_turns=inflight)
         try:
