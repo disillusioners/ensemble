@@ -1,9 +1,9 @@
 # Approver Active State
 
-Plan: unit-secret-exposure (stage-only security fix — systemd unit secret exposure; plan set at .agents/shared/planning/unit-secret-exposure/)
-Slug: unit-secret-exposure
+Plan: db-pool-idle-txn (DB pool idle-in-transaction fix lane — plan set at .agents/shared/planning/db-pool-idle-txn/)
+Slug: db-pool-idle-txn
 Status: APPROVED
 Iteration: 001 FINAL
-Started: 2026-10-23T22:39Z
-Last Verdict: APPROVED (iteration 001, 2026-10-23 — 1/1 worker APPROVED, 0 blocking, 6 notes; N1+N2 flagged DEV-PHASE MUST-FIX: SC3 grep scope wording + two stale-prose sites/needles. Tracking: .agents/approver/unit-secret-exposure-tracking.md)
-Note: superseded-from-active: mcps-gateway-interop APPROVED 002 FINAL 2026-10-22 (tracking: .agents/approver/mcps-gateway-interop-tracking.md). Prior chain (hard-reboot-recovery APPROVED 001 2026-10-19; resource-cost-control ESCALATED 003 2026-10-18; earlier list) preserved in that tracking note.
+Started: 2026-10-28T15:46Z
+Last Verdict: APPROVED (iteration 001, 2026-10-28 — 1/1 worker APPROVED, 0 blocking, 5 notes; disclosed preconditions: expected-collected.md TBD (R-1, tester lane), engine-level backstop ships disabled with enablement condition. Tracking: .agents/approver/db-pool-idle-txn-tracking.md)
+Note: superseded-from-active: unit-secret-exposure APPROVED 001 FINAL 2026-10-23 (tracking: .agents/approver/unit-secret-exposure-tracking.md). Prior chain preserved in that tracking note (mcps-gateway-interop APPROVED 002 FINAL 2026-10-22; hard-reboot-recovery APPROVED 001 2026-10-19; resource-cost-control ESCALATED 003 2026-10-18; earlier list).

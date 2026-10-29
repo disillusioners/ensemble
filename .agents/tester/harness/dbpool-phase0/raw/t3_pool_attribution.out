@@ -1,0 +1,172 @@
+
+===== T3b BASELINE attribution at base (no application_name configured) =====
+{
+  "backends_by_application_name": {
+    "": 2
+  },
+  "distinct_states": [
+    "idle"
+  ],
+  "sample_rows": [
+    {
+      "pid": 2325807,
+      "application_name": "",
+      "state": "idle",
+      "last_query": "ROLLBACK"
+    },
+    {
+      "pid": 2325809,
+      "application_name": "",
+      "state": "idle",
+      "last_query": "ROLLBACK"
+    }
+  ],
+  "verdict": "distinguishable ONLY by last_query text, NOT by pool"
+}
+
+===== T3a POOL INVENTORY (static scan of daemon/ at base) =====
+[
+  {
+    "kind": "AsyncConnectionPool",
+    "file": "daemon/persistence.py",
+    "line": 316,
+    "text": "saver_pool = AsyncConnectionPool("
+  },
+  {
+    "kind": "asyncpg.create_pool",
+    "file": "daemon/persistence.py",
+    "line": 355,
+    "text": "pool = await asyncpg.create_pool("
+  },
+  {
+    "kind": "create_engine",
+    "file": "daemon/__main__.py",
+    "line": 237,
+    "text": "engine = create_engine("
+  },
+  {
+    "kind": "create_engine",
+    "file": "daemon/repositories/factory.py",
+    "line": 184,
+    "text": "engine = create_engine("
+  },
+  {
+    "kind": "create_engine",
+    "file": "daemon/repositories/factory.py",
+    "line": 215,
+    "text": "engine = create_engine("
+  },
+  {
+    "kind": "create_engine",
+    "file": "daemon/repositories/factory.py",
+    "line": 289,
+    "text": "# ``create_engine(connect_timeout=...)`` kwarg (the psycopg dialect"
+  },
+  {
+    "kind": "create_engine",
+    "file": "daemon/repositories/factory.py",
+    "line": 323,
+    "text": "engine = create_engine("
+  },
+  {
+    "kind": "create_engine",
+    "file": "daemon/tools/ens_db_tools.py",
+    "line": 633,
+    "text": "repair_engine = create_engine(url, **kwargs)"
+  },
+  {
+    "kind": "create_engine",
+    "file": "daemon/tools/ens_db_tools.py",
+    "line": 691,
+    "text": "return create_engine("
+  },
+  {
+    "kind": "create_engine",
+    "file": "daemon/services/vacuum_engine.py",
+    "line": 79,
+    "text": "return create_engine("
+  },
+  {
+    "kind": "asyncpg.create_pool",
+    "file": "daemon/services/db_pool_manager.py",
+    "line": 261,
+    "text": "pool = await asyncpg.create_pool("
+  },
+  {
+    "kind": "psycopg.connect",
+    "file": "daemon/services/wedge_capture/db_capture.py",
+    "line": 195,
+    "text": "return psycopg.connect("
+  }
+]
+
+===== T3c1 application_name via options=-c application_name=... =====
+{
+  "backends_by_application_name": {
+    "ensemble-manager": 1
+  },
+  "landed": true
+}
+
+===== T3c2 ORDERING HAZARD (shared constant appended LAST into the repair engine) =====
+{
+  "repair_options_string": "-c statement_timeout=60000 -c lock_timeout=10000 -c idle_in_transaction_session_timeout=60000 -c timezone=UTC -c application_name=ensemble-manager",
+  "backends_by_application_name": {
+    "ensemble-manager": 1
+  },
+  "repair_engine_reports_manager_name": true,
+  "verdict": "CONFIRMED HAZARD: the repair engine reports the manager's application_name because the shared constant is appended LAST"
+}
+
+===== T3c3 LAST -c WINS within a single options string =====
+{
+  "A_then_B": "beta",
+  "B_then_A": "alpha"
+}
+
+===== T3c4 conninfo application_name vs options -c application_name =====
+{
+  "results": {
+    "conninfo_only": "from-conninfo",
+    "options_only": "from-options",
+    "both": "from-conninfo"
+  },
+  "verdict": "MEASURED: the conninfo application_name parameter WINS over options=-c application_name (both set -> 'from-conninfo'). So the conninfo parameter is the STRONGER channel; -c inside options is weaker. Ordering WITHIN one options string is still last-wins (T3c3)."
+}
+
+===== T3c4b role-level application_name default vs startup packet =====
+{
+  "role_default_only": "from-role-default",
+  "role_default_plus_startup": "from-startup"
+}
+
+===== T3c5 asyncpg application_name lands =====
+{
+  "asyncpg_server_settings": "ensemble-checkpoint-adapter",
+  "asyncpg_dsn_param": "ensemble-asyncpg-dsn"
+}
+
+===== T3d ASYNCPG EXPLICIT TRANSACTION (checkpoint_adapter.py:1229-1239 shape) =====
+{
+  "backend_pid": 2325845,
+  "idle_in_transaction_session_timeout_default_ms": 0,
+  "explicit_txn_entered": true,
+  "state_after_3_statements_in_explicit_txn": "idle in transaction",
+  "xact_start_present": true,
+  "last_query": "DELETE FROM phase0_ckpt_del WHERE thread_id = 'x'",
+  "still_present_after_3s": true,
+  "state_after_3s": "idle in transaction",
+  "server_side_reap_observed": false,
+  "verdict": "asyncpg CAN hold idle-in-transaction and has NO server-side reap on this host (idle_in_transaction_session_timeout is the cluster default 0 = disabled)"
+}
+
+===== T3d2 SHARED DSN lands the SAME application_name on both pools =====
+{
+  "p2_psycopg_pid": 2325876,
+  "asyncpg_pid": 2325878,
+  "application_names": {
+    "2325876": "ensemble-shared-dsn",
+    "2325878": "ensemble-shared-dsn"
+  },
+  "verdict": "CONFIRMED: a shared conn_string cannot separate the P2 psycopg saver pool from the asyncpg adapter pool \u2014 a SEPARATE DSN is required to attribute the asyncpg pool"
+}

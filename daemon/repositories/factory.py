@@ -11,7 +11,14 @@ from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.engine import URL
 from sqlmodel import Session, SQLModel
 
-from daemon.constants import BOOT_DB_TIMEOUT_S, MANAGER_POOL_SIZE_DEFAULT
+from daemon.constants import (
+    BOOT_DB_TIMEOUT_S,
+    MANAGER_ENGINE_APPLICATION_NAME,
+    MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS,
+    MANAGER_ENGINE_POOL_RECYCLE_S,
+    MANAGER_ENGINE_POOL_TIMEOUT_S,
+    MANAGER_POOL_SIZE_DEFAULT,
+)
 
 from .project.repository import SQLModelProjectRepository
 from .instance.repository import SQLModelInstanceRepository
@@ -252,6 +259,48 @@ def create_engine_from_config(config: DatabaseConfig) -> Engine:
 PG_SESSION_CONNECT_ARGS: dict[str, str] = {"options": "-c timezone=UTC"}
 
 
+# ── Manager-engine session-options TEMPLATE (db-pool-idle-txn, F2) ────────
+# D-47: the engine-level idle-in-txn backstop ships DEFINED BUT NOT
+# APPLIED. While disabled, the rendered options string is EXACTLY the
+# UTC clause — the ``idle_in_transaction_session_timeout`` clause is
+# appended (UTC FIRST, idle-in-txn SECOND, value taken from the
+# imported constant) IFF enablement fires: applied iff BASELINE.md
+# (or a successor measurement) records a trustworthy measurement of
+# the manager engine's legitimate hold (the post-F8 re-measurement is
+# the candidate figure — DR-11). Enablement is a ONE-EDIT change:
+# flip the flag below. The F2 pins assert the STRUCTURE (clause
+# present ⇒ value equals the imported constant; option order pinned),
+# so enablement does not rewrite them. NO ``statement_timeout`` —
+# ever (D-31/C-3: ``manager.py::_ensure_postgres_columns`` runs FULL
+# TABLE REWRITEs under ACCESS EXCLUSIVE locks in ONE transaction; a
+# 30 s cap there means the daemon does not boot on a steady-state
+# no-op path).
+MANAGER_ENGINE_IDLE_IN_TXN_BACKSTOP_ENABLED = False
+
+
+def _manager_pg_session_options() -> str:
+    """Render the manager engine's libpq ``options`` string (D-47)."""
+    parts = ["-c timezone=UTC"]
+    if MANAGER_ENGINE_IDLE_IN_TXN_BACKSTOP_ENABLED:
+        parts.append(
+            "-c idle_in_transaction_session_timeout="
+            f"{MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS}"
+        )
+    return " ".join(parts)
+
+
+#: The manager engine's OWN connect args — rendered from the D-47
+#: template (NOT the shared ``PG_SESSION_CONNECT_ARGS``, which stays
+#: byte-identical and is embedded LAST into the repair engine's
+#: options string — extending it would silently retune that engine,
+#: D-17). The manager engine's ``application_name`` does NOT ride
+#: here: attribution goes through the URL query dict (the CONNINFO
+#: channel — D-49; see ``create_postgres_engine``).
+MANAGER_PG_SESSION_CONNECT_ARGS: dict[str, str] = {
+    "options": _manager_pg_session_options()
+}
+
+
 def create_postgres_engine(
     config: "EnsembleConfig",
     manager_pool_size: int = MANAGER_POOL_SIZE_DEFAULT,
@@ -331,13 +380,32 @@ def create_postgres_engine(
         host=host,
         port=port,
         database=db,
-        query={"connect_timeout": str(BOOT_DB_TIMEOUT_S)},
+        query={
+            # D-49 (db-pool-idle-txn F2): attribution rides the
+            # CONNINFO channel — the URL query dict — NOT the ``-c
+            # options`` string. Measured (BASELINE.md T3): the
+            # conninfo parameter BEATS ``options=-c``, so a future
+            # edit appending the shared UTC constant can never
+            # override or mis-attribute this engine.
+            "application_name": MANAGER_ENGINE_APPLICATION_NAME,
+            # connect_timeout stays the query's LAST entry (the
+            # boot-budget bound remains the URL's tail — pinned by
+            # tests/unit/test_connect_timeout.py).
+            "connect_timeout": str(BOOT_DB_TIMEOUT_S),
+        },
     ).render_as_string(hide_password=False)
 
     logger.info(
         f"Creating PostgreSQL engine: {host}:{port}/{db}"
     )
 
+    if not MANAGER_ENGINE_IDLE_IN_TXN_BACKSTOP_ENABLED:
+        # D-47: the boot path discloses the DISABLED backstop while
+        # the rendered options string omits the clause.
+        logger.info(
+            "MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS DISABLED — "
+            "no trustworthy Phase-0 measurement"
+        )
     # ── Manager engine pool sizing (devops incident fix item #7) ────────
     # The pool size arrives as the EXPLICIT ``manager_pool_size`` kwarg —
     # threaded from the boot-applied YAML Config by the caller (the
@@ -366,15 +434,32 @@ def create_postgres_engine(
         pool_size=manager_pool_size,
         max_overflow=10,
         pool_pre_ping=True,
-        # B2/B3: render every PG session clock in UTC (see
-        # ``PG_SESSION_CONNECT_ARGS`` above). ``connect_args`` bind at
-        # connection CREATION — initial pool fill, overflow growth,
-        # and any replacement after a pool_pre_ping invalidation all
-        # pass through the same creator, so no pooled connection can
-        # escape the UTC frame. pool_pre_ping's checkout probe does
-        # not (and cannot) reset the option; it only recycles dead
-        # connections through this same path.
-        connect_args=dict(PG_SESSION_CONNECT_ARGS),
+        # F2 (db-pool-idle-txn): pin the pool hygiene invariants
+        # EXPLICITLY instead of relying on library defaults —
+        # pool_reset_on_return="rollback" pins "an aborted connection
+        # is never handed out" (measured already-clean at base — the
+        # library default applies it — but an implicit default is not
+        # a pinned invariant); pool_recycle mirrors REPAIR_POOL_RECYCLE_S;
+        # pool_timeout is the library default, pinned so it cannot
+        # drift (D-15: deliberately NOT lowered — see
+        # daemon/constants.py). Sizing is NOT pinned here: the pool
+        # size is the CONFIG-DRIVEN ``manager_pool_size`` (the
+        # ``limits.manager_pool_size`` ladder; default tier 15, floor
+        # 15, ceiling 30) with ``max_overflow`` 10 — the soak lane's
+        # A4 sizing lives on the P2 pools, not this engine.
+        pool_reset_on_return="rollback",
+        pool_recycle=MANAGER_ENGINE_POOL_RECYCLE_S,
+        pool_timeout=MANAGER_ENGINE_POOL_TIMEOUT_S,
+        # B2/B3: render every PG session clock in UTC. The manager
+        # engine binds its OWN D-47 TEMPLATE (see
+        # ``MANAGER_PG_SESSION_CONNECT_ARGS`` above) — the shared
+        # ``PG_SESSION_CONNECT_ARGS`` stays byte-identical for the
+        # repair engine (D-17). ``connect_args`` bind at connection
+        # CREATION — initial pool fill, overflow growth, and any
+        # replacement after a pool_pre_ping invalidation all pass
+        # through the same creator, so no pooled connection can escape
+        # the UTC frame.
+        connect_args=dict(MANAGER_PG_SESSION_CONNECT_ARGS),
     )
     return engine
 

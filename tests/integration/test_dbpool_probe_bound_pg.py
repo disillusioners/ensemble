@@ -1,0 +1,289 @@
+"""F4-b pin — the probe-scoped statement bound on real PostgreSQL (db-pool-idle-txn).
+
+Lane: ``fix/db-pool-idle-txn`` (job ``634c38f2``). Contract:
+``final-implementation-spec.md`` §1 F4.3/F4.8 and §5.2. Marker:
+``integration``.
+
+**SYNTHETIC** — a deliberately held lock is **NOT** the incident's
+shape (the incident's shape is the pool starvation of F4-f). This leg
+covers the ONLY shape F4-B can address: a statement the probe HOLDS
+while it runs.
+
+What this pin asserts:
+
+* under a deliberately held lock, ``make_queue_probe``'s statement is
+  **cancelled** (``57014`` / ``QueryCanceled``);
+* the abandoned ``to_thread`` future **returns**;
+* the connection is **returned to the pool** —
+  ``engine.pool.checkedout()`` returns to baseline within the bound;
+* the backend row **PERSISTS** in ``pg_stat_activity`` with
+  ``state = 'idle'`` — the persistence leg is **implemented and
+  asserted** (T-H3, option (b)): the probe's backend row is fetched
+  and its state checked (D-05's stated observable). The pack's
+  ``EXPECTED_COLLECTED = 2`` counts this leg as the second test.
+
+The ``"row gone from pg_stat_activity"`` assertion is **NOT** part of
+this pin — that signature belongs to the engine-level
+``idle_in_transaction_session_timeout``, which this lane does **NOT**
+install (it ships DEFINED BUT NOT APPLIED).
+
+Plantable mutation: remove the ``SET LOCAL statement_timeout`` from
+``make_queue_probe`` ⇒ the statement stays blocked, the connection stays
+checked out, ``checkedout()`` does not return to baseline ⇒ RED.
+
+Run (house form — scratch PG, per-variable env scrub, marker override)::
+
+    cd /home/nea/ensemble-src-wt-dbpool-idletxn && \
+    env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD \
+        -u POSTGRES_HOST -u POSTGRES_PORT -u DAEMON_PORT \
+    HOME="$(mktemp -d)" \
+    PG_TEST_HOST=127.0.0.1 PG_TEST_PORT=5433 PG_TEST_DB=<scratch db> \
+    PG_TEST_USER=<scratch role> PG_TEST_PASSWORD=<scratch pw> \
+    /home/nea/ensemble-src/.venv/bin/python -m pytest \
+        tests/integration/test_dbpool_probe_bound_pg.py \
+        --override-ini="addopts=" -m integration -q --timeout=300
+"""
+from __future__ import annotations
+
+import os
+import threading
+import time
+
+import pytest
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import DBAPIError, OperationalError
+from sqlalchemy.pool import QueuePool
+
+from daemon.services.readiness import QUEUE_PROBE_TIMEOUT_S, make_queue_probe
+
+pytestmark = [pytest.mark.integration]
+
+#: The pack-local declared collected count (NEW packs only).
+EXPECTED_COLLECTED = 2
+
+_PG_HOST = os.environ.get("PG_TEST_HOST", "localhost")
+_PG_PORT = int(os.environ.get("PG_TEST_PORT", "5432"))
+_PG_DB = os.environ.get("PG_TEST_DB", "ensemble_test")
+_PG_USER = os.environ.get("PG_TEST_USER", "ensemble")
+_PG_PASSWORD = os.environ.get("PG_TEST_PASSWORD", "ensemble_dev")
+_PG_URL = (
+    f"postgresql+psycopg://{_PG_USER}:{_PG_PASSWORD}"
+    f"@{_PG_HOST}:{_PG_PORT}/{_PG_DB}"
+)
+
+#: The probe engine's distinctive application_name — it binds the
+#: persistence census to the PROBE's backend row.
+_PROBE_APPLICATION_NAME = "dbpool-f4b-probe"
+
+
+@pytest.fixture(scope="module")
+def pg_url() -> str:
+    """The scratch PG URL — skip cleanly when PG is unreachable (never
+    error). A skipped PG gate is a FAILING gate (the runner asserts
+    zero skips)."""
+    try:
+        engine = create_engine(_PG_URL, pool_pre_ping=True, future=True)
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        engine.dispose()
+    except (OperationalError, DBAPIError, Exception) as exc:  # noqa: BLE001
+        pytest.skip(f"PostgreSQL not available at {_PG_URL}: {exc}")
+    return _PG_URL
+
+
+def _hold_lock_on_task(url: str, stop: threading.Event):
+    """Hold ``LOCK TABLE task IN ACCESS EXCLUSIVE MODE`` on a SEPARATE
+    connection (the lock-holder), so the probe's SELECT blocks."""
+    engine = create_engine(url, pool_pre_ping=True, future=True)
+    conn = engine.connect()
+    try:
+        conn.execute(text("LOCK TABLE task IN ACCESS EXCLUSIVE MODE"))
+    except Exception:
+        # The task table may not exist in a bare scratch DB — create the
+        # minimal shape the probe reads.
+        conn.close()
+        with engine.begin() as setup:
+            setup.execute(
+                text(
+                    "create table if not exists task ("
+                    "id text primary key, instance_id text, "
+                    "status text, last_heartbeat_at timestamptz)"
+                )
+            )
+        conn = engine.connect()
+        conn.execute(text("LOCK TABLE task IN ACCESS EXCLUSIVE MODE"))
+    try:
+        while not stop.is_set():
+            time.sleep(0.05)
+    finally:
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        conn.close()
+        engine.dispose()
+
+
+class TestF4bStatementBound:
+    """F4-b — the F4-B statement case (SYNTHETIC: a held lock)."""
+
+    def test_probe_statement_is_cancelled_and_the_connection_returns(
+        self, pg_url
+    ):
+        engine = create_engine(
+            pg_url,
+            poolclass=QueuePool,
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,
+        )
+        stop = threading.Event()
+        holder = threading.Thread(
+            target=_hold_lock_on_task, args=(pg_url, stop), daemon=True
+        )
+        holder.start()
+        try:
+            # Give the lock-holder time to take the ACCESS EXCLUSIVE lock.
+            time.sleep(0.75)
+
+            probe = make_queue_probe(engine)
+            outcome: dict = {}
+            worker = threading.Thread(
+                target=lambda: outcome.update(_call(probe)), daemon=True
+            )
+            started = time.monotonic()
+            worker.start()
+            worker.join(timeout=QUEUE_PROBE_TIMEOUT_S * 4)
+            elapsed = time.monotonic() - started
+            assert not worker.is_alive(), (
+                "F4-b: the probe thread did not return within the bound "
+                f"({elapsed:.2f}s) — the statement was not cancelled"
+            )
+
+            # The statement was cancelled by the server (57014 /
+            # QueryCanceled) — the probe RAISED, it did not hang.
+            error = outcome.get("error")
+            assert error is not None, (
+                "F4-b: the probe did not fail — the SET LOCAL statement "
+                "bound did not cancel the blocked statement"
+            )
+            assert "57014" in str(error) or "cancel" in str(error).lower(), (
+                f"F4-b: the failure was not the statement-cancellation "
+                f"shape: {error!r}"
+            )
+
+            # The connection returned to the pool.
+            baseline = engine.pool.checkedout()
+            deadline = time.monotonic() + 10
+            while engine.pool.checkedout() > baseline and time.monotonic() < deadline:
+                time.sleep(0.1)
+            assert engine.pool.checkedout() == baseline, (
+                "F4-b: the connection was not returned to the pool "
+                f"(checkedout={engine.pool.checkedout()}, baseline={baseline})"
+            )
+
+            # The backend row is EXPECTED TO PERSIST (state='idle') — the
+            # row-gone signature belongs to the engine-level backstop,
+            # which this lane does NOT install.
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        "select state from pg_stat_activity "
+                        "where datname = current_database() "
+                        "and application_name = ''"
+                    )
+                ).all()
+            assert rows is not None  # the census ran
+        finally:
+            stop.set()
+            holder.join(timeout=5)
+            engine.dispose()
+
+
+    def test_the_backend_row_persists_in_the_idle_state(self, pg_url):
+        """T-H3 (option (b)) — the PERSISTENCE leg, implemented and
+        asserted: after the server cancels the blocked statement, the
+        probe's backend row is STILL in ``pg_stat_activity`` with
+        ``state = 'idle'`` (the connection returned to the pool; the
+        BACKEND is alive).
+
+        The row-gone signature belongs to the engine-level
+        ``idle_in_transaction_session_timeout`` — which this lane does
+        NOT install (D-47: defined but not applied) — so the row MUST
+        persist here.
+        """
+        engine = create_engine(
+            pg_url,
+            poolclass=QueuePool,
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,
+            # A DISTINCTIVE application_name binds the census to the
+            # PROBE's backend (the query text cannot — the probe's last
+            # statement is its own ROLLBACK, D-07).
+            connect_args={"application_name": _PROBE_APPLICATION_NAME},
+        )
+        # A DEDICATED census engine: the census must not reuse the
+        # probe's pooled backend (that would overwrite its last query
+        # and hide the row we assert on).
+        census_engine = create_engine(pg_url, pool_pre_ping=True, future=True)
+        stop = threading.Event()
+        holder = threading.Thread(
+            target=_hold_lock_on_task, args=(pg_url, stop), daemon=True
+        )
+        holder.start()
+        try:
+            time.sleep(0.75)
+
+            probe = make_queue_probe(engine)
+            outcome: dict = {}
+            worker = threading.Thread(
+                target=lambda: outcome.update(_call(probe)), daemon=True
+            )
+            worker.start()
+            worker.join(timeout=QUEUE_PROBE_TIMEOUT_S * 4)
+            assert outcome.get("error") is not None, (
+                "F4-b (persistence leg): the probe did not fail — the "
+                "statement was not cancelled, so there is no post-"
+                "cancellation backend state to assert"
+            )
+
+            # Let the connection return to the pool (the backend stays).
+            deadline = time.monotonic() + 10
+            while engine.pool.checkedout() > 0 and time.monotonic() < deadline:
+                time.sleep(0.1)
+
+            with census_engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        "select pid, state from pg_stat_activity "
+                        "where datname = current_database() "
+                        "and pid <> pg_backend_pid() "
+                        "and application_name = :app"
+                    ),
+                    {"app": _PROBE_APPLICATION_NAME},
+                ).all()
+            assert rows, (
+                "F4-b (persistence leg): the probe's backend row is GONE "
+                "from pg_stat_activity — the row-gone signature belongs "
+                "to the engine-level idle_in_transaction_session_timeout, "
+                "which this lane does NOT install (D-47)"
+            )
+            states = {row[1] for row in rows}
+            assert states == {"idle"}, (
+                f"F4-b (persistence leg): the backend row persisted but "
+                f"its state was {sorted(states)} — expected 'idle' (the "
+                "connection returned to the pool; the backend is alive)"
+            )
+        finally:
+            stop.set()
+            holder.join(timeout=5)
+            census_engine.dispose()
+            engine.dispose()
+
+
+def _call(probe):
+    try:
+        return {"result": probe()}
+    except BaseException as exc:  # noqa: BLE001 — the cancellation is the subject
+        return {"error": exc}

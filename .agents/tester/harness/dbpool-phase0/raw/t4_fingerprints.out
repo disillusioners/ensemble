@@ -1,0 +1,56 @@
+
+===== T4 FINGERPRINT MEASUREMENTS =====
+{
+  "F-A_instances_list_ORM_render": {
+    "repo_call_status": "ran",
+    "measured_last_query": "SELECT instances.instance_id, instances.project_id, instances.agent_id, instances.agent_dir, instances.agent_name, instances.agent_tag, instances.parent_id, instances.status, instances.metadata, insta",
+    "pg_state": "idle in transaction",
+    "incident_fingerprint": "SELECT instances.instance_id, instances.project_id ...",
+    "byte_compatible_with_incident": true,
+    "full_rendered_sql": "SELECT instances.instance_id, instances.project_id, instances.agent_id, instances.agent_dir, instances.agent_name, instances.agent_tag, instances.parent_id, instances.status, instances.metadata, instances.version, instances.last_activity_at, instances.created_at, instances.updated_at, instances.paused_at, instances.attestation_denied_count, instances.completion_gate_escalated \nFROM instances"
+  },
+  "F-B_explicit_BEGIN": {
+    "measured_last_query": "BEGIN",
+    "pg_state": "idle in transaction",
+    "incident_fingerprint": "BEGIN",
+    "byte_compatible_with_incident": true,
+    "note": "ens_db_tools.py:1479 (DDL) / :1491 (DML) both execute session.execute(text('BEGIN')) \u2014 the only text('BEGIN') in daemon/"
+  },
+  "F-C_job_queue_items_count": {
+    "measured_last_query": "SELECT count(*) FROM job_queue_items j LEFT JOIN job_queues q ON j.queue_id = q.queue_id WHERE j.deleted_at IS NULL AND j.admission_state = 'queued' AND q.queue_type = 'defer'",
+    "pg_state": "idle in transaction",
+    "incident_fingerprint": "SELECT count(*) FROM job_queue_items ...",
+    "byte_compatible_with_incident": true,
+    "source": "daemon/services/defer_block_resolver.py:185-191 _DEFER_PENDING_COUNT_SQL"
+  },
+  "F-D_readiness_queue_probe": {
+    "probe_call_status": "ran",
+    "measured_last_query_max_age": "SELECT EXTRACT(EPOCH FROM (now() - MAX(CASE WHEN last_heartbeat_at >= $1 THEN last_heartbeat_at END))) FROM task WHERE status = $2",
+    "measured_last_query_inflight_count": "SELECT COUNT(CASE WHEN last_heartbeat_at >= now() - ($1 * interval '1 second') AND last_heartbeat_at >= $2 THEN 1 END) FROM task WHERE status = $3",
+    "pg_state": "idle in transaction",
+    "incident_fingerprint": "SELECT count(*) FROM job_queue_items ...",
+    "byte_compatible_with_incident": false,
+    "reads_from_task": true,
+    "note": "the readiness probe reads FROM task, NOT job_queue_items \u2014 the RCA's job_queue_items fingerprint does NOT belong to the probe"
+  },
+  "F-E_mission_records_insert": {
+    "compiled_insert_sql": "INSERT INTO mission_records (mission_id, anchor_instance_id, epoch_seq, founding_message_id, founding_source, status, attestation_bypassed, created_at, provenance) VALUES (%(mission_id)s::VARCHAR, %(anchor_instance_id)s::VARCHAR, %(epoch_seq)s::INTEGER, %(founding_message_id)s::VARCHAR, %(founding_source)s::VARCHAR, %(status)s::VARCHAR, %(attestation_bypassed)s, %(created_at)s::VARCHAR, %(provenance)s::VARCHAR)",
+    "mission_status_open_value": "open",
+    "incident_fingerprint": "INSERT ... mission_records",
+    "byte_compatible_with_incident": true,
+    "measured_last_query_after_insert": "INSERT INTO mission_records (mission_id, anchor_instance_id, epoch_seq, founding_message_id, founding_source, commissioner_instance_id, work_id, parent_mission_id, status, attested_at, attest_method, ",
+    "pg_state_after_insert": "idle in transaction"
+  }
+}
+
+===== T4 COMPARISON MATRIX =====
+{
+  "incident_fingerprint -> reproduced?": {
+    "BEGIN": true,
+    "SELECT instances.instance_id, instances.project_id ...": true,
+    "SELECT count(*) FROM job_queue_items ...": true,
+    "INSERT ... mission_records": true
+  },
+  "readiness_probe_actually_reads_from_task": true,
+  "readiness_probe_matches_incident_fingerprint": false
+}

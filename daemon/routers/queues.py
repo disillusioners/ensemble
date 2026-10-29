@@ -648,9 +648,18 @@ async def get_defer_blocked(
         count, and the enumerated holders (paused > stalled > live,
         each ascending by instance_id).
     """
-    # Sync resolver call inside the async handler — the
-    # ``list_missions`` precedent (mission_resolver.resolve_page is
-    # sync; two fast SELECTs, no event-loop-relevant latency).
+    # Sync resolver call inside the async handler. NOT a "two fast
+    # SELECTs, no event-loop-relevant latency" path — the measured
+    # truth (architecture-delta.md §③ Δ7; the plan's §8.5 dominant
+    # dwell-multiplier classification): the resolve path is
+    # 2 + N(holder) SELECTs per call (the witness SELECT + the
+    # defer-lane pending count + one WS1 carve-out probe per dedup'd
+    # holder — daemon/services/defer_block_resolver.py:306-345 /
+    # :470-472), and connection #1 is pinned idle-in-transaction
+    # across the whole WS2 stall-classification loop, blocking the
+    # event loop for the duration. This defect stays ROUTED (R-1);
+    # this comment states its severity so the routed owner does not
+    # close it as a non-issue.
     snapshot = resolver.resolve()
     return DeferBlockResponse(
         defer_blocked=snapshot.defer_blocked,
