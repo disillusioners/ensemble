@@ -827,6 +827,7 @@ def kind_for_series(series_key: str) -> str:
         ) else "instance_memory"
     mapped = {
         "daemon.rss_kb": "memory",
+        "daemon.anon_kb": "memory",
         "cgroup.anon_kb": "memory",
         "cgroup.current_kb": "memory",
         "daemon.cpu_pct": "cpu",
@@ -1257,7 +1258,25 @@ class AnomalyEngine:
             self.store.observe("daemon.fds", ts, fds, stratum)
         anon = _finite(row.get("anon_kb"))
         if anon is not None:
-            self.store.observe("cgroup.anon_kb", ts, anon, stratum)
+            # B2 — PROVENANCE SPLIT. The daemon's OWN anonymous pool
+            # rides ``daemon.anon_kb``. It used to be observed under
+            # ``cgroup.anon_kb``, which made the daemon RSS and the
+            # "cgroup" value the SAME number under two names on Darwin
+            # (the macOS anonymous pool is not directly measurable, so
+            # the daemon reader sources ``anon_kb`` from RSS there).
+            # ``cgroup.anon_kb`` is now bound to the cgroup v2
+            # ``memory.anon`` column ONLY.
+            self.store.observe("daemon.anon_kb", ts, anon, stratum)
+        cg_anon = _finite(row.get("cg_anon_kb"))
+        if cg_anon is None:
+            # The live roll-up path carries the cgroup value in MB
+            # (``cg_anon_mb``); the boot-replay path carries the KB
+            # column straight from the minute tier.
+            cg_anon_mb = _finite(row.get("cg_anon_mb"))
+            if cg_anon_mb is not None:
+                cg_anon = cg_anon_mb * 1024.0
+        if cg_anon is not None:
+            self.store.observe("cgroup.anon_kb", ts, cg_anon, stratum)
         # cpu_pct — derived from the CUMULATIVE usec counters between
         # consecutive minute buckets (the /history endpoint's own
         # delta rule). First bucket / counter reset ⇒ skipped.
@@ -1489,7 +1508,7 @@ class AnomalyEngine:
 
         sql = (
             "SELECT bucket_ts, rss_kb, cpu_user_usec, cpu_sys_usec, "
-            "threads, fds, anon_kb FROM resource_daemon_bucket "
+            "threads, fds, anon_kb, cg_anon_kb FROM resource_daemon_bucket "
             "WHERE interval_s = 60 ORDER BY bucket_ts DESC LIMIT :lim"
         )
         try:
@@ -1522,6 +1541,7 @@ class AnomalyEngine:
                 "threads": r[4],
                 "fds": r[5],
                 "anon_kb": r[6],
+                "cg_anon_kb": r[7],
             }
             for r in rows
         ]

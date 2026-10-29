@@ -37,6 +37,9 @@ from sqlalchemy.pool import StaticPool
 from daemon.config import ResourceMonitorConfig
 from daemon.routers.resources import router as resources_router
 from daemon.services.resource_monitor import build_resource_monitor
+from daemon.services.resource_monitor.sampler import (
+    DEGRADED_SENTINEL_INTERVAL_S,
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -252,6 +255,49 @@ class TestEndpointShapes:
         # the fixture — §2.2 in-process attribution), NOT the cgroup
         # figure (which also covers children): 65536 kB = 64 MB.
         assert j["attribution"]["unattributed_mb"] == 64.0
+
+    def test_the_degraded_sentinel_never_reaches_the_live_view(self, app_state):
+        """B1: the sentinel is DB EVIDENCE, never a live measurement.
+
+        The raw ring carries the DEGRADED SENTINEL rows (a tick whose
+        platform read failed). A sentinel has NO measurement — every
+        daemon metric is NULL. If the live view rendered it, the FE
+        would show "0.0 MB RSS" and "no threads" for a daemon whose
+        memory was never measured. The live view must keep showing the
+        last REAL sample.
+        """
+        app, mon = self._build_enabled(app_state)
+        client = TestClient(app)
+        before = client.get("/api/resources/live").json()
+        assert before["daemon"]["rss_mb"] is not None
+
+        mon.ring.append(
+            {
+                "interval_s": DEGRADED_SENTINEL_INTERVAL_S,
+                "pid": None,
+                "rss_kb": None,
+                "pss_kb": None,
+                "anon_kb": None,
+                "hw_peak_kb": None,
+                "threads": None,
+                "fds": None,
+                "cpu_user_usec": None,
+                "cpu_sys_usec": None,
+                "child_rss_total_kb": None,
+                "attributed_bytes": None,
+                "unattributed_kb": None,
+                "coverage_pct": None,
+                "sample_cost_ms": 1.0,
+                "sampler_lag_ms": None,
+                "missed_samples": 1,
+                "ladder_level": "full",
+            }
+        )
+        after = client.get("/api/resources/live").json()
+        assert after["daemon"]["rss_mb"] == before["daemon"]["rss_mb"]
+        assert after["daemon"]["pid"] == before["daemon"]["pid"]
+        assert after["daemon"]["threads"] == before["daemon"]["threads"]
+        assert after["daemon"]["fds"] == before["daemon"]["fds"]
 
     def test_self_cost_exact_field_set(self, app_state):
         """AC11: /self-cost returns the EXACT §2.8 field set."""
