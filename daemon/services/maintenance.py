@@ -72,7 +72,9 @@ from daemon.repositories.message_metadata.repository import (
     MessageMetadataRepository,
 )
 from daemon.services.checkpoint_prune import (
+    AnalyzeOutcome,
     BlobPruneSummary,
+    analyze_checkpoint_tables_after_prune,
     prune_unreferenced_blobs,
 )
 from daemon.services.job_queue_service import TERMINAL_STATUSES
@@ -918,8 +920,11 @@ class CheckpointCleanupJob:
                 return
 
         try:
-            # Operation A: Cleanup orphaned threads
-            await self._cleanup_orphaned_threads()
+            # Operation A: Cleanup orphaned threads. The returned count
+            # (threads whose checkpoint rows were deleted) feeds the
+            # post-prune ANALYZE gate below — an orphaned thread always
+            # removes at least one ``checkpoints`` row.
+            orphans_deleted = await self._cleanup_orphaned_threads()
 
             # Operation B: Cleanup expired terminal instances
             await self._cleanup_expired_terminal()
@@ -947,6 +952,18 @@ class CheckpointCleanupJob:
                 blobs_summary = await self._prune_unreferenced_blobs()
             except Exception as e:  # noqa: BLE001
                 logger.error(f"Unreferenced blob prune operation failed: {e}")
+
+            # ── Post-prune statistics refresh (ANALYZE) ──────────────────
+            # Fires ONLY when this cycle actually deleted rows (the
+            # steady state is a no-op sweep). Runs on the DEDICATED
+            # autocommit maintenance engine — never the hot saver pool —
+            # and is log-and-continue: a statistics refresh must never
+            # fail the cleanup cycle that preceded it.
+            await self._analyze_after_destructive_prune(
+                rows_summary=rows_summary,
+                blobs_summary=blobs_summary,
+                deleted_threads=orphans_deleted,
+            )
 
             logger.info("Checkpoint cleanup job completed")
 
@@ -1049,7 +1066,7 @@ class CheckpointCleanupJob:
                 terminal_count += 1
         return terminal_count
 
-    async def _cleanup_orphaned_threads(self) -> None:
+    async def _cleanup_orphaned_threads(self) -> int:
         """(A) Delete checkpoint threads with no matching instance.
 
         Finds checkpoint thread IDs in the checkpoint DB that don't have
@@ -1057,6 +1074,13 @@ class CheckpointCleanupJob:
 
         Deletion method: checkpointer.adelete_thread(thread_id)
         Thread list is obtained via checkpointer.list_thread_ids().
+
+        Returns:
+            The number of orphaned threads whose checkpoint rows were
+            deleted (0 when nothing was deleted / the sweep failed).
+            The count feeds the post-prune ANALYZE gate: an orphaned
+            thread always removes at least one ``checkpoints`` row, so
+            a non-zero count means the planner statistics went stale.
         """
         try:
             # Get all thread IDs from checkpoint database via the adapter.
@@ -1066,7 +1090,7 @@ class CheckpointCleanupJob:
             checkpoint_threads = await self._checkpointer.list_thread_ids()
 
             if not checkpoint_threads:
-                return
+                return 0
 
             # Get all instance IDs from instance repository
             instance_ids = self._get_all_instance_ids()
@@ -1076,7 +1100,7 @@ class CheckpointCleanupJob:
 
             if not orphaned:
                 logger.debug("No orphaned checkpoint threads found")
-                return
+                return 0
 
             logger.info(f"Found {len(orphaned)} orphaned checkpoint threads")
 
@@ -1128,6 +1152,7 @@ class CheckpointCleanupJob:
                         )
 
             logger.info(f"Deleted {len(orphaned)} orphaned checkpoint threads")
+            deleted_threads = len(orphaned)
 
             # ONE summary line for the sweep (replaces per-thread INFO).
             elapsed_ms = int((time.perf_counter() - sweep_t0) * 1000)
@@ -1136,9 +1161,11 @@ class CheckpointCleanupJob:
                 f"deleted={pruned_rows_total} row(s) elapsed_ms={elapsed_ms} "
                 f"(op=_cleanup_orphaned_threads)"
             )
+            return deleted_threads
 
         except Exception as e:
             logger.error(f"Orphaned threads cleanup failed: {e}")
+            return 0
 
     async def _cleanup_expired_terminal(self) -> None:
         """(B) Delete checkpoint data, instance records, and in-memory state
@@ -1509,6 +1536,70 @@ class CheckpointCleanupJob:
             destructive=destructive if destructive is not None else True,
         )
 
+    async def _analyze_after_destructive_prune(
+        self,
+        *,
+        rows_summary: "CheckpointRowPruneSummary",
+        blobs_summary: "BlobPruneSummary",
+        deleted_threads: int = 0,
+    ) -> "AnalyzeOutcome":
+        """Refresh the planner statistics of the three checkpoint tables.
+
+        Called at the END of a destructive prune path (the auto cycle's
+        A→E sequence and the manual ``run_checkpoint_prunes`` arm). The
+        DELETE statements change the tables' contents without changing
+        PG's planner statistics, so the planner can keep working from a
+        row-count picture that no longer matches the table — the
+        read-path audit measured that class of plan regression on the
+        pinned latest-checkpoint SELECT. Refreshing the statistics right
+        after the prune keeps that window closed.
+
+        HONESTY: the measured regression state (8.56 ms vs 0.064 ms) was
+        NOT reproducible at audit time (autovacuum had already analyzed;
+        the live plan was an index scan) — the pathology is EPISODIC, so
+        this is PREVENTION, not a repair of an always-on regression.
+
+        GATE: the sweep fires ONLY when the run actually deleted rows.
+        The steady state of the sweep is a no-op (every (thread, ns) pair
+        already inside its retention cap) and a no-op sweep must not pay
+        for an ANALYZE.
+
+        WHERE: on the DEDICATED per-cycle autocommit maintenance engine
+        (the VACUUM lane's engine shape — ``daemon/services/
+        checkpoint_prune.py``), never on the hot psycopg saver pool and
+        never on the adapter's shared asyncpg pool (both serve the
+        checkpoint read path).
+
+        NEVER RAISES: engine-build and per-table failures are logged and
+        swallowed — a statistics refresh must never fail the cleanup
+        cycle that preceded it.
+
+        Args:
+            rows_summary: the Op D (per-thread retention) summary — its
+                ``deleted_checkpoints`` / ``deleted_writes`` counters are
+                the actual row counts.
+            blobs_summary: the Op E (reference-aware blob prune) summary
+                — its ``total_deleted`` counter is the actual row count.
+            deleted_threads: number of orphaned threads swept by Op A.
+                A thread count, not a row count — it is a lower-bound
+                proxy used ONLY for the "did anything get deleted?"
+                gate (an orphaned thread always removes at least one
+                ``checkpoints`` row).
+
+        Returns:
+            The :class:`AnalyzeOutcome` (also useful for tests).
+        """
+        deleted_rows = (
+            int(getattr(rows_summary, "deleted_checkpoints", 0) or 0)
+            + int(getattr(rows_summary, "deleted_writes", 0) or 0)
+            + int(getattr(blobs_summary, "total_deleted", 0) or 0)
+            + int(deleted_threads or 0)
+        )
+        return await analyze_checkpoint_tables_after_prune(
+            self._shared_engine,
+            deleted_rows=deleted_rows,
+        )
+
     async def _compute_row_prune_dry_run(
         self,
         *,
@@ -1695,6 +1786,16 @@ class CheckpointCleanupJob:
                 blobs_skipped=blobs.skipped,
             )
         skipped_truncated = len(blobs.skipped) > 1000
+        # ── Post-prune statistics refresh (ANALYZE) ──────────────────────
+        # Sits between the destructive prune and the optional VACUUM FULL
+        # escalation: the planner's statistics must describe the table as
+        # it is AFTER the prune. The gate is the delete count — the
+        # dry-run arm deletes nothing, so its counters stay at 0 and the
+        # sweep is skipped.
+        await self._analyze_after_destructive_prune(
+            rows_summary=rows,
+            blobs_summary=blobs,
+        )
         # v1.1 — the FULL phase runs LAST, strictly AFTER the
         # destructive prune completes (F8a spy-order pin). Dry-runs
         # never escalate; refusals ride the result so the operator

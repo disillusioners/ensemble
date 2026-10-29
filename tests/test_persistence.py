@@ -238,7 +238,9 @@ class TestCreatePostgresCheckpointer:
         # Per-conn kwargs applied to every fresh connect.
         inner = kwargs["kwargs"]
         assert inner["autocommit"] is True
-        assert inner["prepare_threshold"] == 0
+        # ``prepare_threshold=None`` — psycopg3 prepared statements are
+        # DISABLED on the saver pool (see the dedicated test below).
+        assert inner["prepare_threshold"] is None
         assert inner["row_factory"] is _FakeDictRow
 
         # pool.open() was awaited BEFORE saver construction.

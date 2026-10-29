@@ -13,12 +13,16 @@ PostgreSQL Notes:
   (driver psycopg 3, via ``langgraph-checkpoint-postgres`` 3.1.0). The pool
   transparently replaces dead connections — incident 2026-10-10 (PG restart
   killed the prior single long-lived ``AsyncConnection`` permanently). The
-  pool is constructed with ``autocommit=True``, ``prepare_threshold=0`` and
-  ``row_factory=dict_row`` flowing through to every connection via the
+  pool is constructed with ``autocommit=True``, ``prepare_threshold=None``
+  and ``row_factory=dict_row`` flowing through to every connection via the
   pool's ``kwargs`` (psycopg_pool's ``_connect`` applies them on every
-  fresh-connect, including replacements). The adapter additionally maintains
-  an ``asyncpg.Pool`` for the raw SQL operations used by maintenance.py
-  (Phase 2 migration) — a separate driver, separate purpose.
+  fresh-connect, including replacements). ``prepare_threshold=None``
+  DISABLES psycopg3 prepared statements (documented psycopg3 semantics) so
+  the server plans every execution freshly instead of serving it from a
+  cached generic plan — the prevention half of the generic-plan regression
+  class documented at the pool construction site. The adapter additionally
+  maintains an ``asyncpg.Pool`` for the raw SQL operations used by
+  maintenance.py (Phase 2 migration) — a separate driver, separate purpose.
 - All imports (psycopg/psycopg_pool/asyncpg + langgraph.checkpoint.postgres.aio)
   are LAZY so the SQLite path is unaffected when PostgreSQL extras are not
   installed.
@@ -325,7 +329,40 @@ async def create_postgres_checkpointer(config: EnsembleConfig) -> CheckpointerAd
             reconnect_timeout=300,
             kwargs={
                 "autocommit": True,
-                "prepare_threshold": 0,
+                # ``prepare_threshold=None`` — psycopg3 semantics
+                # (documented in ``psycopg.Connection``): ``None``
+                # DISABLES prepared statements entirely, so every
+                # execution is planned fresh by the server (custom
+                # plan). The previous value ``0`` meant "prepare on
+                # first execution" — the statement then lives in the
+                # per-connection statement cache and, after the
+                # server's 5-execution threshold, PG may serve it from
+                # the cached GENERIC plan instead of planning it
+                # afresh. That cached generic plan is the mechanism
+                # the read-path audit attributed the 8.56 ms-vs-0.064
+                # ms regression class to (parameterized checkpoint
+                # reads — the pinned latest-checkpoint SELECT).
+                # HONESTY: the 8.56 ms state was NOT reproducible on
+                # prod at audit time (autovacuum had analyzed; the live
+                # plan was an index scan) — the pathology is EPISODIC,
+                # so this is PREVENTION, not a repair of an observable
+                # regression. The companion half of the same plan
+                # (ANALYZE right after a destructive prune, so the
+                # planner's statistics are never stale) lives in
+                # ``daemon/services/checkpoint_prune.py``.
+                #
+                # MEASURED COST (dev DB A/B, plan Track-1 item 3):
+                # disabling the statement cache costs a re-parse per
+                # execution. On the dev DB (9 checkpoint rows) the
+                # pinned SELECT's median wall time went 0.96 ms
+                # (prepare_threshold=0) → 1.40 ms (None) — about
+                # +0.4 ms per read — while BOTH arms picked the SAME
+                # plan (no generic-plan divergence at that size). On a
+                # table where execution dominates planning, the
+                # relative overhead shrinks; the trade is parse time
+                # for plan freshness, and the pool keeps its exclusive
+                # per-connection checkout either way.
+                "prepare_threshold": None,
                 "row_factory": dict_row,
             },
         )

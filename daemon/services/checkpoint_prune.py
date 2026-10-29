@@ -48,15 +48,23 @@ Design invariants (phase1-plan.md §C3, Hard Constraint 6):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
 
 from daemon.checkpoint_adapter import PostgresCheckpointerAdapter
 from daemon.checkpoint_perf import log_blob_prune
 from daemon.constants import (
     CHECKPOINT_BLOB_PRUNE_MAX_REFS_PER_THREAD,
+    VACUUM_IDLE_IN_TXN_TIMEOUT_MS,
+    VACUUM_LOCK_TIMEOUT_MS,
+    VACUUM_STATEMENT_TIMEOUT_MS,
 )
+from daemon.services.vacuum_engine import create_vacuum_engine
 
 logger = logging.getLogger(__name__)
 
@@ -403,3 +411,200 @@ async def prune_unreferenced_blobs(
         # the retention prune that already ran, or the next cycle's ops).
         logger.error("Reference-aware blob prune failed: %s", e)
         return summary
+
+
+# ── Post-prune statistics refresh (ANALYZE) ─────────────────────────────────
+#
+# WHY: a destructive prune DELETEs rows from the three checkpoint tables.
+# PG's planner statistics (``pg_statistic``) then describe a table that no
+# longer exists; until the next autovacuum/ANALYZE lands, the planner is
+# working from a row-count/selectivity picture that no longer matches the
+# table. The read-path audit measured that class of plan regression on the
+# pinned latest-checkpoint SELECT (the 8.56 ms-vs-0.064 ms gap). HONESTY:
+# the 8.56 ms state was NOT reproducible at audit time (autovacuum had
+# already analyzed; the live plan was an index scan) — the pathology is
+# EPISODIC, so this ANALYZE is PREVENTION, not a repair of an
+# always-on regression. The companion half of the same plan (psycopg3
+# ``prepare_threshold=None``, so the server never serves a cached generic
+# plan) lives at the saver-pool construction site in
+# ``daemon/persistence.py``.
+#
+# WHERE: the DEDICATED per-cycle autocommit engine — the SAME shape the
+# VACUUM lane uses (``daemon/services/vacuum_engine.py``: a NullPool engine
+# derived from the daemon's shared engine, ``autocommit=True``, the daemon's
+# UTC session frame, bounded statement/lock/idle timeouts). Deliberately
+# NOT the hot psycopg saver pool (the checkpoint read path) and deliberately
+# NOT the adapter's shared asyncpg pool — that pool also serves the read
+# path, and borrowing a connection from it for an ANALYZE would compete
+# with the very reads this lane protects.
+#
+# WHEN: ONLY when the run ACTUALLY deleted rows. The steady state of the
+# sweep is a no-op (every (thread, ns) pair already inside its retention
+# cap); a no-op sweep must not pay for an ANALYZE.
+#
+# FAILURE: log-and-continue, per table. An ANALYZE failure must never fail
+# the prune that preceded it.
+
+#: The three checkpoint tables whose planner statistics are refreshed after
+#: a destructive prune. Same order as the VACUUM FULL lane's table order
+#: (``daemon/services/maintenance.py::_VACUUM_FULL_TABLES``).
+ANALYZE_TARGET_TABLES: tuple[str, ...] = (
+    "checkpoints",
+    "checkpoint_blobs",
+    "checkpoint_writes",
+)
+
+
+@dataclass
+class AnalyzeOutcome:
+    """Outcome of one post-prune ANALYZE sweep.
+
+    ``ran`` is True only when the sweep actually reached the server (an
+    engine was built and the tables were visited). ``skipped_reason``
+    explains a non-run: ``no_rows_deleted`` (the steady-state no-op
+    sweep), ``no_shared_engine`` / ``not_postgresql`` (nothing to run
+    against), ``engine_build_failed``.
+    """
+
+    ran: bool = False
+    skipped_reason: str | None = None
+    deleted_rows: int = 0
+    analyzed_tables: list[str] = field(default_factory=list)
+    failed_tables: list[str] = field(default_factory=list)
+    duration_ms: int = 0
+
+
+def _analyze_one_table(engine: Engine, table_name: str) -> None:
+    """Run ``ANALYZE <table>`` on the dedicated autocommit engine.
+
+    Synchronous — the caller wraps it in ``asyncio.to_thread`` so the
+    event loop is never blocked (ANALYZE samples rows and can hold its
+    lock for a while on a large table). The table name comes from the
+    module-level :data:`ANALYZE_TARGET_TABLES` allow-list: PG has no
+    parameter binding for identifiers, so the interpolation is safe by
+    construction — no caller-supplied string ever reaches the SQL.
+    """
+    with engine.connect() as conn:
+        conn.execute(text(f"ANALYZE {table_name}"))
+
+
+async def analyze_checkpoint_tables_after_prune(
+    shared_engine: Engine | None,
+    *,
+    deleted_rows: int,
+    statement_ms: int = VACUUM_STATEMENT_TIMEOUT_MS,
+    lock_ms: int = VACUUM_LOCK_TIMEOUT_MS,
+    idle_ms: int = VACUUM_IDLE_IN_TXN_TIMEOUT_MS,
+) -> AnalyzeOutcome:
+    """Refresh planner statistics on the three checkpoint tables.
+
+    Call this at the END of a destructive prune path with the number of
+    rows the run actually deleted. The ANALYZE fires ONLY when
+    ``deleted_rows > 0`` — a no-op sweep returns immediately without
+    building an engine or touching the DB.
+
+    Never raises: engine-build failures and per-table ANALYZE failures
+    are logged and swallowed (an ANALYZE failure must never fail the
+    prune that preceded it).
+
+    Args:
+        shared_engine: the daemon's shared SQLAlchemy engine — only its
+            URL/dialect are read (the sweep runs on its OWN per-cycle
+            engine). ``None`` ⇒ the sweep is skipped with a WARNING.
+        deleted_rows: rows actually deleted by this run. ``0`` ⇒ skip.
+        statement_ms / lock_ms / idle_ms: per-statement timeouts for the
+            dedicated engine (defaults = the plain-VACUUM(ANALYZE) lane's
+            magnitudes).
+
+    Returns:
+        An :class:`AnalyzeOutcome` describing what ran.
+    """
+    outcome = AnalyzeOutcome(deleted_rows=max(0, int(deleted_rows or 0)))
+
+    # ── Gate 1: did this run actually delete anything? ────────────────────
+    if outcome.deleted_rows <= 0:
+        outcome.skipped_reason = "no_rows_deleted"
+        logger.debug(
+            "[CheckpointPerf] post-prune ANALYZE skipped: no rows "
+            "deleted in this run (deleted_rows=0)"
+        )
+        return outcome
+
+    # ── Gate 2: is there a PostgreSQL engine to run against? ──────────────
+    if shared_engine is None:
+        outcome.skipped_reason = "no_shared_engine"
+        logger.warning(
+            "[CheckpointPerf] post-prune ANALYZE skipped: no shared "
+            "engine wired — planner statistics stay stale for this "
+            "cycle (deleted_rows=%d)",
+            outcome.deleted_rows,
+        )
+        return outcome
+    if shared_engine.dialect.name != "postgresql":
+        outcome.skipped_reason = "not_postgresql"
+        logger.warning(
+            "[CheckpointPerf] post-prune ANALYZE skipped: shared engine "
+            "dialect is %r, not postgresql — planner statistics stay "
+            "stale for this cycle (deleted_rows=%d)",
+            shared_engine.dialect.name,
+            outcome.deleted_rows,
+        )
+        return outcome
+
+    # ── Build the dedicated per-cycle autocommit engine ───────────────────
+    try:
+        engine = create_vacuum_engine(
+            shared_engine,
+            statement_ms=statement_ms,
+            lock_ms=lock_ms,
+            idle_ms=idle_ms,
+        )
+    except Exception as exc:  # noqa: BLE001 — never fatal to the prune
+        outcome.skipped_reason = "engine_build_failed"
+        logger.warning(
+            "[CheckpointPerf] post-prune ANALYZE skipped: dedicated "
+            "engine build failed (%s: %s) — planner statistics stay "
+            "stale for this cycle (never fatal to the prune)",
+            type(exc).__name__,
+            exc,
+        )
+        return outcome
+
+    outcome.ran = True
+    t0 = time.perf_counter()
+    try:
+        for table in ANALYZE_TARGET_TABLES:
+            try:
+                await asyncio.to_thread(_analyze_one_table, engine, table)
+                outcome.analyzed_tables.append(table)
+            except Exception as exc:  # noqa: BLE001 — per-table isolation
+                outcome.failed_tables.append(table)
+                logger.warning(
+                    "[CheckpointPerf] post-prune ANALYZE failed for table "
+                    "%s (%s: %s) — continuing (statistics refresh is "
+                    "best-effort; never fatal to the prune)",
+                    table,
+                    type(exc).__name__,
+                    exc,
+                )
+    finally:
+        # Per-cycle engine — ALWAYS disposed (NullPool + dispose in
+        # ``finally``), exactly like the VACUUM lane's engines.
+        try:
+            engine.dispose()
+        except Exception:  # noqa: BLE001 — disposal is best-effort
+            logger.debug(
+                "[CheckpointPerf] post-prune ANALYZE engine dispose "
+                "failed (non-fatal)",
+                exc_info=True,
+            )
+    outcome.duration_ms = int((time.perf_counter() - t0) * 1000)
+    logger.info(
+        "[CheckpointPerf] op=post_prune_analyze deleted_rows=%d "
+        "analyzed=%d failed=%d duration_ms=%d",
+        outcome.deleted_rows,
+        len(outcome.analyzed_tables),
+        len(outcome.failed_tables),
+        outcome.duration_ms,
+    )
+    return outcome
