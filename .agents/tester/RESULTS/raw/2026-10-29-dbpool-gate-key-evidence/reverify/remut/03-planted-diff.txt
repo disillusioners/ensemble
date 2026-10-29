@@ -1,0 +1,22 @@
+diff --git a/daemon/services/readiness.py b/daemon/services/readiness.py
+index 164be194d..b936dff95 100644
+--- a/daemon/services/readiness.py
++++ b/daemon/services/readiness.py
+@@ -1555,8 +1555,6 @@ def make_db_probe(engine: Engine) -> Callable[[], tuple[bool, Optional[str]]]:
+     """
+ 
+     def _probe() -> tuple[bool, Optional[str]]:
+-        # F4-A — admission pre-check BEFORE the blocking checkout.
+-        _refuse_pool_admission_at_capacity(engine)
+         with engine.connect() as conn:
+             # F4-B — probe-scoped statement bound, FIRST statement
+             # (it opens the autobegun transaction that scopes the
+@@ -1857,8 +1855,6 @@ def make_queue_probe(
+             _QUEUE_MAX_AGE_SQL_POSTGRES if is_postgres else _QUEUE_MAX_AGE_SQL_SQLITE
+         )
+         inflight: Optional[int] = None
+-        # F4-A — admission pre-check BEFORE the blocking checkout.
+-        _refuse_pool_admission_at_capacity(engine)
+         with engine.connect() as conn:
+             # F4-B — probe-scoped statement bound, FIRST statement
+             # (it opens the autobegun transaction that scopes the

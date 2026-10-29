@@ -1,0 +1,48 @@
+=== R11 Part 3 scratch PG setup 2026-10-29T12:00:09Z ===
+port plan: 5449 (next free; 5432=system cluster, 5433/5441-5448 avoided by instruction)
+
+    /usr/lib/postgresql/16/bin/pg_ctl -D /tmp/tdbp-r11/pgdata -l logfile start
+
+waiting for server to start.... stopped waiting
+pg_ctl: could not start server
+Examine the log output.
+--- listening check ---
+PORT 5449 NOT LISTENING
+--- create role ---
+psql: error: connection to server at "127.0.0.1", port 5449 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+--- createdb over TCP as dbpool_r11 (owner = creator) ---
+createdb: error: connection to server at "127.0.0.1", port 5449 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+--- verify ---
+psql: error: connection to server at "127.0.0.1", port 5449 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+psql: error: connection to server at "127.0.0.1", port 5449 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+psql: error: connection to server at "127.0.0.1", port 5449 failed: Connection refused
+	Is the server running on that host and accepting TCP/IP connections?
+=== R11 Part 3 scratch PG setup — ATTEMPT 2 2026-10-29T12:00:25Z ===
+attempt-1 failure: FATAL could not create lock file /var/run/postgresql/.s.PGSQL.5449.lock (dir not user-writable); fix = -c unix_socket_directories=/tmp/tdbp-r11/sock (TCP listener on 5449 unaffected)
+waiting for server to start.... done
+server started
+--- listening check ---
+LISTEN 0      200        127.0.0.1:5449       0.0.0.0:*          
+--- create role ---
+CREATE ROLE
+--- createdb over TCP as dbpool_r11 (owner = creator) ---
+--- verify ---
+ current_user | current_database 
+--------------+------------------
+ dbpool_r11   | dbpool_r11
+(1 row)
+
+  rolname   | rolcanlogin | rolcreatedb 
+------------+-------------+-------------
+ dbpool_r11 | t           | t
+(1 row)
+
+  datname   |   owner    
+------------+------------
+ dbpool_r11 | dbpool_r11
+(1 row)
+

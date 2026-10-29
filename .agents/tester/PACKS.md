@@ -1,8 +1,8 @@
 # Test Packs
 
-## db-pool idle-in-transaction FUNCTIONAL GATE (`fix/db-pool-idle-txn` @ `4cc63574a`, base `19fc11c8b`; gate branch `tester/dbpool-functional-gate` @ `c89e3470c`) — ❌ **FAIL (one gate: G3.5)** (2026-10-29)
+## db-pool idle-in-transaction FUNCTIONAL GATE (`fix/db-pool-idle-txn` @ `441a1657d`, base `19fc11c8b`; gate branch `tester/dbpool-functional-gate` @ merge `3d835d8dd`) — ✅ **LANE VERDICT: PASS-WITH-NOTES — CLEARED FOR DOCS → MERGE → STAGE** (2026-10-29; original gate FAIL on G3.5 superseded by the post-`441a1657d` re-verification)
 
-> Full record: `.agents/tester/RESULTS/2026-10-29-dbpool-functional-gate.md`. **Verdict: FAIL — G3.5 net-new reds = 0 violated: 11 deterministic net-new regressions, ONE root cause** (`daemon/services/readiness.py:1512` — the lane's F4-A admission pre-check calls `pool.checkedout()` unconditionally; StaticPool (real sqlite pool) / FakeEngine crash → probe caught-and-warned → composite `database=False`; 3/3 RED isolated at HEAD, 3/3 GREEN isolated at BASE; minimal repro recorded). **Everything else PASS**: R-1 fill 35/35 (`47ff2f5ff`), Δ3 measured+set (`8cc538a71`, 0.25 s = worst 0.021607 s ×10), ladder **17/17 rows PASS** (`LADDER: OK`, 155 tests 0 failed 0 skipped, exactly-1-xfail satisfied), 9 mutation legs RED→GREEN digest-verified, J5 six base-vs-HEAD scenarios PASS, live boundary SUPPORTED, count identity 30,975 ↔ 31,084 (+109, closes exactly). Lane-owner fix surface + re-verification recipe in the record.
+> Full record: `.agents/tester/RESULTS/2026-10-29-dbpool-functional-gate.md` (original gate + RE-VERIFICATION section). **Original verdict: FAIL — G3.5: 11 deterministic net-new regressions, one root cause** (`readiness.py:1512` F4-A pre-check vs non-QueuePool engines). **Lane owner fix `441a1657d`** (shape guards; real comparison + constant untouched; DO-NOT fence greps zero) merged as `3d835d8dd`; surgical re-run ALL GREEN: the 11 ids ×3 = 33/33; StaticPool path cited + repro green; ladder rows G2.5/G2.6/G3.1-G3.4 + G1.4 exactly-1-xfail re-proven; F4-a mutation RED→GREEN on the merged tree (behavioral assertion included); whole-tree re-run arithmetic fingerprint **exactly +11 passed / −11 failed**, comm: the 11 GONE, 0 disclosed artifacts recurred, 2 new HEAD-only ids = class-a pre-existing flakes (3×-isolated both sides). **Net-new reds = 0 ⇒ G3.5 PASSES. Notes = the standing disclosure ledger (non-blocking).**
 
 | Pack | Invocation | Scope | Last Run | Status |
 |---|---|---|---|---|
@@ -12,6 +12,7 @@
 | `dbpool_j5a/j5b/j5c` | Phase-0-harness + real-code drivers, base-vs-HEAD, scratch PG :5441-:5443 | J5 six symptom scenarios (M-R3 hold, wedge cascade, F6 double-mint, F4 starvation, F7 churn, pool knobs) | 2026-10-29 | ✅ PASS 6/6 (J5(f) brief correction + R-10 disclosure recorded) |
 | `dbpool_mut1` / `dbpool_mut2` | plant→RED→restore→GREEN in scratch worktrees @ `c89e3470c` | J4 mutation re-proof: A1 carrier, T-M7, W-4, T-H1, F8-a, F4-a, F7-a-static (+F7-e, F7-b-static bonus) | 2026-10-29 | ✅ PASS 9/9 legs, zero findings against any pin |
 | `dbpool_classify` | 3×-isolated per side (house rule) on the 19 comm-diff ids | net-new classification | 2026-10-29 | 🔴 11 NET-NEW (one root cause) / 4 order-load / 0 flaky / 0 environment |
+| `dbpool_reverify` (post `441a1657d`, merged `3d835d8dd`) | merge + 11×3 isolated + StaticPool repro + ladder rows G2.5/G2.6/G3.1-G3.4/G1.4 + F4-a plant on merged + whole-tree re-run (method-identical) | targeted re-verification | 2026-10-29 | ✅ **ALL GREEN — G3.5 now PASSES** (33/33; +11/−11 exact; the 11 GONE; 0 artifacts recurred; 2 new = class-a flakes) |
 
 ---
 
