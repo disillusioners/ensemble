@@ -15,12 +15,17 @@ Design constraints (plan: ``metric-catalog.md`` §0.2/§0.5, ``§8``;
 * **Per-metric locks only.** There is deliberately NO registry-level
   lock: one wedged writer must not stall every family.
 * **Render never blocks.** The renderer uses a non-blocking
-  try-acquire (bounded wait, 50 ms).  On contention it serves the last
-  published snapshot and emits ``# <family> unavailable: lock_contended``.
+  try-acquire (bounded wait, 50 ms per family, 250 ms for the whole
+  render).  When the lock is acquired the render serves the CURRENT
+  state (the lock makes it a consistent snapshot); on contention it
+  serves the last published snapshot and emits
+  ``# <family> unavailable: lock_contended``.
 * **Copy-on-publish.** Writers update their own family's state under
   their own short lock and flip a dirty flag (O(1)); the O(series)
   snapshot copy happens at most once per publisher cadence window
-  (``set_publisher_cadence_provider``), never per increment.
+  (``set_publisher_cadence_provider``), never per increment.  The
+  published pointer is the contention fallback, so its staleness is
+  bounded by the cadence window (≤ N seconds).
 * **Non-cumulative bucket storage.** ``Histogram.observe`` touches a
   single bucket (O(log B) via ``bisect``) instead of scanning every
   bucket (O(B)); the cumulative series is accumulated at render time.
@@ -457,6 +462,8 @@ class Metric:
     def _empty_series(self) -> dict[str, Any]:
         if self.kind == "histogram":
             return {"count": 0, "sum": 0.0, "buckets": [0] * len(self.buckets or ())}
+        if self.kind == "counter":
+            return {"value": 0}
         return {"value": 0.0}
 
     # ── label handling (tiers 1 + 2) ────────────────────────────────────────
@@ -695,12 +702,18 @@ class Metric:
                     return 0.0
                 if self.kind == "histogram":
                     return float(series["count"])
+                if self.kind == "counter":
+                    value = series["value"]
+                    return int(value) if float(value).is_integer() else float(value)
                 return float(series["value"])
             if not self._series:
-                return 0.0
+                return 0 if self.kind == "counter" else 0.0
             if self.kind == "histogram":
                 return float(sum(s["count"] for s in self._series.values()))
-            return float(sum(s["value"] for s in self._series.values()))
+            total_value = sum(s["value"] for s in self._series.values())
+            if self.kind == "counter":
+                return int(total_value) if float(total_value).is_integer() else float(total_value)
+            return float(total_value)
 
     def get_count(self, labels: Optional[Mapping[str, str]] = None, **kwargs: str) -> int:
         merged = self._merge_labels(labels, kwargs) if (labels or kwargs) else {}
@@ -974,6 +987,10 @@ _cap_metric = register_counter(
     ),
 )
 
+# The ``{label}`` value is the LABEL KEY name — always one of the
+# observed metric's declared label keys (the observe path raises on an
+# unknown key before it can reach here), so the label axis is a closed
+# enum of registered label keys, never free text.
 _invalid_metric = register_counter(
     "ensemble_metrics_invalid_label_total",
     label_keys=("metric", "label"),
@@ -1012,6 +1029,15 @@ def reset_for_tests() -> None:
 # ─── Text exposition (Prometheus classic format) ───────────────────────────
 
 _DEPRECATION_EMITTED: set[str] = set()
+
+
+def _format_value(value: float) -> str:
+    """Render a sample value (integral values stay integral)."""
+    if isinstance(value, int):
+        return str(value)
+    if float(value).is_integer():
+        return str(int(value))
+    return repr(float(value))
 
 
 def _format_le(value: float) -> str:
@@ -1074,7 +1100,7 @@ def _render_metric(
             labels = dict(key)
             if not _tier3_allowed(metric, key):
                 continue
-            lines.append(f"{_format_line(name, labels)} {series['value']}")
+            lines.append(f"{_format_line(name, labels)} {_format_value(series['value'])}")
     else:  # histogram
         for key, series in sorted(data.items()):
             if not _tier3_allowed(metric, key):
@@ -1088,7 +1114,9 @@ def _render_metric(
             inf_labels = {**labels, "le": "+Inf"}
             lines.append(f"{_format_line(name + '_bucket', inf_labels)} {series['count']}")
             lines.append(f"{_format_line(name + '_count', labels)} {series['count']}")
-            lines.append(f"{_format_line(name + '_sum', labels)} {series['sum']}")
+            lines.append(
+                f"{_format_line(name + '_sum', labels)} {_format_value(series['sum'])}"
+            )
     return lines
 
 
