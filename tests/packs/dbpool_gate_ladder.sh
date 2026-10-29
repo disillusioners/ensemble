@@ -93,12 +93,17 @@ run_row() {
   local gate_id="$1"; shift
   local ec_rows="$1"; shift
   local marker="$1"; shift
+  # W-3: the LABEL may carry a marker-split annotation; the ID column
+  # ($gate_id) stays CANONICAL (contract 6.2a) — the label never feeds
+  # the id checks.
+  local label="${ROW_LABEL:-$gate_id}"
+  ROW_LABEL=""
 
   if [ -n "$ROW_FILTER" ] && [ "$ROW_FILTER" != "$gate_id" ]; then
     return 0
   fi
 
-  echo "── $gate_id ──────────────────────────────────────────────"
+  echo "── $label ──────────────────────────────────────────────"
 
   # The count assertion: sum this row's expected-collected.md cells.
   local expected=0 row cell
@@ -116,7 +121,7 @@ run_row() {
   fi
 
   if [ "$MODE" != "--run" ]; then
-    echo "$gate_id: FENCE-OK (collect-only mode; --run executes)"
+    echo "$label: FENCE-OK (collect-only mode; --run executes)"
     return 0
   fi
 
@@ -132,18 +137,18 @@ run_row() {
     "$PY" -m pytest "$@" "${marker_args[@]}" -q --tb=short 2>&1 | tail -3)
   echo "$summary"
   if echo "$summary" | grep -qE "^[0-9]+ failed|FAILED"; then
-    echo "$gate_id: RUN-FAILED" >&2
+    echo "$label: RUN-FAILED" >&2
     FAILED=1
     return 0
   fi
   if [ -n "$marker" ]; then
     if echo "$summary" | grep -qE "[1-9][0-9]* skipped"; then
-      echo "$gate_id: FATAL — a PG/integration gate that SKIPPED is a FAILING gate (DR-17)" >&2
+      echo "$label: FATAL — a PG/integration gate that SKIPPED is a FAILING gate (DR-17)" >&2
       FAILED=1
       return 0
     fi
   fi
-  echo "$gate_id: PASS (count=$expected asserted from expected-collected.md rows $ec_rows)"
+  echo "$label: PASS (count=$expected asserted from expected-collected.md rows $ec_rows)"
 }
 
 echo "# db-pool gate ladder — interpreter certification"
@@ -196,19 +201,23 @@ run_row G2.3 4 "" \
   "$T/test_dbpool_p2_immutability.py"
 run_row G2.4 1 "" \
   "$U/repositories/test_pg_engine_utc_session.py"
+ROW_LABEL="G2.5 [postgres]"
 run_row G2.5 20,21 postgres \
   tests/postgres/test_dbpool_mission_mint_pg.py \
   tests/postgres/test_dbpool_probe_starvation_pg.py
-run_row G2.5b 23,26 integration \
+ROW_LABEL="G2.5 [integration — marker split of the canonical row]"
+run_row G2.5 23,26 integration \
   tests/integration/test_dbpool_probe_bound_pg.py \
   tests/integration/test_dbpool_deferred_report_reconcile_pg.py
 run_row G2.6 22 postgres \
   tests/postgres/test_dbpool_wedge_capture_pg.py
 run_row G3.1 25 integration \
   tests/integration/test_dbpool_churn_census.py
+ROW_LABEL="G3.2 [integration]"
 run_row G3.2 24 integration \
   tests/integration/test_db_pool_idle_in_transaction_guard.py
-run_row G3.2b 15,14 "" \
+ROW_LABEL="G3.2 [unit static twins — marker split of the canonical row]"
+run_row G3.2 15,14 "" \
   "$T/test_dbpool_guard_pack_selfcheck.py" \
   "$T/test_dbpool_residence_static.py"
 run_row G3.3 12,13,14 "" \

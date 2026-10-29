@@ -56,7 +56,7 @@ from pathlib import Path
 import pytest
 
 #: The pack-local declared collected count (NEW packs only).
-EXPECTED_COLLECTED = 7
+EXPECTED_COLLECTED = 8
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _PLAN_DIR = _REPO_ROOT / ".agents" / "shared" / "planning" / "db-pool-idle-txn"
@@ -327,4 +327,47 @@ class TestGConsistency:
         assert len(pins) == 46, (
             f"G-consistency: the §5 pin inventory carries {len(pins)} pins "
             "— the contract declares 46"
+        )
+
+
+class TestW3LadderRowIdsAreCanonical:
+    """W-3 — the gate ladder's EXECUTABLE row-id set is a SUBSET of the
+    contract §6.2a canonical 17.
+
+    The ladder script (``tests/packs/dbpool_gate_ladder.sh``) executes
+    rows via ``run_row <GATE_ID> …``; a non-canonical id there (the
+    G2.5b/G3.2b drift the council found) is invisible to the W-11
+    scanner (it reads only the 8 planning ``.md`` artifacts), so this
+    pin closes the gap from the other side: it parses the script's
+    ``run_row`` invocations and asserts every id is a member of the
+    canonical set — re-read from the contract (no private copy).
+
+    Marker-split rows are LEGITIMATE (a canonical row split across two
+    invocations by pytest marker, e.g. ``G2.5 [postgres]`` /
+    ``G2.5 [integration]``): the split is recorded in the LABEL, and
+    the ID column stays canonical — which is exactly what this pin
+    enforces.
+
+    Plantable mutation: add a non-canonical row id to the ladder
+    script (e.g. ``run_row G4.7 …``) ⇒ RED.
+    """
+
+    _LADDER = _REPO_ROOT / "tests" / "packs" / "dbpool_gate_ladder.sh"
+    _RUN_ROW = re.compile(r"^\s*run_row\s+(G\d(?:\.\d)?)\s", re.M)
+
+    def test_every_executable_ladder_row_id_is_canonical(self):
+        script = self._LADDER.read_text()
+        executed = self._RUN_ROW.findall(script)
+        assert executed, (
+            "W-3: no run_row invocations were found in the ladder "
+            "script — the parser is stale"
+        )
+        canonical = _canonical_gate_ids()
+        unknown = sorted(set(executed) - canonical)
+        assert not unknown, (
+            "W-3: the gate ladder executes non-canonical row ids "
+            f"{unknown} — the canonical set is the contract §6.2a "
+            f"17 ({sorted(canonical)}); a marker split must reuse the "
+            "canonical id in the id column and record the split in "
+            "the label"
         )
