@@ -1968,19 +1968,6 @@ class InstanceMessagingService:
             logger.info(f"[RESUME] instance={instance_id[:8]} has_checkpoint=False, exception={type(e).__name__}")
             return False
 
-    async def _get_message_count(self, instance_id: str) -> int:
-        """Get the number of messages in the instance's checkpoint/state."""
-        try:
-            config = {"configurable": {"thread_id": instance_id}}
-            state = await self._checkpointer.aget(config)
-            if state:
-                channel_values = state.get("channel_values", {})
-                messages = channel_values.get("messages", [])
-                return len(messages) if messages else 0
-            return 0
-        except Exception:
-            return 0
-
     def _maybe_trigger_title_generation(self, instance_id: str, message: str, should_trigger: bool) -> None:
         """Fire-and-forget title generation and initiative-message capture if conditions are met."""
         if should_trigger:
