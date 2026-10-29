@@ -48,9 +48,17 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 from daemon.services import metrics_census as mc
 
 #: The EXACT set of database names this module may touch. Membership is
-#: EXACT — ``ensemble_prod_test`` is NOT scratch.
+#: EXACT — ``ensemble_prod_test`` is NOT scratch. The pack's OWN
+#: throwaway database (``ensemble_metrics_census_pack``) is in the set
+#: because the pack creates and drops it; the two shared scratch names
+#: are kept for the lanes that already use them. A name is NEVER
+#: matched by substring / prefix.
 ALLOWED_SCRATCH_DBS = frozenset(
-    {"ensemble_dev_test_only", "ensemble_test_only"}
+    {
+        "ensemble_dev_test_only",
+        "ensemble_test_only",
+        "ensemble_metrics_census_pack",
+    }
 )
 
 #: The fence's message fragment — asserted in the child-run legs.

@@ -68,10 +68,12 @@ PG_ADMIN_PASSWORD="${PG_ADMIN_PASSWORD:-ensemble_dev}"
 PG_HOST="${PG_HOST:-localhost}"
 PG_PORT="${PG_PORT:-5432}"
 
-#: The ONE documented throwaway database name of this pack. It is an
-#: EXACT member of the module's allowlist
+#: The ONE documented throwaway database name of this pack. It is
+#: PACK-UNIQUE (the pack creates AND drops it, so a parallel or
+#: sequential pack run can never fight over a shared scratch name) and
+#: it is an EXACT member of the module's allowlist
 #: (tests/postgres/test_metrics_census_pg.py:ALLOWED_SCRATCH_DBS).
-SCRATCH_DB="ensemble_dev_test_only"
+SCRATCH_DB="ensemble_metrics_census_pack"
 #: The pack's dedicated LOGIN role — it owns the scratch database and
 #: NOTHING else.
 SCRATCH_ROLE="ensemble_metrics_census_pack"
@@ -81,7 +83,7 @@ SCRATCH_PW="pack_$(head -c12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 #: script asserts its own target's membership BEFORE it creates
 #: anything, so a rename of the throwaway database fails loudly HERE
 #: instead of deep inside pytest.
-ALLOWED_DBS="ensemble_dev_test_only ensemble_test_only"
+ALLOWED_DBS="ensemble_dev_test_only ensemble_test_only ensemble_metrics_census_pack"
 
 case " ${ALLOWED_DBS} " in
   *" ${SCRATCH_DB} "*)
