@@ -205,8 +205,8 @@ NO live promote performed.
 branch and independently gated — NOT promoted**. The live daemon still runs the pre-fix tree, so
 the incident stays **OPEN** as a symptom class.
 
-- **Branch**: `fix/db-pool-idle-txn` · base `19fc11c8b` (staged v0.27.11 tree) · HEAD `441a1657d`
-  · **59 commits** · worktree `/home/nea/ensemble-src-wt-dbpool-idletxn` · **not pushed to origin**.
+- **Branch**: `fix/db-pool-idle-txn` · base `19fc11c8b` (staged v0.27.11 tree) · HEAD `db15f6d27`
+  · **79 commits** · worktree `/home/nea/ensemble-src-wt-dbpool-idletxn` · **not pushed to origin**.
 - **Scope**: **11 daemon files** (+1096/−207), 30 test/script files, **0 new `.sql`** (migration
   delta vs the live release is EMPTY; `agents/`, `frontend/`, `plugins/` payload trees unchanged).
 - **Plan of record**: `.agents/shared/planning/db-pool-idle-txn/` (BASELINE.md,
@@ -268,17 +268,19 @@ the incident stays **OPEN** as a symptom class.
 2. **The Δ3 measured constant (0.25 s) is likewise tester-side only** (`8cc538a71`); the lane tree
    still ships the sentinel `MANAGER_ENGINE_LEGITIMATE_HOLD_BUDGET_S = -1.0`
    (`daemon/constants.py:353`), which scopes the F7 residence assertion out.
-3. **`origin/latest` has moved 9 commits** (`9bbef71c1`, incl. the manager-pool-size knob
-   hotfix). A read-only `git merge-tree --write-tree` simulation of lane-HEAD × `origin/latest`
-   shows **2 conflicts**: `daemon/repositories/factory.py` (imports; the D-47 options template vs
-   the tip's new `create_postgres_engine(config, manager_pool_size=…)` signature; the `create_engine`
-   `pool_size` kwarg) and `tests/unit/repositories/test_pg_engine_utc_session.py`. The lane's
-   hard-coded `MANAGER_POOL_CONFIGURED_CAPACITY = 15` (`daemon/services/readiness.py:152`) and its
-   AST capacity-equality pin need re-derivation: at the tip the manager engine's `pool_size` is
-   **config-driven** (`limits.manager_pool_size`, default tier 15, floor 15), not a literal, so the
-   pin's `ast.literal_eval` can no longer read the construction site. Per §15.3 the lane must
-   merge, re-verify every anchor and re-run the ladder — a stale stage is refused by the L1
-   tip-identity guard (exit 78), and that refusal must not be overridden.
+3. **The origin/latest merge is DONE** (2026-10-29): merge commit `79bf44936`
+   (parents `aac505291` lane + `69d767b2a` origin/latest — the 9-commit move incl. the
+   manager-pool-size knob hotfix), **3 conflicts resolved as unions**: `daemon/repositories/factory.py`,
+   `tests/unit/repositories/test_pg_engine_utc_session.py`, `.agents/shared/context.md`. The merge's
+   semantic fallout was fixed in the merge-semantics cycle: the hard-coded
+   `MANAGER_POOL_CONFIGURED_CAPACITY = 15` became the DEFAULT-TIER declaration (**25** = 15 pool +
+   10 overflow) with the admission pre-check's refusal threshold DERIVED from the engine's own pool
+   at call time (a static 15 would refuse while overflow slots are servable), and the
+   capacity-equality + sizing pins were re-derived for the config-driven
+   `pool_size=manager_pool_size` construction (`limits.manager_pool_size`, default tier 15,
+   floor 15). The union had also silently dropped one test body (restored). Per §15.3 every anchor
+   must be re-verified before a stage — a stale stage is refused by the L1 tip-identity guard
+   (exit 78), and that refusal must not be overridden.
 4. **The version slot moved:** `v0.27.12` is **taken** (live `current -> releases/v0.27.12`).
    `v0.27.13` is free as of this note, but the slot is re-derived from the live census at stage
    time (W9) and is never hard-coded in an artifact.
