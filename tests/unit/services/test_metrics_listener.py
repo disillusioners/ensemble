@@ -19,6 +19,7 @@ need the parallel coder's ``register_*`` API.
 
 from __future__ import annotations
 
+import io
 import logging
 import socket
 
@@ -321,9 +322,8 @@ def test_unknown_route_is_404(monkeypatch):
 # ─── the detached-listener edge (FIX m8) ───────────────────────────────────
 
 
-def _detached_handler() -> tuple[object, "io.BytesIO"]:
+def _detached_handler() -> tuple[object, io.BytesIO]:
     """A handler whose server has NO listener attached."""
-    import io
     import types
 
     handler = ml._MetricsRequestHandler.__new__(ml._MetricsRequestHandler)
@@ -354,6 +354,86 @@ def test_the_detached_listener_body_is_a_valid_prometheus_comment():
     raw = buffer.getvalue()
     assert b"503" not in raw.split(b"\r\n", 1)[0]
     assert b"# exposition unavailable: listener_detached" in raw
+
+
+# ─── F5 — the Server header must not leak the Python version ────────────
+
+
+def test_the_server_header_does_not_leak_the_python_version():
+    """F5 — the stdlib default appends ``Python/3.x`` to the ``Server:``
+    header. The product token stays; the interpreter version does not."""
+    assert ml._MetricsRequestHandler.sys_version == ""
+    handler, buffer = _detached_handler()
+    handler.do_GET()
+    raw = buffer.getvalue()
+    assert b"Server: ensemble-metrics/1.0" in raw
+    assert b"Python/" not in raw
+
+
+# ─── F3 — the error body must not leak the exception message ────────────
+
+
+def test_a_raising_render_does_not_leak_the_exception_message(monkeypatch):
+    """F3 — the raw exception text (SQL, paths, operator data) must never
+    reach the HTTP body: only the exception TYPE, bounded."""
+    from daemon import checkpoint_metrics as cm
+
+    secret = "postgresql://user:hunter2@db/prod SELECT * FROM secrets"
+    monkeypatch.setenv(metrics_gate.ENV_VAR, "1")
+    listener = ml.MetricsListener(port=0, socket_factory=_FakeSocketFactory())
+
+    def _boom() -> str:
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(cm, "render_metrics", _boom)
+    response = listener.build_response("/metrics", {})
+    body = response.body.decode()
+    assert response.status == 200
+    assert secret not in body
+    assert "hunter2" not in body
+    assert "RuntimeError" in body
+    # The reason is BOUNDED (a fixed-length prefix).
+    reason = body.split("unavailable: ", 1)[1].split("\n", 1)[0]
+    assert len(reason) <= 64
+
+
+def test_the_error_body_is_bounded_for_a_long_exception_type(monkeypatch):
+    """F3 — even an absurdly long exception type name is bounded."""
+    from daemon import checkpoint_metrics as cm
+
+    monkeypatch.setenv(metrics_gate.ENV_VAR, "1")
+    listener = ml.MetricsListener(port=0, socket_factory=_FakeSocketFactory())
+
+    class _VeryLongNameError(Exception):
+        pass
+
+    _VeryLongNameError.__name__ = "E" * 500
+    monkeypatch.setattr(
+        cm, "render_metrics", lambda: (_ for _ in ()).throw(_VeryLongNameError())
+    )
+    response = listener.build_response("/metrics", {})
+    body = response.body.decode()
+    reason = body.split("unavailable: ", 1)[1].split("\n", 1)[0]
+    assert len(reason) <= 64
+
+
+# ─── F6 — a non-loopback bind host is REFUSED ────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "host", ["0.0.0.0", "::", "192.168.1.10", "example.com", "10.0.0.1"]
+)
+def test_a_non_loopback_host_is_refused(host):
+    """F6 — the loopback bind is a SECURITY boundary (CR-2): a wildcard
+    bind would expose an unauthenticated scrape surface to the LAN."""
+    with pytest.raises(ValueError):
+        ml.MetricsListener(port=0, host=host)
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "127.0.0.2", "localhost", "::1"])
+def test_a_loopback_host_is_accepted(host):
+    listener = ml.MetricsListener(port=0, host=host)
+    assert listener.host == host
 
 
 def test_metrics_route_tolerates_a_query_string(monkeypatch):

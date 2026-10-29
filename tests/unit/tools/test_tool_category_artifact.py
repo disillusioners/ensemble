@@ -10,11 +10,15 @@ Contract implemented here:
 * **Generator** — imports the full tool registry, calls
   ``get_tool_categories()`` (``daemon/tools/_tool_registry.py:1598``)
   over the complete tool universe, derives the sorted distinct category
-  list + count, and writes them to the committed artifact
-  (``.agents/shared/metrics/tool-categories.json``).  Run it with::
+  list + count, and writes them to a **scratch** file.  The COMMITTED
+  artifact (``.agents/shared/metrics/tool-categories.json``) is never
+  rewritten by a test run — the ambient regeneration env var alone
+  cannot authorise it (F11: it used to make the drift check compare the
+  file to itself).  Run the generator with::
 
-      ENSEMBLE_REGENERATE_TOOL_CATEGORY_ARTIFACT=1 \\
+      ENSEMBLE_REGENERATE_TOOL_CATEGORY_ARTIFACT=/tmp/tool-categories.json \\
           uv run python -m pytest tests/unit/tools/test_tool_category_artifact.py -q
+      cp /tmp/tool-categories.json .agents/shared/metrics/tool-categories.json
 
 * **Drift check** — re-runs the generator and FAILS (non-zero exit)
   when the on-disk artifact diverges from the freshly derived set, so a
@@ -37,6 +41,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -210,8 +215,9 @@ def _artifact_payload() -> dict[str, object]:
 def _read_artifact() -> dict[str, object]:
     path = tool_category_artifact_path()
     assert path.is_file(), (
-        f"tool-category artifact missing: {path}. Regenerate with "
-        f"{REGENERATE_ENV}=1 uv run python -m pytest "
+        f"tool-category artifact missing: {path}. Regenerate into a scratch "
+        f"path and copy it over: {REGENERATE_ENV}=/tmp/tool-categories.json "
+        f"uv run python -m pytest "
         f"tests/unit/tools/test_tool_category_artifact.py -q"
     )
     return json.loads(path.read_text(encoding="utf-8"))
@@ -220,15 +226,48 @@ def _read_artifact() -> dict[str, object]:
 # ─── tests ───────────────────────────────────────────────────────────────────
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _maybe_regenerate_artifact() -> None:
-    """Rewrite the committed artifact when the regeneration env var is set."""
-    if os.environ.get(REGENERATE_ENV) != "1":
+def _regenerate_if_authorised() -> None:
+    """Write the derived payload into the AUTHORISED scratch path.
+
+    **The committed artifact is NEVER rewritten by a test run** (F11).
+    The ambient ``ENSEMBLE_REGENERATE_TOOL_CATEGORY_ARTIFACT=1`` alone
+    used to authorise the rewrite, which made the drift check compare
+    the committed file to ITSELF — the check went blind exactly when it
+    mattered. Now the env var names the OUTPUT file; writing over the
+    committed artifact is refused outright.
+
+    Maintainer flow::
+
+        ENSEMBLE_REGENERATE_TOOL_CATEGORY_ARTIFACT=/tmp/tool-categories.json \\
+            uv run python -m pytest tests/unit/tools/test_tool_category_artifact.py -q
+        cp /tmp/tool-categories.json .agents/shared/metrics/tool-categories.json
+    """
+    target = os.environ.get(REGENERATE_ENV, "").strip()
+    if not target or target == "1":
+        # No explicit scratch output path ⇒ nothing is written.
         return
-    path = tool_category_artifact_path()
+    path = Path(target)
+    if path.is_dir():
+        path = path / tool_category_artifact_path().name
+    committed = tool_category_artifact_path()
+    try:
+        same = path.resolve() == committed.resolve()
+    except OSError:  # pragma: no cover — defensive
+        same = False
+    if same:
+        # Never rewrite the committed artifact from a test run.
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = _artifact_payload()
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _maybe_regenerate_artifact() -> None:
+    """Regenerate ONLY into an explicit SCRATCH path (see the helper)."""
+    _regenerate_if_authorised()
 
 
 class TestToolCategoryArtifact:
@@ -244,8 +283,9 @@ class TestToolCategoryArtifact:
         on_disk = _read_artifact()
 
         assert on_disk["categories"] == derived["categories"], (
-            "tool-category artifact drifted from the registry — regenerate with "
-            f"{REGENERATE_ENV}=1 (and bump VOCABULARY_VERSION)"
+            "tool-category artifact drifted from the registry — regenerate "
+            f"into a scratch path ({REGENERATE_ENV}=/tmp/tool-categories.json) "
+            "and copy it over (and bump VOCABULARY_VERSION)"
         )
         assert on_disk["count"] == derived["count"] == len(derived["categories"])
 
@@ -315,3 +355,66 @@ class TestToolCategoryArtifact:
         vocabulary = tool_category_vocabulary()
         assert RESERVED_LABEL_VALUE in vocabulary
         assert len(vocabulary) == len(set(vocabulary))
+
+
+class TestArtifactRegenerationAuthority:
+    """F11 — the committed artifact is never rewritten by a test run.
+
+    The ambient ``ENSEMBLE_REGENERATE_TOOL_CATEGORY_ARTIFACT=1`` used to
+    authorise the rewrite, which made the drift check compare the
+    committed file to ITSELF — the check went blind exactly when it
+    mattered.
+    """
+
+    def test_the_ambient_flag_cannot_rewrite_the_committed_artifact(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(REGENERATE_ENV, "1")
+        committed = tool_category_artifact_path()
+        before = committed.read_text(encoding="utf-8")
+        _regenerate_if_authorised()
+        assert committed.read_text(encoding="utf-8") == before
+
+    def test_the_committed_artifact_path_is_refused_as_an_output(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Even an env var that NAMES the committed artifact is refused."""
+        committed = tool_category_artifact_path()
+        monkeypatch.setenv(REGENERATE_ENV, str(committed))
+        before = committed.read_text(encoding="utf-8")
+        _regenerate_if_authorised()
+        assert committed.read_text(encoding="utf-8") == before
+
+    def test_the_drift_check_genuinely_fails_with_the_ambient_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With the ambient flag set, a divergence STILL fails the drift
+        check (the file is not compared to itself)."""
+        monkeypatch.setenv(REGENERATE_ENV, "1")
+        _regenerate_if_authorised()
+
+        drifted = {
+            "categories": ["__drift__"],
+            "count": 1,
+            "vocabulary_version": VOCABULARY_VERSION,
+            "reserved": RESERVED_LABEL_VALUE,
+            "source": "drift",
+        }
+        monkeypatch.setattr(
+            sys.modules[__name__], "_artifact_payload", lambda: drifted
+        )
+        with pytest.raises(AssertionError):
+            TestToolCategoryArtifact().test_artifact_is_generated_from_the_tool_registry()
+
+    def test_an_explicit_scratch_path_receives_the_payload(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The authorised scratch path DOES receive the regenerated
+        payload (the maintainer flow keeps working)."""
+        target = tmp_path / "tool-categories.json"
+        monkeypatch.setenv(REGENERATE_ENV, str(target))
+        _regenerate_if_authorised()
+        assert target.is_file()
+        assert json.loads(target.read_text(encoding="utf-8"))["categories"] == (
+            _artifact_payload()["categories"]
+        )

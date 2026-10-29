@@ -35,11 +35,11 @@ THE MANAGED-KEY TIER
 
 ``limits.metrics_enabled`` (managed key, ``daemon/services/
 settings_service.py``) is the DB-backed tier of the same switch. Its
-value is resolved ONCE per ``MANAGED_REFRESH_TTL_S`` by the LISTENER
-thread (the only thread allowed to touch the DB for this — the census
-sampler is deliberately non-pooled and MUST NOT consume a pool slot
-for a boolean). The census reads the cached value only — a PURE read,
-no I/O — so the census stays pool-free.
+value is read from the managed-key ladder's DB tier (the
+``app_settings`` override rows) by a **REFRESHER THREAD** — never by a
+request thread, never by the event loop, never under a metric's lock.
+The census reads the cached value only — a PURE read, no I/O — so the
+census stays pool-free.
 
 THE LIVE MANAGED-VALUE RESOLVER (MAJOR-2 fix)
 ---------------------------------------------
@@ -62,14 +62,26 @@ the review flagged. They now read the SAME live cache, so a runtime
 ``PUT /api/settings/daemon/{key}`` is reflected by the registry
 providers without a restart, within the TTL.
 
-Two invariants the resolver keeps:
+FOUR INVARIANTS THE RESOLVER KEEPS (FIX ROUND 1 / F1):
 
-* a key with **no DB override** falls back to its BOOT value (the DB
-  tier is absent ⇒ the yaml/env/default tier still applies);
-* the cached read is **PURE** — the registry consults its providers
-  while holding a metric's own lock, so a DB round trip there would be
-  the CR-1 wedged-writer failure. The refresh happens on the LISTENER's
-  dedicated thread, never under a metric lock.
+* **The request path NEVER touches the DB.** ``request_managed_values_refresh``
+  only SIGNALS the refresher thread and returns the last-known values.
+  A pooled checkout can block for tens of seconds under the Oct-26/28
+  pool-poisoning class — Prometheus's ``scrape_timeout`` is 10 s, so a
+  scrape that waits for a checkout turns into ``up==0`` exactly when
+  the data matters most.
+* **The env tier wins — no DB touch at all.** When
+  ``ENSEMBLE_METRICS_ENABLED`` is EXPLICITLY set, the managed chain is
+  irrelevant: the resolver performs NO read (neither on the request
+  path nor on the refresher). The live cadence/cap then keep serving
+  their LAST-KNOWN values until the env is unset again.
+* **Single-flight.** A refresh in progress is never stacked: later
+  callers get the last-known values immediately.
+* **A key with no DB override falls back to its BOOT value** (the DB
+  tier is absent ⇒ the yaml/env/default tier still applies), and the
+  cached read is **PURE** — the registry consults its providers while
+  holding a metric's own lock, so a DB round trip there would be the
+  CR-1 wedged-writer failure.
 
 This module is import-safe and import-light on purpose: BOTH the
 listener (``daemon/services/metrics_listener.py``) and the census
@@ -123,6 +135,20 @@ _managed_values: dict[str, Any] = {}
 _managed_provider: Callable[[], Mapping[str, Any] | None] | None = None
 _managed_refreshed_at: float = 0.0
 _defer_log_emitted: bool = False
+
+#: The refresher thread — the ONLY thread that reads the managed-key DB
+#: tier. ONE per process; started lazily on the first refresh request.
+_refresher_thread: threading.Thread | None = None
+_refresher_wake = threading.Event()
+_refresher_stop = threading.Event()
+_refresher_lock = threading.Lock()
+#: The refresher generation — a restarted thread retires the previous
+#: one (two generations never read at the same time).
+_refresher_generation = 0
+#: The single-flight flag: a refresh in progress is never stacked.
+_refreshing = False
+#: When a refresh was last REQUESTED (the request path's TTL gate).
+_refresh_requested_at: float = 0.0
 
 
 # ─── env tier (per request, no cache) ───────────────────────────────────────
@@ -214,8 +240,7 @@ def live_managed_value(key: str, default: Any) -> Any:
     This is what the registry's providers call: they are consulted
     while a metric's own lock is held, so a DB round trip here would
     be the CR-1 wedged-writer failure. The cache is refreshed by the
-    listener's dedicated thread
-    (:func:`refresh_managed_values`).
+    REFRESHER THREAD (:func:`refresh_managed_values`).
 
     A key with no DB override falls back to ``default`` — the boot
     value (the yaml/env/default tier still applies).
@@ -225,6 +250,109 @@ def live_managed_value(key: str, default: Any) -> Any:
     if key in values:
         return values[key]
     return default
+
+
+def managed_values_snapshot() -> Mapping[str, Any]:
+    """The cached live managed values (PURE read — no I/O)."""
+    with _lock:
+        return dict(_managed_values)
+
+
+def request_managed_values_refresh(
+    *,
+    ttl_s: float = MANAGED_REFRESH_TTL_S,
+) -> Mapping[str, Any]:
+    """The REQUEST/SERVE-PATH entry point — NEVER blocks, NEVER stacks.
+
+    * **The env tier wins — NO DB touch at all.** When
+      ``ENSEMBLE_METRICS_ENABLED`` is EXPLICITLY set the managed chain
+      is irrelevant, so the resolver performs no read at all (neither
+      here nor on the refresher). The emergency-off path pays nothing.
+    * **Single-flight.** A refresh already in flight is never stacked;
+      the caller gets the last-known values.
+    * **The DB read never happens on a request thread.** This function
+      only SIGNALS the refresher thread and returns immediately with
+      the last-known values: a pooled checkout can block for tens of
+      seconds under the pool-poisoning class, and a scrape must never
+      wait for it (Prometheus's ``scrape_timeout`` is 10 s — a blocked
+      scrape is an ``up==0``).
+
+    The request path is TTL-gated: at most one refresh is REQUESTED
+    per ``ttl_s`` seconds, so a scrape burst cannot turn into a burst
+    of DB reads.
+    """
+    global _refresh_requested_at
+    if env_explicit_enabled() is not None:
+        # The env tier is the authority — the managed chain is not read.
+        return managed_values_snapshot()
+    now = time.monotonic()
+    with _lock:
+        if _refreshing:
+            # A refresh is in flight — the last-known values stand.
+            skip = True
+        elif now - _refresh_requested_at < ttl_s:
+            # The TTL window: no new refresh is requested.
+            skip = True
+        else:
+            skip = False
+            _refresh_requested_at = now
+    if skip:
+        return managed_values_snapshot()
+    _ensure_refresher()
+    _refresher_wake.set()
+    return managed_values_snapshot()
+
+
+def _ensure_refresher() -> None:
+    """Start the refresher thread (lazily, once per process).
+
+    A generation counter retires the previous thread when it is
+    restarted (a test reset stops it) — so two refresher generations
+    can never read at the same time.
+    """
+    global _refresher_thread, _refresher_generation
+    with _refresher_lock:
+        if (
+            _refresher_thread is not None
+            and _refresher_thread.is_alive()
+            and not _refresher_stop.is_set()
+        ):
+            return
+        _refresher_generation += 1
+        generation = _refresher_generation
+        _refresher_stop.clear()
+        _refresher_thread = threading.Thread(
+            target=_refresher_loop,
+            args=(generation,),
+            name="metrics-managed-refresh",
+            daemon=True,
+        )
+        _refresher_thread.start()
+
+
+def _refresher_loop(generation: int) -> None:
+    """The refresher loop — the ONLY thread that reads the DB tier.
+
+    It wakes on the request path's signal (or on the TTL timeout) and
+    performs ONE read. A read that blocks (a poisoned pool) stalls
+    THIS thread only: the last-known values keep being served.
+    """
+    while True:
+        _refresher_wake.wait(timeout=MANAGED_REFRESH_TTL_S)
+        _refresher_wake.clear()
+        if _refresher_stop.is_set() or generation != _refresher_generation:
+            return
+        try:
+            if env_explicit_enabled() is not None:
+                # The env tier wins — no DB touch at all.
+                continue
+            refresh_managed_values()
+        except Exception as exc:  # noqa: BLE001 — the refresher never dies
+            logger.warning(
+                "[Metrics] managed-key refresher failed (%s: %s)",
+                type(exc).__name__,
+                exc,
+            )
 
 
 def build_registry_providers(
@@ -238,7 +366,7 @@ def build_registry_providers(
     and the HARD cardinality cap (``limits.metrics_cardinality_cap``)
     are live managed keys (plan §5: "No (per-request)"; §13's back-out
     relies on "raise the cap … no restart"). They read the LIVE
-    managed-value cache — refreshed from the DB tier by the listener's
+    managed-value cache — refreshed from the DB tier by the REFRESHER
     thread — and fall back to the BOOT value when the managed chain
     carries no DB override for the key.
 
@@ -271,8 +399,14 @@ def refresh_managed_values(
     """Refresh the cached live managed values from the provider.
 
     ONE DB read serves EVERY live managed key (the kill-switch, the
-    publisher cadence, the cardinality cap). The refresh is
-    TTL-bounded: at most one read per ``ttl_s`` seconds.
+    publisher cadence, the cardinality cap). The read is
+    TTL-bounded (at most one read per ``ttl_s`` seconds) and
+    SINGLE-FLIGHT: a read already in flight is never stacked — the
+    later caller gets the last-known values.
+
+    This is the REFRESHER THREAD's entry point (and the tests' seam).
+    It MUST NOT be called from a request path: a pooled checkout can
+    block for tens of seconds.
 
     A provider failure is FAIL-SAFE: the last known values are kept
     (never a spurious OFF that would silently darken the surface, never
@@ -280,13 +414,41 @@ def refresh_managed_values(
     always wins anyway).
     """
     global _managed_values, _managed_enabled, _managed_refreshed_at
+    global _refreshing
     with _lock:
         provider = _managed_provider
         current_values = dict(_managed_values)
-        current_enabled = _managed_enabled
         refreshed_at = _managed_refreshed_at
-    if provider is None:
+        if _refreshing:
+            # Single-flight: a read is in flight — never stack it.
+            return current_values
+        if provider is None:
+            return current_values
+        stamp = time.monotonic() if now is None else now
+        if stamp - refreshed_at < ttl_s:
+            return current_values
+        _refreshing = True
+    try:
+        values = dict(provider() or {})
+    except Exception as exc:  # noqa: BLE001 — never raise into the caller
+        logger.warning(
+            "[Metrics] managed-key refresh failed (%s: %s) — keeping the "
+            "last known values",
+            type(exc).__name__,
+            exc,
+        )
+        with _lock:
+            _refreshing = False
         return current_values
+    with _lock:
+        _managed_values = values
+        if MANAGED_KEY in values:
+            # The kill-switch's DB tier — when the DB has no override
+            # row the BOOT fallback stays in force.
+            _managed_enabled = bool(values[MANAGED_KEY])
+        _managed_refreshed_at = stamp
+        _refreshing = False
+    return values
     stamp = time.monotonic() if now is None else now
     if stamp - refreshed_at < ttl_s:
         return current_values
@@ -317,9 +479,10 @@ def refresh_managed_metrics_enabled(
 ) -> bool:
     """Refresh the live managed values and return the gate's value.
 
-    Kept as the gate's own entry point (the listener calls it); it is
-    now a thin wrapper over :func:`refresh_managed_values` — ONE DB
-    read serves every live key.
+    A thin wrapper over :func:`refresh_managed_values` — ONE DB read
+    serves every live key. It performs the READ, so it belongs to the
+    REFRESHER THREAD (never to a request path — see
+    :func:`request_managed_values_refresh`).
     """
     refresh_managed_values(now=now, ttl_s=ttl_s)
     return managed_metrics_enabled()
@@ -332,7 +495,7 @@ def metrics_enabled() -> bool:
     """THE GATE — the single kill-switch decision (one rule, three cases).
 
     Import-cheap and I/O-free: the env tier is read per call; the
-    managed tier is the cached value refreshed by the listener thread.
+    managed tier is the cached value refreshed by the REFRESHER THREAD.
     """
     explicit = env_explicit_enabled()
     if explicit is not None:
@@ -364,9 +527,14 @@ def reset_for_tests() -> None:
     ``reset_for_tests`` convention)."""
     global _managed_enabled, _managed_values, _managed_provider
     global _managed_refreshed_at, _defer_log_emitted
+    global _refreshing, _refresh_requested_at
+    _refresher_stop.set()
+    _refresher_wake.set()
     with _lock:
         _managed_enabled = False
         _managed_values = {}
         _managed_provider = None
         _managed_refreshed_at = 0.0
         _defer_log_emitted = False
+        _refreshing = False
+        _refresh_requested_at = 0.0

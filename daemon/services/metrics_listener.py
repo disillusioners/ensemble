@@ -271,6 +271,10 @@ class _MetricsRequestHandler(BaseHTTPRequestHandler):
     """The single-route handler (``GET /metrics``)."""
 
     server_version = "ensemble-metrics/1.0"
+    # F5 — the default ``sys_version`` leaks the Python version into the
+    # ``Server:`` header ("ensemble-metrics/1.0 Python/3.14.6"). The
+    # product token is kept; the interpreter version is not disclosed.
+    sys_version = ""
     protocol_version = "HTTP/1.1"
 
     def do_GET(self) -> None:  # noqa: N802 — stdlib naming
@@ -313,10 +317,17 @@ class MetricsListener:
 
     Args:
         port: the listen port (``limits.metrics_listener_port``).
-        host: the bind address — loopback ONLY by construction.
+        host: the bind address — loopback ONLY. A non-loopback host is
+            REFUSED in the constructor (F6): the loopback bind is a
+            SECURITY boundary (CR-2 — the main app binds 0.0.0.0 with
+            permissive CORS), so it must not be a convention that a
+            caller can quietly break.
         socket_factory: the injectable socket factory (tests).
         gate_enabled: the kill-switch callable (defaults to the shared
             ``metrics_gate``).
+
+    Raises:
+        ValueError: when ``host`` is not a loopback address.
     """
 
     def __init__(
@@ -327,6 +338,14 @@ class MetricsListener:
         socket_factory: Callable[[str, int], socket.socket] | None = None,
         gate_enabled: Callable[[], bool] | None = None,
     ) -> None:
+        # F6 — FAIL CLOSED: only the loopback family may be bound. There
+        # is no escape hatch (the plan sanctions none): a wildcard bind
+        # would expose an unauthenticated scrape surface to the LAN.
+        if not _host_is_localhost(host):
+            raise ValueError(
+                f"metrics listener refuses to bind a non-loopback host: "
+                f"{host!r} (the exposition surface is loopback-only)"
+            )
         self._port = int(port)
         self._host = host
         self._socket_factory = socket_factory
@@ -371,12 +390,12 @@ class MetricsListener:
             return bool(self._gate_enabled())
         from daemon.services import metrics_gate
 
-        # The LIVE managed values are refreshed HERE (the listener's own
-        # thread — never the event loop, never under a metric lock): ONE
-        # DB read per TTL serves every live managed key (the kill-switch,
-        # the publisher cadence, the cardinality cap). The census sampler
-        # must never touch the DB for a boolean.
-        metrics_gate.refresh_managed_values()
+        # The request path NEVER touches the DB: it only SIGNALS the
+        # refresher thread (which performs the ONE read per TTL) and
+        # reads the last-known values. With ENSEMBLE_METRICS_ENABLED
+        # EXPLICITLY set the signal is skipped entirely — the env tier
+        # wins and the emergency-off path pays nothing.
+        metrics_gate.request_managed_values_refresh()
         return metrics_gate.metrics_enabled()
 
     # ─── the request path (PURE — no socket, no thread) ────────────────
@@ -418,9 +437,12 @@ class MetricsListener:
                 body_text = cm.render_metrics()
                 outcome = "error" if UNAVAILABLE_MARKER in body_text else "ok"
             except Exception as exc:  # noqa: BLE001 — never 503
-                body_text = (
-                    f"# exposition unavailable: {type(exc).__name__}: {exc}\n"
-                )
+                # F3 — the exception MESSAGE never reaches the HTTP
+                # body (it can carry SQL text, paths or operator data).
+                # Only the exception TYPE is disclosed, bounded to a
+                # fixed length.
+                reason = type(exc).__name__[:64]
+                body_text = f"# exposition unavailable: {reason}\n"
                 outcome = "error"
             del scrape_handle, exposition_handle
         elapsed = time.perf_counter() - started

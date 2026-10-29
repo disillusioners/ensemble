@@ -2341,8 +2341,10 @@ async def lifespan(app: FastAPI):
 
         # ONE provider ⇒ ONE DB read per TTL for EVERY live managed key
         # (the kill-switch, the publisher cadence, the cardinality cap).
-        # Read on the listener's own thread at a bounded cadence — the
-        # census sampler must NEVER consume a pool slot for a boolean.
+        # The read is performed by the RESOLVER'S REFRESHER THREAD — never
+        # on a request path (a pooled checkout can block for tens of
+        # seconds under the pool-poisoning class) and never on the census
+        # thread (the census must NOT consume a pool slot for a boolean).
         metrics_gate.set_managed_metrics_provider(
             metrics_gate.build_managed_values_provider(_read_managed_overrides)
         )
