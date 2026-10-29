@@ -205,8 +205,8 @@ NO live promote performed.
 branch and independently gated — NOT promoted**. The live daemon still runs the pre-fix tree, so
 the incident stays **OPEN** as a symptom class.
 
-- **Branch**: `fix/db-pool-idle-txn` · base `19fc11c8b` (staged v0.27.11 tree) · HEAD `db15f6d27`
-  · **79 commits** · worktree `/home/nea/ensemble-src-wt-dbpool-idletxn` · **not pushed to origin**.
+- **Branch**: `fix/db-pool-idle-txn` · base `19fc11c8b` (staged v0.27.11 tree) · HEAD `812ceca60`
+  · **82 commits** (incl. this docs commit) · worktree `/home/nea/ensemble-src-wt-dbpool-idletxn` · **not pushed to origin**.
 - **Scope**: **11 daemon files** (+1096/−207), 30 test/script files, **0 new `.sql`** (migration
   delta vs the live release is EMPTY; `agents/`, `frontend/`, `plugins/` payload trees unchanged).
 - **Plan of record**: `.agents/shared/planning/db-pool-idle-txn/` (BASELINE.md,
