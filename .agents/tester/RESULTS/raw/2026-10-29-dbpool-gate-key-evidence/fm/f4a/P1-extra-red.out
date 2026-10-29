@@ -1,0 +1,22 @@
+.....F..F.......                                                         [100%]
+=================================== FAILURES ===================================
+_ TestF4aAdmissionPreCheck.test_a_raised_pool_size_keeps_the_overflow_slots_servable _
+tests/unit/tools/test_dbpool_probe_bound.py:340: in test_a_raised_pool_size_keeps_the_overflow_slots_servable
+    readiness_mod._refuse_pool_admission_at_capacity(engine)  # type: ignore[arg-type]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+daemon/services/readiness.py:1594: in _refuse_pool_admission_at_capacity
+    raise TimeoutError(
+E   TimeoutError: readiness probe admission refused: manager pool at effective capacity (25/32)
+_ TestF4aCapacityEquality.test_the_refusal_threshold_is_derived_from_the_pool __
+tests/unit/tools/test_dbpool_probe_bound.py:427: in test_the_refusal_threshold_is_derived_from_the_pool
+    assert not (
+E   AssertionError: F4-a: the admission pre-check compares the occupancy against the STATIC MANAGER_POOL_CONFIGURED_CAPACITY — the threshold must be DERIVED from the pool's own effective capacity (the manager pool size is config-driven and operator-raisable)
+E   assert not (True and 'MANAGER_POOL...URED_CAPACITY' == 'MANAGER_POOL...URED_CAPACITY'
+E    +  where True = isinstance(<ast.Name object at 0x73d049ae1110>, <class 'ast.Name'>)
+E    +    where <class 'ast.Name'> = ast.Name
+E     
+E       MANAGER_POOL_CONFIGURED_CAPACITY)
+=========================== short test summary info ============================
+FAILED tests/unit/tools/test_dbpool_probe_bound.py::TestF4aAdmissionPreCheck::test_a_raised_pool_size_keeps_the_overflow_slots_servable
+FAILED tests/unit/tools/test_dbpool_probe_bound.py::TestF4aCapacityEquality::test_the_refusal_threshold_is_derived_from_the_pool
+2 failed, 14 passed in 0.65s

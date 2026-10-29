@@ -1,0 +1,26 @@
+FF.F............                                                         [100%]
+=================================== FAILURES ===================================
+_ TestF4aAdmissionPreCheck.test_db_probe_body_calls_the_precheck_before_connect _
+tests/unit/tools/test_dbpool_probe_bound.py:277: in test_db_probe_body_calls_the_precheck_before_connect
+    assert precheck_at != -1, (
+E   AssertionError: F4-a: make_db_probe has no acquisition admission pre-check
+E   assert -1 != -1
+_ TestF4aAdmissionPreCheck.test_queue_probe_body_calls_the_precheck_before_connect _
+tests/unit/tools/test_dbpool_probe_bound.py:289: in test_queue_probe_body_calls_the_precheck_before_connect
+    assert precheck_at != -1, (
+E   AssertionError: F4-a: make_queue_probe has no acquisition admission pre-check
+E   assert -1 != -1
+__ TestF4aAdmissionPreCheck.test_at_capacity_the_probe_refuses_synchronously ___
+tests/unit/tools/test_dbpool_probe_bound.py:314: in test_at_capacity_the_probe_refuses_synchronously
+    probe()
+daemon/services/readiness.py:1626: in _probe
+    with engine.connect() as conn:
+         ^^^^^^^^^^^^^^^^
+tests/unit/tools/test_dbpool_probe_bound.py:264: in connect
+    raise AssertionError("engine.connect() must not be reached at capacity")
+E   AssertionError: engine.connect() must not be reached at capacity
+=========================== short test summary info ============================
+FAILED tests/unit/tools/test_dbpool_probe_bound.py::TestF4aAdmissionPreCheck::test_db_probe_body_calls_the_precheck_before_connect
+FAILED tests/unit/tools/test_dbpool_probe_bound.py::TestF4aAdmissionPreCheck::test_queue_probe_body_calls_the_precheck_before_connect
+FAILED tests/unit/tools/test_dbpool_probe_bound.py::TestF4aAdmissionPreCheck::test_at_capacity_the_probe_refuses_synchronously
+3 failed, 13 passed in 0.65s

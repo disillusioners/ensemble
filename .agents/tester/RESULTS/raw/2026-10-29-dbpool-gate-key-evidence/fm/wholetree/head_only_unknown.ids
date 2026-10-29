@@ -1,0 +1,2 @@
+tests/message_queue_redesign/test_atomic_dequeue.py::TestDequeueAtomicClaim::test_dequeue_with_instance_filter_under_concurrency
+tests/test_resource_monitor_platform_fallback.py::TestSelfThrottleLatch::test_the_throttle_latch_is_released_when_the_ema_recovers

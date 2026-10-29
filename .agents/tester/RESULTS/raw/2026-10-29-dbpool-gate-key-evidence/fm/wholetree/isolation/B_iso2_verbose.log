@@ -1,0 +1,13 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_ TestSelfThrottleLatch.test_the_throttle_latch_is_released_when_the_ema_recovers _
+tests/test_resource_monitor_platform_fallback.py:452: in test_the_throttle_latch_is_released_when_the_ema_recovers
+    assert sampler.counters.self_throttled is True
+E   AssertionError: assert False is True
+E    +  where False = SamplerCounters(ema_tick_cost_s=0.0, ema_alpha=0.3, ticks=0, ticks_skipped=6, missed_samples=6, cumulative_cpu_s=0.0, ...er_level='full', self_throttled=False, last_overrun_monotonic=None, started_at_monotonic=0.5, prev_cpu_usec_total=None).self_throttled
+E    +    where SamplerCounters(ema_tick_cost_s=0.0, ema_alpha=0.3, ticks=0, ticks_skipped=6, missed_samples=6, cumulative_cpu_s=0.0, ...er_level='full', self_throttled=False, last_overrun_monotonic=None, started_at_monotonic=0.5, prev_cpu_usec_total=None) = <daemon.services.resource_monitor.sampler.Sampler object at 0x7ab2f5f55a90>.counters
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.resource_monitor.sampler:sampler.py:564 resource-monitor sampler: no daemon snapshot (platform read failed: proc-root-unreadable, read_ms=500.0) — samples are being dropped; the resource-telemetry tier stays empty until the platform reader recovers (consecutive_failures=1, missed_samples=1)
+=========================== short test summary info ============================
+FAILED tests/test_resource_monitor_platform_fallback.py::TestSelfThrottleLatch::test_the_throttle_latch_is_released_when_the_ema_recovers
+1 failed in 0.30s

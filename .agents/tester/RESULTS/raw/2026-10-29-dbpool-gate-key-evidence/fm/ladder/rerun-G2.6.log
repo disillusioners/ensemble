@@ -1,0 +1,9 @@
+# db-pool gate ladder — interpreter certification
+/home/nea/ensemble-src-wt-tdbp-gate/daemon/__init__.py 9.0.2
+── G2.6 ──────────────────────────────────────────────
+COLLECTED-OK count=3 expected=3
+ERROR tests/postgres/test_dbpool_wedge_capture_pg.py::TestF5bWedgeCaptureReadPath::test_subsequent_read_not_the_f5_cascade_signature
+ERROR tests/postgres/test_dbpool_wedge_capture_pg.py::TestF5bWedgeCaptureReadPath::test_both_f5_reads_on_one_connection_return_their_rows
+3 errors in 0.37s
+G2.6: RUN-FAILED (pytest exit=1)
+LADDER: FAILED

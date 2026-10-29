@@ -1,0 +1,14 @@
+# db-pool gate ladder — interpreter certification
+/home/nea/ensemble-src-wt-tdbp-gate/daemon/__init__.py 9.0.2
+── G2.5 [postgres] ──────────────────────────────────────────────
+COLLECTED-OK count=5 expected=5
+ERROR tests/postgres/test_dbpool_probe_starvation_pg.py::TestF4fStarvationShape::test_probe_takes_no_connection_under_starvation
+ERROR tests/postgres/test_dbpool_probe_starvation_pg.py::TestF4fStarvationShape::test_probe_still_works_below_capacity
+5 errors in 0.41s
+G2.5 [postgres]: RUN-FAILED (pytest exit=1)
+── G2.5 [integration — marker split of the canonical row] ──────────────────────────────────────────────
+COLLECTED-OK count=9 expected=9
+.........                                                                [100%]
+9 passed in 26.05s
+G2.5 [integration — marker split of the canonical row]: PASS (count=9 asserted from expected-collected.md rows 23,26)
+LADDER: FAILED

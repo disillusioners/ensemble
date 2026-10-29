@@ -1,0 +1,19 @@
+declared default tier (MANAGER_POOL_CONFIGURED_CAPACITY) = 25
+custom tier under test: pool_size=22 max_overflow=10
+[PASS] derived capacity of the custom tier == 32 (≠ 25, ≠ 15) — derived=32
+[PASS] occupancy staged at 25 checked-out (derived 32) — checkedout=25
+[PASS] COUNTERFACTUAL: a static threshold of 25 WOULD refuse here (25 >= 25) — the self-inflicted outage the fix excludes
+[PASS] (a) at 25/32 checked-out the probe does NOT refuse (old static-15/25 would have false-refused) — refused=False verdict=(True, None)
+[PASS] occupancy staged just-below derived (31/32) — checkedout=31
+[PASS] (a) just-below derived capacity (31/32) the probe does NOT refuse — refused=False verdict=(True, None)
+[PASS] occupancy staged AT derived capacity (32/32) — checkedout=32
+[PASS] (b) at proven exhaustion (32/32) the probe refuses with TimeoutError — message='readiness probe admission refused: manager pool at effective capacity (32/32)'
+[PASS] (b) the refusal quotes the DERIVED capacity (32/32), not a static number — message='readiness probe admission refused: manager pool at effective capacity (32/32)'
+[PASS] (b) the refusal took NO slot (checked-out count unchanged) — checkedout=32
+[PASS] (c1) shape: a REAL NullPool exposes none of size()/_max_overflow/checkedout()
+[PASS] (c1) a REAL NullPool engine ⇒ NO refusal (first shape guard)
+[PASS] (c2) shape: the unresolvable pool exposes checkedout() but neither size() nor _max_overflow
+[PASS] (c2) helper returns None for the unresolvable pool
+[PASS] (c2) unresolvable capacity (999 checked-out, no derivable ceiling) ⇒ NO refusal (fail-open on refusal, never refuse on a guess)
+
+DRIVER RESULT: ALL OBSERVATIONS PASS — (a) no false refusal below derived capacity (the self-inflicted outage is excluded), (b) refusal at proven exhaustion with no slot taken, (c1)+(c2) unresolvable capacity never refuses (both shape guards).

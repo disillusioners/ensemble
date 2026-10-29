@@ -1,0 +1,83 @@
+F                                                                        [100%]
+=============================== warnings summary ===============================
+tests/message_queue_redesign/test_atomic_dequeue.py::TestDequeueAtomicClaim::test_dequeue_with_instance_filter_under_concurrency
+tests/message_queue_redesign/test_atomic_dequeue.py::TestDequeueAtomicClaim::test_dequeue_with_instance_filter_under_concurrency
+tests/message_queue_redesign/test_atomic_dequeue.py::TestDequeueAtomicClaim::test_dequeue_with_instance_filter_under_concurrency
+tests/message_queue_redesign/test_atomic_dequeue.py::TestDequeueAtomicClaim::test_dequeue_with_instance_filter_under_concurrency
+tests/message_queue_redesign/test_atomic_dequeue.py::TestDequeueAtomicClaim::test_dequeue_with_instance_filter_under_concurrency
+tests/message_queue_redesign/test_atomic_dequeue.py::TestDequeueAtomicClaim::test_dequeue_with_instance_filter_under_concurrency
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+tests/message_queue_redesign/test_atomic_dequeue.py::TestDequeueAtomicClaim::test_dequeue_with_instance_filter_under_concurrency
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/threadexception.py:58: PytestUnhandledThreadExceptionWarning: Exception in thread Thread-3 (worker)
+  
+  Traceback (most recent call last):
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 1145, in _commit_impl
+      self.engine.dialect.do_commit(self.connection)
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py", line 715, in do_commit
+      dbapi_connection.commit()
+      ~~~~~~~~~~~~~~~~~~~~~~~^^
+  sqlite3.OperationalError: cannot commit transaction - SQL statements in progress
+  
+  The above exception was the direct cause of the following exception:
+  
+  Traceback (most recent call last):
+    File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+      self.run()
+      ~~~~~~~~^^
+    File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+      self._target(*self._args, **self._kwargs)
+      ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/nea/ensemble-src-wt-tdbp-fmbase/tests/message_queue_redesign/test_atomic_dequeue.py", line 403, in worker
+      results[idx] = message_repo.dequeue(instance_id="inst-A")
+                     ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/nea/ensemble-src-wt-tdbp-fmbase/daemon/repositories/message_queue/repository.py", line 361, in dequeue
+      with self.engine.begin() as conn:
+           ~~~~~~~~~~~~~~~~~^^
+    File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/contextlib.py", line 148, in __exit__
+      next(self.gen)
+      ~~~~^^^^^^^^^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 3258, in begin
+      with conn.begin():
+           ~~~~~~~~~~^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/util.py", line 147, in __exit__
+      with util.safe_reraise():
+           ~~~~~~~~~~~~~~~~~^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/util/langhelpers.py", line 121, in __exit__
+      raise exc_value.with_traceback(exc_tb)
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/util.py", line 145, in __exit__
+      self.commit()
+      ~~~~~~~~~~~^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 2640, in commit
+      self._do_commit()
+      ~~~~~~~~~~~~~~~^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 2745, in _do_commit
+      self._connection_commit_impl()
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 2716, in _connection_commit_impl
+      self.connection._commit_impl()
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 1147, in _commit_impl
+      self._handle_dbapi_exception(e, None, None, None, None)
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 2363, in _handle_dbapi_exception
+      raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 1145, in _commit_impl
+      self.engine.dialect.do_commit(self.connection)
+      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+    File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py", line 715, in do_commit
+      dbapi_connection.commit()
+      ~~~~~~~~~~~~~~~~~~~~~~~^^
+  sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) cannot commit transaction - SQL statements in progress
+  (Background on this error at: https://sqlalche.me/e/20/e3q8)
+  
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+    warnings.warn(pytest.PytestUnhandledThreadExceptionWarning(msg))
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/message_queue_redesign/test_atomic_dequeue.py::TestDequeueAtomicClaim::test_dequeue_with_instance_filter_under_concurrency
+1 failed, 7 warnings in 0.42s

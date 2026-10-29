@@ -1,0 +1,33 @@
+============================= test session starts ==============================
+platform linux -- Python 3.13.15, pytest-9.0.2, pluggy-1.6.0 -- /home/nea/ensemble-src/.venv/bin/python
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: /home/nea/ensemble-src-wt-tdbp-fmwt
+configfile: pyproject.toml
+plugins: anyio-4.12.1, hypothesis-6.165.10, asyncio-1.3.0, mock-3.15.1, xdist-3.8.0, langsmith-0.7.7, timeout-2.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 120.0s
+timeout method: thread
+timeout func_only: False
+collecting ... collected 11 items
+
+tests/e2e/test_promote_stop_frozen_amnesty_e2e.py::TestPromoteStopFrozenAmnestyE2E::test_promote_commits_with_busy_daemon PASSED [  9%]
+tests/e2e/test_promote_stop_frozen_amnesty_e2e.py::TestPromoteStopFrozenAmnestyE2E::test_stale_while_continuously_up_still_degrades PASSED [ 18%]
+tests/test_health_probes.py::test_amnesty_epoch_boundary_is_inclusive PASSED [ 27%]
+tests/test_health_probes.py::test_amnesty_mixed_set_max_uses_only_post_boot_beats PASSED [ 36%]
+tests/test_health_probes.py::test_amnesty_pre_boot_beat_is_invisible_to_freshness PASSED [ 45%]
+tests/test_health_probes.py::test_composite_carries_inflight_advisory_without_affecting_status PASSED [ 54%]
+tests/test_health_probes.py::test_inflight_turns_counts_fresh_post_boot_beats_only PASSED [ 63%]
+tests/test_health_probes.py::test_inflight_turns_zero_on_all_frozen_and_none_without_threshold PASSED [ 72%]
+tests/test_health_probes.py::test_periodic_refresh_loop_applies_drill_knob_between_ticks PASSED [ 81%]
+tests/test_health_probes.py::test_periodic_refresh_loop_populates_state_and_stops PASSED [ 90%]
+tests/test_health_probes.py::test_signal_preservation_post_boot_stale_still_degrades PASSED [100%]
+
+=============================== warnings summary ===============================
+tests/e2e/test_promote_stop_frozen_amnesty_e2e.py: 17 warnings
+tests/test_health_probes.py: 59 warnings
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================= 11 passed, 76 warnings in 5.85s ========================
