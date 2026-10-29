@@ -1221,8 +1221,46 @@ ensemble_checkpoint_read_size_bytes = register_histogram(
 )
 ensemble_checkpoint_read_size_bytes.alias_names = ["checkpoint_read_size_bytes"]
 
+#: Canonical counters (aliased exposition: ``checkpoint_cache_hit_total`` /
+#: ``checkpoint_cache_miss_total``) — the read-cache substrate's
+#: OBSERVABLE-off contract (read-cache plan §4.4/§4.5). Plain
+#: (unlabeled) by design: hit/miss are the only two states, and keeping
+#: them label-free avoids touching any frozen label vocabulary
+#: (``known_label_keys()`` stays byte-identical — no VOCABULARY_VERSION
+#: bump). The counters emit in BOTH switch states: with the cache
+#: ENABLED a read increments hit or miss per consultation; with the
+#: kill-switch OFF every non-bypass read increments miss (disabled is
+#: OBSERVABLE, not silent). Bypass reads (``cache_bypass=True`` — the
+#: readiness sentinel) increment NEITHER: they are deliberate
+#: non-participants, and counting them as misses would make the
+#: hit-rate metric meaningless (the sentinel ticks every 10s).
+ensemble_checkpoint_cache_hit_total = register_counter(
+    "ensemble_checkpoint_cache_hit_total",
+    help=(
+        "Checkpoint read-cache HITS served at the saver retry proxy "
+        "(post-deserialize CheckpointTuple served from the read cache "
+        "without a saver round trip). Increments only while "
+        "CHECKPOINT_READ_CACHE_ENABLED is truthy; 0 in the default-OFF "
+        "substrate state."
+    ),
+)
+ensemble_checkpoint_cache_hit_total.alias_names = ["checkpoint_cache_hit_total"]
+
+ensemble_checkpoint_cache_miss_total = register_counter(
+    "ensemble_checkpoint_cache_miss_total",
+    help=(
+        "Checkpoint read-cache MISSES at the saver retry proxy. One "
+        "increment per non-bypass aget/aget_tuple read that was NOT "
+        "served from the read cache — including EVERY read while "
+        "CHECKPOINT_READ_CACHE_ENABLED is off (default OFF: all misses, "
+        "the observable-off contract). cache_bypass=True reads (the "
+        "readiness sentinel) are excluded."
+    ),
+)
+ensemble_checkpoint_cache_miss_total.alias_names = ["checkpoint_cache_miss_total"]
+
 # Legacy PYTHON symbol names — the same objects under their historical
-# names.  Call sites in ``daemon/checkpoint_perf.py`` (the read
+# names. Call sites in ``daemon/checkpoint_perf.py`` (the read
 # chokepoint), ``daemon/checkpoint_adapter.py`` (the fail-open
 # tripwire) and ``daemon/services/readiness.py`` (the leak consumer)
 # import these; the DEPRECATED part is the exposition NAME (the
@@ -1235,6 +1273,8 @@ checkpoint_read_size_bucket_hits_total = ensemble_checkpoint_read_size_bucket_hi
 checkpoint_read_measurement_errors_total = ensemble_checkpoint_read_measurement_errors_total
 checkpoint_leak_signal_total = ensemble_checkpoint_leak_signal_total
 checkpoint_read_size_bytes = ensemble_checkpoint_read_size_bytes
+checkpoint_cache_hit_total = ensemble_checkpoint_cache_hit_total
+checkpoint_cache_miss_total = ensemble_checkpoint_cache_miss_total
 
 
 def read_size_bucket_label(value: float) -> str:
@@ -1504,6 +1544,10 @@ __all__ = [
     "checkpoint_read_ops_total",
     "checkpoint_read_size_bucket_hits_total",
     "checkpoint_read_size_bytes",
+    "checkpoint_cache_hit_total",
+    "checkpoint_cache_miss_total",
+    "ensemble_checkpoint_cache_hit_total",
+    "ensemble_checkpoint_cache_miss_total",
     "ensemble_checkpoint_leak_signal_total",
     "ensemble_checkpoint_list_total",
     "ensemble_checkpoint_op_seconds",

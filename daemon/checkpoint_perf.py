@@ -205,6 +205,33 @@ def log_saver_op(
     record_slow_saver_op(op, thread_id, duration_ms, bytes_=bytes_, deleted=deleted)
 
 
+def log_cache_hit(
+    thread_id: str,
+    duration_ms: int,
+    bytes_: int = 0,
+) -> None:
+    """Emit the ``[CheckpointPerf] op=cache_hit`` line (read-cache plan §4.4).
+
+    Same structured shape as :func:`log_saver_op`, gated by the same
+    ``CHECKPOINT_PERF_LOGS`` switch. DELIBERATELY does NOT observe the
+    ``saver_op_latency_seconds`` histogram: that histogram's ``op``
+    label vocabulary is frozen (``aget``/``aput``/``adelete``/
+    ``alist``/``other`` — ``daemon/checkpoint_metrics.py``), so an
+    ``op=cache_hit`` observation would fold to ``other`` AND increment
+    the invalid-label counter (metric noise, misattributed latency).
+    A cache hit is not a saver op — its µs-scale serve time is carried
+    by this log line alone, and the hit RATE lives in
+    ``ensemble_checkpoint_cache_hit_total``.
+    """
+    if not _logs_enabled():
+        return
+    logger.info(
+        f"[CheckpointPerf] op=cache_hit "
+        f"thread={thread_id[:8] if thread_id else '?'} "
+        f"latency_ms={duration_ms} bytes={bytes_} deleted=0"
+    )
+
+
 async def time_saver_op(op: str, thread_id: str, coro: Awaitable[Any]) -> Any:
     """Time a saver operation; emits ``[CheckpointPerf]`` and returns the result.
 
