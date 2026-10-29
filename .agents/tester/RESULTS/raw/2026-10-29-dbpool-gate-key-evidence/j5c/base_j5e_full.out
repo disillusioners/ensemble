@@ -1,0 +1,571 @@
+[j5e] daemon resolves to /home/nea/ensemble-src-wt-tdbp-j5c-base/daemon/__init__.py
+[j5e] side=base scratch_db=dbpool_j5e_base_980c6d4c N=3.0min fetch_delay=2.0s f3_dwell=1.0s
+{
+  "side": "base",
+  "scratch_db": "dbpool_j5e_base_980c6d4c",
+  "run_start_iso": "2026-10-29T05:20:26.288430+00:00",
+  "N_minutes": 3.0,
+  "rounds": 53,
+  "sampler_period_s": 1.0,
+  "baseline_checkedout_median": 0,
+  "baseline_checkedout_all": [
+    0,
+    0,
+    0
+  ],
+  "final_checkedout": 0,
+  "final_repair_checkedout": 0,
+  "returns_to_baseline": true,
+  "peak_occupancy_mgr": 1,
+  "peak_occupancy_repair": 1,
+  "mgr_xact_age_s_stats": {
+    "n": 109,
+    "max": 2.012,
+    "p95": 1.9233,
+    "median": 1.0062
+  },
+  "xact_age_s_by_application": {
+    "(none)": {
+      "n": 109,
+      "max": 2.012,
+      "p95": 1.9233,
+      "median": 1.0062
+    }
+  },
+  "three_state_bucket_max_15s": {
+    "0": {
+      "idle_no_xact": 3,
+      "idle_in_transaction": 1,
+      "idle_in_transaction_aborted": 1,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 1,
+      "phases": [
+        "R1_churn",
+        "R2_reconcile",
+        "R3_f3",
+        "baseline"
+      ]
+    },
+    "1": {
+      "idle_no_xact": 3,
+      "idle_in_transaction": 1,
+      "idle_in_transaction_aborted": 1,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 1,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "2": {
+      "idle_no_xact": 3,
+      "idle_in_transaction": 1,
+      "idle_in_transaction_aborted": 1,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 1,
+      "phases": [
+        "R1_churn",
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "3": {
+      "idle_no_xact": 3,
+      "idle_in_transaction": 1,
+      "idle_in_transaction_aborted": 1,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 1,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "4": {
+      "idle_no_xact": 3,
+      "idle_in_transaction": 1,
+      "idle_in_transaction_aborted": 1,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 1,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "5": {
+      "idle_no_xact": 3,
+      "idle_in_transaction": 1,
+      "idle_in_transaction_aborted": 1,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 1,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "6": {
+      "idle_no_xact": 3,
+      "idle_in_transaction": 1,
+      "idle_in_transaction_aborted": 1,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 1,
+      "phases": [
+        "R1_churn",
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "7": {
+      "idle_no_xact": 3,
+      "idle_in_transaction": 1,
+      "idle_in_transaction_aborted": 1,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 1,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "8": {
+      "idle_no_xact": 3,
+      "idle_in_transaction": 1,
+      "idle_in_transaction_aborted": 1,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 1,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "9": {
+      "idle_no_xact": 3,
+      "idle_in_transaction": 1,
+      "idle_in_transaction_aborted": 1,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 1,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "10": {
+      "idle_no_xact": 3,
+      "idle_in_transaction": 1,
+      "idle_in_transaction_aborted": 1,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 1,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "11": {
+      "idle_no_xact": 3,
+      "idle_in_transaction": 1,
+      "idle_in_transaction_aborted": 1,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 1,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3"
+      ]
+    },
+    "12": {
+      "idle_no_xact": 3,
+      "idle_in_transaction": 1,
+      "idle_in_transaction_aborted": 1,
+      "active": 0,
+      "other": 0,
+      "mgr_checkedout": 1,
+      "phases": [
+        "R2_reconcile",
+        "R3_f3",
+        "settle"
+      ]
+    }
+  },
+  "f8_fetch_window_bursts_n": 53,
+  "f8_window_idle_in_txn_max": 1,
+  "f8_cycle_samples_idle_in_txn_max": 1,
+  "f3_dwell_bursts_n": 53,
+  "f3_dwell_idle_in_txn_family_max": 1,
+  "f3_in_transaction_at_dwell_rounds": [
+    {
+      "rnd": 1,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 2,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 3,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 4,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 5,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 6,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 7,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 8,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 9,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 10,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 11,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 12,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 13,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 14,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 15,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 16,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 17,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 18,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 19,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 20,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 21,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 22,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 23,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 24,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 25,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 26,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 27,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 28,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 29,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 30,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 31,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 32,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 33,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 34,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 35,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 36,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 37,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 38,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 39,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 40,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 41,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 42,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 43,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 44,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 45,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 46,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 47,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 48,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 49,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 50,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 51,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 52,
+      "leg": "R3",
+      "f3_pid": 2973675,
+      "in_transaction_at_dwell": true
+    },
+    {
+      "rnd": 53,
+      "leg": "R3",
+      "f3_pid": 2973674,
+      "in_transaction_at_dwell": true
+    }
+  ],
+  "errors_n": 0,
+  "errors_first5": [],
+  "final_census": [
+    {
+      "pid": 2973599,
+      "application_name": "",
+      "state": "idle",
+      "wait_event_type": "Client",
+      "wait_event": "ClientRead",
+      "xact_start": null,
+      "query_start": "2026-10-29 05:23:30.906100+00:00",
+      "state_change": "2026-10-29 05:23:30.907681+00:00",
+      "backend_start": "2026-10-29 05:20:26.449159+00:00",
+      "last_query": "COMMIT",
+      "xact_age_s": null,
+      "state_age_s": 6.371276
+    },
+    {
+      "pid": 2973674,
+      "application_name": "",
+      "state": "idle",
+      "wait_event_type": "Client",
+      "wait_event": "ClientRead",
+      "xact_start": null,
+      "query_start": "2026-10-29 05:23:31.927240+00:00",
+      "state_change": "2026-10-29 05:23:31.927316+00:00",
+      "backend_start": "2026-10-29 05:20:32.980158+00:00",
+      "last_query": "ROLLBACK",
+      "xact_age_s": null,
+      "state_age_s": 5.351641
+    },
+    {
+      "pid": 2973675,
+      "application_name": "",
+      "state": "idle",
+      "wait_event_type": "Client",
+      "wait_event": "ClientRead",
+      "xact_start": null,
+      "query_start": "2026-10-29 05:23:30.924081+00:00",
+      "state_change": "2026-10-29 05:23:30.924139+00:00",
+      "backend_start": "2026-10-29 05:20:33.001628+00:00",
+      "last_query": "ROLLBACK",
+      "xact_age_s": null,
+      "state_age_s": 6.354818
+    }
+  ],
+  "teardown": "scratch db dropped; engines disposed"
+}
+[j5e] wrote /tmp/tdbp-j5c/raw/base_j5e_full.json

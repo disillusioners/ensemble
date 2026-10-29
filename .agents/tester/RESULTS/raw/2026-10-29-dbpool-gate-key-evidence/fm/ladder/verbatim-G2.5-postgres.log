@@ -1,0 +1,327 @@
+EEEEE                                                                    [100%]
+==================================== ERRORS ====================================
+_ ERROR at setup of TestF6bConcurrentDoubleMint.test_concurrent_mint_for_one_anchor_returns_one_mission_id _
+
+fixturedef = <FixtureDef argname='pg_scratch_db_fence' scope='session' baseid='tests/postgres'>
+request = <SubRequest 'pg_scratch_db_fence' for <Function test_concurrent_mint_for_one_anchor_returns_one_mission_id>>
+
+    @pytest.hookimpl(wrapper=True)
+    def pytest_fixture_setup(fixturedef: FixtureDef, request) -> object | None:
+        asyncio_mode = _get_asyncio_mode(request.config)
+        if not _is_asyncio_fixture_function(fixturedef.func):
+            if asyncio_mode == Mode.STRICT:
+                # Ignore async fixtures without explicit asyncio mark in strict mode
+                # This applies to pytest_trio fixtures, for example
+                return (yield)
+            if not _is_coroutine_or_asyncgen(fixturedef.func):
+>               return (yield)
+                        ^^^^^
+
+../ensemble-src/.venv/lib/python3.13/site-packages/pytest_asyncio/plugin.py:730: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    @pytest.fixture(scope="session", autouse=True)
+    def pg_scratch_db_fence():
+        """The scratch-DB fence — the FIRST thing that runs in this lane.
+    
+        It is an explicit DEPENDENCY of the shared ``pg_engine`` fixture,
+        so pytest creates it BEFORE the engine exists — i.e. before any
+        SQL (and before the session-scoped ``drop_all``) can reach the
+        target database. See :func:`check_scratch_db_fence` for the rules.
+        It is ALSO autouse, so a module that shadows ``pg_engine`` cannot opt out.
+        """
+>       check_scratch_db_fence()
+
+tests/postgres/conftest.py:353: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def check_scratch_db_fence() -> None:
+        """THE FENCE — fail-closed, and it runs BEFORE the target is touched.
+    
+        Raises ``RuntimeError`` when the target database is not a
+        sanctioned scratch database. Called by the session-scoped
+        ``pg_scratch_db_fence`` fixture, which the shared ``pg_engine``
+        depends on — so the ordering is a property of the fixture graph,
+        not of fixture-resolution luck.
+        """
+        db = _effective_pg_test_db()
+        if db in FORBIDDEN_DB_NAMES:
+            _refuse(
+                f"PG_TEST_DB={db!r} is a LIVE database "
+                f"(forbidden set: {sorted(FORBIDDEN_DB_NAMES)}) — the shared "
+                "pg_engine drops every table of the target at session setup, "
+                "so it only ever runs against a sanctioned scratch database"
+            )
+        declared = _env_declared_dbs()
+        forbidden_declared = declared & FORBIDDEN_DB_NAMES
+        if forbidden_declared:
+            _refuse(
+                f"{ALLOWED_DBS_ENV} declares the live database(s) "
+                f"{sorted(forbidden_declared)} — a live database can never be "
+                "declared into the allowlist"
+            )
+        allowed = set(ALLOWED_SCRATCH_DBS) | declared
+        if db not in allowed:
+>           _refuse(
+                f"PG_TEST_DB={db!r} is not in the hard scratch allowlist "
+                f"{sorted(allowed)} (EXACT-name membership — no substring "
+                "heuristic)"
+            )
+
+tests/postgres/conftest.py:241: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+message = "PG_TEST_DB='dbpool_fm2' is not in the hard scratch allowlist ['ensemble_dev_test_only', 'ensemble_rl_p1', 'ensemble_t...test_only_rmflusher', 'ensemble_test_stage2', 'ensemble_test_stage3'] (EXACT-name membership — no substring heuristic)"
+
+    def _refuse(message: str) -> None:
+>       raise RuntimeError(f"refused: {message}")
+E       RuntimeError: refused: PG_TEST_DB='dbpool_fm2' is not in the hard scratch allowlist ['ensemble_dev_test_only', 'ensemble_rl_p1', 'ensemble_test', 'ensemble_test_only', 'ensemble_test_only_rmflusher', 'ensemble_test_stage2', 'ensemble_test_stage3'] (EXACT-name membership — no substring heuristic)
+
+tests/postgres/conftest.py:211: RuntimeError
+_ ERROR at setup of TestF6cIndexPresence.test_index_exists_with_a_byte_identical_predicate _
+
+    @pytest.fixture(scope="session", autouse=True)
+    def pg_scratch_db_fence():
+        """The scratch-DB fence — the FIRST thing that runs in this lane.
+    
+        It is an explicit DEPENDENCY of the shared ``pg_engine`` fixture,
+        so pytest creates it BEFORE the engine exists — i.e. before any
+        SQL (and before the session-scoped ``drop_all``) can reach the
+        target database. See :func:`check_scratch_db_fence` for the rules.
+        It is ALSO autouse, so a module that shadows ``pg_engine`` cannot opt out.
+        """
+>       check_scratch_db_fence()
+
+tests/postgres/conftest.py:353: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def check_scratch_db_fence() -> None:
+        """THE FENCE — fail-closed, and it runs BEFORE the target is touched.
+    
+        Raises ``RuntimeError`` when the target database is not a
+        sanctioned scratch database. Called by the session-scoped
+        ``pg_scratch_db_fence`` fixture, which the shared ``pg_engine``
+        depends on — so the ordering is a property of the fixture graph,
+        not of fixture-resolution luck.
+        """
+        db = _effective_pg_test_db()
+        if db in FORBIDDEN_DB_NAMES:
+            _refuse(
+                f"PG_TEST_DB={db!r} is a LIVE database "
+                f"(forbidden set: {sorted(FORBIDDEN_DB_NAMES)}) — the shared "
+                "pg_engine drops every table of the target at session setup, "
+                "so it only ever runs against a sanctioned scratch database"
+            )
+        declared = _env_declared_dbs()
+        forbidden_declared = declared & FORBIDDEN_DB_NAMES
+        if forbidden_declared:
+            _refuse(
+                f"{ALLOWED_DBS_ENV} declares the live database(s) "
+                f"{sorted(forbidden_declared)} — a live database can never be "
+                "declared into the allowlist"
+            )
+        allowed = set(ALLOWED_SCRATCH_DBS) | declared
+        if db not in allowed:
+>           _refuse(
+                f"PG_TEST_DB={db!r} is not in the hard scratch allowlist "
+                f"{sorted(allowed)} (EXACT-name membership — no substring "
+                "heuristic)"
+            )
+
+tests/postgres/conftest.py:241: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+message = "PG_TEST_DB='dbpool_fm2' is not in the hard scratch allowlist ['ensemble_dev_test_only', 'ensemble_rl_p1', 'ensemble_t...test_only_rmflusher', 'ensemble_test_stage2', 'ensemble_test_stage3'] (EXACT-name membership — no substring heuristic)"
+
+    def _refuse(message: str) -> None:
+>       raise RuntimeError(f"refused: {message}")
+E       RuntimeError: refused: PG_TEST_DB='dbpool_fm2' is not in the hard scratch allowlist ['ensemble_dev_test_only', 'ensemble_rl_p1', 'ensemble_test', 'ensemble_test_only', 'ensemble_test_only_rmflusher', 'ensemble_test_stage2', 'ensemble_test_stage3'] (EXACT-name membership — no substring heuristic)
+
+tests/postgres/conftest.py:211: RuntimeError
+_ ERROR at setup of TestF6cIndexPresence.test_without_the_index_the_upsert_fails_loudly _
+
+    @pytest.fixture(scope="session", autouse=True)
+    def pg_scratch_db_fence():
+        """The scratch-DB fence — the FIRST thing that runs in this lane.
+    
+        It is an explicit DEPENDENCY of the shared ``pg_engine`` fixture,
+        so pytest creates it BEFORE the engine exists — i.e. before any
+        SQL (and before the session-scoped ``drop_all``) can reach the
+        target database. See :func:`check_scratch_db_fence` for the rules.
+        It is ALSO autouse, so a module that shadows ``pg_engine`` cannot opt out.
+        """
+>       check_scratch_db_fence()
+
+tests/postgres/conftest.py:353: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def check_scratch_db_fence() -> None:
+        """THE FENCE — fail-closed, and it runs BEFORE the target is touched.
+    
+        Raises ``RuntimeError`` when the target database is not a
+        sanctioned scratch database. Called by the session-scoped
+        ``pg_scratch_db_fence`` fixture, which the shared ``pg_engine``
+        depends on — so the ordering is a property of the fixture graph,
+        not of fixture-resolution luck.
+        """
+        db = _effective_pg_test_db()
+        if db in FORBIDDEN_DB_NAMES:
+            _refuse(
+                f"PG_TEST_DB={db!r} is a LIVE database "
+                f"(forbidden set: {sorted(FORBIDDEN_DB_NAMES)}) — the shared "
+                "pg_engine drops every table of the target at session setup, "
+                "so it only ever runs against a sanctioned scratch database"
+            )
+        declared = _env_declared_dbs()
+        forbidden_declared = declared & FORBIDDEN_DB_NAMES
+        if forbidden_declared:
+            _refuse(
+                f"{ALLOWED_DBS_ENV} declares the live database(s) "
+                f"{sorted(forbidden_declared)} — a live database can never be "
+                "declared into the allowlist"
+            )
+        allowed = set(ALLOWED_SCRATCH_DBS) | declared
+        if db not in allowed:
+>           _refuse(
+                f"PG_TEST_DB={db!r} is not in the hard scratch allowlist "
+                f"{sorted(allowed)} (EXACT-name membership — no substring "
+                "heuristic)"
+            )
+
+tests/postgres/conftest.py:241: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+message = "PG_TEST_DB='dbpool_fm2' is not in the hard scratch allowlist ['ensemble_dev_test_only', 'ensemble_rl_p1', 'ensemble_t...test_only_rmflusher', 'ensemble_test_stage2', 'ensemble_test_stage3'] (EXACT-name membership — no substring heuristic)"
+
+    def _refuse(message: str) -> None:
+>       raise RuntimeError(f"refused: {message}")
+E       RuntimeError: refused: PG_TEST_DB='dbpool_fm2' is not in the hard scratch allowlist ['ensemble_dev_test_only', 'ensemble_rl_p1', 'ensemble_test', 'ensemble_test_only', 'ensemble_test_only_rmflusher', 'ensemble_test_stage2', 'ensemble_test_stage3'] (EXACT-name membership — no substring heuristic)
+
+tests/postgres/conftest.py:211: RuntimeError
+_ ERROR at setup of TestF4fStarvationShape.test_probe_takes_no_connection_under_starvation _
+
+    @pytest.fixture(scope="session", autouse=True)
+    def pg_scratch_db_fence():
+        """The scratch-DB fence — the FIRST thing that runs in this lane.
+    
+        It is an explicit DEPENDENCY of the shared ``pg_engine`` fixture,
+        so pytest creates it BEFORE the engine exists — i.e. before any
+        SQL (and before the session-scoped ``drop_all``) can reach the
+        target database. See :func:`check_scratch_db_fence` for the rules.
+        It is ALSO autouse, so a module that shadows ``pg_engine`` cannot opt out.
+        """
+>       check_scratch_db_fence()
+
+tests/postgres/conftest.py:353: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def check_scratch_db_fence() -> None:
+        """THE FENCE — fail-closed, and it runs BEFORE the target is touched.
+    
+        Raises ``RuntimeError`` when the target database is not a
+        sanctioned scratch database. Called by the session-scoped
+        ``pg_scratch_db_fence`` fixture, which the shared ``pg_engine``
+        depends on — so the ordering is a property of the fixture graph,
+        not of fixture-resolution luck.
+        """
+        db = _effective_pg_test_db()
+        if db in FORBIDDEN_DB_NAMES:
+            _refuse(
+                f"PG_TEST_DB={db!r} is a LIVE database "
+                f"(forbidden set: {sorted(FORBIDDEN_DB_NAMES)}) — the shared "
+                "pg_engine drops every table of the target at session setup, "
+                "so it only ever runs against a sanctioned scratch database"
+            )
+        declared = _env_declared_dbs()
+        forbidden_declared = declared & FORBIDDEN_DB_NAMES
+        if forbidden_declared:
+            _refuse(
+                f"{ALLOWED_DBS_ENV} declares the live database(s) "
+                f"{sorted(forbidden_declared)} — a live database can never be "
+                "declared into the allowlist"
+            )
+        allowed = set(ALLOWED_SCRATCH_DBS) | declared
+        if db not in allowed:
+>           _refuse(
+                f"PG_TEST_DB={db!r} is not in the hard scratch allowlist "
+                f"{sorted(allowed)} (EXACT-name membership — no substring "
+                "heuristic)"
+            )
+
+tests/postgres/conftest.py:241: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+message = "PG_TEST_DB='dbpool_fm2' is not in the hard scratch allowlist ['ensemble_dev_test_only', 'ensemble_rl_p1', 'ensemble_t...test_only_rmflusher', 'ensemble_test_stage2', 'ensemble_test_stage3'] (EXACT-name membership — no substring heuristic)"
+
+    def _refuse(message: str) -> None:
+>       raise RuntimeError(f"refused: {message}")
+E       RuntimeError: refused: PG_TEST_DB='dbpool_fm2' is not in the hard scratch allowlist ['ensemble_dev_test_only', 'ensemble_rl_p1', 'ensemble_test', 'ensemble_test_only', 'ensemble_test_only_rmflusher', 'ensemble_test_stage2', 'ensemble_test_stage3'] (EXACT-name membership — no substring heuristic)
+
+tests/postgres/conftest.py:211: RuntimeError
+_ ERROR at setup of TestF4fStarvationShape.test_probe_still_works_below_capacity _
+
+    @pytest.fixture(scope="session", autouse=True)
+    def pg_scratch_db_fence():
+        """The scratch-DB fence — the FIRST thing that runs in this lane.
+    
+        It is an explicit DEPENDENCY of the shared ``pg_engine`` fixture,
+        so pytest creates it BEFORE the engine exists — i.e. before any
+        SQL (and before the session-scoped ``drop_all``) can reach the
+        target database. See :func:`check_scratch_db_fence` for the rules.
+        It is ALSO autouse, so a module that shadows ``pg_engine`` cannot opt out.
+        """
+>       check_scratch_db_fence()
+
+tests/postgres/conftest.py:353: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def check_scratch_db_fence() -> None:
+        """THE FENCE — fail-closed, and it runs BEFORE the target is touched.
+    
+        Raises ``RuntimeError`` when the target database is not a
+        sanctioned scratch database. Called by the session-scoped
+        ``pg_scratch_db_fence`` fixture, which the shared ``pg_engine``
+        depends on — so the ordering is a property of the fixture graph,
+        not of fixture-resolution luck.
+        """
+        db = _effective_pg_test_db()
+        if db in FORBIDDEN_DB_NAMES:
+            _refuse(
+                f"PG_TEST_DB={db!r} is a LIVE database "
+                f"(forbidden set: {sorted(FORBIDDEN_DB_NAMES)}) — the shared "
+                "pg_engine drops every table of the target at session setup, "
+                "so it only ever runs against a sanctioned scratch database"
+            )
+        declared = _env_declared_dbs()
+        forbidden_declared = declared & FORBIDDEN_DB_NAMES
+        if forbidden_declared:
+            _refuse(
+                f"{ALLOWED_DBS_ENV} declares the live database(s) "
+                f"{sorted(forbidden_declared)} — a live database can never be "
+                "declared into the allowlist"
+            )
+        allowed = set(ALLOWED_SCRATCH_DBS) | declared
+        if db not in allowed:
+>           _refuse(
+                f"PG_TEST_DB={db!r} is not in the hard scratch allowlist "
+                f"{sorted(allowed)} (EXACT-name membership — no substring "
+                "heuristic)"
+            )
+
+tests/postgres/conftest.py:241: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+message = "PG_TEST_DB='dbpool_fm2' is not in the hard scratch allowlist ['ensemble_dev_test_only', 'ensemble_rl_p1', 'ensemble_t...test_only_rmflusher', 'ensemble_test_stage2', 'ensemble_test_stage3'] (EXACT-name membership — no substring heuristic)"
+
+    def _refuse(message: str) -> None:
+>       raise RuntimeError(f"refused: {message}")
+E       RuntimeError: refused: PG_TEST_DB='dbpool_fm2' is not in the hard scratch allowlist ['ensemble_dev_test_only', 'ensemble_rl_p1', 'ensemble_test', 'ensemble_test_only', 'ensemble_test_only_rmflusher', 'ensemble_test_stage2', 'ensemble_test_stage3'] (EXACT-name membership — no substring heuristic)
+
+tests/postgres/conftest.py:211: RuntimeError
+=========================== short test summary info ============================
+ERROR tests/postgres/test_dbpool_mission_mint_pg.py::TestF6bConcurrentDoubleMint::test_concurrent_mint_for_one_anchor_returns_one_mission_id
+ERROR tests/postgres/test_dbpool_mission_mint_pg.py::TestF6cIndexPresence::test_index_exists_with_a_byte_identical_predicate
+ERROR tests/postgres/test_dbpool_mission_mint_pg.py::TestF6cIndexPresence::test_without_the_index_the_upsert_fails_loudly
+ERROR tests/postgres/test_dbpool_probe_starvation_pg.py::TestF4fStarvationShape::test_probe_takes_no_connection_under_starvation
+ERROR tests/postgres/test_dbpool_probe_starvation_pg.py::TestF4fStarvationShape::test_probe_still_works_below_capacity
+5 errors in 0.47s

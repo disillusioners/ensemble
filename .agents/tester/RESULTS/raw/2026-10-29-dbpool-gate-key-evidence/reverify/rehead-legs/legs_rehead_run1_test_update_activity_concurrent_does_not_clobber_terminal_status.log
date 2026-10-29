@@ -1,0 +1,9 @@
+.                                                                        [100%]
+=============================== warnings summary ===============================
+tests/message_queue_redesign/test_atomic_status_transitions.py::TestUpdateActivityAtomic::test_update_activity_concurrent_does_not_clobber_terminal_status
+tests/message_queue_redesign/test_atomic_status_transitions.py::TestUpdateActivityAtomic::test_update_activity_concurrent_does_not_clobber_terminal_status
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1 passed, 2 warnings in 0.40s

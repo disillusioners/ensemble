@@ -1,0 +1,26 @@
+....................FFFFFFFFFF.......................................... [ 18%]
+........................................................................ [ 36%]
+........................................................................ [ 54%]
+........................................................................ [ 72%]
+........................................................................ [ 90%]
+........................................                                 [100%]
+=============================== warnings summary ===============================
+tests/services/test_process_message_metrics.py::TestProcessMessageCompletionHook::test_completion_without_feedback_still_records
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/orm/loading.py:933: RuntimeWarning: coroutine 'InstanceMessagingService._maybe_store_initiative_message' was never awaited
+    cached_populators["quick"].append((prop.key, getter))
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_success_callback_path_records_succeeded_true
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_work_fn_error_path_records_succeeded_false
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_post_processing_error_path_records_succeeded_false
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_cancellation_path_operation_cancelled_does_not_fire_hook
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_cancellation_path_asyncio_cancelled_does_not_fire_hook
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_requeue_path_does_not_fire_hook
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_iterations_and_duration_are_non_zero
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_zero_iterations_when_no_agent_messages
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_compute_iterations_and_duration_extracts_task_message
+FAILED tests/services/test_process_message_metrics.py::TestRecordMetricsWiring::test_compute_task_message_empty_when_no_human_message
+10 failed, 390 passed, 1 warning in 29.09s

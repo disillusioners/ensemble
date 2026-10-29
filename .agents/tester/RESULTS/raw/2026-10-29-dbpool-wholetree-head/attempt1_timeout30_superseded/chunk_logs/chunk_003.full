@@ -1,0 +1,317 @@
+..FF....F.......EEE.......ssssssssss.................................... [ 18%]
+........................................................................ [ 36%]
+........................................................................ [ 54%]
+........................................................................ [ 72%]
+........................................................................ [ 90%]
+........................................                                 [100%]
+=============================== warnings summary ===============================
+tests/integration/test_wake_vs_claim_exactly_once.py: 8 warnings
+tests/job_queue/test_a2_autopromote_notify.py: 12 warnings
+tests/job_queue/test_a3_eligible_pending_sweep.py: 23 warnings
+tests/job_queue/test_a4_f14_orphan_detection.py: 12 warnings
+tests/job_queue/test_answer_resume_real_chain.py: 1 warning
+tests/job_queue/test_background_queue.py: 18 warnings
+tests/job_queue/test_chat_pool_starvation_pins.py: 25 warnings
+tests/job_queue/test_claim_gate_sibling_deadlock_pins.py: 12 warnings
+tests/job_queue/test_defer_gate_post_settle_window.py: 2 warnings
+tests/job_queue/test_defer_self_witness_watchdog.py: 32 warnings
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryEnqueue::test_enqueue_creates_dlq_item
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:52: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryGet::test_get_existing_item
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:80: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryGetByJobId::test_get_by_job_id_existing
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:114: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_project_id_filter
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:148: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_project_id_filter
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:162: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_queue_id_filter
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:187: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_queue_id_filter
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:201: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_reason_filter
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:225: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_reason_filter
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:239: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_multiple_filters
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:263: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_multiple_filters
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:277: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_multiple_filters
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:291: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_pagination_offset
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_pagination_offset
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_pagination_offset
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_pagination_offset
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_pagination_offset
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:322: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_pagination_limit
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_pagination_limit
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_pagination_limit
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_pagination_limit
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryList::test_list_with_pagination_limit
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:347: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py: 10 warnings
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:372: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryDelete::test_delete_existing_item
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:406: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryDeleteByJobId::test_delete_by_job_id_existing
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:440: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCleanupByAge::test_cleanup_by_age_deletes_old_items
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:463: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    old_time = datetime.utcnow() - timedelta(hours=25)
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCleanupByAge::test_cleanup_by_age_deletes_old_items
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:482: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    recent_time = datetime.utcnow() - timedelta(hours=1)
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCleanupByAge::test_cleanup_by_age_with_reason_filter
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:512: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    old_time = datetime.utcnow() - timedelta(hours=25)
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCleanupByAge::test_cleanup_by_age_no_matching_items
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:560: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    recent_time = datetime.utcnow() - timedelta(hours=1)
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCount::test_count_no_filters
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCount::test_count_no_filters
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCount::test_count_no_filters
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCount::test_count_no_filters
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCount::test_count_no_filters
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:603: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCount::test_count_with_project_filter
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:625: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_repository.py::TestDeadLetterRepositoryCount::test_count_with_project_filter
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_repository.py:639: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_service.py: 14 warnings
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_service.py:92: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    started_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_service.py: 14 warnings
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_service.py:99: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    completed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_service.py::TestMoveToDLQStandalone::test_move_to_dlq_standalone_wrong_status
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_service.py:307: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    started_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_service.py: 35 warnings
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_service.py:131: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    started_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_service.py: 35 warnings
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_service.py:138: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    completed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dead_letter_service.py::TestReplayFromDLQ::test_replay_from_dlq_resets_retry_fields
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_service.py:442: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    job_item.failed_at = datetime.utcnow().isoformat()
+
+tests/job_queue/test_dead_letter_service.py::TestDLQAtomicityEdgeCases::test_cleanup_dlq_removes_old_items
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_service.py:688: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    old_time = datetime.utcnow() - timedelta(hours=25)
+
+tests/job_queue/test_dead_letter_service.py::TestDLQAtomicityEdgeCases::test_cleanup_dlq_removes_old_items
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_service.py:709: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    recent_time = datetime.utcnow() - timedelta(hours=1)
+
+tests/job_queue/test_dead_letter_service.py::TestCleanupDLQ::test_cleanup_dlq_respects_project_id
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_service.py:754: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    old_time = datetime.utcnow() - timedelta(hours=25)
+
+tests/job_queue/test_dead_letter_service.py::TestCleanupDLQ::test_cleanup_dlq_respects_project_id
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_service.py:775: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    old_time = datetime.utcnow() - timedelta(hours=25)
+
+tests/job_queue/test_dead_letter_service.py::TestCleanupDLQ::test_cleanup_dlq_respects_project_id
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_service.py:796: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    recent_time = datetime.utcnow() - timedelta(hours=1)
+
+tests/job_queue/test_dead_letter_service.py::TestCleanupDLQ::test_cleanup_dlq_without_project_id_deletes_all
+tests/job_queue/test_dead_letter_service.py::TestCleanupDLQ::test_cleanup_dlq_without_project_id_deletes_all
+tests/job_queue/test_dead_letter_service.py::TestCleanupDLQ::test_cleanup_dlq_without_project_id_deletes_all
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_service.py:839: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    old_time = datetime.utcnow() - timedelta(hours=25)
+
+tests/job_queue/test_dead_letter_service.py::TestSQLStatusGuard::test_move_to_dlq_standalone_no_dlq_item_on_guard_failure
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dead_letter_service.py:1272: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    started_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dlq_api.py::TestListDLQItems::test_list_dlq_items
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dlq_api.py:151: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dlq_api.py::TestListDLQItems::test_list_dlq_items_with_filters
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dlq_api.py:179: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dlq_api.py::TestListDLQItems::test_list_dlq_items_with_filters
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dlq_api.py:193: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dlq_api.py::TestListDLQItems::test_list_dlq_items_pagination
+tests/job_queue/test_dlq_api.py::TestListDLQItems::test_list_dlq_items_pagination
+tests/job_queue/test_dlq_api.py::TestListDLQItems::test_list_dlq_items_pagination
+tests/job_queue/test_dlq_api.py::TestListDLQItems::test_list_dlq_items_pagination
+tests/job_queue/test_dlq_api.py::TestListDLQItems::test_list_dlq_items_pagination
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dlq_api.py:236: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dlq_api.py::TestReplayDLQItem::test_replay_dlq_item
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dlq_api.py:324: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dlq_api.py::TestReplayDLQItem::test_replay_dlq_item
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dlq_api.py:325: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    moved_to_dlq_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dlq_api.py::TestCleanupDLQ::test_cleanup_dlq
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dlq_api.py:436: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    old_time = datetime.utcnow() - timedelta(days=30)
+
+tests/job_queue/test_dlq_api.py::TestCleanupDLQ::test_cleanup_dlq
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dlq_api.py:456: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    recent_time = datetime.utcnow() - timedelta(days=1)
+
+tests/job_queue/test_dlq_api.py::TestCleanupDLQ::test_cleanup_dlq_with_reason_filter
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dlq_api.py:491: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    old_time = datetime.utcnow() - timedelta(days=30)
+
+tests/job_queue/test_dlq_api.py::TestDLQSchemas::test_dlq_replay_response_structure
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dlq_api.py:616: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    failed_at=datetime.utcnow().isoformat(),
+
+tests/job_queue/test_dlq_api.py::TestDLQSchemas::test_dlq_replay_response_structure
+  /home/nea/ensemble-src-wt-tdbp-gate/tests/job_queue/test_dlq_api.py:617: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    moved_to_dlq_at=datetime.utcnow().isoformat(),
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/integration/test_vscode_routing_e2e.py::TestSpaCatchAll::test_unknown_route_serves_index_html
+FAILED tests/integration/test_vscode_routing_e2e.py::TestSpaCatchAll::test_root_serves_index_html
+FAILED tests/integration/test_vscode_security_integration.py::TestC1PathTraversal::test_c1_valid_repo_folder_not_blocked
+ERROR tests/integration/test_wc_wake_pure_hang.py::test_http_post_messages_wakes_parked_wc_parent
+ERROR tests/integration/test_wc_wake_pure_hang.py::test_agent_tool_send_message_wakes_parked_wc_parent
+ERROR tests/integration/test_wc_wake_pure_hang.py::test_job_inject_wakes_parked_wc_parent
+3 failed, 384 passed, 10 skipped, 314 warnings, 3 errors in 135.69s (0:02:15)
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-fe73affc-a249-4105-a2aa-981c2d39be6b/test_an_enabled_boot_leaves_a_0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-fe73affc-a249-4105-a2aa-981c2d39be6b/test_an_enabled_boot_leaves_a_0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-fe73affc-a249-4105-a2aa-981c2d39be6b/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-fe73affc-a249-4105-a2aa-981c2d39be6b/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-5416ed11-8ba3-455c-bfff-83a7d536a53e/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-5416ed11-8ba3-455c-bfff-83a7d536a53e/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-5416ed11-8ba3-455c-bfff-83a7d536a53e/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-5416ed11-8ba3-455c-bfff-83a7d536a53e/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-b66ae7c7-e196-4bd4-98ed-e0cff4975175/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-b66ae7c7-e196-4bd4-98ed-e0cff4975175/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-b66ae7c7-e196-4bd4-98ed-e0cff4975175/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-b66ae7c7-e196-4bd4-98ed-e0cff4975175/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-4f20031d-e184-4e0f-8765-7bf5c9c7380c/test_an_enabled_boot_leaves_a_0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-4f20031d-e184-4e0f-8765-7bf5c9c7380c/test_an_enabled_boot_leaves_a_0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:96: PytestWarning: (rm_rf) error removing /tmp/pytest-of-nea/garbage-4f20031d-e184-4e0f-8765-7bf5c9c7380c/test_an_enabled_boot_leaves_a_0/data
+<class 'OSError'>: [Errno 39] Directory not empty: '/tmp/pytest-of-nea/garbage-4f20031d-e184-4e0f-8765-7bf5c9c7380c/test_an_enabled_boot_leaves_a_0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:96: PytestWarning: (rm_rf) error removing /tmp/pytest-of-nea/garbage-4f20031d-e184-4e0f-8765-7bf5c9c7380c/test_an_enabled_boot_leaves_a_0
+<class 'OSError'>: [Errno 39] Directory not empty: '/tmp/pytest-of-nea/garbage-4f20031d-e184-4e0f-8765-7bf5c9c7380c/test_an_enabled_boot_leaves_a_0'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:96: PytestWarning: (rm_rf) error removing /tmp/pytest-of-nea/garbage-4f20031d-e184-4e0f-8765-7bf5c9c7380c
+<class 'OSError'>: [Errno 39] Directory not empty: '/tmp/pytest-of-nea/garbage-4f20031d-e184-4e0f-8765-7bf5c9c7380c'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-1b0f7da2-5223-4b43-b6c2-60daae12fa62/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-1b0f7da2-5223-4b43-b6c2-60daae12fa62/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-1b0f7da2-5223-4b43-b6c2-60daae12fa62/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-1b0f7da2-5223-4b43-b6c2-60daae12fa62/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-89f5d5d1-2ad0-49a1-aef4-7f37f8d893b4/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-89f5d5d1-2ad0-49a1-aef4-7f37f8d893b4/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-89f5d5d1-2ad0-49a1-aef4-7f37f8d893b4/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-89f5d5d1-2ad0-49a1-aef4-7f37f8d893b4/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-06d925b2-6cc6-45b3-87ef-a679e8a199b4/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-06d925b2-6cc6-45b3-87ef-a679e8a199b4/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-06d925b2-6cc6-45b3-87ef-a679e8a199b4/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-06d925b2-6cc6-45b3-87ef-a679e8a199b4/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-d34bcff0-768c-4c82-9fdc-4f01f5c19da7/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-d34bcff0-768c-4c82-9fdc-4f01f5c19da7/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-d34bcff0-768c-4c82-9fdc-4f01f5c19da7/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-d34bcff0-768c-4c82-9fdc-4f01f5c19da7/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-f822072e-acb1-4435-8674-1a7128a7d168/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-f822072e-acb1-4435-8674-1a7128a7d168/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-f822072e-acb1-4435-8674-1a7128a7d168/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-f822072e-acb1-4435-8674-1a7128a7d168/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-9382d410-b8c9-46b0-87cd-0965bc80179c/test_an_enabled_boot_leaves_a_0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-9382d410-b8c9-46b0-87cd-0965bc80179c/test_an_enabled_boot_leaves_a_0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-9382d410-b8c9-46b0-87cd-0965bc80179c/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-9382d410-b8c9-46b0-87cd-0965bc80179c/test_an_enabled_boot_leaves_a_0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-39b373ed-24f2-429a-b99f-499fdc3adb31/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-39b373ed-24f2-429a-b99f-499fdc3adb31/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-39b373ed-24f2-429a-b99f-499fdc3adb31/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-39b373ed-24f2-429a-b99f-499fdc3adb31/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-da1d3ca8-83a3-4951-a6ce-0a1d48defd3e/test_the_pinned_sequence_end_t0/data:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-da1d3ca8-83a3-4951-a6ce-0a1d48defd3e/test_the_pinned_sequence_end_t0/data'
+  warnings.warn(
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/pathlib.py:103: PytestWarning: (rm_rf) unknown function <built-in function scandir> when removing /tmp/pytest-of-nea/garbage-da1d3ca8-83a3-4951-a6ce-0a1d48defd3e/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records:
+<class 'PermissionError'>: [Errno 1] Operation not permitted: '/tmp/pytest-of-nea/garbage-da1d3ca8-83a3-4951-a6ce-0a1d48defd3e/test_the_pinned_sequence_end_t0/data/wedge-captures/boot-records'
+  warnings.warn(

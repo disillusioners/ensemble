@@ -1,0 +1,223 @@
+# SKIPPED-FOR-SIZE/COUNT — dbpool gate key-evidence RE-VERIFICATION bundle (2026-10-29, post 441a1657d / merge 3d835d8dd)
+# One line per skipped file: sha256 | size | source path | standing full-copy locations.
+# Rules: bulk per-chunk wholetree logs/id-lists skipped (dispatch: compact bundle); r11 per-attempt
+# part1_id*_att*.log skipped here but FULLY COMMITTED in-repo same commit at
+# .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/ (44/44 byte-identical to /tmp/tdbp-r11).
+# remut: nothing skipped (7/7 copied). Copied-set verified byte-identical to /tmp sources.
+
+## /tmp/tdbp-rehead/ — wholetree re-run (HEAD-side attempt 2 + rehead): top-level extras + chunks/ + logs/
+b06a5f80432ded5b98ff880e56235b08beb660a82f1fefb4cbc1b43b8839db15  37604B  /tmp/tdbp-rehead/attempt2_base_only.txt  | full copies: /tmp/tdbp-rehead/attempt2_base_only.txt
+6f11c05188bb379b7fd9108227e34d516c975be36693fbde4c5a1a32518a901c  41083B  /tmp/tdbp-rehead/attempt2_head_only.txt  | full copies: /tmp/tdbp-rehead/attempt2_head_only.txt
+b06a5f80432ded5b98ff880e56235b08beb660a82f1fefb4cbc1b43b8839db15  37604B  /tmp/tdbp-rehead/base.ids  | full copies: /tmp/tdbp-rehead/base.ids + /home/nea/ensemble-src-wt-tdbp-rehead/.agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify-wholetree/base.ids
+b06a5f80432ded5b98ff880e56235b08beb660a82f1fefb4cbc1b43b8839db15  37604B  /tmp/tdbp-rehead/base.sorted  | full copies: /tmp/tdbp-rehead/base.sorted
+e35f33e791081258dcd6283122bf232bdec9b84e5556f2def20fc934fc3095fd  745B  /tmp/tdbp-rehead/base_only.ids  | full copies: /tmp/tdbp-rehead/base_only.ids
+c18534b7be7bed95a451f9222e0b1f8c09169efe4e4a5fba84787f2200147b32  225B  /tmp/tdbp-rehead/base_only_final.ids  | full copies: /tmp/tdbp-rehead/base_only_final.ids + /home/nea/ensemble-src-wt-tdbp-rehead/.agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify-wholetree/base_only_final.ids
+d67fe6b574710f56025232f4e9638f200b5c135398bbfbe47de59469ff61e601  44626B  /tmp/tdbp-rehead/chunks/chunk_000.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_000.txt
+3c89e345b82f3a0acdac2ce73a76829b5894074a787de53777c32f4edd3003c9  52143B  /tmp/tdbp-rehead/chunks/chunk_001.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_001.txt
+a097dfe53256768ca0032de22f78fe8a9f005183db6340c813250515c88d4249  47475B  /tmp/tdbp-rehead/chunks/chunk_002.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_002.txt
+e7e9b0c517e2d3db163b7a7b9b2e1308d869a27f401ea1e773583f3b12eaea5f  45936B  /tmp/tdbp-rehead/chunks/chunk_003.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_003.txt
+5bcdf6110159a6529af922f1b8bdcff8cf5dca967280b7d9a485fa52d58e43d4  49078B  /tmp/tdbp-rehead/chunks/chunk_004.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_004.txt
+68f1ac778b7a54a11cd9ff6e0e724fdff7bd53fb50d1280d7c45df22cf480f84  45059B  /tmp/tdbp-rehead/chunks/chunk_005.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_005.txt
+d210ef185527aa0f00e785055c057745a7e3d19774d6d4965a7e84104445fb9d  46113B  /tmp/tdbp-rehead/chunks/chunk_006.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_006.txt
+ab56380c26961ab85a4e594da37e1a0d37a04e41ed5f8db732cf6f9114fc05dc  48189B  /tmp/tdbp-rehead/chunks/chunk_007.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_007.txt
+c87da331c2a58b2bea0f2b57a40a1f1b485a8ef788de7533e34e0a0f9198210a  47282B  /tmp/tdbp-rehead/chunks/chunk_008.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_008.txt
+06cd0b59d3c87e36de78d2b685f99ec9fb43290b791893e7317d4070760624ed  48233B  /tmp/tdbp-rehead/chunks/chunk_009.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_009.txt
+d2352621e6597d86704f65944415a70173734b33feec1ce18402b19defc65c45  45647B  /tmp/tdbp-rehead/chunks/chunk_010.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_010.txt
+7e71fededa4526bb460d1e2b28c2a00bff9d5a12374eb73126d29d5f5a12ae6f  44482B  /tmp/tdbp-rehead/chunks/chunk_011.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_011.txt
+a607068245cb1aa7608530c3f08f5e782a2fa7bef8a58e55712b64e07458410b  44198B  /tmp/tdbp-rehead/chunks/chunk_012.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_012.txt
+86cb167b1eaa56cee3fdc73d08996d77b487976e914d10791ccae0f47c624539  36860B  /tmp/tdbp-rehead/chunks/chunk_013.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_013.txt
+2d4492b3e437f64cf96c7e1972f9b27d23681917c5784683b958802c26844b90  40790B  /tmp/tdbp-rehead/chunks/chunk_014.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_014.txt
+1f3211d6591d10929209f269209ce5478acce29d582d7a0d0661e8a0e24e61f4  36737B  /tmp/tdbp-rehead/chunks/chunk_015.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_015.txt
+c19e12f041789eaf2df08d75296e434435eec723c3e54b2e81a6f2f7b8e55891  38260B  /tmp/tdbp-rehead/chunks/chunk_016.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_016.txt
+95b31580aebbcc249494a8d29b1167fc44bd2feef3edb970b0cc4a200ecd8cc6  39911B  /tmp/tdbp-rehead/chunks/chunk_017.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_017.txt
+f6f4a37c1bf679fa7e8f6d70b2500f18f968fabf7205d12ca259999c4d2fbf34  38460B  /tmp/tdbp-rehead/chunks/chunk_018.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_018.txt
+a95b0670282fa063d5bc40ee2bb5265aff4b80d258ac17b0a7ad1084c2f35737  38718B  /tmp/tdbp-rehead/chunks/chunk_019.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_019.txt
+bbea475e154c83a4579a3c3f94a806c0e0ffad886900c1d1cd73122f295bc486  37729B  /tmp/tdbp-rehead/chunks/chunk_020.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_020.txt
+9d949033f7a6a3b5e263961efd162e99cb5f8d0e6b973f5b84bc27c2960743f5  43774B  /tmp/tdbp-rehead/chunks/chunk_021.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_021.txt
+286e7d8791b61cf1684486e6fa711aef8adea9b2952760d88c830a418d7fdbf5  37956B  /tmp/tdbp-rehead/chunks/chunk_022.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_022.txt
+b168a3c2f9505ba0c0076177ca2d60c00ff5f23ab9ac8d403275a34115f5b51a  39096B  /tmp/tdbp-rehead/chunks/chunk_023.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_023.txt
+98d0f32727935dc97c5624bfd1110d5d9b195361aeb893f9b0b47522e7b9ff66  37473B  /tmp/tdbp-rehead/chunks/chunk_024.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_024.txt
+4b8ccbb7a8b5beefaa48e664376839a381f1800bde2840983c94d5902ba2d97a  38358B  /tmp/tdbp-rehead/chunks/chunk_025.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_025.txt
+a93a583e8804d08fec57f7baabb7de5e2c2a319fcdbbca418cc382cba133ea9b  37831B  /tmp/tdbp-rehead/chunks/chunk_026.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_026.txt
+9318fa4b38297d507178a97599a8c3718fc0c3159e710dc4c0a97aef4578962a  40043B  /tmp/tdbp-rehead/chunks/chunk_027.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_027.txt
+6681139247c573bbdcdcb5759598747ca18f9200714a298dd41ba7b41a75a142  48009B  /tmp/tdbp-rehead/chunks/chunk_028.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_028.txt
+b0623239d56f33ea84708bfa3e6a6a799efc92b082b48330206d4812419813d7  48281B  /tmp/tdbp-rehead/chunks/chunk_029.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_029.txt
+06b7ba0a565bb928767a6eaffda40337448ca0e8e72b121ba53f919e4b365607  44219B  /tmp/tdbp-rehead/chunks/chunk_030.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_030.txt
+ff12ffe56208af17bbba163182d0d106092bd544877e9be31fb8d0404a4bc49f  48470B  /tmp/tdbp-rehead/chunks/chunk_031.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_031.txt
+478ac960f6760df9f05d149a4cb05db427b549981ca3b12fcd057640e0517166  42167B  /tmp/tdbp-rehead/chunks/chunk_032.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_032.txt
+064d66bb56b66645ff6b717259011f1677c7c3c5e201547b9a512aa81d507089  45201B  /tmp/tdbp-rehead/chunks/chunk_033.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_033.txt
+1a7c4d29e5b23e56d037d4cd00785b460166daab50854d4096a969a94c169653  45439B  /tmp/tdbp-rehead/chunks/chunk_034.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_034.txt
+e55fc621524cee6ef48efd91a050319e1c562278811ef531cb4520230a65c39e  49678B  /tmp/tdbp-rehead/chunks/chunk_035.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_035.txt
+61689da69c86d0481b8ed6998f680a11257f7e24c3c9acf289e53b6606a5a715  46905B  /tmp/tdbp-rehead/chunks/chunk_036.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_036.txt
+728582f126777e17ebe3d002badacd58e419c5b36af5872b7687a0269bddb54c  48029B  /tmp/tdbp-rehead/chunks/chunk_037.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_037.txt
+0beaf8d810d9c1d50e58226f29e75bbf25e915885f5c04d7c718c3b7c25759f6  46985B  /tmp/tdbp-rehead/chunks/chunk_038.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_038.txt
+b43c454e660041285374f66f05495ec67a470ef73ba1da80629c8c15e5a18529  46508B  /tmp/tdbp-rehead/chunks/chunk_039.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_039.txt
+b13c591c20814b7c66ac97cb6cb95c7dc411346d5b2038fd3266fb4ba5132841  46443B  /tmp/tdbp-rehead/chunks/chunk_040.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_040.txt
+a95712cd0a46c16d84eac9a34fd076b4a7f379eee1c7312060033ff5f0646c0b  44412B  /tmp/tdbp-rehead/chunks/chunk_041.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_041.txt
+3ba6229a29a29677a5c2f360f47057c5fb575958122740ae530284a4235ee22b  44024B  /tmp/tdbp-rehead/chunks/chunk_042.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_042.txt
+4e6d09589a5c58d5d297bc4328a55205a47b299de4e07769e8d6dbe289ba1e83  39613B  /tmp/tdbp-rehead/chunks/chunk_043.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_043.txt
+73dd786a18839a4e0335a201cbcaa832a283e1dbbd350a19408122ef4172ce91  41589B  /tmp/tdbp-rehead/chunks/chunk_044.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_044.txt
+c41cc5796f211bc9b17f9ea6759ad73c3d1a6f3ce7ef53a047fc7a186abe7c29  42953B  /tmp/tdbp-rehead/chunks/chunk_045.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_045.txt
+843944ee1bc7ac6f0918c8c7371f47664b61bf77e7687f0604e7431e479aa745  39608B  /tmp/tdbp-rehead/chunks/chunk_046.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_046.txt
+2ecc6f99c6e7fed5bc33764c0941ed66cf127b859d86ec3887efc55f46e86f01  43013B  /tmp/tdbp-rehead/chunks/chunk_047.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_047.txt
+b6e8646f720b0ebe2fe3d22df42ab6350d1a14257dc1d126354c29563b42069a  42098B  /tmp/tdbp-rehead/chunks/chunk_048.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_048.txt
+5f452eb581d83a8f73b0df9ff614373d93c38b20cc81a348b89f994395fa05f2  44183B  /tmp/tdbp-rehead/chunks/chunk_049.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_049.txt
+370ca8708a3df5b11a9e55879a9bd7213df8fccedf1305d8f6f7bd587e01f76b  46237B  /tmp/tdbp-rehead/chunks/chunk_050.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_050.txt
+516413bb7c00a82a5a6367f1b36b66d2491eaef1ac005ecb19b7404feaee75df  43610B  /tmp/tdbp-rehead/chunks/chunk_051.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_051.txt
+1532b713f3a7a2be352a79b861ca083cc9f61ac90bfabfdd2b9681ed813c4c39  43403B  /tmp/tdbp-rehead/chunks/chunk_052.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_052.txt
+9f144765aaffae2cf74ca2150893c9d7ce9b7ed97e267906f7ab1cf867557504  39746B  /tmp/tdbp-rehead/chunks/chunk_053.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_053.txt
+c5502081dc3b7e4b56088ceed36a3ea243829957376529470511155cc2b3da26  45035B  /tmp/tdbp-rehead/chunks/chunk_054.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_054.txt
+8f341db76c3a7da9846f7d617f45ba4548e0be84a20fa13cdfae8a1639b0da3e  44665B  /tmp/tdbp-rehead/chunks/chunk_055.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_055.txt
+2a0e6bc0a01ec9189c0663643a1ca6e133e3cddf7f60af22a2cb511cc30f1aa2  41736B  /tmp/tdbp-rehead/chunks/chunk_056.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_056.txt
+19629ca403c8d2d4c14cef15925cdddc8c1f16061ce0ac1514e96c68a5cf150d  41689B  /tmp/tdbp-rehead/chunks/chunk_057.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_057.txt
+ef39452a8ad9c1e7e039413bc0dad021ddfa1992d895f401839a221d1b34590b  41176B  /tmp/tdbp-rehead/chunks/chunk_058.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_058.txt
+0772d0b4aece8f32125092a27f2ee3bbea9ca13dd2bd193275bc8afb0fce6dab  45468B  /tmp/tdbp-rehead/chunks/chunk_059.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_059.txt
+09935142b635894ecb642550b70d8cee422b06ccc67b46993aac7b50b686e191  45402B  /tmp/tdbp-rehead/chunks/chunk_060.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_060.txt
+5d4a54612ee760ee7515ccda219bdc6a814155a61f57e5858702d7b5b1ab2107  41868B  /tmp/tdbp-rehead/chunks/chunk_061.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_061.txt
+e9bcfe975e112f605b22a818c5262773612dada66c2e0665004b3201ef88d8fc  43007B  /tmp/tdbp-rehead/chunks/chunk_062.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_062.txt
+2ed8dc6b818ca833c8f076bde99aac076c117e2fc96a30a73dd93b94fa84b698  48903B  /tmp/tdbp-rehead/chunks/chunk_063.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_063.txt
+a23c4a9dc86a88aa08178279d0f8fe2dd4421337c7d3934897fc12c971aa2590  39801B  /tmp/tdbp-rehead/chunks/chunk_064.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_064.txt
+9026a69862ce24cddfdee9fc66620e42404712dc64211e96df585d4f84642095  44324B  /tmp/tdbp-rehead/chunks/chunk_065.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_065.txt
+6552971f0f2ede73561767a9b9f80e7af57832ed5a8780dcf50a9b9208a6e205  44503B  /tmp/tdbp-rehead/chunks/chunk_066.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_066.txt
+0ae17af0257c48af70daf5c6468b5b495e99084f93397c8fc0260f8c2ddfd943  46887B  /tmp/tdbp-rehead/chunks/chunk_067.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_067.txt
+5b715f5bd6f26d962b8c6fe8aee6089cedbb8b4c1853850d89ebdf1cdc1b27d3  45785B  /tmp/tdbp-rehead/chunks/chunk_068.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_068.txt
+e2c0470bca01a977416e70965c26feeecbcb65b2141265fd10ab2c03adfc3cee  45160B  /tmp/tdbp-rehead/chunks/chunk_069.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_069.txt
+8e23fee35e60ccd66521a3866e7f8450be6cb351ce010907dc0a5614d9b49cce  43958B  /tmp/tdbp-rehead/chunks/chunk_070.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_070.txt
+2515cfd82f155066a9ddb5a8c43ee325888af0a5d998a2aa821cfcbe63306957  45654B  /tmp/tdbp-rehead/chunks/chunk_071.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_071.txt
+a91acb9f9170cde33f110d54972336a52d727e526fef9e33cce68cce84070987  42192B  /tmp/tdbp-rehead/chunks/chunk_072.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_072.txt
+ba99363788f005636c5f4f5557b1c62a4f955ddf6b95fb9e0e8216e593aef278  48068B  /tmp/tdbp-rehead/chunks/chunk_073.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_073.txt
+431484d636d3d59a8573ac99fe358865be1e51a08e79020ecdac4dc711167be1  46208B  /tmp/tdbp-rehead/chunks/chunk_074.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_074.txt
+d8bd6938100f0bcaf19d3b3db594d9834355670358929d08163f89741cb3e892  43738B  /tmp/tdbp-rehead/chunks/chunk_075.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_075.txt
+ddb42cc9f39acd14ff1808a1bfeabad9cdc1e653ca04f107144cc2165a295bde  43594B  /tmp/tdbp-rehead/chunks/chunk_076.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_076.txt
+103d4d4536fba89099bd725c7ee6108c3e0e4f2b53d76d2f5154d1e8ee4d0b7c  32351B  /tmp/tdbp-rehead/chunks/chunk_077.txt  | full copies: /tmp/tdbp-rehead/chunks/chunk_077.txt
+a192f2b4eb7cb475a522d038af5c048b09698f00f9a82d88fab6e684e65500d3  3389733B  /tmp/tdbp-rehead/collect.base.txt  | full copies: /tmp/tdbp-rehead/collect.base.txt
+2ce164fcd90640777218762339c9c011438a1ea0930acbaded60e9b7742a8182  261B  /tmp/tdbp-rehead/e2e_hybrid.log  | full copies: /tmp/tdbp-rehead/e2e_hybrid.log + /home/nea/ensemble-src-wt-tdbp-rehead/.agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify-wholetree/e2e_hybrid.log
+b06a5f80432ded5b98ff880e56235b08beb660a82f1fefb4cbc1b43b8839db15  37604B  /tmp/tdbp-rehead/failed.base.txt  | full copies: /tmp/tdbp-rehead/failed.base.txt
+6f11c05188bb379b7fd9108227e34d516c975be36693fbde4c5a1a32518a901c  41083B  /tmp/tdbp-rehead/failed.head.attempt2.txt  | full copies: /tmp/tdbp-rehead/failed.head.attempt2.txt
+543c8ce8f74d3fd1c5b3602fafee3b2e89b17c1a6197f5fea7a04759579a1f10  40174B  /tmp/tdbp-rehead/failed.rehead.sorted.txt  | full copies: /tmp/tdbp-rehead/failed.rehead.sorted.txt + /home/nea/ensemble-src-wt-tdbp-rehead/.agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify-wholetree/failed.rehead.sorted.txt
+14663f81e3221f76297a23e3d35046ac22586e918fc1be7ae43f9015edcfeff1  8877B  /tmp/tdbp-rehead/g7.log  | full copies: /tmp/tdbp-rehead/g7.log + /home/nea/ensemble-src-wt-tdbp-rehead/.agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify-wholetree/g7.log
+6a99f70a5ef584dba25bb81d3e8ec0e3ddc59b764400e5c6dc8543df348785dc  38611B  /tmp/tdbp-rehead/head2.ids  | full copies: /tmp/tdbp-rehead/head2.ids + /home/nea/ensemble-src-wt-tdbp-rehead/.agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify-wholetree/head2.ids
+6f11c05188bb379b7fd9108227e34d516c975be36693fbde4c5a1a32518a901c  41083B  /tmp/tdbp-rehead/head2.sorted  | full copies: /tmp/tdbp-rehead/head2.sorted
+ec7d4f016557a940ffab5fae82a0c419303c03f028c2e216524852919d3deb48  920B  /tmp/tdbp-rehead/head_only.ids  | full copies: /tmp/tdbp-rehead/head_only.ids
+45acd8ef81e4d7922df111749c931b11eb79cd1af3ac28d480785fa378f07d2a  254B  /tmp/tdbp-rehead/head_only_final.ids  | full copies: /tmp/tdbp-rehead/head_only_final.ids + /home/nea/ensemble-src-wt-tdbp-rehead/.agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify-wholetree/head_only_final.ids
+feb0750998653936aa40668d47cafceb93784c64cf9ad52943503ee3caf4214d  3402452B  /tmp/tdbp-rehead/ids.rehead.txt  | full copies: /tmp/tdbp-rehead/ids.rehead.txt + /home/nea/ensemble-src-wt-tdbp-rehead/.agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify-wholetree/ids.rehead.txt
+78449a664ba9d4ff555c61a3a48953aaa2425efac4f8c790b930aef4dfee1e32  89284B  /tmp/tdbp-rehead/install-audit.jsonl.preserved  | full copies: /tmp/tdbp-rehead/install-audit.jsonl.preserved + /home/nea/ensemble-src-wt-tdbp-rehead/.agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify-wholetree/install-audit.jsonl.preserved
+e269417d77a3ecb5546644b01995bd29055deb1b14c53e1090bf04e99df5416c  14194B  /tmp/tdbp-rehead/logs/chunk_000.log  | full copies: /tmp/tdbp-rehead/logs/chunk_000.log
+985eb136a324c2b1ceaa8bbc547e4a2415dec298d0423f906562fe0323e0cea6  16002B  /tmp/tdbp-rehead/logs/chunk_001.log  | full copies: /tmp/tdbp-rehead/logs/chunk_001.log
+eb69de2481a2f86533771fe6ad20f76458d84884cd8375cf65331967b5725f83  16494B  /tmp/tdbp-rehead/logs/chunk_002.log  | full copies: /tmp/tdbp-rehead/logs/chunk_002.log
+71ffb824e7ac788ee7238da3cad56d0a831a3e2355ffd63a6e70a0f1837718a1  37156B  /tmp/tdbp-rehead/logs/chunk_003.log  | full copies: /tmp/tdbp-rehead/logs/chunk_003.log
+c9aff848af05cc10ffb3d179918719a7667bc7159920ccbb23a3002d65a77418  16752B  /tmp/tdbp-rehead/logs/chunk_004.log  | full copies: /tmp/tdbp-rehead/logs/chunk_004.log
+45eae71565da2a941cdd770d9a7ba9685d8787b71fe7a1e0952e8683754a9c2e  20008B  /tmp/tdbp-rehead/logs/chunk_005.log  | full copies: /tmp/tdbp-rehead/logs/chunk_005.log
+e077d8add46293d9875e5cfb9a8228bccfd6decfc3f6e1e801d703aba7ce9010  18884B  /tmp/tdbp-rehead/logs/chunk_006.log  | full copies: /tmp/tdbp-rehead/logs/chunk_006.log
+aabfdbcc05917e9f60c126b066abba200347402223f98532f0910f3ea2ae76f9  14576B  /tmp/tdbp-rehead/logs/chunk_007.log  | full copies: /tmp/tdbp-rehead/logs/chunk_007.log
+5656e3a275211b683a9588053115aa8d5db69fb836c7672d4d8b894ca60c1350  24383B  /tmp/tdbp-rehead/logs/chunk_008.log  | full copies: /tmp/tdbp-rehead/logs/chunk_008.log
+ce9497bdee7f36a0f2d247bec6f2594db9c2d9bdf6aceb53683fa412e8f7e52c  6181B  /tmp/tdbp-rehead/logs/chunk_009.log  | full copies: /tmp/tdbp-rehead/logs/chunk_009.log
+92472f9b5ea75ab3269a898c98292edde70b2ee5e63344c02deeef473e7961a0  13448B  /tmp/tdbp-rehead/logs/chunk_010.log  | full copies: /tmp/tdbp-rehead/logs/chunk_010.log
+17a4d9a38fa2a001cc01cd5ccd89180d8f4d848304b2961459a258066a77159e  6370B  /tmp/tdbp-rehead/logs/chunk_011.log  | full copies: /tmp/tdbp-rehead/logs/chunk_011.log
+907434952c490b9ba4eed7069e13befe6070ff3111d6cf06a9cb91d11a62ce7d  2623B  /tmp/tdbp-rehead/logs/chunk_012.log  | full copies: /tmp/tdbp-rehead/logs/chunk_012.log
+15cdcd8381d68012a6bc623829b590fcbea2ec9af7a092c4acb111b894fe9eaf  16043B  /tmp/tdbp-rehead/logs/chunk_013.log  | full copies: /tmp/tdbp-rehead/logs/chunk_013.log
+ce68c653ed7405354364f26459a256f435863eda3fc449076c9ff76cfd961710  14351B  /tmp/tdbp-rehead/logs/chunk_014.log  | full copies: /tmp/tdbp-rehead/logs/chunk_014.log
+ef103b8860a08c740d22e86be584e2e798061b7b560f98a39ee4a997bef18d19  18906B  /tmp/tdbp-rehead/logs/chunk_015.log  | full copies: /tmp/tdbp-rehead/logs/chunk_015.log
+6e986171a18904d880a4ccb3e0fdf0d450588fcac5938444531620aa43685a50  16158B  /tmp/tdbp-rehead/logs/chunk_016.log  | full copies: /tmp/tdbp-rehead/logs/chunk_016.log
+8f5d412cdc393c37d598c63f359dfcf10035523cf41d4ee5e82d4310a6bdb6f6  14750B  /tmp/tdbp-rehead/logs/chunk_017.log  | full copies: /tmp/tdbp-rehead/logs/chunk_017.log
+d7700f3c025d6cd2e9ef38c4549918e9d7ff887504511d66f399b4a7965cf708  13660B  /tmp/tdbp-rehead/logs/chunk_018.log  | full copies: /tmp/tdbp-rehead/logs/chunk_018.log
+975ff3d611c861577c1514ac7dd6837a50d78a105328961eb21c5b29981cbe53  23099B  /tmp/tdbp-rehead/logs/chunk_019.log  | full copies: /tmp/tdbp-rehead/logs/chunk_019.log
+0c423b16e08800bd1048310d4596b0bcc0f2b6f3c85ab6fb3396bca68664ed39  12521B  /tmp/tdbp-rehead/logs/chunk_020.log  | full copies: /tmp/tdbp-rehead/logs/chunk_020.log
+f3812b96cac6343f0952f43e5d80c22ade538dee064ac031467b34fbdc697d29  13296B  /tmp/tdbp-rehead/logs/chunk_021.log  | full copies: /tmp/tdbp-rehead/logs/chunk_021.log
+a1e0cf620842afe4b7c2a1691b7f8eb4870b8e1435699f1a62247fcdba458392  13826B  /tmp/tdbp-rehead/logs/chunk_022.log  | full copies: /tmp/tdbp-rehead/logs/chunk_022.log
+27921d22898d7ad3a23a7c11377c53c56ba478c5d2f4dc3320f66de5569232f5  14139B  /tmp/tdbp-rehead/logs/chunk_023.log  | full copies: /tmp/tdbp-rehead/logs/chunk_023.log
+1c0d71110d2531e29f546f6bafe559f6d3827f302366308c29c0cfcb5a409eb1  793B  /tmp/tdbp-rehead/logs/chunk_024.log  | full copies: /tmp/tdbp-rehead/logs/chunk_024.log
+1408b188b95de73a22ded7dada0b20f711f527666b6d3cf8acbcf667ad9501df  19143B  /tmp/tdbp-rehead/logs/chunk_025.log  | full copies: /tmp/tdbp-rehead/logs/chunk_025.log
+3dd2ebe75c4f516ed906e2bcdb1a89b13809eab7cf085ef7baa8039a1d9012ed  13009B  /tmp/tdbp-rehead/logs/chunk_026.log  | full copies: /tmp/tdbp-rehead/logs/chunk_026.log
+3a52673a6e295d9d3e0811d69f9b718367f14473ee20f7146d82193077df2108  15777B  /tmp/tdbp-rehead/logs/chunk_027.log  | full copies: /tmp/tdbp-rehead/logs/chunk_027.log
+9555e2109ac5a40a384adcdb8ffc58d62bcfd3971ab0a4e6b90cb76c9c86a6d5  13036B  /tmp/tdbp-rehead/logs/chunk_028.log  | full copies: /tmp/tdbp-rehead/logs/chunk_028.log
+dbb65cb347b86598d239ede293d32e0041cffb1ca279d5333b4707b8886ce62f  12510B  /tmp/tdbp-rehead/logs/chunk_029.log  | full copies: /tmp/tdbp-rehead/logs/chunk_029.log
+85eb2850c7c4d81c31b9308307f9dbca2032e2ccf9edb75c04fed45d1658466d  13422B  /tmp/tdbp-rehead/logs/chunk_030.log  | full copies: /tmp/tdbp-rehead/logs/chunk_030.log
+d9352259b5d5dfcbdb9ad95e215606a5cbcafe95440a76d567a165f2fe8806b7  12521B  /tmp/tdbp-rehead/logs/chunk_031.log  | full copies: /tmp/tdbp-rehead/logs/chunk_031.log
+829ee77f1cbfa101c25969dc5af0b196a1a192e1c9639ff22331c0ee43e99bb1  12520B  /tmp/tdbp-rehead/logs/chunk_032.log  | full copies: /tmp/tdbp-rehead/logs/chunk_032.log
+eafafac6ff700e2c884c318a74e52dde79a87fde691d417cc9eae9561463b1ce  15151B  /tmp/tdbp-rehead/logs/chunk_033.log  | full copies: /tmp/tdbp-rehead/logs/chunk_033.log
+5524abc2fb97e40827280e26aaf41afaf4f2b555011c120a80d96e4e9eda09ae  13724B  /tmp/tdbp-rehead/logs/chunk_034.log  | full copies: /tmp/tdbp-rehead/logs/chunk_034.log
+648b49e50061467b7d62b82d1348307b2cd4422d3a74a76493d011c8aa2f75e9  14115B  /tmp/tdbp-rehead/logs/chunk_035.log  | full copies: /tmp/tdbp-rehead/logs/chunk_035.log
+14b0c74d49e572e9dbb88ad1eb604ff825f844d25d6342494795bc79a4830f3e  13157B  /tmp/tdbp-rehead/logs/chunk_036.log  | full copies: /tmp/tdbp-rehead/logs/chunk_036.log
+46fe56b004df4e691ecc81a6930597c4c1860c7337d38d93490107758bc5d17e  12520B  /tmp/tdbp-rehead/logs/chunk_037.log  | full copies: /tmp/tdbp-rehead/logs/chunk_037.log
+01f55857b161683aaf970b3ba390365d843537fc7c58b1298063e49363e986db  12510B  /tmp/tdbp-rehead/logs/chunk_038.log  | full copies: /tmp/tdbp-rehead/logs/chunk_038.log
+45c3c4509d3469b4d974801290b9c580a25c517a89a0258c6a800821abb22af5  26883B  /tmp/tdbp-rehead/logs/chunk_039.log  | full copies: /tmp/tdbp-rehead/logs/chunk_039.log
+f39c0f13ae55b68432e053aed67f1f79f9dce186d060449f263a5a92a82cf430  19426B  /tmp/tdbp-rehead/logs/chunk_040.log  | full copies: /tmp/tdbp-rehead/logs/chunk_040.log
+884bd3125fb9c97768ff57e399db8eb13e1985ca351463a816b47e14c8bea24e  12510B  /tmp/tdbp-rehead/logs/chunk_041.log  | full copies: /tmp/tdbp-rehead/logs/chunk_041.log
+498f47aca1efa7c55c2a95f4d850bcc54ba4e246827b5e236877afd880da09ae  12509B  /tmp/tdbp-rehead/logs/chunk_042.log  | full copies: /tmp/tdbp-rehead/logs/chunk_042.log
+bc07b97b4f7c891c7d8290671e4feeb57ed399381fda1f50761a91858ac64e32  13252B  /tmp/tdbp-rehead/logs/chunk_043.log  | full copies: /tmp/tdbp-rehead/logs/chunk_043.log
+3b97c5ba01eb4e67e19b63d0d74e4ee07f18673a9788aed65b09981a70c9abab  15069B  /tmp/tdbp-rehead/logs/chunk_044.log  | full copies: /tmp/tdbp-rehead/logs/chunk_044.log
+aba785579b7fd1edccd1bfd67e9e8301115feb4c3972129300ca92bd215d2647  15897B  /tmp/tdbp-rehead/logs/chunk_045.log  | full copies: /tmp/tdbp-rehead/logs/chunk_045.log
+5057a4f429a8a572b07a5365391d560b596edb0d29c146584c279b9d0d8e5d80  13048B  /tmp/tdbp-rehead/logs/chunk_046.log  | full copies: /tmp/tdbp-rehead/logs/chunk_046.log
+aa1c684927526029de0ed3b521bfa8a189154356e3d84e1f30ef83e551469714  14270B  /tmp/tdbp-rehead/logs/chunk_047.log  | full copies: /tmp/tdbp-rehead/logs/chunk_047.log
+8bbf513f8c8adb0aa7d1d5fb803f7623f50cfd157d9309d48dc3bba0338ae4f2  15490B  /tmp/tdbp-rehead/logs/chunk_048.log  | full copies: /tmp/tdbp-rehead/logs/chunk_048.log
+795bc9a0cd62110328958ecdf7e44b2b8d5eb1fd49f397d0ae6c59373ecd670f  13236B  /tmp/tdbp-rehead/logs/chunk_049.log  | full copies: /tmp/tdbp-rehead/logs/chunk_049.log
+b9005ac48a04300b5eaf65ecb7a2beb1744f6ea38bcf1547fd8d452a4562257f  12521B  /tmp/tdbp-rehead/logs/chunk_050.log  | full copies: /tmp/tdbp-rehead/logs/chunk_050.log
+94c3c5c68dbca6889171b859e5380f6bf34c5249ce193f9d9066b1e698c514d5  14230B  /tmp/tdbp-rehead/logs/chunk_051.log  | full copies: /tmp/tdbp-rehead/logs/chunk_051.log
+1a4550554958ff13dffbd398d2e9577509d1019cf43a4b9af01fa8bfe198a226  12703B  /tmp/tdbp-rehead/logs/chunk_052.log  | full copies: /tmp/tdbp-rehead/logs/chunk_052.log
+92674e63c138eaec7d79dc3537c1fd58d2f51f62b1cc0f3449e757c23c018e7f  12521B  /tmp/tdbp-rehead/logs/chunk_053.log  | full copies: /tmp/tdbp-rehead/logs/chunk_053.log
+3d0101c80260691eb129766f19ef3fa38f17c901e6982da2cb07a9b0ac249609  12510B  /tmp/tdbp-rehead/logs/chunk_054.log  | full copies: /tmp/tdbp-rehead/logs/chunk_054.log
+1cd3114f57f9fc6a863eab7bf3e16e345ed8ddf4f5357d1f7d5d9c3e65191d12  13198B  /tmp/tdbp-rehead/logs/chunk_055.log  | full copies: /tmp/tdbp-rehead/logs/chunk_055.log
+8a41977bb362b90b053e169af021c489b9d2428fced9bb4163aff60112698f6c  14044B  /tmp/tdbp-rehead/logs/chunk_056.log  | full copies: /tmp/tdbp-rehead/logs/chunk_056.log
+b081b7150ed6162e1f69f65e9029665d9c6262bbd03d0e8e0f82d69364fbc69d  21989B  /tmp/tdbp-rehead/logs/chunk_057.log  | full copies: /tmp/tdbp-rehead/logs/chunk_057.log
+1e489c23667f7a8abc5ad517ecfa3add5495f56f658331b7f7289a83ccdf88c3  13516B  /tmp/tdbp-rehead/logs/chunk_058.log  | full copies: /tmp/tdbp-rehead/logs/chunk_058.log
+279dc5a327f711a4a701723de27a82eb180189d2a15b1610dfb1d7be7a354b5b  13964B  /tmp/tdbp-rehead/logs/chunk_059.log  | full copies: /tmp/tdbp-rehead/logs/chunk_059.log
+8263b75f92bed542dbbe9c775f674c6f526b8a5670dbf724acbe036624f347b6  14092B  /tmp/tdbp-rehead/logs/chunk_060.log  | full copies: /tmp/tdbp-rehead/logs/chunk_060.log
+ed8efbf83214699fdbac3be4235574b64dd8acc59becb3bc6125e3f1e4f737b7  12510B  /tmp/tdbp-rehead/logs/chunk_061.log  | full copies: /tmp/tdbp-rehead/logs/chunk_061.log
+bc21e67778113fd8a8b530409d03be041b5f4de754790bb0fc8417ad851e77fb  12510B  /tmp/tdbp-rehead/logs/chunk_062.log  | full copies: /tmp/tdbp-rehead/logs/chunk_062.log
+ab892cf8a99b9060f7b602efe1806549c1d43800ee48e65ab23f9eb8d1122b1a  12510B  /tmp/tdbp-rehead/logs/chunk_063.log  | full copies: /tmp/tdbp-rehead/logs/chunk_063.log
+ecab40f0d054bc78b2593bc1c7b2f972b5437d9c08c1c2509ae4fd2de5357a2d  15061B  /tmp/tdbp-rehead/logs/chunk_064.log  | full copies: /tmp/tdbp-rehead/logs/chunk_064.log
+89803f94969176c33151781c38c75dbdbcda8e8cefcf30a4eb9a870a8cc6ff13  12510B  /tmp/tdbp-rehead/logs/chunk_065.log  | full copies: /tmp/tdbp-rehead/logs/chunk_065.log
+84fedaf2101080cb2047b7525f79eb39875fc80be94ddd680559e7b141b515b4  12729B  /tmp/tdbp-rehead/logs/chunk_066.log  | full copies: /tmp/tdbp-rehead/logs/chunk_066.log
+3a3b22447003cd761375f23396d7f4da39a270bca91141f3dfbf43270ab995a0  14433B  /tmp/tdbp-rehead/logs/chunk_067.log  | full copies: /tmp/tdbp-rehead/logs/chunk_067.log
+b130b20369ca34039ff8994aaea915080986d9bb28ae1e5ce44db8eb1409a957  12988B  /tmp/tdbp-rehead/logs/chunk_068.log  | full copies: /tmp/tdbp-rehead/logs/chunk_068.log
+d3836ed83897f331a8b30ac7b6fd147b61a4e88a8066f9dcacc158a359c7f3bd  13887B  /tmp/tdbp-rehead/logs/chunk_069.log  | full copies: /tmp/tdbp-rehead/logs/chunk_069.log
+fcf9cdb74c8ba845d85f56536b0a167ff54b11c6f879dd296211b9024c2baae9  13454B  /tmp/tdbp-rehead/logs/chunk_070.log  | full copies: /tmp/tdbp-rehead/logs/chunk_070.log
+efa690cca6d1c751b089f6fbb02c0012fa47c3361783ea691cb55a925719768a  12510B  /tmp/tdbp-rehead/logs/chunk_071.log  | full copies: /tmp/tdbp-rehead/logs/chunk_071.log
+d4dc6a84048d64bc70fe9029cdcffff41f15fcd838d10311a5edecfe03375846  500B  /tmp/tdbp-rehead/logs/chunk_072.log  | full copies: /tmp/tdbp-rehead/logs/chunk_072.log
+e4ec29e82b149a79b1e06a3728a44c243623415b66b0633a4c9897281d6160d7  843B  /tmp/tdbp-rehead/logs/chunk_073.log  | full copies: /tmp/tdbp-rehead/logs/chunk_073.log
+584c58b65cce014b638c134c4b513c10b6e6d8220aec10ad97f20f867acb77a1  12949B  /tmp/tdbp-rehead/logs/chunk_074.log  | full copies: /tmp/tdbp-rehead/logs/chunk_074.log
+fbd753a31e50000fb6ea45847286c064df4a3fe498f3a28673004e3cdd4763d4  13683B  /tmp/tdbp-rehead/logs/chunk_075.log  | full copies: /tmp/tdbp-rehead/logs/chunk_075.log
+188df51c6ccf9435fb628d1dcda2a05be4d5f73cf0f6632a885ed155808a61f8  13277B  /tmp/tdbp-rehead/logs/chunk_076.log  | full copies: /tmp/tdbp-rehead/logs/chunk_076.log
+e5602578b3339e29d068e70cf28fe1194a41b52e38bf2de765684ab76b4e064c  14050B  /tmp/tdbp-rehead/logs/chunk_077.log  | full copies: /tmp/tdbp-rehead/logs/chunk_077.log
+34036163e83c1e98fb5d586d041e1e49e962cb80363b937e44e811f606deaa39  8632B  /tmp/tdbp-rehead/progress.log  | full copies: /tmp/tdbp-rehead/progress.log + /home/nea/ensemble-src-wt-tdbp-rehead/.agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify-wholetree/progress.log
+008c8acb6c23746b4228dadbc7a0d81d5c1bcd2ba0ea27ae35d605b10d37640f  37633B  /tmp/tdbp-rehead/rehead.ids  | full copies: /tmp/tdbp-rehead/rehead.ids + /home/nea/ensemble-src-wt-tdbp-rehead/.agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify-wholetree/rehead.ids
+aba12ff542c1ab4c236e46303ec8a75b5883351bc8fcff20d6f3c71c9008100c  2706B  /tmp/tdbp-rehead/run_chunks.sh  | full copies: /tmp/tdbp-rehead/run_chunks.sh + /home/nea/ensemble-src-wt-tdbp-rehead/.agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify-wholetree/run_chunks.sh
+
+## /tmp/tdbp-r11/ — 11-id isolated x3 + ladder rows: per-attempt bulk + driver/id/pg top-level
+136861ae7bfa6a11abe13aec5b294aa2992eb6390a0f521ae9f250c9ece1540d  1017B  /tmp/tdbp-r11/ids.txt  | full copies: /tmp/tdbp-r11/ids.txt
+e4a67493e375caed1d3ab398778ca8b059180b5d08a3a59c6e76f985ebb012ac  1324B  /tmp/tdbp-r11/part1_driver.sh  | full copies: /tmp/tdbp-r11/part1_driver.sh
+0ab0a174bb1e9fe77584bdd59742dee02155959689fdfd5553e50a105706c6fa  6082B  /tmp/tdbp-r11/pg.log  | full copies: /tmp/tdbp-r11/pg.log
+596337a5a0a1468f132b33c55f67720a4d265980ecf1db7701f4f851537b56b2  610B  /tmp/tdbp-r11/raw/part1_id10_att1.log  | full copies: /tmp/tdbp-r11/raw/part1_id10_att1.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id10_att1.log (in-repo, same commit)
+486519b70a8349a30d1fadc5cd16f03f7112fa6ea483bfaade7863317237f47e  610B  /tmp/tdbp-r11/raw/part1_id10_att2.log  | full copies: /tmp/tdbp-r11/raw/part1_id10_att2.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id10_att2.log (in-repo, same commit)
+2a2e67502452396580c8b75b5e5ad826f541712d207fd88156054b98f0c6fb37  610B  /tmp/tdbp-r11/raw/part1_id10_att3.log  | full copies: /tmp/tdbp-r11/raw/part1_id10_att3.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id10_att3.log (in-repo, same commit)
+54dbc3045c52ca7447d3fd36863db7f7c73ed32b52c62a947e2109e153366226  1470B  /tmp/tdbp-r11/raw/part1_id11_att1.log  | full copies: /tmp/tdbp-r11/raw/part1_id11_att1.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id11_att1.log (in-repo, same commit)
+ca5377c56e966c2332883732d217e27ca2da036bef83402ff6f199dccd29c7cb  1470B  /tmp/tdbp-r11/raw/part1_id11_att2.log  | full copies: /tmp/tdbp-r11/raw/part1_id11_att2.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id11_att2.log (in-repo, same commit)
+c34d0fc208513088626500bcd3a3e1087dbe669c244958bde9a74352fb3455f7  1470B  /tmp/tdbp-r11/raw/part1_id11_att3.log  | full copies: /tmp/tdbp-r11/raw/part1_id11_att3.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id11_att3.log (in-repo, same commit)
+042ee2ce700744282c9d2c8cfe9eae280208b46e9b49664e24c36ce9af5db05d  966B  /tmp/tdbp-r11/raw/part1_id1_att1.log  | full copies: /tmp/tdbp-r11/raw/part1_id1_att1.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id1_att1.log (in-repo, same commit)
+9382de1d11a3a2ff0075e27aec8a6572dbfba529033af7fca16b411d173bd161  966B  /tmp/tdbp-r11/raw/part1_id1_att2.log  | full copies: /tmp/tdbp-r11/raw/part1_id1_att2.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id1_att2.log (in-repo, same commit)
+4f57d07bd9eff0f826495348ceb430045890edc2508465155da26b5d78f5bdaf  966B  /tmp/tdbp-r11/raw/part1_id1_att3.log  | full copies: /tmp/tdbp-r11/raw/part1_id1_att3.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id1_att3.log (in-repo, same commit)
+84803614d05a8e10197b91e5dabb8aed86e1bba3c806290cdbe0d1430d11b0fe  1120B  /tmp/tdbp-r11/raw/part1_id2_att1.log  | full copies: /tmp/tdbp-r11/raw/part1_id2_att1.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id2_att1.log (in-repo, same commit)
+b82830e7ae9d8a13fd26e839505803bdff4d774ab596d147c12bcfb29224e645  1120B  /tmp/tdbp-r11/raw/part1_id2_att2.log  | full copies: /tmp/tdbp-r11/raw/part1_id2_att2.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id2_att2.log (in-repo, same commit)
+f655d28b01d0932a10bf37b17ca77219d34e0da78490d96e6fd61838ffa8f3cd  1120B  /tmp/tdbp-r11/raw/part1_id2_att3.log  | full copies: /tmp/tdbp-r11/raw/part1_id2_att3.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id2_att3.log (in-repo, same commit)
+6967a548194f5d7fcf70db83144539e57ccc0b9ec7d8dcf1d043ba1b64323361  956B  /tmp/tdbp-r11/raw/part1_id3_att1.log  | full copies: /tmp/tdbp-r11/raw/part1_id3_att1.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id3_att1.log (in-repo, same commit)
+2f84573db4f13106aaf717bf7866a06604d8d0ca4b5fbd7d6e480f5a9d5e4ddb  956B  /tmp/tdbp-r11/raw/part1_id3_att2.log  | full copies: /tmp/tdbp-r11/raw/part1_id3_att2.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id3_att2.log (in-repo, same commit)
+2f84573db4f13106aaf717bf7866a06604d8d0ca4b5fbd7d6e480f5a9d5e4ddb  956B  /tmp/tdbp-r11/raw/part1_id3_att3.log  | full copies: /tmp/tdbp-r11/raw/part1_id3_att3.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id3_att3.log (in-repo, same commit)
+67a7f0451c722536cadd5de950b4b1655a81098d7aed9b684bae8e4e8c368355  588B  /tmp/tdbp-r11/raw/part1_id4_att1.log  | full copies: /tmp/tdbp-r11/raw/part1_id4_att1.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id4_att1.log (in-repo, same commit)
+f29603050be73bb5ec9ddac1748b84f0a301968f6ffd3eec15dd6e93db0e2164  588B  /tmp/tdbp-r11/raw/part1_id4_att2.log  | full copies: /tmp/tdbp-r11/raw/part1_id4_att2.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id4_att2.log (in-repo, same commit)
+c0343dc269e358f945b6f095f9c2f1668a57bb9e61cb0f210f42dc51306aa897  588B  /tmp/tdbp-r11/raw/part1_id4_att3.log  | full copies: /tmp/tdbp-r11/raw/part1_id4_att3.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id4_att3.log (in-repo, same commit)
+81ee7521d25ae4a690c7cf368ca2649882dd8c85a11847ecce8f05f873a7ff58  588B  /tmp/tdbp-r11/raw/part1_id5_att1.log  | full copies: /tmp/tdbp-r11/raw/part1_id5_att1.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id5_att1.log (in-repo, same commit)
+81ee7521d25ae4a690c7cf368ca2649882dd8c85a11847ecce8f05f873a7ff58  588B  /tmp/tdbp-r11/raw/part1_id5_att2.log  | full copies: /tmp/tdbp-r11/raw/part1_id5_att2.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id5_att2.log (in-repo, same commit)
+a0f5217b8d6203577d9752349bc7e43f16d4aa39a2665497acee9771f41fce90  588B  /tmp/tdbp-r11/raw/part1_id5_att3.log  | full copies: /tmp/tdbp-r11/raw/part1_id5_att3.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id5_att3.log (in-repo, same commit)
+27053d7c93470601d3b7e8a9c577d28bd34f69d9923ceb999eba829d7aee4492  1116B  /tmp/tdbp-r11/raw/part1_id6_att1.log  | full copies: /tmp/tdbp-r11/raw/part1_id6_att1.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id6_att1.log (in-repo, same commit)
+aeda6a36fcb08dd07a76a18baa0c5a5d1a82fab1f16365444989a9e8177195f7  1116B  /tmp/tdbp-r11/raw/part1_id6_att2.log  | full copies: /tmp/tdbp-r11/raw/part1_id6_att2.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id6_att2.log (in-repo, same commit)
+571db9315093e0af3097cd48b7d5f3d45723872093ba760137b0acc78e123192  1116B  /tmp/tdbp-r11/raw/part1_id6_att3.log  | full copies: /tmp/tdbp-r11/raw/part1_id6_att3.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id6_att3.log (in-repo, same commit)
+0c20d6943dda8dfa0203f691a7a91a4aeb55a59a6ebca6e6f1f3a1218b2823b1  98B  /tmp/tdbp-r11/raw/part1_id7_att1.log  | full copies: /tmp/tdbp-r11/raw/part1_id7_att1.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id7_att1.log (in-repo, same commit)
+c7a82a1acbc744ec410dfb95ad54738efc4c81739c4acaa9ea7d79fd5c953c6d  98B  /tmp/tdbp-r11/raw/part1_id7_att2.log  | full copies: /tmp/tdbp-r11/raw/part1_id7_att2.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id7_att2.log (in-repo, same commit)
+7619d6c5db5d4b565c681857299413edb733a0e95c5692d0227704039ba7d813  98B  /tmp/tdbp-r11/raw/part1_id7_att3.log  | full copies: /tmp/tdbp-r11/raw/part1_id7_att3.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id7_att3.log (in-repo, same commit)
+bc08f57662c73fa1c0646a36b3dba7bfc81a67f305913c07bdbb236cb0b2ea16  98B  /tmp/tdbp-r11/raw/part1_id8_att1.log  | full copies: /tmp/tdbp-r11/raw/part1_id8_att1.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id8_att1.log (in-repo, same commit)
+50c2683a6e542447a390ea2bee2fc36642a658ad8d6976df8a48e522a1a4713e  98B  /tmp/tdbp-r11/raw/part1_id8_att2.log  | full copies: /tmp/tdbp-r11/raw/part1_id8_att2.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id8_att2.log (in-repo, same commit)
+6f2bffa6e2a5e4485cf91c46141a323a91086c501d3c99613962b77472659e42  98B  /tmp/tdbp-r11/raw/part1_id8_att3.log  | full copies: /tmp/tdbp-r11/raw/part1_id8_att3.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id8_att3.log (in-repo, same commit)
+3e463b6e00f29aa3686a288e96f951880d7043561e3d22f0b0a2a86c9a5f3eaa  971B  /tmp/tdbp-r11/raw/part1_id9_att1.log  | full copies: /tmp/tdbp-r11/raw/part1_id9_att1.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id9_att1.log (in-repo, same commit)
+12cf9e5429ac1d24c7d188340e29821345dd3ac1154ec916aef19dc2069fe9ba  971B  /tmp/tdbp-r11/raw/part1_id9_att2.log  | full copies: /tmp/tdbp-r11/raw/part1_id9_att2.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id9_att2.log (in-repo, same commit)
+12cf9e5429ac1d24c7d188340e29821345dd3ac1154ec916aef19dc2069fe9ba  971B  /tmp/tdbp-r11/raw/part1_id9_att3.log  | full copies: /tmp/tdbp-r11/raw/part1_id9_att3.log + .agents/tester/RESULTS/raw/2026-10-29-dbpool-reverify/part1_id9_att3.log (in-repo, same commit)

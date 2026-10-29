@@ -1,0 +1,5 @@
+ current_user | current_database | inet_server_port 
+--------------+------------------+------------------
+ dbpool_mut2  | dbpool_mut2      |             5447
+(1 row)
+

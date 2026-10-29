@@ -1,0 +1,16 @@
+--- /tmp/tdbp-mut2/leg6_readiness_pristine.py	2026-10-29 09:21:16.585058557 +0000
++++ daemon/services/readiness.py	2026-10-29 09:21:16.673058438 +0000
+@@ -1846,13 +1846,6 @@
+             # bound in ens_db_repair_postgres_select (see
+             # SELECT_TX_STATEMENT_TIMEOUT_MS in daemon/tools/ens_db_tools.py);
+             # SQLite does not support SET LOCAL.
+-            if engine.url.get_backend_name().startswith("postgres"):
+-                conn.execute(
+-                    sa_text(
+-                        "SET LOCAL statement_timeout = "
+-                        f"{_probe_statement_timeout_ms(QUEUE_PROBE_TIMEOUT_S)}"
+-                    )
+-                )
+             value = conn.execute(
+                 age_statement,
+                 {"status_running": TASK_STATUS_RUNNING, "boot_epoch": epoch_bind},

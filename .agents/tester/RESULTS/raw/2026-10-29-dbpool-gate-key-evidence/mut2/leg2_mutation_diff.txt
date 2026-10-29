@@ -1,0 +1,10 @@
+--- /tmp/tdbp-mut2/leg2_manager_pristine.py	2026-10-29 09:15:24.746091712 +0000
++++ daemon/manager.py	2026-10-29 09:15:24.869091105 +0000
+@@ -11681,6 +11681,7 @@
+         with self._write_guard:
+             with self._session_scope() as session:
+                 # ── P0: read-decide scope ──
++                await asyncio.sleep(0)
+                 inj = session.get(ReportInjection, injection_id)
+                 if inj is None:
+                     logger.info(

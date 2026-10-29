@@ -1,0 +1,13 @@
+# db-pool gate ladder — interpreter certification
+/home/nea/ensemble-src-wt-tdbp-gate/daemon/__init__.py 9.0.2
+── G2.5 [postgres] ──────────────────────────────────────────────
+COLLECTED-OK count=5 expected=5
+.....                                                                    [100%]
+5 passed in 6.20s
+G2.5 [postgres]: PASS (count=5 asserted from expected-collected.md rows 20,21)
+── G2.5 [integration — marker split of the canonical row] ──────────────────────────────────────────────
+COLLECTED-OK count=9 expected=9
+.........                                                                [100%]
+9 passed in 25.56s
+G2.5 [integration — marker split of the canonical row]: PASS (count=9 asserted from expected-collected.md rows 23,26)
+LADDER: OK (mode=--run, rows matched=2)

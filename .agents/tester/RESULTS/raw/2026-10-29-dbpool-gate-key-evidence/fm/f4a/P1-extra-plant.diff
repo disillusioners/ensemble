@@ -1,0 +1,13 @@
+diff --git a/daemon/services/readiness.py b/daemon/services/readiness.py
+index 74c1bc142..205fceb86 100644
+--- a/daemon/services/readiness.py
++++ b/daemon/services/readiness.py
+@@ -1590,7 +1590,7 @@ def _refuse_pool_admission_at_capacity(engine: Engine) -> None:
+         # of exhaustion — never refuse on a guess.
+         return
+     in_use = checkedout()
+-    if in_use >= capacity:
++    if in_use >= MANAGER_POOL_CONFIGURED_CAPACITY:
+         raise TimeoutError(
+             "readiness probe admission refused: manager pool at "
+             f"effective capacity ({in_use}/{capacity})"

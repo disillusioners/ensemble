@@ -1,0 +1,29 @@
+=== FINAL git status --porcelain (tracked changes must be EMPTY) ===
+?? .agents/tester/RESULTS/raw/
+[end of porcelain — empty above means no tracked mutation remains]
+
+=== tracked-file diff vs HEAD (must be empty) ===
+[end diff]
+
+=== the four mutated files: sha256 NOW vs the pristine record ===
+abc6e0745f3bbb330ff35056f39f6b7cdfc5cb61415b4f3b343b6e525965f46e  tests/packs/dbpool_gate_ladder.sh
+a946e2a2d5ca8bba5f415b56c432b0c0acc7717937013ce23d95deafa71003ec  tests/packs/dbpool_collected_fence.sh
+78bb883fc3eb7e67b2a1ca420abf80c6596e21ab53ae0d459cb523bff4933100  daemon/manager.py
+9452e948f45db94d9db7310b6bfc6ef6bd124686e294cb97aff1225e24bd4ee9  daemon/services/readiness.py
+e7e8a490bd720c7bde348d876ccbe7b6a1b9e3d37cd050b97973ad52a7043c78  tests/integration/test_db_pool_idle_in_transaction_guard.py
+0fb48cd1fd1b53807f1e7e08378f2454be12c80216fbf03e6e3053a56003927e  tests/integration/test_dbpool_churn_census.py
+
+=== untracked entries (the evidence dir I created) ===
+?? .agents/tester/RESULTS/raw/2026-10-29-dbpool-mut2/interpreter_certification.txt
+?? .agents/tester/RESULTS/raw/2026-10-29-dbpool-mut2/leg1_baseline_bogus_filter.out
+?? .agents/tester/RESULTS/raw/2026-10-29-dbpool-mut2/leg1_fence_copy.sh
+?? .agents/tester/RESULTS/raw/2026-10-29-dbpool-mut2/leg1_git_status.txt
+?? .agents/tester/RESULTS/raw/2026-10-29-dbpool-mut2/leg1_green_bogus_filter.out
+1
+
+=== worktree HEAD unchanged ===
+c89e3470c test(dbpool): expected-collected.md — strip code spans from filled count cells (Δ1 parser compatibility; format-only)
+c89e3470c64756f6df989a2868ac9d68b484980e
+
+=== gate worktree untouched? (mtime of its ladder script + porcelain of ITS git) ===
+2026-10-29 06:00:42.918594989 +0000 /home/nea/ensemble-src-wt-tdbp-gate/tests/packs/dbpool_gate_ladder.sh

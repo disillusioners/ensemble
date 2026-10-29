@@ -1,0 +1,13 @@
+diff --git a/daemon/repositories/factory.py b/daemon/repositories/factory.py
+index 2810ee648..ef45f9eaa 100644
+--- a/daemon/repositories/factory.py
++++ b/daemon/repositories/factory.py
+@@ -274,7 +274,7 @@ PG_SESSION_CONNECT_ARGS: dict[str, str] = {"options": "-c timezone=UTC"}
+ # TABLE REWRITEs under ACCESS EXCLUSIVE locks in ONE transaction; a
+ # 30 s cap there means the daemon does not boot on a steady-state
+ # no-op path).
+-MANAGER_ENGINE_IDLE_IN_TXN_BACKSTOP_ENABLED = False
++MANAGER_ENGINE_IDLE_IN_TXN_BACKSTOP_ENABLED = True
+ 
+ 
+ def _manager_pg_session_options() -> str:

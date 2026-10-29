@@ -1,0 +1,6 @@
+   datname   |    owner    
+-------------+-------------
+ postgres    | postgres
+ dbpool_mut2 | dbpool_mut2
+(2 rows)
+

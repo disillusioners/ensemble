@@ -1,0 +1,40 @@
+    def format_frame_summary(self, frame_summary, **kwargs):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/message_queue_redesign/test_waiting_for_atomic.py::TestWaitingForIncrementAtomic::test_increment_increases_by_one
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py:95: RuntimeWarning: coroutine 'cancel_bus_watchers_for_task_async' was never awaited
+    args = [caller_kwargs[argname] for argname in hook_impl.argnames]
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/message_queue_redesign/test_worker_timeout.py::TestTimeoutMonitorLifecycle::test_monitor_stopped_on_success
+  /home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/inspect.py:2517: RuntimeWarning: coroutine 'MockTaskProcessor.run_task.<locals>._run' was never awaited
+    _get_signature_of = functools.partial(_signature_from_callable,
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/message_queue_redesign/test_worker_timeout.py::TestWorkerRetryWorkflow::test_timeout_cancellation_triggers_retry
+  /home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/importlib/__init__.py:88: RuntimeWarning: coroutine 'MockTaskProcessor.run_task.<locals>._run' was never awaited
+    return _bootstrap._gcd_import(name[level:], package, level)
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/message_queue_redesign/test_worker_timeout.py::TestOriginalSourcePreservation::test_process_message_processor_dispatches_with_original_source
+  /home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/unittest/mock.py:2600: RuntimeWarning: coroutine 'MockTaskProcessor.run_task.<locals>._run' was never awaited
+    return tuple.__new__(cls, (args, kwargs))
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/migration/test_auth_tables_g2_2.py::TestPgCreateAllIndexParity::test_pg_tables_and_indexes_materialize
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/psycopg/_wrappers.py:122: RuntimeWarning: coroutine 'MockTaskProcessor.run_task.<locals>._run' was never awaited
+    class Oid(int):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/message_queue_redesign/test_usage_limit_worker_seam.py::TestCarveOut::test_usage_limit_re_raised_no_cascade
+FAILED tests/message_queue_redesign/test_usage_limit_worker_seam.py::TestCarveOut::test_other_exceptions_cascade_unchanged
+FAILED tests/migration/test_attestation_migration.py::TestNoBooleanIntegerDefaultInShippedMigrations::test_no_boolean_int_literal_default
+3 failed, 384 passed, 13 skipped, 1178 warnings in 48.85s

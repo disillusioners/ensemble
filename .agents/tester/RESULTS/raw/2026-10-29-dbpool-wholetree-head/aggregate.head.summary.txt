@@ -1,0 +1,130 @@
+=== dbpool-idle-txn whole-tree HEAD leg — aggregate summary (ATTEMPT 2, authoritative) ===
+head_commit            : c89e3470c64756f6df989a2868ac9d68b484980e (tester/dbpool-functional-gate; chain 4cc63574a -> 47ff2f5ff -> 8cc538a71 -> e30ab1890 -> c89e3470c)
+worktree               : /home/nea/ensemble-src-wt-tdbp-gate
+interpreter            : /home/nea/ensemble-src/.venv/bin/python (pytest 9.0.2, py 3.13)
+method (verbatim)      : timeout 1500 env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_HOST -u POSTGRES_PORT -u DAEMON_PORT ENSEMBLE_SELF_ENV=dev HOME=$(mktemp -d) $PY -m pytest <ids...> -q --tb=no -rfE --timeout=120
+method-match           : byte-identical to BASE leg /tmp/tdbp-wtbase/driver.sh (read verbatim pre-run)
+census command         : pytest tests/ --collect-only -q --ignore=tests/packs/g7_unique_index_smoke_test.py --ignore=tests/e2e/test_context_injection_hybrid.py (same fence)
+head_collected         : 31084  (of 32158; 1074 deselected by default addopts)
+identity check         : PASS — 30975 base + 109 = 31084 exact (103 new default-pack tests across 17 new tests/unit/tools/test_dbpool_*.py files + 6 row-1 amendment ids in 4 M files; +27 deselected = new integration(17 defs)+postgres(8 defs) packs, non-default by design; 109+27=136=32158-32022)
+ids_executed           : 31084 (78 chunks: 77x400 + 1x284)
+accounted (p+f+e+s+xf+xp): 31084   (delta vs ids_executed: 0 — every collected id produced a result)
+
+--- execution totals (ATTEMPT 2 — --timeout=120, authoritative) ---
+  passed    : 30425
+  failed    : 330
+  errors    : 27
+  skipped   : 296
+  xfailed   : 6
+  xpassed   : 0
+  warnings  : 4327 (4320 plural-tally + 7 singular "1 warning" lines)
+  deselected: 1074 (default addopts)
+
+--- execution totals (ATTEMPT 1 — SUPERSEDED: ini timeout=30 cap, no ENSEMBLE_SELF_ENV; kept at /tmp/tdbp-wthead/, labeled ATTEMPT1_TIMEOUT30_SUPERSEDED) ---
+  passed 30354 / failed 327 / errors 27 / skipped 296 / xfailed 6 / xpassed 0 / warnings 4385; unique FAILED+ERROR 354; sha256(failed.head) a0950d3838a278f86f6133a3c9110ed9824438d573bfb79727bb98fba812c2d2
+  reason superseded: dispatch correction 2026-10-29 — per-test cap 30s (pyproject ini, thread method) vs base leg --timeout=120; no chunk died at 30s in attempt 1 (78/78 valid summaries) but the cap is a method mismatch and a hidden-chunk hazard; attempt 2 is the evidence of record.
+
+--- failed/error set (ATTEMPT 2) ---
+  unique ids          : 357  (FAILED 330, ERROR 27)
+  sha256(failed.head.txt)  : 6f11c05188bb379b7fd9108227e34d516c975be36693fbde4c5a1a32518a901c
+  sha256(collect.head.txt) : 16861342988036a82794da2e43b259a16fa9862b2a90866f5253867bfbc47264
+  areas               : tests/unit 107, tests/integration 37, tests/job_queue 18, tests/tools 13, tests/services 12, tests/manager 9, tests/e2e 6, tests/repositories 3, tests/message_queue_redesign 3, tests/static 2, tests/performance 2, tests/api 2, root-level files 10
+  dbpool lane packs   : 0 failures (all new tests_dbpool_* packs green — ladder-proven)
+
+--- comm vs BASE (/tmp/tdbp-wtbase/failed.base.txt, sha b06a5f80...) ---
+  shared (red BOTH)   : 342
+  HEAD-only red       : 15 (listed in comm_vs_base.txt)
+  BASE-only red       : 4  (listed in comm_vs_base.txt)
+  watch items: chart seal tripwire test_phase_d_does_not_modify_sealed_artifacts AND checkpoint_pool_constants test_the_field_defaults_mirror_the_constants are BOTH in the SHARED set (red at base too = pre-existing; classification dispatcher-owned)
+
+--- excluded specials (separate bounded probes, NOT folded into failed.head.txt) ---
+  tests/packs/g7_unique_index_smoke_test.py : INTERNALERROR (module-level sys.exit(0) at :121 during import rewrite; "no tests ran in 0.91s"; pytest_exit=3)
+  tests/e2e/test_context_injection_hybrid.py: ERROR at collection (requests.exceptions.Connection... ; 1 error in 0.42s; pytest_exit=2)
+  verbatim transcript in excluded_specials.head.txt
+
+--- run mechanics ---
+chunks OK: 78
+chunks DEAD/split/UNRESOLVED: 0 / 0 / 0
+driver wall: 6457s (09:10:42Z-approx start -> 10:38:19Z done, attempt 2)
+attempt 1 wall: 5801s
+re-runs: attempt1 -> 4 duplicate split re-runs (rchunk_000_0/1, rchunk_001_0/1) caused by MY summary-detection bug (rm_rf warnings follow the tally line); quarantined at superseded_split_reruns_detector_bug/, never aggregated. attempt2: none.
+
+--- per-chunk tallies (attempt 2) ---
+chunk_000 rc=rc=1 369s ids=400
+chunk_001 rc=rc=1 215s ids=400
+chunk_002 rc=rc=1 214s ids=400
+chunk_003 rc=rc=1 146s ids=400
+chunk_004 rc=rc=1 81s ids=400
+chunk_005 rc=rc=1 34s ids=400
+chunk_006 rc=rc=1 65s ids=400
+chunk_007 rc=rc=0 74s ids=400
+chunk_008 rc=rc=1 103s ids=400
+chunk_009 rc=rc=1 54s ids=400
+chunk_010 rc=rc=1 719s ids=400
+chunk_011 rc=rc=1 38s ids=400
+chunk_012 rc=rc=1 33s ids=400
+chunk_013 rc=rc=1 74s ids=400
+chunk_014 rc=rc=0 45s ids=400
+chunk_015 rc=rc=1 37s ids=400
+chunk_016 rc=rc=1 73s ids=400
+chunk_017 rc=rc=1 79s ids=400
+chunk_018 rc=rc=0 21s ids=400
+chunk_019 rc=rc=1 118s ids=400
+chunk_020 rc=rc=0 156s ids=400
+chunk_021 rc=rc=1 160s ids=400
+chunk_022 rc=rc=1 41s ids=400
+chunk_023 rc=rc=1 41s ids=400
+chunk_024 rc=rc=1 17s ids=400
+chunk_025 rc=rc=1 22s ids=400
+chunk_026 rc=rc=0 18s ids=400
+chunk_027 rc=rc=1 110s ids=400
+chunk_028 rc=rc=0 101s ids=400
+chunk_029 rc=rc=0 42s ids=400
+chunk_030 rc=rc=1 64s ids=400
+chunk_031 rc=rc=0 124s ids=400
+chunk_032 rc=rc=0 102s ids=400
+chunk_033 rc=rc=1 109s ids=400
+chunk_034 rc=rc=0 28s ids=400
+chunk_035 rc=rc=1 27s ids=400
+chunk_036 rc=rc=0 22s ids=400
+chunk_037 rc=rc=0 81s ids=400
+chunk_038 rc=rc=0 41s ids=400
+chunk_039 rc=rc=1 85s ids=400
+chunk_040 rc=rc=1 72s ids=400
+chunk_041 rc=rc=0 35s ids=400
+chunk_042 rc=rc=0 13s ids=400
+chunk_043 rc=rc=0 70s ids=400
+chunk_044 rc=rc=1 22s ids=400
+chunk_045 rc=rc=1 59s ids=400
+chunk_046 rc=rc=1 49s ids=400
+chunk_047 rc=rc=0 39s ids=400
+chunk_048 rc=rc=1 112s ids=400
+chunk_049 rc=rc=0 89s ids=400
+chunk_050 rc=rc=0 110s ids=400
+chunk_051 rc=rc=1 33s ids=400
+chunk_052 rc=rc=1 20s ids=400
+chunk_053 rc=rc=0 120s ids=400
+chunk_054 rc=rc=0 33s ids=400
+chunk_055 rc=rc=0 239s ids=400
+chunk_056 rc=rc=0 80s ids=400
+chunk_057 rc=rc=1 23s ids=400
+chunk_058 rc=rc=1 63s ids=400
+chunk_059 rc=rc=1 63s ids=400
+chunk_060 rc=rc=1 339s ids=400
+chunk_061 rc=rc=0 34s ids=400
+chunk_062 rc=rc=0 20s ids=400
+chunk_063 rc=rc=0 46s ids=400
+chunk_064 rc=rc=1 47s ids=400
+chunk_065 rc=rc=0 28s ids=400
+chunk_066 rc=rc=1 22s ids=400
+chunk_067 rc=rc=1 92s ids=400
+chunk_068 rc=rc=1 33s ids=400
+chunk_069 rc=rc=1 75s ids=400
+chunk_070 rc=rc=1 129s ids=400
+chunk_071 rc=rc=0 41s ids=400
+chunk_072 rc=rc=0 8s ids=400
+chunk_073 rc=rc=1 9s ids=400
+chunk_074 rc=rc=1 11s ids=400
+chunk_075 rc=rc=1 88s ids=400
+chunk_076 rc=rc=1 49s ids=400
+chunk_077 rc=rc=0 54s ids=284

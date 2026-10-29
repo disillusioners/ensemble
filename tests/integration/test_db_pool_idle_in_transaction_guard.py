@@ -21,7 +21,7 @@ resolves to an existing constant in ``daemon/constants.py``.
 |------------------------------------------------|-------------------------------------------------------|------------|
 | guard read/write cycle (this pack)             | ``DBPOOL_IDLE_IN_TXN_RESIDENCE_BUDGET_S``             | 62.5x the measured MAX healthy residence (0.0008 s, n=40 — ``BASELINE.md`` T2(d)); > 3 orders above p95 (0.0007 s) |
 | churn census cycle (``test_dbpool_churn_census.py``) | — (none; REPORTED only)                             | the churn pack does NOT budget-judge its cycle: the residence budget assertion lives in THIS pack alone; the churn pack reports peak ``xact_age_s`` as a DISCLOSURE and asserts only the occupancy half (checkedout back to baseline — Deferred #5 reconciliation: the old row over-claimed) |
-| deferred-report reconcile P2 (``daemon/manager.py``) | ``MANAGER_ENGINE_LEGITIMATE_HOLD_BUDGET_S``     | NOT-DERIVABLE at pin-writing (Δ3(iii)/DR-11 — the real fetch latency is unmeasured); measured post-F8 by the TESTER; scoped OUT while the sentinel is negative — never guessed |
+| deferred-report reconcile P2 (``daemon/manager.py``) | ``MANAGER_ENGINE_LEGITIMATE_HOLD_BUDGET_S``     | 0.25 s = worst measured post-F8 legitimate hold ×10, rounded up — worst 0.021607 s / p95 0.019867 s (reconcile P2 sub-shape (a), n=20/leg over 7 legs, scratch PG16 127.0.0.1:5444, lane HEAD 4cc63574a, 2026-10-29); measured post-F8 at pin-writing (NOT Phase-0); raw: ``.agents/tester/RESULTS/raw/2026-10-29-dbpool-delta3/`` |
 
 ── THE MEASURED INVARIANT (D-48/DR-35 — both halves, co-equal) ──
 
@@ -360,9 +360,12 @@ class TestF7aResidenceMetric:
             "positive constant (the 2.0 s placeholder is WITHDRAWN, not "
             "the constant itself)"
         )
-        assert MANAGER_ENGINE_LEGITIMATE_HOLD_BUDGET_S < 0, (
-            "F7-a: the reconcile budget must still carry the Δ3 "
-            "NOT-DERIVABLE sentinel until the TESTER measures post-F8"
+        assert MANAGER_ENGINE_LEGITIMATE_HOLD_BUDGET_S == 0.25, (
+            "F7-a: the reconcile budget is DERIVED post-F8 by the "
+            "TESTER (Δ3(i)/D-47/DR-11 sentinel resolved): 0.25 s = "
+            "worst measured legitimate hold 0.021607 s × 10, rounded "
+            "up; re-derive (with raw evidence) and update this pin "
+            "in the same change — never silently edit the number."
         )
         healthy_rows = scratch_db.census()
         violations = _residence_violations(

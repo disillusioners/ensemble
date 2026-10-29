@@ -1,0 +1,31 @@
+=== PROBE: tests/packs/g7_unique_index_smoke_test.py ===
+INTERNALERROR>   File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+INTERNALERROR>   File "<frozen importlib._bootstrap>", line 935, in _load_unlockedmainloop: caught unexpected SystemExit!
+
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/assertion/rewrite.py", line 197, in exec_module
+INTERNALERROR>     exec(co, module.__dict__)
+INTERNALERROR>     ~~~~^^^^^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/home/nea/ensemble-src-wt-tdbp-gate/tests/packs/g7_unique_index_smoke_test.py", line 121, in <module>
+INTERNALERROR>     sys.exit(0)
+INTERNALERROR>     ~~~~~~~~^^^
+INTERNALERROR> SystemExit: 0
+
+no tests ran in 0.91s
+(probe exit=0)
+
+=== PROBE: tests/e2e/test_context_injection_hybrid.py ===
+
+=========================== short test summary info ============================
+ERROR tests/e2e/test_context_injection_hybrid.py - requests.exceptions.Connec...
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.45s
+(probe exit=0)
+
+
+=== true pytest exit codes (corrected capture) ===
+tests/packs/g7_unique_index_smoke_test.py -> pytest_exit=3
+
+no tests ran in 0.88s
+tests/e2e/test_context_injection_hybrid.py -> pytest_exit=2
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 0.42s

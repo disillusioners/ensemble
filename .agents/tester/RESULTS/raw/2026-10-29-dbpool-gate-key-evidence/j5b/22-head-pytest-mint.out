@@ -1,0 +1,23 @@
+=========== LEG 3: mission mint PG pack (Class-2) ===========
+...                                                                      [100%]
+==================================== PASSES ====================================
+=========================== short test summary info ============================
+PASSED tests/postgres/test_dbpool_mission_mint_pg.py::TestF6bConcurrentDoubleMint::test_concurrent_mint_for_one_anchor_returns_one_mission_id
+PASSED tests/postgres/test_dbpool_mission_mint_pg.py::TestF6cIndexPresence::test_index_exists_with_a_byte_identical_predicate
+PASSED tests/postgres/test_dbpool_mission_mint_pg.py::TestF6cIndexPresence::test_without_the_index_the_upsert_fails_loudly
+3 passed in 4.45s
+leg3_rc=0
+=========== LEG 4: mission mint unit pack (default) ===========
+........                                                                 [100%]
+==================================== PASSES ====================================
+=========================== short test summary info ============================
+PASSED tests/unit/tools/test_dbpool_mission_mint.py::TestF6aUpsertShape::test_insert_mission_uses_on_conflict_do_nothing
+PASSED tests/unit/tools/test_dbpool_mission_mint.py::TestF6aUpsertShape::test_loser_path_resolves_by_anchor
+PASSED tests/unit/tools/test_dbpool_mission_mint.py::TestF6aUpsertShape::test_sequential_double_mint_returns_the_same_mission_id
+PASSED tests/unit/tools/test_dbpool_mission_mint.py::TestF6eConflictPredicate::test_open_epoch_status_sql_is_the_canonical_predicate
+PASSED tests/unit/tools/test_dbpool_mission_mint.py::TestF6eConflictPredicate::test_migration_predicate_is_byte_identical
+PASSED tests/unit/tools/test_dbpool_mission_mint.py::TestF6cStaticIndexPredicate::test_model_index_uses_the_shared_constant
+PASSED tests/unit/tools/test_dbpool_mission_mint.py::TestF6cStaticIndexPredicate::test_no_literal_open_predicate_beside_the_constant
+PASSED tests/unit/tools/test_dbpool_mission_mint.py::TestTm7NonConflictIntegrityErrorPropagates::test_a_non_conflict_integrity_error_propagates_out_of_the_belt
+8 passed in 0.77s
+leg4_rc=0

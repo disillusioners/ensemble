@@ -1,0 +1,2 @@
+tests/message_queue_redesign/test_atomic_status_transitions.py::TestUpdateActivityAtomic::test_update_activity_concurrent_does_not_clobber_terminal_status
+tests/test_dependency_bus.py::TestGenerationCounterBump::test_per_parent_lock_serializes_db_insert

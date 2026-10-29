@@ -382,33 +382,31 @@ MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS: int = 60_000
 # HERE (reachability).
 DBPOOL_IDLE_IN_TXN_RESIDENCE_BUDGET_S: float = 0.05
 # The DEFAULT per-call-site hold budget, for sites that declare no
-# tighter budget. DERIVATION (measurement-anchored, not guessed —
-# Δ3(ii)): 62.5x the measured MAX healthy residence from the Phase-0
-# baseline (max 0.0008 s over 40 borrow/return cycles on the manager
-# engine — BASELINE.md T2(d)); > 3 orders of magnitude above the
-# measured p95 (0.0007 s) so a healthy cycle can never false-red,
-# and 20x below the shortest deliberate-leak dwell exercised by the
-# guard's legs (1.0 s) so the mutation legs stay meaningful. The
-# tester lane re-measures post-F8 at pin-writing (Δ3) and tightens
-# this value with a derivation note in the F7 pack header — never
-# by silently editing the number.
-MANAGER_ENGINE_LEGITIMATE_HOLD_BUDGET_S: float = -1.0
-# NOT-DERIVABLE at implementation time (Δ3(i)/D-47/DR-11): the
-# quantity this budget consumes — the REAL fetch latency of the
-# deferred-report reconcile's content fetch — was NOT measured
-# (Phase-0 modelled the python-side half; the real path needs a
-# booted daemon + a real checkpoint store). The sentinel value
-# (-1.0) means "no trustworthy measurement yet": the F7 guard
-# treats a negative budget as SCOPED OUT (Δ3(iii) — a site whose
-# budget cannot be measured records NOT-DERIVABLE and the residence
-# assertion is scoped to the sites whose budget IS derivable —
-# never a guessed number). MEASURED POST-F8 AT PIN-WRITING BY THE
-# TESTER (the F8-b BASE-vs-HEAD comparison is the candidate figure
-# — DR-11); on measurement, the tester replaces the sentinel with
-# the measured value and records the derivation note in the F7 pack
-# header. This is the PER-OPERATION hold budget F7's residence
-# invariant compares against — NOT a pool-wide reap threshold (the
-# engine-level backstop above stays DISABLED).
+# tighter budget. DERIVED post-F8 at pin-writing by the TESTER (Δ3
+# measure-then-set, discharged 2026-10-29 — derivation + provenance
+# in the block below the constant). Supersedes the pre-measurement
+# placeholder derivation "62.5x the Phase-0 guard-cycle max healthy
+# residence (0.0008 s)" — that derivation belongs to
+# DBPOOL_IDLE_IN_TXN_RESIDENCE_BUDGET_S (F7 pack header row 1). A
+# re-derivation (with raw evidence) must update the value, this
+# comment and the F7 pack header row in the SAME change — never
+# silently edit the number.
+MANAGER_ENGINE_LEGITIMATE_HOLD_BUDGET_S: float = 0.25
+# DERIVED — the Δ3(i)/D-47/DR-11 NOT-DERIVABLE sentinel is resolved:
+# worst measured post-F8 legitimate manager-engine hold × 10, rounded
+# up. Anchors: worst 0.021607 s / p95 0.019867 s — deferred-report
+# reconcile P2 sub-shape (a), the heaviest write scope, n=20/leg over
+# 7 legs, holds INVARIANT to fetch duration 0.05→2.0 s post-F8.
+# Provenance: measured post-F8 at pin-writing (NOT Phase-0); scratch
+# PG16 127.0.0.1:5444, lane HEAD 4cc63574a, 2026-10-29; raw evidence
+# in .agents/tester/RESULTS/raw/2026-10-29-dbpool-delta3/. Margins:
+# 12.6× above the worst measured p95, 7.6× above the worst warm-up
+# outlier (0.0329 s), 4× below the guard's shortest deliberate-leak
+# dwell (1.0 s), 8–32× below the F8-b-class mutation dwell (2.0 s) —
+# a re-introduced borrow-then-await REDs immediately. This is the
+# PER-OPERATION hold budget F7's residence invariant compares against
+# — NOT a pool-wide reap threshold (the engine-level backstop above
+# stays DISABLED).
 
 MAX_INSTANCE_HISTORY: int = 500  # Max terminal instances to keep checkpoint data for
 MAINTENANCE_CHECK_INTERVAL_MINUTES: int = 15  # Maintenance service check interval
