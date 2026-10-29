@@ -170,28 +170,55 @@ class TestPatternASaverWriteCallBan:
         )
 
     def test_the_wrapper_module_defines_each_hot_write_forwarder(self):
-        """The WRAPPER carries the write surface the allowlist names:
-        each hot write attr appears as a flagged call or a
-        ``_call_with_retry("<name>"`` string in the wrapper module —
-        if a forwarder disappears, this fails (the K-guard companion).
-        """
+        """The WRAPPER carries the write surface the allowlist names —
+        scoped to the ``_SaverRetryProxy`` CLASS BODY (fix pass M4):
+        the whole-file scan was vacuous for ``adelete_thread`` (the
+        attr it found lived in the SQLite ADAPTER's method, not the
+        proxy). Inside the proxy body the hot writes appear either as
+        explicit ``self._saver.<attr>(...)`` forwarders or as
+        ``_call_with_retry("<name>"`` retry strings; if a forwarder
+        disappears, this fails (the K-guard companion)."""
         wrapper = DAEMON_ROOT / "checkpoint_adapter.py"
         source = wrapper.read_text(encoding="utf-8")
         tree = ast.parse(source)
-        wrapper_attrs = {
+        proxy_class: ast.ClassDef | None = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == (
+                "_wrap_saver_with_connection_retry"
+            ):
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.ClassDef) and sub.name == "_SaverRetryProxy":
+                        proxy_class = sub
+                        break
+        assert proxy_class is not None, (
+            "the _SaverRetryProxy class no longer lives inside "
+            "_wrap_saver_with_connection_retry — Pattern A's wrapper "
+            "anchor rotted"
+        )
+        proxy_attrs = {
             node.func.attr
-            for node in ast.walk(tree)
+            for node in ast.walk(proxy_class)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr in WRITE_METHODS
         }
-        retry_names = set(re.findall(r'_call_with_retry\(\s*"([a-z_]+)"', source))
-        present = wrapper_attrs | retry_names
+        proxy_source = ast.get_source_segment(source, proxy_class) or ""
+        retry_names = set(
+            re.findall(r'_call_with_retry\(\s*"([a-z_]+)"', proxy_source)
+        )
+        present = proxy_attrs | retry_names
         for hot in ("aput", "aput_writes", "adelete_thread"):
             assert hot in present, (
-                f"the cache wrapper module no longer carries the {hot} "
-                "write forwarder — Pattern A's allowlist went stale"
+                f"the _SaverRetryProxy class body no longer carries the "
+                f"{hot} write forwarder — Pattern A's allowlist went stale"
             )
+        # The class-scoped scan is ARMED: the proxy body really does
+        # contain explicit write-attr forwarders (not only retry
+        # strings) — otherwise the attrs half of this check is vacuous.
+        assert {"put", "put_writes", "delete_thread"} <= proxy_attrs, (
+            "the proxy's sync-twin write forwarders vanished from the "
+            "class body — the attrs scan is vacuous"
+        )
 
 
 # ── Pattern B — raw-SQL checkpoint-table mutation ban ───────────────────────
@@ -319,6 +346,139 @@ class TestPatternBRawSqlMutationBan:
         assert calls, "control source produced no fetch call"
         text = _sql_text(calls[0].args[0])
         assert text is not None and _RAW_SQL_MUTATION.match(text)
+
+    def test_production_adapter_raw_sql_census_is_pinned_at_seven(self):
+        """Fix pass M3: pin the PRODUCTION site census (not just a
+        synthetic control) — ``daemon/checkpoint_adapter.py`` carries
+        EXACTLY 7 detectable raw-SQL checkpoint-table mutations, and
+        the BinOp-concat chunk site (the anti-join DELETE) is among
+        them. Production SQL drift that changes the shape (e.g. the
+        leading constant moves behind an opaque expression) now REDs
+        here instead of evading with all-green."""
+        sites = _scan_pattern_b(ignore_allowlist=True)
+        adapter_sites = [
+            (ln, text) for p, ln, text in sites if p == "daemon/checkpoint_adapter.py"
+        ]
+        assert len(adapter_sites) == 7, (
+            f"expected the pinned 7 raw-SQL checkpoint mutations in the "
+            f"adapter, found {len(adapter_sites)}: {adapter_sites} — the "
+            "site census moved (new seam added, or a site's SQL shape "
+            "became statically undetectable)"
+        )
+        texts = [text for _ln, text in adapter_sites]
+        # The BinOp chunk site — the one a Constant-only scanner misses.
+        assert any(
+            t.startswith("DELETE FROM checkpoint_blobs b WHERE b.ctid") for t in texts
+        ), "the anti-join chunk DELETE is no longer statically detectable"
+        # The distribution across the three tables (SQLite twins use
+        # their own `writes` table and are NOT in this census):
+        #   checkpoints ×3 (SQLite exclude, PG exclude, PG adelete_thread)
+        #   checkpoint_writes ×2 (PG exclude, PG adelete_thread)
+        #   checkpoint_blobs ×2 (PG adelete_thread, the anti-join chunk)
+        assert sum("DELETE FROM checkpoints" in t for t in texts) == 3
+        assert sum("DELETE FROM checkpoint_writes" in t for t in texts) == 2
+        assert sum("DELETE FROM checkpoint_blobs" in t for t in texts) == 2
+
+
+# ── Invalidation-hook existence pin (fix pass M5) ───────────────────────────
+
+
+def _count_invalidate_calls(method: ast.AsyncFunctionDef | ast.FunctionDef) -> int:
+    """Count ``invalidate_cached_reads(...)`` call sites in a method
+    body. The helper is imported at module level, so the call is an
+    ``ast.Name`` (not an Attribute) — match both shapes defensively."""
+    count = 0
+    for node in ast.walk(method):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "invalidate_cached_reads":
+            count += 1
+        elif (
+            isinstance(func, ast.Attribute) and func.attr == "invalidate_cached_reads"
+        ):
+            count += 1
+    return count
+
+
+class TestInvalidationHooksExist:
+    """A deleted invalidation hook previously left ALL 10 AST invariants
+    green (only the behavior pack caught it). This pin asserts the
+    HOOK CALLS THEMSELVES exist, per seam, in the adapter source:
+
+    * ``PostgresCheckpointerAdapter`` — the 4 raw-SQL seams carry the
+      DOUBLE protection (fix pass F4): ≥2 ``invalidate_cached_reads``
+      calls each (BEFORE-half + AFTER-half);
+    * ``SqliteCheckpointerAdapter`` — the 3 defensive twins carry ≥1
+      each (before-only; bare saver, no cache to protect).
+    """
+
+    #: (class name, {method: minimum invalidate_cached_reads call count})
+    _EXPECTED: dict[str, dict[str, int]] = {
+        "PostgresCheckpointerAdapter": {
+            "delete_checkpoints_excluding": 2,
+            "delete_writes_excluding": 2,
+            "adelete_thread": 2,
+            "delete_blobs_anti_join": 2,
+        },
+        "SqliteCheckpointerAdapter": {
+            "delete_checkpoints_excluding": 1,
+            "delete_writes_excluding": 1,
+            "adelete_thread": 1,
+        },
+    }
+
+    def _class_defs(self):
+        adapter = (DAEMON_ROOT / "checkpoint_adapter.py").read_text(encoding="utf-8")
+        tree = ast.parse(adapter)
+        classes = {
+            node.name: node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef)
+        }
+        return adapter, classes
+
+    def test_every_seam_carries_its_pinned_hook_count(self):
+        _source, classes = self._class_defs()
+        for class_name, methods in self._EXPECTED.items():
+            cls = classes.get(class_name)
+            assert cls is not None, f"{class_name} vanished from checkpoint_adapter.py"
+            found: dict[str, int] = {}
+            for node in ast.walk(cls):
+                if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+                    if node.name in methods:
+                        found[node.name] = _count_invalidate_calls(node)
+            assert set(found) == set(methods), (
+                f"{class_name}: expected methods {sorted(methods)}, "
+                f"found {sorted(found)} — a seam method was renamed/removed"
+            )
+            for method_name, minimum in methods.items():
+                assert found[method_name] >= minimum, (
+                    f"{class_name}.{method_name} carries only "
+                    f"{found[method_name]} invalidate_cached_reads call(s) "
+                    f"(pinned minimum {minimum}) — an invalidation hook "
+                    "was deleted; the raw-SQL bypass hole is open"
+                )
+
+    def test_the_pin_is_armed_against_the_current_tree(self):
+        """Vacuity guard: the current tree must actually satisfy the
+        census with the exact totals (4 PG seams × 2 + 3 SQLite × 1 =
+        11 adapter hook calls) — a pin that can never fire is dead."""
+        _source, classes = self._class_defs()
+        total = sum(
+            _count_invalidate_calls(node)
+            for cls_name in self._EXPECTED
+            for node in ast.walk(classes[cls_name])
+            if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+            and node.name in self._EXPECTED[cls_name]
+        )
+        expected_total = sum(sum(m.values()) for m in self._EXPECTED.values())
+        assert expected_total == 11  # the pinned census itself is sane
+        assert total == expected_total, (
+            f"adapter carries {total} hook calls, the pin expects "
+            f"{expected_total} — update the pin DELIBERATELY when a seam "
+            "count changes (never silently)"
+        )
 
 
 # ── Sentinel thread pin (static companion — plan §4.3.D) ────────────────────
