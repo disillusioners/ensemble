@@ -4,7 +4,7 @@
 **Scope** the **daemon-origin** metric surface; exporter-origin series are §6, outside the ≤2k
 daemon budget; skill-metrics (`/api/skills/{id}/metrics`) is a **non-goal**, not catalogued ·
 **Verified against** worktree `agents-ensemble-wt-metrics-v2` @ `feature/metrics-collection`
-(tip `51bbfc000`; WS-A platform-factual correction round applied same day — §13, §11 C35) —
+(tip `9b8437c9f`; WS-A platform-factual correction round applied same day — §13, §11 C35) —
 every `file:line` was read there; corrections to v1 and to the inventory
 digest are logged in §11 · **Compat** Prometheus scrape model + Grafana, **Prometheus classic text exposition format**
 (NOT OpenMetrics — MA-16 corrects the v1 mislabel); m9 —
@@ -212,16 +212,33 @@ dependency is off emits **no series** (absent ≠ zero) unless its contract says
 | F21 | `ensemble_journal_file_bytes`, `ensemble_journal_history_entries`, `ensemble_journal_op_seconds`, `ensemble_journal_ops_total`, `ensemble_upgrade_phase_seconds`, `ensemble_upgrade_phase_total`, `ensemble_upgrade_release_current`, `ensemble_upgrade_journal_events_total` | gauge×3/hist/counter×3/gauge | P1c | reuse `tools/upgrade_journal.py` | 65 |
 | F22 | `ensemble_process_cpu_seconds` + `ensemble_textfile_last_write_timestamp_seconds` + host/PG exporter series | gauge | P2 | greenfield (textfile + off-the-shelf) | 4 shell / ~67 exporter |
 
-**Daemon-origin total: 534** (F0.1→F21) + **4 shell-origin** = **538**. Exporter-origin ≈67 (§6).
+**Daemon-origin total: 534** (F0.1→F21) + **4 shell-origin** series (F22) — the **daemon-budget
+total**. The certified **grand total on the Prometheus server** is **≈605**: it adds the
+**≈67 exporter-origin** series (§6), which are measured separately and are NOT part of the
+daemon-origin budget (catalog §14.1 → *Grand total on Prometheus server*).
 **Budget ≤2k — ≈27 % consumed (headroom 1 466).**
 
 *Reconciliation basis:* §7 counts the §1 row values, with the one range cell (**F7**
 `21→31`) taken at its **today** value **21** — the bytes histogram's +10 arrives with the P1b
-byte wiring (catalog G-5). Row sums: P0 28 + P1a 63 + P1b 217 + P1c 226 = 534. Changes vs. the
-prior 538: P0 +1 (F0.2 invalid-label counter, B-09) +1 (F0.2 cap-rejected, R-m3); P1b −14
-(F10 claim latency moved to F11) +14 (F11) net 0, −4 (F13 wake 7→5 + lifecycle 7→5,
-B-06/B-07), −1 (F7 decomposition 22→21, R-m8); P1c −1 (F15 23→22) −1 (F21 66→65);
-F22 shell 5→4 (NB-8 + B-02(b) freshness gauge). Headroom vs. the ≤2 000 budget: **1 466**.
+byte wiring (catalog G-5). Row sums: P0 28 + P1a 63 + P1b 217 + P1c 226 = 534.
+
+*Delta trail (the basis of the 534).* Every delta is stated against the **§1 summary table** —
+the table is what summed to the **prior, retired daemon-origin total (538)**, so a delta quoted
+from a family *detail line* instead would not reconcile. Each item carries its own baseline:
+
+| Item | Baseline (the retired total's own §1 table cell) | Current (§1 table cell) | Δ | Note |
+|---|---|---|---|---|
+| F0.2 | 2 | 3 | **+1** | the invalid-label counter (B-09). The cap-rejected counter (R-m3) was **already inside** the retired baseline (F0.2 = 1 + 1) — it is **not** a second +1. |
+| F10 | 21 | 6 | **−15** | the claim-latency family (14) moved to F11 (B-08). The v5 *detail line* read 20 while its table cell read 21; the baseline here is the table cell (the one that summed to the retired total). |
+| F11 | 16 | 30 | **+14** | receives `ensemble_job_claim_latency_seconds` (12 buckets + 2 = 14). |
+| F13 | 31 | 29 | **−2** | wake 7→5 (B-06) + lifecycle 7→5 (B-07) against the **table** baseline 31; the v5 *detail line* read 33, and mixing the two bases is where the old "−4" came from. |
+| F15 | 23 | 22 | **−1** | the table cell dropped the reserved `3600.0` bucket rounding (the v5 detail line already read 22). |
+| F21 | 66 | 65 | **−1** | the table cell dropped the v5 rounding (the v5 detail line already read 65). |
+| F7 | 21 | 21 | **0** | the 22→21 decomposition (R-m8) was **already inside** the retired baseline — it is **not** a delta. |
+| F22 (shell-origin) | 5 | 4 | −1 | **outside** the daemon-origin budget (NB-8 + B-02(b) freshness gauge) — it moves the **shell-origin line** (the daemon + shell subtotal), not the daemon-origin 534. |
+
+**538 (the retired pre-reconciliation baseline) + 1 (F0.2) − 15 (F10) + 14 (F11) − 2 (F13) − 1 (F15) − 1 (F21) = 534.**
+Headroom vs. the ≤2 000 budget: **1 466**.
 
 **Platform note (WS-A correction, 2026-10-29).** Every series count above is
 platform-independent — the platform support matrix (§13) changes **which fields render** on
@@ -264,7 +281,7 @@ the registry under load before 200+ more series land on it.
 - **Name:** `ensemble_metrics_registry_measurements` (gauge, no labels) · **`ensemble_metrics_cap_rejected_total` (counter, `{metric}`-labeled)** (R-m3 — folded into this family; the hard cap's atomic observe-time rejection count) · **`ensemble_metrics_invalid_label_total` (counter, `{metric,label}`-labeled)** (B-09 — the rejected-value signal for the 3-tier validation: a wrong label *value* folded to `other`). **Type:** gauge; counter; counter. **Labels:** none (measurements) / `metric` (rejected, cap) / `metric` + `label` (invalid label).
 - **Source:** **reuse** — `daemon/checkpoint_metrics.py:304` `render_metrics()` becomes the registry renderer; the two existing singletons (`:273`, `:281`) become registry-registered instances under their canonical names. The rejected counter is emitted by the hard cap's locked check-then-increment path (catalog §0.5, R-m3). The invalid-label counter is emitted by the observe-time reserved-bucket fold path (catalog §0.5 tier 2) when a wrong label *value* is folded to `other`.
 - **Clarification (A8):** `ensemble_metrics_registry_measurements` counts **measurements** (registered measurement objects), NOT series — dashboards must not conflate it with the ≤2 k series budget. CR-3 record correction: the registry is **wired to collectors** (`checkpoint_perf.py:28-30` imports the singletons, observes `:190`/`:198`, increments `:233`); only `render_metrics()` itself has zero non-test callers.
-- **Phase** P0 · **Owner** developer; reviewer signs the naming migration · **Series estimate** 1 + 1 + 1 = **3** (the rejected counter is `{metric}`-labeled; estimate assumes a single representative metric hits the cap in the proof; cap rejections are rare by construction. The invalid-label counter is `{metric,label}`-labeled; `{metric}` is the family name from the closed 22-family set and `{label}` is the label *key* name from the registry's allowed label-key set (a closed enum, never free text), with a reserved `other` residual — estimate assumes a single representative (metric,label) pair; invalid labels are rare by construction).
+- **Phase** P0 · **Owner** developer; reviewer signs the naming migration · **Series estimate** 1 + 1 + 1 = **3** (the rejected counter is `{metric}`-labeled; estimate assumes a single representative metric hits the cap in the proof; cap rejections are rare by construction. The invalid-label counter is `{metric,label}`-labeled; `{metric}` is the family name from the closed **26-family** set (F0.1–F0.4 = 4 + F1–F22 = 22 → 26; the same set §14.1 quotes as the daemon-origin family count) and `{label}` is the label *key* name from the registry's allowed label-key set (a closed enum, never free text), with a reserved `other` residual — estimate assumes a single representative (metric,label) pair; invalid labels are rare by construction).
 - **Degradation:** always present — a property of the registry, not of a dependency.
 
 ### F0.3 — Resource-spine health gate
@@ -507,7 +524,7 @@ the registry under load before 200+ more series land on it.
   histogram is a **reuse observation, not a new instrument** — but the hot path `time_saver_op`
   (`daemon/checkpoint_perf.py:202`, docstring `:205`) forwards `bytes_=0`, so the bytes histogram is
   **under-reported for `aget`** until P1b wires the real blob byte count.
-- **Write-path instrumentation task (V-6 — distinct write-side hook, do NOT reuse the read seam):** add a **separate** `_charge_checkpoint_write` (its own function, own budget/labels) firing once per successful outer call (same once-per-outer-call contract as `_charge_checkpoint_read`), called from `aput`/`aput_writes` (`checkpoint_adapter.py:377-379`). The read seam `_charge_checkpoint_read` (`:371-374`) is **not** extended to writes — routing write bytes through the read charge would bill them to the READ budget. **Early-return-on-None for writes (decided):** a `None` result on a write path is an **error, not a skip** — the hook does **not** early-return on `None`; instead it records the failure so a missing write charge is visible. Until it lands, the declared `op` enum stays narrowed to `aget`. Risk row 3 carries the risk. After it lands, re-derive the `op` enum from observed call sites rather than inheriting the legacy HELP text (`checkpoint_metrics.py:281-290`).
+- **Write-path instrumentation task (V-6 — distinct write-side hook, do NOT reuse the read seam):** add a **separate** `_charge_checkpoint_write` (its own function, own budget/labels) firing once per successful outer call (same once-per-outer-call contract as `_charge_checkpoint_read`), called from `aput`/`aput_writes` (`checkpoint_adapter.py:377-379`). The read seam `_charge_checkpoint_read` (`daemon/checkpoint_adapter.py:368` — the `aget` charge; `:371-374` — the `aget_tuple` charge) is **not** extended to writes — routing write bytes through the read charge would bill them to the READ budget. **Early-return-on-None for writes (decided):** a `None` result on a write path is an **error, not a skip** — the hook does **not** early-return on `None`; instead it records the failure so a missing write charge is visible. Until it lands, the declared `op` enum stays narrowed to `aget`. Risk row 3 carries the risk. After it lands, re-derive the `op` enum from observed call sites rather than inheriting the legacy HELP text (`checkpoint_metrics.py:281-290`).
 - **Phase** P1b · **Owner** developer; reviewer pins the bucket set · **Series estimate** only
   `op="aget"` fires in production (the sole prod call site is `daemon/persistence.py:509`,
   `time_saver_op("aget", ...)`) ⇒ seconds histogram 19, bytes histogram 0 today → 10 after the
@@ -605,6 +622,15 @@ the registry under load before 200+ more series land on it.
   "busy" count is derived the way the live tool derives it
   (`daemon/tools/instance_read.py:2092` — a worker is busy when its `_current_task_id` is not
   `None`). These counters are in-RAM and **lost on restart** (§10).
+  **Claim latency (moved here from F10 by B-08 — P0-e):** the seam is the **claim CALL**
+  `daemon/services/worker_pool.py:302` (`task = self._task_processor.claim_task(...)`), reached
+  via `daemon/services/worker_pool.py:302` → `daemon/services/task_processor.py:1829`
+  `claim_task` → `daemon/repositories/task/repository.py:2619` `claim_pending_task`; the measured
+  interval is the **task queue's** `task.created_at` / `task.started_at` columns
+  (`daemon/repositories/task/models.py:273-274`) — **not** `message_queue/models.py:83`
+  `enqueued_at` (the claim path is the TASK queue; `grep message_queue worker_pool.py` = 0
+  hits). The observation is taken **once**, at the claim site, and carried — never re-derived
+  downstream.
   **Heartbeat age (m4):** source column `daemon/repositories/task/models.py:284`
   `last_heartbeat_at` — a `timestamp without time zone` column, so bind/compare with
   `now_utc_naive()` per the project timestamp convention. **Cadence:** the per-worker
@@ -640,7 +666,15 @@ the registry under load before 200+ more series land on it.
   the configured interval per lane is published on the HELP text, so an operator compares actual
   vs configured without a second metric.
 - **Phase** P1b · **Owner** developer · **Series estimate** 13 + 13 + 13 + ≈30 live
-  (lane, outcome) combinations (most lanes emit 2–3 of the 6 outcomes) = **≈69**.
+  (lane, outcome) combinations = **≈69**. **Derivation (explicit — NB-5, §11 C80):** the three
+  lane-scoped series (`cycle_seconds`, `cycles_total`, `errors_total`) are counted **one per
+  lane** ⇒ 13 + 13 + 13 = 39; `ensemble_sweep_rows_total{lane,outcome}` is counted at its
+  **observation-bounded** combination count ≈**30** — an OBSERVED figure, **not a rule**: each
+  lane emits 2–3 of the 6 outcomes (13 lanes × 2–3 ≈ 26–39, midpoint 30), and the family
+  **ceiling** is the full `lane` × `outcome` product 13 × 6 = 78 ⇒ family ceiling
+  39 + 78 = **117**. The catalogued figure (39 + 30 = **69**) is therefore the bounded
+  observation estimate; the ceiling, not 69, is what the every-label-combination-live bound
+  (§7) uses.
 - **Degradation:** a lane disabled (the RDRS lanes are individually kill-switchable,
   `daemon/config.py:1951-2020`) ⇒ that lane renders **no** cycle/cycle-count series; its error
   counter renders `0` — a real zero ("the lane ran zero times because it is off") differs from
@@ -856,7 +890,15 @@ WARNING noise on a metric failure (NB-5).
   `len(data["history"])` (the top-level `history` key, `:165`);
   `ensemble_upgrade_release_current{version}` = `data["current"]` (`:159`).
 - **Phase** P1c · **Owner** developer (twin), devops (journal-growth alert) · **Series estimate**
-  1 + 1 + 13 + 26 + 10 + 10 + 1 + 3 = **65** (the summary table rounds to 66).
+  1 + 1 + 13 + 26 + 10 + 10 + 1 + 3 = **65**. (The §1 table cell and this decomposition now
+  agree at 65 — the v5 "summary table rounds to 66" note is withdrawn, §11 C78.)
+  **Histogram counting convention (NB-6, §11 C81):** the **13** is the
+  `ensemble_journal_op_seconds` bucket series counted **once** — that histogram carries **no
+  `op` label** (§8.11 marks it flat, unlike the two checkpoint histograms which are marked
+  `/ op`). The convention is catalog-wide: a histogram's bucket series are counted **once**
+  (the F7 "today" form), and the `/op` fully-wired form is stated separately where it applies
+  (F7: 76 + 40 + 4 + 1 = 121). If the journal histogram were ever op-partitioned, the family
+  ceiling would be 1 + 1 + (13 × 26 = 338) + 26 + 10 + 10 + 1 + 3 = **390**.
 - **Degradation:** twin unreachable (no install dir, journal torn) ⇒ **no series**; a torn
   journal raises `JournalTorn` (`:251`) and the twin degrades to the last good copy.
 
@@ -903,12 +945,16 @@ largest families (F12 sweeps 69, F21 journal 65, F20 tool calls 75, F9 readiness
 **bounded, enumerated** label sets, so growth there is bounded by construction. The three
 unbounded risks in v1 are explicitly closed: per-instance compaction occupancy is a max; the
 leak site is a 6-value fixed map; the MCP roster is capped at 5 values. If every label
-combination in the catalog were live at once the total would be ≈1 118 — still inside budget.
-Per-phase counts shifted (B-13 reconciliation): P0 +1 (F0.2 invalid-label counter, B-09)
-+1 (F0.2 cap-rejected, R-m3); P1b −14 (F10 claim latency moved to F11) +14 (F11) net 0, −4
-(F13 wake 7→5 + lifecycle 7→5, B-06/B-07), −1 (F7 decomposition 22→21, R-m8); P1c −1 (F15
-23→22) −1 (F21 66→65); F22 shell 5→4 (NB-8 + B-02(b) freshness gauge). Net daemon total
-534 (was 538).
+combination in the catalog were live at once the total would be **≈1 114** — still inside
+budget. (*Provenance:* the v5 fully-wired bound was ≈1 118; it moves by exactly the same
+per-family deltas that moved the daemon total, because each moved family's label structure is
+unchanged by the move — **1 118 + 1 (F0.2) − 15 (F10) + 14 (F11) − 2 (F13) − 1 (F15) − 1
+(F21) = 1 114**. The v5 bound's own derivation was never written down, so the figure is an
+**adjusted bound**, not a re-derived product — see §11 C79.)
+**Delta trail (the basis of the 534):** see the §1 reconciliation table —
+**538 (the retired pre-reconciliation baseline) + 1 (F0.2) − 15 (F10) + 14 (F11) − 2 (F13) − 1
+(F15) − 1 (F21) = 534** (F7 = 0 — the 22→21 decomposition was already inside the retired
+baseline; F22 shell 5→4 is outside the daemon-origin budget).
 
 **Intra-family phased rollouts — convention (G-20/H-12 unification).** A family maps to
 **exactly one phase** in the table above (1:1, zero exceptions). When a family needs an early,
@@ -934,7 +980,7 @@ were attached to existing tasks (P0 T4/T8/T6) with explicit metric names in thei
 | F0.1 | P0 | P0 T1, T2, T3, **T11** (V-5) | developer + devops | 16 |
 | F0.2 | P0 | P0 T4 (extended) | developer (+ reviewer naming) | 3 |
 | F0.3 | P0 | P0 T8 (extended) | developer | 8 |
-| F0.4 | P0 | P0 T6 (extended) | developer (+ reviewer annex) | 1 |
+| F0.4 | P0 | P0 T6 (extended) | developer (+ reviewer annex) | 1 — `ensemble_metrics_vocabulary_version` (**EMITTED**, named in the plan's P0 T6 acceptance) |
 | F1 | P1a | P1a T1 | backend | 9 |
 | F2 | P1a | P1a T2 (+ P0 T9) | backend | 22 |
 | F3 | P1a | P1a T3 | backend | 6 |
@@ -944,8 +990,8 @@ were attached to existing tasks (P0 T4/T8/T6) with explicit metric names in thei
 | F7 | P1b | P1b T1, T14 (V-6) | backend + devops (PG) | 21→31 |
 | F8 | P1b | P1b T2, T4 | backend + devops (PG) | 9 |
 | F9 | P1b | P1b T3 | backend + devops | 53 |
-| F10 | P1b | P1b T5, T6 | backend + devops (PG) | 6 |
-| F11 | P1b | P1b T7, T8 | backend + devops (PG) | 30 |
+| F10 | P1b | P1b T5 | backend + devops (PG) | 6 |
+| F11 | P1b | P1b T7, T8, **T6** (P0-e — the claim-latency task moved with the family) | backend + devops (PG) | 30 |
 | F12 | P1b | P1b T11 | backend + devops (PG) | 69 |
 | F13 | P1b | P1b T9, T10, T12 | backend + devops (PG) | 29 |
 | F14 | P1c | P1c T1 | backend | 3 |
@@ -968,8 +1014,9 @@ Every enumerated label set, with the `file:line` it was verified against.
 
 **P-1 freeze rule (V-4 companion).** The P0 vocabulary freeze must NOT freeze tool-categories
 from a hand list. It freezes from the V-4 generated artifact (§8.6), or defers the freeze
-with the `other`-fold as the closure. Wave 2 wires this into plan §4 P0 T6; this annex
-defines the rule it references.
+with the `other`-fold as the closure. **This rule is wired into plan §4 P0 T6** (the P0 T6
+acceptance carries the freeze-from-artifact-or-`other`-fold closure); this annex defines the
+rule it references.
 
 **Cardinality rule (A10/A18):** per-instance attribution = PG-only (`/api/resources/*`); no
 daemon-origin `/metrics` family carries a per-instance label — every daemon-origin family is
@@ -984,8 +1031,9 @@ aggregate. (Companion: plan §3 storage-split boundary rule.)
 `daemon/tools/instance_read.py:228` `_liveness_for` (returns `unknown` for non-mapped input, which
 folds to `other`). **Wake-turn outcome (5, closable set — V-3)**: `claimed`, `skipped_busy_instance`,
 `empty_claim`, `timeout_wake`, `fresh_episode_reset`. Attribution: `claimed` /
-`empty_claim` / `timeout_wake` / `skipped_busy_instance` ← claim path
-`daemon/services/worker_pool.py:1381-1386` (the four `_stats` keys
+`empty_claim` / `timeout_wake` / `skipped_busy_instance` ← the **claim CALL's** counters,
+`daemon/services/worker_pool.py:1381-1386` (the `self._stats` **dict literal** — the four
+`_stats` keys
 `notifications_sent`/`empty_claim_attempts`/`workers_woken_by_timeout`/
 `claims_skipped_due_to_busy_instance`); `fresh_episode_reset` ← episode seam
 `daemon/graph.py:7319` `_detect_fresh_episode_reset` returning a non-`None` sentinel id.
@@ -996,7 +1044,7 @@ A `None` return from the seam yields **no increment** (absent ≠ zero) — ther
 error, parent_id, result_summary)`, whose `status` axis carries only terminal values:
 `completed` (error_reporting.py:827, child_reports.py:5930/:6118), `failed`
 (child_reports.py:5469), `terminated` (instance_lifecycle.py:3096), `error` (job_feedback_observer
-terminal path, InstanceStatus.ERROR). `fan_in_completed`/`fan_in_failed` exist NOWHERE under
+terminal path, InstanceStatus.ERROR). The two retired `fan_in_*` phantom values exist NOWHERE under
 `daemon/` (grep = 0 hits) and are removed; `spawned`/`revived`/`paused`/`resumed` are not published
 by this publisher and fold to reserved `other`. Amendment procedure: adding a new published status
 requires (a) a producer emitting it, (b) a bump of `ensemble_metrics_vocabulary_version`, and
@@ -1073,7 +1121,8 @@ instability IS the defect). It is therefore NOT hand-listed and NOT frozen from 
   list. It either (a) freezes from the V-4 generated artifact (the artifact's sorted list
   becomes the frozen label set for that release) or (b) defers the freeze and ships with the
   `other`-fold as the closure (a bump of `ensemble_metrics_vocabulary_version` is required to
-  change the frozen set — see F0.4). Wave 2 wires this into plan §4 P0 T6.
+  change the frozen set — see F0.4). **This rule is wired into plan §4 P0 T6** (the P0 T6
+  acceptance carries it); this annex defines the rule it references.
 - **My own count in this worktree (freeze-time placeholder, NOT canonical): 55** distinct
   `CATEGORY_NAME` values from the 55 `CATEGORY_MODULES` keys (all importable, no missing
   modules). The artifact is canonical; 55 is only the value I observe today. Series math uses
@@ -1115,17 +1164,31 @@ prune outcome (4): `dry_run`, `executed`, `skipped_non_postgres`, `error`; spine
 
 **8.10 Job / LLM / compaction / turn / gateway vocabularies** — admission state (4): `queued`,
 `active`, `done`, `dead` (`daemon/repositories/job_queue/models.py:40-43`); worker pool name (2):
-`worker`, `chat`; worker pool event (4): `notifications_sent`, `empty_claim_attempts`,
-`workers_woken_by_timeout`, `claims_skipped_due_to_busy_instance`
+`worker`, `chat` (`daemon/services/pool_orchestrator.py:565` — the default worker pool — and
+`:643` — the chat pool, `lane="chat"`); worker pool event (4): `notifications_sent`,
+`empty_claim_attempts`, `workers_woken_by_timeout`, `claims_skipped_due_to_busy_instance`
 (`daemon/services/worker_pool.py:1381-1386`); LLM outcome (8): §8.12; LLM token direction (2):
 `input`, `output` (`daemon/graph.py:3771-3812`); stream-stall phase (3): `abort_attempt`,
 `aborted`, `recovered` (`daemon/services/llm_stream_watchdog.py:456,497`); stream-watchdog sweep
-outcome (2): `none`, `claimed`; compaction rung (3): `l1_pre_dispatch_80`, `l2_precall_95`,
+outcome (2): `none`, `claimed` (`daemon/services/llm_stream_watchdog.py:551-565` — `sweep_once`
+returns the CLAIMED count, `:561` init / `:564` increment; `none` = a pass that claimed 0);
+compaction rung (3): `l1_pre_dispatch_80`, `l2_precall_95`,
 `l3_backstop_600k` (`daemon/compaction.py:1128`); compaction stage (3): `pre_dispatch`,
-`precall_95`, `post_compaction`; turn source (5): `user_message_entry`, `agent_node_return`,
+`precall_95`, `post_compaction` (`daemon/compaction.py:1589` — the 0.80 pre-dispatch gate
+threshold; `daemon/graph.py:7497` — `PRECALL_COMPACTION_RATIO = 0.95`, the pre-call stage;
+`daemon/compaction.py:305` — the `post_compaction_channel` node-return prefix); turn source (5):
+`user_message_entry`, `agent_node_return`,
 `compaction_aupdate_reactive`, `compaction_aupdate_messaging`, `compaction_precall_95`
 (`daemon/services/message_tap.py:120-124`); gateway session outcome (5): `begin`, `end`,
-`expired`, `superseded`, `refused`; gateway audit outcome (2): `ok`, `error`.
+`expired`, `superseded`, `refused` (`daemon/services/mcps_gateway/sessions.py:135` — `begin`,
+`:208` — `end`, `:239` — `expire_due`; `daemon/services/mcps_gateway/tombstones.py:90` —
+`REASON_EXPIRED = "expired"`, `:120` — `REASON_SUPERSEDED = "superseded"`; `refused` is the
+machine-busy refusal, `daemon/services/mcps_gateway/sessions.py:118-133` —
+`assert_machine_free` raising `CODE_MACHINE_BUSY`); gateway audit outcome (2): `ok`, `error`
+(`daemon/services/mcps_gateway/audit.py:53-54` — `OUTCOME_OK`, `OUTCOME_ERROR`; the audit
+table's wider outcome constants at `:55-56` — `denied`, `timeout` — are **not** part of the
+F18 label set and fold to the reserved `other` residual under the §0.5 observe-time rule, so
+the family's series count is unchanged).
 
 **8.11 Histogram bucket sets (the seven histograms).** Each is stated once; `_count`/`_sum` are
 implied.
@@ -1161,7 +1224,7 @@ from the real ladder in `daemon/llm_error_classifier.py`, not invented:
 outcome is a per-message **flag**, so it follows the blueprint's Carrier-Threading Pattern, but
 the producer is **split** (A3) across two sites:
 
-- **Producer (a)** — the **claim path**, i.e. the **claim call** `daemon/services/worker_pool.py:302`
+- **Producer (a)** — the **claim CALL** `daemon/services/worker_pool.py:302`
   (`task = self._task_processor.claim_task(self.worker_id, lane=self._lane)`), yields four closable
   outcomes: `claimed` (from `notifications_sent`), `empty_claim` (`empty_claim_attempts`),
   `timeout_wake` (`workers_woken_by_timeout`), `skipped_busy_instance`
@@ -1182,8 +1245,11 @@ the producer is **split** (A3) across two sites:
   aspirational values). (B-06 reconciliation.)
 - Each producer is computed **once**, each carried. Neither re-derives from partial signals.
 - **Carrier** — a new keyword-only field on `ProcessingContext`
-  (`daemon/services/message_processing_pipeline.py:121`; the existing carrier field
-  `is_fresh_episode_user_message` sits at `:176`), defaulting to `None`.
+  (`daemon/services/message_processing_pipeline.py:120-121` — the `@dataclass` decorator at
+  `:120`, the **class definition** at `:121`; the existing carrier field
+  `is_fresh_episode_user_message` sits at `:176`), defaulting to `None`. (Both numbers are now
+  given together wherever the carrier is cited, so the class anchor and the field anchor can
+  never be confused — §11 C82.)
 - **Threading** — keyword-only, `= None` default, threaded pipeline → facade → service, exactly
   as the blueprint's Carrier-Threading Pattern requires.
 - **Consumer** — **a live turn-end consumer increments the counter; the renderer only reads the
@@ -1350,12 +1416,12 @@ a reset-on-restart counter is restated:
 | C24 | the tool-call family instruments graph internals | **reversed** by m7 — it instruments the `message_tap.py` per-turn seam | `daemon/services/message_tap.py:234` |
 | C25 | VictoriaMetrics / Mimir are compatible targets | **dropped** (m9) — only stock Prometheus + Grafana is claimed | — |
 | C26 | journal metrics come from bash | **reversed** — they come from the Python twin `daemon/tools/upgrade_journal.py`; `scripts/upgrade/` is read-only, never edited | `daemon/tools/upgrade_journal.py` |
-| C27 | tool-category vocabulary = 37/38 (§8.6) | **falsified** — verified 49 distinct across 254 sites; v1 hand-list omitted 8+ (`board-link`, `dynamic-skill`, `ens-db`, `ens-env`, `image-gen`, `self-alarm`, `skill-evolution`, `system-log`); fix: derive at runtime from `get_tool_categories()` (`daemon/tools/_tool_registry.py:1598`) + reserved `other` | `_tool_registry.py:1598` |
+| C27 | tool-category vocabulary = 37/38 (§8.6) | **falsified** — the v1 hand-count (later stated as "49 distinct across 254 sites") was never a code-derived count and is **withdrawn**: the tree's `daemon/tools/_tool_registry.py` `CATEGORY_MODULES` carries **55** keys, and §8.6's freeze-time value is **55 + reserved `other` = 56**. The **V-4 generated artifact is canonical** (CI/test-generated JSON + drift check); 55 is the freeze-time observation in this worktree, not a hand list | `daemon/tools/_tool_registry.py:1598` (`CATEGORY_MODULES` = 55 keys) |
 | C28 | F14 observation site = `graph.py:3811-3812` | **wrong hook** — `:3811-3812` is the non-terminal, per-chunk path; terminal usage chunk returns early at `:3776-3784`; fix: hook terminal branch (or `:9176-9179`) + per-call dedupe | `daemon/graph.py:3776-3784` |
-| C29 | `ensemble_wake_turns_total` consumer = exposition renderer reads carrier | **unimplementable** — carrier dies with the message; split producer into the **claim call** (`worker_pool.py:302`) + episode seam (`graph.py:7319`); a live turn-end consumer increments, renderer reads accumulated counter. **Anchor corrected (B-10, 2026-10-29):** `worker_pool.py:1381-1386` is the `self._stats` **dict literal** — the source of the outcome *vocabulary*, not the claim path; the canonical carrier producer is `task_processor.py:569-598` (carrier field `message_processing_pipeline.py:176`) | `daemon/services/message_processing_pipeline.py:121`; `daemon/services/worker_pool.py:302`; `daemon/services/task_processor.py:569-598` |
+| C29 | `ensemble_wake_turns_total` consumer = exposition renderer reads carrier | **unimplementable** — carrier dies with the message; split producer into the **claim call** (`worker_pool.py:302`) + episode seam (`graph.py:7319`); a live turn-end consumer increments, renderer reads accumulated counter. **Anchor corrected (B-10, 2026-10-29; NB-13/NB-14, 2026-10-29):** `worker_pool.py:1381-1386` is the `self._stats` **dict literal** — the source of **four** of the five outcome values (the fifth, `fresh_episode_reset`, comes from the episode seam), **not** the claim path; the **claim CALL** is `worker_pool.py:302`; the canonical carrier producer is `task_processor.py:569-598` (carrier field `message_processing_pipeline.py:176`; the `ProcessingContext` class is at `message_processing_pipeline.py:120-121` — decorator `:120`, class `:121`) | `daemon/services/message_processing_pipeline.py:120-121`, `:176`; `daemon/services/worker_pool.py:302`, `:1381-1386`; `daemon/services/task_processor.py:569-598` |
 | C30 | "unwired registry" / "zero non-test callers" | **corrected** — registry is wired to collectors (`checkpoint_perf.py:28-30` imports, observes `:190`/`:198`, increments `:233`); only `render_metrics()` is unwired in production | `daemon/checkpoint_perf.py:28-30` |
 | C31 | F20 counting unit unspecified | **defined** — one `tap_node_return` invocation (5 sites, N+1 per turn); turn-duration needs an anchor pair or drop (tap measures its own DB-write latency) | `daemon/services/message_tap.py:234`, `:302-306` |
-| C32 | `ensemble_checkpoint_op_seconds{op="aput"}` declared | **cannot fire** — write path bypasses `time_saver_op`; instrument `checkpoint_adapter.py` charge seam (`:371-374` → `aput`/`aput_writes` `:377-379`) or narrow enum | `daemon/checkpoint_adapter.py:377-379` |
+| C32 | `ensemble_checkpoint_op_seconds{op="aput"}` declared | **cannot fire** — write path bypasses `time_saver_op`; instrument the `checkpoint_adapter.py` charge seam (`:368` = the `aget` charge; `:371-374` = the `aget_tuple` charge → `aput`/`aput_writes` `:377-379`) or narrow enum | `daemon/checkpoint_adapter.py:377-379` |
 | C33 | `ensemble_metrics_registry_measurements` ambiguity | **clarified** — counts measurements, not series | `daemon/checkpoint_metrics.py:304` |
 | C34 | census statement/connect timeouts unspecified | **set** — 5 s / 3 s; execution home = dedicated daemon thread; self-exclusion = census only; blank `pg_stat_activity.query` lands in `other` | `daemon/services/wedge_capture/db_capture.py` |
 | C35 | the resource tier's darkness was caused by the flusher (`bool`→`INTEGER` 42804 every window, all four tables rolled back through the shared `engine.begin()`; runtime fix pending at `flusher.py:770` / `manager.py:7341`) | **REFUTED (2026-10-29, WS-A correction round).** Prod facts: the `estimated` column is `boolean NOT NULL` (`daemon/models/resource_monitor.py:231-233`); the bind is correct (bind-audit test @ `feature/resource-monitor-flusher-fix@53547b915` checks every flusher column against live `information_schema` + round-trips a real bool); the rollback amplifier was already fixed (`7be1b40bf` per-tier SAVEPOINT, `69cea24ea` `flush.errors` surfacing). **Real cause — a dead PRODUCER on macOS:** the prod daemon is a macOS binary; Darwin has no `/proc` and no `/sys/fs/cgroup`, so `proc_readers` returned `None` every tick → the sampler skipped every tick → the flusher had nothing to write. Live signature: samples climbing, `flush {batches:1139, bytes:0, errors:0}` = "produced nothing", NOT "write failed"; `resource_pid_map` climbed (45,575 rows at commit time) from the spawn path, **masking the outage**. Fix = the WS-A branch: Darwin ps-based reader (engaged ONLY when the proc root is ABSENT and the host is Darwin) + corrected sampler counters (`missed_samples`/`ticks_skipped` parity, skips excluded from `counters.ticks`, one-shot WARNING) + 7 unit / 6 real-PG tests. Merges to latest BEFORE P0 executes. Platform consequences: catalog §13; per-child T3 stays `/proc`-only (§13.4 non-goal) | `feature/resource-monitor-flusher-fix@53547b915` (`proc_readers.py`, `sampler.py`, `tests/postgres/test_resource_monitor_flusher_bind_pg.py`); prod census 2026-10-29 |
@@ -1369,11 +1435,11 @@ a reset-on-restart counter is restated:
 | C43 | BashSpin spinning script cannot write its own `*.prom`; `\|` escapes inert | **fixed (V-8/R-m1):** external sampler named (owner + mechanism + 10 s cadence); TextfileStale rule added; pipes unescaped | plan-overview.md §8 |
 | C44 | alert thresholds uncited | **fixed (V-7):** Baseline column cites code constant or incident/bench evidence for all 14 rules | plan-overview.md §8 |
 | C45 | AC2 self-cost dark on macOS; AC6 lag-probe dark when wedge-capture off | **fixed (V-9):** explicit precondition rows on every dark-able AC | plan-overview.md §10 |
-| C46 | P0 vocabulary freeze from hand list | **fixed (P-1):** freeze from V-4 artifact or defer with `other`-fold | catalog §8.6 + plan §4 (wave 2) |
-| C47 | 33 orphaned series with no task row/owner (V-5) | **fixed (V-5):** dedicated task rows added for F0.1 (P0 T11) and F18 (P1c T9); F0.2/F0.3/F0.4 attached to existing tasks with explicit metric names; mapping annex added at catalog §7.1; orphan count now 0 | plan-overview.md §4 + catalog §7.1 |
+| C46 | P0 vocabulary freeze from hand list | **fixed (P-1):** freeze from V-4 artifact or defer with `other`-fold | catalog §8.6 + plan §4 P0 T6 |
+| C47 | 33 orphaned series with no task row/owner (V-5) | **fixed (V-5):** dedicated task rows added for F0.1 (P0 T11) and F18 (P1c T9); F0.2/F0.3/F0.4 attached to existing tasks with explicit metric names; mapping annex added at catalog §7.1; orphan count now 0. **P0-b (2026-10-29):** F0.4's single series `ensemble_metrics_vocabulary_version` is now named as an **EMITTED** series in the plan's P0 T6 acceptance (it was only implied by "version-label policy") | plan-overview.md §4 P0 T6 + catalog §7.1 |
 | C48 | P0 family claim "none new — P0 builds the plumbing" contradicts F0.1–F0.4 shipping in P0 (V-5) | **fixed (V-5):** claim restated as "F0.1–F0.4 foundation families" (G-20 canonical partition) | plan-overview.md §4 P0 |
 | C49 | Checkpoint write path reused the read charge seam, billing writes to READ budget (V-6) | **fixed (V-6):** distinct `_charge_checkpoint_write` hook with own budget/labels; None on write = error not skip; Q1 risk row kept | plan-overview.md §4 P1b T14 + catalog F7 |
-| C50 | Teardown used `join(timeout=5)` instead of the house detached-join precedent (R-m2) | **fixed (R-m2):** aligned to detached join (`daemon/api.py:3411-3433`, `file_change_monitor.py:180-196`); `daemon=True` thread dies with process | plan-overview.md §3 + §4 P0 T1 |
+| C50 | Teardown used a **bounded blocking join** (a `join` call with a timeout argument) instead of the house detached-join precedent (R-m2) | **fixed (R-m2):** aligned to detached join (`daemon/api.py:3411-3433`, `file_change_monitor.py:180-196`); `daemon=True` thread dies with process | plan-overview.md §3 + §4 P0 T1 |
 | C51 | Hard cardinality cap not atomic; no rejected counter (R-m3) | **fixed (R-m3):** observe-time rejection atomic under the metric's own lock (check-then-increment, no TOCTOU); `ensemble_metrics_cap_rejected_total` folded into F0.2 (+1 series) | catalog §0.5 + plan §5/§7 |
 | C52 | Publisher copy-on-publish O(series) per increment unbounded (R-m5) | **fixed (R-m5):** dirty-flag + re-publish at most once per N seconds, or publish-on-scrape-request with bounded staleness | catalog §0.2 |
 | C53 | Plan §12 closing sentence claimed no open questions while OQ-1/2/3 exist (R-m7) | **fixed (R-m7):** sentence restated; OQ-1/2/3 remain open (decided in P0), OQ-4 RESOLVED | plan-overview.md §12 |
@@ -1385,13 +1451,13 @@ a reset-on-restart counter is restated:
 | C59 | `ensemble_textfile_last_write_timestamp_seconds` shipped by TextfileStale rule but uncatalogued (B-02(b)) | **catalogued in F22:** freshness gauge added to F22 name list + §1/§7 proof; shell-origin 5→4 (3 process names + 1 freshness) | catalog F22, §1, §7, §14.3 |
 | C60 | Catalog §10.2 FalseDegraded used `outcome="timeout"` (zero series under 11-class taxonomy) (B-02(c)) | **fixed (V-2 alignment):** `outcome=~"probe_timeout\|read_timeout"` | catalog §10.2 |
 | C61 | Wake vocabulary three-way contradictory: 7 values (line 638) / 33 series (line 649) / 5 values (§8.1) / producers §8.1 rules out (§8.13) / 31 (lines 195,926) (B-06) | **reconciled to 5 closable values:** `claimed`, `skipped_busy_instance`, `empty_claim`, `timeout_wake`, `fresh_episode_reset`; F13 33/31→29; §8.13 producer (b) yields `fresh_episode_reset` only | catalog F13, §8.1, §8.13, §14.3/14.4 |
-| C62 | Lifecycle-event vocabulary unanchored hand-list of 7 incl. `fan_in_completed`/`fan_in_failed` (0 grep hits) (B-07) | **derived from publisher:** `completed`, `failed`, `terminated`, `error` + reserved `other`; amendment procedure added | event_publisher.py:38-80, catalog F13, §8.1 |
+| C62 | Lifecycle-event vocabulary unanchored hand-list of 7 incl. the two `fan_in_*` phantom values (0 grep hits) (B-07) | **derived from publisher:** `completed`, `failed`, `terminated`, `error` + reserved `other`; amendment procedure added | event_publisher.py:38-80, catalog F13, §8.1 |
 | C63 | F10 mixed `job_queue_items` depth with task-queue claim latency; cited `message_queue/models.py:83 enqueued_at` (wrong table) (B-08) | **re-scoped:** F10 = job-queue only (6 series); claim latency (14) moved to F11, sourced from `task.created_at`/`task.started_at` (task/models.py:273-274) | catalog F10, F11, §14.3 |
-| C64 | `ensemble_metrics_invalid_label_total{metric,label}` uncatalogued + `{label}` unbounded (B-09) | **catalogued in F0.2:** `{metric}` = family name (closed 22-set), `{label}` = label-key name (closed enum) + reserved `other`; F0.2 2→3 | catalog F0.2, §0.5, §14.3 |
+| C64 | `ensemble_metrics_invalid_label_total{metric,label}` uncatalogued + `{label}` unbounded (B-09) | **catalogued in F0.2:** `{metric}` = family name (closed **26-set** — 26 daemon-origin families, §14.1; the "22" was the pre-F22 count), `{label}` = label-key name (closed enum) + reserved `other`; F0.2 2→3 | catalog F0.2, §0.5, §14.3 |
 | C65 | "≤2k proof" self-contradicted: 538 vs 535; F10 20 vs 21, F15 22 vs 23, F21 65 vs 66 (B-13) | **reconciled to 534:** P0 28 + P1a 63 + P1b 217 + P1c 226; F15 22, F21 65, F10 6, F11 30, F13 29, F0.2 3, F22 4 shell | catalog §1, §7, §14 |
 | C66 | NB-5: tap increments must not sit in outer try/except (message_tap.py:308 is the `except` branch) | **specified:** dedicated inner try/except that swallows silently | catalog §0.2, F20 |
 | C67 | NB-7: `limits.metrics_census_interval_s` lacked upper bound | **added** `le=300` | plan-overview.md line 294 |
-| C68 | NB-8: F22 declared 5 `name` values but samples 3 | **aligned to 3:** `launcher`, `promote_sh`, `stage_sh` | catalog F22, §8.5? (§8.9), §14.4 |
+| C68 | NB-8: F22 declared 5 `name` values but samples 3 | **aligned to 3:** `launcher`, `promote_sh`, `stage_sh` | catalog F22, **§8.9** (the pool / PG / checkpoint / spine vocabulary block — the process-name set lives there; **not** §8.5), §14.4 |
 | C69 | NB-10: §8.1 liveness set stated 7 reachable; actually 6 | **corrected to 6 reachable + reserved `other`** | catalog §8.1, §14.4 |
 | C70 | NB-11: kill-switch-off empty body vs `ensemble_metrics_up = 0` contradiction | **one semantic:** empty body when off; `ensemble_metrics_up` present only when live | catalog §0.8, F0.1 |
 | C71 | NB-12: §9 subsection order 9.1,9.2,9.3,9.5,9.6,9.4 | **reordered to 9.1,9.2,9.3,9.4,9.5,9.6** | catalog §9 |
@@ -1399,6 +1465,25 @@ a reset-on-restart counter is restated:
 | C73 | Wake producer anchor mis-labelled: `worker_pool.py:1381-1386` called the **claim path** (B-10) | **corrected:** `:1381-1386` is the `self._stats` **dict literal** (the outcome *vocabulary* source); the **claim call** is `worker_pool.py:302` (`claim_task`); the canonical **carrier producer** is `task_processor.py:569-598` (carrier field `message_processing_pipeline.py:176`, ledger identity `instance_messaging.py:2611-2613`) | catalog §8.13, §11 C29; `daemon/services/worker_pool.py:302`, `daemon/services/task_processor.py:569-598` |
 | C74 | Kill-switch §0.8 said "everything else … is OFF (fail closed)", which reads as if **unset ⇒ OFF** — contradicting the same paragraph's "env UNSET defers to the managed-key chain" (NB-6) | **one semantic, three cases:** (i) env explicitly set (incl. set-but-empty) ⇒ ON only for `{1,true,yes}`, every other explicit value ⇒ OFF (an invalid explicit value fails closed); (ii) explicit OFF ⇒ OFF and wins over the managed-key chain; (iii) env UNSET ⇒ the managed-key chain decides. "Fail closed" describes **only** an invalid *explicit* value | catalog §0.8; plan-overview.md §4 P0 T3 + §5 |
 | C75 | §0.2 carried a **dangling paragraph fragment** — the head of the A27 "Freeze rules" paragraph ("**Freeze rules (A27).** Import the listener on the **lifespan path** (not `daemon/api.py`") was missing, leaving an orphaned "module top level) so the PyInstaller analyzer pulls it." | **repaired:** the full A27 paragraph restored, matching plan §3 "Freeze rules (A27)" verbatim | catalog §0.2; plan-overview.md §3 |
+| C76 | **The delta trail did not sum to the certified total** (R-4 / B-13a): three items were mis-stated (F0.2's cap-rejected counter was double-counted; F10 21→6 = −15 with F11 +14 is a net −1, not "net 0"; F13 31→29 = −2, not −4 — the −4 mixed v4's *detail* baseline 33 with the 538 *summary-table* baseline), and F7's 22→21 was already inside the 538 baseline | **fixed:** the trail is restated as a table with an **explicit per-item baseline** (the §1 summary-table cell — the one that summed to 538) and sums on one line in **both** places (§1 and §7) — the trail itself is stated in those two places and is **not** restated here: `§1 → *Reconciliation basis*` + `§7 → *Delta trail (the basis of …)*` (F7 = 0; F22 shell 5→4 sits outside the daemon-origin budget) | catalog §1, §7 |
+| C77 | `ensemble_metrics_invalid_label_total{metric}` bound to a "closed 22-family set" while the catalog carries **26** families (P0-a) | **fixed:** 26 in both places (F0.2's series-estimate text and this row); the `{metric}` description now names the same closed 26-family set §14.1 quotes | catalog F0.2, §11 C64, §14.1 |
+| C78 | F21 carried "(the summary table rounds to 66)" while §1 had moved to 65 (P0-d) | **fixed:** the parenthetical is withdrawn; §1's F21 cell and the family decomposition now agree at 65 | catalog F21, §1 |
+| C79 | "≈1 118" (the every-label-combination-live bound) was carried forward unchanged after five families moved (NB-4) | **fixed:** recomputed to **≈1 114**, with the provenance stated in §7 — the v5 bound ≈1 118 adjusted by the same five per-family deltas (the moved families' label structures are unchanged by the move). The v5 bound's own derivation was never written down, so the figure is an **adjusted bound**, not a re-derived product; §11 C80 records the family-level derivation rule | catalog §7, §14.1 |
+| C80 | F12's "≈30 live (lane, outcome) combinations" was a **rule-less rounding** that propagated as a hard 69 (NB-5) | **fixed:** the derivation is now explicit — three lane-scoped series counted one per lane (13 + 13 + 13 = 39) plus the rows counter at its **observation-bounded** ≈30 (an OBSERVED figure: each lane emits 2–3 of the 6 outcomes), with the family **ceiling** stated separately as the full `lane` × `outcome` product 13 × 6 = 78 ⇒ ceiling 39 + 78 = **117** | catalog F12, §7 |
+| C81 | The journal-op series convention was ambiguous (NB-6): F21 counted `ensemble_journal_op_seconds` as 13 with no `/op` multiplier, while the checkpoint family states its `/op` fully-wired form (F7: 121) | **fixed:** the convention is stated catalog-wide — a histogram's bucket series are counted **once** (the F7 "today" form); the `/op` fully-wired form is stated separately where it applies. §8.11 now marks the two checkpoint histograms `/ op` and the journal histogram **flat** (no `op` label), so F21's 13 is unambiguous; F21's op-partitioned ceiling (if ever applied) is 390 | catalog §8.11, F21, F7 |
+| C82 | `ProcessingContext` was cited at `message_processing_pipeline.py:121` without stating that the decorator sits at `:120` and the carrier field at `:176` (NB-7) | **fixed:** the class anchor is now given as `:120-121` (decorator + class definition) with the field at `:176` wherever the carrier is cited — the two numbers can no longer be confused | catalog §8.13 |
+| C83 | C68's editorial marker (an annex-subsection pointer carrying a query mark) was left unresolved (NB-8) | **fixed:** the F22 process-name vocabulary lives in **§8.9** (the pool / PG / checkpoint / spine block) — **not** §8.5; the marker is resolved | catalog §11 C68 |
+| C84 | §14.3 did not flag F7 as changed although the section heading promises changed families are flagged (NB-9) | **fixed:** F7's row carries an explicit **CHANGED** marker (today 21 / post byte-wiring 31, R-m8) | catalog §14.3 |
+| C85 | §14.4's wake-turn row pointed at the placeholder "catalog §11 C-corr", naming no correction (NB-10) | **fixed:** the real correction ids are named — **C29** (the consumer/producer split), **C39** (the 5-value closable wake set), **C73** (the `worker_pool.py:1381-1386` anchor correction) | catalog §14.4 |
+| C86 | C27 asserted "verified 49 distinct across 254 sites" — the tree's `_tool_registry.py` `CATEGORY_MODULES` carries **55** keys, so the correction row itself was the stale claim (NB-11) | **fixed:** the row records the **V-4 generated artifact as canonical**, the freeze-time value **55 + reserved `other` = 56**, and explicitly withdraws the v1 hand-count (the "49 across 254 sites" figure was never code-derived) | catalog §11 C27, §8.6 |
+| C87 | §14.4 listed "F1 turn source" where the family is **F20** (NB-2) | **fixed:** renamed to F20; the entry keeps its §8.10 anchor | catalog §14.4 |
+| C88 | §8.10 carried **five** label sets with no `file:line` anchor, violating §0.5's "every set is anchored" rule (P0-c) | **fixed:** worker pool name → `pool_orchestrator.py:565` + `:643`; stream-watchdog sweep outcome → `llm_stream_watchdog.py:551-565`; compaction stage → `compaction.py:1589` + `graph.py:7497` + `compaction.py:305`; gateway session outcome → `mcps_gateway/sessions.py:135`/`:208`/`:239` + `mcps_gateway/tombstones.py:90`/`:120`; gateway audit outcome → `mcps_gateway/audit.py:53-54` (the wider audit constants at `:55-56` are outside the F18 label set and fold to `other`, so the series count is unchanged) | catalog §8.10, §0.5 |
+| C89 | F0.4's producer was assigned to P0 T6 in the catalog annex, but the plan's P0 T6 acceptance never named `ensemble_metrics_vocabulary_version` as an **EMITTED** series (P0-b) | **fixed:** the plan's P0 T6 acceptance now names it; catalog §7.1's F0.4 row states the emitted series explicitly | plan-overview.md §4 P0 T6 + catalog §7.1 |
+| C90 | §7.1's task map still assigned the claim-latency task (P1b T6) to F10 after the F10→F11 split, and F11 carried **no** claim-latency Source anchor (P0-e) | **fixed:** T6 moves to F11 in the task map; F11's Source now carries the full claim-latency chain (`worker_pool.py:302` → `task_processor.py:1829` → `task/repository.py:2619`) and the measured columns (`task/models.py:273-274`) | catalog §7.1, F11 |
+| C91 | §14.5/§14.6 carried a "copies must be updated … wave 2/3" deferral note | **dissolved by M-2:** the ledger is now *referenced, not copied* — §14.6 states the pointer discipline and the deferral is removed | catalog §14.5, §14.6 |
+| C92 | The "claim path" phrase named `worker_pool.py:1381-1386` (the `self._stats` dict literal) as the claim path | **fixed:** `:302` is the **claim CALL**; `:1381-1386` is the `self._stats` dict literal = the source of the four claim-side outcome values (the fifth, `fresh_episode_reset`, comes from the episode seam `graph.py:7319`) | catalog §8.1, §8.13, F11 |
+| C93 | The Prometheus TSDB capacity formula (plan §13.1.6 + the P2 risk row 4) omitted the **scrape-interval** input and did not reproduce its own figure — as written ≈124.4 GB, at the plan's own 15 s hint ≈8.3 GB, and the stated ≈21 GB matched neither (NB-17) | **fixed:** the derivation now states **both** inputs — the **scrape interval (15 s)** and the **series count** — and is self-consistent: `30 d = 2 592 000 s` ÷ 15 s = **172 800 samples per series** × **16 B/sample** × **1.5** (WAL + compaction headroom) = **4 147 200 B per series** × **2 000 series** (the ≤2 k daemon-origin budget RULE — the ceiling the gate is sized against) = **8 294 400 000 B ≈ 8.3 GB**. The **observed** count (the grand total quoted in §14.1) is **≈2.5 GB** at the same interval; the gate uses the budget ceiling so it still holds if the surface grows into its budget, and it stays an **install-blocking** precondition | plan-overview.md §13.1.6 + §4 P2 risk row 4 |
+| C94 | The read seam `_charge_checkpoint_read` was cited at `checkpoint_adapter.py:371-374` only — that range covers the **`aget_tuple`** charge; the **`aget`** charge is at `:368` (NB-16) | **fixed:** both sites are now cited together — `daemon/checkpoint_adapter.py:368` (aget) and `:371-374` (aget_tuple) — in the plan (§1, the P1b T14 task row, the P1b risk row 3, §13.1.1) and in the catalog's F7 Source | plan-overview.md §1/§4/§13.1.1 + catalog F7 |
 
 ---
 
@@ -1522,19 +1607,38 @@ separately-scoped decision.
 ## 14. Reconciled counts ledger — single source of truth (B-13, B-06, B-08, B-09)
 
 **Purpose.** ONE authoritative place for every count the plan asserts. Every other document
-(plan-overview.md, decisions.md) must quote these values verbatim; no number may appear in two
-documents with different values. Wave 2 (plan) and wave 3 (decisions) align their copies to
-this ledger. Derived from the §1 summary table + §7 roll-up after the B-series reconciliation.
+(plan-overview.md, decisions.md) **references** these values — it does not copy them (M-2, see
+§14.6); no number may appear in two documents with different values, and no number may be
+restated where a pointer will do. Derived from the §1 summary table + §7 roll-up after the
+B-series reconciliation.
 
-### 14.1 Daemon-origin totals
+### 14.1 Quoted values — the single quoted-values table
 
-| Metric | Value | Derivation |
-|---|---|---|
-| Daemon-origin total | **534** | P0 28 + P1a 63 + P1b 217 + P1c 226 (§7 roll-up) |
-| Shell-origin (textfile) | **4** | F22: 3 process-name series + 1 freshness gauge |
-| Exporter-origin | **≈67** | node_exporter + postgres_exporter (§6) |
-| Grand total on Prometheus server | **≈605** | 534 + 4 + 67 |
-| Budget | ≤2 000 | headroom **1 466** (≈27 % consumed) |
+**Every count the other documents assert is quoted here, once.** plan-overview.md and
+decisions.md **point** at the row they need (M-2 — see §14.6); they do not restate the value.
+The `Scope` column says which document owns the artifact the count describes.
+
+| Value | Quoted number | Scope | Derivation / source |
+|---|---|---|---|
+| Daemon-origin total | **534** | catalog | P0 28 + P1a 63 + P1b 217 + P1c 226 (§7 roll-up) |
+| Shell-origin (textfile) | **4** | catalog | F22: 3 process-name series + 1 freshness gauge |
+| Exporter-origin | **≈67** | catalog | node_exporter + postgres_exporter (§6) — measured separately, NOT part of the daemon-origin budget |
+| Grand total on Prometheus server | **≈605** | catalog | 534 + 4 + 67 |
+| Budget | ≤2 000 | catalog (the RULE) | headroom **1 466** (≈27 % consumed) |
+| Daemon-origin families | **26** | catalog | F0.1–F0.4 (4) + F1–F22 (22) — the same set `ensemble_metrics_invalid_label_total{metric}` names |
+| Fully-wired bound (every label combination live) | **≈1 114** | catalog | the v5 bound ≈1 118 adjusted by the same five per-family deltas (§7) — an adjusted bound, see §11 C79 |
+| Shipped alert rules | **14** | plan | 13 original + `TextfileStale` (V-8) — plan §8 |
+| promtool fixture files | **17** | plan | 11 × 1 + 3 × 2 (the V-1 defect/repro pairs) — plan §10 |
+| Alert-rule baselines | **14** | plan | one per rule — plan §8 Baseline column |
+| Risk rows carrying a BACK-OUT | **17** | plan | P0 3 + P1a 2 + P1b 5 + P1c 3 + P2 4 — plan §4 |
+| **Bound cross-check row** — the fully-wired series bound (three DIFFERENT quantities; do not conflate) | catalogued **≈1 114** (the **provenance-disclosed adjusted bound** — **not** re-derived) · **derived catalogued-ceiling 776** (first-principles) · **conservative expanded-label ceiling 1 099** (first-principles) | catalog | **Derivation status — the three are not interchangeable.** (i) The **≈1 114** figure quoted in §7 is the **adjusted** bound: it is the v5 bound moved by the same per-family deltas, and **its own derivation was never written down** (§11 **C79**) ⇒ it is **not reproducible by rule** and is labelled *adjusted* everywhere it appears. (ii) The **derived catalogued-ceiling 776** is **first-principles**: for each of the 25 daemon-origin families (F0.1–F0.4 + F1–F21), each metric's **full label product** over the label sets that metric actually carries (§8, §14.4), times the histogram bucket-series count where §8.11 states one, summed. It reproduces the family ceilings the catalog states explicitly (F7 121, F12 117) and exceeds the catalogued estimate exactly where that estimate assumed a subset (F0.2, F4, F5, F21). (iii) The **conservative expanded-label ceiling 1 099** is the same first-principles sum with every **documented expanded form** substituted (F21's op-partitioned journal histogram — §11 **C81**; F7's fully-wired `/op` form; F12's full lane × outcome product) — the worst case the catalog's own documented variants allow. **Cross-check result:** the derived expanded ceiling and the adjusted bound agree to within **15 series (≈1.4 %)**, so the adjusted bound is **corroborated in magnitude** but remains **not re-derivable** — that residual is the evidence for keeping it labelled *adjusted*. **All three are inside the ≤2 000 budget rule** (headroom 1 224 and 901 against the two derived ceilings); the **certified daemon-origin total in the first row of this table is unchanged**. |
+
+**Reading the bound cross-check row.** The row exists because the fully-wired bound was
+previously quoted in more than one sense with no statement of which sense it was. It is now
+**one** row carrying **three** labelled quantities with their derivation status, so a reader
+can never mistake the **adjusted** bound (provenance-disclosed, §11 C79) for a **derived**
+ceiling (computed here by rule). Any future change to a family's label structure must bump all
+three consistently and append a §11 correction entry (the ledger discipline of §14.6).
 
 ### 14.2 Per-phase totals
 
@@ -1560,7 +1664,7 @@ this ledger. Derived from the §1 summary table + §7 roll-up after the B-series
 | F4 | 8 | unchanged |
 | F5 | 3 | unchanged |
 | F6 | 15 | unchanged |
-| F7 | 21→31 | today 21 / post byte-wiring 31 (R-m8) |
+| F7 | 21→31 | **CHANGED** — today 21 / post byte-wiring 31 (R-m8) |
 | F8 | 9 | unchanged |
 | F9 | 53 | unchanged |
 | F10 | **6** | was 20/21; claim latency moved to F11 (B-08) |
@@ -1581,7 +1685,7 @@ this ledger. Derived from the §1 summary table + §7 roll-up after the B-series
 
 | Vocabulary | Value | Source anchor | Notes |
 |---|---|---|---|
-| Wake-turn outcome | **5** | claim call `worker_pool.py:302` (claim_task) + episode seam `graph.py:7319` (`_detect_fresh_episode_reset`); canonical carrier producer `task_processor.py:569-598` (fresh-episode flag computed once at `:569-576`, carried on `ProcessingContext` at `:598`; ledger identity `instance_messaging.py:2611-2613`; carrier field `message_processing_pipeline.py:176`); `worker_pool.py:1381-1386` is the `self._stats` dict literal = source of the outcome *vocabulary*, NOT the claim path (B-10, B-11, catalog §11 C-corr) | `claimed`, `skipped_busy_instance`, `empty_claim`, `timeout_wake`, `fresh_episode_reset`; `None` yields no increment (B-06) |
+| Wake-turn outcome | **5** | claim call `worker_pool.py:302` (claim_task) + episode seam `graph.py:7319` (`_detect_fresh_episode_reset`); canonical carrier producer `task_processor.py:569-598` (fresh-episode flag computed once at `:569-576`, carried on `ProcessingContext` at `:598`; ledger identity `instance_messaging.py:2611-2613`; carrier field `message_processing_pipeline.py:176`); `worker_pool.py:1381-1386` is the `self._stats` dict literal = source of the outcome *vocabulary* (the **four** claim-side outcome values; the fifth, `fresh_episode_reset`, comes from the episode seam `graph.py:7319`), NOT the claim path — the claim CALL is `worker_pool.py:302` (B-10, B-11; catalog §11 **C29** — the consumer/producer split, **C39** — the 5-value closable wake set, **C73** — the `worker_pool.py:1381-1386` anchor correction; §11 C92) | `claimed`, `skipped_busy_instance`, `empty_claim`, `timeout_wake`, `fresh_episode_reset`; `None` yields no increment (B-06) |
 | Instance lifecycle event | **4 real + reserved `other`** | event_publisher.py:38-80 | `completed`, `failed`, `terminated`, `error`; `fan_in_*` removed (B-07) |
 | Instance status | 10 | instance/models.py:20-32 | unchanged |
 | Instance liveness | **6 reachable + reserved `other`** | work_status.py:67-99 | `unknown` folds to `other` (NB-10) |
@@ -1618,7 +1722,7 @@ this ledger. Derived from the §1 summary table + §7 roll-up after the B-series
 | F4 native quantity | 4 | §8.9 | unchanged |
 | F4 request-error kind | 3 | §8.9 | unchanged |
 | F5 pool name | 2 | §8.9 | unchanged |
-| F1 turn source | 5 | §8.10 | unchanged |
+| F20 turn source | 5 | §8.10 | unchanged (the turn-source set belongs to **F20**, not F1 — §11 C87) |
 | F1 loop-lag stat | 3 | §8.3 | unchanged |
 | F1 probe state | 4 | §8.3 | unchanged |
 | F3 write outcome | 2 | §8.3 | unchanged |
@@ -1649,7 +1753,7 @@ this ledger. Derived from the §1 summary table + §7 roll-up after the B-series
 
 ### 14.5 Places each total appears
 
-- **534 (daemon total):** catalog §1 summary, §7 roll-up, §14.1/14.2. Plan-overview/decisions copies must be updated to 534 (wave 2/3).
+- **534 (daemon total):** catalog §1 summary, §7 roll-up, §14.1/14.2. **plan-overview.md and decisions.md do not restate it — they POINT at §14.1** (M-2): every series count, headroom, family count, vocabulary size, rule/fixture/baseline/risk-row count and the daemon-origin total are quoted in §14.1 and referenced from the other documents, never duplicated (the old "copies must be updated … wave 2/3" deferral is dissolved — §11 C91).
 - **28 (P0):** catalog §1, §7, §14.2.
 - **63 (P1a):** catalog §1, §7, §14.2.
 - **217 (P1b):** catalog §1, §7, §14.2.
@@ -1657,9 +1761,15 @@ this ledger. Derived from the §1 summary table + §7 roll-up after the B-series
 - **4 (shell):** catalog §1 F22, §6, §7, §14.1.
 - **≈605 (grand total):** catalog §7, §14.1.
 
-### 14.6 Cross-doc alignment instruction
+### 14.6 Cross-doc alignment instruction (M-2 — the ledger is referenced, not copied)
 
-Wave 2 (plan-overview.md) and wave 3 (decisions.md) must quote the values in §14.1–14.4
-verbatim. Where a value differs from the pre-reconciliation copy, update the copy rather than
-the ledger. The ledger is the single source of truth; any future change bumps
-`ensemble_metrics_vocabulary_version` (F0.4) and appends a §11 correction entry.
+plan-overview.md and decisions.md **pointer** to the values in §14.1–14.4 instead of restating
+them: where a document needs a series count, headroom, family count, vocabulary size,
+rule/fixture/baseline/risk-row count or the daemon-origin total, it cites the §14 subsection
+that holds the value. **No number may appear in two documents with a different value, and no
+number may be restated where a pointer will do.** Rule thresholds and their baseline citations
+stay where they are — they are rule *parameters*, not counts — and the budget RULE
+(daemon-origin ≤2 k; exporters measured separately) stays with the rule. Where a value differs
+from a pre-reconciliation copy, fix the copy, not the ledger. The ledger is the single source of
+truth; any future change bumps `ensemble_metrics_vocabulary_version` (F0.4) and appends a §11
+correction entry.
