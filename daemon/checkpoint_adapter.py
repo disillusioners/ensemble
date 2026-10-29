@@ -588,6 +588,38 @@ class CheckpointerAdapter(ABC):
         """
 
     @abstractmethod
+    async def has_checkpoint(self, thread_id: str) -> bool:
+        """Existence probe for the ROOT namespace — bounded, decode-free.
+
+        Track-1 quick-win (checkpoint read-path plan, item 2). Answers
+        exactly one question — "does a checkpoint row exist for this
+        thread?" — with an existence query instead of a FULL saver
+        read.
+
+        Why this exists on the adapter surface (and not on the saver):
+        the saver's read path takes the saver's single ``asyncio.Lock``
+        and deserializes the ENTIRE checkpoint (checkpoint + channel
+        values + blobs) before the caller can look at one field of it.
+        The PostgreSQL adapter already owns a SEPARATE asyncpg pool
+        for direct SQL, so the probe runs there and never touches the
+        saver lock.
+
+        Namespace semantics are IDENTICAL to the saver lookup it
+        replaces: LangGraph resolves
+        ``config["configurable"].get("checkpoint_ns", "")`` — i.e. the
+        ROOT namespace — and returns "no checkpoint" when no
+        ``checkpoints`` row matches. This probe is therefore scoped to
+        the root namespace only.
+
+        Args:
+            thread_id: The instance id (LangGraph thread_id).
+
+        Returns:
+            True iff a checkpoint row exists for ``thread_id`` in the
+            root namespace.
+        """
+
+    @abstractmethod
     async def delete_checkpoints_excluding(
         self, thread_id: str, checkpoint_ns: str, keep_ids: set[str]
     ) -> int:
@@ -834,6 +866,26 @@ class SqliteCheckpointerAdapter(CheckpointerAdapter):
             )
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
+
+    async def has_checkpoint(self, thread_id: str) -> bool:
+        """SQLite mirror of :meth:`PostgresCheckpointerAdapter.has_checkpoint`.
+
+        Same root-namespace semantics (``checkpoint_ns = ''`` — the
+        LangGraph default for a config carrying only ``thread_id``).
+
+        SQLite has no second connection pool: every other helper in
+        this adapter runs on the saver's own connection under the
+        saver's lock, so this one does the same. The off-lock win is
+        PostgreSQL-only by construction — the SQLite saver is a single
+        serialized connection and there is nothing to bypass.
+        """
+        async with self._saver.lock:
+            cursor = await self._saver.conn.execute(
+                "SELECT 1 FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ? LIMIT 1",
+                (thread_id, ""),
+            )
+            row = await cursor.fetchone()
+            return row is not None
 
     async def delete_checkpoints_excluding(
         self, thread_id: str, checkpoint_ns: str, keep_ids: set[str]
@@ -1131,6 +1183,44 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
                 limit,
             )
             return [row["checkpoint_id"] for row in rows]
+
+    async def has_checkpoint(self, thread_id: str) -> bool:
+        """Existence probe on the SEPARATE asyncpg pool — NO saver lock.
+
+        Track-1 quick-win (checkpoint read-path plan, item 2). The
+        retry-path existence check used to run a FULL
+        ``raw_saver.aget(config)``: that (a) took the saver's single
+        ``asyncio.Lock`` — serializing every other checkpoint read
+        behind it — and (b) deserialized the ENTIRE checkpoint
+        (checkpoint + channel values + blobs) only for the caller to
+        look at one boolean.
+
+        This probe answers the SAME question with a bounded existence
+        query on the adapter's own asyncpg pool (``self._pool`` — the
+        pool every other direct-SQL helper in this class already
+        uses). It therefore never touches the saver's lock and never
+        materialises a payload.
+
+        Semantics are IDENTICAL to the saver lookup it replaces:
+        LangGraph's ``aget_tuple`` resolves
+        ``config["configurable"].get("checkpoint_ns", "")`` — i.e. the
+        ROOT namespace — and reports "no checkpoint" when no
+        ``checkpoints`` row matches. The ``checkpoint_ns = ''`` literal
+        below IS that root-namespace default (pinned, not bound: this
+        probe has exactly one supported namespace).
+
+        NOTE (resource-cost-control charge seam): the saver read path
+        charges the DECODED payload to the requesting instance
+        (``_charge_checkpoint_read``). This probe decodes no payload,
+        so it is deliberately NOT charged — charging a non-payload
+        would corrupt the checkpoint read-cost metric.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT 1 FROM checkpoints WHERE thread_id = $1 AND checkpoint_ns = '' LIMIT 1",
+                thread_id,
+            )
+        return row is not None
 
     async def delete_checkpoints_excluding(
         self, thread_id: str, checkpoint_ns: str, keep_ids: set[str]

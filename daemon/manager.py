@@ -12544,6 +12544,22 @@ class InstanceManager:
     async def _has_checkpoint(self, instance_id: str) -> bool:
         """Check if a checkpoint exists for this instance.
 
+        Track-1 quick-win (checkpoint read-path plan, item 2): this
+        used to run a FULL ``self.checkpointer.raw_saver.aget(config)``
+        — deserializing the entire checkpoint (checkpoint + channel
+        values + blobs) and taking the saver's single ``asyncio.Lock``
+        — just to answer a yes/no question. It now issues an EXISTS
+        probe through the checkpoint adapter's direct-SQL surface
+        (``has_checkpoint``), which on PostgreSQL runs on the
+        adapter's SEPARATE asyncpg pool and therefore never touches
+        the saver's lock and never decodes a payload.
+
+        The BOOLEAN SEMANTICS ARE UNCHANGED: a row found in the root
+        namespace (``checkpoint_ns = ''`` — LangGraph's default for a
+        config carrying only ``thread_id``) means "has checkpoint",
+        exactly as the saver lookup did. Fail-soft on error is also
+        unchanged: any exception still yields False.
+
         Args:
             instance_id: The instance ID to check.
 
@@ -12551,36 +12567,12 @@ class InstanceManager:
             True if checkpoint exists, False otherwise.
         """
         try:
-            config = {"configurable": {"thread_id": instance_id}}
-            state = await self.checkpointer.raw_saver.aget(config)
-            result = state is not None
-            channel_values = state.get("channel_values", {}) if state else {}
-            msg_count = len(channel_values.get("messages", []))
-            logger.info(f"[RESUME] instance={instance_id[:8]} has_checkpoint={result}, msg_count={msg_count}")
+            result = await self.checkpointer.has_checkpoint(instance_id)
+            logger.info(f"[RESUME] instance={instance_id[:8]} has_checkpoint={result}")
             return result
         except Exception as e:
             logger.info(f"[RESUME] instance={instance_id[:8]} has_checkpoint=False, exception={type(e).__name__}")
             return False
-
-    async def _get_message_count(self, instance_id: str) -> int:
-        """Get the number of messages in the instance's checkpoint/state.
-
-        Args:
-            instance_id: The instance ID to check.
-
-        Returns:
-            Number of messages in the current state.
-        """
-        try:
-            config = {"configurable": {"thread_id": instance_id}}
-            state = await self.checkpointer.raw_saver.aget(config)
-            if state:
-                channel_values = state.get("channel_values", {})
-                messages = channel_values.get("messages", [])
-                return len(messages) if messages else 0
-            return 0
-        except Exception:
-            return 0
 
     def cancel(self, message_id: str, reason: CancellationReason) -> bool:
         """Request cancellation of a specific message.
