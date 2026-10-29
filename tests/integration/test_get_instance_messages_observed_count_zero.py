@@ -149,7 +149,7 @@ async def _seed_thread(saver, thread_id: str, n_checkpoints: int) -> None:
 
 
 class TestObservedCountZero:
-    """FR-2 invariant: ``message_api_checkpoint_list_total`` stays at 0.
+    """FR-2 invariant: ``ensemble_checkpoint_list_total`` stays at 0.
 
     Post-PR3 the live ``get_instance_messages`` path makes ZERO
     ``saver.alist(…)`` calls. The counter is a regression hook — if
@@ -164,7 +164,7 @@ class TestObservedCountZero:
 
         Seeds each thread with ≥ 100 checkpoints (the brief's minimum
         to prove the live path), runs ``get_instance_messages`` on each,
-        captures the ``message_api_checkpoint_list_total`` counter
+        captures the ``ensemble_checkpoint_list_total`` counter
         AFTER each call, asserts all 10 captured values are 0.
 
         Per T5.4 (F5) the armed-absence fixture is ALSO active: any
