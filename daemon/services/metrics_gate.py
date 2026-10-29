@@ -41,6 +41,36 @@ sampler is deliberately non-pooled and MUST NOT consume a pool slot
 for a boolean). The census reads the cached value only — a PURE read,
 no I/O — so the census stays pool-free.
 
+THE LIVE MANAGED-VALUE RESOLVER (MAJOR-2 fix)
+---------------------------------------------
+
+The resolver serves **every** live managed key from ONE DB read: the
+provider returns the managed-key ladder's DB tier (the ``app_settings``
+override rows) as a MAPPING, and the resolver caches it for
+``MANAGED_REFRESH_TTL_S``. Three keys are live against that cache:
+
+* ``limits.metrics_enabled`` — the kill-switch (case (iii));
+* ``limits.metrics_scrape_interval_hint_s`` — the registry's publisher
+  cadence (plan §5: "No (per-request)");
+* ``limits.metrics_cardinality_cap`` — the registry's HARD cap (plan §5:
+  "No (per-request)"; §13's back-out relies on "raise the cap … no
+  restart").
+
+The last TWO used to be served from the BOOT-APPLIED config object
+while the settings API advertised "no restart needed" — the asymmetry
+the review flagged. They now read the SAME live cache, so a runtime
+``PUT /api/settings/daemon/{key}`` is reflected by the registry
+providers without a restart, within the TTL.
+
+Two invariants the resolver keeps:
+
+* a key with **no DB override** falls back to its BOOT value (the DB
+  tier is absent ⇒ the yaml/env/default tier still applies);
+* the cached read is **PURE** — the registry consults its providers
+  while holding a metric's own lock, so a DB round trip there would be
+  the CR-1 wedged-writer failure. The refresh happens on the LISTENER's
+  dedicated thread, never under a metric lock.
+
 This module is import-safe and import-light on purpose: BOTH the
 listener (``daemon/services/metrics_listener.py``) and the census
 sampler (``daemon/services/metrics_census.py``) import it, and NEITHER
@@ -54,7 +84,7 @@ import logging
 import os
 import threading
 import time
-from typing import Callable
+from typing import Any, Callable, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +97,13 @@ TRUTHY_VALUES: frozenset[str] = frozenset({"1", "true", "yes"})
 
 #: The managed key that mirrors the env switch (DB-backed tier).
 MANAGED_KEY = "limits.metrics_enabled"
+
+#: The managed key that carries the registry's publisher cadence (live).
+SCRAPE_INTERVAL_KEY = "limits.metrics_scrape_interval_hint_s"
+
+#: The managed key that carries the registry's HARD cardinality cap
+#: (live).
+CARDINALITY_CAP_KEY = "limits.metrics_cardinality_cap"
 
 #: The ONE boot log line (plan §5 / catalog §0.8). Emitted exactly once
 #: per process when the env is UNSET while the managed key is ON — the
@@ -82,7 +119,8 @@ MANAGED_REFRESH_TTL_S = 5.0
 
 _lock = threading.Lock()
 _managed_enabled: bool = False
-_managed_provider: Callable[[], bool] | None = None
+_managed_values: dict[str, Any] = {}
+_managed_provider: Callable[[], Mapping[str, Any] | None] | None = None
 _managed_refreshed_at: float = 0.0
 _defer_log_emitted: bool = False
 
@@ -120,20 +158,44 @@ def env_explicit_enabled() -> bool | None:
 
 
 def set_managed_metrics_enabled(value: bool) -> None:
-    """Seed the managed-key tier (boot / test seam)."""
+    """Seed the managed-key tier (boot / test seam).
+
+    The seeded value is the BOOT fallback: it is used until (and after)
+    the live cache holds a DB override for the key.
+    """
     global _managed_enabled, _managed_refreshed_at
     with _lock:
         _managed_enabled = bool(value)
         _managed_refreshed_at = time.monotonic()
 
 
-def set_managed_metrics_provider(
-    provider: Callable[[], bool] | None,
-) -> None:
-    """Install the managed-key value provider (boot wiring / test seam).
+def build_managed_values_provider(
+    read_overrides: Callable[[], Mapping[str, Any]],
+) -> Callable[[], Mapping[str, Any]]:
+    """Wrap the managed-key DB-tier reader as the resolver's provider.
 
-    The provider returns the CURRENT effective managed value. It may hit
-    the DB; the caller (the listener thread) owns that cost.
+    ``read_overrides`` returns the managed-key ladder's DB tier — the
+    ``app_settings`` override rows the settings API writes
+    (``{key: value}``). The provider normalises it to a plain dict; a
+    reader that RAISES is handled by the resolver (the last known
+    values are kept — never a crash, never a silent reset).
+    """
+
+    def _provider() -> Mapping[str, Any]:
+        values = read_overrides()
+        return dict(values or {})
+
+    return _provider
+
+
+def set_managed_metrics_provider(
+    provider: Callable[[], Mapping[str, Any] | None] | None,
+) -> None:
+    """Install the live managed-values provider (boot wiring / test seam).
+
+    The provider returns the CURRENT DB tier of the managed-key ladder
+    (``{key: value}``). It may hit the DB; the caller (the listener
+    thread) owns that cost.
     """
     global _managed_provider
     with _lock:
@@ -141,9 +203,111 @@ def set_managed_metrics_provider(
 
 
 def managed_metrics_enabled() -> bool:
-    """The cached managed-key value (PURE read — no I/O)."""
+    """The cached gate value (PURE read — no I/O)."""
     with _lock:
         return _managed_enabled
+
+
+def live_managed_value(key: str, default: Any) -> Any:
+    """The cached LIVE value of a managed key (PURE read — no I/O).
+
+    This is what the registry's providers call: they are consulted
+    while a metric's own lock is held, so a DB round trip here would
+    be the CR-1 wedged-writer failure. The cache is refreshed by the
+    listener's dedicated thread
+    (:func:`refresh_managed_values`).
+
+    A key with no DB override falls back to ``default`` — the boot
+    value (the yaml/env/default tier still applies).
+    """
+    with _lock:
+        values = _managed_values
+    if key in values:
+        return values[key]
+    return default
+
+
+def build_registry_providers(
+    *,
+    scrape_interval_default: int,
+    cardinality_cap_default: int,
+) -> tuple[Callable[[], float], Callable[[], int]]:
+    """Build the registry's two LIVE managed-value providers.
+
+    The publisher cadence (``limits.metrics_scrape_interval_hint_s``)
+    and the HARD cardinality cap (``limits.metrics_cardinality_cap``)
+    are live managed keys (plan §5: "No (per-request)"; §13's back-out
+    relies on "raise the cap … no restart"). They read the LIVE
+    managed-value cache — refreshed from the DB tier by the listener's
+    thread — and fall back to the BOOT value when the managed chain
+    carries no DB override for the key.
+
+    The reads are PURE (a cached lookup): the registry consults its
+    providers while holding a metric's own lock, so a DB round trip
+    there would be the CR-1 wedged-writer failure.
+
+    Returns:
+        ``(publisher_cadence_provider, cardinality_cap_provider)``.
+    """
+
+    def _publisher_cadence() -> float:
+        return float(
+            live_managed_value(SCRAPE_INTERVAL_KEY, scrape_interval_default)
+        )
+
+    def _cardinality_cap() -> int:
+        return int(
+            live_managed_value(CARDINALITY_CAP_KEY, cardinality_cap_default)
+        )
+
+    return _publisher_cadence, _cardinality_cap
+
+
+def refresh_managed_values(
+    *,
+    now: float | None = None,
+    ttl_s: float = MANAGED_REFRESH_TTL_S,
+) -> Mapping[str, Any]:
+    """Refresh the cached live managed values from the provider.
+
+    ONE DB read serves EVERY live managed key (the kill-switch, the
+    publisher cadence, the cardinality cap). The refresh is
+    TTL-bounded: at most one read per ``ttl_s`` seconds.
+
+    A provider failure is FAIL-SAFE: the last known values are kept
+    (never a spurious OFF that would silently darken the surface, never
+    a spurious ON that would override an explicit env OFF — the env tier
+    always wins anyway).
+    """
+    global _managed_values, _managed_enabled, _managed_refreshed_at
+    with _lock:
+        provider = _managed_provider
+        current_values = dict(_managed_values)
+        current_enabled = _managed_enabled
+        refreshed_at = _managed_refreshed_at
+    if provider is None:
+        return current_values
+    stamp = time.monotonic() if now is None else now
+    if stamp - refreshed_at < ttl_s:
+        return current_values
+    try:
+        values = dict(provider() or {})
+    except Exception as exc:  # noqa: BLE001 — never raise into the caller
+        logger.warning(
+            "[Metrics] managed-key refresh failed (%s: %s) — keeping the "
+            "last known values",
+            type(exc).__name__,
+            exc,
+        )
+        return current_values
+    with _lock:
+        _managed_values = values
+        if MANAGED_KEY in values:
+            # The kill-switch's DB tier — when the DB has no override
+            # row the BOOT fallback stays in force.
+            _managed_enabled = bool(values[MANAGED_KEY])
+        _managed_refreshed_at = stamp
+    return values
 
 
 def refresh_managed_metrics_enabled(
@@ -151,42 +315,14 @@ def refresh_managed_metrics_enabled(
     now: float | None = None,
     ttl_s: float = MANAGED_REFRESH_TTL_S,
 ) -> bool:
-    """Refresh the cached managed-key value from the installed provider.
+    """Refresh the live managed values and return the gate's value.
 
-    Returns the effective managed-key value. A provider failure is
-    FAIL-SAFE: the last known value is kept (never a spurious OFF that
-    would silently darken the surface, never a spurious ON that would
-    override an explicit env OFF — the env tier always wins anyway).
+    Kept as the gate's own entry point (the listener calls it); it is
+    now a thin wrapper over :func:`refresh_managed_values` — ONE DB
+    read serves every live key.
     """
-    global _managed_enabled, _managed_refreshed_at
-    with _lock:
-        provider = _managed_provider
-        current = _managed_enabled
-        refreshed_at = _managed_refreshed_at
-    if provider is None:
-        return current
-    # The env tier WINS over the managed chain — when it is explicitly
-    # set the managed value is irrelevant, so the provider is NEVER
-    # called (no DB round trip on the hot path).
-    if env_explicit_enabled() is not None:
-        return current
-    stamp = time.monotonic() if now is None else now
-    if stamp - refreshed_at < ttl_s:
-        return current
-    try:
-        value = bool(provider())
-    except Exception as exc:  # noqa: BLE001 — never raise into the caller
-        logger.warning(
-            "[Metrics] managed-key refresh failed (%s: %s) — keeping the "
-            "last known value",
-            type(exc).__name__,
-            exc,
-        )
-        return current
-    with _lock:
-        _managed_enabled = value
-        _managed_refreshed_at = stamp
-    return value
+    refresh_managed_values(now=now, ttl_s=ttl_s)
+    return managed_metrics_enabled()
 
 
 # ─── the gate ───────────────────────────────────────────────────────────────
@@ -226,10 +362,11 @@ def log_deferral_once(*, force: bool = False) -> bool:
 def reset_for_tests() -> None:
     """Reset the module state (test-only — mirrors the registry's
     ``reset_for_tests`` convention)."""
-    global _managed_enabled, _managed_provider, _managed_refreshed_at
-    global _defer_log_emitted
+    global _managed_enabled, _managed_values, _managed_provider
+    global _managed_refreshed_at, _defer_log_emitted
     with _lock:
         _managed_enabled = False
+        _managed_values = {}
         _managed_provider = None
         _managed_refreshed_at = 0.0
         _defer_log_emitted = False

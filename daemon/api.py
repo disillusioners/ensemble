@@ -2324,31 +2324,28 @@ async def lifespan(app: FastAPI):
 
         # The managed tier of the kill-switch (the boot-resolved value —
         # the DB override > env > yaml > default ladder already ran in
-        # ``apply_db_settings_overrides``).
+        # ``apply_db_settings_overrides``). This is the BOOT FALLBACK:
+        # it applies whenever the managed chain carries no DB override
+        # for the key.
         _metrics_managed_enabled = bool(
             getattr(config.limits, "metrics_enabled", False)
         )
         metrics_gate.set_managed_metrics_enabled(_metrics_managed_enabled)
 
-        def _metrics_managed_provider() -> bool:
-            """The LIVE managed tier (the DB override row, else the
-            boot-resolved value).
+        def _read_managed_overrides() -> dict:
+            """The managed-key ladder's DB tier (the ``app_settings``
+            override rows) — the SAME source the settings API writes."""
+            from daemon.services.settings_service import SettingsService
 
-            Read on the listener's own thread at a bounded cadence —
-            the census sampler must NEVER consume a pool slot for a
-            boolean. A read failure falls back to the boot value.
-            """
-            try:
-                from daemon.services.settings_service import SettingsService
+            return SettingsService(engine=manager.engine).get_overrides()
 
-                overrides = SettingsService(engine=manager.engine).get_overrides()
-                if "limits.metrics_enabled" in overrides:
-                    return bool(overrides["limits.metrics_enabled"])
-            except Exception:  # noqa: BLE001 — fail back to the boot value
-                pass
-            return _metrics_managed_enabled
-
-        metrics_gate.set_managed_metrics_provider(_metrics_managed_provider)
+        # ONE provider ⇒ ONE DB read per TTL for EVERY live managed key
+        # (the kill-switch, the publisher cadence, the cardinality cap).
+        # Read on the listener's own thread at a bounded cadence — the
+        # census sampler must NEVER consume a pool slot for a boolean.
+        metrics_gate.set_managed_metrics_provider(
+            metrics_gate.build_managed_values_provider(_read_managed_overrides)
+        )
         # The ONE boot log line: the env is unset while the managed key
         # is on — the state must never be mysterious.
         metrics_gate.log_deferral_once()
@@ -2405,22 +2402,32 @@ async def lifespan(app: FastAPI):
         )
 
     # Registry providers (metrics-collection P0 T5): the publisher
-    # cadence and the HARD cardinality cap are read from the managed
-    # keys at scrape/observation time. A registry that predates these
-    # hooks must not break the boot — the listeners degrade instead.
+    # cadence and the HARD cardinality cap are LIVE managed keys (plan
+    # §5: "No (per-request)"; §13's back-out relies on "raise the cap …
+    # no restart"). They therefore read the LIVE managed-value cache
+    # (the DB tier of the managed-key ladder, refreshed by the
+    # listener's thread) and fall back to the BOOT value when the
+    # managed chain carries no override for the key.
+    #
+    # The reads are PURE (a cached lookup): the registry consults its
+    # providers while holding a metric's own lock — a DB round trip
+    # there would be the CR-1 wedged-writer failure.
     try:
         from daemon import checkpoint_metrics as cm
+        from daemon.services import metrics_gate
 
-        cm.set_publisher_cadence_provider(
-            lambda: int(
-                getattr(config.limits, "metrics_scrape_interval_hint_s", 15)
+        _cadence_provider, _cap_provider = (
+            metrics_gate.build_registry_providers(
+                scrape_interval_default=int(
+                    getattr(config.limits, "metrics_scrape_interval_hint_s", 15)
+                ),
+                cardinality_cap_default=int(
+                    getattr(config.limits, "metrics_cardinality_cap", 2000)
+                ),
             )
         )
-        cm.set_cardinality_cap_provider(
-            lambda: int(
-                getattr(config.limits, "metrics_cardinality_cap", 2000)
-            )
-        )
+        cm.set_publisher_cadence_provider(_cadence_provider)
+        cm.set_cardinality_cap_provider(_cap_provider)
     except Exception as metrics_registry_provider_exc:
         logger.warning(
             "[Metrics] registry provider wiring failed: %s",

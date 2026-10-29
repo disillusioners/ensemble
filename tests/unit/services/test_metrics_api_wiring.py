@@ -94,6 +94,18 @@ def test_the_registry_providers_are_wired_at_boot():
     assert "metrics_cardinality_cap" in source
 
 
+def test_the_registry_providers_are_live_not_boot_only():
+    """FIX ROUND 1 / MAJOR-2 — the two live managed keys are served by
+    the LIVE resolver (the DB tier of the managed-key ladder), not by
+    the boot-applied config object."""
+    source = _lifespan_source()
+    assert "build_registry_providers" in source
+    assert "build_managed_values_provider" in source
+    # The boot values are only the FALLBACKS handed to the helper.
+    assert "scrape_interval_default=" in source
+    assert "cardinality_cap_default=" in source
+
+
 def test_the_f0_1_families_are_registered_at_boot():
     source = _lifespan_source()
     assert "ensure_f0_1_registered()" in source

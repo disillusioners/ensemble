@@ -192,9 +192,11 @@ def test_deferral_log_absent_when_managed_default(monkeypatch, caplog):
 def test_managed_provider_is_used_and_cached_within_ttl(monkeypatch):
     calls: list[int] = []
 
-    def provider() -> bool:
+    def provider() -> dict:
+        # The provider returns the managed-key ladder's DB TIER — the
+        # override rows ({key: value}).
         calls.append(1)
-        return True
+        return {metrics_gate.MANAGED_KEY: True}
 
     metrics_gate.set_managed_metrics_provider(provider)
     assert metrics_gate.refresh_managed_metrics_enabled(now=100.0) is True
