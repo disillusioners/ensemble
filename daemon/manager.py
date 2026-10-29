@@ -10863,10 +10863,13 @@ class InstanceManager:
         # the bridge's call shape and 8.0 s timeout are PRESERVED;
         # only its POSITION changed: it now runs in P1, OUTSIDE any
         # held manager-engine session scope) and none across the
-        # nested-session carrier check (F8.4). F8.9 (disclosure):
-        # ``_write_guard`` is a COUNTER, not a lock — taking it twice
-        # (P0 + P2) only means a ``pause_writes()`` drain may proceed
-        # between the phases.
+        # nested-session carrier check (F8.4). W-2 (code-review
+        # council): ``_write_guard`` is held ONCE around the whole body
+        # (P0+P1+P2) — base parity; base held it once, so a
+        # ``pause_writes()`` arriving mid-reconcile could never raise
+        # here. The SESSIONS stay split (the transaction split is F8's
+        # requirement, not the guard split): no manager-engine
+        # transaction is open across any await.
         with self._write_guard:
             with self._session_scope() as session:
                 # ── P0: read-decide scope ──
@@ -10921,39 +10924,38 @@ class InstanceManager:
                         _task_pre is not None and _msg_pre is not None
                     )
 
-        # ── F8.6a / DR-10 — TEST-ONLY P0→P2 seam hook ────────────────────
-        # Never set on any production path; the F8-c pin installs it to
-        # flip the injection row to a terminal state at the exact race
-        # point (after P0's scope closed, before P2's scope opens) and
-        # assert NO artefacts are created.
-        seam_hook = getattr(self, "_f8_p0_p2_seam_hook", None)
-        if seam_hook is not None:  # pragma: no cover — test-only seam
-            seam_hook(injection_id)
+            # ── F8.6a / DR-10 — TEST-ONLY P0→P2 seam hook ────────────────────
+            # Never set on any production path; the F8-c pin installs it to
+            # flip the injection row to a terminal state at the exact race
+            # point (after P0's scope closed, before P2's scope opens) and
+            # assert NO artefacts are created.
+            seam_hook = getattr(self, "_f8_p0_p2_seam_hook", None)
+            if seam_hook is not None:  # pragma: no cover — test-only seam
+                seam_hook(injection_id)
 
-        # ── F8.4 — carrier check OUTSIDE the held scope ──────────────────
-        # ``_has_live_process_report_carrier`` opens its OWN
-        # manager-engine session; called inside the held scope its
-        # checkout wait would park the outer backend idle-in-txn.
-        live_carrier_exists: bool | None = None
-        if carrier_check_needed:
-            live_carrier_exists = self._has_live_process_report_carrier(
-                message_id=report_message_id_pre
-            )
+            # ── F8.4 — carrier check OUTSIDE the held scope ──────────────────
+            # ``_has_live_process_report_carrier`` opens its OWN
+            # manager-engine session; called inside the held scope its
+            # checkout wait would park the outer backend idle-in-txn.
+            live_carrier_exists: bool | None = None
+            if carrier_check_needed:
+                live_carrier_exists = self._has_live_process_report_carrier(
+                    message_id=report_message_id_pre
+                )
 
-        # ── P1: content fetch — NO manager-engine transaction open ───────
-        # Sync content-fetch seam — correct for the SWEEP path (caller
-        # runs on a non-loop ``threading.Thread``). The router path uses
-        # :meth:`_reconcile_deferred_report_async` which ``await``s
-        # directly (no ``run_coroutine_threadsafe(...).result(...)``
-        # from the loop thread → no self-block).
-        content = "[No response content]"
-        if needs_content_fetch:
-            content = self._fetch_subshape_a_content_sync(
-                child_instance_id=child_instance_id,
-                child_agent_id=child_agent_id or "agent",
-            )
+            # ── P1: content fetch — NO manager-engine transaction open ───────
+            # Sync content-fetch seam — correct for the SWEEP path (caller
+            # runs on a non-loop ``threading.Thread``). The router path uses
+            # :meth:`_reconcile_deferred_report_async` which ``await``s
+            # directly (no ``run_coroutine_threadsafe(...).result(...)``
+            # from the loop thread → no self-block).
+            content = "[No response content]"
+            if needs_content_fetch:
+                content = self._fetch_subshape_a_content_sync(
+                    child_instance_id=child_instance_id,
+                    child_agent_id=child_agent_id or "agent",
+                )
 
-        with self._write_guard:
             with self._session_scope() as session:
                 # ── P2: write scope ──
                 # F8.7 — RE-READ ``inj`` (the P0 row is detached after
@@ -11643,10 +11645,12 @@ class InstanceManager:
         # the injection row and RE-ASSERTS both guards against the
         # fresh row (a concurrent escalation between P0 and P2 must
         # not produce double delivery), then writes in ONE transaction.
-        # F8.9 (disclosure): ``_write_guard`` is a COUNTER, not a lock —
-        # taking it twice (P0 + P2) only means a ``pause_writes()``
-        # drain may proceed between the phases; it does not deadlock
-        # and does not amplify the hold.
+        # W-2 (code-review council): ``_write_guard`` is held ONCE
+        # around the whole body (P0+P1+P2) — base parity; base held it
+        # once, so a ``pause_writes()`` arriving mid-reconcile could
+        # never raise here. The SESSIONS stay split (the transaction
+        # split is F8's requirement, not the guard split): no
+        # manager-engine transaction is open across any await.
         with self._write_guard:
             with self._session_scope() as session:
                 # ── P0: read-decide scope ──
@@ -11702,57 +11706,56 @@ class InstanceManager:
                         _task_pre is not None and _msg_pre is not None
                     )
 
-        # ── F8.6a / DR-10 — TEST-ONLY P0→P2 seam hook ────────────────────
-        # Never set on any production path; the F8-c pin installs it to
-        # flip the injection row to a terminal state at the exact race
-        # point (after P0's scope closed, before P2's scope opens) and
-        # assert NO artefacts are created.
-        seam_hook = getattr(self, "_f8_p0_p2_seam_hook", None)
-        if seam_hook is not None:  # pragma: no cover — test-only seam
-            seam_hook(injection_id)
+            # ── F8.6a / DR-10 — TEST-ONLY P0→P2 seam hook ────────────────────
+            # Never set on any production path; the F8-c pin installs it to
+            # flip the injection row to a terminal state at the exact race
+            # point (after P0's scope closed, before P2's scope opens) and
+            # assert NO artefacts are created.
+            seam_hook = getattr(self, "_f8_p0_p2_seam_hook", None)
+            if seam_hook is not None:  # pragma: no cover — test-only seam
+                seam_hook(injection_id)
 
-        # ── F8.3 — carrier check OUTSIDE any held manager-engine scope ──
-        # The callee opens its OWN manager-engine session
-        # (``_has_live_process_report_carrier``); called inside the
-        # held scope its checkout wait (bounded by pool_timeout=30 s)
-        # would park the outer backend idle-in-txn. Computed BEFORE
-        # the P2 scope opens; keyed on the P0-observed
-        # report_message_id (write-once per row lifecycle).
-        live_carrier_exists: bool | None = None
-        if carrier_check_needed:
-            live_carrier_exists = await asyncio.to_thread(
-                self._has_live_process_report_carrier,
-                message_id=report_message_id_pre,
-            )
-
-        # ── P1: content fetch — NO manager-engine transaction open ───────
-        content = "[No response content]"
-        if needs_content_fetch:
-            # Await directly — do NOT use
-            # ``run_coroutine_threadsafe(...).result(...)``
-            # from the loop thread (would self-block). F8-e: the fetch
-            # is BOUNDED (asyncio.wait_for) — the async twin's hold
-            # must never be unbounded (the sync twin's bound is the
-            # same 8.0 s, the sweep ``stop()`` join budget — W3). A
-            # budget-exceeding fetch degrades to the fallback string
-            # and the row is re-tried next cycle.
-            try:
-                content = await asyncio.wait_for(
-                    self._fetch_subshape_a_content_async(
-                        child_instance_id=child_instance_id,
-                        child_agent_id=child_agent_id or "agent",
-                    ),
-                    timeout=8.0,
+            # ── F8.3 — carrier check OUTSIDE any held manager-engine scope ──
+            # The callee opens its OWN manager-engine session
+            # (``_has_live_process_report_carrier``); called inside the
+            # held scope its checkout wait (bounded by pool_timeout=30 s)
+            # would park the outer backend idle-in-txn. Computed BEFORE
+            # the P2 scope opens; keyed on the P0-observed
+            # report_message_id (write-once per row lifecycle).
+            live_carrier_exists: bool | None = None
+            if carrier_check_needed:
+                live_carrier_exists = await asyncio.to_thread(
+                    self._has_live_process_report_carrier,
+                    message_id=report_message_id_pre,
                 )
-            except TimeoutError:
-                logger.warning(
-                    f"reconcile: async content fetch exceeded the 8.0s "
-                    f"budget child={child_instance_id[:8]}... — using "
-                    f"fallback content"
-                )
-                content = "[No response content]"
 
-        with self._write_guard:
+            # ── P1: content fetch — NO manager-engine transaction open ───────
+            content = "[No response content]"
+            if needs_content_fetch:
+                # Await directly — do NOT use
+                # ``run_coroutine_threadsafe(...).result(...)``
+                # from the loop thread (would self-block). F8-e: the fetch
+                # is BOUNDED (asyncio.wait_for) — the async twin's hold
+                # must never be unbounded (the sync twin's bound is the
+                # same 8.0 s, the sweep ``stop()`` join budget — W3). A
+                # budget-exceeding fetch degrades to the fallback string
+                # and the row is re-tried next cycle.
+                try:
+                    content = await asyncio.wait_for(
+                        self._fetch_subshape_a_content_async(
+                            child_instance_id=child_instance_id,
+                            child_agent_id=child_agent_id or "agent",
+                        ),
+                        timeout=8.0,
+                    )
+                except TimeoutError:
+                    logger.warning(
+                        f"reconcile: async content fetch exceeded the 8.0s "
+                        f"budget child={child_instance_id[:8]}... — using "
+                        f"fallback content"
+                    )
+                    content = "[No response content]"
+
             with self._session_scope() as session:
                 # ── P2: write scope ──
                 # F8.7 — RE-READ ``inj``: the P0 row is detached after
