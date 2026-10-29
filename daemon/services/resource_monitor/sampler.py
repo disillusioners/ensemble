@@ -13,6 +13,27 @@ Architecture §2.1 (binding):
     (alarmable; D12).
   * Sampler NEVER touches the DB — writes ONLY the ring.
 
+T1 row identity (T1 tier, ``resource_daemon_bucket``):
+
+  * The sampler stamps ``bucket_ts`` on EVERY raw row at SAMPLE time
+    (naive-UTC, D9, second resolution). The flusher used to stamp it
+    at DRAIN time, so every row drained in one flush window shared one
+    ``(bucket_ts, interval_s)`` key and all but the first were
+    swallowed by ``ON CONFLICT (bucket_ts, interval_s) DO NOTHING`` —
+    silently (``flush.errors == 0``, no log). The raw tier lost ~50 %
+    of the real samples (75 % at the 15 s floor).
+  * GRANULARITY (stated, not promised): the raw tier carries ONE ROW
+    PER SAMPLE, keyed by its own sample second. Two samples inside the
+    same second still collide and the later one is dropped by the
+    ON CONFLICT insert — the tier is NOT a guaranteed one-row-per-tick
+    store at a sub-second cadence.
+  * The DEGRADED SENTINEL (a failed platform read) carries
+    ``interval_s = 0`` and ``missed_samples`` = the running drop
+    total AS OF THAT DROP. The TRUE drop count of a window is
+    ``MAX(missed_samples)`` over the window's rows; the count is never
+    reset below the truth, so it stays recoverable from T1 alone after
+    the platform reader recovers.
+
 Self-cost discipline (D12):
 
   * tick target < 5 ms (median over N synthetic ticks).
@@ -39,10 +60,12 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
 from . import charge as _charge
+from . import proc_readers as _proc_readers_mod
 from .deep_scan import DeepScanResult, DeepScanner
 from .pid_registry import PidRegistry, get_pid_registry, read_proc_stat_field
 from .proc_readers import (
@@ -56,6 +79,52 @@ from .proc_readers import (
 from .ring import TierRing
 
 logger = logging.getLogger(__name__)
+
+
+# ── T1 bucket timestamp (D9) ────────────────────────────────────────────────
+
+#: The ``bucket_ts`` format — naive-UTC ISO-8601 digits at SECOND
+#: resolution. The SAME format the flusher stamps (``flusher.py``) and
+#: the SAME format every reader parses (``rollup._naive_to_epoch_seconds``,
+#: ``resources._floor_naive_iso``).
+BUCKET_TS_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def _now_utc_naive() -> datetime:
+    """Return the current instant as a NAIVE ``datetime`` holding UTC digits.
+
+    Mirrors ``daemon.services.timestamps.now_utc_naive`` (the D9
+    sanctioned bind for a timestamp-without-tz column); importing it
+    here would form a ``daemon.services`` ↔ ``daemon.services
+    .resource_monitor`` cycle on cold load (the same reason the
+    flusher keeps its own mirror — ``flusher._default_now_utc_naive``).
+
+    D9 (never a tz-aware bind): an aware ``datetime`` rendered by
+    PostgreSQL in the SESSION timezone stores the LOCAL digits and
+    silently shifts the instant. Naive-UTC digits are immune.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _bucket_ts_now() -> str:
+    """The current instant as a naive-UTC ``bucket_ts`` string.
+
+    WHY THE SAMPLER STAMPS IT (T1 row-collision fix): the flusher used
+    to stamp ``bucket_ts`` at DRAIN time, so every row drained in one
+    flush window shared one ``(bucket_ts, interval_s)`` key and all but
+    the first were swallowed by the ``ON CONFLICT (bucket_ts, interval_s)
+    DO NOTHING`` insert — with ``flush.errors == 0`` and no log line.
+    The raw tier silently lost ~50 % of the real samples (75 % at the
+    15 s floor). The sampler now stamps the row at SAMPLE time, so two
+    samples at least one second apart get distinct keys.
+
+    Granularity (documented, T-2): the raw tier carries ONE ROW PER
+    SAMPLE, keyed by its own sample second. Two samples inside the
+    SAME second still collide (second resolution) and the later one is
+    dropped by the ON CONFLICT insert — the tier is NOT a guaranteed
+    one-row-per-tick store at a sub-second cadence.
+    """
+    return _now_utc_naive().strftime(BUCKET_TS_FORMAT)
 
 
 # ── Ladder levels ───────────────────────────────────────────────────────────
@@ -89,6 +158,55 @@ LIVE_CHILDREN_CAP = 50
 #: Rows kept for the /live instances view (§2.8 instances[] ≤50).
 LIVE_INSTANCES_CAP = 50
 
+#: The ``interval_s`` value that marks a DEGRADED SENTINEL T1 row.
+#:
+#: A tick whose platform read produced NO snapshot writes NO sample —
+#: but it MUST leave evidence, otherwise a permanently dark host
+#: carries no DB trace of the drops at all (the honest count would
+#: live ONLY in the sampler's RAM counters). The sentinel row is the
+#: DB evidence path: ``interval_s == 0`` (a real bucket row always
+#: carries the effective sampling interval, >= 1), every daemon metric
+#: NULL, and ``missed_samples`` carrying the running drop total AS OF
+#: THE DROP THAT PRODUCED THE ROW.
+#:
+#: EXACTLY WHAT THE COLUMN MEANS (G1 — the earlier wording was
+#: FALSE): with the sampler stamping ``bucket_ts`` at SAMPLE time,
+#: every sentinel of a flush window lands as its OWN row and each row
+#: carries the drop count as of ITS OWN drop. The FIRST sentinel of a
+#: window therefore carries ``missed_samples = 1`` (the count at the
+#: first drop), NOT the window's total. The window's LAST row carries
+#: the running total. (Before the sampler-side stamp every sentinel of
+#: a window collapsed onto ONE ``(bucket_ts, interval_s)`` key and the
+#: surviving row carried the count at the FIRST drop — the count of the
+#: window's other drops was never written anywhere.)
+#:
+#: RECOVERY PATH (T-1): the TRUE drop count for a window is
+#: ``MAX(missed_samples)`` over the window's rows — the highest
+#: running total any row carries. Once the platform reader recovers,
+#: the next REAL row also carries the same running total (the counter
+#: is cumulative and is never reset below the truth), so the maximum
+#: survives the recovery and the count is recoverable from T1 alone.
+#:
+#: Why ``interval_s`` and not a new column: the T1 schema is created
+#: by ``SQLModel.metadata.create_all`` + ``InstanceManager._ensure_postgres_columns``
+#: (the .sql migration runner is a NO-OP on PostgreSQL), so a new
+#: column would need BOTH a DDL mirror and an ``ALTER TABLE`` on every
+#: existing database — a real blast radius on exactly the tier that
+#: was just repaired. The tier discriminator is already the column
+#: every T1 reader filters on (the history endpoint and the anomaly
+#: minute replay select ``interval_s = :interval_s`` with the value
+#: from ``_interval_for_resolution``; the raw tier is the range
+#: ``0 < interval_s < 60``), so the sentinel is excluded from the
+#: history endpoint, the anomaly minute replay and the minute/hour
+#: roll-up WITHOUT any reader change.
+DEGRADED_SENTINEL_INTERVAL_S = 0
+
+#: Re-warn every N consecutive failed platform reads (B4(i)). The
+#: first failure of a streak always warns; a LONG streak re-warns every
+#: N failures so a permanently dark host stays visible without
+#: flooding the log on every tick.
+READ_FAILURE_REWARN_EVERY = 50
+
 #: Bounded maxlen for the sampler-internal instance-row ring when the
 #: facade does not pass one. 8 ticks × (cap + 1 sentinel) covers the
 #: flush window handoff many times over; the DB is the durable store.
@@ -100,7 +218,7 @@ DEFAULT_INSTANCE_RING_TICKS = 8
 #: asserts no canary / tool-arg / message-content key ever appears.
 ALLOWED_T2_ROW_KEYS = frozenset(
     {
-        "bucket_ts",  # stamped by the flusher, not the sampler
+        "bucket_ts",  # stamped by the SAMPLER at sample time (T1)
         "instance_id",
         "agent_id",
         "status",
@@ -136,9 +254,14 @@ class SamplerCounters:
     # EMA decay weight (0 < alpha < 1). Higher = more responsive to
     # the latest tick; 0.3 matches a 3-tick moving window.
     ema_alpha: float = 0.3
-    # Total ticks run since thread start.
+    # Ticks that PRODUCED a sample since thread start. A tick that
+    # overran, or whose platform read failed, is NOT counted here —
+    # it lands in ``ticks_skipped`` / ``missed_samples`` instead, so
+    # this counter (surfaced as the ``samples`` field of
+    # ``/api/resources/self-cost``) never over-reports.
     ticks: int = 0
-    # Skipped (overrun) ticks.
+    # Skipped ticks — an overrun OR a structural read failure (any tick
+    # that produced no sample).
     ticks_skipped: int = 0
     # ``missed_samples`` counter — bumped every time we skip a tick
     # for overrun or for any structural read failure.
@@ -284,6 +407,17 @@ class Sampler:
         # Hysteresis counter for re-promotion.
         self._clean_ticks = 0
 
+        # F3-style warning guard: the FIRST structural read failure of
+        # a streak logs the cause once; the rest of the streak stays
+        # quiet until the streak is re-armed. B4(i): the flag is RESET
+        # on a clean tick (a recovered daemon that degrades again MUST
+        # warn again — the old one-shot flag made a second degradation
+        # invisible for the life of the process), and a long streak
+        # re-warns every ``READ_FAILURE_REWARN_EVERY`` failures.
+        self._no_snapshot_warned = False
+        # Consecutive failed platform reads (reset on a clean tick).
+        self._consecutive_read_failures = 0
+
     # ── Public lifecycle ───────────────────────────────────────────────
 
     def start(self) -> None:
@@ -317,14 +451,19 @@ class Sampler:
         Tick semantics (D4 / D12):
 
           1. Measure ``tick_t`` with ``time.monotonic`` budget.
-          2. If ``tick_t > interval``: skip + ``missed_samples++`` +
+          2. If the platform read produced NO snapshot: skip +
+             ``missed_samples++`` + ``ticks_skipped++`` + write a
+             DEGRADED SENTINEL row (the DB evidence path) + return
+             ``None``. The tick is NOT counted as a sample.
+          3. If ``tick_t > interval``: skip + ``missed_samples++`` +
              demote one ladder level. Return ``None``.
-          3. Otherwise: read /proc + cgroup (subject to ladder level),
+          4. Otherwise: read /proc + cgroup (subject to ladder level),
              update EMA tick cost, write the row into the ring,
              re-promote after N clean ticks (hysteresis).
-          4. If EMA tick cost > ``self_cpu_budget_pct`` % of
+          5. If EMA tick cost > ``self_cpu_budget_pct`` % of
              ``effective_interval_s``: double interval + disable
-             deep scans.
+             deep scans. The latch is RELEASED again once the EMA
+             recovers under the base budget (B5(i)).
         """
         interval = self._effective_interval_s
         tick_start = self._wall_clock()
@@ -356,6 +495,84 @@ class Sampler:
             pss_kb=pss_kb,
             child_pids=child_pids,
         )
+
+        if snap is None:
+            # Structural read failure — THIS TICK PRODUCED NO SAMPLE.
+            #
+            # The counter contract (``SamplerCounters.missed_samples``:
+            # "bumped every time we skip a tick for overrun or for any
+            # structural read failure") was previously VIOLATED here:
+            # only the overrun path bumped it. A host whose platform
+            # reader could not answer therefore reported a
+            # HEALTHY-looking tick count (``samples`` climbing) while
+            # every single sample was silently dropped — no ring row,
+            # so no DB row, so the whole resource-telemetry tier stayed
+            # DARK with ``flush.errors == 0`` and ``flush.batches``
+            # climbing. The counter now records the drop.
+            #
+            # HONEST SCOPE OF THE COUNTER (the previous wording here
+            # was FALSE — it claimed the count "lands in T1"):
+            # ``counters.missed_samples`` / ``counters.ticks_skipped``
+            # are RAM-ONLY. They live on the sampler and are visible
+            # at ``/api/resources/self-cost`` (``samples`` /
+            # ``ticks_skipped``); they are NOT written to the DB by
+            # the counter itself. The DB evidence path is the
+            # DEGRADED SENTINEL row below: a T1 row whose
+            # ``interval_s`` is ``DEGRADED_SENTINEL_INTERVAL_S`` (0),
+            # whose daemon metrics are ALL NULL, and whose
+            # ``missed_samples`` column carries the running drop
+            # total AS OF THAT DROP. The sentinel is written to the
+            # raw ring on the failure path, so the flusher carries it
+            # into T1 exactly like a real bucket row — on a
+            # permanently dark host the DB therefore carries the drop
+            # evidence, and the window's TRUE total is
+            # ``MAX(missed_samples)`` over the window's rows.
+            #
+            # ``counters.ticks`` is NOT incremented — same semantics as
+            # the overrun path: a tick that produced no sample is not a
+            # tick. The ``/self-cost`` ``samples`` field therefore
+            # counts real samples and ``ticks_skipped`` counts drops.
+            read_ms = (self._wall_clock() - tick_start) * 1000.0
+            reason = _proc_readers_mod.last_read_reason() or "unknown"
+            with self._lock:
+                self.counters.missed_samples += 1
+                self.counters.ticks_skipped += 1
+                self._consecutive_read_failures += 1
+                failures = self._consecutive_read_failures
+                missed_total = self.counters.missed_samples
+                # The DEGRADED SENTINEL — the DB evidence path for a
+                # drop. The ring append runs INSIDE the lock (the
+                # lock is documented as the "counters + ring write"
+                # guard — m6): the clean-tick path already appends
+                # under the same lock, so the failure path must too
+                # or the two paths interleave on the ring.
+                self.ring.append(
+                    self._degraded_sentinel_row(read_ms, missed_total)
+                )
+                # B4(i): the warning names the CAUSE, re-arms after a
+                # recovery, and re-warns every N consecutive failures
+                # so a long dark streak never goes silent again. The
+                # FLAG is mutated under the lock (the read of it
+                # below is a snapshot of the decision).
+                should_warn = (
+                    not self._no_snapshot_warned
+                    or failures % READ_FAILURE_REWARN_EVERY == 0
+                )
+                if should_warn:
+                    self._no_snapshot_warned = True
+            if should_warn:
+                logger.warning(
+                    "resource-monitor sampler: no daemon snapshot "
+                    "(platform read failed: %s, read_ms=%.1f) — samples "
+                    "are being dropped; the resource-telemetry tier stays "
+                    "empty until the platform reader recovers "
+                    "(consecutive_failures=%d, missed_samples=%d)",
+                    reason,
+                    read_ms,
+                    failures,
+                    missed_total,
+                )
+            return None
 
         # P2 T10 — attribution sampling (registry children walk +
         # charge snapshot + the 1/tick deep-scan reconcile). Runs
@@ -399,6 +616,19 @@ class Sampler:
             )
             self.counters.ticks += 1
             self.counters.last_tick_cost_ms = tick_cost_ms
+            # B4(i) — a clean tick RE-ARMS the degradation warning: the
+            # daemon recovered, so a later degradation must warn again
+            # (the old one-shot flag stayed silent for the life of the
+            # process) and the consecutive-failure streak restarts.
+            if self._consecutive_read_failures:
+                logger.info(
+                    "resource-monitor sampler: platform read RECOVERED "
+                    "after %d consecutive failed tick(s) — sampling "
+                    "resumed, the degradation warning is re-armed",
+                    self._consecutive_read_failures,
+                )
+                self._consecutive_read_failures = 0
+                self._no_snapshot_warned = False
             # Lag = wall-clock drift between expected_next and actual tick end.
             self.counters.last_tick_lag_ms = max(
                 0.0, (tick_end - expected_next) * 1000.0
@@ -442,6 +672,30 @@ class Sampler:
                     budget_s,
                     self._effective_interval_s,
                 )
+            elif self.counters.self_throttled:
+                # B5(i) — RELEASE the throttle latch. The flag used to
+                # be set once and NEVER cleared, so a single transient
+                # hang (e.g. a hung ``ps``) degraded the sampling
+                # cadence for the LIFETIME of the process. The latch is
+                # released when the tick-cost EMA has recovered back
+                # under the BASE budget (the budget of the UNTHROTTLED
+                # interval — using the doubled budget would re-arm and
+                # release the latch on every tick).
+                base_budget_s = (
+                    self.self_cpu_budget_pct / 100.0
+                ) * float(self.sample_seconds)
+                if self.counters.ema_tick_cost_s <= base_budget_s:
+                    self.counters.self_throttled = False
+                    self._effective_interval_s = float(self.sample_seconds)
+                    self._deep_scan_enabled = True
+                    logger.info(
+                        "resource-monitor sampler self-throttle released: "
+                        "ema_tick_cost_s=%.4f base_budget_s=%.4f "
+                        "interval_s restored to %.2f",
+                        self.counters.ema_tick_cost_s,
+                        base_budget_s,
+                        self._effective_interval_s,
+                    )
 
             self.counters.cumulative_cpu_s += tick_cost_ms / 1000.0
 
@@ -892,6 +1146,72 @@ class Sampler:
             return self.detail_level
         return LADDER_DEFAULT
 
+    def _degraded_sentinel_row(
+        self,
+        read_ms: float,
+        missed_total: int,
+    ) -> dict:
+        """Build the DEGRADED SENTINEL row (a failed platform read).
+
+        The sentinel is the DB EVIDENCE PATH for a dropped sample:
+
+          * ``interval_s`` is ``DEGRADED_SENTINEL_INTERVAL_S`` (0) — a
+            real bucket row always carries the effective sampling
+            interval (>= 1), and every T1 reader filters on the tier
+            discriminator, so the sentinel is excluded from the
+            history endpoint, the anomaly minute replay and the
+            minute/hour roll-up.
+          * EVERY daemon metric is NULL — the tick produced no
+            measurement, so no number is invented.
+          * ``missed_samples`` carries the running drop total AS OF
+            THIS DROP (the first drop of a window carries 1 — NOT the
+            window's total; the window's TRUE total is
+            ``MAX(missed_samples)`` over the window's rows).
+          * ``sample_cost_ms`` carries the elapsed read time so the
+            DB row shows whether the read was slow or instantly dead.
+          * ``bucket_ts`` carries the SAMPLE time (the second the drop
+            happened), stamped by the sampler — NOT the drain time.
+            Every sentinel of a flush window therefore lands as its
+            own row (the T1 unique key is ``(bucket_ts, interval_s)``)
+            instead of collapsing onto one key.
+
+        No new T1 column is used: the schema is owned by
+        ``SQLModel.metadata.create_all`` + ``_ensure_postgres_columns``
+        (the .sql migration runner is a NO-OP on PostgreSQL), and a new
+        column would put a DDL blast radius on exactly the tier that
+        was just repaired.
+        """
+        row: dict = {
+            "bucket_ts": _bucket_ts_now(),
+            "interval_s": DEGRADED_SENTINEL_INTERVAL_S,
+            "pid": None,
+            "rss_kb": None,
+            "pss_kb": None,
+            "anon_kb": None,
+            "hw_peak_kb": None,
+            "threads": None,
+            "fds": None,
+            "cpu_user_usec": None,
+            "cpu_sys_usec": None,
+            "child_rss_total_kb": None,
+            "attributed_bytes": None,
+            "unattributed_kb": None,
+            "coverage_pct": None,
+            "sample_cost_ms": read_ms,
+            "sampler_lag_ms": None,
+            "missed_samples": int(missed_total),
+            "ladder_level": self.counters.ladder_level,
+        }
+        # The cgroup columns are absent on a host without cgroup v2 —
+        # a failed read cannot have read them either.
+        for k in (
+            "cg_current_mb", "cg_peak_mb", "cg_anon_mb",
+            "cg_file_mb", "cg_slab_mb", "cg_usage_usec",
+            "cg_throttled_usec", "cg_nr_throttled",
+        ):
+            row[k] = None
+        return row
+
     def _snapshot_to_row(
         self,
         snap: ProcSnapshot,
@@ -907,9 +1227,17 @@ class Sampler:
         d = snap.daemon
         attrib = getattr(self, "_attrib", None) or {}
         row: dict = {
-            # The tick wall-clock (Naive-UTC ISO) is stamped at write
-            # time by the flusher (T6); the sampler writes the
-            # cost-counter payload, not the timestamp.
+            # The tick wall-clock (Naive-UTC ISO, D9) is stamped HERE,
+            # at SAMPLE time, by the SAMPLER. The flusher used to
+            # stamp it at DRAIN time — every row drained in one window
+            # then shared one ``(bucket_ts, interval_s)`` key and all
+            # but the first were swallowed by the ON CONFLICT DO
+            # NOTHING insert (``flush.errors == 0``, no log): the raw
+            # tier silently lost ~50 % of the real samples (75 % at the
+            # 15 s floor). The flusher's ``setdefault`` is now a
+            # no-op for sampler rows; it stays as the fallback for a
+            # row that arrives without a timestamp.
+            "bucket_ts": _bucket_ts_now(),
             "interval_s": int(self._effective_interval_s),
             # Daemon pid rides the ring row so the /live handler can
             # populate the §2.8 daemon.pid field (review F2).
@@ -1008,6 +1336,8 @@ __all__ = [
     "LIVE_INSTANCES_CAP",
     "OVERFLOW_SENTINEL",
     "ALLOWED_T2_ROW_KEYS",
+    "DEGRADED_SENTINEL_INTERVAL_S",
+    "READ_FAILURE_REWARN_EVERY",
     "SamplerCounters",
     "Sampler",
 ]
