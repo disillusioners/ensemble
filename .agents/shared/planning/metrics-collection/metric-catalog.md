@@ -43,7 +43,17 @@ counts are stored **non-cumulative** and accumulated at render, so `Histogram.ob
 O(1) (~300 ns) instead of the current O(B) cumulative scan (`checkpoint_metrics.py:220-222`,
 ~1394 ns) — the plan's bucket extensions (§8.11) therefore do not scale the hot path.
 
-**Freeze rules (A27).** Import the listener on the **lifespan path** (not `daemon/api.py`
+**Publisher cadence (R-m5).** Per-increment copy-on-publish is **O(series)** — a writer must not pay that
+on every increment. The registry therefore publishes on a **bounded cadence**: a family sets a dirty
+flag on observe and **re-publishes at most once per N seconds** (default N = the scrape interval
+hint, `limits.metrics_scrape_interval_hint_s`, 15 s), or, equivalently, **publish-on-scrape-request**
+with a bounded staleness (the last published snapshot is never older than N seconds). Writers only
+flip the dirty flag (O(1)); the O(series) copy happens at most once per N seconds on the writer's
+own lock, never per increment. Render serves the last published snapshot and, on contention, the
+last published snapshot plus `# <family> unavailable: lock_contended`. The renderer's snapshot
+staleness is therefore **bounded and stated** (≤ N seconds); a scrape never observes an unbounded
+staleness. This is the bounded alternative to per-increment copy-on-publish and is required by the
+P0-core gate (P-3).
 module top level) so the PyInstaller analyzer pulls it. Register aliases at
 **registry-construction time** (not lazily) so a cold start still emits the deprecated names for
 the remainder of their one-release window.
@@ -97,11 +107,17 @@ reference the annex by number.
 3. **Render-time allowlist predicate** — per-family label-name allowlist + per-label value
    membership + defence in depth (also the §7 never-exported hook).
 
-Plus: **hard** cardinality cap (`limits.metrics_cardinality_cap` is currently **soft** in
-plan §5 — make it **hard**: observe beyond the cap is rejected, not warned), name regex
-`^ensemble_[a-z0-9_]+$`, and a label-value charset gate (no `=`, `,`, `"`, newline). Add the
-poisoned-registry defence-in-depth test. All §8 vocabularies are **derived from code, never
-hand-listed** (A1) — see the rule stated in §8.
+**Hard cardinality cap — atomicity (R-m3).** `limits.metrics_cardinality_cap` is **hard**: observe
+beyond the cap is **rejected, not warned**. The observe-time rejection is **atomic under the
+metric's own lock** — check-then-increment happens inside the per-metric lock, so there is **no
+TOCTOU window** between the cardinality check and the increment. A concurrent observer cannot
+slip past the cap. Rejected observations are counted in **`ensemble_metrics_cap_rejected_total`
+(folded into F0.2, the canonical-registry family)** — a counter, `{metric}`-labeled, so the
+operator can see which metric hit the cap. The cap check and the rejected-counter increment are
+part of the same locked critical section. Plus: name regex `^ensemble_[a-z0-9_]+$`, and a
+label-value charset gate (no `=`, `,`, `"`, newline). Add the poisoned-registry defence-in-depth
+test. All §8 vocabularies are **derived from code, never hand-listed** (A1) — see the rule
+stated in §8.
 
 **0.6 Three coexisting idioms (m10).** Each family names the idiom it draws from: **A** =
 in-process registry (`daemon/checkpoint_metrics.py`; resets on restart) · **B** = PG table spine
@@ -160,39 +176,39 @@ dependency is off emits **no series** (absent ≠ zero) unless its contract says
 | # | Family — canonical names | Type | Phase | Source | Series |
 |---|---|---|---|---|---|
 | F0.1 | `ensemble_metrics_up`, `ensemble_metrics_scrape_requests_total`, `ensemble_metrics_exposition_seconds` | gauge/counter/hist | P0 | greenfield (listener seam) | 16 |
-| F0.2 | `ensemble_metrics_registry_measurements` | gauge | P0 | reuse `checkpoint_metrics.py:304` | 1 |
+| F0.2 | `ensemble_metrics_registry_measurements` | gauge | P0 | reuse `checkpoint_metrics.py:304` | 2 |
 | F0.3 | `ensemble_resource_spine_tables_accepting_rows`, `ensemble_resource_spine_rows_written_total` | gauge/counter | P0 | reuse (resource_monitor spine) | 8 |
 | F0.4 | `ensemble_metrics_vocabulary_version` | gauge | P0 | greenfield (freeze marker) | 1 |
 | F1 | `ensemble_loop_lag_seconds`, `ensemble_loop_lag_samples`, `ensemble_loop_lag_overflow_total`, `ensemble_loop_lag_probe_state` | gauge×3/counter | P1a | reuse `wedge_capture/lag_probe.py` | 9 |
 | F2 | `ensemble_thread_cpu_seconds`, `ensemble_thread_count` | gauge×2 | P1a | reuse `wedge_capture/sampler.py` | 22 |
-| F3 | `ensemble_wedge_capture_total`, `ensemble_wedge_capture_write_total` | counter×2 | P1a | reuse `wedge_capture/triggers.py` | 5 |
+| F3 | `ensemble_wedge_capture_total`, `ensemble_wedge_capture_write_total` | counter×2 | P1a | reuse `wedge_capture/triggers.py` | 6 |
 | F4 | `ensemble_db_pool_native`, `ensemble_db_pool_requests_errors_total` | gauge/counter | P1a | reuse `readiness.py:525`,`:552`; `collector.py:29` | 8 |
 | F5 | `ensemble_db_pool_checked_out`, `ensemble_db_pool_waiting_clients` | gauge×2 | P1a | reuse (derived + native, kept apart) | 3 |
 | F6 | `ensemble_pg_backends`, `ensemble_pg_idle_in_txn_oldest_seconds`, `ensemble_pg_leaked_txn`, `ensemble_pg_census_last_success_timestamp_seconds` | gauge×4 | P1a | greenfield (census seam, §9) | 15 |
-| F7 | `ensemble_checkpoint_op_seconds`, `ensemble_checkpoint_op_bytes`, `ensemble_checkpoint_slow_ops_total`, `ensemble_checkpoint_list_total` | hist×2/counter×2 | P1b | reuse `checkpoint_perf.py:190`,`:198`,`:91` | 22→33 |
+| F7 | `ensemble_checkpoint_op_seconds`, `ensemble_checkpoint_op_bytes`, `ensemble_checkpoint_slow_ops_total`, `ensemble_checkpoint_list_total` | hist×2/counter×2 | P1b | reuse `checkpoint_perf.py:190`,`:198`,`:91` | 21→31 |
+
 | F8 | `ensemble_checkpoint_blobs_table_bytes`, `ensemble_checkpoint_table_bytes`, `ensemble_checkpoint_versions_per_thread`, `ensemble_checkpoint_prune_runs_total` | gauge×3/counter | P1b | reuse `maintenance.py:531` + greenfield (per-thread) | 9 |
 | F9 | `ensemble_readiness_probe_total`, `ensemble_readiness_grace_active`, `ensemble_readiness_failure_streak`, `ensemble_readiness_component_state` | counter/gauge×3 | P1b | reuse `readiness.py:64-79` | 53 |
 | F10 | `ensemble_job_queue_depth`, `ensemble_job_claim_latency_seconds`, `ensemble_dead_letter_items`, `ensemble_job_queue_items_created_total` | gauge/hist/gauge/counter | P1b | reuse (admission_state) + greenfield (claim latency) | 21 |
 | F11 | `ensemble_workers_total`, `ensemble_workers_busy`, `ensemble_worker_pool_wakeup_efficiency`, `ensemble_worker_pool_events_total`, `ensemble_task_heartbeat_age_seconds`, `ensemble_task_heartbeat_cadence_seconds` | gauge×3/counter/gauge×2 | P1b | reuse `worker_pool.py:1518`; `task/models.py:284` | 16 |
 | F12 | `ensemble_sweep_cycle_seconds`, `ensemble_sweep_cycles_total`, `ensemble_sweep_errors_total`, `ensemble_sweep_rows_total` | gauge/counter×3 | P1b | reuse (6 sweeps + 7 RDRS lanes) | 69 |
-| F13 | `ensemble_instance_status_count`, `ensemble_instance_liveness_count`, `ensemble_waiting_children_count`, `ensemble_waiting_children_max_age_seconds`, `ensemble_wake_turns_total`, `ensemble_instance_lifecycle_total` | gauge×4/counter×2 | P1b | reuse `instance/models.py:20-32` + greenfield (wake outcome) | 33 |
+| F13 | `ensemble_instance_status_count`, `ensemble_instance_liveness_count`, `ensemble_waiting_children_count`, `ensemble_waiting_children_max_age_seconds`, `ensemble_wake_turns_total`, `ensemble_instance_lifecycle_total` | gauge×4/counter×2 | P1b | reuse `instance/models.py:20-32` + greenfield (wake outcome) | 31 |
 | F14 | `ensemble_llm_tokens_total`, `ensemble_llm_token_usage_missing_total` | counter×2 | P1c | reuse `graph.py:3776-3784` (terminal-usage branch, A2) | 3 |
 | F15 | `ensemble_llm_request_total`, `ensemble_llm_request_seconds` | counter/hist | P1c | reuse `llm_error_classifier.py:764-819` | 23 |
 | F16 | `ensemble_llm_stream_stalls_total`, `ensemble_llm_stream_watchdog_sweep_total` | counter×2 | P1c | reuse `llm_stream_watchdog.py:456` | 5 |
 | F17 | `ensemble_mcp_server_state`, `ensemble_mcp_failures_total` | gauge/counter | P1c | reuse `mcp/init_guard.py:145-147` | 40 |
 | F18 | `ensemble_mcps_gateway_sessions`, `ensemble_mcps_gateway_session_total`, `ensemble_mcps_gateway_tombstones`, `ensemble_mcps_gateway_audit_total` | gauge×2/counter×2 | P1c | reuse `services/mcps_gateway/` | 9 |
 | F19 | `ensemble_compaction_fired_total`, `ensemble_compaction_occupancy_ratio`, `ensemble_compaction_precall_estimate_tokens` | counter/gauge×2 | P1c | reuse `compaction.py:1128`,`:2299` | 7 |
-| F20 | `ensemble_turn_events_total`, `ensemble_turn_duration_seconds`, `ensemble_tool_calls_total` | counter/hist/counter | P1c | reuse `message_tap.py:234` | 69 |
+| F20 | `ensemble_turn_events_total`, `ensemble_turn_duration_seconds`, `ensemble_tool_calls_total` | counter/hist/counter | P1c | reuse `message_tap.py:234` | 75 |
 | F21 | `ensemble_journal_file_bytes`, `ensemble_journal_history_entries`, `ensemble_journal_op_seconds`, `ensemble_journal_ops_total`, `ensemble_upgrade_phase_seconds`, `ensemble_upgrade_phase_total`, `ensemble_upgrade_release_current`, `ensemble_upgrade_journal_events_total` | gauge×3/hist/counter×3/gauge | P1c | reuse `tools/upgrade_journal.py` | 66 |
 | F22 | `ensemble_process_cpu_seconds` + host/PG exporter series | gauge | P2 | greenfield (textfile + off-the-shelf) | 5 shell / ~67 exporter |
 
-**Daemon-origin total: 533** (F0.1→F21) + **5 shell-origin** = **538**. Exporter-origin ≈67 (§6).
-**Budget ≤2k — ≈27 % consumed (headroom 1 467).**
+**Daemon-origin total: 538** (F0.1→F21) + **5 shell-origin** = **543**. Exporter-origin ≈67 (§6).
+**Budget ≤2k — ≈27 % consumed (headroom 1 462).**
 
 *Reconciliation basis:* §7 counts the §1 row values, with the one range cell (**F7**
-`22→33`) taken at its **today** value **22** — the bytes histogram's +11 arrives with the P1b
-byte wiring (catalog G-5). Row sums: P0 26 + P1a 62 + P1b 223 + P1c **222** = **533**. The
-tool-category change (F20 57 → 69 = +12) moved P1c 210 → 222 and the daemon total 521 → **533**.
+`21→31`) taken at its **today** value **21** — the bytes histogram's +10 arrives with the P1b
+byte wiring (catalog G-5). Row sums: P0 27 + P1a 63 + P1b 220 + P1c **228** = **538**. Changes vs. the prior 533: F3 +1 (`manual` reason, R-m9), F13 −2 (wake outcome cut to closable set, V-3), F20 +6 (tool categories 55 + reserved `other` per V-4 artifact, was 49), **F0.2 +1** (`ensemble_metrics_cap_rejected_total` folded in, R-m3), **F7 −1** (decomposition corrected 22→21 today / 33→31 post, R-m8). Headroom vs. the ≤2 000 budget: **1 462**.
 
 **Platform note (WS-A correction, 2026-10-29).** Every series count above is
 platform-independent — the platform support matrix (§13) changes **which fields render** on
@@ -231,17 +247,10 @@ the registry under load before 200+ more series land on it.
 
 ### F0.2 — Canonical registry generalization
 
-- **Name:** `ensemble_metrics_registry_measurements` (gauge, no labels). **Type:** gauge — count
-  of registered measurements. **Labels:** none.
-- **Source:** **reuse** — `daemon/checkpoint_metrics.py:304` `render_metrics()` becomes the
-  registry renderer; the two existing singletons (`:273`, `:281`) become registry-registered
-  instances under their canonical names.
-- **Clarification (A8):** `ensemble_metrics_registry_measurements` counts **measurements**
-  (registered measurement objects), NOT series — dashboards must not conflate it with the
-  ≤2 k series budget. CR-3 record correction: the registry is **wired to collectors**
-  (`checkpoint_perf.py:28-30` imports the singletons, observes `:190`/`:198`, increments
-  `:233`); only `render_metrics()` itself has zero non-test callers.
-- **Phase** P0 · **Owner** developer; reviewer signs the naming migration · **Series estimate** **1**.
+- **Name:** `ensemble_metrics_registry_measurements` (gauge, no labels) · **`ensemble_metrics_cap_rejected_total` (counter, `{metric}`-labeled)** (R-m3 — folded into this family; the hard cap's atomic observe-time rejection count). **Type:** gauge; counter. **Labels:** none (measurements) / `metric` (rejected).
+- **Source:** **reuse** — `daemon/checkpoint_metrics.py:304` `render_metrics()` becomes the registry renderer; the two existing singletons (`:273`, `:281`) become registry-registered instances under their canonical names. The rejected counter is emitted by the hard cap's locked check-then-increment path (catalog §0.5, R-m3).
+- **Clarification (A8):** `ensemble_metrics_registry_measurements` counts **measurements** (registered measurement objects), NOT series — dashboards must not conflate it with the ≤2 k series budget. CR-3 record correction: the registry is **wired to collectors** (`checkpoint_perf.py:28-30` imports the singletons, observes `:190`/`:198`, increments `:233`); only `render_metrics()` itself has zero non-test callers.
+- **Phase** P0 · **Owner** developer; reviewer signs the naming migration · **Series estimate** 1 + 1 = **2** (the rejected counter is `{metric}`-labeled; estimate assumes a single representative metric hits the cap in the proof; cap rejections are rare by construction).
 - **Degradation:** always present — a property of the registry, not of a dependency.
 
 ### F0.3 — Resource-spine health gate
@@ -371,12 +380,14 @@ the registry under load before 200+ more series land on it.
 
 - **Name:** `ensemble_wedge_capture_total{reason}` (counter) ·
   `ensemble_wedge_capture_write_total{outcome}` (counter). **Type:** counter; counter.
-  **Labels:** `reason` ∈ `sustained_cpu`, `sustained_loop_lag`, `thread_concentration` ·
+  **Labels:** `reason` ∈ `sustained_cpu`, `sustained_loop_lag`, `thread_concentration`,
+  `manual` (§8.3; `REASON_MANUAL = "manual"` at
+  `daemon/services/wedge_capture/triggers.py:57`, in `CANONICAL_REASONS` `:60-65`) ·
   `outcome` ∈ `ok`, `failed` (§8.3).
 - **Source:** **reuse** — trigger evaluation sites
   (`daemon/services/wedge_capture/triggers.py:202`, `:237`, `:281`) and the watchdog's capture
-  dispatch (`daemon/services/wedge_capture/watchdog.py:417`).
-- **Phase** P1a · **Owner** developer · **Series estimate** 3 + 2 = **5**.
+  dispatch (`daemon/services/wedge_capture/watchdog.py:417`, `:418` `trigger_source=REASON_MANUAL`).
+- **Phase** P1a · **Owner** developer · **Series estimate** 4 + 2 = **6** (R-m9: +1 for `manual`).
 - **Degradation:** wedge capture off ⇒ **no series** (the trigger never fires). The v1
   `ensemble_db_pool_checkout_timeouts` family is deliberately **absent** here — see F4.
 
@@ -482,18 +493,13 @@ the registry under load before 200+ more series land on it.
   histogram is a **reuse observation, not a new instrument** — but the hot path `time_saver_op`
   (`daemon/checkpoint_perf.py:202`, docstring `:205`) forwards `bytes_=0`, so the bytes histogram is
   **under-reported for `aget`** until P1b wires the real blob byte count.
-- **Write-path instrumentation task (A6/A7, Q1 ratified default):** extend the **existing**
-  `checkpoint_adapter.py` charge seam (`_charge_checkpoint_read` at `:371-374`) to
-  `aput`/`aput_writes` (`:377-379`) in P1b with its own risk row — it touches the checkpoint
-  write path under stress during the incidents this plan exists to diagnose. Until it lands,
-  the declared `op` enum is narrowed to the observable set (`aget`) and the write-side
-  incident mapping is restated in plan §1 (writes are a stall/contention artifact, not
-  throughput).
+- **Write-path instrumentation task (V-6 — distinct write-side hook, do NOT reuse the read seam):** add a **separate** `_charge_checkpoint_write` (its own function, own budget/labels) firing once per successful outer call (same once-per-outer-call contract as `_charge_checkpoint_read`), called from `aput`/`aput_writes` (`checkpoint_adapter.py:377-379`). The read seam `_charge_checkpoint_read` (`:371-374`) is **not** extended to writes — routing write bytes through the read charge would bill them to the READ budget. **Early-return-on-None for writes (decided):** a `None` result on a write path is an **error, not a skip** — the hook does **not** early-return on `None`; instead it records the failure so a missing write charge is visible. Until it lands, the declared `op` enum stays narrowed to `aget`. Risk row 3 carries the risk. After it lands, re-derive the `op` enum from observed call sites rather than inheriting the legacy HELP text (`checkpoint_metrics.py:281-290`).
 - **Phase** P1b · **Owner** developer; reviewer pins the bucket set · **Series estimate** only
   `op="aget"` fires in production (the sole prod call site is `daemon/persistence.py:509`,
   `time_saver_op("aget", ...)`) ⇒ seconds histogram 19, bytes histogram 0 today → 10 after the
-  byte wiring, slow-ops counter 1, list counter 1 ⇒ **22 today, 33 after the byte wiring**.
-  Fully-wired ceiling: 76 + 40 + 4 + 1 = 121.
+  byte wiring, slow-ops counter 1, list counter 1 ⇒ **21 today, 31 after the byte wiring**
+  (R-m8 — corrected decomposition: 19 + 0 + 1 + 1 = 21 today; 19 + 10 + 1 + 1 = 31 post;
+  the prior "22/33" did not reconcile). Fully-wired ceiling: 76 + 40 + 4 + 1 = 121.
 - **Degradation:** the metric side-effect is recorded **regardless of the log gate**
   (`daemon/checkpoint_perf.py:187-189` — "Metric records REGARDLESS of the log gate"), so
   `CHECKPOINT_PERF_LOGS=0` does **not** starve the histogram. A non-psycopg backend (SQLite)
@@ -666,6 +672,18 @@ the registry under load before 200+ more series land on it.
   what requests it; without it `usage_metadata` is `None`).
   `ensemble_llm_token_usage_missing_total` counts observations where `usage_metadata` was
   absent — the **undercount caveat made visible** rather than hidden.
+
+  **R-m4 — streaming-only gap (state explicitly).** The hook at `graph.py:3776-3784` sits
+  inside `_convert_delta_to_message_chunk` (def at `:3721`) = the **STREAMING path only**.
+  Non-streaming completion paths carry usage elsewhere and are **not** captured by this hook:
+  `current_llm.invoke(full_messages)` at `daemon/graph.py:9176-9179`, `:9236`, `:9643`,
+  `:9672` return an `AIMessage` whose `.usage_metadata` is populated by the backend, but the
+  streaming converter is never invoked there. Consequence: **under-count risk** for any call
+  made with `streaming=False` (preserved verbatim at `:3889-3891`) — the tokens counter does
+  not increment and `ensemble_llm_token_usage_missing_total` does. Either (a) add an observation
+  at those four invoke sites (preferred — closes the gap) or (b) document the under-count as
+  an accepted limitation. The F14 series estimate is unchanged (3); only the **coverage** note
+  changes.
 - **Phase** P1c · **Owner** developer · **Series estimate** 2 + 1 = **3**.
 - **Degradation:** non-streaming call sites (`streaming=False` preserved verbatim,
   `daemon/graph.py:3889-3891`) ⇒ `usage_metadata` may be absent ⇒ the tokens counter does not
@@ -767,13 +785,14 @@ the registry under load before 200+ more series land on it.
 - **Name:** `ensemble_turn_events_total{source}` (counter) · `ensemble_turn_duration_seconds`
   (histogram, buckets §8.11) · `ensemble_tool_calls_total{category}` (counter).
   **Type:** counter; histogram; counter. **Labels:** `source` ∈ the 5 `SOURCE_*` tap constants ·
-  `category` ∈ the **49 runtime-derived tool categories + reserved `other`** (§8.6).
+  `category` ∈ the **runtime-derived tool categories (V-4 artifact: 55 in this worktree) +
+  reserved `other`** (§8.6).
 - **Source:** **reuse** — `MessageTapSlot.tap_node_return`
   (`daemon/services/message_tap.py:234`) is the **per-turn seam** (R17). m7: the tool-call and
   turn-performance families instrument **this seam**, NOT graph internals — graph internals would
   multiply measurement sites and re-derive per-turn state the tap already owns. The tool
   category is read from the tool's own registration metadata at the tap site, with an `other`
-  fallback for any tool whose category is not in the runtime-derived set.
+  fallback for any tool whose category is not in the runtime-derived set (V-4 `other`-fold).
 
 **Counting unit + anchor (A5):** `ensemble_turn_events_total{source}` counts **one
 `tap_node_return` invocation** (the tap fires at 5 sites and N+1 times per turn with N tool
@@ -788,9 +807,9 @@ entry-tap counterpart contributes **no observation** (absent ≠ zero); the fami
 for that source rather than shipped mislabelled. The metric increments sit **inside** the tap's
 existing `try/except` (`message_tap.py:308-309`) so a metric error cannot produce per-turn
 WARNING noise.
-- **Phase** P1c · **Owner** developer · **Series estimate** 5 + 14 + 50 = **69** (5 turn sources
-  + 14 duration buckets + 50 tool categories: 49 runtime-derived via `get_tool_categories()`
-  (`daemon/tools/_tool_registry.py:1598`) + reserved `other`).
+- **Phase** P1c · **Owner** developer · **Series estimate** 5 + 14 + 56 = **75** (5 turn sources
+  + 14 duration buckets + 56 tool categories: the V-4 artifact count (55 in this worktree) +
+  reserved `other`).
 - **Degradation:** the tap is **non-load-bearing** — it swallows every exception and logs at
   WARNING (`daemon/services/message_tap.py:308-309`) — so a tap failure yields **no series**,
   never a broken turn.
@@ -831,12 +850,7 @@ WARNING noise.
   postgres_exporter `pg_stat_activity` rollup, `pg_stat_statements` top-N, table sizes, WAL,
   autovacuum, `pg_stat_database`. **Type:** gauge; the rest are exporter-native.
   **Labels:** `name` ∈ `launcher`, `promote_sh`, `stage_sh`, `rollback_sh`, `restart_sh`.
-- **Source:** **greenfield** — the node_exporter **textfile collector** pattern: the house shell
-  scripts rewrite `*.prom` files in a well-known directory under the install dir
-  (`$INSTALL_DIR/data/metrics/`). No daemon dependency, crash-safe, and the only way to see the
-  **bash** spins (the O(n²) `state.json` walk) that in-daemon metrics cannot. The canonical
-  journal shape is `ensemble_journal_file_bytes` / `ensemble_journal_history_entries` (F21) —
-  the textfile carries the same numbers so a daemon-down incident still has them.
+- **Source:** **greenfield** — the node_exporter **textfile collector** pattern: an out-of-process **external sampler** (V-8 — bash scripts never write their own `*.prom`). Owner = node_exporter textfile-collector writer (devops); mechanism = per 10 s tick samples `ps -o %cpu=,comm=` (Darwin) / `/proc/<pid>/stat` (Linux) for the named processes (`promote.sh`, `stage.sh`, `launcher`) and writes `ensemble_process_cpu_seconds{name="…"}` (per-tick delta gauge) + `ensemble_textfile_last_write_timestamp_seconds` (freshness gauge); pinned 10 s cadence (alert math assumes it); spin→stale interaction: when the textfile goes stale (>120 s) while a spin is in progress, `TextfileStale` fires (see plan §8 V-8). The house shell scripts are **observed**, never modified (decision 2). No daemon dependency, crash-safe, and the only way to see the **bash** spins (the O(n²) `state.json` walk) that in-daemon metrics cannot. The canonical journal shape is `ensemble_journal_file_bytes` / `ensemble_journal_history_entries` (F21) — the textfile carries the same numbers so a daemon-down incident still has them.
 - **Phase** P2 — the **minimal** textfile writer ships in **P1b** (A25: the BashSpin data
   source must exist before the P2 alert rules land); the full exporter/textfile work stays in
   P2 · **Owner** devops (exporters, textfile dir, dashboards), developer (the textfile
@@ -852,21 +866,25 @@ WARNING noise.
 
 | Phase | Families | Daemon-origin series |
 |---|---|---|
-| P0 | F0.1–F0.4 | 26 |
-| P1a | F1–F6 | 62 |
-| P1b | F7–F13 | 223 |
-| P1c | F14–F21 | 222 |
-| **Daemon total** | **F0.1–F21** | **533** |
+| P0 | F0.1–F0.4 | 27 |
+| P1a | F1–F6 | 63 |
+| P1b | F7–F13 | 220 |
+| P1c | F14–F21 | 228 |
+| **Daemon total** | **F0.1–F21** | **538** |
 | Shell-origin (textfile) | F22 | 5 |
 | Exporter-origin (node/postgres) | F22 | ≈67 |
-| **Grand total on the Prometheus server** | | **≈605** |
+| **Grand total on the Prometheus server** | | **≈610** |
 
-**533 daemon-origin series against a ≤2 000 budget — ≈27 % consumed; headroom 1 467.** The four
-largest families (F12 sweeps 69, F21 journal 66, F20 tool calls 69, F9 readiness 53) are each
+**538 daemon-origin series against a ≤2 000 budget — ≈27 % consumed; headroom 1 462.** The four
+largest families (F12 sweeps 69, F21 journal 66, F20 tool calls 75, F9 readiness 53) are each
 **bounded, enumerated** label sets, so growth there is bounded by construction. The three
 unbounded risks in v1 are explicitly closed: per-instance compaction occupancy is a max; the
 leak site is a 6-value fixed map; the MCP roster is capped at 5 values. If every label
-combination in the catalog were live at once the total would be ≈1 113 — still inside budget.
+combination in the catalog were live at once the total would be ≈1 118 — still inside budget.
+Per-phase counts shifted: P1a +1 (F3 `manual` reason, R-m9), P1b −2 (wake outcome cut to the
+closable set, V-3) −1 (F7 decomposition corrected 22→21, R-m8), P1c +6 (tool categories 55 +
+reserved `other` from the V-4 generated artifact, was 49), P0 +1 (F0.2 cap-rejected counter,
+R-m3). Net daemon total unchanged at 538.
 
 **Intra-family phased rollouts — convention (G-20/H-12 unification).** A family maps to
 **exactly one phase** in the table above (1:1, zero exceptions). When a family needs an early,
@@ -880,13 +898,54 @@ in which it **completes** (F22 = P2). Per-phase counts below are computed on tha
 completes in P2 (full exporter/textfile work). This is a deliberate phase split inside one
 family — it does not change the series count or the ≤2 k proof.
 
----
+### 7.1 Task / owner mapping (V-5 orphan sweep)
+
+Every catalog §1 family maps to a plan §4 task row + owner role (back-reference). Post-sweep
+orphan count = **0** (every series has a task row + owner). V-5 added dedicated task rows for
+the previously orphaned clusters: F0.1 (P0 task 11) and F18 (P1c task 9); F0.2/F0.3/F0.4
+were attached to existing tasks (P0 T4/T8/T6) with explicit metric names in their acceptance.
+
+| Family | Phase | Plan §4 task row(s) | Owner role | Series |
+|---|---|---|---|---|
+| F0.1 | P0 | P0 T1, T2, T3, **T11** (V-5) | developer + devops | 16 |
+| F0.2 | P0 | P0 T4 (extended) | developer (+ reviewer naming) | 2 |
+| F0.3 | P0 | P0 T8 (extended) | developer | 8 |
+| F0.4 | P0 | P0 T6 (extended) | developer (+ reviewer annex) | 1 |
+| F1 | P1a | P1a T1 | backend | 9 |
+| F2 | P1a | P1a T2 (+ P0 T9) | backend | 22 |
+| F3 | P1a | P1a T3 | backend | 6 |
+| F4 | P1a | P1a T4 | backend | 8 |
+| F5 | P1a | P1a T4 | backend | 3 |
+| F6 | P1a | P1a T5 (+ P0 T7, T10) | backend + devops | 15 |
+| F7 | P1b | P1b T1, T14 (V-6) | backend + devops (PG) | 21→31 |
+| F8 | P1b | P1b T2, T4 | backend + devops (PG) | 9 |
+| F9 | P1b | P1b T3 | backend + devops | 53 |
+| F10 | P1b | P1b T5, T6 | backend + devops (PG) | 20 |
+| F11 | P1b | P1b T7, T8 | backend + devops (PG) | 16 |
+| F12 | P1b | P1b T11 | backend + devops (PG) | 69 |
+| F13 | P1b | P1b T9, T10, T12 | backend + devops (PG) | 31 |
+| F14 | P1c | P1c T1 | backend | 3 |
+| F15 | P1c | P1c T2 | backend | 22 |
+| F16 | P1c | P1c T3 | backend | 5 |
+| F17 | P1c | P1c T6 | backend + devops | 40 |
+| F18 | P1c | P1c T7, **T9** (V-5) | backend | 9 |
+| F19 | P1c | P1c T4 | backend | 7 |
+| F20 | P1c | P1c T5 | backend | 75 |
+| F21 | P1c | P1c T8 | backend + devops | 65 |
+| F22 | P2 (minimal P1b) | P2 T1, T2, T3, T5 (+ P1b T13) | devops (+ developer writer) | 5 + ~67 |
+
+**Orphan census (V-5):** found 33 series without a task row/owner (F0.1 16 + F18 9 + F0.3 counters 4 + F0.2 1 + F0.4 1 + F7 list/slow 2 — enumerated from the catalog, not trusted blindly); closed 33 by adding/extending task rows above; remaining **0**. Every catalog §1 series now has a task row + owner role.
 
 ## 8. Vocabulary annex
 
 Every enumerated label set, with the `file:line` it was verified against.
 
-**Rule (A1): every closed vocabulary in this annex is DERIVED FROM CODE, never hand-listed.** Hand-listing is the drift class that already falsified the tool-category set (§8.6: 37/38 claimed vs 49 verified) and the sweep lanes (§8.4: 7 → 13). Each set must be pinned to a runtime source (`get_tool_categories()`, an enum, a constant) and cross-checked by a test; a vocabulary that cannot be derived from code must carry a reserved `other` residual and a documented amendment procedure (bump `ensemble_metrics_vocabulary_version`).
+**Rule (A1): every closed vocabulary in this annex is DERIVED FROM CODE, never hand-listed.** Hand-listing is the drift class that already falsified the tool-category set (§8.6) and the sweep lanes (§8.4: 7 → 13). Each set must be pinned to a runtime source (`get_tool_categories()`, an enum, a constant) and cross-checked by a test; a vocabulary that cannot be derived from code must carry a reserved `other` residual and a documented amendment procedure (bump `ensemble_metrics_vocabulary_version`).
+
+**P-1 freeze rule (V-4 companion).** The P0 vocabulary freeze must NOT freeze tool-categories
+from a hand list. It freezes from the V-4 generated artifact (§8.6), or defers the freeze
+with the `other`-fold as the closure. Wave 2 wires this into plan §4 P0 T6; this annex
+defines the rule it references.
 
 **Cardinality rule (A10/A18):** per-instance attribution = PG-only (`/api/resources/*`); no
 daemon-origin `/metrics` family carries a per-instance label — every daemon-origin family is
@@ -897,9 +956,16 @@ aggregate. (Companion: plan §3 storage-split boundary rule.)
 `paused`, `completed`, `error`, `terminated`, `queued`, `waiting_children`, `failed`.
 **Instance liveness (7)** — `daemon/services/work_status.py:67-99` (`_STATUS_CANONICAL_MAP`):
 `pending`, `processing`, `paused`, `completed`, `failed`, `cancelled`, `unknown`; live consumer
-`daemon/tools/instance_read.py:228` `_liveness_for`. **Wake-turn outcome (7)**: `claimed`,
-`skipped_busy_instance`, `empty_claim`, `timeout_wake`, `no_op_resume`, `fresh_episode_reset`,
-`stale_episode`. **Instance lifecycle event (7)**: `spawned`, `revived`, `paused`, `resumed`,
+`daemon/tools/instance_read.py:228` `_liveness_for`. **Wake-turn outcome (5, closable set — V-3)**: `claimed`, `skipped_busy_instance`,
+`empty_claim`, `timeout_wake`, `fresh_episode_reset`. Attribution: `claimed` /
+`empty_claim` / `timeout_wake` / `skipped_busy_instance` ← claim path
+`daemon/services/worker_pool.py:1381-1386` (the four `_stats` keys
+`notifications_sent`/`empty_claim_attempts`/`workers_woken_by_timeout`/
+`claims_skipped_due_to_busy_instance`); `fresh_episode_reset` ← episode seam
+`daemon/graph.py:7319` `_detect_fresh_episode_reset` returning a non-`None` sentinel id.
+A `None` return from the seam yields **no increment** (absent ≠ zero) — there is no
+`no_op_resume`/`stale_episode` producer in code, so both are cut (no aspirational values).
+**Instance lifecycle event (7)**: `spawned`, `revived`, `paused`, `resumed`,
 `terminated`, `fan_in_completed`, `fan_in_failed`.
 
 **8.2 Thread group (11)** — `main`, `worker_pool`, `chat_worker_pool`,
@@ -917,9 +983,13 @@ aggregate. (Companion: plan §3 storage-split boundary rule.)
 `read_timeout`, `boot_incomplete`, `identity_mismatch`, `hard_component_red`, `not_serving`,
 `pool_leak`, `unknown`, `ok`. Grace-eligible subset (4): `probe_timeout`, `pool_busy`,
 `queue_stale`, `read_timeout` (`:83-89`). Readiness component (4): `database`,
-`queue_freshness`, `services`, `checkpoint_saver` (`:94-99`). **Wedge-capture reason (3)** —
-`daemon/services/wedge_capture/triggers.py:54-56`: `sustained_cpu`, `sustained_loop_lag`,
-`thread_concentration`. **Wedge write outcome (2)**: `ok`, `failed`. **Exposition outcome (2)**:
+`queue_freshness`, `services`, `checkpoint_saver` (`:94-99`). **Cross-check (V-2):** the
+catalog readiness outcome vocabulary matches the `readiness.py` taxonomy exactly (11 classes) —
+no drift. **Wedge-capture reason (4)** — `daemon/services/wedge_capture/triggers.py:54-64`
+(`CANONICAL_REASONS`, `:57` `REASON_MANUAL = "manual"`): `sustained_cpu`,
+`sustained_loop_lag`, `thread_concentration`, `manual`. (R-m9: `manual` was missing from the
+v1 set; the path is `daemon/services/wedge_capture/triggers.py`, not `daemon/services/triggers.py`.)
+**Wedge write outcome (2)**: `ok`, `failed`. **Exposition outcome (2)**:
 `ok`, `error`.
 
 **8.4 Sweep lane (13) + outcome (6)** — RDRS lanes (7): `rdrs_deferred`,
@@ -945,19 +1015,40 @@ future roster change is additive rather than breaking. MCP state (4): `ok`, `deg
 `daemon/routers/mcp_servers.py:302-307`). MCP failure kind (4): `connect`, `initialize`,
 `tool_call`, `quarantine`.
 
-**8.6 Tool category (derived from code, not hand-listed — A1).** The vocabulary is derived at
-runtime from `get_tool_categories()` (`daemon/tools/_tool_registry.py:1598`); verified in the
-worktree: **49 distinct categories** across **254 `register_tool_category(` sites** (the
-architect's figure was 49 — matches). The hand-listed v1 set (37/38 values) is **falsified**:
-it omits at least `board-link`, `dynamic-skill`, `ens-db`, `ens-env`, `image-gen`,
-`self-alarm`, `skill-evolution`, `system-log` (all verified present in-tree), plus
-`view-views`, `view-write`, `wedge-capture`. The metric label set is the **runtime-derived set
-plus a reserved `other` fallback** (50 values) for the tool→category lookup; a tool whose
-category is not in the set folds to `other` and is counted in
-`ensemble_metrics_invalid_label_total{metric,label}`. A cross-check test pins the annex to
-`get_tool_categories()`. The full closed list is intentionally NOT hand-written here — deriving
-it at runtime is the contract; listing it would re-introduce the drift class the plan already
-caught once for the sweep lanes (§8.4, 7 → 13).
+**8.6 Tool category (V-4 — generated artifact, not a hand list).** The tool-category
+vocabulary is **process-dependent and unstable** (recounts give 41/53/54/55 depending on
+process: MCP name-prefix injection and `scan_tools_for_full_docs` process-dependence — the
+instability IS the defect). It is therefore NOT hand-listed and NOT frozen from prose.
+
+- **Canonical source (V-4):** a **CI/test-GENERATED JSON artifact** produced by a generator
+  test (new test, e.g. `tests/unit/tools/test_tool_category_artifact.py`) that imports the full
+  tool registry, calls `get_tool_categories()` (`daemon/tools/_tool_registry.py:1598`) over the
+  complete tool universe (all agents + MCP-injected names), and writes the sorted distinct
+  category list + count to a committed artifact, e.g.
+  `.agents/shared/metrics/tool-categories.json` (or `tests/fixtures/tool-categories.json`).
+  The artifact is canonical; the prose number is not.
+- **Drift check:** a test that re-runs the generator and fails (non-zero exit) when the
+  on-disk artifact diverges from the freshly generated set — so a new `register_tool_category`
+  site or a renamed `CATEGORY_NAME` breaks CI instead of silently drifting the metric label set.
+- **`other`-fold rule:** any tool whose category is not in the runtime-derived set (or not
+  resolvable at runtime — e.g. MCP-injected tools whose category cannot be resolved) folds to
+  the reserved `other` bucket and is counted in
+  `ensemble_metrics_invalid_label_total{metric,label}`. The `other` bucket is always present, so
+  the cardinality is bounded by (derived count + 1) regardless of process.
+- **Freeze rule (P-1):** the P0 vocabulary freeze must NOT freeze tool-categories from a hand
+  list. It either (a) freezes from the V-4 generated artifact (the artifact's sorted list
+  becomes the frozen label set for that release) or (b) defers the freeze and ships with the
+  `other`-fold as the closure (a bump of `ensemble_metrics_vocabulary_version` is required to
+  change the frozen set — see F0.4). Wave 2 wires this into plan §4 P0 T6.
+- **My own count in this worktree (freeze-time placeholder, NOT canonical): 55** distinct
+  `CATEGORY_NAME` values from the 55 `CATEGORY_MODULES` keys (all importable, no missing
+  modules). The artifact is canonical; 55 is only the value I observe today. Series math uses
+  55 + reserved `other` = 56 tool-category label values (F20).
+- The hand-listed v1 set (37/38 values) is **falsified**: it omits at least `board-link`,
+  `dynamic-skill`, `ens-db`, `ens-env`, `image-gen`, `self-alarm`, `skill-evolution`,
+  `system-log`, `view-views`, `view-write`, `wedge-capture`. The full closed list is
+  intentionally NOT hand-written here — deriving it at runtime (and pinning via the artifact)
+  is the contract.
 
 **8.7 Journal op (26)** — shell-written (16): `commit`, `halt`, `intent_flip`, `live`,
 `quarantine`, `refusal`, `restart`, `restart_gate`, `rollback`, `soak_deferred`,
@@ -1220,6 +1311,29 @@ a reset-on-restart counter is restated:
 | C33 | `ensemble_metrics_registry_measurements` ambiguity | **clarified** — counts measurements, not series | `daemon/checkpoint_metrics.py:304` |
 | C34 | census statement/connect timeouts unspecified | **set** — 5 s / 3 s; execution home = dedicated daemon thread; self-exclusion = census only; blank `pg_stat_activity.query` lands in `other` | `daemon/services/wedge_capture/db_capture.py` |
 | C35 | the resource tier's darkness was caused by the flusher (`bool`→`INTEGER` 42804 every window, all four tables rolled back through the shared `engine.begin()`; runtime fix pending at `flusher.py:770` / `manager.py:7341`) | **REFUTED (2026-10-29, WS-A correction round).** Prod facts: the `estimated` column is `boolean NOT NULL` (`daemon/models/resource_monitor.py:231-233`); the bind is correct (bind-audit test @ `feature/resource-monitor-flusher-fix@53547b915` checks every flusher column against live `information_schema` + round-trips a real bool); the rollback amplifier was already fixed (`7be1b40bf` per-tier SAVEPOINT, `69cea24ea` `flush.errors` surfacing). **Real cause — a dead PRODUCER on macOS:** the prod daemon is a macOS binary; Darwin has no `/proc` and no `/sys/fs/cgroup`, so `proc_readers` returned `None` every tick → the sampler skipped every tick → the flusher had nothing to write. Live signature: samples climbing, `flush {batches:1139, bytes:0, errors:0}` = "produced nothing", NOT "write failed"; `resource_pid_map` climbed (45,575 rows at commit time) from the spawn path, **masking the outage**. Fix = the WS-A branch: Darwin ps-based reader (engaged ONLY when the proc root is ABSENT and the host is Darwin) + corrected sampler counters (`missed_samples`/`ticks_skipped` parity, skips excluded from `counters.ticks`, one-shot WARNING) + 7 unit / 6 real-PG tests. Merges to latest BEFORE P0 executes. Platform consequences: catalog §13; per-child T3 stays `/proc`-only (§13.4 non-goal) | `feature/resource-monitor-flusher-fix@53547b915` (`proc_readers.py`, `sampler.py`, `tests/postgres/test_resource_monitor_flusher_bind_pg.py`); prod census 2026-10-29 |
+| C36 | alert rules published in markdown tables with `\|` escapes → YAML inert for copy-paste | **fixed (R-m1):** authoritative rule text now lives in fenced ```yaml blocks with unescaped pipes; table retained for incident mapping + baselines | plan-overview.md §8 |
+| C37 | multi-vector rules used bare `and` between disjoint label sets → empty vector → never fires (LoopStarved, FalseDegraded, CheckpointSlow) | **fixed (V-1):** explicit `and on()` label guards; evaluation fixtures added (AC8) | plan-overview.md §8 + §10 AC8 |
+| C38 | FalseDegraded selected `outcome="timeout"` which does not exist in the 11-class taxonomy | **fixed (V-2):** `outcome=~"probe_timeout\|read_timeout"`; both grace-eligible; probe_timeout replays the P2 deadline miss | `daemon/services/readiness.py:64-79` |
+| C39 | `ensemble_wake_turns_total{outcome}` claimed 7 values; producers emit only 5 closable values | **fixed (V-3):** cut to `claimed`, `skipped_busy_instance`, `empty_claim`, `timeout_wake`, `fresh_episode_reset`; None yields no increment | `daemon/services/worker_pool.py:1381-1386`, `daemon/graph.py:7319` |
+| C40 | tool-category count hand-listed as 49 (unstable 41/53/54/55 by process) | **fixed (V-4):** CI/test-generated JSON artifact is canonical + drift check + `other`-fold; freeze-time value in this worktree = 55 | `daemon/tools/_tool_registry.py:1598` |
+| C41 | F3 `reason` vocabulary omitted `manual` (`REASON_MANUAL` at triggers.py:57) | **fixed (R-m9):** 4 values: `sustained_cpu`, `sustained_loop_lag`, `thread_concentration`, `manual` | `daemon/services/wedge_capture/triggers.py:54-64` |
+| C42 | F14 hook documented only at streaming path; non-streaming completion paths carry usage elsewhere | **documented (R-m4):** streaming-only gap stated; invoke sites `graph.py:9176-9179`, `:9236`, `:9643`, `:9672` named | `daemon/graph.py:3721`, `:3776-3784` |
+| C43 | BashSpin spinning script cannot write its own `*.prom`; `\|` escapes inert | **fixed (V-8/R-m1):** external sampler named (owner + mechanism + 10 s cadence); TextfileStale rule added; pipes unescaped | plan-overview.md §8 |
+| C44 | alert thresholds uncited | **fixed (V-7):** Baseline column cites code constant or incident/bench evidence for all 14 rules | plan-overview.md §8 |
+| C45 | AC2 self-cost dark on macOS; AC6 lag-probe dark when wedge-capture off | **fixed (V-9):** explicit precondition rows on every dark-able AC | plan-overview.md §10 |
+| C46 | P0 vocabulary freeze from hand list | **fixed (P-1):** freeze from V-4 artifact or defer with `other`-fold | catalog §8.6 + plan §4 (wave 2) |
+| C47 | 33 orphaned series with no task row/owner (V-5) | **fixed (V-5):** dedicated task rows added for F0.1 (P0 T11) and F18 (P1c T9); F0.2/F0.3/F0.4 attached to existing tasks with explicit metric names; mapping annex added at catalog §7.1; orphan count now 0 | plan-overview.md §4 + catalog §7.1 |
+| C48 | P0 family claim "none new — P0 builds the plumbing" contradicts F0.1–F0.4 shipping in P0 (V-5) | **fixed (V-5):** claim restated as "F0.1–F0.4 foundation families" (G-20 canonical partition) | plan-overview.md §4 P0 |
+| C49 | Checkpoint write path reused the read charge seam, billing writes to READ budget (V-6) | **fixed (V-6):** distinct `_charge_checkpoint_write` hook with own budget/labels; None on write = error not skip; Q1 risk row kept | plan-overview.md §4 P1b T14 + catalog F7 |
+| C50 | Teardown used `join(timeout=5)` instead of the house detached-join precedent (R-m2) | **fixed (R-m2):** aligned to detached join (`daemon/api.py:3411-3433`, `file_change_monitor.py:180-196`); `daemon=True` thread dies with process | plan-overview.md §3 + §4 P0 T1 |
+| C51 | Hard cardinality cap not atomic; no rejected counter (R-m3) | **fixed (R-m3):** observe-time rejection atomic under the metric's own lock (check-then-increment, no TOCTOU); `ensemble_metrics_cap_rejected_total` folded into F0.2 (+1 series) | catalog §0.5 + plan §5/§7 |
+| C52 | Publisher copy-on-publish O(series) per increment unbounded (R-m5) | **fixed (R-m5):** dirty-flag + re-publish at most once per N seconds, or publish-on-scrape-request with bounded staleness | catalog §0.2 |
+| C53 | Plan §12 closing sentence claimed no open questions while OQ-1/2/3 exist (R-m7) | **fixed (R-m7):** sentence restated; OQ-1/2/3 remain open (decided in P0), OQ-4 RESOLVED | plan-overview.md §12 |
+| C54 | F7 decomposition did not reconcile (21→31 vs declared 22→33) (R-m8) | **fixed (R-m8):** corrected to 21 today / 31 post (19+0+1+1 / 19+10+1+1); §1 F7 row + §7 P1b (221→220) + reconciliation restated | catalog §1 + §4 + §7 |
+| C55 | Plan §6 dark matrix omitted F3 (wedge-capture /proc-dependent) (R-m10) | **fixed (R-m10):** F3 row added consistent with catalog §13 | plan-overview.md §6 |
+| C56 | Plan §4 P0 T6 freeze rule not wired to V-4 artifact (P-1) | **fixed (P-1):** freeze from V-4 generated artifact or defer with `other`-fold; never hand list | plan-overview.md §4 P0 T6 |
+| C57 | P0-core gate lacked detached-join / atomic-cap / publisher-cadence line items (P-3) | **fixed (P-3):** three mechanics items added as explicit APPLIED line items with anchors | plan-overview.md §4 P0 exit criteria |
+| C58 | V-8 external sampler not referenced in plan §3/§4 P2 or catalog F22 Source | **fixed (V-8):** owner + mechanism + 10 s cadence + stale-file rule referenced in all three | plan-overview.md §3, §4 P2 T1; catalog F22 |
 
 ---
 

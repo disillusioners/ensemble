@@ -53,11 +53,11 @@ Branch: feature/metrics-collection @ 9bbef71c1 (worktree agents-ensemble-wt-metr
 
 **Off-loop discipline (restated, A28).** The blanket "never adds event-loop work" claim is literally false — every increment is loop or executor-thread work. The accurate rule: **no blocking work, no I/O, no logging, and no per-chunk work on the event loop**, plus **≤1 `time.perf_counter()` read per observation window**. Background threads, atomic counters, samplers stay off-loop (existing lag probe + wedge watchdog are the templates); one `/proc` dialect (reuse `resource_monitor/proc_readers.py`, sampler.py already imports it); per-request `ENSEMBLE_METRICS_ENABLED` read (MA-1). Metric increments inside `message_tap` must sit **within the tap's existing `try/except`** (`daemon/services/message_tap.py:308-309`) so a metric error cannot produce per-turn WARNING noise. Per-turn cost budget: ≈4 µs added work per tool-round turn (8 counter incs + 2 histogram observes) against a multi-second turn — **<0.01%**; the tap's own DB write exceeds any metric cost by 3–4 orders of magnitude.
 
-**Textfile collector (R18, genuinely new).** House bash scripts (launcher/promote/stage) append/rewrite `*.prom` files in `$INSTALL_DIR/data/metrics/` (node_exporter textfile collector). Catches the bash spins in-daemon metrics cannot see. Journal metrics via python twin `daemon/tools/upgrade_journal.py` (decision 2 — never touch `scripts/upgrade/`).
+**Textfile collector (R18, genuinely new).** House bash scripts (launcher/promote/stage) append/rewrite `*.prom` files in `$INSTALL_DIR/data/metrics/` (node_exporter textfile collector). Catches the bash spins in-daemon metrics cannot see. Journal metrics via python twin `daemon/tools/upgrade_journal.py` (decision 2 — never touch `scripts/upgrade/`). **V-8 external sampler (do NOT let bash scripts write their own `*.prom`):** the textfile is produced by an out-of-process external sampler — owner = node_exporter textfile-collector writer (devops-owned), mechanism = per 10 s tick runs `ps -o %cpu=,comm=` (Darwin) / reads `/proc/<pid>/stat` (Linux) for the named processes (`promote.sh`, `stage.sh`, `launcher`) and rewrites `$INSTALL_DIR/data/metrics/ensemble_textfile.prom` with the per-tick delta gauge `ensemble_process_cpu_seconds{name="…"}` plus the freshness gauge `ensemble_textfile_last_write_timestamp_seconds`; the pinned cadence is 10 s (alert math assumes it); spin→stale interaction: when the textfile goes stale (>120 s) while a spin is in progress, `TextfileStale` fires and the operator is alerted that the BashSpin signal is no longer trustworthy. See plan §8 "V-8 — BashSpin external sampler design" for the full contract.
 
 **Listener thread/loop topology (A12, CR-1 mitigation).** The listener owns a **dedicated daemon thread** running stdlib `http.server.ThreadingHTTPServer` bound to `127.0.0.1` on its own port, started from the FastAPI lifespan (Option A). A shared-main-event-loop listener is **REJECTED** — it inherits the CR-1 failure (the scrape dies exactly when the daemon wedges). **Render-never-blocks:** per-metric locks only (no global registry lock); render uses non-blocking try-acquire (bounded wait, e.g. 50 ms) and on contention serves the **last published snapshot** plus a `# <family> unavailable: lock_contended` comment line; writers update a family's own state under its own short lock and atomically swap a published pointer (plain assignment, atomic under the GIL) — copy-on-publish. **GIL split:** an **I/O-bound wedge survives** (I/O releases the GIL) but a **CPU-spin wedge does not** (the spin holds the GIL continuously) — so CR-1's out-of-process witnesses (node_exporter textfile, `up==0`/`absent()`, `scrape_duration_seconds`) remain **MANDATORY**, not optional. CR-3 reuse story: the registry is **wired to collectors, exposition unwired** — only `render_metrics()` is unwired in production (`checkpoint_perf.py:28-30` imports the singletons, observes `:190`/`:198`, increments `:233`).
 
-**Boot/teardown lifecycle (A13).** Boot placement, inside the FastAPI **lifespan**: start after `resource_monitor` (`daemon/api.py:2241-2288`) and after `llm_stream_watchdog` (`daemon/api.py:2212-2226`); a bind failure degrades the listener to **disabled + logged**, mirroring `daemon/api.py:2282-2287` (never abort boot — decision 3). Teardown order: stop event → `server.shutdown()` → `join(timeout=5)` → close, **after** `resource_monitor` stop (`daemon/api.py:3411-3433`) and wedge-capture stop (`daemon/api.py:3435-3464`); the thread is `daemon=True` so a wedged join cannot hang shutdown.
+**Boot/teardown lifecycle (A13).** Boot placement, inside the FastAPI **lifespan**: start after `resource_monitor` (`daemon/api.py:2241-2288`) and after `llm_stream_watchdog` (`daemon/api.py:2212-2226`); a bind failure degrades the listener to **disabled + logged**, mirroring `daemon/api.py:2282-2287` (never abort boot — decision 3). Teardown order (R-m2 — aligned to the house detached-join precedent at `daemon/api.py:3411-3433` and `daemon/services/file_change_monitor.py:180-196`): stop event → `server.shutdown()` → **detached join (no blocking join)** → close, **after** `resource_monitor` stop (`daemon/api.py:3411-3433`) and wedge-capture stop (`daemon/api.py:3435-3464`); the listener thread is `daemon=True` so a wedged join is already harmless and **must never block the event loop** (the join is detached, never `join(timeout=…)` on the loop thread). The earlier `join(timeout=5)` wording is superseded by this detached-join precedent; a wedged join cannot hang shutdown.
 
 **Storage-split boundary rule (A18).** Per-instance attribution = **PG-only via `/api/resources/*`**; every daemon-origin `/metrics` family is **aggregate**; **no daemon-origin family carries a per-instance label**. Enforced in catalog §8 as a cardinality rule (not just stated).
 
@@ -89,21 +89,22 @@ P0 is on the critical path for all; P1a/b/c can run in parallel after P0 lands (
 
 Goals: listener + security; kill-switch; registry generalization; census discipline; resource-spine health gate; vocabularies enumerated.
 
-Metric families added (names only): none new — P0 builds the plumbing. (Existing: `message_api_checkpoint_list_total`, `message_api_saver_op_latency_seconds`.)
+Metric families added (names only): **F0.1–F0.4 foundation families** (P0 ships the foundation metrics — listener/exposition, canonical registry, resource-spine health gate, vocabulary freeze marker). (Existing: `message_api_checkpoint_list_total`, `message_api_saver_op_latency_seconds`.)
 
 Tasks:
 | # | Task | Depends On | Acceptance |
 |---|------|------------|------------|
-| 1 | Stand up localhost-bound /metrics listener (127.0.0.1:<port>) | none | Port binds loopback only; main port 9797 returns 404 for /metrics. **Boot placement (A13):** inside the FastAPI lifespan, after `resource_monitor` (`daemon/api.py:2241-2288`) and `llm_stream_watchdog` (`:2212-2226`); bind failure → disabled + logged (`:2282-2287`), never abort boot. Teardown: stop event → `shutdown()` → `join(timeout=5)` after resource_monitor stop (`:3411-3433`) and wedge-capture stop (`:3435-3464`); `daemon=True` thread. |
+| 1 | Stand up localhost-bound /metrics listener (127.0.0.1:<port>) | none | Port binds loopback only; main port 9797 returns 404 for /metrics. **Boot placement (A13):** inside the FastAPI lifespan, after `resource_monitor` (`daemon/api.py:2241-2288`) and `llm_stream_watchdog` (`:2212-2226`); bind failure → disabled + logged (`:2282-2287`), never abort boot. Teardown (R-m2): stop event → `shutdown()` → **detached join (no blocking join; `daemon=True` thread dies with the process)** after resource_monitor stop (`:3411-3433`) and wedge-capture stop (`:3435-3464`) — aligned to the house detached-join precedent (`daemon/api.py:3411-3433`, `daemon/services/file_change_monitor.py:180-196`); never `join(timeout=…)` on the event loop. |
 | 2 | Wire origin guard (maintenance_origin_guard.py pattern) for browser access | 1 | Browser scrape from non-loopback origin returns 403 origin_not_trusted |
 | 3 | Implement ENSEMBLE_METRICS_ENABLED per-request read, default OFF | 1 | Kill-switch flips without restart; /metrics returns empty-shape 200 when off. **Semantics (A14):** truthy set = `{1, true, yes}` case-insensitive; everything else OFF (fail closed — `ture`/`on`/`enabled`/`0`/empty → OFF). Layering: env explicit-OFF always wins; env UNSET defers to the managed-key chain (unset + managed key on ⇒ ON; unset + default ⇒ OFF); explicit env ON overrides the managed-key default. One boot log line when env unset while managed key on. Per-request env read stays (~50–100 ns, no syscall; no TTL cache). |
-| 4 | Generalize checkpoint_metrics.py registry into central registry (Counter/Gauge/Histogram + render); extend checkpoint buckets top ≥120 s | none | render() emits all registered families; 73–99 s read lands in finite bucket |
+| 4 | Generalize checkpoint_metrics.py registry into central registry (Counter/Gauge/Histogram + render); extend checkpoint buckets top ≥120 s | none | render() emits all registered families; 73–99 s read lands in finite bucket. **F0.2 (canonical registry metric):** `ensemble_metrics_registry_measurements` (gauge, counts registered measurements) is emitted from the generalized registry (`checkpoint_metrics.py:304`); alias mechanics per catalog §0.3. **R-m3 (cap rejected counter):** `ensemble_metrics_cap_rejected_total` (counter, `{metric}`-labeled, folded into F0.2) is emitted by the hard cap's atomic observe-time rejection. |
 | 5 | Register managed keys (§5) with bounds mirroring pydantic Fields | 4 | len(MANAGED_KEYS) census updated; bounds validated at write time |
-| 6 | Enumerate vocabularies fully (MA-12) | none | Doc lists 10 instance statuses, 7 sweep lanes, MCP DB-row-bounded server list, version-label policy |
+| 6 | Enumerate vocabularies fully (MA-12) | none | Doc lists 10 instance statuses, 7 sweep lanes, MCP DB-row-bounded server list, version-label policy. **P-1 (V-4 companion):** the tool-category vocabulary is **frozen from the V-4 generated artifact** (catalog §8.6 — CI/test-generated JSON artifact + drift check + `other`-fold), **never from a hand list**; the P0 freeze either (a) freezes from the artifact's sorted list (becomes the frozen label set for that release) or (b) defers the freeze and ships with the `other`-fold as the closure (bump `ensemble_metrics_vocabulary_version`). Reference: catalog §8.6 freeze rule + §8 rule A1 (derived from code, never hand-listed). |
 | 7 | Census discipline: dedicated non-pooled connection, ≥15 s cadence, application_name='ensemble-metrics-census', fragment→site map, statement_timeout | none | Integration test asserts non-pooled connection usage |
-| 8 | Resource-spine health gate: "4 tables accepting rows" (depends on the WS-A Darwin-producer fix — **`feature/resource-monitor-flusher-fix@53547b915`** merging to latest before P0 executes; if not merged, this gate BLOCKS — see the P0-spine split below and catalog F0.3/§11 C35) | none | resource_daemon_bucket, resource_instance_sample, resource_pid_map, resource_limit_policy all accept rows |
+| 8 | Resource-spine health gate: "4 tables accepting rows" (depends on the WS-A Darwin-producer fix — **`feature/resource-monitor-flusher-fix@53547b915`** merging to latest before P0 executes; if not merged, this gate BLOCKS — see the P0-spine split below and catalog F0.3/§11 C35) | none | resource_daemon_bucket, resource_instance_sample, resource_pid_map, resource_limit_policy all accept rows. **F0.3 (both series):** `ensemble_resource_spine_tables_accepting_rows{table}` (gauge, table ∈ the 4 spine tables) + `ensemble_resource_spine_rows_written_total{table}` (counter, table ∈ the same 4). |
 | 9 | Name worker threads at construction (`worker_pool.py:253`: `name=f"worker-{lane}-{worker_id}"`) so the thread-CPU family's groups are honest from first render | none | the thread-CPU family's worker-pool/chat-worker-pool groups no longer fold into `other` (A23; moves cost out of a P1a rework cycle) |
 | 10 | Census execution-home: dedicated daemon thread (`CensusSampler`, `daemon=True`, `time.monotonic` tick) — not the listener thread, not the event loop (A23; catalog §9.1) | none | Census survives a wedge; statement_timeout 5 s / connect_timeout 3 s (catalog §9.1) |
+| 11 | Instrument exposition listener metrics (F0.1 — V-5 orphan sweep) | P0-1 | Emit `ensemble_metrics_up` (gauge, no labels), `ensemble_metrics_scrape_requests_total{outcome}` (counter, outcome ∈ ok/error), and `ensemble_metrics_exposition_seconds` (histogram, buckets §8.11) from the listener seam (`daemon/services/metrics_listener.py`); kill-switch OFF ⇒ `ensemble_metrics_up=0`, scrape counter still increments `outcome="ok"`, exposition histogram records the empty render. Owner: developer (implement) + devops (port/scrape). |
 
 Exit criteria:
 - `/metrics` reachable only on 127.0.0.1:<port>; main port 9797 returns 404 for /metrics; origin guard wired.
@@ -112,7 +113,7 @@ Exit criteria:
 - Vocabularies enumerated fully (MA-12).
 - "4 tables accepting rows" exit criterion for resource spine (MA-3).
 - Census discipline in place (MA-13).
-- Managed keys registered (§5) with bounds mirroring pydantic Fields (R9).
+- **P-3 gate conditions (mechanics — all APPLIED, anchor cited):** (a) **detached-join teardown** per the house precedent (`daemon/api.py:3411-3433`, `daemon/services/file_change_monitor.py:180-196`) — R-m2, listener thread `daemon=True`, join detached, never blocks the event loop; (b) **atomic hard cap + `ensemble_metrics_cap_rejected_total`** — R-m3, observe-time rejection atomic under the metric's own lock (check-then-increment, no TOCTOU), rejected counts folded into F0.2; (c) **bounded publisher cadence** — R-m5, dirty-flag + re-publish at most once per N seconds (or publish-on-scrape-request with bounded staleness), writers never pay O(series) per increment. Gate reads "applied, or accepted deviation with rationale" — all three are applied (no deviation).
 - **Versioned vocabulary-amendment procedure (A24):** label NAMES + closed enums pinned to
   current code at P0; any vocabulary change bumps `ensemble_metrics_vocabulary_version`; a
   bump that changes a literal label VALUE appearing in shipped PromQL is a **breaking alert
@@ -200,7 +201,7 @@ Tasks:
 | 11 | Sweep cycle duration + rows with actual interval (MA-6) | P0-4 | `rate(ensemble_sweep_cycles_total{lane="rdrs_mission_reconciliation"}[5m]) * 300 > 2` basis — the cycle metric is a **gauge**, so no `_count` series exists (catalog F12 / §10.2) |
 | 12 | Lifecycle counters (spawn/revive/pause/fan-in) (m8) | P0-4 | revive-on-send_message captured (lost-wakes class) |
 | 13 | Minimal textfile writer (`ensemble_process_cpu_seconds`) — only the BashSpin data source (A25) | P0-1 | Textfile gauge present before P2 alert rules land; full exporter work stays in P2 |
-| 14 | Instrument the checkpoint **write** path at the existing charge seam (A6/A7) | P0-4 | Extend `checkpoint_adapter.py` `_charge_checkpoint_read` (`:371-374`) to `aput`/`aput_writes` (`:377-379`) — the seam already exists; the write path then reaches the family. Until it lands the declared `op` enum stays narrowed to `aget`; **after** it lands the `op` enum is **re-derived from observed call sites**, not inherited from the legacy HELP text (`checkpoint_metrics.py:281-290`). Risk row 4 carries the risk |
+| 14 | Instrument the checkpoint **write** path via a **DISTINCT write-side hook** (V-6 — do NOT reuse the read seam) | P0-4 | Add `_charge_checkpoint_write` (its own function, own budget/labels) firing once per successful outer call (same once-per-outer-call contract as `_charge_checkpoint_read`), called from `aput`/`aput_writes` (`checkpoint_adapter.py:377-379`); the read seam `_charge_checkpoint_read` (`:371-374`) is **not** extended to writes (routing write bytes through the read charge would bill them to the READ budget). **Early-return-on-None for writes (decided):** a `None` result on a write path is an **error, not a skip** — the hook does NOT early-return on `None`; instead it records the failure (e.g. via the existing slow-op/error ledger) so a missing write charge is visible. Until it lands, the declared `op` enum stays narrowed to `aget`. Risk row 3 carries the risk. |
 
 Exit criteria: checkpoint buckets extended top ≥120 s (CR-3); CheckpointSlow rebased on bucket-extended histogram + slow-op ledger; readiness labels preserve 11-class taxonomy (readiness.py:64–79; grace subset :83-89, components :94-99) with grace on /readyz (no re-probe); wake counters have **two named producers** per the Carrier-Threading rule (m1; A3 — claim path + episode seam) and a **live turn-end consumer** increments the counter while the renderer only reads the accumulated value (A4); sweep hot-loop alert via `rate(ensemble_sweep_cycles_total{lane="rdrs_mission_reconciliation"}[5m]) * 300 > 2` (MA-6 — the gauge form; no `_count` series exists); MCP server list DB-row-bounded.
 
@@ -234,6 +235,7 @@ Tasks:
 | 6 | MCP server state + failure counters (DB-row-bounded) | P0-4 | server list from DB rows, not config |
 | 7 | MCPS gateway sessions + audit | P0-4 | sessions/tombstones/audit counters |
 | 8 | Journal metrics via python twin daemon/tools/upgrade_journal.py (decision 2) | P0-1 | Never touches `scripts/upgrade/`; ties to releases/state.json (MA-14) |
+| 9 | Instrument MCPS gateway metrics (F18 — V-5 orphan sweep) | P0-4 | Emit `ensemble_mcps_gateway_sessions` (gauge), `ensemble_mcps_gateway_session_total{outcome}` (counter, outcome ∈ begin/end/expired/superseded/refused), `ensemble_mcps_gateway_tombstones` (gauge), `ensemble_mcps_gateway_audit_total{outcome}` (counter, outcome ∈ ok/error) from `MachineStore`/`sessions.py`/`tombstones.py`/`audit.py` (`daemon/services/mcps_gateway/`). Gateway disabled (`config.gateway_enabled`, default OFF) ⇒ no series. Owner: developer. |
 
 Exit criteria: LLM tokens reconcile with truncation-undercount caveat documented; compaction hooks fire on the 3 rungs; tool-call seam is message_tap.py; MCP server list DB-row-bounded; MCPS gateway sessions/audit render; journal metrics tied to releases/state.json (MA-14 — incident was entry-count O(n²), not bytes; example exposition corrected).
 
@@ -257,7 +259,7 @@ Metric families added (names only): `ensemble_process_cpu_seconds{name}` (full e
 Tasks:
 | # | Task | Depends On | Acceptance |
 |---|------|------------|------------|
-| 1 | Wire textfile collector into launcher/promote/stage (out-of-process, crash-safe) | P0-1 | *.prom files written; node_exporter textfile collector reads them |
+| 1 | Wire textfile collector into launcher/promote/stage (out-of-process, crash-safe) | P0-1 | *.prom files written; node_exporter textfile collector reads them. **V-8 (external sampler — bash scripts never write their own `*.prom`):** owner = node_exporter textfile-collector writer (devops); mechanism = per 10 s tick samples `ps -o %cpu=,comm=` (Darwin) / `/proc/<pid>/stat` (Linux) for `promote.sh`/`stage.sh`/`launcher` and rewrites `$INSTALL_DIR/data/metrics/ensemble_textfile.prom` with the per-tick delta gauge `ensemble_process_cpu_seconds{name}` + freshness gauge `ensemble_textfile_last_write_timestamp_seconds`; pinned 10 s cadence; spin→stale interaction per plan §8 V-8 (TextfileStale fires when no write for >120 s while a spin is in progress). |
 | 2 | Deploy node_exporter + postgres_exporter | P0-1 | Both scrape targets healthy |
 | 3 | Dashboards: Overview / DB+pools / Checkpoint+storage | P0-1 | All families graphed |
 | 4 | Deploy all alert rules with for: clauses | P0-4 | promtool check rules passes. **Dependency (A26):** alert authoring depends on the referenced families' completion (e.g. SweepHotLoop depends on the `lane` vocabulary pinned in P1a/b/c); dashboards may be drafted earlier. |
@@ -292,7 +294,7 @@ Risks (P2):
 | `limits.metrics_census_interval_s` | int | 15 | ge=15 | Yes | Dedicated PG census cadence. |
 | `limits.metrics_sampler_interval_s` | int | 10 | ge=1, le=60 | Yes | /proc sampler cadence. |
 | `limits.metrics_textfile_dir` | str | `$INSTALL_DIR/data/metrics` | — | Yes | Textfile collector dir. |
-| `limits.metrics_cardinality_cap` | int | 2000 | ge=100, le=10000 | No | **Hard** cap (A10): observe beyond the cap is rejected (not warned); paired with `ensemble_metrics_invalid_label_total{metric,label}` for folded values. |
+| `limits.metrics_cardinality_cap` | int | 2000 | ge=100, le=10000 | No | **Hard** cap (R-m3): observe beyond the cap is **rejected, not warned**; the observe-time rejection is **atomic under the metric's own lock** (check-then-increment inside the per-metric lock — no TOCTOU window); rejected observations counted in `ensemble_metrics_cap_rejected_total` (folded into F0.2). |
 
 All entries follow the registry's value_type + ge/le/gt validation truth (Ruling 1); managed keys require a registry entry + nothing else.
 
@@ -306,6 +308,7 @@ All entries follow the registry's value_type + ge/le/gt validation truth (Ruling
 |---|---|---|
 | `ENSEMBLE_METRICS_ENABLED=false` | All daemon-origin families | Textfile `*.prom` (out-of-process), node_exporter, postgres_exporter, external liveness |
 | Wedge-capture disabled (`ENSEMBLE_WEDGE_CAPTURE_ENABLED=false`) | `ensemble_wedge_capture_total`, lag-probe-derived `ensemble_loop_lag_seconds` (MA-4: lag probe is dark when wedge-capture off — export computed p50/p95 as gauges + document the dependency) | thread-CPU sampler (independent), resource_monitor spine |
+| **F3 wedge-capture counters on a non-Linux / macOS host (R-m10, catalog §13)** | **F3 `ensemble_wedge_capture_total` / `ensemble_wedge_capture_write_total`** are **cross-platform at the trigger level** (counters fire), but **wedge capture content is `/proc`-dependent** — on the macOS prod host the wedge sampler is `/proc`-only and WS-A does not touch `wedge_capture/`, so thread-level detail (F2) is dark and captures lack per-thread data (catalog §13.2: "capture *content* on macOS lacks thread-level detail (F2 side); the counters themselves fire"). Wedge capture is effectively **dark on macOS** for thread-attribution purposes; the counters still increment on trigger. | thread-CPU sampler independent; resource_monitor spine (post-WS-A) |
 | Resource spine dark — WS-A Darwin-producer fix (`feature/resource-monitor-flusher-fix@53547b915`) not merged | Spine-derived families: F0.3 gate fails (renders 0-producing, **P0-spine blocked**); `/api/resources/live`/`history` empty-ring shapes on prod. The failure mode is a **dead producer** (macOS: no `/proc` → sampler skips every tick → `flush bytes:0, errors:0`), NOT a flusher write failure — the earlier "flusher 42804" framing is refuted (catalog §11 C35) | All other families (the flusher was never the broken link); T3 `resource_pid_map` keeps climbing from the spawn path — this **masks** the outage rather than refuting it |
 | PG census connection unavailable | `ensemble_pg_*` | Everything else (census is isolated, non-pooled) |
 | Kill-switch flipped mid-scrape | Current scrape completes with whatever was cached; next scrape empty | Textfile/exporters unaffected |
@@ -326,8 +329,10 @@ depth:
 3. **Render-time allowlist predicate** — per-family label-name allowlist + per-label value
    membership (defence in depth; also the hook for this list).
 
-Plus: **hard** cardinality cap (`limits.metrics_cardinality_cap` — hard per §5: observe beyond the cap is
-rejected, not warned),
+Plus: **hard** cardinality cap (`limits.metrics_cardinality_cap` — hard per R-m3: observe beyond the cap is
+rejected, not warned; the rejection is **atomic under the metric's own lock**, check-then-increment
+inside the per-metric lock, no TOCTOU window; rejected counts in
+`ensemble_metrics_cap_rejected_total`, folded into F0.2),
 name regex `^ensemble_[a-z0-9_]+$`, label-value charset gate (no `=`, `,`, `"`, newline), and a
 poisoned-registry defence-in-depth test.
 
@@ -342,25 +347,195 @@ Explicit categories never exported (enforced at render time):
 
 ## 8. Alert table
 
-Every rule with valid PromQL, each mapped to the incident it replays. for: clauses stated explicitly.
+Every rule with valid PromQL, each mapped to the incident it replays. `for:` clauses stated
+explicitly. **Authoritative rule text lives in the fenced ```yaml blocks below** (one block per
+rule group, unescaped pipes); the table carries the incident mapping + baseline citations. No
+`\|` appears in any PromQL (R-m1).
 
-| Alert | Expr | for: | Incident replayed |
-|---|---|---|---|
-| ExternalLivenessDown (CR-1) | `up{job="ensemble"} == 0 or absent(up{job="ensemble"})` | 1m | Wedged daemon cannot export own /metrics (Oct-26/28 livez/readyz 25–30 s timeouts) |
-| ScrapeDurationHigh (CR-1) | `scrape_duration_seconds{job="ensemble"} > 5` | 2m | Slow scrape = event-loop starvation precursor |
-| PoolLeak | `ensemble_pg_idle_in_txn_oldest_seconds > 60` | 5m | Oct-26/28 leaked `idle in transaction` conns |
-| PoolExhausted (CR-4) | `increase(ensemble_db_pool_requests_errors_total{pool="checkpoint"}[5m]) > 0` | 0m | PoolTimeouts (rebased on requests_errors superset; no native timeout counter exists in psycopg 3.3.1; the manager pool has no requests_errors equivalent, so pool="manager" renders no series) |
-| LoopStarved (MA-4) | `ensemble_loop_lag_seconds{stat="p95"} > 2 and ensemble_loop_lag_samples > 150` | 5m | 116–134% CPU wedges (rolling-window quantile gauge — no `_bucket` series exists) |
-| CheckpointSlow (CR-3) | `histogram_quantile(0.95, rate(ensemble_checkpoint_op_seconds_bucket{op="aget"}[10m])) > 5 and increase(ensemble_checkpoint_op_seconds_count[10m]) > 0` | 10m | 73–99 s reads (rebased on bucket-extended histogram + slow-op ledger; old 10 s top bucket collapsed p95 to 10.0 and fired spuriously forever) |
-| CheckpointBloat | `ensemble_checkpoint_blobs_table_bytes > 8e9` | 30m | 14 GB table / TOAST 10× bloat |
-| JournalWalkRisk | `ensemble_journal_file_bytes > 200000 or ensemble_journal_history_entries > 1000` | 5m | O(n²) bash journal walk (99.9% spins) |
-| SweepHotLoop (MA-6) | `rate(ensemble_sweep_cycles_total{lane="rdrs_mission_reconciliation"}[5m]) * 300 > 2` | 5m | 8 s vs 300 s configured hot loop |
-| LostWake | `ensemble_waiting_children_max_age_seconds > 1800` | 5m | Parked lanes (lost wakes after restarts) |
-| BashSpin (MA-7) | `ensemble_process_cpu_seconds{name=~"promote_sh\|stage_sh\|launcher"} > 0.9` | 5m | 99.9% bash spins (direct comparison on the textfile per-tick gauge; spinning bash cannot self-report — external sampler owner = textfile collector writer) |
-| FalseDegraded (MA-5) | `rate(ensemble_readiness_probe_total{outcome="timeout"}[5m]) > 0.1 and ensemble_pg_backends{state="active"} < 3` | 5m | P2 deadline false-negative (pure PromQL; grace already on /readyz — do not re-probe) |
-| WedgeCaptureFired | `increase(ensemble_wedge_capture_total[5m]) > 0` | 0m | Sustained CPU / loop-lag / concentration wedge |
+**Multi-vector rules (V-1).** Every rule that combines two series uses explicit `and on()`
+label guards so vector matching actually works — the bare `and` required identical label sets
+and silently produced an empty vector (disjoint labels → never fires). Fixed:
+LoopStarved, FalseDegraded, CheckpointSlow (and any other multi-vector rule). Each rule ships a
+`promtool test rules` evaluation fixture in §10 AC8 (input series + eval time + expected
+fire/no-fire), including one fixture that reproduces the pre-fix empty-vector defect and one
+proving the fixed expression fires. Syntax-only `promtool check rules` is no longer sufficient.
 
-for-for clauses are mandatory on every rule; 0m rules are event-style (fire on first occurrence).
+**Alert count: 14 rules** (13 original + `TextfileStale`). Fixture count: 14 (one per rule,
+plus the V-1 defect/repro pair counted inside the per-rule fixtures).
+
+| Alert | Expr (see fenced blocks) | for: | Incident replayed | Baseline |
+|---|---|---|---|---|
+| ExternalLivenessDown (CR-1) | `up{job="ensemble"} == 0 or absent(up{job="ensemble"})` | 1m | Wedged daemon cannot export own /metrics (Oct-26/28 livez/readyz 25–30 s) | external liveness standard; no code constant — incident evidence (Oct-26/28) |
+| ScrapeDurationHigh (CR-1) | `scrape_duration_seconds{job="ensemble"} > 5` | 2m | Slow scrape = event-loop starvation precursor | incident evidence (Oct-26/28 livez 25–30 s timeouts) |
+| PoolLeak | `ensemble_pg_idle_in_txn_oldest_seconds > 60` | 5m | Oct-26/28 leaked `idle in transaction` conns | incident evidence (Oct-26/28 census) |
+| PoolExhausted (CR-4) | `increase(ensemble_db_pool_requests_errors_total{pool="checkpoint"}[5m]) > 0` | 0m | PoolTimeouts (rebased on requests_errors superset) | event-style (first occurrence); CR-4 |
+| LoopStarved (MA-4) | `ensemble_loop_lag_seconds{stat="p95"} > 2 and on() ensemble_loop_lag_samples > 150` | 5m | 116–134% CPU wedges | `>2` s lag: incident evidence (Oct-26/28); `>150` samples = half of the 300-sample rolling window (`lag_probe.py:59`) |
+| CheckpointSlow (CR-3) | `histogram_quantile(0.95, rate(ensemble_checkpoint_op_seconds_bucket{op="aget"}[10m])) > 5 and on() increase(ensemble_checkpoint_op_seconds_count{op="aget"}[10m]) > 0` | 10m | 73–99 s reads | `>5` ← `DEFAULT_SLOW_SAVER_CUT_MS = 5000` (`daemon/checkpoint_perf.py:60`) |
+| CheckpointBloat | `ensemble_checkpoint_blobs_table_bytes > 8e9` | 30m | 14 GB table / TOAST 10× bloat | `>8e9` bytes (8 GB) ← incident evidence (14 GB table, Oct-26/28 bench) |
+| JournalWalkRisk | `ensemble_journal_file_bytes > 200000 or ensemble_journal_history_entries > 1000` | 5m | O(n²) bash journal walk (99.9% spins) | `>200000` bytes / `>1000` entries ← incident evidence (state.json O(n²) walk) |
+| SweepHotLoop (MA-6) | `rate(ensemble_sweep_cycles_total{lane="rdrs_mission_reconciliation"}[5m]) * 300 > 2` | 5m | 8 s vs 300 s configured hot loop | `>2` cycles per 300 s window ← sweep interval registry 300 s (R15) + MA-6 |
+| LostWake | `ensemble_waiting_children_max_age_seconds > 1800` | 5m | Parked lanes (lost wakes after restarts) | `>1800` s (30 min) ← incident evidence (parked lanes, Oct-26/28) |
+| BashSpin (MA-7) | see fenced block + V-8 design | 5m | 99.9% bash spins | per-tick CPU fraction `>0.9` (one core) ← incident evidence (99.9% spins) |
+| FalseDegraded (MA-5) | `rate(ensemble_readiness_probe_total{outcome=~"probe_timeout\|read_timeout"}[5m]) > 0.1 and on() ensemble_pg_backends{state="active"} < 3` | 5m | P2 deadline false-negative | `>0.1` (probe rate) ← incident evidence (P2 5 s deadline vs 17 s reads); classes `probe_timeout` (orchestrator attributes the timeout) and `read_timeout` (checkpoint-saver read with lock free) are the two that replay the incident |
+| WedgeCaptureFired | `increase(ensemble_wedge_capture_total[5m]) > 0` | 0m | Sustained CPU / loop-lag / concentration wedge | event-style (first occurrence) |
+| TextfileStale (V-8) | `time() - ensemble_textfile_last_write_timestamp_seconds > 120` | 2m | Out-of-process textfile writer crashed / stalled while a bash script spins | `>120` s = 12× the 10 s sampler cadence (V-8) |
+
+`for:` clauses are mandatory on every rule; 0m rules are event-style (fire on first occurrence).
+
+### Authoritative rule text (fenced YAML — R-m1, unescaped pipes)
+
+```yaml
+# ExternalLivenessDown (CR-1)
+groups:
+- name: ensemble.external_liveness
+  rules:
+  - alert: ExternalLivenessDown
+    expr: up{job="ensemble"} == 0 or absent(up{job="ensemble"})
+    for: 1m
+```
+
+```yaml
+# ScrapeDurationHigh (CR-1)
+  - alert: ScrapeDurationHigh
+    expr: scrape_duration_seconds{job="ensemble"} > 5
+    for: 2m
+```
+
+```yaml
+# PoolLeak
+  - alert: PoolLeak
+    expr: ensemble_pg_idle_in_txn_oldest_seconds > 60
+    for: 5m
+```
+
+```yaml
+# PoolExhausted (CR-4)
+  - alert: PoolExhausted
+    expr: increase(ensemble_db_pool_requests_errors_total{pool="checkpoint"}[5m]) > 0
+    for: 0m
+```
+
+```yaml
+# LoopStarved (MA-4) — fixed multi-vector (V-1): and on()
+  - alert: LoopStarved
+    expr: ensemble_loop_lag_seconds{stat="p95"} > 2 and on() ensemble_loop_lag_samples > 150
+    for: 5m
+```
+
+```yaml
+# CheckpointSlow (CR-3) — fixed multi-vector (V-1): and on()
+  - alert: CheckpointSlow
+    expr: histogram_quantile(0.95, rate(ensemble_checkpoint_op_seconds_bucket{op="aget"}[10m])) > 5 and on() increase(ensemble_checkpoint_op_seconds_count{op="aget"}[10m]) > 0
+    for: 10m
+```
+
+```yaml
+# CheckpointBloat
+  - alert: CheckpointBloat
+    expr: ensemble_checkpoint_blobs_table_bytes > 8e9
+    for: 30m
+```
+
+```yaml
+# JournalWalkRisk
+  - alert: JournalWalkRisk
+    expr: ensemble_journal_file_bytes > 200000 or ensemble_journal_history_entries > 1000
+    for: 5m
+```
+
+```yaml
+# SweepHotLoop (MA-6)
+  - alert: SweepHotLoop
+    expr: rate(ensemble_sweep_cycles_total{lane="rdrs_mission_reconciliation"}[5m]) * 300 > 2
+    for: 5m
+```
+
+```yaml
+# LostWake
+  - alert: LostWake
+    expr: ensemble_waiting_children_max_age_seconds > 1800
+    for: 5m
+```
+
+```yaml
+# BashSpin (MA-7) — V-8: per-tick delta gauge OR rate() on cumulative counter; pipes unescaped
+  - alert: BashSpin
+    expr: ensemble_process_cpu_seconds{name=~"promote_sh|stage_sh|launcher"} > 0.9
+    for: 5m
+```
+
+```yaml
+# FalseDegraded (MA-5) — V-1 fixed multi-vector (and on()); V-2 taxonomy (probe_timeout | read_timeout)
+  - alert: FalseDegraded
+    expr: rate(ensemble_readiness_probe_total{outcome=~"probe_timeout|read_timeout"}[5m]) > 0.1 and on() ensemble_pg_backends{state="active"} < 3
+    for: 5m
+```
+
+```yaml
+# WedgeCaptureFired
+  - alert: WedgeCaptureFired
+    expr: increase(ensemble_wedge_capture_total[5m]) > 0
+    for: 0m
+```
+
+```yaml
+# TextfileStale (V-8)
+  - alert: TextfileStale
+    expr: time() - ensemble_textfile_last_write_timestamp_seconds > 120
+    for: 2m
+```
+
+### V-8 — BashSpin external sampler design (stand-alone)
+
+A spinning bash script cannot write its own `*.prom`. The textfile is produced by an **external
+sampler**:
+
+- **Owner:** the node_exporter textfile-collector writer (a small out-of-process sampler shipped
+  alongside the daemon; devops-owned). It runs on a **pinned 10 s interval** (the per-tick delta
+  assumes 10 s — `limits.metrics_sampler_interval_s` default 10 s is the advisory cadence; the
+  textfile writer uses its own fixed 10 s tick and the alert math assumes that).
+- **Mechanism:** each tick the sampler runs `ps -o %cpu=,comm=` (Darwin) / `/proc/<pid>/stat`
+  (Linux) for the named processes (`promote.sh`, `stage.sh`, `launcher`) and writes the
+  textfile `$INSTALL_DIR/data/metrics/ensemble_textfile.prom` with
+  `ensemble_process_cpu_seconds{name="..."} <per-tick CPU seconds>` (a **per-tick delta gauge**)
+  plus `ensemble_textfile_last_write_timestamp_seconds <unix_ts>` (the freshness gauge used by
+  `TextfileStale`).
+- **Spin → stale interaction:** if the named script spins, it may block the sampler's `ps`
+  (unlikely — `ps` is separate) or, more realistically, the writer process itself can be killed
+  / wedged. When the textfile goes **stale** (no write for >120 s) while a spin is in progress,
+  `TextfileStale` fires (2 m `for:`) and the operator is alerted that the BashSpin signal is
+  no longer trustworthy. The two alerts are complementary: `BashSpin` fires on high CPU;
+  `TextfileStale` fires on missing freshness.
+- **Expression fix:** the per-tick delta gauge is compared directly (`> 0.9` = >90% of one core
+  in the last tick). If a future sampler instead emits a **cumulative counter**
+  `ensemble_process_cpu_seconds_total{name}`, the rule becomes
+  `rate(ensemble_process_cpu_seconds_total{name=~"promote_sh|stage_sh|launcher"}[1m]) > 0.9`.
+  The sampler's output type (gauge delta vs cumulative counter) is pinned in the sampler's own
+  contract and the alert is written to match.
+- **No `\|` escapes** anywhere in the PromQL (R-m1).
+
+### V-2 — FalseDegraded taxonomy note
+
+`outcome="timeout"` (the v1 value) **does not exist** in the 11-class taxonomy
+(`daemon/services/readiness.py:64-79`: `probe_timeout`, `read_timeout`, `pool_busy`,
+`queue_stale`, `boot_incomplete`, `identity_mismatch`, `hard_component_red`, `not_serving`,
+`pool_leak`, `unknown`, `ok`). The two classes that replay the P2 deadline false-negative are
+`probe_timeout` (the orchestrator attributes a timeout to the probe — the primary replay) and
+`read_timeout` (the checkpoint-saver read that timed out with the saver lock free). Both are
+grace-eligible (`:83-89`). The catalog readiness outcome vocabulary (§8.3 / F9) matches the
+taxonomy exactly (cross-checked).
+
+### V-7 — Baseline column (per-rule citation)
+
+Every threshold above cites its source (code constant or incident/bench evidence with file +
+date); no threshold is left uncited. Verified anchors: CheckpointSlow `>5` ←
+`DEFAULT_SLOW_SAVER_CUT_MS = 5000` (`daemon/checkpoint_perf.py:60`); LoopStarved `>2` ←
+incident evidence + `lag_probe.py:59` (300-sample window, 150 = half); PoolLeak `>60` ←
+incident evidence (Oct-26/28); CheckpointBloat `>8e9` ← incident evidence (14 GB table);
+JournalWalkRisk `>200000`/`>1000` ← incident evidence (state.json O(n²) walk); SweepHotLoop
+`>2` ← sweep interval registry 300 s (R15) + MA-6; LostWake `>1800` ← incident evidence;
+BashSpin `>0.9` ← incident evidence (99.9% spins); ScrapeDurationHigh `>5` ← incident
+evidence; TextfileStale `>120` ← V-8 (10 s cadence × 12).
 
 ## 9. Reuse map (never rebuild what these cover)
 
@@ -385,17 +560,50 @@ for-for clauses are mandatory on every rule; 0m rules are event-style (fire on f
 
 ## 10. Acceptance criteria
 
-Testable (MA-9/MA-10):
-1. Incident replay: for each row in §1, the corresponding alert fires within 5 min using only these metrics, verified against Oct-26/28 timelines (fault-injection fixtures per alert — MA-9).
-2. Self-cost: daemon CPU delta ≤1% measured via `/api/resources/self-cost` under a 15 s scrape (MA-9).
-3. Cardinality census: daemon-origin ≤2 k series; stock exporters (node_exporter, postgres_exporter) measured separately and not counted against the daemon budget (MA-10).
-4. Scrape cost: `/metrics` returns in <50 ms on a healthy daemon; empty-shape 200 in <1 ms when dark (MA-15).
-5. No pool pressure: census on dedicated non-pooled connection; no new pool slots consumed by scraping.
-6. No loop-lag regression: p95 loop lag unchanged under scrape load (≤ baseline +10%).
-7. Incident-replay within 5 min per incident row (§1 table).
-8. All alert rules pass `promtool check rules`; for: clauses present on every rule.
-9. Bucket extension verified: a 73–99 s checkpoint read produces a finite bucket (not +Inf) and CheckpointSlow fires only when p95 > 5 s sustained (CR-3).
-10. PoolExhausted verified against `requests_errors` superset with documented caveat (CR-4).
+Testable (MA-9/MA-10). Each AC that depends on a dark-able surface carries an explicit
+precondition row (V-9).
+
+| # | Acceptance criterion | Precondition (dark-able surface) |
+|---|---|---|
+| AC1 | Incident replay: for each row in §1, the corresponding alert fires within 5 min using only these metrics, verified against Oct-26/28 timelines (fault-injection fixtures per alert — MA-9). | None (pure PromQL over fixture series) |
+| AC2 | Self-cost: daemon CPU delta ≤1% measured via `/api/resources/self-cost` under a 15 s scrape (MA-9). | **WS-A merge precondition (V-9):** `/api/resources/self-cost` is DARK on macOS until `feature/resource-monitor-flusher-fix@53547b915` merges to latest (the spine producer was dead on Darwin — no `/proc`). Gate AC2 sign-off on the WS-A merge; the Linux-host alternative is to run AC2 on a Linux host where the producer is live; the macOS fallback is to measure self-cost via the listener thread's own CPU (listener-thread CPU delta) until WS-A merges. Do NOT sign off AC2 on macOS pre-merge. |
+| AC3 | Cardinality census: daemon-origin ≤2 k series; stock exporters (node_exporter, postgres_exporter) measured separately and not counted against the daemon budget (MA-10). | None |
+| AC4 | Scrape cost: `/metrics` returns in <50 ms on a healthy daemon; empty-shape 200 in <1 ms when dark (MA-15). | None (listener is pure stdlib socket, no `/proc` dependency) |
+| AC5 | No pool pressure: census on dedicated non-pooled connection; no new pool slots consumed by scraping. | None |
+| AC6 | No loop-lag regression: p95 loop lag unchanged under scrape load (≤ baseline +10%). | **Wedge-capture enablement precondition (V-9):** lag-probe-derived `ensemble_loop_lag_seconds` is dark when `ENSEMBLE_WEDGE_CAPTURE_ENABLED=false` (MA-4). Gate AC6 on `ENSEMBLE_WEDGE_CAPTURE_ENABLED=true` (or measure against the thread-CPU sampler, which is independent). |
+| AC7 | Incident-replay within 5 min per incident row (§1 table). | Same as AC1; plus AC2/AC6 preconditions where the replay depends on a dark surface |
+| AC8 | **All alert rules pass `promtool test rules` evaluation fixtures** (not just `promtool check rules` syntax). For each of the 14 rules: input series (concrete samples with labels/values), eval time, and EXPECTED result (fires / does not fire). Includes (a) one fixture reproducing the pre-fix V-1 defect (disjoint-label `and` → empty vector → no-fire) and (b) one fixture proving the fixed expression (with `and on()`) fires. Fixtures rendered as fenced ```yaml blocks (promtool unit-test format). `promtool check rules` alone is no longer sufficient. | None (fixtures are synthetic) |
+| AC9 | Bucket extension verified: a 73–99 s checkpoint read produces a finite bucket (not +Inf) and CheckpointSlow fires only when p95 > 5 s sustained (CR-3). | None |
+| AC10 | PoolExhausted verified against `requests_errors` superset with documented caveat (CR-4). | None |
+| AC11 | Textfile freshness: `TextfileStale` does not fire when the sampler writes within 10 s; fires within 2 m when the writer stops. | WS-A / host-exporter deployment (node_exporter textfile collector) |
+| AC12 | Vocabulary freeze (P-1): the P0 freeze does not freeze tool-categories from a hand list — it freezes from the V-4 generated artifact or defers the freeze with the `other`-fold as closure. | V-4 artifact generator landed (CI test) |
+
+### promtool evaluation fixture format (AC8, one per rule)
+
+Render each fixture as a fenced ```yaml block in promtool unit-test format. Example (LoopStarved, showing the V-1 defect + fix pair):
+
+```yaml
+# promtool test rules — LoopStarved
+rule_files:
+  - alerts.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'ensemble_loop_lag_seconds{stat="p95"}'
+        values: '0 0 0 3 3 3'          # lag spikes to 3s at t=4
+      - series: 'ensemble_loop_lag_samples'
+        values: '200 200 200 200 200 200'   # disjoint label set (no stat label)
+    alertname: LoopStarved
+    # (a) pre-fix expression used bare `and` -> empty vector -> never fires
+    # (b) fixed expression uses `and on()` -> fires
+    expected:
+      alertname: LoopStarved
+      result: fires
+```
+
+(One such block per rule; the V-1 defect/repro pair is included inside the LoopStarved fixture
+and mirrored for FalseDegraded and CheckpointSlow.)
 
 ## 11. Non-goals
 
@@ -408,4 +616,4 @@ Distributed tracing / APM; per-request HTTP histograms; log aggregation pipeline
 - OQ-3: Version label policy — include `version` label on every series or only on `ensemble_upgrade_release_current`? (MA-12 — recommend only on the release gauge to avoid churn; decide in P0.)
 - OQ-4 (**RESOLVED 2026-10-29**): **no new event-kind vocabulary is required** — per-event counting is already covered by `ensemble_turn_events_total{source}` (catalog F20 — the 5 `SOURCE_*` tap constants) + `ensemble_instance_lifecycle_total{event}` (catalog F13 — the 7 lifecycle events). The events-subsystem owner confirms those two vocabularies at the P1c review; no greenfield family is added. See decisions.md §H H-11.
 
-(All other review items are resolved by the ratified decisions and the phase exit criteria above.)
+**Status of open questions (R-m7).** OQ-1, OQ-2, and OQ-3 **remain open** and are decided in P0 (see above) — they are not resolved by this round. OQ-4 is **RESOLVED** (2026-10-29, see decisions.md §H H-11). All other review items are resolved by the ratified decisions and the phase exit criteria above.

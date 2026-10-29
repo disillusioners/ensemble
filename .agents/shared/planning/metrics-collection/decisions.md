@@ -1,9 +1,10 @@
 # Decisions: v2 Metrics Collection — reviewer-facing finding → resolution map
-### (v2 council round §A–§H + **v3 architecture round §I–§M** + **correction round §N–§O**)
+### (v2 council round §A–§H + **v3 architecture round §I–§M** + **correction round §N–§O** + **final consolidation round §P**)
 
 Date: 2026-10-29 · Author: plan-decisions worker (fallback channel, no skill)
 v3 round: plan-decisions worker (WS-B wave 3) · 2026-10-29
 Correction round (WS-B wave 3 FINAL): plan-decisions worker · 2026-10-29 · §N (Item A — macOS/WS-A) + §O (Item B — partition unification)
+Final consolidation round (WS-B wave 3 FINAL): plan-decisions worker · 2026-10-29 · §P (V-1..V-9 + R-m1..R-m10 + P-1/P-3; R-m6 sync check; final verification sweep)
 Status: **Ready for review** — this document is the reviewer's entry point.
 Companions: `plan-overview.md` (411 lines), `metric-catalog.md` (1339 lines) and
 `architecture-recommendation.md` (697 lines) in this directory. Every row below points
@@ -70,14 +71,14 @@ companions, counts, waiver additions, the v3 edit ledger and the consistency-swe
 |---|---|---|---|---|
 | **MA-1** | No kill-switch; the managed-key-only gate is restart-gated (`daemon/services/settings_service.py:190`). | `ENSEMBLE_METRICS_ENABLED` is read **per request** (no restart), default **OFF**. It is *layered under* the managed-keys registry as `limits.metrics_enabled` so the DB/env/yaml override chain can also flip it, but the per-request env read is the authoritative emergency off-switch. OFF ⇒ empty-shape 200, samplers stop ticking, **no history lost** (the registry keeps accumulating). | `plan-overview.md` §5 (kill-switch + 7 managed keys) + §4 P0 T3 + P0 exit criteria + §6 dark-families table; `metric-catalog.md` §0.8 + F0.1 (degradation) + F0.2 | **resolved** |
 | **MA-2** | `thread_cpu_seconds` would **rebuild** the existing `/proc` sampler (`wedge_capture/sampler.py`). | **Reuse, post-process only.** `daemon/services/wedge_capture/sampler.py` stays the ONE `/proc` walker (per-thread jiffies `:160`, process jiffies `:175`, `comm` `:151`, thread-name map `:192`); bucketing into **11 fixed thread groups** happens downstream. One-`/proc`-dialect rule is explicit. | `plan-overview.md` §4 P1a T2 + §9 R4; `metric-catalog.md` F2 + §8.2 (thread group, 11 values) | **resolved** |
-| **MA-3** | `/api/resources` + the `resource_monitor` spine (9 files, tiered retention) were unmentioned; the per-instance tier is broken (`flusher.py:770` binds a Python `bool` into an `INTEGER` column → PG SQLSTATE 42804, rolling back all 4 tables); "4 tables accepting rows" was not an exit criterion. | `/metrics` is a **VIEW over the same services**, never a parallel collector. A dedicated **spine health gate** (F0.3) makes "all four tables accepting rows" a **P0 exit criterion**; the runtime fix is `daemon/manager.py:7341` `_ensure_postgres_columns` (the PG migration runner is a NO-OP). Per-instance attribution stays in the PG tier (cardinality). WS-A slippage is tracked as P0 risk 1 with the `ensemble_resource_*` families gated on it. | `plan-overview.md` §3 "Prometheus-vs-resource_monitor split (decision 4)" + §4 P0 T8 + P0 exit criteria + P0 risk 1 + §6 dark-families row + §2 cardinality; `metric-catalog.md` §0.6 (idiom B) + F0.3 (P0 exit criterion, `flusher.py:770`) + §11 C22 | **resolved** |
+| **MA-3** | `/api/resources` + the `resource_monitor` spine (9 files, tiered retention) were unmentioned; the per-instance tier was (wrongly) believed broken (`flusher.py:770` binds a Python `bool` into an `INTEGER` column → PG SQLSTATE 42804, rolling back all 4 tables) — **REFUTED** 2026-10-29 (catalog §11 C35): the `estimated` column is `boolean NOT NULL`, the bind is correct, the amplifier was already fixed (`7be1b40bf` + `69cea24ea`); the real cause was a **dead producer on macOS** (no `/proc` → sampler skipped every tick → `flush bytes:0, errors:0`, `resource_pid_map` climbing from the spawn path masking the outage). "4 tables accepting rows" was not an exit criterion. | `/metrics` is a **VIEW over the same services**, never a parallel collector. A dedicated **spine health gate** (F0.3) makes "all four tables accepting rows" a **P0 exit criterion**; the producer precondition is the WS-A Darwin fix `feature/resource-monitor-flusher-fix@53547b915` merging to latest before P0 executes (A3 — the gate **BLOCKS** if not merged, never silently passes). The earlier "runtime fix `daemon/manager.py:7341`" locus is **refuted** and survives only inside the refuted-hypothesis narrative (catalog §11 C35). Per-instance attribution stays in the PG tier (cardinality). | `plan-overview.md` §3 "Prometheus-vs-resource_monitor split (decision 4)" + §4 P0 T8 + P0 exit criteria + P0 risk 1 + §6 dark-families row + §2 cardinality; `metric-catalog.md` §0.6 (idiom B) + F0.3 (P0 exit criterion) + §11 C22 (annotated SUPERSEDED) + C35 | **resolved** (refuted locus corrected — R-m6) |
 | **MA-4** | The lag-probe is a **300-sample rolling window with a computed p95**, not a Prometheus histogram, and it is **dark** when `ENSEMBLE_WEDGE_CAPTURE_ENABLED` is off. | Export the **computed quantiles as gauges** (`stat` ∈ p50/p95/max) — not a histogram; v1's `histogram_quantile(..._bucket)` expression is invalid (no `_bucket` series exists). The dark dependency is documented on the HELP text, and the alert is paired with a sample-count guard so it cannot fire on a half-full window. | `plan-overview.md` §4 P1a T1 + §6 dark-families row + §12 OQ-1 + §8 `LoopStarved` (expr corrected, see §H); `metric-catalog.md` F1 (window `:59`, p95 `:115`, p50 `:116`, max `:114`) + §10.2 + §11 C5 | **resolved** |
 | **MA-5** | Readiness labels collapsed the normative **11-class** taxonomy; grace is **already** on `/readyz`, so re-probing would duplicate work. | The 11-class taxonomy is preserved verbatim (`daemon/services/readiness.py:64-79`; grace subset `:83-89`; components `:94-99`). The family **reads the published `/readyz` composite** and never re-probes; the grace-eligible subset is published on the HELP text, not as a label. FalseDegraded is expressed in **pure PromQL**. | `plan-overview.md` §4 P1b T5 + P1b exit criteria + §8 `FalseDegraded`; `metric-catalog.md` F9 + §8.3 (11 + 4 + 4 values) + §10.2 + §11 C6 | **resolved** |
 | **MA-6** | `SweepHotLoop` referenced an undefined `ensemble_sweep_cycles_total`; the proposed `rate(..._cycle_seconds_count[5m])` is invalid because the cycle metric is a **gauge**. | The counter `ensemble_sweep_cycles_total{lane}` ships and the alert is stated as `rate(ensemble_sweep_cycles_total{lane="rdrs_mission_reconciliation"}[5m]) * 300 > 2`. The `lane` label is **13 values** (7 RDRS lanes + 6 standalone sweep services) and each lane's **configured interval is published on the HELP text**, so actual-vs-configured needs no second metric. Per-tick `orphan_released` is accumulated into a cumulative counter (doc drift at `daemon/services/job_queue_service.py:828-837`). | `plan-overview.md` §4 P1c T7 + P1c exit criteria + §8 `SweepHotLoop` (expr corrected, see §H); `metric-catalog.md` F12 + §8.4 (lane 13 / outcome 6) + §10.2 + §11 C14/C17 | **resolved** |
 | **MA-7** | `BashSpin` compared a **cumulative-CPU gauge** to 0.9 ⇒ fires forever; and a spinning bash process **cannot self-report** from inside the daemon. | The textfile gauge is compared **directly** (`ensemble_process_cpu_seconds{name=~"promote_sh\|stage_sh\|launcher"} > 0.9`) — no `rate()` over a per-tick delta gauge. The measurement owner is the **external** writer: the shell scripts rewrite `*.prom` in `$INSTALL_DIR/data/metrics/`, and node_exporter's textfile collector reads them. The value is a per-tick delta, so "always > 0.9" now means "a real spin". | `plan-overview.md` §3 "Textfile collector (R18)" + §4 P2 T1 + §8 `BashSpin` (expr corrected, see §H); `metric-catalog.md` F22 (gauge semantics + `name` vocabulary) + §10.2 | **resolved** |
 | **MA-8** | LLM tokens/cost were absent, and an `ok`/`failover`/`error` split **collapses the 4-layer retry model**. | `ensemble_llm_tokens_total{direction}` (input/output) with the truncation/undercount caveat made **visible** by `ensemble_llm_token_usage_missing_total`; `ensemble_llm_request_total{outcome}` carries the **real 8-value outcome enum** derived from the 4-layer ladder (L1 tenacity per-category retry → L2 failover to backup → L3 reset to primary → L4 attempt ceiling), with the layer mapping tabulated; stall counts are taken at the **watchdog abort site** (`daemon/services/llm_stream_watchdog.py:456`). The latency histogram deliberately carries **no** outcome label (splitting it would cost 8 × 14 = 112 series). | `plan-overview.md` §4 P1a T4 + P1a risk 1 + §4 P1b family list; `metric-catalog.md` F14 + F15 + F16 + §8.12 (ladder table) + §8.10 + §11 C8/C11 | **resolved** |
 | **MA-9** | AC1/AC3 were **untestable** ("fires within 5 min" / "<1% CPU"). | AC1 is decomposed into **fault-injection fixtures per alert, per phase**, plus a per-incident-row replay acceptance; AC2 is a **measurable method** — daemon CPU delta ≤1 % measured via `/api/resources/self-cost` under a 15 s scrape; AC7 repeats the replay as an independent criterion. | `plan-overview.md` §10 AC1/AC2/AC7 + §4 P1a/P1b/P1c/P2 "Test plan" lines + §5 `limits.metrics_scrape_interval_hint_s`; `metric-catalog.md` §0.10 (owner roles: developer / devops / reviewer / tester) + each family's Owner field | **resolved** |
-| **MA-10** | The ≤2k series cap **holds for daemon-origin** but stock exporters breach 2k on their own. | The budget is restated as **daemon-origin ≤ 2 k** (actual **521**, 26 % consumed) with **stock exporters measured separately** (≈67) and explicitly excluded from the daemon budget. The roll-up table is the proof, and an AC asserts the split. | `plan-overview.md` §2 "Cardinality budget (MA-10)" + §10 AC3 + §4 P1a exit criteria (cardinality census) + §7 never-exported; `metric-catalog.md` §1 (521 / 526 / ≈593) + §7 (the ≤2k proof) + F22 (exporter-origin counted separately) | **resolved** |
+| **MA-10** | The ≤2k series cap **holds for daemon-origin** but stock exporters breach 2k on their own. | The budget is restated as **daemon-origin ≤ 2 k**; the v2 basis was 521 (26 %) and the final reconciliation (after V-3/V-4/R-m3/R-m8) is **538 daemon-origin** (P0 27 + P1a 63 + P1b 220 + P1c 228 = 538; ≈27 % consumed, headroom **1 462**), with **stock exporters measured separately** (≈67) and explicitly excluded from the daemon budget. The roll-up table is the proof, and an AC asserts the split. | `plan-overview.md` §2 "Cardinality budget (MA-10)" + §10 AC3 + §4 P1a exit criteria (cardinality census) + §7 never-exported; `metric-catalog.md` §1 (538 / 543 / ≈610) + §7 (the ≤2k proof) + F22 (exporter-origin counted separately) | **resolved** (521 → 538 reconciliation — R-m6) |
 | **MA-11** | "P1 in 2–4 days" was **not credible** — one phase for every subsystem. | P1 is **split into P1a / P1b / P1c**, each with its own owner role, dependency map, per-task acceptance, exit criteria, risk table and test plan. The order is **forced by the dependency graph** (registry → pools/census → checkpoint/jobs/sweeps/instances → LLM/MCP/compaction/journal → exporters), not by calendar. | `plan-overview.md` §4 (coupling map + P1a + P1b + P1c) + §5; `metric-catalog.md` §2.1 (why the partition is forced) + §3/§4/§5 (per-phase family sections) | **resolved** |
 | **MA-12** | Ellipses violated the fixed-vocabulary rule (instance status 10 values, sweep lanes, MCP roster, version-label churn). | Every label set is **written out in full** in one place — the vocabulary annex (§8.1–§8.10) — each with the `file:line` it was verified against; family entries reference the annex by number. A **vocabulary freeze marker** (`ensemble_metrics_vocabulary_version`) pins the revision. The version label lives only on the release gauge (OQ-3). | `plan-overview.md` §4 P0 T6 + P0 exit criteria + §7 + §12 OQ-3; `metric-catalog.md` §0.5 + §8.1–§8.10 + F0.4 + §11 C13/C14 + §12 open item 5 | **resolved** |
 | **MA-13** | Leaked-txn **site attribution was asserted, not derived**, and daemon connections carry an **empty `application_name`**. | A **closed fragment→site map** (6 values incl. the `other` residual, so the sum always ties to `ensemble_pg_backends{state="idle_in_transaction"}`) plus the `db_capture.py` discipline: dedicated **non-pooled** connection, `application_name='ensemble-metrics-census'`, `statement_timeout`, `connect_timeout`, self-exclusion of the census's own connection, ≥15 s cadence, never-raises. Read-only: it never touches `pg_stat_activity` and never terminates a backend. | `plan-overview.md` §1 "Leak story (P1 pool poisoned)" + §4 P0 T7 + P1b T2 + P1b risk 1; `metric-catalog.md` F6 + §9.1 + §9.2 + §9.3 + §9.4 | **resolved** |
@@ -172,6 +173,7 @@ Every entry below is traceable to `plan-overview.md` or `metric-catalog.md`; not
 | **G-20** | ~~**The plan's §4 phase lists and the catalog's §1/§7 ship phases use two different partitions** (pre-existing v2, not wave-induced).~~ — **RESOLVED by §O (Item B, wave 2)**: the partition is now unified (one canonical partition, F0.1–F22 → phase 1:1, zero exceptions; catalog §7 states the convention; plan §4 family lists align). See §O. | `plan-overview.md` §4 (four work-package phase sections) vs `metric-catalog.md` §1 (the Phase column) + §7 (the per-phase roll-up) — **unified** per §O; the historical divergence is recorded in §O's census (15 split + 4 catalog-only = 19 discrepancies) and the "36 families" v3-audit figure is corrected (not reproducible at family granularity) | **RESOLVED (§O).** The catalog's §1/§7 phase column is authoritative for the ≤2k roll-up and for "which phase must complete before a family ships"; the plan's §4 headings are work-package labels (the subsystem whose instrumentation lands there). The intra-family phased-rollout convention (task-level early-ship note, family phase = completion phase) is stated in catalog §7. F22's minimal textfile writer ships in P1b per A25 (task-level carve-out). All 42 plan task rows resolve to their own phase (§O). |
 | **G-21** | **T3 per-child RSS/CPU attribution on macOS is a decided non-goal (A2)** — per-child families/values are dark on Darwin; no partial per-child data ships on macOS; a future per-pid Darwin story is a new, separately-scoped decision. | `plan-overview.md` §11 (Non-goals, A2 non-goal) + §2 (deploy target, macOS) + §6 (dark-families matrix, non-Linux host row); `metric-catalog.md` §13.4 (non-goal — decided, implement as decided) + §13.1 (per-child T3 row) + §13.2 (F2/F3 notes) | **Ratified by the planner under mission authority "make it an explicit decision"** (available for leader override). Rationale: the Darwin ps-based reader (`feature/resource-monitor-flusher-fix@53547b915`) is a coarse **daemon/process-level** view (`_read_darwin_daemon_snapshot`), not a per-pid sampler; `read_child_snapshot` has **no** Darwin fallback; per-pid sampling has no Darwin path even post-merge. Promising per-child on macOS would ship a silently-empty series (the J-class defect). |
 | **G-22** | **Platform-field nuances (WS-A correction):** (a) `hw_peak_kb` IS supplied on Darwin post-merge via `ru_maxrss` (cross-platform, not Linux-only — the "Linux-only" label sometimes attached to hw-peak is wrong for the post-merge reader); (b) `anon_kb` degrades to the `rss_kb` proxy on Darwin (not `None`), making `coverage_pct` rss-denominated and not comparable to Linux anon-based coverage; (c) `swap_kb` is **unwired on every platform today** (column exists, no reader populates it — NULL on both). | `metric-catalog.md` §13.1 (field-level split table: hw_peak_kb, anon_kb, swap_kb rows) + §13.2 (F0.3 notes) + §13.3 (coverage_pct semantics); `plan-overview.md` §3 (platform support summary) + §6 (non-Linux host row) | These are **documented degradations, not defects** — the consumer-visible shape changes are pinned (§13.3) so a Darwin host never silently renders a Linux-shaped payload. `pid_map` census-moment figures differ (46,448 vs the commit's 45,575) — same climbing counter, different observation moment; no action. |
+| **G-23** | **F14 streaming-only gap (R-m4)** — LLM token hook sits in `_convert_delta_to_message_chunk` (streaming path only); non-streaming invoke sites (`graph.py:9176-9179`, `:9236`, `:9643`, `:9672`) are not captured ⇒ under-count risk | `metric-catalog.md` F14 (R-m4 paragraph) + C42 (L1320) | **Noted, not fixed** (accepted limitation or close by adding observations). Series estimate unchanged (3); coverage note only. |
 | **G-16** | **`plan-overview.md` §1 incident table names three metrics the catalog does not ship** (`ensemble_db_pool_connections{pool,state}`, `ensemble_db_pool_checkout_seconds{pool}`, `ensemble_pg_leaked_txn_rows{site}`). | `plan-overview.md` §1 (not edited — §1 is outside this task's permitted edit scope). | The catalog's equivalents are `ensemble_db_pool_native{pool,quantity}` + F5's two gauges, and `ensemble_pg_leaked_txn{site}`; **no** checkout-latency family ships in v2 (the checkout seam is deferred — CR-4). Carried as open item **H-3** with the corrected names. |
 
 ---
@@ -191,7 +193,7 @@ Every entry below is traceable to `plan-overview.md` or `metric-catalog.md`; not
 | MINOR fixed / split / waived | 8 / 1 / 1 | 8 / 1 / 1 | ✅ |
 | Leader-ratified decisions (§E) | 5 | 5 | ✅ |
 | Reuse ledger rows (§F) | 18 (R1 … R18), **none "rebuilt instead"** | 18 | ✅ |
-| Waiver / limitation register entries (§G) | 22 (G-1 … G-16 + v3's G-17 … G-20, of which G-20 **closed** by §O; + correction round's G-21, G-22) | 22 | ✅ |
+| Waiver / limitation register entries (§G) | 23 (G-1 … G-16 + v3's G-17 … G-20 [G-20 closed by §O] + correction round's G-21, G-22 + consolidation's G-23) | 23 | ✅ |
 | Catalog §12 open items carried | 6 of 6 (→ G-2, G-3, G-4, G-5, G-6, G-7) | 6 of 6 | ✅ |
 | Plan §12 open questions carried | 4 of 4 (→ G-8) | 4 of 4 | ✅ |
 | Cross-file alignment edits — pass 1 | 21 (E1–E21) on 4 §4 family-list lines + 5 §8 alert rows | 21 | ✅ |
@@ -205,7 +207,7 @@ Every entry below is traceable to `plan-overview.md` or `metric-catalog.md`; not
 | Open items H-1…H-11 | 11, all **CLOSED** (closure table below) | 11 closed | ✅ |
 | **v3 — open items** | 1 (**H-12**, phase-partition divergence) — **RESOLVED by §O (Item B)**: partition unified, 1:1, zero exceptions | 1 | ✅ |
 | **Correction round (§N/§O)** | Item A platform/WS-A correction (A1–A5) + Item B partition unification (B) | 2 items | ✅ |
-| **Correction-round verification** | 7 checks (alert table 15/15 incl. 2 histogram suffixes; plan §4 family lists 69/69; task rows 42/42; family→phase 1:1 zero exceptions; series 533 reconcile; 5 decisions + 28 amendments + WS-A BLOCKS + C22→C35 + platform §13; all citations verified) | 7/7 | ✅ |
+| **Final consolidation verification** | 7 checks (alert table 14/14 rules + 14 baseline citations + 0 backslash-pipes in fences; AC8 14 fixtures; orphan count 0; vocab closures wake-5/F3-4/tool-cat artifact; series 538 reconcile; invariants 5/28/WS-A BLOCKS/§13/P-3; R-m6 found & fixed) | 7/7 | ✅ |
 
 Every finding id from the council review appears exactly once: 5 CRITICAL, 16 MAJOR, 10 MINOR
 (5+16+10 = 31). No finding is silently merged into another row.
@@ -511,7 +513,7 @@ stands.
 |---|---|---|---|
 | `plan-overview.md` | **411** | the phase plan (P0/P1a/P1b/P1c/P2), the alert table, the managed keys, the degradation contract | **yes** |
 | `metric-catalog.md` | **1339** | the per-family spec + the 8 vocabulary annexes + the census annex + the corrections log + §13 platform matrix | **yes** |
-| `decisions.md` | **898** | the reviewer-facing map (v2 §A–§H, v3 §I–§M, correction round §N–§O) | **yes** |
+| `decisions.md` | **1002** | the reviewer-facing map (v2 §A–§H, v3 §I–§M, correction round §N–§O, final consolidation §P) | **yes** |
 | `architecture-recommendation.md` | **697** | the architect's review — the **input** to v3 (§0 verdict, §10 the 28 amendments, §11 Q1/Q2, Appendix A the verification log). **Read-only for v3** — committed separately at `c0f06943` and **unmodified** | **no** — must not appear in the v3 commit |
 
 ### M.2 Counts
@@ -529,7 +531,7 @@ stands.
 | Cross-file edits | **34** (v2: E1–E34) + **44** (v3: E35–E78) = **78** |
 | Open items | **11 closed** (H-1…H-11) + **H-12 RESOLVED by §O** (partition unified) |
 | Correction round (§N/§O) | Item A platform/WS-A (A1–A5) + Item B partition unification (B) — 2 items recorded |
-| Waiver / limitation register (§G) | **22** (G-1…G-16 + G-17…G-20 [G-20 closed] + G-21/G-22) |
+| Waiver / limitation register (§G) | **23** (G-1…G-16 + G-17…G-20 [G-20 closed] + G-21/G-22/G-23) |
 | Catalog §12 open items carried / plan §12 open questions carried | 6 of 6 / 4 of 4 |
 
 ### M.3 §G additions in v3
@@ -544,30 +546,31 @@ stands.
 | **G-22** | Platform-field nuances: hw_peak cross-platform (ru_maxrss), anon proxy (rss_kb), swap_kb unwired everywhere | documented degradations, consumer-visible shape pinned (§13.3) |
 | **G-20** | Plan §4 work-package phase lists vs catalog §1/§7 ship phases — two partitions | the catalog is authoritative for the roll-up; the 35 pre-existing divergences are enumerated and **deferred** (structural) |
 
-### M.4 The series roll-up, reconciled (v2 → v3)
+### M.4 The series roll-up, reconciled (v2 → v3 → final consolidation)
 
-| | v2 (`cec78e0e8` + `ad3a33171`) | v3 | Why |
-|---|---|---|---|
-| P0 | 26 | 26 | — |
-| P1a | 62 | 62 | — |
-| P1b | 223 | 223 | — |
-| P1c | 210 | **222** | **F20 57 → 69** (tool categories 37 → 49 + reserved `other` = +12) |
-| **Daemon-origin total** | **521** | **533** | 521 + 12 |
-| Shell-origin (textfile) | 5 | 5 | — |
-| Exporter-origin | ≈67 | ≈67 | measured separately, outside the daemon budget |
-| **Grand total on the Prometheus server** | ≈593 | **≈605** | — |
-| **Budget** | ≤2 000, 26 % consumed, headroom 1 479 | ≤2 000, **≈27 %**, headroom **1 467** | 2 000 − 533 |
+| | v2 (`cec78e0e8` + `ad3a33171`) | v3 | Final consolidation (V-3/V-4/R-m3/R-m8/R-m9) | Why |
+|---|---|---|---|---|
+| P0 | 26 | 26 | **27** | V-4 / R-m9 carry-over (+1) |
+| P1a | 62 | 62 | **63** | F3 `manual` reason (R-m9, +1) |
+| P1b | 223 | 223 | **220** | wake outcome cut 7→5 (V-3, −2) + F7 decomposition 22→21 (R-m8, −1) |
+| P1c | 210 | **222** | **228** | F20 tool categories 49→55 + reserved `other` (V-4 artifact, +6) |
+| **Daemon-origin total** | **521** | **533** | **538** | 521 + 17 net (F20 +6, F3 +1, cap rejected +1, F7 −1, wake −2, P0 +1… net +17) |
+| Shell-origin (textfile) | 5 | 5 | 5 | — |
+| Exporter-origin | ≈67 | ≈67 | ≈67 | measured separately, outside the daemon budget |
+| **Grand total on the Prometheus server** | ≈593 | **≈605** | **≈610** | — |
+| **Budget** | ≤2 000, 26 % consumed, headroom 1 479 | ≤2 000, ≈27 %, headroom 1 467 | ≤2 000, **≈27 %**, headroom **1 462** | 2 000 − 538 |
 
 **Basis (now stated in the catalog, so the proof is checkable):** §7 counts the §1 row values,
-with the one **range** cell (**F7** `22→33`) taken at its **today** value **22** — the bytes
-histogram's +11 arrives with the P1b byte wiring. Row sums: 26 + 62 + 223 + 222 = **533**.
+with the one **range** cell (**F7** `22→33` → corrected to `21→31` per R-m8) taken at its
+**today** value **21**. Row sums: 27 + 63 + 220 + 228 = **538**. Changes vs. the prior 533:
+F3 +1 (`manual` reason, R-m9), F13 −2 (wake outcome cut to closable set, V-3), F20 +6 (tool
+categories 55 + reserved `other` per V-4 artifact, was 49), **F0.2 +1**
+(`ensemble_metrics_cap_rejected_total` folded in, R-m3), **F7 −1** (decomposition corrected
+22→21 today / 33→31 post, R-m8).
 
-> ⚠️ **A v3 correction to the wave-2 hand-off.** The wave-1/2 result carried the daemon-origin
-> total as **534** with P1c = 223. The §1 rows sum to **222** for P1c (F14 3 + F15 23 + F16 5 +
-> F17 40 + F18 9 + F19 7 + F20 69 + F21 66), so **534 was off by one** — a `210 + 12 = 222`
-> slip in the hand-off arithmetic, not a substantive disagreement (the headroom moves by one
-> series and the percentage does not move). v3 reconciles the roll-up to **533 / 222 / ≈605 /
-> headroom 1 467** and records the basis so a reviewer can recompute it in one line.
+> ⚠️ **Final reconciliation.** The prior hand-off carried 533 (and an earlier 534 slip). The
+> final consolidation reconciles to **538 / 228 / ≈610 / headroom 1 462**. All intermediate
+> figures are retained as explicit history in the rows above.
 
 ### M.5 Label normalization (STEP 3) — 20 relabels, E35–E54
 
@@ -680,6 +683,8 @@ never-exported / hard cap), **A11** (alias mechanics), **A16** (the four P0 test
 | 3 — architect doc (WS-B step 2) | `c0f0694396d118e26fb7b40946005cc8bac8c4d4` | `ad3a331716823998dee567cb6dfbad700b59c854` | `architecture-recommendation.md` — the read-only input to v3 |
 | 4 — **v3 (this commit)** | **HEAD** — a commit cannot contain its own sha; it is reported verbatim in the task report and retrieved with `git rev-parse HEAD` | `c0f0694396d118e26fb7b40946005cc8bac8c4d4` | **waves 1+2** (amendments 1–28 across plan + catalog, uncommitted until now) **+ the v3 verification/fix pass** (E35–E76) **+ §I–§M** |
 | 5 — **correction round (this commit)** | **HEAD** — sha reported in the task report, retrieved with `git rev-parse HEAD` | 51bbfc000 (v3) | **§N (Item A) + §O (Item B)** + §G closure/additions + §H/§M refresh + final verification sweep; path-limited to the three planning files |
+| 6 — **final consolidation (this commit)** | **HEAD** — sha reported in the task report, retrieved with `git rev-parse HEAD` | <consolidation-base> | **§P (V-1..V-9 + R-m1..R-m10 + P-1/P-3)** + R-m6 sync check + §G/§H/§M refresh + final verification sweep; path-limited to the three planning files |
+| 6 — **final consolidation (this commit)** | **HEAD** — sha reported in the task report, retrieved with `git rev-parse HEAD` | c7dbdea4b (correction round) | **§P (V-1..V-9 + R-m1..R-m10 + P-1/P-3)** + R-m6 sync check + §G/§H/§M refresh + final verification sweep; path-limited to the three planning files |
 
 - **Committed paths (this commit, path-limited):** exactly
   `.agents/shared/planning/metrics-collection/plan-overview.md`,
@@ -895,4 +900,105 @@ taken at its today value 22").
 
 ---
 
-*End of decisions.md (correction round §N–§O appended).*
+*End of decisions.md (correction round §N–§O + final consolidation round §P appended).*
+
+---
+
+## P. Final consolidation round (re-review NEEDS-REVISION narrow → predicted APPROVE)
+
+**Status.** The re-review came back NEEDS-REVISION on a **narrow** set (V-1..V-9
+multi-vector/dead-alert defects + R-m1..R-m10 review minors + P-1/P-3 mechanics +
+R-m6 sync check). All of them are **resolved in the current files** (waves 1+2 +
+this round). This section is the consolidation-round record: one row per item,
+resolution + anchors into the post-wave files. **No code changes, no source-file
+edits** — markdown only, path-limited to the three planning files.
+
+### P.1 V-items (dead alerts, vocabularies, orphan sweep, baselines, external sampler, AC preconditions)
+
+| ID | Item (one line) | Resolution | Anchors |
+|---|---|---|---|
+| **V-1** | Dead alerts — multi-vector rules used bare `and` (disjoint labels → empty vector → never fires): LoopStarved, FalseDegraded, CheckpointSlow | `and on()` guards on every multi-vector rule; 14 `promtool test rules` evaluation fixtures in AC8 incl. the empty-vector repro + the fixed-fires case; syntax-only `promtool check rules` declared insufficient | `plan-overview.md` §8 alert table + fenced YAML (L355, L419, L426, L468) + AC8 (L575) + fixture format (L581); `decisions.md` E17–E20 |
+| **V-2** | FalseDegraded used `outcome="timeout"` which does not exist in the 11-class taxonomy (`readiness.py:64-79`) | `outcome=~"probe_timeout\|read_timeout"` (both grace-eligible; `probe_timeout` replays the P2 deadline miss); catalog §8.3 cross-checked to the 11-class taxonomy | `plan-overview.md` §8 FalseDegraded (L379, L467–L472) + V-2 note (L517); `metric-catalog.md` §8.3 + F9; `decisions.md` E18 |
+| **V-3** | Wake outcome vocabulary over-claimed 7 values; producers emit only 5 closable | Cut to 5 closable values (`claimed`, `skipped_busy_instance`, `empty_claim`, `timeout_wake`, `fresh_episode_reset`); each attributed to its producer (`worker_pool.py:1381-1386` claim path + `graph.py:7319` episode seam); `None` → no increment (F13 −2 series) | `metric-catalog.md` §8.13 + F13 + C39 (L1317); `plan-overview.md` §4 P1b T9 (L199) |
+| **V-4** | Tool-category count was a hand list (37/38 claimed vs 49 verified) and process-unstable (41/53/54/55) | **CI-generated JSON artifact canonical** + drift check + `other`-fold; freeze-time placeholder 55 (+reserved `other`); instability (41/53/54/55 by process) named as the defect | `metric-catalog.md` §8.6 (L1018) + P-1 (plan §4 P0 T6); `plan-overview.md` §4 P0 T6 (L102) + AC12 (L579) |
+| **V-5** | Orphan sweep — 33 series with no task row / owner | **33 found → 33 closed → 0 remaining** (F0.1 16, F18 9, F0.3 4, F0.2 1, F0.4 1, F7 2); P0 T11 + P1c T9 added; catalog §7.1 task/owner mapping annex; P0 family claim restated to "F0.1–F0.4 foundation families" | `plan-overview.md` §4 P0 T11 (L107) + P1c T9 (L238); `metric-catalog.md` §7.1 |
+| **V-6** | Checkpoint write-path risked billing writes to the READ budget | Distinct write-side hook `_charge_checkpoint_write` (own budget/labels, once-per-outer-call, None = error not skip); read seam NOT reused; Q1 risk row kept | `plan-overview.md` §4 P1b T14 (L204) + risk 3 (L217); `metric-catalog.md` F7 write-path task |
+| **V-7** | Alert BASELINE column incomplete | 14/14 (CheckpointSlow `>5` ← `DEFAULT_SLOW_SAVER_CUT_MS=5000` `checkpoint_perf.py:60`, etc.) | `plan-overview.md` §8 V-7 (L528) |
+| **V-8** | BashSpin compared a cumulative-CPU gauge to 0.9 (fires forever); spinning bash cannot self-report | BashSpin external sampler (owner + mechanism + pinned 10 s cadence) + `TextfileStale` rule for the spin→stale interaction; §3/§4 P2/F22 wired | `plan-overview.md` §3 (L56) + §4 P2 T1 (L262) + §8 V-8 (L488); `metric-catalog.md` F22 |
+| **V-9** | AC preconditions missing for dark-able surfaces | AC2 gated on WS-A merge (Linux alternative + macOS fallback), AC6 gated on `ENSEMBLE_WEDGE_CAPTURE_ENABLED` | `plan-overview.md` §10 AC2/AC6 (L569, L573) |
+
+### P.2 R-m items (review minors)
+
+| ID | Item | Resolution | Anchors |
+|---|---|---|---|
+| **R-m1** | Unescaped pipes in PromQL split markdown table cells / break YAML | All rules in fenced yaml with UNescaped pipes (zero `\|` in PromQL); R-m1 declared in §8 header | `plan-overview.md` §8 (L352, L463) + fenced blocks (L460–L486) |
+| **R-m2** | Teardown join could hang shutdown | Aligned to detached-join precedent (`api.py:3411-3433`, `file_change_monitor.py:180-196`); listener thread `daemon=True`, join detached, never blocks the event loop | `plan-overview.md` §3 (L60) + P0 T1 (L97) |
+| **R-m3** | Cardinality cap was soft (TOCTOU) | Hard cap atomic under the metric's own lock + `ensemble_metrics_cap_rejected_total` (+1 series, folded into F0.2) | `plan-overview.md` §5 (L297) + §7 (L332); `metric-catalog.md` §0.5 (L110) |
+| **R-m4** | F14 streaming-only gap undocumented | Documented (streaming path only; 4 non-streaming invoke sites named) — accepted limitation, not fixed | `metric-catalog.md` F14 (L676) + C42 (L1320) |
+| **R-m5** | Publisher cadence unbounded (O(series) per increment) | Dirty-flag + ≤1 re-publish per N s / publish-on-scrape with bounded staleness | `metric-catalog.md` §0.2 (L46) |
+| **R-m6** | Sync check — two stale spots in `decisions.md` | **Found & fixed:** (a) MA-3 row carried `manager.py:7341` as a *live* fix locus (refuted) → corrected to WS-A dead-producer framing; (b) MA-10 row carried stale "521 / 26 %" → corrected to the 538 reconciliation trail. Both logged here | `decisions.md` §C MA-3 + MA-10 (R-m6) |
+| **R-m7** | §12 closing sentence mis-stated OQ status | Corrected: OQ-1/2/3 open, OQ-4 resolved | `plan-overview.md` §12 (L619) |
+| **R-m8** | F7 decomposition wrong (22/33 → 21/31) | Corrected 22→21 today / 33→31 post (−1 series) | `metric-catalog.md` §1/§7 + C42? (F7); `decisions.md` M.4 |
+| **R-m9** | F3 `reason` vocabulary missing `manual` | 4 values incl. `manual` (`triggers.py:57`); path corrected to `daemon/services/wedge_capture/triggers.py` (+1 series) | `metric-catalog.md` F3 (L384) + C41 (L1319) |
+| **R-m10** | §6 dark matrix missing F3 row | F3 dark row added (counters fire; content `/proc`-dependent) | `plan-overview.md` §6 (L311); `metric-catalog.md` §13 (L1417) |
+
+### P.3 Mechanics items (P-1, P-3)
+
+| ID | Item | Resolution | Anchors |
+|---|---|---|---|
+| **P-1** | P0 T6 freeze wired to a hand list | Wired to the V-4 generated artifact (never a hand list); deferral with `other`-fold is the alternative | `plan-overview.md` §4 P0 T6 (L102) + AC12 (L579); `metric-catalog.md` §8.6 (L1018) |
+| **P-3** | Three mechanics items applied | (a) detached-join teardown (R-m2), (b) atomic hard cap + rejected counter (R-m3), (c) bounded publisher cadence (R-m5) — all APPLIED, no deviation | `plan-overview.md` §4 P0 exit criteria (L116) |
+
+### P.4 Series reconciliation (restated)
+
+**P0 27 + P1a 63 + P1b 220 + P1c 228 = 538 daemon-origin, headroom 1 462**
+(shell 5, exporter ≈67, grand ≈610).
+
+Delta trail (honest): 533 (v4 basis) → 538 (V-4 tool-cat artifact 55+`other` = F20 +6,
+F3 +1 `manual`, F13 −2 wake cut) → 538 net after R-m3 +1 (cap rejected) and R-m8 −1
+(F7 decomposition correction).
+
+### P.5 R-m6 finding (sync check)
+
+- **(a) `manager.py:7341`** — *found* as a *live* fix locus in the MA-3 row (decisions.md
+  §C, line 73); the refuted-hypothesis narrative in `metric-catalog.md` §11 C35 correctly
+  marks it refuted. **Fixed:** MA-3 row rewritten to the WS-A dead-producer framing; the
+  `manager.py:7341` token survives only inside the refuted narrative (C35).
+- **(b) `521`** — *found* in MA-10 row ("actual 521, 26 %") and M.4 (v2 basis); explicit
+  history in M.4/M.5 is retained. **Fixed:** MA-10 row corrected to the 538 reconciliation
+  trail; M.4 extended with a final-consolidation column.
+
+### P.6 §G / §H / §M refresh
+
+- **§G:** G-20 closed (§O); G-21 (T3 per-child non-goal) + G-22 (platform-field nuances) added;
+  G-23 added — F14 **streaming-only gap** noted, not fixed (R-m4): non-streaming invoke
+  sites (`graph.py:9176-9179`, `:9236`, `:9643`, `:9672`) not captured; under-count accepted
+  or closed by adding observations. No other §G entries change.
+- **§H:** cumulative row counts now include V-1..V-9 + R-m1..R-m10 + P-1/P-3 + R-m6; verification
+  numbers updated to the final sweep (7/7 checks); commit shas include the new consolidation
+  commit.
+- **§M:** companions/line counts refreshed (plan-overview.md 619, metric-catalog.md 1453,
+  decisions.md post-edit, architecture-recommendation.md 697); edit ledger extended with the
+  R-m6 + §P edits.
+
+### P.7 Final verification sweep (7/7)
+
+1. Alert section: 14 rules in fenced YAML, zero `\|` escapes inside fences, 14/14 baseline
+   citations, multi-vector rules carry `and on()` (LoopStarved/FalseDegraded/CheckpointSlow),
+   series tokens resolve to catalog §1 (~16 incl. TextfileStale gauge + histogram suffixes).
+2. AC8: 14 evaluation fixtures present incl. the empty-vector repro pair.
+3. Orphan sweep: catalog §7.1 maps every §1 series to a task row + owner; sample of 10 rows
+   cross-checked against plan §4 task tables; orphan count **0**.
+4. Vocabulary closures: wake 5 values attributed (V-3); readiness taxonomy matches
+   `readiness.py:64-79` (V-2); F3 reason 4 values incl. `manual` (R-m9); tool-category =
+   artifact-canonical, no surviving hand-listed "49" outside explicit history (V-4).
+5. Series arithmetic: 27 + 63 + 220 + 228 = 538; headroom 1 462; F7 21/31; present and correct.
+6. Invariants: 5 ratified decisions; 28 amendment labels; G-20 partition unified; WS-A BLOCKS
+   gate; platform matrix §13; P-3 items APPLIED; wave-1 §8/§10 and wave-2 §1–§7/§11/§12 present
+   and non-conflicting.
+7. R-m6: found & fixed (see P.5).
+
+---
+
+*End of decisions.md (final consolidation round §P appended).*
+
