@@ -46,9 +46,13 @@ from daemon.constants import (
     CHECKPOINT_POOL_TIMEOUT_S_DEFAULT,
     MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS,
 )
+from daemon.repositories.factory import (
+    MANAGER_ENGINE_IDLE_IN_TXN_BACKSTOP_ENABLED,
+    MANAGER_PG_SESSION_CONNECT_ARGS,
+)
 
 #: The pack-local declared collected count (NEW packs only).
-EXPECTED_COLLECTED = 7
+EXPECTED_COLLECTED = 8
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CONSTANTS_SRC = (_REPO_ROOT / "daemon" / "constants.py").read_text()
@@ -130,7 +134,36 @@ class TestConstantsHonestyBlock:
         value."""
         assert CHECKPOINT_POOL_MAX_SIZE_DEFAULT == 10
         assert CHECKPOINT_POOL_TIMEOUT_S_DEFAULT == 5.0
-        assert MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS == 60_000
+
+    def test_idle_in_txn_backstop_defined_not_applied_structure(self):
+        """W-4 — the backstop constant is DEFINED and TYPED, and while
+        the backstop flag is False the rendered manager options OMIT the
+        ``idle_in_transaction_session_timeout`` clause.
+
+        The contracted enablement is a ONE-EDIT ceremony (flip
+        ``MANAGER_ENGINE_IDLE_IN_TXN_BACKSTOP_ENABLED``); this
+        structural pin is the deliberate-update tripwire — flipping
+        the flag renders the clause ⇒ this pin REDs ⇒ the ceremony
+        consciously updates it. It deliberately does NOT freeze the
+        value literal: DR-20's letter is scoped to F2-c/F2-e, the
+        constant ships DEFINED BUT NOT APPLIED (D-47), and the value
+        is set from the trustworthy measurement at enablement time.
+        """
+        # The constant exists and is typed.
+        assert isinstance(MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS, int)
+        assert MANAGER_ENGINE_IDLE_IN_TXN_TIMEOUT_MS > 0
+        # While the backstop is disabled ...
+        assert MANAGER_ENGINE_IDLE_IN_TXN_BACKSTOP_ENABLED is False
+        # ... the rendered manager options OMIT the clause.
+        rendered = MANAGER_PG_SESSION_CONNECT_ARGS["options"]
+        assert "idle_in_transaction_session_timeout" not in rendered, (
+            "W-4: the manager options render the idle-in-txn clause "
+            f"({rendered!r}) while the backstop flag is False — either "
+            "the flag was flipped (the enablement ceremony: update this "
+            "pin deliberately) or the render is unconditional"
+        )
+        # (And the render still carries the UTC frame — the B2/B3 base.)
+        assert "-c timezone=UTC" in rendered
 
 
 class TestPersistenceHonestyBlock:
