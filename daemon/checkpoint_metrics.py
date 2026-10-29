@@ -565,14 +565,16 @@ class Metric:
         **kwargs: str,
     ) -> None:
         """Increment a counter by ``value`` (default 1)."""
+        if "amount" in kwargs and "amount" not in self.label_keys:
+            # Legacy keyword alias (``Counter.inc(amount=3)``) — resolve
+            # it BEFORE the monotonicity check so a negative alias
+            # cannot slip past the guard.
+            value = kwargs.pop("amount")
         if value < 0:
             raise ValueError(
                 f"Counter.inc requires a non-negative amount (got {value}); "
                 f"use a Gauge for values that can decrease."
             )
-        if "amount" in kwargs and "amount" not in self.label_keys:
-            # Legacy keyword alias (``Counter.inc(amount=3)``).
-            value = kwargs.pop("amount")
         merged = self._merge_labels(labels, kwargs)
         if self.internal:
             self._inc_raw(value, merged)
@@ -1171,50 +1173,71 @@ def render_metrics() -> str:
         metrics = list(_METRICS)
     deadline = time.monotonic() + RENDER_TOTAL_BUDGET_SECONDS
     for metric in metrics:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            # The render-wide budget is spent — serve the last published
-            # snapshot instead of blocking any further.
-            lines.extend(
-                _render_metric(
-                    metric.name,
-                    metric,
-                    metric._published,
-                    True,
-                    "render_budget_exhausted",
-                )
+        # Per-family guard (arch §1.5 / plan §6 degradation contract): an
+        # exception in ONE family must skip THAT family only — the
+        # remaining families still render, and the skipped family is
+        # marked with a ``# <family> unavailable: <reason>`` comment
+        # (bounded reason code; never a raw traceback).
+        try:
+            lines.extend(_render_family_lines(metric, deadline))
+        except Exception as family_exc:  # noqa: BLE001 — a broken family never breaks the scrape
+            lines.append(
+                f"# {metric.name} unavailable: render_error:{type(family_exc).__name__}"
             )
             continue
-        acquired = metric._lock.acquire(timeout=min(RENDER_TRY_ACQUIRE_SECONDS, remaining))
-        if acquired:
-            try:
-                # The lock is held, so the live state is a consistent
-                # snapshot — render it directly (no staleness).  The
-                # copy-on-publish pointer is refreshed here at most once
-                # per publisher-cadence window (R-m5) so a contended
-                # render can still serve the last published snapshot.
-                live = metric._copy_locked()
-            finally:
-                metric._lock.release()
-            snapshot = live
-            contended = False
-        else:
-            snapshot = metric._published
-            contended = True
-        lines.extend(_render_metric(metric.name, metric, snapshot, contended))
-        for alias in metric.alias_names:
-            if alias not in _DEPRECATION_EMITTED:
-                _DEPRECATION_EMITTED.add(alias)
-                logger.warning(
-                    "Deprecated metric name %s is an alias of %s; migrate to the "
-                    "canonical name (the alias is removed one release after the "
-                    "deprecation window).",
-                    alias,
-                    metric.name,
-                )
-            lines.extend(_render_metric(alias, metric, snapshot, False))
-    lines.extend(_render_frozen_vocabularies())
+    try:
+        lines.extend(_render_frozen_vocabularies())
+    except Exception:  # noqa: BLE001 — the footer is informational; never sink the scrape
+        pass
     return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _render_family_lines(metric: Metric, deadline: float) -> list[str]:
+    """Render one family (its own lock/copy/render + its aliases).
+
+    Raises on a broken family — :func:`render_metrics` catches and
+    degrades per family (arch §1.5 "Render exception in one family").
+    """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        # The render-wide budget is spent — serve the last published
+        # snapshot instead of blocking any further.
+        return _render_metric(
+            metric.name,
+            metric,
+            metric._published,
+            True,
+            "render_budget_exhausted",
+        )
+    acquired = metric._lock.acquire(timeout=min(RENDER_TRY_ACQUIRE_SECONDS, remaining))
+    if acquired:
+        try:
+            # The lock is held, so the live state is a consistent
+            # snapshot — render it directly (no staleness).  The
+            # copy-on-publish pointer is refreshed here at most once
+            # per publisher-cadence window (R-m5) so a contended
+            # render can still serve the last published snapshot.
+            live = metric._copy_locked()
+        finally:
+            metric._lock.release()
+        snapshot = live
+        contended = False
+    else:
+        snapshot = metric._published
+        contended = True
+    lines = _render_metric(metric.name, metric, snapshot, contended)
+    for alias in metric.alias_names:
+        if alias not in _DEPRECATION_EMITTED:
+            _DEPRECATION_EMITTED.add(alias)
+            logger.warning(
+                "Deprecated metric name %s is an alias of %s; migrate to the "
+                "canonical name (the alias is removed one release after the "
+                "deprecation window).",
+                alias,
+                metric.name,
+            )
+        lines.extend(_render_metric(alias, metric, snapshot, False))
+    return lines
 
 
 __all__ = [

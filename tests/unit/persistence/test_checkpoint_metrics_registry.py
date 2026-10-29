@@ -320,6 +320,42 @@ class TestNeverExportedEnforcement:
 # ─── (f) hard cardinality cap ────────────────────────────────────────────────
 
 
+class TestCounterMonotonicityGuard:
+    """The monotonicity guard must see the RESOLVED amount (m1).
+
+    ``inc(amount=-1)`` resolves the legacy keyword alias to -1; the
+    guard used to run before the alias resolution and let it through.
+    """
+
+    def test_negative_keyword_alias_raises(self, clean_registry):
+        counter = register_counter("ensemble_test_negative_alias")
+        with pytest.raises(ValueError, match="non-negative"):
+            counter.inc(amount=-1)
+        assert counter.get() == 0
+
+    def test_negative_positional_raises(self, clean_registry):
+        counter = register_counter("ensemble_test_negative_positional")
+        with pytest.raises(ValueError, match="non-negative"):
+            counter.inc(-1)
+        assert counter.get() == 0
+
+    def test_positive_keyword_alias_still_works(self, clean_registry):
+        counter = register_counter("ensemble_test_positive_alias")
+        counter.inc(amount=1)
+        counter.inc(amount=2)
+        assert counter.get() == 3
+
+    def test_a_label_named_amount_is_not_stolen(self, clean_registry):
+        """``amount`` as a real label key is a label, not the alias."""
+        counter = register_counter(
+            "ensemble_test_amount_label",
+            label_keys=("amount",),
+            allowed_values={"amount": frozenset({"big", "small"})},
+        )
+        counter.inc(1, labels={"amount": "big"})
+        assert counter.get(labels={"amount": "big"}) == 1
+
+
 class TestHardCardinalityCap:
     def test_observation_beyond_the_cap_is_rejected(self, clean_registry):
         """R-m3 — the cap is HARD: the observation is rejected, not warned."""
@@ -366,6 +402,119 @@ class TestHardCardinalityCap:
             f'ensemble_metrics_cap_rejected_total{{metric="ensemble_test_capped_concurrent"}} {rejections}'
             in rendered
         )
+
+
+# ─── per-family render degradation (MAJOR-1, arch §1.5) ─────────────────────
+
+
+class TestPerFamilyRenderDegradation:
+    """A render exception in ONE family must skip THAT family only.
+
+    arch §1.5 / plan §6 degradation contract: "Render exception in one
+    family → skip that family, others render" — with a
+    ``# <family> unavailable: <reason>`` comment line.  Before the
+    guard, one broken family escaped ``render_metrics()`` entirely and
+    every family was lost.
+    """
+
+    @staticmethod
+    def _poison_copy(metric: "cm.Metric") -> None:
+        """Inject a series whose snapshot-copy raises (a broken family).
+
+        ``_copy_locked`` does ``list(series["buckets"])`` — a
+        non-iterable bucket payload raises INSIDE the copy path, which
+        is exactly the "family whose _copy_locked raises" shape the
+        review probed.
+        """
+        with metric.lock:
+            metric._series[(("poisoned", "1"),)] = {
+                "kind": "counter",
+                "value": 1,
+                "buckets": object(),  # not iterable -> copy raises
+            }
+            metric._dirty = True
+
+    @staticmethod
+    def _poison_render(metric: "cm.Metric") -> None:
+        """Inject a series that copies fine but breaks at render time.
+
+        The poison rides the EMPTY label key so the tier-3 render
+        allowlist lets it through (a keyed poison on an unlabeled family
+        would be dropped by tier 3 before it could raise) — then the
+        missing ``value`` field raises KeyError inside ``_render_metric``.
+        """
+        with metric.lock:
+            metric._series[()] = {
+                "kind": "counter",
+                # no "value" key -> _render_metric raises KeyError
+            }
+            metric._dirty = True
+
+    def test_a_poisoned_family_does_not_sink_the_scrape(self, clean_registry):
+        """N healthy families render; the poisoned family degrades."""
+        healthy = [
+            register_counter(f"ensemble_test_healthy_{i}") for i in range(3)
+        ]
+        for counter in healthy:
+            counter.inc(5)
+        poisoned = register_counter("ensemble_test_poisoned_family")
+        self._poison_copy(poisoned)
+
+        rendered = render_metrics()  # must NOT raise
+
+        for counter in healthy:
+            assert f"{counter.name} 5" in rendered, f"{counter.name} lost from the render"
+        assert "# ensemble_test_poisoned_family unavailable: render_error:TypeError" in rendered
+
+    def test_a_family_that_breaks_at_render_degrades_the_same_way(self, clean_registry):
+        """A family that copies fine but raises while rendering degrades too."""
+        healthy = register_counter("ensemble_test_render_healthy")
+        healthy.inc(3)
+        poisoned = register_gauge("ensemble_test_poisoned_render")
+        self._poison_render(poisoned)
+
+        rendered = render_metrics()  # must NOT raise
+
+        assert "ensemble_test_render_healthy 3" in rendered
+        assert "# ensemble_test_poisoned_render unavailable: render_error:KeyError" in rendered
+
+    def test_a_raising_frozen_vocabulary_footer_never_sinks_the_scrape(
+        self, clean_registry
+    ):
+        """The footer is informational — the body must survive it."""
+        healthy = register_counter("ensemble_test_healthy_footer_counter")
+        healthy.inc(2)
+        original = cm._render_frozen_vocabularies
+
+        def _boom() -> list[str]:
+            raise RuntimeError("vocabulary footer exploded")
+
+        cm._render_frozen_vocabularies = _boom  # type: ignore[assignment]
+        try:
+            rendered = render_metrics()
+        finally:
+            cm._render_frozen_vocabularies = original  # type: ignore[assignment]
+        assert "ensemble_test_healthy_footer_counter 2" in rendered
+
+    def test_the_degraded_family_marker_is_the_listener_marker(self, clean_registry):
+        """The listener flips outcome=error off ``"unavailable:"`` — the
+        per-family degradation comment must carry it."""
+        poisoned = register_gauge("ensemble_test_poisoned_gauge")
+        self._poison_copy(poisoned)
+        rendered = render_metrics()
+        assert "# ensemble_test_poisoned_gauge unavailable:" in rendered
+        # Bounded reason — the raw error TEXT never appears.
+        assert "'object' object is not iterable" not in rendered
+
+    def test_the_poisoned_family_aliases_do_not_render(self, clean_registry):
+        """A degraded family's aliases degrade with it (no half-family)."""
+        poisoned = register_counter("ensemble_test_poisoned_aliased")
+        poisoned.alias_names = ["ensemble_test_poisoned_aliased_legacy"]
+        self._poison_copy(poisoned)
+        rendered = render_metrics()
+        assert "# ensemble_test_poisoned_aliased unavailable: render_error:" in rendered
+        assert "ensemble_test_poisoned_aliased_legacy" not in rendered
+
 
 
 # ─── (g) alias dual exposition ───────────────────────────────────────────────
