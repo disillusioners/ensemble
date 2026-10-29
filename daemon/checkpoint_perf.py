@@ -27,6 +27,12 @@ from typing import Any, Awaitable
 
 from daemon.checkpoint_metrics import (
     checkpoint_list_total,
+    checkpoint_read_bytes_total,
+    checkpoint_read_ops_total,
+    checkpoint_read_rows_total,
+    checkpoint_read_size_bucket_hits_total,
+    checkpoint_read_size_bytes,
+    read_size_bucket_label,
     saver_op_latency_seconds,
 )
 
@@ -213,6 +219,60 @@ async def time_saver_op(op: str, thread_id: str, coro: Awaitable[Any]) -> Any:
     finally:
         elapsed = int((time.perf_counter() - t0) * 1000)
         log_saver_op(op, thread_id, elapsed)
+
+
+def log_checkpoint_read(
+    op: str,
+    thread_id: str,
+    *,
+    bytes_: int,
+    rows: int,
+) -> None:
+    """Record ONE settled checkpoint READ (payload bytes + rows).
+
+    The read-instrumentation seam (plan Track-1 item 4). Called from the
+    saver retry proxy (``daemon/checkpoint_adapter.py``) AFTER the retry
+    wrapper settled — one call per OUTER read, so a transient connection
+    retry never double-counts (the same once-per-outer-call contract
+    the charge seam follows).
+
+    METRIC SIDE-EFFECTS ARE ALWAYS RECORDED — the operator's
+    measurement surface is independent of log volume (the same rule
+    :func:`log_saver_op` follows: suppressing the log line must not
+    starve the histogram). The ``[CheckpointPerf]`` line itself is
+    gated by ``CHECKPOINT_PERF_LOGS``.
+
+    The recorded series:
+
+    * ``checkpoint_read_ops_total{op}`` — one per settled read.
+    * ``checkpoint_read_bytes_total{op}`` — the payload bytes.
+    * ``checkpoint_read_rows_total{op}`` — the derived row count.
+    * ``checkpoint_read_size_bucket_hits_total{op,bucket}`` — the
+      bucket the observation fell into (NOT cumulative — one increment
+      per observation).
+    * ``checkpoint_read_size_bytes{op}`` — the size histogram
+      (log2 buckets, 64 KiB → 8 MiB).
+
+    A MISS (no checkpoint found) is a read too: it is counted with
+    ``bytes_=0`` / ``rows=0`` so "reads per message" and "bytes per
+    read" stay honest ratios.
+    """
+    bytes_ = max(0, int(bytes_))
+    rows = max(0, int(rows))
+    bucket = read_size_bucket_label(bytes_)
+    # Metric records FIRST and unconditionally (see the docstring).
+    checkpoint_read_ops_total.inc(op=op)
+    checkpoint_read_bytes_total.inc(bytes_, op=op)
+    checkpoint_read_rows_total.inc(rows, op=op)
+    checkpoint_read_size_bucket_hits_total.inc(op=op, bucket=bucket)
+    checkpoint_read_size_bytes.labels(op=op).observe(bytes_)
+    if not _logs_enabled():
+        return
+    logger.info(
+        f"[CheckpointPerf] op=read_size "
+        f"thread={thread_id[:8] if thread_id else '?'} "
+        f"bytes={bytes_} rows={rows} bucket={bucket}"
+    )
 
 
 def increment_checkpoint_list_total(amount: int = 1) -> int:

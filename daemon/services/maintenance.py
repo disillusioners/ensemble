@@ -75,6 +75,7 @@ from daemon.services.checkpoint_prune import (
     AnalyzeOutcome,
     BlobPruneSummary,
     analyze_checkpoint_tables_after_prune,
+    collect_blob_bytes_by_channel,
     prune_unreferenced_blobs,
 )
 from daemon.services.job_queue_service import TERMINAL_STATUSES
@@ -472,6 +473,18 @@ class CheckpointRowPruneSummary:
     would_delete_checkpoints: int = 0 # dry-run: sum(cnt - N) per excess pair
     would_delete_writes: int = 0      # dry-run: sum(count_writes_excluding) (T2b)
     would_free_bytes_after_row_prune: int = 0  # [v3.2 R-1] dry-run projection only
+    # ── Track-1 item 4: the version census (PRE-prune readings) ─────
+    # ``max_versions`` — the largest version count any single
+    # ``(thread_id, checkpoint_ns)`` pair held when this pass scanned
+    # it. It is derived from the SAME ``find_all_thread_ns_pairs``
+    # GROUP BY the prune already runs (no second scan) and is a
+    # PRE-prune reading: the pressure this cycle is about to relieve (a
+    # post-prune reading would be the cap by construction). It rides
+    # the run summary's ``version_census`` block — NOT the frozen
+    # ``to_summary_dict`` wire shape below. The census' ``excess_pairs``
+    # is this summary's OWN ``excess_pairs`` (the canonical count of
+    # pairs over the retention cap).
+    max_versions: int = 0
 
     def to_summary_dict(self) -> dict[str, Any]:
         """The FROZEN ``checkpoint_rows`` + ``writes`` blocks of a cycle summary.
@@ -619,6 +632,76 @@ class VacuumFullResult:
         }
 
 
+# ── Version census (plan Track-1 item 4) ─────────────────────────────────────
+#
+# The census answers the question the maintenance LOG cannot answer
+# reliably: how much retention pressure is on the checkpoint store, and
+# where does its storage mass live?
+#
+# WHY IT LANDS IN ``maintenance_runs.summary_json``: the maintenance
+# cycle's own "skipping checkpoint_cleanup: system not idle" line is
+# logger.DEBUG — invisible at prod INFO — so a grep-based starvation
+# audit is a FALSE-NEGATIVE channel (the Phase-2 audit's finding). The
+# audit row is the reliable channel: it is written on EVERY terminal
+# cycle and is queryable after the fact.
+#
+# HONESTY — what each number is:
+#
+# * ``max_versions`` / ``excess_pairs`` / ``scanned_pairs`` — PRE-prune
+#   readings (the pressure the cycle just relieved). They are derived
+#   from the prune pass' OWN ``find_all_thread_ns_pairs`` GROUP BY (no
+#   second scan): the adapter already returns the per-pair version
+#   count. A post-prune reading would be the retention cap by
+#   construction and would say nothing.
+# * ``blob_bytes_by_channel`` / ``blob_bytes_total`` / ``blob_rows`` —
+#   POST-prune readings: the LIVE storage mass, the number the
+#   read-amplification audit measured (the ``messages`` channel carried
+#   ~99.6 % of the bytes). The byte figure is the STORED size
+#   (``pg_column_size`` — no detoasting, so the census stays cheap on a
+#   multi-GB table).
+# * ``version_threshold`` — the retention cap the excess count was
+#   measured against (the shipped keep-3 policy; the operator-tunable
+#   ``checkpoint_max_per_thread``).
+
+
+@dataclass
+class CheckpointVersionCensus:
+    """One maintenance cycle's checkpoint version census."""
+
+    #: The census ran (the version part is always available once the
+    #: cycle reached the census point).
+    ran: bool = False
+    #: WHY the per-channel blob breakdown is missing (``None`` when it
+    #: was taken): ``no_shared_engine`` / ``not_postgresql`` /
+    #: ``engine_build_failed`` / ``query_failed``.
+    blob_skipped_reason: str | None = None
+    backend: str = "postgres"
+    max_versions: int = 0
+    excess_pairs: int = 0
+    version_threshold: int = 0
+    scanned_pairs: int = 0
+    blob_rows: int = 0
+    blob_bytes_total: int = 0
+    blob_bytes_by_channel: dict[str, int] = field(default_factory=dict)
+    captured_at: str = ""
+
+    def to_summary_dict(self) -> dict[str, Any]:
+        """The census block of ``maintenance_runs.summary_json``."""
+        return {
+            "ran": self.ran,
+            "blob_skipped_reason": self.blob_skipped_reason,
+            "backend": self.backend,
+            "max_versions": self.max_versions,
+            "excess_pairs": self.excess_pairs,
+            "version_threshold": self.version_threshold,
+            "scanned_pairs": self.scanned_pairs,
+            "blob_rows": self.blob_rows,
+            "blob_bytes_total": self.blob_bytes_total,
+            "blob_bytes_by_channel": dict(self.blob_bytes_by_channel),
+            "captured_at": self.captured_at,
+        }
+
+
 @dataclass
 class CheckpointRunResult:
     """One checkpoint-cleanup cycle result — wires into the audit table.
@@ -632,6 +715,15 @@ class CheckpointRunResult:
     variation lives ONLY inside the ``blobs`` block (dual-flavor keys,
     AM-11); there is NO top-level ``skipped_truncated`` (the §2 example
     carries it inside ``blobs`` only).
+
+    Track-1 item 4 — the ADDITIVE ``version_census`` block. The
+    census answers the retention-pressure question the maintenance LOG
+    cannot: the cycle's own skip line is DEBUG (a grep-based audit is
+    a FALSE-NEGATIVE channel) and the Phase-2 audit named
+    ``maintenance_runs.summary_json`` as THE reliable observability
+    channel. The block is ADDITIVE (no existing key is renamed or
+    removed) and is present only when the cycle actually took a census
+    — its own ``ran`` / ``blob_skipped_reason`` fields say which.
     """
 
     rows: CheckpointRowPruneSummary = field(default_factory=CheckpointRowPruneSummary)
@@ -643,6 +735,10 @@ class CheckpointRunResult:
     # operator sees WHY no FULL ran). ``None`` (auto cycle, dry-run,
     # non-escalated manual runs) keeps the FROZEN wire shape.
     vacuum_full: VacuumFullResult | None = None
+    # Track-1 item 4 — the version census block (see the class
+    # docstring). ``None`` ⇒ the cycle took no census (the key is
+    # absent from the summary — an absent census is NOT a zero census).
+    version_census: "CheckpointVersionCensus | None" = None
 
     def to_summary_dict(self) -> dict[str, Any]:
         """The FROZEN wire shape (plan-overview §2 — last_run.summary)."""
@@ -660,6 +756,11 @@ class CheckpointRunResult:
             # v1.1 — additive 5th key, manual-escalated runs only
             # (the auto-cycle FROZEN 4-key shape is untouched).
             summary["vacuum_full"] = self.vacuum_full.to_summary_dict()
+        if self.version_census is not None:
+            # Track-1 item 4 — additive 5th/6th key, every cycle that
+            # took a census. Additive only: no existing key is renamed
+            # or removed.
+            summary["version_census"] = self.version_census.to_summary_dict()
         return summary
 
 
@@ -967,10 +1068,25 @@ class CheckpointCleanupJob:
 
             logger.info("Checkpoint cleanup job completed")
 
+            # Track-1 item 4 — the version census (the retention
+            # pressure + the per-channel storage mass). Taken AFTER the
+            # prune ops so the blob breakdown describes the LIVE mass;
+            # the version half reuses the Op D pass' own scan.
+            try:
+                version_census = await self._collect_version_census(rows_summary)
+            except Exception as e:  # noqa: BLE001 — a census never fails a cycle
+                logger.error(
+                    f"Version census failed: {e} — the cycle continues "
+                    f"without the census block",
+                    exc_info=True,
+                )
+                version_census = None
+
             result = CheckpointRunResult(
                 rows=rows_summary,
                 blobs=blobs_summary,
                 skipped_truncated=len(blobs_summary.skipped) > 1000,
+                version_census=version_census,
             )
 
             # T3 — terminal write on success.
@@ -1428,6 +1544,16 @@ class CheckpointCleanupJob:
                 all_pairs = await self._checkpointer.find_all_thread_ns_pairs()
                 summary.scanned_pairs = len(all_pairs)
 
+                # Track-1 item 4 — the version census REUSES this pass's
+                # data (no second scan): ``find_all_thread_ns_pairs``
+                # already carries the per-pair version count, so the
+                # census' ``max_versions`` is a max over those counts and
+                # its ``excess_pairs`` is the count of pairs over the
+                # retention threshold. Both are PRE-prune readings (the
+                # pressure this cycle is about to relieve) — a
+                # post-prune reading would be the cap by construction.
+                self._apply_version_census_fields(summary, all_pairs)
+
                 # Find threads with excessive checkpoints via the adapter.
                 # The SQLite adapter wraps this in AsyncSqliteSaver's lock.
                 excess_pairs = await self._checkpointer.find_excess_checkpoint_groups(
@@ -1535,6 +1661,109 @@ class CheckpointCleanupJob:
             # (True / None) paths.
             destructive=destructive if destructive is not None else True,
         )
+
+    @staticmethod
+    def _apply_version_census_fields(
+        summary: CheckpointRowPruneSummary,
+        all_pairs: list[tuple[str, str, int]],
+    ) -> None:
+        """Track-1 item 4 — derive the census' worst-pair version count.
+
+        ``find_all_thread_ns_pairs`` already returns the per-pair
+        version count, so the census costs NO second scan: the max over
+        those counts is the worst pair's version count.
+
+        The census' ``excess_pairs`` does NOT come from here — it is the
+        prune pass' OWN ``excess_pairs`` (the count of pairs over the
+        retention cap, from ``find_excess_checkpoint_groups``), which is
+        the canonical number and already on the summary.
+
+        A malformed row is skipped (never breaks the cycle).
+        """
+        version_counts: list[int] = []
+        for pair in all_pairs:
+            try:
+                version_counts.append(int(pair[2]))
+            except (IndexError, TypeError, ValueError):
+                continue  # a malformed row never breaks the cycle
+        summary.max_versions = max(version_counts) if version_counts else 0
+
+    async def _collect_version_census(
+        self,
+        rows_summary: CheckpointRowPruneSummary,
+    ) -> CheckpointVersionCensus:
+        """Take this cycle's checkpoint version census (Track-1 item 4).
+
+        The census rides the run's ``summary_json`` — the reliable
+        observability channel (the maintenance cycle's own skip line is
+        DEBUG, so a grep-based starvation audit is a FALSE-NEGATIVE
+        channel — see the Phase-2 audit).
+
+        REUSES the prune pass' data: the version half comes from the
+        Op D summary (which already carries the per-pair version counts
+        from the SAME ``find_all_thread_ns_pairs`` GROUP BY — no second
+        scan). The blob half is ONE cheap aggregate on the DEDICATED
+        per-cycle maintenance engine (the post-prune ANALYZE lane's
+        shape) — never on the hot psycopg saver pool and never on the
+        adapter's shared asyncpg pool (both serve the checkpoint read
+        path this census protects).
+
+        NEVER RAISES: a failed census is reported in the block itself
+        (``blob_skipped_reason``), and the cleanup cycle is unaffected.
+        """
+        from daemon.services.timestamps import now_utc_iso
+
+        census = CheckpointVersionCensus()
+        census.ran = True
+        census.backend = str(
+            getattr(rows_summary, "backend", "postgres") or "postgres"
+        )
+        census.max_versions = int(getattr(rows_summary, "max_versions", 0) or 0)
+        # The prune pass' OWN excess count (pairs over the retention
+        # cap) — the canonical number, already on the row summary.
+        census.excess_pairs = int(getattr(rows_summary, "excess_pairs", 0) or 0)
+        census.scanned_pairs = int(
+            getattr(rows_summary, "scanned_pairs", 0) or 0
+        )
+        try:
+            census.version_threshold = int(self._config.checkpoint_max_per_thread)
+        except Exception:  # noqa: BLE001 — a config read never fails a cycle
+            census.version_threshold = 0
+        census.captured_at = now_utc_iso()
+
+        try:
+            blob_census = await collect_blob_bytes_by_channel(self._shared_engine)
+        except Exception as exc:  # noqa: BLE001 — belt-and-braces
+            logger.warning(
+                "[CheckpointPerf] blob byte census raised (%s: %s) — the "
+                "census records the skip and the cycle continues",
+                type(exc).__name__,
+                exc,
+            )
+            blob_census = None
+            # The breakdown is UNAVAILABLE — say so. An absent
+            # breakdown must never read as "zero bytes".
+            census.blob_skipped_reason = "census_failed"
+        if blob_census is not None:
+            census.blob_rows = blob_census.rows
+            census.blob_bytes_total = blob_census.total_bytes
+            census.blob_bytes_by_channel = dict(blob_census.by_channel)
+            if not blob_census.ran:
+                census.blob_skipped_reason = blob_census.skipped_reason
+
+        logger.info(
+            "[CheckpointPerf] op=version_census max_versions=%d "
+            "excess_pairs=%d threshold=%d scanned_pairs=%d blob_rows=%d "
+            "blob_bytes=%d channels=%d",
+            census.max_versions,
+            census.excess_pairs,
+            census.version_threshold,
+            census.scanned_pairs,
+            census.blob_rows,
+            census.blob_bytes_total,
+            len(census.blob_bytes_by_channel),
+        )
+        return census
 
     async def _analyze_after_destructive_prune(
         self,
@@ -1649,6 +1878,10 @@ class CheckpointCleanupJob:
             # delete-behavior change; mirrors the destructive arm).
             all_pairs = await self._checkpointer.find_all_thread_ns_pairs()
             summary.scanned_pairs = len(all_pairs)
+            # Track-1 item 4 — the version census reuses this scan (the
+            # dry-run arm reads the same GROUP BY the destructive arm
+            # does — no second scan).
+            self._apply_version_census_fields(summary, all_pairs)
             excess_pairs = await self._checkpointer.find_excess_checkpoint_groups(
                 max_per_thread
             )
@@ -1806,12 +2039,24 @@ class CheckpointCleanupJob:
                 vacuum_full=True
             )
         duration_ms = int((time.perf_counter() - t0) * 1000)
+        # Track-1 item 4 — the version census rides the MANUAL run's
+        # summary too (the same reliable channel as the auto cycle).
+        try:
+            version_census = await self._collect_version_census(rows)
+        except Exception as e:  # noqa: BLE001 — a census never fails a run
+            logger.error(
+                f"Version census failed: {e} — the run continues without "
+                f"the census block",
+                exc_info=True,
+            )
+            version_census = None
         return CheckpointRunResult(
             rows=rows,
             blobs=blobs,
             duration_ms=duration_ms,
             skipped_truncated=skipped_truncated,
             vacuum_full=full_result,
+            version_census=version_census,
         )
 
     # ── VACUUM FULL escalation (MANUAL-ONLY, v1.1) ──────────────────────────

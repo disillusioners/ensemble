@@ -46,7 +46,15 @@ except ImportError:
 from daemon._redact import redact_exc_str
 # P2 T3 charge seam (resource-cost-control): stdlib-only module, no
 # import-cycle risk — see daemon/services/resource_monitor/charge.py.
-from daemon.services.resource_monitor.charge import note_checkpoint_read
+from daemon.services.resource_monitor.charge import (
+    bounded_deep_size,
+    note_checkpoint_read,
+)
+# Track-1 item 4 (read instrumentation): the metric registry is
+# stdlib-only (no daemon imports) and the perf helper module depends
+# on it — no import-cycle risk.
+from daemon.checkpoint_metrics import checkpoint_read_measurement_errors_total
+from daemon.checkpoint_perf import log_checkpoint_read
 from daemon.constants import (
     CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE,
     CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES,
@@ -179,6 +187,125 @@ def _charge_checkpoint_read(args: tuple, kwargs: dict, result: Any) -> None:
     if instance_id is None:
         return
     note_checkpoint_read(instance_id, result)
+
+
+# ── Read instrumentation (plan Track-1 item 4) ─────────────────────────────
+#
+# The read-amplification audit's ONE adopted fix: measure BYTES and ROWS
+# per read at the PROXY chokepoint (the seam every daemon read surface
+# traverses — see the architecture recommendation §4.1). The measurement
+# is FAIL-OPEN by construction: it runs AFTER the read settled, it
+# never touches the result, and every failure inside it is swallowed —
+# the read result is ALWAYS returned as-is.
+#
+# WHAT "ROWS" MEANS HERE (honest labelling): the server's row counter
+# is not observable at this seam, so the count is DERIVED from the
+# returned structure:
+#
+#   * 1 — the checkpoint row itself;
+#   * +1 per channel value that is NOT a primitive — the PG saver
+#     inlines primitives (``None``/``str``/``int``/``float``/``bool``)
+#     in the checkpoint row and stores everything else as a SEPARATE
+#     blob row (``langgraph/checkpoint/postgres/aio.py`` aput: "inline
+#     primitive values in checkpoint table / others are stored in blobs
+#     table");
+#   * +1 per pending write — each pending write is its own row.
+#
+# WHAT "BYTES" MEANS HERE: the DECODED payload size, estimated with the
+# bounded deep-size walk (the SAME estimator the resource-monitor
+# charge seam uses on this very payload). It is NOT the wire size — the
+# serializer's framing overhead is not included.
+
+
+def _derive_read_rows(op: str, result: Any) -> int:
+    """Derive the number of rows a settled read returned.
+
+    See the block comment above for the derivation rules. Never raises
+    for an unexpected shape: an unreadable payload yields 0 (the
+    measurement is advisory).
+    """
+    if result is None:
+        return 0
+    checkpoint: Any = None
+    pending_writes: Any = None
+    if op == "aget_tuple":
+        # CheckpointTuple(config, checkpoint, metadata, parent_config,
+        # pending_writes) — a NamedTuple, so attribute access is the
+        # canonical read (the tuple is NOT unpacked here: a foreign
+        # shape must not raise).
+        checkpoint = getattr(result, "checkpoint", None)
+        pending_writes = getattr(result, "pending_writes", None)
+    else:
+        checkpoint = result
+    rows = 0
+    if isinstance(checkpoint, dict):
+        rows += 1  # the checkpoint row
+        channel_values = checkpoint.get("channel_values")
+        if isinstance(channel_values, dict):
+            for value in channel_values.values():
+                if value is None or isinstance(value, (str, int, float, bool)):
+                    continue  # inlined in the checkpoint row — no blob row
+                rows += 1  # one blob row
+    if isinstance(pending_writes, (list, tuple)):
+        rows += len(pending_writes)
+    return rows
+
+
+def _record_read_measurement_error(op: str, exc: BaseException) -> None:
+    """Count a measurement failure — the FAIL-OPEN tripwire.
+
+    The measurement never breaks a read, so this counter is the ONLY
+    signal that the instrumentation itself stopped working. The counter
+    increment is itself guarded: a broken metric registry must not
+    turn into a broken read.
+    """
+    try:
+        checkpoint_read_measurement_errors_total.inc()
+    except Exception:  # noqa: BLE001 — the tripwire must never raise
+        logger.warning(
+            "[CheckpointPerf] read instrumentation counter update failed "
+            "(op=%s) — the failure counter itself is unavailable",
+            op,
+            exc_info=True,
+        )
+    logger.warning(
+        "[CheckpointPerf] read instrumentation failed (op=%s): %s: %s — "
+        "the read itself was NOT affected (fail-open)",
+        op,
+        type(exc).__name__,
+        exc,
+    )
+
+
+def _measure_checkpoint_read(op: str, args: tuple, kwargs: dict, result: Any) -> None:
+    """Measure ONE settled checkpoint read (bytes + rows) — FAIL-OPEN.
+
+    Called from the proxy forwarders AFTER the retry wrapper settled, so
+    a transient connection retry is measured ONCE (the same
+    once-per-outer-call contract the charge seam follows).
+
+    NEVER raises: every failure is counted in
+    ``checkpoint_read_measurement_errors_total`` and swallowed. The read
+    result is never inspected destructively — the payload is only
+    measured.
+    """
+    try:
+        if result is None:
+            # A MISS is still a read (a DB round trip that returned no
+            # checkpoint): count it with zero bytes / zero rows.
+            bytes_ = 0
+            rows = 0
+        else:
+            bytes_, _nodes, _partial = bounded_deep_size(result)
+            rows = _derive_read_rows(op, result)
+        thread_id = _charge_instance_from_args(args, kwargs) or ""
+    except Exception as exc:  # noqa: BLE001 — fail-open by contract
+        _record_read_measurement_error(op, exc)
+        return
+    try:
+        log_checkpoint_read(op, thread_id, bytes_=bytes_, rows=rows)
+    except Exception as exc:  # noqa: BLE001 — fail-open by contract
+        _record_read_measurement_error(op, exc)
 
 
 def _wrap_saver_with_connection_retry(saver: Any) -> Any:
@@ -366,12 +493,18 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
             # wrapper settles ⇒ transient retry charges ONCE (AC1).
             result = await self._call_with_retry("aget", args, kwargs)
             _charge_checkpoint_read(args, kwargs, result)
+            # Track-1 item 4: read instrumentation (bytes + rows) at the
+            # proxy chokepoint. FAIL-OPEN — a measurement failure never
+            # breaks or slows the read; the result is returned as-is.
+            _measure_checkpoint_read("aget", args, kwargs, result)
             return result
 
         async def aget_tuple(self, *args, **kwargs):
             # P2 T3 charge seam: same once-per-outer-call contract.
             result = await self._call_with_retry("aget_tuple", args, kwargs)
             _charge_checkpoint_read(args, kwargs, result)
+            # Track-1 item 4: same fail-open contract as ``aget``.
+            _measure_checkpoint_read("aget_tuple", args, kwargs, result)
             return result
 
         async def aput(self, *args, **kwargs):

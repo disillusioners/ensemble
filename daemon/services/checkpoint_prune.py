@@ -608,3 +608,166 @@ async def analyze_checkpoint_tables_after_prune(
         outcome.duration_ms,
     )
     return outcome
+
+
+# ── Blob byte census (plan Track-1 item 4) ───────────────────────────────────
+#
+# WHY: the read-amplification audit measured where the checkpoint
+# storage mass actually lives (the ``messages`` channel carried ~99.6 %
+# of the bytes) — a LIVE measurement, not an inference. The census
+# makes that measurement REPEATABLE: one cheap aggregate per
+# maintenance cycle, landing in ``maintenance_runs.summary_json`` (the
+# reliable channel — the maintenance cycle's own skip line is DEBUG,
+# so a grep-based audit is a FALSE-NEGATIVE channel).
+#
+# WHY ``pg_column_size`` AND NOT ``octet_length``: ``pg_column_size``
+# reports the STORED size of the datum (compressed / TOAST-external
+# sizes included) WITHOUT detoasting the value, so the aggregate stays
+# a heap scan on a multi-GB table. ``octet_length(blob)`` would fetch
+# every TOASTed value — a full read of the table's payload bytes on
+# each cycle. The number is therefore the STORED size, not the logical
+# payload size; the difference is the compression/TOAST overhead.
+#
+# WHERE: the DEDICATED per-cycle autocommit engine (the same shape the
+# post-prune ANALYZE lane above uses) — NEVER the hot psycopg saver
+# pool and NEVER the adapter's shared asyncpg pool (both serve the
+# checkpoint read path this census is meant to protect).
+#
+# FAILURE: never raises. A census that cannot be taken is reported as
+# ``ran=False`` + a ``skipped_reason`` — the cycle that preceded it
+# must never fail because of an observation.
+
+
+#: The aggregate — one row per blob channel.
+_BLOB_BYTES_BY_CHANNEL_SQL = (
+    "SELECT channel, COUNT(*) AS rows, "
+    "COALESCE(SUM(pg_column_size(blob)), 0) AS bytes "
+    "FROM checkpoint_blobs "
+    "GROUP BY channel "
+    "ORDER BY bytes DESC"
+)
+
+
+@dataclass
+class BlobBytesCensus:
+    """The per-channel blob byte census of one maintenance cycle.
+
+    ``ran`` is True only when the aggregate actually reached the server.
+    ``skipped_reason`` explains a non-run: ``no_shared_engine`` /
+    ``not_postgresql`` (nothing to run against) or
+    ``engine_build_failed`` / ``query_failed`` (the observation failed
+    — the cycle that preceded it is unaffected).
+    """
+
+    ran: bool = False
+    skipped_reason: str | None = None
+    rows: int = 0
+    total_bytes: int = 0
+    by_channel: dict[str, int] = field(default_factory=dict)
+    duration_ms: int = 0
+
+
+def _collect_blob_bytes_sync(engine: Engine) -> tuple[int, int, dict[str, int]]:
+    """Run the per-channel aggregate. Returns ``(rows, bytes, by_channel)``."""
+    with engine.connect() as conn:
+        rows = conn.execute(text(_BLOB_BYTES_BY_CHANNEL_SQL)).fetchall()
+    by_channel: dict[str, int] = {}
+    total = 0
+    count = 0
+    for row in rows:
+        channel = row[0]
+        channel_rows = int(row[1] or 0)
+        channel_bytes = int(row[2] or 0)
+        by_channel[str(channel)] = channel_bytes
+        total += channel_bytes
+        count += channel_rows
+    return count, total, by_channel
+
+
+async def collect_blob_bytes_by_channel(
+    shared_engine: Engine | None,
+    *,
+    statement_ms: int = VACUUM_STATEMENT_TIMEOUT_MS,
+    lock_ms: int = VACUUM_LOCK_TIMEOUT_MS,
+    idle_ms: int = VACUUM_IDLE_IN_TXN_TIMEOUT_MS,
+) -> BlobBytesCensus:
+    """Measure the checkpoint blob storage mass per channel.
+
+    Never raises: a failed census is reported as ``ran=False`` plus a
+    ``skipped_reason``.
+
+    Args:
+        shared_engine: the daemon's shared SQLAlchemy engine — only its
+            URL/dialect are read (the census runs on its OWN per-cycle
+            engine). ``None`` ⇒ skipped with ``no_shared_engine``.
+        statement_ms / lock_ms / idle_ms: per-statement timeouts for the
+            dedicated engine (the VACUUM lane's magnitudes).
+
+    Returns:
+        A :class:`BlobBytesCensus`.
+    """
+    outcome = BlobBytesCensus()
+    if shared_engine is None:
+        outcome.skipped_reason = "no_shared_engine"
+        logger.warning(
+            "[CheckpointPerf] blob byte census skipped: no shared engine "
+            "wired — the per-channel storage breakdown is unavailable "
+            "this cycle"
+        )
+        return outcome
+    if shared_engine.dialect.name != "postgresql":
+        outcome.skipped_reason = "not_postgresql"
+        logger.warning(
+            "[CheckpointPerf] blob byte census skipped: shared engine "
+            "dialect is %r, not postgresql — the per-channel storage "
+            "breakdown is unavailable this cycle",
+            shared_engine.dialect.name,
+        )
+        return outcome
+    try:
+        engine = create_vacuum_engine(
+            shared_engine,
+            statement_ms=statement_ms,
+            lock_ms=lock_ms,
+            idle_ms=idle_ms,
+        )
+    except Exception as exc:  # noqa: BLE001 — never fatal to the cycle
+        outcome.skipped_reason = "engine_build_failed"
+        logger.warning(
+            "[CheckpointPerf] blob byte census skipped: dedicated engine "
+            "build failed (%s: %s) — the per-channel storage breakdown is "
+            "unavailable this cycle",
+            type(exc).__name__,
+            exc,
+        )
+        return outcome
+
+    t0 = time.perf_counter()
+    try:
+        rows, total, by_channel = await asyncio.to_thread(
+            _collect_blob_bytes_sync, engine
+        )
+        outcome.ran = True
+        outcome.rows = rows
+        outcome.total_bytes = total
+        outcome.by_channel = by_channel
+    except Exception as exc:  # noqa: BLE001 — never fatal to the cycle
+        outcome.skipped_reason = "query_failed"
+        logger.warning(
+            "[CheckpointPerf] blob byte census failed (%s: %s) — the "
+            "per-channel storage breakdown is unavailable this cycle "
+            "(the cleanup cycle itself is unaffected)",
+            type(exc).__name__,
+            exc,
+        )
+    finally:
+        try:
+            engine.dispose()
+        except Exception:  # noqa: BLE001 — disposal is best-effort
+            logger.debug(
+                "[CheckpointPerf] blob byte census engine dispose failed "
+                "(non-fatal)",
+                exc_info=True,
+            )
+    outcome.duration_ms = int((time.perf_counter() - t0) * 1000)
+    return outcome
