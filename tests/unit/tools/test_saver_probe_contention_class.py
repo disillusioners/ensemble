@@ -66,7 +66,14 @@ class _FakeSaver:
     async def aput_writes(self, *args, **kwargs):
         return None
 
-    async def aget_tuple(self, config):
+    async def aget_tuple(self, config, **kwargs):
+        # **kwargs accommodation (read-cache PR-1 fix pass C1): the
+        # production proxy's aget_tuple forwarder accepts (and pops)
+        # ``cache_bypass`` — the readiness sentinel now passes it. The
+        # double previously had a narrower signature than the real seam
+        # and raised TypeError on the kwarg (A/B-proven by the tester
+        # gate: base 8 passed / HEAD 5 failed + 3 passed). Mirrors the
+        # updated sibling fake in tests/test_readiness_checkpoint_saver.py.
         try:
             if self._hold_lock:
                 # Simulate the production write storm: the saver's lock
