@@ -254,6 +254,18 @@ Framing [plan §9.2]: run against the environment being diagnosed (§8);
 **a missing row is itself a finding.** All SQL below is read-only — run it
 on a replica or with a read-only role [plan §9.3].
 
+> **Metrics pointer** [this PR]: the checkpoint-read metrics (counters +
+> histograms for the read walk) are exposed at **`GET /api/metrics`**
+> (Prometheus text). The endpoint **requires auth-ON with the
+> `maintenance:read` scope** and **503s fail-closed (`AUTH_NOT_CONFIGURED`)
+> in the default auth-OFF posture** — the daemon listens on `0.0.0.0` with
+> CORS-`*`, so the surface is never exposed unauthenticated. Scrapers must
+> mint a **dedicated machine token with `--scopes maintenance:read`** — the
+> bootstrap `auth:admin` token does **not** satisfy that scope (it 403s).
+> Note: **`CHECKPOINT_PERF_LOGS=0` disables the read instrumentation
+> entirely** (the walk + the counters), so the endpoint's series stay empty
+> with the flag off.
+
 ### 6.1 Checklist (10 items)
 
 | # | Item | Evidence to collect |
