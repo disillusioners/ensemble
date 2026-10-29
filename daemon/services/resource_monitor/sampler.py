@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Optional
 
 from . import charge as _charge
+from . import proc_readers as _proc_readers_mod
 from .deep_scan import DeepScanResult, DeepScanner
 from .pid_registry import PidRegistry, get_pid_registry, read_proc_stat_field
 from .proc_readers import (
@@ -88,6 +89,33 @@ LIVE_CHILDREN_CAP = 50
 
 #: Rows kept for the /live instances view (§2.8 instances[] ≤50).
 LIVE_INSTANCES_CAP = 50
+
+#: The ``interval_s`` value that marks a DEGRADED SENTINEL T1 row.
+#:
+#: A tick whose platform read produced NO snapshot writes NO sample —
+#: but it MUST leave evidence, otherwise a permanently dark host
+#: carries no DB trace of the drops at all (the honest count would
+#: live ONLY in the sampler's RAM counters). The sentinel row is the
+#: DB evidence path: ``interval_s == 0`` (a real bucket row always
+#: carries the effective sampling interval, >= 1), every daemon metric
+#: NULL, and ``missed_samples`` carrying the running drop total.
+#:
+#: Why ``interval_s`` and not a new column: the T1 schema is created
+#: by ``SQLModel.metadata.create_all`` + ``InstanceManager._ensure_postgres_columns``
+#: (the .sql migration runner is a NO-OP on PostgreSQL), so a new
+#: column would need BOTH a DDL mirror and an ``ALTER TABLE`` on every
+#: existing database — a real blast radius on exactly the tier that
+#: was just repaired. The tier discriminator is already the column
+#: every T1 reader filters on (``interval_s IN (30, 60, 3600)``), so
+#: the sentinel is excluded from the history endpoint, the anomaly
+#: minute replay and the minute/hour roll-up WITHOUT any reader change.
+DEGRADED_SENTINEL_INTERVAL_S = 0
+
+#: Re-warn every N consecutive failed platform reads (B4(i)). The
+#: first failure of a streak always warns; a LONG streak re-warns every
+#: N failures so a permanently dark host stays visible without
+#: flooding the log on every tick.
+READ_FAILURE_REWARN_EVERY = 50
 
 #: Bounded maxlen for the sampler-internal instance-row ring when the
 #: facade does not pass one. 8 ticks × (cap + 1 sentinel) covers the
@@ -289,11 +317,16 @@ class Sampler:
         # Hysteresis counter for re-promotion.
         self._clean_ticks = 0
 
-        # F3-style one-shot guard: the first structural read failure
-        # logs the cause once; later failures stay silent (one clear
-        # line ties the degradation to its cause — the flusher's
-        # ``_missing_table_warned`` precedent).
+        # F3-style warning guard: the FIRST structural read failure of
+        # a streak logs the cause once; the rest of the streak stays
+        # quiet until the streak is re-armed. B4(i): the flag is RESET
+        # on a clean tick (a recovered daemon that degrades again MUST
+        # warn again — the old one-shot flag made a second degradation
+        # invisible for the life of the process), and a long streak
+        # re-warns every ``READ_FAILURE_REWARN_EVERY`` failures.
         self._no_snapshot_warned = False
+        # Consecutive failed platform reads (reset on a clean tick).
+        self._consecutive_read_failures = 0
 
     # ── Public lifecycle ───────────────────────────────────────────────
 
@@ -329,7 +362,8 @@ class Sampler:
 
           1. Measure ``tick_t`` with ``time.monotonic`` budget.
           2. If the platform read produced NO snapshot: skip +
-             ``missed_samples++`` + ``ticks_skipped++`` + return
+             ``missed_samples++`` + ``ticks_skipped++`` + write a
+             DEGRADED SENTINEL row (the DB evidence path) + return
              ``None``. The tick is NOT counted as a sample.
           3. If ``tick_t > interval``: skip + ``missed_samples++`` +
              demote one ladder level. Return ``None``.
@@ -338,7 +372,8 @@ class Sampler:
              re-promote after N clean ticks (hysteresis).
           5. If EMA tick cost > ``self_cpu_budget_pct`` % of
              ``effective_interval_s``: double interval + disable
-             deep scans.
+             deep scans. The latch is RELEASED again once the EMA
+             recovers under the base budget (B5(i)).
         """
         interval = self._effective_interval_s
         tick_start = self._wall_clock()
@@ -383,24 +418,58 @@ class Sampler:
             # every single sample was silently dropped — no ring row,
             # so no DB row, so the whole resource-telemetry tier stayed
             # DARK with ``flush.errors == 0`` and ``flush.batches``
-            # climbing. The counter now records the drop, and the
-            # ``missed_samples`` column it feeds lands in T1 so the
-            # database carries the honest count.
+            # climbing. The counter now records the drop.
+            #
+            # HONEST SCOPE OF THE COUNTER (the previous wording here
+            # was FALSE — it claimed the count "lands in T1"):
+            # ``counters.missed_samples`` / ``counters.ticks_skipped``
+            # are RAM-ONLY. They live on the sampler and are visible
+            # at ``/api/resources/self-cost`` (``samples`` /
+            # ``ticks_skipped``); they are NOT written to the DB by
+            # the counter itself. The DB evidence path is the
+            # DEGRADED SENTINEL row below: a T1 row whose
+            # ``interval_s`` is ``DEGRADED_SENTINEL_INTERVAL_S`` (0),
+            # whose daemon metrics are ALL NULL, and whose
+            # ``missed_samples`` column carries the running drop
+            # total. The sentinel is written to the raw ring on the
+            # failure path, so the flusher carries it into T1 exactly
+            # like a real bucket row — on a permanently dark host the
+            # DB therefore carries the drop evidence.
             #
             # ``counters.ticks`` is NOT incremented — same semantics as
             # the overrun path: a tick that produced no sample is not a
             # tick. The ``/self-cost`` ``samples`` field therefore
             # counts real samples and ``ticks_skipped`` counts drops.
+            read_ms = (self._wall_clock() - tick_start) * 1000.0
+            reason = _proc_readers_mod.last_read_reason() or "unknown"
             with self._lock:
                 self.counters.missed_samples += 1
                 self.counters.ticks_skipped += 1
-            if not self._no_snapshot_warned:
+                self._consecutive_read_failures += 1
+                failures = self._consecutive_read_failures
+                missed_total = self.counters.missed_samples
+            # The DEGRADED SENTINEL — the DB evidence path for a drop.
+            self.ring.append(
+                self._degraded_sentinel_row(read_ms, missed_total)
+            )
+            # B4(i): the warning names the CAUSE, re-arms after a
+            # recovery, and re-warns every N consecutive failures so a
+            # long dark streak never goes silent again.
+            if (
+                not self._no_snapshot_warned
+                or failures % READ_FAILURE_REWARN_EVERY == 0
+            ):
                 self._no_snapshot_warned = True
                 logger.warning(
                     "resource-monitor sampler: no daemon snapshot "
-                    "(platform read failed) — samples are being dropped; "
-                    "the resource-telemetry tier stays empty until the "
-                    "platform reader recovers",
+                    "(platform read failed: %s, read_ms=%.1f) — samples "
+                    "are being dropped; the resource-telemetry tier stays "
+                    "empty until the platform reader recovers "
+                    "(consecutive_failures=%d, missed_samples=%d)",
+                    reason,
+                    read_ms,
+                    failures,
+                    missed_total,
                 )
             return None
 
@@ -446,6 +515,19 @@ class Sampler:
             )
             self.counters.ticks += 1
             self.counters.last_tick_cost_ms = tick_cost_ms
+            # B4(i) — a clean tick RE-ARMS the degradation warning: the
+            # daemon recovered, so a later degradation must warn again
+            # (the old one-shot flag stayed silent for the life of the
+            # process) and the consecutive-failure streak restarts.
+            if self._consecutive_read_failures:
+                logger.info(
+                    "resource-monitor sampler: platform read RECOVERED "
+                    "after %d consecutive failed tick(s) — sampling "
+                    "resumed, the degradation warning is re-armed",
+                    self._consecutive_read_failures,
+                )
+                self._consecutive_read_failures = 0
+                self._no_snapshot_warned = False
             # Lag = wall-clock drift between expected_next and actual tick end.
             self.counters.last_tick_lag_ms = max(
                 0.0, (tick_end - expected_next) * 1000.0
@@ -489,6 +571,30 @@ class Sampler:
                     budget_s,
                     self._effective_interval_s,
                 )
+            elif self.counters.self_throttled:
+                # B5(i) — RELEASE the throttle latch. The flag used to
+                # be set once and NEVER cleared, so a single transient
+                # hang (e.g. a hung ``ps``) degraded the sampling
+                # cadence for the LIFETIME of the process. The latch is
+                # released when the tick-cost EMA has recovered back
+                # under the BASE budget (the budget of the UNTHROTTLED
+                # interval — using the doubled budget would re-arm and
+                # release the latch on every tick).
+                base_budget_s = (
+                    self.self_cpu_budget_pct / 100.0
+                ) * float(self.sample_seconds)
+                if self.counters.ema_tick_cost_s <= base_budget_s:
+                    self.counters.self_throttled = False
+                    self._effective_interval_s = float(self.sample_seconds)
+                    self._deep_scan_enabled = True
+                    logger.info(
+                        "resource-monitor sampler self-throttle released: "
+                        "ema_tick_cost_s=%.4f base_budget_s=%.4f "
+                        "interval_s restored to %.2f",
+                        self.counters.ema_tick_cost_s,
+                        base_budget_s,
+                        self._effective_interval_s,
+                    )
 
             self.counters.cumulative_cpu_s += tick_cost_ms / 1000.0
 
@@ -939,6 +1045,64 @@ class Sampler:
             return self.detail_level
         return LADDER_DEFAULT
 
+    def _degraded_sentinel_row(
+        self,
+        read_ms: float,
+        missed_total: int,
+    ) -> dict:
+        """Build the DEGRADED SENTINEL row (a failed platform read).
+
+        The sentinel is the DB EVIDENCE PATH for a dropped sample:
+
+          * ``interval_s`` is ``DEGRADED_SENTINEL_INTERVAL_S`` (0) — a
+            real bucket row always carries the effective sampling
+            interval (>= 1), and every T1 reader filters on the tier
+            discriminator, so the sentinel is excluded from the
+            history endpoint, the anomaly minute replay and the
+            minute/hour roll-up.
+          * EVERY daemon metric is NULL — the tick produced no
+            measurement, so no number is invented.
+          * ``missed_samples`` carries the running drop total (the
+            honest count the RAM counter holds).
+          * ``sample_cost_ms`` carries the elapsed read time so the
+            DB row shows whether the read was slow or instantly dead.
+
+        No new T1 column is used: the schema is owned by
+        ``SQLModel.metadata.create_all`` + ``_ensure_postgres_columns``
+        (the .sql migration runner is a NO-OP on PostgreSQL), and a new
+        column would put a DDL blast radius on exactly the tier that
+        was just repaired.
+        """
+        row: dict = {
+            "interval_s": DEGRADED_SENTINEL_INTERVAL_S,
+            "pid": None,
+            "rss_kb": None,
+            "pss_kb": None,
+            "anon_kb": None,
+            "hw_peak_kb": None,
+            "threads": None,
+            "fds": None,
+            "cpu_user_usec": None,
+            "cpu_sys_usec": None,
+            "child_rss_total_kb": None,
+            "attributed_bytes": None,
+            "unattributed_kb": None,
+            "coverage_pct": None,
+            "sample_cost_ms": read_ms,
+            "sampler_lag_ms": None,
+            "missed_samples": int(missed_total),
+            "ladder_level": self.counters.ladder_level,
+        }
+        # The cgroup columns are absent on a host without cgroup v2 —
+        # a failed read cannot have read them either.
+        for k in (
+            "cg_current_mb", "cg_peak_mb", "cg_anon_mb",
+            "cg_file_mb", "cg_slab_mb", "cg_usage_usec",
+            "cg_throttled_usec", "cg_nr_throttled",
+        ):
+            row[k] = None
+        return row
+
     def _snapshot_to_row(
         self,
         snap: ProcSnapshot,
@@ -1055,6 +1219,8 @@ __all__ = [
     "LIVE_INSTANCES_CAP",
     "OVERFLOW_SENTINEL",
     "ALLOWED_T2_ROW_KEYS",
+    "DEGRADED_SENTINEL_INTERVAL_S",
+    "READ_FAILURE_REWARN_EVERY",
     "SamplerCounters",
     "Sampler",
 ]

@@ -56,6 +56,7 @@ from .rollup import (
     rollup_to_hour,
     rollup_to_minute,
 )
+from .sampler import DEGRADED_SENTINEL_INTERVAL_S
 
 logger = logging.getLogger(__name__)
 
@@ -325,7 +326,7 @@ class Flusher:
         # store. Same for the minute roll-up rows already computed.
         instance_rows: list[dict] = []
         swept = {"raw": 0, "minute": 0, "hour": 0, "instance": 0,
-                 "pid_map": 0}
+                 "pid_map": 0, "degraded": 0}
         minute_rows: list[dict] = []
         hour_rows: list[dict] = []
         # D4 — drained pid-map history (one read per window; the
@@ -339,7 +340,20 @@ class Flusher:
                     # Roll-up is only meaningful when there are rows
                     # to roll. An empty buffer skips the writes (no
                     # transaction content) but the sweep still runs.
-                    minute_rows = rollup_to_minute(self._buffer)
+                    #
+                    # B1: the DEGRADED SENTINEL rows (a tick whose
+                    # platform read failed) carry NO measurement —
+                    # every daemon metric is NULL — so they are NOT
+                    # rolled up. Rolling them in would fold a "no
+                    # sample" marker into the minute/hour tiers and
+                    # make the sample tiers carry phantom buckets.
+                    # They stay in the RAW tier (interval_s = 0), which
+                    # is where the drop evidence belongs.
+                    sample_rows = [
+                        r for r in self._buffer
+                        if r.get("interval_s") != DEGRADED_SENTINEL_INTERVAL_S
+                    ]
+                    minute_rows = rollup_to_minute(sample_rows)
                     hour_rows = rollup_to_hour(minute_rows)
                     rows_written += self._write_raw(conn, self._buffer)
                     # 2. Minute tier — INSERT the roll-up rows.
@@ -359,6 +373,19 @@ class Flusher:
                 # with no interval discrimination (§2.5 raw tier).
                 swept["raw"] = self._sweep(
                     conn, "resource_daemon_bucket", raw_cut, interval_s=30
+                )
+                # B1: the DEGRADED SENTINEL rows live in the raw tier
+                # with ``interval_s = 0`` (the tier discriminator every
+                # reader filters on), so they need their OWN sweep —
+                # without it a permanently dark host would grow the
+                # sentinel rows without bound. Same cutoff as the raw
+                # tier (they are stamped with the flush-time
+                # ``bucket_ts``).
+                swept["degraded"] = self._sweep(
+                    conn,
+                    "resource_daemon_bucket",
+                    raw_cut,
+                    interval_s=DEGRADED_SENTINEL_INTERVAL_S,
                 )
                 swept["minute"] = self._sweep(
                     conn, "resource_daemon_bucket", min_cut, interval_s=60
@@ -505,6 +532,14 @@ class Flusher:
         table with a marker. P1 stores minute rows in
         ``resource_daemon_bucket`` with ``interval_s=60`` and a
         raw_count helper — keeps the table count to the spec 4.
+
+        B2: the minute tier also carries ``cg_anon_kb`` (the cgroup
+        v2 ``memory.anon`` value). The anomaly store binds its
+        ``cgroup.anon_kb`` series to that column ONLY — the daemon's
+        own anonymous pool rides the separate ``daemon.anon_kb``
+        series. Without the column in the minute tier the series
+        could not be restored by the boot replay (which reads the
+        minute tier).
         """
         params = [
             {
@@ -515,6 +550,8 @@ class Flusher:
                 "cpu_sys_usec": r.get("cpu_sys_usec"),
                 "missed_samples": r.get("missed_samples", 0),
                 "anon_kb": r.get("anon_kb"),
+                "cg_anon_kb": r.get("cg_anon_mb", 0) * 1024
+                    if r.get("cg_anon_mb") is not None else None,
                 "threads": r.get("threads"),
                 "fds": r.get("fds"),
                 "sample_cost_ms": r.get("sample_cost_ms"),
@@ -528,8 +565,8 @@ class Flusher:
             "resource_daemon_bucket",
             [
                 "bucket_ts", "interval_s", "rss_kb", "cpu_user_usec",
-                "cpu_sys_usec", "missed_samples", "anon_kb", "threads",
-                "fds", "sample_cost_ms", "attributed_bytes",
+                "cpu_sys_usec", "missed_samples", "anon_kb", "cg_anon_kb",
+                "threads", "fds", "sample_cost_ms", "attributed_bytes",
                 "unattributed_kb", "coverage_pct",
             ],
             idempotent=True,

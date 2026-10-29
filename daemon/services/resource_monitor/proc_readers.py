@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -384,11 +385,85 @@ def _parse_status_kb(text: str) -> dict[str, int]:
 #   * CPU        — ``resource.getrusage(RUSAGE_SELF)`` (utime/stime).
 #   * peak RSS   — ``resource.getrusage().ru_maxrss`` (BYTES on Darwin).
 #
-# Cost: two short ``ps`` forks per sampler tick (~7 ms). The tick
+# Cost: two short ``ps`` forks per sampler tick. The tick
 # interval is 15-60 s and the sampler self-cost budget is 1 % of that
 # interval (>= 150 ms), so the fallback stays far inside the budget.
+# The cost is stated as a RATIO, never as a settled millisecond
+# measurement: on the macOS deployment host the fallback measures in
+# the tens of milliseconds against a 30 s interval — well under 0.1 %
+# of the interval, i.e. >10x headroom against the self-cost budget.
+# The absolute value tracks host load and is NOT a contract.
+#
+# The per-call ``ps`` timeout is ``_PS_TIMEOUT_S`` (1 s) — the tick
+# budget is ~300 ms, so a hung ``ps`` must not block the sampler for
+# seconds; two hung calls would exceed the whole tick budget.
 
-_PS_TIMEOUT_S = 5.0
+_PS_TIMEOUT_S = 1.0
+
+#: The ``ps`` binary is resolved ONCE at import time. A PATH that is
+#: broken at boot used to surface as a ``FileNotFoundError`` swallowed
+#: by :func:`_run_ps` — the SAME silent ``None`` as every other
+#: failure, so the original macOS dark-tier bug could reappear with NO
+#: operator-visible cause. Resolving once (and warning once) makes the
+#: "the binary is not on PATH" case loud at boot instead of silent at
+#: tick time. ``None`` ⇒ the portable fallback cannot read memory.
+_PS_PATH: Optional[str] = shutil.which("ps")
+
+if _PS_PATH is None:  # pragma: no cover - depends on the host PATH
+    logger.warning(
+        "resource-monitor proc_readers: the `ps` binary was NOT found on "
+        "PATH — the portable (no-/proc) host fallback cannot read RSS/VSZ "
+        "or the thread count, so every sampler tick on such a host will "
+        "be a DEGRADED (no-sample) tick",
+    )
+
+
+# ── Read-failure reason vocabulary ─────────────────────────────────────────
+#
+# The sampler's degradation warning must name a CAUSE, not just
+# "(platform read failed)" — a missing binary, a non-zero exit, a
+# timeout and a parse failure are four different operator problems.
+# The vocabulary below is a FIXED, CLOSED set of tokens: it NEVER
+# carries ``ps`` stdout (that would leak process command lines into
+# the log) and never carries an exception repr.
+#
+# The reason is recorded in a module-level slot rather than returned
+# through the read seam because ``_run_ps`` is a MONKEYPATCHED seam in
+# the test corpus (the real ``ps`` is never spawned) — changing its
+# signature would break every caller for no diagnostic gain. The slot
+# is written by the sampler thread only (one reader thread), so the
+# plain assignment is safe.
+
+REASON_PS_BINARY_MISSING = "ps-binary-missing"
+REASON_PS_SPAWN_FAILED = "ps-spawn-failed"
+REASON_PS_TIMEOUT = "ps-timeout"
+REASON_PS_NONZERO_EXIT = "ps-nonzero-exit"
+REASON_PS_EMPTY_OUTPUT = "ps-empty-output"
+REASON_PS_UNPARSABLE = "ps-unparsable-output"
+REASON_PROC_UNREADABLE = "proc-root-unreadable"
+REASON_DARWIN_FALLBACK_FAILED = "darwin-fallback-failed"
+
+_LAST_READ_REASON: Optional[str] = None
+
+
+def reset_read_reason() -> None:
+    """Clear the recorded read-failure reason (called before a read)."""
+    global _LAST_READ_REASON
+    _LAST_READ_REASON = None
+
+
+def last_read_reason() -> Optional[str]:
+    """The reason token for the MOST RECENT failed platform read.
+
+    ``None`` when the last read SUCCEEDED (or when the read seam was
+    replaced by a test double that cannot report a cause).
+    """
+    return _LAST_READ_REASON
+
+
+def _set_read_reason(reason: str) -> None:
+    global _LAST_READ_REASON
+    _LAST_READ_REASON = reason
 
 
 def _run_ps(args: list[str]) -> Optional[str]:
@@ -397,21 +472,36 @@ def _run_ps(args: list[str]) -> Optional[str]:
     Fail-soft by contract: a missing ``ps`` binary, a non-zero exit
     code, an empty stdout, or a timeout all return ``None`` — the
     caller degrades instead of raising into the sampler tick.
+
+    Each failure mode records a DISTINCT reason token (see
+    :func:`last_read_reason`) so the sampler can name the cause. The
+    ``ps`` stdout is NEVER recorded, logged or returned in the reason.
     """
+    if _PS_PATH is None:
+        _set_read_reason(REASON_PS_BINARY_MISSING)
+        return None
     try:
         completed = subprocess.run(
-            ["ps", *args],
+            [_PS_PATH, *args],
             capture_output=True,
             text=True,
             timeout=_PS_TIMEOUT_S,
             check=False,
         )
+    except subprocess.TimeoutExpired:
+        _set_read_reason(REASON_PS_TIMEOUT)
+        return None
     except (OSError, subprocess.SubprocessError):
+        _set_read_reason(REASON_PS_SPAWN_FAILED)
         return None
     if completed.returncode != 0:
+        _set_read_reason(REASON_PS_NONZERO_EXIT)
         return None
     out = (completed.stdout or "").strip()
-    return out or None
+    if not out:
+        _set_read_reason(REASON_PS_EMPTY_OUTPUT)
+        return None
+    return out
 
 
 def _darwin_memory_kb(pid: int) -> Optional[tuple[int, int]]:
@@ -421,10 +511,12 @@ def _darwin_memory_kb(pid: int) -> Optional[tuple[int, int]]:
         return None
     parts = out.split()
     if len(parts) < 2:
+        _set_read_reason(REASON_PS_UNPARSABLE)
         return None
     try:
         return int(parts[0]), int(parts[1])
     except (TypeError, ValueError):
+        _set_read_reason(REASON_PS_UNPARSABLE)
         return None
 
 
@@ -472,6 +564,11 @@ def _read_darwin_daemon_snapshot(
     """
     memory = _darwin_memory_kb(pid)
     if memory is None:
+        if last_read_reason() is None:
+            # The ``ps`` seam did not report a cause (e.g. a test
+            # double replaced it) — name the fallback instead of
+            # staying silent.
+            _set_read_reason(REASON_DARWIN_FALLBACK_FAILED)
         return None
     rss_kb, vsize_kb = memory
 
@@ -704,6 +801,10 @@ def read_proc_snapshot(
     Returns ``None`` on a structurally-broken /proc (the sampler
     treats that as a skip — never crashes).
 
+    A failed read records a REASON token (see :func:`last_read_reason`)
+    so the sampler can name the cause in its degradation warning
+    instead of the opaque "(platform read failed)".
+
     Args:
         proc_root: Injectable /proc root (tests).
         cgroup_root: Injectable cgroup v2 root (tests).
@@ -713,8 +814,13 @@ def read_proc_snapshot(
     proc_root = Path(proc_root)
     cgroup_root = Path(cgroup_root)
 
+    reset_read_reason()
     daemon = read_daemon_snapshot(proc_root, pss_kb=pss_kb)
     if daemon is None:
+        if last_read_reason() is None:
+            # The /proc path (Linux) has no reason vocabulary yet —
+            # name the structural fact instead of staying silent.
+            _set_read_reason(REASON_PROC_UNREADABLE)
         return None
     cgroup = read_cgroup_snapshot(proc_root, cgroup_root)
 
@@ -739,4 +845,6 @@ __all__ = [
     "read_child_snapshot",
     "read_proc_snapshot",
     "read_pss_rollup",
+    "reset_read_reason",
+    "last_read_reason",
 ]

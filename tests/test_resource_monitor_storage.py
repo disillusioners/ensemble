@@ -1441,7 +1441,12 @@ class TestPGTxnAbortWindowSurvival:
         # The window continued past the failed raw write: minute/hour
         # inserts ran, and every sweep DELETE executed.
         deletes = [s for s in conn.executed if "DELETE FROM" in s]
-        assert len(deletes) == 5, conn.executed
+        # SIX sweeps: raw (30) + DEGRADED SENTINEL (0) + minute (60) +
+        # hour (3600) + instance + pid_map. The sentinel sweep is the
+        # sixth — the B1 degraded-sentinel rows live in the raw tier
+        # under ``interval_s = 0`` and need their own retention
+        # predicate (they are never touched by the tier sweeps).
+        assert len(deletes) == 6, conn.executed
         assert any("resource_pid_map" in s for s in deletes)
         # The savepoint rollback cleared the PG abort state.
         assert conn.aborted is False
@@ -1449,7 +1454,7 @@ class TestPGTxnAbortWindowSurvival:
 
     def test_sweep_path_tolerated_error_no_longer_kills_the_window(self):
         """Empty-buffer window: the FIRST sweep DELETE hits 42P01;
-        post-fix the remaining 4 sweeps + the pid_map write still
+        post-fix the remaining 5 sweeps + the pid_map write still
         run (pre-fix: the second sweep died 25P02 and the window
         raised)."""
         conn = self._AbortEmulatingConn()
@@ -1458,7 +1463,9 @@ class TestPGTxnAbortWindowSurvival:
         result = flusher.run_once()
         assert result["rows_written"] == 0
         deletes = [s for s in conn.executed if "DELETE FROM" in s]
-        assert len(deletes) == 5, conn.executed
+        # SIX sweeps — see the sibling test for the breakdown (the
+        # sixth is the B1 DEGRADED SENTINEL sweep, interval_s = 0).
+        assert len(deletes) == 6, conn.executed
         assert conn.aborted is False
 
     def test_non_tolerated_error_now_isolated_by_amplifier(self, caplog):

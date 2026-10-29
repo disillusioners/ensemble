@@ -87,6 +87,9 @@ from sqlalchemy import text
 from daemon.services.resource_monitor.flusher import (
     is_missing_relation_error as _is_missing_relation_error,
 )
+from daemon.services.resource_monitor.sampler import (
+    DEGRADED_SENTINEL_INTERVAL_S,
+)
 from daemon.services import resource_traceback
 from daemon.services.timestamps import to_utc_iso
 
@@ -224,6 +227,27 @@ def _get_monitor(request: Request) -> Optional[Any]:
     return getattr(request.app.state, "resource_monitor", None)
 
 
+def _sample_rows(monitor: Any) -> list[dict]:
+    """The ring rows that carry a REAL sample.
+
+    The raw ring also carries the DEGRADED SENTINEL rows — the tick
+    whose platform read produced no snapshot (the DB evidence path for
+    a dropped sample, written by the sampler so the flusher carries it
+    into T1). A sentinel carries NO measurement: every daemon metric
+    is NULL and its ``interval_s`` is the degraded marker (0).
+
+    The live views must show the last REAL sample, never a sentinel's
+    NULLs — rendering them would show "0.0 MB RSS" for a daemon whose
+    memory was never measured. The sentinel belongs to the DB
+    evidence path, not to the live view.
+    """
+    rows = monitor.ring.snapshot()
+    return [
+        r for r in rows
+        if r.get("interval_s") != DEGRADED_SENTINEL_INTERVAL_S
+    ]
+
+
 def _cpu_pct_from_rows(rows: list[dict]) -> Optional[float]:
     """Compute daemon cpu_pct from the last two ring rows.
 
@@ -262,7 +286,7 @@ async def get_live(request: Request) -> dict:
         return _empty_live_shape()
 
     try:
-        rows = monitor.ring.snapshot()
+        rows = _sample_rows(monitor)
         counters = monitor.sampler_counters
         last = rows[-1] if rows else None
         cpu_pct = _cpu_pct_from_rows(rows)
@@ -387,7 +411,7 @@ def _self_cost_from_monitor(monitor: Any) -> dict:
     """Build the §2.8 /self-cost payload from the monitor."""
     counters = monitor.sampler_counters
     flusher_counters = monitor.flusher_counters
-    rows = monitor.ring.snapshot()
+    rows = _sample_rows(monitor)
     cpu_pct = _cpu_pct_from_rows(rows)
     # buffers_bytes — approximate via ring row count * avg row size;
     # P1 exposes the in-flight flusher buffer + ring byte estimate.
