@@ -10909,11 +10909,12 @@ class InstanceManager:
                 fetch_agent_id: str | None = (
                     None if child_row_missing else (child_agent_id or "agent")
                 )
-                # Sub-shape decision — same gating as the async twin:
-                # the carrier check runs only when the P0 snapshot
-                # says sub-shape (c) is reachable (message AND task
-                # both present), mirroring the original in-scope call
-                # conditions exactly.
+                # Sub-shape decision: (a) needs the P1 content fetch;
+                # (c) needs the pre-scope carrier check — gated on the
+                # P0-observed (c)-reachability (message AND task both
+                # present), mirroring the original in-scope call
+                # conditions exactly so (b)-shape reconciles do not
+                # pay a needless second session checkout.
                 needs_content_fetch = inj.report_message_id is None
                 report_message_id_pre = (
                     None if needs_content_fetch else inj.report_message_id
@@ -10941,10 +10942,13 @@ class InstanceManager:
             if seam_hook is not None:  # pragma: no cover — test-only seam
                 seam_hook(injection_id)
 
-            # ── F8.4 — carrier check OUTSIDE the held scope ──────────────────
-            # ``_has_live_process_report_carrier`` opens its OWN
-            # manager-engine session; called inside the held scope its
-            # checkout wait would park the outer backend idle-in-txn.
+            # ── F8.3 / F8.4 — carrier check OUTSIDE any held manager-engine scope ──
+            # The callee opens its OWN manager-engine session
+            # (``_has_live_process_report_carrier``); called inside the
+            # held scope its checkout wait (bounded by pool_timeout=30 s)
+            # would park the outer backend idle-in-txn. Computed BEFORE
+            # the P2 scope opens; keyed on the P0-observed
+            # report_message_id (write-once per row lifecycle).
             live_carrier_exists: bool | None = None
             if carrier_check_needed:
                 live_carrier_exists = self._has_live_process_report_carrier(
@@ -11199,7 +11203,7 @@ class InstanceManager:
                 # deliver). The F2 dead-parent guard above already
                 # short-circuits on dead parents; we re-check here so
                 # the revival is bounded to alive parents only.
-                # F8.4 (db-pool-idle-txn): the carrier check ran
+                # F8.3/F8.4 (db-pool-idle-txn): the carrier check ran
                 # BEFORE this scope opened (the pre-computed
                 # ``live_carrier_exists`` above) — the callee opens its
                 # OWN manager-engine session, so running it inside this
@@ -11319,12 +11323,15 @@ class InstanceManager:
         timeout could orphan the daemon thread on shutdown — the
         join would expire mid-.result(). 8s leaves a 2s headroom
         for the join; a content fetch that exceeds the budget
-        falls back to ``"[No response content]"`` and the row
-        is re-tried next cycle.
+        falls back to ``"[No response content]"`` and the row is
+        DELIVERED with it (base-parity degraded delivery — nothing
+        re-fetches the content later).
 
         Returns:
-            The child's last assistant content, or
-            ``"[No response content]"`` on missing/empty/failure.
+            The child's last assistant content, ``""`` when the child
+            Instance row is MISSING (the fetch is skipped — the W-1
+            base-parity contract above), or
+            ``"[No response content]"`` on an empty/failed fetch.
         """
         content = ""
         try:
@@ -11387,8 +11394,10 @@ class InstanceManager:
         from inside a manager-engine session scope (F8-a).
 
         Returns:
-            The child's last assistant content, or
-            ``"[No response content]"`` on missing/empty/failure.
+            The child's last assistant content, ``""`` when the child
+            Instance row is MISSING (the fetch is skipped — the W-1
+            base-parity contract above), or
+            ``"[No response content]"`` on an empty/failed fetch.
         """
         content = ""
         try:
@@ -11741,7 +11750,7 @@ class InstanceManager:
             if seam_hook is not None:  # pragma: no cover — test-only seam
                 seam_hook(injection_id)
 
-            # ── F8.3 — carrier check OUTSIDE any held manager-engine scope ──
+            # ── F8.3 / F8.4 — carrier check OUTSIDE any held manager-engine scope ──
             # The callee opens its OWN manager-engine session
             # (``_has_live_process_report_carrier``); called inside the
             # held scope its checkout wait (bounded by pool_timeout=30 s)
@@ -11764,8 +11773,9 @@ class InstanceManager:
                 # is BOUNDED (asyncio.wait_for) — the async twin's hold
                 # must never be unbounded (the sync twin's bound is the
                 # same 8.0 s, the sweep ``stop()`` join budget — W3). A
-                # budget-exceeding fetch degrades to the fallback string
-                # and the row is re-tried next cycle.
+                # budget-exceeding fetch degrades to the fallback content
+                # and the row is DELIVERED with it (base-parity degraded
+                # delivery — nothing re-fetches the content later).
                 try:
                     content = await asyncio.wait_for(
                         self._fetch_subshape_a_content_async(
@@ -12003,14 +12013,25 @@ class InstanceManager:
 
                 # Sub-shape (c) — both exist. Normally the natural
                 # path delivers; HOWEVER this is also the wedge-fix
-                # carrier-revival seam (async variant — see sync
-                # sibling for the full rationale). F8.3
-                # (db-pool-idle-txn): the carrier check ran BEFORE
-                # this scope opened (the pre-computed
+                # carrier-revival seam. When the existing process_report
+                # Task has been CANCELLED (e.g. by a pre-fix Pattern (d)
+                # false-positive) and the parent is alive in
+                # ``WAITING_CHILDREN``, the message sits READY in the
+                # queue with no carrier to deliver it — the parent
+                # never wakes. Detect this sub-shape (c) wedge and
+                # enqueue a fresh carrier + ``notify_work()``.
+                # Idempotent: if any live (PENDING/RUNNING) carrier
+                # already exists for the message, the wedge is NOT
+                # active — skip silently (the existing carrier will
+                # deliver). The F2 dead-parent guard above already
+                # short-circuits on dead parents; we re-check here so
+                # the revival is bounded to alive parents only.
+                # F8.3/F8.4 (db-pool-idle-txn): the carrier check ran
+                # BEFORE this scope opened (the pre-computed
                 # ``live_carrier_exists`` above) — the callee opens its
                 # OWN manager-engine session, so running it inside this
-                # held scope would park the outer backend idle-in-txn
-                # across the callee's checkout wait.
+                # held scope parks the outer backend idle-in-txn across
+                # the callee's checkout wait.
                 #
                 # STRICT CONSUMER (A1 fix, db-pool-idle-txn): the flag is
                 # consumed as ``is False`` — the check MUST have run and

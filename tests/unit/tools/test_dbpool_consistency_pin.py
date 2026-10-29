@@ -140,8 +140,14 @@ def _contract_fix_ids() -> set[str]:
 def _sentinel_markers() -> tuple[str, str]:
     """The BEGIN / END marker text (read from the contract, §6.3)."""
     text = _spec_text()
+    # SYMMETRY: the BEGIN and END markers are matched by the SAME
+    # shape — a character class that excludes the NEWLINE. The END
+    # marker previously used `[^n]*`, which excludes the LETTER n (and
+    # matches newlines): any marker text containing an "n" broke the
+    # match, and a wrong-span match was fed into the exempt-region
+    # strip — a silent wrong-region strip in every W-11 check.
     begin = re.search(r"<!--\s*EXEMPT:BEGIN[^\n]*-->", text)
-    end = re.search(r"<!--\s*EXEMPT:END[^n]*-->", text)
+    end = re.search(r"<!--\s*EXEMPT:END[^\n]*-->", text)
     assert begin is not None, "G-consistency: the EXEMPT:BEGIN marker was not found"
     assert end is not None, "G-consistency: the EXEMPT:END marker was not found"
     return begin.group(0), end.group(0)
