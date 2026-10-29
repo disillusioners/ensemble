@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 
 
+from daemon.constants import MANAGER_POOL_SIZE_DEFAULT
 from daemon.services.readiness import (
     FAILURE_CLASS_HARD_COMPONENT_RED,
     FAILURE_CLASS_PROBE_TIMEOUT,
@@ -41,11 +42,25 @@ from daemon.services.readiness import (
     refresh_readiness_composite,
 )
 
+#: The manager engine's CONFIGURED overflow at the construction site.
+EXPECTED_MAX_OVERFLOW = 10
+
 #: The pack-local declared collected count (NEW packs only).
 EXPECTED_COLLECTED = 3
 
 
 class _SaturatedPool:
+    """A QueuePool-SHAPED stub sitting AT the engine's effective capacity.
+
+    The admission pre-check derives the threshold from the pool's own
+    configured size + configured overflow (2026-10-29: the manager
+    pool size is config-driven, so a static threshold would refuse
+    while overflow slots are still servable). This stub therefore
+    carries the REAL surface: ``size()`` = the default tier, and
+    ``_max_overflow`` = the configured overflow — the sum IS
+    ``MANAGER_POOL_CONFIGURED_CAPACITY`` (the default-tier total).
+    """
+
     def __init__(self) -> None:
         self._n = MANAGER_POOL_CONFIGURED_CAPACITY
 
@@ -53,7 +68,11 @@ class _SaturatedPool:
         return self._n
 
     def size(self) -> int:
-        return 5
+        return MANAGER_POOL_SIZE_DEFAULT
+
+    @property
+    def _max_overflow(self) -> int:
+        return EXPECTED_MAX_OVERFLOW
 
 
 class _SaturatedEngine:

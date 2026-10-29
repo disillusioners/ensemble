@@ -137,19 +137,32 @@ CHECKPOINT_SAVER_PROBE_TIMEOUT_S: float = 1.0
 # not query cost.
 QUEUE_PROBE_TIMEOUT_S: float = 2.0
 
-# F4-A (D-57/D-59): the manager engine's LANE-PINNED CONFIGURED
-# CAPACITY — ``pool_size`` 5 + ``max_overflow`` 10 as passed to
-# ``create_engine`` at ``daemon/repositories/factory.py`` (the
-# construction site). The readiness probes refuse to enter the
-# blocking pool checkout once ``checkedout()`` reaches this value
-# (synchronous ``TimeoutError`` ⇒ ``FAILURE_CLASS_PROBE_TIMEOUT`` ⇒
-# grace-eligibility preserved, no stranded waiter thread). Deliberately
-# NOT read from ``QueuePool._max_overflow`` (private API) and NOT from
-# ``pool.overflow()`` (current overflow — a load probe, not the
-# configured limit); a capacity-equality pin asserts this constant
-# equals the engine's configured capacity at construction so a knob
-# drift REDs the pack.
-MANAGER_POOL_CONFIGURED_CAPACITY: int = 15
+# F4-A (D-57/D-59): the manager engine's DEFAULT-TIER TOTAL CAPACITY
+# DECLARATION — the default pool tier (15 = ``pool_size``'s default,
+# ``daemon/constants.py::MANAGER_POOL_SIZE_DEFAULT``, the default tier
+# of the managed ``limits.manager_pool_size`` knob) + ``max_overflow``
+# 10, as passed to ``create_engine`` at
+# ``daemon/repositories/factory.py`` (the construction site) ⇒ 25.
+#
+# MEANING (2026-10-29 merge-semantics fix — the manager-pool-size knob
+# hotfix made the pool size CONFIG-DRIVEN, so the pre-merge reading
+# "15 = the whole ceiling" is WRONG): this is the DEFAULT-TIER
+# DECLARATION ONLY — it is NOT the refusal threshold. The EFFECTIVE
+# threshold is DERIVED at call time from the pool the engine actually
+# holds (configured pool size + configured max overflow; see
+# ``_manager_pool_effective_capacity``), because
+# ``limits.manager_pool_size`` is operator-raisable and the engine's
+# overflow slots are servable: a STATIC threshold of 15 would refuse
+# admission while 10 overflow slots are still free — a self-inflicted
+# outage. A capacity-equality pin reconciles THIS declaration against
+# the construction site, so a drift in the default tier or in the
+# overflow REDs the pack (D-57's purpose, re-derived for the
+# config-driven construction).
+#
+# Deliberately NOT read from the pool at import time (the engine does
+# not exist yet) and NOT from the private ``_max_overflow`` alone —
+# the derivation happens per call, defensively.
+MANAGER_POOL_CONFIGURED_CAPACITY: int = 25
 
 # Task-status literal for RUNNING (TaskStatus.RUNNING.value in
 # daemon/repositories/task/models.py). Kept as a literal so this
@@ -1485,12 +1498,54 @@ async def refresh_readiness_composite(
     )
 
 
+def _manager_pool_effective_capacity(pool: Any) -> Optional[int]:
+    """The pool's EFFECTIVE total capacity (configured size + overflow).
+
+    Resolved from the pool object the engine ACTUALLY holds, AT CALL
+    TIME — the manager engine's size is config-driven
+    (``limits.manager_pool_size``) and can differ between boots, so a
+    module-level threshold is never authoritative:
+
+    * ``pool.size()`` — the PUBLIC ``QueuePool`` accessor for the
+      CONFIGURED pool size (SQLAlchemy returns ``_pool.maxsize``);
+    * ``pool._max_overflow`` — PRIVATE (no public accessor) ⇒ read
+      defensively via ``getattr``.
+
+    Returns ``None`` when the capacity cannot be resolved (a pool
+    without ``size()`` — StaticPool/NullPool/test doubles — or an
+    unreadable/negative overflow). The caller MUST then NOT refuse:
+    an unresolvable capacity is NOT proof of exhaustion, and refusing
+    on a guess would strand a probe that still had servable slots
+    (fail-open ON REFUSAL — the safe direction; the probe then behaves
+    exactly as it did before the pre-check existed).
+    """
+    size_accessor = getattr(pool, "size", None)
+    if size_accessor is None:
+        return None
+    try:
+        base = int(size_accessor())
+    except (TypeError, ValueError):
+        return None
+    overflow = getattr(pool, "_max_overflow", None)
+    if overflow is None:
+        return None
+    try:
+        overflow = int(overflow)
+    except (TypeError, ValueError):
+        return None
+    if overflow < 0:
+        return None
+    return base + overflow
+
+
 def _refuse_pool_admission_at_capacity(engine: Engine) -> None:
     """F4-A: probe-scoped acquisition admission pre-check.
 
     Runs at the top of each probe body, immediately BEFORE
-    ``engine.connect()``. When the manager pool is at its configured
-    capacity (``MANAGER_POOL_CONFIGURED_CAPACITY``) the probe raises
+    ``engine.connect()``. When the manager pool is at its EFFECTIVE
+    capacity (the engine's own configured pool size + configured
+    overflow — resolved per call by
+    ``_manager_pool_effective_capacity``) the probe raises
     ``TimeoutError`` SYNCHRONOUSLY instead of entering the blocking
     checkout — ``asyncio.wait_for``'s cancellation cannot stop a
     running ``to_thread`` worker, so a probe that enters a saturated
@@ -1506,11 +1561,19 @@ def _refuse_pool_admission_at_capacity(engine: Engine) -> None:
     between this pre-check and ``engine.connect()`` can still strand
     the probe thread for up to ``pool_timeout`` = 30 s.
 
-    Shape guard: a pool WITHOUT ``checkedout`` cannot be "at capacity"
-    in the QueuePool sense (StaticPool — SQLAlchemy's REAL sqlite pool,
+    Two shape guards, both fail-safe (NEVER refuse on a guess):
+    a pool WITHOUT ``checkedout`` cannot be "at capacity" in the
+    QueuePool sense (StaticPool — SQLAlchemy's REAL sqlite pool,
     production-shaped; NullPool; test doubles) ⇒ the pre-check SKIPS
-    for such pools — no refusal, no crash, no warning escalation. The
-    manager engine is a QueuePool and keeps the current behavior.
+    for such pools; and a pool whose EFFECTIVE capacity cannot be
+    resolved (no ``size()``; unreadable overflow) ⇒ the pre-check
+    SKIPS as well (fail-open ON REFUSAL). The manager engine is a
+    QueuePool and keeps the current behavior.
+
+    The threshold is NEVER a static literal (2026-10-29): the manager
+    pool size is config-driven and operator-raisable, so a fixed
+    threshold would refuse admission while overflow slots are still
+    servable — a self-inflicted outage.
     """
     pool = getattr(engine, "pool", None)
     if pool is None:  # pragma: no cover — defensive (Engine always has one)
@@ -1521,11 +1584,16 @@ def _refuse_pool_admission_at_capacity(engine: Engine) -> None:
         # skip, never crash (2026-10-29 functional gate: 11 net-new
         # reds from StaticPool/FakeEngine shapes; see docstring).
         return
-    if checkedout() >= MANAGER_POOL_CONFIGURED_CAPACITY:
+    capacity = _manager_pool_effective_capacity(pool)
+    if capacity is None:
+        # Fail-open ON REFUSAL: an unresolvable capacity is not proof
+        # of exhaustion — never refuse on a guess.
+        return
+    in_use = checkedout()
+    if in_use >= capacity:
         raise TimeoutError(
             "readiness probe admission refused: manager pool at "
-            "configured capacity "
-            f"({checkedout()}/{MANAGER_POOL_CONFIGURED_CAPACITY})"
+            f"effective capacity ({in_use}/{capacity})"
         )
 
 
