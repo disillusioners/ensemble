@@ -128,6 +128,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from sqlalchemy.exc import IntegrityError
+
+from ..repositories.mission_record.repository import (
+    MissionEpochConflictError,
+)
 from sqlmodel import Session, select
 
 from ..repositories.instance.models import Instance, InstanceStatus
@@ -549,15 +553,15 @@ class MissionRecordService:
         )
         try:
             return self._repo.insert_mission(record, session=session)
-        except IntegrityError:
-            # Lost a unique race — the concurrent mint won. The
-            # repository upsert already handles the measured trigger
-            # (the CONCURRENT DOUBLE-MINT for the same anchor —
-            # D-51: on the ``RETURNING`` loser signal (no returned
-            # row) it re-resolves via the
-            # anchor-scoped probe and returns the winner WITHOUT
-            # raising), so this branch is the residual belt for any
-            # OTHER IntegrityError shape.
+        except MissionEpochConflictError:
+            # The repository's CONFLICT guard — the one shape the belt
+            # may re-resolve (a genuine open-epoch conflict whose
+            # anchor-scoped re-resolve found no winner INSIDE the
+            # repository session). T-M7: the previous anchor-keyed
+            # ``except IntegrityError`` ALSO caught NON-conflict shapes
+            # (NOT NULL / FK / check violations — and the repository's
+            # own fail-closed guards) and silently converted them into
+            # "mint succeeded"; those now PROPAGATE unchanged.
             if session is not None:
                 # The caller's transaction is poisoned on PG after a
                 # statement-level IntegrityError — fail the mint and

@@ -49,6 +49,7 @@ import pytest
 from sqlalchemy import text
 from sqlmodel import SQLModel, create_engine
 
+from daemon.repositories.instance.models import Instance as _IINSTANCE
 from daemon.repositories.mission_record.models import (
     OPEN_EPOCH_STATUS_SQL,
     MissionRecord,
@@ -56,7 +57,7 @@ from daemon.repositories.mission_record.models import (
 from daemon.repositories.mission_record.repository import MissionRecordRepository
 
 #: The pack-local declared collected count (NEW packs only).
-EXPECTED_COLLECTED = 7
+EXPECTED_COLLECTED = 8
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _REPO_PATH = _REPO_ROOT / "daemon" / "repositories" / "mission_record" / "repository.py"
@@ -77,7 +78,15 @@ def mint_engine():
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "mission_mint.db"
         engine = create_engine(f"sqlite:///{path}")
-        SQLModel.metadata.create_all(engine, tables=[MissionRecord.__table__])
+        SQLModel.metadata.create_all(
+            engine,
+            tables=[
+                MissionRecord.__table__,
+                # T-M7 pin: the mint-path existence contract reads the
+                # instances table.
+                _IINSTANCE.__table__,
+            ],
+        )
         try:
             yield engine
         finally:
@@ -255,3 +264,111 @@ class TestF6cStaticIndexPredicate:
             f"exists in models.py: {code_copies!r} — the constant is the "
             "single source of truth"
         )
+
+
+class TestTm7NonConflictIntegrityErrorPropagates:
+    """T-M7 — ONLY a genuine open-epoch CONFLICT maps to the re-resolve
+    belt; a NON-conflict IntegrityError MUST PROPAGATE.
+
+    After F6 the repository's own-session path absorbs the genuine
+    conflict (ON CONFLICT DO NOTHING + the RETURNING loser signal), so
+    an IntegrityError reaching the service's belt on the own-session
+    path is a DIFFERENT shape — a NOT NULL / FK / check violation, or
+    the repository's own fail-closed guards. The pre-T-M7 handler
+    (``except IntegrityError``) silently converted those into "mint
+    succeeded" (it re-resolved the anchor's open epoch and returned
+    it) — a fail-open surface. The narrow ``MissionEpochConflictError``
+    catch closes it.
+
+    Plantable mutation (the T-M7 leg): revert the catch to
+    ``except IntegrityError`` ⇒ the planted non-conflict error is
+    swallowed and the anchor's existing epoch is returned ⇒ the
+    assert-raises REDs.
+    """
+
+    def test_a_non_conflict_integrity_error_propagates_out_of_the_belt(
+        self, mint_engine
+    ):
+        from daemon.repositories.instance.models import Instance as IInstance
+        from sqlmodel import Session as S
+
+        # The anchor must EXIST (the mint-path existence contract) and
+        # carry an OPEN epoch — so the (hypothetical) belt's
+        # anchor-scoped re-resolve WOULD find a winner if it (wrongly)
+        # ran for a non-conflict error.
+        with S(mint_engine) as s:
+            s.add(
+                IInstance(
+                    instance_id="anchor-tm7",
+                    agent_id="leader",
+                    agent_dir="/tmp/leader",
+                    agent_name="leader",
+                    status="idle",
+                    version=1,
+                    instance_metadata={},
+                )
+            )
+            s.commit()
+        repo = MissionRecordRepository(mint_engine)
+        existing = repo.insert_mission(
+            MissionRecord(
+                anchor_instance_id="anchor-tm7",
+                founding_source="boot",
+                epoch_seq=1,
+            )
+        )
+
+        from daemon.services.mission_record_service import MissionRecordService
+        from daemon.repositories.mission_record.repository import (
+            MissionEpochConflictError,
+        )
+        from sqlalchemy.exc import IntegrityError
+
+        service = MissionRecordService(mint_engine)
+
+        # Plant: the repository raises a NON-conflict IntegrityError
+        # (a NOT NULL violation shape — NOT MissionEpochConflictError).
+        planted = IntegrityError(
+            statement='INSERT INTO mission_records ... (founding_source)',
+            params={},
+            orig=RuntimeError('null value in column "founding_source" '
+                              "violates not-null constraint"),
+        )
+        original = MissionRecordRepository.insert_mission
+
+        def _plant(self, record, *, session=None):
+            raise planted
+
+        MissionRecordRepository.insert_mission = _plant
+        try:
+            import pytest as _pytest
+            with _pytest.raises(IntegrityError) as excinfo:
+                service._mint_epoch_locked(
+                    actor_instance_id="anchor-tm7",
+                    founding_source="boot",
+                    session=None,
+                )
+            # It must be the PLANTED error — NOT the belt's silent
+            # conversion (which would have returned `existing`).
+            assert excinfo.value is planted
+        finally:
+            MissionRecordRepository.insert_mission = original
+
+        # And the dedicated conflict type DOES map to the belt (the
+        # anchor-scoped re-resolve finds the winner) — the one shape it
+        # is for.
+        def _plant_conflict(self, record, *, session=None):
+            raise MissionEpochConflictError(
+                "insert_mission: open-epoch conflict for anchor anchor-tm7..."
+            )
+
+        MissionRecordRepository.insert_mission = _plant_conflict
+        try:
+            result = service._mint_epoch_locked(
+                actor_instance_id="anchor-tm7",
+                founding_source="boot",
+                session=None,
+            )
+            assert result is not None and result.mission_id == existing.mission_id
+        finally:
+            MissionRecordRepository.insert_mission = original

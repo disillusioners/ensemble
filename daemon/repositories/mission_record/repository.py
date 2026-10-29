@@ -22,9 +22,8 @@ import logging
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import update
+from sqlalchemy import text, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import text
 from sqlmodel import Session, select
 
 from .models import (
@@ -41,6 +40,27 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
 
 logger = logging.getLogger(__name__)
+
+
+class MissionEpochConflictError(IntegrityError):
+    """A GENUINE open-epoch conflict the repository could not resolve.
+
+    Raised ONLY at the repository's conflict guard (the upsert lost the
+    race AND the anchor-scoped re-resolve found no winner) — the one
+    shape the service's mint belt may legitimately re-resolve once
+    more. Every OTHER ``IntegrityError`` (NOT NULL / FK / check
+    violations) is a DIFFERENT shape and must propagate unchanged
+    (T-M7: the previous anchor-keyed catch silently converted those
+    into "mint succeeded").
+    """
+
+    def __init__(self, message: str) -> None:
+        # T-M6: a REAL ``orig`` — ``IntegrityError(message, None, None)``
+        # put the prose in the SQL slot and left ``orig=None``, which
+        # defeats standard ``isinstance(exc.orig, ...)`` classification.
+        super().__init__(
+            statement=message, params=None, orig=RuntimeError(message)
+        )
 
 
 class MissionRecordError(RuntimeError):
@@ -594,12 +614,10 @@ class MissionRecordRepository:
                         )
                 if winner is not None:
                     return winner
-                raise IntegrityError(
+                raise MissionEpochConflictError(
                     "insert_mission: open-epoch conflict for anchor "
                     f"{(record.anchor_instance_id or '')[:8]}... but no "
-                    "epoch row could be re-resolved",
-                    None,
-                    None,
+                    "epoch row could be re-resolved"
                 )
             # The Core insert does not attach the ORM instance to the
             # session — re-read by the PK the insert carried so the
@@ -609,11 +627,13 @@ class MissionRecordRepository:
             if stored is not None:
                 return stored
             raise IntegrityError(
-                "insert_mission: the mint reported success but the "
-                f"minted epoch row {(record.mission_id or '')[:8]}... "
-                "is not readable post-commit",
-                None,
-                None,
+                statement=(
+                    "insert_mission: the mint reported success but the "
+                    f"minted epoch row {(record.mission_id or '')[:8]}... "
+                    "is not readable post-commit"
+                ),
+                params=None,
+                orig=RuntimeError("post-commit read-back failed"),
             )
 
     def insert_commission(
