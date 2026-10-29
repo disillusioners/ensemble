@@ -32,9 +32,9 @@ from daemon.checkpoint_perf import (
     time_saver_op,
 )
 from daemon.checkpoint_metrics import (
-    checkpoint_list_total,
+    ensemble_checkpoint_list_total as checkpoint_list_total,
+    ensemble_checkpoint_op_seconds as saver_op_latency_seconds,
     reset_for_tests as reset_metrics_for_tests,
-    saver_op_latency_seconds,
 )
 
 
@@ -956,10 +956,16 @@ class TestLogSaverOpPerAllFour:
 class TestMetricsSurface:
     """AC-5.2: the metric surface exposes both the counter and the histogram.
 
-    * ``message_api_checkpoint_list_total`` — counter. Expected normal
+    * ``ensemble_checkpoint_list_total`` — counter. Expected normal
       value 0 (post-PR3 alist is gone from the live path).
-    * ``message_api_saver_op_latency_seconds`` — histogram, labeled
-      by ``op``. Bucket layout is Prometheus-style (10ms..10s).
+    * ``ensemble_checkpoint_op_seconds`` — histogram, labeled
+      by ``op``. Bucket layout is Prometheus-style (10ms..300s — the
+      legacy 10ms..10s set EXTENDED, per the metrics plan CR-3).
+
+    The legacy names (``message_api_checkpoint_list_total`` /
+    ``message_api_saver_op_latency_seconds``) remain as one-release
+    DEPRECATED ALIASES of the same series — the tests below pin the
+    canonical names so the alias can drop cleanly.
 
     A minimal internal collector lives in
     ``daemon/checkpoint_metrics.py``. The wire format is the Prometheus
@@ -970,8 +976,8 @@ class TestMetricsSurface:
 
     def test_counter_and_histogram_are_exposed(self):
         """Both singletons exist at module level with the contract names."""
-        assert checkpoint_list_total.name == "message_api_checkpoint_list_total"
-        assert saver_op_latency_seconds.name == "message_api_saver_op_latency_seconds"
+        assert checkpoint_list_total.name == "ensemble_checkpoint_list_total"
+        assert saver_op_latency_seconds.name == "ensemble_checkpoint_op_seconds"
         assert saver_op_latency_seconds.label_keys == ("op",)
 
     def test_counter_starts_at_zero(self):
@@ -1063,9 +1069,9 @@ class TestMetricsSurface:
         from daemon.checkpoint_metrics import render_metrics
         rendered = render_metrics()
         # Counter shape: `name <value>` (no labels on the counter).
-        assert "message_api_checkpoint_list_total 1" in rendered
+        assert "ensemble_checkpoint_list_total 1" in rendered
         # Histogram shape: at least one `_bucket{op="aget",le="..."}` line.
-        assert "message_api_saver_op_latency_seconds_bucket" in rendered
+        assert "ensemble_checkpoint_op_seconds_bucket" in rendered
         assert 'op="aget"' in rendered
         # +Inf bucket must be present (the implicit top bucket).
         assert 'le="+Inf"' in rendered

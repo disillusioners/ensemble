@@ -339,7 +339,7 @@ class TestReadReviveRead:
         """Read → revive → read: the FOUR AC-13.3 sub-assertions (a)-(d)."""
         from daemon.persistence import get_instance_messages
         from daemon.checkpoint_metrics import (
-            checkpoint_list_total,
+            ensemble_checkpoint_list_total as checkpoint_list_total,
             reset_for_tests,
         )
 
