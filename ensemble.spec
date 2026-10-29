@@ -26,6 +26,18 @@ a = Analysis(
         # ``_verify_vendored_mermaid_sha256`` — a missing/tampered
         # asset fails closed (HTTP 500 + operator log line).
         ('daemon/services/live_views/assets', 'daemon/services/live_views/assets'),
+        # Metrics-collection P0 (T6) — the frozen tool-category artifact.
+        # ``daemon/checkpoint_metrics.py`` resolves it against the
+        # repository root (``Path(__file__).parents[1]``), so the dest
+        # path mirrors the source-relative shape: in a frozen build the
+        # lookup resolves under ``_MEIPASS`` and finds the extracted
+        # data file.  Without it the runtime would fall back to a live
+        # registry derivation whose category set can DIFFER from the
+        # canonical artifact (catalog §8.6: the artifact is canonical —
+        # e.g. ``doc_maintenance`` is registered only inside tool
+        # factories, so a live derivation misses it) and the deployed
+        # F0.4 freeze marker would describe the wrong label set.
+        ('.agents/shared/metrics/tool-categories.json', '.agents/shared/metrics'),
     ],
     hiddenimports=[
         # Tiktoken plugin system

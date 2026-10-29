@@ -1849,14 +1849,18 @@ class DaemonSettingEntry(BaseModel):
 
     Value typing is per the managed key's ``value_type`` — ``int``
     for v1's single key (``limits.llm_concurrency``); future typed
-    keys widen these annotations per-key at the registry.
+    keys widen these annotations per-key at the registry. The
+    metrics-collection P0 knobs (``limits.metrics_enabled`` — bool,
+    ``limits.metrics_textfile_dir`` — str) are the first non-int
+    registry entries, so the value annotations are widened to the
+    registry's four value types (``int | str | bool | float``).
     """
 
     key: str = Field(
         ...,
         description="Managed-key identifier (registry-gated), e.g. 'limits.llm_concurrency'.",
     )
-    value: int = Field(
+    value: int | str | bool | float = Field(
         ...,
         description=(
             "The BOOT-APPLIED running truth (snapshot.applied_value — "
@@ -1875,11 +1879,11 @@ class DaemonSettingEntry(BaseModel):
             "literal snapshot > registry default."
         ),
     )
-    default: int = Field(
+    default: int | str | bool | float = Field(
         ...,
         description="Registry default (the ladder's tier 4).",
     )
-    env_value: int | None = Field(
+    env_value: int | str | bool | float | None = Field(
         default=None,
         description=(
             "The env tier's parsed, validated value (os.environ "
@@ -1887,14 +1891,14 @@ class DaemonSettingEntry(BaseModel):
             "or holds an invalid value."
         ),
     )
-    yaml_value: int | None = Field(
+    yaml_value: int | str | bool | float | None = Field(
         default=None,
         description=(
             "The yaml tier's parsed, validated literal — omitted when "
             "the key is not literally present in config.yaml."
         ),
     )
-    db_override: int | None = Field(
+    db_override: int | str | bool | float | None = Field(
         default=None,
         description=(
             "The live DB override row's validated value — omitted "
@@ -1953,10 +1957,13 @@ class DaemonSettingUpdate(BaseModel):
     ``value`` is typed per the managed key at v1 (int — the single
     registry entry's value_type). Non-integral bodies are rejected by
     pydantic (422); out-of-range ints by the registry validator
-    (422, e.g. ge=1).
+    (422, e.g. ge=1). The metrics-collection P0 knobs widened the
+    registry's value types (bool / str), so the body annotation is
+    widened to the registry's four value types; the REGISTRY validator
+    remains the one truth for parsing + bounds.
     """
 
-    value: int = Field(
+    value: int | str | bool | float = Field(
         ...,
         description=(
             "The override value to persist (validated against the "

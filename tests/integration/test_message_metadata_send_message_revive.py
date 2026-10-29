@@ -392,7 +392,10 @@ class TestSendMessageRevive:
         self, _probe_pg, armed_alist_fixture, monkeypatch
     ):
         """COMPLETED instance + enqueue_message → revived, read unchanged, alist-free."""
-        from daemon.checkpoint_metrics import checkpoint_list_total, reset_for_tests
+        from daemon.checkpoint_metrics import (
+            ensemble_checkpoint_list_total as checkpoint_list_total,
+            reset_for_tests,
+        )
         from daemon.persistence import get_instance_messages
         from sqlmodel import Session, select
 

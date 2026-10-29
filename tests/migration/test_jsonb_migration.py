@@ -73,6 +73,14 @@ from daemon.repositories.infra import models as _infra_models  # noqa: F401
 # formerly 17).
 from daemon.repositories.infra.types import JSONBType
 
+# Shared-ensemble_test PG hazard: the ``fresh_pg_schema`` fixture below
+# DROPs/CREATEs the public schema. Under ``-n auto`` these tests land on
+# different xdist workers and destroy each other's schema mid-test
+# (UniqueViolation ``pg_type_typname_nsp_index``, UndefinedTable).
+# Quarantined from worker parallelism; run serially via
+# ``pytest --override-ini="addopts=" -m no_xdist``.
+pytestmark = pytest.mark.no_xdist
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants — the 17 (table, column) pairs the DO block converts.

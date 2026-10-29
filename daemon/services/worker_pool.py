@@ -250,7 +250,12 @@ class Worker(threading.Thread):
                 lane, D2/D10.5). A CLAIM ARGUMENT, not processor
                 state.
         """
-        super().__init__(daemon=True)
+        # Thread naming (metrics-collection P0 T9): the thread-CPU
+        # family groups threads by name, so a worker must be honest
+        # about its lane from the FIRST render — an unnamed thread
+        # folds into the "other" residual. The lane is the CLAIM lane
+        # ("default" / "chat"), so BOTH worker pools are covered.
+        super().__init__(daemon=True, name=f"worker-{lane}-{worker_id}")
         self.worker_id = worker_id
         self._task_processor = task_processor
         self._worker_pool = worker_pool

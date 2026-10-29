@@ -1,7 +1,7 @@
 """T5.5 — FR-3 perf matrix: cost ∝ page size, NOT history depth.
 
 PR5 acceptance gate on REAL PostgreSQL (binding). Asserts the FR-3
-property: ``message_api_checkpoint_list_total`` cost scales with page
+property: ``ensemble_checkpoint_list_total`` cost scales with page
 size ONLY, NOT with checkpoint history depth. Post-PR3 the read path
 is aget-only + ``message_metadata`` enrichment, so adding more
 checkpoints to the thread's history MUST NOT change the per-message
