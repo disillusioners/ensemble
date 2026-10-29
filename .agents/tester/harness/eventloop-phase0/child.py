@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
 import json
 import os
 import re
@@ -135,8 +136,12 @@ class RoundTripCounter:
             bucket["count"] += 1
             if on_loop:
                 bucket["on_loop"] += 1
-            sh = bucket["by_shape"].setdefault(shape, {"count": 0, "total_s": 0.0})
+            sh = bucket["by_shape"].setdefault(
+                shape, {"count": 0, "on_loop": 0, "total_s": 0.0}
+            )
             sh["count"] += 1
+            if on_loop:
+                sh["on_loop"] += 1
             sh["total_s"] += dur
 
     # -- snapshot / reset ---------------------------------------------------
@@ -148,7 +153,17 @@ class RoundTripCounter:
                         "count": v["count"],
                         "on_loop": v["on_loop"],
                         "by_shape": {
-                            s: {"count": sv["count"], "total_s": round(sv["total_s"], 4)}
+                            s: {
+                                "count": sv["count"],
+                                # PER-SHAPE on-loop attribution (repair
+                                # 2026-10-30): the architect's G9 fence
+                                # (§6.3) is stated over the on-loop
+                                # SHAPE-SET, which the pre-repair counter
+                                # could not express (it only kept the
+                                # per-request total).
+                                "on_loop": sv.get("on_loop", 0),
+                                "total_s": round(sv["total_s"], 4),
+                            }
                             for s, sv in sorted(v["by_shape"].items())
                         },
                     }
@@ -182,11 +197,18 @@ class TaggingMiddleware:
     A plain ASGI middleware (NOT ``BaseHTTPMiddleware``): the inner app
     runs in THIS task, so the contextvar set here is visible to the
     endpoint's direct sync-DB calls (the defect under measurement).
+
+    REPAIR 2026-10-30: the middleware also records the response
+    ``body_sha256`` + ``body_len`` per request.  The G5 response-bytes
+    gate is a BASE↔HEAD byte-diff of these hashes; without them the gate
+    had no artifact to diff (a silent no-op gate).
     """
 
-    def __init__(self, app, recorder: dict[str, list]) -> None:  # noqa: ANN001
+    def __init__(self, app, recorder: dict[str, list],  # noqa: ANN001
+                 body_meta: dict[str, list] | None = None) -> None:
         self.app = app
         self.recorder = recorder
+        self.body_meta = body_meta if body_meta is not None else {}
 
     async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
         if scope["type"] != "http":
@@ -204,11 +226,18 @@ class TaggingMiddleware:
         token = REQ_TAG.set(tag) if tag is not None else None
         t0 = time.perf_counter()
         status_holder: list[int] = []
+        digest = hashlib.sha256()
+        body_len = 0
         original_send = send
 
         async def wrapped_send(message) -> None:  # noqa: ANN001
+            nonlocal body_len
             if message["type"] == "http.response.start":
                 status_holder.append(message["status"])
+            elif message["type"] == "http.response.body":
+                chunk = message.get("body") or b""
+                body_len += len(chunk)
+                digest.update(chunk)
             await original_send(message)
 
         try:
@@ -221,6 +250,11 @@ class TaggingMiddleware:
                 self.recorder.setdefault(tag, []).append(
                     (dur, status_holder[0] if status_holder else 0)
                 )
+                self.body_meta.setdefault(tag, []).append({
+                    "sha256": digest.hexdigest(),
+                    "len": body_len,
+                    "status": status_holder[0] if status_holder else 0,
+                })
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -238,6 +272,8 @@ class DaemonChild:
         self.port = port
         self.counter = RoundTripCounter()
         self.latencies: dict[str, list[tuple[float, int]]] = {}
+        #: tag -> [{sha256, len, status}] — the G5 byte-diff artifact.
+        self.body_meta: dict[str, list[dict]] = {}
         self.app = None
         self.manager = None
         self.server = None
@@ -301,7 +337,10 @@ class DaemonChild:
         self.app = create_app()
         # HARNESS-ONLY routes/middleware — after create_app, before serve.
         self._mount_harness_routes()
-        self.app.add_middleware(TaggingMiddleware, recorder=self.latencies)
+        self.app.add_middleware(
+            TaggingMiddleware, recorder=self.latencies,
+            body_meta=self.body_meta,
+        )
 
         self._lifespan_cm = lifespan(self.app)
         await self._lifespan_cm.__aenter__()

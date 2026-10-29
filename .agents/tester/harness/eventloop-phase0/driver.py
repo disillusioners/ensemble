@@ -37,6 +37,8 @@ from typing import Any
 
 import httpx
 
+from common import stats_ms
+
 # ── the censused endpoint shapes (FE-verbatim) ───────────────────────────
 
 SHAPES: dict[str, str] = {
@@ -168,9 +170,17 @@ def window_lag(
             "p50_s": round(pct(50), 4),
             "p95_s": round(pct(95), 4),
             "max_s": round(max(series), 4),
+            # REPAIR 2026-10-30: the RAW series, so the architect's §6.4
+            # G4 fence (STALL count above TICK + 0.25 s, paired BASE↔HEAD)
+            # is computable.  A p95/max summary alone cannot express a
+            # STALL COUNT, and the count is the fence's discriminating
+            # signal (p95 is invisible to a regression affecting <5% of
+            # ticks — architect §6.4).
+            "series": [round(float(v), 4) for v in series],
         })
     else:
         out["samples"] = 0
+        out["series"] = []
     return out
 
 
@@ -407,6 +417,79 @@ async def run_profile(
         if own_client:
             await client.aclose()
     return result
+
+
+async def synthetic_handler_load(
+    child,  # DaemonChild
+    duration_s: float,
+    *,
+    concurrency: int = 4,
+) -> dict[str, Any]:
+    """The architect's SYNTHETIC HANDLER-LOAD LEG (§6.1/§6.4).
+
+    WHY THIS EXISTS — MEASURED, not theoretical.  The wedge-capture fires
+    on a thread that SUSTAINS CPU, which at full scale is a jobs-enrichment
+    worker, not the loop thread.  When it fires it samples every thread,
+    and whether the loop thread happens to be inside the sync-DB instances
+    frames at that INSTANT is luck:
+
+      * the committed pre-repair full run: 4/5 captures had the family
+        frames on the loop thread;
+      * the repaired harness's first full run (2026-10-29T23:05Z, same
+        tree, same fixture, same knobs): 0/8 — every capture found the
+        loop thread idle in ``selectors.select``.
+
+    A BASE positive control that fires 0/8 is not a control.  The
+    architect prescribed the remedy: "the synthetic handler-load leg must
+    supply >=1 capture at BASE and 0 instances-path frames at HEAD"
+    (§6.1), and flagged its absence as an unscheduled tester-lane
+    deliverable (§6.4).
+
+    WHAT IT DOES.  Drives the two 100%-on-loop instance shapes
+    (BFS(100) and flat(10)) continuously from a small worker pool for the
+    capture window, so the loop spends ~100% of that window inside — or
+    immediately adjacent to — the sync-DB frames instead of a few percent.
+    The sampling target becomes the whole window rather than a lucky
+    instant.
+
+    MODE-NEUTRAL BY CONSTRUCTION.  The SAME load runs in both modes and
+    issues the SAME statements; at HEAD they are simply off the loop, so
+    the pin reads 0 while the load still proves the instrument was armed.
+    The request COUNT therefore differs by mode (the loop is the
+    bottleneck at BASE) — it is reported, never gated as an equality.
+    """
+    deadline = time.monotonic() + duration_s
+    stats: dict[str, Any] = {
+        "requests": 0, "errors": 0, "latencies_s": [],
+        "concurrency": concurrency, "duration_s": duration_s,
+        "shapes": ["instances_bfs_home", "instances_flat_badge"],
+    }
+    lock = asyncio.Lock()
+
+    async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{child.port}") as client:
+        async def worker(slot: int) -> None:
+            i = slot
+            while time.monotonic() < deadline:
+                shape = stats["shapes"][i % len(stats["shapes"])]
+                i += 1
+                t0 = time.perf_counter()
+                try:
+                    r = await client.get(SHAPES[shape], timeout=180.0)
+                    async with lock:
+                        stats["latencies_s"].append(round(time.perf_counter() - t0, 4))
+                        if r.status_code == 200:
+                            stats["requests"] += 1
+                        else:
+                            stats["errors"] += 1
+                except Exception:  # noqa: BLE001
+                    async with lock:
+                        stats["errors"] += 1
+
+        await asyncio.gather(*(worker(s) for s in range(concurrency)))
+
+    lat = stats.pop("latencies_s")
+    stats["latency"] = stats_ms(lat)
+    return stats
 
 
 async def wait_for_capture(

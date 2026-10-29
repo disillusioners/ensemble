@@ -53,9 +53,19 @@ from driver import (  # noqa: E402
     BADGE_LEGS,
     SHAPES,
     run_profile,
+    synthetic_handler_load,
     wait_for_capture,
 )
 from seed import SeedScale, seed  # noqa: E402
+import modes  # noqa: E402
+from modes import (  # noqa: E402
+    MODE_BASE,
+    MODE_HEAD,
+    MODES,
+    SIMULATE_HEAD,
+    SIMULATIONS,
+    SIMULATE_NONE,
+)
 
 
 class Fences:
@@ -120,8 +130,15 @@ def _body_facts(shape: str, payload: object) -> dict[str, object]:
 
 
 async def per_endpoint_phase(child: DaemonChild, fences: Fences, smoke: bool,
-                             report: dict) -> None:
-    """Deliverables (1) floor + (3) round-trip formula table — serialized."""
+                             report: dict,
+                             raw_bodies: dict[str, bytes] | None = None) -> None:
+    """Deliverables (1) floor + (3) round-trip formula table — serialized.
+
+    REPAIR 2026-10-30: also records the per-request response
+    ``body_sha256``/``body_len`` (from the harness middleware) and keeps
+    the FIRST response body per shape — the G5 response-bytes gate needs
+    a byte artifact to diff, and the pre-repair harness recorded neither.
+    """
     import httpx
 
     n_inst = 4 if smoke else 30
@@ -148,12 +165,15 @@ async def per_endpoint_phase(child: DaemonChild, fences: Fences, smoke: bool,
                     err = f"{type(exc).__name__}: {exc}"
                     facts = {}
                 dur = time.perf_counter() - t0
+                if r is not None and r.status_code == 200 and raw_bodies is not None:
+                    raw_bodies.setdefault(shape, r.content)
                 records.append({
                     "shape": shape, "seq": seq, "tag": tag,
                     "status": getattr(r, "status_code", None),
                     "dur_s": round(dur, 4), "error": err, **facts,
                 })
         n4 = child.counter.snapshot()["per_request"]
+        body_meta = dict(child.body_meta)
 
     per_shape: dict[str, dict[str, object]] = {}
     for shape in SHAPES:
@@ -161,14 +181,26 @@ async def per_endpoint_phase(child: DaemonChild, fences: Fences, smoke: bool,
         durs = [float(r["dur_s"]) for r in recs if r.get("status") == 200]
         rt = [n4[r["tag"]]["count"] for r in recs if r["tag"] in n4]
         onloop = [n4[r["tag"]]["on_loop"] for r in recs if r["tag"] in n4]
-        shapes_seen: dict[str, int] = {}
+        # REPAIR 2026-10-30: the per-shape aggregation now keeps the
+        # ON-LOOP count as well as the total.  The architect's G9 fence
+        # (§6.3) is stated over the on-loop SHAPE-SET, which the pre-repair
+        # {shape: int} aggregate could not express.
+        shapes_seen: dict[str, dict[str, int]] = {}
         for r in recs:
             if r["tag"] in n4:
                 for s, v in n4[r["tag"]]["by_shape"].items():
-                    shapes_seen[s] = shapes_seen.get(s, 0) + v["count"]
+                    e = shapes_seen.setdefault(s, {"count": 0, "on_loop": 0})
+                    e["count"] += v["count"]
+                    e["on_loop"] += int(v.get("on_loop", 0))
+        bodies = [
+            body_meta[r["tag"]][0] for r in recs
+            if r["tag"] in body_meta and body_meta[r["tag"]]
+        ]
         per_shape[shape] = {
             "samples": len(recs),
             "ok_samples": len(durs),
+            "body_sha256_distinct": sorted({b["sha256"] for b in bodies}),
+            "body_len": bodies[0]["len"] if bodies else None,
             "latency": stats_ms(durs),
             "round_trips": {
                 "mean": round(sum(rt) / len(rt), 2) if rt else None,
@@ -200,8 +232,17 @@ async def per_endpoint_phase(child: DaemonChild, fences: Fences, smoke: bool,
     report["per_endpoint_records"] = records
 
 
-def formula_table(per_shape: dict, seed_result, fences: Fences) -> dict:
-    """Validate the census formulas against measured round-trips (Q2/Q3)."""
+def formula_table(per_shape: dict, seed_result) -> dict:
+    """The BASE census formula validation (Q2/Q3) — PURE computation.
+
+    REPAIR 2026-10-30: the fences moved OUT of this function.  They are
+    MODE-dependent (BASE asserts the census EXACTLY; HEAD asserts the
+    O(1)/bounded targets) and must run AFTER the optional HEAD-fix
+    simulation has transformed the measurements — see
+    ``gate_formula_table``.  Keeping them here would have asserted the
+    BASE census before the simulation could run, which is the whole
+    defect this repair removes.
+    """
     table: dict[str, dict[str, object]] = {}
 
     flat = per_shape.get("instances_flat_badge", {})
@@ -252,10 +293,67 @@ def formula_table(per_shape: dict, seed_result, fences: Fences) -> dict:
         "measured_mean": (ms.get("round_trips") or {}).get("mean"),
         "match": (ms.get("round_trips") or {}).get("mean") == 3,
     }
-    for name, row in table.items():
-        fences.check(f"formula[{name}]", bool(row["match"]),
-                     f"expected={row['expected']} measured={row['measured_mean']}")
     return table
+
+
+def gate_formula_table(table: dict, per_shape: dict, mode: str,
+                       fences: Fences) -> None:
+    """The MODE-AWARE round-trip gate (G9's count half).
+
+    BASE mode asserts the BASE census EXACTLY (unchanged from the
+    committed harness — the positive control that the defect is
+    measurable).
+
+    HEAD mode asserts the plan's O(1)/bounded targets
+    (``plan-overview.md`` §(d) table):
+      * flat <= 6, BFS <= 12, work <= 12, jobs recent <= 25, jobs page <= 30;
+      * defer-blocked and missions are UNCHANGED (asserted against the
+        same census formula).
+
+    WHY A BOUND AND NOT THE PLAN'S BAND: the architect's §6.3 fence
+    defers the totals to the plan's §(d) table, whose values are
+    projections written with "~" anchors.  The SCIENTIFIC claim is
+    O(N) -> O(1) (the per-row N+1 collapses), which is an UPPER bound.
+    A lower bound would (a) forbid the fix from landing better than
+    projected and (b) false-red on the projection's own disagreement
+    with itself — exactly the failure class the architect corrected for
+    G2 in §6.2.  The projection band is still REPORTED per shape.
+    """
+    if mode == MODE_BASE:
+        for name, row in table.items():
+            fences.check(
+                f"formula[{name}]", bool(row["match"]),
+                f"expected={row['expected']} measured={row['measured_mean']}",
+            )
+        return
+
+    # HEAD mode — the bounded targets.
+    census = {
+        "instances_flat_badge": table["instances_flat_badge"]["expected"],
+        "instances_bfs_home": table["instances_bfs_home"]["expected"],
+        "defer_blocked": table["defer_blocked"]["expected"],
+        "missions_badge": table["missions_badge"]["expected"],
+    }
+    for shape in ("instances_flat_badge", "instances_bfs_home", "work",
+                  "jobs_recent_badge", "jobs_page"):
+        row = per_shape.get(shape) or {}
+        rt = (row.get("round_trips") or {}).get("mean")
+        bound = modes.head_round_trip_expectation(shape)["max"]
+        fences.check(
+            f"head_round_trips_bounded[{shape}]",
+            rt is not None and bound is not None and rt <= bound,
+            f"measured={rt} bound<={bound} "
+            f"(plan projection band: see HEAD_ROUND_TRIP_MAX)",
+        )
+    for shape in modes.HEAD_COUNT_UNCHANGED:
+        row = per_shape.get(shape) or {}
+        rt = (row.get("round_trips") or {}).get("mean")
+        expected = census.get(shape)
+        fences.check(
+            f"head_round_trips_unchanged[{shape}]",
+            rt is not None and expected is not None and rt == expected,
+            f"measured={rt} unchanged-expected={expected}",
+        )
 
 
 ORPHAN_LOOKUP_SHAPE = "SELECT instances"
@@ -321,134 +419,404 @@ def jobs_time_share(profile_result: dict, tag_prefixes: tuple[str, ...]) -> dict
     }
 
 
-def capture_assertion(capture_root: Path, fences: Fences, report: dict) -> None:
-    """N2 — the stack-pin positive control at BASE.
+def collect_captures(capture_root: Path) -> list[dict]:
+    """Parse every wedge-capture into a record (SECTIONS kept in memory).
 
-    Asserts the MAIN-thread stack contains ``list_child_ids_permanent``
-    AND ``daemon/routers/instances.py`` — the pin that flips to NEGATIVE
-    at HEAD (shape A+C removes the loop-thread sync-DB frames).
+    REPAIR 2026-10-30 — the pre-repair analyser was THREAD-AGNOSTIC: it
+    computed the family pin over EVERY thread section
+    (``main.py:410-415``) and stored it under a key that CLAIMED the main
+    thread (``:416``), while the main-thread identification it computed
+    (``:385-401``) was dead code.  The architect (§6.1) proved the
+    consequence: at HEAD the BRIDGE thread's own instance-repo frames
+    trip the pin, so the harness false-reds on a correct fix.  The
+    analyser now applies the architect's LITERAL predicate to the LOOP
+    thread only, and the thread-agnostic count is kept as DIAGNOSTIC
+    context (never as the assertion).
     """
     dirs = sorted(
         d for d in capture_root.iterdir()
         if d.is_dir() and d.name != "boot-records"
     ) if capture_root.is_dir() else []
-    fences.check("captures_collected", len(dirs) >= 1, f"{len(dirs)} capture dir(s)")
-
-    results = []
+    records: list[dict] = []
     for d in dirs:
         stacks_p = d / "stacks.txt"
         manifest_p = d / "manifest.json"
-        threads_p = d / "threads.csv"
         entry: dict[str, object] = {"capture_id": d.name}
         if manifest_p.is_file():
             with contextlib.suppress(Exception):
                 entry["manifest"] = json.loads(manifest_p.read_text())
         if not stacks_p.is_file():
             entry["stacks"] = "missing"
-            results.append(entry)
+            entry["sections"] = []
+            entry["facts"] = modes.analyze_capture_sections([])
+            records.append(entry)
             continue
-        text = stacks_p.read_text(errors="replace")
-        # faulthandler sections: 'Thread 0x… (most recent call first):'
-        sections: list[tuple[str, str]] = []
-        current = None
-        buf: list[str] = []
-        for line in text.splitlines():
-            if line.startswith(("Thread ", "Current thread ")):
-                if current:
-                    sections.append((current, "\n".join(buf)))
-                current = line.strip()
-                buf = []
-            elif current:
-                buf.append(line)
-        if current:
-            sections.append((current, "\n".join(buf)))
+        sections = modes.parse_sections(stacks_p.read_text(errors="replace"))
+        entry["sections"] = sections
+        entry["facts"] = modes.analyze_capture_sections(sections)
+        records.append(entry)
+    return records
 
-        fam_hits = [
-            (hdr, body) for hdr, body in sections
-            if "list_child_ids_permanent" in body
-        ]
-        router_hits = [
-            (hdr, body) for hdr, body in sections
-            if "daemon/routers/instances.py" in body
-        ]
-        both = [
-            (hdr, body) for hdr, body in sections
-            if "list_child_ids_permanent" in body
-            and "daemon/routers/instances.py" in body
-        ]
-        entry["threads_total"] = len(sections)
-        entry["sections_with_list_child_ids"] = len(fam_hits)
-        entry["sections_with_routers_instances"] = len(router_hits)
-        entry["sections_with_both"] = len(both)
 
-        # main-thread identification via threads.csv (tid ↔ native_id ↔ name)
-        main_native = None
-        if threads_p.is_file():
-            import csv
-            with contextlib.suppress(Exception):
-                with open(threads_p, newline="") as fh:
-                    for row in csv.DictReader(fh):
-                        if (row.get("name") or "") == "MainThread":
-                            main_native = row.get("native_id")
-                            break
-        entry["main_thread_native_id"] = main_native
-        main_section = None
-        if both and main_native:
-            # the manifest's executor thread is the capturer (watchdog);
-            # the LOOP thread is MainThread — match its tid via threads.csv
-            for hdr, body in both:
-                main_section = (hdr, body)
-                break
-        # The FAMILY pin (the flip target): the loop thread is INSIDE
-        # a sync SQLAlchemy/psycopg frame reaching the instances read
-        # path — ``list_child_ids_permanent`` (repository) OR the
-        # router frame.  The boot-probe-observed reality: the loop
-        # spends its time in ``repositories/instance/repository.py``
-        # (the BFS/list queries) AND ``list_child_ids_permanent``
-        # (the per-row N+1); both are the sync-DB-on-loop defect this
-        # lane fixes, and BOTH disappear from the loop thread at HEAD.
-        fam_any = [
-            (hdr, body) for hdr, body in sections
-            if ("daemon/routers/instances.py" in body
-                or "daemon/repositories/instance/repository.py" in body)
-            and "sqlalchemy" in body.lower()
-        ]
-        entry["frame_family_present_in_main_thread"] = bool(fam_any)
-        entry["stack_pin_narrow"] = bool(both)
-        results.append(entry)
+def _public_capture(rec: dict) -> dict:
+    """The JSON-safe view (the parsed stack sections never reach the report)."""
+    return {k: v for k, v in rec.items() if k != "sections"}
 
-    report["captures"] = results
-    fam = sum(1 for r in results if r.get("frame_family_present_in_main_thread"))
-    narrow = sum(1 for r in results if r.get("stack_pin_narrow"))
-    fences.check(
-        "stack_pin_family[sync-DB instances path on a thread]",
-        fam >= 1,
-        f"{fam}/{len(results)} capture(s) show the loop-thread sync-DB "
-        f"instances-path frames (routers/instances.py | "
-        f"repositories/instance/repository.py over sqlalchemy)",
+
+def gate_captures(records: list[dict], fences: Fences, report: dict,
+                  mode: str, profile: str) -> None:
+    """G1/G3 — the MODE-AWARE wedge-capture gate.
+
+    Non-vacuity is TWO fences, in BOTH modes:
+      * ``captures_collected`` — the capture phase produced >= 1 capture;
+      * ``capture_loop_section_collected`` — at least one capture
+        actually CONTAINS the loop thread.  A capture taken while the
+        dump could not see the loop thread cannot clear (or convict)
+        anything; the pre-repair harness would have read "0 violations"
+        off an empty section set and called it a pass (architect §6.1:
+        "G1 is INCONCLUSIVE (not PASS) if the capture phase collected 0
+        captures").
+      * ``predicate_discriminator_selftest`` — a tree-independent proof
+        that the predicates TELL BROKEN FROM FIXED.  Without it, HEAD
+        mode's "0 violations" is unfalsifiable.
+    """
+    n = len(records)
+    fences.check("captures_collected", n >= 1, f"{n} capture dir(s)")
+
+    loop_seen = sum(
+        1 for r in records if (r.get("facts") or {}).get("loop_sections", 0) >= 1
     )
-    # The NARROW pin (list_child_ids_permanent + routers/instances.py in
-    # the SAME thread section) is scale-dependent — fenced on the FULL
-    # profile (3.3k rows → long in-frame dwell), reported on smoke.
-    if report.get("profile") == "full":
+    fences.check(
+        "capture_loop_section_collected", loop_seen >= 1,
+        f"{loop_seen}/{n} capture(s) contain the loop thread "
+        f"({modes.LOOP_THREAD_MARKER})",
+    )
+
+    st = modes.discriminator_selftest()
+    report["predicate_selftest"] = st
+    fences.check(
+        "predicate_discriminator_selftest", bool(st["ok"]),
+        "the G1 predicates separate the synthetic BROKEN stack (fires) from "
+        "the synthetic FIXED stack (silent, bridge-thread frames ignored) "
+        "and ignore the D-9 UI-prefs residual",
+    )
+
+    fam_loop = sum(
+        1 for r in records if (r.get("facts") or {}).get("family_violation_loop_thread")
+    )
+    narrow_loop = sum(
+        1 for r in records if (r.get("facts") or {}).get("narrow_violation_loop_thread")
+    )
+    fam_any = sum(
+        1 for r in records if (r.get("facts") or {}).get("family_violation_any_thread")
+    )
+    narrow_any = sum(
+        1 for r in records if (r.get("facts") or {}).get("narrow_violation_any_thread")
+    )
+    summary = {
+        "captures": n,
+        "captures_with_loop_section": loop_seen,
+        "family_violation_loop_thread": fam_loop,
+        "narrow_violation_loop_thread": narrow_loop,
+        "family_violation_any_thread_DIAGNOSTIC": fam_any,
+        "narrow_violation_any_thread_DIAGNOSTIC": narrow_any,
+        "predicate": (
+            f"loop section contains {modes.FAMILY_REPO_PATH!r} AND "
+            f"{modes.SQLALCHEMY!r} (architect §6.1, literal)"
+        ),
+    }
+    report["capture_gate"] = summary
+
+    if mode == MODE_BASE:
         fences.check(
-            "stack_pin_narrow[list_child_ids_permanent+routers/instances.py]",
-            narrow >= 1,
-            f"{narrow}/{len(results)} capture(s) carry the narrow pin",
+            "stack_pin_family[loop thread: sync-DB instances path]",
+            fam_loop >= 1,
+            f"{fam_loop}/{n} capture(s) show the instances-path DB frames on "
+            f"the LOOP thread (diagnostic: {fam_any}/{n} across ALL threads)",
+        )
+        if profile == "full":
+            fences.check(
+                "stack_pin_narrow[loop thread: list_child_ids_permanent + router]",
+                narrow_loop >= 1,
+                f"{narrow_loop}/{n} capture(s) carry the narrow pin on the "
+                f"LOOP thread (diagnostic: {narrow_any}/{n} across ALL threads)",
+            )
+        else:
+            print(
+                f"  [fence:INFO] stack_pin_narrow (smoke: report-only — the "
+                f"narrow pin is scale-dependent) — {narrow_loop}/{n} on the "
+                f"loop thread"
+            )
+    else:
+        fences.check(
+            "stack_pin_family_absent[loop thread: sync-DB instances path]",
+            fam_loop == 0,
+            f"{fam_loop}/{n} capture(s) still show the instances-path DB frames "
+            f"on the LOOP thread (diagnostic: {fam_any}/{n} across ALL threads "
+            f"— a bridge-thread hit is NOT a violation)",
+        )
+        fences.check(
+            "stack_pin_narrow_absent[loop thread: list_child_ids_permanent + router]",
+            narrow_loop == 0,
+            f"{narrow_loop}/{n} capture(s) carry the narrow pin on the LOOP "
+            f"thread (diagnostic: {narrow_any}/{n} across ALL threads)",
+        )
+
+
+def gate_g9_on_loop(per_shape: dict, fences: Fences, report: dict,
+                    mode: str) -> None:
+    """G9's ON-LOOP half — the architect's §6.3 per-shape SET fence.
+
+    The pre-repair harness had NO on-loop shape gate, and the plan's
+    wording ("instances-path on-loop 0 in every shape") false-reds on the
+    ROUTED-OUT missions shape because the harness classifies statements by
+    TABLE SET: the missions census legitimately issues ``SELECT
+    instances`` on the loop (§6.3, census #4 — explicitly exempt).
+
+    COLLECTION FENCE FIRST: every censused shape must be present with
+    samples, or the per-shape assertion below is vacuous (the
+    false-green family this harness exists to prevent).
+    """
+    missing = [
+        shape for shape in SHAPES
+        if not (per_shape.get(shape) or {}).get("samples")
+    ]
+    fences.check(
+        "g9_shapes_collected", not missing,
+        f"{len(SHAPES) - len(missing)}/{len(SHAPES)} censused shape(s) measured"
+        + (f"; MISSING: {missing}" if missing else ""),
+    )
+
+    derived: dict[str, dict[str, int]] = {}
+    for shape, row in per_shape.items():
+        by_shape = modes.norm_by_shape(row.get("statements_by_shape"))
+        on_loop = {
+            s: int(sv.get("on_loop", 0))
+            for s, sv in by_shape.items() if int(sv.get("on_loop", 0)) > 0
+        }
+        derived[shape] = on_loop
+    report["g9_on_loop_shape_sets"] = derived
+
+    for shape in SHAPES:
+        got = derived.get(shape, {})
+        if mode == MODE_BASE:
+            row = per_shape.get(shape) or {}
+            total = (row.get("round_trips") or {}).get("mean")
+            on_loop_total = (row.get("on_loop_round_trips") or {}).get("mean")
+            if shape in modes.BASE_ON_LOOP_NONE:
+                fences.check(
+                    f"g9_on_loop_base[{shape}]", on_loop_total == 0,
+                    f"the BASE census puts NOTHING on the loop for this shape "
+                    f"(asyncio.to_thread); measured on-loop={on_loop_total} "
+                    f"of {total}",
+                )
+            elif shape in modes.BASE_ON_LOOP_ALL:
+                fences.check(
+                    f"g9_on_loop_base[{shape}]",
+                    on_loop_total is not None and total is not None
+                    and on_loop_total == total,
+                    f"the BASE census puts EVERY round-trip on the loop; "
+                    f"measured on-loop={on_loop_total} of {total}",
+                )
+            continue
+
+        rule = modes.HEAD_ON_LOOP_RULES.get(shape)
+        if rule is None:
+            fences.check(
+                f"g9_on_loop_head[{shape}]", not got,
+                f"on-loop {got or '{} (empty)'} — every shape not carrying a "
+                f"disclosed residual must be EMPTY on the loop",
+            )
+        elif "exact" in rule:
+            exp = rule["exact"]
+            ok = set(got) == set(exp) and all(
+                lo <= got[s] <= hi for s, (lo, hi) in exp.items()
+            )
+            fences.check(
+                f"g9_on_loop_head[{shape}]", ok,
+                f"on-loop {got or '{} (empty)'} vs exact {exp} — {rule['why']}",
+            )
+        else:
+            forbid = tuple(rule.get("forbid_exact", ()))
+            allow = tuple(rule.get("allow_prefixes", ()))
+            ceiling = rule.get("max_on_loop")
+            bad_forbidden = [s for s in got if s in forbid]
+            bad_outside = [
+                s for s in got if allow and not str(s).startswith(allow)
+            ]
+            total = sum(got.values())
+            ok = (not bad_forbidden and not bad_outside
+                  and (ceiling is None or total <= ceiling))
+            fences.check(
+                f"g9_on_loop_head[{shape}]", ok,
+                f"on-loop {got or '{} (empty)'}; forbidden-hit="
+                f"{bad_forbidden or 'none'}, outside-allowlist="
+                f"{bad_outside or 'none'}, total={total}"
+                + (f"<={ceiling}" if ceiling is not None else "")
+                + f" — {rule['why']}",
+            )
+
+
+def gate_g2_band(report: dict, fences: Fences, mode: str,
+                 profile: str) -> None:
+    """G2 — the ONE-SIDED loaded-flat band (architect §6.2).
+
+    The pre-repair plan asserted a TWO-SIDED 0.067-0.23 s band.  The
+    architect measured that a HEALTHY HEAD lands at 0.02-0.10 s — BELOW
+    the lower anchor — so the two-sided band false-reds a working lane.
+    The corrected fence is one-sided and re-purposes the floor: anything
+    at or below 0.230 s PASSES, and a value below 0.067 s is recorded as
+    an IMPROVEMENT.
+    """
+    badge = report.get("profile_badge") or {}
+    lat = badge.get("latencies") or {}
+    flat = lat.get("instances_flat_badge") or {}
+    p95_ms = flat.get("p95_ms")
+    p95_s = (float(p95_ms) / 1000.0) if p95_ms is not None else None
+    verdict = modes.g2_verdict(p95_s)
+
+    reqs = [r for r in (badge.get("requests") or [])
+            if r.get("shape") == "instances_flat_badge"]
+    all_200 = bool(reqs) and all(r.get("status") == 200 for r in reqs)
+    flat_rts = ((report.get("per_endpoint") or {})
+                .get("instances_flat_badge", {})
+                .get("round_trips", {}).get("mean"))
+
+    report["g2"] = {
+        "loaded_flat_p95_s": p95_s,
+        "verdict": verdict,
+        "one_sided_bands_s": {
+            "pass_max": modes.G2_PASS_MAX_S,
+            "degraded_max": modes.G2_DEGRADED_MAX_S,
+            "base_anchor": modes.G2_BASE_ANCHOR_S,
+            "expected_healthy": list(modes.G2_EXPECTED_HEALTHY_S),
+        },
+        "flat_samples": len(reqs),
+        "flat_round_trips": flat_rts,
+        "below_anchor_is_improvement": (
+            p95_s is not None and p95_s < modes.G2_BASE_ANCHOR_S
+        ),
+    }
+
+    # Non-vacuity (architect §6.2): >=5 badge ticks and every flat leg 200.
+    # SCALE-DEPENDENT by construction: the smoke window is 16 s at an 8 s
+    # cadence => 2 ticks, so the >=5 requirement can only be MET on the full
+    # profile.  Smoke reports it instead of reding a run that structurally
+    # cannot satisfy it (the same discipline as the scale-dependent narrow
+    # pin in BASE mode) — the requirement itself is unchanged on `full`.
+    g2_nonvac_ok = len(reqs) >= 5 and all_200 and p95_s is not None
+    if profile == "full":
+        fences.check(
+            "g2_non_vacuity_flat_measurement", g2_nonvac_ok,
+            f"{len(reqs)} flat leg request(s) (>=5 required), "
+            f"all-200={all_200}, p95={p95_s}",
         )
     else:
-        print(f"  [fence:INFO] stack_pin_narrow (smoke: report-only) — "
-              f"{narrow}/{len(results)} capture(s)")
+        print(
+            f"  [fence:INFO] g2_non_vacuity_flat_measurement (smoke: "
+            f"report-only — the smoke badge window is 2 ticks, the architect "
+            f"requires >=5) — {len(reqs)} request(s), all-200={all_200}"
+        )
+    # SCALE-DEPENDENT: G2's signal is the flat leg QUEUING BEHIND the loop
+    # blockers.  At 1/10 scale (smoke: 350 instances, a 16 s badge window)
+    # that queueing does not reproduce — the smoke run measured a loaded
+    # flat p95 of 0.139 s against 0.914 s at full scale — so the band is
+    # asserted on the `full` profile and REPORTED on smoke.  The defect
+    # pins that DO discriminate at every scale (the round-trips, the
+    # on-loop attribution and the stack pin) stay asserted on both.
+    name = ("g2_band[base: the defect is measurable]" if mode == MODE_BASE
+            else "g2_band[head: p95 <= 0.230 s, one-sided]")
+    want_ok = (verdict != modes.G2_VERDICT_PASS if mode == MODE_BASE
+               else verdict == modes.G2_VERDICT_PASS)
+    detail = (
+        f"loaded flat p95={p95_s} s -> {verdict}; "
+        + ("BASE mode EXPECTS the loaded leg OUTSIDE the healthy band "
+           "(the committed full-scale BASELINE measured 0.914 s)"
+           if mode == MODE_BASE else "HEAD mode REQUIRES the healthy band")
+    )
+    if profile == "full":
+        fences.check(name, want_ok, detail)
+    else:
+        print(f"  [fence:INFO] {name} (smoke: report-only — the loop-queueing "
+              f"inflation G2 measures does not reproduce at 1/10 scale) — "
+              f"{detail}")
 
 
-async def main(profile: str) -> int:
+def gate_g4_paired_lag(report: dict, fences: Fences, mode: str,
+                       reference: dict | None) -> None:
+    """G4 — the PAIRED loop-lag comparison (architect §6.4).
+
+    The bare p95 comparison is forbidden: the probe's healthy value IS the
+    watchdog tick (~0.5 s), so the minimum detectable effect of a p95
+    comparison (~30 ms) sits BELOW the noise floor, and p95 is invisible
+    to a regression affecting <5% of ticks.  The fence compares STALL
+    COUNT, MAX (no tolerance) and p95 + one tick, per profile, against a
+    paired BASE reference run.
+    """
+    profiles = ("profile_badge", "profile_home", "profile_jobs_page")
+    out: dict[str, object] = {}
+    if reference is None:
+        report["g4"] = {
+            "paired": False,
+            "note": ("no --reference supplied: the paired comparison is the "
+                     "gate, not an absolute constant"),
+        }
+        if mode == MODE_HEAD:
+            fences.check(
+                "g4_paired_reference_present", False,
+                "HEAD mode REQUIRES --reference=<BASE BASELINE JSON>: G4 is a "
+                "paired BASE<->HEAD comparison, and a HEAD run without its "
+                "reference cannot assert the non-vacuity condition "
+                "(samples >= 0.5 x BASE) — failing loudly rather than passing "
+                "vacuously",
+            )
+        else:
+            print("  [fence:INFO] g4 paired comparison (BASE mode, no "
+                  "reference: report-only)")
+        return
+
+    ok_all = True
+    for key in profiles:
+        head_prof = report.get(key) or {}
+        base_prof = reference.get(key) or {}
+        head_series = [float(v) for v in ((head_prof.get("lag") or {}).get("series") or [])]
+        base_series = [float(v) for v in ((base_prof.get("lag") or {}).get("series") or [])]
+        verdict = modes.g4_profile_verdict(head_series, base_series)
+        out[key] = verdict
+        ok_all = ok_all and bool(verdict.get("ok"))
+        fences.check(
+            f"g4_paired[{key}]", bool(verdict.get("ok")),
+            verdict.get("reason")
+            or (f"stalls {verdict.get('head_stalls')}<={verdict.get('base_stalls')}, "
+                f"max {verdict.get('head_max_s')}<={verdict.get('base_max_s')}, "
+                f"p95 {verdict.get('head_p95_s')}<={verdict.get('base_p95_s')}+"
+                f"{modes.G4_TICK_S}, samples {verdict.get('head_samples')}>="
+                f"0.5*{verdict.get('base_samples')}"),
+        )
+    report["g4"] = {"paired": True, "profiles": out, "ok": ok_all}
+
+
+async def main(profile: str, mode: str, simulate: str,
+               reference_path: str | None, capture_bodies: bool) -> int:
+    """Collect, (optionally) simulate, then apply the MODE's gate set.
+
+    ORDER IS LOAD-BEARING: every measurement is collected FIRST, the
+    optional HEAD-fix simulation transforms the collected evidence, and
+    ONLY THEN do the mode-dependent assertions run.  The pre-repair
+    harness asserted the BASE census inside the collection phase, so no
+    simulation and no mode switch could reach it (the blocking defect).
+    """
     smoke = profile == "smoke"
+    simulate_head = simulate == SIMULATE_HEAD
     raw_dir = HARNESS_DIR / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     fences = Fences()
     report: dict[str, object] = {
         "harness": "eventloop-phase0",
+        "harness_repair": "2026-10-30-head-mode",
         "profile": profile,
+        "mode": mode,
+        "simulation_requested": simulate,
         "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "repo_head": None,
     }
@@ -456,11 +824,28 @@ async def main(profile: str) -> int:
     # ── phase 0: fences ─────────────────────────────────────────────
     assert_clean_env()
     fences.check("env_scrub", True, "no ambient POSTGRES_*/PORT survived")
+    fences.check(
+        "mode_declared", mode in MODES,
+        f"mode={mode!r} (BASE asserts the defect PRESENT; HEAD asserts it ABSENT)",
+    )
+    report["mode_expectations"] = modes.mode_summary(mode)
+    if simulate_head:
+        print("\n" + "!" * 72)
+        print("!! " + modes.SIMULATION_DISCLAIMER)
+        print("!" * 72 + "\n")
+        report["simulated"] = True
     import subprocess
 
     report["repo_head"] = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True
     ).stdout.strip()
+
+    reference: dict | None = None
+    if reference_path:
+        reference = json.loads(Path(reference_path).read_text())
+        report["reference_path"] = reference_path
+        report["reference_mode"] = reference.get("mode")
+        report["reference_repo_head"] = reference.get("repo_head")
 
     pg: ScratchPG | None = None
     child: DaemonChild | None = None
@@ -519,11 +904,9 @@ async def main(profile: str) -> int:
                 with contextlib.suppress(Exception):
                     await client.get(SHAPES[shape], timeout=180.0)
 
-        # ── phase 3: per_endpoint floor + formula table ─────────────
-        await per_endpoint_phase(child, fences, smoke, report)
-        report["formula_table"] = formula_table(
-            report["per_endpoint"], seed_result, fences
-        )
+        # ── phase 3: per_endpoint floor + body hashes (COLLECTION) ──
+        raw_bodies: dict[str, bytes] = {}
+        await per_endpoint_phase(child, fences, smoke, report, raw_bodies)
 
         # ── phase 4: badge composite ────────────────────────────────
         print("[phase] badge composite (8s forkJoin, sustained)")
@@ -585,14 +968,6 @@ async def main(profile: str) -> int:
         }
 
         # ── precomputed §6 jobs time-share (windows labeled) ────────
-        # The orphan `_lookup_instance` N+1's share of statement time,
-        # precomputed into the run JSON so readers never re-derive it
-        # (the baseline narrative's 92.3% page vs 89.6–89.9% badge
-        # spread came from hand-derived filters on the same data).
-        # Per-leg badge sub-windows: the recent(10) leg is the one the
-        # narrative's "89.9% in the badge window" cites; the active leg
-        # sits far lower (active/queued jobs are on real instances —
-        # fewer orphan misses).
         report["jobs_time_share"] = {
             "definition": (
                 "share = orphan `_lookup_instance` statement seconds "
@@ -627,12 +1002,13 @@ async def main(profile: str) -> int:
         # ── phase 7: capture phase (badge + home until capture) ─────
         print("[phase] capture phase (badge + home concurrently, tightened knobs)")
         cap_s = 90 if smoke else 240
-        # Cadence DISCLOSURE: the capture phase drives the SAME FE
-        # shapes but at a tighter driver-side cadence (2s/4s vs the
-        # FE's 8s/10s) so the loop spends a higher duty-cycle inside
-        # the sync-DB frames the dump must catch — an instrumentation
-        # choice on the DRIVER, not an endpoint-shape change (Q2
-        # shapes are preserved verbatim).
+        # The SYNTHETIC HANDLER-LOAD LEG (architect §6.1 non-vacuity): the
+        # capture fires on a CPU-sustained thread, so the loop's duty cycle
+        # inside the sync-DB frames is a few percent and the loop-thread pin
+        # is sampled by LUCK (measured: 0/8 captures in one full run, 4/5 in
+        # another).  This leg holds the loop inside those frames for the whole
+        # window, so the BASE positive control is deterministic.
+        load_s = min(cap_s, 45 if smoke else 120)
         async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client:
             combined = await asyncio.gather(
                 run_profile(child, "capture_badge", cap_s,
@@ -641,26 +1017,70 @@ async def main(profile: str) -> int:
                             shapes=("instances_bfs_home",), cadence_s=2.0,
                             client=client),
                 wait_for_capture(child.capture_root, cap_s),
+                synthetic_handler_load(child, load_s, concurrency=4),
             )
         report["profile_capture_badge"] = combined[0]
         report["profile_capture_home"] = combined[1]
-        capture_assertion(child.capture_root, fences, report)
+        report["profile_capture_load"] = combined[3]
+        fences.check(
+            "capture_load_leg_active",
+            (combined[3].get("requests") or 0) >= 10,
+            f"{combined[3].get('requests')} synthetic handler-load request(s) "
+            f"over {combined[3].get('duration_s')} s at concurrency "
+            f"{combined[3].get('concurrency')} — the BASE positive control's "
+            f"sampling target",
+        )
 
-        # lag fences
+        # ══ COLLECTION DONE — parse the captures, then (optionally) ══
+        # ══ simulate the fixed state, THEN run the MODE's gates.   ══
+        captures = collect_captures(child.capture_root)
+
+        if capture_bodies and raw_bodies:
+            bodies_dir = raw_dir / f"bodies-{profile}-{mode}"
+            bodies_dir.mkdir(parents=True, exist_ok=True)
+            for shape, body in raw_bodies.items():
+                (bodies_dir / f"{shape}.json").write_bytes(body)
+            report["bodies_dir"] = str(bodies_dir)
+            print(f"[bodies] wrote {len(raw_bodies)} raw response body(ies) to "
+                  f"{bodies_dir}")
+
+        if simulate_head:
+            report = modes.simulate_report(report)
+            captures = modes.simulate_captures(captures)
+            # the simulation must re-derive the profile-lag summaries it
+            # rewrote so downstream readers see one consistent number set.
+            print("[simulate] HEAD-fix evidence transformation applied "
+                  "(SIMULATED — not a measurement)")
+
+        # ── the mode's gate set ─────────────────────────────────────
+        table = formula_table(report["per_endpoint"], seed_result)
+        report["formula_table"] = table
+        gate_formula_table(table, report["per_endpoint"], mode, fences)
+        gate_g9_on_loop(report["per_endpoint"], fences, report, mode)
+        gate_captures(captures, fences, report, mode, profile)
+        gate_g2_band(report, fences, mode, profile)
+        gate_g4_paired_lag(report, fences, mode, reference)
+
+        # lag collection fences (the probe series must be non-empty)
         for name, prof in (("badge", badge), ("home", home), ("jobs", jobs)):
             lag = prof.get("lag") or {}
             fences.check(f"lag_samples[{name}]", (lag.get("samples") or 0) > 0,
                          f"samples={lag.get('samples')}")
 
+        report["captures"] = [_public_capture(r) for r in captures]
         report["fences"] = fences.results
         report["finished_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         report["verdict"] = "PASS" if fences.all_ok else "FAIL"
-        # PROFILE-SUFFIXED so a --profile=smoke re-run can never
-        # overwrite the committed full-scale baseline (BASELINE.full.json):
-        # smoke output lands at BASELINE.smoke.json (gitignored).
-        out_path = raw_dir / f"BASELINE.{profile}.json"
+        # MODE-SUFFIXED output name (repair 2026-10-30): a mode-aware run
+        # can never overwrite the committed PRE-REPAIR baseline artifact
+        # (raw/BASELINE.full.json, the 34/34 evidence of the old fence
+        # set) nor a run of the OTHER mode.  A simulated run carries an
+        # extra suffix so it can never be mistaken for gate evidence.
+        suffix = f"{profile}.{mode}" + (".simulated" if simulate_head else "")
+        out_path = raw_dir / f"BASELINE.{suffix}.json"
         write_json(out_path, report)
-        print(f"\n[report] {out_path} — verdict {report['verdict']}")
+        print(f"\n[report] {out_path} — mode={mode} "
+              f"simulate={simulate} verdict {report['verdict']}")
         return 0 if fences.all_ok else 1
 
     finally:
@@ -686,7 +1106,36 @@ async def main(profile: str) -> int:
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--profile", choices=("full", "smoke"), default="full")
+    ap = argparse.ArgumentParser(
+        description="eventloop-phase0 harness — MODE-AWARE (repair 2026-10-30)"
+    )
+    ap.add_argument("--profile", choices=("full", "smoke"), required=True)
+    ap.add_argument(
+        "--mode", choices=MODES, required=True,
+        help="base = the defect IS present (pins positive); "
+             "head = the defect is ABSENT (pins negative). REQUIRED and "
+             "mutually exclusive — a default would let a base-mode run be "
+             "mistaken for a HEAD gate run.",
+    )
+    ap.add_argument(
+        "--simulate", choices=SIMULATIONS, default=SIMULATE_NONE,
+        help="head = transform the MEASURED evidence into the fixed state "
+             "(SIMULATION — never gate evidence)",
+    )
+    ap.add_argument(
+        "--reference", default=None,
+        help="path to the paired BASE BASELINE JSON (REQUIRED in head mode: "
+             "G4 is a paired comparison)",
+    )
+    ap.add_argument(
+        "--capture-bodies", action="store_true",
+        help="write one raw response body per shape (the G5 byte-diff "
+             "artifact); off by default to keep the tree small",
+    )
     args = ap.parse_args()
-    raise SystemExit(asyncio.run(main(args.profile)))
+    raise SystemExit(
+        asyncio.run(
+            main(args.profile, args.mode, args.simulate, args.reference,
+                 args.capture_bodies)
+        )
+    )
