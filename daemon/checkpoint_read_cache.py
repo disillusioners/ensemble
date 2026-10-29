@@ -301,6 +301,19 @@ def extract_cache_key(args: tuple, kwargs: dict) -> Optional[tuple[str, str]]:
     checkpoint_ns live under ``config["configurable"]``. Returns None
     for an un-attributable call (no config / no thread_id) — such
     reads bypass the cache entirely, never guessed.
+
+    VERSION-SCOPED READS ARE NEVER CACHEABLE (read-cache PR-1 fix pass
+    F1): when ``configurable`` carries a TRUTHY ``checkpoint_id``, the
+    read is pinned to that specific checkpoint version (the pinned
+    saver's SELECT honors it). Such a read must neither CONSULT nor
+    POPULATE the cache: the cache key is ``(thread_id, ns)`` with
+    LATEST-commit semantics (every write invalidates ⇒ a hit is the
+    latest committed state by construction) — a version-scoped result
+    stored under the thread key would make a later latest-semantics
+    hit serve the WRONG VERSION. Returns None so the caller takes the
+    real saver path and skips the put. (A FALSY ``checkpoint_id`` —
+    None or "" — is the latest-semantics spelling and stays cacheable,
+    matching the upstream reader's own ``is not None`` gate.)
     """
     if args:
         cfg = args[0]
@@ -314,6 +327,8 @@ def extract_cache_key(args: tuple, kwargs: dict) -> Optional[tuple[str, str]]:
     thread_id = configurable.get("thread_id")
     if not isinstance(thread_id, str) or not thread_id:
         return None
+    if configurable.get("checkpoint_id"):
+        return None  # version-scoped read — never consult, never populate
     checkpoint_ns = configurable.get("checkpoint_ns", "")
     if not isinstance(checkpoint_ns, str):
         checkpoint_ns = ""

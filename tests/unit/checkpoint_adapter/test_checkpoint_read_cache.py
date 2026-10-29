@@ -337,6 +337,122 @@ class TestCacheOn:
         assert miss == 1
 
 
+# ── Version-scoped reads (fix pass F1) ──────────────────────────────────────
+
+
+class _VersionedSaver:
+    """Honors ``checkpoint_id`` pinning like the real saver's SELECT."""
+
+    def __init__(self) -> None:
+        self.versions = {
+            "v1": _make_tuple(_config("thread-1"), marker=1),
+            "v2": _make_tuple(_config("thread-1"), marker=2),
+        }
+        self.latest = "v1"
+        self.reads: list[str | None] = []
+
+    async def aget_tuple(self, config, **kwargs):
+        cid = config.get("configurable", {}).get("checkpoint_id")
+        self.reads.append(cid)
+        return self.versions[cid] if cid else self.versions[self.latest]
+
+    async def aput(self, config, checkpoint, metadata, new_versions):
+        return config
+
+
+class TestVersionScopedReads:
+    """A pinned read must never consult or populate the latest-key cache."""
+
+    def test_extract_cache_key_rejects_truthy_checkpoint_id(self):
+        from daemon.checkpoint_read_cache import extract_cache_key
+
+        base = {"configurable": {"thread_id": "t", "checkpoint_ns": ""}}
+        assert extract_cache_key((dict(base),), {}) == ("t", "")
+        falsy = {"configurable": {"thread_id": "t", "checkpoint_ns": "", "checkpoint_id": None}}
+        assert extract_cache_key((falsy,), {}) == ("t", "")
+        empty = {"configurable": {"thread_id": "t", "checkpoint_ns": "", "checkpoint_id": ""}}
+        assert extract_cache_key((empty,), {}) == ("t", "")
+        pinned = {"configurable": {"thread_id": "t", "checkpoint_ns": "", "checkpoint_id": "v1"}}
+        assert extract_cache_key((pinned,), {}) is None
+
+    def test_pinned_read_bypass_write_latest_read_correct(self, monkeypatch):
+        """The F1 hole end-to-end: pinned read → (no populate) → write →
+        latest read serves the LATEST version, never the pinned one."""
+        monkeypatch.setenv("CHECKPOINT_READ_CACHE_ENABLED", "1")
+        import daemon.checkpoint_adapter as ca
+
+        saver = _VersionedSaver()
+        proxy = ca._wrap_saver_with_connection_retry(saver)
+        cfg = _config("thread-1")
+
+        # 1) A latest-semantics read populates the cache with v1 (the
+        #    current latest) — the only legal populate.
+        first = asyncio.run(proxy.aget_tuple(dict(cfg)))
+        assert first.checkpoint["v"] == 1
+        assert len(proxy._read_cache) == 1
+
+        # 2) A VERSION-SCOPED read (checkpoint_id pinned) must hit the
+        #    REAL saver and return the pinned version — it must not be
+        #    served the cached latest, and must not re-populate.
+        pinned_cfg = {
+            "configurable": {
+                "thread_id": "thread-1",
+                "checkpoint_ns": "",
+                "checkpoint_id": "v1",
+            }
+        }
+        pinned = asyncio.run(proxy.aget_tuple(dict(pinned_cfg)))
+        assert pinned.checkpoint["v"] == 1
+        assert len(saver.reads) == 2  # the pinned read did NOT hit the cache
+        assert len(proxy._read_cache) == 1  # and did NOT populate a new entry
+
+        # 3) Advance latest to v2 via a WRITE (invalidates thread-1).
+        saver.latest = "v2"
+        asyncio.run(proxy.aput(dict(cfg), {"v": 2}, {}, {}))
+        assert len(proxy._read_cache) == 0
+
+        # 4) Another pinned read (still v1). WITHOUT the F1 guard this
+        #    would (wrongly) populate the thread key with the v1 tuple;
+        #    the subsequent latest read would then HIT and serve v1.
+        asyncio.run(proxy.aget_tuple(dict(pinned_cfg)))
+        assert len(proxy._read_cache) == 0, (
+            "a version-scoped read populated the latest-semantics cache key"
+        )
+
+        # 5) The latest read returns v2 — from the SAVER (a miss), or
+        #    at never from a poisoned cache entry.
+        latest = asyncio.run(proxy.aget_tuple(dict(cfg)))
+        assert latest.checkpoint["v"] == 2
+        hit, miss = _read_counters()
+        # Reads: populate(miss) + pinned×2(misses — version-scoped reads
+        # are never cache-servable) + latest(miss). Zero hits — the
+        # pinned reads never polluted, the latest read re-fetched.
+        assert hit == 0
+        assert miss == 4
+
+    def test_pinned_read_is_not_served_a_cached_latest(self, monkeypatch):
+        """The consult half of F1: a pinned read must not be HANDED the
+        cached latest-semantics tuple even when one is present."""
+        monkeypatch.setenv("CHECKPOINT_READ_CACHE_ENABLED", "1")
+        import daemon.checkpoint_adapter as ca
+
+        saver = _VersionedSaver()
+        saver.latest = "v2"
+        proxy = ca._wrap_saver_with_connection_retry(saver)
+        cfg = _config("thread-1")
+        asyncio.run(proxy.aget_tuple(dict(cfg)))  # cache now holds v2
+        pinned_cfg = {
+            "configurable": {
+                "thread_id": "thread-1",
+                "checkpoint_ns": "",
+                "checkpoint_id": "v1",
+            }
+        }
+        pinned = asyncio.run(proxy.aget_tuple(dict(pinned_cfg)))
+        assert pinned.checkpoint["v"] == 1  # the PINNED version, not cached v2
+        assert len(saver.reads) == 2  # consulted the real saver
+
+
 # ── Invalidation completeness (plan §4.3) ────────────────────────────────────
 
 
