@@ -264,6 +264,84 @@ def test_a_failed_connection_never_raises(caplog):
     assert sampler.snapshot is None
 
 
+# ─── the never-raise guard covers the WHOLE tick body (FIX m5) ───────────
+
+
+def test_an_unpack_time_exception_never_raises(caplog):
+    """A malformed result row must not escape ``collect`` — the guard
+    wraps the query AND the unpacking AND the store."""
+    connect = _RecordingConnect(rows=[("state", "idle")])  # a 2-tuple row
+    sampler = mc.CensusSampler(dsn="postgresql://x", connect=connect)
+    with caplog.at_level(logging.WARNING, logger=mc.logger.name):
+        snapshot = sampler.collect()
+    assert snapshot is None
+    assert "census failed" in caplog.text
+    assert sampler.snapshot is None
+
+
+def test_the_sampler_thread_survives_an_unpack_time_exception():
+    """The dead-producer class: the tick body must not kill the thread
+    — the NEXT tick still runs and still stores a snapshot."""
+    import time
+
+    calls = {"n": 0}
+
+    class _FlakyConnect:
+        def __call__(self, dsn: str) -> _FakeConnection:
+            calls["n"] += 1
+            rows = (
+                [("state", "idle")]  # malformed → the tick must survive
+                if calls["n"] == 1
+                else [("state", "idle", 1, 0.0)]
+            )
+            return _FakeConnection(rows)
+
+    sampler = mc.CensusSampler(
+        dsn="postgresql://x",
+        connect=_FlakyConnect(),
+        gate_enabled=lambda: True,
+    )
+    sampler._interval_s = 0.05  # test seam: a fast tick
+    sampler.start()
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and sampler.snapshot is None:
+            time.sleep(0.02)
+    finally:
+        detached = sampler.stop()
+        if detached is not None:
+            detached.join(timeout=5.0)
+    assert calls["n"] >= 2, "the sampler thread died on the malformed row"
+    assert sampler.snapshot is not None
+
+
+def test_a_persistent_failure_logs_once_per_streak(caplog):
+    """A dead DB must not spam the log once per tick."""
+    connect = _RecordingConnect(error=RuntimeError("boom"))
+    sampler = mc.CensusSampler(dsn="postgresql://x", connect=connect)
+    with caplog.at_level(logging.WARNING, logger=mc.logger.name):
+        for _ in range(5):
+            sampler.collect()
+    assert caplog.text.count("census failed") == 1
+
+
+def test_the_failure_warning_is_rearmed_by_a_success(caplog):
+    rows = [_row("state", "idle", 1)]
+    connect = _RecordingConnect(rows=rows)
+    sampler = mc.CensusSampler(dsn="postgresql://x", connect=connect)
+    with caplog.at_level(logging.WARNING, logger=mc.logger.name):
+        assert sampler.collect() is not None
+        assert caplog.text.count("census failed") == 0
+        # A success re-arms the one-shot warning.
+        sampler._connect = _RecordingConnect(error=RuntimeError("boom"))
+        sampler.collect()
+        sampler._connect = connect
+        sampler.collect()
+        sampler._connect = _RecordingConnect(error=RuntimeError("boom"))
+        sampler.collect()
+    assert caplog.text.count("census failed") == 2
+
+
 def test_a_failed_query_never_raises():
     class _BoomCursor(_FakeCursor):
         def execute(self, sql: str) -> None:

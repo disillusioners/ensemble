@@ -299,6 +299,10 @@ class CensusSampler:
         self._snapshot: CensusSnapshot | None = None
         self._last_success_monotonic: float | None = None
         self._started = False
+        # The one-shot failure warning (a persistent failure must not
+        # spam the log once per tick).
+        self._warn_lock = threading.Lock()
+        self._warned = False
 
     # ─── introspection ────────────────────────────────────────────────
 
@@ -340,23 +344,26 @@ class CensusSampler:
     def collect(self) -> CensusSnapshot | None:
         """Run ONE census.
 
-        Returns the snapshot, or ``None`` when the census failed (the
-        failure never raises into the daemon and the last-success
-        timestamp stays stale).
+        NEVER raises: the ENTIRE tick body (the query, the row
+        unpacking and the snapshot store) sits behind one guard, so an
+        unexpected shape in a result row cannot kill the sampler
+        thread (the "dead producer" failure class). A failure renders
+        no snapshot and leaves the last-success timestamp STALE.
+
+        Returns the snapshot, or ``None`` when the census failed.
         """
+        try:
+            return self._collect_once()
+        except Exception as exc:  # noqa: BLE001 — never raises
+            self._warn_failure(exc)
+            return None
+
+    def _collect_once(self) -> CensusSnapshot | None:
+        """The census body — every step may raise; the caller guards."""
         dsn = self.dsn
         if not dsn:
             return None
-        try:
-            rows = self._query(dsn)
-        except Exception as exc:  # noqa: BLE001 — never raises
-            logger.warning(
-                "[MetricsCensus] census failed (%s: %s) — the last-success "
-                "timestamp stays stale",
-                type(exc).__name__,
-                exc,
-            )
-            return None
+        rows = self._query(dsn)
         state_counts: dict[str, int] = {}
         by_site: dict[str, int] = {}
         age_by_site: dict[str, float] = {}
@@ -382,7 +389,31 @@ class CensusSampler:
         # A SUCCESSFUL census replaces the stored snapshot; a failure
         # leaves the previous one (and its last-success stamp) STALE.
         self._snapshot = snapshot
+        self._rearm_failure_warning()
         return snapshot
+
+    def _warn_failure(self, exc: BaseException) -> None:
+        """Log a census failure ONCE per failure streak.
+
+        A persistent failure (a dead DB) must not spam the log once per
+        tick — the warning is re-armed only by a successful census.
+        """
+        with self._warn_lock:
+            if self._warned:
+                return
+            self._warned = True
+        logger.warning(
+            "[MetricsCensus] census failed (%s: %s) — the last-success "
+            "timestamp stays stale (further failures are not logged "
+            "until a census succeeds)",
+            type(exc).__name__,
+            exc,
+        )
+
+    def _rearm_failure_warning(self) -> None:
+        """Re-arm the one-shot failure warning (after a success)."""
+        with self._warn_lock:
+            self._warned = False
 
     def _query(self, dsn: str) -> list[tuple[Any, ...]]:
         """Run the ONE-round-trip census query (never exports query text)."""
@@ -401,14 +432,24 @@ class CensusSampler:
     # ─── the tick loop ────────────────────────────────────────────────
 
     def _run(self) -> None:
-        """The tick loop — ``time.monotonic`` cadence, daemon thread."""
+        """The tick loop — ``time.monotonic`` cadence, daemon thread.
+
+        The WHOLE tick body sits behind one guard: an unexpected
+        exception (a malformed result row, a raising gate) must never
+        kill the sampler thread — a dead producer is the failure class
+        the review flagged (the "dead producer" pattern WS-A just fixed
+        for the resource monitor).
+        """
         while not self._stop_event.is_set():
-            # The kill-switch gates the DB WORK: with the switch off the
-            # sampler performs NO database work at all.
-            if self._gate():
-                # ``collect`` stores the snapshot on success; a failure
-                # leaves the previous one stale.
-                self.collect()
+            try:
+                # The kill-switch gates the DB WORK: with the switch off
+                # the sampler performs NO database work at all.
+                if self._gate():
+                    # ``collect`` stores the snapshot on success; a
+                    # failure leaves the previous one stale.
+                    self.collect()
+            except Exception as exc:  # noqa: BLE001 — the loop never dies
+                self._warn_failure(exc)
             self._stop_event.wait(timeout=self._interval_s)
 
     def start(self) -> bool:
