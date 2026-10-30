@@ -34,7 +34,7 @@ from langchain_core.tools import tool, BaseTool
 from pydantic import BaseModel, Field, model_validator
 from sqlmodel import Session
 
-from daemon.constants import INJECTION_ELIGIBLE_STATUSES, TERMINAL_INSTANCE_STATUSES
+from daemon.constants import INJECTION_ELIGIBLE_STATUSES, TERMINAL_INSTANCE_STATUSES, INSTANCE_LIST_INTERNAL_INCLUDE_DESCENDANTS_DEFAULT
 # M5 — single-source the documented default for the
 # ``spawn_intelligence_tier_high_model`` boot snapshot. The constant
 # lives in ``daemon.config`` (canonical home); the tool layer imports
@@ -6167,7 +6167,7 @@ Caveats:
         # ``truncated`` is only meaningful with ``include_descendants=true``;
         # this tool uses the default (false), so the third tuple slot is a
         # throwaway.
-        instances, _, _ = manager.list_instances(limit=DEFAULT_PAGE_LIMIT, include_descendants=False)
+        instances, _, _ = manager.list_instances(limit=DEFAULT_PAGE_LIMIT, include_descendants=INSTANCE_LIST_INTERNAL_INCLUDE_DESCENDANTS_DEFAULT)
         return instances
 
     list_instances._full_doc_ = f"""List the {DEFAULT_PAGE_LIMIT} most recent active instances.

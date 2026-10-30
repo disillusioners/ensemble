@@ -1,3 +1,4 @@
+from daemon.constants import INSTANCE_LIST_INTERNAL_INCLUDE_DESCENDANTS_DEFAULT
 """Instance READ tools — the ``instance_read`` privileged category (5 tools).
 
 The five tools answer the questions the maintenancer could not answer
@@ -1672,7 +1673,7 @@ def _build_health_report(
             break
         rows, total, _repo_truncated = manager.list_instances(
             limit=FLEET_SCAN_LIMIT, offset=window_index * FLEET_SCAN_LIMIT,
-            include_descendants=False,
+            include_descendants=INSTANCE_LIST_INTERNAL_INCLUDE_DESCENDANTS_DEFAULT,
         )
         if total_first is None:
             # FIRST window only — never reassigned (see the docstring).
