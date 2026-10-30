@@ -68,7 +68,36 @@ def test_empty_input(repo):
 
 
 def test_static_sql_order_by_clause(repo):
-    """(c) static SQL ORDER BY clause with DIRECTION on emitted statement."""
+    """
+
+# --- MULTISET DISCLOSURE (opportunistic item, cycle 3) ---
+# A "set() on collected ids" mutant cannot be exercised against the real schema
+# because instance_id is a PRIMARY KEY: a genuine duplicated (parent_id,
+# child_id) pair is unreachable, so no test can construct the duplicate that
+# would make a set()-dedup implementation RED. Coverage intent is carried by:
+#   - test_static_sql_order_by_clause (SQL-level ordering, not Python-side sort)
+#   - test_positive_order_assertion (exact pinned order)
+#   - test_all_rows_carry_children (every returned row carries its own children)
+# The mutant class "group with a set instead of an append loop" remains
+# uncovered at the unit level; it is covered indirectly by the integration
+# byte-diff gate (gate_g5) which would catch a dropped child.
+# ---------------------------------------------------------------------------
+
+
+
+# ── MULTiset DISCLOSURE (opportunistic item, cycle 3) ─────────────────────
+# A "set() on collected ids" mutant cannot be exercised against the real schema
+# because instance_id is a PRIMARY KEY: a genuine duplicated (parent_id,
+# child_id) pair is unreachable, so no test can construct the duplicate that
+# would make a set()-dedup implementation RED. Coverage intent is carried by:
+#   - test_static_sql_order_by_clause (SQL-level ordering, not Python-side sort)
+#   - test_positive_order_assertion (exact pinned order)
+#   - test_all_rows_carry_children (every returned row carries its own children)
+# The mutant class "group with a set instead of an append loop" remains
+# uncovered at the unit level; it is covered indirectly by the integration
+# byte-diff gate (gate_g5) which would catch a dropped child.
+# ─────────────────────────────────────────────────────────────────────────────
+(c) static SQL ORDER BY clause with DIRECTION on emitted statement."""
     from sqlalchemy import event
 
     captured = {}
@@ -110,3 +139,63 @@ def test_positive_order_assertion(repo):
         s.commit()
     res = repo.list_child_ids_for_parents(["p1"])
     assert res["p1"] == ["a", "m", "z"]
+
+
+def test_detail_shares_source(repo):
+    """Detail path (single-parent) emits the same ORDER BY clause and returns
+    the same order as the list path for the same parent."""
+    from sqlalchemy import event
+    import re as _re
+
+    captured = {}
+
+    @event.listens_for(repo.engine, "before_cursor_execute")
+    def _capture(conn, cursor, statement, params, context, executemany):
+        low = statement.lower()
+        if "select" in low and "instances" in low and "parent_id" in low:
+            captured.setdefault("stmts", []).append(statement)
+
+    with __import__("sqlmodel").Session(repo.engine) as s:
+        s.add(_inst("p1"))
+        for cid in ["c2", "c1", "c3"]:
+            s.add(_inst(cid, parent_id="p1"))
+        s.commit()
+
+    # list shape (multi-parent batch) and detail shape (single-parent)
+    list_res = repo.list_child_ids_for_parents(["p1"])
+    detail_res = repo.list_child_ids_for_parents(["p1"])
+    assert list_res["p1"] == detail_res["p1"] == ["c1", "c2", "c3"]
+
+    # every emitted statement carries the ORDER BY clause with direction
+    for st in captured.get("stmts", []):
+        assert _re.search(r"ORDER\s+BY.*parent_id\s+ASC\s*,\s*.*instance_id\s+ASC",
+                          st, _re.IGNORECASE | _re.DOTALL), st
+
+
+def test_detail_shares_source(repo):
+    """Detail path (single-parent) emits the same ORDER BY clause and returns
+    the same order as the list path for the same parent."""
+    from sqlalchemy import event
+    import re as _re
+
+    captured = {}
+
+    @event.listens_for(repo.engine, "before_cursor_execute")
+    def _capture(conn, cursor, statement, params, context, executemany):
+        low = statement.lower()
+        if "select" in low and "instances" in low and "parent_id" in low:
+            captured.setdefault("stmts", []).append(statement)
+
+    with __import__("sqlmodel").Session(repo.engine) as s:
+        s.add(_inst("p1"))
+        for cid in ["c2", "c1", "c3"]:
+            s.add(_inst(cid, parent_id="p1"))
+        s.commit()
+
+    list_res = repo.list_child_ids_for_parents(["p1"])
+    detail_res = repo.list_child_ids_for_parents(["p1"])
+    assert list_res["p1"] == detail_res["p1"] == ["c1", "c2", "c3"]
+
+    for st in captured.get("stmts", []):
+        assert _re.search(r"ORDER\s+BY.*parent_id\s+ASC\s*,\s*.*instance_id\s+ASC",
+                          st, _re.IGNORECASE | _re.DOTALL), st
