@@ -211,6 +211,15 @@ if ! _splice_python_floor_probe; then
     lock_release 2>/dev/null || true
     exit 78
 fi
+# D1 (promote-preflight-hang) — the journal read-path SIZE GUARD refuses on
+# the PROMOTE path only (leader ruling Q3): if the O(N) read helper is
+# unavailable AND the journal is at/above JOURNAL_SIZE_GUARD_BYTES, a promote
+# must not spend minutes (or hours) in the legacy per-character bash walk.
+# Set as a PLAIN shell variable — NOT exported: the child scripts this run
+# launches (stop-ensemble.sh, ...) keep their own warn-and-continue recovery
+# semantics and must never inherit a promote-only refusal.
+JOURNAL_READ_STRICT=1
+
 # P3 / decision (d) — first phase boundary (preflight). The probe
 # above is the gate's first long operation; we check the deadline
 # AFTER the probe succeeds (a missing python3 is a refusal, not a
@@ -224,6 +233,13 @@ fi
 journal_init || { _warn "cannot initialize journal"; exit 1; }
 J="$(journal_read)" || {
     _warn "journal unreadable/TORN at $(journal_path) — halt-for-human (repair the journal before any pipeline mutation)"
+    # R1 (leader ruling, wave-2): the promote-path size-guard refusal is an
+    # exit 78 + a HALT ROW. Best-effort at the CALLER site (never inside
+    # journal_read — the read path stays write-pure; status.sh's census row
+    # pins "never a journal write", and the size-guard pack pins the journal
+    # byte-unchanged at the lib-level refusal). A torn journal refuses the
+    # append too; `|| true` keeps the exit-78 refusal itself unconditional.
+    journal_history_append halt "promote preflight: journal read REFUSED (size guard ${JOURNAL_SIZE_GUARD_BYTES}B x legacy class, or unreadable/torn) — halt-for-human" >/dev/null 2>&1 || true
     exit 78
 }
 # Probe-OK event (T2.0a / C-7) — journals the interpreter path that

@@ -126,6 +126,20 @@ STOP_SCRIPT_BUDGET_S="${STOP_SCRIPT_BUDGET_S:-120}"     # placeholder; effective
 HANDBACK_START_BUDGET_S="${HANDBACK_START_BUDGET_S:-60}"  # unit hand-back start (the §9 culprit)
 SYSTEMCTL_PROBE_BUDGET_S="${SYSTEMCTL_PROBE_BUDGET_S:-5}"  # reset-failed / is-active probes
 SCOPE_START_BUDGET_S="${SCOPE_START_BUDGET_S:-10}"      # scope-arm/opt-in launcher start
+# D1 (promote-preflight-hang) — per-tree cap for the stage manifest checksum
+# walks. DERIVED, not invented (wave-2 re-measurement — the wave-1 numbers
+# were lost with its /tmp sandbox; this host, read-only over the worktree,
+# ambient load ~2 cores, `preflight_shasum_batch_parity_test.sh --full`):
+# the BATCHED walk is 2.0 s for the 4,930-file plugins tree (303.8 s before
+# batching), 0.28 s agents (338 files), 0.33 s frontend (567 files); output
+# byte-parity pinned by the same pack. Budget = 60 s = ~30x the worst
+# measured batched walk — headroom for a cold cache or a slower host —
+# while staying ~150x BELOW the 304 s per-file pass, so a batching REGRESSION
+# (fallback to per-file hashing) trips this LOUDLY instead of reproducing
+# the 2026-10-28 09:51/09:54 stage-SIGTERM shape (unbounded, unlogged CPU in
+# an early phase). Env-overridable. Re-measure with:
+#   nohup bash tests/packs/preflight_shasum_batch_parity_test.sh --full &
+STAGE_TREE_BUDGET_S="${STAGE_TREE_BUDGET_S:-60}"
 # Post-flip soak (ADR-005 gate: 300s). Overridable for sandbox drills only
 # (ENSEMBLE_PROMOTE_SOAK_S); production default stays 300.
 SOAK_S_DEFAULT=300
@@ -587,6 +601,31 @@ _json_has() {
 # _json_sub <json> <key> — extract a nested object/array value by bracket
 # counting from `"key":`. Prints the raw {…} / […] text.
 _json_sub() {
+    local json="$1" key="$2" out rc
+    # Fast path (D1): the O(N) extractor. String-NAIVE by design -- a brace or
+    # bracket inside a string value still moves the depth, exactly as the
+    # legacy counter below does (plan D1-12: the three verbs are three
+    # algorithms; the string-aware machine is NOT shared with this one).
+    if _journal_read_probe; then
+        out="$(printf '%s' "$json" | "$_JR_PY" "$_JR_HELPER" sub "$key")"
+        rc=$?
+        case "$rc" in
+            0) printf '%s' "$out"; return 0 ;;
+            1) return 1 ;;
+            *) _warn "_json_sub: read helper UNUSABLE (exit $rc) — falling back to the legacy bracket counter" ;;
+        esac
+    else
+        # T1.5: the same fallback discipline as journal_read — the slow path
+        # is ALWAYS visible, never a silent legacy walk.
+        _warn "_json_sub: O(N) read helper unavailable — using the legacy bracket counter (correct but slow; install python3 >= 3.7 for the fast path)"
+    fi
+    _json_sub_legacy "$json" "$key"
+}
+
+# _json_sub_legacy <json> <key> — the pre-fix bracket counter, kept verbatim as
+# the no-interpreter fallback. Quadratic TWICE (`out="$out$char"` and
+# `rest="${rest:1}"`); both mechanisms are removed from the fast path.
+_json_sub_legacy() {
     local json="$1" key="$2" rest char depth start out=""
     rest="${json#*"${key}"}"
     [ "$rest" = "$json" ] && return 1
@@ -949,18 +988,104 @@ journal_init() {
     journal_write '{"current":null,"previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}'
 }
 
-# journal_read — print journal JSON; exit 1 when absent/unreadable/torn.
-# Torn-write detection is CONTENT-based (Batch C doc correction — earlier
-# comments described a ".torn marker sibling" mechanism that never existed
-# in code; there is NO .torn file, and none is needed): our writers never
-# touch the target in place (temp-file + mv is atomic), so a torn state.json
-# can only come from an OUT-of-discipline writer — and it is caught by (a)
-# the empty-file check and (b) the brace/bracket-balance scan below, which
-# rejects truncated JSON. Nothing under releases/ named *.torn is produced
-# or consumed by this pipeline.
-journal_read() {
+# ── Journal read path: O(N) helper + legacy fallback + size guard ───────────
+#
+# D1 (promote-preflight-hang, 2026-10-29). The 2026-10-28 preflight called
+# `journal_read` on a 455,783-byte journal and burned 37 min of 100 % CPU
+# without reaching integrity: the balance scan below is O(N^2) because every
+# character access is an offset substring (`${json:i:1}`, lib.sh:~910).
+#
+# The read path now delegates to `scripts/upgrade/journal_read.py` (single
+# pass, O(N), byte-level port of the SAME algorithm — exact verdict and
+# stdout parity is pinned by tests/packs/preflight_journal_parity_test.sh).
+# The bash scanner stays as the FALLBACK so a host without an interpreter is
+# slow, never broken.
+#
+# READ PATH POLICY vs WRITE PATH POLICY (plan D1-13 / RULING 2): the helper is
+# its own file with its own policy. It is deliberately NOT routed through
+# `_splice_journal`, because that wrapper remaps rc 78 -> 1 and merges stderr
+# into stdout (both break the read contract), and because
+# `journal_splice.py` refuses a path under the live install unless the
+# pipeline lock is held — which `status.sh` (no lock at all) and
+# `rollback.sh`/`restart.sh` (before lock acquisition) never hold.
+#
+# SIZE GUARD (D1-17, leader directive W1): a LEGACY-CLASS REGRESSION BACKSTOP,
+# not a size police. It trips only when BOTH conjuncts hold — (1) the read is
+# about to run the per-character bash walk (helper absent/unusable) AND
+# (2) the journal is >= JOURNAL_SIZE_GUARD_BYTES. On the O(N) path the guard
+# is NOT consulted, so the next ceremony reading a 455 KB+ live journal is
+# never blocked. Path scope (leader ruling Q3): REFUSE on the promote path;
+# WARN + CONTINUE on rollback/restart/status — the emergency recovery path is
+# never blocked by a promote-hygiene guard.
+#
+#   * the number: the measured legacy-walk curve (11 KB -> 2.27 s,
+#     55 KB -> 51.6 s, 111 KB -> 199 s, evidence/CODE-PATHS.md §4.4) crosses
+#     the 120 s preflight step budget at ~87 KB => 98304 B (96 KiB) is a round
+#     number just above the crossover.
+#   * JOURNAL_READ_STRICT is set by promote.sh PER INVOCATION as a plain
+#     (non-exported) shell variable, immediately before its first journal
+#     read: never persisted, never in .env, and never inherited by the child
+#     scripts promote.sh launches (so `stop-ensemble.sh` keeps the
+#     warn-and-continue recovery semantics).
+JOURNAL_SIZE_GUARD_BYTES="${JOURNAL_SIZE_GUARD_BYTES:-98304}"
+JOURNAL_LEGACY_READ_BUDGET_S="${JOURNAL_LEGACY_READ_BUDGET_S:-120}"
+JOURNAL_READ_STRICT="${JOURNAL_READ_STRICT:-0}"
+
+# _journal_read_helper_path — absolute path to the read helper. Mirrors
+# `_splice_journal_path`: BASH_SOURCE-anchored so the helper is found even
+# when the caller changes PWD, with a $REPO_ROOT fallback. JOURNAL_READ_HELPER
+# is an explicit override (tests pin the "helper absent" class with it).
+_journal_read_helper_path() {
+    if [ -n "${JOURNAL_READ_HELPER:-}" ]; then
+        if [ -f "$JOURNAL_READ_HELPER" ]; then
+            printf '%s\n' "$JOURNAL_READ_HELPER"
+            return 0
+        fi
+        return 1
+    fi
+    local self_dir
+    self_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || self_dir=""
+    if [ -n "$self_dir" ] && [ -f "$self_dir/journal_read.py" ]; then
+        printf '%s\n' "$self_dir/journal_read.py"
+        return 0
+    fi
+    if [ -n "${REPO_ROOT:-}" ] && [ -f "$REPO_ROOT/scripts/upgrade/journal_read.py" ]; then
+        printf '%s\n' "$REPO_ROOT/scripts/upgrade/journal_read.py"
+        return 0
+    fi
+    return 1
+}
+
+# _journal_read_probe — 0 when the O(N) read path is usable. Sets the pair
+# _JR_PY / _JR_HELPER. The probe is the interpreter floor check: the helper is
+# stdlib-only and runs on 3.7+ (the same floor `_splice_python_floor_probe`
+# enforces for the write path). Called directly (NOT in a command
+# substitution) so the globals land in the caller's shell.
+_journal_read_probe() {
+    local h p
+    _JR_PY=""
+    _JR_HELPER=""
+    if ! h="$(_journal_read_helper_path)"; then
+        return 1
+    fi
+    if ! p="$(_splice_python_path)"; then
+        return 1
+    fi
+    if "$p" "$h" --probe >/dev/null 2>&1; then
+        _JR_PY="$p"
+        _JR_HELPER="$h"
+        return 0
+    fi
+    return 1
+}
+
+# _journal_read_legacy <journal_path> — the pre-fix scanner, kept verbatim as
+# the no-interpreter fallback. Correct, but O(N^2): it is the SLOW path and it
+# always announces itself (a silent fallback would recreate the incident as a
+# "mystery slow host").
+_journal_read_legacy() {
     local jp
-    jp="$(journal_path)"
+    jp="$1"
     if [ ! -f "$jp" ]; then
         return 1
     fi
@@ -998,6 +1123,61 @@ journal_read() {
     printf '%s' "$json"
 }
 
+# _journal_read_fallback <journal_path> — the legacy walk, guarded.
+_journal_read_fallback() {
+    local jp="$1" size rc
+    size="$(wc -c < "$jp" 2>/dev/null | tr -d ' ')" || size=0
+    case "$size" in ''|*[!0-9]*) size=0 ;; esac
+    if [ "$size" -ge "$JOURNAL_SIZE_GUARD_BYTES" ]; then
+        if [ "$JOURNAL_READ_STRICT" = "1" ]; then
+            _warn "journal at $jp is ${size} bytes and the O(N) read helper is UNAVAILABLE — REFUSING (promote path; JOURNAL_SIZE_GUARD_BYTES=${JOURNAL_SIZE_GUARD_BYTES}): the legacy per-character bash walk needs ${size}B worth of quadratic scanning (minutes: this is the 2026-10-28 preflight hang). Remedy: put python3 >= 3.7 on PATH (or set SPLICE_PYTHON), or trim the journal below ${JOURNAL_SIZE_GUARD_BYTES} bytes."
+            return 1
+        fi
+        _warn "journal at $jp is ${size} bytes and the O(N) read helper is UNAVAILABLE — proceeding on the LEGACY per-character bash walk under a ${JOURNAL_LEGACY_READ_BUDGET_S}s bound (warn-and-continue: a recovery/diagnostic read is never blocked by the size guard; put python3 >= 3.7 on PATH, or trim the journal to speed this up)"
+        _run_bounded "$JOURNAL_LEGACY_READ_BUDGET_S" _journal_read_legacy "$jp"
+        rc=$?
+        case "$rc" in
+            0) return 0 ;;
+            124)
+                _warn "legacy journal read at $jp exceeded ${JOURNAL_LEGACY_READ_BUDGET_S}s — treating the journal as UNREADABLE (hung read; install python3 >= 3.7 for the O(N) path)"
+                return 1 ;;
+            *) return 1 ;;
+        esac
+    fi
+    _warn "journal at $jp: O(N) read helper unavailable — falling back to the legacy per-character bash walk (correct but slow; install python3 >= 3.7 for the fast path)"
+    _journal_read_legacy "$jp"
+}
+
+# journal_read — print journal JSON; exit 1 when absent/unreadable/torn.
+# Torn-write detection is CONTENT-based (Batch C doc correction — earlier
+# comments described a ".torn marker sibling" mechanism that never existed
+# in code; there is NO .torn file, and none is needed): our writers never
+# touch the target in place (temp-file + mv is atomic), so a torn state.json
+# can only come from an OUT-of-discipline writer — and it is caught by (a)
+# the empty-file check and (b) the brace/bracket-balance scan below, which
+# rejects truncated JSON. Nothing under releases/ named *.torn is produced
+# or consumed by this pipeline.
+journal_read() {
+    local jp
+    jp="$(journal_path)"
+    if [ ! -f "$jp" ]; then
+        return 1
+    fi
+    # Fast path (D1): the O(N) helper does ONE read and one pass, and prints
+    # the bash-processed bytes (trailing newlines stripped, NULs dropped) --
+    # the SAME string the legacy scan below consumes. Verdict and stdout are
+    # byte-identical to the walk (pinned: tests/packs/preflight_journal_parity_test.sh).
+    if _journal_read_probe; then
+        "$_JR_PY" "$_JR_HELPER" verify "$jp"
+        case $? in
+            0) return 0 ;;                 # stdout already carries the journal
+            1) return 1 ;;                 # authoritative refusal (wording from the helper)
+            *) _warn "journal read helper ($_JR_HELPER) was UNUSABLE — falling back to the legacy per-character bash walk" ;;
+        esac
+    fi
+    _journal_read_fallback "$jp"
+}
+
 # journal_write <json> — ATOMIC: temp file in the same dir + mv -f (D4).
 journal_write() {
     local json="$1" jp tmp
@@ -1022,8 +1202,41 @@ journal_write() {
 # arrive pre-quoted; numbers/bools/null raw). Simple + sufficient for the D4
 # schema; avoids a jq dependency (none in the repo's shell toolchain).
 journal_update() {
-    local field="$1" raw="$2" json rest head tail out="" c depth
+    local field="$1" raw="$2" json out rc
     json="$(journal_read)" || return 1
+    # Fast path (D1): the O(N) value splice. ONE read (the journal_read above)
+    # -- a second read could straddle the writer's atomic replace (D1-16).
+    if _journal_read_probe; then
+        out="$(printf '%s' "$json" | "$_JR_PY" "$_JR_HELPER" update "$field" "$raw")"
+        rc=$?
+        case "$rc" in
+            0)
+                # The helper terminates its output with a 0x1f sentinel so a
+                # raw value that ends in newlines survives `$( )` (bash strips
+                # trailing newlines; the sentinel is never the last newline).
+                out="${out%$'\x1f'}"
+                journal_write "$out"
+                return $?
+                ;;
+            3) _warn "journal_update: field '$field' not found (schema drift?)"; return 1 ;;
+            4) _warn "journal_update: splice failed for '$field'"; return 1 ;;
+            *) _warn "journal_update: read helper UNUSABLE (exit $rc) — falling back to the legacy value scanner" ;;
+        esac
+    else
+        # T1.5: the same fallback discipline as journal_read — the slow path
+        # is ALWAYS visible, never a silent legacy walk.
+        _warn "journal_update: O(N) read helper unavailable — using the legacy value scanner (correct but slow; install python3 >= 3.7 for the fast path)"
+    fi
+    _journal_update_legacy_from "$field" "$raw" "$json"
+}
+
+# _journal_update_legacy_from <field> <raw> <json> — the pre-fix RMW splice,
+# kept verbatim as the no-interpreter fallback. Its duplicate-key asymmetry
+# (head at the LAST occurrence, value scan at the FIRST) is BASE behaviour and
+# is preserved by the fast path too (BASE-BUG-PRESERVING; see the parity pack).
+_journal_update_legacy_from() {
+    local field="$1" raw="$2" json rest head tail out="" c depth
+    json="$3"
     if ! _json_has "$json" "$field"; then
         _warn "journal_update: field '$field' not found (schema drift?)"
         return 1
@@ -2117,12 +2330,88 @@ manifest_field() {
 # _tree_manifest <dir> <relprefix> — print "sha256  relpath" lines, sorted by
 # relpath (deterministic; D-FA4.4 per-file map + sorted-listing hash).
 _tree_manifest() {
-    local dir="$1" prefix="$2" f rel
+    local dir="$1" prefix="$2"
     ( cd "$dir" 2>/dev/null || exit 1
-      find . -type f | sed 's|^\./||' | sort | while IFS= read -r rel; do
-          [ -n "$rel" ] || continue
-          printf '%s  %s\n' "$(_sha256 "$rel")" "$prefix$rel"
-      done )
+      local list sums rel line sha n_list n_sums
+      list="$(mktemp "${TMPDIR:-/tmp}/tree-manifest.XXXXXX")" || exit 1
+      sums="$list.sum"
+      trap 'rm -f "$list" "$sums"' EXIT
+      find . -type f | sed 's|^\./||' | sort > "$list" || exit 1
+      [ -s "$list" ] || return 0
+      # ONE shasum invocation per chunk instead of one fork PER FILE. The
+      # per-file fork is what made the plugins tree walk 329.6 s/pass
+      # (measured; stage walks it twice) -- the phase-1 D1-7 batching.
+      # Output order == argv order == the sorted list order, so the two files
+      # pair up line by line.
+      while IFS= read -r rel; do printf '%s\0' "$rel"; done < "$list" \
+        | xargs -0 shasum -a 256 2>/dev/null > "$sums"
+      n_list="$(wc -l < "$list" | tr -d ' ')"
+      n_sums="$(wc -l < "$sums" | tr -d ' ')"
+      if [ "$n_list" != "$n_sums" ]; then
+          # A hashing failure (unreadable file, an unnameable path) breaks the
+          # positional pairing. Fall back to the per-file loop -- byte-identical
+          # output, slow -- instead of emitting a MISALIGNED manifest.
+          _warn "_tree_manifest: batched shasum produced ${n_sums}/${n_list} lines for $dir — falling back to per-file hashing"
+          while IFS= read -r rel; do
+              [ -n "$rel" ] || continue
+              printf '%s  %s\n' "$(_sha256 "$rel")" "$prefix$rel"
+          done < "$list"
+          return 0
+      fi
+      exec 3< "$list" 4< "$sums"
+      while IFS= read -r rel <&3; do
+          IFS= read -r line <&4 || break
+          sha="${line%%  *}"
+          printf '%s  %s\n' "$sha" "$prefix$rel"
+      done
+      exec 3<&- 4<&-
+    )
+}
+
+# _stage_tree_walk <label> <dir> — a bounded, heartbeating, LOGGED tree walk.
+#
+# D1-7 (phase1): stage.sh:436-446 spent an unbounded, unlogged stretch of CPU
+# in an early phase with the last `lock_heartbeat` BEFORE the walk and the next
+# one ~130 lines later. That is exactly the shape of the 2026-10-28
+# 09:51:36Z / 09:54:59Z stage SIGTERMs: nothing to correlate a kill against.
+# Three things change, nothing else:
+#   (a) the walk runs under `_run_bounded` with STAGE_TREE_BUDGET_S;
+#   (b) a heartbeat loop refreshes the lock/journal DURING the walk;
+#   (c) a log line before and after each tree, with the entry count.
+# The walk itself is unchanged (_tree_manifest), so byte-parity of the
+# manifest is a property of _tree_manifest alone.
+_stage_tree_walk() {
+    local label="$1" dir="$2" out_f rc hb
+    # The walk's output is DATA (it feeds the manifest hash and the per-file
+    # map). This function is always invoked as `X="$(_stage_tree_walk ...)"`,
+    # so EVERYTHING it writes to stdout is captured into that variable --
+    # including `_log` markers, which corrupt the manifest (caught by
+    # tests/test_release_journal.sh: tree-hash MISMATCH + phantom map rows on
+    # the .staging walk). Two rules therefore:
+    #   * the walk lands in a temp file and is cat'd as the ONLY stdout;
+    #   * the before/after markers go to STDERR (`_log ... >&2`).
+    out_f="$(mktemp "${TMPDIR:-/tmp}/stage-walk.XXXXXX")" || { _warn "stage: checksum walk ${label}: mktemp failed"; return 1; }
+    _log "stage: checksum walk START ${label} ($(find "$dir" -type f 2>/dev/null | wc -l | tr -d ' ') files)" >&2
+    ( while :; do sleep 15; lock_heartbeat >/dev/null 2>&1 || true; done ) &
+    hb=$!
+    _run_bounded "$STAGE_TREE_BUDGET_S" _tree_manifest "$dir" "" > "$out_f"
+    rc=$?
+    kill -KILL "$hb" 2>/dev/null || true
+    wait "$hb" 2>/dev/null || true
+    case "$rc" in
+        0) ;;
+        124)
+            rm -f "$out_f"
+            _warn "stage: checksum walk ${label} exceeded STAGE_TREE_BUDGET_S=${STAGE_TREE_BUDGET_S}s — aborting (an unbounded walk in an early phase is the 2026-10-28 stage-SIGTERM shape; re-measure before raising the budget)"
+            return 1 ;;
+        *)
+            rm -f "$out_f"
+            _warn "stage: checksum walk ${label} failed (rc=$rc)"
+            return 1 ;;
+    esac
+    _log "stage: checksum walk DONE ${label} ($(wc -l < "$out_f" | tr -d ' ') entries)" >&2
+    cat "$out_f"
+    rm -f "$out_f"
 }
 
 # _tree_hash <dir> — hash over the sorted listing (the tree's identity).

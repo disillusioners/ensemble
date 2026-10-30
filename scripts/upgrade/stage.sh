@@ -437,10 +437,13 @@ _log "computing manifest checksums (per-file sha256 + tree aggregates)"
 BIN_SHA="$(_sha256 "$STAGE_TMP/ensemble-prod")"
 LAUNCHER_SHA="$(_sha256 "$STAGE_TMP/launcher.sh")"
 CONFIG_SHA="$(_sha256 "$STAGE_TMP/config.yaml")"
-# one walk per tree feeds BOTH the aggregate hash and the per-file map
-AGENTS_LINES="$(_tree_manifest "$STAGE_TMP/agents" "")"
-FRONTEND_LINES="$(_tree_manifest "$STAGE_TMP/frontend" "")"
-PLUGINS_LINES="$(_tree_manifest "$STAGE_TMP/plugins" "")"
+# one walk per tree feeds BOTH the aggregate hash and the per-file map.
+# D1 (promote-preflight-hang): each walk is now BOUNDED (STAGE_TREE_BUDGET_S),
+# heartbeats DURING the walk, and logs before/after -- an unbounded, unlogged
+# early-phase walk is the shape that produced the 2026-10-28 stage SIGTERMs.
+AGENTS_LINES="$(_stage_tree_walk agents "$STAGE_TMP/agents")" || { rm -rf "$STAGE_TMP"; exit 1; }
+FRONTEND_LINES="$(_stage_tree_walk frontend "$STAGE_TMP/frontend")" || { rm -rf "$STAGE_TMP"; exit 1; }
+PLUGINS_LINES="$(_stage_tree_walk plugins "$STAGE_TMP/plugins")" || { rm -rf "$STAGE_TMP"; exit 1; }
 AGENTS_TREE="$(_tree_hash_of_lines "$AGENTS_LINES")"
 FRONTEND_TREE="$(_tree_hash_of_lines "$FRONTEND_LINES")"
 PLUGINS_TREE="$(_tree_hash_of_lines "$PLUGINS_LINES")"
