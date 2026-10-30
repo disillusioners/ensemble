@@ -7,8 +7,9 @@
 # PLANTED (the defect is re-introduced), shown to turn RED, then restored and
 # shown to turn GREEN. The planted digest is recorded.
 #
-# The matrix covers M1–M32 (the plan-frozen span) PLUS M33–M40, the
-# verifier-fix wave appended by the 2026-10-30 fix iteration
+# The matrix covers M1–M32 (the plan-frozen span) PLUS M33–M40 (the
+# verifier-fix wave) PLUS M41–M46 (the 2026-10-30 fix cycle 2: code-council
+# warnings W1/W2/W3 and advisories A1/A2/A5)
 # (implementation-decisions.md §10 — the plan set's own span claim is left
 # untouched: it is a frozen approval artefact). Each row states its
 # verification mode:
@@ -26,6 +27,10 @@
 #     the hang cannot wedge the matrix.
 #   * The runner NEVER touches the live install and never invokes a pipeline
 #     script itself — it only runs the packs (each of which owns its fence).
+#   * FENCED REPO (M9): it sources tests/helpers/preflight_pack_common.sh and
+#     refuses a live-shaped / shared main-checkout REPO_ROOT
+#     (`pf_assert_not_live`) — it must never plant defects in
+#     /home/nea/ensemble-src or a live install. Run it from a linked worktree.
 #
 # Usage:
 #   bash tests/packs/preflight_mutation_matrix_test.sh                # all legs
@@ -35,6 +40,19 @@
 set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+
+# ── M9 (tidier 2026-10-30): THE FENCE ───────────────────────────────────────
+# This is the ONE script in the lane that REWRITES REAL TRACKED FILES, so it
+# must fail closed from a live-shaped or shared checkout instead of planting
+# defects there. It sources the lane's shared helper for exactly this
+# (`pf_assert_not_live`) and names itself in the shared vocabulary; it does
+# NOT call `pf_fence_init` (no scratch install root / no FAKE_HOME is needed —
+# every pack it runs owns its own fence).
+PF_PACK_NAME="preflight_mutation_matrix"
+. "$REPO_ROOT/tests/helpers/preflight_pack_common.sh"
+PF_REAL_HOME="${HOME:-/nonexistent}"
+pf_assert_not_live "$REPO_ROOT"
+
 APPLY="$REPO_ROOT/tests/helpers/preflight_mutation_apply.py"
 RESULTS="${RESULTS:-/tmp/preflight-mutation-matrix.tsv}"
 SB="$(mktemp -d "${TMPDIR:-/tmp}/pf-mutmatrix.XXXXXX")" || exit 2
@@ -55,6 +73,8 @@ PLANT_TARGETS="scripts/upgrade/lib.sh scripts/upgrade/journal_read.py scripts/up
 # LEAVE-NO-PLANT-BEHIND guard. The legs rewrite REAL tracked files, and a
 # SIGKILL (a runaway plant, a tool timeout) can land between the plant and the
 # restore — a planted defect left in the tree would poison the next commit.
+# SCOPE (2026-10-30): the RESTORING half only ever touches PLANTED_LIST; the
+# PRE-FLIGHT half below is a read-only assertion and stays unscoped.
 #   1. refuse to start if any target is already dirty (a pre-existing edit is
 #      indistinguishable from a leftover plant);
 #   2. after every leg and at exit, every target must be CLEAN vs HEAD; a
@@ -77,15 +97,27 @@ assert_plants_clean_or_die() {
     fi
 }
 
+# PLANTED_THIS_RUN — the ONLY files this run may touch.
+#
+# DEFECT FOUND AND FIXED HERE (2026-10-30, fix cycle 2): the reclaim pass used
+# to `git checkout --` EVERY dirty plant target. Run from a worktree with
+# uncommitted work (e.g. an in-flight fix), a REFUSING pre-run check still
+# fired the EXIT trap, which then "restored" the user's edits from git and
+# silently destroyed them. Restoring is only legitimate for a plant THIS run
+# made, so the reclaim pass is now scoped to an explicit list: nothing planted
+# ⇒ nothing touched.
+PLANTED_LIST="$SB/planted.list"
+: > "$PLANTED_LIST"
 reclaim_leftover_plants() {
-    local dirty f
-    dirty="$(plants_clean)" || {
-        for f in $dirty; do
-            printf 'PLANT-LEFTOVER: %s differed from HEAD — restoring from git\n' "$f" >&2
+    local f
+    [ -s "$PLANTED_LIST" ] || return 0
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        if ! git -C "$REPO_ROOT" diff --quiet -- "$f" 2>/dev/null; then
+            printf 'PLANT-LEFTOVER: %s differed from HEAD — restoring the plant from git\n' "$f" >&2
             git -C "$REPO_ROOT" checkout -- "$f"
-        done
-        plants_clean >/dev/null || { printf 'FATAL: could not restore the plant targets\n' >&2; }
-    }
+        fi
+    done < "$PLANTED_LIST"
 }
 
 ONLY=""
@@ -171,6 +203,12 @@ M37|packi:preflight_ceremony_readiness_test.sh|I16a stamp gate MISMATCH|
 M38|packi:preflight_ceremony_readiness_test.sh|I16f stamp gate MISMATCH|
 M39|pytest:tests/unit/tools/test_upgrade_tools.py::TestScriptsDirProvenanceArmPath::test_w3a_floor_unset_on_an_explicit_pin_refuses|test_w3a_floor_unset_on_an_explicit_pin_refuses|
 M40|pytest:tests/unit/tools/test_upgrade_tools.py::TestScriptsDirProvenanceArmPath::test_w3b_fallback_dir_downgrades_refusal_to_warning|test_w3b_fallback_dir_downgrades_refusal_to_warning|
+M41|packi:preflight_ceremony_readiness_test.sh|SCENARIO I13b FAIL expected=refuse got=arm|
+M42|pack:preflight_watchdog_test.sh|FAIL recovery phase CONTINUES after a wedged probe|
+M43|pack:preflight_watchdog_test.sh|D13a a txn-busy refusal row was appended|
+M44|pack:preflight_logging_test.sh|E10b fence LOST: run-a2keep.client.log|
+M45|pack:preflight_watchdog_test.sh|FAIL D14 the step budget falls back|
+M46|pack:preflight_shasum_batch_parity_test.sh|A1 leaked temp files|
 "
 
 deferred_row() { # deferred_row <id> <symptom>
@@ -217,6 +255,7 @@ while IFS= read -r row; do
         cp "$SB/inflight.bak" "$REPO_ROOT/$file"; INFLIGHT_FILE=""
         FAIL=$((FAIL+1)); continue
     fi
+    printf '%s\n' "$file" >> "$PLANTED_LIST"
     sha_planted="$(shasum -a 256 "$REPO_ROOT/$file" | awk '{print $1}')"
     if [ "$sha_planted" = "$sha_before" ]; then
         printf '%s\tERROR-plant-noop\t%s\t%s\t%s\t-\t-\tplant changed nothing\n' \
@@ -297,5 +336,5 @@ if [ "$DRY" = "1" ]; then
     printf 'MUTATION MATRIX: DRY-RUN (nothing planted)\n'
     exit 0
 fi
-printf 'MUTATION MATRIX: PASS (span M1–M40 complete — M33–M40 are the 2026-10-30 verifier-fix wave, D-49; deferred rows recorded)\n'
+printf 'MUTATION MATRIX: PASS (span M1–M46 complete — M33–M40 verifier-fix wave, M41–M46 fix cycle 2; deferred rows recorded)\n'
 exit 0

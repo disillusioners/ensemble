@@ -21,25 +21,39 @@
 #   _probe                    health-gate probe (2s sleep, curl max-time 5s —
 #                             the same budget as deploy.sh phase 5)
 #
-# Size rationale: ~5560 lines (crossed >3000 during the supervision-
-# detection + 3-layer adoption-protocol growth, then ~2400 more across
-# the W5 journal-splice shell helpers, C4 live-waiver refusal, F2 gate
-# plumbing and the fast-by-default promote lane) is still the
-# single shared substrate for the five entry scripts (stage/promote/
+# Size rationale: ~6720 lines (refreshed 2026-10-30 — the previous note said
+# ~5560, i.e. ~1,080 lines stale; +854 of the growth is the
+# promote-preflight-hang work: the O(N) journal-read wrapper family
+# `_journal_read_helper_path`/`_journal_read_probe`/`_journal_read_legacy`/
+# `_journal_read_fallback`/`journal_read` + `_json_sub_legacy`, the per-run
+# logging sink `_log*`/`_log_write_failed`, `_run_bounded_step`, the
+# `_pipeline_scripts_stamp_verdict` stage gate, the numeric-knob resolver,
+# the TERM-forwarding tree walk and `_run_log_retention`). The file crossed
+# >3000 during the supervision-detection + 3-layer adoption-protocol growth,
+# then ~2400 more across the W5 journal-splice shell helpers, C4 live-waiver
+# refusal, F2 gate plumbing and the fast-by-default promote lane; it is still
+# the single shared substrate for the five entry scripts (stage/promote/
 # rollback/restart/status) plus the SOURCED consumers stop-ensemble.sh /
 # adopt-unit.sh; splitting would duplicate cross-cutting contracts
 # (journal layout, lock semantics, ENV allowlist, BSD/GNU dispatch). The
 # file is the contract inventory. The recent growth is the supervision-
 # detection section (classify / outcome map / dualfight / unit hand-back)
 # — one twin lives here, the python twin in daemon/tools/upgrade_journal.py.
-# BACKLOG (fix-back cycle 2 — candidates ONLY, no split executed; any
-# split must keep every consumer's sourcing line byte-identical and re-run
-# the full journal/lock/supervision suites):
+# BACKLOG (fix-back cycle 2 + fix cycle 2 — candidates ONLY, no split
+# executed; any split must keep every consumer's sourcing line
+# byte-identical and re-run the full journal/lock/supervision suites):
 #   (a) supervision_* family (~:1879-2900: hand-back, restart_via_launcher,
 #       owned_pids, classify, outcome map, dualfight) → supervision_lib.sh;
 #   (b) pipeline_settled + adoption_marker_* (~:1212-1527, Layer i/ii) →
 #       settle_lib.sh;
-#   (c) journal_* family (~:481-1014, atomic state.json IO) → journal_lib.sh.
+#   (c) journal_* family (~:481-1014, atomic state.json IO) → journal_lib.sh;
+#   (d) journal-READ family (~:1324-1500: `_journal_read_helper_path` →
+#       `journal_read`) + `_json_sub_legacy` → journal_read_lib.sh (all five
+#       consumers source lib.sh, so the sourcing line stays byte-identical;
+#       the parity pack's `git show <rev>:scripts/upgrade/lib.sh` oracle
+#       extraction needs a one-line path update);
+#   (e) per-run logging family (`_log*` / `_log_write_failed`, ~:296-486)
+#       + `_run_log_retention` → log_lib.sh.
 #
 # ENV DISCIPLINE (D-FA4.6 + test-strategy §5):
 #   - the resolved triple (INSTALL_DIR / PORT / POSTGRES_DB) is asserted and
@@ -80,6 +94,34 @@ LOG_TAG="${LOG_TAG:-upgrade}"
 # travel together, T6.15/AC15).
 PIPELINE_SCRIPTS_REV=unreleased-fix-promote-preflight-hang
 
+# ── _numeric_knob <NAME> <raw-value> <default> — A5 (code council, 2026-10-30)
+# The budget knobs below are consumed in ARITHMETIC (`$(( now + BUDGET ))`)
+# and in `sleep`. A non-numeric value used to die CRYPTICALLY (`abc:
+# unbound variable` inside `$(( ))`) or, worse, silently INVERT a bound
+# (`sleep abc` fails instantly => the watcher fires at elapsed=0 and the
+# first wrapped step "breaches" in zero seconds). Resolve every numeric
+# knob through here: a non-numeric value is a LOUD, named validation error
+# on stderr and the documented default takes over — never a cryptic death
+# and never a silently-dead watchdog. Empty => default (the documented
+# "unset" spelling). Non-fatal by design: this runs at SOURCE time, and
+# status.sh / restart.sh / rollback.sh (R1 recovery class) must never be
+# fail-fast halted by an operator typo in an unrelated knob.
+_numeric_knob() {
+    local __name="$1" __raw="${2:-}" __def="$3"
+    if [ -z "$__raw" ]; then
+        printf '%s' "$__def"
+        return 0
+    fi
+    case "$__raw" in
+        *[!0-9]*)
+            printf 'ERROR: %s="%s" is not a decimal integer — using the documented default %s (a garbage budget silently disables or inverts the bound it guards; A5/code council 2026-10-30)\n' \
+                "$__name" "$__raw" "$__def" >&2
+            printf '%s' "$__def"
+            ;;
+        *) printf '%s' "$__raw" ;;
+    esac
+}
+
 # Health-gate budgets (seconds) — same numbers as deploy.sh phase 5.
 # LIVEZ_BUDGET_S = 180s (v0.16.9, was 60s): attempt-2 halt showed the
 # post-flip boot alone eats ~51s for the journal sweep on the first live
@@ -101,8 +143,8 @@ PIPELINE_SCRIPTS_REV=unreleased-fix-promote-preflight-hang
 # See decisions.md (c)/(d), phase3-plan.md D-P3.1/D-P3.2, plan-overview
 # §4. C-5: this comment refresh rides the P1 PR as a discoverability
 # win for operators BEFORE P3 lands the behavior.
-LIVEZ_BUDGET_S="${LIVEZ_BUDGET_S:-180}"
-READYZ_BUDGET_S="${READYZ_BUDGET_S:-120}"
+LIVEZ_BUDGET_S="$(_numeric_knob LIVEZ_BUDGET_S "${LIVEZ_BUDGET_S:-}" 180)"
+READYZ_BUDGET_S="$(_numeric_knob READYZ_BUDGET_S "${READYZ_BUDGET_S:-}" 120)"
 # P3 / decision (d) — total ceremony wall-clock ceiling. The
 # promote.sh top-level wraps every phase boundary in
 # `_enforce_deadline promote_deadline <phase-name>`. Breach → journal
@@ -118,7 +160,7 @@ READYZ_BUDGET_S="${READYZ_BUDGET_S:-120}"
 #   worst (+30s slack inside the 900s ceiling). The conservative
 #   mode preserves the v0.18-era envelope (soak 300s flat) so
 #   total ≤ 900s + slack remains the conservative floor.
-PROMOTE_TOTAL_DEADLINE_S="${PROMOTE_TOTAL_DEADLINE_S:-900}"
+PROMOTE_TOTAL_DEADLINE_S="$(_numeric_knob PROMOTE_TOTAL_DEADLINE_S "${PROMOTE_TOTAL_DEADLINE_S:-}" 900)"
 
 # Subprocess-wait budgets (2.2b, upgrade-resilience 2026-10-07). Rationale
 # (cite: §9 manual-push reproduction + incident ④ 2026-10-07 forensics):
@@ -134,10 +176,10 @@ PROMOTE_TOTAL_DEADLINE_S="${PROMOTE_TOTAL_DEADLINE_S:-900}"
 # defaults so the happy path NEVER trips them; env-overridable for
 # sandbox drills and tests. One event kind `subprocess_wait_timeout`
 # journals every site for forensic correlation.
-STOP_SCRIPT_BUDGET_S="${STOP_SCRIPT_BUDGET_S:-120}"     # placeholder; effective bound derived at call site (see _derive_parent_stop_budget)
-HANDBACK_START_BUDGET_S="${HANDBACK_START_BUDGET_S:-60}"  # unit hand-back start (the §9 culprit)
-SYSTEMCTL_PROBE_BUDGET_S="${SYSTEMCTL_PROBE_BUDGET_S:-5}"  # reset-failed / is-active probes
-SCOPE_START_BUDGET_S="${SCOPE_START_BUDGET_S:-10}"      # scope-arm/opt-in launcher start
+STOP_SCRIPT_BUDGET_S="$(_numeric_knob STOP_SCRIPT_BUDGET_S "${STOP_SCRIPT_BUDGET_S:-}" 120)"     # placeholder; effective bound derived at call site (see _derive_parent_stop_budget)
+HANDBACK_START_BUDGET_S="$(_numeric_knob HANDBACK_START_BUDGET_S "${HANDBACK_START_BUDGET_S:-}" 60)"  # unit hand-back start (the §9 culprit)
+SYSTEMCTL_PROBE_BUDGET_S="$(_numeric_knob SYSTEMCTL_PROBE_BUDGET_S "${SYSTEMCTL_PROBE_BUDGET_S:-}" 5)"  # reset-failed / is-active probes
+SCOPE_START_BUDGET_S="$(_numeric_knob SCOPE_START_BUDGET_S "${SCOPE_START_BUDGET_S:-}" 10)"      # scope-arm/opt-in launcher start
 # D1 (promote-preflight-hang) — per-tree cap for the stage manifest checksum
 # walks. DERIVED, not invented (wave-2 re-measurement — the wave-1 numbers
 # were lost with its /tmp sandbox; this host, read-only over the worktree,
@@ -151,7 +193,7 @@ SCOPE_START_BUDGET_S="${SCOPE_START_BUDGET_S:-10}"      # scope-arm/opt-in launc
 # the 2026-10-28 09:51/09:54 stage-SIGTERM shape (unbounded, unlogged CPU in
 # an early phase). Env-overridable. Re-measure with:
 #   nohup bash tests/packs/preflight_shasum_batch_parity_test.sh --full &
-STAGE_TREE_BUDGET_S="${STAGE_TREE_BUDGET_S:-60}"
+STAGE_TREE_BUDGET_S="$(_numeric_knob STAGE_TREE_BUDGET_S "${STAGE_TREE_BUDGET_S:-}" 60)"
 # D2 (promote-preflight-hang, phase 2) — the preflight watchdog budgets.
 # Both are env-overridable; the value in force is NAMED in the breach row
 # when a budget trips (T2.1/AC1 — `_budget_in_force` is the resolver).
@@ -181,8 +223,8 @@ STAGE_TREE_BUDGET_S="${STAGE_TREE_BUDGET_S:-60}"
 # scripts hold no pipeline lock on their journal reads and get the
 # UNLOCKED breach behaviour instead (D2-6/SC4b: warn + per-run log, no
 # journal row; status.sh exits 1).
-PREFLIGHT_STEP_BUDGET_S="${PREFLIGHT_STEP_BUDGET_S:-120}"
-PREFLIGHT_PHASE_BUDGET_S="${PREFLIGHT_PHASE_BUDGET_S:-300}"
+PREFLIGHT_STEP_BUDGET_S="$(_numeric_knob PREFLIGHT_STEP_BUDGET_S "${PREFLIGHT_STEP_BUDGET_S:-}" 120)"
+PREFLIGHT_PHASE_BUDGET_S="$(_numeric_knob PREFLIGHT_PHASE_BUDGET_S "${PREFLIGHT_PHASE_BUDGET_S:-}" 300)"
 # Post-flip soak (ADR-005 gate: 300s). Overridable for sandbox drills only
 # (ENSEMBLE_PROMOTE_SOAK_S); production default stays 300.
 SOAK_S_DEFAULT=300
@@ -416,13 +458,19 @@ _enforce_deadline() {
 # default) so the breach row can NAME it; refusing loudly on an unknown
 # name keeps the resolver honest (a typo'd budget in a breach row would
 # silently misreport the value).
+#
+# A5 (code council, 2026-10-30): the values printed here are the RESOLVED
+# globals — every numeric knob already passed through `_numeric_knob` at
+# source time, so a garbage override can neither reach a breach row nor
+# reach `$(( ))`/`sleep`. The defaults are NOT re-declared here (one
+# source of truth per budget).
 _budget_in_force() {
     case "$1" in
-        PREFLIGHT_STEP_BUDGET_S)   printf '%s' "${PREFLIGHT_STEP_BUDGET_S:-120}" ;;
-        PREFLIGHT_PHASE_BUDGET_S)  printf '%s' "${PREFLIGHT_PHASE_BUDGET_S:-300}" ;;
-        STAGE_TREE_BUDGET_S)       printf '%s' "${STAGE_TREE_BUDGET_S:-60}" ;;
-        SYSTEMCTL_PROBE_BUDGET_S)  printf '%s' "${SYSTEMCTL_PROBE_BUDGET_S:-5}" ;;
-        JOURNAL_LEGACY_READ_BUDGET_S) printf '%s' "${JOURNAL_LEGACY_READ_BUDGET_S:-120}" ;;
+        PREFLIGHT_STEP_BUDGET_S)   printf '%s' "$PREFLIGHT_STEP_BUDGET_S" ;;
+        PREFLIGHT_PHASE_BUDGET_S)  printf '%s' "$PREFLIGHT_PHASE_BUDGET_S" ;;
+        STAGE_TREE_BUDGET_S)       printf '%s' "$STAGE_TREE_BUDGET_S" ;;
+        SYSTEMCTL_PROBE_BUDGET_S)  printf '%s' "$SYSTEMCTL_PROBE_BUDGET_S" ;;
+        JOURNAL_LEGACY_READ_BUDGET_S) printf '%s' "$JOURNAL_LEGACY_READ_BUDGET_S" ;;
         *) return 1 ;;
     esac
 }
@@ -473,16 +521,28 @@ _budget_breach() {
 # + exit 78). Any other rc propagates unchanged — healthy steps are
 # unaffected.
 #
-# WRAPPER CONTRACT (D2-14): the wrapped step MUST be side-effect-free-on-kill
-# or process-group-killed. Every phase-2 wrap site is a READ-ONLY step
-# (journal reads, entry checks, staleness predicate, integrity walks) —
-# the side-effecting ceremonies (stop script, launcher swap, flip) are
-# deliberately NOT wrapped; a kill mid-`retention_evict`/stop would leave
+# WRAPPER CONTRACT (D2-14, corrected by W1/code council 2026-10-30): the
+# wrapped step MUST be read-only OR death-idempotent BY ITS OWN DESIGN (a
+# kill mid-step must leave either no state change or a state the next
+# sweep/re-run repairs). Read-only sites (journal reads, entry checks,
+# staleness predicate, integrity walks) are the majority; the ONE
+# non-read-only site is `adopt_stale_txn` (promote.sh step 1c), whose
+# recovery is flip-first precisely so a death mid-sequence is re-run
+# idempotently by the launcher sweep on the same stale txn (its own comment
+# block says so). The side-effecting ceremonies that are NOT death-
+# idempotent (stop script, launcher swap, the post-txn flip) are
+# deliberately NOT wrapped — a kill mid-`retention_evict`/stop would leave
 # half-mutated state (the MUST-NOT-WRAP rows in phase2-plan §3.3b).
 # NOTE: the step runs in a forked subshell (the house primitive backgrounds
 # it) — never wrap a step that must set globals in this shell
 # (supervision_preflight is covered INSIDE its dualfight probe sites
 # instead, via _df_systemctl below).
+#
+# RC CONTRACT: a step that REFUSES by `exit 78` inside the subshell surfaces
+# to the caller as the wrapper's rc 78 — the caller MUST propagate it
+# (`exit 78`) and MUST NOT append a row of its own (that row would be
+# mislabelled and would double-record one refusal). See promote.sh's
+# adopt-txn arm (W1) and the BUDGET_BREACH_RC consumers below.
 _run_bounded_step() {
     local step="$1"; shift
     local t0 rc
@@ -1314,7 +1374,7 @@ journal_init() {
 #     scripts promote.sh launches (so `stop-ensemble.sh` keeps the
 #     warn-and-continue recovery semantics).
 JOURNAL_SIZE_GUARD_BYTES="${JOURNAL_SIZE_GUARD_BYTES:-98304}"
-JOURNAL_LEGACY_READ_BUDGET_S="${JOURNAL_LEGACY_READ_BUDGET_S:-120}"
+JOURNAL_LEGACY_READ_BUDGET_S="$(_numeric_knob JOURNAL_LEGACY_READ_BUDGET_S "${JOURNAL_LEGACY_READ_BUDGET_S:-}" 120)"
 JOURNAL_READ_STRICT="${JOURNAL_READ_STRICT:-0}"
 
 # _journal_read_helper_path — absolute path to the read helper. Mirrors
@@ -2666,11 +2726,46 @@ manifest_field() {
 # relpath (deterministic; D-FA4.4 per-file map + sorted-listing hash).
 _tree_manifest() {
     local dir="$1" prefix="$2"
+    local _tm_sub="" _tm_rc=0
+    # A1 (code council, 2026-10-30): `_run_bounded` TERMs the function's
+    # subshell, and a signal does NOT propagate to grandchildren — the inner
+    # worker survived a budget kill, kept hashing into a file nobody reads,
+    # and its `trap ... EXIT` never ran (the mktemp pair leaked). Two levels
+    # are needed: this forwarding trap (the process `_run_bounded` signals)
+    # TERMs the worker and WAITS for its own cleanup trap to finish before
+    # exiting, so a killed walk leaves no process and no temp file behind.
+    # Every call site runs this function in its own subshell (`_run_bounded`,
+    # a pipeline, `$( )`), so installing the trap here cannot disturb a
+    # caller's handlers.
+    trap '{ [ -n "$_tm_sub" ] && kill -TERM "$_tm_sub" 2>/dev/null; [ -n "$_tm_sub" ] && wait "$_tm_sub" 2>/dev/null; exit 143; }' TERM INT HUP
     ( cd "$dir" 2>/dev/null || exit 1
       local list sums rel line sha n_list n_sums
       list="$(mktemp "${TMPDIR:-/tmp}/tree-manifest.XXXXXX")" || exit 1
       sums="$list.sum"
-      trap 'rm -f "$list" "$sums"' EXIT
+      # A1: an EXIT-only trap does NOT run when the parent TERMs this worker,
+      # so the batch survived and the mktemp pair leaked. Reap the batch on
+      # TERM/INT/HUP too: children FIRST (a TERMed xargs orphans them and the
+      # pgrep lookup would find nothing), then xargs, then remove the pair.
+      # Bounded by construction — at most ONE shasum child is in flight
+      # (chunks are sequential inside xargs).
+      _tm_batch=""
+      _tm_clean() {
+          local _tm_kids=""
+          if [ -n "$_tm_batch" ]; then
+              if command -v pgrep >/dev/null 2>&1; then
+                  _tm_kids="$(pgrep -P "$_tm_batch" 2>/dev/null)"
+              fi
+              for _tm_c in $_tm_kids; do
+                  kill -TERM "$_tm_c" 2>/dev/null || true
+              done
+              kill -TERM "$_tm_batch" 2>/dev/null || true
+              wait "$_tm_batch" 2>/dev/null || true
+              _tm_batch=""
+          fi
+          rm -f "$list" "$sums" 2>/dev/null || true
+      }
+      trap '_tm_clean' EXIT
+      trap '_tm_clean; exit 143' TERM INT HUP
       find . -type f | sed 's|^\./||' | sort > "$list" || exit 1
       [ -s "$list" ] || return 0
       # ONE shasum invocation per chunk instead of one fork PER FILE. The
@@ -2690,6 +2785,7 @@ _tree_manifest() {
       while IFS= read -r rel; do printf '%s\0' "$rel"; done < "$list" \
         | xargs -0 -n 500 shasum -a 256 2>/dev/null > "$sums" &
       _tx=$!
+      _tm_batch="$_tx"
       # progress narration on the same interval (stderr; stdout stays DATA)
       _tsz="$(wc -l < "$list" | tr -d ' ')"
       _tlast=0
@@ -2704,6 +2800,7 @@ _tree_manifest() {
           sleep 0.2
       done
       wait "$_tx"
+      _tm_batch=""
       n_list="$(wc -l < "$list" | tr -d ' ')"
       n_sums="$(wc -l < "$sums" | tr -d ' ')"
       if [ "$n_list" != "$n_sums" ]; then
@@ -2724,7 +2821,12 @@ _tree_manifest() {
           printf '%s  %s\n' "$sha" "$prefix$rel"
       done
       exec 3<&- 4<&-
-    )
+    ) &
+    _tm_sub=$!
+    wait "$_tm_sub"
+    _tm_rc=$?
+    _tm_sub=""
+    return "$_tm_rc"
 }
 
 # _stage_tree_walk <label> <dir> — a bounded, heartbeating, LOGGED tree walk.
@@ -5677,18 +5779,51 @@ supervision_map_outcome() {
 #
 # STATEMENT-FORM CONTRACT: this helper is called as a statement (never
 # inside `$( )`) — on a budget breach `_budget_breach` exits THE SCRIPT.
-# Output lands in <outfile> (the caller `read`s it back); rc is the
+# Output lands in <outfile> (the caller `reads` it back); rc is the
 # probe's own rc (is-active exits 3 when inactive — preserved).
+#
+# KIND SCOPE (W3, code council 2026-10-30): the breach handler is
+# promote-path-only. `supervision_preflight` is reached from promote.sh
+# (`promote:*`, holds the lock), rollback.sh (`rollback:*`, holds the lock)
+# and restart.sh (`restart:*`, adopts a lock), plus the P2 stop-site
+# re-check inside stop_via_stop_script. R1 is binding: "non-promote paths
+# (status / rollback / restart / adopt-unit / stop) => WARN + bounded +
+# continue. NO fail-fast on recovery paths." A wedged bus during a restart
+# or a rollback must not fail-fast a RECOVERY-class script (and on a live
+# install its halt row would be fence-refused anyway — fatal AND
+# unrecorded, the inverse of this lane's promise). So:
+#   * `_PIPELINE_PHASE` unset            => treat as the PROMOTE path
+#     (fail-closed: today's behaviour for any un-phased caller, and every
+#     shipped recovery script sets its phase BEFORE its supervision call);
+#   * `_PIPELINE_PHASE=promote:*`        => `_budget_breach` (row + WARN +
+#     lock release + exit 78) — unchanged;
+#   * any other explicit phase           => WARN + continue with the probe's
+#     own rc, 124 mapped to "unknown / cannot classify" (the dual-fight
+#     check then degrades instead of claiming a FAULT it cannot see).
+# Both arms are pinned by tests/packs/preflight_watchdog_test.sh (D10/D10b
+# promote-breach, D12 recovery-continue).
 _df_systemctl() {
     local __out="$1"; shift
-    local __t0 __rc
+    local __t0 __rc __phase
     __t0="$(_now_epoch)"
     _run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" "$@" > "$__out" 2>/dev/null
     __rc=$?
     if [ "$__rc" -eq 124 ]; then
-        rm -f "$__out" 2>/dev/null || true
-        : > "$__out" 2>/dev/null || true
-        _budget_breach SYSTEMCTL_PROBE_BUDGET_S "systemctl-$1" "supervision-dualfight" "$(( $(_now_epoch) - __t0 ))"
+        __phase="${_PIPELINE_PHASE:-}"
+        case "$__phase" in
+            ''|promote:*)
+                rm -f "$__out" 2>/dev/null || true
+                : > "$__out" 2>/dev/null || true
+                _budget_breach SYSTEMCTL_PROBE_BUDGET_S "systemctl-$1" "supervision-dualfight" "$(( $(_now_epoch) - __t0 ))"
+                ;;
+            *)
+                # R1 recovery class: bounded probe + loud WARN + continue.
+                rm -f "$__out" 2>/dev/null || true
+                : > "$__out" 2>/dev/null || true
+                _warn "supervision probe '$1' exceeded SYSTEMCTL_PROBE_BUDGET_S=${SYSTEMCTL_PROBE_BUDGET_S}s at phase ${__phase} — continuing WITHOUT a classification (R1: no fail-fast on a recovery path; elapsed=$(( $(_now_epoch) - __t0 ))s)"
+                return 124
+                ;;
+        esac
     fi
     return "$__rc"
 }
@@ -6280,7 +6415,8 @@ retention_evict() {
 # own owner; R8 supersedes it).
 #
 # Rule: keep-newest 20 (by mtime) + age-cap 14 d, over the env-scoped
-# per-run file family (<run_id>.log narrative / .payload.log / .client.log).
+# per-run file family (<run_id>.log narrative / .payload.log / .client.log,
+# plus the PRE-A2 <run_id>.payload.client.log name still on disk).
 # FIVE FENCES -- a file survives regardless of age/count when it is:
 #   (1) this run's own narrative file ($ENSEMBLE_UPGRADE_LOG_FILE);
 #   (2) the journal in_flight run's files (a CONCURRENT txn's narrative);
@@ -6340,7 +6476,15 @@ _run_log_retention() {
         case " $protected " in *" $name "*) continue ;; esac
         case "$cur_ptr_run" in
             "") ;;
-            *) case "$name" in "${cur_ptr_run}.log"|"${cur_ptr_run}.payload.log"|"${cur_ptr_run}.client.log") continue ;; esac ;;
+            # A2 (code council, 2026-10-30): the per-run family is FOUR names
+            # while pre-A2 runs exist on disk -- `<run>.log` (narrative),
+            # `<run>.payload.log` (unit append: capture), `<run>.client.log`
+            # (client stderr, the CURRENT name since A2) and
+            # `<run>.payload.client.log` (the PRE-A2 name). Fencing only the
+            # first three left the running run's client log protected solely
+            # by the <6 h mtime fence. Pinned by preflight_logging_test.sh
+            # E10b.
+            *) case "$name" in "${cur_ptr_run}.log"|"${cur_ptr_run}.payload.log"|"${cur_ptr_run}.client.log"|"${cur_ptr_run}.payload.client.log") continue ;; esac ;;
         esac
         case "$ptr_line" in *"$name"*) continue ;; esac
         printf '%s\n' "$recent" | grep -Fqx -- "$name" && continue

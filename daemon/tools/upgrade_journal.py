@@ -87,8 +87,9 @@ the single journal protocol home. Splitting the protocol twin from the
 tool surface would force every contract change to touch two modules.
 """
 
-# Size rationale (~3433 lines, refreshed 2026-10-19 — was ~3050 at the
-# P2 journal hardening): single-source-of-truth for the upgrade journal —
+# Size rationale (~3760 lines, refreshed 2026-10-30 — was ~3433 at the
+# promote-preflight-hang close, ~3050 at the P2 journal hardening):
+# single-source-of-truth for the upgrade journal —
 # schema (JOURNAL_EMPTY + PendingOp + PendingWake), atomic I/O,
 # reconcile/expiry + the agent-restart additive surface (restart_audits /
 # restart_window / close_stale_restart_arm / the terminal-event
@@ -2227,6 +2228,12 @@ def bounded_git_probe(cwd: Path, *args: str) -> tuple[int, str, str]:
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 "HOME": os.environ.get("HOME", "/"),
                 "GIT_CONFIG_NOSYSTEM": "1",
+                # A3 (code council, 2026-10-30): never let a read-only probe
+                # take `.git/index.lock` to refresh the stat cache — it makes
+                # the purity caveat above INERT on the arm path (no lock
+                # contention with a concurrent git user, no transient lock
+                # file for a concurrent ceremony to trip over).
+                "GIT_OPTIONAL_LOCKS": "0",
             },
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -2279,6 +2286,40 @@ def executor_run_log_paths(
         env_scope = "demo"
     base = install_dir / "data" / "upgrade" / env_scope
     return base / f"{run_id}.log", base / f"{run_id}.payload.log"
+
+
+_RUN_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def per_run_narrative_path(install_dir: Path, run_id: str | None) -> Path | None:
+    """Resolve a run's per-run NARRATIVE file by ``run_id`` (M7, tidier
+    2026-10-30): THE single resolver for the readers.
+
+    Resolution is BY run_id, never "the last pointer line" (a stale pointer
+    resolves to the wrong file after a newer run); the glob over the
+    env-scoped ``data/upgrade/<env>/`` dirs is exact because run_ids are
+    unique and file-name shaped. Returns None when the file is absent
+    (evicted by retention, or a pre-D3 run) -- callers fall back to the
+    aggregate ``data/upgrade.log``.
+
+    WHY IT LIVES HERE: this module owns both the WRITER
+    (``executor_run_log_paths``) and the env-scope table
+    (``_UPGRADE_ENV_SCOPES``), so the naming rule has exactly one home. The
+    two previous copies (``daemon/tools/upgrade_tools._resolve_per_run_log``
+    and ``daemon/services/upgrade_journal_sweep._per_run_narrative_path``)
+    had already DRIFTED -- the sweep copy had no run_id validation -- and a
+    third reader tailing a different file than the tools' tail is a
+    post-mortem trap. The run_id is validated here (it is interpolated into
+    a path) so no caller can inject a separator or a glob.
+    """
+    if not run_id or not _RUN_ID_RE.fullmatch(run_id):
+        return None
+    base = install_dir / "data" / "upgrade"
+    for env_dir in base.glob("*"):
+        cand = env_dir / f"{run_id}.log"
+        if cand.is_file():
+            return cand
+    return None
 
 
 def _append_pointer_line(
@@ -2939,7 +2980,15 @@ def spawn_executor(
         # signature triage alive: _is_systemd_run_failure reads the FILE's
         # tail below, so the systemd-unavailable refusal (the NEVER-returns
         # fail-closed path) is NOT silenced by this redirect (R7).
-        client_err_path = payload_path.with_suffix(".client.log")
+        # A2 (code council 2026-10-30): the client log is named
+        # `<run_id>.client.log` — the THIRD name of the same per-run family
+        # (`<run_id>.log` narrative / `<run_id>.payload.log` payload /
+        # `<run_id>.client.log` client stderr). The previous
+        # `payload_path.with_suffix(".client.log")` produced
+        # `<run_id>.payload.client.log`, a FOURTH name that `_run_log_retention`
+        # did not fence as the current run's file (it survived only via the
+        # <6 h mtime fence — an off-by-one in the documented 5-fence model).
+        client_err_path = payload_path.with_name(f"{run_id}.client.log")
         try:
             client_err_fh = client_err_path.open("ab")
         except OSError:  # diagnostics only -- degrade to DEVNULL, never fail
@@ -2986,20 +3035,46 @@ def spawn_executor(
         # R7 PIN: read the client's stderr from the FILE (never a pipe) —
         # the fail-closed systemd-unavailable refusal below MUST still fire
         # on a signature-bearing stderr.
+        #
+        # A7 (code council 2026-10-30): the fail-closed guarantee had a
+        # SILENT hole — if the client log could not be OPENED for append
+        # (`client_err_fh is None`, i.e. the payload dir is unwritable) AND
+        # the tail read then failed too, `err_tail` stayed empty, the
+        # signature test returned False, and the code fell through to the
+        # "payload failed fast — journal is truth" downgrade: a blind triage
+        # reporting a conclusion it could not observe (and if systemd-run
+        # really had failed, NO shell ever runs, so the journal stays empty
+        # and the operator sees a silent nothing). Both halves must fail for
+        # the hole to open, which is why it is pinned explicitly.
         err_tail = b""
+        err_tail_read = False
         try:
             with client_err_path.open("rb") as eh:
                 eh.seek(0, os.SEEK_END)
                 size = eh.tell()
                 eh.seek(max(0, size - _CLIENT_ERR_TAIL_BYTES))
                 err_tail = eh.read() or b""
+            err_tail_read = True
         except OSError:
-            err_tail = b""
+            err_tail_read = False
         if _is_systemd_run_failure(err_tail):
             _refuse_systemd_unavailable(
                 install_dir,
                 f"systemd-run client exited rc={rc}: "
                 f"{err_tail.decode('utf-8', errors='replace')[-300:]}",
+            )
+        if not err_tail_read:
+            # Deliberately the SAME fail-closed refusal family (no new
+            # envelope token): the claim being refused is "a transient
+            # executor unit was started and its payload ran" — and it is
+            # UNVERIFIABLE here. The reason text names the sub-case so the
+            # journal row is unambiguous.
+            _refuse_systemd_unavailable(
+                install_dir,
+                f"systemd-run client exited rc={rc} but its stderr is "
+                f"UNREADABLE (client-log-unavailable: {client_err_path}) — "
+                "the systemd-failure signature cannot be triaged, so the "
+                "unit start is UNVERIFIABLE (A7 fail-closed)",
             )
         # Fast non-zero WITHOUT a systemd failure signature ⇒ the payload
         # itself ran and failed fast (e.g. a preflight exit-78 refusal) —

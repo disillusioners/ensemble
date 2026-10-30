@@ -17,6 +17,9 @@
 #      wave-1 measurement and cited in lib.sh's STAGE_TREE_BUDGET_S comment;
 #      this pack re-measures the SCALED shape so the gate never pays 5 min).
 #
+#   4. A1 KILL HYGIENE (code council 2026-10-30): a budget kill reaps the
+#      `xargs … shasum` batch and leaves no `tree-manifest.*` temp pair.
+#
 # Usage: bash tests/packs/preflight_shasum_batch_parity_test.sh [--full]
 
 set -u
@@ -119,6 +122,45 @@ if [ "$HEAD_MS" -lt "$BASE_MS" ]; then
     pf_ok "batching is faster on the scaled shape (${BASE_MS}ms -> ${HEAD_MS}ms)"
 else
     pf_bad "batching is NOT faster on the scaled shape (${BASE_MS}ms -> ${HEAD_MS}ms)"
+fi
+
+printf '\n== 4b. A1: a budget kill reaps the batch and leaks no temp pair ==\n'
+# A1 (code council 2026-10-30): `_run_bounded` TERMs the SUBSHELL, so the
+# EXIT-only trap did not run: the `xargs … shasum` batch survived (still
+# hashing into a file nobody reads) and the mktemp pair leaked. Pinned as two
+# observable facts on a stubbed slow `shasum`: (a) no `tree-manifest.*` temp
+# file is left behind, (b) the batch's own process is gone shortly after the
+# bounded call returns. The stub writes its pid and `exec`s the sleep, so pid
+# identity is exact (no `pgrep -f` pattern matching).
+mkdir -p "$PF_SB/a1/bin" "$PF_SB/a1/tree" "$PF_SB/a1/tmp"
+printf '#!/bin/sh\nprintf "%%s\\n" "$$" > "$A1_PIDFILE"\nexec sleep 30\n' > "$PF_SB/a1/bin/shasum"
+chmod +x "$PF_SB/a1/bin/shasum"
+for i in 1 2 3 4 5; do printf 'x\n' > "$PF_SB/a1/tree/f$i"; done
+cat > "$PF_SB/a1/run.sh" <<'EOS'
+set -u
+. "$REPO_ROOT/scripts/upgrade/lib.sh"
+LOG_TAG=pf-a1
+INSTALL_DIR="$A1_INSTALL"; export INSTALL_DIR
+UP_TARGET=sandbox
+_run_bounded 2 _tree_manifest "$A1_TREE" "" >/dev/null 2>&1
+printf 'rc=%s\n' "$?"
+EOS
+A1_PIDFILE="$PF_SB/a1/shasum.pid"; export A1_PIDFILE
+A1_INSTALL="$INSTALL_DIR" A1_TREE="$PF_SB/a1/tree" A1_PIDFILE="$A1_PIDFILE" \
+    REPO_ROOT="$PF_REPO_ROOT" TMPDIR="$PF_SB/a1/tmp" PATH="$PF_SB/a1/bin:$PATH" \
+    bash "$PF_SB/a1/run.sh" > "$PF_SB/a1/out" 2> "$PF_SB/a1/err"
+A1_RC_LINE="$(cat "$PF_SB/a1/out" 2>/dev/null)"
+[ "$A1_RC_LINE" = "rc=124" ] && pf_ok "the stub batch tripped the 2 s budget (rc=124)" \
+                             || pf_bad "A1 unexpected bound result: [$A1_RC_LINE] $(head -2 "$PF_SB/a1/err" | tr '\n' ' ')"
+A1_PID="$(cat "$A1_PIDFILE" 2>/dev/null)"
+A1_LEFTOVER="$(find "$PF_SB/a1/tmp" -maxdepth 1 -name 'tree-manifest.*' 2>/dev/null | wc -l | tr -d ' ')"
+[ "$A1_LEFTOVER" = "0" ] && pf_ok "no mktemp pair left behind by the killed walk" \
+                         || pf_bad "A1 leaked temp files: $(find "$PF_SB/a1/tmp" -maxdepth 1 -name 'tree-manifest.*' | tr '\n' ' ')"
+if [ -n "$A1_PID" ] && kill -0 "$A1_PID" 2>/dev/null; then
+    pf_bad "A1 the batch grandchild (pid $A1_PID) SURVIVED the budget kill"
+    kill -KILL "$A1_PID" 2>/dev/null || true
+else
+    pf_ok "the batch grandchild was reaped by the kill path (pid ${A1_PID:-none})"
 fi
 
 # ── optional full-tree measurement (NOT part of the default gate) ─────────

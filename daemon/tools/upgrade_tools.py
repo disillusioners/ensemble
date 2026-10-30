@@ -59,7 +59,13 @@ refactor pass (decisions.md "P2.3 Gate Rulings & Fences" item 2); do not
 grow it further without pulling that fence.
 """
 
-# Size rationale (~3931 lines): the upgrade tool surface — the read pair
+# Size rationale (~4160 lines, refreshed 2026-10-30 — was ~3931): +230 for
+# the phase-6 scripts-dir provenance guard (arm-time floor/stamp ancestry,
+# the W-1/W-2/W-3 verdict branches, the M5 `ScriptsProvenanceVerdict`
+# Literal and the M7 delegating per-run-log resolver), appended at the END
+# with a load-bearing POSITION constraint (the guard must precede
+# `consume_pending_action`; see the phase-6 block). The upgrade tool
+# surface — the read pair
 # (release_info / upgrade_status incl. the §6.3 restart-audit ledger),
 # the actor pair (system_restart / system_upgrade), the upgrade 3-factor
 # gate, and the agent-restart block (restart-provenance reader + rails +
@@ -948,16 +954,13 @@ def _resolve_per_run_log(install_dir: Path | None, run_id: str | None) -> Path |
     ``data/upgrade/<env>/`` dirs is exact because run_ids are unique and
     file-name shaped. Returns None when the file is absent (evicted by
     retention or a pre-D3 run) — callers fall back to the aggregate."""
-    if install_dir is None or not run_id:
+    # M7 (tidier, 2026-10-30): DELEGATES to the owning module
+    # (`upgrade_journal.per_run_narrative_path` — same module that owns the
+    # writer and the env-scope table), which also carries the run_id
+    # validation this copy had and the sweep's copy lacked.
+    if install_dir is None:
         return None
-    if not re.fullmatch(r"[A-Za-z0-9._-]+", run_id):
-        return None
-    base = install_dir / "data" / "upgrade"
-    for env_dir in base.glob("*"):
-        cand = env_dir / f"{run_id}.log"
-        if cand.is_file():
-            return cand
-    return None
+    return uj.per_run_narrative_path(install_dir, run_id)
 
 
 def _upgrade_log_tail(
@@ -3712,6 +3715,8 @@ never decides go/rollback).
             # git revision + the local-edit state, on EVERY arm — pass,
             # warn, or refusal — so the ceremony's audit trail names the
             # exact tree that ran.
+            prov_verdict: ScriptsProvenanceVerdict
+            prov_detail: str
             prov_verdict, prov_detail = scripts_dir_provenance_verdict(
                 scripts_dir,
                 floor_commit=(PIPELINE_SCRIPTS_FLOOR_COMMIT or None),
@@ -3946,6 +3951,13 @@ _STAMP_RE = re.compile(
     r'(?m)^PIPELINE_SCRIPTS_REV="?([0-9A-Za-z._/-]+)"?[ \t]*$'
 )
 
+# M5 (tidier, 2026-10-30): the verdict is a CLOSED vocabulary. It used to be
+# a bare ``str`` compared by equality — a typo ("refused") compiled, reviewed
+# clean and silently took the ARM branch, i.e. the fail-closed guard degraded
+# to fail-open exactly where a ceremony starts. ``Literal`` makes the typo a
+# type error and keeps the three verdicts greppable.
+ScriptsProvenanceVerdict = Literal["arm", "warn", "refuse"]
+
 
 def _pipeline_stamp_and_sha(scripts_dir: Path) -> tuple[str | None, str]:
     """``(stamp, lib.sh digest)`` — the B3 acquisition.
@@ -3973,7 +3985,7 @@ def scripts_dir_provenance_verdict(
     scripts_dir: Path | str,
     floor_commit: str | None = None,
     env: dict[str, str] | None = None,
-) -> tuple[str, str]:
+) -> tuple[ScriptsProvenanceVerdict, str]:
     """Arm-time scripts-dir provenance verdict — phase6 §4.2 (T6.5/T6.9/
     T6.10/T6.11).
 
@@ -4030,6 +4042,24 @@ def scripts_dir_provenance_verdict(
     rev_rc, rev_out, rev_err = uj.bounded_git_probe(
         path, "rev-parse", "--verify", "HEAD"
     )
+    if rev_rc != 0 and rev_rc != uj.GIT_PROBE_ERROR_RC and (path / ".git").exists():
+        # W2 (code council 2026-10-30): git ANSWERS 128 (not the 255 probe
+        # sentinel) for "not a git repository" — and for dubious ownership
+        # (`safe.directory`), a corrupt/unreadable `.git`, and a gitfile
+        # whose worktree metadata was pruned. Those are COMMAND-ERROR cases on
+        # a GIT-SHAPED dir: the ancestry is unverifiable, so the dir must
+        # REFUSE (D6-10) exactly like the 255 band. Before this arm the case
+        # fell through to the non-git branch, where a self-asserted stamp
+        # ARMED — FAIL-OPEN on the very gate that must stop a stale scripts
+        # dir, since a stamp cannot prove ancestry.
+        return (
+            "refuse",
+            f"git-probe-failed (git-shaped dir): git rev-parse rc={rev_rc} "
+            f"({(rev_err or rev_out).strip() or 'no detail'}) — ancestry is "
+            f"UNVERIFIABLE on a dir that IS git-shaped (dubious ownership, "
+            f"corrupt/pruned .git, or a broken gitfile); {provenance} "
+            f"floor={floor_commit or '<unset>'}; {_SYNC_REMEDY}",
+        )
     if rev_rc == uj.GIT_PROBE_ERROR_RC:
         # W-1 (verifier 2026-10-30): the PROBE ITSELF failed — git is absent
         # or unusable, or the 30 s bound tripped. This is NOT the "not a git
@@ -4056,13 +4086,22 @@ def scripts_dir_provenance_verdict(
         return ("warn", f"git-probe-error (non-git dir): {probe_detail}")
     if rev_rc == 0:
         rev = rev_out.strip()
-        _s_rc, status_out, _ = uj.bounded_git_probe(
-            path, "status", "--porcelain"
+        # A3 (code council, 2026-10-30): the local-edit state is an AUDIT
+        # ARTEFACT, never a gate input — so probe it with the cheapest
+        # predicate that still answers the question the row asks ("are there
+        # uncommitted changes to TRACKED content?"). `git status --porcelain`
+        # was ~90 % of the measured probe cost (0.08-0.11 s vs 0.00 s for
+        # rev-parse) because it stats and formats the whole tree and scans
+        # untracked paths. `diff-index --quiet HEAD --` is one fork, stops at
+        # the first difference, and ignores untracked files entirely.
+        # Conservative reading preserved: rc 0 => clean, ANY other rc
+        # (1 = differences, 128/255 = unknown/error) => report dirty — never
+        # claim a clean tree we could not observe.
+        _s_rc, _s_out, _s_err = uj.bounded_git_probe(
+            path, "diff-index", "--quiet", "HEAD", "--"
         )
-        # A status-probe failure leaves the local-edit state UNKNOWN; report
-        # it as dirty rather than claiming a clean tree (the conservative
-        # reading — the row is an audit artefact, never a gate input).
-        edited = bool(status_out.strip()) or _s_rc == uj.GIT_PROBE_ERROR_RC
+        edited = _s_rc != 0
+        _ = _s_out, _s_err
         prov_git = (
             f"{provenance} git_rev={rev} dirty={'yes' if edited else 'no'}"
         )

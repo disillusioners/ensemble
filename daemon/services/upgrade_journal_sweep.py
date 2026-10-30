@@ -43,7 +43,9 @@ Lifecycle mirrors :class:`~daemon.services.job_lock_sweep.JobLockSweepService`:
 (CancelledError is the normal shutdown path — FM-11: never swallow it).
 """
 
-# Size rationale (~2300 lines, refreshed 2026-10-19): the sweep service
+# Size rationale (~2417 lines, refreshed 2026-10-30 — grew with the
+# promote-preflight-hang rows: the typed `PerRunObservation` record and
+# the delegating per-run resolver): the sweep service
 # owns FIVE janitor lanes in one loop by design — periodic reconcile/GC
 # tick, the two-signal (W4) liveness predicate, the wake-record sweep,
 # the bounded reaper (waitpid + signal attribution), and the
@@ -65,7 +67,7 @@ import signal
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from daemon.tools import upgrade_journal as uj
 from daemon.tools.upgrade_journal import (
@@ -112,6 +114,16 @@ EXECUTOR_STALENESS_WINDOW_S: int = 900
 # Log-tail bounds for the ``executor_exit`` payload.
 _LOG_TAIL_MAX_BYTES = 4096
 _LOG_TAIL_MAX_LINES = 40
+
+
+class PerRunObservation(NamedTuple):
+    """M6 (tidier, 2026-10-30): the per-run observability record behind the
+    ``executor_still_running`` row. ``None`` means ABSENT (rendered as
+    ``unknown`` by the row builder); a real ``0`` stays distinguishable."""
+
+    narrative: Path | None
+    last_phase: str | None
+    elapsed_s: int | None
 
 
 @dataclass(frozen=True)
@@ -2224,29 +2236,36 @@ class UpgradeJournalSweepService:
 
     @staticmethod
     def _per_run_narrative_path(install_dir: Path, run_id: str | None) -> Path | None:
-        """D3-12/D3-14: resolve the run's NARRATIVE file by run_id (never
-        the aggregate's last-pointer line — a stale pointer resolves to
-        the wrong file after a newer run). Env scope is discovered by
-        globbing the one-level ``data/upgrade/<env>/`` dirs; run_ids are
-        unique so at most one file matches."""
-        if not run_id:
-            return None
-        for env_dir in (install_dir / "data" / "upgrade").glob("*"):
-            cand = env_dir / f"{run_id}.log"
-            if cand.is_file():
-                return cand
-        return None
+        """D3-12/D3-14: resolve the run's NARRATIVE file by run_id.
+
+        M7 (tidier, 2026-10-30): DELEGATES to the owning module's single
+        resolver (``upgrade_journal.per_run_narrative_path``). This copy used
+        to be a second implementation with NO run_id validation while the
+        tools-side copy validated — the drift the review found. One naming
+        rule, one home (the module that also owns the writer
+        ``executor_run_log_paths`` and the env-scope table)."""
+        return uj.per_run_narrative_path(install_dir, run_id)
 
     def _per_run_observation(
         self, install_dir: Path, run_id: str | None
-    ) -> tuple[str, str, str]:
-        """(narrative_path, last_phase_marker, elapsed_since_last_journal_activity)
-        for the executor_still_running row (D3-9/phase-4 T4.4 enrichment).
-        Best-effort: any miss degrades to "unknown" — the row must never
-        fail because observability is absent."""
+    ) -> PerRunObservation:
+        """Per-run observation for the executor_still_running row
+        (D3-9/phase-4 T4.4 enrichment). Best-effort: any miss degrades to
+        "unknown" — the row must never fail because observability is absent.
+
+        M6 (tidier, 2026-10-30): a typed record instead of a bare 3-tuple of
+        stringly sentinels (``"(no per-run narrative)"`` / ``"unknown"`` /
+        ``"123s"``), so a caller cannot mistake ``"0s"`` for ``"unknown"``
+        and a fourth field cannot silently reorder every call site. The
+        "unknown" RENDERING lives at the row builder, not in the data.
+
+        A8 (code council, 2026-10-30): the ``releases/state.json`` read is
+        an unbounded whole-file ``json.load`` (455 KB+ today, and ``history``
+        grows without limit) — a small instance of the event-loop-blocking
+        class. Its async caller runs THIS function in a worker thread
+        (``asyncio.to_thread``), so the loop never blocks on it."""
         narr = self._per_run_narrative_path(install_dir, run_id)
-        narr_s = str(narr) if narr is not None else "(no per-run narrative)"
-        last_phase = "unknown"
+        last_phase: str | None = None
         if narr is not None:
             try:
                 with narr.open("rb") as fh:
@@ -2260,7 +2279,7 @@ class UpgradeJournalSweepService:
                         break
             except OSError:
                 pass
-        elapsed = "unknown"
+        elapsed_s: int | None = None
         try:
             jp = uj.executor_log_path(install_dir)  # parent dir only
             state = jp.parent.parent / "releases" / "state.json"
@@ -2273,12 +2292,14 @@ class UpgradeJournalSweepService:
                     last_dt = datetime.fromisoformat(
                         last_ts.replace("Z", "+00:00")
                     )
-                    elapsed = str(
-                        int((datetime.now(timezone.utc) - last_dt).total_seconds())
-                    ) + "s"
+                    elapsed_s = int(
+                        (datetime.now(timezone.utc) - last_dt).total_seconds()
+                    )
         except (OSError, ValueError, TypeError, KeyError):
             pass
-        return narr_s, last_phase, elapsed
+        return PerRunObservation(
+            narrative=narr, last_phase=last_phase, elapsed_s=elapsed_s
+        )
 
     def _log_tail(self, install_dir: Path, run_id: str | None = None) -> str:
         """Last ≤4KB byte-tail, then last ≤40 lines of decoded text of the
@@ -2349,8 +2370,18 @@ class UpgradeJournalSweepService:
         # so the operator reads WHERE the run stalled instead of following
         # a hand-off into one shared aggregate file. The kill contract and
         # the 660 s threshold are UNCHANGED (pinned).
-        narr_s, last_phase, elapsed = self._per_run_observation(
-            job.install_dir, job.run_id
+        # A8 (code council): the observation does a whole-file
+        # ``json.load`` of releases/state.json — off the loop.
+        obs = await asyncio.to_thread(
+            self._per_run_observation, job.install_dir, job.run_id
+        )
+        narr_s = (
+            str(obs.narrative) if obs.narrative is not None
+            else "(no per-run narrative)"
+        )
+        last_phase = obs.last_phase if obs.last_phase is not None else "unknown"
+        elapsed = (
+            f"{obs.elapsed_s}s" if obs.elapsed_s is not None else "unknown"
         )
         try:
             uj.journal_history_append(

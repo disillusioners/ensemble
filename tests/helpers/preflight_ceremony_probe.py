@@ -34,6 +34,12 @@ at all must degrade to a verdict instead of unwinding the arm path
 must refuse (I15) — three branches that previously had zero executed
 coverage.
 
+I13b/I13c are the W2 (code council 2026-10-30) legs: `git rev-parse` answers
+128 (not the 255 probe sentinel) for "not a git repository", dubious
+ownership, a corrupt/pruned `.git` and a broken gitfile. On a GIT-SHAPED dir
+that must REFUSE (I13b — ancestry unverifiable, a stamp cannot prove it); on
+a dir with NO `.git` the same rc must stay stamp-provenance (I13c).
+
 Usage:  python3 tests/helpers/preflight_ceremony_probe.py --root <scratch-dir>
 Exit:   0 all scenarios pass · 1 a scenario FAILED · 3 guard absent
 """
@@ -286,6 +292,62 @@ def main(argv: list[str]) -> int:
             failures += 0 if ok else 1
     finally:
         _uj.subprocess.run = _real_run
+
+    # ── I13b — W2 (code council 2026-10-30): git ANSWERS 128 for "not a git
+    # repository" — and for dubious ownership (`safe.directory`), a
+    # corrupt/unreadable `.git` and a gitfile whose worktree metadata was
+    # pruned. Only the 255 PROBE sentinel (I13) was handled, so every 128 on a
+    # GIT-SHAPED dir fell through to the non-git branch, where a self-asserted
+    # stamp ARMED — fail-open on the one gate that must stop a stale scripts
+    # dir (a stamp cannot prove ancestry). Pinned by forcing the probe to
+    # answer rc=128 on a directory that IS git-shaped.
+    _real_probe = _uj.bounded_git_probe
+
+    def _probe_128(*_a, **_k):
+        return 128, "", "fatal: not a git repository (or any of the parent directories): .git"
+
+    _uj.bounded_git_probe = _probe_128
+    try:
+        for sid, key, expected, note in (
+            ("I13b", "fresh", "refuse",
+             "git-SHAPED dir + rev-parse rc=128 ⇒ refuse (W2: ancestry UNVERIFIABLE, no stamp arm)"),
+        ):
+            try:
+                verdict, detail = seam(
+                    scripts_dir=fx[key], floor_commit=floor, env=dict(os.environ)
+                )
+            except Exception as exc:  # noqa: BLE001 - the pinned defect class
+                print(
+                    f"SCENARIO {sid} FAIL raised {type(exc).__name__}: {exc} -- {note}"
+                )
+                failures += 1
+                continue
+            ok = str(verdict) == expected
+            print(
+                f"SCENARIO {sid} {'PASS' if ok else 'FAIL'} expected={expected} "
+                f"got={verdict} :: {detail} -- {note}"
+            )
+            failures += 0 if ok else 1
+        # Control: the SAME rc on a dir with NO `.git` must stay WARN-only
+        # (Q2/D6-11) — the new arm must not invent a refusal for a genuinely
+        # non-git pinned dir.
+        try:
+            verdict, detail = seam(
+                scripts_dir=fx["plain_stamp"], floor_commit=floor,
+                env=dict(os.environ),
+            )
+            ok = str(verdict) == "arm"
+            print(
+                f"SCENARIO I13c {'PASS' if ok else 'FAIL'} expected=arm "
+                f"got={verdict} :: {detail} -- rc=128 on a NON-git dir stays "
+                f"stamp-provenance (Q2), never a refusal"
+            )
+            failures += 0 if ok else 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"SCENARIO I13c FAIL raised {type(exc).__name__}: {exc}")
+            failures += 1
+    finally:
+        _uj.bounded_git_probe = _real_probe
 
     if not args.keep:
         shutil.rmtree(root, ignore_errors=True)

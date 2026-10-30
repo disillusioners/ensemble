@@ -10,7 +10,9 @@
 #     (2) the journal is >= JOURNAL_SIZE_GUARD_BYTES (default 98304).
 #   On the O(N) path the guard is NOT consulted -> any size reads.
 #   Path scope: promote (JOURNAL_READ_STRICT=1) => REFUSE loudly;
-#               rollback/restart/status (strict unset) => WARN + CONTINUE.
+#               rollback/restart/status/adopt-unit/stage/stop-ensemble
+#               (strict unset) => WARN + CONTINUE. A4 pins all six scripts
+#               individually, deriving each one's strictness from its FILE.
 #   NO fail-fast on a recovery path: the walk is ATTEMPTED, bounded at
 #   JOURNAL_LEGACY_READ_BUDGET_S (120 s default).
 #
@@ -164,6 +166,58 @@ for cls in promote recovery diagnostic; do
         diagnostic) [ "$LR_RC" = "0" ] && pf_ok "matrix diagnostic: WARN+CONTINUE (R1 — no fail-fast on a read; the D1-18 bounded-diagnostic idea is superseded by the binding ruling)" || pf_bad "matrix diagnostic: rc=$LR_RC" ;;
     esac
 done
+
+# ── A4 (code council 2026-10-30): the SIX script paths, one leg each ──────
+# R1 routes by SCRIPT, so pin each script's routing rather than only the
+# three CLASSES above. The strictness each leg uses is DERIVED FROM THE FILE
+# (does <script> set JOURNAL_READ_STRICT=1?), so an edit that marks a recovery
+# script strict turns its leg RED — the R1 violation class itself, not a
+# hand-copied constant that would agree with the defect.
+printf '\n-- A4: per-script routing (R1) --\n'
+mkjournal 513
+for script in promote rollback restart status stage adopt-unit; do
+    case "$script" in
+        adopt-unit) path="$PF_REPO_ROOT/scripts/upgrade/adopt-unit.sh" ;;
+        *)          path="$PF_REPO_ROOT/scripts/upgrade/$script.sh" ;;
+    esac
+    [ -f "$path" ] || { pf_bad "A4 $script: script file missing ($path)"; continue; }
+    if grep -Eq '^[[:space:]]*(export[[:space:]]+)?JOURNAL_READ_STRICT=1[[:space:]]*$' "$path"; then
+        derived=1
+    else
+        derived=0
+    fi
+    case "$script" in
+        promote) want=1 ;;
+        *)       want=0 ;;
+    esac
+    if [ "$derived" != "$want" ]; then
+        pf_bad "A4 $script: derived strict=$derived, R1 wants $want (a recovery path must never be strict)"
+        continue
+    fi
+    run_lib "$derived" 513 "$NOHELPER"
+    case "$script" in
+        promote)
+            [ "$LR_RC" = "1" ] && pf_ok "A4 promote.sh ⇒ REFUSE over-threshold (strict by its own source)" \
+                               || pf_bad "A4 promote.sh rc=$LR_RC want 1"
+            ;;
+        *)
+            [ "$LR_RC" = "0" ] && [ "$LR_OUT" = "513" ] \
+                && pf_ok "A4 $script.sh ⇒ WARN+CONTINUE over-threshold (no fail-fast on a recovery path)" \
+                || pf_bad "A4 $script.sh rc=$LR_RC out=$LR_OUT want 0/513"
+            ;;
+    esac
+done
+# stop-ensemble.sh reaches the read path transitively (it sources lib.sh and
+# inherits J_READ with strict unset) — pin the inherited routing too.
+STOP_SH="$PF_REPO_ROOT/scripts/stop-ensemble.sh"
+if [ -f "$STOP_SH" ] && grep -q 'scripts/upgrade/lib.sh' "$STOP_SH" \
+   && ! grep -Eq '^[[:space:]]*(export[[:space:]]+)?JOURNAL_READ_STRICT=1' "$STOP_SH"; then
+    run_lib 0 513 "$NOHELPER"
+    [ "$LR_RC" = "0" ] && pf_ok "A4 stop-ensemble.sh ⇒ inherits WARN+CONTINUE (sources lib.sh, never strict)" \
+                       || pf_bad "A4 stop-ensemble.sh rc=$LR_RC want 0"
+else
+    pf_bad "A4 stop-ensemble.sh no longer sources lib.sh, or became strict"
+fi
 
 # ── mutation: the THRESHOLD is what refuses, not some other branch ───────
 printf '\n-- mutation: raise the threshold -> the same input is ALLOWED --\n'

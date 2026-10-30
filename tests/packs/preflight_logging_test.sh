@@ -376,6 +376,50 @@ done
 grep -q "stat -f '%m'" <(awk '/^_run_log_retention\(\)/,/^}/' "$PF_REPO_ROOT/scripts/upgrade/lib.sh") \
     && pf_bad "E10 stat -f %m present in _run_log_retention (GNU garbage)" \
     || pf_ok "portable primitives only (no stat -f %m in the retention fn)"
+# ── E10b (A2, code council 2026-10-30): the CURRENT run's whole family ────
+# The per-run family is FOUR names on disk: <run>.log (narrative),
+# <run>.payload.log (unit append: capture), <run>.client.log (client stderr —
+# the name the writer uses since A2) and <run>.payload.client.log (the PRE-A2
+# name). The fence used to name only three, so the running run's client log
+# survived on the <6 h mtime fence alone — an off-by-one against the
+# documented 5-fence model. Fixture: 25 fillers NEWER than the family (so the
+# count pass would delete the family if it were unfenced) and the family
+# older than 6 h (so the mtime fence cannot explain survival).
+printf '\n== E10b: the current run keeps its FOUR-name family (A2) ==\n'
+A2_DIR="$PF_SB/ret-a2"
+mkdir -p "$A2_DIR"
+for i in $(seq 1 25); do
+    printf 'filler %s\n' "$i" > "$A2_DIR/run-a2fill-$i.log"
+    touch -d '2 days ago' "$A2_DIR/run-a2fill-$i.log" 2>/dev/null || true
+done
+for n in run-a2keep.log run-a2keep.payload.log run-a2keep.client.log run-a2keep.payload.client.log; do
+    printf 'family\n' > "$A2_DIR/$n"
+    touch -d '3 days ago' "$A2_DIR/$n" 2>/dev/null || true
+done
+mkjournal
+/usr/bin/python3 - "$J" <<'PYA2'
+import json, sys
+p = sys.argv[1]
+j = json.load(open(p))
+j["in_flight"] = {"kind": "promote", "target": "v1", "run_id": "run-a2keep"}
+json.dump(j, open(p, "w"))
+PYA2
+R_INSTALL="$INSTALL_DIR" R_DIR="$A2_DIR" REPO_ROOT="$PF_REPO_ROOT" bash "$PF_SB/ret.sh" \
+    > "$PF_SB/ret-a2.out" 2> "$PF_SB/ret-a2.err"
+A2_FILL_LEFT="$(find "$A2_DIR" -maxdepth 1 -name 'run-a2fill-*.log' -type f | wc -l | tr -d ' ')"
+[ "$A2_FILL_LEFT" = "20" ] && pf_ok "E10b non-vacuous: the count pass ran and kept 20 fillers" \
+                           || pf_bad "E10b filler count=$A2_FILL_LEFT want 20 (the retention pass did not run)"
+A2_MISSING=""
+for n in run-a2keep.log run-a2keep.payload.log run-a2keep.client.log run-a2keep.payload.client.log; do
+    [ -f "$A2_DIR/$n" ] || A2_MISSING="$A2_MISSING $n"
+done
+[ -z "$A2_MISSING" ] && pf_ok "E10b all FOUR current-run names survive (narrative/payload/client/pre-A2 client)" \
+                     || pf_bad "E10b fence LOST:$A2_MISSING (a per-run name is not fenced)"
+# and the WRITER really uses the third name (not the pre-A2 fourth one)
+grep -q 'with_name(f"{run_id}.client.log")' "$PF_REPO_ROOT/daemon/tools/upgrade_journal.py" \
+    && pf_ok "E10b the writer names <run_id>.client.log (A2 rename in place)" \
+    || pf_bad "E10b the writer still derives a different client-log name"
+
 # foreign live owner => hands off entirely
 for i in $(seq 1 5); do printf 'x\n' > "$LOGDIR/run-f-$i.log"; touch -t 202601010000 "$LOGDIR/run-f-$i.log"; done
 BEFORE="$(find "$LOGDIR" -name '*.log' -type f | wc -l | tr -d ' ')"

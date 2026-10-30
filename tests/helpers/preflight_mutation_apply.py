@@ -427,6 +427,57 @@ PLANTS: dict[str, dict] = {
             '            if False:  # PLANT M40: fallback-dir warn downgrade removed',
         )],
     },
+    # ── FIX CYCLE 2 (code council 2026-10-30, 3 WARNINGs + advisories):
+    # M41–M46 pin the fixes. Each leg is the DEFECT RE-INTRODUCED, exactly as
+    # the council/advisory described it.
+    "M41": {
+        "file": UTOOLS, "mode": "executable",
+        "why": "the git-shaped 128 band is dead — `git rev-parse` answering 128 (dubious ownership / corrupt .git / pruned gitfile) falls into the non-git branch, where a self-asserted stamp ARMS (W2 fail-open)",
+        "pairs": [(
+            '    if rev_rc != 0 and rev_rc != uj.GIT_PROBE_ERROR_RC and (path / ".git").exists():',
+            '    if False:  # PLANT M41: the 128-on-git-shaped refuse arm removed (W2 fail-open)',
+        )],
+    },
+    "M42": {
+        "file": LIB, "mode": "executable",
+        "why": "the supervision probe's budget breach is not kind-scoped — a wedged D-Bus fail-fast halts restart.sh (a RECOVERY-class script, R1 violation) instead of warning and continuing (W3)",
+        "pairs": [(
+            "            ''|promote:*)\n",
+            "            ''|promote:*|restart:*)  # PLANT M42: the recovery phase is not scoped out (W3)\n",
+        )],
+    },
+    "M43": {
+        "file": PROMOTE, "mode": "executable",
+        "why": "the adopt-txn arm no longer propagates the step's own exit-78 — `_refuse txn-busy` appends a SECOND, contradicting refusal row over the adopt diagnostics' halt row (W1)",
+        "pairs": [(
+            '[ "$_arc" -eq 78 ] && exit 78;',
+            ':  # PLANT M43: the 78 is not propagated (W1: second, contradicting row)',
+        )],
+    },
+    "M44": {
+        "file": LIB, "mode": "executable",
+        "why": "the current run's `<run>.client.log` is no longer fenced — retention keeps it only via the <6 h mtime fence, so the running run's client log can be deleted (A2)",
+        "pairs": [(
+            '"${cur_ptr_run}.client.log"|"${cur_ptr_run}.payload.client.log") continue ;; esac ;;',
+            '"${cur_ptr_run}.payload.client.log") continue ;; esac ;;  # PLANT M44: <run>.client.log unfenced (A2)',
+        )],
+    },
+    "M45": {
+        "file": LIB, "mode": "executable",
+        "why": "a garbage numeric knob passes through unvalidated — `PREFLIGHT_PHASE_BUDGET_S=abc` dies cryptically in `$(( ))` and `PREFLIGHT_STEP_BUDGET_S=abc` trips the step watcher instantly at elapsed=0 (A5)",
+        "pairs": [(
+            '    case "$__raw" in\n        *[!0-9]*)',
+            '    case "$__raw" in\n        *NOPE*)  # PLANT M45: non-numeric values pass through (A5)',
+        )],
+    },
+    "M46": {
+        "file": LIB, "mode": "executable",
+        "why": "the tree-walk worker gets no forwarding TERM — a budget kill orphans the `xargs … shasum` batch and leaks the mktemp pair (A1)",
+        "pairs": [(
+            '    trap \'{ [ -n "$_tm_sub" ] && kill -TERM "$_tm_sub" 2>/dev/null; [ -n "$_tm_sub" ] && wait "$_tm_sub" 2>/dev/null; exit 143; }\' TERM INT HUP',
+            '    trap \'exit 143\' TERM INT HUP  # PLANT M46: no forwarding TERM to the worker (A1)',
+        )],
+    },
 }
 
 # ── Pack I legs (phase 6 / wave 4): previously deferred, now EXECUTABLE in

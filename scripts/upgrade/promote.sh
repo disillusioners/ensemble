@@ -350,7 +350,16 @@ _splice_journal append-history python_floor_probe \
 # 1c. adopt-or-refuse an existing in_flight (sweep-mirroring, D-FA4.3)
 _log_phase_marker "journal-read"
 lock_heartbeat
-_run_bounded_step adopt-txn adopt_stale_txn || _refuse txn-busy "promote refused: unresolved in_flight txn (see the adopt diagnostics above — pipeline-busy)"
+# W1 (code council 2026-10-30): `adopt_stale_txn` REFUSES by `exit 78` from
+# inside the wrapper's forked subshell, so the wrapper hands that rc back
+# WITHOUT the step having reached this shell. Propagate it: `_refuse
+# txn-busy` must NOT append a second, contradicting row over the adopt
+# diagnostics' own halt row (quarantined-previous / not-rollback_safe /
+# previous-missing / cap-reached) — and it must not invent a `txn-busy`
+# token for the warn-only classes either (kind=restart / unparseable
+# started_at / FRESH txn write no row of their own by design). A genuine
+# non-78 failure (the wrapper's own no-return class) still refuses here.
+_run_bounded_step adopt-txn adopt_stale_txn || { _arc=$?; [ "$_arc" -eq 78 ] && exit 78; _refuse txn-busy "promote refused: unresolved in_flight txn (see the adopt diagnostics above — pipeline-busy)"; }
 
 # D2 L1 checkpoint (phase budget belt) + T2.6 heartbeat cadence: the
 # checkpoints bound the phase BETWEEN steps (the per-step wraps bound

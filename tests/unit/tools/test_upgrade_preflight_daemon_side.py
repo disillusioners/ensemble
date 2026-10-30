@@ -403,12 +403,16 @@ class TestNoClientPipe:
         kw = recorder.popen_calls[0]
         assert kw["stderr"] is not subprocess.PIPE, kw["stderr"]
         assert kw["stdout"] is subprocess.DEVNULL
-        # the client's stderr file lives beside the payload, named by the
-        # payload path with a .client.log suffix (audit trail, never ambient)
-        payload = install / "data" / "upgrade" / "demo" / "r-pipe-1.payload.log"
-        expected = payload.with_suffix(".client.log")
+        # the client's stderr file lives beside the payload and is the THIRD
+        # name of the per-run family — `<run_id>.client.log` (A2, code council
+        # 2026-10-30: the old `payload.with_suffix(".client.log")` produced
+        # `<run_id>.payload.client.log`, a fourth name the retention fence did
+        # not cover as the current run's file)
+        expected = install / "data" / "upgrade" / "demo" / "r-pipe-1.client.log"
         assert expected.is_file(), sorted(p.name for p in expected.parent.iterdir())
         assert Path(kw["stderr"].name) == expected
+        assert not (install / "data" / "upgrade" / "demo"
+                    / "r-pipe-1.payload.client.log").exists()
 
     def test_systemd_unavailable_triage_reads_the_client_file(
         self, install: Path, monkeypatch: pytest.MonkeyPatch, recorder: Recorder
@@ -433,6 +437,35 @@ class TestNoClientPipe:
             uj.spawn_executor(
                 ["bash", "promote.sh", "live"], install, {}, run_id="r-pipe-2",
             )
+
+
+    def test_unreadable_client_log_refuses_instead_of_guessing(
+        self, install: Path, monkeypatch: pytest.MonkeyPatch, recorder: Recorder
+    ) -> None:
+        """A7 (code council 2026-10-30): the fail-closed systemd-unavailable
+        triage had a silent hole — if the client log could not be OPENED for
+        append AND the tail read then failed, the empty tail read as "no
+        systemd signature" and the code fell through to "payload failed fast —
+        journal is truth": a conclusion the triage could not observe (and if
+        systemd-run really had failed, NO shell ever runs, so the journal stays
+        silent and the operator sees nothing). Both halves must fail, which is
+        why the double-failure case is pinned explicitly."""
+        _stub_detect(monkeypatch, uj.SERVICE_BRANCH_SERVICE, "user")
+        recorder.next_proc = FakeProc(rc=1)
+
+        real_open = Path.open
+
+        def open_without_append(self: Path, mode: str = "r", *a, **k):
+            if self.name.endswith(".client.log") and mode == "ab":
+                raise OSError("read-only file system (A7 fixture)")
+            return real_open(self, mode, *a, **k)
+
+        monkeypatch.setattr(Path, "open", open_without_append)
+        with pytest.raises(uj.ExecutorSystemdUnavailable) as exc:
+            uj.spawn_executor(
+                ["bash", "promote.sh", "live"], install, {}, run_id="r-a7-1",
+            )
+        assert "client-log-unavailable" in str(exc.value)
 
 
 # ── T4.4/D3-9: the enriched still-running row + the unchanged 660 s ─────────

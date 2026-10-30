@@ -267,12 +267,12 @@ else
             ;;
         3)
             sym="$(printf '%s\n' "$OUT" | grep -m1 '^PF_MISSING_GUARD:' | cut -d: -f2- | sed 's/^ //')"
-            for id in I1 I2 I3 I4 I5 I6 I7 I8 I13 I14 I15; do
+            for id in I1 I2 I3 I4 I5 I6 I7 I8 I13 I13b I13c I14 I15; do
                 deferred_red "$id" "guard absent — ${sym:-PF_MISSING_GUARD}"
             done
             ;;
         *)
-            for id in I1 I2 I3 I4 I5 I6 I7 I8 I13 I14 I15; do
+            for id in I1 I2 I3 I4 I5 I6 I7 I8 I13 I13b I13c I14 I15; do
                 ln="$(printf '%s\n' "$OUT" | grep -m1 "^SCENARIO $id " || true)"
                 if [ -n "$ln" ]; then
                     printf '%s\n' "$ln" | grep -q ' PASS ' && pf_ok "${ln#SCENARIO }" \

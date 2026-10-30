@@ -217,7 +217,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Size rationale (~13990 lines): the InstanceManager facade is the
+# Size rationale (~15317 lines, refreshed 2026-10-30 — the previous
+# ~13990 count had drifted): the InstanceManager facade is the
 # daemon's single coordination point by design — lifecycle, repositories,
 # message/job queues, source adapters, tool construction, and the
 # deferred-execution + provenance seams. It is a DEFERRED-DECOMPOSITION

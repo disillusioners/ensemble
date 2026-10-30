@@ -35,7 +35,19 @@
 #                         breach row as value=7 (value in force journalled).
 #   D10 wedged systemctl — a sleeping systemctl stub in the dual-fight
 #                         check fails LOUD (row + exit 78), never a silent
-#                         "not-active".
+#                         "not-active" (un-phased caller => fail-closed).
+#   D10b promote phase    — the SAME probe with an EXPLICIT `promote:*` phase
+#                         still halts (the loud arm, pinned the other way).
+#   D12 recovery phase    — the SAME probe on `restart:adopt` WARNS + CONTINUES
+#                         with no halt row (W3 / R1: no fail-fast on a
+#                         recovery path).
+#   D14 numeric knobs     — a garbage budget override is a NAMED validation
+#                         error + the documented default (never a cryptic
+#                         `unbound variable` death, never an instant breach).
+#   D13 adopt-refusal     — the REAL promote.sh against planted stale txns:
+#                         exactly ONE row for the journaling class, ZERO for
+#                         the warn-only class, and NEVER a `reason=txn-busy`
+#                         echo (W1).
 #
 # The REAL 300 s conservative soak control (SC5's soak leg) is executed by
 # preflight_logging_test.sh's soak phase (shared scratch) — see
@@ -669,6 +681,172 @@ grep -q "journal unreadable/TORN" "$PF_SB/a4.err" \
 [ ! -d "$INSTALL_DIR/releases/rollback.lock.d" ] \
     && pf_ok "A4 lock dir RELEASED by the breach handler" \
     || pf_bad "A4 lock dir still present after the breach"
+
+printf '\n== D10b: EXPLICIT promote phase => the loud arm (W3)'"'"'s other half) ==\n'
+# The un-phased default is pinned by D10 above (fail-closed). This leg pins
+# the EXPLICIT promote arm, so a future edit that makes the branch depend on
+# something other than `_PIPELINE_PHASE` cannot silently move promote to the
+# WARN side (bare `set -u`) — the R1 ruling the other way round.
+mkjournal
+cat > "$PF_SB/wd_promote.sh" <<'EOS'
+#!/usr/bin/env bash
+set -u
+. "$REPO_ROOT/scripts/upgrade/lib.sh"
+LOG_TAG=pf-wdp
+INSTALL_DIR="$WD_INSTALL"; export INSTALL_DIR
+UP_TARGET=sandbox
+SYSTEMCTL_BIN="$WD_STUB" SUPERVISION_MODE=unit SUPERVISION_UNIT=ensemble-fake.service
+export SYSTEMCTL_BIN SUPERVISION_MODE SUPERVISION_UNIT
+_trap_install_signal_handlers "promote:preflight"
+lock_acquire || exit 78
+supervision_dualfight_check
+echo "WRONG-promote-continued"
+lock_release
+exit 0
+EOS
+WD_INSTALL="$INSTALL_DIR" WD_STUB="$PF_SB/bin/systemctl" REPO_ROOT="$PF_REPO_ROOT" \
+    PATH="$PF_SB/bin:$PATH" bash "$PF_SB/wd_promote.sh" > "$PF_SB/wdp.out" 2> "$PF_SB/wdp.err"
+WDP_RC=$?
+[ "$WDP_RC" = "78" ] && pf_ok "explicit promote:phase breach halts (rc=78)" \
+                     || pf_bad "D10b rc=$WDP_RC want 78 (promote must stay fail-fast)"
+grep -q "WRONG-promote-continued" "$PF_SB/wdp.out" \
+    && pf_bad "D10b the promote path CONTINUED after a wedged systemctl probe" \
+    || pf_ok "explicit promote:phase never reaches the continue path"
+[ "$(count_rows "$J" halt)" -ge 1 ] && pf_ok "explicit promote:phase wrote its halt row" \
+                                    || pf_bad "D10b no halt row"
+
+printf '\n== D12: wedged systemctl on a RECOVERY phase => WARN + continue (W3/R1) ==\n'
+# W3 (code council 2026-10-30): `supervision_preflight` is reached from
+# restart.sh ("restart:adopt") and rollback.sh ("rollback:preflight") as well
+# as promote.sh. R1 is binding: NO fail-fast on a recovery path. Before this
+# fix a wedged D-Bus exited 78 out of a RECOVERY script — and on a live
+# install its halt row was fence-refused (no lock acquired by restart.sh's
+# caller contract), so the breach was fatal AND unrecorded.
+mkjournal
+cat > "$PF_SB/wd_restart.sh" <<'EOS'
+#!/usr/bin/env bash
+set -u
+. "$REPO_ROOT/scripts/upgrade/lib.sh"
+LOG_TAG=pf-wdr
+INSTALL_DIR="$WD_INSTALL"; export INSTALL_DIR
+UP_TARGET=sandbox
+SYSTEMCTL_BIN="$WD_STUB" SUPERVISION_MODE=unit SUPERVISION_UNIT=ensemble-fake.service
+export SYSTEMCTL_BIN SUPERVISION_MODE SUPERVISION_UNIT
+_trap_install_signal_handlers "restart:adopt"
+lock_acquire || exit 78
+supervision_dualfight_check
+echo "continued-after-warn"
+lock_release
+exit 0
+EOS
+WD_INSTALL="$INSTALL_DIR" WD_STUB="$PF_SB/bin/systemctl" REPO_ROOT="$PF_REPO_ROOT" \
+    PATH="$PF_SB/bin:$PATH" bash "$PF_SB/wd_restart.sh" > "$PF_SB/wdr.out" 2> "$PF_SB/wdr.err"
+WDR_RC=$?
+[ "$WDR_RC" = "0" ] && pf_ok "recovery phase CONTINUES after a wedged probe (rc=0, R1)" \
+                    || pf_bad "D12 rc=$WDR_RC want 0 (a recovery path must never fail-fast)"
+grep -q "continued-after-warn" "$PF_SB/wdr.out" \
+    && pf_ok "the dualfight check degraded instead of halting (cannot classify)" \
+    || pf_bad "D12 the recovery path did not continue [err: $(head -2 "$PF_SB/wdr.err" | tr '\n' ' ')]"
+[ "$(count_rows "$J" halt)" = "0" ] && pf_ok "no halt row on the recovery path (R1: WARN only)" \
+                                    || pf_bad "D12 halt rows=$(count_rows "$J" halt) want 0"
+grep -q "R1: no fail-fast on a recovery path" "$PF_SB/wdr.err" \
+    && pf_ok "the WARN names the ruling (R1) and the phase" \
+    || pf_bad "D12 warning missing/misworded: $(head -2 "$PF_SB/wdr.err" | tr '\n' ' ')"
+grep -q "silent-not-active" "$PF_SB/wdr.out" && pf_ok "no silent not-active claim either" \
+                                             || pf_ok "degraded to framework-level continue (no claim)"
+
+printf '\n== D13: adopt-refusal accounting — ONE row, correct kind, never a txn-busy echo (W1) ==\n'
+# W1 (code council 2026-10-30): `_run_bounded_step adopt-txn adopt_stale_txn
+# || _refuse txn-busy` wrapped a MUTATING recovery whose internal refusals
+# `exit 78` from the wrapper'"'"'s FORKED subshell — so the caller saw 78 and
+# appended a SECOND, contradicting `refusal reason=txn-busy` row over the
+# adopt diagnostics'"'"' own halt row (and invented a txn-busy token for the
+# warn-only classes, which write no row at all). This leg runs the REAL
+# promote.sh against planted stale txns: exactly one row for the journaling
+# class, ZERO for the warn-only class, and never a txn-busy echo.
+# A CLEAN scratch copy of the scripts tree: the D11 copy above carries the
+# planted 6 s `journal_read` (which would trip the step budget mid-adopt and
+# make this leg test the wrong thing).
+W1_SCRIPTS="$PF_SB/w1-scripts"
+cp -a "$PF_REPO_ROOT/scripts" "$W1_SCRIPTS"
+count_reason() { grep -o 'reason=txn-busy' "$1" 2>/dev/null | wc -l | tr -d ' '; }
+adopt_promote_run() { # adopt_promote_run <in_flight-json> <previous-json>
+    mkjournal
+    /usr/bin/python3 - "$J" "$1" "$2" <<'PYA'
+import json, sys, time
+p, inf, prev = sys.argv[1], sys.argv[2], sys.argv[3]
+j = json.load(open(p))
+j["in_flight"] = json.loads(inf)
+j["previous"] = json.loads(prev)
+j["current"] = "v0.0.1-test"
+json.dump(j, open(p, "w"))
+PYA
+    ( cd "$PF_SB" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$PF_SB/tmp" PORT=18082 \
+          LOG_TAG=pf-adopt INSTALL_DIR="$INSTALL_DIR" \
+          timeout -k 5 180 bash "$W1_SCRIPTS/upgrade/promote.sh" sandbox --version v0.0.1-test \
+          > "$PF_SB/adopt.out" 2> "$PF_SB/adopt.err" )
+}
+STALE_TS="$(/usr/bin/python3 -c 'import datetime,time;print(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time()-172800)))')"
+# (a) the JOURNALING class: stale flipped txn whose previous release is gone.
+adopt_promote_run \
+  "{\"kind\":\"promote\",\"target\":\"v9.9.9\",\"started_at\":\"$STALE_TS\",\"flipped\":true,\"owner_pid\":999999}" \
+  "\"v0.0.0-missing\""
+ADOPT_RC=$?
+[ "$ADOPT_RC" = "78" ] && pf_ok "adopt refusal halts the promote (rc=78)" \
+                       || pf_bad "D13a rc=$ADOPT_RC want 78 (tail: $(tail -1 "$PF_SB/adopt.err" 2>/dev/null | cut -c1-160))"
+[ "$(count_rows "$J" halt)" = "1" ] && pf_ok "D13a exactly ONE halt row (the adopt diagnostic)" \
+                                    || pf_bad "D13a halt rows=$(count_rows "$J" halt) want 1"
+[ "$(count_reason "$J")" = "0" ] && pf_ok "D13a NO second, contradicting txn-busy refusal row" \
+                                 || pf_bad "D13a a txn-busy refusal row was appended over the adopt row"
+grep -q "previous release v0.0.0-missing missing" "$J" \
+    && pf_ok "the single row names the real reason (previous missing)" \
+    || pf_bad "D13a the row does not name the real reason: $(tail -c 200 "$PF_SB/adopt.err" 2>/dev/null | tr '\n' ' ')"
+# (b) the WARN-ONLY class: kind=restart is never adopted (D-FA4.3). It writes
+# no row of its own, so a txn-busy echo would be the ONLY trace — and it
+# would be a lie (the txn is not "busy", it is structurally un-adoptable).
+adopt_promote_run \
+  "{\"kind\":\"restart\",\"target\":\"v9.9.9\",\"started_at\":\"$STALE_TS\",\"flipped\":false,\"owner_pid\":999999}" \
+  "null"
+ADOPT2_RC=$?
+[ "$ADOPT2_RC" = "78" ] && pf_ok "warn-only class also halts the promote (rc=78)" \
+                        || pf_bad "D13b rc=$ADOPT2_RC want 78"
+[ "$(count_rows "$J" halt)" = "0" ] && pf_ok "D13b the warn-only class writes NO halt row (by design)" \
+                                    || pf_bad "D13b halt rows=$(count_rows "$J" halt) want 0"
+[ "$(count_reason "$J")" = "0" ] && pf_ok "D13b no invented txn-busy token for the warn-only class" \
+                                 || pf_bad "D13b a txn-busy refusal row appeared (W1 regression)"
+
+printf '\n== D14: a garbage numeric knob is a LOUD validation error (A5) ==\n'
+# A5 (code council 2026-10-30): `PREFLIGHT_PHASE_BUDGET_S=abc` used to die
+# cryptically inside `$(( ))` ("abc: unbound variable") and
+# `PREFLIGHT_STEP_BUDGET_S=abc` silently produced an INSTANT rc 124 (the
+# watcher's `sleep abc` fails and fires at elapsed=0 — a watchog that fires
+# on every step). Both are now a named ERROR plus the documented default.
+cat > "$PF_SB/knob.sh" <<'EOS'
+set -u
+. "$REPO_ROOT/scripts/upgrade/lib.sh"
+printf 'STEP=%s PHASE=%s SYSCTL=%s DEADLINE_ARITH=%s\n' \
+    "$PREFLIGHT_STEP_BUDGET_S" "$PREFLIGHT_PHASE_BUDGET_S" \
+    "$SYSTEMCTL_PROBE_BUDGET_S" "$(( $(_now_epoch) + PREFLIGHT_PHASE_BUDGET_S > 0 ? 1 : 0 ))"
+EOS
+PREFLIGHT_STEP_BUDGET_S=abc PREFLIGHT_PHASE_BUDGET_S=abc SYSTEMCTL_PROBE_BUDGET_S=abc \
+    REPO_ROOT="$PF_REPO_ROOT" bash "$PF_SB/knob.sh" > "$PF_SB/knob.out" 2> "$PF_SB/knob.err"
+KNOB_RC=$?
+[ "$KNOB_RC" = "0" ] && pf_ok "a garbage knob never kills the sourcing shell (no cryptic death)" \
+                     || pf_bad "D14 sourcing died on a garbage knob (rc=$KNOB_RC)"
+for k in PREFLIGHT_STEP_BUDGET_S PREFLIGHT_PHASE_BUDGET_S SYSTEMCTL_PROBE_BUDGET_S; do
+    grep -q "ERROR: ${k}=\"abc\" is not a decimal integer" "$PF_SB/knob.err" \
+        && pf_ok "D14 ${k} reports a NAMED validation error" \
+        || pf_bad "D14 no named validation error for ${k}: $(head -2 "$PF_SB/knob.err" | tr '\n' ' ')"
+done
+grep -q 'STEP=120' "$PF_SB/knob.out" && pf_ok "D14 the step budget falls back to the documented 120 s" \
+                                    || pf_bad "D14 step budget: $(cat "$PF_SB/knob.out")"
+grep -q 'PHASE=300' "$PF_SB/knob.out" && pf_ok "D14 the phase budget falls back to the documented 300 s" \
+                                     || pf_bad "D14 phase budget: $(cat "$PF_SB/knob.out")"
+grep -q 'SYSCTL=5' "$PF_SB/knob.out" && pf_ok "D14 the probe budget falls back to the documented 5 s" \
+                                    || pf_bad "D14 probe budget: $(cat "$PF_SB/knob.out")"
+grep -q 'DEADLINE_ARITH=1' "$PF_SB/knob.out" \
+    && pf_ok "D14 the phase-deadline arithmetic is computable (no unbound-variable death)" \
+    || pf_bad "D14 the deadline arithmetic did not evaluate: $(cat "$PF_SB/knob.out")"
 
 # ── spawn-watcher proof ─────────────────────────────────────────────────────
 kill "$PF_WATCHER" 2>/dev/null; wait "$PF_WATCHER" 2>/dev/null
