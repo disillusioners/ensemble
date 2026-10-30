@@ -45,6 +45,11 @@ it). The static pack doubling as a no-edit proof is the isolation guarantee.
 
 ## 7. Risks & if-flipped contingency
 
+> **D-8 RATIFIED @ `9657be93a` (4.35 vs 3.05)** — include-as-rider CONFIRMED. The contingency
+> below is retained as the priced flip path for the architect §12 non-blocking note: an overrule
+> means routing R-10 to a (currently nonexistent) owner lane and accepting the census staying
+> born-broken.
+
 - **D-8 flip (route R-10 to the wedge-capture owner lane instead of this rider):** Phase 2 drops
   entirely (T2.1-T2.3 + AC-2.1-2.3); Phase 3 loses only the R-10 mutation-leg row; Phases 4/5
   corpora shrink accordingly; the handoff report (Phase 6) routes the defect with the findings

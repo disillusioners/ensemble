@@ -95,7 +95,7 @@ is pattern (h).** Option (c) below = a pattern-(h) leg inside `JobRecoveryServic
 | Coverage of the signature | full (own candidate query) | full only if it grows a job-candidate scan — a layer violation | full (own candidate query folded into the drift pass) |
 | E1 interplay / no-self-hold | needs the E1 param either way | needs it + couples watcher machinery to admission writes | needs the E1 param either way; E1 already wired at 3 f-arm seams (`:2666-2699`, `:2970-3001`) to copy from |
 | Blast radius / regression risk | new api.py boot block, new service file, new shutdown path; LOW overlap with existing code but NEW wiring surface | HIGH — converts a self-declared non-writer (:64, :109-115) into an admission writer; touches watcher CAS machinery used by every notify | MEDIUM — additive leg in an already-hot file, behind its own knobs; existing f-arms untouched (their gates precede the leg) |
-| Audit + idempotency fit | same primitives either way (guarded UPDATE + rowcount; §8) | same | same — PLUS direct reuse of `_pattern_f_finalize_done`'s notify fire-then-cancel helper (`:4103-4234`) and the census-registered `force_finalize_orphan` writer (§6) |
+| Audit + idempotency fit | same primitives either way (guarded UPDATE + rowcount; §8) | same | same — PLUS direct reuse of the f2 helper's **notify half** (see A7 precision below) and the census-registered `force_finalize_orphan` writer (§6) |
 | Scheduling fit | asyncio task + cancel/await (house pattern, `api.py:1709-1751` block) | already an asyncio task — but wrong layer | rides the EXISTING drift asyncio task (`_periodic_drift_reconcile_loop`, `api.py:1477-1487`, loop `:3878+`); zero new scheduling; NO thread+`run_coroutine_threadsafe` bridge (that is the RDRS thread pattern with its 28s stop budget, `report_delivery_recovery.py:873-897` — unnecessary here) |
 | Kill-switch / knob fit | strand-heal template knobs, own constructor | would need knobs foreign to its charter | house precedent VERBATIM: `min_pending_age`/`min_orphan_age`/`f1_tree_activity_max_age` are read from `config.services` at `api.py:1446-1470` and passed loop→`reconcile_drift_states(...)` kwargs (`api.py:3878-3960`) — the (h) knobs copy this exact shape |
 | Testability | new pack, new fixtures, new service harness | muddies the watcher-sweep packs | packs land in the DENSE existing home `tests/job_queue/` next to `test_orphan_active_job_recovery.py`, `test_pattern_f_mission_live_gate.py`, `test_running_zombie_sweep.py` (findings-riders §8); the f-arm test harness (bus mocks, E1 fixtures) is reusable |
@@ -106,10 +106,18 @@ is pattern (h).** Option (c) below = a pattern-(h) leg inside `JobRecoveryServic
 
 **Pick (c): a pattern-(h) leg inside `JobRecoveryService.reconcile_drift_states`.**
 
+> **RATIFIED @ 9657be93a** — architect confirmed (c), weighted matrix 3.95 vs 2.85 (a) / 2.35 (b);
+> dominant axes Cost + Maintainability; premise checks all passed (arm enumeration, letter-(h)
+> free, knob precedent verified end-to-end `api.py:1446-1487` → loop `:3931-3940` → signature
+> `:925-934`). Contingent process note carried forward: keep the leg strictly additive and land
+> early (concurrent-lane merge pressure on the 4,946-line file). See
+> `architecture-recommendation.md` §1.
+
 **Reasoning:** The heal object is the JobItem's admission state — exactly the drift reconciler's
 charter, whose pattern family (a)–(g) already enumerates the missed-finalize shapes this class
 belongs to. Option (c) inherits the candidate-loop infrastructure, the E1 gate wiring, the notify
-fire-then-cancel helper, the census-registered F5 writer, the knob-passing precedent
+half of the f2 helper (A7 precision — fire-then-cancel composition only), the census-registered
+F5 writer, the knob-passing precedent
 (loop kwargs → `reconcile_drift_states` args), and the densest test-pack home — at the cost of one
 more leg in an already-hot file, which the knobs/batch-cap/fail-closed discipline bounds. Option
 (a) duplicates all of that wiring for an isolation benefit that does not materialize (the leg would
@@ -120,6 +128,13 @@ it is shared surface, not a reason to split the sweep out.
 **Assumptions:** the drift 300s cadence is sufficient (the class is hours old by definition — the
 age bound ≥ 7200s dominates); the drift loop remains an asyncio task (true at this HEAD,
 `api.py:1477`).
+
+> **A7 precision (folded per architect §1/§10):** "reuse of the f2 helper" means the **NOTIFY HALF
+> ONLY** — `_pattern_f_finalize_done` (`job_recovery_service.py:4103`) writes via
+> `atomic_transition`, which cannot carry `terminal_reason`; the WRITE seam is
+> `force_finalize_orphan` per D-4 (unchanged). Any plan text implying full-helper reuse reads as
+> the notify composition only. The pre-filter SQL stays pinned through `asyncio.to_thread` per
+> D-12 (existing arms `:539, :554, :628, :873, :1101, :1143`).
 
 **Reversibility:** high — the leg is one method + one candidate query + three knobs + one E1 param;
 kill-switch OFF is a complete no-op (strand-healer semantics, `config.py:2651-2653`).
@@ -174,6 +189,14 @@ TERMINALIZE iff ALL hold (any leg unprovable ⇒ SKIP — fail-closed, see polar
    `live=False` **with** `error or timed_out` ⇒ SKIP (fail-closed divergence, below).
    `live=False` clean ⇒ terminalize.
 5. **Write + notify** (§6, §7).
+
+> **A2 probe/commit TOCTOU (folded per architect §10):** a retry child minted between the
+> instance inflight probe (leg 1) and the finalize UPDATE is not re-checked inside the
+> transaction. Preferred cheap closure per the architect: **re-run the inflight probe (one
+> SELECT) inside `force_finalize_orphan`'s transaction**; if that disturbs the census-registered
+> seam's contract, the sanctioned fallback is to **pin the accepted sub-second window with a
+> mutation-verified test + disclose** (the f-arms share the same window today —
+> `architecture-recommendation.md` §4). Phased as a Phase-1 task with the decision rule spelled.
 
 ### Each verified starvation vector, addressed
 
@@ -266,7 +289,23 @@ reverse index `_CANONICAL_TO_SOURCES` builds FROM the map at import time (`:181-
 `_TERMINAL_STATUSES` change** (`:168-177`): the canonical targets are already terminal (unlike
 `orphaned_no_task`, which mapped to itself and needed the set addition, `:130-142`). The token is
 query-attributable via the existing index `idx_job_queue_terminal_reason` (`models.py:307-313`) —
-every heal findable by `terminal_reason LIKE 'zombie_active_%'`.
+every heal findable by `terminal_reason IN ('zombie_active_completed','zombie_active_failed',
+'zombie_active_cancelled')` *(A5, folded: attribution/forensics queries use the explicit IN-list,
+NOT a prefix `LIKE 'zombie_active_%'` — PG btree is prefix-blind without `text_pattern_ops`;
+architect §10)*.
+
+> **RATIFIED @ 9657be93a (D-3)** — three synthetic tokens CONFIRMED. The architect proved
+> pass-through is **provably harmful**, not merely weaker: `_derive_legacy_status` gates on map
+> membership (`work_status.py:401-416`) — an unregistered token on a `done` row falls through to
+> `_ADMISSION_TO_LEGACY_STATUS['done']='completed'`, i.e. pass-through would misreport
+> `zombie_active_failed` as completed, and `_job_to_record` (`work_resolver.py:1765-1770`) would
+> leak the raw token as `record.status`. Consumer census: zero consumers require a code change
+> the plan missed (`architecture-recommendation.md` §5).
+>
+> **A4 disclosure (folded per architect §5/§10):** `JobRetryEngine` reads `failed_at`, NOT
+> `terminal_reason` (`job_retry_engine.py:183, 287`) — healed `zombie_active_failed` rows carry
+> no `failed_at` ⇒ `atomic_retry` is FORECLOSED for them. Disclosed as intended semantics. Do
+> **NOT** stamp `failed_at` on heal — that would re-arm 2h+-stale work for retry.
 
 **PAUSED protections preserved:** the cured semantics are untouched — the (h) predicate requires
 the work_id Task TERMINAL and the instance inflight probe EMPTY; PAUSED tasks are non-terminal
@@ -339,7 +378,9 @@ impossible-by-construction crash-between-writes case).
    atomic DELETE...RETURNING BEFORE any enqueue) is the ONLY exactly-once enforcement —
    "Do not add new notify-then-claim call sites" (`work_notifier.py:401-409`, findings-riders §3).
    f2's `_pattern_f_finalize_done` helper already composes exactly this fire-then-cancel sequence
-   (`job_recovery_service.py:4103-4234`) — reuse its shape.
+   (`job_recovery_service.py:4103-4234`) — reuse its NOTIFY composition shape (A7: the helper's
+   write half is `atomic_transition` and cannot carry `terminal_reason`; the write seam is
+   `force_finalize_orphan`, §6).
 2. **Terminal cleanup:** on terminal status the notify path itself removes the rows — `if status in
    ALL_TERMINAL_STATES: remove_all_watches_for_job(job_id)` (idempotent DELETE,
    `job_queue_service.py:506-509`).
@@ -356,6 +397,15 @@ impossible-by-construction crash-between-writes case).
    Correct-by-design: our close is admission-scoped, not mission-scoped.
 5. **stored_watches:** rows reference work_ids and the GC's own liveness predicates — no
    interaction with an admission finalize (findings-riders §3).
+
+> **A3 post-commit notify loss (folded per architect §4/§10):** a crash between the finalize
+> commit and the notify leaves watcher rows orphaned with NO WARN and no event row — the
+> f2-precedent exposure class. Folded posture: the (h) log line carries an explicit
+> `notify=<outcome>` field on every close (the outcome is recorded even when notify is lost), and
+> "terminal job with surviving watcher rows" routes into a `watch_reconcile_sweep` follow-up
+> ticket (its zombie-GC leg already retires rows whose job is terminal and liveness is terminal —
+> `watch_reconcile_sweep.py` `remove_all_watches_for_job` at the :946 call site). Precedent-
+> consistent with f2's best-effort notify.
 
 ---
 
@@ -409,6 +459,14 @@ Rationale:
    (`zombie_close_skipped_mission_live` / `_age_unmet` / `_bus_pending` / `_guard_error` /
    `_disabled`), mirroring the f-family detail-token style.
 
+> **A1 stuck-closed observability (folded per architect §6/§10):** the drift loop logs stats only
+> when `reconciled>0` today (`api.py:3926-3935`) — a stuck-closed heal (examined>0,
+> finalized=0, holds/skips accumulating) would otherwise be INVISIBLE. Folded requirements:
+> (i) the (h) counter block logs whenever **`examined>0`** — NOT gated on `reconciled>0`;
+> (ii) non-zero `error_skips` surfaces in the drift-stats WARN line; (iii) an **escalating WARN**
+> fires when the same job accumulates ≥K consecutive error_skips/mission_live_holds (K≈40 ≈ 3.3h
+> at the 300s cadence). Counters alone are forensic, not operational.
+
 ---
 
 ## 10. Config knobs + kill-switch (strand-heal template, `config.py:2645-2695`)
@@ -435,6 +493,17 @@ writer: fail-closed predicate (any unprovable leg skips), hours-wide monotone ag
 guarded single-seam write reusable from a mutation-proven writer, and the alternative is the
 DEMONSTRATED unbounded harm (immortal lock slots; limit=1 queues blocked indefinitely, §1).
 Rollout: dev-staged, promote-gated, kill-switch OFF = instant operator escape hatch.
+
+> **RATIFIED @ 9657be93a (D-6)** — default-ON CONFIRMED, 4.15 vs 3.20; dominant axis Risk ("the
+> riskiest thing is the disease, not the heal"). House policy is codified, not vibes:
+> `watch_reconcile_sweep.py:~56-60` carries the rule that "a kill-switch defaulting OFF that
+> gates a fix is an unacceptable deliverable"; strand-heal shipped default-ON with the identical
+> containment profile and ran clean since 2026-10-21. NON-BLOCKING note (architect §12): if the
+> leader weighs first-release caution differently, the flip is ONE Field default + no redesign
+> (priced in phase1-plan.md §7). *(Citation correction verified: the RDRS stuck-wake kill-switch
+> precedent lives at `config.py:2098` — NOT `config.py:1628-1650` (compaction token params); the
+> wrong-range form appears NOWHERE in this plan set — the plan set's own RDRS cites are correct:
+> `config.py:2098-2120` in findings-riders §5, thread-bridge `report_delivery_recovery.py:873-897`.)*
 
 ---
 
@@ -506,12 +575,22 @@ Rollout: dev-staged, promote-gated, kill-switch OFF = instant operator escape ha
 
 ## Open Questions
 
-None blocking. Four decisions are marked open-for-architect-review in `decisions.md` (D-1 shape,
-D-3 token set, D-6 default-ON posture, D-8 R-10 rider inclusion) — each carries a firm
-recommendation and can be flipped without redesign.
+None blocking. ~~Four decisions are marked open-for-architect-review~~ **All four ratified by the
+architect @ `9657be93a`** (D-1 shape 3.95/5 · D-3 tokens with pass-through proven harmful ·
+D-6 default-ON 4.15 vs 3.20 · D-8 R-10 rider 4.35; R-9 exclusion endorsed) — verdicts recorded in
+`decisions.md` and `architecture-recommendation.md` (§0, §12). Two NON-BLOCKING leader-ratification
+notes stand (D-6 one-Field flip; D-8 overrule = census stays born-broken) — both priced in the
+phase-plan contingencies, neither blocks implementation. Remaining open questions per the
+architect §13 (live prod incidence unmeasured; exact candidate-SQL NULL-handling = implementation
+stage; un-discounted E1 inside notify's mission-live guard = functional-gate confirmation) belong
+to Phases 0/4/5 — none is a design input.
 
 ## References
 
+- **`architecture-recommendation.md`** (this directory, architect @ `9657be93a`) — the ratified
+  verdict record: §1 shape matrix, §2 root-cause git evidence (`47b69bf00`), §3 no-self-hold
+  confirmation, §4 race-interleaving table, §5 D-3 consumer census, §10 amendments A1–A7 folded
+  herein, §12 non-blocking leader notes, §13 open questions routed to gates
 - Findings (this directory): `research-findings-core.md` (Q1-Q9 + discrepancies),
   `research-findings-repair-riders.md` (§1-§8 + discrepancies) — primary evidence base
 - `daemon/services/job_state_machine.py:53-62` — admission transitions; same-state no-ops `:108-110`

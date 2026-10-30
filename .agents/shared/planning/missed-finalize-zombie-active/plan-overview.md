@@ -1,9 +1,13 @@
 # missed-finalize / zombie-ACTIVE JobItem close path — Plan Overview
 
 Board: `wi-78967dba` · Lane worktree: `/home/nea/ensemble-src-wt-missed-finalize` (branch
-`fix/missed-finalize-zombie-active`, base `22fe83317`) · Plan date: 2026-10-30.
+`fix/missed-finalize-zombie-active`, base `22fe83317`) · Plan date: 2026-10-30 ·
+**Architect fold: 2026-10-31 @ `9657be93a`** (all four held-open decisions RATIFIED;
+amendments A1–A7 folded into the plan set; this file and the phases carry the results).
 Companion files (this directory): `research-findings-core.md`, `research-findings-repair-riders.md`,
-`technical-analysis.md` (the design, §1–§12), `decisions.md` (D-1..D-13 with statuses).
+`technical-analysis.md` (the design, §1–§12 + fold annotations), `decisions.md` (D-1..D-13 with
+statuses incl. RATIFIED verdicts), `architecture-recommendation.md` (the architect's authoritative
+verdict record — read-only input).
 This plan set is the IMPLEMENTATION half — it phases the DECIDED design; it does not re-litigate it.
 
 ---
@@ -81,7 +85,7 @@ existing `notify_watchers` partition/CAS path. Audit = log lines + counters, no 
 | 3 | Test packs | phase3-plan.md | Full mutation-verified pin family for every decision leg + negatives + races + kill-switch + knob wiring + real-PG trigger leg; PACKS.md entries | Every pin plant→RED→GREEN with digests; collected-count fences set; PACKS.md keep-both entries written | 1, 2 |
 | 4 | Functional gate | phase4-plan.md | net-new=EMPTY: full FAILED-list diff vs the Phase-0 TRUE base, same commands both sides; order/load-sensitive reds isolated 3× per side | `net_new=∅` AND previously-red-green-at-HEAD check done; gate report written | 3 |
 | 5 | House gates + stage | phase5-plan.md | Code council → fix cycles → tidier → tester functional gate; giter stage with version RE-DERIVED at lane end; migration delta EMPTY adjudication | STAGED release (expected v0.27.16) with 4-way sha match, staged verification PASS; STAGE-ONLY — no promote, no live contact | 4 |
-| 6 | Lane closeout | phase6-plan.md | Evidence sweep, RESULTS doc, board wi-78967dba update, handoff report surfacing the four open-for-architect-review decisions + R-9 follow-up registration | Handoff report delivered with decision statuses, follow-ups registered, lane artifacts dispositioned | 5 |
+| 6 | Lane closeout | phase6-plan.md | Evidence sweep, RESULTS doc, board wi-78967dba update, handoff report surfacing the four RATIFIED decision statuses (verdicts + flip costs + the two non-blocking leader notes) + R-9 follow-up registration | Handoff report delivered with decision statuses, follow-ups registered, lane artifacts dispositioned | 5 |
 
 ## 5. Coupling map
 
@@ -140,7 +144,7 @@ from P1 but shares the P4/P5 gates.
   passes staged verification with 4-way sha match (disk==dist==manifest==sidecar), live fence
   intact (current symlink + state.json promote fields untouched); NO promote.
 
-## 8. Assumptions, invariants & open items for the dispatcher
+## 8. Assumptions, invariants & ratified items for the dispatcher
 
 **Assumptions.**
 - The drift 300s cadence suffices (the class is hours old by definition; the 7200s age bound
@@ -170,15 +174,21 @@ from P1 but shares the P4/P5 gates.
   path; PG packs: `PG_TEST_*` DSN (localhost:5432/ensemble_test), SERIAL-only under xdist.
 - PACKS.md conflicts keep-both newest-first.
 
-**Open items surfaced upward (each phases the RECOMMENDED path; flips are cheap and
-non-redesigning — per-decision contingencies live in the phase plans):**
-- **D-1 shape** (open-for-architect-review; recommended: pattern-(h) leg) → contingency in
-  phase1-plan.md §7.
-- **D-3 token set** (open; recommended: three `zombie_active_*` tokens) → contingency in
-  phase1-plan.md §7.
-- **D-6 default-ON posture** (open; recommended: default-ON) → contingency in phase1-plan.md §7.
-- **D-8 R-10-as-rider** (open; recommended: include) → contingency in phase2-plan.md §6.
-- R-9 follow-up registration (D-9, decided-exclude) — executed in Phase 6.
+**Ratified items (history — each was held open, then ratified by the architect @ `9657be93a`
+with the recorded verdicts; each phases the RECOMMENDED path; contingencies retained as priced
+flip paths in the phase plans; see `architecture-recommendation.md` §0/§12):**
+- **D-1 shape** (RATIFIED 3.95/5 vs (a) 2.85 / (b) 2.35; implemented: pattern-(h) leg) → priced
+  flip path in phase1-plan.md §7.
+- **D-3 token set** (RATIFIED; pass-through provably harmful via `work_status.py:401-416`
+  fall-through misreporting failed/cancelled as completed; implemented: three `zombie_active_*`
+  tokens) → flip foreclosed by the proof of harm; record in phase1-plan.md §7.
+- **D-6 default-ON posture** (RATIFIED 4.15 vs 3.20; non-blocking leader note: one-Field flip if
+  first-release caution is weighed differently) → priced flip path in phase1-plan.md §7.
+- **D-8 R-10-as-rider** (RATIFIED 4.35 vs 3.05; non-blocking leader note: overrule = route to a
+  nonexistent owner lane and accept the census staying born-broken) → priced flip path in
+  phase2-plan.md §6/§7.
+- R-9 follow-up registration (D-9, decided-exclude, exclusion ENDORSED @ `9657be93a` §9 with the
+  both-or-neither warning addition) — executed in Phase 6 (T6.4).
 
 ## 9. Authorization envelope (restated)
 
@@ -201,3 +211,7 @@ checkout `/home/nea/ensemble-src` is NEVER touched.
 - `phase6-plan.md` — Lane closeout & handoff
 - Inputs: `research-findings-core.md`, `research-findings-repair-riders.md`,
   `technical-analysis.md`, `decisions.md`
+- **`architecture-recommendation.md`** — the architect's verdict record @ `9657be93a`
+  (authoritative input; read-only): §0 verdicts, §1–§9 decision confirmations, §10 amendments
+  A1–A7 (folded into the plan set 2026-10-31), §12 non-blocking leader notes, §13 open questions
+  routed to gates

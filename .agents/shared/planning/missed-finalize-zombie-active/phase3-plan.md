@@ -40,7 +40,8 @@ xdist.
 | T3.8 | **Pack H — candidate query shape (static/exact-string):** exact-string pins over the candidate SQL (task-kind filter, active filter, `deleted_at IS NULL`, work_id JOIN, instance NOT EXISTS, `MAX(completed_at)` age key — NOT `last_activity_at`, LIMIT); greppable log-line assertions (`reconcile_drift_states: Pattern (h) zombie-active close`, skip tokens) in the `test_running_zombie_sweep.py:1158` style | Exact-string source pins; log-line pins | `tests/job_queue/test_zombie_active_close_static.py` (new) | P1 | R4 | AC-3.8 |
 | T3.9 | **Pack I — real-PG leg:** trigger suite present (`trg_job_locks_active_guard` both directions) + the close survives it; same-txn lock release verified on real PG; seeded data end-to-end (fixture→cycle→DONE+token+lock gone); runs under the postgres marker, serial-only | Real-PG close assertion under the live trigger suite | `tests/postgres/test_zombie_active_close_pg.py` (new) | P1 | R5 | AC-3.9 |
 | T3.10 | **R-10 legs:** static pack green UNCHANGED (run-only, no edits — the isolation proof); PG pack re-pointed green; the old-form plant (`c.n_live_tup`) RED→GREEN recorded in the consolidated matrix | Mutation leg row in the matrix; both packs green | (Phase 2 files) | P2 | — | AC-3.10 |
-| T3.11 | **Mutation matrix + PACKS.md:** consolidate EVERY pin's plant→RED→GREEN evidence (defect form, planted sha/digest, RED proof, restore, GREEN proof) into the lane's mutation matrix (TSV/MD per the v0.27.15 precedent); write PACKS.md entries (keep-both newest-first) with invocation/scope/run-anchor/status + collected-count fences per pack | Matrix complete (every leg accounted); PACKS.md rows added; counts fenced | `.agents/tester/PACKS.md` + lane evidence doc | T3.1-T3.10 | — | AC-3.11 |
+| T3.11 | **Mutation matrix + PACKS.md:** consolidate EVERY pin's plant→RED→GREEN evidence (defect form, planted sha/digest, RED proof, restore, GREEN proof) into the lane's mutation matrix (TSV/MD per the v0.27.15 precedent); write PACKS.md entries (keep-both newest-first) with invocation/scope/run-anchor/status + collected-count fences per pack | Matrix complete (every leg accounted, incl. Pack J and the T1.9 A2 disposition leg); PACKS.md rows added; counts fenced | `.agents/tester/PACKS.md` + lane evidence doc | T3.1-T3.12 | — | AC-3.11 |
+| T3.12 | **Pack J — architect-amendment pins (A1/A3/A5/A6 per architect §10, folded):** (i) **A1** — the (h) counter block is emitted whenever `examined>0` (plant: gate on `reconciled>0` ⇒ pin RED); non-zero `error_skips` surfaces in the drift-stats WARN; the escalating WARN fires at ≥K≈40 consecutive error_skips/mission_live_holds for the same job (plant: K unchecked ⇒ RED); (ii) **A3** — every close log line carries `notify=<outcome>`; a post-commit notify-loss shape leaves the follow-up ticket token (terminal job with surviving watcher rows routed to the `watch_reconcile_sweep` follow-up semantics); (iii) **A5** — attribution query shape is the explicit IN-list `('zombie_active_completed','zombie_active_failed','zombie_active_cancelled')`, never a prefix-LIKE (static exact-string pin; plant a LIKE form ⇒ RED); (iv) **A6 defensive E1 pins** — (a) the member-alive candidate builder never re-arms fail-MISS on the discounted instance (`mission_live_guard.py:605-612` invariant: candidate set excludes root + non-terminal-only), (b) the childless-root `member_count==0` fallback (`:925-930`) is never on the (h) close path (anti-"unify the anchor" regression: plant a shape where the fallback gates the close ⇒ RED); (v) the **A2 disposition leg** mirrors T1.9's outcome — if pin+disclose was taken: the window pin (retry child minted in-window ⇒ close aborts/foreclosed next cycle) is RED under the planted no-check form; if in-txn re-check was taken: the in-txn probe abort pin is RED when the re-check is removed | Every amendment pin plant→RED→GREEN with digests; Pack J collected-count fenced | `tests/job_queue/test_zombie_active_close_amendments.py` (new) | P1 (incl. T1.9 disposition) | R1, R2, R6 | AC-3.12 |
 
 ## 5. Acceptance criteria
 
@@ -56,7 +57,8 @@ xdist.
 | AC-3.8 | Candidate SQL exact-string pins + log-line pins green |
 | AC-3.9 | Real-PG close under the live trigger suite green (serial-only, `PG_TEST_*` DSN) |
 | AC-3.10 | R-10: static pack green UNCHANGED; PG pack re-pointed green; old-form plant RED |
-| AC-3.11 | Mutation matrix complete with digests; PACKS.md keep-both entries with collected-count fences |
+| AC-3.11 | Mutation matrix complete with digests (incl. Pack J + the A2 disposition leg); PACKS.md keep-both entries with collected-count fences |
+| AC-3.12 | A1/A3/A5/A6 amendment pins green and mutation-verified (each plant form RED); A2 leg mirrors the T1.9 disposition |
 
 ## 6. Verification method
 
@@ -73,6 +75,7 @@ serial + explicit `--timeout` where needed; mutation legs recorded in the matrix
   v0.27.14 council's "pin that could not catch its defect" rejection).
 - Pack I needs the PG trigger suite actually INSTALLED on the scratch fixture (the manager
   install path, `manager.py:8201-8206`) — assert trigger existence first, else the leg is vacuous.
-- If D-3 flips (pass-through tokens): T3.7's token-map pins re-point to pass-through assertions
+- If D-3 flips (pass-through tokens): **foreclosed by the architect proof of harm** — record
+  only. Mechanically T3.7's token-map pins re-point to pass-through assertions
   (AC-3.7 adjusts; the WARN/hold/survival pins unchanged). If D-6 flips: T3.6's posture pins
   invert (OFF-by-default + opt-in), same mechanics.

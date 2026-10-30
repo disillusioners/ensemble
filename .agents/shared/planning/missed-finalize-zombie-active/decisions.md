@@ -1,8 +1,15 @@
 # Decisions — missed-finalize / zombie-ACTIVE JobItem close path (wi-78967dba)
 
 Companion to `technical-analysis.md` (same directory). Status legend:
-**decided** = design-fixed, planner phases it as-is · **open-for-architect-review** = firm
-recommendation attached, genuinely contestable, flip is cheap and non-redesigning.
+**decided** = design-fixed, planner phases it as-is · **RATIFIED** = was open-for-architect-review,
+architect confirmed @ `9657be93a` (`architecture-recommendation.md`) — implementation proceeds on
+the recommended path; flip costs remain priced in the phase-plan contingencies ·
+**architect-confirmed** = was decided, architect re-verified at source.
+
+> **Fold record (2026-10-31):** D-1/D-3/D-6/D-8 RATIFIED with matrix verdicts (§0 of the
+> architect doc); D-2/D-4/D-5 re-confirmed SOUND at source; R-9 exclusion ENDORSED; amendments
+> A1–A7 folded into `technical-analysis.md` home sections + the phase plans; the two non-blocking
+> leader-ratification notes (architect §12) recorded under D-6/D-8 below.
 
 ---
 
@@ -20,14 +27,22 @@ exists. The new leg is **pattern (h)**.
 
 **Rationale:** the heal object is the JobItem admission state — the drift reconciler's charter,
 whose (a)–(g) family already enumerates missed-finalize shapes. (c) inherits the candidate-loop
-infra, E1 wiring (`:2666-2699`, `:2970-3001`), the f2 notify fire-then-cancel helper
-(`:4103-4234`), the census-registered F5 writer (D-4), the knob-passing precedent
+infra, E1 wiring (`:2666-2699`, `:2970-3001`), the f2 helper's NOTIFY half (fire-then-cancel
+composition, `:4103-4234` — A7: notify half only; the write seam is `force_finalize_orphan`),
+the census-registered F5 writer (D-4), the knob-passing precedent
 (`api.py:1446-1487` → loop kwargs → `reconcile_drift_states` args), and the densest pack home
 (`tests/job_queue/`). (a) duplicates all wiring for isolation that does not materialize; (b)
 breaks a self-declared non-writer's charter (`watch_reconcile_sweep.py:64`, `:109-115`). Full
 matrix in technical-analysis §3.
 
-**Status:** open-for-architect-review (the brief holds the shape open; recommendation is firm).
+**Status:** **RATIFIED @ 9657be93a** — architect CONFIRMED (c), weighted matrix **3.95 vs 2.85
+(a) / 2.35 (b)** (Complexity 20% · Scalability 20% · Maintainability 25% · Risk 20% inverted ·
+Cost 15% inverted); dominant axes Cost + Maintainability; confidence High; premise checks all
+passed (arm enumeration, letter-(h) free, knob precedent verified end-to-end `api.py:1446-1487` →
+`:1481-1489` → loop `:3931-3940` → signature `:925-934`). (b) disqualified by its own charter
+docstring; (a)'s wiring surface carries the WS3 miss precedent (`api.py:1465-1470` patch).
+Process note carried: keep the leg strictly additive, land early (merge pressure on the
+4,946-line file). A7 precision folded: helper reuse = notify half only.
 
 ---
 
@@ -56,7 +71,20 @@ hold via every OTHER member's status + bus + any non-terminal task anywhere on t
 age bound applies ONLY to the zombie-shape predicate — healthy trees never enter the candidate
 set. Full vector-by-vector table in technical-analysis §4.
 
-**Status:** decided.
+**Root-cause premise — git evidence (verified this lane):** commit `47b69bf00` ("fix(strand-healer):
+the running-zombie anchor, the widened tree leg, the re-arm", giter, 2026-10-21, branch
+`fix/running-zombie-sweep`) touched `mission_live_guard.py` (anchor scope: root stamp collected
+separately; childless-root fallback fires only when `member_count==0`, `:869-870`, `:900-925`) and
+`mission_strand_healer.py` (tree-leg widening onto the canonical guard with `skip_root=True`).
+It fixed **only the backstop CLOCK** — leg (c)'s non-terminal COUNT was never touched and remains
+unconditional for existing consumers (`:893-898` with `skip_root=False` in the f-arms). What
+remains open after that commit is exactly "non-terminal status with no provable staleness" = the
+zombie-ACTIVE shape pattern (h) closes. Premise holds; confirmed by architect §2.
+
+**Status:** **architect-confirmed SOUND** (§3: discount sites verified — exactly TWO
+non-terminal-count sites `:893-898`/`:978-982`, no third writer of `any_non_terminal`; liveness
+is conditional-not-absolute, disclosed as designed; fail-closed polarity "exactly right for an
+autonomous finalizer").
 
 ---
 
@@ -80,9 +108,18 @@ truthful AND make every heal query-attributable via `idx_job_queue_terminal_reas
 (`models.py:307-313`). PAUSED protections are preserved untouched (paused tasks are non-terminal
 ⇒ predicate fails before any write; f1's strict skips `:2474-2546` upstream and unchanged).
 
-**Status:** open-for-architect-review (public vocabulary surface; the pass-through-the-task-reason
-alternative with observability-only attribution is the fallback if the reviewer prefers zero new
-tokens).
+**Status:** **RATIFIED @ 9657be93a** — three synthetic tokens CONFIRMED; **pass-through is
+provably harmful** (not merely weaker): `_derive_legacy_status` gates on map membership
+(`work_status.py:401-416`) — an unregistered token on a `done` row falls through to
+`_ADMISSION_TO_LEGACY_STATUS['done']='completed'`, i.e. pass-through would MISREPORT
+`zombie_active_failed` as completed, and `_job_to_record` (`work_resolver.py:1765-1770`) would
+leak the raw token as `record.status`. Architect consumer census (§5): zero consumers need a code
+change the plan missed; `mission_resolver` zero contact ((h) writes DONE never DEAD; epochs
+hard-return 1). **A4 folded:** JobRetryEngine reads `failed_at` not `terminal_reason`
+(`job_retry_engine.py:183, 287`) — healed `zombie_active_failed` rows get no `failed_at` ⇒
+`atomic_retry` FORECLOSED (disclosed; NEVER stamp `failed_at` on heal — it would re-arm 2h+-stale
+work). **A5 folded:** attribution queries use the explicit IN-list, not prefix-LIKE (PG btree
+prefix-blind without `text_pattern_ops`).
 
 ---
 
@@ -135,10 +172,14 @@ terminalizing writes (`:2684-2689`) + guarded single write seam; the kill-switch
 operator's escape hatch. Modern ServicesConfig shape chosen over the legacy env-only F1 resolver
 (`job_recovery_service.py:115-158`; findings-riders §5 template guidance).
 
-**Status:** open-for-architect-review (automated terminalizing writer defaulting ON is the single
-most operator-visible posture call in this design; default-OFF-first-release is the cheap
-alternative if the reviewer weighs first-release caution over the demonstrated unbounded harm of
-the status quo — immortal lock slots, limit=1 queues blocked indefinitely).
+**Status:** **RATIFIED @ 9657be93a** — default-ON CONFIRMED, weighted matrix **4.15 vs 3.20**;
+dominant axis Risk ("the riskiest thing is the disease, not the heal" — immortal lock slots,
+limit=1 queues blocked indefinitely). House policy codified: `watch_reconcile_sweep.py:~56-60`
+("a kill-switch defaulting OFF that gates a fix is an unacceptable deliverable"); strand-heal
+shipped default-ON with the identical containment profile (fail-closed, 7200s, cap 25), clean
+since 2026-10-21. **NON-BLOCKING (architect §12):** if the leader weighs first-release caution
+differently, the flip is ONE Field default + pin re-point, no redesign — priced in
+phase1-plan.md §7.
 
 ---
 
@@ -170,7 +211,14 @@ InFailedSqlTransaction cascades into read-3); one-function, PG-only, strictly-a-
 radius; it restores the observability instrument for exactly this incident class. Counter-weight
 (scope discipline: wedge-capture is a foreign subsystem) — hence review-flagged.
 
-**Status:** open-for-architect-review (include-as-rider vs route to the wedge-capture owner lane).
+**Status:** **RATIFIED @ 9657be93a** — INCLUDE CONFIRMED, weighted matrix **4.35 vs 3.05**;
+dominant axes Cost + Maintainability. The architect verified: born-broken at
+`db_capture.py:374-386`; fix-shape precedent `ens_db_tools.py:1218-1229`; static pins
+(`test_dbpool_wedge_capture_static.py:100-137`) assert NONE of the touched forms — the LEFT-JOIN
+shape survives unchanged; and the PG pack's own STOP item documents owner=wedge-capture lane
+with **no active owner lane existing** — routing out means lane startup overhead ≫ the fix.
+**NON-BLOCKING (architect §12):** an overrule means routing R-10 to a (currently nonexistent)
+owner lane and accepting the census staying born-broken — priced in phase2-plan.md §7.
 
 ---
 
@@ -189,7 +237,12 @@ its own commission — 60s there would reap legitimate saves.
 measurement gap, not inertia; enabling now risks server-side backend kills of legitimate
 transactions.
 
-**Status:** decided.
+**Status:** **ENDORSED @ 9657be93a (exclusion)** — 4.35 vs 3.00; "the disable rationale is a
+measurement argument, not inertia"; adapter agets 73-99s EXCEED the 60s constant (enabling would
+reap legitimate checkpoint saves mid-flight); v0.27.15's live pool knobs already address the
+class at pool level. Registration judged ADEQUATE with ONE addition per architect §9: carry the
+**"template-alone edit is NOT enablement" both-or-neither warning** (`constants.py:337-341`)
+explicitly in the follow-up ticket — folded into phase6-plan.md T6.4.
 
 ---
 
@@ -243,4 +296,12 @@ net-new=EMPTY via full FAILED-list diff vs true pre-fix base, same commands both
 (worked example: `.agents/tester/RESULTS/2026-10-29-dbpool-functional-gate.md`). PACKS.md entry
 per convention.
 
-**Status:** decided.
+**Fold addition (A1/A3/A5/A6, per architect §10):** the pack gains **Pack J — architect-amendment
+pins** (phase3-plan.md T3.12): A1 counter-block-logged-when-examined>0 + escalating WARN ≥K
+consecutive skips; A3 `notify=<outcome>` on every close + surviving-watcher follow-up ticket
+token; A5 attribution IN-list (never prefix-LIKE); A6 two defensive E1 pins — (i) the
+member-alive candidate builder never re-arms fail-MISS on the discounted instance
+(`mission_live_guard.py:605-612` invariant), (ii) the childless-root `member_count==0` fallback
+(`:925-930`) is never on the (h) close path (anti-"unify the anchor" regression pin).
+
+**Status:** decided (pack contents extended by the architect fold).
