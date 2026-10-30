@@ -233,6 +233,7 @@ _LOOP: asyncio.AbstractEventLoop | None = None
 _CLOSED = False
 _DRAIN_BOUND: float = _DEFAULT_DRAIN_BOUND
 _CONFIGURED = False
+_WARN_SUM: int | None = None
 
 
 def configure(
@@ -284,17 +285,33 @@ def configure(
     _EXECUTOR = ThreadPoolExecutor(
         max_workers=max_workers, thread_name_prefix=_OFFLOAD_THREAD_PREFIX
     )
-    _GATE = _Gate(workers=max_workers, loop=loop, warn_sum=wait_warn_sum)
+    if loop is not None:
+        _GATE = _Gate(workers=max_workers, loop=loop, warn_sum=wait_warn_sum)
+    else:
+        _GATE = None
     _DRAIN_BOUND = drain_bound_s
     _CLOSED = False
     _CONFIGURED = True
 
 
 def _ensure_configured() -> None:
-    global _CONFIGURED
-    if not _CONFIGURED or _EXECUTOR is None or _GATE is None:
-        # lazy init with defaults
+    global _CONFIGURED, _LOOP, _GATE
+    if not _CONFIGURED:
         configure()
+    if _EXECUTOR is None:
+        configure()
+    if _GATE is None:
+        try:
+            _LOOP = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        if _LOOP is not None and _GATE is None:
+            _GATE = _Gate(
+                workers=_EXECUTOR._max_workers,
+                loop=_LOOP,
+                warn_sum=(_WARN_SUM if _WARN_SUM is not None else _EXECUTOR._max_workers + 2),
+            )
+
 
 
 def _reentrancy_check() -> None:
@@ -307,10 +324,21 @@ def _reentrancy_check() -> None:
 
 async def offload(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     """Run ``fn(*args, **kwargs)`` on the dedicated offload executor."""
+    global _GATE, _LOOP
     _reentrancy_check()
     _ensure_configured()
 
     assert _EXECUTOR is not None
+    if _GATE is None or _LOOP is None:
+        try:
+            _LOOP = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        if _GATE is None and _LOOP is not None:
+            _GATE = _Gate(
+                workers=_EXECUTOR._max_workers, loop=_LOOP,
+                warn_sum=(_WARN_SUM if _WARN_SUM is not None else _EXECUTOR._max_workers + 2),
+            )
     assert _GATE is not None
     assert _LOOP is not None
 
