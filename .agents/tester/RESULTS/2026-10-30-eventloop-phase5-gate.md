@@ -226,3 +226,49 @@ and a plausible story.
 2. `psql -c` multi-statement wrapping made `DROP DATABASE` fail inside a transaction — fixed
    by single-statement calls; scratch PG provisioning now uses the harness's own
    `common.create_scratch_pg` (proven env contract) instead of a hand-rolled one.
+
+---
+
+# Amendment 2 — SEEDED 5.11 boot smoke + SEEDED P4 4.7 saturation (2026-10-30)
+
+Runner: `/tmp/gate_seeded.py` — boots the real daemon (`python -m daemon`) on a scratch PG,
+seeds **330 `instances` rows** (30 roots × 10 children, direct insert, FIXTURE_EPOCH
+timestamps) so BFS reads carry real dwell, then drives a **16-thread saturation burst**.
+Port asserted ∉ {9797, 8088, 8079, 7979}; `HOST=127.0.0.1`; FAKE home + temp data dir;
+no `.env` edit; no live contact; scratch DB dropped.
+
+Measured at the **payload `f636756aa`** (HEAD worktree) and **BASE `b1183a637`**:
+
+| quantity | BASE | HEAD (payload) |
+|---|---|---|
+| boot → `/livez` | 17.1 s | 17.1 s |
+| single BFS(100) read | **1.119 s** | **0.106 s** (10.5× faster) |
+| concurrent reads started-not-finished at probe | 16 | 16 |
+| `/readyz` **idle** — leak_signal | `{detected:false, checkedout_rising:false, streak:0}` | identical |
+| `/readyz` **saturated** | **no response within the 10 s probe budget** (`status=None`, 16 reads in flight) | **200 in 0.245 s**, `leak_signal {detected:false, checkedout_rising:false, streak:0}` |
+| pool_state saturated | n/a (probe unanswered) | sqlalchemy `{checkedout:1,size:15,overflow:-6}` · psycopg `{available:2,waiting:0}` |
+| SIGTERM **with 16 bridged reads in flight** | n/a (no bridge at BASE) | **exit −15 in 1.16 s**, `bounded_90s=true` |
+| `Engine is disposed` | 0 | **0** |
+| tracebacks on shutdown | 0 | **0** |
+| seam load lines | — | `db_offload: backpressure alarm — waiters=1 inflight=6 sum=7 threshold=8` ×3 |
+
+## Verdicts
+
+- **5.11 boot smoke — PASS (seeded).** The precondition is now real: **16 bridged reads were
+  started-not-finished at the moment of SIGTERM** (`marker_asserted=true`), the seam was
+  under load (backpressure alarms), exit was **1.16 s** — bounded far inside
+  `TimeoutStopSec=90` — with **zero** `Engine is disposed` and **zero** tracebacks. This is
+  the evidence the empty-fixture run could not give; `db_offload.shutdown()` was exercised
+  with live in-flight work.
+- **P4 4.7 saturation — PASS at HEAD, with a notable BASE-side observation.** Under identical
+  saturation the leak oracle stays silent at HEAD (`detected=false`, no rising checkout, no
+  waiting requests) ⇒ **no leak signal is attributable to this lane**. The BASE comparison
+  could not be completed *at the same load* because **BASE's `/readyz` did not answer at all
+  within 10 s while 16 BFS reads were in flight** — the loop is starved by the very defect
+  this lane removes. Reported as measured; the exact probe exception text was not captured
+  (the runner recorded `status=None`), which I am disclosing rather than filling in.
+- **Drain logging gap (instrument-side, not a defect):** a *clean* drain logs nothing —
+  `db_offload.shutdown()` only warns on bound-exceeded/fallback. So "the drain ran" is
+  inferable from the timing (1.16 s ≈ in-flight completion) but not directly printed.
+  **Recommendation for the lane:** one INFO line `db_offload: drained inflight=N elapsed=…s`
+  would make the drain observable instead of inferred.
