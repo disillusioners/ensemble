@@ -401,7 +401,7 @@ under a saturated 16-read burst**, where BASE's readiness probe could not answer
 | item | value |
 |---|---|
 | **Code payload** | `c9eac9747388852a47d3a3ac11487bb3d8c44d3f` |
-| **Branch tip at measurement** | `7ac2e9e4f`-independent: docs-only amendments on top of the payload (`9e26242aa`, `142998ad1`, this commit) |
+| **Branch tip at measurement** | `142998ad1` (docs-only amendment 3; the three HEAD runs and both seeded runs were executed with the tip at this sha and the payload `c9eac9747` unchanged) |
 | **BASE tree** | `b1183a637649f94c23b94dfc745df44381dc54ab` |
 | **BASE reference** | `raw/BASELINE.full.base.json` sha256 `2440959ba240249369ccd233c0d053a5ad812db26bf45cf2b17933c0d4c80d31` |
 | **Harness** | `main.py` sha256 `11057a76ad1b0af5dfb689bc249e23cd06ec0cc0d4a35dd3b10282d6a02d6a8f` — identical in both trees; repaired `gate_g5`; `selftest 62/62` |
