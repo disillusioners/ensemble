@@ -266,3 +266,36 @@ def test_xiii_drain_waiter_failure():
         await holder
 
     asyncio.run(run())
+
+
+def test_barging_repro_fifo():
+    """Barging repro (C2): parked waiter admitted, never rejected, FIFO holds."""
+    async def run():
+        db_offload.configure(max_workers=1, drain_bound_s=5)
+        gate = db_offload.get_gate()
+        # occupy the single worker
+        await gate.acquire()
+        # park two waiters (FIFO order)
+        w1 = asyncio.create_task(gate.acquire())
+        w2 = asyncio.create_task(gate.acquire())
+        await asyncio.sleep(0.1)
+        assert gate.waiters == 2
+        # release one permit (transfer) — should wake w1, NOT admit a fresh acquirer
+        gate.do_release()
+        # in the SAME tick, submit a fresh acquirer
+        fresh = asyncio.create_task(gate.acquire())
+        await asyncio.sleep(0)
+        # w1 must be admitted (never rejected)
+        await w1
+        # fresh + w2 must be parked (FIFO: w2 before fresh)
+        assert gate.waiters == 2, gate.waiters
+        # admit w2 then fresh in order
+        gate.do_release()
+        await w2
+        gate.do_release()
+        await fresh
+        gate.do_release()
+        assert gate.permits == 1 and gate.inflight == 0 and gate.waiters == 0
+        await db_offload.shutdown()
+
+    asyncio.run(run())
