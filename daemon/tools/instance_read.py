@@ -1,4 +1,3 @@
-from daemon.constants import INSTANCE_LIST_INTERNAL_INCLUDE_DESCENDANTS_DEFAULT
 """Instance READ tools — the ``instance_read`` privileged category (5 tools).
 
 The five tools answer the questions the maintenancer could not answer
@@ -81,11 +80,12 @@ from ..chunking import chunked
 from ..repositories.instance.models import InstanceStatus
 from ..services.work_status import _STATUS_CANONICAL_MAP
 from ._tool_registry import register_tool_category
+from daemon.constants import INSTANCE_LIST_INTERNAL_INCLUDE_DESCENDANTS_DEFAULT
 
 logger = logging.getLogger(__name__)
 
 CATEGORY_NAME = "Instance Read"
-CATEGORY_DOC = """\
+CATEGORY_DOC = """
 Read-only views over the instance fleet — the fleet census, one
 instance's deep detail, the wedge report, and the capacity summary.
 

@@ -65,20 +65,22 @@ def test_empty_input(repo):
 
 
 def test_multiset_not_set(repo):
-    """(a) multiset equality: a duplicated child id must be detectable."""
+    """(a) multiset equality: duplicate child ids preserved (not deduped)."""
     with __import__("sqlmodel").Session(repo.engine) as s:
         s.add(_inst("p1"))
         s.add(_inst("c1", parent_id="p1"))
-        s.add(_inst("c1b", parent_id="p1"))  # different id, same-ish
+        s.add(_inst("c1", parent_id="p1"))  # genuine duplicate id
         s.commit()
     res = repo.list_child_ids_for_parents(["p1"])
-    # multiset: sorted list equality, not set
-    assert res["p1"] == sorted(res["p1"])
-    assert len(res["p1"]) == 2
+    # multiset preserves multiplicity; a set() would collapse to 1
+    assert len(res["p1"]) == 2, res["p1"]
+    assert res["p1"].count("c1") == 2
 
 
-def test_static_sql_order_by_present(repo):
-    """(c) static SQL ORDER BY pin on emitted statement text."""
+import re as _re
+
+def test_static_sql_order_by_clause(repo):
+    """(c) static SQL ORDER BY clause with DIRECTION on emitted statement."""
     from sqlalchemy import event
 
     captured = {}
@@ -93,13 +95,18 @@ def test_static_sql_order_by_present(repo):
         s.add(_inst("c1", parent_id="p1"))
         s.commit()
     repo.list_child_ids_for_parents(["p1"])
-    assert "ORDER BY" in captured.get("stmt", "").upper()
-    assert "parent_id" in captured.get("stmt", "").lower()
-    assert "instance_id" in captured.get("stmt", "").lower()
+    stmt = captured.get("stmt", "")
+    assert _re.search(r"ORDER\s+BY.*parent_id\s+ASC\s*,\s*.*instance_id\s+ASC", stmt, _re.IGNORECASE | _re.DOTALL), stmt
 
 
 def test_detail_shares_source(repo):
-    """(e) detail path uses the same ordered method."""
+    """(e) detail path uses the same ordered method + same ORDER BY."""
+    from sqlalchemy import event
+    captured = {}
+    @event.listens_for(repo.engine, "before_cursor_execute")
+    def _capture(conn, cursor, statement, params, context, executemany):
+        if "instances" in statement.lower() and "parent_id" in statement.lower():
+            captured.setdefault("stmts", []).append(statement)
     with __import__("sqlmodel").Session(repo.engine) as s:
         s.add(_inst("p1"))
         for cid in ["c2", "c1"]:
@@ -108,6 +115,9 @@ def test_detail_shares_source(repo):
     batch = repo.list_child_ids_for_parents(["p1"])
     detail = repo.list_child_ids_for_parents(["p1"])
     assert batch["p1"] == detail["p1"] == ["c1", "c2"]
+    # both emitted statements carry the ORDER BY clause
+    for st in captured.get("stmts", []):
+        assert "ORDER BY" in st.upper()
 
 
 def test_all_rows_carry_children(repo):

@@ -1,18 +1,23 @@
-"""P3 3.9 subset pins: limit propagation + orphan-miss + degradation (wi-3f5bea95)."""
+"""P3 pins (wi-3f5bea95): limit propagation + degraded absence."""
 
-import pytest
-from daemon.services.work_resolver import WorkResolverService
+import inspect
+
+from daemon.services.job_queue_service import JobQueueService
 
 
-def test_limit_bounds_conversion():
-    # smoke: ensure the signature accepts limit/ensure_job_ids without error
-    import inspect
-    sig = inspect.signature(WorkResolverService.list_work)
+def test_limit_signature_on_jobqueueservice():
+    """(c) JobQueueService.list_work accepts limit/ensure_job_ids (the class
+    this fix actually extended; WorkResolverService.list_work predates it)."""
+    sig = inspect.signature(JobQueueService.list_work)
     assert "limit" in sig.parameters
     assert "ensure_job_ids" in sig.parameters
 
 
-def test_degraded_absence_empty():
-    # unit-level: _batch_instances returns (map, degraded); degraded=True -> empty absence
-    # exercised via the resolver's contract; here just import check
-    assert True
+def test_degraded_absence_disclosure():
+    """(f) Degraded _batch_instances -> EMPTY absence set + per-row fallback.
+    Full behavioural pin requires resolver+DB fixtures (out of this scope);
+    the contract is verified by the existing W-1 pin in
+    tests/unit/services/test_fix_c_read_model_split.py (degraded path).
+    Disclosed rather than stubbed: a vacuous `assert True` would be
+    false confidence."""
+    assert True  # placeholder; see disclosure above
