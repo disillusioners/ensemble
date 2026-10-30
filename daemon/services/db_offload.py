@@ -85,9 +85,6 @@ class DbOffloadReentrancyError(DbOffloadError):
     """Raised when a bridged callee re-enters the seam (B1)."""
 
 
-class DbOffloadUnconfiguredError(DbOffloadError):
-    """Raised when offload() is called before configure() and lazy init is off."""
-
 
 _OFFLOAD_THREAD_PREFIX = "db-offload"
 
@@ -185,11 +182,7 @@ class _Gate:
             raise
         if self._closed:
             raise DbOffloadClosedError("db_offload seam is closed")
-        # woken by release: claim the slot
-        if self._permits <= 0:
-            # shouldn't happen; guard
-            raise DbOffloadClosedError("db_offload seam is closed")
-        self._permits -= 1
+        # woken by release: claim the transferred slot (no permit change)
         self._inflight += 1
         self._check_alarm()
 
@@ -197,8 +190,9 @@ class _Gate:
         # runs on loop thread
         if self._inflight > 0:
             self._inflight -= 1
-        self._permits = min(self._permits + 1, self._workers)
-        # wake a waiter
+        # transfer-style: wake one waiter WITHOUT incrementing permits;
+        # the woken waiter claims the transferred slot on wake. If no
+        # waiter, free the permit.
         while self._waiters:
             waiter = self._waiters[0]
             if waiter.cancelled() or waiter.done():
@@ -209,7 +203,8 @@ class _Gate:
                 waiter.set_result(None)
             except (asyncio.InvalidStateError, RuntimeError):
                 pass
-            break
+            return
+        self._permits = min(self._permits + 1, self._workers)
 
     def close(self) -> None:
         self._closed = True
@@ -234,6 +229,7 @@ _CLOSED = False
 _DRAIN_BOUND: float = _DEFAULT_DRAIN_BOUND
 _CONFIGURED = False
 _WARN_SUM: int | None = None
+_MAX_WORKERS: int = DB_OFFLOAD_MAX_WORKERS_DEFAULT
 
 
 def configure(
@@ -254,32 +250,33 @@ def configure(
         max_workers = DB_OFFLOAD_MAX_WORKERS_DEFAULT
     if drain_bound_s is None:
         drain_bound_s = _DEFAULT_DRAIN_BOUND
-    if wait_warn_sum is None:
-        # resolve from config if available? default workers+2
-        pass
     if loop is None:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
-    if loop is None:
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = None
 
     # re-configure: shut down prior
     if _CONFIGURED and _EXECUTOR is not None:
-        # bounded drain of prior
+        # bounded drain of prior (D-78): shut down the old executor
+        # without cancel_futures so in-flight work completes within
+        # the drain bound; then drop references.
         try:
-            _EXECUTOR.shutdown(wait=False, cancel_futures=True)
+            _EXECUTOR.shutdown(wait=True)
         except Exception:
-            pass
+            try:
+                _EXECUTOR.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
         _EXECUTOR = None
         _GATE = None
 
     if wait_warn_sum is None:
         wait_warn_sum = max_workers + 2
+
+    global _WARN_SUM, _MAX_WORKERS
+    _WARN_SUM = wait_warn_sum
+    _MAX_WORKERS = max_workers
 
     _LOOP = loop
     _EXECUTOR = ThreadPoolExecutor(
@@ -295,6 +292,10 @@ def configure(
 
 
 def _ensure_configured() -> None:
+    # D-78 lazy-init form (stated): if unconfigured when offload() is
+    # first called, configure() runs with defaults and the loop is
+    # captured from the running loop; a second configure() performs a
+    # bounded drain of the prior executor before replacing it.
     global _CONFIGURED, _LOOP, _GATE
     if not _CONFIGURED:
         configure()
@@ -307,9 +308,9 @@ def _ensure_configured() -> None:
             pass
         if _LOOP is not None and _GATE is None:
             _GATE = _Gate(
-                workers=_EXECUTOR._max_workers,
+                workers=_MAX_WORKERS,
                 loop=_LOOP,
-                warn_sum=(_WARN_SUM if _WARN_SUM is not None else _EXECUTOR._max_workers + 2),
+                warn_sum=(_WARN_SUM if _WARN_SUM is not None else _MAX_WORKERS + 2),
             )
 
 
@@ -336,8 +337,8 @@ async def offload(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
             pass
         if _GATE is None and _LOOP is not None:
             _GATE = _Gate(
-                workers=_EXECUTOR._max_workers, loop=_LOOP,
-                warn_sum=(_WARN_SUM if _WARN_SUM is not None else _EXECUTOR._max_workers + 2),
+                workers=_MAX_WORKERS, loop=_LOOP,
+                warn_sum=(_WARN_SUM if _WARN_SUM is not None else _MAX_WORKERS + 2),
             )
     assert _GATE is not None
     assert _LOOP is not None

@@ -1762,3 +1762,7 @@ AUTH_KNOWN_SCOPES: tuple[str, ...] = (
 DB_OFFLOAD_MAX_WORKERS_DEFAULT: int = 6  # Binding sizing (D-21)
 DB_OFFLOAD_DRAIN_BOUND_S: int = 10  # Bounded drain (D-53/D-74); <= 2s observed, >=80s margin vs TimeoutStopSec=90
 DB_OFFLOAD_QUEUE_WARN_DEPTH: int = 4  # Secondary queue-depth diagnostic (structurally blind behind the gate)
+
+# ── Instance list include_descendants defaults (wi-3f5bea95 Phase 2) ──────────
+INSTANCE_LIST_HTTP_INCLUDE_DESCENDANTS_DEFAULT: bool = True
+INSTANCE_LIST_INTERNAL_INCLUDE_DESCENDANTS_DEFAULT: bool = False

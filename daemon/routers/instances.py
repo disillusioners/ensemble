@@ -385,6 +385,14 @@ async def list_instances(
         ),
     ),
     exclude_kb: bool = Query(True, description="Exclude KB-related instances (experiencer, kb-importer)"),
+    # D-A (wi-3f5bea95 Phase 2, (c)+ ruling): two defaults coexist —
+    # INSTANCE_LIST_HTTP_INCLUDE_DESCENDANTS_DEFAULT (True, this Query) and
+    # INSTANCE_LIST_INTERNAL_INCLUDE_DESCENDANTS_DEFAULT (False, manager/
+    # lifecycle). They are kept as a named pair (no default flipped):
+    # (a) router->False is ROUTED to the Q2 FE-shapes follow-up (response
+    # semantics change for consumers omitting the param); (b) manager->True
+    # is REJECTED (widens the expensive path for every internal caller).
+    # Both internal call sites pass include_descendants explicitly (False).
     include_descendants: bool = Query(
         True,
         description=(

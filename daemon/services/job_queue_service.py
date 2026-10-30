@@ -1778,6 +1778,8 @@ class JobQueueService:
         status: str | None = None,
         kind: str = "job",
         root_only: bool = True,
+        limit: int | None = None,
+        ensure_job_ids: set | None = None,
     ) -> list[WorkRecord]:
         """Batched equivalent of :meth:`get_work` for the ``list_jobs`` path.
 
@@ -1834,6 +1836,8 @@ class JobQueueService:
             status=status,
             kind=kind,
             root_only=root_only,
+            limit=limit,
+            ensure_job_ids=ensure_job_ids,
         )
 
     async def get_job_by_instance(self, instance_id: str) -> JobItem | None:
