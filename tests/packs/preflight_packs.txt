@@ -1,0 +1,32 @@
+# tests/packs/preflight_packs.txt — the PACK LIST (phase5 §1: machine-readable,
+# one repo-relative path per line so the enumeration cannot drift from the
+# invocation). The canonical pack set is A–J (phase5 §2); the support rows are
+# measurement/negative-control companions, not letters.
+#
+# A–J mapping (the letters are phase5-plan §2):
+#   A  preflight_journal_parity_test.sh       (60 assertions)
+#   B  preflight_journal_scale_test.sh        (12)
+#   C  preflight_repro_test.sh                (7)
+#   D  preflight_watchdog_test.sh             (38)  + support: preflight_real_soak_test.sh (5)
+#   E  preflight_logging_test.sh              (30)
+#   F  preflight_stage_lock_test.sh           (13)
+#   G  preflight_census_test.sh (10) + preflight_anchor_index_test.sh (42)
+#   H  ../unit/tools/test_upgrade_preflight_daemon_side.py (31, pytest)
+#   I  preflight_ceremony_readiness_test.sh   (expected RED until phase 6;
+#      run with --expect-implemented at the final gate)
+#   J  preflight_size_guard_test.sh           (24)
+#   (matrix) preflight_mutation_matrix_test.sh — M1–M32
+tests/packs/preflight_journal_parity_test.sh
+tests/packs/preflight_journal_scale_test.sh
+tests/packs/preflight_repro_test.sh
+tests/packs/preflight_watchdog_test.sh
+tests/packs/preflight_real_soak_test.sh
+tests/packs/preflight_logging_test.sh
+tests/packs/preflight_stage_lock_test.sh
+tests/packs/preflight_census_test.sh
+tests/packs/preflight_anchor_index_test.sh
+tests/packs/preflight_size_guard_test.sh
+tests/packs/preflight_shasum_batch_parity_test.sh
+tests/packs/preflight_ceremony_readiness_test.sh
+tests/unit/tools/test_upgrade_preflight_daemon_side.py
+tests/packs/preflight_mutation_matrix_test.sh

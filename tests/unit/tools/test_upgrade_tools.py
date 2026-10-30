@@ -3621,6 +3621,7 @@ class TestManagerDrainPendingExecution:
         def _rec(
             argv, install_dir, extra_env=None, *, run_id=None,
             unit_prefix: str = "ensemble-upgrade-",
+            unit_properties=None,
         ) -> tuple:
             inst = Path(str(install_dir))
             calls.append(
@@ -3629,6 +3630,14 @@ class TestManagerDrainPendingExecution:
                     "install": inst,
                     "extra_env": dict(extra_env or {}),
                     "unit_prefix": unit_prefix,
+                    # D2-8 (promote-preflight-hang phase 2): the seam gained a
+                    # kw-only ``unit_properties``; captured so the kind-scoping
+                    # (promote ⇒ RuntimeMaxSec, restart ⇒ None) is assertable.
+                    "unit_properties": (
+                        list(unit_properties)
+                        if unit_properties is not None
+                        else None
+                    ),
                     "lock_held_at_spawn": uj.lock_dir(inst).exists(),
                 }
             )
@@ -4102,6 +4111,7 @@ class TestManagerDrainPendingExecution:
         def _loud_refusal_spawn(
             argv, install_dir, extra_env=None, *, run_id=None,
             unit_prefix: str = "ensemble-upgrade-",
+            unit_properties=None,
         ):
             from daemon.tools.upgrade_journal import ExecutorSystemdUnavailable
             detail = (
