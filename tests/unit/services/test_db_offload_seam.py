@@ -218,21 +218,33 @@ def test_x_during_flight_not_released():
 
 
 def test_xii_subprocess_knob():
+    """W-2: drive the real LIMITS_ -> LimitsConfig -> configure chain."""
     import os, subprocess, sys
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    assert (repo_root / "daemon" / "config.py").is_file(), repo_root
 
     code = (
-        "import asyncio\n"
+        "import os, sys, asyncio\n"
+        "sys.path.insert(0, os.environ['REPO_ROOT'])\n"
+        "os.environ.setdefault('ENSEMBLE_SELF_ENV', 'dev')\n"
+        "from daemon.config import LimitsConfig\n"
+        "cfg = LimitsConfig()  # reads LIMITS_DB_OFFLOAD_MAX_WORKERS from env\n"
         "from daemon.services import db_offload\n"
         "async def main():\n"
-        "    db_offload.configure(max_workers=3, drain_bound_s=5)\n"
+        "    db_offload.configure(max_workers=cfg.db_offload_max_workers, drain_bound_s=cfg.db_offload_drain_bound_s)\n"
         "    print('WORKERS', db_offload.get_gate().workers)\n"
         "    await db_offload.shutdown()\n"
         "asyncio.run(main())\n"
     )
+    env = dict(os.environ)
+    env["LIMITS_DB_OFFLOAD_MAX_WORKERS"] = "3"
+    env["REPO_ROOT"] = str(repo_root)
     proc = subprocess.run(
         [sys.executable, "-c", code],
-        capture_output=True, text=True,
-        cwd="/home/nea/ensemble-src-wt-eventloop-sync-db-hotpaths",
+        capture_output=True, text=True, env=env,
+        cwd=str(repo_root),
     )
     assert "WORKERS 3" in proc.stdout, proc.stdout + proc.stderr
 
@@ -296,6 +308,81 @@ def test_barging_repro_fifo():
         await fresh
         gate.do_release()
         assert gate.permits == 1 and gate.inflight == 0 and gate.waiters == 0
+        await db_offload.shutdown()
+
+    asyncio.run(run())
+
+
+def test_cancel_after_wake_returns_token():
+    """CRITICAL-1: cancel-after-wake must return the token, not drop it."""
+    async def run():
+        db_offload.configure(max_workers=1, drain_bound_s=5)
+        gate = db_offload.get_gate()
+        # occupy the single worker
+        await gate.acquire()
+        # park a waiter
+        waiter_task = asyncio.create_task(gate.acquire())
+        await asyncio.sleep(0.05)
+        assert gate.waiters == 1
+        # release (transfer) — wakes waiter_task's future
+        gate.do_release()
+        # cancel in the micro-gap before resumption
+        waiter_task.cancel()
+        try:
+            await waiter_task
+        except asyncio.CancelledError:
+            pass
+        # token must be returned: either transferred or freed
+        # a subsequent acquire must complete (no hang, no wedged state)
+        async def probe():
+            await gate.acquire()
+            gate.do_release()
+            return "ok"
+        res = await asyncio.wait_for(probe(), timeout=2.0)
+        assert res == "ok"
+        assert gate.permits + gate.inflight + gate.in_transit == gate.workers
+        await db_offload.shutdown()
+
+    asyncio.run(run())
+
+
+def test_bounded_capacity_sweep():
+    """CRITICAL-1: ~260 trials, zero permanent capacity loss."""
+    async def run():
+        W = 2
+        db_offload.configure(max_workers=W, drain_bound_s=5)
+        gate = db_offload.get_gate()
+        losses = 0
+        for _ in range(260):
+            # occupy all workers
+            holders = []
+            for _ in range(W):
+                await gate.acquire()
+                holders.append(True)
+            # park a waiter
+            async def waiter_coro():
+                await gate.acquire()
+                gate.do_release()
+                return "done"
+            wt = asyncio.create_task(waiter_coro())
+            await asyncio.sleep(0)
+            # release one (transfer) then cancel the woken waiter
+            gate.do_release()
+            wt.cancel()
+            try:
+                await wt
+            except (asyncio.CancelledError, Exception):
+                pass
+            # release remaining holders
+            for _ in range(W):
+                gate.do_release()
+            # invariant check
+            if gate.permits + gate.inflight + gate.in_transit != W:
+                losses += 1
+            # probe: a fresh acquire must complete
+            await asyncio.wait_for(gate.acquire(), timeout=1.0)
+            gate.do_release()
+        assert losses == 0, f"permanent losses: {losses}"
         await db_offload.shutdown()
 
     asyncio.run(run())

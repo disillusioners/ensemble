@@ -27,11 +27,21 @@ the authoritative plan; D-ids cited inline):
   error (otherwise they escape the loop and crash-loop the daemon). ``CancelledError``
   is re-raised **first**, so cancellation is never swallowed.
 * **Admission gate (B4, D-43/D-67/D-79):** a custom permit counter + waiter
-  deque. Permits == workers == in-flight at all times (NO-RESERVE model:
-  waiters hold NO permits). A cancelled parked waiter removes itself from the
-  deque and returns nothing. The gate **defers, never rejects, never times out**.
-  The permit is released in the **executor future's done-callback** (thread-side
-  truth), never the caller's ``finally``.
+  deque. Invariant: `permits + inflight + in_transit == W` (waiters hold NO
+  permits; `in_transit` is TRACKED, not implicit — it counts tokens delivered
+  by `do_release` via set_result but not yet claimed by the woken waiter).
+  Transfer semantics: `do_release` decrements `_inflight` and, if a waiter
+  exists, pops it, increments `_in_transit`, and set_results its future WITHOUT
+  incrementing `_permits`; the woken waiter's normal resume decrements
+  `_in_transit` and increments `_inflight`; post-wake cancellation (the window
+  between set_result and resumption) returns the token — re-transferring to the
+  next live waiter if the deque is non-empty, else restoring `_permits`. A
+  cancelled parked waiter that was never woken removes itself from the deque and
+  returns nothing. No-barging rule: `acquire()` parks (`if self._waiters or
+  self._permits <= 0`) BEFORE the permits fast path, so a fresh acquirer can
+  never steal a permit ahead of parked waiters. The gate **defers, never
+  rejects, never times out**.
+  The permit is released in the **executor future's done-callback** (thread-side truth), never the caller's `finally`.
 * **Drain (B3, D-24/D-53):** four-step shutdown (closed flag -> fail all
   waiters -> wait for in-flight up to ``DB_OFFLOAD_DRAIN_BOUND_S`` -> executor
   shutdown). Called from the lifespan **before** ``manager.shutdown()``.
@@ -222,23 +232,21 @@ class _Gate:
         if self._inflight > 0:
             self._inflight -= 1
         # transfer-style: wake one waiter WITHOUT incrementing permits;
-        # the woken waiter claims the transferred slot on wake. If no
-        # waiter, free the permit.
-        # MUTANT old increment-then-wake
-        if self._inflight > 0:
-            self._inflight -= 1
-        self._permits = min(self._permits + 1, self._workers)
+        # increment in_transit (token in flight).
         while self._waiters:
             waiter = self._waiters[0]
             if waiter.cancelled() or waiter.done():
                 self._waiters.popleft()
                 continue
             self._waiters.popleft()
+            self._in_transit += 1
             try:
                 waiter.set_result(None)
             except (asyncio.InvalidStateError, RuntimeError):
-                pass
-            break
+                self._in_transit = max(0, self._in_transit - 1)
+                self._permits = min(self._permits + 1, self._workers)
+            return
+        self._permits = min(self._permits + 1, self._workers)
 
     def close(self) -> None:
         self._closed = True
@@ -297,8 +305,9 @@ def configure(
                 _GATE.close()
             except Exception:
                 pass
+        # sync path: non-blocking, never join on the loop thread
         try:
-            _EXECUTOR.shutdown(wait=True, timeout=_DRAIN_BOUND)
+            _EXECUTOR.shutdown(wait=False)
         except Exception:
             pass
         _EXECUTOR = None
@@ -421,7 +430,7 @@ async def offload(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
 
 async def shutdown() -> None:
     """Four-step drain (D-53)."""
-    global _CLOSED
+    global _CLOSED, _EXECUTOR, _GATE
     _CLOSED = True
     if _GATE is not None:
         _GATE.close()  # fail all waiters
@@ -437,10 +446,18 @@ async def shutdown() -> None:
         await asyncio.sleep(0.05)
     # executor shutdown
     if _EXECUTOR is not None:
+        exec_ref = _EXECUTOR
+        _EXECUTOR = None
         try:
-            _EXECUTOR.shutdown(wait=True, timeout=_DRAIN_BOUND)
-        except Exception:
-            pass
+            await asyncio.wait_for(
+                asyncio.to_thread(exec_ref.shutdown, True),
+                timeout=_DRAIN_BOUND,
+            )
+        except (asyncio.TimeoutError, Exception):
+            try:
+                exec_ref.shutdown(wait=False)
+            except Exception:
+                pass
 
 
 def get_executor() -> ThreadPoolExecutor | None:
