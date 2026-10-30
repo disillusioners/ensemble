@@ -1753,3 +1753,12 @@ AUTH_KNOWN_SCOPES: tuple[str, ...] = (
     AUTH_SCOPE_SOURCES_WRITE,
     AUTH_SCOPE_AUTH_ADMIN,
 )
+
+
+# ── DB offload seam (wi-3f5bea95 / Phase 1) ───────────────────────────────────
+# Dedicated executor that moves synchronous DB read paths off the event loop.
+# Default tier only — the env-overridable knobs live in LimitsConfig
+# (daemon/config.py) and are resolved at lifespan configure() time.
+DB_OFFLOAD_MAX_WORKERS_DEFAULT: int = 6  # Binding sizing (D-21)
+DB_OFFLOAD_DRAIN_BOUND_S: int = 10  # Bounded drain (D-53/D-74); <= 2s observed, >=80s margin vs TimeoutStopSec=90
+DB_OFFLOAD_QUEUE_WARN_DEPTH: int = 4  # Secondary queue-depth diagnostic (structurally blind behind the gate)
