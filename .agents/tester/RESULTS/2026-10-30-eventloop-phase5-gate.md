@@ -123,3 +123,106 @@ needs either a re-run to see if it reproduces or an explicit leader waiver.
 **Nothing in this report was executed against the live daemon, the live `.env`, or port 9797.**
 Scratch PG databases were created and dropped by the harness (`evloop_scratch_test_*`,
 `dropped=True`, 0 rows) and by the packs (P2.8 self-provisioning). No stage, no promote.
+
+---
+
+# Amendment 1 — the four "not run" legs, executed (2026-10-30, post-gate)
+
+Same pins, in-process, no children. **The verdict does not change: GATE FAIL** (FAIL-1 G5
+bytes, FAIL-2 G4 badge max). These legs were run because they are independent of the jobs
+bytes and are required for a clean pass later.
+
+## G11 — live-version truth (read from the install dir; no daemon contact)
+
+| item | value |
+|---|---|
+| `releases/current` → | `/home/nea/agents-ensemble/releases/current` (symlink) |
+| `state.json` | `current=v0.27.12`, `previous=v0.27.11`, `in_flight=None`, `pending_op=None`, `quarantined=[]` |
+| release dirs on disk | `v0.27.4, v0.27.7, v0.27.8, v0.27.11, v0.27.12, v0.27.13` |
+| `v0.27.13` | **exists, manifest version `v0.27.13`, NOT promoted** (current is still 0.27.12) |
+
+⇒ **live = v0.27.12; v0.27.13 staged-unpromoted; this lane (superseding v0.27.13 at
+promote) is therefore unreleased.** G11 PASS.
+
+## G12 — attribution (path class → owning commits, BASE..payload = 36 commits)
+
+| path class | owning commits |
+|---|---|
+| production `daemon/**` | P1 `377f0b627` · P2 `fa42ba328` · P3 `a40321001` · P4 `85452628c` · council/seam fixes `4c4020a20`,`63bc43b41`,`250082d7b`,`4be3cade2`,`ef1404c54`,`09ce9d369`,`a677bdcaf` · tidier `054ba46b6` · final `f636756aa` |
+| tests (developer) | `acd035318` (P1 pins), `8e6df58e4`→`836334e87`, `4c4020a20`, `63bc43b41`, `250082d7b`, `ef1404c54`, `2fd676df6`, `5f83d5ddc`, `f4fa4cc8b`, `09ce9d369`, `054ba46b6`, `f636756aa` |
+| tests (tester) | `5f22bfb08` (fence add), `10b3c982d` (fence restore), `6efebfb6` (three packs) |
+| `.agents/tester/**` | harness `d42ba2976`,`42764588c`,`c3d87af26`,`3e976696b`,`dd6d1ed12`,`469ca7d68` · docs `7ac87d8a5`,`0d8693820`,`71eef27e1`,`46a385f8e`,`acfa5fa1b`,`ba8e276bf`,`40727f70c` |
+| `.agents/shared/**` | `69c69b3a9` (W1 planning set), `d42ba2976`, `42764588c` |
+| `frontend/**` · `plugins/**` · root files | **ZERO commits** (no frontend/plugin/root change in this lane) |
+
+## D-70 — additive-only, per-hunk region map (9 files / 176 deleted lines)
+
+| file | deleted | hunks (old-range) | region verdict |
+|---|---|---|---|
+| `daemon/services/work_resolver.py` | **143** | `1233,1277,1303,1356,1367,1376,1397,1414,1424,1436,1450,1461,1468,1472,1479,1482` (P3 restructure) · `1778`,`1846`,`1869` (**D-B three sites**) · `2371,2404,2409,2415,2431` (`_batch_instances` degraded) | **INSIDE** P3 tasks 3.2–3.7 · the deletions are in-place replacements at the cited sites |
+| `daemon/routers/work.py` | 8 | `181` | INSIDE 3.6/3.7 |
+| `daemon/routers/instances.py` | 6 | `14` (import) `345,388,476,550` (offload/batch call sites) | INSIDE 2.1–2.6 |
+| `daemon/services/instance_lifecycle.py` | 6 | `5111,5115,5140` (children batch + detail-share) | INSIDE 2.2/2.4 |
+| `daemon/services/job_queue_service.py` | 4 | `1800` (pagination docstring) | INSIDE (named-pair/limit doc; **low risk**) |
+| `daemon/tools/instance.py` | 4 | `37` (constants import) `6168` (docstring caveat) | INSIDE (W-3 named pair) |
+| `daemon/tools/instance_read.py` | 2 | `1674` (`FLEET_SCAN_LIMIT` wiring) `87` (`CATEGORY_DOC`) | INSIDE (W-3) — `:87` is a **documentation string**, flagged low risk |
+| `daemon/routers/queues.py` | 2 | `651,663` (defer-blocked offload) | INSIDE 4.1 |
+| `daemon/routers/messages.py` | 1 | `204` (send path offload) | INSIDE P4 |
+
+**No file-wide deletion, no removed function body, no test file gutted.** Every deletion is
+an in-place replacement at a plan-cited edit region ⇒ **D-70 COMPLIANT** (two documentation-
+string deletions flagged low-risk, not blocking).
+
+## P4 4.7 — readiness behavioural leg (leak_signal / pool_state, BASE vs HEAD)
+
+Real daemon booted per tree (`python -m daemon`, scratch PG, `PORT` = free port asserted
+outside {9797,8088,8079,7979}, `HOST=127.0.0.1`, FAKE home + temp data dir, auth inert,
+MCP builtins off), `/readyz` sampled before and after a 20-request BFS/flat load burst.
+
+| tree | leak_signal (before → after) | pool_state (before → after) |
+|---|---|---|
+| **BASE** `b1183a637` | `{detected:false, checkedout_rising:false, streak:0}` → **identical** | sqlalchemy `{checkedout:1,size:15,overflow:-5}` · psycopg `{pool_size:2,pool_max:10,available:2,waiting:0}` → identical |
+| **HEAD** `f636756aa` | `{detected:false, checkedout_rising:false, streak:0}` → **identical** | sqlalchemy `{checkedout:1,size:15,overflow:-4}` · psycopg `{pool_size:2,pool_max:10,available:2,waiting:0}` → identical |
+
+**Read: the leak oracle's behaviour is unchanged — no leak signal is attributable to this
+lane** (no new `detected`, no rising checkout streak, no waiting requests, same pool shape
+at both trees; the `overflow -4/-5` difference is the pool's own accounting and appears in
+both). **Caveat stated plainly:** the load was light (empty fixture, p50 ≈ 0.09 s), so this
+proves *unchanged under light load*, not *no-leak under saturation*. A seeded-fixture
+saturation run remains owed if the leader wants the stronger claim.
+
+## 5.11 — boot smoke (bridged read in flight at SIGTERM)
+
+| assertion | measured |
+|---|---|
+| banner | `Starting Ensemble v0.27.13` (both trees) |
+| `/livez` | **200** after ~17 s boot |
+| `/readyz` | **200**, `components_False=[]`, `detail.leak_signal.detected=false` |
+| SIGTERM | exit **-15 in 0.27 s** (bounded, ≪ TimeoutStopSec 90) |
+| `"Engine is disposed"` | **0 occurrences** |
+| tracebacks in shutdown | **0** |
+| scratch PG / data dir | harness-provisioned scratch DB **dropped** (`dropped=true`); FAKE home + temp data dir; no `.env` edit; no :9797 contact |
+| **bridged read in flight** | **NOT ACHIEVED** — the fixture is empty, so the BFS read returned `200` in **0.01 s** and was already complete when the signal landed; `db_offload` drain logged nothing |
+
+**Honest verdict on 5.11: PARTIAL.** The boot/liveness/termination envelope is proven
+(banner, 200/200, no disposed-engine error, bounded exit, clean teardown), but the
+*in-flight* precondition — the whole point of the leg, since the lane's only lifespan edit is
+`await db_offload.shutdown()` before `manager.shutdown()` — **was not exercised**. A seeded
+run (a few hundred instances so the BFS read is genuinely in the bridge at signal time) is
+required to close it. Recording PARTIAL rather than PASS is the difference between evidence
+and a plausible story.
+
+## Incidents during Amendment 1 (disclosed)
+
+1. **A stray test daemon bound port 8088.** The first boot attempt ran `python -m daemon`
+   with `DAEMON_PORT` set but `PORT` unset; `config.yaml` defaults `daemon.port` to
+   `${PORT:-8088}`, so the child bound **:8088** (the ensemble self-system port) with a
+   scratch DB. Detected via `ss -ltnp`, identity confirmed from `/proc/<pid>/environ`
+   (`POSTGRES_DB=evloop_gate_*`, data dir under `/tmp/gate-p47-*`), **SIGTERM'd only that
+   pid**, :8088 freed, live `:9797` verified `200` before and after. Root cause is mine
+   (wrong env var name); the harness itself passes the port to uvicorn explicitly.
+   **Mitigation now in the script: `PORT` set explicitly and a hard assert that the chosen
+   port ∉ {9797, 8088, 8079, 7979}.**
+2. `psql -c` multi-statement wrapping made `DROP DATABASE` fail inside a transaction — fixed
+   by single-statement calls; scratch PG provisioning now uses the harness's own
+   `common.create_scratch_pg` (proven env contract) instead of a hand-rolled one.
