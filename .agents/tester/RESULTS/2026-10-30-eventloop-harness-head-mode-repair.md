@@ -35,7 +35,9 @@ both directions, through the REAL gate path, with the evidence committed
   anchor → `FIXTURE_EPOCH = 2026-10-29T00:00:00Z` (env-overridable for a
   deliberate re-baseline; a malformed override REFUSES rather than falling
   back to wall clock). Measured effect: **9/9 normalized body hashes
-  identical across two independent runs**.
+  identical across two independent runs** (that two-run comparison lived in
+  a gitignored run workspace and is **not committed**; the only committed
+  9/9 is the single-run G5 fence, §8).
 * **`gate_g5` implemented** (it did not exist): 9 requests = the **8** censused
   shapes **+ `/api/instances/{id}`** (the plan's §(e); the detail id is chosen
   deterministically — most children, tie-break by id); children-order
@@ -173,7 +175,7 @@ thread happens to be inside the sync-DB frames at that instant is luck:
 | run (same tree, same fixture `seed=20261029`, same knobs) | captures | family pin **on the loop thread** |
 |---|---|---|
 | the committed pre-repair full run (`raw/evidence/`) | 5 | **4/5** |
-| the repaired harness's first full run (2026-10-29T23:05Z) | 8 | **0/8** |
+| the repaired harness's first full run (2026-10-29T23:05Z) — gitignored run workspace, **not committed** | 8 | **0/8** |
 
 In the 0/8 run every capture found the loop thread idle in
 `selectors.select` while 4/8 captures carried the family frames on *other*
@@ -187,7 +189,10 @@ frames instead of a few percent of it. It is **mode-neutral by construction**:
 the same load runs in both modes and issues the same statements — at HEAD they
 are simply off the loop. Result at smoke: **6/8 captures with the family pin
 on the loop thread**, plus 6/8 narrow (a pin previously described as
-full-only). Non-vacuity fence: `capture_load_leg_active` (≥ 10 requests).
+full-only) — smoke runs are gitignored, so these are **not committed**; the
+committed full-profile figure is cell 1's **2/8 on the loop thread (7/8
+diagnostic across all threads)**. Non-vacuity fence: `capture_load_leg_active`
+(145 requests in cell 1; ≥ 10 required).
 
 ---
 
@@ -318,8 +323,9 @@ section [2]/[3]): 4/5 already carry the violation **on the loop thread**
 the simulation transform the loop-thread count goes 4 → **0** while the
 off-loop count stays ≥ 1.
 
-`python3 .agents/tester/harness/eventloop-phase0/selftest.py` → **43/43
-PASS**.
+`python3 .agents/tester/harness/eventloop-phase0/selftest.py` → **62/62
+PASS** (re-measured 2026-10-30 from this worktree: exit 0, `SELFTEST: 62/62
+checks PASS`; the 43/43 figure was the ROUND-1 count — council inc2 W2).
 
 ---
 
@@ -359,7 +365,7 @@ the fixed tree would produce, using the fix's published semantics. It is
 | **S2.batch** | the per-row instance lookups collapse into the batched selects of A12/D-B ("one job_ids IN-select + one instance batch + one mission batch") | `count' = (count − instances_selects) + 3` → work 1873−1869+3 = **7**, jobs recent 1439−1434+3 = **8**, jobs page 1874−1869+3 = **8** |
 | **S2.unchanged** | the lane does not change these counts (plan: defer-blocked "89 — UNCHANGED", missions "3 — unchanged") | identity |
 | **S3** on-loop | the instances-path DB work is off-loaded; the D-9 prefs merge and the routed-out missions census stay | every statement off-loop except the prefs-family shapes; missions/jobs untouched |
-| **G2** loaded flat | the BASE inflation was loop queueing (BASELINE §3) | the loaded flat p95 is replaced by the **measured unloaded floor p95 of the same run** (0.9137 s → **0.0678 s**) |
+| **G2** loaded flat | the BASE inflation was loop queueing (BASELINE §3) | the loaded flat p95 is replaced by the **measured unloaded floor p95 of the same run** (940.99 ms → **86.5 ms** — the values the committed simulated artifact's `simulation.provenance.rules` records for `S2.g2`; an earlier run's pair 0.9137 s → 0.0678 s is **not committed**) |
 | **S4** loop lag | with no handler holding the loop the interval IS the watchdog tick | every sample clamped to the **measured tick floor** (the series' p50) → STALL count 0 |
 
 **Why this is not a tautology.** The rules are stated in terms of the
@@ -370,9 +376,10 @@ constant. Three independent agreements follow:
 * S2's outputs land on the plan's own projections (4 ≤ 6, 8 ≈ 8,
   7 ∈ [6,10], 8 ≤ 25, 8 ≤ 30) — derived from the *measured* statement
   counts, not from the assertions;
-* G2's out-of-band value (**0.0678 s**) lands inside the architect's
-  *independently* stated healthy range **0.02–0.10 s** (a value I did not
-  choose: it is the unloaded floor the harness measured at BASE);
+* G2's out-of-band value (**0.0865 s**, the value the committed cell-3 fence
+  reports) lands inside the architect's *independently* stated healthy range
+  **0.02–0.10 s** (a value I did not choose: it is the unloaded floor the
+  harness measured at BASE);
 * the assertions consume the architect's / plan's published numbers, which
   are **different quantities** from the rule's inputs.
 
@@ -443,7 +450,7 @@ exactly what the landed fix achieved and exactly what remains.
 | loop-thread family pin | 2/8 captures | **0/4 captures** | G1/G3 FLIPPED ✔ |
 | narrow pin | 2/8 | **0/4** | ✔ |
 | G5 children order | (report-only) | **canonical 47/47 + 1/1** | §5.2 ✔ |
-| G5 bytes vs BASE tree | — | **8/9 shapes byte-identical** after normalization | ✔ |
+| G5 bytes vs BASE tree | — | **8/8 COMPARED shapes byte-identical** after normalization (9 rows − `shape:work`: 500 ⇒ no `normalized_sha256` ⇒ excluded from the diff; 0 diffs) | ✔ |
 
 *Still RED — correctly, because those phases have not landed:*
 
@@ -453,12 +460,20 @@ exactly what the landed fix achieved and exactly what remains.
   4 rts, but it still queues behind the defer-blocked leg's 89 on-loop
   round-trips. This is the architect's §2.2 prediction ("G2 is
   D-B-dependent, not bridge-dependent") **confirmed on a real tree**.
-- **`/api/work` FAILED to return 200** — `floor_samples[work]`,
-  `g5_shapes_collected` (9/9) and `head_round_trips_bounded[work]` all red
-  because the work shape errored, and G5's byte-diff flags `shape:work` as
-  the one differing body. **This is a lane finding, not an instrument
-  finding**: the endpoint errors in the in-flight tree (P3/C-4 not landed or
-  a regression) — routed to the developer lane.
+- **`/api/work` FAILED to return 200** (`g5_bodies["shape:work"]` =
+  `{"status": 500, "error": null}`), so `floor_samples[work]` reads `0/10 ok`
+  and `head_round_trips_bounded[work]` reads `measured=None`. **The G5 red
+  carrier is `g5_shapes_collected`** — `"9/9 shape(s) fetched,
+  all-200=False"`, red on the **all-200 clause**, not on the count. The
+  byte-diff did **not** compare the work body at all: a 500 carries no body,
+  so the shape has **no `normalized_sha256`**, and `gate_g5` builds `diffs`
+  only over rows whose hash is non-null — work is therefore **excluded from
+  the comparison** (measured: compared 8, matched 8, excluded
+  `['shape:work']`). The fence's "9/9" is the raw-row denominator
+  (`len(rows)` = 9), not a comparison count — see §9b item 9. **This is a
+  lane finding, not an instrument finding**: the endpoint errors in the
+  in-flight tree (P3/C-4 not landed or a regression) — routed to the
+  developer lane.
 - G4 paired vs the BASE reference: **ok** (provenance ok; the reference is
   a real base-mode run).
 
@@ -501,11 +516,18 @@ path.
 
 1. **`/api/work` errors in the in-flight HEAD tree** (`dd6d1ed12`, P1+P2
    landed): the shape failed to return 200 in the HEAD-mode run —
-   `floor_samples[work]`, `g5_shapes_collected` and
-   `head_round_trips_bounded[work]` all red, and G5's byte-diff flags
-   `shape:work` as the one differing body. At BASE the same shape returns
+   `floor_samples[work]` (`0/10 ok`), `g5_shapes_collected`
+   (`"9/9 shape(s) fetched, all-200=False"`) and
+   `head_round_trips_bounded[work]` (`measured=None`) all red.
+   **G5's byte-diff never compared the work body**: a 500 returns no body,
+   so the shape carries no `normalized_sha256`, and `gate_g5` builds `diffs`
+   only over rows whose hash is non-null — measured compared **8**, diffs
+   **0**, excluded **`['shape:work']`**. The fence's "9/9" is the raw-row
+   denominator (`len(rows)`), not a comparison count (see §9b item 9). At
+   BASE the same shape returns
    200 with 1873 rts, so this is a regression or an unbuilt phase (C-4 /
-   D-B), not a harness artifact. **The other 8 shapes are byte-identical to
+   D-B), not a harness artifact. **The 8 hash-bearing shapes are
+   byte-identical to
    the BASE tree after the children-order normalization.**
 2. **G2 remains red with the flat leg already fixed** (0.9687 s loaded p95
    while flat itself is 4 rts): the leg queues behind defer-blocked's 89
@@ -517,10 +539,13 @@ path.
 
 ## 9b. Assertions I could NOT repair / residuals
 
-1. **The BASE positive control's duty cycle is 2/8 (cell 1) — thin but
-   positive.** With the
-   synthetic leg the family/narrow pins fire on **3 of 8** full-scale
-   captures (measured; 0/8 without the leg). The gate asserts `>= 1`, so a
+1. **The BASE positive control's duty cycle is thin but positive — 2/8 on the
+   loop thread in the committed cell-1 artifact** (`stack_pin_family`: "2/8
+   capture(s) show the instances-path DB frames on the LOOP thread",
+   diagnostic 7/8 across all threads; `stack_pin_narrow` 2/8). An earlier
+   full-scale run measured **3 of 8** with the synthetic leg and **0/8**
+   without it, but that run lived in a **gitignored run workspace and is not
+   committed** — the committed number is 2/8. The gate asserts `>= 1`, so a
    re-run has a ~2 % chance of a spurious BASE red (P(0/8) at p≈0.375).
    The obvious improvement — raising the leg's concurrency from 4 to 8 so the
    loop has queued work at every sampling instant — is a **one-line change
@@ -529,18 +554,18 @@ path.
    runnable-as-clean requirement). Land it as its own commit and re-measure.
 2. **Three gates are full-profile-only** (G2's band, G2's >= 5-tick
    non-vacuity, the BASE narrow pin — the last now also fires at smoke).
-   Measured reason: the loaded flat p95 is **0.139–0.149 s at smoke** vs
-   **0.9648 s at full** — the loop-queueing inflation G2 measures does not
-   reproduce at 1/10 scale. Smoke prints a loud `[fence:INFO]` instead of a
+   Measured reason: the loaded flat p95 is **0.9687 s at full** (committed
+   cell-2 `loaded_flat_p95_s`) vs **0.139–0.149 s at smoke** (gitignored run
+   workspace — **not committed**) — the loop-queueing inflation G2 measures
+   does not reproduce at 1/10 scale. Smoke prints a loud `[fence:INFO]` instead of a
    silent pass.
-3. **G5 (response bytes) is instrumented but not gated.** The middleware now
-   records `body_sha256`/`body_len` per request and `--capture-bodies` writes
-   one raw body per shape, so the gate finally HAS an artifact. The
-   byte-diff gate itself — the children-order normalization plus the
-   `parent_id ASC, instance_id ASC` positive assertion from
-   `architecture-recommendation.md` §5.2 — is a BASE↔HEAD comparison step I
-   did not implement. Hash equality already proves byte equality; only the
-   normalized diff needs the two runs.
+3. **G5 (response bytes) IS gated in round 2** — superseding this item's
+   round-1 text ("instrumented but not gated"). Cells 2–4 carry
+   `g5_normalized_bytes_equal_vs_reference`, `g5_shapes_collected`,
+   `g5_children_arrays_present` and the two `g5_children_order` positive
+   assertions, and the round-2 truth table ran the BASE↔HEAD comparison the
+   round-1 note said was missing (cell 2: compared 8, diffs 0; cells 3 and 4:
+   compared 9, diffs 0). The residual is item 9 below, not a missing gate.
 4. **The HEAD round-trip bounds are the plan's projections.** The plan
    (`plan-overview.md:243`) says the tester re-pins them **once** from the
    developer's measured HEAD run. They live in exactly one place
@@ -550,9 +575,11 @@ path.
 5. **The missions on-loop exact counts need the NEW per-shape counter.** A
    pre-repair report cannot satisfy that gate — it fails loudly
    (`on-loop {} vs exact {...}`) rather than passing vacuously. Intended.
-6. **HEAD mode has never run against a real fixed tree.** Every HEAD cell in
-   §8 is either the BASE tree (must red) or the simulation (labelled). The
-   first true HEAD run is the developer's.
+6. **HEAD mode had never run against a real fixed tree in round 1.** Round 2
+   closes that: cell 2 (§8) is HEAD mode against the REAL in-flight HEAD tree
+   `dd6d1ed12` (P1+P2 landed) — FAIL, 58/63, with its 5 reds itemised in §8
+   and §9. What remains true: no HEAD cell has yet run against the COMPLETE
+   fix (C-3 / C-4 / D-B outstanding), and cells 3–4 are simulations, labelled.
 7. **The simulation mutates the report in place** (`simulate_report`) and
    re-derives the lag summaries it rewrote; it is applied only under the
    explicit `--simulate=head` flag and is labelled in three places.
@@ -560,6 +587,17 @@ path.
    loop on purpose, so that window's lag is a load artifact. G4 compares the
    `badge` / `home` / `jobs_page` windows only — none of which contains the
    leg.
+9. **`g5_normalized_bytes_equal_vs_reference` reports a raw-row denominator and
+   names no excluded shape.** The fence detail renders `<rows − diffs>/<rows>`
+   — in cell 2 that reads **9/9** while the genuine comparison is **8**,
+   because `shape:work` has no `normalized_sha256` (500 ⇒ no body) and is
+   skipped by the `is not None` guard. A shape that errors is therefore
+   neither compared nor named. Today the run is still red for the right
+   reason one fence over (`g5_shapes_collected`'s `all-200` clause), but a
+   future run in which a shape 500s *and* that count fence were relaxed would
+   read a **vacuous green**. The honest form is `compared/total` plus the
+   excluded list in the detail. **Instrument code is FROZEN in this pass —
+   reported, not changed.**
 
 ---
 
