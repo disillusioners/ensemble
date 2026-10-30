@@ -69,6 +69,7 @@ character, which is what a byte scan does too.  The one char-vs-byte cell
 for the same reason: the skipped bytes can only be continuation bytes, which
 can never be a quote.
 """
+from __future__ import annotations
 
 import os
 import sys
@@ -92,7 +93,7 @@ CH_QUOTE = 0x22
 CH_BACKSLASH = 0x5C
 
 
-def _warn_prefix():
+def _warn_prefix() -> str:
     """Reproduce lib.sh's ``_warn`` prefix byte-for-byte.
 
     ``_warn`` is: printf '%s[%s]: WARN: %s\\n' "$LOG_TAG" "${UP_TARGET:-lib}" "$*"
@@ -104,7 +105,7 @@ def _warn_prefix():
     return "%s[%s]: WARN: " % (tag, target)
 
 
-def _warn(msg):
+def _warn(msg: str) -> None:
     sys.stderr.write(_warn_prefix() + msg + "\n")
     sys.stderr.flush()
 
@@ -116,7 +117,7 @@ class _Unusable(Exception):
 # ── shared I/O helpers (no algorithm lives here) ──────────────────────────────
 
 
-def _read_processed(path):
+def _read_processed(path: str) -> bytes | None:
     """Read the journal ONCE and return the bytes bash would hold.
 
     Single read by construction (plan D1-16): a second read could straddle
@@ -137,7 +138,7 @@ def _read_processed(path):
     return raw.rstrip(b"\n")
 
 
-def _strip_leading_ws(buf):
+def _strip_leading_ws(buf: bytes) -> bytes:
     i = 0
     n = len(buf)
     while i < n and buf[i] in WHITESPACE:
@@ -148,7 +149,7 @@ def _strip_leading_ws(buf):
 # ── verb 1: verify — string-AWARE balance scan (journal_read) ────────────────
 
 
-def _balance_scan(data):
+def _balance_scan(data: bytes) -> bool:
     """Byte-level port of lib.sh's journal_read state machine.
 
     The algorithm is reproduced term for term (``ob/cb/os/cs/in_str/esc``):
@@ -183,7 +184,7 @@ def _balance_scan(data):
     return ob == cb and os_ == cs and in_str == 0
 
 
-def cmd_verify(path):
+def cmd_verify(path: str) -> int:
     data = _read_processed(path)
     if data is None:
         return 1
@@ -204,7 +205,7 @@ def cmd_verify(path):
 # ── verb 2: sub — string-NAIVE bracket counter (_json_sub) ───────────────────
 
 
-def _json_sub(data, key):
+def _json_sub(data: bytes, key: str) -> bytes | None:
     """Port of lib.sh's ``_json_sub``: string-NAIVE, first occurrence.
 
     A ``}``/``]`` inside a string value still decrements the depth -- that is
@@ -240,7 +241,7 @@ def _json_sub(data, key):
     return None
 
 
-def cmd_sub(key):
+def cmd_sub(key: str) -> int:
     data = sys.stdin.buffer.read()
     got = _json_sub(data, key)
     if got is None:
@@ -253,7 +254,7 @@ def cmd_sub(key):
 # ── verb 3: update — string-NAIVE value consumer (journal_update) ────────────
 
 
-def _splice_value(data, field, raw):
+def _splice_value(data: bytes, field: str, raw: str) -> bytes:
     """Port of lib.sh's ``journal_update`` splice.
 
     ``head`` is the prefix up to AND INCLUDING the LAST ``"field"``
@@ -316,7 +317,7 @@ def _splice_value(data, field, raw):
     return head + b":" + raw.encode("utf-8", "surrogateescape") + rest
 
 
-def cmd_update(field, raw):
+def cmd_update(field: str, raw: str) -> int:
     data = sys.stdin.buffer.read()
     out = _splice_value(data, field, raw)
     if out is None:
@@ -339,7 +340,7 @@ _USAGE = (
 )
 
 
-def main(argv):
+def main(argv: list[str]) -> int:
     if not argv:
         sys.stderr.write(_USAGE)
         return 2

@@ -50,6 +50,7 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -158,7 +159,9 @@ def build_fixtures(root: Path) -> dict[str, Path]:
     return fx
 
 
-def discover_seam():
+def discover_seam() -> (
+    tuple[Callable[..., tuple[str, str]] | None, str, str]
+):
     # Resolve the daemon package from the TREE UNDER TEST (this repo), not
     # from whatever checkout the interpreter's site-packages/.pth points
     # at — in script mode sys.path[0] is tests/helpers/, so an ambient

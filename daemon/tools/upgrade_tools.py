@@ -1374,7 +1374,6 @@ def _capture_user_message_id(
     return msg_id if isinstance(msg_id, str) and msg_id else None
 
 
-
 def _restart_cooldown_state(journal: dict[str, Any] | None) -> tuple[bool, str]:
     """Rail (b) — live-only cooldown read (§4). Returns ``(active,
     until_display)``. Fail CLOSED on unparseable (an unparseable
@@ -2045,7 +2044,6 @@ def _live_gate_summary(label: str, factor_failures: list[str]) -> str:
         factor_failures[0],
         "; ".join(factor_failures) if factor_failures else "3-factor gate failed",
     )
-
 
 
 def create_upgrade_tools(
@@ -3980,7 +3978,6 @@ def _pipeline_stamp_and_sha(scripts_dir: Path) -> tuple[str | None, str]:
 
 
 
-
 def scripts_dir_provenance_verdict(
     scripts_dir: Path | str,
     floor_commit: str | None = None,
@@ -4100,8 +4097,8 @@ def scripts_dir_provenance_verdict(
         _s_rc, _s_out, _s_err = uj.bounded_git_probe(
             path, "diff-index", "--quiet", "HEAD", "--"
         )
+        del _s_out, _s_err  # only the rc is meaningful for a --quiet probe
         edited = _s_rc != 0
-        _ = _s_out, _s_err
         prov_git = (
             f"{provenance} git_rev={rev} dirty={'yes' if edited else 'no'}"
         )

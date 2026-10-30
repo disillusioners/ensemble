@@ -45,7 +45,7 @@ import asyncio
 import os
 import re
 import subprocess
-import sys
+from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -58,7 +58,11 @@ from daemon.tools import upgrade_journal as uj
 
 
 @pytest.fixture
-def install(tmp_path: Path) -> Path:
+# tidier low #14: named `install_min` — this package has a SECOND,
+# richer `install` fixture (tests/unit/tools/test_upgrade_tools.py) with
+# a different shape (two releases + manifest + symlink); two same-named
+# fixtures in one package invite a silent shadow.
+def install_min(tmp_path: Path) -> Path:
     """A fresh staged-install fixture: journal initialized, extensions on."""
     inst = tmp_path / "install"
     (inst / "releases").mkdir(parents=True)
@@ -88,11 +92,13 @@ class Recorder:
         self.calls: list[dict[str, Any]] = []
         self.next_proc: FakeProc = FakeProc(hang=True)
 
-    def popen(self, argv, **kwargs) -> FakeProc:
+    def popen(self, argv: Sequence[str], **kwargs: Any) -> FakeProc:
         self.calls.append({"kind": "Popen", "argv": list(argv), **kwargs})
         return self.next_proc
 
-    def run(self, argv, **kwargs):
+    def run(
+        self, argv: Sequence[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess:
         self.calls.append({"kind": "run", "argv": list(argv), **kwargs})
         return subprocess.CompletedProcess(argv, 0, b"", b"")
 
@@ -243,9 +249,19 @@ class _DrainHarness:
             )
         self.calls: list[dict[str, Any]] = []
 
+    # Annotations copied VERBATIM from the real seam
+    # (upgrade_journal.spawn_executor) so a signature change breaks visibly
+    # here instead of leaving a stale hand-copy that silently stops seeing
+    # the new kwarg (tidier low #8).
     def spawn_stub(
-        self, argv, install_dir, extra_env=None, *, run_id=None,
-        unit_prefix="ensemble-upgrade-", unit_properties=None,
+        self,
+        argv: list[str],
+        install_dir: Path,
+        extra_env: dict[str, str] | None = None,
+        *,
+        run_id: str | None = None,
+        unit_prefix: str = "ensemble-upgrade-",
+        unit_properties: list[str] | None = None,
     ) -> tuple[int, str]:
         self.calls.append(
             {
@@ -318,43 +334,43 @@ class TestKindScopedRuntimeMaxSec:
 
 class TestPerRunLogTargets:
     def test_payload_append_targets_the_per_run_payload_file(
-        self, install: Path, monkeypatch: pytest.MonkeyPatch, recorder: Recorder
+        self, install_min: Path, monkeypatch: pytest.MonkeyPatch, recorder: Recorder
     ) -> None:
         _stub_detect(monkeypatch, uj.SERVICE_BRANCH_SERVICE, "user")
         uj.spawn_executor(
             ["bash", "promote.sh", "live", "--version", "v1"],
-            install, {}, run_id="r-perrun-1",
+            install_min, {}, run_id="r-perrun-1",
         )
         argv = recorder.popen_calls[0]["argv"]
-        payload = install / "data" / "upgrade" / "live" / "r-perrun-1.payload.log"
+        payload = install_min / "data" / "upgrade" / "live" / "r-perrun-1.payload.log"
         assert f"--property=StandardOutput=append:{payload}" in argv, argv
         assert f"--property=StandardError=append:{payload}" in argv, argv
 
     def test_narrative_path_is_threaded_in_the_executor_env(
-        self, install: Path, monkeypatch: pytest.MonkeyPatch, recorder: Recorder
+        self, install_min: Path, monkeypatch: pytest.MonkeyPatch, recorder: Recorder
     ) -> None:
         _stub_detect(monkeypatch, uj.SERVICE_BRANCH_SERVICE, "user")
         uj.spawn_executor(
             ["bash", "promote.sh", "live", "--version", "v1"],
-            install, {}, run_id="r-perrun-2",
+            install_min, {}, run_id="r-perrun-2",
         )
         argv = recorder.popen_calls[0]["argv"]
-        narrative = install / "data" / "upgrade" / "live" / "r-perrun-2.log"
+        narrative = install_min / "data" / "upgrade" / "live" / "r-perrun-2.log"
         assert f"--setenv=ENSEMBLE_UPGRADE_LOG_FILE={narrative}" in argv, argv
         # two files, never one: the payload target is a DIFFERENT path
-        payload = install / "data" / "upgrade" / "live" / "r-perrun-2.payload.log"
+        payload = install_min / "data" / "upgrade" / "live" / "r-perrun-2.payload.log"
         assert narrative != payload
         assert f"--property=StandardOutput=append:{payload}" in argv, argv
 
     def test_pointer_line_names_both_files(
-        self, install: Path, monkeypatch: pytest.MonkeyPatch, recorder: Recorder
+        self, install_min: Path, monkeypatch: pytest.MonkeyPatch, recorder: Recorder
     ) -> None:
         _stub_detect(monkeypatch, uj.SERVICE_BRANCH_SERVICE, "user")
         uj.spawn_executor(
             ["bash", "promote.sh", "sandbox", "--version", "v1"],
-            install, {}, run_id="r-perrun-3",
+            install_min, {}, run_id="r-perrun-3",
         )
-        aggregate = install / "data" / "upgrade.log"
+        aggregate = install_min / "data" / "upgrade.log"
         text = aggregate.read_text(encoding="utf-8")
         assert "run_id=r-perrun-3" in text
         assert "narrative=" in text and "r-perrun-3.log" in text
@@ -370,15 +386,15 @@ class TestPerRunLogTargets:
         ],
     )
     def test_env_scope_comes_from_the_argv_token(
-        self, install: Path, monkeypatch: pytest.MonkeyPatch, recorder: Recorder,
+        self, install_min: Path, monkeypatch: pytest.MonkeyPatch, recorder: Recorder,
         argv: list[str], expected: str,
     ) -> None:
         _stub_detect(monkeypatch, uj.SERVICE_BRANCH_SERVICE, "user")
-        uj.spawn_executor(argv, install, {}, run_id="r-scope-1")
+        uj.spawn_executor(argv, install_min, {}, run_id="r-scope-1")
         path = recorder.popen_calls[0]["argv"]
         assert any(
             t == f"--setenv=ENSEMBLE_UPGRADE_LOG_FILE="
-                 f"{install / 'data' / 'upgrade' / expected / 'r-scope-1.log'}"
+                 f"{install_min / 'data' / 'upgrade' / expected / 'r-scope-1.log'}"
             for t in path
         ), path
 
@@ -393,12 +409,12 @@ class TestPerRunLogTargets:
 
 class TestNoClientPipe:
     def test_client_stderr_is_a_file(
-        self, install: Path, monkeypatch: pytest.MonkeyPatch, recorder: Recorder
+        self, install_min: Path, monkeypatch: pytest.MonkeyPatch, recorder: Recorder
     ) -> None:
         _stub_detect(monkeypatch, uj.SERVICE_BRANCH_SERVICE, "user")
         uj.spawn_executor(
             ["bash", "promote.sh", "demo", "--version", "v1"],
-            install, {}, run_id="r-pipe-1",
+            install_min, {}, run_id="r-pipe-1",
         )
         kw = recorder.popen_calls[0]
         assert kw["stderr"] is not subprocess.PIPE, kw["stderr"]
@@ -408,14 +424,14 @@ class TestNoClientPipe:
         # 2026-10-30: the old `payload.with_suffix(".client.log")` produced
         # `<run_id>.payload.client.log`, a fourth name the retention fence did
         # not cover as the current run's file)
-        expected = install / "data" / "upgrade" / "demo" / "r-pipe-1.client.log"
+        expected = install_min / "data" / "upgrade" / "demo" / "r-pipe-1.client.log"
         assert expected.is_file(), sorted(p.name for p in expected.parent.iterdir())
         assert Path(kw["stderr"].name) == expected
-        assert not (install / "data" / "upgrade" / "demo"
+        assert not (install_min / "data" / "upgrade" / "demo"
                     / "r-pipe-1.payload.client.log").exists()
 
     def test_systemd_unavailable_triage_reads_the_client_file(
-        self, install: Path, monkeypatch: pytest.MonkeyPatch, recorder: Recorder
+        self, install_min: Path, monkeypatch: pytest.MonkeyPatch, recorder: Recorder
     ) -> None:
         """R7: redirecting the client's stderr to a file must NOT silence the
         fail-closed systemd-unavailable refusal."""
@@ -435,12 +451,12 @@ class TestNoClientPipe:
         monkeypatch.setattr(uj.subprocess, "Popen", popen_writing_signature)
         with pytest.raises(uj.ExecutorSystemdUnavailable):
             uj.spawn_executor(
-                ["bash", "promote.sh", "live"], install, {}, run_id="r-pipe-2",
+                ["bash", "promote.sh", "live"], install_min, {}, run_id="r-pipe-2",
             )
 
 
     def test_unreadable_client_log_refuses_instead_of_guessing(
-        self, install: Path, monkeypatch: pytest.MonkeyPatch, recorder: Recorder
+        self, install_min: Path, monkeypatch: pytest.MonkeyPatch, recorder: Recorder
     ) -> None:
         """A7 (code council 2026-10-30): the fail-closed systemd-unavailable
         triage had a silent hole — if the client log could not be OPENED for
@@ -463,7 +479,7 @@ class TestNoClientPipe:
         monkeypatch.setattr(Path, "open", open_without_append)
         with pytest.raises(uj.ExecutorSystemdUnavailable) as exc:
             uj.spawn_executor(
-                ["bash", "promote.sh", "live"], install, {}, run_id="r-a7-1",
+                ["bash", "promote.sh", "live"], install_min, {}, run_id="r-a7-1",
             )
         assert "client-log-unavailable" in str(exc.value)
 
@@ -478,27 +494,27 @@ class TestStillRunningRowEnriched:
         return object.__new__(UpgradeJournalSweepService)
 
     def test_row_carries_narrative_phase_and_elapsed(
-        self, install: Path, monkeypatch: pytest.MonkeyPatch
+        self, install_min: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         run_id = "r-still-1"
-        narr = install / "data" / "upgrade" / "live" / f"{run_id}.log"
+        narr = install_min / "data" / "upgrade" / "live" / f"{run_id}.log"
         narr.parent.mkdir(parents=True, exist_ok=True)
         narr.write_text(
             "2026-01-01T00:00:00Z phase-marker: promote:preflight\n"
             "2026-01-01T00:00:05Z phase-marker: promote:soak\n",
             encoding="utf-8",
         )
-        state = install / "releases" / "state.json"
+        state = install_min / "releases" / "state.json"
         state.write_text(
             '{"current":null,"previous":null,"in_flight":null,'
             '"history":[{"ts":"2026-01-01T00:00:05Z","event":"x","detail":"y"}]}',
             encoding="utf-8",
         )
-        job = SimpleNamespace(install_dir=install, run_id=run_id, pid=4321)
+        job = SimpleNamespace(install_dir=install_min, run_id=run_id, pid=4321)
         asyncio.run(
             self._service()._journal_executor_still_running(job, 660)
         )
-        hist = uj.journal_read(install)["history"]
+        hist = uj.journal_read(install_min)["history"]
         row = hist[-1]
         assert row["event"] == "executor_still_running", row
         detail = row["detail"]
@@ -508,11 +524,11 @@ class TestStillRunningRowEnriched:
         assert "still running after 660s" in detail, detail
 
     def test_row_degrades_gracefully_without_a_narrative(
-        self, install: Path, monkeypatch: pytest.MonkeyPatch
+        self, install_min: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        job = SimpleNamespace(install_dir=install, run_id="r-still-2", pid=4322)
+        job = SimpleNamespace(install_dir=install_min, run_id="r-still-2", pid=4322)
         asyncio.run(self._service()._journal_executor_still_running(job, 660))
-        detail = uj.journal_read(install)["history"][-1]["detail"]
+        detail = uj.journal_read(install_min)["history"][-1]["detail"]
         assert "narrative=(no per-run narrative)" in detail, detail
         assert "last=unknown" in detail, detail
 

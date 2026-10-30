@@ -19,6 +19,7 @@ Usage:
 The generator is also importable (`build()`), which is how the packs derive
 the fixture at runtime without shelling out to python twice.
 """
+from __future__ import annotations
 
 import argparse
 import hashlib
@@ -47,7 +48,7 @@ OTHER_EVENTS = (
 )
 
 
-def _is_mcp(i):
+def _is_mcp(i: int) -> bool:
     """Bresenham spread: exactly TARGET_MCP_ENTRIES of TARGET_ENTRIES marks.
 
     A plain modulo would not hit the measured 2,775 / 2,949 ratio exactly; the
@@ -59,7 +60,7 @@ def _is_mcp(i):
     ) // TARGET_ENTRIES
 
 
-def _entry(i):
+def _entry(i: int) -> dict[str, object]:
     if _is_mcp(i):
         event = "mcp_server_state"
         detail = BASE_DETAILS[i % len(BASE_DETAILS)].format(n=i)
@@ -78,7 +79,7 @@ def _entry(i):
     }
 
 
-def _skeleton():
+def _skeleton() -> tuple[dict[str, object], list[dict[str, object]]]:
     """The journal with EMPTY details -- the byte budget's fixed part."""
     history = []
     for i in range(TARGET_ENTRIES):
@@ -105,11 +106,11 @@ def _skeleton():
     return doc, history
 
 
-def _serialise(doc):
+def _serialise(doc: dict[str, object]) -> bytes:
     return json.dumps(doc, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
 
 
-def build():
+def build() -> bytes:
     """Return the incident-shaped journal bytes (exactly TARGET_BYTES long).
 
     The detail budget is DISTRIBUTED, not padded at the tail: the skeleton's
@@ -137,7 +138,7 @@ def build():
     return raw
 
 
-def build_stats():
+def build_stats() -> dict[str, int | str]:
     raw = build()
     doc = json.loads(raw)
     hist = doc["history"]
@@ -150,7 +151,7 @@ def build_stats():
     }
 
 
-def main(argv):
+def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out")
     ap.add_argument("--print-sha", action="store_true")

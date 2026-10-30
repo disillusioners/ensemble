@@ -120,7 +120,7 @@ FW="$(count_rows "$J" warn)"
 [ "$FW" = "1" ] && pf_ok "exactly ONE logwrite_failed journal row per run" \
                 || pf_bad "E2 logwrite_failed rows=$FW want 1"
 grep -q "logwrite_failed" "$J" && pf_ok "the row carries the logwrite_failed marker" \
-                               || pf_bad "E2 marker missing"
+                               || pf_bad "E2 marker missing: warn rows=$(count_rows "$J" warn) journal=$(head -c 240 "$J")"
 
 printf '\n== E3/E4: SC7 markers + ISO timestamps (real preflight harness) ==\n'
 mkjournal
@@ -266,8 +266,24 @@ for name, good in ok:
 PY
 )"
 echo "$E7_OUT" | sed 's/^/  /'
-echo "$E7_OUT" | grep -q "^FAIL" && pf_bad "E7/E12/E14 python pins failed" \
-    || pf_ok "two-file sink + pointer-by-run_id + env scope + reader fallback"
+# Per-ID assertion (tidier low #13): the three scenario ids used to collapse
+# into ONE undifferentiated failure token after dumping the whole buffer, so
+# the summary could not name the failing leg.
+E7_IDS="paths-split env-scope scope-derive argv-payload argv-payload-err env-threads pointer-both resolve-by-id aggregate-fallback no-cross-env"
+E7_ANY_FAIL=0
+for _id in $E7_IDS; do
+    if echo "$E7_OUT" | grep -qx "FAIL ${_id}"; then
+        pf_bad "E7/E12/E14 python pin FAILED: ${_id}"
+        E7_ANY_FAIL=1
+    elif echo "$E7_OUT" | grep -qx "PASS ${_id}"; then
+        :
+    else
+        pf_bad "E7/E12/E14 the helper reported NOTHING for '${_id}'"
+        E7_ANY_FAIL=1
+    fi
+done
+[ "$E7_ANY_FAIL" = "0" ] \
+    && pf_ok "two-file sink + pointer-by-run_id + env scope + reader fallback (all ${E7_IDS} named)"
 
 printf '\n== E8: R7 — client stderr FILE keeps the systemd-unavailable refusal ==\n'
 E8_OUT="$(cd "$PF_REPO_ROOT" && "$PYV" - "$PF_SB" <<'PY'
@@ -462,8 +478,12 @@ class Dummy:
     _per_run_narrative_path = staticmethod(sw.UpgradeJournalSweepService._per_run_narrative_path)
     _per_run_observation = sw.UpgradeJournalSweepService._per_run_observation
 obs = Dummy()._per_run_observation(inst, "run-sw")
-ok.append(("obs-path", str(narr) in obs[0]))
-ok.append(("obs-phase", "step=integrity-current" in obs[1]))
+# M6 (fix cycle 2): the observation is a TYPED record now
+# (PerRunObservation.narrative / .last_phase / .elapsed_s), not a 3-tuple of
+# stringly sentinels — assert the typed fields (and that the record IS typed).
+ok.append(("obs-typed", obs.__class__.__name__ == "PerRunObservation"))
+ok.append(("obs-path", obs.narrative is not None and str(narr) in str(obs.narrative)))
+ok.append(("obs-phase", "step=integrity-current" in (obs.last_phase or "")))
 for name, good in ok:
     print(("PASS " if good else "FAIL ") + name)
 PY

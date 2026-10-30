@@ -449,9 +449,13 @@ PLANTS: dict[str, dict] = {
     "M43": {
         "file": PROMOTE, "mode": "executable",
         "why": "the adopt-txn arm no longer propagates the step's own exit-78 — `_refuse txn-busy` appends a SECOND, contradicting refusal row over the adopt diagnostics' halt row (W1)",
+        # NOTE: no `# PLANT` comment is possible here — it would comment out
+        # the rest of the one-line arm (`_refuse ...; }`) and turn the defect
+        # into a syntax error. Deleting the propagation token reproduces the
+        # W1 defect exactly: the caller falls straight through to `_refuse`.
         "pairs": [(
-            '[ "$_arc" -eq 78 ] && exit 78;',
-            ':  # PLANT M43: the 78 is not propagated (W1: second, contradicting row)',
+            '{ _arc=$?; [ "$_arc" -eq 78 ] && exit 78; _refuse txn-busy',
+            '{ _refuse txn-busy',
         )],
     },
     "M44": {

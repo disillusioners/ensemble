@@ -93,12 +93,14 @@ done
 for f in "$PF_FIXTURES"/G1-*.json "$PF_FIXTURES"/G2-*.json "$PF_FIXTURES"/G3-*.json "$PF_FIXTURES"/G4-*.json; do
     [ -f "$f" ] || { pf_bad "missing guard fixture: $f"; continue; }
 done
-[ "$(pf_bytes "$PF_FIXTURES/G1-guard-threshold-minus-1.json")" = "98303" ] \
-    && pf_ok "G1 is threshold-1 (98303 B)" || pf_bad "G1 size wrong"
-[ "$(pf_bytes "$PF_FIXTURES/G2-guard-threshold-exact.json")" = "98304" ] \
-    && pf_ok "G2 is threshold-exact (98304 B)" || pf_bad "G2 size wrong"
-[ "$(pf_bytes "$PF_FIXTURES/G3-guard-threshold-plus-1.json")" = "98305" ] \
-    && pf_ok "G3 is threshold+1 (98305 B)" || pf_bad "G3 size wrong"
+for pair in "G1-guard-threshold-minus-1:98303" "G2-guard-threshold-exact:98304" \
+            "G3-guard-threshold-plus-1:98305"; do
+    gname="${pair%%:*}"; gwant="${pair##*:}"
+    ggot="$(pf_bytes "$PF_FIXTURES/$gname.json")"
+    [ "$ggot" = "$gwant" ] \
+        && pf_ok "${gname%%-*} is $ggot B" \
+        || pf_bad "${gname%%-*} size wrong: got ${ggot:-<missing>} B want $gwant B"
+done
 
 # ── phase B: `sub` parity (_json_sub) ---------------------------------------
 

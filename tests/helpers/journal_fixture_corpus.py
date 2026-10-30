@@ -22,10 +22,12 @@ the helper is a defect in the helper, never a "correction" of the fixture.
 Usage:
     python3 tests/helpers/journal_fixture_corpus.py [--out DIR]
 """
+from __future__ import annotations
 
 import argparse
 import os
 import sys
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -137,7 +139,7 @@ CASES = [
 GUARD_BYTES = 98304  # JOURNAL_SIZE_GUARD_BYTES default (phase1 D1-17 / W1)
 
 
-def _pad_to(size, seed=b'{"current":null,"previous":null,"in_flight":null,'
+def _pad_to(size: int, seed: bytes =b'{"current":null,"previous":null,"in_flight":null,'
                         b'"rollback_window_count":{"24h":0,"window_start":null},'
                         b'"cooldown_until":null,"quarantined":[],"history":['
                         b'{"ts":"2026-01-01T00:00:00Z","event":"pad","detail":"'):
@@ -149,7 +151,7 @@ def _pad_to(size, seed=b'{"current":null,"previous":null,"in_flight":null,'
     return seed + b"x" * filler_len + tail
 
 
-def guard_fixtures():
+def guard_fixtures() -> list[tuple[str, bytes, str]]:
     return [
         ("G1-guard-threshold-minus-1", _pad_to(GUARD_BYTES - 1),
          "JOURNAL_SIZE_GUARD_BYTES-1 on the LEGACY class (helper absent) -> "
@@ -172,7 +174,7 @@ def guard_fixtures():
     ]
 
 
-def write_all(out_dir):
+def write_all(out_dir: str | Path) -> list[str]:
     os.makedirs(out_dir, exist_ok=True)
     written = []
     for name, data, _note in CASES + guard_fixtures():
@@ -209,7 +211,7 @@ def write_all(out_dir):
     return written
 
 
-def main(argv):
+def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=DEFAULT_OUT)
     args = ap.parse_args(argv)

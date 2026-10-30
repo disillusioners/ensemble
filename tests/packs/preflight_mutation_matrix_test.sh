@@ -204,10 +204,10 @@ M38|packi:preflight_ceremony_readiness_test.sh|I16f stamp gate MISMATCH|
 M39|pytest:tests/unit/tools/test_upgrade_tools.py::TestScriptsDirProvenanceArmPath::test_w3a_floor_unset_on_an_explicit_pin_refuses|test_w3a_floor_unset_on_an_explicit_pin_refuses|
 M40|pytest:tests/unit/tools/test_upgrade_tools.py::TestScriptsDirProvenanceArmPath::test_w3b_fallback_dir_downgrades_refusal_to_warning|test_w3b_fallback_dir_downgrades_refusal_to_warning|
 M41|packi:preflight_ceremony_readiness_test.sh|SCENARIO I13b FAIL expected=refuse got=arm|
-M42|pack:preflight_watchdog_test.sh|FAIL recovery phase CONTINUES after a wedged probe|
+M42|pack:preflight_watchdog_test.sh|FAIL D12 rc=78 want 0|
 M43|pack:preflight_watchdog_test.sh|D13a a txn-busy refusal row was appended|
 M44|pack:preflight_logging_test.sh|E10b fence LOST: run-a2keep.client.log|
-M45|pack:preflight_watchdog_test.sh|FAIL D14 the step budget falls back|
+M45|pack:preflight_watchdog_test.sh|FAIL D14 sourcing died on a garbage knob|
 M46|pack:preflight_shasum_batch_parity_test.sh|A1 leaked temp files|
 "
 

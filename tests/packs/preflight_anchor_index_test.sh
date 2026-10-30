@@ -106,9 +106,9 @@ printf '\n== C. new constructs (D1) ==\n'
 newcheck() { # newcheck <path> <pattern> <label>
     if grep -qF -- "$2" "$WS/$1" 2>/dev/null; then pf_ok "present: $3"; else pf_bad "MISSING: $3 ($1 :: $2)"; fi
 }
-newcheck scripts/upgrade/journal_read.py 'def _balance_scan(data):' 'the string-AWARE balance scan (verify)'
-newcheck scripts/upgrade/journal_read.py 'def _json_sub(data, key):' 'the string-NAIVE bracket counter (sub)'
-newcheck scripts/upgrade/journal_read.py 'def _splice_value(data, field, raw):' 'the string-NAIVE value consumer (update)'
+newcheck scripts/upgrade/journal_read.py 'def _balance_scan(data: bytes) -> bool:' 'the string-AWARE balance scan (verify; annotated in fix cycle 2)'
+newcheck scripts/upgrade/journal_read.py 'def _json_sub(data: bytes, key: str) -> bytes | None:' 'the string-NAIVE bracket counter (sub; annotated in fix cycle 2)'
+newcheck scripts/upgrade/journal_read.py 'def _splice_value(data: bytes, field: str, raw: str) -> bytes:' 'the string-NAIVE value consumer (update; annotated in fix cycle 2)'
 newcheck scripts/upgrade/journal_read.py 'NUL_WARNING = ' 'the command-substitution NUL-drop warning class'
 newcheck scripts/upgrade/lib.sh '_journal_read_probe()' 'the O(N) helper resolver/probe'
 newcheck scripts/upgrade/lib.sh '_journal_read_legacy()' 'the legacy walk fallback'

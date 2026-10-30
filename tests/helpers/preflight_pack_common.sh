@@ -208,8 +208,11 @@ pf_run_bounded() {
 
 # ── repo/root resolution + fixture helpers ──────────────────────────────────
 
-PF_PACK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-PF_REPO_ROOT="$(cd "$PF_PACK_DIR/../.." && pwd)"
+# PF_HELPER_DIR (tidier low #4: it used to be named PF_PACK_DIR, but it
+# resolves THIS HELPER's directory — tests/helpers/ — not a pack dir, which
+# would silently mislead the next reader if the helper ever moved).
+PF_HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+PF_REPO_ROOT="$(cd "$PF_HELPER_DIR/../.." && pwd)"
 PF_FIXTURES="$PF_REPO_ROOT/tests/fixtures/journal"
 
 pf_incident_fixture() {

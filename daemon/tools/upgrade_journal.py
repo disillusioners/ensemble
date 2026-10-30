@@ -2174,7 +2174,7 @@ EXECUTOR_ENV_ALLOWLIST: tuple[str, ...] = (
 EXECUTOR_ENV_PREFIXES: tuple[str, ...] = ("PG",)
 
 
-def executor_env(extra: dict[str, str] | None = None) -> dict[str]:
+def executor_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     env: dict[str, str] = {}
     for key in EXECUTOR_ENV_ALLOWLIST:
         val = os.environ.get(key)
