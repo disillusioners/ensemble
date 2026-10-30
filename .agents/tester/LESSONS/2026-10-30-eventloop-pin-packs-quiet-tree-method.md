@@ -86,3 +86,19 @@ says what I wrote. "No substitutes" cuts both ways — my paraphrase is not the 
 - A pack that provisions a PG database must drop the **database**, not just its tables —
   `_cascade_drop_all` alone left `ensemble_p2_8_scratch` behind, and with
   `CREATE DATABASE IF NOT EXISTS` the next run would inherit the previous schema.
+
+## Trap 5 — cross-lane edits must preserve registered fences
+
+Developer cycle-3 commit `09ce9d369` **deleted** `test_collected_node_count_fence` +
+`EXPECTED_NODE_NAMES` from the tester-registered, mutation-verified children-order pack —
+undeclared, not in the cycle's requirements, and not forced (the pack would have stayed
+green). A registered fence is a contract between the lane that owns the pack and the gate
+that cites it.
+
+**Rule:** cross-lane edits to tester-registered pack files must preserve registered
+fences. A deleting edit reds the gate tripwire and reads as silent weakening — even when
+the same commit is otherwise clean and reviewed. Restored by tester at `10b3c982`
+(8-name set + count == 8 + no-skip/xfail, fence excluding itself); both mutation legs
+re-proven RED at the restore. The pack's own fence is what made the deletion *visible*
+rather than silent — which is the argument for fencing every gate-carrying pack.
+
