@@ -155,7 +155,7 @@ def pg_engine() -> Engine:
 async def manager_and_tools(pg_engine: Engine):
     """Real InstanceManager over the scratch PG engine + the registered
     tool list produced by create_instance_tools."""
-    from unittest.mock import patch
+    from unittest.mock import MagicMock, patch
 
     from daemon.config import (
         AgentsConfig,
@@ -190,11 +190,11 @@ async def manager_and_tools(pg_engine: Engine):
         patch("daemon.tools.instance.is_rag_enabled", return_value=False),
         patch("daemon.tools.instance.create_rag_tools", return_value=[]),
         patch("daemon.tools.instance.create_knowledge_tools", return_value=[]),
-        patch("daemon.tools.instance.create_inner_soul_tool", return_value=__import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()),
-        patch("daemon.tools.instance.create_access_memory_tool", return_value=__import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()),
+        patch("daemon.tools.instance.create_inner_soul_tool", return_value=MagicMock()),
+        patch("daemon.tools.instance.create_access_memory_tool", return_value=MagicMock()),
         patch("daemon.tools.instance.create_project_tools", return_value=[]),
         patch("daemon.tools.instance.create_job_tools_if_available", return_value=[]),
-        patch("daemon.tools.instance.create_help_tool", return_value=__import__("unittest.mock", fromlist=["MagicMock"]).MagicMock()),
+        patch("daemon.tools.instance.create_help_tool", return_value=MagicMock()),
         patch("daemon.tools.instance.create_critical_notes_tools", return_value=[]),
         patch("daemon.tools.instance.create_project_history_tools", return_value=[]),
         patch("daemon.tools.instance.create_db_tools", return_value=[]),
@@ -333,9 +333,9 @@ def test_node3_output_stable_projection_vs_base(seeded):
     manager, li_tool, gi_tool = seeded
     out = li_tool.invoke({})
     # Stable projection: (instance_id, tuple(children), parent_id, status).
-    # # BASE-PINNED from daemon/tools/instance.py list_instances closure
-    # # (post-P2 HEAD) observed against the seeded fixture above
-    # # (run 2026-10-30, scratch DB ensemble_p2_8_scratch).
+    # BASE-PINNED from daemon/tools/instance.py list_instances closure
+    # (post-P2 HEAD) observed against the seeded fixture above
+    # (run 2026-10-30, scratch DB ensemble_p2_8_scratch).
     projection = sorted(
         (r["instance_id"], tuple(r["children"]), r.get("parent_id"), r.get("status")) for r in out
     )

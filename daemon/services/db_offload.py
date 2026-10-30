@@ -43,8 +43,9 @@ the authoritative plan; D-ids cited inline):
   rejects, never times out**.
   The permit is released in the **executor future's done-callback** (thread-side truth), never the caller's `finally`.
 * **Drain (B3, D-24/D-53):** four-step shutdown (closed flag -> fail all
-  waiters -> wait for in-flight up to ``DB_OFFLOAD_DRAIN_BOUND_S`` -> executor
-  shutdown). Called from the lifespan **before** ``manager.shutdown()``.
+  waiters -> wait for in-flight up to the configured drain bound (default
+  ``DB_OFFLOAD_DRAIN_BOUND_S``) -> executor shutdown). Called from the
+  lifespan **before** ``manager.shutdown()``.
 * **Contextvars:** ``run_in_executor`` does not propagate context; ``copy_context().run``
   preserves request tags / logging context. Offload-thread statements are
   attributed OFF-loop by construction (what the N2/N4 gates measure).
@@ -74,9 +75,10 @@ from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable, TypeVar
 
-from daemon.constants import DB_OFFLOAD_DRAIN_BOUND_S as _DEFAULT_DRAIN_BOUND
-from daemon.constants import DB_OFFLOAD_MAX_WORKERS_DEFAULT
-from daemon.constants import DB_OFFLOAD_QUEUE_WARN_DEPTH
+from daemon.constants import (
+    DB_OFFLOAD_DRAIN_BOUND_S as _DEFAULT_DRAIN_BOUND,
+    DB_OFFLOAD_MAX_WORKERS_DEFAULT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +95,6 @@ class DbOffloadClosedError(DbOffloadError):
 
 class DbOffloadReentrancyError(DbOffloadError):
     """Raised when a bridged callee re-enters the seam (B1)."""
-
 
 
 _OFFLOAD_THREAD_PREFIX = "db-offload"
@@ -250,7 +251,9 @@ class _Gate:
 
     def close(self) -> None:
         self._closed = True
-        # fail all waiters (also transfers in-flight tokens back to permits)
+        # Fail all parked waiters; in-flight tokens return to permits via
+        # do_release as their jobs complete (close() itself touches only
+        # the waiter deque).
         while self._waiters:
             w = self._waiters.popleft()
             if not w.done():
@@ -260,6 +263,7 @@ class _Gate:
                     pass
 
     def fail_waiters(self) -> None:
+        """Alias of :meth:`close` — also PERMANENTLY closes the seam (no current callers)."""
         self.close()
 
 
@@ -280,11 +284,13 @@ def configure(
     wait_warn_sum: int | None = None,
     loop: asyncio.AbstractEventLoop | None = None,
 ) -> None:
-    """Configure (or re-configure) the seam. Idempotent-ish.
+    """Configure (or re-configure) the seam.
 
     Called from the lifespan after config load, before the first request.
-    Captures the loop once. Re-configuration shuts down the prior executor
-    (bounded drain) before creating a new one.
+    Captures the loop once. Re-configuration closes the prior gate and
+    shuts the prior executor down NON-blocking (``shutdown(wait=False)``:
+    in-flight work finishes unawaited on its worker thread) before
+    creating new ones.
     """
     global _EXECUTOR, _GATE, _LOOP, _CLOSED, _DRAIN_BOUND, _CONFIGURED
 
@@ -298,18 +304,29 @@ def configure(
         except RuntimeError:
             loop = None
 
-    # re-configure: shut down prior (bounded, no cancel_futures)
+    # re-configure: shut down prior (non-blocking ``shutdown(wait=False)``;
+    # in-flight work completes unawaited; no cancel_futures)
     if _CONFIGURED and _EXECUTOR is not None:
         if _GATE is not None:
+            # Best-effort: a failed prior-gate close must never block
+            # a new configuration.
             try:
                 _GATE.close()
             except Exception:
-                pass
+                logger.warning(
+                    "db_offload: prior gate close failed during re-configure",
+                    exc_info=True,
+                )
         # sync path: non-blocking, never join on the loop thread
         try:
             _EXECUTOR.shutdown(wait=False)
         except Exception:
-            pass
+            # Best-effort: a wedged prior executor must not block a
+            # new configuration either.
+            logger.warning(
+                "db_offload: prior executor shutdown failed during re-configure",
+                exc_info=True,
+            )
         _EXECUTOR = None
         _GATE = None
 
@@ -336,8 +353,9 @@ def configure(
 def _ensure_configured() -> None:
     # D-78 lazy-init form (stated): if unconfigured when offload() is
     # first called, configure() runs with defaults and the loop is
-    # captured from the running loop; a second configure() performs a
-    # bounded drain of the prior executor before replacing it.
+    # captured from the running loop; a second configure() shuts the
+    # prior executor down non-blocking (``shutdown(wait=False)``) —
+    # NO drain wait — before replacing it.
     global _CONFIGURED, _LOOP, _GATE
     if not _CONFIGURED:
         configure()
@@ -354,7 +372,6 @@ def _ensure_configured() -> None:
                 loop=_LOOP,
                 warn_sum=(_WARN_SUM if _WARN_SUM is not None else _MAX_WORKERS + 2),
             )
-
 
 
 def _reentrancy_check() -> None:
@@ -405,6 +422,10 @@ async def offload(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         try:
             loop.call_soon_threadsafe(gate.do_release)
         except RuntimeError:
+            # Loop closed between the is_closed() check and the call
+            # (shutdown race): there is no loop left to deliver the
+            # permit release into. The silent drop is intended here,
+            # not a leak — the seam is being torn down anyway.
             pass
 
     fut.add_done_callback(_release)
@@ -417,12 +438,14 @@ async def offload(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         # double-release: the done-callback is the single release point.
         raise
     except BaseException as exc:  # containment (B2)
-        # The done-callback still releases the permit when the thread
-        # finishes. Surface as defined error? Plan: contain and surface
-        # as defined error path. Re-raise typed? We'll re-raise original
-        # for normal exceptions; contain BaseException.
+        # The done-callback is the single permit-release point: it still
+        # fires when the worker thread finishes, however this await ends.
+        # Callee exceptions propagate verbatim; only KeyboardInterrupt /
+        # SystemExit are contained (B2) and surfaced as DbOffloadError.
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-            raise DbOffloadError("contained BaseException in bridged callable") from exc
+            raise DbOffloadError(
+                f"contained BaseException in bridged callable: {type(exc).__name__}"
+            ) from exc
         raise
     # If the callee raised, wrap_future re-raises it; reach here only on success.
     return result
@@ -454,6 +477,15 @@ async def shutdown() -> None:
                 timeout=_DRAIN_BOUND,
             )
         except (asyncio.TimeoutError, Exception):
+            # Bounded drain missed its deadline (or the join raised):
+            # downgrade to fire-and-forget so lifespan shutdown never
+            # hangs on a stuck worker — remaining in-flight work
+            # finishes unobserved on its thread.
+            logger.warning(
+                "db_offload: drain bound exhausted; falling back to "
+                "fire-and-forget executor shutdown",
+                exc_info=True,
+            )
             try:
                 exec_ref.shutdown(wait=False)
             except Exception:

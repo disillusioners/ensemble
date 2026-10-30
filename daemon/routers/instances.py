@@ -11,8 +11,11 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from daemon.auth.decorators import scope_required
-from daemon.constants import (DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
-                            INSTANCE_LIST_HTTP_INCLUDE_DESCENDANTS_DEFAULT)
+from daemon.constants import (
+    DEFAULT_PAGE_LIMIT,
+    INSTANCE_LIST_HTTP_INCLUDE_DESCENDANTS_DEFAULT,
+    MAX_PAGE_LIMIT,
+)
 from daemon.models import (
     ErrorCodes,
     ErrorResponse,

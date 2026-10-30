@@ -23,11 +23,9 @@ No production code changes. No edits to existing tests/conftest/.agents.
 from __future__ import annotations
 
 import asyncio
-import threading
-from typing import Any
 
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
@@ -39,11 +37,9 @@ import daemon.repositories.job_queue.models  # noqa: F401
 import daemon.repositories.task.models  # noqa: F401
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
-from daemon.repositories.job_queue import _idle_predicate_sql
-from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobQueue
+from daemon.repositories.job_queue.models import AdmissionState, JobItem
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.routers import messages as messages_router_module
-from daemon.routers import queues as queues_router_module
 from daemon.routers.messages import router as messages_router
 from daemon.routers.queues import (
     router as project_queues_router,
@@ -55,7 +51,7 @@ from daemon.services.defer_block_resolver import (
     DeferBlockResolver,
     _classify_stalled_holders,
 )
-from daemon.models.common import ErrorCodes, ErrorResponse
+from daemon.models.common import ErrorCodes
 
 # ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -115,7 +111,8 @@ def client(resolver: DeferBlockResolver) -> TestClient:
 # ─── Seed helpers ────────────────────────────────────────────────────────────
 
 
-def _seed_instance(engine, instance_id, status=InstanceStatus.RUNNING.value):
+def _seed_instance(engine: Engine, instance_id: str,
+                   status: str = InstanceStatus.RUNNING.value) -> None:
     now = "2026-01-01T00:00:00+00:00"
     with Session(engine) as s:
         s.add(Instance(
@@ -132,8 +129,9 @@ def _seed_instance(engine, instance_id, status=InstanceStatus.RUNNING.value):
         s.commit()
 
 
-def _seed_job(engine, instance_id, admission_state=AdmissionState.ACTIVE.value,
-              job_type="task", queue_id=None):
+def _seed_job(engine: Engine, instance_id: str,
+              admission_state: str = AdmissionState.ACTIVE.value,
+              job_type: str = "task", queue_id: str | None = None) -> None:
     with Session(engine) as s:
         job = JobItem(
             job_id=f"job-{instance_id}",

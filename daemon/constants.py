@@ -1761,7 +1761,11 @@ AUTH_KNOWN_SCOPES: tuple[str, ...] = (
 # (daemon/config.py) and are resolved at lifespan configure() time.
 DB_OFFLOAD_MAX_WORKERS_DEFAULT: int = 6  # Binding sizing (D-21)
 DB_OFFLOAD_DRAIN_BOUND_S: int = 10  # Bounded drain (D-53/D-74); <= 2s observed, >=80s margin vs TimeoutStopSec=90
-DB_OFFLOAD_QUEUE_WARN_DEPTH: int = 4  # Secondary queue-depth diagnostic (structurally blind behind the gate)
+# NOTE: currently has NO consumer anywhere (daemon or tests) — the
+# db_offload seam imports only the two knobs above. Kept as a declared
+# knob for a possible future queue-depth diagnostic; candidate for
+# deletion by the lane owner if it stays unconsumed.
+DB_OFFLOAD_QUEUE_WARN_DEPTH: int = 4
 
 # ── Instance list include_descendants defaults (wi-3f5bea95 Phase 2) ──────────
 INSTANCE_LIST_HTTP_INCLUDE_DESCENDANTS_DEFAULT: bool = True

@@ -458,7 +458,8 @@ class SQLModelInstanceRepository:
             ).all()
         result: dict[str, list[str]] = {pid: [] for pid in valid}
         for parent_id, child_id in rows:
-            result.setdefault(parent_id, []).append(child_id)
+            # parent_id is guaranteed in ``valid`` by the WHERE clause.
+            result[parent_id].append(child_id)
         return result
 
     def _enrich_instance(self, db_session: SQLModelSession, instance: Instance | None) -> Instance | None:

@@ -1232,10 +1232,15 @@ class WorkResolverService:
           internal mechanics of that root's job and have **no link
           back to the originating ``job_id``** — surfacing them as
           first-class work units is noise that breaks the "one
-          virtual job per root" mental model. The filter is applied
-          **before** any future pagination/limit so a capped page
-          cannot shrink unpredictably after the slice (reviewer W1
-          in ``docs/plans/virtual-job-tool-completeness.md``).
+          virtual job per root" mental model. JobItem-side, the filter
+          is applied **pre-accumulation** (D-72) — child-bound rows
+          never enter the sortable pool. Task-side it is applied
+          **post-slice**, during conversion (wi-3f5bea95 Phase 3,
+          disclosed): a capped page can shrink below ``limit`` when
+          late-ordered task rows are child-bound (the historical
+          "applied before any pagination/limit" guarantee — reviewer
+          W1 in ``docs/plans/virtual-job-tool-completeness.md`` — now
+          holds on the JobItem side only).
 
           **Note (reviewer S2):** ``process_report`` and
           ``send_report`` Task rows are *parent-bound* — see
@@ -1276,7 +1281,10 @@ class WorkResolverService:
         is a ``datetime``; we normalise both to ``datetime`` via
         :func:`_parse_iso_datetime` so the sort key is uniform.
         Records with an unparseable ``created_at`` sort to the
-        end (treated as ``datetime.min``).
+        end (treated as ``datetime.min``). With ``limit`` set, the
+        merged rows are sorted and sliced BEFORE record conversion
+        (pre-conversion accumulation, D-42/D-30), so conversion cost
+        is bounded by the slice.
 
         Args:
             project_id: Optional project ID filter.
@@ -1299,10 +1307,26 @@ class WorkResolverService:
                 ``False`` returns the union of root + child work
                 (the pre-P-A behaviour, useful as a debug escape
                 hatch).
+            limit: Optional pre-conversion slice (wi-3f5bea95 Phase
+                3): the merged union is sorted newest-first and
+                sliced BEFORE WorkRecord conversion, so an explicit
+                ``limit`` bounds per-row conversion work. ``None``
+                (default) converts every matching row. Post-slice
+                filters (Task-side ``root_only`` / ``project_id``)
+                can shrink the page below ``limit``.
+            ensure_job_ids: Optional set of job_ids appended back
+                after the slice even when they sorted out of the
+                top-N (D-29/D-69 patch-up; reuses the already-fetched
+                batch maps — no additional DB statements, and the
+                returned page can exceed ``limit``). ``None``
+                (default) disables patch-up.
 
         Returns:
             A list of :class:`WorkRecord` ordered by ``created_at``
-            descending (newest first). Empty list if nothing matches.
+            descending (newest first); with ``ensure_job_ids`` set,
+            patch-up records are appended AFTER the sort and may sit
+            out-of-DESC at the tail of the list. Empty list if nothing
+            matches.
         """
         source_statuses: set[str] | None = None
         canonical_statuses: list[str] = []
@@ -1379,6 +1403,16 @@ class WorkResolverService:
             task_instances_by_id, _task_degraded = self._batch_instances(
                 task_instance_ids
             )
+            # ``_task_degraded`` is intentionally unread: on a transient
+            # batch failure the map degrades to (possibly) empty and task
+            # rows simply convert with ``instance=None`` (root_only and
+            # project filters still apply on the record).
+            # Sort-key note (the ``ca =`` line here + both JobItem loops
+            # below): the defensive ``getattr(row, "created_at", None)``
+            # floors a missing attribute to datetime.min (sorts last)
+            # instead of raising — test doubles / legacy rows may lack
+            # the column. The loud hard-AttributeError alternative is
+            # left to the lane owner.
             for task in tasks:
                 instance = (
                     task_instances_by_id.get(task.instance_id)
@@ -1415,16 +1449,13 @@ class WorkResolverService:
                         {j.job_id for j in jobs}
                     )
                 )
-                _patch_jobs = jobs
-                _patch_instances_by_id = instances_by_id
-                _patch_mission_fields_by_id = mission_fields_by_id
-                _patch_task_timing_by_work_id = task_timing_by_work_id
-                _patch_absent_ids = absent_ids
             else:
                 instances_by_id = {}
                 absent_ids = set()
                 mission_fields_by_id = {}
                 task_timing_by_work_id = {}
+            # Both legs converge here: the trailing assignments cover the
+            # empty-jobs case too (patch-up maps stay empty then).
             _patch_jobs = jobs if jobs else None
             _patch_instances_by_id = instances_by_id
             _patch_mission_fields_by_id = mission_fields_by_id

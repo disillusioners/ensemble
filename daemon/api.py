@@ -737,8 +737,7 @@ async def lifespan(app: FastAPI):
             wait_warn_sum=getattr(config.limits, "db_offload_wait_warn_sum", None),
         )
     except Exception as _dbo_exc:
-        import logging as _logging
-        _logging.getLogger(__name__).warning(
+        logger.warning(
             "db_offload configure failed: %s", _dbo_exc
         )
 
@@ -3825,8 +3824,7 @@ async def lifespan(app: FastAPI):
         from daemon.services import db_offload as _db_offload
         await _db_offload.shutdown()
     except Exception as _dbo_exc:
-        import logging as _logging
-        _logging.getLogger(__name__).warning('db_offload shutdown failed: %s', _dbo_exc)
+        logger.warning("db_offload shutdown failed: %s", _dbo_exc)
 
     # Call manager shutdown for graceful shutdown
     await manager.shutdown()

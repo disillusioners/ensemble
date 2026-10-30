@@ -910,6 +910,9 @@ async def list_jobs(
     work_records_by_id: dict[str, Any] = {}
     if jobs:
         status_filter = ",".join(statuses) if statuses else None
+        # Enrichment is only sliced/patch-up-bounded when the client sent
+        # an explicit ``limit`` query param — otherwise the full job page
+        # is enriched unconditionally (D-29/D-69 page-completeness).
         _explicit_limit = "limit" in (request.query_params or {})
         records = await service.list_work(
             project_id=project_id,

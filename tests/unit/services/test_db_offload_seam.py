@@ -1,3 +1,10 @@
+"""Unit pins for the ``daemon.services.db_offload`` seam (wi-3f5bea95 P2).
+
+Covers value/exception propagation, contextvar survival, thread naming,
+gate accounting under cancellation, reentrancy containment, drain
+semantics, FIFO/barging, and the LIMITS_-knob wiring. In-process only —
+no DB, no network.
+"""
 import asyncio
 import threading
 import time
@@ -355,10 +362,8 @@ def test_bounded_capacity_sweep():
         losses = 0
         for _ in range(260):
             # occupy all workers
-            holders = []
             for _ in range(W):
                 await gate.acquire()
-                holders.append(True)
             # park a waiter
             async def waiter_coro():
                 await gate.acquire()

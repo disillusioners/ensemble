@@ -19,11 +19,11 @@ Expected collected node count (fence): see ``test_collected_node_count_fence``.
 
 from __future__ import annotations
 
-import threading
 from datetime import datetime, timezone
-from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool
@@ -35,9 +35,19 @@ import daemon.repositories.task.models  # noqa: F401
 
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
+from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.job_queue.models import AdmissionState, JobItem
+from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.task.repository import TaskRepository
+from daemon.routers.jobs_crud import (
+    get_dead_letter_svc,
+    get_job_queue_service,
+    router as jobs_crud_router,
+)
+from daemon.services.dead_letter_service import DeadLetterService
+from daemon.services.job_lock_manager import JobLockManager
+from daemon.services.job_queue_service import JobQueueService
 from daemon.services.work_resolver import WorkResolverService
 
 
@@ -68,7 +78,8 @@ def resolver(engine: Engine) -> WorkResolverService:
     )
 
 
-def _seed_instance(engine, *, instance_id, status="running", parent_id=None):
+def _seed_instance(engine: Engine, *, instance_id: str, status: str = "running",
+                   parent_id: str | None = None) -> str:
     now = datetime.now(timezone.utc)
     with Session(engine) as s:
         s.add(
@@ -90,8 +101,10 @@ def _seed_instance(engine, *, instance_id, status="running", parent_id=None):
     return instance_id
 
 
-def _seed_job(engine, *, instance_id, admission_state=AdmissionState.ACTIVE.value,
-              terminal_reason=None, job_type="message", job_id=None):
+def _seed_job(engine: Engine, *, instance_id: str,
+              admission_state: str = AdmissionState.ACTIVE.value,
+              terminal_reason: str | None = None, job_type: str = "message",
+              job_id: str | None = None) -> str:
     jid = job_id or f"job-{instance_id}"
     now = datetime.now(timezone.utc).isoformat()
     with Session(engine) as s:
@@ -118,7 +131,7 @@ def _seed_job(engine, *, instance_id, admission_state=AdmissionState.ACTIVE.valu
     return jid
 
 
-def _seed_orphans(engine, n):
+def _seed_orphans(engine: Engine, n: int) -> list[str]:
     """Seed n done JobItems whose instance_id points at a MISSING instance."""
     jids = []
     for i in range(n):
@@ -403,16 +416,13 @@ def test_c_limit_propagation_clamped(engine, resolver):
         conv["n"] += 1
         return orig(*a, **kw)
 
-    resolver2 = resolver
-    import types
     # Simulate clamped limit=100
-    monkeypatch_obj = None
     conv["n"] = 0
-    resolver2._job_to_record = _spy
-    resolver2.list_work(kind="job", limit=100)
+    resolver._job_to_record = _spy
+    resolver.list_work(kind="job", limit=100)
     n100 = conv["n"]
     conv["n"] = 0
-    resolver2.list_work(kind="job", limit=3)
+    resolver.list_work(kind="job", limit=3)
     n3 = conv["n"]
     assert n100 <= 100, f"limit=100 conversion {n100} > 100"
     assert n3 <= 3, f"limit=3 conversion {n3} > 3"
@@ -436,22 +446,6 @@ def test_e_db_disclosure_comment_present():
 
 
 # ─── HTTP-layer node (b): per-job mirror identity at the :951 trigger ────────
-
-
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
-from daemon.routers.jobs_crud import (
-    get_dead_letter_svc,
-    get_job_queue_service,
-    router as jobs_crud_router,
-)
-from daemon.services.dead_letter_service import DeadLetterService
-from daemon.services.job_queue_service import JobQueueService
-from daemon.repositories.job_queue.lock_repository import LockRepository
-from daemon.repositories.job_queue.queue_repository import JobQueueRepository
-from daemon.repositories.job_queue.repository import JobRepository
-from daemon.services.job_lock_manager import JobLockManager
 
 
 @pytest.fixture
@@ -498,7 +492,7 @@ def http_client(http_engine):
     return TestClient(app)
 
 
-def _seed_http_page(engine, n_healthy=3, n_orphan=2):
+def _seed_http_page(engine: Engine, n_healthy: int = 3, n_orphan: int = 2) -> list[str]:
     from sqlmodel import Session
     import datetime as _dt
     now = _dt.datetime.now(_dt.timezone.utc)
@@ -562,9 +556,6 @@ def test_b_per_job_mirror_identity_http(http_client):
     base_resp = http_client.get("/api/jobs")
     assert base_resp.status_code == 200, base_resp.text
     base_jobs = base_resp.json().get('jobs', [])
-    # proxy for work_record presence: mission_id is not None when the
-    # resolver backed the row (work_record is not None). When
-    # work_record is None, mission_id is None (route code).
     # proxy for work_record presence: mission_liveness is populated ONLY
     # when the resolver backed the row (work_record is not None).
     #
@@ -586,15 +577,11 @@ def test_b_per_job_mirror_identity_http(http_client):
     # proxy; mission_liveness is equivalent and is asserted here.
     # BASE-PINNED: code-reading of jobs_crud.py:297-330 + resolver
     # `_job_to_record`; no committed measurement. Healthy jobs carry a
-    # non-None mission_liveness at BASE (resolver-backed, instance present);
-    # orphans carry None (instance missing -> work_record absent).
+    # non-None mission_liveness at BASE (resolver-backed, instance
+    # present); orphans are enriched via the instance_absent path but
+    # mission_liveness stays None (instance missing) -- that is their
+    # BASE identity, recorded here.
     base_identity = {j["job_id"]: (j.get("mission_liveness") is not None) for j in base_jobs}
-    # BASE-PINNED: code-reading of jobs_crud.py:297-330 + resolver
-    # `_job_to_record`; no committed measurement. Every healthy job has
-    # work_record present at BASE (no limit -> all rows enriched). Orphans
-    # are also enriched via the instance_absent path but mission_liveness
-    # stays None because the instance is missing -- that is their BASE
-    # identity, recorded here.
 
     # Limited page (explicit limit) — per-job identity set.
     limit_resp = http_client.get("/api/jobs?limit=2")

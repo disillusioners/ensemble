@@ -5108,7 +5108,9 @@ class InstanceLifecycleService:
         # record (NOT the ``instance_hierarchy`` working set, whose rows are
         # deleted when a child completes — that would orphan completed
         # children from their parent's tree in the UI). See
-        # ``InstanceRepository.list_child_ids_permanent``.
+        # ``InstanceRepository.list_child_ids_for_parents`` (the batched
+        # form; ``list_child_ids_permanent`` survives for single-id
+        # consumers).
         # wi-3f5bea95 Phase 2: batch the children lookup so the list path
         # issues ONE statement instead of one per row.
         instance_ids = [inst.instance_id for inst in instances]

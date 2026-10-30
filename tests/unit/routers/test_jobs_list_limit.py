@@ -11,7 +11,6 @@ import daemon.repositories.instance.models  # noqa: F401
 import daemon.repositories.job_queue.models  # noqa: F401
 
 from daemon.repositories.job_queue.lock_repository import LockRepository
-from daemon.repositories.job_queue.models import AdmissionState, JobItem
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.routers.jobs_crud import (

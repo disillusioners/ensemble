@@ -6,6 +6,8 @@ order is pinned at the DB, not in Python.
 """
 
 from __future__ import annotations
+
+import os
 import re as _re
 
 import pytest
@@ -23,7 +25,7 @@ def repo():
     return SQLModelInstanceRepository(engine)
 
 
-def _inst(instance_id, parent_id=None):
+def _inst(instance_id: str, parent_id: str | None = None) -> Instance:
     return Instance(instance_id=instance_id, parent_id=parent_id, agent_id="a", agent_dir="/tmp")
 
 
@@ -83,20 +85,6 @@ def test_static_sql_order_by_clause(repo):
 # byte-diff gate (gate_g5) which would catch a dropped child.
 # ---------------------------------------------------------------------------
 
-
-
-# ── MULTiset DISCLOSURE (opportunistic item, cycle 3) ─────────────────────
-# A "set() on collected ids" mutant cannot be exercised against the real schema
-# because instance_id is a PRIMARY KEY: a genuine duplicated (parent_id,
-# child_id) pair is unreachable, so no test can construct the duplicate that
-# would make a set()-dedup implementation RED. Coverage intent is carried by:
-#   - test_static_sql_order_by_clause (SQL-level ordering, not Python-side sort)
-#   - test_positive_order_assertion (exact pinned order)
-#   - test_all_rows_carry_children (every returned row carries its own children)
-# The mutant class "group with a set instead of an append loop" remains
-# uncovered at the unit level; it is covered indirectly by the integration
-# byte-diff gate (gate_g5) which would catch a dropped child.
-# ─────────────────────────────────────────────────────────────────────────────
 (c) static SQL ORDER BY clause with DIRECTION on emitted statement."""
     from sqlalchemy import event
 
@@ -163,9 +151,7 @@ def test_detail_shares_source(repo):
         s.commit()
 
     # :5115 shape — multi-parent batch (the list path)
-    batch_shape = repo.list_child_ids_for_parents(
-        [inst.instance_id for inst in []] or ["p1", "p2"]
-    )
+    batch_shape = repo.list_child_ids_for_parents(["p1", "p2"])
     # :5145 shape — single-parent (the detail path)
     detail_shape = repo.list_child_ids_for_parents(["p1"])
 
@@ -176,8 +162,6 @@ def test_detail_shares_source(repo):
         assert _re.search(r"ORDER\s+BY.*parent_id\s+ASC\s*,\s*.*instance_id\s+ASC",
                           st, _re.IGNORECASE | _re.DOTALL), st
 
-
-import os
 
 EXPECTED_NODE_NAMES = frozenset({
     "test_sql_order_by_pin",

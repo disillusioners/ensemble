@@ -648,7 +648,8 @@ async def get_defer_blocked(
         count, and the enumerated holders (paused > stalled > live,
         each ascending by instance_id).
     """
-    # Sync resolver call inside the async handler. NOT a "two fast
+    # Before wi-3f5bea95 this was a sync resolver call inside the async
+    # handler (now off-loaded below). It was NOT a "two fast
     # SELECTs, no event-loop-relevant latency" path — the measured
     # truth (architecture-delta.md §③ Δ7; the plan's §8.5 dominant
     # dwell-multiplier classification): the resolve path is

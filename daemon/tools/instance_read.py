@@ -77,10 +77,10 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from ..chunking import chunked
+from ..constants import INSTANCE_LIST_INTERNAL_INCLUDE_DESCENDANTS_DEFAULT
 from ..repositories.instance.models import InstanceStatus
 from ..services.work_status import _STATUS_CANONICAL_MAP
 from ._tool_registry import register_tool_category
-from daemon.constants import INSTANCE_LIST_INTERNAL_INCLUDE_DESCENDANTS_DEFAULT
 
 logger = logging.getLogger(__name__)
 
