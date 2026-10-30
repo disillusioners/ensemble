@@ -11,7 +11,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from daemon.auth.decorators import scope_required
-from daemon.constants import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT
+from daemon.constants import (DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
+                            INSTANCE_LIST_HTTP_INCLUDE_DESCENDANTS_DEFAULT)
 from daemon.models import (
     ErrorCodes,
     ErrorResponse,
@@ -394,7 +395,7 @@ async def list_instances(
     # is REJECTED (widens the expensive path for every internal caller).
     # Both internal call sites pass include_descendants explicitly (False).
     include_descendants: bool = Query(
-        True,
+        INSTANCE_LIST_HTTP_INCLUDE_DESCENDANTS_DEFAULT,
         description=(
             "When True (default — back-compat for every existing consumer), "
             "paginate by root and BFS-load all descendants of each root in "

@@ -280,10 +280,10 @@ def test_barging_repro_fifo():
         w2 = asyncio.create_task(gate.acquire())
         await asyncio.sleep(0.1)
         assert gate.waiters == 2
+        # create the fresh acquirer BEFORE do_release so the pre-fix path REDs
+        fresh = asyncio.create_task(gate.acquire())
         # release one permit (transfer) — should wake w1, NOT admit a fresh acquirer
         gate.do_release()
-        # in the SAME tick, submit a fresh acquirer
-        fresh = asyncio.create_task(gate.acquire())
         await asyncio.sleep(0)
         # w1 must be admitted (never rejected)
         await w1

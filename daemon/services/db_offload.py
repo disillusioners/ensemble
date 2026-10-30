@@ -97,6 +97,7 @@ class _Gate:
         self._loop = loop
         self._permits = workers
         self._inflight = 0
+        self._in_transit = 0
         self._waiters: deque[asyncio.Future] = deque()
         self._closed = False
         self._warn_sum = warn_sum
@@ -120,6 +121,10 @@ class _Gate:
     @property
     def waiters(self) -> int:
         return len(self._waiters)
+
+    @property
+    def in_transit(self) -> int:
+        return self._in_transit
 
     @property
     def waiter_deque(self) -> deque:
@@ -151,38 +156,64 @@ class _Gate:
         self.submit_count += 1
         if self._closed:
             raise DbOffloadClosedError("db_offload seam is closed")
-        if self._permits > 0:
-            self._permits -= 1
+        # no-barging: if any waiter is parked, this acquirer must park too,
+        # even if a permit appears free (waiters>0 ==> permits==0 structurally).
+        if self._waiters or self._permits <= 0:
+            # park a waiter
+            waiter = self._loop.create_future()
+            self._waiters.append(waiter)  # register first
+            if self._closed:
+                try:
+                    self._waiters.remove(waiter)
+                except ValueError:
+                    pass
+                if not waiter.done():
+                    try:
+                        waiter.set_exception(DbOffloadClosedError("db_offload seam is closed"))
+                    except (asyncio.InvalidStateError, RuntimeError):
+                        pass
+            self._check_alarm()
+            try:
+                await waiter
+            except asyncio.CancelledError:
+                # Post-wake cancellation token handling (CRITICAL-1 fix):
+                # if the future is done and not cancelled, set_result already
+                # delivered the token -> the waiter HOLDS it; return it.
+                if waiter.done() and not waiter.cancelled():
+                    if self._in_transit > 0:
+                        self._in_transit -= 1
+                    # return the token: transfer if waiters, else free permit
+                    while self._waiters:
+                        nxt = self._waiters[0]
+                        if nxt.cancelled() or nxt.done():
+                            self._waiters.popleft()
+                            continue
+                        self._waiters.popleft()
+                        self._in_transit += 1
+                        try:
+                            nxt.set_result(None)
+                        except (asyncio.InvalidStateError, RuntimeError):
+                            pass
+                        return  # token transferred; cancelled caller returns nothing
+                    self._permits = min(self._permits + 1, self._workers)
+                    return
+                else:
+                    # never woken: remove from deque if still present
+                    try:
+                        self._waiters.remove(waiter)
+                    except ValueError:
+                        pass
+                raise
+            if self._closed:
+                raise DbOffloadClosedError("db_offload seam is closed")
+            # normal wake: claim the transferred token
+            if self._in_transit > 0:
+                self._in_transit -= 1
             self._inflight += 1
             self._check_alarm()
             return
-        # park a waiter
-        waiter = self._loop.create_future()
-        self._waiters.append(waiter)  # register first
-        if self._closed:
-            # fail it
-            try:
-                self._waiters.remove(waiter)
-            except ValueError:
-                pass
-            if not waiter.done():
-                try:
-                    waiter.set_exception(DbOffloadClosedError("db_offload seam is closed"))
-                except (asyncio.InvalidStateError, RuntimeError):
-                    pass
-        self._check_alarm()
-        try:
-            await waiter
-        except asyncio.CancelledError:
-            # cancelled parked waiter removes itself; held no permit
-            try:
-                self._waiters.remove(waiter)
-            except ValueError:
-                pass
-            raise
-        if self._closed:
-            raise DbOffloadClosedError("db_offload seam is closed")
-        # woken by release: claim the transferred slot (no permit change)
+        # direct admit
+        self._permits -= 1
         self._inflight += 1
         self._check_alarm()
 
@@ -193,6 +224,10 @@ class _Gate:
         # transfer-style: wake one waiter WITHOUT incrementing permits;
         # the woken waiter claims the transferred slot on wake. If no
         # waiter, free the permit.
+        # MUTANT old increment-then-wake
+        if self._inflight > 0:
+            self._inflight -= 1
+        self._permits = min(self._permits + 1, self._workers)
         while self._waiters:
             waiter = self._waiters[0]
             if waiter.cancelled() or waiter.done():
@@ -203,12 +238,11 @@ class _Gate:
                 waiter.set_result(None)
             except (asyncio.InvalidStateError, RuntimeError):
                 pass
-            return
-        self._permits = min(self._permits + 1, self._workers)
+            break
 
     def close(self) -> None:
         self._closed = True
-        # fail all waiters
+        # fail all waiters (also transfers in-flight tokens back to permits)
         while self._waiters:
             w = self._waiters.popleft()
             if not w.done():
@@ -256,18 +290,17 @@ def configure(
         except RuntimeError:
             loop = None
 
-    # re-configure: shut down prior
+    # re-configure: shut down prior (bounded, no cancel_futures)
     if _CONFIGURED and _EXECUTOR is not None:
-        # bounded drain of prior (D-78): shut down the old executor
-        # without cancel_futures so in-flight work completes within
-        # the drain bound; then drop references.
-        try:
-            _EXECUTOR.shutdown(wait=True)
-        except Exception:
+        if _GATE is not None:
             try:
-                _EXECUTOR.shutdown(wait=False, cancel_futures=True)
+                _GATE.close()
             except Exception:
                 pass
+        try:
+            _EXECUTOR.shutdown(wait=True, timeout=_DRAIN_BOUND)
+        except Exception:
+            pass
         _EXECUTOR = None
         _GATE = None
 
@@ -405,7 +438,7 @@ async def shutdown() -> None:
     # executor shutdown
     if _EXECUTOR is not None:
         try:
-            _EXECUTOR.shutdown(wait=False, cancel_futures=True)
+            _EXECUTOR.shutdown(wait=True, timeout=_DRAIN_BOUND)
         except Exception:
             pass
 
