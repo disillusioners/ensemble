@@ -12,7 +12,7 @@
         }
     ],
     "blueprint_inactive": true,
-    "skill_injection": true,
+    "skill_injection": false,
     "tools": {
         "allow": [
             "blueprint",
