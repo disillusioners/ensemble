@@ -217,7 +217,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Size rationale (~13990 lines): the InstanceManager facade is the
+# Size rationale (~15317 lines, refreshed 2026-10-30 — the previous
+# ~13990 count had drifted): the InstanceManager facade is the
 # daemon's single coordination point by design — lifecycle, repositories,
 # message/job queues, source adapters, tool construction, and the
 # deferred-execution + provenance seams. It is a DEFERRED-DECOMPOSITION
@@ -5520,6 +5521,14 @@ class InstanceManager:
                     "bash", str(scripts_dir / "promote.sh"), env,
                     "--version", str(spec.get("target", "")),
                 ]
+                # T6.6/D6-5 (promote-preflight-hang phase 6): EVERY promote
+                # arm carries the mixed-generation watchdog token — the
+                # explicit-extra merge (per-call-site, never ambient) sets
+                # it here; the allowlist entry in upgrade_journal is the
+                # belt. promote.sh refuses loudly when the token is present
+                # but the phase-2 preflight watchdog is not armed in its
+                # scripts tree (new daemon + half-synced scripts).
+                extra_env["ENSEMBLE_PROMOTE_WATCHDOG"] = "1"
                 # v0.15.3 P1 Item 1 (user ratification 2026-09-26): a
                 # 3-factor-verified live arm carries its F2 attestation to
                 # the gate. Explicit gate — the UNVERIFIED path below is
@@ -5565,6 +5574,21 @@ class InstanceManager:
                 self._journal_executor_orphaned(install_dir, kind, run_id)
                 return False
 
+            # D2-8/D2-9 (promote-preflight-hang phase 2): the promote
+            # executor unit carries the L3 outer bound, DERIVED at arm
+            # time (max(1200, PROMOTE_TOTAL_DEADLINE_S + SOAK_S + 120) —
+            # 1320 s at the defaults), strictly above the shell's own
+            # 900 s ceremony deadline so systemd fires only when the
+            # shell's deadline machinery itself is wedged. KIND-SCOPED:
+            # restart arms carry NO RuntimeMaxSec (a shared bound would
+            # kill a legitimate restart ceremony with the promote's
+            # budget — the restart path is excluded from the watchdog by
+            # commission ruling).
+            _promote_unit_props: list[str] | None = None
+            if kind != "restart":
+                _promote_unit_props = [
+                    f"RuntimeMaxSec={_uj.derived_runtime_max_sec()}"
+                ]
             child_pid, _spawn_mode_note = _uj.spawn_executor(
                 argv, install_dir, extra_env, run_id=run_id,
                 # agent-restart §3.3 (V-7 / A-5): transient unit names are
@@ -5577,6 +5601,7 @@ class InstanceManager:
                     if kind == "restart"
                     else _uj.UNIT_NAME_PREFIX
                 ),
+                unit_properties=_promote_unit_props,
             )
             # Option D (Stage-2.2a): log the ACTUAL spawn mode — the
             # transient-service unit name when the service branch fired,

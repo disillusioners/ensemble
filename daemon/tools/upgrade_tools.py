@@ -59,7 +59,13 @@ refactor pass (decisions.md "P2.3 Gate Rulings & Fences" item 2); do not
 grow it further without pulling that fence.
 """
 
-# Size rationale (~3931 lines): the upgrade tool surface — the read pair
+# Size rationale (~4160 lines, refreshed 2026-10-30 — was ~3931): +230 for
+# the phase-6 scripts-dir provenance guard (arm-time floor/stamp ancestry,
+# the W-1/W-2/W-3 verdict branches, the M5 `ScriptsProvenanceVerdict`
+# Literal and the M7 delegating per-run-log resolver), appended at the END
+# with a load-bearing POSITION constraint (the guard must precede
+# `consume_pending_action`; see the phase-6 block). The upgrade tool
+# surface — the read pair
 # (release_info / upgrade_status incl. the §6.3 restart-audit ledger),
 # the actor pair (system_restart / system_upgrade), the upgrade 3-factor
 # gate, and the agent-restart block (restart-provenance reader + rails +
@@ -75,6 +81,7 @@ grow it further without pulling that fence.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -938,16 +945,43 @@ def _launcher_state(install_dir: Path | None) -> str:
     return f"launcher: {rendered}"
 
 
-def _upgrade_log_tail(install_dir: Path | None, lines: int = _UPGRADE_LOG_TAIL_LINES) -> str:
-    """Bounded tail of ``<install_dir>/data/upgrade.log`` (D8/§7 observability).
+def _resolve_per_run_log(install_dir: Path | None, run_id: str | None) -> Path | None:
+    """D3-12/D3-5 (phase 3): resolve a run's per-run NARRATIVE file by its
+    run_id — the pointer line in ``data/upgrade.log`` names it, and the
+    journal's ``run_log`` row is the durable record. Resolution is BY
+    run_id (never "the last pointer line": a stale pointer would resolve
+    to the wrong file after a newer run). A glob over the env-scoped
+    ``data/upgrade/<env>/`` dirs is exact because run_ids are unique and
+    file-name shaped. Returns None when the file is absent (evicted by
+    retention or a pre-D3 run) — callers fall back to the aggregate."""
+    # M7 (tidier, 2026-10-30): DELEGATES to the owning module
+    # (`upgrade_journal.per_run_narrative_path` — same module that owns the
+    # writer and the env-scope table), which also carries the run_id
+    # validation this copy had and the sweep's copy lacked.
+    if install_dir is None:
+        return None
+    return uj.per_run_narrative_path(install_dir, run_id)
+
+
+def _upgrade_log_tail(
+    install_dir: Path | None,
+    lines: int = _UPGRADE_LOG_TAIL_LINES,
+    run_id: str | None = None,
+) -> str:
+    """Bounded tail of the executor log (D8/§7 observability).
 
     The daemonized executor's log (P2.2 write-side, Dispatch B) — read here
     when present so progress lines are observable the moment it exists.
-    Bounded: at most the last 256KB is read, then the last ``lines`` lines.
+    D3-12: when ``run_id`` resolves a per-run narrative file, THAT is
+    read (the aggregate is pointer-only after D3-12); otherwise the
+    aggregate ``data/upgrade.log`` (unchanged behaviour for callers that
+    pass no run_id). Bounded: at most the last 256KB is read, then the
+    last ``lines`` lines.
     """
     if install_dir is None:
         return "upgrade.log: none (no install dir)"
-    lp = install_dir / _UPGRADE_LOG_REL
+    per_run = _resolve_per_run_log(install_dir, run_id)
+    lp = per_run or (install_dir / _UPGRADE_LOG_REL)
     try:
         if not lp.is_file():
             return f"upgrade.log: none at {lp} (no daemonized run has logged yet)"
@@ -1338,7 +1372,6 @@ def _capture_user_message_id(
         manager, instance_id, "message_id", "root_message_id"
     )
     return msg_id if isinstance(msg_id, str) and msg_id else None
-
 
 
 def _restart_cooldown_state(journal: dict[str, Any] | None) -> tuple[bool, str]:
@@ -2011,7 +2044,6 @@ def _live_gate_summary(label: str, factor_failures: list[str]) -> str:
         factor_failures[0],
         "; ".join(factor_failures) if factor_failures else "3-factor gate failed",
     )
-
 
 
 def create_upgrade_tools(
@@ -3666,6 +3698,76 @@ never decides go/rollback).
                             f"case for {flag} — the flag would hit the "
                             "unknown-flag trap (exit 78); nonce NOT burned",
                         )
+            # ── Check 4 — phase6 (T6.5/T6.9/T6.10): scripts-dir provenance ──
+            # The Q1 HYBRID floor, acquired at ARM time from the FILE
+            # (<scripts_dir>/lib.sh, bounded first-N-KB read — B3) and
+            # judged HERE, BEFORE consume_pending_action below, so a
+            # refusal NEVER burns the nonce (D6-4's sequencing clause —
+            # otherwise the guard would consume the very ceremony it
+            # protects, R-G). The refusal applies EXCLUSIVELY to an
+            # explicitly pinned ENSEMBLE_UPGRADE_SCRIPTS_DIR (a deliberate
+            # operator choice); a fallback resolution (module-repo /
+            # install_dir/scripts) only ever WARNS (§4.2 — backward
+            # compatibility). Journal-always provenance (D6-3/SC14/W5):
+            # the arm row carries scripts_dir + the lib.sh digest + the
+            # git revision + the local-edit state, on EVERY arm — pass,
+            # warn, or refusal — so the ceremony's audit trail names the
+            # exact tree that ran.
+            prov_verdict: ScriptsProvenanceVerdict
+            prov_detail: str
+            prov_verdict, prov_detail = scripts_dir_provenance_verdict(
+                scripts_dir,
+                floor_commit=(PIPELINE_SCRIPTS_FLOOR_COMMIT or None),
+                env=os.environ,
+            )
+            if prov_verdict == "refuse" and not os.environ.get(
+                "ENSEMBLE_UPGRADE_SCRIPTS_DIR", ""
+            ).strip():
+                prov_verdict = "warn"
+                prov_detail = (
+                    "fallback-dir (no explicit ENSEMBLE_UPGRADE_SCRIPTS_DIR "
+                    "pin — refusal downgraded to WARNING, §4.2): "
+                    f"{prov_detail}"
+                )
+            try:
+                uj.journal_history_append(
+                    install_dir,
+                    "arm-scripts-provenance",
+                    f"verdict={prov_verdict} {prov_detail}",
+                )
+            except uj.JournalTorn:
+                # virgin install (no nonce flow journaled yet): init the
+                # skeleton ONCE and retry — the row is journal-always.
+                try:
+                    uj.journal_init(install_dir)
+                    uj.journal_history_append(
+                        install_dir,
+                        "arm-scripts-provenance",
+                        f"verdict={prov_verdict} {prov_detail}",
+                    )
+                except (uj.JournalTorn, OSError):
+                    logger.warning(
+                        "arm-scripts-provenance row lost (journal "
+                        "unavailable) — verdict=%s detail=%s",
+                        prov_verdict,
+                        prov_detail,
+                    )
+            except OSError as exc:
+                logger.warning(
+                    "arm-scripts-provenance row failed (%s: %s) — "
+                    "verdict=%s",
+                    type(exc).__name__,
+                    exc,
+                    prov_verdict,
+                )
+            if prov_verdict == "refuse":
+                journal_lock_release(install_dir)
+                return _refusal(
+                    label,
+                    "stale-scripts-dir",
+                    f"arm preflight: {prov_detail} — nonce NOT burned "
+                    "(the arm simply did not happen; nothing consumed)",
+                )
             try:
                 if confirmed_action is not None:
                     uj.consume_pending_action(
@@ -3721,6 +3823,7 @@ never decides go/rollback).
                     "executes: after this turn completes (deferred — daemonized promote.sh)",
                     f"post-restart: the arm is recorded (run_id=\"{run_id}\"); on daemon restart an auto-wake will be delivered to this instance to report the outcome — no user action required; kill-switch: ENSEMBLE_POST_RESTART_ARM_NOTIFY=0 in <install_dir>/.env",
                     f"journal: releases/state.json txn opened (started_at={op.armed_at}, owner=exec-pending)",
+                    f"scripts provenance: verdict={prov_verdict} ({prov_detail})",
                     (
                         f"live-confirmation: nonce consumed (confirmed_source={confirmed_source})"
                         if confirmed_action is not None
@@ -3798,3 +3901,261 @@ go/rollback).
 """
 
     return [release_info, upgrade_status, system_restart, system_upgrade]
+
+
+# ═══════ Phase 6 (promote-preflight-hang): scripts-dir provenance guard ═══════
+#
+# POSITION IS LOAD-BEARING: this block lives at the END of the module,
+# BELOW the system_upgrade arm path. Pack I's C5 pin (the no-nonce-burn
+# sequencing check) locates the guard by searching for the seam's call
+# expression BEFORE the first ``consume_pending_action(`` occurrence in
+# this file — if these ``def`` lines sat above the arm path, the pin would
+# match a definition instead of the call site and be vacuous. Relocate
+# only downwards.
+
+PIPELINE_SCRIPTS_FLOOR_COMMIT = ""
+"""The Q1 floor (D6-10, leader ruling FINAL): the commit that introduced
+the preflight-hang fix, compared against a pinned scripts dir's HEAD by
+git ancestry at arm time.
+
+OWNER: this lane's release process (D-F7/T6.15) — the value does not
+exist until the lane merges, so the MECHANISM ships here and the VALUE is
+written by the release bump, at the same cadence as the
+``PIPELINE_SCRIPTS_REV`` stamp in scripts/upgrade/lib.sh (D6-8 — the two
+travel together). stage.sh FAILS THE RELEASE when this constant is unset,
+unresolvable, or not an ancestor of the built tree (T6.15/AC15), so an
+empty value never ships in a correctly-made release; the arm-time guard
+below treats an unset floor as the fail-closed command-error class
+(refuse on an explicitly pinned dir — the loud backstop that makes a
+mis-made release detectable at the ceremony; WARNING-only on a fallback
+dir). The daemon constant and the release manifest must carry the SAME
+value."""
+
+# B3: the stamp acquisition window — a bounded first-N-KB read of
+# <scripts_dir>/lib.sh (the stamp sits in the header block, well inside).
+PIPELINE_SCRIPTS_STAMP_WINDOW_BYTES = 64 * 1024
+
+# The refuse detail names the sync command (T6.5/AC5): git ancestry is the
+# predicate, so the remedy is a fetch + checkout to a floor-descendant
+# (W4: ">= this rev" is meaningless for unordered SHAs).
+_SYNC_REMEDY = (
+    "Remedy: sync the pinned scripts dir (git fetch origin && git checkout "
+    "<a-floor-descendant>, scoped to scripts/ — the W4 ancestry predicate), "
+    "or move the ENSEMBLE_UPGRADE_SCRIPTS_DIR pin; see the runbook section "
+    "'ceremony scripts provenance'"
+)
+
+_STAMP_RE = re.compile(
+    r'(?m)^PIPELINE_SCRIPTS_REV="?([0-9A-Za-z._/-]+)"?[ \t]*$'
+)
+
+# M5 (tidier, 2026-10-30): the verdict is a CLOSED vocabulary. It used to be
+# a bare ``str`` compared by equality — a typo ("refused") compiled, reviewed
+# clean and silently took the ARM branch, i.e. the fail-closed guard degraded
+# to fail-open exactly where a ceremony starts. ``Literal`` makes the typo a
+# type error and keeps the three verdicts greppable.
+ScriptsProvenanceVerdict = Literal["arm", "warn", "refuse"]
+
+
+def _pipeline_stamp_and_sha(scripts_dir: Path) -> tuple[str | None, str]:
+    """``(stamp, lib.sh digest)`` — the B3 acquisition.
+
+    The stamp is parsed from a bounded first-N-KB read of
+    ``<scripts_dir>/lib.sh``; the digest covers the FULL file (which bytes
+    will actually run — a tree can change under a path; linear cost)."""
+    lib = scripts_dir / "lib.sh"
+    h = hashlib.sha256()
+    try:
+        with lib.open("rb") as fh:
+            head = fh.read(PIPELINE_SCRIPTS_STAMP_WINDOW_BYTES)
+            h.update(head)
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError as exc:
+        return None, f"<unreadable:{type(exc).__name__}>"
+    m = _STAMP_RE.search(head.decode("utf-8", errors="replace"))
+    return (m.group(1) if m else None), h.hexdigest()
+
+
+
+def scripts_dir_provenance_verdict(
+    scripts_dir: Path | str,
+    floor_commit: str | None = None,
+    env: dict[str, str] | None = None,
+) -> tuple[ScriptsProvenanceVerdict, str]:
+    """Arm-time scripts-dir provenance verdict — phase6 §4.2 (T6.5/T6.9/
+    T6.10/T6.11).
+
+    Returns ``(verdict, detail)`` with verdict in ``{"arm", "warn",
+    "refuse"}``:
+
+    * explicit-pin refusal semantics are the CALLER's carve-out — this
+      function judges the DIR; ``system_upgrade`` downgrades a refusal to
+      a warning when the dir was NOT resolved via an explicit
+      ``ENSEMBLE_UPGRADE_SCRIPTS_DIR`` pin (fallback dirs only ever warn);
+    * git dir: the stamp MUST parse from ``<dir>/lib.sh`` (B3 — the file
+      is the input, never the executor echo); the floor comparison is GIT
+      ANCESTRY (``git -C <dir> merge-base --is-ancestor <floor> HEAD``) —
+      pass iff ancestor; a missing/unknown floor object or command error
+      REFUSES (a tree that does not contain the fix commit object cannot
+      contain the fix; D6-10). An unset floor refuses fail-closed on this
+      branch. A checkout carrying local edits still ARMS (the state rides
+      the detail as a journaled WARNING, never a refusal);
+    * non-git dir: WARNING-ONLY (Q2/D6-11) — a stamp arms, no stamp
+      warns; NO refusal is reachable from that branch (AC11);
+    * a probe that cannot RUN at all (git absent/unusable, 30 s bound) is
+      the W-1 class: a git-SHAPED dir refuses (D6-10 command-error — the
+      ancestry is unverifiable), a non-git dir warns. It is never an
+      exception, and never an "arm" on a claim that could not be checked;
+    * ``ENSEMBLE_ALLOW_STALE_SCRIPTS=1`` (per-invocation only, never
+      persisted — T6.12) bypasses the check with a loud warn verdict.
+
+    The detail line always carries the full provenance (path, lib.sh
+    digest, stamp, and — on a git dir — the revision + local-edit state)
+    so the journal-always arm row (SC14/W5) is constructible from it.
+    """
+    e = os.environ if env is None else env
+    path = Path(scripts_dir)
+    if not path.is_dir() or not (path / "lib.sh").is_file():
+        return (
+            "refuse",
+            f"scripts-dir-unusable: {path} does not contain a lib.sh — not "
+            f"a pipeline scripts tree; {_SYNC_REMEDY}",
+        )
+    stamp, lib_sha = _pipeline_stamp_and_sha(path)
+    provenance = (
+        f"scripts_dir={path} lib.sh_sha256={lib_sha} "
+        f"stamp={stamp or 'absent'}"
+    )
+    if str(e.get("ENSEMBLE_ALLOW_STALE_SCRIPTS", "")).strip() == "1":
+        return (
+            "warn",
+            "stale-scripts-allowed: ENSEMBLE_ALLOW_STALE_SCRIPTS=1 "
+            "(per-invocation only — never persisted to .env, T6.12) "
+            f"bypasses the provenance check; {provenance} "
+            f"floor={floor_commit or '<unset>'}",
+        )
+
+    rev_rc, rev_out, rev_err = uj.bounded_git_probe(
+        path, "rev-parse", "--verify", "HEAD"
+    )
+    if rev_rc != 0 and rev_rc != uj.GIT_PROBE_ERROR_RC and (path / ".git").exists():
+        # W2 (code council 2026-10-30): git ANSWERS 128 (not the 255 probe
+        # sentinel) for "not a git repository" — and for dubious ownership
+        # (`safe.directory`), a corrupt/unreadable `.git`, and a gitfile
+        # whose worktree metadata was pruned. Those are COMMAND-ERROR cases on
+        # a GIT-SHAPED dir: the ancestry is unverifiable, so the dir must
+        # REFUSE (D6-10) exactly like the 255 band. Before this arm the case
+        # fell through to the non-git branch, where a self-asserted stamp
+        # ARMED — FAIL-OPEN on the very gate that must stop a stale scripts
+        # dir, since a stamp cannot prove ancestry.
+        return (
+            "refuse",
+            f"git-probe-failed (git-shaped dir): git rev-parse rc={rev_rc} "
+            f"({(rev_err or rev_out).strip() or 'no detail'}) — ancestry is "
+            f"UNVERIFIABLE on a dir that IS git-shaped (dubious ownership, "
+            f"corrupt/pruned .git, or a broken gitfile); {provenance} "
+            f"floor={floor_commit or '<unset>'}; {_SYNC_REMEDY}",
+        )
+    if rev_rc == uj.GIT_PROBE_ERROR_RC:
+        # W-1 (verifier 2026-10-30): the PROBE ITSELF failed — git is absent
+        # or unusable, or the 30 s bound tripped. This is NOT the "not a git
+        # dir" observation (git answers 128 for that), so it must never be
+        # silently folded into the non-git branch, where a stamped dir would
+        # ARM on an unverified ancestry. Two classes:
+        #   * git-SHAPED dir (``.git`` present): the D6-10 command-error class
+        #     — ancestry is unverifiable, so REFUSE (an explicitly pinned dir
+        #     is judged, the caller's fallback carve-out still downgrades);
+        #   * non-git dir: Q2/D6-11 — the stamp IS the provenance, so the
+        #     ordinary stamp/no-stamp WARN applies (never a new refusal class,
+        #     and never an "arm" on a claim we could not check).
+        probe_detail = (
+            "git-probe-error: the git probe could not run "
+            f"({rev_err.strip() or 'no detail'}) — ancestry is UNVERIFIABLE; "
+            f"{provenance} floor={floor_commit or '<unset>'}"
+        )
+        if (path / ".git").exists():
+            return (
+                "refuse",
+                f"git-probe-error (git-shaped dir): {probe_detail}; "
+                f"{_SYNC_REMEDY}",
+            )
+        return ("warn", f"git-probe-error (non-git dir): {probe_detail}")
+    if rev_rc == 0:
+        rev = rev_out.strip()
+        # A3 (code council, 2026-10-30): the local-edit state is an AUDIT
+        # ARTEFACT, never a gate input — so probe it with the cheapest
+        # predicate that still answers the question the row asks ("are there
+        # uncommitted changes to TRACKED content?"). `git status --porcelain`
+        # was ~90 % of the measured probe cost (0.08-0.11 s vs 0.00 s for
+        # rev-parse) because it stats and formats the whole tree and scans
+        # untracked paths. `diff-index --quiet HEAD --` is one fork, stops at
+        # the first difference, and ignores untracked files entirely.
+        # Conservative reading preserved: rc 0 => clean, ANY other rc
+        # (1 = differences, 128/255 = unknown/error) => report dirty — never
+        # claim a clean tree we could not observe.
+        _s_rc, _s_out, _s_err = uj.bounded_git_probe(
+            path, "diff-index", "--quiet", "HEAD", "--"
+        )
+        del _s_out, _s_err  # only the rc is meaningful for a --quiet probe
+        edited = _s_rc != 0
+        prov_git = (
+            f"{provenance} git_rev={rev} dirty={'yes' if edited else 'no'}"
+        )
+        if stamp is None:
+            return (
+                "refuse",
+                "stamp-absent: PIPELINE_SCRIPTS_REV is unparsable from "
+                f"{path}/lib.sh (bounded first-"
+                f"{PIPELINE_SCRIPTS_STAMP_WINDOW_BYTES // 1024}KiB read, "
+                f"B3 — the tree predates the preflight-hang fix); "
+                f"{_SYNC_REMEDY}; {prov_git}",
+            )
+        if not floor_commit:
+            return (
+                "refuse",
+                "floor-unset: PIPELINE_SCRIPTS_FLOOR_COMMIT is empty in "
+                "this daemon build — the release process must set it "
+                "(T6.15/AC15; D6-10 command-error class ⇒ fail-closed "
+                "refuse); escape hatch: ENSEMBLE_ALLOW_STALE_SCRIPTS=1 "
+                f"(per-invocation only); {prov_git}",
+            )
+        anc_rc, _, anc_err = uj.bounded_git_probe(
+            path, "merge-base", "--is-ancestor", floor_commit, "HEAD"
+        )
+        if anc_rc == 0:
+            return (
+                "arm",
+                f"floor-ancestor-ok: {prov_git} floor={floor_commit}",
+            )
+        if anc_rc == 1:
+            return (
+                "refuse",
+                "stale-scripts: HEAD "
+                f"{rev} does NOT contain the floor commit {floor_commit} "
+                f"as an ancestor (D6-10/Q1 — however NEW the tree is, it "
+                f"lacks the fix); {_SYNC_REMEDY}; {prov_git}",
+            )
+        return (
+            "refuse",
+            "floor-object-unknown: git merge-base --is-ancestor "
+            f"{floor_commit} HEAD errored (rc={anc_rc}: "
+            f"{anc_err.strip()[:120] or 'no stderr'}) — a tree that "
+            "does not contain the fix commit object cannot contain the "
+            f"fix (D6-10); {_SYNC_REMEDY}; {prov_git}",
+        )
+
+    # Q2/D6-11 (FINAL): a NON-git pinned dir is WARNING-ONLY — never
+    # refused. The stamp + digest are the provenance. No ``refuse`` return
+    # is reachable from this branch (AC11 — pinned by Pack I I5).
+    if stamp is not None:
+        return (
+            "arm",
+            f"non-git-with-stamp: {provenance} (no git ancestry "
+            "available — Q2: the stamp is the provenance)",
+        )
+    return (
+        "warn",
+        f"non-git-no-stamp: WARNING only, never a refusal (Q2/D6-11); "
+        f"{provenance}",
+    )

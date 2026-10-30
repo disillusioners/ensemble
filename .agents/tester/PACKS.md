@@ -1,5 +1,27 @@
 # Test Packs
 
+## promote-preflight-hang FUNCTIONAL GATE (`fix/promote-preflight-hang` @ `0b6a21236`, base `b1183a637`) — ✅ **LANE VERDICT: PASS-WITH-NOTES — ceremony-ready CONDITIONAL on the G3 1-line pre-stage fold** (2026-10-30)
+
+> Full record: `.agents/tester/RESULTS/2026-10-30-preflight-hang-functional-gate.md`. All 9 gates execution-verified independently (12 workers, sandbox-fenced, lane HEAD pinned). Sole finding: G3 net-new red = stale 1-line test stub (`test_agent_restart.py` `_rec` lacks `unit_properties` kwarg vs `manager.py:5579` widening) — remediation VERIFIED in a disposable tree; the 1-line fold is REQUIRED before stage. Count-growth rows (31/33/68/40/7/469 vs anchors 24/30/38/27/4/236) = fix-cycle pack growth, 0 failed everywhere.
+
+| Pack | Invocation | Scope | Last Run | Status |
+|---|---|---|---|---|
+| `preflight_journal_parity` | `timeout 300 bash tests/packs/preflight_journal_parity_test.sh` | 27-fixture BASE-oracle parity (verdict/stdout/stderr-class; duplicate-key BASE-bug; locale; atomic-replace race; placement) | 2026-10-30 @ `0b6a21236` | ✅ PASS 60/0 (anchor-exact) |
+| `preflight_journal_scale` | `timeout 300 bash tests/packs/preflight_journal_scale_test.sh` | SC1 timings; scaling flat; guard never consulted on O(N) path | 2026-10-30 @ `0b6a21236` | ✅ PASS 12/0 (anchor-exact) |
+| `preflight_repro` | `timeout 300 bash tests/packs/preflight_repro_test.sh` | BASE rc=124 symptom + HEAD fast whole-journal read | 2026-10-30 @ `0b6a21236` | ✅ PASS 7/0 (anchor-exact; G1 re-derived independently) |
+| `preflight_census` | `timeout 300 bash tests/packs/preflight_census_test.sh` | 25-site census; per-char walks legacy-only; two-sided unreachability | 2026-10-30 @ `0b6a21236` | ✅ PASS 10/0 (anchor-exact; G9 negative control) |
+| `preflight_anchor_index` | `timeout 300 bash tests/packs/preflight_anchor_index_test.sh` | base line-exact anchors + HEAD constructs + spawn-watcher | 2026-10-30 @ `0b6a21236` | ✅ PASS 42/0 (anchor-exact) |
+| `preflight_stage_lock` | `timeout 300 bash tests/packs/preflight_stage_lock_test.sh` | SC8 SIGKILL orphan; both reclaim paths; live-owner; double-release | 2026-10-30 @ `0b6a21236` | ✅ PASS 13/0 (anchor-exact; G9 negative control) |
+| `preflight_size_guard` | `timeout 300 bash tests/packs/preflight_size_guard_test.sh` | G1/G2/G3 boundary trio; 3-class matrix; A4 per-script routing; threshold mutation | 2026-10-30 @ `0b6a21236` | ✅ PASS 31/0 (grew +7; six-path matrix independently verified G8) |
+| `preflight_logging` | `timeout 300 bash tests/packs/preflight_logging_test.sh` | SC6/SC7 survival+markers; two-file sink; EPIPE; R8 retention; redaction | 2026-10-30 @ `0b6a21236` | ✅ PASS 33/0 (grew +3; double-confirmed by G5 drills) |
+| `preflight_watchdog` | `timeout 300 bash tests/packs/preflight_watchdog_test.sh` | SC4 breach shape/order; RuntimeMaxSec derivation + kind scoping; SC5 exclusion; cgroup-TERM invariant; D12/D13/D14 | 2026-10-30 @ `0b6a21236` | ✅ PASS 68/0 (grew +30; double-confirmed by G4 drills) |
+| `preflight_ceremony_readiness` | `timeout 300 bash tests/packs/preflight_ceremony_readiness_test.sh [--expect-implemented]` | ceremony interlock; I16d–I16g stamp gates | 2026-10-30 @ `0b6a21236` | ✅ PASS 40/0 BOTH modes, deferrals 0 (grew +13) |
+| `preflight_shasum_batch_parity` | `timeout 300 bash tests/packs/preflight_shasum_batch_parity_test.sh` | batched `_tree_manifest` byte-parity; misalignment fallback | 2026-10-30 @ `0b6a21236` | ✅ PASS 7/0 default (grew +3). `--full` = measurement mode OUT-OF-CAP by construction (BASE fork-per-file timing is the subject; agents+frontend legs parity=OK before the 300 s kill) |
+| `preflight_real_soak` | `timeout 300 bash tests/packs/preflight_real_soak_test.sh` | SC5 REAL conservative soak (responder /livez+/readyz + 300 s loop) | 2026-10-30 @ `0b6a21236` | ⚠ PASS-WITH-DISCLOSURE — cap-incompatible by construction (literal `gate_soak 300`, no knob); bounded 20 s leg green + G4 non-firing corroboration + dev 330 s record; `PREFLIGHT_REAL_SOAK_S` knob routed (optional). Cap never relaxed |
+| `preflight daemon-side pytest corpus` | `cd <worktree> && timeout 300 /home/nea/ensemble-src/.venv/bin/python -m pytest <9 files: tests/unit/tools/test_upgrade_*.py incl. preflight_daemon_side + executor_systemd_service> -q --tb=short` | daemon-side pins: journal/sweep/tools/registration/splice/reasons/executor/install-root + NEW preflight_daemon_side | 2026-10-30 @ `0b6a21236` | ✅ PASS 469/0/1-skip (superset of dev 236 3-file composition) |
+| `preflight_mutation_matrix` | `bash tests/packs/preflight_mutation_matrix_test.sh --legs <Mxx…>` (per-leg; sources common fence + PF_PACK_NAME) | plant→RED→GREEN per leg; planted-sha discipline | 2026-10-30 @ `0b6a21236` | ✅ G7 independent 12-leg sample: M6/M41/M42/M43 + M2/M13/M14/M29/M37/M44/M46 + M15×2 — all digests byte-exact vs R3 TSV, all RED→GREEN (M6 outer=900 disclosed: internal 400 s bound is the subject) |
+| `preflight_base_scale_measure` | one-off measurement protocol (NOT a gate pack) | bounded k·N² base sampling + labelled extrapolation | 2026-10-30 @ `0b6a21236` | ✅ G1 re-derived independently: k=1.6865e-8 s/B², R²=0.999880 ⇒ 58.4 min @ 455,783 B (never run full) |
+
 ## eventloop-sync-DB hot paths (`fix/eventloop-sync-db-hotpaths`, board `wi-3f5bea95`) — PACK REGISTERED (2026-10-30)
 
 > The children-order pin pack is a **gate-carrying artifact**: it is the

@@ -103,9 +103,20 @@ def _isolated_home(base: Path) -> str:
 
 
 @pytest.fixture
-def install(tmp_path: Path) -> Path:
+def install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Staged-install fixture: journal (Python writer), two releases with
-    manifests, current symlink → 1.2.2."""
+    manifests, current symlink → 1.2.2.
+
+    Hermeticity (phase 6, promote-preflight-hang): scrub the ambient
+    ``ENSEMBLE_UPGRADE_SCRIPTS_DIR`` pin — this suite can run INSIDE the
+    daemon's own environment (e.g. from an agent shell), which carries the
+    live-shaped pin; the phase-6 arm-time guard makes that leak OBSERVABLE
+    (a stale pinned dir refuses the arm), so without the scrub every
+    arm-exercising test would judge the HOST's pinned checkout instead of
+    the fallback resolution the tests were written against. Tests that
+    deliberately pin a fixture dir (e.g. the malformed-argv preflight
+    test) set the var themselves AFTER this scrub."""
+    monkeypatch.delenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", raising=False)
     inst = tmp_path / "install"
     (inst / "releases").mkdir(parents=True)
     uj.journal_init(inst)
@@ -3621,6 +3632,7 @@ class TestManagerDrainPendingExecution:
         def _rec(
             argv, install_dir, extra_env=None, *, run_id=None,
             unit_prefix: str = "ensemble-upgrade-",
+            unit_properties=None,
         ) -> tuple:
             inst = Path(str(install_dir))
             calls.append(
@@ -3629,6 +3641,14 @@ class TestManagerDrainPendingExecution:
                     "install": inst,
                     "extra_env": dict(extra_env or {}),
                     "unit_prefix": unit_prefix,
+                    # D2-8 (promote-preflight-hang phase 2): the seam gained a
+                    # kw-only ``unit_properties``; captured so the kind-scoping
+                    # (promote ⇒ RuntimeMaxSec, restart ⇒ None) is assertable.
+                    "unit_properties": (
+                        list(unit_properties)
+                        if unit_properties is not None
+                        else None
+                    ),
                     "lock_held_at_spawn": uj.lock_dir(inst).exists(),
                 }
             )
@@ -4102,6 +4122,7 @@ class TestManagerDrainPendingExecution:
         def _loud_refusal_spawn(
             argv, install_dir, extra_env=None, *, run_id=None,
             unit_prefix: str = "ensemble-upgrade-",
+            unit_properties=None,
         ):
             from daemon.tools.upgrade_journal import ExecutorSystemdUnavailable
             detail = (
@@ -4154,3 +4175,194 @@ class TestManagerDrainPendingExecution:
         # did NOT release the lock in addition to what the
         # pre-spawn promote branch already did.
         assert not uj.lock_dir(install).exists()
+
+
+# ═══════ phase 6 arm-time provenance — verifier-fix legs (W-1/W-3) ═══════════
+#
+# The independent verifier's 2026-10-30 iteration-1 review found three
+# load-bearing branches of the scripts-dir provenance guard with ZERO executed
+# coverage, plus an unguarded exception source inside the arm's lock window.
+# These legs drive the REAL `system_upgrade` arm path (Pack I's seam probe
+# cannot see the caller-side carve-out — it lives inline in the arm):
+#
+#   W-1  a probe that cannot RUN degrades to a refusal and the pipeline lock
+#        is RELEASED (before the fix the exception unwound the arm's generic
+#        `except Exception`, which releases nothing → orphaned lock until the
+#        300 s stale-break);
+#   W-3a floor-unset on an EXPLICITLY pinned dir REFUSES (D6-10/D-31);
+#   W-3b the caller's fallback-dir downgrade: an EPHEMERAL (unpinned) dir
+#        that the guard refuses only WARNS, and the arm proceeds;
+#   W-3c a pinned dir with no lib.sh REFUSES as `scripts-dir-unusable`.
+#
+# Every leg also asserts the ARM-ROW SIDE-EFFECT (the `arm-scripts-provenance`
+# journal row): a verdict that never reaches the journal is not provenance.
+
+
+def _pinned_scripts(tmp_path: Path, *, stamp: str | None = "deadbeef",
+                    lib: bool = True, promote: bool = True,
+                    git_shaped: bool = False) -> Path:
+    """A scratch pinned scripts dir. ``git_shaped`` plants a bare ``.git``
+    entry — enough for the guard's git-SHAPE classification without needing a
+    real repository (the probe itself is stubbed or raising in these legs)."""
+    d = tmp_path / "pinned-scripts" / "upgrade"
+    d.mkdir(parents=True, exist_ok=True)
+    if lib:
+        (d / "lib.sh").write_text(
+            "#!/usr/bin/env bash\n"
+            + (f"PIPELINE_SCRIPTS_REV={stamp}\n" if stamp is not None else ""),
+            encoding="utf-8",
+        )
+    if promote:
+        (d / "promote.sh").write_text(
+            "#!/usr/bin/env bash\n# fixture promote.sh (never executed here)\n",
+            encoding="utf-8",
+        )
+    if git_shaped:
+        (d / ".git").mkdir()
+    return d
+
+
+def _fake_probe(rev_rc: int = 0, rev: str = "deadbeef" * 5,
+                status_rc: int = 0, status: str = ""):
+    """A hermetic stand-in for ``uj.bounded_git_probe`` (no git dependency)."""
+
+    def _probe(cwd, *args):
+        if args[:1] == ("rev-parse",):
+            return rev_rc, (rev + "\n" if rev_rc == 0 else ""), ""
+        if args[:1] == ("status",):
+            return status_rc, status, ""
+        return 128, "", "unexpected probe in this fixture"
+
+    return _probe
+
+
+def _prov_rows(install: Path) -> list[dict]:
+    history = uj.journal_read(install).get("history") or []
+    return [r for r in history if r.get("event") == "arm-scripts-provenance"]
+
+
+async def _arm_demo_promote(tools, version: str = "1.2.3") -> str:
+    return await tools["system_upgrade"].ainvoke(
+        {"target_env": "demo", "version": version, "dry_run": False}
+    )
+
+
+class TestScriptsDirProvenanceArmPath:
+    """The four executed legs the verifier found missing (W-1/W-3)."""
+
+    async def test_w1_probe_error_refuses_and_releases_the_lock(
+        self, harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """W-1: ``bounded_git_probe`` RAISES (absent git / 30 s bound). The
+        guard must degrade to a refusal — never the arm's generic
+        ``Error: system_upgrade failed:`` string — and the pipeline lock
+        acquired at arm time must be GONE (the defect's orphaned-lock
+        consequence: a `pipeline-busy` refusal on every retry until the 300 s
+        stale-break)."""
+        tools, markers, install = harness
+        pinned = _pinned_scripts(tmp_path, stamp="deadbeef", git_shaped=True)
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(pinned))
+
+        real_run = uj.subprocess.run
+
+        def _boom(argv, *a, **k):
+            if isinstance(argv, (list, tuple)) and argv and str(argv[0]).endswith("git"):
+                raise subprocess.TimeoutExpired(cmd="git", timeout=30)
+            return real_run(argv, *a, **k)
+
+        monkeypatch.setattr(uj.subprocess, "run", _boom)
+
+        out = await _arm_demo_promote(tools)
+        assert _refusal_reason(out) == "stale-scripts-dir", out
+        assert str(pinned) in out, f"the pinned dir did not take effect: {out}"
+        assert "git-probe-error" in out, out
+        assert not out.startswith("Error: system_upgrade failed"), (
+            "the probe exception escaped to the arm's generic handler (W-1 "
+            f"regression): {out}"
+        )
+        # side-effects: no lock, nothing armed, no executor marker
+        assert not uj.lock_dir(install).exists(), "orphaned pipeline lock (W-1)"
+        assert uj.journal_read(install).get("pending_op") is None
+        assert markers == []
+        rows = _prov_rows(install)
+        assert rows, "the arm-scripts-provenance row is missing (journal-always)"
+        assert "verdict=refuse" in rows[-1]["detail"], rows[-1]
+        assert "git-probe-error" in rows[-1]["detail"], rows[-1]
+
+    async def test_w3a_floor_unset_on_an_explicit_pin_refuses(
+        self, harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """W-3a: an EXPLICITLY pinned git-shaped dir while the shipped floor is
+        UNSET (the pre-release state, D-31) REFUSES fail-closed — the loud
+        runtime backstop for a mis-made release — and releases the lock."""
+        tools, markers, install = harness
+        pinned = _pinned_scripts(tmp_path, stamp="deadbeef", git_shaped=True)
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(pinned))
+        monkeypatch.setattr(ut, "PIPELINE_SCRIPTS_FLOOR_COMMIT", "")
+        monkeypatch.setattr(uj, "bounded_git_probe", _fake_probe())
+
+        out = await _arm_demo_promote(tools)
+        assert _refusal_reason(out) == "stale-scripts-dir", out
+        assert str(pinned) in out, f"the pinned dir did not take effect: {out}"
+        assert "floor-unset" in out, out
+        assert not uj.lock_dir(install).exists()
+        assert markers == []
+        rows = _prov_rows(install)
+        assert rows and "verdict=refuse" in rows[-1]["detail"], rows
+        assert "floor-unset" in rows[-1]["detail"], rows[-1]
+
+    async def test_w3b_fallback_dir_downgrades_refusal_to_warning(
+        self, harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """W-3b: the CALLER's carve-out. With NO explicit pin the dir is a
+        FALLBACK resolution, so a guard refusal is downgraded to a WARNING
+        (§4.2 backward compatibility) — the arm PROCEEDS, and both the arm
+        row and the tool's output say `verdict=warn` + `fallback-dir`."""
+        tools, markers, install = harness
+        fallback = _pinned_scripts(tmp_path, stamp=None, git_shaped=True)
+        monkeypatch.delenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", raising=False)
+        monkeypatch.setattr(ut, "_resolve_scripts_dir", lambda _d: fallback)
+        monkeypatch.setattr(ut, "PIPELINE_SCRIPTS_FLOOR_COMMIT", "")
+        monkeypatch.setattr(uj, "bounded_git_probe", _fake_probe())
+
+        out = await _arm_demo_promote(tools)
+        assert "UPGRADE ARMED" in out, out
+        assert str(fallback) in out, f"the fallback dir was not judged: {out}"
+        assert "verdict=warn" in out, out
+        assert "fallback-dir" in out, out
+        rows = _prov_rows(install)
+        assert rows and "verdict=warn" in rows[-1]["detail"], rows
+        assert "fallback-dir" in rows[-1]["detail"], rows[-1]
+        assert "refusal downgraded to WARNING" in rows[-1]["detail"], rows[-1]
+        # the arm really happened (the downgrade is not a silent no-op)
+        assert uj.journal_read(install).get("pending_op") is not None
+        assert markers, "the executor marker is missing on a successful arm"
+
+    async def test_w3c_scripts_dir_unusable_refuses(
+        self, harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """W-3c: a dir that is not a scripts tree (no lib.sh) REFUSES as
+        `scripts-dir-unusable` — the guard's first branch, previously with zero
+        executed coverage.
+
+        REACHABILITY (recorded, D-42): `_resolve_scripts_dir` itself requires
+        lib.sh, so through the resolver this branch is reachable only via a
+        TOCTOU (lib.sh removed between resolution and the guard) or a future
+        caller that does not pre-filter; the CALLER's handling — refusal token,
+        lock release, journal row — is what this leg pins, and it is identical
+        whichever way the state arises."""
+        tools, markers, install = harness
+        pinned = _pinned_scripts(tmp_path, lib=False, git_shaped=False)
+        monkeypatch.setenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", str(pinned))
+        monkeypatch.setattr(ut, "_resolve_scripts_dir", lambda _d: pinned)
+        monkeypatch.setattr(uj, "bounded_git_probe", _fake_probe())
+
+        out = await _arm_demo_promote(tools)
+        assert _refusal_reason(out) == "stale-scripts-dir", out
+        assert str(pinned) in out, f"the pinned dir did not take effect: {out}"
+        assert "scripts-dir-unusable" in out, out
+        assert not uj.lock_dir(install).exists()
+        assert markers == []
+        rows = _prov_rows(install)
+        assert rows and "verdict=refuse" in rows[-1]["detail"], rows
+        assert "scripts-dir-unusable" in rows[-1]["detail"], rows[-1]

@@ -1,0 +1,45 @@
+# tests/packs/preflight_packs.txt — the PACK LIST (phase5 §1).
+#
+# HUMAN-READABLE INDEX (corrected 2026-10-30, tidier low #9): this file is NOT
+# consumed by any script — no runner greps it (`grep -rl preflight_packs.txt`
+# finds only this file and two planning docs) — so it cannot make the
+# enumeration "drift-proof" by itself. It is the operator-facing inventory of
+# the canonical pack set A–J (phase5 §2) plus the support rows
+# (measurement/negative-control companions, not letters). Any invocation list
+# must be derived from the pack directory, not from this comment.
+#
+# A–J mapping (the letters are phase5-plan §2):
+#   A  preflight_journal_parity_test.sh       (60 assertions)
+#   B  preflight_journal_scale_test.sh        (12)
+#   C  preflight_repro_test.sh                (7)
+#   D  preflight_watchdog_test.sh             (38)  + support: preflight_real_soak_test.sh (5)
+#   E  preflight_logging_test.sh              (30)
+#   F  preflight_stage_lock_test.sh           (13)
+#   G  preflight_census_test.sh (10) + preflight_anchor_index_test.sh (42)
+#   H  ../unit/tools/test_upgrade_preflight_daemon_side.py (31, pytest)
+#   I  preflight_ceremony_readiness_test.sh   (expected RED until phase 6;
+#      run with --expect-implemented at the final gate)
+#   J  preflight_size_guard_test.sh           (24, incl. the A4 per-script legs)
+#   K  preflight_shasum_batch_parity_test.sh  (7)   <- letter assigned 2026-10-30
+#      (tidier low #11: it was listed with NO letter despite 7 assertions and
+#      parity-family membership, leaving the letter space non-exhaustive)
+#   (matrix) preflight_mutation_matrix_test.sh — M1–M46 (M41–M46 = fix cycle 2)
+#
+# EXCLUDED BY DESIGN (tidier low #10):
+#   preflight_base_scale_measure.sh — a MEASUREMENT companion, not a gate pack
+#   (deliberately outside the gate and deliberately without the `_test`
+#   suffix; --full runs its slow BASE/vs/batched comparison).
+tests/packs/preflight_journal_parity_test.sh
+tests/packs/preflight_journal_scale_test.sh
+tests/packs/preflight_repro_test.sh
+tests/packs/preflight_watchdog_test.sh
+tests/packs/preflight_real_soak_test.sh
+tests/packs/preflight_logging_test.sh
+tests/packs/preflight_stage_lock_test.sh
+tests/packs/preflight_census_test.sh
+tests/packs/preflight_anchor_index_test.sh
+tests/packs/preflight_size_guard_test.sh
+tests/packs/preflight_shasum_batch_parity_test.sh
+tests/packs/preflight_ceremony_readiness_test.sh
+tests/unit/tools/test_upgrade_preflight_daemon_side.py
+tests/packs/preflight_mutation_matrix_test.sh

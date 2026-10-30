@@ -1,0 +1,30 @@
+# tests/packs/preflight_ceremony_readiness.txt — Pack I, machine-readable
+# scenario table (phase5 §2 Pack I; T5.16; AC16; phase6 §4.2/§4.3).
+#
+# One scenario per line: <id> <mode> <what it proves>
+#   mode = probe   — executed by tests/helpers/preflight_ceremony_probe.py
+#          static  — asserted against the shipped source (a construct that
+#                    must exist / must not exist)
+#          shell   — executed against the real promote.sh inside the pack's
+#                    asserted sandbox fence
+#
+# The pack asserts the row count and that EVERY id is exercised; a leg that
+# silently disappears is a RED, not a pass. Pack I is EXPECTED RED until P6
+# lands the guard — the pack then prints PF_DEFERRED_RED per leg.
+
+I1  probe   git pinned dir CONTAINING the floor commit arms (however new)
+I2  probe   git pinned dir NOT containing the floor commit REFUSES
+I3  probe   a missing/unknown floor object REFUSES (cannot contain the fix)
+I4  probe   non-git pinned dir WITH a stamp arms
+I5  probe   non-git pinned dir WITHOUT a stamp WARNS only (never refuses)
+I6  probe   stamp absent from <dir>/lib.sh REFUSES (B3: the file is the input)
+I7  probe   a dirty checkout that contains the floor arms (warn, not refuse)
+I8  probe   ENSEMBLE_ALLOW_STALE_SCRIPTS=1 arms a stale dir (loudly)
+I9  static  the guard call site precedes consume_pending_action (no nonce burn)
+I10 static  the arm row carries scripts_dir + lib.sh sha256 + git rev + dirty
+I11 shell   the watchdog token is allowlisted and promote.sh refuses when unarmed
+I12 static  the refusal row NAMES the sync command
+I13 probe   W-1: a git-SHAPED dir whose probe CANNOT RUN refuses (never raises)
+I14 probe   W-1: a non-git dir whose probe CANNOT RUN warns (never raises)
+I15 probe   a dir without lib.sh refuses (scripts-dir-unusable)
+I16 shell   W-2: the stage-time stamp gate refuses a placeholder/unresolved/floor-mismatched stamp and accepts the floor-equal sha

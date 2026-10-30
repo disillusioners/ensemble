@@ -78,6 +78,7 @@ class FakeProc:
     ) -> None:
         self.pid = pid
         self._rc = rc
+        self._stderr_bytes = stderr
         self._stderr = io.BytesIO(stderr)
         self._hang = hang
 
@@ -100,6 +101,19 @@ class Recorder:
 
     def popen(self, argv, **kwargs) -> FakeProc:
         self.calls.append({"kind": "Popen", "argv": list(argv), **kwargs})
+        # D3-6/R7 (promote-preflight-hang phase 3): the executor CLIENT's
+        # stderr is a FILE (never a PIPE), so a stubbed ``stderr=`` payload
+        # must be written into that file exactly as systemd-run would —
+        # otherwise the fail-closed systemd-unavailable triage (which reads
+        # the file's tail) sees nothing and the R6 pins go vacuously green.
+        err = getattr(self.next_proc, "_stderr_bytes", b"")
+        target = kwargs.get("stderr")
+        if err and hasattr(target, "write"):
+            try:
+                target.write(err)
+                target.flush()
+            except (OSError, ValueError):
+                pass
         return self.next_proc
 
     def run(self, argv, **kwargs):
@@ -268,9 +282,20 @@ class TestR3SetenvThreading:
         argv = recorder.popen_calls[0]["argv"]
         assert not any(t.startswith("--setenv=ENSEMBLE_UPGRADE_LIVE") for t in argv)
         assert not any(t.startswith("--setenv=OPENAI_API_KEY") for t in argv)
-        # allowlist discipline still holds in the threaded set
+        # allowlist discipline still holds in the threaded set. ONE sanctioned
+        # exception (D3-12, promote-preflight-hang phase 3): the per-run
+        # NARRATIVE path is computed by the DAEMON and merged per-call-site
+        # (never read from ambient env), so it is deliberately NOT added to
+        # EXECUTOR_ENV_ALLOWLIST — a path var in the allowlist would let an
+        # ambient value steer the sink. Asserted BY VALUE, not merely exempted.
         for t in (x for x in argv if x.startswith("--setenv=")):
             key = t.split("=", 1)[1].split("=", 1)[0]
+            if key == "ENSEMBLE_UPGRADE_LOG_FILE":
+                value = t.split("=", 1)[1].split("=", 1)[1]
+                assert value == str(
+                    install / "data" / "upgrade" / "demo" / "r-unverified.log"
+                ), f"unexpected narrative path: {value}"
+                continue
             assert (
                 key in uj.EXECUTOR_ENV_ALLOWLIST
                 or any(key.startswith(p) for p in uj.EXECUTOR_ENV_PREFIXES)

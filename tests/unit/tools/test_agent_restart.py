@@ -701,7 +701,7 @@ class TestT8Extras:
         calls: list[dict] = []
 
         def _rec(argv, install_dir, extra_env=None, *, run_id=None,
-                 unit_prefix="ensemble-upgrade-"):
+                 unit_prefix="ensemble-upgrade-", unit_properties=None):
             calls.append(
                 {"argv": list(argv), "extra_env": dict(extra_env or {}),
                  "unit_prefix": unit_prefix}

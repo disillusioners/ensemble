@@ -437,10 +437,13 @@ _log "computing manifest checksums (per-file sha256 + tree aggregates)"
 BIN_SHA="$(_sha256 "$STAGE_TMP/ensemble-prod")"
 LAUNCHER_SHA="$(_sha256 "$STAGE_TMP/launcher.sh")"
 CONFIG_SHA="$(_sha256 "$STAGE_TMP/config.yaml")"
-# one walk per tree feeds BOTH the aggregate hash and the per-file map
-AGENTS_LINES="$(_tree_manifest "$STAGE_TMP/agents" "")"
-FRONTEND_LINES="$(_tree_manifest "$STAGE_TMP/frontend" "")"
-PLUGINS_LINES="$(_tree_manifest "$STAGE_TMP/plugins" "")"
+# one walk per tree feeds BOTH the aggregate hash and the per-file map.
+# D1 (promote-preflight-hang): each walk is now BOUNDED (STAGE_TREE_BUDGET_S),
+# heartbeats DURING the walk, and logs before/after -- an unbounded, unlogged
+# early-phase walk is the shape that produced the 2026-10-28 stage SIGTERMs.
+AGENTS_LINES="$(_stage_tree_walk agents "$STAGE_TMP/agents")" || { rm -rf "$STAGE_TMP"; exit 1; }
+FRONTEND_LINES="$(_stage_tree_walk frontend "$STAGE_TMP/frontend")" || { rm -rf "$STAGE_TMP"; exit 1; }
+PLUGINS_LINES="$(_stage_tree_walk plugins "$STAGE_TMP/plugins")" || { rm -rf "$STAGE_TMP"; exit 1; }
 AGENTS_TREE="$(_tree_hash_of_lines "$AGENTS_LINES")"
 FRONTEND_TREE="$(_tree_hash_of_lines "$FRONTEND_LINES")"
 PLUGINS_TREE="$(_tree_hash_of_lines "$PLUGINS_LINES")"
@@ -532,11 +535,64 @@ rm -f "$_plugins_frag"
 # staged_at = first to evict).
 STAGED_AT="$(_now_iso)"
 
+# ── T6.15/AC15 (promote-preflight-hang phase 6): release-time SET-AND-VALIDATE
+# of PIPELINE_SCRIPTS_FLOOR_COMMIT — the daemon-side arm-time guard compares a
+# pinned scripts dir's HEAD against this floor by git ancestry (D6-10/Q1).
+# A wrong shipped value converts the lane's failure mode from "stale scripts
+# run" into "NO arm can ever succeed" with nothing able to detect it — so the
+# value must be provably correct at BUILD time, never hand-copied:
+#   SET       — the release bump (the merge commit that introduces the
+#               ceremony-relevant scripts/upgrade semantics) writes the
+#               constant in daemon/tools/upgrade_tools.py, at the SAME cadence
+#               as the PIPELINE_SCRIPTS_REV stamp in lib.sh (D6-8 — the two
+#               travel together; this step refuses to ship an unset floor);
+#   VALIDATE  — the value must resolve AND be an ANCESTOR of the built tree
+#               (git merge-base --is-ancestor <floor> HEAD): the floor names a
+#               commit the release itself contains, so a daemon built from
+#               this tree can never demand a fix commit its own history lacks.
+# The manifest carries the same value (daemon constant == manifest, AC15) so
+# a staged artifact is self-describing about the floor it will enforce.
+FLOOR_SRC="$REPO_ROOT/daemon/tools/upgrade_tools.py"
+FLOOR_COMMIT="$(sed -n 's/^PIPELINE_SCRIPTS_FLOOR_COMMIT = "\([0-9a-f][0-9a-f]\{6,39\}\)"$/\1/p' "$FLOOR_SRC" 2>/dev/null || true)"
+if [ -z "$FLOOR_COMMIT" ]; then
+    _warn "REFUSING TO STAGE: PIPELINE_SCRIPTS_FLOOR_COMMIT is unset (or not a commit sha) in daemon/tools/upgrade_tools.py — the daemon-side arm-time stale-scripts guard (phase 6) would refuse every explicitly-pinned ceremony. The release bump MUST set it to the merge commit introducing the preflight-hang fix (T6.15/AC15, cadence D6-8). No release ships without a provably-valid floor."
+    rm -rf "$STAGE_TMP"
+    exit 78
+fi
+if ! git -C "$REPO_ROOT" merge-base --is-ancestor "$FLOOR_COMMIT" HEAD >/dev/null 2>&1; then
+    _warn "REFUSING TO STAGE: PIPELINE_SCRIPTS_FLOOR_COMMIT=$FLOOR_COMMIT is unresolvable or NOT an ancestor of the built tree $(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo '?') (T6.15/AC15 — the floor must name a commit this release itself contains; git merge-base --is-ancestor failed). Fix the constant to the merge commit introducing the preflight-hang fix and re-stage."
+    rm -rf "$STAGE_TMP"
+    exit 78
+fi
+_log "floor validated: PIPELINE_SCRIPTS_FLOOR_COMMIT=$FLOOR_COMMIT is an ancestor of the built tree (T6.15)"
+
+# ── W-2 (verifier 2026-10-30): the STAMP half of the same gate ──────────────
+# The floor above is the DAEMON-side input (ancestry). The lib.sh stamp is the
+# OTHER provenance channel: on a NON-GIT pinned dir the stamp IS the whole
+# provenance (Q2/D6-11), so a meaningless value (the pre-release placeholder
+# `unreleased-<lane>`, which the daemon's `_STAMP_RE` happily parses) would
+# ARM with nothing able to detect it. The release bump sets the real value
+# (D-F7/D6-8); this gate refuses to ship anything else. Three conditions, all
+# mechanical:
+#   1. the stamp is a 40-hex commit sha (a placeholder is NOT);
+#   2. the sha RESOLVES in this tree (git cat-file -e <rev>^{commit});
+#   3. when the floor is set it IS the floor commit — D6-8's "the two travel
+#      together": the stamp names the same merge commit the daemon demands.
+STAMP_SRC="$REPO_ROOT/scripts/upgrade/lib.sh"
+STAMP_REV="$(sed -n 's/^PIPELINE_SCRIPTS_REV="\{0,1\}\([0-9A-Za-z._/-]*\)"\{0,1\}[[:space:]]*$/\1/p' "$STAMP_SRC" 2>/dev/null | head -1 || true)"
+if ! STAMP_REFUSAL="$(_pipeline_scripts_stamp_verdict "$STAMP_REV" "$FLOOR_COMMIT" "$REPO_ROOT")"; then
+    _warn "REFUSING TO STAGE: ${STAMP_REFUSAL}"
+    rm -rf "$STAGE_TMP"
+    exit 78
+fi
+_log "stamp validated: PIPELINE_SCRIPTS_REV=$STAMP_REV is a resolvable commit sha == the floor (W-2/T6.4/D6-8)"
+
 cat > "$STAGE_TMP/manifest.json" <<EOF
 {
   "version": "$VERSION",
   "binary_version": "$BINARY_VERSION",
   "staged_at": "$STAGED_AT",
+  "pipeline_scripts_floor_commit": "$FLOOR_COMMIT",
   "known_schema_gen": "$KNOWN_SCHEMA_GEN",
   "contains_contract_phase": $CONTAINS_CONTRACT_PHASE,
   "rollback_safe": $ROLLBACK_SAFE,
@@ -741,4 +797,13 @@ if ! integrity_verify "$VERSION"; then
 fi
 
 _log "staged release $VERSION at $REL (rollback_safe=$ROLLBACK_SAFE source=$ROLLBACK_SAFE_SRC known_schema_gen=$KNOWN_SCHEMA_GEN contains_contract_phase=$CONTAINS_CONTRACT_PHASE) — NO flip performed (promote.sh owns current)"
+# D4(a)/T4.3 (phase 4): EXPLICIT success-path release. The lock's lifetime
+# no longer depends on the EXIT trap surviving (a trap-bypassing death is
+# the D4(a) orphan class; a NORMAL stage already released via the trap).
+# lock_release is owner-guarded and idempotent -- the belt is free: the
+# EXIT trap's second release is a no-op (dir gone => rc 0).
+# D3-10/T3.11 (R8): per-run log retention, owner = THIS shell under the
+# lock -- this is the stage seat (the promote seat is promote.sh's commit).
+_run_log_retention
+lock_release
 exit 0

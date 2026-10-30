@@ -1,0 +1,41 @@
+leg	mode	file	planted_sha256	red_pin	red_rc	green_rc	note
+M1	executed	scripts/upgrade/lib.sh	f700f96f7b155608cc1057394de55ee81dc66dbb1bfe5c92fdb5a1dfd185c4ca	lib.sh integration failed	1	0	ok
+M2	executed	scripts/upgrade/journal_read.py	fb2eda644169a286a432fd0c15dc73ce5badd6c1ac3fc350e6039afcb896f89b	07-escaped-quote-in-string	1	0	ok
+M3	executed	scripts/upgrade/journal_read.py	35264ac042362059a12800357a1078bc9d56869c05ce4f1a17aea40b7cd70f15	01-canonical-empty-journal	1	0	ok
+M4	executed	scripts/upgrade/journal_read.py	dd55fd8691c12bcca49f6e54f66df404cfb50ac7650c7356cb0c53f55de96b8a	03-empty-file	1	0	ok
+M5	executed	scripts/upgrade/journal_read.py	e879071edf6ef06f31d24ffeec5995105768bf9ffdbf2fafac6a3c5c700dc46b	update parity:	1	0	ok
+M6	executed	scripts/upgrade/lib.sh	44d886e80b8db9f60d9ff2b4761d9d157da2a57868d76160526e683c9bcdd865	G2: rc=	124	0	ok
+M7	executed	scripts/upgrade/journal_read.py	6768cdcb5b62906a24485e235e9421990dd5fbafc6ab25421371b000b0c96559	single read: found	1	0	ok
+M8	executed	scripts/upgrade/journal_read.py	283a11b368c96ad4cb047852f34ceaba827b90697f58aa81e59d7e1d2043271a	HEAD wall	1	0	ok
+M9	executed	scripts/upgrade/lib.sh	51e7de6e252eed8f18d7ce74fea79561264b40406a222ba034dba0a0e3d38837	D1 rc=	1	0	ok
+M10	executed	scripts/upgrade/lib.sh	00352b9b7dc8fa92169858d637f69d8b79c293763acbe0db86b32fc6ac140ab6	row lost (rows=0)	1	0	ok
+M11	executed	scripts/upgrade/lib.sh	725079e90907b466a687ace23ecb8ce7ff3b0b740cdd3e98c2629ad2dbfd62b6	D1 halt rows=	1	0	ok
+M12	executed	scripts/upgrade/lib.sh	373d3513b585e986e2df1fed586daea5cb729c5d24b11d193626c2afc4658f25	E1 stdout not empty	1	0	ok
+M13	executed	scripts/upgrade/lib.sh	1f3522ab4f8e9137dfe416fb92b8ca7f40fc8a74bdf395bc1be0609b921da05b	E2 logwrite_failed rows=	1	0	ok
+M14	executed	daemon/tools/upgrade_journal.py	47592ae988e6d088ced40a3674762fefd4c0e1c086799be32870f61e49ed01fb	test_payload_append_targets_the_per_run_payload_file	1	0	ok
+M15	executed	scripts/upgrade/lib.sh	95347a13b10dd9ea1627c49dfbeb659469f011194ee1c3ec3728105f87d4f04b	F2 rows=	1	0	ok
+M16	executed	scripts/upgrade/stage.sh	0c7e516c5faa23364e5dd6ed49c93905e29697807ed6f75098052d46e9814bb1	no explicit release before the success exit	1	0	ok
+M17	executed	scripts/upgrade/lib.sh	ff655f2ed4d5f9b597a5afcc531c787804cdca28f7122a36870577162e8446a1	a per-character walk exists outside the legacy fallbacks	1	0	ok
+M18	executed	scripts/upgrade/lib.sh	fa1dc3c20272184a66f8bb05960858b01258eec64973be60a603c295255be8a7	anchored constructs disappeared from HEAD	1	0	ok
+M19	executed	daemon/manager.py	4a52477267d2aab25e9d72494410887a676b4f9348f7ea93704a3ab18b4209e3	test_promote_arm_carries_the_derived_bound	1	0	ok
+M20	executed	daemon/tools/upgrade_journal.py	bf486a55be5aee01e2f08dd4f07ff7b54633d885bc1515ec2356bfa31bb89181	test_client_stderr_is_a_file	1	0	ok
+M21	executed	daemon/config.py	cb91b9c010c4e43f4ba130b8b2b118a9ca94a93d976d2b3242d36f406f693106	test_reaper_timeout_default_is_still_660	1	0	ok
+M22	executed	scripts/upgrade/lib.sh	041c0927f54d111e3908c1a194ca52659ccaebdd5886114a982211c1fbf9a1e9	DEFERRED_RED C1	1	0	ok
+M23	executed	daemon/tools/upgrade_tools.py	4bd312cf41bd02d0372aa606adbe08e46d526313efc313c5108feccb398fbee4	DEFERRED_RED C5	1	0	ok
+M24	executed	daemon/tools/upgrade_tools.py	582297202ad3af9198f0703a14ed605d846a14f47218ea419b31180c53b88c17	DEFERRED_RED C6	1	0	ok
+M25	executed	daemon/tools/upgrade_tools.py	ef23b1f4e16ed73577be43500295ee940d11a152fc5fcdf2634adaa3e33a53b1	I4 FAIL	1	0	ok
+M26	executed	daemon/tools/upgrade_tools.py	e3f76afc1d5a2d7be6ce740fe51eeff7920a8086d66057c07c851c1adf92760d	I2 FAIL	1	0	ok
+M27	executed	daemon/tools/upgrade_tools.py	cc88bc1a801ee81276916bc5dde0afcfa6287e43d026f66710746cc08fb13004	I3 FAIL	1	0	ok
+M28	executed	daemon/tools/upgrade_tools.py	f641da118bf56fe8e6fca63f22bd712133c4cf4efecdebdad16cbd5435256e0b	I5 FAIL	1	0	ok
+M29	executed	scripts/upgrade/lib.sh	814b8ef4b282ff1cea6d426223c4aa8f69954fc073e4ddc184b0a7bd568843d0	recovery class: rc=	1	0	ok
+M30	executed	scripts/upgrade/lib.sh	e9cb7c45fc005907134d6a3d7aaad724c212b1b724009f8c7c34e0c9c3a648a2	G2 refusal does not name the size	1	0	ok
+M31	executed	scripts/upgrade/lib.sh	931849fbf1818156cf588988dcc6aad9ca529ea3456e6ce2783c4a30e849cba4	G1: rc=	1	0	ok
+M32	executed	scripts/upgrade/promote.sh	4a76aa19ddbb32e4f149c5508e931ead11070046b4a974d49ef3e6de7130636f	DEFERRED_RED I11	1	0	ok
+M33	executed	daemon/tools/upgrade_journal.py	43d9f5ba77dd0c2ff80fbc7ef22f9379ec40a562cfb38f3856f38b3202c7ef00	SCENARIO I13 FAIL raised	1	0	ok
+M34	executed	daemon/tools/upgrade_tools.py	9f3f9144358c45179150362588e22d562b0356744038b5e67111823902ac0598	SCENARIO I13 FAIL expected=refuse got=arm	1	0	ok
+M35	executed	daemon/tools/upgrade_tools.py	ea301101fb2b8800502b5bce30300866c370475b6d1af19d4e200bd66bc0c09b	I15 FAIL	1	0	ok
+M36	executed	scripts/upgrade/promote.sh	1f22d27ae18c4e56f99d1fa9964bd1dc763229f7c7cb1da972ee19775c25bfc4	A4 halt rows=2	1	0	ok
+M37	executed	scripts/upgrade/lib.sh	492c99e1ee4f5aca4b60f5c39f37ecefed640692cc20ce31529b704ca65f39c1	I16a stamp gate MISMATCH	1	0	ok
+M38	executed	scripts/upgrade/lib.sh	0d2b1e34ba67b96230ff76a16c4a7b99655d2178faeb491428be63baada24b22	I16f stamp gate MISMATCH	1	0	ok
+M39	executed	daemon/tools/upgrade_tools.py	b6110f0a488ecf5dc0c86b09f1b605cd55cae1b1f6fdffe58438e0e0f7fb2524	test_w3a_floor_unset_on_an_explicit_pin_refuses	1	0	ok
+M40	executed	daemon/tools/upgrade_tools.py	f4ba649359270ed84deacdfb9eb48b9534c35ee1ac5d6c1a12507350d52cb50c	test_w3b_fallback_dir_downgrades_refusal_to_warning	1	0	ok

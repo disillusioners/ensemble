@@ -87,8 +87,9 @@ the single journal protocol home. Splitting the protocol twin from the
 tool surface would force every contract change to touch two modules.
 """
 
-# Size rationale (~3433 lines, refreshed 2026-10-19 — was ~3050 at the
-# P2 journal hardening): single-source-of-truth for the upgrade journal —
+# Size rationale (~3760 lines, refreshed 2026-10-30 — was ~3433 at the
+# promote-preflight-hang close, ~3050 at the P2 journal hardening):
+# single-source-of-truth for the upgrade journal —
 # schema (JOURNAL_EMPTY + PendingOp + PendingWake), atomic I/O,
 # reconcile/expiry + the agent-restart additive surface (restart_audits /
 # restart_window / close_stale_restart_arm / the terminal-event
@@ -2158,11 +2159,22 @@ EXECUTOR_ENV_ALLOWLIST: tuple[str, ...] = (
     "XDG_RUNTIME_DIR",
     "DBUS_SESSION_BUS_ADDRESS",
     "DBUS_SYSTEM_BUS_ADDRESS",
+    # T6.6/D6-5 (promote-preflight-hang phase 6): the mixed-generation
+    # watchdog token. The promote drain seam (daemon/manager.py,
+    # drain_pending_system_execution kind == "promote") sets it in the
+    # explicit-extra merge for EVERY promote arm; this allowlist entry is
+    # the belt that also carries an operator-ambient value across the
+    # systemd boundary. promote.sh REFUSES (loud `refusal` row, exit 78)
+    # when the token is present but the phase-2 watchdog machinery is not
+    # armed in its scripts tree; scripts that predate the token ignore it
+    # (the arm-time floor check catches those). Non-secret, non-privileged
+    # — a bare presence flag.
+    "ENSEMBLE_PROMOTE_WATCHDOG",
 )
 EXECUTOR_ENV_PREFIXES: tuple[str, ...] = ("PG",)
 
 
-def executor_env(extra: dict[str, str] | None = None) -> dict[str]:
+def executor_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     env: dict[str, str] = {}
     for key in EXECUTOR_ENV_ALLOWLIST:
         val = os.environ.get(key)
@@ -2176,8 +2188,205 @@ def executor_env(extra: dict[str, str] | None = None) -> dict[str]:
     return env
 
 
+# W-1 sentinel: "the probe could not run" — distinct from any git exit code
+# (git uses 128 for its own fatal errors and 129 for usage; 255 is unused).
+GIT_PROBE_ERROR_RC = 255
+
+
+def bounded_git_probe(cwd: Path, *args: str) -> tuple[int, str, str]:
+    """``(rc, stdout, stderr)`` from a bounded git invocation in ``cwd`` —
+    promote-preflight-hang phase 6 arm-time guard support (D6-10/Q1):
+    ``merge-base --is-ancestor`` / ``rev-parse`` / ``status`` probes against
+    the pinned scripts dir. NO fetch, NO checkout and NO mutation of TREE
+    CONTENT, 30 s bound. Lives HERE and not in upgrade_tools because the
+    tools module carries a no-direct-process-spawn discipline
+    (test_static_no_direct_process_spawn_in_tools_module, D2/D3) — the
+    guard delegates rather than spawning.
+
+    PURITY CAVEAT (A-2, verifier 2026-10-30): ``git status --porcelain`` is
+    read-only with respect to tracked content, but it MAY opportunistically
+    refresh the stat cache in ``.git/index`` and therefore create a
+    transient ``index.lock``. The earlier "NO write" claim overstated the
+    purity: the probe never writes the working tree, the objects or the
+    refs, yet it is not filesystem-inert.
+
+    NEVER RAISES (W-1, verifier 2026-10-30): a probe that cannot run at all
+    — ``git`` absent (``FileNotFoundError``), a resource failure (``OSError``)
+    or the 30 s bound (``subprocess.TimeoutExpired``) — returns the sentinel
+    ``(GIT_PROBE_ERROR_RC, "", "<ExcType>: <message>")``. Callers judge a
+    DIR and must degrade to a refuse/warn verdict; an exception escaping here
+    would unwind the arm path's outer handler, which does NOT release the
+    pipeline lock (the arm-time lock is released by the verdict's callers,
+    never by the generic ``except``)."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": os.environ.get("HOME", "/"),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                # A3 (code council, 2026-10-30): never let a read-only probe
+                # take `.git/index.lock` to refresh the stat cache — it makes
+                # the purity caveat above INERT on the arm path (no lock
+                # contention with a concurrent git user, no transient lock
+                # file for a concurrent ceremony to trip over).
+                "GIT_OPTIONAL_LOCKS": "0",
+            },
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return GIT_PROBE_ERROR_RC, "", f"{type(exc).__name__}: {exc}"
+    return proc.returncode, proc.stdout, proc.stderr
+
+
 def executor_log_path(install_dir: Path) -> Path:
     return install_dir / "data" / "upgrade.log"
+
+
+# ── D3-12/D3-15 (promote-preflight-hang phase 3): the TWO-file per-run sink ──
+#
+# Every executor run gets a PAIR of files under an ENV-SCOPED directory:
+#   <install>/data/upgrade/<env>/<run_id>.log          -- the shell's
+#       timestamped, strictly-ordered NARRATIVE (direct writes; the shell
+#       receives this path via ENSEMBLE_UPGRADE_LOG_FILE).
+#   <install>/data/upgrade/<env>/<run_id>.payload.log  -- systemd's
+#       StandardOutput/StandardError=append: target for the payload's RAW
+#       stdout/stderr.
+# Two files, not one: a child's stdout to a regular file is libc
+# BLOCK-buffered, so the payload stream is durable but NOT real-time and
+# its bytes can land AFTER later markers — in a single file that is an
+# ORDERING ILLUSION that would mislead exactly the post-mortem this sink
+# exists for.
+#
+# ENV SCOPE (D3-15): a sandbox ceremony resolves the LIVE install root via
+# the frozen-binary path derivation, so an unscoped per-run file would
+# write into (and retention would delete from) the live tree's audit
+# domain. The scope is derived from the ceremony's own argv target token.
+_UPGRADE_ENV_SCOPES = ("live", "demo", "sandbox")
+
+
+def _ceremony_env_scope(argv: list[str] | None) -> str:
+    """The ceremony's env scope from its argv (promote.sh's first positional
+    is live|demo|sandbox; the script's own default is demo). An
+    unresolvable argv degrades to ``demo`` -- the same default the shell
+    would have applied, never ``live``."""
+    for tok in (argv or []):
+        if tok in _UPGRADE_ENV_SCOPES:
+            return tok
+    return "demo"
+
+
+def executor_run_log_paths(
+    install_dir: Path, run_id: str, env_scope: str
+) -> tuple[Path, Path]:
+    """(narrative_path, payload_path) for one run -- see the block above."""
+    if env_scope not in _UPGRADE_ENV_SCOPES:
+        env_scope = "demo"
+    base = install_dir / "data" / "upgrade" / env_scope
+    return base / f"{run_id}.log", base / f"{run_id}.payload.log"
+
+
+_RUN_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def per_run_narrative_path(install_dir: Path, run_id: str | None) -> Path | None:
+    """Resolve a run's per-run NARRATIVE file by ``run_id`` (M7, tidier
+    2026-10-30): THE single resolver for the readers.
+
+    Resolution is BY run_id, never "the last pointer line" (a stale pointer
+    resolves to the wrong file after a newer run); the glob over the
+    env-scoped ``data/upgrade/<env>/`` dirs is exact because run_ids are
+    unique and file-name shaped. Returns None when the file is absent
+    (evicted by retention, or a pre-D3 run) -- callers fall back to the
+    aggregate ``data/upgrade.log``.
+
+    WHY IT LIVES HERE: this module owns both the WRITER
+    (``executor_run_log_paths``) and the env-scope table
+    (``_UPGRADE_ENV_SCOPES``), so the naming rule has exactly one home. The
+    two previous copies (``daemon/tools/upgrade_tools._resolve_per_run_log``
+    and ``daemon/services/upgrade_journal_sweep._per_run_narrative_path``)
+    had already DRIFTED -- the sweep copy had no run_id validation -- and a
+    third reader tailing a different file than the tools' tail is a
+    post-mortem trap. The run_id is validated here (it is interpolated into
+    a path) so no caller can inject a separator or a glob.
+    """
+    if not run_id or not _RUN_ID_RE.fullmatch(run_id):
+        return None
+    base = install_dir / "data" / "upgrade"
+    for env_dir in base.glob("*"):
+        cand = env_dir / f"{run_id}.log"
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _append_pointer_line(
+    aggregate: Path, run_id: str, narrative: Path, payload: Path
+) -> None:
+    """D3-12/D3-5: one pointer line per run in the AGGREGATE data/upgrade.log
+    naming BOTH per-run files. Append-only and race-free (unlike a symlink);
+    best-effort (a pointer failure never blocks the spawn -- the journal's
+    run_log row is the durable correlation record)."""
+    try:
+        aggregate.parent.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with aggregate.open("a", encoding="utf-8") as fh:
+            fh.write(
+                f"{ts} run_id={run_id} narrative={narrative} payload={payload}\n"
+            )
+    except OSError as exc:  # noqa: BLE001 -- best-effort observability only
+        logger.warning(
+            "upgrade_journal: pointer line append failed for run %s: %s",
+            run_id, exc,
+        )
+
+
+# ── D2-9 (promote-preflight-hang phase 2): the L3 outer bound ────────────────
+#
+# RuntimeMaxSec on the promote transient unit is DERIVED at arm time, never
+# a pinned constant: max(1200, PROMOTE_TOTAL_DEADLINE_S + SOAK_S + 120).
+# At the house defaults (900 + 300 + 120) that is 1320 s. The derivation
+# is the single source of truth (architect fold B2): the stale 1200
+# literal fired MID-SOAK after the symlink flip whenever an operator
+# raised ENSEMBLE_PROMOTE_SOAK_S above 300 — a kill that leaves the
+# release flipped, the txn open and the daemon restarted. Derived, the
+# bound is always strictly ABOVE the shell's own 900 s ceremony deadline,
+# so systemd fires only when the shell's own deadline machinery has
+# failed to (a wedged shell that cannot run its traps) — precisely a
+# backstop's job. promote.sh additionally refuses SOAK_S>300 on the live
+# lane (T2.17), so live arms derive 1320 unless the deadline itself was
+# raised.
+# Bound for the client-stderr tail read (D3-6; same scale as the
+# daemon-side log-tail readers).
+_CLIENT_ERR_TAIL_BYTES = 65536
+
+RUNTIME_MAX_SEC_FLOOR = 1200
+RUNTIME_MAX_SEC_TAIL_S = 120
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "")
+    try:
+        return int(raw) if raw.strip() else default
+    except ValueError:
+        return default
+
+
+def derived_runtime_max_sec(
+    soak_s: int | None = None, total_deadline_s: int | None = None
+) -> int:
+    """max(1200, PROMOTE_TOTAL_DEADLINE_S + SOAK_S + 120) — 1320 at the
+    defaults. Reads the daemon-side env at arm time when the explicit
+    parameters are omitted; ENSEMBLE_PROMOTE_SOAK_S is clamped to the same
+    900 ceiling promote.sh applies (``[ "$SOAK_S" -gt 900 ] && SOAK_S=900``)."""
+    if total_deadline_s is None:
+        total_deadline_s = _env_int("PROMOTE_TOTAL_DEADLINE_S", 900)
+    if soak_s is None:
+        soak_s = _env_int("ENSEMBLE_PROMOTE_SOAK_S", 300)
+    soak_s = max(0, min(soak_s, 900))
+    return max(RUNTIME_MAX_SEC_FLOOR, total_deadline_s + soak_s + RUNTIME_MAX_SEC_TAIL_S)
 
 
 # ── systemd transient SERVICE executor (Option D, Stage-2.2a) ────────────────
@@ -2660,6 +2869,7 @@ def spawn_executor(
     *,
     run_id: str | None = None,
     unit_prefix: str = UNIT_NAME_PREFIX,
+    unit_properties: list[str] | None = None,
 ) -> tuple[int, str]:
     """Daemonize the executor payload. THREE BRANCHES (Option D):
 
@@ -2718,6 +2928,13 @@ def spawn_executor(
     §3.3 V-7). Every unit-name site downstream (argv build, R4
     reset-failed, mode note) consumes the same parameter.
 
+    ``unit_properties`` (kw-only, D2-8): extra unit properties threaded
+    into :func:`build_service_argv` (e.g. the promote-only
+    ``RuntimeMaxSec=<derived per D2-9>`` L3 backstop). The kind scoping
+    is the CALLER's job (daemon/manager.py passes it for promote arms
+    only — a shared property would bound the restart ceremony with the
+    promote's budget).
+
     Raises:
         ExecutorSystemdUnavailable: branch 3 only (loud refusal).
         ValueError: (via build_service_argv) on an unsafe run_id.
@@ -2735,20 +2952,56 @@ def spawn_executor(
 
     if branch == SERVICE_BRANCH_SERVICE:
         run_id = _resolve_run_id(argv, run_id)
-        wrapped_argv = build_service_argv(
-            argv, run_id, bus_kind, env, log, unit_prefix=unit_prefix
+        # D3-12/D3-15: the two per-run files. The unit's append: capture
+        # owns the PAYLOAD file; the shell writes the NARRATIVE file
+        # directly (path threaded below via ENSEMBLE_UPGRADE_LOG_FILE).
+        env_scope = _ceremony_env_scope(argv)
+        narrative_path, payload_path = executor_run_log_paths(
+            install_dir, run_id, env_scope
         )
+        payload_path.parent.mkdir(parents=True, exist_ok=True)
+        # Env-carried narrative path (the allowlist is NOT widened: this is
+        # the sanctioned explicit-extra merge, same as the verified-arm
+        # extras -- per-call-site, never ambient).
+        env["ENSEMBLE_UPGRADE_LOG_FILE"] = str(narrative_path)
+        wrapped_argv = build_service_argv(
+            argv, run_id, bus_kind, env, payload_path, unit_prefix=unit_prefix,
+            unit_properties=unit_properties,
+        )
+        # The aggregate pointer (D3-12/D3-5) -- names BOTH files.
+        _append_pointer_line(log, run_id, narrative_path, payload_path)
         # R4 hygiene BEFORE the start (best-effort; see helper).
         _reset_failed_unit(run_id, bus_kind, env, unit_prefix=unit_prefix)
+        # D3-6/H1 (phase-3 fold R7 pin): the CLIENT's stderr goes to a
+        # FILE, never a PIPE. A long-lived client could fill a 64 KiB pipe
+        # that is only drained on the fast-fail path and BLOCK the client
+        # (a daemon-side stall of the same family as the incident). A file
+        # removes the drain obligation entirely -- AND keeps the fast-fail
+        # signature triage alive: _is_systemd_run_failure reads the FILE's
+        # tail below, so the systemd-unavailable refusal (the NEVER-returns
+        # fail-closed path) is NOT silenced by this redirect (R7).
+        # A2 (code council 2026-10-30): the client log is named
+        # `<run_id>.client.log` — the THIRD name of the same per-run family
+        # (`<run_id>.log` narrative / `<run_id>.payload.log` payload /
+        # `<run_id>.client.log` client stderr). The previous
+        # `payload_path.with_suffix(".client.log")` produced
+        # `<run_id>.payload.client.log`, a FOURTH name that `_run_log_retention`
+        # did not fence as the current run's file (it survived only via the
+        # <6 h mtime fence — an off-by-one in the documented 5-fence model).
+        client_err_path = payload_path.with_name(f"{run_id}.client.log")
+        try:
+            client_err_fh = client_err_path.open("ab")
+        except OSError:  # diagnostics only -- degrade to DEVNULL, never fail
+            client_err_fh = None
         proc = subprocess.Popen(
             wrapped_argv,
             stdin=subprocess.DEVNULL,
             # The CLIENT's stdio is not the payload's stdio (unit-owned via
-            # append: properties). stdout is discarded; stderr is captured
-            # ONLY for the fast-fail signature triage below (systemd-run
-            # writes a bounded diagnostic — no pipe-fill deadlock risk).
+            # append: properties). stdout is discarded; stderr lands in the
+            # per-run .client.log for the signature triage below.
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+            stderr=(client_err_fh if client_err_fh is not None
+                    else subprocess.DEVNULL),
             cwd=str(install_dir),
             env=env,
             # start_new_session stays False (same reasoning as the scope
@@ -2757,6 +3010,11 @@ def spawn_executor(
             start_new_session=False,
             close_fds=True,
         )
+        if client_err_fh is not None:
+            try:
+                client_err_fh.close()  # the child owns its own fd now
+            except OSError:
+                pass
         note = f"service={unit_prefix}{run_id} (bus={bus_kind})"
         try:
             rc = proc.wait(timeout=SERVICE_CLIENT_FAST_FAIL_S)
@@ -2774,17 +3032,49 @@ def spawn_executor(
             return proc.pid, note + (
                 " (client exited rc=0 fast — outcome is journal-truth)"
             )
+        # R7 PIN: read the client's stderr from the FILE (never a pipe) —
+        # the fail-closed systemd-unavailable refusal below MUST still fire
+        # on a signature-bearing stderr.
+        #
+        # A7 (code council 2026-10-30): the fail-closed guarantee had a
+        # SILENT hole — if the client log could not be OPENED for append
+        # (`client_err_fh is None`, i.e. the payload dir is unwritable) AND
+        # the tail read then failed too, `err_tail` stayed empty, the
+        # signature test returned False, and the code fell through to the
+        # "payload failed fast — journal is truth" downgrade: a blind triage
+        # reporting a conclusion it could not observe (and if systemd-run
+        # really had failed, NO shell ever runs, so the journal stays empty
+        # and the operator sees a silent nothing). Both halves must fail for
+        # the hole to open, which is why it is pinned explicitly.
         err_tail = b""
-        if proc.stderr is not None:
-            try:
-                err_tail = proc.stderr.read() or b""
-            except OSError:
-                err_tail = b""
+        err_tail_read = False
+        try:
+            with client_err_path.open("rb") as eh:
+                eh.seek(0, os.SEEK_END)
+                size = eh.tell()
+                eh.seek(max(0, size - _CLIENT_ERR_TAIL_BYTES))
+                err_tail = eh.read() or b""
+            err_tail_read = True
+        except OSError:
+            err_tail_read = False
         if _is_systemd_run_failure(err_tail):
             _refuse_systemd_unavailable(
                 install_dir,
                 f"systemd-run client exited rc={rc}: "
                 f"{err_tail.decode('utf-8', errors='replace')[-300:]}",
+            )
+        if not err_tail_read:
+            # Deliberately the SAME fail-closed refusal family (no new
+            # envelope token): the claim being refused is "a transient
+            # executor unit was started and its payload ran" — and it is
+            # UNVERIFIABLE here. The reason text names the sub-case so the
+            # journal row is unambiguous.
+            _refuse_systemd_unavailable(
+                install_dir,
+                f"systemd-run client exited rc={rc} but its stderr is "
+                f"UNREADABLE (client-log-unavailable: {client_err_path}) — "
+                "the systemd-failure signature cannot be triaged, so the "
+                "unit start is UNVERIFIABLE (A7 fail-closed)",
             )
         # Fast non-zero WITHOUT a systemd failure signature ⇒ the payload
         # itself ran and failed fast (e.g. a preflight exit-78 refusal) —

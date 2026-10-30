@@ -21,25 +21,39 @@
 #   _probe                    health-gate probe (2s sleep, curl max-time 5s —
 #                             the same budget as deploy.sh phase 5)
 #
-# Size rationale: ~5560 lines (crossed >3000 during the supervision-
-# detection + 3-layer adoption-protocol growth, then ~2400 more across
-# the W5 journal-splice shell helpers, C4 live-waiver refusal, F2 gate
-# plumbing and the fast-by-default promote lane) is still the
-# single shared substrate for the five entry scripts (stage/promote/
+# Size rationale: ~6720 lines (refreshed 2026-10-30 — the previous note said
+# ~5560, i.e. ~1,080 lines stale; +854 of the growth is the
+# promote-preflight-hang work: the O(N) journal-read wrapper family
+# `_journal_read_helper_path`/`_journal_read_probe`/`_journal_read_legacy`/
+# `_journal_read_fallback`/`journal_read` + `_json_sub_legacy`, the per-run
+# logging sink `_log*`/`_log_write_failed`, `_run_bounded_step`, the
+# `_pipeline_scripts_stamp_verdict` stage gate, the numeric-knob resolver,
+# the TERM-forwarding tree walk and `_run_log_retention`). The file crossed
+# >3000 during the supervision-detection + 3-layer adoption-protocol growth,
+# then ~2400 more across the W5 journal-splice shell helpers, C4 live-waiver
+# refusal, F2 gate plumbing and the fast-by-default promote lane; it is still
+# the single shared substrate for the five entry scripts (stage/promote/
 # rollback/restart/status) plus the SOURCED consumers stop-ensemble.sh /
 # adopt-unit.sh; splitting would duplicate cross-cutting contracts
 # (journal layout, lock semantics, ENV allowlist, BSD/GNU dispatch). The
 # file is the contract inventory. The recent growth is the supervision-
 # detection section (classify / outcome map / dualfight / unit hand-back)
 # — one twin lives here, the python twin in daemon/tools/upgrade_journal.py.
-# BACKLOG (fix-back cycle 2 — candidates ONLY, no split executed; any
-# split must keep every consumer's sourcing line byte-identical and re-run
-# the full journal/lock/supervision suites):
+# BACKLOG (fix-back cycle 2 + fix cycle 2 — candidates ONLY, no split
+# executed; any split must keep every consumer's sourcing line
+# byte-identical and re-run the full journal/lock/supervision suites):
 #   (a) supervision_* family (~:1879-2900: hand-back, restart_via_launcher,
 #       owned_pids, classify, outcome map, dualfight) → supervision_lib.sh;
 #   (b) pipeline_settled + adoption_marker_* (~:1212-1527, Layer i/ii) →
 #       settle_lib.sh;
-#   (c) journal_* family (~:481-1014, atomic state.json IO) → journal_lib.sh.
+#   (c) journal_* family (~:481-1014, atomic state.json IO) → journal_lib.sh;
+#   (d) journal-READ family (~:1324-1500: `_journal_read_helper_path` →
+#       `journal_read`) + `_json_sub_legacy` → journal_read_lib.sh (all five
+#       consumers source lib.sh, so the sourcing line stays byte-identical;
+#       the parity pack's `git show <rev>:scripts/upgrade/lib.sh` oracle
+#       extraction needs a one-line path update);
+#   (e) per-run logging family (`_log*` / `_log_write_failed`, ~:296-486)
+#       + `_run_log_retention` → log_lib.sh.
 #
 # ENV DISCIPLINE (D-FA4.6 + test-strategy §5):
 #   - the resolved triple (INSTALL_DIR / PORT / POSTGRES_DB) is asserted and
@@ -68,6 +82,46 @@
 # sourcing if they want their own name; default "upgrade").
 LOG_TAG="${LOG_TAG:-upgrade}"
 
+# ── PIPELINE SCRIPTS IDENTITY STAMP (promote-preflight-hang phase 6, T6.4/D6-4/D6-8) ──
+# The daemon-side arm-time guard parses THIS line (a bounded first-64KiB
+# read of THIS FILE — B3: the file at <scripts_dir>/lib.sh is the guard's
+# input, never the executor echo) before the ceremony nonce burns. A
+# pinned scripts dir whose lib.sh predates this stamp is refused as stale.
+# The release process stamps the merge commit that introduced the current
+# ceremony-relevant scripts/upgrade semantics here (cadence D6-8: bumps
+# per release that touches ceremony-relevant scripts/upgrade semantics —
+# the SAME cadence as the daemon's PIPELINE_SCRIPTS_FLOOR_COMMIT; the two
+# travel together, T6.15/AC15).
+PIPELINE_SCRIPTS_REV=unreleased-fix-promote-preflight-hang
+
+# ── _numeric_knob <NAME> <raw-value> <default> — A5 (code council, 2026-10-30)
+# The budget knobs below are consumed in ARITHMETIC (`$(( now + BUDGET ))`)
+# and in `sleep`. A non-numeric value used to die CRYPTICALLY (`abc:
+# unbound variable` inside `$(( ))`) or, worse, silently INVERT a bound
+# (`sleep abc` fails instantly => the watcher fires at elapsed=0 and the
+# first wrapped step "breaches" in zero seconds). Resolve every numeric
+# knob through here: a non-numeric value is a LOUD, named validation error
+# on stderr and the documented default takes over — never a cryptic death
+# and never a silently-dead watchdog. Empty => default (the documented
+# "unset" spelling). Non-fatal by design: this runs at SOURCE time, and
+# status.sh / restart.sh / rollback.sh (R1 recovery class) must never be
+# fail-fast halted by an operator typo in an unrelated knob.
+_numeric_knob() {
+    local __name="$1" __raw="${2:-}" __def="$3"
+    if [ -z "$__raw" ]; then
+        printf '%s' "$__def"
+        return 0
+    fi
+    case "$__raw" in
+        *[!0-9]*)
+            printf 'ERROR: %s="%s" is not a decimal integer — using the documented default %s (a garbage budget silently disables or inverts the bound it guards; A5/code council 2026-10-30)\n' \
+                "$__name" "$__raw" "$__def" >&2
+            printf '%s' "$__def"
+            ;;
+        *) printf '%s' "$__raw" ;;
+    esac
+}
+
 # Health-gate budgets (seconds) — same numbers as deploy.sh phase 5.
 # LIVEZ_BUDGET_S = 180s (v0.16.9, was 60s): attempt-2 halt showed the
 # post-flip boot alone eats ~51s for the journal sweep on the first live
@@ -89,8 +143,8 @@ LOG_TAG="${LOG_TAG:-upgrade}"
 # See decisions.md (c)/(d), phase3-plan.md D-P3.1/D-P3.2, plan-overview
 # §4. C-5: this comment refresh rides the P1 PR as a discoverability
 # win for operators BEFORE P3 lands the behavior.
-LIVEZ_BUDGET_S="${LIVEZ_BUDGET_S:-180}"
-READYZ_BUDGET_S="${READYZ_BUDGET_S:-120}"
+LIVEZ_BUDGET_S="$(_numeric_knob LIVEZ_BUDGET_S "${LIVEZ_BUDGET_S:-}" 180)"
+READYZ_BUDGET_S="$(_numeric_knob READYZ_BUDGET_S "${READYZ_BUDGET_S:-}" 120)"
 # P3 / decision (d) — total ceremony wall-clock ceiling. The
 # promote.sh top-level wraps every phase boundary in
 # `_enforce_deadline promote_deadline <phase-name>`. Breach → journal
@@ -106,7 +160,7 @@ READYZ_BUDGET_S="${READYZ_BUDGET_S:-120}"
 #   worst (+30s slack inside the 900s ceiling). The conservative
 #   mode preserves the v0.18-era envelope (soak 300s flat) so
 #   total ≤ 900s + slack remains the conservative floor.
-PROMOTE_TOTAL_DEADLINE_S="${PROMOTE_TOTAL_DEADLINE_S:-900}"
+PROMOTE_TOTAL_DEADLINE_S="$(_numeric_knob PROMOTE_TOTAL_DEADLINE_S "${PROMOTE_TOTAL_DEADLINE_S:-}" 900)"
 
 # Subprocess-wait budgets (2.2b, upgrade-resilience 2026-10-07). Rationale
 # (cite: §9 manual-push reproduction + incident ④ 2026-10-07 forensics):
@@ -122,10 +176,55 @@ PROMOTE_TOTAL_DEADLINE_S="${PROMOTE_TOTAL_DEADLINE_S:-900}"
 # defaults so the happy path NEVER trips them; env-overridable for
 # sandbox drills and tests. One event kind `subprocess_wait_timeout`
 # journals every site for forensic correlation.
-STOP_SCRIPT_BUDGET_S="${STOP_SCRIPT_BUDGET_S:-120}"     # placeholder; effective bound derived at call site (see _derive_parent_stop_budget)
-HANDBACK_START_BUDGET_S="${HANDBACK_START_BUDGET_S:-60}"  # unit hand-back start (the §9 culprit)
-SYSTEMCTL_PROBE_BUDGET_S="${SYSTEMCTL_PROBE_BUDGET_S:-5}"  # reset-failed / is-active probes
-SCOPE_START_BUDGET_S="${SCOPE_START_BUDGET_S:-10}"      # scope-arm/opt-in launcher start
+STOP_SCRIPT_BUDGET_S="$(_numeric_knob STOP_SCRIPT_BUDGET_S "${STOP_SCRIPT_BUDGET_S:-}" 120)"     # placeholder; effective bound derived at call site (see _derive_parent_stop_budget)
+HANDBACK_START_BUDGET_S="$(_numeric_knob HANDBACK_START_BUDGET_S "${HANDBACK_START_BUDGET_S:-}" 60)"  # unit hand-back start (the §9 culprit)
+SYSTEMCTL_PROBE_BUDGET_S="$(_numeric_knob SYSTEMCTL_PROBE_BUDGET_S "${SYSTEMCTL_PROBE_BUDGET_S:-}" 5)"  # reset-failed / is-active probes
+SCOPE_START_BUDGET_S="$(_numeric_knob SCOPE_START_BUDGET_S "${SCOPE_START_BUDGET_S:-}" 10)"      # scope-arm/opt-in launcher start
+# D1 (promote-preflight-hang) — per-tree cap for the stage manifest checksum
+# walks. DERIVED, not invented (wave-2 re-measurement — the wave-1 numbers
+# were lost with its /tmp sandbox; this host, read-only over the worktree,
+# ambient load ~2 cores, `preflight_shasum_batch_parity_test.sh --full`):
+# the BATCHED walk is 2.0 s for the 4,930-file plugins tree (303.8 s before
+# batching), 0.28 s agents (338 files), 0.33 s frontend (567 files); output
+# byte-parity pinned by the same pack. Budget = 60 s = ~30x the worst
+# measured batched walk — headroom for a cold cache or a slower host —
+# while staying ~150x BELOW the 304 s per-file pass, so a batching REGRESSION
+# (fallback to per-file hashing) trips this LOUDLY instead of reproducing
+# the 2026-10-28 09:51/09:54 stage-SIGTERM shape (unbounded, unlogged CPU in
+# an early phase). Env-overridable. Re-measure with:
+#   nohup bash tests/packs/preflight_shasum_batch_parity_test.sh --full &
+STAGE_TREE_BUDGET_S="$(_numeric_knob STAGE_TREE_BUDGET_S "${STAGE_TREE_BUDGET_S:-}" 60)"
+# D2 (promote-preflight-hang, phase 2) — the preflight watchdog budgets.
+# Both are env-overridable; the value in force is NAMED in the breach row
+# when a budget trips (T2.1/AC1 — `_budget_in_force` is the resolver).
+#
+# PREFLIGHT_STEP_BUDGET_S=120 — DERIVED (D2-15/architect RULING 6b): ≈ 2.3x
+# the longest single measured preflight step. `integrity_verify` ≈ 26 s/call
+# on the release payload shape (agents+frontend, ~431 files; the pre-D1
+# per-file walk — evidence/CODE-PATHS.md §12: 52-60 s of the 68 s healthy
+# preflight across 2 calls). Post-D1 both calls ride the batched walk
+# (~0.3 s/tree), so 120 s is generous belt headroom; it exists to catch the
+# NEXT unknown slow site (the 2026-10-28 hang was ONE step — a checkpoint
+# before/after the site still hung 37 minutes; only a per-step bound fires
+# inside a step).
+#
+# PREFLIGHT_PHASE_BUDGET_S=300 — ≈ 4.4x the measured healthy preflight
+# (68 s wall / 22 s CPU, sandbox replay at 25 KB journal), and deliberately
+# BELOW the daemon's 660 s benign-detach observation
+# (upgrade_journal_sweep.py DEFAULT_REAPER_TIMEOUT_SECONDS): the shell's
+# loud failure beats the daemon's silent observation.
+#
+# ARMING SCOPE (D2-11/T2.19): these budgets are armed around the promote
+# PREFLIGHT window ONLY (promote.sh:225-373 region) and the stage tree
+# walks (STAGE_TREE_BUDGET_S). They are NEVER armed around gate_soak
+# (lib.sh gate_soak; reachable only from promote.sh's gate section, outside
+# the wrapped window) — a watchdog that covers the soak would kill a
+# legitimate 300 s conservative soak (R1). The rollback/restart/status
+# scripts hold no pipeline lock on their journal reads and get the
+# UNLOCKED breach behaviour instead (D2-6/SC4b: warn + per-run log, no
+# journal row; status.sh exits 1).
+PREFLIGHT_STEP_BUDGET_S="$(_numeric_knob PREFLIGHT_STEP_BUDGET_S "${PREFLIGHT_STEP_BUDGET_S:-}" 120)"
+PREFLIGHT_PHASE_BUDGET_S="$(_numeric_knob PREFLIGHT_PHASE_BUDGET_S "${PREFLIGHT_PHASE_BUDGET_S:-}" 300)"
 # Post-flip soak (ADR-005 gate: 300s). Overridable for sandbox drills only
 # (ENSEMBLE_PROMOTE_SOAK_S); production default stays 300.
 SOAK_S_DEFAULT=300
@@ -219,9 +318,71 @@ HEARTBEAT_STALE_S=300
 # Retention (ADR-004): keep 3 releases; previous pinned.
 RETENTION_KEEP=3
 
-_log()  { printf '%s[%s]: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "$*" 2>/dev/null; }
-_logv() { printf '%s\n' "$*" 2>/dev/null; }                # verbatim (JSON etc.)
-_warn() { printf '%s[%s]: WARN: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "$*" >&2 2>/dev/null; }
+# D3 (promote-preflight-hang phase 3) -- LOGGING THAT SURVIVES ANYTHING.
+#
+# When ENSEMBLE_UPGRADE_LOG_FILE is set (the daemon threads the per-run
+# NARRATIVE path into the executor env; D3-12's two-file sink), the
+# shell's own lines are appended DIRECTLY to that file -- timestamped --
+# and stdout/stderr become a best-effort mirror that is SKIPPED on a
+# successful file write (no duplication: systemd's `append:` capture
+# feeds the separate PAYLOAD file, not this one). When the variable is
+# UNSET (manual/legacy runs), the behaviour is BYTE-IDENTICAL to the
+# pre-D3 shape (AC1).
+#
+# Write failures are REPORTED (D3-5/O5): the append goes through
+# _log_tsl (the single writer -- D3-14/AC15); on failure the line goes to
+# stderr WITHOUT the blanket 2>/dev/null and ONE best-effort journal row
+# (marker logwrite_failed) is attempted per run, so a full disk / a
+# read-only log surfaces instead of swallowing the narrative.
+_LOG_WRITE_WARNED=0
+_log_write_failed() {
+    # stderr, UNREDIRECTED (a broken transport must be visible)
+    printf '%s\n' "$1" >&2
+    if [ "${_LOG_WRITE_WARNED:-0}" = "0" ]; then
+        _LOG_WRITE_WARNED=1
+        # journald visibility (AC2/AC13): the unwritable-file fallback is
+        # recorded with a distinct marker; best-effort, never fatal (the
+        # journal append itself routes through _warn on its own failures --
+        # the flag above stops that recursion).
+        journal_history_append warn "logwrite_failed: per-run narrative log write FAILED (path=${ENSEMBLE_UPGRADE_LOG_FILE:-?}) -- lines fall back to stderr only" >/dev/null 2>&1 || true
+    fi
+}
+_log()  {
+    if [ -n "${ENSEMBLE_UPGRADE_LOG_FILE:-}" ]; then
+        if _log_tsl "$ENSEMBLE_UPGRADE_LOG_FILE" "${LOG_TAG}[${UP_TARGET:-lib}]: $*"; then
+            return 0
+        fi
+        _log_write_failed "${LOG_TAG}[${UP_TARGET:-lib}]: $*"
+        return 0
+    fi
+    printf '%s[%s]: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "$*" 2>/dev/null
+}
+# _logv -- verbatim body writer (JSON payloads etc.). D3-11 (phase-3 fold
+# A21): the _logv call sites (promote.sh livez/readyz bodies, rollback,
+# restart) are UNBOUNDED today (1,258 B measured; a degraded readyz grows)
+# -- so with the narrative sink set they ride the SAME writer (timestamp,
+# 4 KiB cap, embedded-newline sanitization); without it the legacy
+# byte-identical stdout write stands.
+_logv() {
+    if [ -n "${ENSEMBLE_UPGRADE_LOG_FILE:-}" ]; then
+        if _log_tsl "$ENSEMBLE_UPGRADE_LOG_FILE" "$*"; then
+            return 0
+        fi
+        _log_write_failed "$*"
+        return 0
+    fi
+    printf '%s\n' "$*" 2>/dev/null
+}                # verbatim (JSON etc.)
+_warn() {
+    if [ -n "${ENSEMBLE_UPGRADE_LOG_FILE:-}" ]; then
+        if _log_tsl "$ENSEMBLE_UPGRADE_LOG_FILE" "${LOG_TAG}[${UP_TARGET:-lib}]: WARN: $*"; then
+            return 0
+        fi
+        _log_write_failed "${LOG_TAG}[${UP_TARGET:-lib}]: WARN: $*"
+        return 0
+    fi
+    printf '%s[%s]: WARN: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "$*" >&2 2>/dev/null
+}
 
 # _now_epoch — seconds since epoch (BSD-safe).
 _now_epoch() { date +%s; }
@@ -253,7 +414,7 @@ _now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # is the consumer's job to interpret. The journal field is the
 # single source of truth (runbook step 1 + post-mortem correlation).
 _enforce_deadline() {
-    local deadline="$1" phase="$2"
+    local deadline="$1" phase="$2" budget_extra="${3:-}"
     local now elapsed daemon_state="live"
     now="$(_now_epoch)"
     if [ "$now" -le "$deadline" ]; then
@@ -274,11 +435,192 @@ _enforce_deadline() {
         *stop*|*launcher*|*flip*) daemon_state="stopped" ;;
         *) daemon_state="live" ;;
     esac
-    journal_history_append halt "deadline-breach-${phase} (elapsed=${elapsed}s past ${deadline}) daemon-state=${daemon_state}" \
-                          || true   # history is advisory; the breach is already decided
+    # W3 (phase-2 fold): the optional third argument carries the budget
+    # identity (e.g. "budget=PREFLIGHT_PHASE_BUDGET_S value=300") so BOTH
+    # breach producers — this L1 checkpoint and the L2a `_budget_breach`
+    # below — emit daemon-state= in one readable row shape. Callers that
+    # pass two arguments (every pre-existing site) produce BYTE-IDENTICAL
+    # rows to the pre-D2 shape.
+    if [ -n "$budget_extra" ]; then
+        journal_history_append halt "deadline-breach-${phase} (elapsed=${elapsed}s past ${deadline}) ${budget_extra} daemon-state=${daemon_state}" \
+                              || true   # history is advisory; the breach is already decided
+    else
+        journal_history_append halt "deadline-breach-${phase} (elapsed=${elapsed}s past ${deadline}) daemon-state=${daemon_state}" \
+                              || true   # history is advisory; the breach is already decided
+    fi
     _warn "CEREMONY DEADLINE BREACH at phase=${phase}: elapsed=${elapsed}s past deadline=${deadline} (daemon-state=${daemon_state}) — halt-for-human (C-10b/C-10c)"
     lock_release 2>/dev/null || true
     exit 78
+}
+
+# _budget_in_force <NAME> — single resolver for the D2 watchdog budgets
+# (T2.1/AC1). Prints the value in force (env override or documented
+# default) so the breach row can NAME it; refusing loudly on an unknown
+# name keeps the resolver honest (a typo'd budget in a breach row would
+# silently misreport the value).
+#
+# A5 (code council, 2026-10-30): the values printed here are the RESOLVED
+# globals — every numeric knob already passed through `_numeric_knob` at
+# source time, so a garbage override can neither reach a breach row nor
+# reach `$(( ))`/`sleep`. The defaults are NOT re-declared here (one
+# source of truth per budget).
+_budget_in_force() {
+    case "$1" in
+        PREFLIGHT_STEP_BUDGET_S)   printf '%s' "$PREFLIGHT_STEP_BUDGET_S" ;;
+        PREFLIGHT_PHASE_BUDGET_S)  printf '%s' "$PREFLIGHT_PHASE_BUDGET_S" ;;
+        STAGE_TREE_BUDGET_S)       printf '%s' "$STAGE_TREE_BUDGET_S" ;;
+        SYSTEMCTL_PROBE_BUDGET_S)  printf '%s' "$SYSTEMCTL_PROBE_BUDGET_S" ;;
+        JOURNAL_LEGACY_READ_BUDGET_S) printf '%s' "$JOURNAL_LEGACY_READ_BUDGET_S" ;;
+        *) return 1 ;;
+    esac
+}
+
+# _budget_breach <budget_name> <step> <phase> <elapsed_s> — the L2a breach
+# handler (T2.2/D2-5/D2-12/W3). ORDER IS LOAD-BEARING and pinned
+# (tests/packs/preflight_watchdog_test.sh): journal row FIRST, then the
+# stderr _warn, then lock_release, then exit 78. Release-first would lose
+# the row on a live install: journal_splice.py's live-install fence
+# (`_pipeline_lock_held`, journal_splice.py:553) refuses history appends
+# while the pipeline lock is NOT held by a live owner — releasing the lock
+# before journalling makes the append fail exactly when it matters most.
+# The row keeps the house vocabulary: kind `halt`, detail prefixed
+# `deadline-breach-<step>` (same family as _enforce_deadline's
+# `deadline-breach-<phase>`), carrying ALL FIVE budget fields (T2.9/AC9:
+# budget name, value in force, step, elapsed, phase) PLUS daemon-state=
+# (W3 — one row shape for both producers; the runbook's first-recovery-step
+# reads the field from either). Two breach classes stay distinct (D2-12):
+# (i) this shell-watchdog breach = exit 78 + halt row WITH the
+# `deadline-breach-` prefix; (ii) an L3 systemd RuntimeMaxSec kill =
+# exit 143 + halt row WITHOUT the prefix (the TERM trap's
+# "killed by SIGTERM" row). Terminal classification is by row kind, never
+# by exit code alone.
+#
+# LOCKED-PATH ONLY: callers hold the pipeline lock (the promote preflight
+# and the supervision probes all run under it). The unlocked scripts
+# (status.sh / the unlocked journal reads in rollback.sh / restart.sh) use
+# their own failure handling — they must NOT call this function (their
+# breach rows would be fence-refused on a live install; D2-6/SC4b).
+_budget_breach() {
+    local budget="$1" step="$2" phase="$3" elapsed="$4"
+    local value daemon_state="live"
+    value="$(_budget_in_force "$budget" 2>/dev/null)" || value="unknown"
+    # The steps this handler serves are preflight/pre-stop ⇒ daemon live
+    # (same conservative mapping as _enforce_deadline's default arm).
+    journal_history_append halt "deadline-breach-${step} (budget=${budget} value=${value} elapsed=${elapsed}s phase=${phase}) daemon-state=${daemon_state}" \
+                          || true   # a torn journal must not block the halt; the exit below is the contract
+    _warn "PREFLIGHT STEP BUDGET BREACH step=${step}: exceeded budget=${budget} value=${value}s elapsed=${elapsed}s phase=${phase} — halting (deadline-breach-${step}, exit 78; lock released)"
+    lock_release 2>/dev/null || true
+    exit 78
+}
+
+# _run_bounded_step <step-name> <command...> — the L2a per-step wrapper
+# (T2.3/D2-14). Runs the step under the house `_run_bounded` primitive
+# (BYTE-UNCHANGED; the 7 pre-existing consumers are untouched) with
+# PREFLIGHT_STEP_BUDGET_S; on rc 124 (the 137/143→124 collapse inside
+# _run_bounded) the breach handler fires LOUDLY (row + warn + lock release
+# + exit 78). Any other rc propagates unchanged — healthy steps are
+# unaffected.
+#
+# WRAPPER CONTRACT (D2-14, corrected by W1/code council 2026-10-30): the
+# wrapped step MUST be read-only OR death-idempotent BY ITS OWN DESIGN (a
+# kill mid-step must leave either no state change or a state the next
+# sweep/re-run repairs). Read-only sites (journal reads, entry checks,
+# staleness predicate, integrity walks) are the majority; the ONE
+# non-read-only site is `adopt_stale_txn` (promote.sh step 1c), whose
+# recovery is flip-first precisely so a death mid-sequence is re-run
+# idempotently by the launcher sweep on the same stale txn (its own comment
+# block says so). The side-effecting ceremonies that are NOT death-
+# idempotent (stop script, launcher swap, the post-txn flip) are
+# deliberately NOT wrapped — a kill mid-`retention_evict`/stop would leave
+# half-mutated state (the MUST-NOT-WRAP rows in phase2-plan §3.3b).
+# NOTE: the step runs in a forked subshell (the house primitive backgrounds
+# it) — never wrap a step that must set globals in this shell
+# (supervision_preflight is covered INSIDE its dualfight probe sites
+# instead, via _df_systemctl below).
+#
+# RC CONTRACT: a step that REFUSES by `exit 78` inside the subshell surfaces
+# to the caller as the wrapper's rc 78 — the caller MUST propagate it
+# (`exit 78`) and MUST NOT append a row of its own (that row would be
+# mislabelled and would double-record one refusal). See promote.sh's
+# adopt-txn arm (W1) and the BUDGET_BREACH_RC consumers below.
+_run_bounded_step() {
+    local step="$1"; shift
+    local t0 rc
+    t0="$(_now_epoch)"
+    _run_bounded "$PREFLIGHT_STEP_BUDGET_S" "$@"
+    rc=$?
+    if [ "$rc" -eq 124 ]; then
+        _budget_breach PREFLIGHT_STEP_BUDGET_S "$step" "${_PIPELINE_PHASE:-preflight}" "$(( $(_now_epoch) - t0 ))"
+    fi
+    return "$rc"
+}
+
+# BUDGET_BREACH_RC — the rc `_budget_breach` exits with, exported to the
+# CALLERS that invoke `_run_bounded_step` inside a COMMAND SUBSTITUTION
+# (A-4, verifier 2026-10-30). `exit` inside `$( )` ends only the
+# substitution's subshell, so such a caller never observes the wrapper's
+# 124: it sees THIS rc, while the breach handler has ALREADY written its
+# `deadline-breach-<step>` halt row, emitted its WARN and released the lock.
+# The caller's contract is therefore: on this rc, propagate the halt
+# (`exit "$BUDGET_BREACH_RC"`) and write NO row of its own — a caller-side
+# row would be mislabelled (it names the step's own failure vocabulary, e.g.
+# the journal size guard) and would double-record a single breach event.
+# Keep in lockstep with `_budget_breach` (which pins the literal 78: its
+# ORDER/shape is asserted by tests/packs/preflight_watchdog_test.sh).
+BUDGET_BREACH_RC=78
+
+# _pipeline_scripts_stamp_verdict <stamp> <floor> <repo_root> — W-2 (verifier
+# 2026-10-30): the RELEASE-TIME validity check for the lib.sh
+# `PIPELINE_SCRIPTS_REV` stamp, the second half of the phase-6 provenance gate
+# (the daemon-side floor is the first half; stage.sh validates both).
+#
+# WHY IT EXISTS: on a NON-GIT pinned scripts dir the stamp IS the provenance
+# (Q2/D6-11), and the daemon's acquisition regex (`_STAMP_RE`) accepts any
+# `[0-9A-Za-z._/-]+` — so the pre-release placeholder
+# (`unreleased-<lane>`) would arm a ceremony with a meaningless value and no
+# git ancestry able to contradict it. Three mechanical conditions:
+#   1. a 40-hex commit sha (a placeholder is NOT one);
+#   2. that sha RESOLVES to a commit in this tree (same rule as the floor: a
+#      release may only name commits it contains);
+#   3. when the floor is set, the stamp IS the floor commit — D6-8's "the two
+#      travel together" (one merge commit names both the floor the daemon
+#      enforces and the revision the scripts tree declares).
+# CONTRACT: prints "" / returns 0 when valid; prints the human REFUSAL REASON
+# (one line, no trailing newline) / returns 1 when not. It writes nothing and
+# exits nothing, so a caller owns the wording prefix and the halt. Extracted
+# from stage.sh's inline block so the gate is EXECUTABLE in a pack (the real
+# stage.sh cannot be run without a full PyInstaller build) — the pack's
+# refusal legs and the mutation matrix drive THIS function.
+_pipeline_scripts_stamp_verdict() {
+    local stamp="${1:-}" floor="${2:-}" repo="${3:-.}"
+    if ! printf '%s' "$stamp" | grep -Eq '^[0-9a-f]{40}$'; then
+        printf 'PIPELINE_SCRIPTS_REV in scripts/upgrade/lib.sh is "%s" — not a 40-hex commit sha (W-2/T6.4). The pre-release placeholder MUST be replaced by the release bump with the merge commit introducing the preflight-hang fix (the SAME commit as PIPELINE_SCRIPTS_FLOOR_COMMIT, cadence D6-8). A non-git pinned scripts dir has NO other provenance than this stamp, so a placeholder would arm silently.' "${stamp:-<absent>}"
+        return 1
+    fi
+    if ! git -C "$repo" cat-file -e "${stamp}^{commit}" >/dev/null 2>&1; then
+        printf 'PIPELINE_SCRIPTS_REV=%s does not resolve to a commit in this tree (W-2 — the stamp must name a commit this release contains, the same rule as the floor). Fix scripts/upgrade/lib.sh and re-stage.' "$stamp"
+        return 1
+    fi
+    if [ -n "$floor" ] && [ "$stamp" != "$floor" ]; then
+        printf 'PIPELINE_SCRIPTS_REV=%s does not equal PIPELINE_SCRIPTS_FLOOR_COMMIT=%s — D6-8 requires the two to travel together (the same merge commit names both the floor the daemon enforces and the revision the scripts tree declares). Align both and re-stage.' "$stamp" "$floor"
+        return 1
+    fi
+    return 0
+}
+
+# _log_phase_marker <step> -- the D3-8/T3.3 mid-phase marker: ONE
+# timestamped line naming the phase, the step and the elapsed seconds
+# since the preflight armed (_PREFLIGHT_T0). Written through _log, so it
+# lands in the per-run NARRATIVE file when ENSEMBLE_UPGRADE_LOG_FILE is
+# set (SC7) and on stdout otherwise (manual runs). The markers sit at the
+# SAME boundaries as the D2 checkpoints -- one coherent narrative for the
+# post-mortem (a watchdog trip and the last marker name the same step).
+_log_phase_marker() {
+    local step="$1" elapsed=0
+    if [ -n "${_PREFLIGHT_T0:-}" ]; then
+        elapsed=$(( $(_now_epoch) - _PREFLIGHT_T0 ))
+    fi
+    _log "phase-marker: phase=${_PIPELINE_PHASE:-?} step=${step} elapsed=${elapsed}s"
 }
 
 # _effective_ceremony_remaining_s <deadline_epoch> — returns the
@@ -346,15 +688,33 @@ _log_ts() { date -u +'%Y-%m-%dT%H:%M:%SZ'; }
 # than aborting the write. The log line still goes through; a
 # reviewer who sees "-" can correlate with the journal's ISO
 # started_at timestamps (always present, comp4-portable).
+# D3-11 ATOMICITY CONTRACT (phase-3 fold A21): ONE log line = one write(2)
+# to an O_APPEND fd; lines < 8192 B are atomic against a concurrent
+# writer, >= 8192 B corrupt (the break is stdio BUFSIZ). Therefore a hard
+# 4 KiB line cap (2x margin): longer payloads emit a header plus
+# 'payload elided, N bytes'; embedded newlines are sanitized so one call
+# yields ONE physical line. Per-line fsync is REJECTED (page-cache
+# durability covers parent/process death -- the stated objective; a host
+# crash loses everything else too).
+_LOG_LINE_MAX=4000
 _log_tsl() {
     local file="$1"; shift
-    local ts
+    local ts line orig_n
     ts="$(_log_ts 2>/dev/null)" || ts="-"
-    printf '%s %s\n' "$ts" "$*" >> "$file" 2>/dev/null || return 1
+    line="$*"
+    # one physical line: CR/LF -> spaces
+    line="$(printf '%s' "$line" | tr '\n\r' '  ')"
+    orig_n=${#line}
+    if [ "$orig_n" -gt "$_LOG_LINE_MAX" ]; then
+        line="${line:0:_LOG_LINE_MAX} payload elided, ${orig_n} bytes"
+    fi
+    printf '%s %s\n' "$ts" "$line" >> "$file" 2>/dev/null || return 1
 }
 
-# comp6 (r-f82e): the existing _log helper writes to stderr (WARN to
-# stdout — see _warn above) and is fine for the operator's console.
+# comp6 (r-f82e): the existing _log helper writes to STDOUT (and WARN —
+# i.e. _warn — writes to STDERR; the pre-D3 text here had the two streams
+# INVERTED, corrected under phase-3 fold R-H) and is fine for the
+# operator's console.
 # It is NOT a timestamped upgrade.log writer; the upgrade.log
 # history that the forensic report needed was the executor's own
 # stdout/stderr captured by spawn_executor (data/upgrade.log, append).
@@ -587,6 +947,31 @@ _json_has() {
 # _json_sub <json> <key> — extract a nested object/array value by bracket
 # counting from `"key":`. Prints the raw {…} / […] text.
 _json_sub() {
+    local json="$1" key="$2" out rc
+    # Fast path (D1): the O(N) extractor. String-NAIVE by design -- a brace or
+    # bracket inside a string value still moves the depth, exactly as the
+    # legacy counter below does (plan D1-12: the three verbs are three
+    # algorithms; the string-aware machine is NOT shared with this one).
+    if _journal_read_probe; then
+        out="$(printf '%s' "$json" | "$_JR_PY" "$_JR_HELPER" sub "$key")"
+        rc=$?
+        case "$rc" in
+            0) printf '%s' "$out"; return 0 ;;
+            1) return 1 ;;
+            *) _warn "_json_sub: read helper UNUSABLE (exit $rc) — falling back to the legacy bracket counter" ;;
+        esac
+    else
+        # T1.5: the same fallback discipline as journal_read — the slow path
+        # is ALWAYS visible, never a silent legacy walk.
+        _warn "_json_sub: O(N) read helper unavailable — using the legacy bracket counter (correct but slow; install python3 >= 3.7 for the fast path)"
+    fi
+    _json_sub_legacy "$json" "$key"
+}
+
+# _json_sub_legacy <json> <key> — the pre-fix bracket counter, kept verbatim as
+# the no-interpreter fallback. Quadratic TWICE (`out="$out$char"` and
+# `rest="${rest:1}"`); both mechanisms are removed from the fast path.
+_json_sub_legacy() {
     local json="$1" key="$2" rest char depth start out=""
     rest="${json#*"${key}"}"
     [ "$rest" = "$json" ] && return 1
@@ -949,18 +1334,104 @@ journal_init() {
     journal_write '{"current":null,"previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}'
 }
 
-# journal_read — print journal JSON; exit 1 when absent/unreadable/torn.
-# Torn-write detection is CONTENT-based (Batch C doc correction — earlier
-# comments described a ".torn marker sibling" mechanism that never existed
-# in code; there is NO .torn file, and none is needed): our writers never
-# touch the target in place (temp-file + mv is atomic), so a torn state.json
-# can only come from an OUT-of-discipline writer — and it is caught by (a)
-# the empty-file check and (b) the brace/bracket-balance scan below, which
-# rejects truncated JSON. Nothing under releases/ named *.torn is produced
-# or consumed by this pipeline.
-journal_read() {
+# ── Journal read path: O(N) helper + legacy fallback + size guard ───────────
+#
+# D1 (promote-preflight-hang, 2026-10-29). The 2026-10-28 preflight called
+# `journal_read` on a 455,783-byte journal and burned 37 min of 100 % CPU
+# without reaching integrity: the balance scan below is O(N^2) because every
+# character access is an offset substring (`${json:i:1}`, lib.sh:~910).
+#
+# The read path now delegates to `scripts/upgrade/journal_read.py` (single
+# pass, O(N), byte-level port of the SAME algorithm — exact verdict and
+# stdout parity is pinned by tests/packs/preflight_journal_parity_test.sh).
+# The bash scanner stays as the FALLBACK so a host without an interpreter is
+# slow, never broken.
+#
+# READ PATH POLICY vs WRITE PATH POLICY (plan D1-13 / RULING 2): the helper is
+# its own file with its own policy. It is deliberately NOT routed through
+# `_splice_journal`, because that wrapper remaps rc 78 -> 1 and merges stderr
+# into stdout (both break the read contract), and because
+# `journal_splice.py` refuses a path under the live install unless the
+# pipeline lock is held — which `status.sh` (no lock at all) and
+# `rollback.sh`/`restart.sh` (before lock acquisition) never hold.
+#
+# SIZE GUARD (D1-17, leader directive W1): a LEGACY-CLASS REGRESSION BACKSTOP,
+# not a size police. It trips only when BOTH conjuncts hold — (1) the read is
+# about to run the per-character bash walk (helper absent/unusable) AND
+# (2) the journal is >= JOURNAL_SIZE_GUARD_BYTES. On the O(N) path the guard
+# is NOT consulted, so the next ceremony reading a 455 KB+ live journal is
+# never blocked. Path scope (leader ruling Q3): REFUSE on the promote path;
+# WARN + CONTINUE on rollback/restart/status — the emergency recovery path is
+# never blocked by a promote-hygiene guard.
+#
+#   * the number: the measured legacy-walk curve (11 KB -> 2.27 s,
+#     55 KB -> 51.6 s, 111 KB -> 199 s, evidence/CODE-PATHS.md §4.4) crosses
+#     the 120 s preflight step budget at ~87 KB => 98304 B (96 KiB) is a round
+#     number just above the crossover.
+#   * JOURNAL_READ_STRICT is set by promote.sh PER INVOCATION as a plain
+#     (non-exported) shell variable, immediately before its first journal
+#     read: never persisted, never in .env, and never inherited by the child
+#     scripts promote.sh launches (so `stop-ensemble.sh` keeps the
+#     warn-and-continue recovery semantics).
+JOURNAL_SIZE_GUARD_BYTES="${JOURNAL_SIZE_GUARD_BYTES:-98304}"
+JOURNAL_LEGACY_READ_BUDGET_S="$(_numeric_knob JOURNAL_LEGACY_READ_BUDGET_S "${JOURNAL_LEGACY_READ_BUDGET_S:-}" 120)"
+JOURNAL_READ_STRICT="${JOURNAL_READ_STRICT:-0}"
+
+# _journal_read_helper_path — absolute path to the read helper. Mirrors
+# `_splice_journal_path`: BASH_SOURCE-anchored so the helper is found even
+# when the caller changes PWD, with a $REPO_ROOT fallback. JOURNAL_READ_HELPER
+# is an explicit override (tests pin the "helper absent" class with it).
+_journal_read_helper_path() {
+    if [ -n "${JOURNAL_READ_HELPER:-}" ]; then
+        if [ -f "$JOURNAL_READ_HELPER" ]; then
+            printf '%s\n' "$JOURNAL_READ_HELPER"
+            return 0
+        fi
+        return 1
+    fi
+    local self_dir
+    self_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || self_dir=""
+    if [ -n "$self_dir" ] && [ -f "$self_dir/journal_read.py" ]; then
+        printf '%s\n' "$self_dir/journal_read.py"
+        return 0
+    fi
+    if [ -n "${REPO_ROOT:-}" ] && [ -f "$REPO_ROOT/scripts/upgrade/journal_read.py" ]; then
+        printf '%s\n' "$REPO_ROOT/scripts/upgrade/journal_read.py"
+        return 0
+    fi
+    return 1
+}
+
+# _journal_read_probe — 0 when the O(N) read path is usable. Sets the pair
+# _JR_PY / _JR_HELPER. The probe is the interpreter floor check: the helper is
+# stdlib-only and runs on 3.7+ (the same floor `_splice_python_floor_probe`
+# enforces for the write path). Called directly (NOT in a command
+# substitution) so the globals land in the caller's shell.
+_journal_read_probe() {
+    local h p
+    _JR_PY=""
+    _JR_HELPER=""
+    if ! h="$(_journal_read_helper_path)"; then
+        return 1
+    fi
+    if ! p="$(_splice_python_path)"; then
+        return 1
+    fi
+    if "$p" "$h" --probe >/dev/null 2>&1; then
+        _JR_PY="$p"
+        _JR_HELPER="$h"
+        return 0
+    fi
+    return 1
+}
+
+# _journal_read_legacy <journal_path> — the pre-fix scanner, kept verbatim as
+# the no-interpreter fallback. Correct, but O(N^2): it is the SLOW path and it
+# always announces itself (a silent fallback would recreate the incident as a
+# "mystery slow host").
+_journal_read_legacy() {
     local jp
-    jp="$(journal_path)"
+    jp="$1"
     if [ ! -f "$jp" ]; then
         return 1
     fi
@@ -998,6 +1469,61 @@ journal_read() {
     printf '%s' "$json"
 }
 
+# _journal_read_fallback <journal_path> — the legacy walk, guarded.
+_journal_read_fallback() {
+    local jp="$1" size rc
+    size="$(wc -c < "$jp" 2>/dev/null | tr -d ' ')" || size=0
+    case "$size" in ''|*[!0-9]*) size=0 ;; esac
+    if [ "$size" -ge "$JOURNAL_SIZE_GUARD_BYTES" ]; then
+        if [ "$JOURNAL_READ_STRICT" = "1" ]; then
+            _warn "journal at $jp is ${size} bytes and the O(N) read helper is UNAVAILABLE — REFUSING (promote path; JOURNAL_SIZE_GUARD_BYTES=${JOURNAL_SIZE_GUARD_BYTES}): the legacy per-character bash walk needs ${size}B worth of quadratic scanning (minutes: this is the 2026-10-28 preflight hang). Remedy: put python3 >= 3.7 on PATH (or set SPLICE_PYTHON), or trim the journal below ${JOURNAL_SIZE_GUARD_BYTES} bytes."
+            return 1
+        fi
+        _warn "journal at $jp is ${size} bytes and the O(N) read helper is UNAVAILABLE — proceeding on the LEGACY per-character bash walk under a ${JOURNAL_LEGACY_READ_BUDGET_S}s bound (warn-and-continue: a recovery/diagnostic read is never blocked by the size guard; put python3 >= 3.7 on PATH, or trim the journal to speed this up)"
+        _run_bounded "$JOURNAL_LEGACY_READ_BUDGET_S" _journal_read_legacy "$jp"
+        rc=$?
+        case "$rc" in
+            0) return 0 ;;
+            124)
+                _warn "legacy journal read at $jp exceeded ${JOURNAL_LEGACY_READ_BUDGET_S}s — treating the journal as UNREADABLE (hung read; install python3 >= 3.7 for the O(N) path)"
+                return 1 ;;
+            *) return 1 ;;
+        esac
+    fi
+    _warn "journal at $jp: O(N) read helper unavailable — falling back to the legacy per-character bash walk (correct but slow; install python3 >= 3.7 for the fast path)"
+    _journal_read_legacy "$jp"
+}
+
+# journal_read — print journal JSON; exit 1 when absent/unreadable/torn.
+# Torn-write detection is CONTENT-based (Batch C doc correction — earlier
+# comments described a ".torn marker sibling" mechanism that never existed
+# in code; there is NO .torn file, and none is needed): our writers never
+# touch the target in place (temp-file + mv is atomic), so a torn state.json
+# can only come from an OUT-of-discipline writer — and it is caught by (a)
+# the empty-file check and (b) the brace/bracket-balance scan below, which
+# rejects truncated JSON. Nothing under releases/ named *.torn is produced
+# or consumed by this pipeline.
+journal_read() {
+    local jp
+    jp="$(journal_path)"
+    if [ ! -f "$jp" ]; then
+        return 1
+    fi
+    # Fast path (D1): the O(N) helper does ONE read and one pass, and prints
+    # the bash-processed bytes (trailing newlines stripped, NULs dropped) --
+    # the SAME string the legacy scan below consumes. Verdict and stdout are
+    # byte-identical to the walk (pinned: tests/packs/preflight_journal_parity_test.sh).
+    if _journal_read_probe; then
+        "$_JR_PY" "$_JR_HELPER" verify "$jp"
+        case $? in
+            0) return 0 ;;                 # stdout already carries the journal
+            1) return 1 ;;                 # authoritative refusal (wording from the helper)
+            *) _warn "journal read helper ($_JR_HELPER) was UNUSABLE — falling back to the legacy per-character bash walk" ;;
+        esac
+    fi
+    _journal_read_fallback "$jp"
+}
+
 # journal_write <json> — ATOMIC: temp file in the same dir + mv -f (D4).
 journal_write() {
     local json="$1" jp tmp
@@ -1022,8 +1548,41 @@ journal_write() {
 # arrive pre-quoted; numbers/bools/null raw). Simple + sufficient for the D4
 # schema; avoids a jq dependency (none in the repo's shell toolchain).
 journal_update() {
-    local field="$1" raw="$2" json rest head tail out="" c depth
+    local field="$1" raw="$2" json out rc
     json="$(journal_read)" || return 1
+    # Fast path (D1): the O(N) value splice. ONE read (the journal_read above)
+    # -- a second read could straddle the writer's atomic replace (D1-16).
+    if _journal_read_probe; then
+        out="$(printf '%s' "$json" | "$_JR_PY" "$_JR_HELPER" update "$field" "$raw")"
+        rc=$?
+        case "$rc" in
+            0)
+                # The helper terminates its output with a 0x1f sentinel so a
+                # raw value that ends in newlines survives `$( )` (bash strips
+                # trailing newlines; the sentinel is never the last newline).
+                out="${out%$'\x1f'}"
+                journal_write "$out"
+                return $?
+                ;;
+            3) _warn "journal_update: field '$field' not found (schema drift?)"; return 1 ;;
+            4) _warn "journal_update: splice failed for '$field'"; return 1 ;;
+            *) _warn "journal_update: read helper UNUSABLE (exit $rc) — falling back to the legacy value scanner" ;;
+        esac
+    else
+        # T1.5: the same fallback discipline as journal_read — the slow path
+        # is ALWAYS visible, never a silent legacy walk.
+        _warn "journal_update: O(N) read helper unavailable — using the legacy value scanner (correct but slow; install python3 >= 3.7 for the fast path)"
+    fi
+    _journal_update_legacy_from "$field" "$raw" "$json"
+}
+
+# _journal_update_legacy_from <field> <raw> <json> — the pre-fix RMW splice,
+# kept verbatim as the no-interpreter fallback. Its duplicate-key asymmetry
+# (head at the LAST occurrence, value scan at the FIRST) is BASE behaviour and
+# is preserved by the fast path too (BASE-BUG-PRESERVING; see the parity pack).
+_journal_update_legacy_from() {
+    local field="$1" raw="$2" json rest head tail out="" c depth
+    json="$3"
     if ! _json_has "$json" "$field"; then
         _warn "journal_update: field '$field' not found (schema drift?)"
         return 1
@@ -1628,6 +2187,17 @@ _pid_alive() {
 # lock_run_id. Returns: 0 acquired (incl. stale-break); 1 busy after wait.
 lock_acquire() {
     local wait_s="${1:-$LOCK_WAIT_S_DEFAULT}" lock owner_pid hb age run_id
+    # D4(a)/T4.2 (phase 4): reclaim audit state. The release is TRAP-ONLY
+    # today, so a trap-bypassing death (SIGKILL class) orphans the lock
+    # dir; the dead-owner/stale-heartbeat breaks below reclaim it --
+    # previously a stdout-only _log line, invisible in the durable audit
+    # trail, which is how the 2026-10-28 operator ended up performing a
+    # MANUAL stale-break believing it necessary. Set on the break, written
+    # AFTER we hold the lock (the live-install splice fence refuses
+    # history appends unless the pipeline lock is held by a LIVE owner --
+    # at break time the old owner is dead, so the row must wait until the
+    # new acquisition succeeds).
+    local _broke_reason="" _broke_owner="" _broke_run="" _broke_age=""
     lock="$(lock_dir_path)"
     mkdir -p "$(dirname "$lock")"
     lock_run_id="run-$(date +%Y%m%d-%H%M%S)-$$"
@@ -1637,6 +2207,15 @@ lock_acquire() {
             printf '%s\n' "$$" > "$lock/owner" 2>/dev/null
             printf '%s\n' "$lock_run_id" > "$lock/run_id" 2>/dev/null
             printf '%s\n' "$(_now_epoch)" > "$lock/heartbeat" 2>/dev/null
+            if [ -n "$_broke_reason" ]; then
+                # ONE row per reclaim, all five fields (AC2): reclaimed
+                # owner pid, reclaimed run_id, heartbeat age, reason,
+                # reclaiming run_id. Best-effort (a torn/absent journal
+                # never blocks the acquisition).
+                journal_history_append lock-stale-break \
+                    "reclaimed owner pid=${_broke_owner:-?} run_id=${_broke_run:-?} heartbeat_age=${_broke_age:-?}s reason=${_broke_reason} reclaiming_run_id=${lock_run_id}" \
+                    >/dev/null 2>&1 || true
+            fi
             return 0
         fi
         # exists — stale? Break only when the heartbeat is > LOCK_STALE_S AND
@@ -1677,7 +2256,13 @@ lock_acquire() {
                 fi
                 if [ "$owner_live" -eq 0 ]; then
                     _log "pipeline lock stale (heartbeat ${age}s old, owner pid ${owner_pid:-?} dead/unverifiable, run ${run_id:-?}) — breaking"
-                    mv "$lock" "${lock}.stale.$$" 2>/dev/null || continue
+                    if mv "$lock" "${lock}.stale.$$" 2>/dev/null; then
+                        _broke_reason="stale-heartbeat"
+                        _broke_owner="$owner_pid"
+                        _broke_run="$run_id"
+                        _broke_age="$age"
+                        continue
+                    fi
                     continue
                 fi
                 # LIVE owner mid un-heartbeated long op (the stop span) —
@@ -1689,7 +2274,13 @@ lock_acquire() {
         if [ -n "$owner_pid" ] && printf '%s' "$owner_pid" | grep -Eq '^[0-9]+$' \
            && ! _pid_alive "$owner_pid"; then
             _log "pipeline lock owner pid $owner_pid is dead — breaking lock"
-            mv "$lock" "${lock}.stale.$$" 2>/dev/null || continue
+            if mv "$lock" "${lock}.stale.$$" 2>/dev/null; then
+                _broke_reason="dead-owner"
+                _broke_owner="$owner_pid"
+                _broke_run="$run_id"
+                _broke_age="${age:-?}"
+                continue
+            fi
             continue
         fi
         if [ "$waited" -ge "$wait_s" ]; then
@@ -2043,7 +2634,20 @@ _trap_safe_exit() {
 # the exit (the lock release below is what matters for the next action
 # to acquire; a missing halt event is no worse than today's behavior).
 # Mirrors _refuse's best-effort journal pattern (ADR-034 append).
+#
+# D2-4 (phase-2 fold A1/R14): RE-ENTRANCY GUARD. A second TERM arriving
+# while the handler is mid-journalling re-enters it ⇒ a DUPLICATE halt
+# row (the journal is append-only; `_LOCK_RELEASED` protects the lock
+# release, NOT the journal write). The guard sets the flag BEFORE
+# journalling; a second entry is a NO-OP (first-row-wins). Pinned by the
+# double-TERM and post-completion-TERM legs of
+# tests/packs/preflight_watchdog_test.sh.
+_HALT_JOURNALED=0
 _signal_journal_halt() {
+    if [ "${_HALT_JOURNALED:-0}" = "1" ]; then
+        return 0
+    fi
+    _HALT_JOURNALED=1
     local sig="$1" phase="${_PIPELINE_PHASE:-unknown}" detail
     detail="killed by SIG$(printf '%s' "$sig" | sed 's/^SIG//') at phase $phase (r-20260928-005506-f82e: death-anchored journaling; signal handler installed 2026-09-28)"
     journal_history_append halt "$detail" >/dev/null 2>&1 || true
@@ -2088,8 +2692,12 @@ _trap_install_signal_handlers() {
     trap '_signal_handler HUP'  HUP
     trap '_signal_handler INT'  INT
     trap '_trap_safe_exit' EXIT
-    # Reset guard (in case the script was sourced mid-flow).
+    # Reset both guards (in case the script was sourced mid-flow). The
+    # halt-journal guard resets with the traps: a re-install (e.g. promote
+    # preflight → stage:lock phase rename) must be able to journal a fresh
+    # halt row for the NEW phase if a signal lands after the rename.
     _LOCK_RELEASED=0
+    _HALT_JOURNALED=0
 }
 
 # ── Integrity (T3 / D-FA4.4) ─────────────────────────────────────────────────
@@ -2117,12 +2725,154 @@ manifest_field() {
 # _tree_manifest <dir> <relprefix> — print "sha256  relpath" lines, sorted by
 # relpath (deterministic; D-FA4.4 per-file map + sorted-listing hash).
 _tree_manifest() {
-    local dir="$1" prefix="$2" f rel
+    local dir="$1" prefix="$2"
+    local _tm_sub="" _tm_rc=0
+    # A1 (code council, 2026-10-30): `_run_bounded` TERMs the function's
+    # subshell, and a signal does NOT propagate to grandchildren — the inner
+    # worker survived a budget kill, kept hashing into a file nobody reads,
+    # and its `trap ... EXIT` never ran (the mktemp pair leaked). Two levels
+    # are needed: this forwarding trap (the process `_run_bounded` signals)
+    # TERMs the worker and WAITS for its own cleanup trap to finish before
+    # exiting, so a killed walk leaves no process and no temp file behind.
+    # Every call site runs this function in its own subshell (`_run_bounded`,
+    # a pipeline, `$( )`), so installing the trap here cannot disturb a
+    # caller's handlers.
+    trap '{ [ -n "$_tm_sub" ] && kill -TERM "$_tm_sub" 2>/dev/null; [ -n "$_tm_sub" ] && wait "$_tm_sub" 2>/dev/null; exit 143; }' TERM INT HUP
     ( cd "$dir" 2>/dev/null || exit 1
-      find . -type f | sed 's|^\./||' | sort | while IFS= read -r rel; do
-          [ -n "$rel" ] || continue
-          printf '%s  %s\n' "$(_sha256 "$rel")" "$prefix$rel"
-      done )
+      local list sums rel line sha n_list n_sums
+      list="$(mktemp "${TMPDIR:-/tmp}/tree-manifest.XXXXXX")" || exit 1
+      sums="$list.sum"
+      # A1: an EXIT-only trap does NOT run when the parent TERMs this worker,
+      # so the batch survived and the mktemp pair leaked. Reap the batch on
+      # TERM/INT/HUP too: children FIRST (a TERMed xargs orphans them and the
+      # pgrep lookup would find nothing), then xargs, then remove the pair.
+      # Bounded by construction — at most ONE shasum child is in flight
+      # (chunks are sequential inside xargs).
+      _tm_batch=""
+      _tm_clean() {
+          local _tm_kids=""
+          if [ -n "$_tm_batch" ]; then
+              if command -v pgrep >/dev/null 2>&1; then
+                  _tm_kids="$(pgrep -P "$_tm_batch" 2>/dev/null)"
+              fi
+              for _tm_c in $_tm_kids; do
+                  kill -TERM "$_tm_c" 2>/dev/null || true
+              done
+              kill -TERM "$_tm_batch" 2>/dev/null || true
+              wait "$_tm_batch" 2>/dev/null || true
+              _tm_batch=""
+          fi
+          rm -f "$list" "$sums" 2>/dev/null || true
+      }
+      trap '_tm_clean' EXIT
+      trap '_tm_clean; exit 143' TERM INT HUP
+      find . -type f | sed 's|^\./||' | sort > "$list" || exit 1
+      [ -s "$list" ] || return 0
+      # ONE shasum invocation per chunk instead of one fork PER FILE. The
+      # per-file fork is what made the plugins tree walk 329.6 s/pass
+      # (measured; stage walks it twice) -- the phase-1 D1-7 batching.
+      # Output order == argv order == the sorted list order, so the two files
+      # pair up line by line.
+      # ONE shasum invocation per CHUNK (500 files) instead of one fork
+      # PER FILE: the per-file fork made the plugins walk 329.6 s/pass
+      # (measured; stage walks it twice). Chunking additionally emits an
+      # IN-OP progress marker per chunk to STDERR (D3-13/T3.14 -- no
+      # background writer; the walk itself narrates every 500 files).
+      # Output order == argv order == the sorted list order, so the two
+      # files pair up line by line; concatenated chunk output is
+      # BYTE-IDENTICAL to the whole-list form (parity re-pinned).
+      _tn=0
+      while IFS= read -r rel; do printf '%s\0' "$rel"; done < "$list" \
+        | xargs -0 -n 500 shasum -a 256 2>/dev/null > "$sums" &
+      _tx=$!
+      _tm_batch="$_tx"
+      # progress narration on the same interval (stderr; stdout stays DATA)
+      _tsz="$(wc -l < "$list" | tr -d ' ')"
+      _tlast=0
+      while kill -0 "$_tx" 2>/dev/null; do
+          _tn="$(wc -l < "$sums" 2>/dev/null | tr -d ' ')"
+          [ -n "$_tn" ] || _tn=0
+          if [ "$_tn" -gt "$_tlast" ] && [ $(( _tn / 500 )) -gt $(( _tlast / 500 )) ]; then
+              _tlast=$_tn
+              printf '%s %s[%s]: tree-walk progress: %s/%s files
+' "$(_log_ts 2>/dev/null || printf '%s' '-')" "$LOG_TAG" "${UP_TARGET:-lib}" "$_tn" "$_tsz" >&2
+          fi
+          sleep 0.2
+      done
+      wait "$_tx"
+      _tm_batch=""
+      n_list="$(wc -l < "$list" | tr -d ' ')"
+      n_sums="$(wc -l < "$sums" | tr -d ' ')"
+      if [ "$n_list" != "$n_sums" ]; then
+          # A hashing failure (unreadable file, an unnameable path) breaks the
+          # positional pairing. Fall back to the per-file loop -- byte-identical
+          # output, slow -- instead of emitting a MISALIGNED manifest.
+          _warn "_tree_manifest: batched shasum produced ${n_sums}/${n_list} lines for $dir — falling back to per-file hashing"
+          while IFS= read -r rel; do
+              [ -n "$rel" ] || continue
+              printf '%s  %s\n' "$(_sha256 "$rel")" "$prefix$rel"
+          done < "$list"
+          return 0
+      fi
+      exec 3< "$list" 4< "$sums"
+      while IFS= read -r rel <&3; do
+          IFS= read -r line <&4 || break
+          sha="${line%%  *}"
+          printf '%s  %s\n' "$sha" "$prefix$rel"
+      done
+      exec 3<&- 4<&-
+    ) &
+    _tm_sub=$!
+    wait "$_tm_sub"
+    _tm_rc=$?
+    _tm_sub=""
+    return "$_tm_rc"
+}
+
+# _stage_tree_walk <label> <dir> — a bounded, heartbeating, LOGGED tree walk.
+#
+# D1-7 (phase1): stage.sh:436-446 spent an unbounded, unlogged stretch of CPU
+# in an early phase with the last `lock_heartbeat` BEFORE the walk and the next
+# one ~130 lines later. That is exactly the shape of the 2026-10-28
+# 09:51:36Z / 09:54:59Z stage SIGTERMs: nothing to correlate a kill against.
+# Three things change, nothing else:
+#   (a) the walk runs under `_run_bounded` with STAGE_TREE_BUDGET_S;
+#   (b) a heartbeat loop refreshes the lock/journal DURING the walk;
+#   (c) a log line before and after each tree, with the entry count.
+# The walk itself is unchanged (_tree_manifest), so byte-parity of the
+# manifest is a property of _tree_manifest alone.
+_stage_tree_walk() {
+    local label="$1" dir="$2" out_f rc hb
+    # The walk's output is DATA (it feeds the manifest hash and the per-file
+    # map). This function is always invoked as `X="$(_stage_tree_walk ...)"`,
+    # so EVERYTHING it writes to stdout is captured into that variable --
+    # including `_log` markers, which corrupt the manifest (caught by
+    # tests/test_release_journal.sh: tree-hash MISMATCH + phantom map rows on
+    # the .staging walk). Two rules therefore:
+    #   * the walk lands in a temp file and is cat'd as the ONLY stdout;
+    #   * the before/after markers go to STDERR (`_log ... >&2`).
+    out_f="$(mktemp "${TMPDIR:-/tmp}/stage-walk.XXXXXX")" || { _warn "stage: checksum walk ${label}: mktemp failed"; return 1; }
+    _log "stage: checksum walk START ${label} ($(find "$dir" -type f 2>/dev/null | wc -l | tr -d ' ') files)" >&2
+    ( while :; do sleep 15; lock_heartbeat >/dev/null 2>&1 || true; done ) &
+    hb=$!
+    _run_bounded "$STAGE_TREE_BUDGET_S" _tree_manifest "$dir" "" > "$out_f"
+    rc=$?
+    kill -KILL "$hb" 2>/dev/null || true
+    wait "$hb" 2>/dev/null || true
+    case "$rc" in
+        0) ;;
+        124)
+            rm -f "$out_f"
+            _warn "stage: checksum walk ${label} exceeded STAGE_TREE_BUDGET_S=${STAGE_TREE_BUDGET_S}s — aborting (an unbounded walk in an early phase is the 2026-10-28 stage-SIGTERM shape; re-measure before raising the budget)"
+            return 1 ;;
+        *)
+            rm -f "$out_f"
+            _warn "stage: checksum walk ${label} failed (rc=$rc)"
+            return 1 ;;
+    esac
+    _log "stage: checksum walk DONE ${label} ($(wc -l < "$out_f" | tr -d ' ') entries)" >&2
+    cat "$out_f"
+    rm -f "$out_f"
 }
 
 # _tree_hash <dir> — hash over the sorted listing (the tree's identity).
@@ -4731,7 +5481,12 @@ supervision_classify() {
                 SUPERVISION_UNIT="${ENSEMBLE_RESTART_UNIT:-}"
                 if [ -z "$SUPERVISION_UNIT" ] && [ "$(uname -s)" = "Linux" ] \
                    && [ -d /run/systemd/system ]; then
-                    pid="$(_supervision_owned_pids | head -1)"
+                    # 2>/dev/null (D3-7/H2): the `head -1` early close is a
+                    # BENIGN EPIPE the helper would print as "write error: Broken
+                    # pipe" -- 64 historic lines of red herring in the aggregate
+                    # log. Suppressing the helper's stderr removes the symptom
+                    # without hiding a real failure (stdout unaffected).
+                    pid="$(_supervision_owned_pids 2>/dev/null | head -1)"
                     if [ -n "$pid" ]; then
                         leaf="$(_supervision_pid_cgroup_leaf "$pid")"
                         case "$leaf" in *.service) SUPERVISION_UNIT="$leaf" ;; esac
@@ -4787,7 +5542,7 @@ supervision_classify() {
         printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
         return 0
     fi
-    pid="$(_supervision_owned_pids | head -1)"
+    pid="$(_supervision_owned_pids 2>/dev/null | head -1)"
     if [ -z "$pid" ]; then
         _supervision_warn_once "no owned pid discovered (anchored tiers vs INSTALL_DIR=$INSTALL_DIR) — classifying script"
         printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
@@ -5014,20 +5769,87 @@ supervision_map_outcome() {
 # slice) may over-include. Deliberately conservative — diagnostic-
 # only — the FAULT arm only fires when reality disagrees.
 # Linux+systemd only; every other shape returns 0 (zero behavior change).
+# _df_systemctl <outfile> <args...> — a BOUNDED supervision systemctl probe
+# (T2.7/phase-2 D2). The dual-fight check's four `systemctl is-active` /
+# `systemctl show` calls were the last unbounded probes on the preflight
+# path (unlike the 5 sibling sites that already ride `_run_bounded`).
+# A wedged D-Bus must surface as a LOUD failure (journal row + exit 78),
+# NEVER as a silent "the unit is not active" — reading a wedged bus as
+# "unit down" is exactly the misread the incident family forbids.
+#
+# STATEMENT-FORM CONTRACT: this helper is called as a statement (never
+# inside `$( )`) — on a budget breach `_budget_breach` exits THE SCRIPT.
+# Output lands in <outfile> (the caller `reads` it back); rc is the
+# probe's own rc (is-active exits 3 when inactive — preserved).
+#
+# KIND SCOPE (W3, code council 2026-10-30): the breach handler is
+# promote-path-only. `supervision_preflight` is reached from promote.sh
+# (`promote:*`, holds the lock), rollback.sh (`rollback:*`, holds the lock)
+# and restart.sh (`restart:*`, adopts a lock), plus the P2 stop-site
+# re-check inside stop_via_stop_script. R1 is binding: "non-promote paths
+# (status / rollback / restart / adopt-unit / stop) => WARN + bounded +
+# continue. NO fail-fast on recovery paths." A wedged bus during a restart
+# or a rollback must not fail-fast a RECOVERY-class script (and on a live
+# install its halt row would be fence-refused anyway — fatal AND
+# unrecorded, the inverse of this lane's promise). So:
+#   * `_PIPELINE_PHASE` unset            => treat as the PROMOTE path
+#     (fail-closed: today's behaviour for any un-phased caller, and every
+#     shipped recovery script sets its phase BEFORE its supervision call);
+#   * `_PIPELINE_PHASE=promote:*`        => `_budget_breach` (row + WARN +
+#     lock release + exit 78) — unchanged;
+#   * any other explicit phase           => WARN + continue with the probe's
+#     own rc, 124 mapped to "unknown / cannot classify" (the dual-fight
+#     check then degrades instead of claiming a FAULT it cannot see).
+# Both arms are pinned by tests/packs/preflight_watchdog_test.sh (D10/D10b
+# promote-breach, D12 recovery-continue).
+_df_systemctl() {
+    local __out="$1"; shift
+    local __t0 __rc __phase
+    __t0="$(_now_epoch)"
+    _run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" "$@" > "$__out" 2>/dev/null
+    __rc=$?
+    if [ "$__rc" -eq 124 ]; then
+        __phase="${_PIPELINE_PHASE:-}"
+        case "$__phase" in
+            ''|promote:*)
+                rm -f "$__out" 2>/dev/null || true
+                : > "$__out" 2>/dev/null || true
+                _budget_breach SYSTEMCTL_PROBE_BUDGET_S "systemctl-$1" "supervision-dualfight" "$(( $(_now_epoch) - __t0 ))"
+                ;;
+            *)
+                # R1 recovery class: bounded probe + loud WARN + continue.
+                rm -f "$__out" 2>/dev/null || true
+                : > "$__out" 2>/dev/null || true
+                _warn "supervision probe '$1' exceeded SYSTEMCTL_PROBE_BUDGET_S=${SYSTEMCTL_PROBE_BUDGET_S}s at phase ${__phase} — continuing WITHOUT a classification (R1: no fail-fast on a recovery path; elapsed=$(( $(_now_epoch) - __t0 ))s)"
+                return 124
+                ;;
+        esac
+    fi
+    return "$__rc"
+}
+
 supervision_dualfight_check() {
     [ "${SUPERVISION_MODE:-}" = "unit" ] || return 0
     [ -n "${SUPERVISION_UNIT:-}" ] || return 0
     [ "$(uname -s)" = "Linux" ] || return 0
     [ -d /run/systemd/system ] || return 0
     local unit="${SUPERVISION_UNIT:-}" is_active restart main_pid cg pid pcg hpid fault=""
-    is_active="$("$SYSTEMCTL_BIN" is-active "$unit" 2>/dev/null || true)"
-    restart="$("$SYSTEMCTL_BIN" show "$unit" -p Restart --value 2>/dev/null || true)"
+    local df_out
+    df_out="$(mktemp /tmp/.ensemble-df.XXXXXX)" || return 0
+    _df_systemctl "$df_out" is-active "$unit"
+    is_active="$(cat "$df_out" 2>/dev/null)"
+    _df_systemctl "$df_out" show "$unit" -p Restart --value
+    restart="$(cat "$df_out" 2>/dev/null)"
     if [ "$is_active" != "active" ] \
        && [ "$restart" != "always" ] && [ "$restart" != "on-failure" ]; then
+        rm -f "$df_out" 2>/dev/null
         return 0  # unit dormant and unarmed — no fight possible
     fi
-    main_pid="$("$SYSTEMCTL_BIN" show "$unit" -p MainPID --value 2>/dev/null || true)"
-    cg="$("$SYSTEMCTL_BIN" show "$unit" -p ControlGroup --value 2>/dev/null || true)"
+    _df_systemctl "$df_out" show "$unit" -p MainPID --value
+    main_pid="$(cat "$df_out" 2>/dev/null)"
+    _df_systemctl "$df_out" show "$unit" -p ControlGroup --value
+    cg="$(cat "$df_out" 2>/dev/null)"
+    rm -f "$df_out" 2>/dev/null
     if [ -z "$cg" ] || [ "$cg" = "/" ]; then
         _supervision_warn_once "unit $unit active/armed but ControlGroup unobservable — skipping DUAL_FIGHT pid checks (diagnostic only)"
         return 0
@@ -5578,6 +6400,110 @@ retention_evict() {
         [ -n "$name" ] || continue
         _log "retention: evicting $name (staged $st) — neither current ($cur) nor previous ($prev)"
         rm -rf "$rel/$name"
+    done
+    return 0
+}
+
+# _run_log_retention <dir> -- D3-10/T3.11 per-run LOG retention (R8 binding).
+#
+# OWNER = the running shell AT CEREMONY END, UNDER THE PIPELINE LOCK (the
+# seats are promote.sh's commit phase and stage.sh's success path). R8:
+# the liveness check applies to FOREIGN/STALE lock owners ONLY -- the
+# running owner ($$) IS the one deleting, so "<=20 kept" genuinely holds
+# (the plan's original fence-5 wording -- "never delete while the lock is
+# held" -- would have made retention a self-contradicting NO-OP for its
+# own owner; R8 supersedes it).
+#
+# Rule: keep-newest 20 (by mtime) + age-cap 14 d, over the env-scoped
+# per-run file family (<run_id>.log narrative / .payload.log / .client.log,
+# plus the PRE-A2 <run_id>.payload.client.log name still on disk).
+# FIVE FENCES -- a file survives regardless of age/count when it is:
+#   (1) this run's own narrative file ($ENSEMBLE_UPGRADE_LOG_FILE);
+#   (2) the journal in_flight run's files (a CONCURRENT txn's narrative);
+#   (3) the last pointer's files (data/upgrade.log's newest pointer line);
+#   (4) modified < 6 h ago -- the incident-class guard: a STALLED live run
+#       holds a stale-mtime file open while systemd still owns it; deleting
+#       it would vanish the narrative into an unlinked inode exactly when
+#       the post-mortem needs it;
+#   (5) nothing at all when the lock is held by a LIVE FOREIGN owner.
+# Portable primitives ONLY: `find -mmin` / `find -mtime` / `ls -1t`. NEVER
+# `stat -f '%m'` (MEASURED silent garbage on GNU -- lib.sh's retention_evict
+# call at the release seat is a pre-existing P2.1-class defect this lane
+# must not propagate; grep-pinned absent from THIS function).
+_run_log_retention() {
+    local dir="${1:-}"
+    [ -n "$dir" ] || dir="$(dirname "${ENSEMBLE_UPGRADE_LOG_FILE:-/nonexistent/x}")"
+    [ -d "$dir" ] || return 0
+    # (5) foreign live owner -> hands off
+    local lock owner
+    lock="$(lock_dir_path)"
+    if [ -d "$lock" ]; then
+        owner="$(cat "$lock/owner" 2>/dev/null)"
+        if [ -n "$owner" ] && [ "$owner" != "$$" ]            && printf '%s' "$owner" | grep -Eq '^[0-9]+$' && _pid_alive "$owner"; then
+            _log "run-log retention: skipped (pipeline lock held by a live foreign owner pid $owner)"
+            return 0
+        fi
+    fi
+    local protected="" cur_ptr_run f
+    # (1) our own narrative
+    [ -n "${ENSEMBLE_UPGRADE_LOG_FILE:-}" ] && protected="$protected $(basename "$ENSEMBLE_UPGRADE_LOG_FILE")"
+    # (2) the in_flight run (concurrent txn transcript)
+    local _j="" _inf=""
+    _j="$(journal_read 2>/dev/null)" || _j=""
+    if [ -n "$_j" ]; then
+        _inf="$(_json_sub "$_j" in_flight 2>/dev/null)" || _inf=""
+    fi
+    cur_ptr_run=""
+    if [ -n "$_inf" ] && [ "$_inf" != "null" ]; then
+        cur_ptr_run="$(_json_field "$_inf" run_id 2>/dev/null)" || cur_ptr_run=""
+    fi
+    # NOTE: a miss is a safe non-protect only because a concurrent txn also
+    # holds the pipeline lock (fence 5 would have blocked the whole pass).
+    case "$cur_ptr_run" in ''|null|*[!A-Za-z0-9._-]*) cur_ptr_run="" ;; esac
+    # (3) the last pointer line's files
+    local ptr_line=""
+    [ -f "$INSTALL_DIR/data/upgrade.log" ] && ptr_line="$(tail -1 "$INSTALL_DIR/data/upgrade.log" 2>/dev/null)"
+    # (4) anything modified in the last 6 h
+    local recent
+    recent="$(find "$dir" -maxdepth 1 -type f \( -name '*.log' \) -mmin -360 2>/dev/null | sed 's|.*/||')"
+    # newest-first ordering, then keep the first 20 NON-fenced; delete the rest.
+    local kept=0 name
+    local alln
+    alln="$(ls -1t "$dir" 2>/dev/null | grep -E '\.log$')" || alln=""
+    [ -n "$alln" ] || return 0
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        case " $protected " in *" $name "*) continue ;; esac
+        case "$cur_ptr_run" in
+            "") ;;
+            # A2 (code council, 2026-10-30): the per-run family is FOUR names
+            # while pre-A2 runs exist on disk -- `<run>.log` (narrative),
+            # `<run>.payload.log` (unit append: capture), `<run>.client.log`
+            # (client stderr, the CURRENT name since A2) and
+            # `<run>.payload.client.log` (the PRE-A2 name). Fencing only the
+            # first three left the running run's client log protected solely
+            # by the <6 h mtime fence. Pinned by preflight_logging_test.sh
+            # E10b.
+            *) case "$name" in "${cur_ptr_run}.log"|"${cur_ptr_run}.payload.log"|"${cur_ptr_run}.client.log"|"${cur_ptr_run}.payload.client.log") continue ;; esac ;;
+        esac
+        case "$ptr_line" in *"$name"*) continue ;; esac
+        printf '%s\n' "$recent" | grep -Fqx -- "$name" && continue
+        kept=$((kept + 1))
+        if [ "$kept" -gt 20 ]; then
+            rm -f "$dir/$name" 2>/dev/null || true
+        fi
+    done <<EOF
+$alln
+EOF
+    # age cap: anything older than 14 d that survived the count pass must
+    # still be fence-protected, so only UNFENCED over-age files remain --
+    # the loop above already deleted everything past the newest 20.
+    find "$dir" -maxdepth 1 -type f -name '*.log' -mtime +14 2>/dev/null | while IFS= read -r f; do
+        name="$(basename "$f")"
+        case " $protected " in *" $name "*) continue ;; esac
+        case "$ptr_line" in *"$name"*) continue ;; esac
+        printf '%s\n' "$recent" | grep -Fqx -- "$name" && continue
+        rm -f "$f" 2>/dev/null || true
     done
     return 0
 }

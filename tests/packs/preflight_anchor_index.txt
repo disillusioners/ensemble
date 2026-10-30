@@ -1,0 +1,76 @@
+# tests/packs/preflight_anchor_index.txt — the verified anchor index.
+#
+# Format:  <path>\t<line>\t<literal substring that must be ON that line>\t<what it anchors>
+# Columns are TAB-separated. `#` lines and blank lines are ignored.
+#
+# ASSERTED AT THE PINNED REV (`PF_BASE_REV` = b1183a637 = v0.27.13 bump =
+# origin/latest at lane open). phase0 P0-D4 / T0.1 / AC1: the index is
+# re-verified BY A SCRIPT at the implementation rev, not by re-reading the
+# plan. Rows whose HEAD-side construct was moved by this lane still have to
+# be PRESENT somewhere at HEAD (all three refactored verbs survive verbatim as
+# the `*_legacy` fallbacks).
+scripts/upgrade/promote.sh	170	lock_acquire	preflight lock acquisition
+scripts/upgrade/promote.sh	179	_trap_install_signal_handlers "promote:preflight"	signal handlers installed (before the first read)
+scripts/upgrade/promote.sh	182	lock_heartbeat	the ONLY preflight heartbeat (frozen for 37 min in the incident)
+scripts/upgrade/promote.sh	197	promote_deadline	the ceremony deadline is armed here
+scripts/upgrade/promote.sh	209	_splice_python_floor_probe	python3 floor probe (before the hang site)
+scripts/upgrade/promote.sh	218	_enforce_deadline "$promote_deadline" preflight	the only in-preflight deadline checkpoint
+scripts/upgrade/promote.sh	225	J="$(journal_read)"	THE HANG: first journal read after the last log line
+scripts/upgrade/promote.sh	235	_splice_journal append-history python_floor_probe	never reached in the incident (absence is a proof marker)
+scripts/upgrade/promote.sh	276	CUR_JSON="$(journal_read)"	preflight current-version read
+scripts/upgrade/promote.sh	327	journal_open_txn	the txn opens only after integrity
+scripts/upgrade/promote.sh	373	_enforce_deadline	next deadline checkpoint (the :218->:373 structural gap)
+scripts/upgrade/promote.sh	558	journal_read	commit-path read
+scripts/upgrade/promote.sh	588	journal_read	gate-fail-path read
+scripts/upgrade/lib.sh	109	PROMOTE_TOTAL_DEADLINE_S	ceremony wall-clock ceiling (900 s)
+scripts/upgrade/lib.sh	131	SOAK_S_DEFAULT=300	the long healthy phase (excluded from the watchdog by construction)
+scripts/upgrade/lib.sh	210	LOCK_HEARTBEAT_S=30	lock heartbeat cadence
+scripts/upgrade/lib.sh	255	_enforce_deadline()	deadline breach => journal row + lock release + exit 78
+scripts/upgrade/lib.sh	589	_json_sub()	the nested-value bracket counter (O(N^2) #3)
+scripts/upgrade/lib.sh	601	char="${rest:0:1}"	_json_sub per-character access (quadratic mechanism #1)
+scripts/upgrade/lib.sh	941	journal_path()	journal path resolver
+scripts/upgrade/lib.sh	961	journal_read()	the O(N^2) balance scan (THE HANG)
+scripts/upgrade/lib.sh	968	json="$(cat "$jp" 2>/dev/null)"	the command-substitution read (the stdout contract's origin)
+scripts/upgrade/lib.sh	975	for ((i = 0; i < ${#json}; i++)); do	the per-character loop
+scripts/upgrade/lib.sh	976	c="${json:i:1}"	the offset substring (O(N) per access => O(N^2))
+scripts/upgrade/lib.sh	998	printf '%s' "$json"	the stdout contract
+scripts/upgrade/lib.sh	1024	journal_update()	the RMW path (inherits the read, adds its own scanner)
+scripts/upgrade/lib.sh	1026	json="$(journal_read)" || return 1	RMW inherits the walk
+scripts/upgrade/lib.sh	1047	depth=0	journal_update's own value scanner (O(N^2) #2)
+scripts/upgrade/lib.sh	1106	journal_history_append()	the (already O(N)) write path -- must not regress
+scripts/upgrade/lib.sh	1134	_splice_journal_path()	the write-helper path resolver (mirrored by the read resolver)
+scripts/upgrade/lib.sh	1161	_splice_journal()	the write bridge (rc 78 -> 1, stderr merged -- why reads may NOT use it)
+scripts/upgrade/lib.sh	1629	lock_acquire()	the pipeline lock
+scripts/upgrade/lib.sh	1729	lock_heartbeat()	lock + journal heartbeat refresh
+scripts/upgrade/lib.sh	1745	lock_release()	owner-guarded release
+scripts/upgrade/lib.sh	3531	_run_bounded()	the house watchdog primitive (child + watcher -> TERM -> KILL -> 124)
+scripts/upgrade/stage.sh	364	lock_acquire	stage lock
+scripts/upgrade/stage.sh	375	_trap_install_signal_handlers "stage:lock"	signal handlers => a NORMAL exit releases the lock
+scripts/upgrade/stage.sh	426	lock_heartbeat	heartbeat BEFORE the checksum walks
+scripts/upgrade/stage.sh	436	computing manifest checksums	the last marker before the 09:51/09:54 SIGTERMs
+scripts/upgrade/stage.sh	437	BIN_SHA="$(_sha256	the checksum walks
+scripts/upgrade/stage.sh	558	lock_heartbeat	heartbeat AFTER the walks (the unlogged gap)
+scripts/upgrade/stage.sh	618	journal_quarantine_clear	stage tail: two journal reads on the same file
+scripts/upgrade/stage.sh	744	exit 0	success path (the EXIT trap covers the release)
+scripts/upgrade/journal_splice.py	158	_pipeline_lock_held	the live-install waiver predicate
+scripts/upgrade/journal_splice.py	269	_read_journal	the O(N) python read twin (0.024 s on the incident file)
+scripts/upgrade/journal_splice.py	319	_atomic_write	the atomic writer (temp + rename)
+scripts/upgrade/journal_splice.py	513	_OPS	the op dispatch table
+scripts/upgrade/journal_splice.py	553	_is_under_live(jp)	the live-install refusal (read path must NOT inherit it)
+scripts/upgrade/status.sh	52	journal_read	status read (no lock at all)
+scripts/upgrade/rollback.sh	90	journal_read	rollback preflight (BEFORE the lock)
+scripts/upgrade/rollback.sh	157	journal_read	rollback target resolution
+scripts/upgrade/restart.sh	133	journal_read	restart preflight (BEFORE the lock)
+scripts/stop-ensemble.sh	224	pipeline_settled	INTERPRETER-LESS transitive read caller (R6)
+scripts/upgrade/adopt-unit.sh	201	pipeline_settled	INTERPRETER-LESS transitive read caller (D1-9)
+daemon/tools/upgrade_tools.py	1953	candidates	arm-time scripts-dir resolution (phase-6 refusal design)
+daemon/tools/upgrade_tools.py	3714	"scripts_dir": str(scripts_dir)	the arm marker text
+daemon/manager.py	5495	promote.sh	the executor argv construction
+daemon/tools/upgrade_journal.py	2156	EXECUTOR_ENV_ALLOWLIST	the executor env allowlist
+daemon/tools/upgrade_journal.py	2179	executor_log_path	the single shared log path (D3's subject)
+daemon/tools/upgrade_journal.py	2468	unit_properties	the RuntimeMaxSec extension point
+daemon/tools/upgrade_journal.py	2536	StandardOutput=append:	payload stdio is a FILE (no daemon-side reader)
+daemon/tools/upgrade_journal.py	2656	spawn_executor	the executor launcher
+daemon/services/upgrade_journal_sweep.py	96	DEFAULT_UPGRADE_JOURNAL_SWEEP_INTERVAL_SECONDS	the 90 s sweep tick
+daemon/services/upgrade_journal_sweep.py	102	DEFAULT_REAPER_TIMEOUT_SECONDS: int = 660	the 660 s benign-detach observation
+daemon/mcp/init_guard.py	150	JOURNAL_EVENT	the 89 % journal-bloat writer

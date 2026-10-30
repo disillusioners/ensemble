@@ -163,4 +163,12 @@ if [ "$VERIFY" = "1" ]; then
     exit 1
 fi
 
+# D2-6/SC4b (promote-preflight-hang phase 2): a breached or unreadable
+# journal read is a DIAGNOSTIC failure — in plain (non---verify) mode too,
+# status.sh exits 1 (never 78: a read-only tool never files itself as a
+# pipeline refusal; never a journal mutation: the unlocked path cannot and
+# must not write rows). The warn already went to stderr/the per-run log.
+if [ "${VERIFY_RC_NOTE:-0}" = "1" ]; then
+    exit 1
+fi
 exit 0
