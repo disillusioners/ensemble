@@ -170,3 +170,61 @@ def test_detail_shares_source(repo):
     for st in captured.get("stmts", []):
         assert _re.search(r"ORDER\s+BY.*parent_id\s+ASC\s*,\s*.*instance_id\s+ASC",
                           st, _re.IGNORECASE | _re.DOTALL), st
+
+
+import os
+
+EXPECTED_NODE_NAMES = frozenset({
+    "test_collected_node_count_fence",
+    "test_sql_order_by_pin",
+    "test_batch_covers_all_parents",
+    "test_childless_parent_yields_empty_list",
+    "test_empty_input",
+    "test_static_sql_order_by_clause",
+    "test_detail_shares_source",
+    "test_all_rows_carry_children",
+    "test_positive_order_assertion",
+})
+
+
+def test_collected_node_count_fence(request):
+    """Collected-node-set fence for this gate-carrying pack.
+
+    This pack is the sole discriminator for children ordering: the BASE-side
+    control is measurably impossible on this host, so a silent partial
+    collection (a deselected, renamed, removed, added or skipped node) would
+    otherwise pass vacuously green. This fence asserts that the collected name
+    set equals the expected set, that the collected count is exactly 9, and that
+    no node carries a skip/skipif/xfail marker.
+    """
+    this_file = os.path.abspath(__file__)
+    collected = [
+        it for it in request.session.items
+        if os.path.abspath(str(it.fspath)) == this_file
+    ]
+    names = {it.name.split("[", 1)[0] for it in collected}
+
+    # 1. collected name SET equals EXPECTED_NODE_NAMES
+    assert names == EXPECTED_NODE_NAMES, (
+        "collected node name set mismatch: "
+        f"missing={sorted(EXPECTED_NODE_NAMES - names)} "
+        f"extra={sorted(names - EXPECTED_NODE_NAMES)} "
+        f"collected={sorted(names)}"
+    )
+
+    # 2. explicit count == 9
+    assert len(collected) == 9, (
+        f"collected node count mismatch: expected 9, got {len(collected)} "
+        f"({sorted(names)})"
+    )
+
+    # 3. no expected node carries a skip/skipif/xfail marker
+    offenders = []
+    for it in collected:
+        for marker_name in ("skip", "skipif", "xfail"):
+            if it.get_closest_marker(marker_name) is not None:
+                offenders.append((it.name, marker_name))
+    assert not offenders, (
+        "skipped/xfail-marked nodes in gate-carrying pack: "
+        + ", ".join(f"{n} ({m})" for n, m in offenders)
+    )
