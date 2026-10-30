@@ -287,3 +287,15 @@ by that report; this ledger covers only the findings it delivered).
 * **Fence**: zero live contact. Every pack leg runs under
   `preflight_pack_common.sh` (scratch install root, `mktemp` FAKE_HOME, escape
   guard, per-variable `POSTGRES_*` scrub); the daemon-side legs use `tmp_path`.
+
+## 12. Mutation-plant re-anchor (evidence re-run) — 2026-10-30
+
+Base for this wave: `5bb465e22` (fix-cycle-2 close). The full-matrix run at that
+HEAD measured **45/46 ok** with the single failure being leg M8 itself:
+`PLANT-FAILED: scripts/upgrade/journal_read.py pair#1 matched 0 times (want
+exactly 1) — the source drifted`
+(evidence/MUTATION-MATRIX-FULL-20261030.log, sha256 871f9738…).
+
+| # | Decision / deviation | Ruling that wins | Rationale |
+|---|---|---|---|
+| D-63 | **Leg M8's plant pair is RE-ANCHORED to the annotated signature; nothing else in the plant table changes.** The `find` text moves from `def cmd_verify(path):\n    data = _read_processed(path)` to `def cmd_verify(path: str) -> int:\n    data = _read_processed(path)` (count restored to exactly 1 at `5bb465e22`), and the `replace` text injects the SAME defect semantics — `import time as _t; _t.sleep(6)` before `_read_processed(path)` — under the new signature. | Fix-cycle-2's tidier pass annotated `journal_read.py` (type hints on `cmd_verify`), so the M8 anchor silently stopped matching. | The ERROR-plant guard worked AS DESIGNED: the exactly-once count refused loudly (PLANT-FAILED, matched 0) instead of planting nothing and reporting a vacuous pass — this is the drift-detection behaviour the plant table was built for, now proven on a real annotation drift. Re-anchoring the find text is the minimal change that restores the leg; the defect semantics (the 6 s stall the scale pack detects) are byte-identical to the original plant. No other leg touched; single-leg M8 proof re-run before the full-matrix re-run. |

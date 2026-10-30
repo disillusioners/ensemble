@@ -121,8 +121,8 @@ PLANTS: dict[str, dict] = {
         "file": HELPER, "mode": "executable",
         "why": "the incident cost reintroduced in the read path (a 6 s stall)",
         "pairs": [(
-            "def cmd_verify(path):\n    data = _read_processed(path)",
-            "def cmd_verify(path):\n"
+            "def cmd_verify(path: str) -> int:\n    data = _read_processed(path)",
+            "def cmd_verify(path: str) -> int:\n"
             "    import time as _t; _t.sleep(6)  # PLANT M8: the symptom, re-planted\n"
             "    data = _read_processed(path)",
         )],
