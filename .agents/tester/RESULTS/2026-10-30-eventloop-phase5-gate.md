@@ -272,3 +272,113 @@ Measured at the **payload `f636756aa`** (HEAD worktree) and **BASE `b1183a637`**
   inferable from the timing (1.16 s ≈ in-flight completion) but not directly printed.
   **Recommendation for the lane:** one INFO line `db_offload: drained inflight=N elapsed=…s`
   would make the drain observable instead of inferred.
+
+---
+
+# Amendment 3 — RE-RUN AT PAYLOAD `c9eac9747`: G5 RESOLVED (GATE PASS-WITH-DISCLOSURES; one G4 flake open)
+
+**New pins.** Code payload `c9eac9747388852a47d3a3ac11487bb3d8c44d3f`
+("fix: restore BASE jobs payload bytes — root_only parity in the ensure_job_ids patch-up",
+2 files +152/−2; `work_resolver.py` 22 insertions/2 deletions). Branch tip at measurement:
+`9e26242aa` (docs-only, on top of the payload). BASE unchanged: `b1183a637649f94c23b94dfc745df44381dc54ab`,
+reference `BASELINE.full.base.json` sha256 `2440959b…`. Harness sha unchanged
+`11057a76…` (identical in both trees, repaired `gate_g5` marker present).
+New worktree: `/home/nea/ensemble-src-wt-gate-head2` (detached at the payload).
+
+## 1. G5 — RESOLVED. Nine-entry byte identity, both runs
+
+Verbatim fence (both runs):
+
+```
+g5_normalized_bytes_equal_vs_reference
+  OK :: COMPARED 9/9 shape(s) — all byte-identical after the children-order normalization
+```
+
+The corrected exclusion rendering is in play (`COMPARED n/9`, no excluded shape named
+because none is excluded — `g5_shapes_collected 9/9 all-200=True`). Body-level confirmation:
+
+| shape | BASE len | payload len | verdict |
+|---|---|---|---|
+| `jobs_page` | 82469 | **82469** | identical (`norm 5531aaa4…` both) |
+| `jobs_recent_badge` | 8218 | **8218** | identical (`norm 3013b577…` both) |
+| `jobs_active_badge` | 41320 | 41320 | identical (was already clean — the no-limit shape, matching the patch-up mechanism) |
+| `instances_flat_badge` / `instances_bfs_home` / `work` / `defer_blocked` / `missions_badge` / `detail:{id}` | — | — | identical |
+
+`g5_children_order` 47/47 + 1/1 ordered; `g5_jobs_active_non_regression` 7 ≤ 7.
+**FAIL-1 is closed: the `mission_id`/`mission_epoch`/`mission_liveness`/`mission_terminal_reason`
+population and the `mission_ref.liveness` flip are gone; BASE bytes are restored.**
+
+## 2. G4 badge leg — TWO runs at the new payload: 1 PASS / 1 FAIL
+
+| run | verdict | `g4_paired[profile_badge]` verbatim | loaded flat p95 |
+|---|---|---|---|
+| RUN1 | **FAIL** (62/63) | `stalls 2<=1, max 0.8332<=1.0583, p95 0.5381<=0.5236+0.5, samples 186>=0.5*170` | 0.1318 s |
+| RUN2 | **PASS** (63/63) | `stalls 1<=1, max 0.8657<=1.0583, p95 0.5753<=0.5236+0.5, samples 188>=0.5*170` | 0.1606 s |
+
+**Read, not laundered:** the *original* failure mode (max 1.0594 > 1.0583, +1.1 ms) is gone —
+max is now comfortably inside BASE in both runs (0.83 / 0.87 vs 1.0583). What remains is a
+**knife-edge STALL-COUNT flake**: BASE has 1 stall; RUN1 counted **2**, RUN2 counted **1**.
+Same profile, same tree, same reference. So the badge leg is **marginally unstable at the
+stall boundary**, not a reproducible regression. **Adjudication needed from the leader:** a
+third run (evidence either way) or a documented waiver of the stall count for this leg — I
+will not convert one failing run into a pass by choosing the nicer number.
+
+All other G4 profiles PASS in both runs (`home` 0≤0, `jobs_page` 1≤1) and
+`g4_reference_provenance` PASS (`mode=base simulated=False tree=b1183a637649`).
+
+## 3. Gate table at the new payload (RUN2, the clean run)
+
+`verdict=PASS, 63/63 fences, 0 failing`. Round-trips per request: flat **4** (on-loop 1 =
+prefs residual), BFS **8** (on-loop 1), work **6** (0), defer **89** (0, unchanged),
+jobs recent **7** (0), jobs page **7** (0), missions **3** (3, routed census #4 — exempt).
+`g2_band[head]` **0.1318 s / 0.1606 s** ≤ 0.230 both runs. Expanded unloaded floor retained.
+
+## 4. SEEDED 5.11 at the new payload — PASS
+
+Seeded 330-instance fixture (one provisioning, reused for P4 4.7):
+
+| assertion | measured at `c9eac9747` |
+|---|---|
+| boot → `/livez` | 18.1 s |
+| single BFS(100) read | 0.099 s |
+| **started-not-finished at SIGTERM** | **16** concurrent bridged reads in flight (`marker_asserted=true`) |
+| seam under load | `db_offload: backpressure alarm — waiters=1 inflight=6 sum=7 threshold=8` |
+| SIGTERM | **exit −15 in 1.36 s** (`bounded_90s=true`) |
+| `Engine is disposed` | **0** |
+| shutdown tracebacks | **0** |
+| scratch PG | dropped |
+
+## 5. SEEDED P4 4.7 — PASS at the payload; the BASE comparator is the notable datum
+
+| tree | `/readyz` idle | `/readyz` **saturated** (16 concurrent BFS) |
+|---|---|---|
+| **BASE** `b1183a637` | leak silent, pool sqlalchemy `{1,15,-6}` | **no response within the 10 s probe budget** (loop starved by the defect) |
+| **HEAD** `c9eac9747` | leak silent, pool `{1,15,-6}`, psycopg `{2/10, avail 2, waiting 0}` | **200 in 0.376 s**, leak `{detected:false, checkedout_rising:false, streak:0}`, same pool shape |
+
+⇒ **no leak signal attributable to the lane under saturation**, and the bridge is not
+merely "unchanged under light load" (Amendment 1's caveat) but **unchanged and responsive
+under a saturated 16-read burst**, where BASE's readiness probe could not answer at all.
+
+## 6. FINAL VERDICT
+
+**GATE: PASS-WITH-DISCLOSURES.**
+
+- The commission's blocking finding (FAIL-1, G5 jobs bytes) is **RESOLVED and proven twice**
+  at the new payload.
+- Every gate item is green except **G4 badge, which is 1 PASS / 1 FAIL across two runs on a
+  stall-count knife-edge (2 vs 1)** — reported as an open flake requiring a third run or an
+  explicit leader waiver, **not** converted into a pass.
+- 5.11 (seeded, in-flight) and P4 4.7 (seeded, saturated) are both green at the payload.
+
+### Disclosures (additions this amendment)
+
+- **ROUTED ITEM (not a lane defect):** the developer disclosed the underlying **liveness-source
+  asymmetry** — the legacy fallback renders `mission_ref.liveness` from `terminal_reason`,
+  while the resolver-backed path renders it from `instance.status`, for **child-instance
+  Jobs**; the two disagree (`failed` vs `completed`). The byte-restore restores BASE parity
+  by keeping child-instance Jobs out of the resolver-backed payload; the asymmetry itself
+  remains a **design fact for a future, separate semantics decision**.
+- Carried from Amendment 1: two documentation-string deletions (`instance_read.py:87`,
+  `job_queue_service.py:1800`), D-70 **low-risk doc-only**, mapped to their regions.
+- Carried: the clean-drain logging gap (`db_offload.shutdown()` logs nothing on success);
+  drain observability is inferred from the 1.36 s exit, not printed. Recommend one INFO line.
