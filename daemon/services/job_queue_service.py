@@ -1778,6 +1778,8 @@ class JobQueueService:
         status: str | None = None,
         kind: str = "job",
         root_only: bool = True,
+        limit: int | None = None,
+        ensure_job_ids: set | None = None,
     ) -> list[WorkRecord]:
         """Batched equivalent of :meth:`get_work` for the ``list_jobs`` path.
 
@@ -1797,10 +1799,11 @@ class JobQueueService:
           behaviour, which did not exclude child-instance jobs.
 
         The resolver does not currently expose ``queue_id`` or
-        pagination (``limit``/``offset``); those filters remain on the
-        repository side (the JobItem list is the page-defining source of
-        truth, and the WorkRecord list is a per-row enrichment). The
-        caller matches the two lists by ``job_id == work_id``.
+        ``offset`` (``limit`` IS forwarded, as a pre-conversion slice —
+        see :meth:`WorkResolverService.list_work`); the JobItem list
+        remains the page-defining source of truth and the WorkRecord
+        list is a per-row enrichment. The caller matches the two
+        lists by ``job_id == work_id``.
 
         Args:
             project_id: Optional project filter. Matches the
@@ -1815,6 +1818,13 @@ class JobQueueService:
             root_only: When ``True`` (default), drop JobItems bound to
                 child instances. Matches the legacy ``list_jobs``
                 semantics which did not surface child-instance jobs.
+            limit: Optional pre-conversion slice forwarded verbatim to
+                the resolver (``None`` = no slice; conversion cost
+                unbounded, matching the pre-slice behaviour).
+            ensure_job_ids: Optional set of job_ids guaranteed present
+                on the returned page even when sliced out of the
+                top-N (resolver-side patch-up). Forwarded verbatim;
+                ``None`` disables patch-up.
 
         Returns:
             A list of :class:`WorkRecord` ordered newest-first. Empty
@@ -1834,6 +1844,8 @@ class JobQueueService:
             status=status,
             kind=kind,
             root_only=root_only,
+            limit=limit,
+            ensure_job_ids=ensure_job_ids,
         )
 
     async def get_job_by_instance(self, instance_id: str) -> JobItem | None:

@@ -1,0 +1,16 @@
+# ── transient per-run artifacts (local only) ────────────────────────────
+# RUNNABLE-AS-CLEAN (leader requirement): a harness run must leave the tree
+# CLEAN under the harness dir, so every artifact the harness writes is
+# ignored here.  The COMMITTED evidence set stays exactly:
+#   BASELINE.full.json  (the PRE-REPAIR baseline artifact — historical record)
+#   run_full.out        (its console log)
+#   evidence/           (its 5 wedge captures + the faulthandler dump)
+run-*/
+bootprobe/
+run_smoke*.out
+run_*.*.out
+BASELINE.smoke*.json
+BASELINE.*.base.json
+BASELINE.*.head.json
+BASELINE.*.simulated.json
+bodies-*/

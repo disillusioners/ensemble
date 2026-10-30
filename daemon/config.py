@@ -44,6 +44,8 @@ from .constants import (
     CHECKPOINT_TTL_HOURS,
     CHECKPOINT_CLEANUP_INTERVAL_HOURS,
     CHECKPOINT_MAX_PER_THREAD_FLOOR,
+    DB_OFFLOAD_DRAIN_BOUND_S,
+    DB_OFFLOAD_MAX_WORKERS_DEFAULT,
     ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED,
     ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX,
     MAX_INSTANCE_HISTORY,
@@ -645,6 +647,31 @@ class LimitsConfig(BaseSettings):
             "psycopg checkpoint-saver pool acquisition timeout in seconds "
             "(bounds the ghost-waiter lifetime an abandoned readiness "
             "probe leaves behind)"
+        ),
+    )
+
+    # ── DB offload seam (wi-3f5bea95 / Phase 1) ─────────────────────
+    db_offload_max_workers: int = Field(
+        default=DB_OFFLOAD_MAX_WORKERS_DEFAULT,
+        ge=1,
+        description=(
+            "Dedicated db-offload executor workers (boot-applied; "
+            "DB/env/yaml resolve at boot via managed keys)"
+        ),
+    )
+    db_offload_drain_bound_s: float = Field(
+        default=DB_OFFLOAD_DRAIN_BOUND_S,
+        gt=0,
+        description=(
+            "Bounded drain for the db-offload executor at shutdown "
+            "(seconds)"
+        ),
+    )
+    db_offload_wait_warn_sum: int | None = Field(
+        default=None,
+        description=(
+            "Alarm threshold for waiters+in-flight on the db-offload "
+            "gate; None resolves to workers+2 at configure() time"
         ),
     )
 

@@ -201,7 +201,8 @@ async def send_message(
 
     # Check instance exists and get its status FIRST (before any enqueue)
     try:
-        instance_info = manager.get_instance_info(instance_id)
+        from daemon.services.db_offload import offload as _offload
+        instance_info = await _offload(manager.get_instance_info, instance_id)
     except KeyError:
         raise HTTPException(
             status_code=404,

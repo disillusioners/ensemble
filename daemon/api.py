@@ -728,6 +728,20 @@ async def lifespan(app: FastAPI):
     # it into tool factories via closure injection.
     credential_manager = CredentialManager()
 
+    # wi-3f5bea95 Phase 1: configure the db-offload seam (lazy executor +
+    # admission gate) from the resolved config BEFORE any request can arrive.
+    try:
+        from daemon.services import db_offload as _db_offload
+        _db_offload.configure(
+            max_workers=getattr(config.limits, "db_offload_max_workers", None),
+            drain_bound_s=getattr(config.limits, "db_offload_drain_bound_s", None),
+            wait_warn_sum=getattr(config.limits, "db_offload_wait_warn_sum", None),
+        )
+    except Exception as _dbo_exc:
+        logger.warning(
+            "db_offload configure failed: %s", _dbo_exc
+        )
+
     # Initialize InstanceManager
     manager = InstanceManager(
         config,
@@ -3805,6 +3819,13 @@ async def lifespan(app: FastAPI):
             await app.state.vscode_manager.stop()
         except Exception as e:
             logger.warning(f"VS Code server shutdown failed: {e}")
+
+    # wi-3f5bea95 Phase 1: drain the db-offload seam BEFORE dispose_db_pools
+    try:
+        from daemon.services import db_offload as _db_offload
+        await _db_offload.shutdown()
+    except Exception as _dbo_exc:
+        logger.warning("db_offload shutdown failed: %s", _dbo_exc)
 
     # Call manager shutdown for graceful shutdown
     await manager.shutdown()

@@ -1,0 +1,33 @@
+tid,native_id,name,comm,cpu_delta_s,share_pct
+3881763,3881763,"asyncio_3","asyncio_3",0.33,80.488
+3881536,3881536,"MainThread","python",0.05,12.195
+3881716,3881716,"worker-chat-chat-worker-0","worker-chat-cha",0.03,7.317
+3881705,3881705,"worker-default-worker-0","worker-default-",0.01,2.439
+3881766,3881766,"WedgeCaptureWatchdog","WedgeCaptureWat",0.01,2.439
+3881631,3881631,"asyncio_0","asyncio_0",0.0,0.0
+3881683,3881683,"asyncio_1","asyncio_1",0.0,0.0
+3881701,3881701,"StaleTaskRecovery","StaleTaskRecove",0.0,0.0
+3881702,3881702,"StalePauseSweepService","StalePauseSweep",0.0,0.0
+3881703,3881703,"ReportDeliveryRecoveryService","ReportDeliveryR",0.0,0.0
+3881706,3881706,"worker-default-worker-1","worker-default-",0.0,0.0
+3881707,3881707,"worker-default-worker-2","worker-default-",0.0,0.0
+3881708,3881708,"TaskHeartbeat-125127196068896","TaskHeartbeat-1",0.0,0.0
+3881709,3881709,"worker-default-worker-3","worker-default-",0.0,0.0
+3881710,3881710,"TaskHeartbeat-125127197593424","TaskHeartbeat-1",0.0,0.0
+3881711,3881711,"worker-default-worker-4","worker-default-",0.0,0.0
+3881712,3881712,"TaskHeartbeat-125127197579888","TaskHeartbeat-1",0.0,0.0
+3881714,3881714,"TaskHeartbeat-125127197580192","TaskHeartbeat-1",0.0,0.0
+3881718,3881718,"TaskHeartbeat-125127197594064","TaskHeartbeat-1",0.0,0.0
+3881720,3881720,"TaskHeartbeat-125127197673520","TaskHeartbeat-1",0.0,0.0
+3881722,3881722,"worker-chat-chat-worker-1","worker-chat-cha",0.0,0.0
+3881724,3881724,"TaskHeartbeat-125127195259728","TaskHeartbeat-1",0.0,0.0
+3881730,3881730,"asyncio_2","asyncio_2",0.0,0.0
+3881758,3881758,"llm-stream-watchdog","llm-stream-watc",0.0,0.0
+3881759,3881759,"resource-monitor-sampler","resource-monito",0.0,0.0
+3881760,3881760,"resource-monitor-flusher","resource-monito",0.0,0.0
+3881761,3881761,"metrics-listener","metrics-listene",0.0,0.0
+3881762,3881762,"metrics-census","metrics-census",0.0,0.0
+3882761,3882761,"asyncio_4","asyncio_4",0.0,0.0
+3882762,3882762,"asyncio_5","asyncio_5",0.0,0.0
+3888956,3888956,"AnyIO worker thread","AnyIO worker th",0.0,0.0
+3889057,3889057,"AnyIO worker thread","AnyIO worker th",0.0,0.0

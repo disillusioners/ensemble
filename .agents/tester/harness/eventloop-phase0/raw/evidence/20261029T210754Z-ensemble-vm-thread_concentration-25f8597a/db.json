@@ -1,0 +1,10 @@
+{
+  "boot_epoch": "2026-10-29T20:53:48.628531",
+  "checkpoint_store_census": {
+    "status": "failed:UndefinedColumn"
+  },
+  "executing_turns": [],
+  "executing_turns_count": 0,
+  "resume_history": [],
+  "status": "ok"
+}

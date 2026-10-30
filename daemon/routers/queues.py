@@ -648,7 +648,8 @@ async def get_defer_blocked(
         count, and the enumerated holders (paused > stalled > live,
         each ascending by instance_id).
     """
-    # Sync resolver call inside the async handler. NOT a "two fast
+    # Before wi-3f5bea95 this was a sync resolver call inside the async
+    # handler (now off-loaded below). It was NOT a "two fast
     # SELECTs, no event-loop-relevant latency" path — the measured
     # truth (architecture-delta.md §③ Δ7; the plan's §8.5 dominant
     # dwell-multiplier classification): the resolve path is
@@ -660,7 +661,12 @@ async def get_defer_blocked(
     # event loop for the duration. This defect stays ROUTED (R-1);
     # this comment states its severity so the routed owner does not
     # close it as a non-issue.
-    snapshot = resolver.resolve()
+    # RELOCATED OFF-LOOP by wi-3f5bea95 (Phase 4): the resolve path now
+    # runs on the db-offload executor; the dwell class (conn-#1 hold,
+    # 2+N probe shape) is UNCHANGED and stays routed (R-1 / entry 18,
+    # and R-2 / D-32 for the BFS span).
+    from daemon.services.db_offload import offload as _offload
+    snapshot = await _offload(resolver.resolve)
     return DeferBlockResponse(
         defer_blocked=snapshot.defer_blocked,
         pending_count=snapshot.pending_count,

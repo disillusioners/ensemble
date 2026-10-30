@@ -5108,11 +5108,17 @@ class InstanceLifecycleService:
         # record (NOT the ``instance_hierarchy`` working set, whose rows are
         # deleted when a child completes — that would orphan completed
         # children from their parent's tree in the UI). See
-        # ``InstanceRepository.list_child_ids_permanent``.
+        # ``InstanceRepository.list_child_ids_for_parents`` (the batched
+        # form; ``list_child_ids_permanent`` survives for single-id
+        # consumers).
+        # wi-3f5bea95 Phase 2: batch the children lookup so the list path
+        # issues ONE statement instead of one per row.
+        instance_ids = [inst.instance_id for inst in instances]
+        children_by_parent = instance_repository.list_child_ids_for_parents(instance_ids)
         result = []
         for inst in instances:
             info = inst.to_dict()
-            info["children"] = instance_repository.list_child_ids_permanent(inst.instance_id)
+            info["children"] = children_by_parent.get(inst.instance_id, [])
             result.append(info)
         return result, total, truncated
 
@@ -5137,10 +5143,9 @@ class InstanceLifecycleService:
         if meta is None:
             raise KeyError(f"Instance not found: {instance_id}")
         info = meta.to_dict()
-        # children from the permanent parent_id record (includes completed
-        # children) — NOT the instance_hierarchy working set, which deletes
-        # rows on completion and would orphan finished children.
-        info["children"] = instance_repository.list_child_ids_permanent(instance_id)
+        # wi-3f5bea95 Phase 2: share the ordered source with the list path.
+        children_by_parent = instance_repository.list_child_ids_for_parents([instance_id])
+        info["children"] = children_by_parent.get(instance_id, [])
         return info
 
     def clear_all_instances(self) -> int:

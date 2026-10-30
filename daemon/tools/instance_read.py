@@ -77,6 +77,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from ..chunking import chunked
+from ..constants import INSTANCE_LIST_INTERNAL_INCLUDE_DESCENDANTS_DEFAULT
 from ..repositories.instance.models import InstanceStatus
 from ..services.work_status import _STATUS_CANONICAL_MAP
 from ._tool_registry import register_tool_category
@@ -84,7 +85,7 @@ from ._tool_registry import register_tool_category
 logger = logging.getLogger(__name__)
 
 CATEGORY_NAME = "Instance Read"
-CATEGORY_DOC = """\
+CATEGORY_DOC = """
 Read-only views over the instance fleet — the fleet census, one
 instance's deep detail, the wedge report, and the capacity summary.
 
@@ -1671,7 +1672,8 @@ def _build_health_report(
             stop_reason = "time_budget"
             break
         rows, total, _repo_truncated = manager.list_instances(
-            limit=FLEET_SCAN_LIMIT, offset=window_index * FLEET_SCAN_LIMIT
+            limit=FLEET_SCAN_LIMIT, offset=window_index * FLEET_SCAN_LIMIT,
+            include_descendants=INSTANCE_LIST_INTERNAL_INCLUDE_DESCENDANTS_DEFAULT,
         )
         if total_first is None:
             # FIRST window only — never reassigned (see the docstring).

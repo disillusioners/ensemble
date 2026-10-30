@@ -3883,3 +3883,209 @@ class TestDeferredWorkIdWatchable:
 
 
 # ─── end of file ─────────────────────────────────────────────────────────────
+
+
+# ─── RECORDED BEHAVIOUR: Task-side root_only under instance-lookup outage ───
+#
+# Measured on both trees (probe run 2026-10-30), NOT desired behaviour:
+#
+#   tree                              healthy root_only=True   degraded root_only=True
+#   BASE b1183a637 (per-row lookup)   child dropped            child KEPT  (fail-open)
+#   HEAD 054ba46b6 (batched lookup)   child dropped            child KEPT  (fail-open)
+#
+# A transient ``SQLAlchemyError`` on the instance lookup yields
+# ``instance=None`` for the affected Task rows, and the post-conversion guard
+# (``root_only and _instance is not None and _instance.parent_id``) cannot prove
+# root-ness from a missing instance — so the rows are kept. BASE behaves
+# identically row-by-row; the batched path widens the blast radius from the
+# affected rows to the whole page.
+#
+# Deliberately NOT "fixed" in this lane: a fail-closed one-liner
+# (``if root_only and _task_degraded: continue``) would CONTRADICT BASE
+# semantics, and mirroring the Job branch would mean a dedicated
+# non-degrading child-id query (not a one-liner; and that branch fails loud
+# instead of degrading). Disclosed as a measured residual for the gate. This
+# pin exists so the behaviour cannot drift silently in either direction.
+class TestListWorkTaskBranchDegradedRootOnly:
+    """Pins the CURRENT degraded Task-branch behaviour (recorded, not endorsed)."""
+
+    @staticmethod
+    def _poison_instance_reads(engine):
+        """Install a listener that simulates a transient outage on ``instances``."""
+        from sqlalchemy import event
+        from sqlalchemy.exc import OperationalError
+
+        def _boom(conn, cursor, statement, parameters, context, executemany):
+            if "instances" in statement.lower():
+                raise OperationalError(
+                    statement, parameters, Exception("simulated transient outage")
+                )
+
+        event.listen(engine, "before_cursor_execute", _boom)
+        return _boom
+
+    def test_task_root_only_keeps_child_rows_when_instance_lookup_degrades(
+        self, engine, resolver
+    ):
+        """DEGRADED root_only=True keeps child-instance Tasks (fail-open)."""
+        from sqlalchemy import event
+
+        _seed_instance(engine, instance_id="inst-root")
+        _seed_instance(engine, instance_id="inst-child", parent_id="inst-root")
+        root_wid = _seed_task(
+            engine, instance_id="inst-root", task_type="process_report",
+        )
+        child_wid = _seed_task(
+            engine, instance_id="inst-child", task_type="process_report",
+        )
+
+        # Healthy control: root_only scoping is exact when lookups succeed.
+        assert {r.work_id for r in resolver.list_work(root_only=True)} == {root_wid}
+
+        listener = self._poison_instance_reads(engine)
+        try:
+            degraded = resolver.list_work(root_only=True)
+        finally:
+            event.remove(engine, "before_cursor_execute", listener)
+
+        ids = {r.work_id for r in degraded}
+        assert ids == {root_wid, child_wid}, (
+            "recorded degraded behaviour changed. Observed work_ids="
+            f"{sorted(ids)}; recorded = both root and child (fail-open). "
+            "If this was made fail-closed intentionally, update this pin AND "
+            "the disclosure: BASE (b1183a637) keeps these rows."
+        )
+
+        # Recovery: once the outage clears, scoping is exact again — the
+        # degradation is transient, not a permanent widening.
+        assert {r.work_id for r in resolver.list_work(root_only=True)} == {root_wid}
+
+
+# ─── G5 payload byte-identity: /api/jobs enrichment vs BASE ──────────────────
+#
+# The route (``jobs_crud.list_jobs``) now passes ``limit`` + ``ensure_job_ids``
+# when the client sends an explicit ``limit``. The ``ensure_job_ids`` patch-up
+# in ``list_work`` draws from the PRE-``root_only`` job list, so without a
+# root_only guard it re-admits child-instance Jobs that the accumulation path
+# dropped — rows BASE never rendered. Rendering them also flips
+# ``mission_ref.liveness`` from the legacy fallback (``job.terminal_reason``:
+# 'failed'/'cancelled') to the resolver value ('completed'), and populates
+# ``mission_id`` / ``mission_epoch`` / ``mission_liveness`` /
+# ``mission_terminal_reason``.
+#
+# The expectation below is BASE-CAPTURED (taken from a resolver run at
+# ``b1183a637`` with the same fixture) — field-level identity is the contract,
+# not an invented ideal.
+BASE_CAPTURED_JOBS_ENRICHMENT = {
+    # BASE-CAPTURED (resolver run at b1183a637, identical fixture):
+    # root-instance Task job — resolved at BASE too.
+    "pay-root-task": {
+        "mission_id": "inst-root-pay",
+        "mission_epoch": 1,
+        "mission_liveness": None,
+        "mission_terminal_reason": None,
+        "status": "completed",
+        "mission_ref_liveness": "completed",
+    },
+    # CHILD-instance mirror job: NO record at BASE — root_only drops it at
+    # accumulation, so the route falls back to the legacy derivation
+    # (liveness from the JobItem's own terminal_reason: 'failed').
+    "pay-child-msg": None,
+    # Orphan job (instance row ABSENT): rendered at BASE with all-None mission
+    # fields — it is not a child (no row proves parentage), which is exactly
+    # the miss the patch-up exists to close.
+    "pay-orphan-msg": {
+        "mission_id": None,
+        "mission_epoch": None,
+        "mission_liveness": None,
+        "mission_terminal_reason": None,
+        "status": "settled",
+        "mission_ref_liveness": "settled",
+    },
+}
+
+
+class TestJobsEnrichmentBasePayloadIdentity:
+    """``list_work`` with the route's limit+patch-up shape must match BASE bytes."""
+
+    def _seed(self, engine):
+        _seed_instance(engine, instance_id="inst-root-pay")
+        _seed_instance(engine, instance_id="inst-child-pay", parent_id="inst-root-pay")
+        _seed_job(
+            engine, job_id="pay-root-task", instance_id="inst-root-pay",
+            status="done", terminal_reason="completed", job_type="task",
+            created_at="2026-03-01T00:00:10",
+        )
+        _seed_job(
+            engine, job_id="pay-child-msg", instance_id="inst-child-pay",
+            status="failed", terminal_reason="failed", job_type="message",
+            created_at="2026-03-01T00:00:09",
+        )
+        _seed_job(
+            engine, job_id="pay-orphan-msg", instance_id="inst-ghost-pay",
+            status="completed", terminal_reason="completed", job_type="message",
+            created_at="2026-03-01T00:00:08",
+        )
+        return {"pay-root-task", "pay-child-msg", "pay-orphan-msg"}
+
+    def test_route_shape_matches_base_captured_enrichment(self, engine, resolver):
+        """RED if the patch-up re-admits a child Job or flips a mission value."""
+        from daemon.routers.jobs_crud import _derive_m2_mission_ref
+
+        page_ids = self._seed(engine)
+
+        # Route shape: explicit limit -> pre-conversion slice + patch-up.
+        records = resolver.list_work(
+            project_id=None, status=None, kind="job",
+            limit=2, ensure_job_ids=page_ids,
+        )
+
+        observed = {}
+        for rec in records:
+            mission_ref = _derive_m2_mission_ref(rec, None) or {}
+            observed[rec.work_id] = {
+                "mission_id": rec.mission_id,
+                "mission_epoch": rec.mission_epoch,
+                "mission_liveness": rec.mission_liveness,
+                "mission_terminal_reason": rec.mission_terminal_reason,
+                "status": rec.status,
+                "mission_ref_liveness": mission_ref.get("liveness"),
+            }
+
+        # 1. The child-instance Job must NOT be enriched (BASE never rendered it).
+        assert "pay-child-msg" not in observed, (
+            "root_only parity broken: the ensure_job_ids patch-up re-admitted "
+            "the child-instance Job, which flips mission_ref.liveness from "
+            "'failed' to the resolver's value and populates mission_* on the "
+            "wire. Observed keys: "
+            f"{sorted(observed)}"
+        )
+
+        # 2. Orphan-miss closure preserved: absent instance row still surfaces.
+        assert "pay-orphan-msg" in observed, (
+            "orphan-miss closure regressed: a page job whose instance row is "
+            "ABSENT must still be returned by the patch-up"
+        )
+
+        # 3. Field-level identity for every record BASE rendered.
+        for wid, expected in BASE_CAPTURED_JOBS_ENRICHMENT.items():
+            if expected is None:
+                continue
+            assert observed.get(wid) == expected, (
+                f"{wid}: enrichment drifted from BASE-captured payload.\n"
+                f"  expected={expected}\n  observed={observed.get(wid)}"
+            )
+
+    def test_root_only_false_still_admits_child_through_patch_up(
+        self, engine, resolver
+    ):
+        """The guard must not over-reach: ``root_only=False`` keeps the child."""
+        page_ids = self._seed(engine)
+        records = resolver.list_work(
+            project_id=None, status=None, kind="job",
+            root_only=False, limit=2, ensure_job_ids=page_ids,
+        )
+        assert "pay-child-msg" in {r.work_id for r in records}, (
+            "root_only=False must still surface child-instance Jobs via the "
+            "patch-up (debug escape hatch preserved)"
+        )

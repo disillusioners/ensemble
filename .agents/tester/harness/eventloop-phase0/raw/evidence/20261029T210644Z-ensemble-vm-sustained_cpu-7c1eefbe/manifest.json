@@ -1,0 +1,53 @@
+{
+  "artifacts": {
+    "checkpoint_perf_tail.json": "ok",
+    "db.json": "ok",
+    "lag.json": "ok",
+    "metrics.json": "ok",
+    "readyz.json": "ok",
+    "stacks.txt": {
+      "status": "ok"
+    },
+    "threads.csv": "ok"
+  },
+  "auto_continue_mode": "on",
+  "boot_epoch": "2026-10-29T20:53:48.628531",
+  "capture_id": "20261029T210644Z-ensemble-vm-sustained_cpu-7c1eefbe",
+  "captured_at": "20261029T210644Z",
+  "deadline_s": 20.0,
+  "executor_native_id": 3881766,
+  "file_count": 7,
+  "host": "ensemble-vm",
+  "lag_probe": {
+    "last_probe_age_s": 0.5769394049420953,
+    "never_fired": false,
+    "stale": false,
+    "state": "ok"
+  },
+  "observed": {
+    "process_cpu_delta_s": 6.51,
+    "process_cpu_pct": 81.798,
+    "sustain_s": 5.0,
+    "sustained_s": 6.015,
+    "threshold_pct": 55.0
+  },
+  "pool_counters": {
+    "pool_checked_out": 0,
+    "pool_checkout_timeouts": null,
+    "pool_checkout_timeouts_reason": "not_exposed_by_psycopg_pool_3.3.1",
+    "pool_counters_source": "psycopg_pool.get_stats",
+    "pool_field_reasons": {
+      "pool_requests_errors": "field_absent_in_this_pool_type"
+    },
+    "pool_max": 10,
+    "pool_requests_errors": null,
+    "pool_size_current": 1,
+    "pool_waiting_clients": 0
+  },
+  "release_version": "0.27.13",
+  "summary": "process CPU 81.8% of one core sustained for 6.0s (threshold 55.0% / 5.0s)",
+  "total_bytes": 39039,
+  "trigger_reason": "sustained_cpu",
+  "trigger_since": 913237.140716712,
+  "trigger_source": "sustained_cpu"
+}

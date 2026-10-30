@@ -11,7 +11,11 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from daemon.auth.decorators import scope_required
-from daemon.constants import DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT
+from daemon.constants import (
+    DEFAULT_PAGE_LIMIT,
+    INSTANCE_LIST_HTTP_INCLUDE_DESCENDANTS_DEFAULT,
+    MAX_PAGE_LIMIT,
+)
 from daemon.models import (
     ErrorCodes,
     ErrorResponse,
@@ -342,8 +346,9 @@ async def create_instance(
             ).model_dump()
         )
 
-    # Get instance info from database
-    instance_meta = manager.get_instance_info(instance_id)
+    # Get instance info from database (off-loop, wi-3f5bea95)
+    from daemon.services.db_offload import offload as _offload
+    instance_meta = await _offload(manager.get_instance_info, instance_id)
     return InstanceInfo(
         instance_id=instance_meta["instance_id"],
         agent_id=instance_meta["agent_id"],
@@ -384,8 +389,16 @@ async def list_instances(
         ),
     ),
     exclude_kb: bool = Query(True, description="Exclude KB-related instances (experiencer, kb-importer)"),
+    # D-A (wi-3f5bea95 Phase 2, (c)+ ruling): two defaults coexist —
+    # INSTANCE_LIST_HTTP_INCLUDE_DESCENDANTS_DEFAULT (True, this Query) and
+    # INSTANCE_LIST_INTERNAL_INCLUDE_DESCENDANTS_DEFAULT (False, manager/
+    # lifecycle). They are kept as a named pair (no default flipped):
+    # (a) router->False is ROUTED to the Q2 FE-shapes follow-up (response
+    # semantics change for consumers omitting the param); (b) manager->True
+    # is REJECTED (widens the expensive path for every internal caller).
+    # Both internal call sites pass include_descendants explicitly (False).
     include_descendants: bool = Query(
-        True,
+        INSTANCE_LIST_HTTP_INCLUDE_DESCENDANTS_DEFAULT,
         description=(
             "When True (default — back-compat for every existing consumer), "
             "paginate by root and BFS-load all descendants of each root in "
@@ -473,7 +486,9 @@ async def list_instances(
     limit = max(1, min(limit, MAX_PAGE_LIMIT))  # Clamp to 1-MAX_PAGE_LIMIT
     offset = max(0, offset)  # Ensure non-negative
 
-    instances_data, total, truncated = manager.list_instances(
+    from daemon.services.db_offload import offload as _offload
+    instances_data, total, truncated = await _offload(
+        manager.list_instances,
         limit=limit,
         offset=offset,
         project_id=project_id,
@@ -547,7 +562,8 @@ async def get_instance(
     manager = _get_manager(request)
     
     try:
-        instance_meta = manager.get_instance_info(instance_id)
+        from daemon.services.db_offload import offload as _offload
+        instance_meta = await _offload(manager.get_instance_info, instance_id)
     except KeyError:
         raise HTTPException(
             status_code=404,

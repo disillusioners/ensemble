@@ -178,14 +178,19 @@ async def list_work(
                 "accepted": sorted(_KIND_VALUES),
             },
         )
-    records = resolver.list_work(
-        project_id=project_id,
-        instance_id=instance_id,
-        status=status,
-        kind=kind,
-        root_only=root_only,
-    )
-    return [r.to_dict() for r in records]
+    from daemon.services.db_offload import offload as _offload
+
+    def _fetch_and_serialize():
+        records = resolver.list_work(
+            project_id=project_id,
+            instance_id=instance_id,
+            status=status,
+            kind=kind,
+            root_only=root_only,
+        )
+        return [r.to_dict() for r in records]
+
+    return await _offload(_fetch_and_serialize)
 
 
 __all__ = ["router", "set_work_resolver", "get_work_resolver"]
