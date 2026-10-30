@@ -59,6 +59,7 @@ import glob
 import asyncio
 import concurrent.futures
 import logging
+import json
 import os
 import signal
 from dataclasses import dataclass, field
@@ -2221,13 +2222,75 @@ class UpgradeJournalSweepService:
 
     # ── journal writers (R-M5-1: OSError → WARNING, NO retry, continue) ──
 
-    def _log_tail(self, install_dir: Path) -> str:
-        """Last ≤4KB byte-tail, then last ≤40 lines of decoded text of
-        ``data/upgrade.log``. seek(-4KB) + truncate-at-newline — never
-        an O(n) whole-file read; the file is parent-created before Popen
-        so absence just means an empty tail."""
+    @staticmethod
+    def _per_run_narrative_path(install_dir: Path, run_id: str | None) -> Path | None:
+        """D3-12/D3-14: resolve the run's NARRATIVE file by run_id (never
+        the aggregate's last-pointer line — a stale pointer resolves to
+        the wrong file after a newer run). Env scope is discovered by
+        globbing the one-level ``data/upgrade/<env>/`` dirs; run_ids are
+        unique so at most one file matches."""
+        if not run_id:
+            return None
+        for env_dir in (install_dir / "data" / "upgrade").glob("*"):
+            cand = env_dir / f"{run_id}.log"
+            if cand.is_file():
+                return cand
+        return None
+
+    def _per_run_observation(
+        self, install_dir: Path, run_id: str | None
+    ) -> tuple[str, str, str]:
+        """(narrative_path, last_phase_marker, elapsed_since_last_journal_activity)
+        for the executor_still_running row (D3-9/phase-4 T4.4 enrichment).
+        Best-effort: any miss degrades to "unknown" — the row must never
+        fail because observability is absent."""
+        narr = self._per_run_narrative_path(install_dir, run_id)
+        narr_s = str(narr) if narr is not None else "(no per-run narrative)"
+        last_phase = "unknown"
+        if narr is not None:
+            try:
+                with narr.open("rb") as fh:
+                    fh.seek(0, os.SEEK_END)
+                    size = fh.tell()
+                    fh.seek(max(0, size - _LOG_TAIL_MAX_BYTES))
+                    text = fh.read().decode("utf-8", errors="replace")
+                for line in reversed(text.splitlines()):
+                    if "phase-marker:" in line:
+                        last_phase = line.strip()
+                        break
+            except OSError:
+                pass
+        elapsed = "unknown"
         try:
-            log = uj.executor_log_path(install_dir)
+            jp = uj.executor_log_path(install_dir)  # parent dir only
+            state = jp.parent.parent / "releases" / "state.json"
+            with state.open(encoding="utf-8") as fh:
+                doc = json.load(fh)
+            hist = doc.get("history") or []
+            if hist:
+                last_ts = hist[-1].get("ts") or ""
+                if last_ts:
+                    last_dt = datetime.fromisoformat(
+                        last_ts.replace("Z", "+00:00")
+                    )
+                    elapsed = str(
+                        int((datetime.now(timezone.utc) - last_dt).total_seconds())
+                    ) + "s"
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+        return narr_s, last_phase, elapsed
+
+    def _log_tail(self, install_dir: Path, run_id: str | None = None) -> str:
+        """Last ≤4KB byte-tail, then last ≤40 lines of decoded text of the
+        run's log. D3-14: when ``run_id`` resolves a per-run NARRATIVE file,
+        read THAT (the aggregate is pointer-only after D3-12 — reading it
+        here would lose the run's tail at exactly the wrong moment);
+        otherwise fall back to the aggregate. seek(-4KB) + truncate-at-
+        newline — never an O(n) whole-file read; the file is parent-created
+        before Popen so absence just means an empty tail."""
+        try:
+            log = self._per_run_narrative_path(install_dir, run_id) \
+                or uj.executor_log_path(install_dir)
             with log.open("rb") as fh:
                 fh.seek(0, os.SEEK_END)
                 size = fh.tell()
@@ -2250,7 +2313,7 @@ class UpgradeJournalSweepService:
         signal_name: str | None = None,
         signal_num: int | None = None,
     ) -> None:
-        tail = self._log_tail(job.install_dir)
+        tail = self._log_tail(job.install_dir, run_id=job.run_id)
         # comp5 (r-f82e): when the executor was killed by a signal,
         # surface the signal name in the journal detail so the operator
         # reads "executor_exit run_id=… exit_code=143 terminated by
@@ -2281,13 +2344,22 @@ class UpgradeJournalSweepService:
     async def _journal_executor_still_running(
         self, job: ReaperJob, timeout_s: int
     ) -> None:
+        # T4.4/D3-9 (phase 3): the row carries the per-run narrative path,
+        # the last phase marker and the elapsed-since-last-journal-activity
+        # so the operator reads WHERE the run stalled instead of following
+        # a hand-off into one shared aggregate file. The kill contract and
+        # the 660 s threshold are UNCHANGED (pinned).
+        narr_s, last_phase, elapsed = self._per_run_observation(
+            job.install_dir, job.run_id
+        )
         try:
             uj.journal_history_append(
                 job.install_dir,
                 "executor_still_running",
                 f"run_id={job.run_id} pid={job.pid} still running after "
                 f"{timeout_s}s — benign-detach (no kill; own process group; "
-                "correlate with data/upgrade.log)",
+                f"narrative={narr_s}; last={last_phase}; "
+                f"last_journal_activity={elapsed} ago)",
             )
         except OSError as exc:
             logger.warning(

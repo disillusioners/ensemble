@@ -264,9 +264,71 @@ HEARTBEAT_STALE_S=300
 # Retention (ADR-004): keep 3 releases; previous pinned.
 RETENTION_KEEP=3
 
-_log()  { printf '%s[%s]: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "$*" 2>/dev/null; }
-_logv() { printf '%s\n' "$*" 2>/dev/null; }                # verbatim (JSON etc.)
-_warn() { printf '%s[%s]: WARN: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "$*" >&2 2>/dev/null; }
+# D3 (promote-preflight-hang phase 3) -- LOGGING THAT SURVIVES ANYTHING.
+#
+# When ENSEMBLE_UPGRADE_LOG_FILE is set (the daemon threads the per-run
+# NARRATIVE path into the executor env; D3-12's two-file sink), the
+# shell's own lines are appended DIRECTLY to that file -- timestamped --
+# and stdout/stderr become a best-effort mirror that is SKIPPED on a
+# successful file write (no duplication: systemd's `append:` capture
+# feeds the separate PAYLOAD file, not this one). When the variable is
+# UNSET (manual/legacy runs), the behaviour is BYTE-IDENTICAL to the
+# pre-D3 shape (AC1).
+#
+# Write failures are REPORTED (D3-5/O5): the append goes through
+# _log_tsl (the single writer -- D3-14/AC15); on failure the line goes to
+# stderr WITHOUT the blanket 2>/dev/null and ONE best-effort journal row
+# (marker logwrite_failed) is attempted per run, so a full disk / a
+# read-only log surfaces instead of swallowing the narrative.
+_LOG_WRITE_WARNED=0
+_log_write_failed() {
+    # stderr, UNREDIRECTED (a broken transport must be visible)
+    printf '%s\n' "$1" >&2
+    if [ "${_LOG_WRITE_WARNED:-0}" = "0" ]; then
+        _LOG_WRITE_WARNED=1
+        # journald visibility (AC2/AC13): the unwritable-file fallback is
+        # recorded with a distinct marker; best-effort, never fatal (the
+        # journal append itself routes through _warn on its own failures --
+        # the flag above stops that recursion).
+        journal_history_append warn "logwrite_failed: per-run narrative log write FAILED (path=${ENSEMBLE_UPGRADE_LOG_FILE:-?}) -- lines fall back to stderr only" >/dev/null 2>&1 || true
+    fi
+}
+_log()  {
+    if [ -n "${ENSEMBLE_UPGRADE_LOG_FILE:-}" ]; then
+        if _log_tsl "$ENSEMBLE_UPGRADE_LOG_FILE" "${LOG_TAG}[${UP_TARGET:-lib}]: $*"; then
+            return 0
+        fi
+        _log_write_failed "${LOG_TAG}[${UP_TARGET:-lib}]: $*"
+        return 0
+    fi
+    printf '%s[%s]: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "$*" 2>/dev/null
+}
+# _logv -- verbatim body writer (JSON payloads etc.). D3-11 (phase-3 fold
+# A21): the _logv call sites (promote.sh livez/readyz bodies, rollback,
+# restart) are UNBOUNDED today (1,258 B measured; a degraded readyz grows)
+# -- so with the narrative sink set they ride the SAME writer (timestamp,
+# 4 KiB cap, embedded-newline sanitization); without it the legacy
+# byte-identical stdout write stands.
+_logv() {
+    if [ -n "${ENSEMBLE_UPGRADE_LOG_FILE:-}" ]; then
+        if _log_tsl "$ENSEMBLE_UPGRADE_LOG_FILE" "$*"; then
+            return 0
+        fi
+        _log_write_failed "$*"
+        return 0
+    fi
+    printf '%s\n' "$*" 2>/dev/null
+}                # verbatim (JSON etc.)
+_warn() {
+    if [ -n "${ENSEMBLE_UPGRADE_LOG_FILE:-}" ]; then
+        if _log_tsl "$ENSEMBLE_UPGRADE_LOG_FILE" "${LOG_TAG}[${UP_TARGET:-lib}]: WARN: $*"; then
+            return 0
+        fi
+        _log_write_failed "${LOG_TAG}[${UP_TARGET:-lib}]: WARN: $*"
+        return 0
+    fi
+    printf '%s[%s]: WARN: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "$*" >&2 2>/dev/null
+}
 
 # _now_epoch — seconds since epoch (BSD-safe).
 _now_epoch() { date +%s; }
@@ -420,6 +482,22 @@ _run_bounded_step() {
     fi
     return "$rc"
 }
+
+# _log_phase_marker <step> -- the D3-8/T3.3 mid-phase marker: ONE
+# timestamped line naming the phase, the step and the elapsed seconds
+# since the preflight armed (_PREFLIGHT_T0). Written through _log, so it
+# lands in the per-run NARRATIVE file when ENSEMBLE_UPGRADE_LOG_FILE is
+# set (SC7) and on stdout otherwise (manual runs). The markers sit at the
+# SAME boundaries as the D2 checkpoints -- one coherent narrative for the
+# post-mortem (a watchdog trip and the last marker name the same step).
+_log_phase_marker() {
+    local step="$1" elapsed=0
+    if [ -n "${_PREFLIGHT_T0:-}" ]; then
+        elapsed=$(( $(_now_epoch) - _PREFLIGHT_T0 ))
+    fi
+    _log "phase-marker: phase=${_PIPELINE_PHASE:-?} step=${step} elapsed=${elapsed}s"
+}
+
 # _effective_ceremony_remaining_s <deadline_epoch> — returns the
 # remaining seconds on the ceremony wall-clock ceiling, clamped at
 # zero. Used by gate_soak (D-P3.5) to shrink the adaptive cap
@@ -485,15 +563,33 @@ _log_ts() { date -u +'%Y-%m-%dT%H:%M:%SZ'; }
 # than aborting the write. The log line still goes through; a
 # reviewer who sees "-" can correlate with the journal's ISO
 # started_at timestamps (always present, comp4-portable).
+# D3-11 ATOMICITY CONTRACT (phase-3 fold A21): ONE log line = one write(2)
+# to an O_APPEND fd; lines < 8192 B are atomic against a concurrent
+# writer, >= 8192 B corrupt (the break is stdio BUFSIZ). Therefore a hard
+# 4 KiB line cap (2x margin): longer payloads emit a header plus
+# 'payload elided, N bytes'; embedded newlines are sanitized so one call
+# yields ONE physical line. Per-line fsync is REJECTED (page-cache
+# durability covers parent/process death -- the stated objective; a host
+# crash loses everything else too).
+_LOG_LINE_MAX=4000
 _log_tsl() {
     local file="$1"; shift
-    local ts
+    local ts line orig_n
     ts="$(_log_ts 2>/dev/null)" || ts="-"
-    printf '%s %s\n' "$ts" "$*" >> "$file" 2>/dev/null || return 1
+    line="$*"
+    # one physical line: CR/LF -> spaces
+    line="$(printf '%s' "$line" | tr '\n\r' '  ')"
+    orig_n=${#line}
+    if [ "$orig_n" -gt "$_LOG_LINE_MAX" ]; then
+        line="${line:0:_LOG_LINE_MAX} payload elided, ${orig_n} bytes"
+    fi
+    printf '%s %s\n' "$ts" "$line" >> "$file" 2>/dev/null || return 1
 }
 
-# comp6 (r-f82e): the existing _log helper writes to stderr (WARN to
-# stdout — see _warn above) and is fine for the operator's console.
+# comp6 (r-f82e): the existing _log helper writes to STDOUT (and WARN —
+# i.e. _warn — writes to STDERR; the pre-D3 text here had the two streams
+# INVERTED, corrected under phase-3 fold R-H) and is fine for the
+# operator's console.
 # It is NOT a timestamped upgrade.log writer; the upgrade.log
 # history that the forensic report needed was the executor's own
 # stdout/stderr captured by spawn_executor (data/upgrade.log, append).
@@ -2485,13 +2581,32 @@ _tree_manifest() {
       # (measured; stage walks it twice) -- the phase-1 D1-7 batching.
       # Output order == argv order == the sorted list order, so the two files
       # pair up line by line.
-      # ONE shasum invocation per chunk instead of one fork PER FILE. The
-      # per-file fork is what made the plugins tree walk 329.6 s/pass
-      # (measured; stage walks it twice) -- the phase-1 D1-7 batching.
-      # Output order == argv order == the sorted list order, so the two files
-      # pair up line by line.
+      # ONE shasum invocation per CHUNK (500 files) instead of one fork
+      # PER FILE: the per-file fork made the plugins walk 329.6 s/pass
+      # (measured; stage walks it twice). Chunking additionally emits an
+      # IN-OP progress marker per chunk to STDERR (D3-13/T3.14 -- no
+      # background writer; the walk itself narrates every 500 files).
+      # Output order == argv order == the sorted list order, so the two
+      # files pair up line by line; concatenated chunk output is
+      # BYTE-IDENTICAL to the whole-list form (parity re-pinned).
+      _tn=0
       while IFS= read -r rel; do printf '%s\0' "$rel"; done < "$list" \
-        | xargs -0 shasum -a 256 2>/dev/null > "$sums"
+        | xargs -0 -n 500 shasum -a 256 2>/dev/null > "$sums" &
+      _tx=$!
+      # progress narration on the same interval (stderr; stdout stays DATA)
+      _tsz="$(wc -l < "$list" | tr -d ' ')"
+      _tlast=0
+      while kill -0 "$_tx" 2>/dev/null; do
+          _tn="$(wc -l < "$sums" 2>/dev/null | tr -d ' ')"
+          [ -n "$_tn" ] || _tn=0
+          if [ "$_tn" -gt "$_tlast" ] && [ $(( _tn / 500 )) -gt $(( _tlast / 500 )) ]; then
+              _tlast=$_tn
+              printf '%s %s[%s]: tree-walk progress: %s/%s files
+' "$(_log_ts 2>/dev/null || printf '%s' '-')" "$LOG_TAG" "${UP_TARGET:-lib}" "$_tn" "$_tsz" >&2
+          fi
+          sleep 0.2
+      done
+      wait "$_tx"
       n_list="$(wc -l < "$list" | tr -d ' ')"
       n_sums="$(wc -l < "$sums" | tr -d ' ')"
       if [ "$n_list" != "$n_sums" ]; then
@@ -5167,7 +5282,12 @@ supervision_classify() {
                 SUPERVISION_UNIT="${ENSEMBLE_RESTART_UNIT:-}"
                 if [ -z "$SUPERVISION_UNIT" ] && [ "$(uname -s)" = "Linux" ] \
                    && [ -d /run/systemd/system ]; then
-                    pid="$(_supervision_owned_pids | head -1)"
+                    # 2>/dev/null (D3-7/H2): the `head -1` early close is a
+                    # BENIGN EPIPE the helper would print as "write error: Broken
+                    # pipe" -- 64 historic lines of red herring in the aggregate
+                    # log. Suppressing the helper's stderr removes the symptom
+                    # without hiding a real failure (stdout unaffected).
+                    pid="$(_supervision_owned_pids 2>/dev/null | head -1)"
                     if [ -n "$pid" ]; then
                         leaf="$(_supervision_pid_cgroup_leaf "$pid")"
                         case "$leaf" in *.service) SUPERVISION_UNIT="$leaf" ;; esac
@@ -5223,7 +5343,7 @@ supervision_classify() {
         printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
         return 0
     fi
-    pid="$(_supervision_owned_pids | head -1)"
+    pid="$(_supervision_owned_pids 2>/dev/null | head -1)"
     if [ -z "$pid" ]; then
         _supervision_warn_once "no owned pid discovered (anchored tiers vs INSTALL_DIR=$INSTALL_DIR) — classifying script"
         printf 'ENSEMBLE_SUPERVISION_RESULT=%s\n' "$SUPERVISION_STATE"
@@ -6051,6 +6171,102 @@ retention_evict() {
     done
     return 0
 }
+
+# _run_log_retention <dir> -- D3-10/T3.11 per-run LOG retention (R8 binding).
+#
+# OWNER = the running shell AT CEREMONY END, UNDER THE PIPELINE LOCK (the
+# seats are promote.sh's commit phase and stage.sh's success path). R8:
+# the liveness check applies to FOREIGN/STALE lock owners ONLY -- the
+# running owner ($$) IS the one deleting, so "<=20 kept" genuinely holds
+# (the plan's original fence-5 wording -- "never delete while the lock is
+# held" -- would have made retention a self-contradicting NO-OP for its
+# own owner; R8 supersedes it).
+#
+# Rule: keep-newest 20 (by mtime) + age-cap 14 d, over the env-scoped
+# per-run file family (<run_id>.log narrative / .payload.log / .client.log).
+# FIVE FENCES -- a file survives regardless of age/count when it is:
+#   (1) this run's own narrative file ($ENSEMBLE_UPGRADE_LOG_FILE);
+#   (2) the journal in_flight run's files (a CONCURRENT txn's narrative);
+#   (3) the last pointer's files (data/upgrade.log's newest pointer line);
+#   (4) modified < 6 h ago -- the incident-class guard: a STALLED live run
+#       holds a stale-mtime file open while systemd still owns it; deleting
+#       it would vanish the narrative into an unlinked inode exactly when
+#       the post-mortem needs it;
+#   (5) nothing at all when the lock is held by a LIVE FOREIGN owner.
+# Portable primitives ONLY: `find -mmin` / `find -mtime` / `ls -1t`. NEVER
+# `stat -f '%m'` (MEASURED silent garbage on GNU -- lib.sh's retention_evict
+# call at the release seat is a pre-existing P2.1-class defect this lane
+# must not propagate; grep-pinned absent from THIS function).
+_run_log_retention() {
+    local dir="${1:-}"
+    [ -n "$dir" ] || dir="$(dirname "${ENSEMBLE_UPGRADE_LOG_FILE:-/nonexistent/x}")"
+    [ -d "$dir" ] || return 0
+    # (5) foreign live owner -> hands off
+    local lock owner
+    lock="$(lock_dir_path)"
+    if [ -d "$lock" ]; then
+        owner="$(cat "$lock/owner" 2>/dev/null)"
+        if [ -n "$owner" ] && [ "$owner" != "$$" ]            && printf '%s' "$owner" | grep -Eq '^[0-9]+$' && _pid_alive "$owner"; then
+            _log "run-log retention: skipped (pipeline lock held by a live foreign owner pid $owner)"
+            return 0
+        fi
+    fi
+    local protected="" cur_ptr_run f
+    # (1) our own narrative
+    [ -n "${ENSEMBLE_UPGRADE_LOG_FILE:-}" ] && protected="$protected $(basename "$ENSEMBLE_UPGRADE_LOG_FILE")"
+    # (2) the in_flight run (concurrent txn transcript)
+    local _j="" _inf=""
+    _j="$(journal_read 2>/dev/null)" || _j=""
+    if [ -n "$_j" ]; then
+        _inf="$(_json_sub "$_j" in_flight 2>/dev/null)" || _inf=""
+    fi
+    cur_ptr_run=""
+    if [ -n "$_inf" ] && [ "$_inf" != "null" ]; then
+        cur_ptr_run="$(_json_field "$_inf" run_id 2>/dev/null)" || cur_ptr_run=""
+    fi
+    # NOTE: a miss is a safe non-protect only because a concurrent txn also
+    # holds the pipeline lock (fence 5 would have blocked the whole pass).
+    case "$cur_ptr_run" in ''|null|*[!A-Za-z0-9._-]*) cur_ptr_run="" ;; esac
+    # (3) the last pointer line's files
+    local ptr_line=""
+    [ -f "$INSTALL_DIR/data/upgrade.log" ] && ptr_line="$(tail -1 "$INSTALL_DIR/data/upgrade.log" 2>/dev/null)"
+    # (4) anything modified in the last 6 h
+    local recent
+    recent="$(find "$dir" -maxdepth 1 -type f \( -name '*.log' \) -mmin -360 2>/dev/null | sed 's|.*/||')"
+    # newest-first ordering, then keep the first 20 NON-fenced; delete the rest.
+    local kept=0 name
+    local alln
+    alln="$(ls -1t "$dir" 2>/dev/null | grep -E '\.log$')" || alln=""
+    [ -n "$alln" ] || return 0
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        case " $protected " in *" $name "*) continue ;; esac
+        case "$cur_ptr_run" in
+            "") ;;
+            *) case "$name" in "${cur_ptr_run}.log"|"${cur_ptr_run}.payload.log"|"${cur_ptr_run}.client.log") continue ;; esac ;;
+        esac
+        case "$ptr_line" in *"$name"*) continue ;; esac
+        printf '%s\n' "$recent" | grep -Fqx -- "$name" && continue
+        kept=$((kept + 1))
+        if [ "$kept" -gt 20 ]; then
+            rm -f "$dir/$name" 2>/dev/null || true
+        fi
+    done <<EOF
+$alln
+EOF
+    # age cap: anything older than 14 d that survived the count pass must
+    # still be fence-protected, so only UNFENCED over-age files remain --
+    # the loop above already deleted everything past the newest 20.
+    find "$dir" -maxdepth 1 -type f -name '*.log' -mtime +14 2>/dev/null | while IFS= read -r f; do
+        name="$(basename "$f")"
+        case " $protected " in *" $name "*) continue ;; esac
+        case "$ptr_line" in *"$name"*) continue ;; esac
+        printf '%s\n' "$recent" | grep -Fqx -- "$name" && continue
+        rm -f "$f" 2>/dev/null || true
+    done
+    return 0
+}
+
 # ── Entry-side refusal checks (D-FA4.2: ENTRY only — never the recovery) ────
 # _refuse <reason-token> <message...> — entry-refusal: WARN the message
 # UNCHANGED, best-effort-append a `refusal` journal history event carrying

@@ -938,16 +938,46 @@ def _launcher_state(install_dir: Path | None) -> str:
     return f"launcher: {rendered}"
 
 
-def _upgrade_log_tail(install_dir: Path | None, lines: int = _UPGRADE_LOG_TAIL_LINES) -> str:
-    """Bounded tail of ``<install_dir>/data/upgrade.log`` (D8/§7 observability).
+def _resolve_per_run_log(install_dir: Path | None, run_id: str | None) -> Path | None:
+    """D3-12/D3-5 (phase 3): resolve a run's per-run NARRATIVE file by its
+    run_id — the pointer line in ``data/upgrade.log`` names it, and the
+    journal's ``run_log`` row is the durable record. Resolution is BY
+    run_id (never "the last pointer line": a stale pointer would resolve
+    to the wrong file after a newer run). A glob over the env-scoped
+    ``data/upgrade/<env>/`` dirs is exact because run_ids are unique and
+    file-name shaped. Returns None when the file is absent (evicted by
+    retention or a pre-D3 run) — callers fall back to the aggregate."""
+    if install_dir is None or not run_id:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", run_id):
+        return None
+    base = install_dir / "data" / "upgrade"
+    for env_dir in base.glob("*"):
+        cand = env_dir / f"{run_id}.log"
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _upgrade_log_tail(
+    install_dir: Path | None,
+    lines: int = _UPGRADE_LOG_TAIL_LINES,
+    run_id: str | None = None,
+) -> str:
+    """Bounded tail of the executor log (D8/§7 observability).
 
     The daemonized executor's log (P2.2 write-side, Dispatch B) — read here
     when present so progress lines are observable the moment it exists.
-    Bounded: at most the last 256KB is read, then the last ``lines`` lines.
+    D3-12: when ``run_id`` resolves a per-run narrative file, THAT is
+    read (the aggregate is pointer-only after D3-12); otherwise the
+    aggregate ``data/upgrade.log`` (unchanged behaviour for callers that
+    pass no run_id). Bounded: at most the last 256KB is read, then the
+    last ``lines`` lines.
     """
     if install_dir is None:
         return "upgrade.log: none (no install dir)"
-    lp = install_dir / _UPGRADE_LOG_REL
+    per_run = _resolve_per_run_log(install_dir, run_id)
+    lp = per_run or (install_dir / _UPGRADE_LOG_REL)
     try:
         if not lp.is_file():
             return f"upgrade.log: none at {lp} (no daemonized run has logged yet)"

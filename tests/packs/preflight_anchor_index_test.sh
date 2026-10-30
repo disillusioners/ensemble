@@ -130,10 +130,20 @@ newcheck scripts/upgrade/lib.sh '_run_bounded_step()' 'the per-step bounded wrap
 newcheck scripts/upgrade/lib.sh '_budget_in_force()' 'the value-in-force resolver'
 newcheck scripts/upgrade/lib.sh '_HALT_JOURNALED=0' 'the halt re-entrancy guard (D2-4)'
 newcheck scripts/upgrade/lib.sh '_df_systemctl()' 'the bounded dual-fight probe (T2.7)'
+newcheck scripts/upgrade/lib.sh '_log_phase_marker()' 'the mid-phase marker (D3-8)'
+newcheck scripts/upgrade/lib.sh '_run_log_retention()' 'per-run log retention (D3-10/R8)'
+newcheck scripts/upgrade/lib.sh '_log_write_failed()' 'the write-failure reporter (D3-5)'
 newcheck scripts/upgrade/promote.sh 'preflight_deadline=$(( $(_now_epoch) + PREFLIGHT_PHASE_BUDGET_S ))' 'the preflight phase deadline (T2.5)'
 newcheck scripts/upgrade/promote.sh 'exceeds 300 on the live lane' 'the live soak refusal (T2.17)'
 newcheck scripts/upgrade/status.sh 'a read-only tool never files itself as a' 'status.sh exits 1 (SC4b)'
+newcheck scripts/upgrade/promote.sh '_run_log_retention' 'retention seat in promote commit'
 newcheck daemon/tools/upgrade_journal.py 'def derived_runtime_max_sec(' 'the derived RuntimeMaxSec (D2-9)'
+newcheck daemon/tools/upgrade_journal.py 'def executor_run_log_paths(' 'the two-file sink paths (D3-12)'
+newcheck daemon/tools/upgrade_journal.py 'ENSEMBLE_UPGRADE_LOG_FILE' 'narrative path threaded (D3-2)'
+newcheck daemon/tools/upgrade_journal.py '_append_pointer_line(' 'the aggregate pointer (D3-12)'
+newcheck daemon/tools/upgrade_journal.py '.client.log' 'client stderr to FILE (D3-6/R7)'
+newcheck daemon/services/upgrade_journal_sweep.py '_per_run_observation' 'still_running enrichment (T4.4)'
+newcheck daemon/tools/upgrade_tools.py '_resolve_per_run_log' 'reader resolves by run_id (D3-12)'
 
 # the trap-install ORDER at HEAD: handlers BEFORE lock_acquire (D2-7)
 TRAP_LINE="$(grep -n '_trap_install_signal_handlers "promote:preflight"' "$WS/scripts/upgrade/promote.sh" | head -1 | cut -d: -f1)"

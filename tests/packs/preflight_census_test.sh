@@ -112,12 +112,21 @@ fi
 
 # ── 2. HEAD: the call sites are unchanged; the walks are legacy-only ──────
 printf '\n== 2. HEAD census (implementation migrated, call sites not touched) ==\n'
+# BASE = 25 (the pinned incident census). PHASE 3 (promote-preflight-hang)
+# legitimately ADDS one read-only site: `_run_log_retention` reads the
+# journal to learn the in_flight run_id (fence 2 of the retention rule).
+# The invariant is "no BASE site changed", not "no site may ever be added":
+# the BASE-derived table below already proves the 25 are stable; HEAD adds
+# exactly this one, documented site.
 HEAD_TOTAL="$(pf_gen_census "$WS" ws | sed -n 's/^# total=//p')"
-if [ "$HEAD_TOTAL" = "25" ]; then
-    pf_ok "the same 25 direct call sites exist at HEAD (zero call-site edits)"
+if [ "${HEAD_TOTAL:-0}" = "26" ]; then
+    pf_ok "HEAD carries the 25 BASE call sites + 1 documented phase-3 site (=26)"
 else
-    pf_bad "HEAD census total is $HEAD_TOTAL, want 25 (call sites must not change)"
+    pf_bad "HEAD census total is $HEAD_TOTAL, want 26 (25 BASE + _run_log_retention)"
 fi
+grep -q 'journal_read 2>/dev/null' <(awk '/^_run_log_retention\(\)/,/^}/' "$WS/scripts/upgrade/lib.sh") \
+    && pf_ok "the added site is the retention read (documented, post-D1 fast path)" \
+    || pf_bad "the +1 HEAD site is not the documented retention read"
 
 # every per-character WALK over the journal string lives in a legacy fallback
 # (or one of the two DOCUMENTED small-input exemptions). A "walk" is a LOOP

@@ -274,6 +274,20 @@ J="$(_run_bounded_step journal-read journal_read)" || {
     journal_history_append halt "promote preflight: journal read REFUSED (size guard ${JOURNAL_SIZE_GUARD_BYTES}B x legacy class, or unreadable/torn) — halt-for-human" >/dev/null 2>&1 || true
     exit 78
 }
+# D3-8/D3-9 (phase 3): the RUN-IDENTITY row — one per run, naming the
+# per-run NARRATIVE file the shell writes directly and the PAYLOAD file
+# systemd's append: capture owns (D3-12's two-file sink). Only emitted
+# when the daemon threaded ENSEMBLE_UPGRADE_LOG_FILE (daemon-spawned
+# runs); a manual run has no per-run files to name. This is the row the
+# operator (and the daemon's executor_still_running) reads to correlate
+# run_id -> file WITHOUT the mtime-dating anti-pattern.
+if [ -n "${ENSEMBLE_UPGRADE_LOG_FILE:-}" ]; then
+    _run_log_dir="$(dirname "$ENSEMBLE_UPGRADE_LOG_FILE")"
+    journal_history_append run_log \
+        "run_id=${lock_run_id:-?} narrative=$ENSEMBLE_UPGRADE_LOG_FILE payload=${_run_log_dir}/${lock_run_id:-?}.payload.log" \
+        || _warn "run-identity journal row FAILED (best-effort — the per-run file still survives)"
+fi
+
 # Probe-OK event (T2.0a / C-7) — journals the interpreter path that
 # signed off on the splice. This is a SHELL → journal write using the
 # legacy `journal_history_append` (small fixture, runs ONCE on the
@@ -285,6 +299,7 @@ _splice_journal append-history python_floor_probe \
     || { _warn "could not journal probe-OK event — refusing"; lock_release 2>/dev/null || true; exit 78; }
 
 # 1c. adopt-or-refuse an existing in_flight (sweep-mirroring, D-FA4.3)
+_log_phase_marker "journal-read"
 lock_heartbeat
 _run_bounded_step adopt-txn adopt_stale_txn || _refuse txn-busy "promote refused: unresolved in_flight txn (see the adopt diagnostics above — pipeline-busy)"
 
@@ -302,6 +317,7 @@ _enforce_deadline "$preflight_deadline" preflight "budget=PREFLIGHT_PHASE_BUDGET
 # surfaces as rc 78 through the wrapper (mirrored below), a 124 breach
 # never returns (the handler exits).
 lock_heartbeat
+_log_phase_marker "adopt-txn"
 _run_bounded_step entry-check promote_entry_check "$VERSION" || exit 78
 _enforce_deadline "$preflight_deadline" preflight "budget=PREFLIGHT_PHASE_BUDGET_S value=${PREFLIGHT_PHASE_BUDGET_S}"
 
@@ -331,12 +347,14 @@ supervision_preflight
 # visible at the earliest refusal point, and BEFORE any stop/flip
 # mutation.
 lock_heartbeat
+_log_phase_marker "entry-check"
 _run_bounded_step plugin-staleness promote_plugin_staleness_check || exit 78
 _enforce_deadline "$preflight_deadline" preflight "budget=PREFLIGHT_PHASE_BUDGET_S value=${PREFLIGHT_PHASE_BUDGET_S}"
 
 # 1e. integrity (D-FA4.4): CURRENT (drift detection) + TARGET + manifest
 # fields + no-.env invariant. Same-version re-promote verifies once.
 lock_heartbeat
+_log_phase_marker "plugin-staleness"
 CUR_JSON="$(_run_bounded_step journal-read-current journal_read)"
 # Anchored on the QUOTED-key form (`"current":`) via _json_field_quoted
 # (lib.sh:1355-1364 precedent) — defends against a future key-naming
@@ -351,7 +369,8 @@ if [ -n "$CUR" ] && [ "$CUR" != "$VERSION" ]; then
         exit 78
     fi
     _log "integrity: verifying CURRENT release $CUR (drift detection)"
-        lock_heartbeat
+    _log_phase_marker "integrity-current"
+    lock_heartbeat
     _run_bounded_step integrity-current integrity_verify "$CUR"
     iv_rc=$?
     if [ "$iv_rc" -ne 0 ]; then
@@ -362,6 +381,7 @@ if [ -n "$CUR" ] && [ "$CUR" != "$VERSION" ]; then
     fi
 fi
 _log "integrity: verifying TARGET release $VERSION"
+_log_phase_marker "integrity-target"
 lock_heartbeat
 _run_bounded_step integrity-target integrity_verify "$VERSION"
 iv_rc=$?
@@ -397,6 +417,7 @@ journal_history_append intent_flip \
     || _warn "intent_flip journal event append FAILED (best-effort; boot-sweep commit-and-continue path will see no evidence and fall to the conservative halt gates)"
 
 # 1f. open the transaction (D4)
+_log_phase_marker "txn-open"
 lock_heartbeat
 if ! journal_open_txn "promote" "$VERSION"; then
     _warn "cannot open journal txn (an in_flight survived adoption?) — pipeline-busy"
@@ -643,6 +664,11 @@ if [ -z "$gate_fail_reason" ]; then
                                           || journal_fail_loud "commit: history append"
     _log "COMMITTED: current=$VERSION previous=${OLD_CUR:-<none>}"
     retention_evict
+    # D3-10/T3.11 (R8): per-run log retention — owner = THIS shell, still
+    # UNDER the pipeline lock (this seat). <=20 kept + 14 d age cap, five
+    # fences (its own narrative, an in_flight run's files, the last
+    # pointer's files, <6 h mtime, foreign-live-owner hand-off).
+    _run_log_retention
     lock_release
     _log "promote complete — $UP_TARGET serves $BIN_VERSION on :$PORT"
     exit 0
