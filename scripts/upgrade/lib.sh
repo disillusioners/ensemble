@@ -2062,6 +2062,17 @@ _pid_alive() {
 # lock_run_id. Returns: 0 acquired (incl. stale-break); 1 busy after wait.
 lock_acquire() {
     local wait_s="${1:-$LOCK_WAIT_S_DEFAULT}" lock owner_pid hb age run_id
+    # D4(a)/T4.2 (phase 4): reclaim audit state. The release is TRAP-ONLY
+    # today, so a trap-bypassing death (SIGKILL class) orphans the lock
+    # dir; the dead-owner/stale-heartbeat breaks below reclaim it --
+    # previously a stdout-only _log line, invisible in the durable audit
+    # trail, which is how the 2026-10-28 operator ended up performing a
+    # MANUAL stale-break believing it necessary. Set on the break, written
+    # AFTER we hold the lock (the live-install splice fence refuses
+    # history appends unless the pipeline lock is held by a LIVE owner --
+    # at break time the old owner is dead, so the row must wait until the
+    # new acquisition succeeds).
+    local _broke_reason="" _broke_owner="" _broke_run="" _broke_age=""
     lock="$(lock_dir_path)"
     mkdir -p "$(dirname "$lock")"
     lock_run_id="run-$(date +%Y%m%d-%H%M%S)-$$"
@@ -2071,6 +2082,15 @@ lock_acquire() {
             printf '%s\n' "$$" > "$lock/owner" 2>/dev/null
             printf '%s\n' "$lock_run_id" > "$lock/run_id" 2>/dev/null
             printf '%s\n' "$(_now_epoch)" > "$lock/heartbeat" 2>/dev/null
+            if [ -n "$_broke_reason" ]; then
+                # ONE row per reclaim, all five fields (AC2): reclaimed
+                # owner pid, reclaimed run_id, heartbeat age, reason,
+                # reclaiming run_id. Best-effort (a torn/absent journal
+                # never blocks the acquisition).
+                journal_history_append lock-stale-break \
+                    "reclaimed owner pid=${_broke_owner:-?} run_id=${_broke_run:-?} heartbeat_age=${_broke_age:-?}s reason=${_broke_reason} reclaiming_run_id=${lock_run_id}" \
+                    >/dev/null 2>&1 || true
+            fi
             return 0
         fi
         # exists — stale? Break only when the heartbeat is > LOCK_STALE_S AND
@@ -2111,7 +2131,13 @@ lock_acquire() {
                 fi
                 if [ "$owner_live" -eq 0 ]; then
                     _log "pipeline lock stale (heartbeat ${age}s old, owner pid ${owner_pid:-?} dead/unverifiable, run ${run_id:-?}) — breaking"
-                    mv "$lock" "${lock}.stale.$$" 2>/dev/null || continue
+                    if mv "$lock" "${lock}.stale.$$" 2>/dev/null; then
+                        _broke_reason="stale-heartbeat"
+                        _broke_owner="$owner_pid"
+                        _broke_run="$run_id"
+                        _broke_age="$age"
+                        continue
+                    fi
                     continue
                 fi
                 # LIVE owner mid un-heartbeated long op (the stop span) —
@@ -2123,7 +2149,13 @@ lock_acquire() {
         if [ -n "$owner_pid" ] && printf '%s' "$owner_pid" | grep -Eq '^[0-9]+$' \
            && ! _pid_alive "$owner_pid"; then
             _log "pipeline lock owner pid $owner_pid is dead — breaking lock"
-            mv "$lock" "${lock}.stale.$$" 2>/dev/null || continue
+            if mv "$lock" "${lock}.stale.$$" 2>/dev/null; then
+                _broke_reason="dead-owner"
+                _broke_owner="$owner_pid"
+                _broke_run="$run_id"
+                _broke_age="${age:-?}"
+                continue
+            fi
             continue
         fi
         if [ "$waited" -ge "$wait_s" ]; then

@@ -744,4 +744,13 @@ if ! integrity_verify "$VERSION"; then
 fi
 
 _log "staged release $VERSION at $REL (rollback_safe=$ROLLBACK_SAFE source=$ROLLBACK_SAFE_SRC known_schema_gen=$KNOWN_SCHEMA_GEN contains_contract_phase=$CONTAINS_CONTRACT_PHASE) — NO flip performed (promote.sh owns current)"
+# D4(a)/T4.3 (phase 4): EXPLICIT success-path release. The lock's lifetime
+# no longer depends on the EXIT trap surviving (a trap-bypassing death is
+# the D4(a) orphan class; a NORMAL stage already released via the trap).
+# lock_release is owner-guarded and idempotent -- the belt is free: the
+# EXIT trap's second release is a no-op (dir gone => rc 0).
+# D3-10/T3.11 (R8): per-run log retention, owner = THIS shell under the
+# lock -- this is the stage seat (the promote seat is promote.sh's commit).
+_run_log_retention
+lock_release
 exit 0
