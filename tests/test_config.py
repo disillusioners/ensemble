@@ -491,6 +491,39 @@ class TestModelKeywordsConfig:
         assert config.model_keywords == config.model
 
 
+class TestModelTitleDefault:
+    """Regression pins for the ``model_title`` default (``'title'``).
+
+    ``daemon/config.py`` defaults ``LLMConfig.model_title`` to the
+    ``'title'`` alias and ``config.yaml`` mirrors it via
+    ``${OPENAI_MODEL_TITLE:-title}``; set-but-empty remaps to ``model``
+    via the ``set_title_model_fallback`` validator.
+    """
+
+    def _clean(self, monkeypatch) -> None:
+        """Clear all LLM env vars so defaults are observable."""
+        for key in list(os.environ.keys()):
+            if key.startswith("OPENAI_"):
+                monkeypatch.delenv(key, raising=False)
+
+    def test_model_title_defaults_to_title_alias_when_unset(self, monkeypatch) -> None:
+        from daemon.config import LLMConfig
+
+        self._clean(monkeypatch)
+        config = LLMConfig()
+        assert config.model_title == "title"
+
+    def test_load_config_resolves_model_title_default(self, tmp_path, sample_config_yaml, monkeypatch) -> None:
+        from daemon.config import load_config
+
+        self._clean(monkeypatch)
+        config_file = tmp_path / "config.yaml"
+        with open(config_file, "w") as f:
+            f.write(sample_config_yaml)
+        config = load_config(str(config_file))
+        assert config.llm.model_title == "title"
+
+
 class TestDaemonConfig:
     """Tests for DaemonConfig."""
 
