@@ -1429,6 +1429,10 @@ class WorkResolverService:
         _patch_mission_fields_by_id = {}
         _patch_task_timing_by_work_id = {}
         _patch_absent_ids = set()
+        # root_only child-instance ids for the Job branch: computed once in
+        # the accumulation step below and REUSED by the ``ensure_job_ids``
+        # patch-up (no extra SELECT). Empty when ``root_only`` is off.
+        child_job_instance_ids: set[str] = set()
 
         if query_jobs_table:
             jobs = self._query_jobs(project_id, instance_id, job_status_filters)
@@ -1462,11 +1466,11 @@ class WorkResolverService:
             _patch_task_timing_by_work_id = task_timing_by_work_id
             _patch_absent_ids = absent_ids
             if root_only and jobs:
-                child_instance_ids = self._batch_child_instance_ids(
+                child_job_instance_ids = self._batch_child_instance_ids(
                     {j.instance_id for j in jobs if j.instance_id is not None}
                 )
                 for j in jobs:
-                    if j.instance_id is not None and j.instance_id in child_instance_ids:
+                    if j.instance_id is not None and j.instance_id in child_job_instance_ids:
                         continue
                     ca = _parse_iso_datetime(getattr(j, "created_at", None))
                     source_rows.append(
@@ -1543,6 +1547,22 @@ class WorkResolverService:
                     continue
                 j = jobs_by_id.get(jid)
                 if j is None:
+                    continue
+                # root_only parity (G5): the accumulation path drops
+                # child-instance Jobs, but this patch-up draws from the
+                # PRE-root_only job list, so without the same guard it
+                # re-admits a row the resolver — and BASE — never rendered.
+                # Rendering it also flips ``mission_ref.liveness`` from the
+                # route's legacy fallback (``job.terminal_reason``) to the
+                # resolver value and populates the four ``mission_*`` fields
+                # on the wire. Truly-absent instance ids are not children
+                # (no row proves parentage), so the orphan-miss closure the
+                # patch-up exists for is untouched.
+                if (
+                    root_only
+                    and j.instance_id is not None
+                    and j.instance_id in child_job_instance_ids
+                ):
                     continue
                 record = self._job_to_record(
                     j,
