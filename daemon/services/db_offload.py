@@ -204,6 +204,7 @@ class _Gate:
                         try:
                             nxt.set_result(None)
                         except (asyncio.InvalidStateError, RuntimeError):
+                            # do_release()'s rollback is AUTHORITATIVE; mirror it here (restore _in_transit + _permits) if this path ever gains an await -- the bare pass is safe only with no await in between.
                             pass
                         raise  # token transferred; cancelled caller still cancelled
                     self._permits = min(self._permits + 1, self._workers)
@@ -413,7 +414,20 @@ async def offload(fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
 
     # submit
     ctx = contextvars.copy_context()
-    fut: Future = executor.submit(ctx.run, functools.partial(fn, *args, **kwargs))
+    try:
+        fut: Future = executor.submit(ctx.run, functools.partial(fn, *args, **kwargs))
+    except RuntimeError as exc:
+        # The executor drained between acquire() and submit(): ``submit`` raises
+        # a raw RuntimeError, but this caller already holds exactly ONE admitted
+        # token, accounted as ``_inflight``. Return it through the canonical
+        # token-return path -- ``do_release`` decrements ``_inflight`` ONLY, then
+        # either transfers the token to the head parked waiter (``_in_transit``
+        # += 1 + set_result, NO permit increment) or, with no waiters, restores
+        # ``_permits``. ``_in_transit`` is never touched for this caller's own
+        # token: it was inflight, never in transit -- decrementing it here would
+        # erase another waiter's unclaimed transfer token.
+        gate.do_release()
+        raise DbOffloadClosedError("db_offload seam closed while submitting") from exc
 
     def _release(_f: Future) -> None:
         # runs on worker thread

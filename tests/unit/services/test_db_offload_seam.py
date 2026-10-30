@@ -442,3 +442,144 @@ def test_cancel_propagates_callee_not_called():
         await db_offload.shutdown()
 
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# Submit-failure permit accounting (D-79). A drain can land in the window
+# between `gate.acquire()` and `executor.submit()`; `submit` then raises a RAW
+# RuntimeError (not DbOffloadClosedError) and the admitted token must still be
+# returned. The caller holds exactly ONE token, accounted as `_inflight`:
+# decrement `_inflight` only, then transfer to a parked waiter (no permit
+# increment) when one exists, else restore the permit. `_in_transit` must never
+# be touched for the caller's own token — it was inflight, never in transit.
+# ---------------------------------------------------------------------------
+
+
+def _assert_gate_invariant(gate, expected_workers=None):
+    """D-79: permits + inflight + in_transit == W (waiters hold NO permits)."""
+    w = gate.workers if expected_workers is None else expected_workers
+    total = gate.permits + gate.inflight + gate.in_transit
+    assert total == w, (
+        f"gate invariant broken: permits={gate.permits} "
+        f"inflight={gate.inflight} in_transit={gate.in_transit} "
+        f"sum={total} W={w} waiters={gate.waiters}"
+    )
+
+
+def test_submit_failure_transfers_token_to_parked_waiter():
+    """WITH parked waiters: the token is TRANSFERRED, not dropped.
+
+    A starved waiter (token thrown away) and a raw RuntimeError are both RED.
+    """
+
+    async def run():
+        W = 1
+        db_offload.configure(max_workers=W, drain_bound_s=5)
+        gate = db_offload.get_gate()
+        # occupy the single slot; gate.do_release() stands in for the
+        # executor done-callback that would normally release it
+        await gate.acquire()
+        assert gate.inflight == 1 and gate.permits == 0
+        # park two callers through the PUBLIC seam
+        woken = asyncio.create_task(db_offload.offload(lambda: "woken"))
+        parked = asyncio.create_task(db_offload.offload(lambda: "parked"))
+        await asyncio.sleep(0.05)
+        assert gate.waiters == 2, gate.waiters
+        # drain the executor: every submit() from here raises raw RuntimeError
+        db_offload.get_executor().shutdown(wait=False)
+        # transfer the held token to the head waiter (FIFO: `woken`)
+        gate.do_release()
+        # `woken` is admitted, then its own submit() fails
+        with pytest.raises(db_offload.DbOffloadClosedError) as woken_exc:
+            await asyncio.wait_for(woken, timeout=5.0)
+        assert isinstance(woken_exc.value.__cause__, RuntimeError), (
+            "expected the raw submit RuntimeError chained as __cause__, got "
+            f"{woken_exc.value.__cause__!r}"
+        )
+        # THE SHAPE THE DRAFT MISSED: `parked` is still in the deque at the
+        # moment of failure and must be ADMITTED by the transfer. A dropped
+        # token starves it (TimeoutError), and a permit-increment substitute
+        # also starves it while looking invariant-clean.
+        with pytest.raises(db_offload.DbOffloadClosedError):
+            await asyncio.wait_for(parked, timeout=5.0)
+        # both callers died in submit; the single token must be back in full
+        _assert_gate_invariant(gate, W)
+        assert gate.permits == W, gate.permits
+        assert gate.waiters == 0
+        assert gate.inflight == 0
+        assert gate.in_transit == 0
+        await db_offload.shutdown()
+
+    asyncio.run(run())
+
+
+def test_submit_failure_does_not_erase_unclaimed_transfer_token():
+    """WITH parked waiters, TWO transfers unclaimed at once.
+
+    The first woken caller fails its submit while the SECOND transfer is still
+    in flight (``in_transit == 2`` at that instant). Returning a token the
+    caller never held — decrementing ``_in_transit`` for its own token — erases
+    another waiter's token and breaks the invariant.
+    """
+
+    async def run():
+        W = 2
+        db_offload.configure(max_workers=W, drain_bound_s=5)
+        gate = db_offload.get_gate()
+        await gate.acquire()
+        await gate.acquire()
+        assert gate.inflight == 2 and gate.permits == 0
+        first = asyncio.create_task(db_offload.offload(lambda: "first"))
+        second = asyncio.create_task(db_offload.offload(lambda: "second"))
+        await asyncio.sleep(0.05)
+        assert gate.waiters == 2, gate.waiters
+        db_offload.get_executor().shutdown(wait=False)
+        # BOTH transfers issue before either woken caller resumes
+        gate.do_release()
+        gate.do_release()
+        assert gate.in_transit == 2, gate.in_transit
+        for task in (first, second):
+            with pytest.raises(db_offload.DbOffloadClosedError):
+                await asyncio.wait_for(task, timeout=5.0)
+        # no token erased, none duplicated
+        _assert_gate_invariant(gate, W)
+        assert gate.permits == W, gate.permits
+        assert gate.waiters == 0
+        assert gate.inflight == 0
+        assert gate.in_transit == 0
+        await db_offload.shutdown()
+
+    asyncio.run(run())
+
+
+def test_submit_failure_restores_capacity_without_waiters():
+    """WITHOUT waiters: the permit is restored, capacity stays W."""
+
+    async def run():
+        W = 2
+        db_offload.configure(max_workers=W, drain_bound_s=5)
+        gate = db_offload.get_gate()
+        db_offload.get_executor().shutdown(wait=False)
+        for _ in range(W):
+            with pytest.raises(db_offload.DbOffloadClosedError):
+                await asyncio.wait_for(db_offload.offload(lambda: "x"), timeout=5.0)
+            _assert_gate_invariant(gate, W)
+        assert gate.permits == W, gate.permits
+        assert gate.inflight == 0 and gate.in_transit == 0 and gate.waiters == 0
+        # capacity proof on a FRESH gate: W callers admit concurrently with
+        # zero parking (alarm_count counts backpressure episodes)
+        db_offload.configure(max_workers=W, drain_bound_s=5)
+        fresh = db_offload.get_gate()
+        assert fresh is not gate
+        results = await asyncio.gather(
+            *[db_offload.offload(lambda: "ok") for _ in range(W)]
+        )
+        assert results == ["ok"] * W
+        assert fresh.waiters == 0 and fresh.alarm_count == 0, (
+            f"fresh gate parked/backpressured: waiters={fresh.waiters} "
+            f"alarm_count={fresh.alarm_count}"
+        )
+        _assert_gate_invariant(fresh, W)
+        await db_offload.shutdown()
+
+    asyncio.run(run())

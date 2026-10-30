@@ -3883,3 +3883,79 @@ class TestDeferredWorkIdWatchable:
 
 
 # ─── end of file ─────────────────────────────────────────────────────────────
+
+
+# ─── RECORDED BEHAVIOUR: Task-side root_only under instance-lookup outage ───
+#
+# Measured on both trees (probe run 2026-10-30), NOT desired behaviour:
+#
+#   tree                              healthy root_only=True   degraded root_only=True
+#   BASE b1183a637 (per-row lookup)   child dropped            child KEPT  (fail-open)
+#   HEAD 054ba46b6 (batched lookup)   child dropped            child KEPT  (fail-open)
+#
+# A transient ``SQLAlchemyError`` on the instance lookup yields
+# ``instance=None`` for the affected Task rows, and the post-conversion guard
+# (``root_only and _instance is not None and _instance.parent_id``) cannot prove
+# root-ness from a missing instance — so the rows are kept. BASE behaves
+# identically row-by-row; the batched path widens the blast radius from the
+# affected rows to the whole page.
+#
+# Deliberately NOT "fixed" in this lane: a fail-closed one-liner
+# (``if root_only and _task_degraded: continue``) would CONTRADICT BASE
+# semantics, and mirroring the Job branch would mean a dedicated
+# non-degrading child-id query (not a one-liner; and that branch fails loud
+# instead of degrading). Disclosed as a measured residual for the gate. This
+# pin exists so the behaviour cannot drift silently in either direction.
+class TestListWorkTaskBranchDegradedRootOnly:
+    """Pins the CURRENT degraded Task-branch behaviour (recorded, not endorsed)."""
+
+    @staticmethod
+    def _poison_instance_reads(engine):
+        """Install a listener that simulates a transient outage on ``instances``."""
+        from sqlalchemy import event
+        from sqlalchemy.exc import OperationalError
+
+        def _boom(conn, cursor, statement, parameters, context, executemany):
+            if "instances" in statement.lower():
+                raise OperationalError(
+                    statement, parameters, Exception("simulated transient outage")
+                )
+
+        event.listen(engine, "before_cursor_execute", _boom)
+        return _boom
+
+    def test_task_root_only_keeps_child_rows_when_instance_lookup_degrades(
+        self, engine, resolver
+    ):
+        """DEGRADED root_only=True keeps child-instance Tasks (fail-open)."""
+        from sqlalchemy import event
+
+        _seed_instance(engine, instance_id="inst-root")
+        _seed_instance(engine, instance_id="inst-child", parent_id="inst-root")
+        root_wid = _seed_task(
+            engine, instance_id="inst-root", task_type="process_report",
+        )
+        child_wid = _seed_task(
+            engine, instance_id="inst-child", task_type="process_report",
+        )
+
+        # Healthy control: root_only scoping is exact when lookups succeed.
+        assert {r.work_id for r in resolver.list_work(root_only=True)} == {root_wid}
+
+        listener = self._poison_instance_reads(engine)
+        try:
+            degraded = resolver.list_work(root_only=True)
+        finally:
+            event.remove(engine, "before_cursor_execute", listener)
+
+        ids = {r.work_id for r in degraded}
+        assert ids == {root_wid, child_wid}, (
+            "recorded degraded behaviour changed. Observed work_ids="
+            f"{sorted(ids)}; recorded = both root and child (fail-open). "
+            "If this was made fail-closed intentionally, update this pin AND "
+            "the disclosure: BASE (b1183a637) keeps these rows."
+        )
+
+        # Recovery: once the outage clears, scoping is exact again — the
+        # degradation is transient, not a permanent widening.
+        assert {r.work_id for r in resolver.list_work(root_only=True)} == {root_wid}
