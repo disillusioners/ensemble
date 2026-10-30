@@ -990,6 +990,11 @@ def gate_g4_paired_lag(report: dict, fences: Fences, mode: str,
     """
     profiles = ("profile_badge", "profile_home", "profile_jobs_page")
     out: dict[str, object] = {}
+    # Initialize FIRST, on every path — the provenance block below writes
+    # into report["g4"] and the reference-present branch previously reached
+    # it before any assignment (KeyError; measured in the round-2b truth
+    # table, cell 2: exit 1 with NO report written).
+    report.setdefault("g4", {})
     if reference is None:
         report["g4"] = {
             "paired": False,
@@ -1044,7 +1049,10 @@ def gate_g4_paired_lag(report: dict, fences: Fences, mode: str,
                 f"{modes.G4_TICK_S}, samples {verdict.get('head_samples')}>="
                 f"0.5*{verdict.get('base_samples')}"),
         )
-    report["g4"] = {"paired": True, "profiles": out, "ok": ok_all}
+    # UPDATE, never reassign: the provenance record written above must
+    # survive into the report (a bare assignment dropped it — caught by the
+    # regression guard added with this fix).
+    report["g4"].update({"paired": True, "profiles": out, "ok": ok_all})
 
 
 async def main(profile: str, mode: str, simulate: str,
