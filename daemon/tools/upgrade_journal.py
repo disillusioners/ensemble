@@ -2180,6 +2180,7 @@ def executor_log_path(install_dir: Path) -> Path:
     return install_dir / "data" / "upgrade.log"
 
 
+
 # ── systemd transient SERVICE executor (Option D, Stage-2.2a) ────────────────
 #
 # HISTORY: r-f82e (2026-09-28, ensemble-vm LIVE) wrapped the executor in a
@@ -2660,6 +2661,7 @@ def spawn_executor(
     *,
     run_id: str | None = None,
     unit_prefix: str = UNIT_NAME_PREFIX,
+    unit_properties: list[str] | None = None,
 ) -> tuple[int, str]:
     """Daemonize the executor payload. THREE BRANCHES (Option D):
 
@@ -2718,6 +2720,13 @@ def spawn_executor(
     §3.3 V-7). Every unit-name site downstream (argv build, R4
     reset-failed, mode note) consumes the same parameter.
 
+    ``unit_properties`` (kw-only, D2-8): extra unit properties threaded
+    into :func:`build_service_argv` (e.g. the promote-only
+    ``RuntimeMaxSec=<derived per D2-9>`` L3 backstop). The kind scoping
+    is the CALLER's job (daemon/manager.py passes it for promote arms
+    only — a shared property would bound the restart ceremony with the
+    promote's budget).
+
     Raises:
         ExecutorSystemdUnavailable: branch 3 only (loud refusal).
         ValueError: (via build_service_argv) on an unsafe run_id.
@@ -2735,25 +2744,15 @@ def spawn_executor(
 
     if branch == SERVICE_BRANCH_SERVICE:
         run_id = _resolve_run_id(argv, run_id)
-        wrapped_argv = build_service_argv(
-            argv, run_id, bus_kind, env, log, unit_prefix=unit_prefix
-        )
         # R4 hygiene BEFORE the start (best-effort; see helper).
         _reset_failed_unit(run_id, bus_kind, env, unit_prefix=unit_prefix)
         proc = subprocess.Popen(
             wrapped_argv,
             stdin=subprocess.DEVNULL,
-            # The CLIENT's stdio is not the payload's stdio (unit-owned via
-            # append: properties). stdout is discarded; stderr is captured
-            # ONLY for the fast-fail signature triage below (systemd-run
-            # writes a bounded diagnostic — no pipe-fill deadlock risk).
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             cwd=str(install_dir),
             env=env,
-            # start_new_session stays False (same reasoning as the scope
-            # path): the CLIENT may stay in our group — the PAYLOAD's
-            # survivability comes from the UNIT, not from setsid.
             start_new_session=False,
             close_fds=True,
         )

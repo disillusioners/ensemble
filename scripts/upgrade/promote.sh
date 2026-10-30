@@ -166,20 +166,52 @@ TARGET_REL="$REL/$VERSION"
 # ═══════════════════════════ 1. PREFLIGHT ══════════════════════════════════
 _log "preflight: lock · integrity · journal txn · entry checks"
 
-# 1a. lock (D5/D-FA5.1) — second invocation = structured pipeline-busy
+# D2-7 (phase-2 fold A4/R20): install the signal handlers BEFORE
+# lock_acquire. The former order (lock first, traps second) left a window
+# where the lock was held but no handler was installed -- a TERM there
+# orphans the lock with NO halt row (exactly the D4(a) trap-bypass shape,
+# reproduced inside our own fix). The handler is a no-op without a lock
+# (lock_release returns 0 when the dir is absent; the halt append is
+# best-effort). Pinned by the trap-order leg of
+# tests/packs/preflight_watchdog_test.sh.
+_trap_install_signal_handlers "promote:preflight"
+
+# 1a. lock (D5/D-FA5.1) -- second invocation = structured pipeline-busy
 if ! lock_acquire; then
     exit 78
 fi
-# Signal trap discipline (component 2 of r-20260928-005506-f82e): bash's
-# EXIT trap does NOT fire on untrapped TERM/HUP/INT. Install explicit
-# handlers that journal a halt event and release the lock before exit
-# — otherwise the systemd-cgroup kill leaves an orphan txn AND a
-# stale lock. The helper ALSO swaps the EXIT trap to _trap_safe_exit
-# (no double-release against the signal handler's release).
-_trap_install_signal_handlers "promote:preflight"
 
-# lock held from here on — heartbeat before every long wait
+# lock held from here on -- heartbeat before every long wait
 lock_heartbeat
+
+# D2 (phase-2, T2.17/D2-9 fold A6/R17): refuse ENSEMBLE_PROMOTE_SOAK_S>300
+# on the LIVE lane (a long soak pushes the derived RuntimeMaxSec outward
+# AND stretches the post-flip dark window; the knob stays available for
+# sandbox drills). Refused HERE -- after lock_acquire (the splice fence is
+# satisfied for the halt row), before any staged-ness or journal work: a
+# policy refusal on the ceremony's INPUTS. The row is best-effort (a
+# journal absent on a virgin install loses the row; the exit-78 refusal
+# itself is unconditional).
+if [ "$UP_TARGET" = "live" ] && [ "$SOAK_S" -gt 300 ]; then
+    journal_history_append halt "promote refused: ENSEMBLE_PROMOTE_SOAK_S=${SOAK_S} exceeds 300 on the live lane (long soaks widen the post-flip dark window and push the systemd RuntimeMaxSec backstop; run long soaks on a sandbox drill lane)" \
+                          || true
+    _warn "ENSEMBLE_PROMOTE_SOAK_S=${SOAK_S} > 300 refused on the live lane -- halt (exit 78); use a sandbox drill for long soaks"
+    lock_release 2>/dev/null || true
+    exit 78
+fi
+
+# D2 (phase-2, T2.5): the preflight phase budget -- its OWN deadline,
+# independent of the 900 s ceremony deadline armed below. Default 300 s
+# is ~4.4x the measured healthy preflight (68 s wall; evidence/
+# CODE-PATHS.md sec 12) and deliberately BELOW the daemon's 660 s
+# benign-detach observation, so the shell's loud failure always beats
+# the daemon's silent one. Env-overridable; the value in force is named
+# in the L1 breach row (AC1). Checkpoints at each step boundary below
+# are the L1 belt; the per-step `_run_bounded_step` wraps are the L2a
+# primary (a breach inside ONE step fires at <=PREFLIGHT_STEP_BUDGET_S
+# with the step named).
+preflight_deadline=$(( $(_now_epoch) + PREFLIGHT_PHASE_BUDGET_S ))
+_PREFLIGHT_T0="$(_now_epoch)"
 
 # P3 / decision (d) / D-P3.3 — initialize the top-level wall-clock
 # ceiling. Every phase boundary in this script calls
@@ -231,7 +263,7 @@ if [ ! -d "$TARGET_REL" ]; then
     _refuse not-staged "target release $TARGET_REL does not exist — stage it first (stage.sh $UP_TARGET --version $VERSION)"
 fi
 journal_init || { _warn "cannot initialize journal"; exit 1; }
-J="$(journal_read)" || {
+J="$(_run_bounded_step journal-read journal_read)" || {
     _warn "journal unreadable/TORN at $(journal_path) — halt-for-human (repair the journal before any pipeline mutation)"
     # R1 (leader ruling, wave-2): the promote-path size-guard refusal is an
     # exit 78 + a HALT ROW. Best-effort at the CALLER site (never inside
@@ -253,12 +285,25 @@ _splice_journal append-history python_floor_probe \
     || { _warn "could not journal probe-OK event — refusing"; lock_release 2>/dev/null || true; exit 78; }
 
 # 1c. adopt-or-refuse an existing in_flight (sweep-mirroring, D-FA4.3)
-adopt_stale_txn || _refuse txn-busy "promote refused: unresolved in_flight txn (see the adopt diagnostics above — pipeline-busy)"
+lock_heartbeat
+_run_bounded_step adopt-txn adopt_stale_txn || _refuse txn-busy "promote refused: unresolved in_flight txn (see the adopt diagnostics above — pipeline-busy)"
+
+# D2 L1 checkpoint (phase budget belt) + T2.6 heartbeat cadence: the
+# checkpoints bound the phase BETWEEN steps (the per-step wraps bound
+# each step INSIDE); the heartbeat keeps the lock's age under
+# LOCK_STALE_S across the whole preflight (the 2026-10-28 run froze the
+# heartbeat for 37 min -- stale-by-age yet correctly unbreakable).
+_enforce_deadline "$preflight_deadline" preflight "budget=PREFLIGHT_PHASE_BUDGET_S value=${PREFLIGHT_PHASE_BUDGET_S}"
 
 # 1d. ENTRY-side checks (D-FA4.2): cap/halt · cooldown · quarantine.
 # L11 (tidier): promote_entry_check only ever returns 0 — every refusal
 # path inside it exits 78 itself (_refuse) — so no caller-side exit arm.
-promote_entry_check "$VERSION"
+# D2: the whole check rides the per-step bound; an internal exit-78
+# surfaces as rc 78 through the wrapper (mirrored below), a 124 breach
+# never returns (the handler exits).
+lock_heartbeat
+_run_bounded_step entry-check promote_entry_check "$VERSION" || exit 78
+_enforce_deadline "$preflight_deadline" preflight "budget=PREFLIGHT_PHASE_BUDGET_S value=${PREFLIGHT_PHASE_BUDGET_S}"
 
 # 1d-sup. Supervision classification (ownership-mode P1, 2026-09-29):
 # classify + ONE machine-readable ENSEMBLE_SUPERVISION_RESULT line +
@@ -285,11 +330,14 @@ supervision_preflight
 # plugin-less promotes). Runs BEFORE integrity so staleness is
 # visible at the earliest refusal point, and BEFORE any stop/flip
 # mutation.
-promote_plugin_staleness_check
+lock_heartbeat
+_run_bounded_step plugin-staleness promote_plugin_staleness_check || exit 78
+_enforce_deadline "$preflight_deadline" preflight "budget=PREFLIGHT_PHASE_BUDGET_S value=${PREFLIGHT_PHASE_BUDGET_S}"
 
 # 1e. integrity (D-FA4.4): CURRENT (drift detection) + TARGET + manifest
 # fields + no-.env invariant. Same-version re-promote verifies once.
-CUR_JSON="$(journal_read)"
+lock_heartbeat
+CUR_JSON="$(_run_bounded_step journal-read-current journal_read)"
 # Anchored on the QUOTED-key form (`"current":`) via _json_field_quoted
 # (lib.sh:1355-1364 precedent) — defends against a future key-naming
 # collision where a top-level field named e.g. "current_previous_candidate"
@@ -303,16 +351,25 @@ if [ -n "$CUR" ] && [ "$CUR" != "$VERSION" ]; then
         exit 78
     fi
     _log "integrity: verifying CURRENT release $CUR (drift detection)"
-    if ! integrity_verify "$CUR"; then
+        lock_heartbeat
+    _run_bounded_step integrity-current integrity_verify "$CUR"
+    iv_rc=$?
+    if [ "$iv_rc" -ne 0 ]; then
+        # rc 124 is unreachable here (the breach handler exits), the belt
+        # arm documents that; every other non-zero is the integrity refusal.
         _warn "preflight ABORT (exit 78): CURRENT release $CUR failed integrity — the running baseline is corrupted/tampered; promote refuses to build on it"
         exit 78
     fi
 fi
 _log "integrity: verifying TARGET release $VERSION"
-if ! integrity_verify "$VERSION"; then
+lock_heartbeat
+_run_bounded_step integrity-target integrity_verify "$VERSION"
+iv_rc=$?
+if [ "$iv_rc" -ne 0 ]; then
     _warn "preflight ABORT (exit 78): TARGET release $VERSION failed integrity"
     exit 78
 fi
+_enforce_deadline "$preflight_deadline" preflight "budget=PREFLIGHT_PHASE_BUDGET_S value=${PREFLIGHT_PHASE_BUDGET_S}"
 BIN_VERSION="$(manifest_field "$VERSION" binary_version)"
 if [ -z "$BIN_VERSION" ]; then
     _warn "target manifest missing binary_version — refusing"
@@ -340,6 +397,7 @@ journal_history_append intent_flip \
     || _warn "intent_flip journal event append FAILED (best-effort; boot-sweep commit-and-continue path will see no evidence and fall to the conservative halt gates)"
 
 # 1f. open the transaction (D4)
+lock_heartbeat
 if ! journal_open_txn "promote" "$VERSION"; then
     _warn "cannot open journal txn (an in_flight survived adoption?) — pipeline-busy"
     exit 78

@@ -5540,6 +5540,21 @@ class InstanceManager:
                 self._journal_executor_orphaned(install_dir, kind, run_id)
                 return False
 
+            # D2-8/D2-9 (promote-preflight-hang phase 2): the promote
+            # executor unit carries the L3 outer bound, DERIVED at arm
+            # time (max(1200, PROMOTE_TOTAL_DEADLINE_S + SOAK_S + 120) —
+            # 1320 s at the defaults), strictly above the shell's own
+            # 900 s ceremony deadline so systemd fires only when the
+            # shell's deadline machinery itself is wedged. KIND-SCOPED:
+            # restart arms carry NO RuntimeMaxSec (a shared bound would
+            # kill a legitimate restart ceremony with the promote's
+            # budget — the restart path is excluded from the watchdog by
+            # commission ruling).
+            _promote_unit_props: list[str] | None = None
+            if kind != "restart":
+                _promote_unit_props = [
+                    f"RuntimeMaxSec={_uj.derived_runtime_max_sec()}"
+                ]
             child_pid, _spawn_mode_note = _uj.spawn_executor(
                 argv, install_dir, extra_env, run_id=run_id,
                 # agent-restart §3.3 (V-7 / A-5): transient unit names are
@@ -5552,6 +5567,7 @@ class InstanceManager:
                     if kind == "restart"
                     else _uj.UNIT_NAME_PREFIX
                 ),
+                unit_properties=_promote_unit_props,
             )
             # Option D (Stage-2.2a): log the ACTUAL spawn mode — the
             # transient-service unit name when the service branch fired,

@@ -140,6 +140,37 @@ SCOPE_START_BUDGET_S="${SCOPE_START_BUDGET_S:-10}"      # scope-arm/opt-in launc
 # an early phase). Env-overridable. Re-measure with:
 #   nohup bash tests/packs/preflight_shasum_batch_parity_test.sh --full &
 STAGE_TREE_BUDGET_S="${STAGE_TREE_BUDGET_S:-60}"
+# D2 (promote-preflight-hang, phase 2) — the preflight watchdog budgets.
+# Both are env-overridable; the value in force is NAMED in the breach row
+# when a budget trips (T2.1/AC1 — `_budget_in_force` is the resolver).
+#
+# PREFLIGHT_STEP_BUDGET_S=120 — DERIVED (D2-15/architect RULING 6b): ≈ 2.3x
+# the longest single measured preflight step. `integrity_verify` ≈ 26 s/call
+# on the release payload shape (agents+frontend, ~431 files; the pre-D1
+# per-file walk — evidence/CODE-PATHS.md §12: 52-60 s of the 68 s healthy
+# preflight across 2 calls). Post-D1 both calls ride the batched walk
+# (~0.3 s/tree), so 120 s is generous belt headroom; it exists to catch the
+# NEXT unknown slow site (the 2026-10-28 hang was ONE step — a checkpoint
+# before/after the site still hung 37 minutes; only a per-step bound fires
+# inside a step).
+#
+# PREFLIGHT_PHASE_BUDGET_S=300 — ≈ 4.4x the measured healthy preflight
+# (68 s wall / 22 s CPU, sandbox replay at 25 KB journal), and deliberately
+# BELOW the daemon's 660 s benign-detach observation
+# (upgrade_journal_sweep.py DEFAULT_REAPER_TIMEOUT_SECONDS): the shell's
+# loud failure beats the daemon's silent observation.
+#
+# ARMING SCOPE (D2-11/T2.19): these budgets are armed around the promote
+# PREFLIGHT window ONLY (promote.sh:225-373 region) and the stage tree
+# walks (STAGE_TREE_BUDGET_S). They are NEVER armed around gate_soak
+# (lib.sh gate_soak; reachable only from promote.sh's gate section, outside
+# the wrapped window) — a watchdog that covers the soak would kill a
+# legitimate 300 s conservative soak (R1). The rollback/restart/status
+# scripts hold no pipeline lock on their journal reads and get the
+# UNLOCKED breach behaviour instead (D2-6/SC4b: warn + per-run log, no
+# journal row; status.sh exits 1).
+PREFLIGHT_STEP_BUDGET_S="${PREFLIGHT_STEP_BUDGET_S:-120}"
+PREFLIGHT_PHASE_BUDGET_S="${PREFLIGHT_PHASE_BUDGET_S:-300}"
 # Post-flip soak (ADR-005 gate: 300s). Overridable for sandbox drills only
 # (ENSEMBLE_PROMOTE_SOAK_S); production default stays 300.
 SOAK_S_DEFAULT=300
@@ -267,7 +298,7 @@ _now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # is the consumer's job to interpret. The journal field is the
 # single source of truth (runbook step 1 + post-mortem correlation).
 _enforce_deadline() {
-    local deadline="$1" phase="$2"
+    local deadline="$1" phase="$2" budget_extra="${3:-}"
     local now elapsed daemon_state="live"
     now="$(_now_epoch)"
     if [ "$now" -le "$deadline" ]; then
@@ -288,13 +319,107 @@ _enforce_deadline() {
         *stop*|*launcher*|*flip*) daemon_state="stopped" ;;
         *) daemon_state="live" ;;
     esac
-    journal_history_append halt "deadline-breach-${phase} (elapsed=${elapsed}s past ${deadline}) daemon-state=${daemon_state}" \
-                          || true   # history is advisory; the breach is already decided
+    # W3 (phase-2 fold): the optional third argument carries the budget
+    # identity (e.g. "budget=PREFLIGHT_PHASE_BUDGET_S value=300") so BOTH
+    # breach producers — this L1 checkpoint and the L2a `_budget_breach`
+    # below — emit daemon-state= in one readable row shape. Callers that
+    # pass two arguments (every pre-existing site) produce BYTE-IDENTICAL
+    # rows to the pre-D2 shape.
+    if [ -n "$budget_extra" ]; then
+        journal_history_append halt "deadline-breach-${phase} (elapsed=${elapsed}s past ${deadline}) ${budget_extra} daemon-state=${daemon_state}" \
+                              || true   # history is advisory; the breach is already decided
+    else
+        journal_history_append halt "deadline-breach-${phase} (elapsed=${elapsed}s past ${deadline}) daemon-state=${daemon_state}" \
+                              || true   # history is advisory; the breach is already decided
+    fi
     _warn "CEREMONY DEADLINE BREACH at phase=${phase}: elapsed=${elapsed}s past deadline=${deadline} (daemon-state=${daemon_state}) — halt-for-human (C-10b/C-10c)"
     lock_release 2>/dev/null || true
     exit 78
 }
 
+# _budget_in_force <NAME> — single resolver for the D2 watchdog budgets
+# (T2.1/AC1). Prints the value in force (env override or documented
+# default) so the breach row can NAME it; refusing loudly on an unknown
+# name keeps the resolver honest (a typo'd budget in a breach row would
+# silently misreport the value).
+_budget_in_force() {
+    case "$1" in
+        PREFLIGHT_STEP_BUDGET_S)   printf '%s' "${PREFLIGHT_STEP_BUDGET_S:-120}" ;;
+        PREFLIGHT_PHASE_BUDGET_S)  printf '%s' "${PREFLIGHT_PHASE_BUDGET_S:-300}" ;;
+        STAGE_TREE_BUDGET_S)       printf '%s' "${STAGE_TREE_BUDGET_S:-60}" ;;
+        SYSTEMCTL_PROBE_BUDGET_S)  printf '%s' "${SYSTEMCTL_PROBE_BUDGET_S:-5}" ;;
+        JOURNAL_LEGACY_READ_BUDGET_S) printf '%s' "${JOURNAL_LEGACY_READ_BUDGET_S:-120}" ;;
+        *) return 1 ;;
+    esac
+}
+
+# _budget_breach <budget_name> <step> <phase> <elapsed_s> — the L2a breach
+# handler (T2.2/D2-5/D2-12/W3). ORDER IS LOAD-BEARING and pinned
+# (tests/packs/preflight_watchdog_test.sh): journal row FIRST, then the
+# stderr _warn, then lock_release, then exit 78. Release-first would lose
+# the row on a live install: journal_splice.py's live-install fence
+# (`_pipeline_lock_held`, journal_splice.py:553) refuses history appends
+# while the pipeline lock is NOT held by a live owner — releasing the lock
+# before journalling makes the append fail exactly when it matters most.
+# The row keeps the house vocabulary: kind `halt`, detail prefixed
+# `deadline-breach-<step>` (same family as _enforce_deadline's
+# `deadline-breach-<phase>`), carrying ALL FIVE budget fields (T2.9/AC9:
+# budget name, value in force, step, elapsed, phase) PLUS daemon-state=
+# (W3 — one row shape for both producers; the runbook's first-recovery-step
+# reads the field from either). Two breach classes stay distinct (D2-12):
+# (i) this shell-watchdog breach = exit 78 + halt row WITH the
+# `deadline-breach-` prefix; (ii) an L3 systemd RuntimeMaxSec kill =
+# exit 143 + halt row WITHOUT the prefix (the TERM trap's
+# "killed by SIGTERM" row). Terminal classification is by row kind, never
+# by exit code alone.
+#
+# LOCKED-PATH ONLY: callers hold the pipeline lock (the promote preflight
+# and the supervision probes all run under it). The unlocked scripts
+# (status.sh / the unlocked journal reads in rollback.sh / restart.sh) use
+# their own failure handling — they must NOT call this function (their
+# breach rows would be fence-refused on a live install; D2-6/SC4b).
+_budget_breach() {
+    local budget="$1" step="$2" phase="$3" elapsed="$4"
+    local value daemon_state="live"
+    value="$(_budget_in_force "$budget" 2>/dev/null)" || value="unknown"
+    # The steps this handler serves are preflight/pre-stop ⇒ daemon live
+    # (same conservative mapping as _enforce_deadline's default arm).
+    journal_history_append halt "deadline-breach-${step} (budget=${budget} value=${value} elapsed=${elapsed}s phase=${phase}) daemon-state=${daemon_state}" \
+                          || true   # a torn journal must not block the halt; the exit below is the contract
+    _warn "PREFLIGHT STEP BUDGET BREACH step=${step}: exceeded budget=${budget} value=${value}s elapsed=${elapsed}s phase=${phase} — halting (deadline-breach-${step}, exit 78; lock released)"
+    lock_release 2>/dev/null || true
+    exit 78
+}
+
+# _run_bounded_step <step-name> <command...> — the L2a per-step wrapper
+# (T2.3/D2-14). Runs the step under the house `_run_bounded` primitive
+# (BYTE-UNCHANGED; the 7 pre-existing consumers are untouched) with
+# PREFLIGHT_STEP_BUDGET_S; on rc 124 (the 137/143→124 collapse inside
+# _run_bounded) the breach handler fires LOUDLY (row + warn + lock release
+# + exit 78). Any other rc propagates unchanged — healthy steps are
+# unaffected.
+#
+# WRAPPER CONTRACT (D2-14): the wrapped step MUST be side-effect-free-on-kill
+# or process-group-killed. Every phase-2 wrap site is a READ-ONLY step
+# (journal reads, entry checks, staleness predicate, integrity walks) —
+# the side-effecting ceremonies (stop script, launcher swap, flip) are
+# deliberately NOT wrapped; a kill mid-`retention_evict`/stop would leave
+# half-mutated state (the MUST-NOT-WRAP rows in phase2-plan §3.3b).
+# NOTE: the step runs in a forked subshell (the house primitive backgrounds
+# it) — never wrap a step that must set globals in this shell
+# (supervision_preflight is covered INSIDE its dualfight probe sites
+# instead, via _df_systemctl below).
+_run_bounded_step() {
+    local step="$1"; shift
+    local t0 rc
+    t0="$(_now_epoch)"
+    _run_bounded "$PREFLIGHT_STEP_BUDGET_S" "$@"
+    rc=$?
+    if [ "$rc" -eq 124 ]; then
+        _budget_breach PREFLIGHT_STEP_BUDGET_S "$step" "${_PIPELINE_PHASE:-preflight}" "$(( $(_now_epoch) - t0 ))"
+    fi
+    return "$rc"
+}
 # _effective_ceremony_remaining_s <deadline_epoch> — returns the
 # remaining seconds on the ceremony wall-clock ceiling, clamped at
 # zero. Used by gate_soak (D-P3.5) to shrink the adaptive cap
@@ -2256,7 +2381,20 @@ _trap_safe_exit() {
 # the exit (the lock release below is what matters for the next action
 # to acquire; a missing halt event is no worse than today's behavior).
 # Mirrors _refuse's best-effort journal pattern (ADR-034 append).
+#
+# D2-4 (phase-2 fold A1/R14): RE-ENTRANCY GUARD. A second TERM arriving
+# while the handler is mid-journalling re-enters it ⇒ a DUPLICATE halt
+# row (the journal is append-only; `_LOCK_RELEASED` protects the lock
+# release, NOT the journal write). The guard sets the flag BEFORE
+# journalling; a second entry is a NO-OP (first-row-wins). Pinned by the
+# double-TERM and post-completion-TERM legs of
+# tests/packs/preflight_watchdog_test.sh.
+_HALT_JOURNALED=0
 _signal_journal_halt() {
+    if [ "${_HALT_JOURNALED:-0}" = "1" ]; then
+        return 0
+    fi
+    _HALT_JOURNALED=1
     local sig="$1" phase="${_PIPELINE_PHASE:-unknown}" detail
     detail="killed by SIG$(printf '%s' "$sig" | sed 's/^SIG//') at phase $phase (r-20260928-005506-f82e: death-anchored journaling; signal handler installed 2026-09-28)"
     journal_history_append halt "$detail" >/dev/null 2>&1 || true
@@ -2301,8 +2439,12 @@ _trap_install_signal_handlers() {
     trap '_signal_handler HUP'  HUP
     trap '_signal_handler INT'  INT
     trap '_trap_safe_exit' EXIT
-    # Reset guard (in case the script was sourced mid-flow).
+    # Reset both guards (in case the script was sourced mid-flow). The
+    # halt-journal guard resets with the traps: a re-install (e.g. promote
+    # preflight → stage:lock phase rename) must be able to journal a fresh
+    # halt row for the NEW phase if a signal lands after the rename.
     _LOCK_RELEASED=0
+    _HALT_JOURNALED=0
 }
 
 # ── Integrity (T3 / D-FA4.4) ─────────────────────────────────────────────────
@@ -2338,6 +2480,11 @@ _tree_manifest() {
       trap 'rm -f "$list" "$sums"' EXIT
       find . -type f | sed 's|^\./||' | sort > "$list" || exit 1
       [ -s "$list" ] || return 0
+      # ONE shasum invocation per chunk instead of one fork PER FILE. The
+      # per-file fork is what made the plugins tree walk 329.6 s/pass
+      # (measured; stage walks it twice) -- the phase-1 D1-7 batching.
+      # Output order == argv order == the sorted list order, so the two files
+      # pair up line by line.
       # ONE shasum invocation per chunk instead of one fork PER FILE. The
       # per-file fork is what made the plugins tree walk 329.6 s/pass
       # (measured; stage walks it twice) -- the phase-1 D1-7 batching.
@@ -5303,20 +5450,54 @@ supervision_map_outcome() {
 # slice) may over-include. Deliberately conservative — diagnostic-
 # only — the FAULT arm only fires when reality disagrees.
 # Linux+systemd only; every other shape returns 0 (zero behavior change).
+# _df_systemctl <outfile> <args...> — a BOUNDED supervision systemctl probe
+# (T2.7/phase-2 D2). The dual-fight check's four `systemctl is-active` /
+# `systemctl show` calls were the last unbounded probes on the preflight
+# path (unlike the 5 sibling sites that already ride `_run_bounded`).
+# A wedged D-Bus must surface as a LOUD failure (journal row + exit 78),
+# NEVER as a silent "the unit is not active" — reading a wedged bus as
+# "unit down" is exactly the misread the incident family forbids.
+#
+# STATEMENT-FORM CONTRACT: this helper is called as a statement (never
+# inside `$( )`) — on a budget breach `_budget_breach` exits THE SCRIPT.
+# Output lands in <outfile> (the caller `read`s it back); rc is the
+# probe's own rc (is-active exits 3 when inactive — preserved).
+_df_systemctl() {
+    local __out="$1"; shift
+    local __t0 __rc
+    __t0="$(_now_epoch)"
+    _run_bounded "$SYSTEMCTL_PROBE_BUDGET_S" -- "$SYSTEMCTL_BIN" "$@" > "$__out" 2>/dev/null
+    __rc=$?
+    if [ "$__rc" -eq 124 ]; then
+        rm -f "$__out" 2>/dev/null || true
+        : > "$__out" 2>/dev/null || true
+        _budget_breach SYSTEMCTL_PROBE_BUDGET_S "systemctl-$1" "supervision-dualfight" "$(( $(_now_epoch) - __t0 ))"
+    fi
+    return "$__rc"
+}
+
 supervision_dualfight_check() {
     [ "${SUPERVISION_MODE:-}" = "unit" ] || return 0
     [ -n "${SUPERVISION_UNIT:-}" ] || return 0
     [ "$(uname -s)" = "Linux" ] || return 0
     [ -d /run/systemd/system ] || return 0
     local unit="${SUPERVISION_UNIT:-}" is_active restart main_pid cg pid pcg hpid fault=""
-    is_active="$("$SYSTEMCTL_BIN" is-active "$unit" 2>/dev/null || true)"
-    restart="$("$SYSTEMCTL_BIN" show "$unit" -p Restart --value 2>/dev/null || true)"
+    local df_out
+    df_out="$(mktemp /tmp/.ensemble-df.XXXXXX)" || return 0
+    _df_systemctl "$df_out" is-active "$unit"
+    is_active="$(cat "$df_out" 2>/dev/null)"
+    _df_systemctl "$df_out" show "$unit" -p Restart --value
+    restart="$(cat "$df_out" 2>/dev/null)"
     if [ "$is_active" != "active" ] \
        && [ "$restart" != "always" ] && [ "$restart" != "on-failure" ]; then
+        rm -f "$df_out" 2>/dev/null
         return 0  # unit dormant and unarmed — no fight possible
     fi
-    main_pid="$("$SYSTEMCTL_BIN" show "$unit" -p MainPID --value 2>/dev/null || true)"
-    cg="$("$SYSTEMCTL_BIN" show "$unit" -p ControlGroup --value 2>/dev/null || true)"
+    _df_systemctl "$df_out" show "$unit" -p MainPID --value
+    main_pid="$(cat "$df_out" 2>/dev/null)"
+    _df_systemctl "$df_out" show "$unit" -p ControlGroup --value
+    cg="$(cat "$df_out" 2>/dev/null)"
+    rm -f "$df_out" 2>/dev/null
     if [ -z "$cg" ] || [ "$cg" = "/" ]; then
         _supervision_warn_once "unit $unit active/armed but ControlGroup unobservable — skipping DUAL_FIGHT pid checks (diagnostic only)"
         return 0
@@ -5870,7 +6051,6 @@ retention_evict() {
     done
     return 0
 }
-
 # ── Entry-side refusal checks (D-FA4.2: ENTRY only — never the recovery) ────
 # _refuse <reason-token> <message...> — entry-refusal: WARN the message
 # UNCHANGED, best-effort-append a `refusal` journal history event carrying

@@ -68,6 +68,18 @@ fi
 
 # ── (B) construct-present at HEAD ─────────────────────────────────────────
 printf '\n== B. construct-present in %s ==\n' "$WS"
+# RELOCATED-AT-HEAD rows (phase-2/3 wraps): a base anchor whose construct
+# the lane WRAPPED survives at HEAD in the wrapped form (moved != deleted).
+# Key = the base literal; value = the new form that must be present at HEAD.
+head_alias_for() {
+    case "$1" in
+        'J="$(journal_read)"')
+            printf '%s' 'J="$(_run_bounded_step journal-read journal_read)"' ;;
+        'CUR_JSON="$(journal_read)"')
+            printf '%s' 'CUR_JSON="$(_run_bounded_step journal-read-current journal_read)"' ;;
+        *) return 1 ;;
+    esac
+}
 GONE=0
 while IFS=$'\t' read -r path line pat what; do
     [ -n "${path:-}" ] || continue
@@ -75,6 +87,10 @@ while IFS=$'\t' read -r path line pat what; do
         GONE=$((GONE + 1)); printf '  GONE %s (file missing)\n' "$path"; continue
     fi
     if ! grep -qF -- "$pat" "$WS/$path" 2>/dev/null; then
+        if alias_pat="$(head_alias_for "$pat")" && grep -qF -- "$alias_pat" "$WS/$path" 2>/dev/null; then
+            printf '  MOVE %s  relocated-at-HEAD (%s)\n' "$path" "$what"
+            continue
+        fi
         GONE=$((GONE + 1))
         printf '  GONE %s  pattern=[%s]  (%s)\n' "$path" "$pat" "$what"
     fi
@@ -106,6 +122,25 @@ newcheck scripts/upgrade/lib.sh 'STAGE_TREE_BUDGET_S="${STAGE_TREE_BUDGET_S:-60}
 newcheck scripts/upgrade/promote.sh 'JOURNAL_READ_STRICT=1' 'the promote-only strict marker'
 newcheck scripts/upgrade/stage.sh '_stage_tree_walk agents' 'stage uses the bounded walk (agents)'
 newcheck scripts/upgrade/stage.sh '_stage_tree_walk plugins' 'stage uses the bounded walk (plugins)'
+printf '\n== C2. phase-2/3 constructs ==\n'
+newcheck scripts/upgrade/lib.sh 'PREFLIGHT_STEP_BUDGET_S="${PREFLIGHT_STEP_BUDGET_S:-120}"' 'step budget (phase 2)'
+newcheck scripts/upgrade/lib.sh 'PREFLIGHT_PHASE_BUDGET_S="${PREFLIGHT_PHASE_BUDGET_S:-300}"' 'phase budget (phase 2)'
+newcheck scripts/upgrade/lib.sh '_budget_breach()' 'the L2a breach handler (journal-first order)'
+newcheck scripts/upgrade/lib.sh '_run_bounded_step()' 'the per-step bounded wrapper'
+newcheck scripts/upgrade/lib.sh '_budget_in_force()' 'the value-in-force resolver'
+newcheck scripts/upgrade/lib.sh '_HALT_JOURNALED=0' 'the halt re-entrancy guard (D2-4)'
+newcheck scripts/upgrade/lib.sh '_df_systemctl()' 'the bounded dual-fight probe (T2.7)'
+newcheck scripts/upgrade/promote.sh 'preflight_deadline=$(( $(_now_epoch) + PREFLIGHT_PHASE_BUDGET_S ))' 'the preflight phase deadline (T2.5)'
+newcheck scripts/upgrade/promote.sh 'exceeds 300 on the live lane' 'the live soak refusal (T2.17)'
+newcheck scripts/upgrade/status.sh 'a read-only tool never files itself as a' 'status.sh exits 1 (SC4b)'
+newcheck daemon/tools/upgrade_journal.py 'def derived_runtime_max_sec(' 'the derived RuntimeMaxSec (D2-9)'
+
+# the trap-install ORDER at HEAD: handlers BEFORE lock_acquire (D2-7)
+TRAP_LINE="$(grep -n '_trap_install_signal_handlers "promote:preflight"' "$WS/scripts/upgrade/promote.sh" | head -1 | cut -d: -f1)"
+LOCK_LINE="$(grep -n '^if ! lock_acquire; then' "$WS/scripts/upgrade/promote.sh" | head -1 | cut -d: -f1)"
+[ -n "$TRAP_LINE" ] && [ -n "$LOCK_LINE" ] && [ "$TRAP_LINE" -lt "$LOCK_LINE" ] \
+    && pf_ok "trap handlers installed BEFORE lock_acquire (lines $TRAP_LINE < $LOCK_LINE)" \
+    || pf_bad "trap/lock order wrong (trap=$TRAP_LINE lock=$LOCK_LINE)"
 
 # the strict marker must NOT be exported (child scripts must not inherit it)
 if grep -qE '^[[:space:]]*export[[:space:]]+JOURNAL_READ_STRICT' "$WS/scripts/upgrade/promote.sh"; then
