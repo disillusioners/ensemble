@@ -1,0 +1,47 @@
+leg	mode	file	planted_sha256	red_pin	red_rc	green_rc	note
+M1	executed	scripts/upgrade/lib.sh	faac4e46a6b8f4c4a122b1bf5e4de43a6565b5d182582e153c2cdd74a1b277b8	lib.sh integration failed	1	0	ok
+M2	executed	scripts/upgrade/journal_read.py	b485ceefa954923fe0606270f8acd3e73ac8df7f7b0129e4609193d5696d79a8	07-escaped-quote-in-string	1	0	ok
+M3	executed	scripts/upgrade/journal_read.py	3e92584410844d538cc95c3aa800a9e2314d2d7073a2f6bfabcab62a36813cb7	01-canonical-empty-journal	1	0	ok
+M4	executed	scripts/upgrade/journal_read.py	025cea321f2af1b9890cee5183264cdb091e1d3349b3e82c395882585a7411b5	03-empty-file	1	0	ok
+M5	executed	scripts/upgrade/journal_read.py	ab3f76273d7465ff7d4425244f5b548118405e754a5085b5a5ffdd870aaa8a7e	update parity:	1	0	ok
+M6	executed	scripts/upgrade/lib.sh	cd469b73fc993f9baf27fd97f4e6d2a1ca393516a40d9c68b4c9a07452510892	G2: rc=	124	0	ok
+M7	executed	scripts/upgrade/journal_read.py	a2d9560491fc6c2e3d881a63dbd71447ddced32c272a844bba6a53cacb37e8a0	single read: found	1	0	ok
+M8	executed	scripts/upgrade/journal_read.py	ee027c306e5f007acd49d2a6853ac96038d1437539caa360c36eb9edc5c948c7	HEAD wall	1	0	ok
+M9	executed	scripts/upgrade/lib.sh	bdb9ac462e48e2187e9569dfdf6d3eeab67f41ed4b45db82da4a1fadfb4fc921	D1 rc=	1	0	ok
+M10	executed	scripts/upgrade/lib.sh	c57e8c313bb22ece18072f52cb312ac30e4b8356584a1fb3988dfbebfedd230e	row lost (rows=0)	1	0	ok
+M11	executed	scripts/upgrade/lib.sh	04fd31df517685f7ce41e2f7c1e13ca01a8361da65e9101008b3e9310a0ce139	D1 halt rows=	1	0	ok
+M12	executed	scripts/upgrade/lib.sh	5d302e07a707ff938de5f0d94a675b7b5abca88ce4e6354d50ac2369676f1cba	E1 stdout not empty	1	0	ok
+M13	executed	scripts/upgrade/lib.sh	a118f8674424cd9fd1c3b3f01d3dbe0160b29e5d1da52437defdacd35cddc11d	E2 logwrite_failed rows=	1	0	ok
+M14	executed	daemon/tools/upgrade_journal.py	2f253798b7211197298e374acfbf36ff8ed12fe2611ac64f7ddd01b095178750	test_payload_append_targets_the_per_run_payload_file	1	0	ok
+M15	executed	scripts/upgrade/lib.sh	52c810c6903b2b7db5b47e186cb97a27bd1202f2e4b5a7a2a37b7e579c622203	F2 rows=	1	0	ok
+M16	executed	scripts/upgrade/stage.sh	1a2b3bea54b45d2b0485f650db8cf656570f81d2aa04dbd9376edbebf1dc7571	no explicit release before the success exit	1	0	ok
+M17	executed	scripts/upgrade/lib.sh	b6dcb76524a2e3de84087f69a7764d311a38484cc164f5a5beb4e7938b3b36da	a per-character walk exists outside the legacy fallbacks	1	0	ok
+M18	executed	scripts/upgrade/lib.sh	2d2dcac632ba571b3a985f8a42675520716609ccc47ed2794a7e26e89a1dd84e	anchored constructs disappeared from HEAD	1	0	ok
+M19	executed	daemon/manager.py	a9c6cca4241edb630f413ab3dd8b399efc82ea90baa9cdea338b3a68e9f7669b	test_promote_arm_carries_the_derived_bound	1	0	ok
+M20	executed	daemon/tools/upgrade_journal.py	48e156fabf05fd80c305f4fe409149ee58de90f86e292edd21a3add9f085496b	test_client_stderr_is_a_file	1	0	ok
+M21	executed	daemon/config.py	cb91b9c010c4e43f4ba130b8b2b118a9ca94a93d976d2b3242d36f406f693106	test_reaper_timeout_default_is_still_660	1	0	ok
+M29	executed	scripts/upgrade/lib.sh	786be73f06c86815eee6cf9964daf20e9f13c8acaa189a228ae6b2401d5ef0c0	recovery class: rc=	1	0	ok
+M30	executed	scripts/upgrade/lib.sh	b12eed6c2e680722fb03b30fb8cabc8552a0fd7b7339853d1e150585573816f7	G2 refusal does not name the size	1	0	ok
+M31	executed	scripts/upgrade/lib.sh	58a721b21c8217dcf43b4b9eeaebf15a3551c8ea70ddb8de2c58814b1ff44bd4	G1: rc=	1	0	ok
+M22	executed	scripts/upgrade/lib.sh	25770170be3f2fe142aab54170d5781a6ebb83d8d6a5c086450b63ee404223e6	DEFERRED_RED C1	1	0	ok
+M23	executed	daemon/tools/upgrade_tools.py	3a7d39cdeeee81e2b48124e86abf5fd46d0091411e9ea1dbc9e1e2f4c6a02ae6	DEFERRED_RED C5	1	0	ok
+M24	executed	daemon/tools/upgrade_tools.py	f9ac201036b9e58df3c08a32016256cd786c17b9cb0e33a4b8e1e95a4f56c176	DEFERRED_RED C6	1	0	ok
+M25	executed	daemon/tools/upgrade_tools.py	fcbcc0144940b048102647161aa54c6c40f2f119b063254f259c4fd821635927	I4 FAIL	1	0	ok
+M26	executed	daemon/tools/upgrade_tools.py	cee03c9a7f7bf0fe962013a3598e8ea58e8e2df244aaf7bf777ca69af74ecbdc	I2 FAIL	1	0	ok
+M27	executed	daemon/tools/upgrade_tools.py	896fd9a73170161d63ad1aecfce7d3df83d62d1668aa72933ede12e4c798743e	I3 FAIL	1	0	ok
+M28	executed	daemon/tools/upgrade_tools.py	9bc234b6cad2962c387a21e092b9fc605a3477cba39854ac8c8a6d8cea08d375	I5 FAIL	1	0	ok
+M32	executed	scripts/upgrade/promote.sh	03868a6774abca64b766546a4a194b0eb3d074d05dc3923d8e7c9dae26d070a9	DEFERRED_RED I11	1	0	ok
+M33	executed	daemon/tools/upgrade_journal.py	2fff313f7631f145a7ebbb0383b6bf68202599b4f6883c5b8486e3bd8d6d930d	SCENARIO I13 FAIL raised	1	0	ok
+M34	executed	daemon/tools/upgrade_tools.py	071a035b70cdf997b293d6bfcecfc7e6e7b4bb46b63d8ded459c72e01e7a6bb8	SCENARIO I13 FAIL expected=refuse got=arm	1	0	ok
+M35	executed	daemon/tools/upgrade_tools.py	9d1509131541f032403511e915ff30750e83421ca3c718f3366d6fd9b4c14ae8	I15 FAIL	1	0	ok
+M36	executed	scripts/upgrade/promote.sh	4a9ba86a48cfa51df183d15255933a052bc26d0250067c545be9140042bcaf2c	A4 halt rows=2	1	0	ok
+M37	executed	scripts/upgrade/lib.sh	fae79068519fdfa9863979269006b8b7a26e63de1eb4b1cf211efee965872787	I16a stamp gate MISMATCH	1	0	ok
+M38	executed	scripts/upgrade/lib.sh	ff6645af2c4a5dbbe2eca12ae5b903ac18c93fae76794b7f8255038d07d902c9	I16f stamp gate MISMATCH	1	0	ok
+M39	executed	daemon/tools/upgrade_tools.py	0db4fb85deea8b473295555ba9f23876fc8e1ab7148ca10931740826ef3d7119	test_w3a_floor_unset_on_an_explicit_pin_refuses	1	0	ok
+M40	executed	daemon/tools/upgrade_tools.py	003dce46a4f0540c3feefdf339236a4a9ac03e197ebf677c64801deb2f7f5240	test_w3b_fallback_dir_downgrades_refusal_to_warning	1	0	ok
+M41	executed	daemon/tools/upgrade_tools.py	8ebed203016a3c0c0cdc8371270dcd4f70fb8c0d53feb4bb46fdaf5d31a52827	SCENARIO I13b FAIL expected=refuse got=arm	1	0	ok
+M42	executed	scripts/upgrade/lib.sh	f22166d6d238f99ddeb85bb6d6180d018338837f2494caa29ee6800b6d5aa7ea	FAIL D12 rc=78 want 0	1	0	ok
+M43	executed	scripts/upgrade/promote.sh	7d7015b397093705971483e19fdc2fb99aa191abf1a1b2e2ab6e288e8f4f03d2	D13a a txn-busy refusal row was appended	1	0	ok
+M44	executed	scripts/upgrade/lib.sh	91c06741877d3e35c5ecd6205443455aff9ed31032195700c163113cb2a32f41	E10b fence LOST: run-a2keep.client.log	1	0	ok
+M45	executed	scripts/upgrade/lib.sh	bb2c9e60dc18eddf059697bcf001b836ee510946059a8b01cce7aa35b7fb6661	FAIL D14 sourcing died on a garbage knob	1	0	ok
+M46	executed	scripts/upgrade/lib.sh	8bec1e8c8cc0bddbce3f76f82d63ed2acb41866f90a4cffc3a0b74a24b789f68	A1 leaked temp files	1	0	ok

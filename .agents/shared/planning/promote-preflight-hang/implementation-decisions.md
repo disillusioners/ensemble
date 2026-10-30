@@ -299,3 +299,28 @@ exactly 1) — the source drifted`
 | # | Decision / deviation | Ruling that wins | Rationale |
 |---|---|---|---|
 | D-63 | **Leg M8's plant pair is RE-ANCHORED to the annotated signature; nothing else in the plant table changes.** The `find` text moves from `def cmd_verify(path):\n    data = _read_processed(path)` to `def cmd_verify(path: str) -> int:\n    data = _read_processed(path)` (count restored to exactly 1 at `5bb465e22`), and the `replace` text injects the SAME defect semantics — `import time as _t; _t.sleep(6)` before `_read_processed(path)` — under the new signature. | Fix-cycle-2's tidier pass annotated `journal_read.py` (type hints on `cmd_verify`), so the M8 anchor silently stopped matching. | The ERROR-plant guard worked AS DESIGNED: the exactly-once count refused loudly (PLANT-FAILED, matched 0) instead of planting nothing and reporting a vacuous pass — this is the drift-detection behaviour the plant table was built for, now proven on a real annotation drift. Re-anchoring the find text is the minimal change that restores the leg; the defect semantics (the 6 s stall the scale pack detects) are byte-identical to the original plant. No other leg touched; single-leg M8 proof re-run before the full-matrix re-run. |
+
+## 13. Mutation-matrix evidence record — full-run ledger R1→R3 — 2026-10-30
+
+Three hardened-setsid full-matrix runs in disposable worktrees bracket the M8
+re-anchor (§12/D-63) and close the matrix. The `*.log` evidence files are
+gitignored (`.gitignore:54`, `*.log`) — the digests below keep them verifiable
+after worktree teardown; the committed per-leg record is the R3 `.tsv`
+(`evidence/MUTATION-MATRIX-FULL-20261030-R3.tsv`, sha256
+`3fd3bccbf53823e41dd00d2fba54f61307406694844f8d6482fcf5d779197fa1`, 46 rows +
+header, per-leg `planted_sha256` included).
+
+| Run | HEAD | Log (evidence/) | log sha256 | Result | Wall |
+|---|---|---|---|---|---|
+| R1 | `5bb465e22` (pre-re-anchor) | `MUTATION-MATRIX-FULL-20261030.log` | `871f97385f81fdfbba8a43eb70c8186f4316fb95e6baa01bded4af154b42c6d5` | 45/46 ok — the 1 failure is leg M8 itself: the ERROR-plant refused loudly on exact-string anchor drift after the fix-cycle-2 annotations (`PLANT-FAILED` per D-63; the M8 table row is absent from the log, summary reads `45 executed … 1 failures`, matrix FAIL) | 44m32s |
+| R2 | `dec3a82c2` (post-re-anchor, D-63) | `MUTATION-MATRIX-FULL-20261030-R2.log` | `e9d290fd7d1411520f518c5dfbb46fa5065cf467502ea30eefbf4557d23ac39b`¹ | 45/46 ok — the 1 failure is M15 green-phase miss (`M15 GREEN-not-proven(rc=1)`, red-output head `FAIL F2 rows=0 want 1` post-restore); M15 passed in R1-full and 2/2 in isolation at the same planted digest `52c810c6…` | 46m34s |
+| R3 | `dec3a82c2` | `MUTATION-MATRIX-FULL-20261030-R3.log` | `81b3b3577b959121f1ffc2d30ea36547f7893a0048c300bb25fad3f901f02a08` | **46/46 executed legs green-and-red-proven, 0 failures, contiguous** — `MUTATION MATRIX: PASS (span M1–M46 complete …)`; M6 `red_rc=124` is its designed timeout RED | 46m04s |
+
+¹ Transcription note: the dispatch note carried `…dfbb46aa5065…` for this
+digest; the file on disk hashes to `…dfbb46fa5065…` (a single hex digit
+differs). Recorded as computed — the R2 file (4,311 B) is the only R2 log in
+`evidence/`, and its content matches the R2 narrative above.
+
+| # | Decision / deviation | Ruling that wins | Rationale |
+|---|---|---|---|
+| D-64 | **R3 is the authoritative mutation-matrix evidence for this lane** (46/46 executed legs green-and-red-proven, contiguous M1–M46, 0 failures at `dec3a82c2`), and the two earlier single-failure runs are dispositioned with NO code changes: R1's M8 failure = the plant-table drift guard firing AS DESIGNED (re-anchored at D-63), and R2's M15 failure = a characterized load-transient (3 of 4 contiguous observations green; every isolated observation green; ambient 2-core CPU spinners on the host during R2) — NOT routed as a product defect; flake-ledger candidate only if the tester sees it again. | D-63 (the re-anchor is proven by R2 and R3 both passing M8) + the matrix's own contiguity requirement (a run is evidence only when every leg red-proves its pin AND restores green). | Collapsing the ledger to R3 alone would destroy the failure history that proves the guard works (M8 in R1) and would leave M15's non-reproducibility undocumented — it failed exactly once, in one full run under ambient load, and is green everywhere else including both isolated runs at the same planted digest `52c810c6…`. Recording all three runs with verifiable digests keeps the gitignored logs auditable after worktree teardown, and routing M15 as a transient rather than a defect declines to invent a failure mode the evidence does not support. |
