@@ -168,7 +168,7 @@ class LLMConfig(BaseSettings):
     )
     api_key: str = Field(default="")
     model: str = Field(default="gpt-4")
-    model_title: str | None = Field(default=None, description="Model for title generation (falls back to model)")
+    model_title: str | None = Field(default="title", description="Model for title generation (defaults to the 'title' alias; falls back to model if cleared)")
     model_keywords: str | None = Field(
         default=None,
         description=(
