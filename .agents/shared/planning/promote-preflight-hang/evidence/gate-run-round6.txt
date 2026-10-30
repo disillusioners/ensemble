@@ -1,0 +1,38 @@
+==============================================================================
+PLAN-SET GATE — promote-preflight-hang (read-only over the plan documents)
+dir: /home/nea/ensemble-src-wt-preflight-hang/.agents/shared/planning/promote-preflight-hang
+==============================================================================
+[PASS] (a) corpus cardinality — one canonical '22 + G1–G5 = 27'; no stale counts
+[PASS] (b) mutation-matrix span — every LIVE span claim is M1–M32
+[PASS] (c) pack set — no LIVE 'packs A–H' / 'A–I' (canonical A–J)
+[PASS] (d) RuntimeMaxSec — no LIVE '=1200' pin literal
+[PASS] (e) phase3 — no single-file-era wording / no LIVE D3-3 pointer reference
+[PASS] (f) anchors — the stale anchors are gone (lib.sh:5567 / :1041 / :1053 / :1169 / :1173; stage.sh:577)
+[PASS] (g) superseded identifiers — no LIVE 'MIN_PIPELINE_SCRIPTS_REV'
+[PASS] (g+) the replacement identifier 'PIPELINE_SCRIPTS_FLOOR_COMMIT' IS present
+[PASS] (h1) RESOLUTION — every file-qualified citation resolves in the file it is cited for
+[PASS] (h2) RESOLUTION — every referenced id is defined somewhere in the set
+[PASS] (h3) RESOLUTION/TOPIC — every §11.1 map row's anchor matches the DEFINING row's topic (map rows NOT exempt)
+[PASS] (i) ARTIFACT — the recorded result names an executable gate.sh, and the set's stated check count matches the gate's
+------------------------------------------------------------------------------
+RESULT: PASS — 12/12 executable checks passed
+EXIT CODE: 0
+
+================================================================================
+MUTATION PROOF (same session, 2026-10-29 fold round 6 — audit + completion pass)
+  Each defect was planted on a THROWAWAY COPY of the plan set (/tmp); the real set was never mutated.
+  Restoring the copy returns the gate to PASS.
+  (a)  plant "22 + 3"                          -> FAIL (a)   | plant "**25** fixtures"  -> FAIL (a)
+  (b)  plant a live "M1–M28" span              -> FAIL (b)
+  (c)  plant "packs A–I"                       -> FAIL (c)
+  (d)  plant "RuntimeMaxSec=1200"              -> FAIL (d)
+  (e)  plant "lives in **one per-run file**"   -> FAIL (e)
+  (f)  plant "lib.sh:5569"                     -> FAIL (f)
+  (g)  plant "MIN_PIPELINE_SCRIPTS_REV"        -> FAIL (g)
+  (h1) point a real `phase1-plan.md` D1-13 citation at phase3-plan.md   -> FAIL (h1)
+  (h2) mention an id defined nowhere (D7-1)                             -> FAIL (h2)
+  (h3) re-anchor a §11.1 map row to a DIFFERENT row's topic             -> FAIL (h3)
+  restored                                                              -> PASS 12/12
+  h3 coverage: 61 map rows matched and topic-checked (counted, not assumed) => not vacuous.
+  Idempotency: two consecutive runs byte-identical, exit 0 both times.
+  Safety: reads the nine plan documents only; no pipeline script executed; no live path resolved.

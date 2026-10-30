@@ -1,0 +1,142 @@
+
+== 0. identity ==
+worktree : /home/nea/ensemble-src-wt-preflight-hang
+branch   : fix/promote-preflight-hang
+HEAD     : d12f999b0223678dcb0f02b876bc32fc756a10a7
+base     : b1183a637649f94c23b94dfc745df44381dc54ab (chore(release): bump version to 0.27.13)
+commits  : 6
+
+== 1. change surface — THIS LANE (base..HEAD), shipped first ==
+-- shipped (daemon/ + scripts/) --
+M	daemon/manager.py
+M	daemon/services/upgrade_journal_sweep.py
+M	daemon/tools/upgrade_journal.py
+M	daemon/tools/upgrade_tools.py
+A	scripts/upgrade/journal_read.py
+M	scripts/upgrade/lib.sh
+M	scripts/upgrade/promote.sh
+M	scripts/upgrade/stage.sh
+M	scripts/upgrade/status.sh
+
+-- tests/ (not shipped in a payload) --
+A tests/fixtures/journal/01-canonical-empty-journal.json (x1)
+A tests/fixtures/journal/02-live-shaped-journal.json (x1)
+A tests/fixtures/journal/03-empty-file.json (x1)
+A tests/fixtures/journal/04-truncated-mid-object.json (x1)
+A tests/fixtures/journal/05-truncated-mid-array.json (x1)
+A tests/fixtures/journal/06-unterminated-string.json (x1)
+A tests/fixtures/journal/07-escaped-quote-in-string.json (x1)
+A tests/fixtures/journal/08-trailing-backslash-outside-string.json (x1)
+A tests/fixtures/journal/09-braces-inside-string.json (x1)
+A tests/fixtures/journal/10-multibyte-utf8.json (x1)
+A tests/fixtures/journal/11-invalid-utf8.json (x1)
+A tests/fixtures/journal/12-single-quoted-pseudo-json.json (x1)
+A tests/fixtures/journal/13-trailing-comma.json (x1)
+A tests/fixtures/journal/14-top-level-array.json (x1)
+A tests/fixtures/journal/15-binary-garbage-no-braces.json (x1)
+A tests/fixtures/journal/16-whitespace-only.json (x1)
+A tests/fixtures/journal/17-newline-only.json (x1)
+A tests/fixtures/journal/18-trailing-garbage-bracefree.json (x1)
+A tests/fixtures/journal/19-trailing-garbage-with-brace.json (x1)
+A tests/fixtures/journal/20-nul-inside-string.json (x1)
+A tests/fixtures/journal/21-duplicate-key.json (x1)
+A tests/fixtures/journal/22-escape-then-multibyte.json (x1)
+A tests/fixtures/journal/CORPUS.md (x1)
+A tests/fixtures/journal/G1-guard-threshold-minus-1.json (x1)
+A tests/fixtures/journal/G2-guard-threshold-exact.json (x1)
+A tests/fixtures/journal/G3-guard-threshold-plus-1.json (x1)
+A tests/fixtures/journal/G4-guard-on-fast-path.json (x1)
+A tests/fixtures/journal/G5-processed-bytes-divergence.json (x1)
+A tests/fixtures/journal/INCIDENT.sha256 (x1)
+A tests/helpers/journal_fixture_corpus.py (x1)
+A tests/helpers/journal_fixture_incident.py (x1)
+A tests/helpers/preflight_ceremony_probe.py (x1)
+A tests/helpers/preflight_mutation_apply.py (x1)
+A tests/helpers/preflight_pack_common.sh (x1)
+A tests/packs/preflight_anchor_index.txt (x1)
+A tests/packs/preflight_anchor_index_test.sh (x1)
+A tests/packs/preflight_base_scale_measure.sh (x1)
+A tests/packs/preflight_census.txt (x1)
+A tests/packs/preflight_census_test.sh (x1)
+A tests/packs/preflight_ceremony_readiness.txt (x1)
+A tests/packs/preflight_ceremony_readiness_test.sh (x1)
+A tests/packs/preflight_journal_parity_test.sh (x1)
+A tests/packs/preflight_journal_scale_test.sh (x1)
+A tests/packs/preflight_logging_test.sh (x1)
+A tests/packs/preflight_mutation_matrix_test.sh (x1)
+A tests/packs/preflight_packs.txt (x1)
+A tests/packs/preflight_real_soak_test.sh (x1)
+A tests/packs/preflight_repro_test.sh (x1)
+A tests/packs/preflight_shasum_batch_parity_test.sh (x1)
+A tests/packs/preflight_size_guard_test.sh (x1)
+A tests/packs/preflight_stage_lock_test.sh (x1)
+A tests/packs/preflight_watchdog_test.sh (x1)
+A tests/unit/tools/test_upgrade_preflight_daemon_side.py (x1)
+M tests/unit/tools/test_upgrade_executor_systemd_service.py (x1)
+M tests/unit/tools/test_upgrade_tools.py (x1)
+
+-- counts --
+shipped files changed : 9
+test files changed    : 55
+agents/frontend/plugins touched : 0
+
+== 2. no-schema-change proof ==
+migrations diff base..HEAD      : 0 file(s)
+migration .sql at BASE          : 115
+migration .sql at HEAD          : 115
+migration .sql at live tag v0.27.12: 115
+migrations diff live-tag..HEAD  : 0 file(s)
+new SQLModel tables in this lane: 0
+VERDICT: migration set EMPTY -- no schema mutation ships
+
+== 3. rollback posture (the adjudication input) ==
+rollback_safe        : true
+source               : explicit
+reasoning (standing rule):
+  (a) no schema mutation ships (section 2);
+  (b) the journal FORMAT is unchanged -- the write path is byte-untouched
+      (journal_splice.py sha256 == the base object: 50c406a476902566);
+  (c) runtime changes are ADDITIVE: a new helper file (journal_read.py), a
+      per-run log PATH, and one derived unit property (RuntimeMaxSec);
+  (d) DISCLOSED CAVEAT: a rollback restores the O(N^2) read -- a CAPABILITY
+      REGRESSION, not an incompatibility. A rolled-back release must not be
+      treated as "fixed"; the ceremony notes carry this verbatim.
+
+== 4. version slot — derived from the live census (no reservation) ==
+live current symlink : /home/nea/agents-ensemble/releases/v0.27.12
+live state.json      : current=v0.27.12 previous=v0.27.11 in_flight=None
+highest local tag    : v0.27.13
+releases dirs        : 6
+NEXT FREE SLOT       : derive at stage time as max(highest tag, releases dirs) + 1 minor-patch
+                       (the sibling lane may stage first; the live census decides)
+
+== 5. live-contact attestation ==
+live-mutating commands run by this script : 0
+live paths WRITTEN                       : 0 (readlink + one state.json READ + one /livez GET)
+livez                    : 200 (a READ; the daemon is untouched)
+daemon restarts          : 0
+current symlink flips    : 0
+
+== 6. THE GATE CHAIN (runnable; run from the worktree root) ==
+# --- unit / pack surface (this lane) -------------------------------------
+bash tests/packs/preflight_journal_parity_test.sh        # Pack A  60 assertions
+bash tests/packs/preflight_journal_scale_test.sh         # Pack B  12
+bash tests/packs/preflight_repro_test.sh                 # Pack C   7
+bash tests/packs/preflight_watchdog_test.sh              # Pack D  38
+bash tests/packs/preflight_logging_test.sh               # Pack E  30
+bash tests/packs/preflight_stage_lock_test.sh            # Pack F  13
+bash tests/packs/preflight_census_test.sh                # Pack G1 10
+bash tests/packs/preflight_anchor_index_test.sh          # Pack G2 42
+bash tests/packs/preflight_size_guard_test.sh            # Pack J  24
+bash tests/packs/preflight_shasum_batch_parity_test.sh   # support  4
+bash tests/packs/preflight_real_soak_test.sh             # Pack D negative control (300 s) 5
+bash tests/packs/preflight_ceremony_readiness_test.sh --expect-implemented   # Pack I (phase 6)
+/home/nea/ensemble-src/.venv/bin/python -m pytest \
+  tests/unit/tools/test_upgrade_preflight_daemon_side.py -q   # Pack H  31
+
+# --- the mutation matrix (M1-M32; ~20 min, run it backgrounded) ----------
+nohup bash tests/packs/preflight_mutation_matrix_test.sh > /tmp/preflight-mutation-matrix.log 2>&1 &
+
+# --- stage (giter's step; NOT this lane's) --------------------------------
+# VERSION must be the v-prefixed describe output (ADR-009 D3 guard)
+# ENSEMBLE_UPGRADE_LIVE=1 VERSION=vX.Y.Z bash scripts/upgrade/stage.sh live

@@ -62,6 +62,28 @@ deadline-breach-<phase> (elapsed=<X>s past <deadline>) daemon-state=<live|stoppe
 
 …then releases the lock + exits 78. The halt routes to the **existing halt machinery** at `promote.sh:459-496`. The breach does **NOT** trigger auto-rollback (auto-rollback is for gate-fail halts, NOT ceremony timing halts — per decision (d)). Operator: do NOT intervene mid-rollback; budget-breach = terminal-within-budget.
 
+**B.3a TWO breach classes — never read exit-78 alone** (D2-12/T2.20/AC20,
+promote-preflight-hang phase 2, folded from the P2 runbook deferral):
+
+| Class | Exit | Journal row | Producer |
+|---|---|---|---|
+| (i) shell watchdog breach | **78** | kind `halt`, detail carries the **`deadline-breach-<step>` (budget=… value=… elapsed=… phase=…) daemon-state=…** prefix | the L2a `_budget_breach` handler / the L1 `_enforce_deadline` checkpoints |
+| (ii) L3 systemd kill | **143** (SIGTERM) | kind `halt`, detail **WITHOUT** the prefix (the TERM trap journals "killed by SIGTERM") | the transient unit's derived `RuntimeMaxSec=` backstop |
+
+**The discriminator is the JOURNAL ROW KIND + the `deadline-breach-` prefix,
+NEVER the exit code** — 78 already spans two semantics (`refusal` vs `halt`),
+so no operator surface may read exit-78 alone. First step on a suspected
+class-(ii) kill:
+
+```bash
+systemctl show ensemble-upgrade-<run_id> -p RuntimeUSec -p RuntimeMaxUSec
+```
+
+(`RuntimeMaxSec` is derived at arm time — `max(1200, PROMOTE_TOTAL_DEADLINE_S
++ SOAK_S + 120)`; a runtime AT or above it means systemd fired, not the
+shell.) Both producers' rows carry `daemon-state=` (W3/D2-23) — one reader,
+one runbook, both shapes.
+
 **B.4 C-10b post-stop breach first-recovery-step.** If the halt detail shows **`daemon-state=stopped`** (i.e. the breach fired DURING or AFTER the `stop` phase), the operator's first action is:
 
 ```bash
@@ -215,6 +237,69 @@ No other budget knob is part of the escape — every other knob is locked by the
 
 ---
 
-**End of §C/§D/§E watch runbook entry.**
+## §F. Ceremony scripts provenance (promote-preflight-hang phase 6)
+
+The upgrade pipeline's SHELL surface (promote.sh/stage.sh/lib.sh/…) is NOT
+shipped inside release payloads (payloads have carried no `scripts/` since
+v0.27.4) — the daemon resolves a **scripts dir** at ARM time:
+`ENSEMBLE_UPGRADE_SCRIPTS_DIR` → the module repo → `<install>/scripts/upgrade`.
+**Deployment truth (measured 2026-10-29, architect RULING 9):** the live
+`.env` pins `ENSEMBLE_UPGRADE_SCRIPTS_DIR=/home/nea/ensemble-src/scripts/upgrade`
+and that checkout was **277 commits behind** the lane base — its `lib.sh`
+still carried the O(N²) journal walk (the 2026-10-28 preflight hang). Without
+a sync, the next ceremony would run the OLD code with the watchdog absent.
+
+### §F.1 The arm-time guard (what the daemon now enforces)
+
+At ARM time, BEFORE the ceremony nonce burns, the daemon reads
+`<scripts_dir>/lib.sh` (bounded first-64KiB read) for the
+`PIPELINE_SCRIPTS_REV` stamp and judges the dir:
+
+| Pinned-dir state | Verdict |
+|---|---|
+| git dir, HEAD contains `PIPELINE_SCRIPTS_FLOOR_COMMIT` as an ancestor (`git -C <dir> merge-base --is-ancestor <floor> HEAD`) | **arm** (however new the tree is) |
+| git dir, floor NOT an ancestor / floor object missing-unknown / git error | **refuse** — pre-nonce, refusal names the sync command |
+| git dir whose lib.sh carries no stamp (tree predates the fix) | **refuse** |
+| floor constant unset in the daemon build | **refuse** on an explicitly pinned dir (fail-closed — a mis-made release becomes visible instead of silently skipping the guard); warn on a fallback dir |
+| NON-git dir, with stamp | **arm** (stamp + sha256 are the provenance) |
+| NON-git dir, no stamp | **warn only — never refused** (Q2) |
+| any dir + `ENSEMBLE_ALLOW_STALE_SCRIPTS=1` | allowed, **journaled loudly** |
+
+Every arm journals an `arm-scripts-provenance` row carrying `scripts_dir`,
+the `lib.sh` sha256, the git rev and the dirty flag — plus a
+`stale-scripts-dir` refusal row when it refuses.
+
+### §F.2 USER-OWNED PRECONDITION (before the next ceremony)
+
+Either **(a) sync the pinned checkout** so its HEAD contains
+`PIPELINE_SCRIPTS_FLOOR_COMMIT` as an ANCESTOR — `git -C <dir> fetch origin
+&& git -C <dir> checkout <a-floor-descendant>` (git SHAs are UNORDERED: the
+predicate is ancestry, never a "≥ rev" comparison) — or **(b) move the
+`ENSEMBLE_UPGRADE_SCRIPTS_DIR` pin** to a dir that passes the same predicate.
+The lane itself does NOT touch the shared checkout (it carries another lane's
+WIP; cross-lane WIP-owner precedent) or the live `.env`. If the precondition
+is unmet the ceremony **refuses at arm time and NO ceremony is consumed** —
+the loud failure mode, by design.
+
+### §F.3 Checklist items
+
+- [ ] **ceremony scripts provenance verified — the arm row shows the expected
+      stamp** (`arm-scripts-provenance` in `releases/state.json` history).
+- [ ] exit-code discipline (§B.3a): classify by journal row, never exit-78
+      alone; on a suspected L3 kill run the `RuntimeMaxUSec` show step.
+- [ ] `ENSEMBLE_ALLOW_STALE_SCRIPTS` is **per-invocation only** — never write
+      it to `.env` or any durable store (the arm journals its use loudly).
+
+### §F.4 Staged-verification split (W5)
+
+The **daemon-side** guard surface is verified from the **staged artifact**
+(the binary carries the guard); the **shell** surface (stamp, watchdog
+token) is verified from the **pinned checkout at the synced rev** — payloads
+ship no `scripts/`. The arm row's REQUIRED provenance fields are BOTH the
+git rev AND the `lib.sh` sha256; a missing field rejects the row.
+
+---
+
+**End of §C/§D/§E/§F watch runbook entry.**
 
 The §0–§B pre/during sections above pair with §7 / §8 / §9 of `docs/runbooks/upgrade-drills.md` (the canonical drill runbook; this file extends the operator-facing surface for the v0.20.1 maiden promote specifically).
