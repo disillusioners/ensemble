@@ -120,6 +120,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Also in this release (merged from `origin/latest`, foreign to the lane)** — the checkpoint read-cache PR-1 substrate (**inert, default OFF**) with its metrics counters and kill-switch, the checkpoint quick-wins batch (EXISTS probe, `subtree_messages` concurrency + 100 → 25 cap, pool knobs wired, post-prune `ANALYZE`, `prepare_threshold=None`), the db-pool pin re-baseline, and the blueprint model pins. **Zero migration files** in either the lane or the merge.
 - **Release-line note** — this release carries the staged-but-never-promoted **v0.27.13** db-pool idle-in-transaction fix as an ancestor; the live daemon stays on **v0.27.12** until the promote ceremony.
 
+## [0.27.15] — 2026-10-30
+
+### Fixed — the promote-executor preflight hang: root cause, watchdog, and broken-pipe-safe logging (`fix/promote-preflight-hang`, board `wi-fc1786a2`; base `b1183a637`, merge `953603108` onto `70a13fd5c`)
+
+- **Root cause (the 2026-10-28 37-minute preflight spin): the journal brace-walk on the promote path is O(N²)-shaped in shell** — `lib.sh` re-scanned the whole `state.json` history array per read, and at the incident's journal size (~123 entries, ~455 KB) the extrapolated cost was ~57 minutes of pure shell CPU (measured base scale k=1.644e-8 s/B², evidence `BASE-SCALE-20261030.md`). Fixed by the `scripts/upgrade/journal_read.py` helper (read/`sub`/`update` with byte-parity against the verbatim base scanner: 60/60 parity, 149 ms at the incident-shaped 455,783 B vs the 5,000 ms budget) and wired into `lib.sh`/`promote.sh`/`stage.sh` with size guards and the parity/scale packs.
+- **Watchdog around the preflight window** — a bounded token/heartbeat watchdog now arms around the lock/journal preflight window only (structurally excluded from `gate_soak`), so a future preflight spin trips loudly instead of hanging silently; real 300 s conservative soak leg proven (0 breach rows, watchdog never armed on the soak).
+- **Broken-pipe-safe logging** — `lib.sh` printf sites that lost the promote's stdout lines on reader death now write pipe-safely; the lost-stdout failure mode is diagnosed and logged instead of silently vanishing.
+- **Arm-time scripts-dir provenance floor (`PIPELINE_SCRIPTS_FLOOR_COMMIT` / `PIPELINE_SCRIPTS_REV`, D6-8/T6.15)** — the unpinned-scripts hazard (live promote executes the mutable dev checkout via `ENSEMBLE_UPGRADE_SCRIPTS_DIR`) is now fenced: the daemon compares the pinned scripts dir HEAD against the floor by git ancestry at arm time, `lib.sh` declares the matching rev stamp, and `stage.sh` REFUSES to stage while the floor is unset/unresolvable/non-ancestor. Both constants are pinned to merge `953603108` by this release.
+- **Executor spawn/stdio hardening** (`daemon/tools/upgrade_journal.py`, `daemon/services/upgrade_journal_sweep.py`, `daemon/manager.py`) — spawn-side wiring covered by the new daemon-side pins; scoped re-review CLEAR-WITH-NOTES (one deferred non-blocking residual: `os.path.lexists` next cycle).
+
 ## [0.26.4] — 2026-10-21
 
 ### Fixed — running-zombie strand heal (`fix/running-zombie-sweep`, merge `9b1777b8`)
