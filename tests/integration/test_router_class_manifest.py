@@ -134,6 +134,17 @@ PINNED_MANIFEST_AUTH_ON: dict[str, frozenset[str]] = {
     # protected-default ("pd"), exactly like the other read families.
     # The family therefore carries BOTH classes.
     "/api/mcps-gateway": frozenset({"module_lane", "pd"}),
+    # checkpoint read-path plan / Track-1 item 4 — the metrics_router
+    # mounts /api/metrics (ONE route: GET "" — the metric registry
+    # rendered as Prometheus text-exposition). No route carries an
+    # explicit class tag (no public probe / module-lane / protected
+    # decoration) — the family classifies protected-default ("pd"), the
+    # D3.7 legacy posture, declared HERE. Untagged ⇒ OAuth2-protected
+    # when auth is ON (401 for an unauthenticated caller); M-1 added the
+    # ``maintenance:read`` SCOPE declaration (the scope cage, not this
+    # one) and the auth-OFF 503 fail-closed gate, so the route is NOT
+    # open in the auth-OFF local mode any more.
+    "/api/metrics": frozenset({"pd"}),
     "/api/webhooks": frozenset({"module_lane"}),  # FR-40 module lane
     "/api/work": frozenset({"pd"}),
     "/api/workspace": frozenset({"pd"}),
@@ -368,4 +379,7 @@ class TestRouterClassManifest:
         # from 30 to 31.
         # wedge-capture (2026-10-22) added the /api/wedge-captures
         # family — the api_families count grew from 31 to 32.
-        assert len(api_families) == 32, sorted(api_families)
+        # checkpoint read-path plan / Track-1 item 4 added the
+        # /api/metrics family — the api_families count grew from 32
+        # to 33.
+        assert len(api_families) == 33, sorted(api_families)

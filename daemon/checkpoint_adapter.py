@@ -22,6 +22,7 @@ operations (aget, aput, etc.) that are not covered by this adapter.
 
 import asyncio
 import logging
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
@@ -46,7 +47,31 @@ except ImportError:
 from daemon._redact import redact_exc_str
 # P2 T3 charge seam (resource-cost-control): stdlib-only module, no
 # import-cycle risk — see daemon/services/resource_monitor/charge.py.
-from daemon.services.resource_monitor.charge import note_checkpoint_read
+from daemon.services.resource_monitor.charge import (
+    bounded_deep_size,
+    is_enabled as _charge_enabled,
+    note_checkpoint_read,
+)
+# Track-1 item 4 (read instrumentation): the metric registry is
+# stdlib-only (no daemon imports) and the perf helper module depends
+# on it — no import-cycle risk.
+from daemon.checkpoint_metrics import (
+    checkpoint_read_measurement_errors_total,
+    ensemble_checkpoint_cache_hit_total,
+    ensemble_checkpoint_cache_miss_total,
+)
+from daemon.checkpoint_perf import (
+    checkpoint_perf_logs_enabled,
+    log_cache_hit,
+    log_checkpoint_read,
+)
+from daemon.checkpoint_read_cache import (
+    CheckpointReadCache,
+    checkpoint_read_cache_enabled,
+    extract_cache_key,
+    extract_thread_ids_from_write,
+    invalidate_cached_reads,
+)
 from daemon.constants import (
     CHECKPOINT_BLOB_PRUNE_DELETE_BATCH_SIZE,
     CHECKPOINT_BLOB_PRUNE_DELETE_RETRIES,
@@ -166,19 +191,278 @@ def _charge_instance_from_args(args: tuple, kwargs: dict) -> Optional[str]:
     return None
 
 
-def _charge_checkpoint_read(args: tuple, kwargs: dict, result: Any) -> None:
+def _shared_payload_size(result: Any) -> tuple[Optional[int], Optional[BaseException]]:
+    """ONE bounded deep-size walk for BOTH read consumers (M-2).
+
+    The read path has TWO consumers of the decoded payload's size:
+
+    * the resource-charge seam (``note_checkpoint_read``), which charges
+      the bytes to the instance's resource budget;
+    * the read instrumentation (``log_checkpoint_read``), which records
+      the bytes + rows in the metric registry.
+
+    Both used to run their OWN ``bounded_deep_size`` walk over the SAME
+    payload — two O(payload) walks per read, ON THE EVENT LOOP. This
+    helper performs the walk ONCE and hands the number to both.
+
+    Returns:
+        ``(size, error)`` — ``size`` is the measured byte count (``0``
+        for a MISS — a miss is a read with no payload), or ``None`` when
+        the walk FAILED. ``error`` is the exception that broke the walk
+        (``None`` on success). The walk NEVER raises out: the caller
+        counts the failure in the fail-open tripwire.
+    """
+    if result is None:
+        return 0, None
+    try:
+        size, _nodes, _partial = bounded_deep_size(result)
+        return size, None
+    except Exception as exc:  # noqa: BLE001 — fail-open by contract
+        return None, exc
+
+
+def _charge_checkpoint_read(
+    args: tuple,
+    kwargs: dict,
+    result: Any,
+    *,
+    size: Optional[int] = None,
+) -> None:
     """Charge a decoded checkpoint READ payload to the requesting
     instance (P2 T3). Fires ONCE per successful outer call — the retry
     wrapper (``_call_with_retry``) has already settled when this runs,
     so a transient connection retry NEVER double-charges (AC1). All
     failure modes are swallowed inside the charge module: observability
-    must never break the read path (R1)."""
+    must never break the read path (R1).
+
+    ``size`` — the PRE-COMPUTED deep size (M-2: ONE walk, two
+    consumers). ``None`` means the shared walk FAILED ⇒ nothing is
+    charged (there is no number to charge) and the tripwire already
+    counted the failure.
+    """
     if result is None:
         return
     instance_id = _charge_instance_from_args(args, kwargs)
     if instance_id is None:
         return
-    note_checkpoint_read(instance_id, result)
+    if size is None:
+        # The shared walk failed — the tripwire owns the failure
+        # signal; the charge is skipped (there is no size to charge).
+        return
+    note_checkpoint_read(instance_id, result, size=size)
+
+
+# ── Read instrumentation (plan Track-1 item 4) ─────────────────────────────
+#
+# The read-amplification audit's ONE adopted fix: measure BYTES and ROWS
+# per read at the PROXY chokepoint (the seam every daemon read surface
+# traverses — see the architecture recommendation §4.1). The measurement
+# is FAIL-OPEN by construction: it runs AFTER the read settled, it
+# never touches the result, and every failure inside it is swallowed —
+# the read result is ALWAYS returned as-is.
+#
+# WHAT "ROWS" MEANS HERE (honest labelling): the server's row counter
+# is not observable at this seam, so the count is DERIVED from the
+# returned structure:
+#
+#   * 1 — the checkpoint row itself;
+#   * +1 per channel value that is NOT a primitive — the PG saver
+#     inlines primitives (``None``/``str``/``int``/``float``/``bool``)
+#     in the checkpoint row and stores everything else as a SEPARATE
+#     blob row (``langgraph/checkpoint/postgres/aio.py`` aput: "inline
+#     primitive values in checkpoint table / others are stored in blobs
+#     table");
+#   * +1 per pending write — each pending write is its own row.
+#
+# WHAT "BYTES" MEANS HERE: the DECODED payload size, estimated with the
+# bounded deep-size walk (the SAME estimator the resource-monitor
+# charge seam uses on this very payload). It is NOT the wire size — the
+# serializer's framing overhead is not included.
+#
+# ONE WALK, TWO CONSUMERS (M-2): the walk happens ONCE per read, at
+# the proxy chokepoint (:func:`_observe_read`), and the resulting
+# number is handed to BOTH the charge seam and the instrumentation.
+# The payload is never walked twice for the same read.
+
+
+def _derive_read_rows(op: str, result: Any) -> int:
+    """Derive the number of rows a settled read returned.
+
+    See the block comment above for the derivation rules. Never raises
+    for an unexpected shape: an unreadable payload yields 0 (the
+    measurement is advisory).
+    """
+    if result is None:
+        return 0
+    checkpoint: Any = None
+    pending_writes: Any = None
+    if op == "aget_tuple":
+        # CheckpointTuple(config, checkpoint, metadata, parent_config,
+        # pending_writes) — a NamedTuple, so attribute access is the
+        # canonical read (the tuple is NOT unpacked here: a foreign
+        # shape must not raise).
+        checkpoint = getattr(result, "checkpoint", None)
+        pending_writes = getattr(result, "pending_writes", None)
+    else:
+        checkpoint = result
+    rows = 0
+    if isinstance(checkpoint, dict):
+        rows += 1  # the checkpoint row
+        channel_values = checkpoint.get("channel_values")
+        if isinstance(channel_values, dict):
+            for value in channel_values.values():
+                if value is None or isinstance(value, (str, int, float, bool)):
+                    continue  # inlined in the checkpoint row — no blob row
+                rows += 1  # one blob row
+    if isinstance(pending_writes, (list, tuple)):
+        rows += len(pending_writes)
+    return rows
+
+
+def _record_read_measurement_error(op: str, exc: BaseException) -> None:
+    """Count a measurement failure — the FAIL-OPEN tripwire.
+
+    The measurement never breaks a read, so this counter is the ONLY
+    signal that the instrumentation itself stopped working. The counter
+    increment is itself guarded: a broken metric registry must not
+    turn into a broken read.
+    """
+    try:
+        checkpoint_read_measurement_errors_total.inc()
+    except Exception:  # noqa: BLE001 — the tripwire must never raise
+        logger.warning(
+            "[CheckpointPerf] read instrumentation counter update failed "
+            "(op=%s) — the failure counter itself is unavailable",
+            op,
+            exc_info=True,
+        )
+    logger.warning(
+        "[CheckpointPerf] read instrumentation failed (op=%s): %s: %s — "
+        "the read itself was NOT affected (fail-open)",
+        op,
+        type(exc).__name__,
+        exc,
+    )
+
+
+def _observe_read(
+    op: str,
+    args: tuple,
+    kwargs: dict,
+    result: Any,
+    *,
+    size: Optional[int] = None,
+) -> Optional[int]:
+    """Observe ONE settled read: ONE size walk, BOTH consumers (M-2).
+
+    The read path has two consumers of the decoded payload's size — the
+    resource-charge seam (per-instance byte budget) and the read
+    instrumentation (bytes + rows in the metric registry). Both used to
+    run their OWN bounded deep-size walk over the SAME payload: two
+    O(payload) walks per read, ON THE EVENT LOOP.
+
+    This seam walks the payload ONCE and hands the number to both.
+
+    ``size`` — a PRE-COMPUTED deep size (the read-cache HIT path hands
+    the size stored at PUT time, so a hit charges the exact same byte
+    count a real read would have walked — no second walk; the M-2
+    one-walk discipline extended to the cache). ``None`` (the default,
+    and every pre-cache call site) walks here.
+
+    Returns the size that was walked (or handed in), or ``None`` when
+    nobody needed it — the read-cache PUT uses this to avoid a second
+    walk when one already happened.
+
+    THE KILL-SWITCH: ``CHECKPOINT_PERF_LOGS=0`` turns the
+    instrumentation OFF (the recording is skipped — see
+    :func:`daemon.checkpoint_perf.log_checkpoint_read`). When the
+    resource monitor is ALSO off, NOTHING needs the size ⇒ the walk is
+    skipped entirely (no O(payload) work on the hot path). The charge
+    seam is INDEPENDENT of the perf kill-switch: it keeps working
+    (and keeps walking) while the monitor is enabled.
+    """
+    charge_on = _charge_enabled()
+    perf_on = checkpoint_perf_logs_enabled()
+    if not charge_on and not perf_on:
+        # Nobody needs the size — the walk is pure waste.
+        return None
+    if size is None:
+        size, size_error = _shared_payload_size(result)
+    else:
+        size_error = None
+    if charge_on:
+        _charge_checkpoint_read(args, kwargs, result, size=size)
+    if perf_on:
+        _measure_checkpoint_read(
+            op, args, kwargs, result, bytes_=size, size_error=size_error
+        )
+    return size
+
+
+def _measure_checkpoint_read(
+    op: str,
+    args: tuple,
+    kwargs: dict,
+    result: Any,
+    *,
+    bytes_: Optional[int] = None,
+    size_error: Optional[BaseException] = None,
+) -> None:
+    """Measure ONE settled checkpoint read (bytes + rows) — FAIL-OPEN.
+
+    Called from the proxy forwarders AFTER the retry wrapper settled, so
+    a transient connection retry is measured ONCE (the same
+    once-per-outer-call contract the charge seam follows).
+
+    ``bytes_`` — the PRE-COMPUTED deep size of the payload (M-2: the
+    walk happens ONCE per read and is SHARED with the charge seam; this
+    function never walks the payload itself). ``None`` means the shared
+    walk failed — ``size_error`` then carries the exception, and the
+    failure is counted in the tripwire (never raised).
+
+    NEVER raises: every failure is counted in
+    ``checkpoint_read_measurement_errors_total`` and swallowed. The read
+    result is never inspected destructively — the payload is only
+    measured.
+    """
+    try:
+        if size_error is not None:
+            raise size_error
+        if result is None:
+            # A MISS is still a read (a DB round trip that returned no
+            # checkpoint): count it with zero bytes / zero rows.
+            bytes_ = 0
+            rows = 0
+        else:
+            bytes_ = max(0, int(bytes_ or 0))
+            rows = _derive_read_rows(op, result)
+        thread_id = _charge_instance_from_args(args, kwargs) or ""
+    except Exception as exc:  # noqa: BLE001 — fail-open by contract
+        _record_read_measurement_error(op, exc)
+        return
+    try:
+        log_checkpoint_read(op, thread_id, bytes_=bytes_, rows=rows)
+    except Exception as exc:  # noqa: BLE001 — fail-open by contract
+        _record_read_measurement_error(op, exc)
+
+
+def _inc_cache_metric(counter: Any, op: str) -> None:
+    """Increment a read-cache counter — FAIL-OPEN (never break a read).
+
+    Same swallow-and-log contract as the measurement tripwire
+    (:func:`_record_read_measurement_error`): observability must never
+    break the read path. The registry inc is lock+arithmetic (no I/O),
+    so this guard is belt-and-braces.
+    """
+    try:
+        counter.inc()
+    except Exception:  # noqa: BLE001 — fail-open by contract
+        logger.warning(
+            "[CheckpointPerf] read-cache counter update failed (op=%s) — "
+            "the read itself was NOT affected",
+            op,
+            exc_info=True,
+        )
 
 
 def _wrap_saver_with_connection_retry(saver: Any) -> Any:
@@ -302,10 +586,17 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
         ``BaseCheckpointSaver`` to ``ABCMeta``.
         """
 
-        __slots__ = ("_saver",)
+        __slots__ = ("_saver", "_read_cache")
 
         def __init__(self, saver: Any) -> None:
             self._saver = saver
+            # Read-cache substrate (plan §4.1/§4.2): one cache per
+            # proxy (per saver). INERT while
+            # ``CHECKPOINT_READ_CACHE_ENABLED`` is off — every read
+            # takes the miss path (identical to today); the write
+            # forwarders' invalidation hooks fire as no-ops; the
+            # hit/miss counters still emit (all misses).
+            self._read_cache = CheckpointReadCache()
 
         def __getattr__(self, name: str) -> Any:
             # Only invoked when normal lookup misses — the explicit
@@ -339,6 +630,47 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
                 # exactly as it did before the wrapper existed.
                 return await method(*args, **kwargs)
 
+        # ── Write invalidation (plan §4.3.A) ─────────────────────────────
+        #
+        # EVERY write forwarder invalidates BEFORE delegating the write
+        # (an invalidation that raced AFTER the write could re-cache a
+        # pre-write read that landed between the two). The runtime
+        # self-check below asserts post-write cache-emptiness for the
+        # written thread — an explicit branch, NEVER an ``assert``
+        # (house rule: must survive ``python -O``) and NEVER a raise
+        # (a broken invariant logs ERROR + forces the invalidation; it
+        # must not break the production write).
+
+        def _invalidate_for_write(self, method_name: str, args: tuple, kwargs: dict) -> None:
+            thread_ids = extract_thread_ids_from_write(method_name, args, kwargs)
+            if thread_ids:
+                self._read_cache.invalidate_many(thread_ids)
+            else:
+                # Un-attributable write — stale-is-worse-than-cold.
+                self._read_cache.clear()
+
+        def _assert_post_write_empty(self, method_name: str, args: tuple, kwargs: dict) -> None:
+            """Runtime self-check: the written thread left the cache (§4.3.C)."""
+            thread_ids = extract_thread_ids_from_write(method_name, args, kwargs)
+            if thread_ids:
+                for thread_id in thread_ids:
+                    if self._read_cache.thread_cached(thread_id):
+                        logger.error(
+                            "[CheckpointReadCache] thread %.8s still cached "
+                            "after %s — invalidation seam broken (stale-read "
+                            "risk); forcing invalidation",
+                            thread_id,
+                            method_name,
+                        )
+                        self._read_cache.invalidate(thread_id)
+            elif len(self._read_cache) != 0:
+                logger.error(
+                    "[CheckpointReadCache] cache non-empty after "
+                    "un-attributable write %s — forcing full clear",
+                    method_name,
+                )
+                self._read_cache.clear()
+
         # ── Retry-wrapped async methods (hot checkpoint ops) ─────────
         # The six methods below carry the one-shot connection-retry
         # layer. They are the LangGraph hot path (reads/writes during
@@ -361,30 +693,166 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
         # green); a scrub failure is swallowed + logged (never fails
         # a checkpoint write). This is the sibling of the
         # ``redact_exc_str`` log-scrub in ``_call_with_retry``.
+        # ── Read-cache substrate helpers (plan §4.1/§4.2/§4.4) ──────────
+        #
+        # The cache lives HERE — above ``_call_with_retry`` and above
+        # ``_charge_checkpoint_read`` — because the proxy's read
+        # forwarders are the ONE chokepoint every daemon read surface
+        # traverses. ``cache_bypass=True`` (readiness sentinel) skips
+        # ONLY the cache layer: the sentinel's health semantics require
+        # the REAL production path (retry + lock + charge).
+        #
+        # Counters (observable-off contract, plan §4.5): a non-bypass
+        # read increments hit or miss in BOTH switch states — with the
+        # kill-switch OFF every read counts as a miss (disabled is
+        # OBSERVABLE, not silent). Bypass reads count NEITHER.
+
+        def _serve_cache_hit(
+            self,
+            op: str,
+            args: tuple,
+            kwargs: dict,
+            served: Any,
+            thread_id: str,
+            size: Optional[int],
+            t0: float,
+        ) -> None:
+            """One HIT: counter + structured line + CHARGE (§4.4).
+
+            The payload was still materialized and decoded once (at
+            PUT time), so the resource charge keeps its baseline —
+            never silently uncharged.
+
+            CHARGE-BASIS SYMMETRY (fix pass F2): ``size`` is the
+            PRE-COMPUTED size of the artifact the MISS path would have
+            walked — for ``aget_tuple`` hits that is the STORED TUPLE
+            size (an aget_tuple miss walks the fresh tuple), handed in
+            so the hit does NOT re-walk (M-2). For ``aget`` hits the
+            miss basis is the CHECKPOINT DICT, not the tuple — the
+            stored tuple size (config + metadata + pending_writes
+            included) measured ~2.7× larger; the aget call site
+            therefore passes ``size=None`` and this seam walks the
+            SERVED PROJECTION — the exact basis an aget miss charges.
+            A ``None`` return from ``_observe_read`` (charge and perf
+            both off — nobody walked) falls back to the passed size
+            for the log line only.
+            """
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            _inc_cache_metric(ensemble_checkpoint_cache_hit_total, op)
+            walked = _observe_read(op, args, kwargs, served, size=size)
+            try:
+                log_cache_hit(
+                    thread_id,
+                    elapsed_ms,
+                    bytes_=walked if walked is not None else (size or 0),
+                )
+            except Exception:  # noqa: BLE001 — fail-open observability
+                logger.warning(
+                    "[CheckpointPerf] cache-hit log line failed (op=%s)",
+                    op,
+                    exc_info=True,
+                )
+
         async def aget(self, *args, **kwargs):
             # P2 T3 charge seam: decoded payload charged AFTER the retry
             # wrapper settles ⇒ transient retry charges ONCE (AC1).
+            # Track-1 item 4: read instrumentation (bytes + rows) at the
+            # proxy chokepoint. FAIL-OPEN — a measurement failure never
+            # breaks or slows the read; the result is returned as-is.
+            #
+            # M-2: ONE bounded deep-size walk per read, SHARED by both
+            # consumers (the charge seam + the instrumentation). The walk
+            # used to run TWICE over the SAME payload (twice the
+            # O(payload) work, on the event loop).
+            #
+            # Read cache (plan §4.1): consult BEFORE the saver; a hit
+            # serves ``cached.checkpoint`` (the base ``aget`` contract —
+            # ``base/__init__.py``: ``if value := await self.aget_tuple``.
+            # A miss keeps TODAY's exact delegation (the K-guard
+            # contract requires ``proxy.aget`` to reach the WRAPPED
+            # saver's ``aget`` override, so aget does NOT delegate to
+            # the proxy's own aget_tuple); aget misses therefore do NOT
+            # populate the cache — only aget_tuple does (one artifact,
+            # plan §4.2).
+            cache_bypass = kwargs.pop("cache_bypass", False)
+            if not cache_bypass:
+                key = extract_cache_key(args, kwargs)
+                if checkpoint_read_cache_enabled() and key is not None:
+                    t0 = time.perf_counter()
+                    hit = self._read_cache.get(*key)
+                    if hit is not None:
+                        cached, _tuple_size = hit
+                        # F2 charge-basis symmetry: an aget MISS charges
+                        # the walked CHECKPOINT DICT, not the tuple — so
+                        # the hit walks the served projection (size=None)
+                        # instead of charging the stored tuple size
+                        # (~2.7× the aget basis, measured).
+                        self._serve_cache_hit(
+                            "aget", args, kwargs, cached.checkpoint,
+                            key[0], None, t0,
+                        )
+                        return cached.checkpoint
+                _inc_cache_metric(ensemble_checkpoint_cache_miss_total, "aget")
             result = await self._call_with_retry("aget", args, kwargs)
-            _charge_checkpoint_read(args, kwargs, result)
+            _observe_read("aget", args, kwargs, result)
             return result
 
         async def aget_tuple(self, *args, **kwargs):
-            # P2 T3 charge seam: same once-per-outer-call contract.
+            # P2 T3 charge seam: same once-per-outer-call contract; the
+            # SAME single shared walk (M-2).
+            #
+            # Read cache (plan §4.1/§4.2): the POPULATING read — the
+            # cached artifact is the post-deserialize CheckpointTuple
+            # exactly as the saver returned it (the serde already ran;
+            # its cost is what the cache amortizes). ``put`` stores a
+            # SHALLOW COPY and reuses the walk ``_observe_read`` already
+            # paid (or walks once itself when charge+perf are both off).
+            cache_bypass = kwargs.pop("cache_bypass", False)
+            key = None if cache_bypass else extract_cache_key(args, kwargs)
+            if not cache_bypass:
+                if checkpoint_read_cache_enabled() and key is not None:
+                    t0 = time.perf_counter()
+                    hit = self._read_cache.get(*key)
+                    if hit is not None:
+                        cached, size = hit
+                        self._serve_cache_hit(
+                            "aget_tuple", args, kwargs, cached,
+                            key[0], size, t0,
+                        )
+                        return cached
+                _inc_cache_metric(ensemble_checkpoint_cache_miss_total, "aget_tuple")
             result = await self._call_with_retry("aget_tuple", args, kwargs)
-            _charge_checkpoint_read(args, kwargs, result)
+            walked = _observe_read("aget_tuple", args, kwargs, result)
+            if (
+                not cache_bypass
+                and key is not None
+                and result is not None
+                and checkpoint_read_cache_enabled()
+            ):
+                self._read_cache.put(key[0], key[1], result, size=walked)
             return result
 
         async def aput(self, *args, **kwargs):
             args, kwargs = scrub_saver_write_args("aput", args, kwargs)
-            return await self._call_with_retry("aput", args, kwargs)
+            self._invalidate_for_write("aput", args, kwargs)
+            result = await self._call_with_retry("aput", args, kwargs)
+            self._assert_post_write_empty("aput", args, kwargs)
+            return result
 
         async def aput_writes(self, *args, **kwargs):
             args, kwargs = scrub_saver_write_args(
                 "aput_writes", args, kwargs
             )
-            return await self._call_with_retry("aput_writes", args, kwargs)
+            self._invalidate_for_write("aput_writes", args, kwargs)
+            result = await self._call_with_retry("aput_writes", args, kwargs)
+            self._assert_post_write_empty("aput_writes", args, kwargs)
+            return result
 
         async def aget_delta_channel_history(self, *args, **kwargs):
+            # A READ of a DIFFERENT artifact (delta channel history) —
+            # deliberately NOT cached (the read cache serves whole
+            # CheckpointTuples only) and needs no bypass kwarg (it
+            # never consults the cache).
             return await self._call_with_retry(
                 "aget_delta_channel_history", args, kwargs
             )
@@ -395,9 +863,12 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
             # 3.1.x). Forwarded through the same retry wrapper as
             # the other public methods so a mid-cursor-open PG
             # failure during a thread drop is also recovered once.
-            return await self._call_with_retry(
+            self._invalidate_for_write("adelete_thread", args, kwargs)
+            result = await self._call_with_retry(
                 "adelete_thread", args, kwargs
             )
+            self._assert_post_write_empty("adelete_thread", args, kwargs)
+            return result
 
         # NOTE: ``adelete`` is deliberately NOT defined here — it is
         # absent from BOTH the pinned langgraph-checkpoint-postgres
@@ -441,15 +912,28 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
 
         # Remaining concrete async ops — forward (async-preserving),
         # no retry (not on the hot path; the retry set above is
-        # deliberately the six hot-path ops).
+        # deliberately the six hot-path ops). ALL of them are WRITES on
+        # the checkpoint store ⇒ each carries the same
+        # invalidate-before-delegate + post-write self-check hooks as
+        # the hot-path write forwarders (plan §4.3.A: EVERY write
+        # forwarder).
         async def acopy_thread(self, *args, **kwargs):
-            return await self._saver.acopy_thread(*args, **kwargs)
+            self._invalidate_for_write("acopy_thread", args, kwargs)
+            result = await self._saver.acopy_thread(*args, **kwargs)
+            self._assert_post_write_empty("acopy_thread", args, kwargs)
+            return result
 
         async def adelete_for_runs(self, *args, **kwargs):
-            return await self._saver.adelete_for_runs(*args, **kwargs)
+            self._invalidate_for_write("adelete_for_runs", args, kwargs)
+            result = await self._saver.adelete_for_runs(*args, **kwargs)
+            self._assert_post_write_empty("adelete_for_runs", args, kwargs)
+            return result
 
         async def aprune(self, *args, **kwargs):
-            return await self._saver.aprune(*args, **kwargs)
+            self._invalidate_for_write("aprune", args, kwargs)
+            result = await self._saver.aprune(*args, **kwargs)
+            self._assert_post_write_empty("aprune", args, kwargs)
+            return result
 
         # Sync twins — concrete on the base; their pinned-upstream
         # behavior varies per twin (real sync wrappers for most —
@@ -459,7 +943,10 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
         # not a proxy artifact. NO retry (never invoked by the daemon).
         # ``put`` / ``put_writes`` carry the SAME S2 scrub as their
         # async twins (design §2.2 pins :386/:389 + :298/:301 alike)
-        # so a future sync caller cannot become the unscrubbed hole.
+        # so a future sync caller cannot become the unscrubbed hole;
+        # the WRITE twins carry the same invalidate-before-delegate +
+        # post-write self-check hooks for the same reason (a future
+        # sync caller cannot become the un-invalidated hole either).
         def get_tuple(self, *args, **kwargs):
             return self._saver.get_tuple(*args, **kwargs)
 
@@ -471,25 +958,43 @@ def _wrap_saver_with_connection_retry(saver: Any) -> Any:
 
         def put(self, *args, **kwargs):
             args, kwargs = scrub_saver_write_args("put", args, kwargs)
-            return self._saver.put(*args, **kwargs)
+            self._invalidate_for_write("put", args, kwargs)
+            result = self._saver.put(*args, **kwargs)
+            self._assert_post_write_empty("put", args, kwargs)
+            return result
 
         def put_writes(self, *args, **kwargs):
             args, kwargs = scrub_saver_write_args(
                 "put_writes", args, kwargs
             )
-            return self._saver.put_writes(*args, **kwargs)
+            self._invalidate_for_write("put_writes", args, kwargs)
+            result = self._saver.put_writes(*args, **kwargs)
+            self._assert_post_write_empty("put_writes", args, kwargs)
+            return result
 
         def delete_thread(self, *args, **kwargs):
-            return self._saver.delete_thread(*args, **kwargs)
+            self._invalidate_for_write("delete_thread", args, kwargs)
+            result = self._saver.delete_thread(*args, **kwargs)
+            self._assert_post_write_empty("delete_thread", args, kwargs)
+            return result
 
         def delete_for_runs(self, *args, **kwargs):
-            return self._saver.delete_for_runs(*args, **kwargs)
+            self._invalidate_for_write("delete_for_runs", args, kwargs)
+            result = self._saver.delete_for_runs(*args, **kwargs)
+            self._assert_post_write_empty("delete_for_runs", args, kwargs)
+            return result
 
         def copy_thread(self, *args, **kwargs):
-            return self._saver.copy_thread(*args, **kwargs)
+            self._invalidate_for_write("copy_thread", args, kwargs)
+            result = self._saver.copy_thread(*args, **kwargs)
+            self._assert_post_write_empty("copy_thread", args, kwargs)
+            return result
 
         def prune(self, *args, **kwargs):
-            return self._saver.prune(*args, **kwargs)
+            self._invalidate_for_write("prune", args, kwargs)
+            result = self._saver.prune(*args, **kwargs)
+            self._assert_post_write_empty("prune", args, kwargs)
+            return result
 
         def get_delta_channel_history(self, *args, **kwargs):
             return self._saver.get_delta_channel_history(*args, **kwargs)
@@ -585,6 +1090,38 @@ class CheckpointerAdapter(ABC):
 
         Used by maintenance.py Operation D (_prune_thread_checkpoints)
         to determine which checkpoints to keep.
+        """
+
+    @abstractmethod
+    async def has_checkpoint(self, thread_id: str) -> bool:
+        """Existence probe for the ROOT namespace — bounded, decode-free.
+
+        Track-1 quick-win (checkpoint read-path plan, item 2). Answers
+        exactly one question — "does a checkpoint row exist for this
+        thread?" — with an existence query instead of a FULL saver
+        read.
+
+        Why this exists on the adapter surface (and not on the saver):
+        the saver's read path takes the saver's single ``asyncio.Lock``
+        and deserializes the ENTIRE checkpoint (checkpoint + channel
+        values + blobs) before the caller can look at one field of it.
+        The PostgreSQL adapter already owns a SEPARATE asyncpg pool
+        for direct SQL, so the probe runs there and never touches the
+        saver lock.
+
+        Namespace semantics are IDENTICAL to the saver lookup it
+        replaces: LangGraph resolves
+        ``config["configurable"].get("checkpoint_ns", "")`` — i.e. the
+        ROOT namespace — and returns "no checkpoint" when no
+        ``checkpoints`` row matches. This probe is therefore scoped to
+        the root namespace only.
+
+        Args:
+            thread_id: The instance id (LangGraph thread_id).
+
+        Returns:
+            True iff a checkpoint row exists for ``thread_id`` in the
+            root namespace.
         """
 
     @abstractmethod
@@ -835,12 +1372,39 @@ class SqliteCheckpointerAdapter(CheckpointerAdapter):
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
 
+    async def has_checkpoint(self, thread_id: str) -> bool:
+        """SQLite mirror of :meth:`PostgresCheckpointerAdapter.has_checkpoint`.
+
+        Same root-namespace semantics (``checkpoint_ns = ''`` — the
+        LangGraph default for a config carrying only ``thread_id``).
+
+        SQLite has no second connection pool: every other helper in
+        this adapter runs on the saver's own connection under the
+        saver's lock, so this one does the same. The off-lock win is
+        PostgreSQL-only by construction — the SQLite saver is a single
+        serialized connection and there is nothing to bypass.
+        """
+        async with self._saver.lock:
+            cursor = await self._saver.conn.execute(
+                "SELECT 1 FROM checkpoints WHERE thread_id = ? AND checkpoint_ns = ? LIMIT 1",
+                (thread_id, ""),
+            )
+            row = await cursor.fetchone()
+            return row is not None
+
     async def delete_checkpoints_excluding(
         self, thread_id: str, checkpoint_ns: str, keep_ids: set[str]
     ) -> int:
         """Delete checkpoints NOT in keep_ids. Returns deleted count."""
         if not keep_ids:
             return 0
+
+        # Read-cache invalidation seam (SQLite twin — plan §4.3.B):
+        # the SQLite saver is NEVER wrapped by the retry proxy, so
+        # ``self._saver`` carries no cache and the helper is a no-op.
+        # Kept for symmetry: if a proxied SQLite shape ever appears,
+        # the raw-SQL bypass hole is already closed here.
+        invalidate_cached_reads(self._saver, [thread_id])
 
         placeholders = ",".join("?" * len(keep_ids))
         async with self._saver.lock:
@@ -861,6 +1425,10 @@ class SqliteCheckpointerAdapter(CheckpointerAdapter):
         """Delete writes NOT in keep_ids. Returns deleted count."""
         if not keep_ids:
             return 0
+
+        # Read-cache invalidation seam (SQLite twin — plan §4.3.B);
+        # no-op today, see delete_checkpoints_excluding above.
+        invalidate_cached_reads(self._saver, [thread_id])
 
         placeholders = ",".join("?" * len(keep_ids))
         async with self._saver.lock:
@@ -903,6 +1471,9 @@ class SqliteCheckpointerAdapter(CheckpointerAdapter):
 
     async def adelete_thread(self, thread_id: str) -> None:
         """Delete all checkpoint data for a thread."""
+        # Read-cache invalidation seam (SQLite twin — plan §4.3.B);
+        # no-op today (the SQLite saver is never proxied).
+        invalidate_cached_reads(self._saver, [thread_id])
         await self._saver.adelete_thread(thread_id)
 
     async def find_excess_checkpoint_groups(
@@ -1132,12 +1703,59 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
             )
             return [row["checkpoint_id"] for row in rows]
 
+    async def has_checkpoint(self, thread_id: str) -> bool:
+        """Existence probe on the SEPARATE asyncpg pool — NO saver lock.
+
+        Track-1 quick-win (checkpoint read-path plan, item 2). The
+        retry-path existence check used to run a FULL
+        ``raw_saver.aget(config)``: that (a) took the saver's single
+        ``asyncio.Lock`` — serializing every other checkpoint read
+        behind it — and (b) deserialized the ENTIRE checkpoint
+        (checkpoint + channel values + blobs) only for the caller to
+        look at one boolean.
+
+        This probe answers the SAME question with a bounded existence
+        query on the adapter's own asyncpg pool (``self._pool`` — the
+        pool every other direct-SQL helper in this class already
+        uses). It therefore never touches the saver's lock and never
+        materialises a payload.
+
+        Semantics are IDENTICAL to the saver lookup it replaces:
+        LangGraph's ``aget_tuple`` resolves
+        ``config["configurable"].get("checkpoint_ns", "")`` — i.e. the
+        ROOT namespace — and reports "no checkpoint" when no
+        ``checkpoints`` row matches. The ``checkpoint_ns = ''`` literal
+        below IS that root-namespace default (pinned, not bound: this
+        probe has exactly one supported namespace).
+
+        NOTE (resource-cost-control charge seam): the saver read path
+        charges the DECODED payload to the requesting instance
+        (``_charge_checkpoint_read``). This probe decodes no payload,
+        so it is deliberately NOT charged — charging a non-payload
+        would corrupt the checkpoint read-cost metric.
+        """
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT 1 FROM checkpoints WHERE thread_id = $1 AND checkpoint_ns = '' LIMIT 1",
+                thread_id,
+            )
+        return row is not None
+
     async def delete_checkpoints_excluding(
         self, thread_id: str, checkpoint_ns: str, keep_ids: set[str]
     ) -> int:
         """Delete checkpoints NOT in keep_ids. Returns deleted count."""
         if not keep_ids:
             return 0
+
+        # Read-cache invalidation seam 1/4 (plan §4.3.B — raw SQL
+        # bypasses the proxy): this DELETE runs on the separate
+        # asyncpg pool, so the proxy's write forwarders never see it.
+        # ``self._saver`` IS the proxy, so the shared helper reaches
+        # its cache; fires BEFORE the DELETE (same before-delegate
+        # contract as the proxy writes). No-op while the kill-switch
+        # is off (nothing is ever cached).
+        invalidate_cached_reads(self._saver, [thread_id])
 
         # asyncpg accepts a Python list for the ``$N::text[]`` parameter.
         # The leading NOT inverts the IN-semantics of ``= ANY()`` so we keep
@@ -1153,12 +1771,19 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
                 checkpoint_ns,
                 list(keep_ids),
             )
-            # asyncpg.execute returns "DELETE n" where n is count
-            if result:
-                parts = result.split()
-                if len(parts) >= 2:
-                    return int(parts[1])
-            return 0
+        # Read-cache re-invalidation, seam 1/4 AFTER-half (fix pass F4):
+        # the await point between the BEFORE-half and the DELETE COMMIT
+        # lets a racing aget_tuple re-put an entry for a row this DELETE
+        # then removes — a no-TTL ghost of deleted state. Mirrors the
+        # proxy's double protection (invalidate-before + post-write
+        # emptiness): the AFTER-half closes the window.
+        invalidate_cached_reads(self._saver, [thread_id])
+        # asyncpg.execute returns "DELETE n" where n is count
+        if result:
+            parts = result.split()
+            if len(parts) >= 2:
+                return int(parts[1])
+        return 0
 
     async def delete_writes_excluding(
         self, thread_id: str, checkpoint_ns: str, keep_ids: set[str]
@@ -1171,6 +1796,10 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
         if not keep_ids:
             return 0
 
+        # Read-cache invalidation seam 2/4 (plan §4.3.B) — see the
+        # identical note at ``delete_checkpoints_excluding`` above.
+        invalidate_cached_reads(self._saver, [thread_id])
+
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 """
@@ -1182,11 +1811,14 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
                 checkpoint_ns,
                 list(keep_ids),
             )
-            if result:
-                parts = result.split()
-                if len(parts) >= 2:
-                    return int(parts[1])
-            return 0
+        # AFTER-half (fix pass F4) — closes the racing re-put window,
+        # same as seam 1.
+        invalidate_cached_reads(self._saver, [thread_id])
+        if result:
+            parts = result.split()
+            if len(parts) >= 2:
+                return int(parts[1])
+        return 0
 
     async def count_writes_excluding(
         self, thread_id: str, checkpoint_ns: str, keep_ids: set[str]
@@ -1227,6 +1859,11 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
         state. Order: ``checkpoint_writes`` and ``checkpoint_blobs`` first
         (no FK to ``checkpoints``), then ``checkpoints`` last.
         """
+        # Read-cache invalidation seam 3/4 (plan §4.3.B — raw SQL
+        # bypasses the proxy): same before-delete contract as seams
+        # 1/2 above; drops EVERY namespace of the thread.
+        invalidate_cached_reads(self._saver, [thread_id])
+
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute(
@@ -1241,6 +1878,10 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
                     "DELETE FROM checkpoints WHERE thread_id = $1",
                     thread_id,
                 )
+        # AFTER-half (fix pass F4) — the three-statement transaction has
+        # THREE await points a racing read could interleave on; the
+        # post-commit re-invalidate drops whatever it re-put.
+        invalidate_cached_reads(self._saver, [thread_id])
 
     async def find_excess_checkpoint_groups(
         self, max_per_thread: int
@@ -1533,6 +2174,16 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
         # site after the loop publishes the reason on normal returns.
         self.last_pair_stop_reason = None
         self.last_pair_chunks_skipped = 0
+        # Read-cache invalidation seam 4/4 (plan §4.3.B): the anti-join
+        # DELETE runs on the asyncpg pool, bypassing the proxy's write
+        # forwarders. A referenced blob cannot be deleted by
+        # construction, so a cached tuple stays VALID — but the
+        # reference snapshot is taken under this transaction's
+        # isolation, and a racing aput (READ COMMITTED, no SSI edge)
+        # can slip a new blob past it. Conservative invalidation is
+        # cheap (one thread's keys) and matches the plan's complete
+        # invalidation set. No-op while the kill-switch is off.
+        invalidate_cached_reads(self._saver, [thread_id])
         # W1 (fix cycle 1): partial-completion accounting. A chunk that
         # comes back with a stop reason (retry exhaustion) or the
         # LIMIT-guard break below both leave residual rows — the pair
@@ -1599,6 +2250,12 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
         # staleness is possible on the sanctioned path.
         self.last_pair_stop_reason = stop_reason
         self.last_pair_chunks_skipped = chunks_skipped
+        # Read-cache re-invalidation, seam 4/4 AFTER-half (fix pass F4):
+        # the chunk loop's awaits span the whole pair deletion — a racing
+        # aget_tuple could have re-put the thread's entry mid-loop; the
+        # post-loop invalidate closes the window (the BEFORE-half at
+        # entry covered only the loop's start).
+        invalidate_cached_reads(self._saver, [thread_id])
         return (total_deleted, total_bytes_freed)
 
     async def _delete_blobs_anti_join_chunk(

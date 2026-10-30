@@ -51,6 +51,43 @@ exposition of the SAME series, never a second measurement.  The alias
 is registered at registry-construction time (cold start still emits
 it) and logs one deprecation line per process at first emission.
 
+* No external dependency.
+* Thread-safe under ``asyncio`` (each accessor takes the lock).
+* Test-pinnable: tests can reset the registry between runs and
+  assert exact counts / bucket observations without HTTP scraping.
+* Render-able: ``render_metrics()`` emits the Prometheus text-exposition
+  format. It is served over HTTP by ``GET /api/metrics``
+  (``daemon/routers/metrics.py`` — a minimal single-endpoint wiring;
+  there is NO Prometheus client dependency and NO scrape framework).
+
+Read instrumentation (plan Track-1 item 4). The registry also carries
+the checkpoint READ surface: ``checkpoint_read_ops_total`` /
+``checkpoint_read_rows_total`` / ``checkpoint_read_bytes_total`` /
+``checkpoint_read_size_bucket_hits_total`` (labeled by op) and the
+``checkpoint_read_size_bytes`` histogram (log2 buckets, 64 KiB → 8 MiB),
+plus ``checkpoint_read_measurement_errors_total`` — the FAIL-OPEN
+tripwire: the measurement never breaks a read, so that counter is the
+only signal that the instrumentation itself broke. The measurement seam
+lives in ``daemon/checkpoint_adapter.py`` (the saver retry proxy).
+Item 6 adds the leak-signal CONSUMER counter
+``checkpoint_leak_signal_total`` (plan Track-1 item 6): the readiness
+leak predicate had an emission but no consumer — this is the alertable
+tally, consumed by ``daemon/services/readiness.py`` (fail-open).
+
+Lifecycle / C-14 compliance. Every accessor path is ``except Exception:``
+or narrower — NEVER ``except BaseException:`` (CancelledError must
+propagate on Python 3.13; per ``daemon/services/message_tap.py:146-220``
+containment rule and requirements.md C-14). The metric surface is a
+side-effect of the saver-op callsite, NOT a control-flow point; a
+counter-collect failure must not abort the saver op.
+
+Compatibility. The module exposes module-level singletons
+(``checkpoint_list_total``, ``saver_op_latency_seconds`` and the
+checkpoint-read surface below) so call sites and tests import them by
+name — no global registration dance.
+A ``reset_for_tests()`` function clears all metrics; tests that need
+isolation call it in their own setup / fixture.
+
 Legacy module-level singletons (``checkpoint_list_total``,
 ``saver_op_latency_seconds``) are preserved because
 ``daemon/checkpoint_perf.py`` imports them — the collectors stay wired.
@@ -1024,6 +1061,236 @@ _vocabulary_version_gauge = register_gauge(
 )
 
 
+# ─── Checkpoint READ instrumentation (plan Track-1 item 4, quick-wins) ──────
+#
+# The read-amplification audit's one adopted fix: instrument the read
+# path at the PROXY chokepoint (``daemon/checkpoint_adapter.py`` —
+# ``_SaverRetryProxy.aget`` / ``.aget_tuple``) so the "bytes per read"
+# and "rows per read" question has a MEASURED answer instead of an
+# estimate from a synthetic bench.
+#
+# WHAT IS MEASURED (and what is NOT):
+#   * bytes — the SIZE of the decoded payload the read returned
+#     (a bounded deep-size walk, the same estimator the resource-monitor
+#     charge seam uses). It is the DECODED size, not the wire size: the
+#     serializer's framing overhead is not included.
+#   * rows — the number of rows the read RETURNED, derived from the
+#     returned structure (1 checkpoint row + one blob row per non-primitive
+#     channel value + one row per pending write). It is a DERIVED count,
+#     not the server's row counter.
+#
+# REGISTRY RE-HOMING (metrics-collection WS-B catch-up merge): the
+# family now registers THROUGH the canonical registry under
+# ``ensemble_checkpoint_*`` names — the registry's frozen ``ensemble_``
+# naming rule does not admit the historical ``checkpoint_read_*`` names
+# as canonical. The historical names ride as deprecated alias
+# expositions (the same one-release alias pattern the FR-5 legacy pair
+# uses: a second exposition of the SAME series, never a second
+# measurement) and remain the PYTHON symbol names the call sites import.
+#
+# The size histogram uses log2 buckets from 64 KiB to 8 MiB — the range
+# the audit measured the payload amplification in (the "2 MB blob"
+# read). Observations outside the range land in the first / ``+Inf``
+# bucket.
+
+#: Log2 size buckets (bytes) for the checkpoint read size histogram —
+#: 64 KiB → 8 MiB. Prometheus-style upper bounds (cumulative). Every
+#: member is an integral power of two — the invariant the bucket-label
+#: vocabulary below and ``_format_le`` rely on.
+READ_SIZE_BUCKETS: tuple[float, ...] = (
+    65536.0, 131072.0, 262144.0, 524288.0,
+    1048576.0, 2097152.0, 4194304.0, 8388608.0,
+)
+
+#: Frozen bucket-label vocabulary for the bucket-hits counter and the
+#: join-by-label surface — derived from ``READ_SIZE_BUCKETS`` plus
+#: ``"+Inf"``. All members are integral, so ``str(int(bound))`` equals
+#: the unified ``_format_le(bound)`` rendering by construction.
+_READ_SIZE_BUCKET_LABELS: frozenset[str] = frozenset(
+    {str(int(bound)) for bound in READ_SIZE_BUCKETS} | {"+Inf"}
+)
+
+#: Canonical counter (aliased exposition: ``checkpoint_read_ops_total``).
+ensemble_checkpoint_read_ops_total = register_counter(
+    "ensemble_checkpoint_read_ops_total",
+    label_keys=("op",),
+    allowed_values={"op": frozenset({"aget", "aget_tuple"})},
+    help=(
+        "Checkpoint read operations observed at the saver retry proxy, "
+        "labeled by op (aget, aget_tuple). One increment per settled read."
+    ),
+)
+ensemble_checkpoint_read_ops_total.alias_names = ["checkpoint_read_ops_total"]
+
+#: Canonical counter (aliased exposition: ``checkpoint_read_rows_total``).
+ensemble_checkpoint_read_rows_total = register_counter(
+    "ensemble_checkpoint_read_rows_total",
+    label_keys=("op",),
+    allowed_values={"op": frozenset({"aget", "aget_tuple"})},
+    help=(
+        "Rows returned by checkpoint reads at the saver retry proxy, "
+        "labeled by op. DERIVED count: 1 checkpoint row + one blob row "
+        "per non-primitive channel value + one row per pending write."
+    ),
+)
+ensemble_checkpoint_read_rows_total.alias_names = ["checkpoint_read_rows_total"]
+
+#: Canonical counter (aliased exposition: ``checkpoint_read_bytes_total``).
+ensemble_checkpoint_read_bytes_total = register_counter(
+    "ensemble_checkpoint_read_bytes_total",
+    label_keys=("op",),
+    allowed_values={"op": frozenset({"aget", "aget_tuple"})},
+    help=(
+        "Decoded payload bytes returned by checkpoint reads at the saver "
+        "retry proxy, labeled by op. Bounded deep-size estimate (the "
+        "resource-monitor charge estimator), not the wire size."
+    ),
+)
+ensemble_checkpoint_read_bytes_total.alias_names = ["checkpoint_read_bytes_total"]
+
+#: Canonical counter (aliased exposition:
+#: ``checkpoint_read_size_bucket_hits_total``).
+ensemble_checkpoint_read_size_bucket_hits_total = register_counter(
+    "ensemble_checkpoint_read_size_bucket_hits_total",
+    label_keys=("op", "bucket"),
+    allowed_values={
+        "op": frozenset({"aget", "aget_tuple"}),
+        "bucket": _READ_SIZE_BUCKET_LABELS,
+    },
+    help=(
+        "Per-observation bucket attribution for checkpoint read sizes, "
+        "labeled by op and bucket (the bucket's upper bound in bytes, or "
+        "+Inf). NOT cumulative — one increment per observation, in the "
+        "bucket the observation fell into."
+    ),
+)
+ensemble_checkpoint_read_size_bucket_hits_total.alias_names = [
+    "checkpoint_read_size_bucket_hits_total"
+]
+
+#: Canonical counter (aliased exposition:
+#: ``checkpoint_read_measurement_errors_total``). No label keys: the
+#: registry renders a no-label counter with no series at its real value
+#: (0) — the always-visible tripwire semantics the quick-wins renderer
+#: had for this counter carry over unchanged.
+ensemble_checkpoint_read_measurement_errors_total = register_counter(
+    "ensemble_checkpoint_read_measurement_errors_total",
+    help=(
+        "Read-instrumentation failures at the saver retry proxy. The "
+        "measurement is FAIL-OPEN (a failure never breaks the read), so "
+        "this counter is the ONLY signal that the instrumentation itself "
+        "stopped working."
+    ),
+)
+ensemble_checkpoint_read_measurement_errors_total.alias_names = [
+    "checkpoint_read_measurement_errors_total"
+]
+
+#: Leak-signal CONSUMER counter (plan Track-1 item 6). The readiness
+#: leak predicate (``GraceTracker._evaluate_leak`` →
+#: ``GraceObservation.leak_signal`` → ``/readyz`` ``detail``) has
+#: published its verdict for every tick since the grace commission,
+#: but nothing alerted on it — the 2026-10-28 idle-in-transaction
+#: incident produced leak signals nobody saw. This is the alertable
+#: tally: ONE increment per readiness tick the predicate reports
+#: ``detected``. Plain (unlabeled) by design: the reason tokens embed
+#: tick counts ("(3 ticks)"), so labeling by reason would explode
+#: series cardinality; the WARN log line carries the reason detail.
+#: Aliased exposition: ``checkpoint_leak_signal_total``.
+ensemble_checkpoint_leak_signal_total = register_counter(
+    "ensemble_checkpoint_leak_signal_total",
+    help=(
+        "Leak-signal fires consumed from the readiness leak predicate. "
+        "One increment per readiness tick the predicate reports "
+        "detected=true. The consumer is FAIL-OPEN: it never affects the "
+        "emitter (the grace verdict and the /readyz detail)."
+    ),
+)
+ensemble_checkpoint_leak_signal_total.alias_names = ["checkpoint_leak_signal_total"]
+
+#: Canonical histogram (aliased exposition: ``checkpoint_read_size_bytes``).
+ensemble_checkpoint_read_size_bytes = register_histogram(
+    "ensemble_checkpoint_read_size_bytes",
+    label_keys=("op",),
+    buckets=READ_SIZE_BUCKETS,
+    allowed_values={"op": frozenset({"aget", "aget_tuple"})},
+    help=(
+        "Checkpoint read payload size in bytes, labeled by op "
+        "(aget, aget_tuple). Log2 buckets from 64 KiB to 8 MiB."
+    ),
+)
+ensemble_checkpoint_read_size_bytes.alias_names = ["checkpoint_read_size_bytes"]
+
+#: Canonical counters (aliased exposition: ``checkpoint_cache_hit_total`` /
+#: ``checkpoint_cache_miss_total``) — the read-cache substrate's
+#: OBSERVABLE-off contract (read-cache plan §4.4/§4.5). Plain
+#: (unlabeled) by design: hit/miss are the only two states, and keeping
+#: them label-free avoids touching any frozen label vocabulary
+#: (``known_label_keys()`` stays byte-identical — no VOCABULARY_VERSION
+#: bump). The counters emit in BOTH switch states: with the cache
+#: ENABLED a read increments hit or miss per consultation; with the
+#: kill-switch OFF every non-bypass read increments miss (disabled is
+#: OBSERVABLE, not silent). Bypass reads (``cache_bypass=True`` — the
+#: readiness sentinel) increment NEITHER: they are deliberate
+#: non-participants, and counting them as misses would make the
+#: hit-rate metric meaningless (the sentinel ticks every 10s).
+ensemble_checkpoint_cache_hit_total = register_counter(
+    "ensemble_checkpoint_cache_hit_total",
+    help=(
+        "Checkpoint read-cache HITS served at the saver retry proxy "
+        "(post-deserialize CheckpointTuple served from the read cache "
+        "without a saver round trip). Increments only while "
+        "CHECKPOINT_READ_CACHE_ENABLED is truthy; 0 in the default-OFF "
+        "substrate state."
+    ),
+)
+ensemble_checkpoint_cache_hit_total.alias_names = ["checkpoint_cache_hit_total"]
+
+ensemble_checkpoint_cache_miss_total = register_counter(
+    "ensemble_checkpoint_cache_miss_total",
+    help=(
+        "Checkpoint read-cache MISSES at the saver retry proxy. One "
+        "increment per non-bypass aget/aget_tuple read that was NOT "
+        "served from the read cache — including EVERY read while "
+        "CHECKPOINT_READ_CACHE_ENABLED is off (default OFF: all misses, "
+        "the observable-off contract). cache_bypass=True reads (the "
+        "readiness sentinel) are excluded."
+    ),
+)
+ensemble_checkpoint_cache_miss_total.alias_names = ["checkpoint_cache_miss_total"]
+
+# Legacy PYTHON symbol names — the same objects under their historical
+# names. Call sites in ``daemon/checkpoint_perf.py`` (the read
+# chokepoint), ``daemon/checkpoint_adapter.py`` (the fail-open
+# tripwire) and ``daemon/services/readiness.py`` (the leak consumer)
+# import these; the DEPRECATED part is the exposition NAME (the
+# alias), not the Python symbol — the same contract the FR-5 legacy
+# pair carries.
+checkpoint_read_ops_total = ensemble_checkpoint_read_ops_total
+checkpoint_read_rows_total = ensemble_checkpoint_read_rows_total
+checkpoint_read_bytes_total = ensemble_checkpoint_read_bytes_total
+checkpoint_read_size_bucket_hits_total = ensemble_checkpoint_read_size_bucket_hits_total
+checkpoint_read_measurement_errors_total = ensemble_checkpoint_read_measurement_errors_total
+checkpoint_leak_signal_total = ensemble_checkpoint_leak_signal_total
+checkpoint_read_size_bytes = ensemble_checkpoint_read_size_bytes
+checkpoint_cache_hit_total = ensemble_checkpoint_cache_hit_total
+checkpoint_cache_miss_total = ensemble_checkpoint_cache_miss_total
+
+
+def read_size_bucket_label(value: float) -> str:
+    """The bucket label (``le``-style) a size observation falls into.
+
+    Returns the upper bound of the FIRST bucket that contains the
+    value, or ``"+Inf"`` when the value is above the largest bucket.
+    The label is the SAME string the histogram renders for its
+    ``_bucket`` lines, so the two surfaces can be joined by label.
+    """
+    for ub in READ_SIZE_BUCKETS:
+        if value <= ub:
+            return _format_le(ub)
+    return "+Inf"
+
+
 # ─── Test-only reset ────────────────────────────────────────────────────────
 
 
@@ -1052,6 +1319,20 @@ def _format_value(value: float) -> str:
 def _format_le(value: float) -> str:
     if value == float("inf"):
         return "+Inf"
+    # Prometheus convention: bucket bounds are floats; emit as "1.0", "0.05"
+    # not as "1" / "5.0e-2".
+    #
+    # INTEGRAL bounds render as plain integers ("65536", "1048576") —
+    # the byte buckets of the checkpoint-read size histogram would
+    # otherwise render in scientific notation ("1.04858e+06"), which is
+    # unreadable for an operator and inconsistent with the byte values
+    # the metric reports. The latency histograms' integral bounds
+    # (1.0 / 5.0 / 10.0) are UNCHANGED by this rule — ``%g`` already
+    # rendered them as "1" / "5" / "10", and ``str(int(...))`` is
+    # identical for every integral bound, so the registry's frozen
+    # bucket-label vocabulary is byte-identical before and after.
+    if value.is_integer():
+        return str(int(value))
     return f"{value:g}"
 
 
@@ -1252,13 +1533,31 @@ __all__ = [
     "DEFAULT_LATENCY_BUCKETS",
     "DEFAULT_PUBLISHER_CADENCE_SECONDS",
     "LEGACY_ALIAS_NAMES",
+    "READ_SIZE_BUCKETS",
     "Metric",
     "RESERVED_LABEL_VALUE",
     "VOCABULARY_VERSION",
+    "checkpoint_leak_signal_total",
     "checkpoint_list_total",
+    "checkpoint_read_bytes_total",
+    "checkpoint_read_measurement_errors_total",
+    "checkpoint_read_ops_total",
+    "checkpoint_read_size_bucket_hits_total",
+    "checkpoint_read_size_bytes",
+    "checkpoint_cache_hit_total",
+    "checkpoint_cache_miss_total",
+    "ensemble_checkpoint_cache_hit_total",
+    "ensemble_checkpoint_cache_miss_total",
+    "ensemble_checkpoint_leak_signal_total",
     "ensemble_checkpoint_list_total",
     "ensemble_checkpoint_op_seconds",
+    "ensemble_checkpoint_read_bytes_total",
+    "ensemble_checkpoint_read_measurement_errors_total",
+    "ensemble_checkpoint_read_ops_total",
+    "ensemble_checkpoint_read_size_bucket_hits_total",
+    "ensemble_checkpoint_read_size_bytes",
     "known_label_keys",
+    "read_size_bucket_label",
     "register_counter",
     "register_gauge",
     "register_histogram",

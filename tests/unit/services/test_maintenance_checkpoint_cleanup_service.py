@@ -509,6 +509,15 @@ class TestExecuteHappyPath:
             "vacuum_full": False,
         }
         assert set(row.summary_json.keys()) == {
+            # Track-1 item 4: the shape gained ONE ADDITIVE key —
+            # ``version_census`` (the per-cycle checkpoint version
+            # census) — but this test MOCKS the cleanup job
+            # (``run_checkpoint_prunes`` is an AsyncMock returning a
+            # hand-built result), so no census was taken and the key is
+            # ABSENT. An absent census is NOT a zero census: the real
+            # job attaches the block (see
+            # ``test_maintenance_run_lock_and_capture.py``'s auto-cycle
+            # case). The four frozen keys keep their shape either way.
             "checkpoint_rows", "writes", "blobs", "duration_ms"
         }
         assert svc._run_lock.in_flight is None  # gate released

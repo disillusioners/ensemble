@@ -1955,31 +1955,30 @@ class InstanceMessagingService:
             )
 
     async def _has_checkpoint(self, instance_id: str) -> bool:
-        """Check if a checkpoint exists for this instance."""
+        """Check if a checkpoint exists for this instance.
+
+        Track-1 item 2 (retry path): the existence check used to run a
+        FULL saver read (``self._checkpointer.aget(config)``) — taking
+        the saver's single ``asyncio.Lock`` and deserializing the whole
+        checkpoint — to answer one boolean. It now uses the checkpoint
+        adapter's EXISTS probe (``has_checkpoint``), which on
+        PostgreSQL runs on the adapter's separate asyncpg pool and never
+        touches the saver lock. Boolean semantics and the fail-soft
+        contract are unchanged.
+
+        The probe lives on the ADAPTER, so it is reached through the
+        manager's PUBLIC ``checkpointer`` property (the adapter
+        instance) — the service's own ``_checkpointer`` property
+        returns the RAW SAVER, which has no ``has_checkpoint``.
+        """
         try:
-            config = {"configurable": {"thread_id": instance_id}}
-            state = await self._checkpointer.aget(config)
-            result = state is not None
-            channel_values = state.get("channel_values", {}) if state else {}
-            msg_count = len(channel_values.get("messages", []))
-            logger.info(f"[RESUME] instance={instance_id[:8]} has_checkpoint={result}, msg_count={msg_count}")
+            adapter = self._manager.checkpointer
+            result = await adapter.has_checkpoint(instance_id)
+            logger.info(f"[RESUME] instance={instance_id[:8]} has_checkpoint={result}")
             return result
         except Exception as e:
             logger.info(f"[RESUME] instance={instance_id[:8]} has_checkpoint=False, exception={type(e).__name__}")
             return False
-
-    async def _get_message_count(self, instance_id: str) -> int:
-        """Get the number of messages in the instance's checkpoint/state."""
-        try:
-            config = {"configurable": {"thread_id": instance_id}}
-            state = await self._checkpointer.aget(config)
-            if state:
-                channel_values = state.get("channel_values", {})
-                messages = channel_values.get("messages", [])
-                return len(messages) if messages else 0
-            return 0
-        except Exception:
-            return 0
 
     def _maybe_trigger_title_generation(self, instance_id: str, message: str, should_trigger: bool) -> None:
         """Fire-and-forget title generation and initiative-message capture if conditions are met."""

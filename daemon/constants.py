@@ -182,8 +182,15 @@ READINESS_LEAK_TICK_THRESHOLD: int = 3
 # and ``limits.checkpoint_pool_timeout_s`` (env
 # ``LIMITS_CHECKPOINT_POOL_TIMEOUT_S``). They feed the
 # ``LimitsConfig.checkpoint_pool_max_size`` / ``.checkpoint_pool_timeout_s``
-# Field defaults (daemon/config.py), which ``daemon/persistence.py`` reads
-# when it constructs the psycopg saver pool.
+# Field defaults (daemon/config.py). The boot-applied YAML Config is the
+# ONLY carrier of the resolved value: the checkpointer factory receives
+# the ensemble.json ``EnsembleConfig`` (NO ``.limits``), so
+# ``InstanceManager.initialize`` THREADS the resolved fields explicitly
+# into ``daemon/persistence.get_checkpointer`` — severed-knob repair D5
+# (plan Track-1 item 5), mirroring the manager engine pool threading
+# below. (Prior to the repair, ``persistence.py`` read
+# ``getattr(config, "limits", None)`` off ``EnsembleConfig`` and every
+# tier silently degraded to these defaults.)
 #
 # SIZING ARITHMETIC (decisions §3d D2 — the formula, re-derivable):
 #   concurrent_checkpoint_writers = min(limits.llm_concurrency,

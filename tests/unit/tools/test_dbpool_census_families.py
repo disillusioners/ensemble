@@ -9,7 +9,7 @@ materialisation note assigns that path to the phase-3 implementer).
 What this pin asserts: the borrow-site census over ``daemon/``
 reproduces the **executed instrument's** family counts exactly —
 **A=438**, **B=175**, **C=4** at the four named manual-borrow sites,
-**D=148**, **E=14**, **F=2** — and the total **781**.
+**D=150**, **E=15**, **F=2** — and the total **784**.
 
 **Reconciliation with the audit artifact** (T-H2; the instrument, this
 pin and ``audit-findings.md`` are one triangle):
@@ -33,9 +33,11 @@ pin and ``audit-findings.md`` are one triangle):
   2026-10-29 §7.3 re-baseline** (see the re-baseline record below) —
   the second site is the metrics census's own one-shot connect, same
   pattern, audited with all four criteria code-cited.
-* Consequently the total is **781**, not the artifact's 779: the
+* Consequently the total is **784**, not the artifact's 779: the
   difference is exactly the two F sites the old instrument could not
-  see. Nothing else moved.
+  see (F 0 → 2) plus the checkpoint lane's three audited borrow sites
+  (D +2, E +1) — both re-baselines are recorded below. Nothing else
+  moved.
 
 **Base vs HEAD (audit-method §7.2 diff gate):** the SAME fixed
 instrument run at base ``19fc11c8b`` yields the IDENTICAL numbers
@@ -43,6 +45,73 @@ instrument run at base ``19fc11c8b`` yields the IDENTICAL numbers
 added **ZERO** borrow sites — the delta is empty, so no §7.3
 classification table is required. Any family count delta from here on
 is a FAILURE until classified per §7.3 — the diff IS the failing step.
+
+**§7.3 RE-BASELINE (2026-10-29 — the checkpoint lane's THREE borrow
+sites, individually audited; family D 148 → 150, family E 14 → 15,
+total 781 → 784):** the checkpoint-read-path lane (merged into
+``latest`` at ``4c8d2f105``) added THREE borrow sites to ``daemon/``.
+**CODE DRIFT** (not scanner drift — the materialised instrument
+``scripts/audit/borrow_census.py`` is UNCHANGED, byte-for-byte, by
+this re-baseline; §5.3's "the scanner definition is the contract"
+therefore still holds and the baseline, not the scanner, is what
+moved). Classification table of three:
+
+* ``daemon/services/checkpoint_prune.py:493`` — family **D** —
+  **CLEAN** — ``with engine.connect() as conn:`` inside
+  ``_analyze_one_table`` (:483-494), the post-prune ``ANALYZE`` sweep.
+  (i) **NEVER POOLED** — the engine is the DEDICATED per-cycle
+  autocommit engine built by ``create_vacuum_engine``
+  (``daemon/services/vacuum_engine.py:54-88``), a **NullPool** engine
+  whose ``connect_args`` carry the bounded ``statement_timeout`` /
+  ``lock_timeout`` / ``idle_in_transaction_session_timeout`` triple
+  (``checkpoint_prune.py:574-580``); (ii) **BOUNDED** — server-side
+  ``statement_timeout`` = ``VACUUM_STATEMENT_TIMEOUT_MS`` (10 min,
+  ``daemon/constants.py:570``) and ``lock_timeout`` =
+  ``VACUUM_LOCK_TIMEOUT_MS`` (45 s, ``constants.py:571``);
+  (iii) **GUARANTEED CLOSED on every path** — a ``with`` form, so it
+  closes by construction (and the engine is ``dispose()``-d in the
+  caller's ``finally``, :608-617); (iv) **NEVER HANDED OUT** — the
+  connection is function-local and only the ``ANALYZE`` result leaves
+  it. It is deliberately NOT the hot psycopg saver pool and NOT the
+  adapter's shared asyncpg pool (:434-439).
+* ``daemon/services/checkpoint_prune.py:693`` — family **D** —
+  **CLEAN** — ``with engine.connect() as conn:`` inside
+  ``_collect_blob_bytes_sync`` (:691-695), the per-channel blob byte
+  census. Same dedicated NullPool per-cycle engine and the same
+  bounded timeout triple (:749-755), and the engine is ``dispose()``-d
+  in the caller's ``finally`` (:784-791); a ``with`` form ⇒ closes by
+  construction; the connection is function-local and only the fetched
+  rows leave it.
+* ``daemon/checkpoint_adapter.py:1458`` — family **E** —
+  **CLEAN** — ``async with self._pool.acquire() as conn:`` inside
+  ``has_checkpoint`` (:1427-1464), the ``EXISTS`` probe that moved the
+  retry-path existence check OFF the saver's single ``asyncio.Lock``
+  (checkpoint-read-path plan Track-1 item 2, commit ``d9ece2fee``).
+  (i) **NEVER A MANUAL CHECKOUT** — an ``async with`` form ⇒ it
+  returns to the pool by construction, exactly like the 12 sibling
+  ``self._pool.acquire()`` sites already in this file; (ii)
+  **BOUNDED** — the asyncpg pool's own checkout budget plus the
+  server-side bounds the pool is configured with; (iii)
+  **GUARANTEED CLOSED on every path** — the ``async with`` exits on
+  both the success and the exception path; (iv) **NEVER HANDED OUT**
+  — the connection is function-local and only the fetched row leaves
+  it. NOTE: this probe opens **NO explicit transaction** (unlike the
+  sibling ``_delete_blobs_anti_join_chunk`` site, which wraps its work
+  in ``conn.transaction()``) ⇒ it contributes **no** idle-in-transaction
+  hold — the adapter pool's transaction-shape idle-in-txn item is the
+  db-pool lane's routed R-9 (decisions.md D-58), not this site.
+
+All three sites are ``with`` / ``async with`` forms ⇒ **0 LEAK, 0
+unclosed**; the audit conclusion is unchanged. The re-baseline names
+EXACTLY these three sites (see :data:`REBASELINED_DELTA_SITES`) and
+nothing broader — the **drift rule STANDS**: any FOURTH borrow site in
+``daemon/`` still REDs the family counts until individually audited.
+
+The audited family-D baseline becomes **D=150** and family-E becomes
+**E=15**; the total becomes **784** (438 + 175 + 4 + 150 + 15 + 2).
+Families **A**, **B**, **C** and **F** are UNCHANGED — the checkpoint
+lane added no session borrow, no manual borrow, and no raw-psycopg
+borrow.
 
 **§7.3 RE-BASELINE (2026-10-29 — one delta site, audited BENIGN on
 all four criteria; family F 1 → 2, total 780 → 781):** the lane's
@@ -106,7 +175,9 @@ Run (house form)::
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -127,8 +198,39 @@ _SCANNER_PATH = _REPO_ROOT / "scripts" / "audit" / "borrow_census.py"
 #: The audit artifact's A=613 is this instrument's A+B COMBINED
 #: (438 + 175) and its F=0 was a SCANNER GAP (no F detector); see the
 #: module docstring.
-AST_BASELINE = {"A": 438, "B": 175, "C": 4, "D": 148, "E": 14, "F": 2}
-AST_BASELINE_TOTAL = 781
+AST_BASELINE = {"A": 438, "B": 175, "C": 4, "D": 150, "E": 15, "F": 2}
+AST_BASELINE_TOTAL = 784
+
+#: The THREE borrow sites the checkpoint lane added — the §7.3
+#: re-baseline's named classification table (module docstring above).
+#: Each row is (family, path, the ENCLOSING QUALIFIED FUNCTION, the
+#: audited count of sites inside that function).
+#:
+#: Keyed on PATH + QUALIFIED FUNCTION, not on a line number: the lines
+#: drift with every upstream merge, and one file can carry MANY borrows
+#: of the same statement shape (the adapter holds 13
+#: ``self._pool.acquire()`` sites — 12 pre-existing plus this one). The
+#: qualified function is the auditable unit — it is what the §7.3
+#: classification table names.
+#:
+#: The counts here are the §7.3 DELTA legs, not the family totals — the
+#: totals stay gated by AST_BASELINE above. A FOURTH borrow site in
+#: ``daemon/`` still REDs the family counts until individually audited.
+REBASELINED_DELTA_SITES = (
+    ("D", "daemon/services/checkpoint_prune.py", "_analyze_one_table", 1),
+    (
+        "D",
+        "daemon/services/checkpoint_prune.py",
+        "_collect_blob_bytes_sync",
+        1,
+    ),
+    (
+        "E",
+        "daemon/checkpoint_adapter.py",
+        "PostgresCheckpointerAdapter.has_checkpoint",
+        1,
+    ),
+)
 
 #: The TWO family-F sites — audited-clean one-shot psycopg.connect
 #: calls (contract F5.3: closes in a finally, holds no pool, cannot
@@ -218,6 +320,68 @@ def _pattern_count(pattern: str) -> int:
     return len(result.stdout.splitlines())
 
 
+def _per_site_counts(family: str) -> dict[tuple[str, str], int]:
+    """Enumerate the per-(path, QUALIFIED FUNCTION) borrow sites of
+    family D or E.
+
+    Uses the MATERIALISED INSTRUMENT'S OWN predicates
+    (``scripts/audit/borrow_census.py`` — ``_is_connect_call`` /
+    ``_is_acquire_call``), so this list can never drift from the
+    definition that produces the counted totals (audit-method §3.1:
+    "the scanner definition is the contract, not the aggregate
+    number"). The instrument exposes per-site detail for family C
+    only; families D and E need the same naming for the §7.3
+    re-baseline record, so this helper re-derives it THROUGH the
+    instrument's own predicates — not through a second, competing
+    definition.
+
+    Sites are keyed on the ENCLOSING QUALIFIED FUNCTION
+    (``Class.method`` for a method, ``func`` for a module-level
+    function), NOT on the statement text and NOT on a line number: one
+    file can carry MANY borrows of the same statement shape (the
+    adapter holds 13 ``self._pool.acquire()`` sites, 12 of them
+    pre-existing), and lines drift with every upstream merge. The
+    qualified function is the auditable unit — it is what the §7.3
+    classification table names.
+
+    Returns a map ``(relpath, qualified_function) -> count``.
+    """
+    module = _load_scanner()
+    root = str(_REPO_ROOT)
+    is_target = (
+        module._is_connect_call if family == "D" else module._is_acquire_call
+    )
+    node_kind = ast.With if family == "D" else ast.AsyncWith
+    counts: dict[tuple[str, str], int] = {}
+
+    def visit(node: ast.AST, stack: list[str]) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                qual = stack + [child.name]
+                for sub in ast.walk(child):
+                    if isinstance(sub, node_kind):
+                        for item in sub.items:
+                            if is_target(item.context_expr):
+                                key = (os.path.relpath(path, root), ".".join(qual))
+                                counts[key] = counts.get(key, 0) + 1
+                visit(child, qual)
+            elif isinstance(child, ast.ClassDef):
+                visit(child, stack + [child.name])
+            else:
+                visit(child, stack)
+
+    for dirpath, dirnames, filenames in os.walk(os.path.join(root, "daemon")):
+        dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+        for fn in sorted(filenames):
+            if not fn.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, fn)
+            with open(path, encoding="utf-8") as fh:
+                tree = ast.parse(fh.read())
+            visit(tree, [])
+    return counts
+
+
 class TestGAstCensusFamilies:
     """G-A — the census families match the AST baseline."""
 
@@ -241,6 +405,27 @@ class TestGAstCensusFamilies:
             f"G-A: the scanner-independent total drifted — baseline "
             f"{AST_BASELINE_TOTAL}, observed {total}"
         )
+        # §7.3: the re-baseline NAMES its delta sites — the three
+        # borrow sites the checkpoint lane added (module docstring's
+        # classification table). The family counts above gate the
+        # totals; this leg names WHERE the audited delta sites are, so
+        # a future delta is attributable to a file and the audit
+        # record stays truthful. Line numbers are deliberately NOT
+        # pinned (they drift with every upstream merge — the same
+        # contract the family-C pin uses). Enumeration rides the
+        # INSTRUMENT'S OWN predicates (_per_site_counts), never a
+        # second competing definition of the family.
+        for family, rel, statement, expected_sites in REBASELINED_DELTA_SITES:
+            observed_sites = _per_site_counts(family).get((rel, statement), 0)
+            assert observed_sites == expected_sites, (
+                f"G-A: the §7.3 re-baselined family-{family} site "
+                f"{rel} ({statement}) drifted — expected "
+                f"{expected_sites} audited site(s), observed "
+                f"{observed_sites}. Re-audit the delta per "
+                "audit-method.md §7.3 (classify every site, then "
+                "re-baseline only with an explicit note) before "
+                "touching REBASELINED_DELTA_SITES."
+            )
 
     def test_family_c_is_exactly_the_four_named_sites(self):
         _counts, family_c, _errs = _run_scan()

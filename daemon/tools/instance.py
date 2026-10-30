@@ -1946,8 +1946,11 @@ def _validate_subtree_target(
 # and the structured marker is the authoritative signal.
 
 # Cap on the max_instances input clamp. Above this we silently clamp to
-# 100 (matches the truncation-warning copy and is the documented ceiling).
-_SUBTREE_MAX_INSTANCES_CAP = 100
+# 25 (matches the truncation-warning copy and is the documented ceiling).
+# Track-1 quick-win (checkpoint read-path plan, item 1): lowered 100 → 25
+# to bound the per-subtree checkpoint-read fan-out; the tool's DEFAULT
+# ``max_instances=20`` is unchanged.
+_SUBTREE_MAX_INSTANCES_CAP = 25
 # Cap on the limit input clamp. Above this we silently clamp to 500.
 # Distinct from max_instances — limit is per-message, max_instances is
 # per-subtree-instance.
@@ -5079,7 +5082,7 @@ Example outputs::
                 f"must be >= 0 (got {cap_first_N_per_instance})."
             )
         # W4 — input upper-bound clamps (silent, not errors). The
-        # truncation warning at step 6 promises "<= 100" for
+        # truncation warning at step 6 promises "<= 25" for
         # ``max_instances``; the helper enforces it here so the warning
         # is literally true against the working cap.
         if max_instances > _SUBTREE_MAX_INSTANCES_CAP:
@@ -5215,7 +5218,46 @@ Example outputs::
             ]
 
         # ── 5. Per-instance read loop (get_messages once per iid) ───
-        collected: list[tuple[str, dict]] = []  # (instance_id, msg)
+        # Track-1 quick-win (checkpoint read-path plan, item 1): the
+        # per-instance fetches run CONCURRENTLY via asyncio.gather
+        # bounded by a Semaphore(5) — the same pattern as the status
+        # filter at step 4 above. Invariants preserved exactly:
+        #   (a) EXACTLY ONE checkpoint read per instance — the
+        #       child_instance_id filter is applied BEFORE scheduling
+        #       so filtered-out instances are NEVER read, and each
+        #       scheduled instance gets exactly one ``get_messages``
+        #       call (scheduling change only — no extra reads, no
+        #       skipped instances);
+        #   (b) DETERMINISTIC RESULT ORDER — ``asyncio.gather``
+        #       preserves input-sequence order, so ``fetch_results``
+        #       lines up 1:1 with the working set (caller-first, then
+        #       lexicographic — identical to the historical sequential
+        #       walk). No re-sort, no re-dedupe.
+        read_sem = asyncio.Semaphore(5)
+
+        async def _fetch_instance_messages(iid: str) -> tuple[str, list | None]:
+            async with read_sem:
+                # ``await asyncio.sleep(0)`` yields control to the
+                # event loop so the ``Semaphore(5)`` actually
+                # interleaves concurrent reads — without it, a purely
+                # sync body acquires+releases in the same tick and the
+                # semaphore is decorative. Behavior-neutral: does not
+                # change correctness or output; only makes the
+                # concurrency limit real.
+                await asyncio.sleep(0)
+                try:
+                    return iid, await manager.get_messages(iid)
+                except Exception as e:
+                    logger.warning(
+                        "subtree_messages: get_messages(%s) failed: %s: %s",
+                        iid, type(e).__name__, e,
+                    )
+                    # Sentinel: mirrors the sequential behavior — this
+                    # instance is skipped below, the whole query still
+                    # succeeds.
+                    return iid, None
+
+        fetch_ids: list[str] = []
         for iid in working_set:
             # child_instance_id filter BEFORE the read so filtered-out
             # instances are NEVER read. The EXACTLY-one-read-per-
@@ -5225,16 +5267,22 @@ Example outputs::
             if child_filter is not None and child_filter != "":
                 if iid != child_filter:
                     continue
+            fetch_ids.append(iid)
+
+        # ``asyncio.gather`` returns results in ARGUMENT order — the
+        # pairing below is positional and deterministic.
+        fetch_results = await asyncio.gather(
+            *[_fetch_instance_messages(iid) for iid in fetch_ids]
+        )
+
+        collected: list[tuple[str, dict]] = []  # (instance_id, msg)
+        for iid, msgs in fetch_results:
+            if msgs is None:
+                # Fetch failed — warning already logged inside the
+                # fetch; skip this instance (sequential behavior).
+                continue
 
             is_descendant = iid != current_instance_id
-            try:
-                msgs = await manager.get_messages(iid)
-            except Exception as e:
-                logger.warning(
-                    "subtree_messages: get_messages(%s) failed: %s: %s",
-                    iid, type(e).__name__, e,
-                )
-                continue
             if not isinstance(msgs, list):
                 msgs = []
 
@@ -5297,7 +5345,7 @@ Example outputs::
                 f"WARNING: subtree has {len(sorted_subtree)} "
                 f"instances; only the first {max_instances} (sorted "
                 "by instance_id) were queried. Increase max_instances "
-                "(<= 100) to inspect the rest, or split the query "
+                "(<= 25) to inspect the rest, or split the query "
                 "across multiple targets."
             )
 
@@ -5446,7 +5494,10 @@ config is built inside ``get_instance_messages``
 (``daemon/persistence.py:309``). The older graph-state path is
 explicitly NOT used here — that API does not exist; this tool reads via
 the saver/checkpoint machinery only (regression guard against the
-broken API reappearing).
+broken API reappearing). The per-instance reads are SCHEDULED
+concurrently — ``asyncio.gather`` bounded by ``Semaphore(5)`` — but the
+exactly-once-per-instance and deterministic-output-order invariants are
+unchanged (gather preserves argument order; Track-1 quick-win, item 1).
 
 When ``filters.child_instance_id`` is set, the membership check runs
 BEFORE ``get_messages`` so filtered-out instances are never read —
@@ -5496,11 +5547,12 @@ Token safety
     misconfigured long tool name or a message with many tool calls
     cannot dominate the rendered line (pre-merge security-council
     batch W3).
-  * Per-instance cap: ``max_instances=20`` (default). When the subtree
-    exceeds the cap, the first 20 instances (caller FIRST, then
-    lexicographic by ``instance_id`` — caller is never pushed off the
-    slice by lexicographic ordering) are returned + a warning. The
-    caller is prioritized via the composite sort key
+  * Per-instance cap: ``max_instances=20`` (default). Values above the
+    hard clamp ``_SUBTREE_MAX_INSTANCES_CAP=25`` are silently clamped
+    to 25. When the subtree exceeds the cap, the first 20 instances
+    (caller FIRST, then lexicographic by ``instance_id`` — caller is
+    never pushed off the slice by lexicographic ordering) are returned
+    + a warning. The caller is prioritized via the composite sort key
     ``(x != caller, x)`` (S1).
   * Output ceiling: ~8000 chars. Tail-truncated with a warning; reduce
     ``limit``, lower ``max_instances``, or set ``summary=True`` to fit.
@@ -5528,8 +5580,8 @@ Args:
         return zero message rows.
     offset: Global offset across the merged collection (default 0).
     max_instances: Total instance cap (default 20). Values above
-        ``_SUBTREE_MAX_INSTANCES_CAP=100`` are silently clamped to 100
-        (W4); the truncation-warning copy "(<= 100)" is literally
+        ``_SUBTREE_MAX_INSTANCES_CAP=25`` are silently clamped to 25
+        (W4); the truncation-warning copy "(<= 25)" is literally
         true against the working cap. Non-positive values are an ERROR.
     cap_first_N_per_instance: When > 0, take only the first N messages
         per instance before global pagination (default 0 = no
@@ -5836,7 +5888,7 @@ Ordering, caps, filter
     (sort key ``(x != caller, x)`` — the subtree_messages S1 lesson).
   * ``max_instances`` (default 50) caps rows; values above 200 are
     silently clamped to 200 (statuses are one short row each, hence
-    the higher cap vs subtree_messages' 100). NO pagination in v1 —
+    the higher cap vs subtree_messages' 25). NO pagination in v1 —
     a truncation WARNING names the true subtree size and points at
     the target drill-down.
   * ``status_filter`` (default ``"all"``): lowercased EXACT match
