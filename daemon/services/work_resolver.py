@@ -1178,6 +1178,8 @@ class WorkResolverService:
         status: str | None = None,
         kind: str | None = None,
         root_only: bool = True,
+        limit: int | None = None,
+        ensure_job_ids: set | None = None,
     ) -> list[WorkRecord]:
         """List work records matching the supplied filters, newest first.
 
@@ -1350,174 +1352,176 @@ class WorkResolverService:
 
         records: list[WorkRecord] = []
 
+        # Pre-conversion accumulation (D-42/D-30, wi-3f5bea95 Phase 3):
+        # collect (sort_key, payload) tuples from BOTH branches in CURRENT
+        # APPEND ORDER (Task block first, then Job block) so the tie-break
+        # is preserved. Conversion (and the post-conversion Task filters)
+        # happens ONLY after the sort + slice, so an explicit ``limit``
+        # bounds the per-row conversion count. Job-branch ``root_only``
+        # child filter stays PRE-accumulation (D-72).
+        source_rows: list[tuple] = []
+
         # Translate kind filter into per-table predicates.
         # Phase 4 partial collapse (2026-07-06): the only valid kind
         # values are ``"job"`` / ``"report"`` (and ``None`` for the
-        # union). ``"turn"`` / ``"task"`` are rejected by the router
-        # and should never reach this method; we still defend against
-        # them by mapping them to "no records" so a buggy caller does
-        # not silently fall back to the union.
-        #
-        # ``"job"`` excludes the Task side entirely; ``"report"``
-        # excludes the JobItem side. ``None`` queries both.
+        # union). See the docstring above.
         query_tasks_table = kind is None or kind == "report"
         query_jobs_table = kind is None or kind == "job"
 
         # Map kind filter to a task_type set for the Task SELECT.
-        # Phase 4 partial collapse: the Task query is ALWAYS report-only.
-        # ``kind="report"`` filters to report task types; ``kind=None``
-        # (union path) returns JobItems + all report Tasks but never
-        # process_message Tasks (which are now JobItems). Router
-        # rejects ``kind="turn"`` / ``kind="task"`` with HTTP 400; if
-        # they reach here defensively, no Task rows match them anyway.
         task_type_filter: set[str] = set(REPORT_TASK_TYPES)
 
         if query_tasks_table:
-            # Task table has no ``project_id`` column — the filter is
-            # applied here against the WorkRecord (which already pulled
-            # project_id from the matching instance row in
-            # ``_task_to_record``). JobItem keeps its SQL-level filter
-            # in ``_query_jobs`` because it does carry the column.
-            #
-            # P-A: ``root_only`` is applied HERE, against the
-            # already-fetched instance, so we don't pay a second
-            # round-trip to evaluate the parent_id guard. The lookup
-            # is reused by ``_task_to_record`` via the optional
-            # ``instance=`` parameter.
-            #
-            # Phase 4 partial collapse: the previous Task fetch
-            # broadening (include ``completed`` so the
-            # active-orchestration promotion could flip eligible rows
-            # to ``processing``) is GONE — promotion is deleted and
-            # turns are JobItems, so the broadened fetch is no longer
-            # needed. The DB Task fetch now applies the source-status
-            # filter verbatim.
             tasks = self._query_tasks(instance_id, source_statuses, task_type_filter)
+            task_instance_ids = {
+                t.instance_id for t in tasks if t.instance_id is not None
+            }
+            task_instances_by_id, _task_degraded = self._batch_instances(
+                task_instance_ids
+            )
             for task in tasks:
-                instance = self._lookup_instance(task.instance_id)
-                # Reviewer S2: report tasks are parent-bound (their
-                # ``Task.instance_id`` is set to the ROOT instance by
-                # ``child_reports.py:649-656``), so this guard only
-                # excludes child-instance ``process_report`` Tasks —
-                # but in practice reports are always parent-bound so
-                # they always survive ``root_only=True``.
-                if root_only and instance is not None and instance.parent_id:
-                    continue
-                record = self._task_to_record(task, instance=instance)
-                if project_id is not None and record.project_id != project_id:
-                    continue
-                records.append(record)
+                instance = (
+                    task_instances_by_id.get(task.instance_id)
+                    if task.instance_id is not None
+                    else None
+                )
+                ca = _parse_iso_datetime(getattr(task, "created_at", None))
+                source_rows.append(
+                    (_normalize_sort_key(ca), "task", task, instance)
+                )
+
+        _patch_jobs = None
+        _patch_instances_by_id = {}
+        _patch_mission_fields_by_id = {}
+        _patch_task_timing_by_work_id = {}
+        _patch_absent_ids = set()
 
         if query_jobs_table:
             jobs = self._query_jobs(project_id, instance_id, job_status_filters)
             if jobs:
-                # Phase 1 (Job as Queue Proxy): batch-fetch Instance rows
-                # for all distinct ``job.instance_id`` values so
-                # ``_job_to_record`` doesn't N+1 the lookup. Each JobItem
-                # becomes a single ``SELECT … WHERE instance_id IN (...)``
-                # against the instances table — same pattern used by
-                # ``_batch_child_instance_ids`` below for the ``root_only``
-                # guard.
                 instance_ids = {
                     j.instance_id for j in jobs if j.instance_id is not None
                 }
-                instances_by_id = self._batch_instances(instance_ids)
-                # S4 batching fix (2026-09-02, mission-class WS3):
-                # pre-compute the whole page's mission fields with ONE
-                # JobItem SELECT. Without this, ``_job_to_record`` runs
-                # ``_mission_fields_for_instance`` per row — one
-                # JobItem SELECT per row on the ``GET /api/jobs`` /
-                # ``GET /api/work`` list path. Engine-bound O(1)-per-
-                # page budget pinned by
-                # ``tests/unit/services/test_work_resolver_query_budget.py``.
+                instances_by_id, _degraded = self._batch_instances(instance_ids)
+                if not _degraded:
+                    absent_ids = instance_ids - set(instances_by_id.keys())
+                else:
+                    absent_ids = set()
                 mission_fields_by_id = self._batch_mission_fields(
                     instances_by_id
                 )
-                # D1 timing batch (tz fix, Phase 3): ONE Task SELECT
-                # for the whole page's job_ids so started_at /
-                # completed_at source from the Task rows without a
-                # per-row lookup (S4 query-budget pattern).
                 task_timing_by_work_id = (
                     self._task_repo.get_timing_by_work_ids(
                         {j.job_id for j in jobs}
                     )
                 )
+                _patch_jobs = jobs
+                _patch_instances_by_id = instances_by_id
+                _patch_mission_fields_by_id = mission_fields_by_id
+                _patch_task_timing_by_work_id = task_timing_by_work_id
+                _patch_absent_ids = absent_ids
             else:
                 instances_by_id = {}
+                absent_ids = set()
                 mission_fields_by_id = {}
                 task_timing_by_work_id = {}
+            _patch_jobs = jobs if jobs else None
+            _patch_instances_by_id = instances_by_id
+            _patch_mission_fields_by_id = mission_fields_by_id
+            _patch_task_timing_by_work_id = task_timing_by_work_id
+            _patch_absent_ids = absent_ids
             if root_only and jobs:
-                # Batch-resolve which of the JobItems' backing
-                # instances are children (parent_id IS NOT NULL).
-                # One SQL round-trip instead of N+1; the result is
-                # the small set of child instance_ids which we then
-                # use to drop the corresponding JobItem rows.
-                # JobItems with ``instance_id IS NULL`` (queue-stage,
-                # not yet dispatched) have no parent relationship and
-                # are kept — they ARE the jober's management surface.
                 child_instance_ids = self._batch_child_instance_ids(
                     {j.instance_id for j in jobs if j.instance_id is not None}
                 )
-                records.extend(
-                    self._job_to_record(
-                        j,
-                        instance=instances_by_id.get(j.instance_id),
-                        mission_fields=mission_fields_by_id.get(j.instance_id),
-                        task_timing=task_timing_by_work_id.get(j.job_id),
+                for j in jobs:
+                    if j.instance_id is not None and j.instance_id in child_instance_ids:
+                        continue
+                    ca = _parse_iso_datetime(getattr(j, "created_at", None))
+                    source_rows.append(
+                        (
+                            _normalize_sort_key(ca),
+                            "job",
+                            j,
+                            instances_by_id,
+                            mission_fields_by_id,
+                            task_timing_by_work_id,
+                            absent_ids,
+                        )
                     )
-                    for j in jobs
-                    if j.instance_id is None or j.instance_id not in child_instance_ids
-                )
             else:
-                records.extend(
-                    self._job_to_record(
-                        j,
-                        instance=instances_by_id.get(j.instance_id),
-                        mission_fields=mission_fields_by_id.get(j.instance_id),
-                        task_timing=task_timing_by_work_id.get(j.job_id),
+                for j in jobs:
+                    ca = _parse_iso_datetime(getattr(j, "created_at", None))
+                    source_rows.append(
+                        (
+                            _normalize_sort_key(ca),
+                            "job",
+                            j,
+                            instances_by_id,
+                            mission_fields_by_id,
+                            task_timing_by_work_id,
+                            absent_ids,
+                        )
                     )
-                    for j in jobs
+
+        # sort (stable) by created_at DESC, append order as tie-break
+        source_rows.sort(key=lambda r: r[0], reverse=True)
+
+        # slice pre-conversion
+        if limit is not None and limit >= 0:
+            sliced = source_rows[:limit]
+        else:
+            sliced = source_rows
+
+        # convert only the slice
+        for row in sliced:
+            kind_tag = row[1]
+            if kind_tag == "task":
+                _task = row[2]
+                _instance = row[3]
+                # post-conversion root_only guard (disclosed)
+                if root_only and _instance is not None and _instance.parent_id:
+                    continue
+                record = self._task_to_record(_task, instance=_instance)
+                if project_id is not None and record.project_id != project_id:
+                    continue
+                records.append(record)
+            else:
+                j = row[2]
+                _instances_by_id = row[3]
+                _mission_fields_by_id = row[4]
+                _task_timing_by_work_id = row[5]
+                _absent_ids = row[6]
+                record = self._job_to_record(
+                    j,
+                    instance=_instances_by_id.get(j.instance_id),
+                    mission_fields=_mission_fields_by_id.get(j.instance_id),
+                    task_timing=_task_timing_by_work_id.get(j.job_id),
+                    instance_absent=(j.instance_id in _absent_ids),
                 )
+                records.append(record)
 
-        # Phase 4 partial collapse (2026-07-06): the previous
-        # Task-turn deduplication, F10 status-drift warning, and
-        # active-orchestration status promotion are ALL removed.
-        # Turns are no longer Task rows (they are JobItems from the
-        # entry point on), so:
-        #
-        # * **P-C(i) dedup** — gone. JobItems now surface as their
-        #   own ``kind="job"`` records; there are no
-        #   ``kind="turn"`` Task rows to suppress.
-        # * **F10 drift warning** — gone. The previous code logged
-        #   when a dropped turn's status disagreed with the
-        #   shadowing JobItem's status. With no dedup there is no
-        #   drift to detect; JobFeedbackObserver still keeps
-        #   JobItem statuses authoritative (via
-        #   ``_job_to_record``), but no warning is needed because
-        #   the surface now shows only one row per logical work
-        #   unit by construction.
-        # * **Active-orchestration promotion** — gone. JobItem
-        #   ``kind="job"`` records source their status from the
-        #   joined Instance row in ``_job_to_record`` (Phase 1,
-        #   Job as Queue Proxy). Report Tasks (``kind="report"``)
-        #   keep their own ``Task.status`` (they are
-        #   parent-bound delivery records, not active
-        #   orchestrations), so promotion is unnecessary for them
-        #   too.
-        #
-        # The single-record ``resolve_work`` path is unaffected by
-        # any of these deletions — Task-side record conversion in
-        # ``_task_to_record`` still works for any
-        # ``process_report`` / ``send_report`` row a caller
-        # resolves directly.
+        # Patch-up (D-29/D-69): ensure page-jobs (ensure_job_ids) are
+        # present even when sliced out of the top-N. Uses the already
+        # computed batch maps — NO additional DB statements.
+        if ensure_job_ids:
+            present_ids = {r.work_id for r in records}
+            jobs_by_id = {j.job_id: j for j in (_patch_jobs or [])}
+            for jid in ensure_job_ids:
+                if jid in present_ids:
+                    continue
+                j = jobs_by_id.get(jid)
+                if j is None:
+                    continue
+                record = self._job_to_record(
+                    j,
+                    instance=_patch_instances_by_id.get(j.instance_id),
+                    mission_fields=_patch_mission_fields_by_id.get(j.instance_id),
+                    task_timing=_patch_task_timing_by_work_id.get(j.job_id),
+                    instance_absent=(j.instance_id in _patch_absent_ids),
+                )
+                records.append(record)
 
-        # Sort newest-first. Use ``_normalize_sort_key`` to coerce
-        # every key to tz-aware UTC — Task rows come back from SQLite
-        # as naive datetimes (the sqlite3 default datetime adapter
-        # drops tz info on round-trip) while JobItem rows come back
-        # as parsed ISO strings that are tz-aware; Python refuses to
-        # compare the two without normalisation.
-        records.sort(key=lambda r: _normalize_sort_key(r.created_at), reverse=True)
         return records
 
     # ── Private helpers ───────────────────────────────────────────────────
@@ -1601,6 +1605,7 @@ class WorkResolverService:
         mission_fields: "tuple[str | None, int | None, str | None] | None" = None,
         task_timing: "tuple[datetime | None, datetime | None] | None" = None,
         task: "Task | None" = None,
+        instance_absent: bool = False,
     ) -> WorkRecord:
         """Build a :class:`WorkRecord` from a JobItem row.
 
@@ -1775,7 +1780,7 @@ class WorkResolverService:
                 job.admission_state == AdmissionState.ACTIVE.value
                 and job.instance_id is not None
             ):
-                if instance is None:
+                if instance is None and not instance_absent:
                     instance = self._lookup_instance(job.instance_id)
                 if instance is not None:
                     status = canonicalize_status(instance.status)
@@ -1843,7 +1848,7 @@ class WorkResolverService:
             # the same pattern the existing active-state path already
             # uses (defensive contract; see the message_metadata repo
             # access precedent referenced in the Fix C spec).
-            if instance is None:
+            if instance is None and not instance_absent:
                 instance = self._lookup_instance(job.instance_id)
             if instance is not None:
                 mission_liveness = canonicalize_status(instance.status)
@@ -1866,7 +1871,7 @@ class WorkResolverService:
             # re-discover ``None`` per-row.
             mission_id, mission_epoch, mission_terminal_reason = mission_fields
         else:
-            if instance is None and job.instance_id is not None:
+            if instance is None and job.instance_id is not None and not instance_absent:
                 # Single-row ``resolve_work`` path — no pre-fetched
                 # instance yet. Look it up lazily before consulting
                 # ``MissionResolver`` so the mission fields (and the
@@ -2368,7 +2373,7 @@ class WorkResolverService:
     def _batch_instances(
         self,
         instance_ids: set[str | None],
-    ) -> dict[str, "Instance"]:
+    ) -> tuple[dict[str, "Instance"], bool]:
         """Return a ``{instance_id: Instance}`` map for the requested ids.
 
         Phase 1 (Job as Queue Proxy): one batched SELECT replaces the
@@ -2401,18 +2406,19 @@ class WorkResolverService:
                 query (the Instance PK is never null).
 
         Returns:
-            A dict mapping ``instance_id`` → ``Instance``. Missing ids
-            are absent from the dict (caller treats them as unknown).
+            A tuple ``(map, degraded)`` where ``map`` maps
+            ``instance_id`` → ``Instance`` (missing ids absent) and
+            ``degraded`` is True only on a transient ``SQLAlchemyError``.
         """
         valid_ids = {iid for iid in instance_ids if iid is not None}
         if not valid_ids:
-            return {}
+            return ({}, False)
         from sqlmodel import Session as SQLModelSession
 
         try:
             with SQLModelSession(self._instance_repo.engine) as session:
                 stmt = select(Instance).where(Instance.instance_id.in_(valid_ids))
-                return {row.instance_id: row for row in session.exec(stmt)}
+                return ({row.instance_id: row for row in session.exec(stmt)}, False)
         except SQLAlchemyError as exc:
             # W-1 degradation contract: a transient DB error during the
             # batched instance fetch must not blow up the whole page.
@@ -2428,7 +2434,7 @@ class WorkResolverService:
                 len(valid_ids),
                 exc,
             )
-            return {}
+            return ({}, True)
 
 
 __all__ = ["WorkRecord", "WorkResolverService", "JobStatusFilter"]

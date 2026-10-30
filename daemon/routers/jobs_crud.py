@@ -728,6 +728,7 @@ async def get_job(
     response_model=JobListResponse,
 )
 async def list_jobs(
+    request: Request,
     status: str | None = None,
     project_id: str | None = None,
     queue_id: str | None = None,
@@ -909,10 +910,13 @@ async def list_jobs(
     work_records_by_id: dict[str, Any] = {}
     if jobs:
         status_filter = ",".join(statuses) if statuses else None
+        _explicit_limit = "limit" in (request.query_params or {})
         records = await service.list_work(
             project_id=project_id,
             status=status_filter,
             kind="job",
+            limit=(limit if _explicit_limit else None),
+            ensure_job_ids=({j.job_id for j in jobs} if _explicit_limit else None),
         )
         for record in records:
             # Defensive: only ``kind="job"`` rows belong on the
