@@ -278,16 +278,59 @@ esac
 TOK_TARGET="$PF_SB/ceremony-target"
 mkdir -p "$TOK_TARGET/releases"
 pf_assert_not_live "$TOK_TARGET"
+
+# PHASE-6 AMENDMENT (implementation-decisions D-33): the committed E2 ran the
+# REAL promote.sh and expected the token refusal — but phase 2 ARMED the real
+# tree's watchdog (the L1/L2a machinery is in lib.sh by construction), so the
+# real script can only ever take the HONORED branch. The refusal leg now runs
+# a SCRATCH COPY of the scripts dir with the watchdog machinery stripped (a
+# genuinely-unarmed mixed-generation fixture — new token semantics, no
+# watchdog); the armed control (E2b) runs the REAL promote.sh. Both under the
+# same asserted fence.
+UNARMED_DIR="$PF_SB/unarmed-scripts/upgrade"
+mkdir -p "$UNARMED_DIR"
+cp "$PROMOTE" "$UNARMED_DIR/promote.sh"
+cp "$LIB" "$UNARMED_DIR/lib.sh"
+# strip the phase-2 watchdog machinery: rename the L1/L2a function
+# definitions so `declare -F` cannot resolve them (the exact predicate
+# promote.sh's token check uses). Anchored at column 0 — only the
+# definitions move; nothing at source time calls them.
+sed -i -E 's/^(_enforce_deadline|_budget_breach|_run_bounded_step|_run_bounded)\(\) \{/\1_UNARMED_FIXTURE() {/' \
+    "$UNARMED_DIR/lib.sh"
+pf_assert_not_live_scripts "$UNARMED_DIR"
+if ( bash -c '. "$1/lib.sh"; declare -F _budget_breach >/dev/null' _ "$UNARMED_DIR" 2>/dev/null ); then
+    pf_bad "E2-fix the unarmed fixture still resolves the watchdog machinery (sed strip failed)"
+else
+    pf_ok "E2-fix the unarmed fixture genuinely lacks the watchdog machinery"
+fi
+
 TOK_OUT="$PF_SB/token.out"
 ( cd "$PF_SB" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$PF_SB/tmp" PORT=18079 \
       LOG_TAG=pf-pack-i ENSEMBLE_PROMOTE_WATCHDOG=1 INSTALL_DIR="$TOK_TARGET" \
-      timeout -k 5 120 bash "$PROMOTE" sandbox --version v0.0.1-test \
+      timeout -k 5 120 bash "$UNARMED_DIR/promote.sh" sandbox --version v0.0.1-test \
       > "$TOK_OUT" 2>&1 )
 TOK_RC=$?
 if grep -qi 'watchdog' "$TOK_OUT" && [ "$TOK_RC" = "78" ]; then
     pf_ok "E2 promote.sh refuses the unarmed watchdog token (rc=78, names the watchdog)"
 else
     deferred_red "I11" "the token is not refused (rc=$TOK_RC; stderr last: $(tail -1 "$TOK_OUT" | cut -c1-140)) — phase6 T6.6"
+fi
+
+# E2b — the ARMED control: the REAL promote.sh with the token present must
+# take the HONORED branch (the refusal must be reachable ONLY from the
+# unarmed state — a check that refused an armed tree would brick every
+# ceremony from a new daemon).
+ARM_OUT="$PF_SB/armed.out"
+( cd "$PF_SB" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$PF_SB/tmp" PORT=18080 \
+      LOG_TAG=pf-pack-i ENSEMBLE_PROMOTE_WATCHDOG=1 INSTALL_DIR="$TOK_TARGET" \
+      timeout -k 5 120 bash "$PROMOTE" sandbox --version v0.0.1-test \
+      > "$ARM_OUT" 2>&1 )
+ARM_RC=$?
+if grep -q 'watchdog token honored' "$ARM_OUT" \
+   && ! grep -q 'NOT armed' "$ARM_OUT"; then
+    pf_ok "E2b the ARMED real promote.sh honors the token (machinery verified, rc=$ARM_RC from later gates)"
+else
+    deferred_red "I11b" "the armed control did not take the honored branch (rc=$ARM_RC; last: $(tail -1 "$ARM_OUT" | cut -c1-140))"
 fi
 
 # ── the state report: NEVER a silent pass ─────────────────────────────────

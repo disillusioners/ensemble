@@ -164,6 +164,12 @@ REL="$INSTALL_DIR/releases"
 TARGET_REL="$REL/$VERSION"
 
 # ═══════════════════════════ 1. PREFLIGHT ══════════════════════════════════
+# T6.4/D6-4 (phase 6): the per-run log's FIRST line is the pipeline-scripts
+# identity stamp — the executor-start echo. CORROBORATING SIGNAL ONLY (B3:
+# it proves running code == stamped code; it arrives AFTER the nonce burn so
+# it gates nothing — the daemon-side guard reads <scripts_dir>/lib.sh at
+# ARM time, before the burn).
+_log "pipeline-scripts rev=${PIPELINE_SCRIPTS_REV:-<unstamped>} (executor-start echo; the arm-time guard reads the lib.sh stamp file)"
 _log "preflight: lock · integrity · journal txn · entry checks"
 
 # D2-7 (phase-2 fold A4/R20): install the signal handlers BEFORE
@@ -198,6 +204,33 @@ if [ "$UP_TARGET" = "live" ] && [ "$SOAK_S" -gt 300 ]; then
     _warn "ENSEMBLE_PROMOTE_SOAK_S=${SOAK_S} > 300 refused on the live lane -- halt (exit 78); use a sandbox drill for long soaks"
     lock_release 2>/dev/null || true
     exit 78
+fi
+
+# T6.6/D6-5 (phase 6): the MIXED-GENERATION WATCHDOG TOKEN. The daemon
+# sets ENSEMBLE_PROMOTE_WATCHDOG=1 in the promote executor's env; when the
+# token is present the phase-2 preflight watchdog (the L1 `_enforce_deadline`
+# checkpoints + the L2a `_run_bounded_step`/`_budget_breach` machinery in
+# lib.sh) MUST be armed in THIS scripts tree. A token present + machinery
+# absent means a new daemon was paired with half-synced/stale scripts — the
+# exact deployment the floor check cannot see (a synced dir at a rev that
+# nonetheless lacks the watchdog). The check is structural (the machinery's
+# function definitions must resolve), so a future refactor that removes the
+# watchdog trips it automatically. Belt, not mechanism (D6-5): the floor
+# check is the mechanism; old scripts that predate the token ignore it and
+# are caught by the floor. Row needs the lock (D-14 placement); the append
+# is best-effort (virgin-install journal absent loses the row; the
+# exit-78 refusal itself is unconditional).
+if [ "${ENSEMBLE_PROMOTE_WATCHDOG:-}" = "1" ]; then
+    if ! declare -F _budget_breach >/dev/null 2>&1 \
+       || ! declare -F _run_bounded_step >/dev/null 2>&1 \
+       || ! declare -F _enforce_deadline >/dev/null 2>&1; then
+        journal_history_append refusal "promote refused: ENSEMBLE_PROMOTE_WATCHDOG=1 (the daemon expects the phase-2 preflight watchdog) but the watchdog machinery is NOT ARMED in this scripts dir (mixed-generation deployment: new daemon + half-synced scripts, D6-5) — sync the pinned scripts dir (git -C <dir> fetch origin && git -C <dir> checkout <floor-or-newer>; see runbook 'ceremony scripts provenance')" \
+                              || true
+        _warn "ENSEMBLE_PROMOTE_WATCHDOG=1 but the preflight watchdog is NOT armed in this scripts tree — refusing (mixed-generation defense, exit 78)"
+        lock_release 2>/dev/null || true
+        exit 78
+    fi
+    _log "watchdog token honored: ENSEMBLE_PROMOTE_WATCHDOG=1 and the preflight watchdog is armed (L1/L2a machinery resolved)"
 fi
 
 # D2 (phase-2, T2.5): the preflight phase budget -- its OWN deadline,
@@ -263,6 +296,10 @@ if [ ! -d "$TARGET_REL" ]; then
     _refuse not-staged "target release $TARGET_REL does not exist — stage it first (stage.sh $UP_TARGET --version $VERSION)"
 fi
 journal_init || { _warn "cannot initialize journal"; exit 1; }
+# T6.4 (phase 6): the executor-start journal row carries the stamp (the
+# corroborating echo — the gating input is the arm-time FILE read, B3).
+journal_history_append promote-start "pipeline-scripts rev=${PIPELINE_SCRIPTS_REV:-<unstamped>} pid=$$ scripts=$SCRIPT_DIR" \
+                      || true
 J="$(_run_bounded_step journal-read journal_read)" || {
     _warn "journal unreadable/TORN at $(journal_path) — halt-for-human (repair the journal before any pipeline mutation)"
     # R1 (leader ruling, wave-2): the promote-path size-guard refusal is an

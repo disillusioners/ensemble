@@ -535,11 +535,43 @@ rm -f "$_plugins_frag"
 # staged_at = first to evict).
 STAGED_AT="$(_now_iso)"
 
+# ── T6.15/AC15 (promote-preflight-hang phase 6): release-time SET-AND-VALIDATE
+# of PIPELINE_SCRIPTS_FLOOR_COMMIT — the daemon-side arm-time guard compares a
+# pinned scripts dir's HEAD against this floor by git ancestry (D6-10/Q1).
+# A wrong shipped value converts the lane's failure mode from "stale scripts
+# run" into "NO arm can ever succeed" with nothing able to detect it — so the
+# value must be provably correct at BUILD time, never hand-copied:
+#   SET       — the release bump (the merge commit that introduces the
+#               ceremony-relevant scripts/upgrade semantics) writes the
+#               constant in daemon/tools/upgrade_tools.py, at the SAME cadence
+#               as the PIPELINE_SCRIPTS_REV stamp in lib.sh (D6-8 — the two
+#               travel together; this step refuses to ship an unset floor);
+#   VALIDATE  — the value must resolve AND be an ANCESTOR of the built tree
+#               (git merge-base --is-ancestor <floor> HEAD): the floor names a
+#               commit the release itself contains, so a daemon built from
+#               this tree can never demand a fix commit its own history lacks.
+# The manifest carries the same value (daemon constant == manifest, AC15) so
+# a staged artifact is self-describing about the floor it will enforce.
+FLOOR_SRC="$REPO_ROOT/daemon/tools/upgrade_tools.py"
+FLOOR_COMMIT="$(sed -n 's/^PIPELINE_SCRIPTS_FLOOR_COMMIT = "\([0-9a-f][0-9a-f]\{6,39\}\)"$/\1/p' "$FLOOR_SRC" 2>/dev/null || true)"
+if [ -z "$FLOOR_COMMIT" ]; then
+    _warn "REFUSING TO STAGE: PIPELINE_SCRIPTS_FLOOR_COMMIT is unset (or not a commit sha) in daemon/tools/upgrade_tools.py — the daemon-side arm-time stale-scripts guard (phase 6) would refuse every explicitly-pinned ceremony. The release bump MUST set it to the merge commit introducing the preflight-hang fix (T6.15/AC15, cadence D6-8). No release ships without a provably-valid floor."
+    rm -rf "$STAGE_TMP"
+    exit 78
+fi
+if ! git -C "$REPO_ROOT" merge-base --is-ancestor "$FLOOR_COMMIT" HEAD >/dev/null 2>&1; then
+    _warn "REFUSING TO STAGE: PIPELINE_SCRIPTS_FLOOR_COMMIT=$FLOOR_COMMIT is unresolvable or NOT an ancestor of the built tree $(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo '?') (T6.15/AC15 — the floor must name a commit this release itself contains; git merge-base --is-ancestor failed). Fix the constant to the merge commit introducing the preflight-hang fix and re-stage."
+    rm -rf "$STAGE_TMP"
+    exit 78
+fi
+_log "floor validated: PIPELINE_SCRIPTS_FLOOR_COMMIT=$FLOOR_COMMIT is an ancestor of the built tree (T6.15)"
+
 cat > "$STAGE_TMP/manifest.json" <<EOF
 {
   "version": "$VERSION",
   "binary_version": "$BINARY_VERSION",
   "staged_at": "$STAGED_AT",
+  "pipeline_scripts_floor_commit": "$FLOOR_COMMIT",
   "known_schema_gen": "$KNOWN_SCHEMA_GEN",
   "contains_contract_phase": $CONTAINS_CONTRACT_PHASE,
   "rollback_safe": $ROLLBACK_SAFE,

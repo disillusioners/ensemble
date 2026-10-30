@@ -5495,6 +5495,14 @@ class InstanceManager:
                     "bash", str(scripts_dir / "promote.sh"), env,
                     "--version", str(spec.get("target", "")),
                 ]
+                # T6.6/D6-5 (promote-preflight-hang phase 6): EVERY promote
+                # arm carries the mixed-generation watchdog token — the
+                # explicit-extra merge (per-call-site, never ambient) sets
+                # it here; the allowlist entry in upgrade_journal is the
+                # belt. promote.sh refuses loudly when the token is present
+                # but the phase-2 preflight watchdog is not armed in its
+                # scripts tree (new daemon + half-synced scripts).
+                extra_env["ENSEMBLE_PROMOTE_WATCHDOG"] = "1"
                 # v0.15.3 P1 Item 1 (user ratification 2026-09-26): a
                 # 3-factor-verified live arm carries its F2 attestation to
                 # the gate. Explicit gate — the UNVERIFIED path below is

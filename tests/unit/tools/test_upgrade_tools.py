@@ -103,9 +103,20 @@ def _isolated_home(base: Path) -> str:
 
 
 @pytest.fixture
-def install(tmp_path: Path) -> Path:
+def install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Staged-install fixture: journal (Python writer), two releases with
-    manifests, current symlink → 1.2.2."""
+    manifests, current symlink → 1.2.2.
+
+    Hermeticity (phase 6, promote-preflight-hang): scrub the ambient
+    ``ENSEMBLE_UPGRADE_SCRIPTS_DIR`` pin — this suite can run INSIDE the
+    daemon's own environment (e.g. from an agent shell), which carries the
+    live-shaped pin; the phase-6 arm-time guard makes that leak OBSERVABLE
+    (a stale pinned dir refuses the arm), so without the scrub every
+    arm-exercising test would judge the HOST's pinned checkout instead of
+    the fallback resolution the tests were written against. Tests that
+    deliberately pin a fixture dir (e.g. the malformed-argv preflight
+    test) set the var themselves AFTER this scrub."""
+    monkeypatch.delenv("ENSEMBLE_UPGRADE_SCRIPTS_DIR", raising=False)
     inst = tmp_path / "install"
     (inst / "releases").mkdir(parents=True)
     uj.journal_init(inst)

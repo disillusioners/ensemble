@@ -2158,6 +2158,17 @@ EXECUTOR_ENV_ALLOWLIST: tuple[str, ...] = (
     "XDG_RUNTIME_DIR",
     "DBUS_SESSION_BUS_ADDRESS",
     "DBUS_SYSTEM_BUS_ADDRESS",
+    # T6.6/D6-5 (promote-preflight-hang phase 6): the mixed-generation
+    # watchdog token. The promote drain seam (daemon/manager.py,
+    # drain_pending_system_execution kind == "promote") sets it in the
+    # explicit-extra merge for EVERY promote arm; this allowlist entry is
+    # the belt that also carries an operator-ambient value across the
+    # systemd boundary. promote.sh REFUSES (loud `refusal` row, exit 78)
+    # when the token is present but the phase-2 watchdog machinery is not
+    # armed in its scripts tree; scripts that predate the token ignore it
+    # (the arm-time floor check catches those). Non-secret, non-privileged
+    # — a bare presence flag.
+    "ENSEMBLE_PROMOTE_WATCHDOG",
 )
 EXECUTOR_ENV_PREFIXES: tuple[str, ...] = ("PG",)
 
@@ -2174,6 +2185,29 @@ def executor_env(extra: dict[str, str] | None = None) -> dict[str]:
     for key, val in (extra or {}).items():
         env[key] = str(val)
     return env
+
+
+def bounded_git_probe(cwd: Path, *args: str) -> tuple[int, str, str]:
+    """``(rc, stdout, stderr)`` from a read-only, bounded git invocation in
+    ``cwd`` — promote-preflight-hang phase 6 arm-time guard support
+    (D6-10/Q1): ``merge-base --is-ancestor`` / ``rev-parse`` / ``status``
+    probes against the pinned scripts dir. NO fetch, NO checkout, NO
+    write, 30 s bound. Lives HERE and not in upgrade_tools because the
+    tools module carries a no-direct-process-spawn discipline
+    (test_static_no_direct_process_spawn_in_tools_module, D2/D3) — the
+    guard delegates rather than spawning."""
+    proc = subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": os.environ.get("HOME", "/"),
+            "GIT_CONFIG_NOSYSTEM": "1",
+        },
+    )
+    return proc.returncode, proc.stdout, proc.stderr
 
 
 def executor_log_path(install_dir: Path) -> Path:

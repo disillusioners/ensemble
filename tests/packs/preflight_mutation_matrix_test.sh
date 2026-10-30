@@ -47,7 +47,7 @@ restore_inflight() {
 }
 trap restore_inflight EXIT INT TERM
 
-PLANT_TARGETS="scripts/upgrade/lib.sh scripts/upgrade/journal_read.py scripts/upgrade/stage.sh daemon/tools/upgrade_journal.py daemon/manager.py daemon/config.py"
+PLANT_TARGETS="scripts/upgrade/lib.sh scripts/upgrade/journal_read.py scripts/upgrade/stage.sh scripts/upgrade/promote.sh daemon/tools/upgrade_journal.py daemon/tools/upgrade_tools.py daemon/manager.py daemon/config.py"
 
 # LEAVE-NO-PLANT-BEHIND guard. The legs rewrite REAL tracked files, and a
 # SIGKILL (a runaway plant, a tool timeout) can land between the plant and the
@@ -117,6 +117,11 @@ run_pack() { # run_pack <pack-spec> ; prints output, returns rc
                 "${spec#pytest:}" -q -p no:cacheprovider 2>&1 ) ;;
         pack:*)
             ( cd "$REPO_ROOT" && timeout -k 5 400 bash "tests/packs/${spec#pack:}" 2>&1 ) ;;
+        # packi: — a pack invoked in --expect-implemented mode (the phase-6
+        # final-gate semantics: a deferral IS a failure). Phase 6 wave 4.
+        packi:*)
+            ( cd "$REPO_ROOT" && timeout -k 5 400 bash "tests/packs/${spec#packi:}" \
+                --expect-implemented 2>&1 ) ;;
         *) printf 'bad pack spec: %s\n' "$spec" >&2; return 2 ;;
     esac
 }
@@ -147,6 +152,14 @@ M21|pytest:tests/unit/tools/test_upgrade_preflight_daemon_side.py::TestStillRunn
 M29|pack:preflight_size_guard_test.sh|recovery class: rc=|
 M30|pack:preflight_size_guard_test.sh|G2 refusal does not name the size|
 M31|pack:preflight_size_guard_test.sh|G1: rc=|
+M22|packi:preflight_ceremony_readiness_test.sh|DEFERRED_RED C1|
+M23|packi:preflight_ceremony_readiness_test.sh|DEFERRED_RED C5|
+M24|packi:preflight_ceremony_readiness_test.sh|DEFERRED_RED C6|
+M25|packi:preflight_ceremony_readiness_test.sh|I4 FAIL|
+M26|packi:preflight_ceremony_readiness_test.sh|I2 FAIL|
+M27|packi:preflight_ceremony_readiness_test.sh|I3 FAIL|
+M28|packi:preflight_ceremony_readiness_test.sh|I5 FAIL|
+M32|packi:preflight_ceremony_readiness_test.sh|DEFERRED_RED I11|
 "
 
 deferred_row() { # deferred_row <id> <symptom>
@@ -244,13 +257,18 @@ done <<LEGSEOF
 $LEGS
 LEGSEOF
 
-# ── the deferred legs (Pack I / phase 6): complete the M1–M32 span ─────────
-for id in M22 M23 M24 M25 M26 M27 M28 M32; do
-    if [ -n "$ONLY" ]; then
-        case ",$ONLY," in *",$id,"*) : ;; *) continue ;; esac
-    fi
-    deferred_row "$id" "$(/usr/bin/python3 "$APPLY" --leg "$id" --why 2>&1 | head -1)"
-done
+# ── the formerly-deferred legs (Pack I / phase 6) became EXECUTABLE in wave 4
+# (the guard landed; see preflight_mutation_apply.py PLANTS M22–M28/M32). The
+# span is now the full 32/32 with zero deferrals; this hook remains only to
+# surface any NEW deferral loudly instead of letting it pass silently.
+_NEW_DEFERRED="$(/usr/bin/python3 "$APPLY" --list 2>/dev/null | awk -F'\t' '$2 == "deferred" {print $1}')"
+if [ -n "$_NEW_DEFERRED" ]; then
+    for id in $_NEW_DEFERRED; do
+        deferred_row "$id" "$( /usr/bin/python3 "$APPLY" --leg "$id" --why 2>&1 | head -1)"
+        FAIL=$((FAIL+1))
+    done
+    printf 'FATAL: the matrix regressed to deferred legs: %s\n' "$_NEW_DEFERRED" >&2
+fi
 
 reclaim_leftover_plants
 if plants_clean >/dev/null; then

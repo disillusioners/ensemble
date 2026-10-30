@@ -40,6 +40,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent.parent
+
 CANDIDATE_SEAMS = (
     "scripts_dir_provenance_verdict",
     "check_scripts_dir_provenance",
@@ -121,11 +124,15 @@ def build_fixtures(root: Path) -> dict[str, Path]:
     )
     fx["plain_nostamp"] = plain_nostamp
 
-    # a DIRTY git checkout that CONTAINS the floor (I7: warn, never refuse)
+    # a DIRTY git checkout that CONTAINS the floor (I7: warn, never refuse).
+    # DETERMINISM (phase 6 wave 4): COPY the fresh repo — including its
+    # .git — instead of re-building "equivalent" commits, whose sha equality
+    # would depend on both repos committing inside the SAME wall-clock
+    # second (observed flake under ambient load: the dirty repo's fix
+    # commit got a later timestamp, a different sha, and the shared floor
+    # object vanished from its history ⇒ I7 spuriously refused).
     dirty = root / "dirty-git"
-    _init_repo(dirty)
-    _commit(dirty, "base")
-    _commit(dirty, "the preflight-hang fix", "PIPELINE_SCRIPTS_REV=deadbeef")
+    shutil.copytree(fresh, dirty)
     (dirty / "lib.sh").write_text(
         "#!/usr/bin/env bash\nPIPELINE_SCRIPTS_REV=deadbeef\n# local edit\n",
         encoding="utf-8",
@@ -135,6 +142,15 @@ def build_fixtures(root: Path) -> dict[str, Path]:
 
 
 def discover_seam():
+    # Resolve the daemon package from the TREE UNDER TEST (this repo), not
+    # from whatever checkout the interpreter's site-packages/.pth points
+    # at — in script mode sys.path[0] is tests/helpers/, so an ambient
+    # editable-install .pth would otherwise shadow the worktree's module
+    # and the probe would judge the WRONG tree (found while flipping Pack
+    # I green, phase 6; the D-22 seam contract itself is unchanged).
+    repo_root = str(HERE.parent.parent)
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
     try:
         from daemon.tools import upgrade_tools as ut  # noqa: WPS433 (lazy)
     except Exception as exc:  # pragma: no cover - import failure reports

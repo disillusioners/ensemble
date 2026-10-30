@@ -68,6 +68,18 @@
 # sourcing if they want their own name; default "upgrade").
 LOG_TAG="${LOG_TAG:-upgrade}"
 
+# ── PIPELINE SCRIPTS IDENTITY STAMP (promote-preflight-hang phase 6, T6.4/D6-4/D6-8) ──
+# The daemon-side arm-time guard parses THIS line (a bounded first-64KiB
+# read of THIS FILE — B3: the file at <scripts_dir>/lib.sh is the guard's
+# input, never the executor echo) before the ceremony nonce burns. A
+# pinned scripts dir whose lib.sh predates this stamp is refused as stale.
+# The release process stamps the merge commit that introduced the current
+# ceremony-relevant scripts/upgrade semantics here (cadence D6-8: bumps
+# per release that touches ceremony-relevant scripts/upgrade semantics —
+# the SAME cadence as the daemon's PIPELINE_SCRIPTS_FLOOR_COMMIT; the two
+# travel together, T6.15/AC15).
+PIPELINE_SCRIPTS_REV=unreleased-fix-promote-preflight-hang
+
 # Health-gate budgets (seconds) — same numbers as deploy.sh phase 5.
 # LIVEZ_BUDGET_S = 180s (v0.16.9, was 60s): attempt-2 halt showed the
 # post-flip boot alone eats ~51s for the journal sweep on the first live

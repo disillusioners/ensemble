@@ -38,9 +38,11 @@ REPO = HERE.parent.parent
 LIB = "scripts/upgrade/lib.sh"
 HELPER = "scripts/upgrade/journal_read.py"
 STAGE = "scripts/upgrade/stage.sh"
+PROMOTE = "scripts/upgrade/promote.sh"
 UJ = "daemon/tools/upgrade_journal.py"
 MGR = "daemon/manager.py"
 CFG = "daemon/config.py"
+UTOOLS = "daemon/tools/upgrade_tools.py"
 
 # ── the plants ──────────────────────────────────────────────────────────────
 # leg -> {"file": <repo-relative>, "mode": executable|deferred,
@@ -207,8 +209,7 @@ PLANTS: dict[str, dict] = {
             '    local _plant_s="x" _plant_i=0 _plant_c="${json:i:1}"  # PLANT M17: a per-character walk\n'
             '    local json="$1" jp tmp',
         )],
-    },
-    "M18": {
+    },    "M18": {
         "file": LIB, "mode": "executable",
         "why": "a cited anchor construct shifts out of the working tree",
         "pairs": [("SOAK_S_DEFAULT=300", "SOAK_S_DEFAULT=301  # PLANT M18")],
@@ -264,20 +265,101 @@ PLANTS: dict[str, dict] = {
             '    if true; then  # PLANT M31: size conjunct dropped',
         )],
     },
+
+    # ── phase 6 (wave 4): the ceremony-readiness legs, now executable — the
+    # guard they pin landed (upgrade_tools.scripts_dir_provenance_verdict +
+    # the lib.sh stamp + the promote.sh watchdog token). Pack I runs in
+    # --expect-implemented mode (the final-gate mode) for every leg.
+    "M22": {
+        "file": LIB, "mode": "executable",
+        "why": "a stale tree predates the stamp: the PIPELINE_SCRIPTS_REV line is absent from lib.sh (the arm-time guard's B3 input)",
+        "pairs": [(
+            "PIPELINE_SCRIPTS_REV=unreleased-fix-promote-preflight-hang",
+            "# PLANT M22: stamp line removed (a stale tree predates the stamp)",
+        )],
+    },
+    "M23": {
+        "file": UTOOLS, "mode": "executable",
+        "why": "the provenance guard no longer precedes consume_pending_action (the D6-4 sequencing broken — the nonce would burn first)",
+        "pairs": [(
+            '            prov_verdict, prov_detail = scripts_dir_provenance_verdict(\n'
+            '                scripts_dir,\n'
+            '                floor_commit=(PIPELINE_SCRIPTS_FLOOR_COMMIT or None),\n'
+            '                env=os.environ,\n'
+            '            )',
+            '            prov_verdict = "arm"  # PLANT M23: provenance guard neutralized pre-burn (D6-4 sequencing broken)\n'
+            '            prov_detail = "PLANT M23: the guard no longer precedes consume_pending_action"',
+        )],
+    },
+    "M24": {
+        "file": UTOOLS, "mode": "executable",
+        "why": "the arm-row provenance is dropped (the git revision + local-edit state leave the journal row)",
+        "pairs": [(
+            '        prov_git = (\n'
+            '            f"{provenance} git_rev={rev} dirty={\'yes\' if edited else \'no\'}"\n'
+            '        )',
+            '        prov_git = f"{provenance}"  # PLANT M24: arm-row provenance dropped (T6.3/W5)',
+        )],
+    },
+    "M25": {
+        "file": UTOOLS, "mode": "executable",
+        "why": "the stamp is taken from the executor env echo instead of <dir>/lib.sh (B3 broken)",
+        "pairs": [(
+            '    stamp, lib_sha = _pipeline_stamp_and_sha(path)',
+            '    stamp = e.get("PIPELINE_SCRIPTS_REV")  # PLANT M25: the executor echo, not the file (B3 broken)\n'
+            '    lib_sha = _pipeline_stamp_and_sha(path)[1]',
+        )],
+    },
+    "M26": {
+        "file": UTOOLS, "mode": "executable",
+        "why": "the ancestry outcome is ignored — a non-ancestor pinned dir arms (D6-10 broken)",
+        "pairs": [(
+            '        if anc_rc == 0:\n'
+            '            return (\n'
+            '                "arm",',
+            '        if True:  # PLANT M26: ancestry outcome ignored (D6-10 broken)\n'
+            '            return (\n'
+            '                "arm",',
+        )],
+    },
+    "M27": {
+        "file": UTOOLS, "mode": "executable",
+        "why": "a missing/unknown floor object no longer refuses (D6-10 broken)",
+        "pairs": [(
+            '        return (\n'
+            '            "refuse",\n'
+            '            "floor-object-unknown: git merge-base --is-ancestor "',
+            '        return (\n'
+            '            "warn",  # PLANT M27: missing/unknown floor object no longer refuses (D6-10 broken)\n'
+            '            "floor-object-unknown: git merge-base --is-ancestor "',
+        )],
+    },
+    "M28": {
+        "file": UTOOLS, "mode": "executable",
+        "why": "the non-git branch refuses (Q2/D6-11 broken)",
+        "pairs": [(
+            '    return (\n'
+            '        "warn",\n'
+            '        f"non-git-no-stamp: WARNING only, never a refusal (Q2/D6-11); "',
+            '    return (\n'
+            '        "refuse",  # PLANT M28: the non-git branch refuses (Q2/D6-11 broken)\n'
+            '        f"non-git-no-stamp: WARNING only, never a refusal (Q2/D6-11); "',
+        )],
+    },
+    "M32": {
+        "file": PROMOTE, "mode": "executable",
+        "why": "promote.sh ignores ENSEMBLE_PROMOTE_WATCHDOG (the mixed-generation token never checked)",
+        "pairs": [(
+            'if [ "${ENSEMBLE_PROMOTE_WATCHDOG:-}" = "1" ]; then',
+            'if false; then  # PLANT M32: promote.sh ignores ENSEMBLE_PROMOTE_WATCHDOG (T6.6 broken)',
+        )],
+    },
 }
 
-# ── Pack I legs: pinned by the ceremony-readiness contract, implemented in
-# phase 6 (wave 4). Recorded as DEFERRED — never as passed.
-DEFERRED_LEGS = {
-    "M22": "plant a stale stamp ⇒ Pack I refuses (phase6 T6.4/T6.5)",
-    "M23": "move the refusal after consume_pending_action ⇒ the nonce burns (phase6 D6-4)",
-    "M24": "drop the arm-row provenance ⇒ Pack I C6/I10 reddens (phase6 T6.3)",
-    "M25": "take the stamp from the executor instead of <dir>/lib.sh ⇒ Pack I I6 reddens (phase6 B3)",
-    "M26": "plant a non-ancestor pinned dir ⇒ Pack I I2 reddens (phase6 D6-10)",
-    "M27": "plant a missing floor object ⇒ Pack I I3 reddens (phase6 D6-10)",
-    "M28": "make the non-git branch refuse ⇒ Pack I I5 reddens (phase6 D6-11 / Q2)",
-    "M32": "make promote.sh ignore ENSEMBLE_PROMOTE_WATCHDOG ⇒ Pack I I11 reddens (phase6 T6.6)",
-}
+# ── Pack I legs (phase 6 / wave 4): previously deferred, now EXECUTABLE in
+# PLANTS above — the guard they pin landed. The list stays EMPTY; the runner
+# treats an empty list as "no deferrals remain" (the full 32/32 span).
+DEFERRED_LEGS: dict[str, str] = {}
 
 
 def _apply_pairs(rel: str, pairs: list[tuple[str, str]]) -> None:
