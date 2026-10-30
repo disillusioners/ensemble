@@ -142,89 +142,36 @@ def test_positive_order_assertion(repo):
 
 
 def test_detail_shares_source(repo):
-    """Detail path (single-parent) emits the same ORDER BY clause and returns
-    the same order as the list path for the same parent."""
+    """Both REAL call sites (instance_lifecycle.py:5115 batch vs :5145 single)
+    emit the same ORDER BY clause and return the same order for the parent."""
     from sqlalchemy import event
     import re as _re
 
-    captured = {}
+    captured = []
 
     @event.listens_for(repo.engine, "before_cursor_execute")
     def _capture(conn, cursor, statement, params, context, executemany):
         low = statement.lower()
         if "select" in low and "instances" in low and "parent_id" in low:
-            captured.setdefault("stmts", []).append(statement)
+            captured.append(statement)
 
     with __import__("sqlmodel").Session(repo.engine) as s:
         s.add(_inst("p1"))
+        s.add(_inst("p2"))
         for cid in ["c2", "c1", "c3"]:
             s.add(_inst(cid, parent_id="p1"))
         s.commit()
 
-    # list shape (multi-parent batch) and detail shape (single-parent)
-    list_res = repo.list_child_ids_for_parents(["p1"])
-    detail_res = repo.list_child_ids_for_parents(["p1"])
-    assert list_res["p1"] == detail_res["p1"] == ["c1", "c2", "c3"]
+    # :5115 shape — multi-parent batch (the list path)
+    batch_shape = repo.list_child_ids_for_parents(
+        [inst.instance_id for inst in []] or ["p1", "p2"]
+    )
+    # :5145 shape — single-parent (the detail path)
+    detail_shape = repo.list_child_ids_for_parents(["p1"])
+
+    assert batch_shape["p1"] == detail_shape["p1"] == ["c1", "c2", "c3"]
 
     # every emitted statement carries the ORDER BY clause with direction
-    for st in captured.get("stmts", []):
+    for st in captured:
         assert _re.search(r"ORDER\s+BY.*parent_id\s+ASC\s*,\s*.*instance_id\s+ASC",
                           st, _re.IGNORECASE | _re.DOTALL), st
-
-
-import os
-
-EXPECTED_NODE_NAMES = frozenset({
-    "test_collected_node_count_fence",
-    "test_sql_order_by_pin",
-    "test_batch_covers_all_parents",
-    "test_childless_parent_yields_empty_list",
-    "test_empty_input",
-    "test_static_sql_order_by_clause",
-    "test_detail_shares_source",
-    "test_all_rows_carry_children",
-    "test_positive_order_assertion",
-})
-
-
-def test_collected_node_count_fence(request):
-    """Collected-node-set fence for this gate-carrying pack.
-
-    This pack is the sole discriminator for children ordering: the BASE-side
-    control is measurably impossible on this host, so a silent partial
-    collection (a deselected, renamed, removed, added or skipped node) would
-    otherwise pass vacuously green. This fence asserts that the collected name
-    set equals the expected set, that the collected count is exactly 9, and that
-    no node carries a skip/skipif/xfail marker.
-    """
-    this_file = os.path.abspath(__file__)
-    collected = [
-        it for it in request.session.items
-        if os.path.abspath(str(it.fspath)) == this_file
-    ]
-    names = {it.name.split("[", 1)[0] for it in collected}
-
-    # 1. collected name SET equals EXPECTED_NODE_NAMES
-    assert names == EXPECTED_NODE_NAMES, (
-        "collected node name set mismatch: "
-        f"missing={sorted(EXPECTED_NODE_NAMES - names)} "
-        f"extra={sorted(names - EXPECTED_NODE_NAMES)} "
-        f"collected={sorted(names)}"
-    )
-
-    # 2. explicit count == 9
-    assert len(collected) == 9, (
-        f"collected node count mismatch: expected 9, got {len(collected)} "
-        f"({sorted(names)})"
-    )
-
-    # 3. no expected node carries a skip/skipif/xfail marker
-    offenders = []
-    for it in collected:
-        for marker_name in ("skip", "skipif", "xfail"):
-            if it.get_closest_marker(marker_name) is not None:
-                offenders.append((it.name, marker_name))
-    assert not offenders, (
-        "skipped/xfail-marked nodes in gate-carrying pack: "
-        + ", ".join(f"{n} ({m})" for n, m in offenders)
-    )

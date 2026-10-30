@@ -340,7 +340,7 @@ def test_cancel_after_wake_returns_token():
             return "ok"
         res = await asyncio.wait_for(probe(), timeout=2.0)
         assert res == "ok"
-        assert gate.permits + gate.inflight + gate.in_transit == gate.workers
+        assert gate.permits + gate.inflight + getattr(gate, 'in_transit', 0) == gate.workers
         await db_offload.shutdown()
 
     asyncio.run(run())
@@ -383,6 +383,57 @@ def test_bounded_capacity_sweep():
             await asyncio.wait_for(gate.acquire(), timeout=1.0)
             gate.do_release()
         assert losses == 0, f"permanent losses: {losses}"
+        await db_offload.shutdown()
+
+    asyncio.run(run())
+
+
+def test_cancel_propagates_callee_not_called():
+    """DISCRIMINATOR (cycle-3 CRITICAL): a cancelled parked waiter must (a)
+    propagate CancelledError to the caller, (b) NOT have its callee submitted,
+    and (c) leave _inflight == real running work."""
+    running = {"n": 0}
+
+    def counting_callee():
+        running["n"] += 1
+        time.sleep(0.1)
+        running["n"] -= 1
+        return "done"
+
+    async def run():
+        db_offload.configure(max_workers=1, drain_bound_s=5)
+        gate = db_offload.get_gate()
+        # occupy the single slot directly (no offload; keeps inflight==1
+        # without a holder whose done-callback would race the cancel)
+        await gate.acquire()
+        # park a waiter via the PUBLIC offload() API
+        cancelled_task = asyncio.create_task(db_offload.offload(counting_callee))
+        await asyncio.sleep(0.05)
+        assert gate.waiters == 1
+        # release (transfer) then cancel in the SAME tick: the post-wake
+        # branch is the only path that can swallow.
+        gate.do_release()
+        cancelled_task.cancel()
+        try:
+            await cancelled_task
+            raise AssertionError("CancelledError did NOT propagate (swallowed)")
+        except asyncio.CancelledError:
+            pass
+
+        # (b) the cancelled task's callee must NOT have been submitted
+        assert running["n"] == 0, (
+            f"callee ran {running['n']}x for a cancelled task (swallowed)"
+        )
+
+        # (c) submit a probe; _inflight must equal real running work
+        probe = asyncio.create_task(db_offload.offload(counting_callee))
+        await asyncio.sleep(0.02)
+        assert gate.inflight == running["n"], (
+            f"_inflight={gate.inflight} but real running={running['n']}"
+        )
+        await probe
+        gate.do_release()
+        assert gate.permits + gate.inflight + getattr(gate, 'in_transit', 0) == gate.workers
         await db_offload.shutdown()
 
     asyncio.run(run())

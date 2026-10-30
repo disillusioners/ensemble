@@ -204,9 +204,9 @@ class _Gate:
                             nxt.set_result(None)
                         except (asyncio.InvalidStateError, RuntimeError):
                             pass
-                        return  # token transferred; cancelled caller returns nothing
+                        raise  # token transferred; cancelled caller still cancelled
                     self._permits = min(self._permits + 1, self._workers)
-                    return
+                    raise
                 else:
                     # never woken: remove from deque if still present
                     try:
