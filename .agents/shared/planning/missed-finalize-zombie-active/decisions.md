@@ -10,6 +10,20 @@ the recommended path; flip costs remain priced in the phase-plan contingencies �
 > architect doc); D-2/D-4/D-5 re-confirmed SOUND at source; R-9 exclusion ENDORSED; amendments
 > A1–A7 folded into `technical-analysis.md` home sections + the phase plans; the two non-blocking
 > leader-ratification notes (architect §12) recorded under D-6/D-8 below.
+>
+> **Second fold pass — reviewer council fold (W1/W2/W3/CF-3/A3/S4/S5/A6), 2026-10-31, verdict
+> APPROVE-WITH-ADVISORIES 0C/3W/7A:** W1 notify-status fidelity (canonical
+> `canonicalize_status(token)`, never raw token / f2-literal — D-4 addendum + T1.3 + Pack G);
+> W2 A2 in-txn re-check parameterized (`recheck_instance_inflight=False` default — second caller
+> `job_queue_service.py:2180`; retry-rearm orphan corner named on any fallback — D-4 addendum +
+> T1.9 + Pack J(v)); W3 A7 rationale corrected (f2 helper's SEPARATE-step lock release is the
+> real differentiator; `extra_updates` CAN carry terminal_reason, `repository.py:1692-1775` —
+> false ground truth reworded at every site); CF-3 streak state = service-level dict
+> (`child_reports.py:292` precedent, reset-on-close, evict-on-disappear); A3 citation fix
+> (reconciled>0 gate = `api.py:3942-3948`, boot twin `:2456` — the earlier `:3926-3935` was
+> wrong); S4 NULL-instance finalize-without-lock-release pin (Pack H); S5 deterministic ORDER BY
+> oldest-terminal-first (T1.2 + D-12); A6 operator-race wording + self-surgery scope note
+> (`ens_db_tools.py:50-57` — refusals do NOT cover `job_queue_items`/`job_locks`).
 
 ---
 
@@ -135,6 +149,19 @@ Double-admission impossible: the job leaves the active set at/before the same co
 release. The boot sweep (`api.py:933-944`) and the ALWAYS-ON 90s F3 sweep
 (`config.py:2428-2462` hard policy — untouched) remain the residual-crash backstop behind the
 no-crash-window same-txn pairing. Canonical ordering rule cited: `job_recovery_service.py:1400-1416`.
+**W2 addendum (reviewer council):** the seam has a LIVE SECOND CALLER — the
+`cleanup_non_terminal_jobs` orphan reaper (`job_queue_service.py:2180`) — so the A2 in-txn
+inflight re-check ships as a PARAMETER `recheck_instance_inflight: bool = False` (existing
+callers byte-identical by default; the (h) leg always True). Fallback to pin+disclose only on
+demonstrated contract disturbance, naming the RETRY-REARM ORPHAN CORNER explicitly (bounded by
+the 7200s gate). **W3 addendum (reviewer council):** the A7 rationale is corrected —
+`atomic_transition`'s `extra_updates` DOES map to JobItem columns incl. potential
+`terminal_reason` (`repository.py:1692-1775`); the f2 helper's write half is not reused because
+it releases the job lock in a SEPARATE step 2 (`job_recovery_service.py:4188-4235`, own crash
+window) vs this seam's single-transaction pairing. **W1 addendum (reviewer council):** the
+(h) notify status is the canonical verdict string via `canonicalize_status(token)` — never the
+raw token (absent from `ALL_TERMINAL_STATES`, `watcher_models.py:13` ⇒ terminal-cleanup
+misroute) and never the f2-literal `'completed'`.
 
 **Status:** decided.
 
@@ -275,13 +302,15 @@ charter is the JobItem close path. The residual is disclosed, not hidden.
 
 **Decision:** one pre-filtered SQL round-trip per drift pass —
 `job_type='task' AND admission_state='active' AND deleted_at IS NULL` JOIN task-on-work_id
-(terminal) + NOT EXISTS instance-scoped non-terminal task + age filter, `LIMIT batch_cap`;
+(terminal) + NOT EXISTS instance-scoped non-terminal task + age filter, **deterministic ORDER BY
+oldest-terminal-first `MAX(task terminal stamp) ASC` with `job_id` tiebreak (S5, reviewer
+council — LIMIT without ORDER BY is non-deterministic across ticks)**, `LIMIT batch_cap`;
 per-candidate E1 via the existing `asyncio.to_thread` tree walk
 (`mission_live_guard.py:803-825`); all repository access off-loop (v0.27.14 eventloop-lane
 discipline — sync-DB-on-loop is the incident class this daemon just cured). Remainder next tick
 (`config.py:2684-2690` semantics). Stats fold into the drift stats dict the loop already logs.
 
-**Status:** decided.
+**Status:** decided (S5 ORDER BY folded by the reviewer council pass).
 
 ---
 

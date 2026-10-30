@@ -129,12 +129,17 @@ it is shared surface, not a reason to split the sweep out.
 age bound ≥ 7200s dominates); the drift loop remains an asyncio task (true at this HEAD,
 `api.py:1477`).
 
-> **A7 precision (folded per architect §1/§10):** "reuse of the f2 helper" means the **NOTIFY HALF
-> ONLY** — `_pattern_f_finalize_done` (`job_recovery_service.py:4103`) writes via
-> `atomic_transition`, which cannot carry `terminal_reason`; the WRITE seam is
-> `force_finalize_orphan` per D-4 (unchanged). Any plan text implying full-helper reuse reads as
-> the notify composition only. The pre-filter SQL stays pinned through `asyncio.to_thread` per
-> D-12 (existing arms `:539, :554, :628, :873, :1101, :1143`).
+> **A7 precision (per architect §1/§10, rationale corrected by reviewer council W3):** "reuse of
+> the f2 helper" means the **NOTIFY HALF ONLY** — the helper's write path releases the job lock
+> in a SEPARATE step 2 (`job_recovery_service.py:4188-4235`, its own crash window between
+> finalize and release), whereas the (h) write seam `force_finalize_orphan` pairs
+> finalize+release in ONE transaction (`repository.py:4294-4347`) — the single-transaction
+> pairing (D-4) is the reason the helper's write half is NOT reused. (An earlier fold pass
+> justified this with "atomic_transition cannot carry terminal_reason" — FALSE per
+> `repository.py:1692-1775`: `extra_updates` maps directly to JobItem columns and could carry
+> it; the correction is recorded so later lanes don't inherit the false ground truth.) The
+> pre-filter SQL stays pinned through `asyncio.to_thread` per D-12 (existing arms `:539, :554,
+> :628, :873, :1101, :1143`).
 
 **Reversibility:** high — the leg is one method + one candidate query + three knobs + one E1 param;
 kill-switch OFF is a complete no-op (strand-healer semantics, `config.py:2651-2653`).
@@ -175,6 +180,9 @@ TERMINALIZE iff ALL hold (any leg unprovable ⇒ SKIP — fail-closed, see polar
 
 1. **Zombie predicate** (§1 query shape): `job_type='task'` AND `admission_state='active'` AND
    `deleted_at IS NULL` AND work_id Task terminal AND instance-scoped inflight probe empty.
+   **Candidate SQL carries a deterministic ORDER BY (S5, reviewer council): oldest-terminal-first
+   `MAX(task terminal stamp) ASC` with `job_id` tiebreak — `LIMIT batch_cap` without ORDER BY is
+   non-deterministic across ticks (a stable order guarantees progress and reproducibility).**
 2. **Age bound** (monotone clock): `now − max(terminal stamp over the instance's Task rows) ≥
    zombie_close_age_bound_seconds` (default 7200). Keyed on **task terminal stamps**
    (`completed_at` et al.), NOT `instances.last_activity_at` — the strand-healer precedent is
@@ -190,13 +198,18 @@ TERMINALIZE iff ALL hold (any leg unprovable ⇒ SKIP — fail-closed, see polar
    `live=False` clean ⇒ terminalize.
 5. **Write + notify** (§6, §7).
 
-> **A2 probe/commit TOCTOU (folded per architect §10):** a retry child minted between the
-> instance inflight probe (leg 1) and the finalize UPDATE is not re-checked inside the
-> transaction. Preferred cheap closure per the architect: **re-run the inflight probe (one
-> SELECT) inside `force_finalize_orphan`'s transaction**; if that disturbs the census-registered
-> seam's contract, the sanctioned fallback is to **pin the accepted sub-second window with a
-> mutation-verified test + disclose** (the f-arms share the same window today —
-> `architecture-recommendation.md` §4). Phased as a Phase-1 task with the decision rule spelled.
+> **A2 probe/commit TOCTOU (architect §10, parameterized per reviewer council W2):** a retry
+> child minted between the instance inflight probe (leg 1) and the finalize UPDATE is not
+> re-checked inside the transaction. The seam (`force_finalize_orphan`, `repository.py:4294+`)
+> has a **LIVE SECOND CALLER** — the `cleanup_non_terminal_jobs` orphan reaper
+> (`job_queue_service.py:2180`) — so the closure is a PARAMETER:
+> `recheck_instance_inflight: bool = False` (existing callers byte-identical by default; the (h)
+> leg ALWAYS passes True — re-run the inflight probe, one SELECT, inside the same
+> `engine.begin()` before the guarded UPDATE; probe fails ⇒ abort, skip, next cycle). Fallback
+> to pin+disclose ONLY on demonstrated contract disturbance during implementation, and any
+> fallback disclosure MUST name the **RETRY-REARM ORPHAN CORNER** explicitly (the one
+> non-consistent terminal ordering, bounded by the 7200s gate) — never softened to "shared
+> window". Phased as T1.9 with the rule spelled.
 
 ### Each verified starvation vector, addressed
 
@@ -378,9 +391,18 @@ impossible-by-construction crash-between-writes case).
    atomic DELETE...RETURNING BEFORE any enqueue) is the ONLY exactly-once enforcement —
    "Do not add new notify-then-claim call sites" (`work_notifier.py:401-409`, findings-riders §3).
    f2's `_pattern_f_finalize_done` helper already composes exactly this fire-then-cancel sequence
-   (`job_recovery_service.py:4103-4234`) — reuse its NOTIFY composition shape (A7: the helper's
-   write half is `atomic_transition` and cannot carry `terminal_reason`; the write seam is
-   `force_finalize_orphan`, §6).
+   (`job_recovery_service.py:4103-4234`) — reuse its NOTIFY composition shape. **A7 (rationale
+   corrected by reviewer W3):** the helper's WRITE half is not reused because it releases the
+   job lock in a SEPARATE step 2 (`:4188-4235`, own crash window between finalize and release);
+   the (h) write seam `force_finalize_orphan` pairs finalize+release in ONE transaction
+   (`repository.py:4294-4347`, §6). **W1 notify-status fidelity (reviewer council):** the notify
+   STATUS passed to `notify_watchers` is the canonical task-verdict string via
+   `canonicalize_status(token)` — NEVER the raw `zombie_active_*` token (absent from
+   `ALL_TERMINAL_STATES`, `watcher_models.py:13`, so the terminal-cleanup branch at
+   `job_queue_service.py:506-509` would misroute) and NEVER the f2-literal `'completed'`
+   (hardcoded in the helper — would mislabel failed/cancelled verdicts); the status feeds
+   bucket classification + `[JOB_EVENT]` payload (`job_queue_service.py:377`,
+   `work_notifier.py:346-380`).
 2. **Terminal cleanup:** on terminal status the notify path itself removes the rows — `if status in
    ALL_TERMINAL_STATES: remove_all_watches_for_job(job_id)` (idempotent DELETE,
    `job_queue_service.py:506-509`).
@@ -422,7 +444,7 @@ docstring `:84-86`; epoch=None only when degraded). No epoch CAS exists to build
 | JobFeedbackObserver (production chain, e.g. strand-healer-driven) | observer finalize may land concurrently | same guarded seam (observer's atomic transition `:3680-3683`); whoever wins owns the lock release in-txn |
 | F-1 mirror backstop | disjoint row set (message-kind vs task-kind filter) | no overlap by construction (§5) |
 | mission strand-healer | drives instances, not admission; its running-zombie strand targets COMPLETED-task ROOTS | predicate key is the instance/task, not the JobItem — unaffected; if its chain-drive finalizes the job first, (h)'s guarded UPDATE loses and no-ops |
-| operator repair lane (`ens_db_repair_execute`) | operator may terminalize manually | operator SQL racing (h) hits the same guarded predicate; audit-row + nonce ceremony unaffected (findings-riders §2); the (h) log line makes the automated side attributable |
+| operator repair lane (`ens_db_repair_execute`) | operator may terminalize manually | operator SQL racing (h) hits the same guarded predicate; audit-row + nonce ceremony unaffected (findings-riders §2); the (h) log line makes the automated side attributable — **(A6, reviewer council:) guarded per the runbook protocol; unguarded operator SQL remains the operator's responsibility as today. Scope note: the repair tool's self-surgery refusals cover `instances`/`messages`/`message_queue`/`tasks` but NOT `job_queue_items`/`job_locks` (`ens_db_tools.py:50-57`) — operator writes to our two tables carry no tool-layer refusal guard beyond the nonce ceremony** |
 | (h) re-run after its own success | next cycle re-selects candidates | admission no longer 'active' ⇒ candidate query misses ⇒ no-op (self-idempotent) |
 
 Additional invariants: terminal-only writes are same-state no-ops at the state machine
@@ -459,13 +481,21 @@ Rationale:
    (`zombie_close_skipped_mission_live` / `_age_unmet` / `_bus_pending` / `_guard_error` /
    `_disabled`), mirroring the f-family detail-token style.
 
-> **A1 stuck-closed observability (folded per architect §6/§10):** the drift loop logs stats only
-> when `reconciled>0` today (`api.py:3926-3935`) — a stuck-closed heal (examined>0,
-> finalized=0, holds/skips accumulating) would otherwise be INVISIBLE. Folded requirements:
-> (i) the (h) counter block logs whenever **`examined>0`** — NOT gated on `reconciled>0`;
-> (ii) non-zero `error_skips` surfaces in the drift-stats WARN line; (iii) an **escalating WARN**
-> fires when the same job accumulates ≥K consecutive error_skips/mission_live_holds (K≈40 ≈ 3.3h
-> at the 300s cadence). Counters alone are forensic, not operational.
+> **A1 stuck-closed observability (architect §6/§10; streak-state holder named per reviewer
+> council CF-3):** the drift loop logs stats only when `reconciled>0` today (`api.py:3942-3948`;
+> a distinct boot-time twin gates the same way at `api.py:2456` — citation corrected by reviewer
+> A3: the earlier `:3926-3935` cite landed on the startup-delay block) — a stuck-closed heal
+> (examined>0, finalized=0, holds/skips accumulating) would otherwise be INVISIBLE. Folded
+> requirements: (i) the (h) counter block logs whenever **`examined>0`** — NOT gated on
+> `reconciled>0`; (ii) non-zero `error_skips` surfaces in the drift-stats WARN line; (iii) an
+> **escalating WARN** fires when the same job accumulates ≥K consecutive
+> error_skips/mission_live_holds (K≈40 ≈ 3.3h at the 300s cadence); (iv) **the streak state is a
+> service-level dict on `JobRecoveryService`** (strand-healer precedent:
+> `child_reports.py:292` `_strand_heal_inflight` — service-level in-memory holder) keyed
+> `job_id → consecutive skip/hold count`, with **reset-on-close** (successful finalize clears the
+> entry) and **evict-when-candidate-disappears** semantics (job no longer in the candidate set ⇒
+> drop the entry); restart-reset is acceptable if disclosed (in-memory, no persistence).
+> Counters alone are forensic, not operational.
 
 ---
 

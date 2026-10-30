@@ -3,7 +3,10 @@
 Board: `wi-78967dba` · Lane worktree: `/home/nea/ensemble-src-wt-missed-finalize` (branch
 `fix/missed-finalize-zombie-active`, base `22fe83317`) · Plan date: 2026-10-30 ·
 **Architect fold: 2026-10-31 @ `9657be93a`** (all four held-open decisions RATIFIED;
-amendments A1–A7 folded into the plan set; this file and the phases carry the results).
+amendments A1–A7 folded into the plan set) ·
+**Reviewer council fold (W1/W2/W3/CF-3/A3/S4/S5/A6): 2026-10-31** (verdict APPROVE-WITH-
+ADVISORIES 0C/3W/7A, design shape ratified, gap re-proven at HEAD — doc-level corrections
+folded; see the second fold-record block in `decisions.md`).
 Companion files (this directory): `research-findings-core.md`, `research-findings-repair-riders.md`,
 `technical-analysis.md` (the design, §1–§12 + fold annotations), `decisions.md` (D-1..D-13 with
 statuses incl. RATIFIED verdicts), `architecture-recommendation.md` (the architect's authoritative
