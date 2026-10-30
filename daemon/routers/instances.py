@@ -342,8 +342,9 @@ async def create_instance(
             ).model_dump()
         )
 
-    # Get instance info from database
-    instance_meta = manager.get_instance_info(instance_id)
+    # Get instance info from database (off-loop, wi-3f5bea95)
+    from daemon.services.db_offload import offload as _offload
+    instance_meta = await _offload(manager.get_instance_info, instance_id)
     return InstanceInfo(
         instance_id=instance_meta["instance_id"],
         agent_id=instance_meta["agent_id"],
@@ -473,7 +474,9 @@ async def list_instances(
     limit = max(1, min(limit, MAX_PAGE_LIMIT))  # Clamp to 1-MAX_PAGE_LIMIT
     offset = max(0, offset)  # Ensure non-negative
 
-    instances_data, total, truncated = manager.list_instances(
+    from daemon.services.db_offload import offload as _offload
+    instances_data, total, truncated = await _offload(
+        manager.list_instances,
         limit=limit,
         offset=offset,
         project_id=project_id,
@@ -547,7 +550,8 @@ async def get_instance(
     manager = _get_manager(request)
     
     try:
-        instance_meta = manager.get_instance_info(instance_id)
+        from daemon.services.db_offload import offload as _offload
+        instance_meta = await _offload(manager.get_instance_info, instance_id)
     except KeyError:
         raise HTTPException(
             status_code=404,

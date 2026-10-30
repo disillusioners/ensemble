@@ -437,6 +437,30 @@ class SQLModelInstanceRepository:
             ).all()
             return list(rows)
 
+    def list_child_ids_for_parents(self, parent_ids: list[str]) -> dict[str, list[str]]:
+        """Return a ``{parent_id: [child_instance_id, ...]}`` map.
+
+        One batched statement with a deterministic ``ORDER BY parent_id ASC,
+        instance_id ASC``. Used by the instance list/detail paths so the
+        children N+1 collapses to a single round-trip and the children order
+        is pinned at the SQL level (wi-3f5bea95 / Phase 2).
+        """
+        valid = [pid for pid in (parent_ids or []) if pid]
+        if not valid:
+            return {}
+        with SQLModelSession(self.engine) as db_session:
+            rows = db_session.exec(
+                select(Instance.parent_id, Instance.instance_id).where(
+                    Instance.parent_id.in_(valid)
+                ).order_by(
+                    Instance.parent_id.asc(), Instance.instance_id.asc()
+                )
+            ).all()
+        result: dict[str, list[str]] = {pid: [] for pid in valid}
+        for parent_id, child_id in rows:
+            result.setdefault(parent_id, []).append(child_id)
+        return result
+
     def _enrich_instance(self, db_session: SQLModelSession, instance: Instance | None) -> Instance | None:
         """Hook for subclasses/tests to enrich a freshly-read instance. Default returns unchanged."""
         return instance

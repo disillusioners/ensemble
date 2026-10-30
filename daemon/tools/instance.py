@@ -6167,7 +6167,7 @@ Caveats:
         # ``truncated`` is only meaningful with ``include_descendants=true``;
         # this tool uses the default (false), so the third tuple slot is a
         # throwaway.
-        instances, _, _ = manager.list_instances(limit=DEFAULT_PAGE_LIMIT)
+        instances, _, _ = manager.list_instances(limit=DEFAULT_PAGE_LIMIT, include_descendants=False)
         return instances
 
     list_instances._full_doc_ = f"""List the {DEFAULT_PAGE_LIMIT} most recent active instances.

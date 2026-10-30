@@ -1671,7 +1671,8 @@ def _build_health_report(
             stop_reason = "time_budget"
             break
         rows, total, _repo_truncated = manager.list_instances(
-            limit=FLEET_SCAN_LIMIT, offset=window_index * FLEET_SCAN_LIMIT
+            limit=FLEET_SCAN_LIMIT, offset=window_index * FLEET_SCAN_LIMIT,
+            include_descendants=False,
         )
         if total_first is None:
             # FIRST window only — never reassigned (see the docstring).
