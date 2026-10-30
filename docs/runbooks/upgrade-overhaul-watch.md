@@ -298,6 +298,56 @@ token) is verified from the **pinned checkout at the synced rev** — payloads
 ship no `scripts/`. The arm row's REQUIRED provenance fields are BOTH the
 git rev AND the `lib.sh` sha256; a missing field rejects the row.
 
+## §G. Operator-visible contract changes in the promote-preflight-hang lane
+
+### §G.1 `status.sh` exit codes (A6)
+
+`status.sh` (read-only, no lock) **exits 1 — not 0 — when its journal read is
+refused or over-budget** (the size-guard / torn-journal class). This is
+deliberate (D2-6/SC4b: a diagnostic tool never files itself as a pipeline
+refusal, so 78 is never used, and it never mutates the journal), but it IS a
+contract change for anything scripting `status.sh`:
+
+| mode | journal readable | journal refused / over-budget |
+|---|---|---|
+| plain `status.sh` | rc 0 | **rc 1** |
+| `status.sh --verify` | rc 0 (all checks pass) | **rc 1** (the verify result is folded in at the same rc) |
+
+There is no in-repo consumer of `status.sh`'s rc today; external wrappers
+should treat 1 as "diagnostics incomplete" and read the WARN line, not as
+"the daemon is down".
+
+### §G.2 Per-run log family — FOUR names (A2)
+
+One ceremony run writes, in `$INSTALL_DIR/data/upgrade/<env>/`:
+
+| file | writer | content |
+|---|---|---|
+| `<run_id>.log` | the shell (`ENSEMBLE_UPGRADE_LOG_FILE`) | the narrative (markers, WARNs, breach lines) |
+| `<run_id>.payload.log` | systemd (`StandardOutput=append:`) | the payload's raw stdout |
+| `<run_id>.client.log` | the daemon (`spawn_executor`) | the `systemd-run` CLIENT's stderr (signature triage) |
+| `<run_id>.payload.client.log` | **pre-A2 daemon builds only** | legacy name of the row above |
+
+Retention keeps 20 newest per directory (+ a 14-day cap) and fences the
+current run's **whole family**, all four names, plus the in-flight run's and
+the last pointer line's files, plus anything modified within 6 h. Since A2
+the writer uses `<run_id>.client.log`; the legacy fourth name stays fenced so
+a run started by an older build is not retro-deleted mid-ceremony.
+
+### §G.3 Supervision probe on a wedged bus (W3)
+
+`_df_systemctl`'s budget breach is **kind-scoped**:
+
+- phase `promote:*` (or an un-phased caller) ⇒ halt row + exit 78 (unchanged);
+- any other phase (`restart:*`, `rollback:*`, `stop:*`, `stage:*`) ⇒ ONE
+  WARN, the probe returns "unknown", the DUAL_FIGHT check degrades to
+  "cannot classify" and the RECOVERY script continues (R1).
+
+An operator seeing `supervision probe ... exceeded SYSTEMCTL_PROBE_BUDGET_S`
+on a restart/rollback path should read it as "this recovery continued blind",
+not as a failure — re-run the probe or `systemctl status` by hand when the
+bus recovers.
+
 ---
 
 **End of §C/§D/§E/§F watch runbook entry.**

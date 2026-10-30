@@ -211,3 +211,79 @@ only — no re-architecture, nothing outside the listed sites.
 * **Fence**: zero live contact in this wave — every leg runs under the packs'
   `preflight_pack_common.sh` fence (scratch install root + `FAKE_HOME` + escape
   guard + per-variable `POSTGRES_*` scrub); the daemon-side legs are `tmp_path`-only.
+
+## 11. Fix cycle 2 (code council: 3 WARNINGs + 9 advisories; tidier: H1/M1/M2/M5…M10) — decisions + deviations, 2026-10-30
+
+Base for this wave: `f76765e6a82` (fix iteration 1 close). Branch
+`fix/promote-preflight-hang`. Inputs: `review-code-council.md` (APPROVE-WITH-
+ADVISORIES, 0 CRITICAL / 3 WARNING / 9 ADVISORY) and `tidier-report.md`
+(29 findings from 1 of 3 lanes — the two readability/robustness lanes died on
+a provider rate-limit storm, so the shell surface is NOT craftsmanship-reviewed
+by that report; this ledger covers only the findings it delivered).
+
+| # | Decision / deviation | Ruling that wins | Rationale |
+|---|---|---|---|
+| D-50 | **W1 fixed by propagating the rc, not by dropping the wrap**: `_run_bounded_step adopt-txn adopt_stale_txn \|\| { _arc=$?; [ "$_arc" -eq 78 ] && exit 78; _refuse txn-busy …; }`, and the wrapper-contract text now reads "read-only **or death-idempotent by its own design**" with the adopt idempotence argument cited at the call site. | W1's own fix; D2-14's invariant has to be TRUE as written. | Dropping the wrap was the council's alternative; keeping it preserves the 120 s kill vector on a step whose healthy cost is ms while the recovery is designed to survive death (flip-first ⇒ the launcher sweep re-runs it). What could NOT stay is the contract text claiming every wrapped site is read-only. The rc arm removes the double row for every adopt refusal class. |
+| D-51 | **The warn-only adopt classes still write NO row** (kind=restart / unparseable `started_at` / FRESH txn). | Pre-existing behaviour; W1 asks to stop inventing a CONTRADICTING row, not to add rows. | Their WARN carries the reason on the per-run narrative, and `_refuse txn-busy`'s lie is gone. Pinned as "exactly one row for the journaling class, ZERO for the warn-only class, never a txn-busy echo" (Pack D D13) — the pin states the invariant, not a new row shape. |
+| D-52 | **W2 refuses on 128 only when the dir IS git-shaped** (`(path/".git").exists()`, file or dir). | D6-10 (command-error ⇒ refuse) + Q2/D6-11 (non-git ⇒ the stamp IS the provenance). | One predicate mirroring the 255 handler. The companion leg I13c pins that the SAME 128 on a dir with no `.git` still ARMS on its stamp — otherwise the new arm would invent a refusal class for git-less hosts and break I4. |
+| D-53 | **W3 branches on `_PIPELINE_PHASE`; UNSET ⇒ the promote (loud) arm.** | R1 (no fail-fast on a recovery path) + fail-closed-by-default. | Every shipped recovery script sets its phase BEFORE its supervision call (`restart:adopt` :192→:199, `rollback:preflight` :147→:154, `stop:lock`, `stage:lock`), so only an un-phased ad-hoc caller gets the loud arm — which is today's behaviour, so nothing silently degrades. Both arms pinned (D10/D10b loud, D12 continue). |
+| D-54 | **A5 validates at the SOURCE site and never fails the source**: `_numeric_knob` prints a NAMED `ERROR:` line to stderr and substitutes the documented default. | A5 ("loud validation error, not a cryptic death") + R1. | A hard exit at source time would brick `status.sh`/`restart.sh`/`rollback.sh` on an unrelated typo — the exact fail-fast-on-recovery-path class W3 is about. `_budget_in_force` now prints the RESOLVED globals (one source of truth per budget; no duplicated default literals). |
+| D-55 | **A2 renames the writer to `<run_id>.client.log` AND keeps the legacy `<run_id>.payload.client.log` fenced.** | A2's option 1 (rename) + retention safety for runs started by an older build. | The rename makes the family exactly the three documented names; the legacy fence entry costs one `case` alternative and prevents retro-deleting an old build's client log mid-ceremony. Pinned by E10b including a non-vacuity leg (20 fillers kept ⇒ the pass really ran). |
+| D-56 | **A7 refuses with the existing `executor-systemd-unavailable` family** (`reason:` text names `client-log-unavailable`) instead of minting a new envelope token. | Fail-closed triage + the project's envelope-vocabulary discipline. | The refused claim is "a transient unit started and its payload ran" — unverifiable when the client stderr cannot be read. A new token would need an envelope/vocabulary decision this lane does not own; the reason text keeps the row unambiguous and a pinned pytest leg (`test_unreadable_client_log_refuses_instead_of_guessing`) holds it. |
+| D-57 | **A8 uses `asyncio.to_thread` for the observation** (not a byte-tail re-implementation of `state.json`). | A8's own two options. | The read is ~5-15 ms; the loop-safety property is the point, and `to_thread` gets it with no parser fork. (The DEDICATED-executor rule in this module applies to the long BLOCKING `waitpid`, a different constraint.) |
+| D-58 | **A1 restructures `_tree_manifest` into a forwarding-TERM wrapper + a backgrounded worker**, with `pgrep -P` (when present) reaping the in-flight `shasum` before `xargs`. | A1 ("`setsid` the batch or kill the group") under the constraint that `_run_bounded` is a shared primitive used by 7+ pre-existing sites. | A signal does NOT reach grandchildren, so a trap in the inner worker alone was unreachable — the FIRST attempt at this fix failed its own pin (proved by the new leg, which is why the leg exists). Changing `_run_bounded` to `set -m` + group-kill would have changed semantics for every bounded site (load-stop, hand-back, probes); the wrapper keeps the change inside one function. Every call site already runs `_tree_manifest` in its own subshell, so the trap cannot leak. Residual (disclosed): `pgrep` absent ⇒ only `xargs` is TERMed; at most ONE in-flight `shasum` chunk finishes and exits (no new spawns, no leak). |
+| D-59 | **A4 derives each script's strictness FROM ITS FILE** rather than tabulating six constants. | A4 + R1. | A hand-copied table would agree with a future defect (if someone marked a recovery script strict, both the script and the table would say "strict"). Deriving from the file makes the leg RED on exactly the R1 violation. |
+| D-60 | **A9 amends the G5 row IN PLACE with a supersession pointer to D-3**, rather than rewriting the row's verdict. | The plan set is a frozen approval artefact; the project's own supersession style. | The measurement stands (BASE and the helper both refuse); what was wrong was the plan's premise about `$(cat)` dropping the NUL before the scan. A reader of the plan alone now sees the ratified direction and cannot "fix" the code back. |
+| D-61 | **M9 fixed AND the matrix's own restore trap re-scoped to `PLANTED_LIST`.** | M9 + a defect found while executing it. | Running the matrix from a dirty worktree made its EXIT trap `git checkout --` every dirty plant target — i.e. the safety guard DESTROYED uncommitted work (observed once in this session, work recovered and re-applied). The restoring half now only touches files this run actually planted; the pre-flight assertion stays unscoped (it is read-only). |
+| D-62 | **M5's `Literal` sweep stops at the two modules that consume the verdict**; M7 keeps ONE resolver in `upgrade_journal` and both readers delegate; M6 introduces `PerRunObservation(NamedTuple)` with `None` for absent and the "unknown" rendering moved to the row builder. | M5/M6/M7 as written. | Each is the smallest change that removes the failure mode the finding names (typo ⇒ arm; three positional strings; two drifting resolvers). The logging pack's E13 probe was updated in the same commit (it called the old tuple contract). |
+
+### Declined in this cycle (with reasons)
+
+| Item | Disposition | Reason |
+|---|---|---|
+| M8 (hoist the duplicate drain harness into `tests/unit/tools/conftest.py`) | **DECLINED** | A test-harness refactor, not a safety fix: two `object.__new__(InstanceManager)` harnesses with DIFFERENT fixtures (one seeds a minimal install for `unit_properties` assertions, the other two releases + manifest + symlink) and different recorders. Collapsing them now would hand the next dispatch (full matrix + whole-tree rerun) a behavioural change in test infrastructure for no coverage gain. Both copies cite each other and the drift risk is a two-file edit that the tidier already documented. Next tidy pass, when no gate is queued. |
+| M4 (stop committing the ~295 KB G1–G4 generated fixtures) | **DECLINED** | Not in this cycle's brief, and the counter-argument is documented at `CORPUS.md:3`. Generating them at pack run time is a fixture-lifecycle decision that belongs with the corpus owner. |
+| Tidier low #15 (PACKS.md rows for the 14 packs + matrix) | **ROUTED** | `.agents/tester/PACKS.md` is the tester's file; the shape precedent is the dbpool table. Routed at merge, not edited from this lane. |
+
+### Fix-cycle-2 verification notes
+
+* **Pack D** (`preflight_watchdog_test.sh`): **68 passed / 0 failed**. New legs:
+  D10b (explicit `promote:` phase ⇒ halt), D12 (recovery phase ⇒ WARN +
+  continue + no halt row + the R1 wording), D13 a/b (adopt-refusal accounting
+  through the REAL `promote.sh` and a planted stale txn — one halt row for the
+  journaling class, zero for the warn-only class, never a `txn-busy` echo),
+  D14 (garbage numeric knobs ⇒ three named ERROR lines + documented defaults +
+  computable deadline arithmetic).
+* **Pack I** (`preflight_ceremony_readiness_test.sh --expect-implemented`):
+  **40 passed / 0 failed**. New legs I13b (git-shaped + `rev-parse` rc=128 ⇒
+  refuse) and I13c (the same rc on a non-git dir ⇒ still stamp-provenance).
+* **Pack E** (`preflight_logging_test.sh`): **33 passed / 0 failed**. New leg
+  E10b (all four current-run names survive + the writer names the third one),
+  and the E13 probe updated for the typed observation.
+* **Pack A/shasum** (`preflight_shasum_batch_parity_test.sh`): **7 passed / 0
+  failed**, including the new A1 kill-hygiene leg (no leaked mktemp pair, no
+  surviving grandchild) — and the parity legs stayed byte-identical after the
+  `_tree_manifest` restructure.
+* **Pack J/size-guard**: **31 passed / 0 failed** with the six new A4
+  per-script legs (+ the transitive stop-ensemble leg).
+* **Unchanged and re-run green**: journal-parity 60, journal-scale 12, anchor
+  42, stage-lock 13, repro 7, census 10.
+* **Daemon-side pytest**: `test_upgrade_preflight_daemon_side` 32 + 
+  `test_upgrade_tools` 177 + `test_upgrade_journal` + 
+  `test_upgrade_executor_systemd_service` = **358 passed / 1 skipped / 0
+  failed**. New: `test_unreadable_client_log_refuses_instead_of_guessing` (A7)
+  and the A2 name assertions in `test_client_stderr_is_a_file`.
+* **Mutation legs M41–M46** (executed: plant → named pin RED → restore →
+  GREEN; tree clean after every leg): M41 (W2 arm dead ⇒ I13b `got=arm`),
+  M42 (recovery phase not scoped out ⇒ D12 rc=78), M43 (78 not propagated ⇒
+  D13a txn-busy row), M44 (`<run>.client.log` unfenced ⇒ E10b fence lost),
+  M45 (numeric guard dead ⇒ D14 sourcing dies on a garbage knob), M46 (no
+  forwarding TERM ⇒ A1 leak + surviving grandchild). Two further pins are
+  mutation-verified by a manual plant (recorded here because they pin
+  behaviours whose plant file is not a matrix PLANT target): the A4 legs
+  (appending `JOURNAL_READ_STRICT=1` to rollback.sh ⇒ `FAIL A4 rollback:
+  derived strict=1, R1 wants 0`, restored ⇒ green) and the A7 pytest leg
+  (`if not err_tail_read:` → `if False:` ⇒ `1 failed`, restored ⇒ 32 passed).
+* **Fence**: zero live contact. Every pack leg runs under
+  `preflight_pack_common.sh` (scratch install root, `mktemp` FAKE_HOME, escape
+  guard, per-variable `POSTGRES_*` scrub); the daemon-side legs use `tmp_path`.
