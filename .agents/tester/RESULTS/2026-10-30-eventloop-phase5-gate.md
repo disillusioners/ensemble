@@ -382,3 +382,126 @@ under a saturated 16-read burst**, where BASE's readiness probe could not answer
   `job_queue_service.py:1800`), D-70 **low-risk doc-only**, mapped to their regions.
 - Carried: the clean-drain logging gap (`db_offload.shutdown()` logs nothing on success);
   drain observability is inferred from the 1.36 s exit, not printed. Recommend one INFO line.
+
+---
+
+# AMENDMENT 4 — FINAL GATE REPORT (payload `c9eac9747`)
+
+## THE HEADLINE — the commission's thesis, measured on the same fixture and load
+
+> **Under a 16-concurrent-BFS saturation burst, BASE's `/readyz` did not answer at all
+> within a 10 s probe budget; HEAD answered `200` in 0.376 s** — with `leak_signal
+> {detected: false, checkedout_rising: false, streak: 0}` and an unchanged pool shape
+> (`sqlalchemy {checkedout 1, size 15}`, `psycopg {pool 2/10, available 2, waiting 0}`).
+> On the same 330-instance fixture a single BFS(100) read took **1.119 s at BASE vs
+> 0.099 s at HEAD**.
+
+## Pins
+
+| item | value |
+|---|---|
+| **Code payload** | `c9eac9747388852a47d3a3ac11487bb3d8c44d3f` |
+| **Branch tip at measurement** | `7ac2e9e4f`-independent: docs-only amendments on top of the payload (`9e26242aa`, `142998ad1`, this commit) |
+| **BASE tree** | `b1183a637649f94c23b94dfc745df44381dc54ab` |
+| **BASE reference** | `raw/BASELINE.full.base.json` sha256 `2440959ba240249369ccd233c0d053a5ad812db26bf45cf2b17933c0d4c80d31` |
+| **Harness** | `main.py` sha256 `11057a76ad1b0af5dfb689bc249e23cd06ec0cc0d4a35dd3b10282d6a02d6a8f` — identical in both trees; repaired `gate_g5`; `selftest 62/62` |
+| Worktrees | `-gate-base` @BASE · `-gate-head2` @payload (three full HEAD runs) |
+
+## GATE TABLE (final)
+
+| G | Result | Evidence |
+|---|---|---|
+| **G1** three-part | **PASS** | loop-thread family pin **1/8 (BASE) → 0/8 (HEAD)**; narrow **1/8 → 0/8**; captures 8/8 with a loop thread; discriminator self-test PASS; leg 135/1500 requests; **0 unattributable captures** (table §G1) |
+| **G2** band | **PASS** (×3 runs) | loaded flat p95 **0.1318 / 0.1606 / 0.1163 s** ≤ 0.230 one-sided; BASE 1.0922 s `FAIL_BASE_EQUIVALENT`; plan anchors annotated `commission-body, unverified` |
+| **G4(e)** | **PASS** | `g4_reference_provenance` = `mode=base simulated=False tree=b1183a637649`; `STALL_BASE_synthetic > 0` (1) and paired comparisons per profile |
+| **G4 badge** | **WAIVED (stall-count only)** — see §G4 | 3 runs: FAIL/PASS/PASS; max ≤ BASE and p95 in band in **all three** |
+| **G5** | **PASS** (×3 runs) | `COMPARED 9/9 — all byte-identical after the children-order normalization`; `g5_shapes_collected 9/9 all-200=True`; children order 47/47 + 1/1; `jobs_active` 7 ≤ 7 |
+| **G6** | **PASS** | collected 52 (BASE) → 63 (HEAD); FAILED 0 → 0 (RUN2/RUN3); RUN1's single red enumerated |
+| **G7** | **PASS** | modes clean, mode-suffixed artifacts, no leakage |
+| **G9** per-shape | **PASS** | on-loop: flat `{prefs:1}` ≤2, BFS `{prefs:1}` ≤2, work/defer/jobs_active/jobs_recent/jobs_page `{}`, missions `{instances:2, job_queue_items:1}` = exact routed census #4 (exempt) |
+| **G10** | **PASS** | observable `None → populated` population is **0** at the payload (byte parity restored); anchors `:951` / `:152-153` / `:383-405` verified in place by the D-70 hunk map |
+| **G11** | **PASS** | `state.json current=v0.27.12`, `previous=v0.27.11`, `in_flight=None`; `v0.27.13` staged-unpromoted ⇒ lane unreleased |
+| **G12** | **PASS** | 36 commits attributed by path class; `frontend/`, `plugins/`, root files = **ZERO** |
+| **N2 flip (core claim)** | **PASS** | **1/8 → 0/8** loop-thread; any-thread diagnostic 8/8 both trees (bridge frames correctly ignored) |
+| **Packs (137 nodes)** | **PASS** | children-order **9**, p3.9 **14**, p4.5 **10**, p2.8 **6**, db_offload_seam **21**, work_resolver **77** — all green at the payload |
+| **D-70** | **COMPLIANT** | 9 files / 176 deleted lines, every hunk inside a plan-cited region; two doc-string deletions low-risk |
+| **5.11 boot smoke** | **PASS (seeded)** | 330-row fixture, **16 bridged reads in flight at SIGTERM**, seam-loud (`backpressure alarm waiters=1 inflight=6 sum=7 threshold=8`), **exit −15 in 1.36 s** ≪ 90, `Engine is disposed` **0**, tracebacks **0** |
+| **P4 4.7 readiness** | **PASS (seeded)** | BASE: **no `/readyz` response within 10 s** under saturation · HEAD: **200 in 0.376 s**, leak silent, pool unchanged |
+
+### Success criteria vs measured
+
+| criterion | measured |
+|---|---|
+| instances floor 0.067–0.23 s | **0.116–0.161 s** (BASE 1.09 s) |
+| round-trips per request | flat **13 → 4**, BFS **248 → 8**, work **1873 → 6**, defer **89 → 89** (on-loop **89 → 0**), jobs recent **1439 → 7**, jobs page **1874 → 7**, missions **3 → 3** (exempt) |
+| loop-lag under synthetic load (1.408 s p95 baseline) | badge p95 **0.529–0.575 s**, home **0.506–0.517 s**, jobs_page **0.505–0.512 s** |
+
+## §G4 — the badge leg, three runs, and the WAIVER
+
+| run | verdict | stalls | max | p95 | samples | loaded flat p95 |
+|---|---|---|---|---|---|---|
+| RUN1 | **FAIL** 62/63 | **2 > 1** | 0.8332 ≤ 1.0583 | 0.5381 ≤ 1.0236 | 186 | 0.1318 s |
+| RUN2 | **PASS** 63/63 | 1 ≤ 1 | 0.8657 ≤ 1.0583 | 0.5753 ≤ 1.0236 | 188 | 0.1606 s |
+| RUN3 | **PASS** 63/63 | 0 ≤ 1 | 0.6078 ≤ 1.0583 | 0.5290 ≤ 1.0236 | — | 0.1163 s |
+
+**Leader ruling applied (pre-declared): 2 of 3 pass · max ≤ BASE in all three · p95 within
+band in all three ⇒ DOCUMENTED WAIVER of the stall-count fence.** Recorded **as a waiver,
+never as a pass**:
+
+> The fence is `stalls ≤ BASE` where BASE = 1 — **zero statistical headroom by
+> construction**. A count with mean ≈1 exceeds 1 in a large fraction of runs, so the fence
+> **cannot discriminate this lane's effect**; it is not measuring the lane, it is measuring
+> Poisson noise at 1. The discriminating tail signals are clean in **every** run: `max` sits
+> 21%/18%/43% **inside** BASE (0.8332 / 0.8657 / 0.6078 vs 1.0583) and `p95` is inside the
+> band in all three. The original failure mode (max 1.0594 **>** 1.0583, +1.1 ms at the
+> previous payload `f636756aa`) does **not** recur at this payload.
+> **Scope of the waiver: the stall-count sub-fence of `g4_paired[profile_badge]`, this
+> payload only. Max and p95 remain enforced.**
+
+## §G1 — attribution table (required deliverable)
+
+| capture(s) | reason | loop-thread verdict | attributed site | owning routed item |
+|---|---|---|---|---|
+| 4 × `sustained_cpu` (HEAD) | CPU-sustained trigger | **no instances-path frames on the loop** (0/8) | bridge-thread DB work (`db-offload_*`) | none — not a violation |
+| `boot-records/` | capture metadata | n/a | n/a | n/a |
+| `sustained_loop_lag` captures | — | **ZERO at HEAD** | — | — |
+| G9 on-loop residual (flat, BFS) | `SELECT instance_ui_prefs` ×1 | attributable | `routers/instances.py:496` prefs merge | **D-9 residual** (enumerated) |
+| G9 on-loop residual (missions) | `SELECT instances`×2 + `job_queue_items`×1 | attributable | missions census | **routed-out census #4** (exempt) |
+| executor-class | jobs_active_badge **7 rts** | non-regression only (7 ≤ 7) | jobs enrichment population | **C-4 unbounded** (enumerated residual) |
+
+## DISCLOSURES (final)
+
+1. **`ensure_job_ids` pre-`root_only` draw order — FIXED** by the payload's guard (hoisted
+   child-id set, no new query, same guard applied in the patch-up). No longer a residual.
+2. **Liveness-source asymmetry (ROUTED, design fact, not a lane defect):** the legacy
+   fallback renders `mission_ref.liveness` from `terminal_reason`; the resolver-backed path
+   renders it from `instance.status` — they disagree for **child-instance Jobs**
+   (`failed` vs `completed`). The byte-restore restores BASE parity by keeping child-instance
+   Jobs out of the resolver-backed payload; the asymmetry itself awaits a separate semantics
+   decision.
+3. **ITEM-2 — degraded Task `root_only` fail-open** under instance-lookup degradation, in
+   **BOTH** BASE and HEAD (pre-existing, base-faithful); the batched path widens it
+   per-row → per-page; the Job branch fails loud instead. Not fixed by design.
+4. **Two doc-only deletions** (`daemon/tools/instance_read.py:87`, `daemon/services/job_queue_service.py:1800`) — D-70 low-risk, mapped to their regions.
+5. **Clean-drain logging gap — ROUTED, not fixed** (per ruling): `db_offload.shutdown()`
+   logs nothing on a successful drain; the drain is **behaviourally proven** (16 bridged
+   reads, marker asserted, 1.36 s exit) but not printed. Adding a log line now would re-pin
+   the payload for zero gating value. *Observability item for the owning lane.*
+6. **`/api/work` population unbounded (Q2)** — no limit lever exists; 1873 → 6 rts by
+   batching only.
+7. **T-3 deferred** — `daemon/routers/jobs_crud.py:943` remains an on-loop site.
+8. **D-B observation-window narrowing** — the race is disclosed as a comment, not engineered.
+9. **async-native deferral unfunded** — the lane ships bridge-based offload (path C).
+10. **`jobs_active_badge` executor-class residual** — 7 rts, non-regression only, no absolute bound.
+11. Instrument doc-warnings folded at `469ca7d68`; tidier pass `054ba46b6` present.
+12. Pre-existing noise on both trees: wedge-capture census `c.n_live_tup` (R-10),
+    `asyncio.iscoroutinefunction` deprecation, root-owned `/tmp/pytest-of-nea` teardown `PermissionError`s.
+
+## FINAL VERDICT
+
+# **GATE: PASS-WITH-DISCLOSURES**
+
+Payload `c9eac9747`. G5 resolved and proven three times; the core N2 claim flips
+1/8 → 0/8; every round-trip target met; 5.11 and P4 4.7 green **with real in-flight work**;
+one fence (the badge stall count) **waived with rationale, not passed**. No stage, no
+promote, no live contact, no `.env` edit — merge/bump/tag/stage belong to the giter.
