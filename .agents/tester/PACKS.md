@@ -1,5 +1,23 @@
 # Test Packs
 
+## eventloop-sync-DB hot paths (`fix/eventloop-sync-db-hotpaths`, board `wi-3f5bea95`) — PACK REGISTERED (2026-10-30)
+
+> The children-order pin pack is a **gate-carrying artifact**: it is the
+> DISCRIMINATING evidence for children ordering, because the BASE-side
+> "unordered children" positive control is **impossible on this host**
+> (measured retraction — `list_child_ids_permanent` has no `ORDER BY` yet the
+> planner returns primary-key order, so children arrive already sorted at BASE
+> under both ascending and reversed sibling insertion; see the harness repair
+> note §"A measured retraction"). Unregistered it was invisible to every later
+> lane. It carries the architect §5.2 / D-34 FIVE corrections: multiset (not
+> set) equality, per-parent **and** global comparison, a **static SQL
+> `ORDER BY`** pin, all returned rows, and detail-shares-source.
+
+| Pack | Invocation | Scope | Last Run | Status |
+|---|---|---|---|---|
+| `instance_children_order_repository` | `cd <worktree> && env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_HOST -u POSTGRES_PORT -u DATABASE_URL -u PORT -u DAEMON_PORT -u ENSEMBLE_SELF_ENV timeout 300 .venv/bin/python -m pytest tests/unit/test_instance_children_order_repository.py -v -p no:randomly` | §5.2 / D-34 children-order assertion set: `test_sql_order_by_pin`, `test_batch_covers_all_parents`, `test_childless_parent_yields_empty_list`, `test_empty_input`, `test_multiset_not_set`, **`test_static_sql_order_by_present`** (captures the emitted statement via `before_cursor_execute`; asserts `ORDER BY` + `parent_id` + `instance_id`), `test_detail_shares_source`, `test_all_rows_carry_children`, `test_positive_order_assertion` | 2026-10-30 @ `836334e87` | ✅ PASS **9/9** (0.90 s; 0 skipped; `daemon.__file__` proven = the worktree) |
+
+---
 ## db-pool idle-in-transaction FUNCTIONAL GATE (`fix/db-pool-idle-txn` @ `441a1657d`, base `19fc11c8b`; gate branch `tester/dbpool-functional-gate` @ merge `3d835d8dd`) — ✅ **LANE VERDICT: PASS-WITH-NOTES — CLEARED FOR DOCS → MERGE → STAGE** (2026-10-29; original gate FAIL on G3.5 superseded by the post-`441a1657d` re-verification)
 
 > Full record: `.agents/tester/RESULTS/2026-10-29-dbpool-functional-gate.md` (original gate + RE-VERIFICATION section). **Original verdict: FAIL — G3.5: 11 deterministic net-new regressions, one root cause** (`readiness.py:1512` F4-A pre-check vs non-QueuePool engines). **Lane owner fix `441a1657d`** (shape guards; real comparison + constant untouched; DO-NOT fence greps zero) merged as `3d835d8dd`; surgical re-run ALL GREEN: the 11 ids ×3 = 33/33; StaticPool path cited + repro green; ladder rows G2.5/G2.6/G3.1-G3.4 + G1.4 exactly-1-xfail re-proven; F4-a mutation RED→GREEN on the merged tree (behavioral assertion included); whole-tree re-run arithmetic fingerprint **exactly +11 passed / −11 failed**, comm: the 11 GONE, 0 disclosed artifacts recurred, 2 new HEAD-only ids = class-a pre-existing flakes (3×-isolated both sides). **Net-new reds = 0 ⇒ G3.5 PASSES. Notes = the standing disclosure ledger (non-blocking).**

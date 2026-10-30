@@ -197,7 +197,7 @@ reported on `smoke` (each prints a loud `[fence:INFO]`):
 |---|---|
 | narrow pin (BASE) | the N+1 dwell is only long enough to be caught at scale |
 | G2 non-vacuity | the architect requires ≥5 badge ticks; the smoke window is 2 |
-| G2 band | the flat leg only queues behind multi-second loop blockers at scale (measured 0.139 s at smoke vs 0.914 s at full) |
+| G2 band | the flat leg only queues behind multi-second loop blockers at scale (measured 0.139 s at smoke vs **1.1027 s** at full — the committed cell-1 `loaded_flat_p95_s`; the earlier round-1 figure 0.914 s was a hardcoded string, corrected 2026-10-30) |
 
 Everything else — the family pin, the on-loop attribution, the
 round-trip counts, the predicate self-test — is asserted on **both**

@@ -818,19 +818,50 @@ def gate_g5(report: dict, fences: Fences, mode: str,
     )
 
     # ── part (i): normalized byte equality vs the reference ───────────
+    # ROUND-3 FIX (wi-3f5bea95, residual §9b item 9).  The round-2 fence
+    # rendered ``len(rows) - len(diffs)`` over ``len(rows)``: a shape with NO
+    # normalized hash (a 500 carries no body) was EXCLUDED by the
+    # ``is not None`` guard and STILL counted in the denominator, so a real
+    # run printed "9/9 ... byte-identical" while only 8 shapes had ever been
+    # compared — the vacuous-green class.  An uncomparable shape is a
+    # COMPARISON GAP: it is NAMED in the fence line with its reason and it
+    # FAILS.  There is no path on which an excluded shape reads as a pass.
+    # ``g5_shapes_collected``'s all-200 clause remains the hard red carrier.
     if ref_rows:
-        diffs = [
-            n for n, v in rows.items()
-            if v.get("normalized_sha256") is not None
-            and (ref_rows.get(n) or {}).get("normalized_sha256")
-            != v.get("normalized_sha256")
-        ]
+        compared: list[str] = []
+        excluded: list[str] = []
+        for n, v in rows.items():
+            rv = ref_rows.get(n) or {}
+            if v.get("normalized_sha256") is None:
+                excluded.append(
+                    f"{n} (this side: status {v.get('status')}, "
+                    f"no normalized_sha256"
+                    + (f", error={v.get('error')!r}" if v.get("error") else "")
+                    + ")"
+                )
+            elif rv.get("normalized_sha256") is None:
+                excluded.append(
+                    f"{n} (reference side: no normalized_sha256)"
+                )
+            else:
+                compared.append(n)
+        diffs = sorted(
+            n for n in compared
+            if (ref_rows.get(n) or {}).get("normalized_sha256")
+            != rows[n].get("normalized_sha256")
+        )
+        detail = f"COMPARED {len(compared)}/{len(rows)} shape(s)"
+        detail += (" — all byte-identical after the children-order "
+                   "normalization" if not diffs else f" — DIFFER: {diffs}")
+        if excluded:
+            detail += (
+                f"; EXCLUDED — NOT COMPARABLE: {sorted(excluded)} "
+                f"→ an excluded shape is NOT evidence of byte-identity"
+            )
         fences.check(
             "g5_normalized_bytes_equal_vs_reference",
-            not diffs,
-            f"{len(rows) - len(diffs)}/{len(rows)} shape(s) byte-identical "
-            f"after the children-order normalization"
-            + (f"; DIFFER: {sorted(diffs)}" if diffs else ""),
+            not diffs and not excluded,
+            detail,
         )
     else:
         print("  [fence:INFO] g5_normalized_bytes_equal_vs_reference "
@@ -955,7 +986,7 @@ def gate_g2_band(report: dict, fences: Fences, mode: str,
     # SCALE-DEPENDENT: G2's signal is the flat leg QUEUING BEHIND the loop
     # blockers.  At 1/10 scale (smoke: 350 instances, a 16 s badge window)
     # that queueing does not reproduce — the smoke run measured a loaded
-    # flat p95 of 0.139 s against 0.914 s at full scale — so the band is
+    # flat p95 of 0.139 s against 1.1027 s at full scale — so the band is
     # asserted on the `full` profile and REPORTED on smoke.  The defect
     # pins that DO discriminate at every scale (the round-trips, the
     # on-loop attribution and the stack pin) stay asserted on both.
@@ -966,7 +997,7 @@ def gate_g2_band(report: dict, fences: Fences, mode: str,
     detail = (
         f"loaded flat p95={p95_s} s -> {verdict}; "
         + ("BASE mode EXPECTS the loaded leg OUTSIDE the healthy band "
-           "(the committed full-scale BASELINE measured 0.914 s)"
+           "(the committed full-scale BASELINE measured 1.1027 s)"
            if mode == MODE_BASE else "HEAD mode REQUIRES the healthy band")
     )
     if profile == "full":
