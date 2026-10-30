@@ -413,6 +413,39 @@ G4_TICK_S = 0.5
 G4_STALL_MARGIN_S = 0.25
 
 
+def reference_provenance(reference: dict | None) -> dict[str, Any]:
+    """Assert the G4 reference is a REAL BASE-mode run (Blocking 2).
+
+    Pointing ``--reference`` at a SIMULATED output (whose lag series is
+    clamped to the tick floor by S4) made every G4 condition pass on a
+    broken tree.  The reference must therefore be provenance-clean before
+    G4 consumes it: a ``base``-mode run with NO simulation applied and a
+    recorded repo head.
+    """
+    if reference is None:
+        return {"ok": False, "reason": "no reference supplied"}
+    problems: list[str] = []
+    mode = reference.get("mode")
+    if mode != MODE_BASE:
+        problems.append(f"reference.mode={mode!r} (must be 'base')")
+    sim = reference.get("simulation") or {}
+    if sim.get("applied"):
+        problems.append(
+            "reference is a SIMULATED run (simulation.applied=true) — its lag "
+            "series is clamped to the tick floor, so every G4 condition would "
+            "pass on a broken tree"
+        )
+    if not reference.get("repo_head"):
+        problems.append("reference carries no repo_head (unknown tree)")
+    return {
+        "ok": not problems,
+        "problems": problems,
+        "reference_mode": mode,
+        "reference_simulated": bool(sim.get("applied")),
+        "reference_repo_head": reference.get("repo_head"),
+    }
+
+
 def g4_stall_count(series: list[float]) -> int:
     """Samples above the stall threshold (TICK + margin)."""
     threshold = G4_TICK_S + G4_STALL_MARGIN_S
@@ -525,6 +558,64 @@ def simulate_captures(captures: list[dict[str, Any]]) -> list[dict[str, Any]]:
         cap["simulated_moved_frames"] = moved
         out.append(cap)
     return out
+
+
+# ════════════════════════════════════════════════════════════════════════
+# UNIT CLASSES (council round-2 Blocking 1) — declared, never implicit
+#
+#   "per-request"  a PER-REQUEST constant.  What every G9 rule, bound and
+#                  census formula in this module is stated in.
+#   "sample-summed" the RAW aggregate the collector records in
+#                  ``statements_by_shape`` (summed over the phase's samples).
+#
+# The gate boundary normalizes EXACTLY ONCE, in ``per_request_by_shape``.
+# The pre-repair gate compared sample-summed counts against per-request
+# constants — measured on the committed artifact: missions {20,10} over 10
+# samples vs the pinned (2,1) ⇒ a shape the lane never touches failed
+# deterministically forever, i.e. a correct fix could not clear the gate.
+# ════════════════════════════════════════════════════════════════════════
+
+UNIT_PER_REQUEST = "per-request"
+UNIT_SAMPLE_SUMMED = "sample-summed"
+
+
+def per_request_by_shape(row: dict[str, Any]) -> dict[str, dict[str, int]]:
+    """THE gate-boundary unit normalization (round-2 Blocking 1).
+
+    ``statements_by_shape`` carries SAMPLE-SUMMED counts; every rule in
+    this module is PER-REQUEST.  Divide by the phase's sample count, once,
+    here — the gate reads only this, so a real run and a simulated run go
+    through the SAME single normalization path.
+    """
+    samples = int(row.get("samples") or 0)
+    if samples <= 0:
+        # a zero sample count must never silently divide-by-zero into a
+        # pass: return empty and let the shape-count fence fail loudly.
+        return {}
+    out: dict[str, dict[str, int]] = {}
+    for shape, value in norm_by_shape(row.get("statements_by_shape")).items():
+        out[shape] = {
+            "count": int(round(value["count"] / samples)),
+            "on_loop": int(round(value["on_loop"] / samples)),
+        }
+    return out
+
+
+def declared_unit_classes() -> dict[str, str]:
+    """The unit class of every frozen/derived quantity the gates consume."""
+    return {
+        "statements_by_shape": UNIT_SAMPLE_SUMMED,
+        "statements_by_shape_per_request": UNIT_PER_REQUEST,
+        "round_trips.mean": UNIT_PER_REQUEST,
+        "on_loop_round_trips.mean": UNIT_PER_REQUEST,
+        "HEAD_ON_LOOP_RULES.exact": UNIT_PER_REQUEST,
+        "HEAD_ON_LOOP_RULES.max_on_loop": UNIT_PER_REQUEST,
+        "HEAD_ROUND_TRIP_MAX": UNIT_PER_REQUEST,
+        "BASE census formulas (3+limit, 4+levels+rows, 2+holders, 3)":
+            UNIT_PER_REQUEST,
+        "G5 normalized body hash": "per-body (one request per shape)",
+        "G5 jobs_active non-regression": UNIT_PER_REQUEST,
+    }
 
 
 def norm_by_shape(raw: Any) -> dict[str, dict[str, int]]:
@@ -717,7 +808,15 @@ def simulate_report(report: dict[str, Any]) -> dict[str, Any]:
         row["on_loop_round_trips"] = {
             "mean": sim_on["on_loop"], "max": sim_on["on_loop"],
         }
-        row["statements_by_shape"] = sim_on["by_shape"]
+        # Write the SUMMED form back, exactly as a REAL run's collector
+        # would: the gate normalizes ONCE (divide by samples) and must not
+        # know whether the report is real or simulated — ONE code path
+        # (round-2 Blocking 1).  Skipping this multiply-back is precisely
+        # how the round-1 truth table hid the unit bug.
+        row["statements_by_shape"] = {
+            k: {"count": v["count"] * samples, "on_loop": v["on_loop"] * samples}
+            for k, v in sim_on["by_shape"].items()
+        }
         row["simulated"] = {
             "count_rule": sim_total["rule"],
             "on_loop_rule": sim_on["rule"],
@@ -768,6 +867,31 @@ def simulate_report(report: dict[str, Any]) -> dict[str, Any]:
             "count": rule,
         })
 
+    # G5: the fix's documented effect on the bodies — the children source
+    # becomes ``ORDER BY parent_id, instance_id``, so every children array
+    # comes back canonically ordered.  The NORMALIZED hashes need NO change:
+    # the normalization already removed the order, which is exactly why it
+    # is the one permitted difference class.
+    g5 = report.get("g5_bodies") or {}
+    if g5:
+        for name, row in g5.items():
+            co = row.get("children_order")
+            if isinstance(co, dict) and co.get("arrays"):
+                co["ordered"] = co["arrays"]
+                co["unordered"] = 0
+                co["offender_paths"] = []
+                co["canonical"] = True
+                co["simulated"] = True
+        prov["rules"].append({
+            "shape": "G5.children_order",
+            "count": (
+                "S5.order: the children source becomes ORDER BY parent_id, "
+                "instance_id, so every children array is canonical "
+                "(normalized hashes unchanged — the normalization already "
+                "removed the order)"
+            ),
+        })
+
     report["simulation"] = {
         "applied": True,
         "kind": "head",
@@ -785,6 +909,108 @@ def _lag_stats(series: list[float]) -> tuple[float, float, float]:
         round(percentile(series, 95), 4),
         round(max(series), 4),
     )
+
+
+# ════════════════════════════════════════════════════════════════════════
+# G5 — the response-bytes gate (round-2 increment)
+#
+# The plan's adopted two-part rule (architecture-recommendation.md §5.2):
+# exact bytes everywhere EXCEPT the children-array order (the ONE disclosed
+# normalization), PLUS a positive assertion that HEAD's children order is
+# exactly ``parent_id ASC, instance_id ASC``.
+#
+# The middleware hashes RAW bytes and has no hook, so the gate normalizes
+# POST-PROCESSING: it re-fetches the bodies, applies the normalization to
+# the parsed payload itself, re-serializes BOTH sides with identical
+# separators, and only then hashes.  The normalization touches NOTHING but
+# the children arrays.
+# ════════════════════════════════════════════════════════════════════════
+
+G5_CHILDREN_KEY = "children"
+
+
+#: The children arrays carry child IDS (plain strings) —
+#: ``instance_lifecycle.py:5115/:5143`` assigns the return of
+#: ``list_child_ids_permanent`` (a list of ids) directly.  Dict-form
+#: children are still accepted defensively, but the measured API shape is
+#: ids.
+
+
+def _child_sort_key(k: Any) -> str:
+    return str(k.get("instance_id", "")) if isinstance(k, dict) else str(k)
+
+
+def _is_children_array(kids: Any) -> bool:
+    if not (isinstance(kids, list) and kids):
+        return False
+    return all(
+        (isinstance(k, dict) and "instance_id" in k)
+        or isinstance(k, str) for k in kids
+    )
+
+
+def normalize_children_order(payload: Any) -> Any:
+    """The ONE permitted difference class, normalized away.
+
+    Sorts every ``children`` array (a list of child IDS — the measured API
+    shape; dict-form rows are accepted defensively).  Nothing else is
+    touched.  Returns the payload re-serialized with canonical separators
+    so both sides hash identically.
+    """
+    import json as _json
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            kids = node.get(G5_CHILDREN_KEY)
+            if _is_children_array(kids):
+                node[G5_CHILDREN_KEY] = sorted(kids, key=_child_sort_key)
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(payload)
+    return _json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def children_order_canonical(payload: Any) -> dict[str, Any]:
+    """The §5.2 POSITIVE assertion: is every children array ordered?
+
+    At BASE the children come back in heap order (``repository.py:432-437``
+    has no ORDER BY) ⇒ this is False; the fix's ``ORDER BY parent_id,
+    instance_id`` makes it True.  This is the assertion that FAILS at BASE
+    for exactly the reason the fix removes.
+    """
+    total = 0
+    ordered = 0
+    offenders: list[str] = []
+
+    def walk(node: Any, path: str = "") -> None:
+        nonlocal total, ordered
+        if isinstance(node, dict):
+            kids = node.get(G5_CHILDREN_KEY)
+            if _is_children_array(kids):
+                total += 1
+                ids = [_child_sort_key(k) for k in kids]
+                if ids == sorted(ids):
+                    ordered += 1
+                elif len(offenders) < 5:
+                    offenders.append(f"{path or '/'}/children")
+            for k, v in node.items():
+                walk(v, f"{path}/{k}")
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                walk(v, f"{path}[{i}]")
+
+    walk(payload)
+    return {
+        "arrays": total,
+        "ordered": ordered,
+        "unordered": total - ordered,
+        "offender_paths": offenders,
+        "canonical": total > 0 and ordered == total,
+    }
 
 
 def deepcopy_report(report: dict[str, Any]) -> dict[str, Any]:

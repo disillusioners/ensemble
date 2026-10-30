@@ -54,7 +54,7 @@ shared, so the same instrument decides both verdicts.
 | **G1** narrow pin | ≥1 capture with `list_child_ids_permanent` + the router on the loop thread *(full profile; smoke reports)* | **0** captures |
 | **G1** non-vacuity | ≥1 capture **and** ≥1 capture that actually contains the loop thread **and** the predicate discriminator self-test — in BOTH modes | same |
 | **G2** loaded flat p95 | the leg sits **outside** the healthy band (the defect is measurable) *(full profile; smoke reports)* | p95 **≤ 0.230 s**, one-sided (a value **below 0.067 s passes** as an improvement) |
-| **G4** loop lag | paired vs the BASE reference (report-only without one) | paired vs the BASE reference — **required**; STALL count, max (no tolerance), p95 + one tick, sample non-vacuity |
+| **G4** loop lag | paired vs the BASE reference (report-only without one) | paired vs the BASE reference — **required**, and the reference's **provenance is asserted** (a real `base`-mode run, not simulated, tree recorded); STALL count, max (no tolerance), p95 + one tick, sample non-vacuity |
 | **G9** on-loop | the instances/missions shapes put **every** round-trip on the loop; the jobs shapes put **none** | per-shape on-loop **SET equals the disclosed residual**; every other shape **empty** |
 | **G9** round-trips | the BASE census holds **exactly** (3+limit, 4+levels+rows, 2+holders, 3) | **O(1)/bounded** (plan §(d) upper anchors) |
 
@@ -78,6 +78,63 @@ is still reported as `*_DIAGNOSTIC` for transparency.
 Other shapes covered: `/api/work`, `/api/jobs?…&limit=10`,
 `/api/jobs?limit=100`, `/api/queues/defer-blocked`,
 `/api/missions?liveness=…&limit=20`.
+
+## UNIT CLASSES (round-2 Blocking 1) — declared, never implicit
+
+| Quantity | Unit class |
+|---|---|
+| `statements_by_shape[shape].count` / `.on_loop` | **sample-summed** (raw aggregate) |
+| `statements_by_shape` **as the gates read it** (`modes.per_request_by_shape`) | **per-request** — the ONE normalization site, at the gate boundary |
+| `round_trips.mean`, `on_loop_round_trips.mean` | **per-request** |
+| `HEAD_ON_LOOP_RULES` (exact counts, `max_on_loop`) | **per-request** |
+| `HEAD_ROUND_TRIP_MAX` bounds | **per-request** |
+| the BASE census formulas (3+limit, 4+levels+rows, 2+holders, 3) | **per-request** |
+| G5 normalized body hash | per-body (one request per shape) |
+| G5 `jobs_active_badge` non-regression | **per-request** |
+
+The pre-repair gate compared **sample-summed** counts against **per-request**
+constants — the council measured missions `{20,10}` over 10 samples vs the
+pinned `(2,1)`, a shape the lane never touches failing deterministically
+forever. `modes.per_request_by_shape` divides by the sample count exactly
+once, and the simulation writes the **summed** form back, so a real run and a
+simulated run go through the SAME single normalization path.
+
+## G5 — the response-bytes gate (round-2 increment)
+
+Two parts (plan §(e) + architect §5.2), over **9 requests = the 8 censused
+shapes + one `/api/instances/{id}` DETAIL** (the detail path shares the
+ordered children source):
+
+* **(i) normalized byte equality** vs the paired reference — the
+  children-array order is normalized **post-processing** on the parsed
+  payload (the middleware hashes raw bytes and has no hook), then both sides
+  are re-serialized with canonical separators and hashed. Children arrays
+  carry child **ids** (the measured API shape, `instance_lifecycle.py:5115`).
+* **(ii) the positive children-order assertion** — HEAD's children must be
+  exactly `parent_id ASC, instance_id ASC`.
+
+**A measured retraction.** The BASE-side "unordered" control is impossible on
+this host: `list_child_ids_permanent` has **no ORDER BY** (verified
+statically, `repository.py:434-437`) yet the planner returns rows in
+primary-key order, so children arrive **already sorted** — measured 130/130
+BFS arrays and 1/1 detail array canonical at BASE, under **both** ascending
+and **reversed** sibling insertion orders (the `seed.py` G5 discriminator
+experiment, kept in the fixture). The order is contractually unspecified but
+behaviorally sorted today; asserting "unordered" would red a non-defective
+tree. Part (ii) is therefore **asserted at HEAD only** (the fix makes the
+order a contract), and the unspecified-order half is carried by §5.2
+correction 3's **static SQL ORDER BY pin** in the pin pack — reported here,
+never asserted at BASE.
+
+**Determinism.** `seed.py` pins the fixture clock (`FIXTURE_EPOCH`,
+env-overridable for a deliberate re-baseline) so two runs of the same tree
+produce byte-identical bodies: measured, all **9/9** normalized hashes
+identical across two independent smoke runs.
+
+**jobs_active_badge** is in the canonical 8-shape set (the plan froze 7). The
+caller sends no limit param, so C-4 cannot bound it without a semantics
+change: it is an **ENUMERATED RESIDUAL**, gated on **non-regression only**
+(HEAD ≤ BASE, per-request), never on an absolute bound.
 
 ## The SIMULATION (`--simulate=head`) — read this before quoting a number
 

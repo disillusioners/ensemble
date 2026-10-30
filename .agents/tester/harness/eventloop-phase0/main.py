@@ -520,6 +520,13 @@ def gate_captures(records: list[dict], fences: Fences, report: dict,
         "narrow_violation_loop_thread": narrow_loop,
         "family_violation_any_thread_DIAGNOSTIC": fam_any,
         "narrow_violation_any_thread_DIAGNOSTIC": narrow_any,
+        # W-5 (round-2 ride-along): per-capture, not just the aggregate —
+        # one HEAD capture had loop_sections=0 and must be visible as
+        # "no evidence" rather than folded into a clean aggregate.
+        "captures_without_loop_section": [
+            r.get("capture_id") for r in records
+            if (r.get("facts") or {}).get("loop_sections", 0) < 1
+        ],
         "predicate": (
             f"loop section contains {modes.FAMILY_REPO_PATH!r} AND "
             f"{modes.SQLALCHEMY!r} (architect §6.1, literal)"
@@ -587,15 +594,23 @@ def gate_g9_on_loop(per_shape: dict, fences: Fences, report: dict,
         + (f"; MISSING: {missing}" if missing else ""),
     )
 
+    # UNIT NORMALIZATION AT THE GATE BOUNDARY (round-2 Blocking 1).
+    # ``statements_by_shape`` is SAMPLE-SUMMED; every rule below is
+    # PER-REQUEST.  The pre-repair gate compared summed against per-request
+    # constants — the council measured missions {20,10} over 10 samples vs
+    # the pinned (2,1), a shape this lane never touches failing
+    # deterministically forever.  One normalization site, one path, shared
+    # by real and simulated runs alike.
     derived: dict[str, dict[str, int]] = {}
     for shape, row in per_shape.items():
-        by_shape = modes.norm_by_shape(row.get("statements_by_shape"))
+        by_shape = modes.per_request_by_shape(row)
         on_loop = {
             s: int(sv.get("on_loop", 0))
             for s, sv in by_shape.items() if int(sv.get("on_loop", 0)) > 0
         }
         derived[shape] = on_loop
     report["g9_on_loop_shape_sets"] = derived
+    report["g9_unit_class"] = modes.declared_unit_classes()
 
     for shape in SHAPES:
         got = derived.get(shape, {})
@@ -655,6 +670,226 @@ def gate_g9_on_loop(per_shape: dict, fences: Fences, report: dict,
                 + (f"<={ceiling}" if ceiling is not None else "")
                 + f" — {rule['why']}",
             )
+
+
+async def g5_bodies_phase(child: DaemonChild, fences: Fences,
+                           report: dict) -> None:
+    """G5 EVIDENCE COLLECTION — the response bodies, deterministically.
+
+    Fetches the EIGHT censused shapes plus ONE ``/api/instances/{id}``
+    DETAIL request (the plan's §(e) requires it: the detail path shares the
+    ordered children source), serialized and unloaded, one request each, so
+    every count below is PER-REQUEST BY CONSTRUCTION.
+
+    Records per shape: the RAW body sha256, the NORMALIZED sha256
+    (children-array order normalized away — the ONE permitted difference
+    class — then re-serialized with canonical separators), the
+    ``children_order`` facts (the §5.2 positive assertion), and the
+    per-request round-trips.
+    """
+    import hashlib
+    import httpx
+
+    names: list[tuple[str, str]] = [("shape:" + k, v) for k, v in SHAPES.items()]
+
+    async with httpx.AsyncClient(
+        base_url=f"http://127.0.0.1:{child.port}"
+    ) as client:
+        # The detail id, chosen DETERMINISTICALLY from the BFS response:
+        # the row with the most children, tie-broken by instance_id.  The
+        # fixture is seeded and its clock pinned, so this is stable across
+        # runs and across BASE/HEAD.
+        detail_id: str | None = None
+        child.counter.reset_requests()
+        try:
+            r = await client.get(
+                SHAPES["instances_bfs_home"],
+                headers={"X-Evloop-Tag": "g5:pick-detail"},
+                timeout=180.0,
+            )
+            if r.status_code == 200:
+                insts = (r.json() or {}).get("instances") or []
+                with_kids = [
+                    i for i in insts
+                    if isinstance(i, dict) and i.get("children")
+                ]
+                if with_kids:
+                    detail_id = max(
+                        with_kids,
+                        key=lambda i: (len(i["children"]), i.get("instance_id", "")),
+                    ).get("instance_id")
+        except Exception:  # noqa: BLE001
+            detail_id = None
+        if detail_id:
+            names.append(("detail:/api/instances/{id}",
+                          f"/api/instances/{detail_id}"))
+        report["g5_detail_id"] = detail_id
+        fences.check(
+            "g5_detail_shape_resolved", detail_id is not None,
+            f"detail id resolved deterministically from the BFS response: "
+            f"{detail_id}",
+        )
+
+        child.counter.reset_requests()
+        rows: dict[str, dict] = {}
+        for name, url in names:
+            t0 = time.perf_counter()
+            try:
+                r = await client.get(
+                    url, headers={"X-Evloop-Tag": f"g5:{name}"}, timeout=180.0
+                )
+                err = None
+            except Exception as exc:  # noqa: BLE001
+                r, err = None, f"{type(exc).__name__}: {exc}"
+            if r is None or r.status_code != 200:
+                rows[name] = {
+                    "status": getattr(r, "status_code", None), "error": err,
+                }
+                continue
+            raw = r.content
+            try:
+                payload = r.json()
+            except Exception:  # noqa: BLE001
+                payload = None
+            rows[name] = {
+                "status": r.status_code,
+                "dur_s": round(time.perf_counter() - t0, 4),
+                "raw_sha256": hashlib.sha256(raw).hexdigest(),
+                "body_len": len(raw),
+                "normalized_sha256": (
+                    hashlib.sha256(
+                        modes.normalize_children_order(payload).encode()
+                    ).hexdigest() if payload is not None else None
+                ),
+                "children_order": (
+                    modes.children_order_canonical(payload)
+                    if payload is not None else None
+                ),
+            }
+        n4 = child.counter.snapshot()["per_request"]
+        for name, url in names:
+            row = rows.get(name) or {}
+            tag = f"g5:{name}"
+            if tag in n4:
+                row["round_trips"] = n4[tag]["count"]
+                row["on_loop_round_trips"] = n4[tag]["on_loop"]
+    report["g5_bodies"] = rows
+    fences.check(
+        "g5_shapes_collected",
+        len(rows) == len(names) and all(
+            (v or {}).get("status") == 200 for v in rows.values()
+        ),
+        f"{len(rows)}/{len(names)} shape(s) fetched, all-200="
+        f"{all((v or {}).get('status') == 200 for v in rows.values())}",
+    )
+
+
+def gate_g5(report: dict, fences: Fences, mode: str,
+            reference: dict | None) -> None:
+    """G5 — the response-bytes gate (two-part, plan §(e) + architect §5.2).
+
+    Part (i)  NORMALIZED-hash equality vs the paired reference: exact bytes
+              everywhere EXCEPT the children-array order (the ONE disclosed
+              normalization, applied POST-PROCESSING to the parsed payload —
+              the middleware hashes raw bytes and has no hook).
+    Part (ii) the POSITIVE children-order assertion: HEAD's children order
+              must be exactly ``parent_id ASC, instance_id ASC``.  At BASE
+              the order is heap order (``repository.py:432-437`` has no
+              ORDER BY) ⇒ this FAILS at BASE for exactly the reason the fix
+              removes — that is the gate's BASE-side positive control.
+    Non-vacuity: a shape-count fence (9 = 8 shapes + the detail request) and
+    a children-arrays-present fence (the detail + BFS must actually carry
+    children arrays, else part (ii) is vacuous).
+    """
+    rows = report.get("g5_bodies") or {}
+    ref_rows = (reference or {}).get("g5_bodies") or {}
+
+    # ── non-vacuity ───────────────────────────────────────────────────
+    with_arrays = {
+        n for n, v in rows.items()
+        if (v.get("children_order") or {}).get("arrays", 0) > 0
+    }
+    fences.check(
+        "g5_children_arrays_present",
+        any(n.startswith("detail:") for n in with_arrays)
+        and any("instances_bfs_home" in n for n in with_arrays),
+        f"{len(with_arrays)} shape(s) carry children arrays: "
+        f"{sorted(with_arrays)[:4]}",
+    )
+
+    # ── part (i): normalized byte equality vs the reference ───────────
+    if ref_rows:
+        diffs = [
+            n for n, v in rows.items()
+            if v.get("normalized_sha256") is not None
+            and (ref_rows.get(n) or {}).get("normalized_sha256")
+            != v.get("normalized_sha256")
+        ]
+        fences.check(
+            "g5_normalized_bytes_equal_vs_reference",
+            not diffs,
+            f"{len(rows) - len(diffs)}/{len(rows)} shape(s) byte-identical "
+            f"after the children-order normalization"
+            + (f"; DIFFER: {sorted(diffs)}" if diffs else ""),
+        )
+    else:
+        print("  [fence:INFO] g5_normalized_bytes_equal_vs_reference "
+              "(no reference: report-only)")
+
+    # ── part (ii): the children-order positive assertion ──────────────
+    for name, v in sorted(rows.items()):
+        co = v.get("children_order") or {}
+        if not co.get("arrays"):
+            continue
+        canonical = bool(co.get("canonical"))
+        if mode == MODE_BASE:
+            # MEASURED RETRACTION (round 2): the BASE-side "unordered"
+            # positive control is IMPOSSIBLE on this host.  The query has
+            # NO order_by (repository.py:434-437, verified statically) yet
+            # the planner returns the rows in primary-key order, so the
+            # children arrive ALREADY sorted — measured 130/130 BFS arrays
+            # and 1/1 detail array canonical at BASE, under BOTH ascending
+            # and REVERSED sibling insertion orders (the seed.py G5
+            # discriminator experiment).  The order is therefore
+            # contractually unspecified but behaviorally sorted today:
+            # asserting "unordered" would red a tree that is not defective.
+            # The instrument for the unspecified-order half is §5.2
+            # correction 3's STATIC SQL ORDER BY pin (the pin pack), not
+            # this harness.  Reported here, never asserted at BASE.
+            print(
+                f"  [fence:INFO] g5_children_order (BASE: report-only — "
+                f"measured ALREADY canonical on this host/planner; the "
+                f"contract-unspecified half is the static ORDER BY pin) — "
+                f"{name}: {co.get('ordered')}/{co.get('arrays')} ordered"
+            )
+        else:
+            fences.check(
+                f"g5_children_order[head: parent_id ASC, instance_id ASC][{name}]",
+                canonical,
+                f"{co.get('ordered')}/{co.get('arrays')} arrays ordered — "
+                f"offenders: {co.get('offender_paths')}",
+            )
+
+    # ── jobs_active_badge: the ENUMERATED RESIDUAL ─────────────────────
+    # Included in the 8-shape canonical set (the plan froze 7).  The caller
+    # sends no limit param, so C-4 cannot bound it without a semantics
+    # change: gated on NON-REGRESSION ONLY (HEAD <= BASE, per-request),
+    # never on an absolute bound.  Unit class: PER-REQUEST.
+    ja = "shape:jobs_active_badge"
+    head_rt = (rows.get(ja) or {}).get("round_trips")
+    if mode == MODE_HEAD and ref_rows:
+        base_rt = (ref_rows.get(ja) or {}).get("round_trips")
+        fences.check(
+            "g5_jobs_active_non_regression[enumerated residual]",
+            head_rt is not None and base_rt is not None and head_rt <= base_rt,
+            f"HEAD {head_rt} <= BASE {base_rt} round-trips per request "
+            f"(unit: per-request; NOT absolutely bounded — the caller sends "
+            f"no limit param, so C-4 cannot bound it)",
+        )
+    else:
+        print(f"  [fence:INFO] g5_jobs_active_non_regression — measured "
+              f"{head_rt} round-trips/request (report-only without a HEAD "
+              f"reference)")
 
 
 def gate_g2_band(report: dict, fences: Fences, mode: str,
@@ -774,6 +1009,22 @@ def gate_g4_paired_lag(report: dict, fences: Fences, mode: str,
             print("  [fence:INFO] g4 paired comparison (BASE mode, no "
                   "reference: report-only)")
         return
+
+    # BLOCKING 2 (round 2): the reference's PROVENANCE is asserted before
+    # G4 consumes it.  Pointing --reference at a SIMULATED output (lag
+    # clamped to the tick floor by rule S4) made every G4 condition pass on
+    # a broken tree.  A mismatched or unverifiable reference is a FAIL, not
+    # a silent pass.
+    prov = modes.reference_provenance(reference)
+    report["g4"]["reference_provenance"] = prov
+    fences.check(
+        "g4_reference_provenance[base-mode, not simulated, tree recorded]",
+        bool(prov.get("ok")),
+        "; ".join(prov.get("problems") or [])
+        or f"mode={prov.get('reference_mode')} simulated="
+           f"{prov.get('reference_simulated')} tree="
+           f"{str(prov.get('reference_repo_head'))[:12]}",
+    )
 
     ok_all = True
     for key in profiles:
@@ -907,6 +1158,10 @@ async def main(profile: str, mode: str, simulate: str,
         # ── phase 3: per_endpoint floor + body hashes (COLLECTION) ──
         raw_bodies: dict[str, bytes] = {}
         await per_endpoint_phase(child, fences, smoke, report, raw_bodies)
+
+        # ── phase 3b: G5 response-body evidence (9 shapes, deterministic) ──
+        print("[phase] G5 response bodies (8 shapes + detail, serialized)")
+        await g5_bodies_phase(child, fences, report)
 
         # ── phase 4: badge composite ────────────────────────────────
         print("[phase] badge composite (8s forkJoin, sustained)")
@@ -1060,6 +1315,7 @@ async def main(profile: str, mode: str, simulate: str,
         gate_captures(captures, fences, report, mode, profile)
         gate_g2_band(report, fences, mode, profile)
         gate_g4_paired_lag(report, fences, mode, reference)
+        gate_g5(report, fences, mode, reference)
 
         # lag collection fences (the probe series must be non-empty)
         for name, prof in (("badge", badge), ("home", home), ("jobs", jobs)):
@@ -1070,7 +1326,14 @@ async def main(profile: str, mode: str, simulate: str,
         report["captures"] = [_public_capture(r) for r in captures]
         report["fences"] = fences.results
         report["finished_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        report["verdict"] = "PASS" if fences.all_ok else "FAIL"
+        # W-4 (round-2 ride-along): a simulated run must never print a bare
+        # PASS — the README's "can never be mistaken for gate evidence" is
+        # now enforced in the verdict string itself.
+        base_verdict = "PASS" if fences.all_ok else "FAIL"
+        report["verdict"] = (
+            f"{base_verdict} (SIMULATED — not gate evidence)"
+            if simulate_head else base_verdict
+        )
         # MODE-SUFFIXED output name (repair 2026-10-30): a mode-aware run
         # can never overwrite the committed PRE-REPAIR baseline artifact
         # (raw/BASELINE.full.json, the 34/34 evidence of the old fence

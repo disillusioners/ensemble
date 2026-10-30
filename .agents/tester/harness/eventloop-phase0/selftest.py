@@ -236,6 +236,160 @@ def check_g9_tables() -> None:
           "the mode switch is exactly two mutually exclusive values")
 
 
+def check_unit_normalization() -> None:
+    """Round-2 Blocking 1 — the gate-boundary unit normalization.
+
+    The council measured the bug on the committed artifact: missions
+    {SELECT instances: 20, SELECT job_queue_items: 10} over 10 samples vs
+    the pinned per-request (2,1); flat prefs 60 over 30 vs max_on_loop 2.
+    The leg is MUTATION-MEANINGFUL: feeding the SUMMED counts straight into
+    the per-request rules (the round-1 behaviour) must FAIL both checks,
+    and the normalized counts must PASS them.
+    """
+    print("\n[8] unit normalization at the gate boundary (Blocking 1)")
+    missions = {
+        "samples": 10,
+        "statements_by_shape": {
+            "SELECT instances": {"count": 20, "on_loop": 20},
+            "SELECT job_queue_items": {"count": 10, "on_loop": 10},
+        },
+    }
+    flat = {
+        "samples": 30,
+        "statements_by_shape": {
+            "SELECT instance_ui_prefs": {"count": 30, "on_loop": 30},
+            "SELECT instance_ui_prefs+instances": {"count": 30, "on_loop": 30},
+            "SELECT instances": {"count": 330, "on_loop": 330},
+        },
+    }
+    m_pr = modes.per_request_by_shape(missions)
+    f_pr = modes.per_request_by_shape(flat)
+    check("units.missions_per_request", m_pr["SELECT instances"]["count"] == 2
+          and m_pr["SELECT job_queue_items"]["count"] == 1,
+          f"{m_pr}")
+    check("units.flat_prefs_per_request",
+          sum(v["on_loop"] for k, v in f_pr.items()
+              if k.startswith(modes.PREF_SHAPE_PREFIX)) == 2,
+          f"prefs on-loop total = 2 (the architect's §6.3 count)")
+    check("units.zero_samples_is_loud",
+          modes.per_request_by_shape({"samples": 0,
+                                      "statements_by_shape": {"x": 1}}) == {},
+          "a zero sample count returns EMPTY (never a silent divide)")
+
+    # MUTATION legs: the round-1 behaviour (summed straight into the rules)
+    def exact_ok(counts: dict) -> bool:
+        exp = modes.HEAD_ON_LOOP_RULES[modes.SHAPE_MISSIONS]["exact"]
+        return set(counts) == set(exp) and all(
+            lo <= counts.get(s, 0) <= hi for s, (lo, hi) in exp.items())
+
+    summed = {"SELECT instances": 20, "SELECT job_queue_items": 10}
+    normalized = {"SELECT instances": 2, "SELECT job_queue_items": 1}
+    check("units.mutation_summed_fails_the_rule", not exact_ok(summed),
+          f"summed {summed} vs pinned (2,1) — the round-1 bug, still failing")
+    check("units.normalized_passes_the_rule", exact_ok(normalized),
+          f"normalized {normalized} matches the pinned rule")
+
+    rule = modes.HEAD_ON_LOOP_RULES[modes.SHAPE_INSTANCES_FLAT]
+    prefs_summed = sum(v["on_loop"] for k, v in flat["statements_by_shape"].items()
+                       if k.startswith(modes.PREF_SHAPE_PREFIX))
+    check("units.mutation_flat_summed_exceeds_ceiling",
+          prefs_summed > rule["max_on_loop"],
+          f"summed prefs on-loop {prefs_summed} > ceiling "
+          f"{rule['max_on_loop']} — the round-1 false red, reproduced")
+    check("units.normalized_flat_within_ceiling",
+          sum(v["on_loop"] for k, v in f_pr.items()
+              if k.startswith(modes.PREF_SHAPE_PREFIX)) <= rule["max_on_loop"],
+          "normalized 2 <= 2")
+
+    # the simulation must write the SUMMED form back (one gate path)
+    sim = modes.simulate_report({
+        "per_endpoint": {"missions_badge": {
+            "samples": 10,
+            "round_trips": {"mean": 3.0},
+            "on_loop_round_trips": {"mean": 3.0},
+            "body_facts": {"rows": 20},
+            "statements_by_shape": {
+                "SELECT instances": {"count": 20, "on_loop": 20},
+                "SELECT job_queue_items": {"count": 10, "on_loop": 10},
+            },
+        }},
+    })
+    sim_row = sim["per_endpoint"]["missions_badge"]
+    gate_view = modes.per_request_by_shape(sim_row)
+    check("units.simulation_writes_summed",
+          sim_row["statements_by_shape"]["SELECT instances"]["count"] == 20,
+          f"simulated statements_by_shape stays sample-summed "
+          f"({sim_row['statements_by_shape']['SELECT instances']['count']})")
+    check("units.simulated_report_survives_the_gate_path",
+          gate_view["SELECT instances"]["count"] == 2
+          and gate_view["SELECT job_queue_items"]["count"] == 1,
+          f"the SAME normalization path yields the pinned (2,1): {gate_view}")
+
+    uc = modes.declared_unit_classes()
+    check("units.every_quantity_declares_a_class", len(uc) >= 9,
+          f"{len(uc)} declared: statements_by_shape="
+          f"{uc.get('statements_by_shape')}")
+
+
+def check_reference_provenance() -> None:
+    print("\n[9] G4 reference provenance (Blocking 2)")
+    real_base = {"mode": "base", "repo_head": "abc123",
+                 "simulation": {"applied": False}}
+    simulated = {"mode": "head", "repo_head": "abc123",
+                 "simulation": {"applied": True}}
+    head_mode = {"mode": "head", "repo_head": "abc123"}
+    no_head = {"mode": "base"}
+    check("prov.real_base_accepted",
+          modes.reference_provenance(real_base)["ok"], str(real_base))
+    check("prov.simulated_reference_refused",
+          not modes.reference_provenance(simulated)["ok"],
+          "a SIMULATED reference (lag clamped to the tick floor) must never "
+          "satisfy G4")
+    check("prov.head_mode_reference_refused",
+          not modes.reference_provenance(head_mode)["ok"],
+          "the reference must be the BASE leg of the pair")
+    check("prov.unattributed_reference_refused",
+          not modes.reference_provenance(no_head)["ok"],
+          "a reference without a repo_head is an unknown tree")
+    check("prov.missing_reference_refused",
+          not modes.reference_provenance(None)["ok"], "no reference at all")
+
+
+def check_g5_helpers() -> None:
+    print("\n[10] G5 helpers (children-order normalization + positive order)")
+    payload = {"instances": [
+        {"instance_id": "b", "children": [
+            {"instance_id": "z"}, {"instance_id": "a"}]},
+        {"instance_id": "a", "children": [
+            {"instance_id": "m"}, {"instance_id": "c"}]},
+    ]}
+    co = modes.children_order_canonical(payload)
+    check("g5.unordered_payload_is_not_canonical", not co["canonical"],
+          f"{co['ordered']}/{co['arrays']} ordered — BASE heap order")
+    norm1 = modes.normalize_children_order(payload)
+    # NB: the ROW order is identical; ONLY the order inside each children
+    # array differs — the single permitted difference class.
+    norm2 = modes.normalize_children_order({
+        "instances": [
+            {"instance_id": "b", "children": [
+                {"instance_id": "a"}, {"instance_id": "z"}]},
+            {"instance_id": "a", "children": [
+                {"instance_id": "c"}, {"instance_id": "m"}]},
+        ]})
+    check("g5.normalization_is_the_only_difference", norm1 == norm2,
+          "two payloads differing ONLY in children order normalize to "
+          "identical bytes")
+    co2 = modes.children_order_canonical({
+        "instances": [{"instance_id": "a", "children": [
+            {"instance_id": "c"}, {"instance_id": "m"}]}]})
+    check("g5.ordered_payload_is_canonical", co2["canonical"],
+          f"{co2['ordered']}/{co2['arrays']} — the fixed tree's shape")
+    check("g5.no_children_arrays_is_reported",
+          modes.children_order_canonical({"x": 1})["arrays"] == 0,
+          "a payload with no arrays carries no assertion (the shape-count "
+          "fence handles vacuity)")
+
+
 def check_mode_docs() -> None:
     print("\n[7] the mode contract is documented and total")
     for mode in modes.MODES:
@@ -259,6 +413,9 @@ def main() -> int:
     check_g2_band()
     check_g4_pair()
     check_g9_tables()
+    check_unit_normalization()
+    check_reference_provenance()
+    check_g5_helpers()
     check_mode_docs()
 
     failed = [r for r in RESULTS if not r[1]]

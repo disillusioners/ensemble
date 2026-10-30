@@ -107,13 +107,40 @@ class SeedResult:
     instance_ids: list[str] = field(default_factory=list)
 
 
+#: THE PINNED FIXTURE CLOCK (G5 increment, round 2).  Every timestamp the
+#: fixture stamps (created_at / updated_at / last_activity_at, and the
+#: Job/Task rows derived from them) is anchored to ONE fixed epoch instead
+#: of ``datetime.now()``, so two runs of the SAME tree produce byte-identical
+#: response bodies — the precondition for the G5 BASE<->HEAD byte-diff.
+#: The value is arbitrary but FROZEN: changing it invalidates every
+#: committed body hash.  Overridable via env for a deliberate re-baseline.
+FIXTURE_EPOCH = datetime(2026, 10, 29, 0, 0, 0, tzinfo=timezone.utc)
+
+
+def _fixture_now() -> datetime:
+    """The fixture's clock — pinned, unless explicitly re-baselined."""
+    import os
+
+    raw = os.environ.get("ENSEMBLE_HARNESS_FIXTURE_EPOCH")
+    if not raw:
+        return FIXTURE_EPOCH
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        # a malformed override must NEVER silently fall back to wall clock
+        raise SystemExit(
+            f"ENSEMBLE_HARNESS_FIXTURE_EPOCH is not an ISO timestamp: {raw!r}"
+        )
+
+
 def _iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
 def build_tree_plan(scale: SeedScale, rng: random.Random) -> tuple[list[dict], int]:
     """Plan the instance rows (parents before children, stable ids)."""
-    now = datetime.now(timezone.utc)
+    now = _fixture_now()  # PINNED (G5): never wall clock — see FIXTURE_EPOCH
     rows: list[dict] = []
     max_depth = 0
 
@@ -148,7 +175,16 @@ def build_tree_plan(scale: SeedScale, rng: random.Random) -> tuple[list[dict], i
         while level and depth_seen < depth:
             nxt: list[str] = []
             for parent in level:
-                for k in range(branching):
+                # G5 DISCRIMINATOR (round-2 increment): siblings are added
+                # in REVERSED id order, so the fixture's INSERTION order —
+                # and therefore the heap order ``list_child_ids_permanent``
+                # returns at BASE (no ORDER BY, repository.py:432-437) — is
+                # observably NOT the canonical ``instance_id`` order.  With
+                # ascending insertion the two coincide (measured: 130/130
+                # BFS arrays already sorted at BASE) and the children-order
+                # half of the G5 gate cannot discriminate.  Reversing keeps
+                # parents-before-children intact.
+                for k in reversed(range(branching)):
                     counter += 1
                     iid = f"{root_iid}-d{depth_seen}-c{k}-{counter}"
                     add(iid, rng.choice(AGENTS)[0], parent, "completed", ts)
@@ -241,7 +277,7 @@ def seed(engine, scale: SeedScale) -> SeedResult:
     )
     result.roots = sum(1 for r in rows if r["parent_id"] is None)
 
-    now = datetime.now(timezone.utc)
+    now = _fixture_now()  # PINNED (G5): never wall clock — see FIXTURE_EPOCH
     with engine.begin() as conn:
         conn.execute(insert(Instance), rows)
         # The permanent parent_id record is what every display path walks;
