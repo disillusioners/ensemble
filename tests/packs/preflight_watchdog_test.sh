@@ -610,6 +610,66 @@ grep -q "silent-not-active" "$PF_SB/wd.out" && pf_bad "D10 reached the silent fa
 grep -q "deadline-breach-systemctl" "$J" && pf_ok "row names the wedged step (systemctl-*)" \
                                         || pf_bad "D10 row does not name the step"
 
+printf '\n== D11: command-substituted step breach → ONE row + rc propagation (A-4) ==\n'
+# A-4 (verifier 2026-10-30). `J="$(_run_bounded_step journal-read journal_read)"`
+# and `CUR_JSON="$(... journal-read-current ...)"` run inside a COMMAND
+# SUBSTITUTION, so `_budget_breach`'s `exit` ends only the subshell: the
+# caller sees the handler's rc (BUDGET_BREACH_RC=78, never the wrapper's 124)
+# while the row/WARN/lock-release already happened. The old `|| {` arm then
+# appended a SECOND halt row mislabelling the breach as a read-path refusal
+# ("journal read REFUSED (size guard …)"), and the CURRENT-read site simply
+# continued with an empty string. This leg runs the REAL promote.sh (from a
+# scratch COPY of the scripts tree whose journal_read is slow, the only
+# deterministic way to trip a step budget on a command-substituted read)
+# against a staged scratch target and counts the halt rows.
+A4_SCRIPTS="$PF_SB/a4-scripts"
+cp -a "$PF_REPO_ROOT/scripts" "$A4_SCRIPTS"
+/usr/bin/python3 - "$A4_SCRIPTS/upgrade/lib.sh" <<'PYA4'
+import sys
+p = sys.argv[1]
+text = open(p, encoding="utf-8").read()
+old = "journal_read() {\n    local jp\n"
+assert old in text, "A-4 fixture: journal_read anchor missing"
+new = ("journal_read() {\n"
+       "    sleep 6   # A-4 fixture: slow read so the step budget trips\n"
+       "    local jp\n")
+open(p, "w", encoding="utf-8").write(text.replace(old, new, 1))
+PYA4
+A4_TARGET="$INSTALL_DIR/releases/v0.0.1-test"
+mkdir -p "$A4_TARGET"
+printf 'binary\n' > "$A4_TARGET/ensemble-prod"
+mkjournal
+( cd "$PF_SB" && env -i PATH="$PATH" HOME="$HOME" TMPDIR="$PF_SB/tmp" PORT=18081 \
+      LOG_TAG=pf-a4 INSTALL_DIR="$INSTALL_DIR" PREFLIGHT_STEP_BUDGET_S=3 \
+      timeout -k 5 180 bash "$A4_SCRIPTS/upgrade/promote.sh" sandbox --version v0.0.1-test \
+      > "$PF_SB/a4.out" 2> "$PF_SB/a4.err" )
+A4_RC=$?
+A4_ROWS="$(count_rows "$J" halt)"
+[ "$A4_RC" = "78" ] && pf_ok "A4 the step-budget breach HALTS the promote (rc=$A4_RC)" \
+                    || pf_bad "A4 rc=$A4_RC want 78 (tail: $(tail -1 "$PF_SB/a4.err" 2>/dev/null | cut -c1-160))"
+A4_DETAIL="$(/usr/bin/python3 -c '
+import json,sys
+j=json.load(open(sys.argv[1]))
+h=[r for r in j["history"] if r.get("event")=="halt"]
+print(h[-1]["detail"] if h else "")' "$J")"
+case "$A4_DETAIL" in
+    deadline-breach-journal-read*) pf_ok "the single row names the breach (deadline-breach-journal-read)" ;;
+    *) pf_bad "A4 row is not the breach row: $A4_DETAIL" ;;
+esac
+[ "$A4_ROWS" = "1" ] && pf_ok "A4 halt rows=1 (the caller wrote no second, mislabelled row)" \
+                     || pf_bad "A4 halt rows=$A4_ROWS want 1 (double halt row — the A-4 defect)"
+grep -q "journal read REFUSED" "$J" \
+    && pf_bad "A4 the caller's mislabelled 'journal read REFUSED' row was written" \
+    || pf_ok "A4 no mislabelled 'journal read REFUSED' row"
+grep -q "journal unreadable/TORN" "$PF_SB/a4.err" \
+    && pf_bad "A4 the caller's torn-journal WARN fired on a budget breach" \
+    || pf_ok "A4 the caller's torn-journal WARN stays silent on a budget breach"
+[ "$(grep -c 'BUDGET BREACH' "$PF_SB/a4.err" 2>/dev/null || echo 0)" = "1" ] \
+    && pf_ok "A4 exactly ONE breach WARN" || pf_bad "A4 breach WARN count=$(grep -c 'BUDGET BREACH' "$PF_SB/a4.err" 2>/dev/null || echo 0)"
+[ ! -d "$INSTALL_DIR/releases/rollback.lock.d" ] \
+    && pf_ok "A4 lock dir RELEASED by the breach handler" \
+    || pf_bad "A4 lock dir still present after the breach"
+
 # ── spawn-watcher proof ─────────────────────────────────────────────────────
 kill "$PF_WATCHER" 2>/dev/null; wait "$PF_WATCHER" 2>/dev/null
 PF_MAX_PROCS="$(cat "$PF_WATCH_DIR/max" 2>/dev/null || echo '?')"

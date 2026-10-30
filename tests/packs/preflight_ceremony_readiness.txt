@@ -24,3 +24,7 @@ I9  static  the guard call site precedes consume_pending_action (no nonce burn)
 I10 static  the arm row carries scripts_dir + lib.sh sha256 + git rev + dirty
 I11 shell   the watchdog token is allowlisted and promote.sh refuses when unarmed
 I12 static  the refusal row NAMES the sync command
+I13 probe   W-1: a git-SHAPED dir whose probe CANNOT RUN refuses (never raises)
+I14 probe   W-1: a non-git dir whose probe CANNOT RUN warns (never raises)
+I15 probe   a dir without lib.sh refuses (scripts-dir-unusable)
+I16 shell   W-2: the stage-time stamp gate refuses a placeholder/unresolved/floor-mismatched stamp and accepts the floor-equal sha

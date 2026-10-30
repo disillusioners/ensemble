@@ -6,7 +6,7 @@
 # BEFORE the nonce burns) and §4.3 (the watchdog token).
 #
 # WHAT IT PROVES (the machine-readable table is
-# tests/packs/preflight_ceremony_readiness.txt — one row per leg I1–I12):
+# tests/packs/preflight_ceremony_readiness.txt — one row per leg I1–I16):
 #   * a staged sandbox arm against a PROVABLY-STALE pinned scripts dir REFUSES
 #     BEFORE the nonce is consumed (no nonce burn; the row names the sync
 #     command); a synced dir arms cleanly;
@@ -105,24 +105,54 @@ BANNED="$(grep -rnE '(^|[;|&(])[[:space:]]*env[[:space:]]+-u[[:space:]]+POSTGRES
 # ── Section B — the table is complete and non-vacuous ──────────────────────
 printf '\n== B. scenario table ==\n'
 ROWS="$(grep -c '^I[0-9]' "$TABLE" 2>/dev/null || true)"
-[ "$ROWS" = "12" ] \
-    && pf_ok "B1 the table carries all 12 legs (I1–I12)" \
-    || pf_bad "B1 the table carries $ROWS legs, expected 12"
+[ "$ROWS" = "16" ] \
+    && pf_ok "B1 the table carries all 16 legs (I1–I16)" \
+    || pf_bad "B1 the table carries $ROWS legs, expected 16"
 IDS_OK=1
-for i in $(seq 1 12); do
+for i in $(seq 1 16); do
     grep -qE "^I$i[[:space:]]" "$TABLE" \
         || { IDS_OK=0; pf_bad "B2 table row I$i is missing"; }
 done
-[ "$IDS_OK" = "1" ] && pf_ok "B2 every id I1–I12 is present"
+[ "$IDS_OK" = "1" ] && pf_ok "B2 every id I1–I16 is present"
 
 # ── Section C — the static contract (phase6 §4.2/§4.3) ────────────────────
 printf '\n== C. static contract ==\n'
 
-# C1 — the stamp in lib.sh (PIPELINE_SCRIPTS_REV=<this lane's merge commit>).
-if grep -q '^PIPELINE_SCRIPTS_REV=' "$LIB" 2>/dev/null; then
-    pf_ok "C1 lib.sh carries the PIPELINE_SCRIPTS_REV stamp"
+# C1 (W-2, verifier 2026-10-30) — the stamp in lib.sh must be RELEASE-VALID,
+# not merely PRESENT: a 40-hex commit sha that resolves in this tree and, when
+# the floor is set, IS the floor commit. The one permitted non-40-hex value is
+# the documented PRE-RELEASE placeholder `unreleased-<lane>` — and only while
+# the floor is still unset (a release that set the floor but left a
+# placeholder is a build-order defect; stage.sh refuses it, leg I16).
+# The old form ("a ^PIPELINE_SCRIPTS_REV= line exists") let the placeholder —
+# which the daemon's `_STAMP_RE` happily parses and which is the WHOLE
+# provenance on a non-git pinned dir — arm a ceremony.
+if /usr/bin/python3 - "$LIB" "$UTOOLS" <<'PYC1'
+import re, subprocess, sys, pathlib
+lib, utools = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+m = re.search(r'(?m)^PIPELINE_SCRIPTS_REV="?([0-9A-Za-z._/-]+)"?[ \t]*$',
+              lib.read_text(encoding="utf-8", errors="replace"))
+if not m:
+    sys.exit(1)                              # no stamp at all
+stamp = m.group(1)
+fm = re.search(r'(?m)^PIPELINE_SCRIPTS_FLOOR_COMMIT = "([0-9a-f]*)"$',
+               utools.read_text(encoding="utf-8"))
+floor = fm.group(1) if fm else ""
+if not re.fullmatch(r"[0-9a-f]{40}", stamp):
+    # only the documented pre-release placeholder, only with the floor unset
+    sys.exit(0 if (stamp.startswith("unreleased-") and not floor) else 1)
+repo = str(lib.parent.parent.parent)
+if subprocess.run(["git", "-C", repo, "cat-file", "-e", stamp + "^{commit}"],
+                  capture_output=True).returncode != 0:
+    sys.exit(1)                              # 40-hex but not a commit here
+if floor and stamp != floor:
+    sys.exit(1)                              # D6-8: the two travel together
+sys.exit(0)
+PYC1
+then
+    pf_ok "C1 the PIPELINE_SCRIPTS_REV stamp is release-valid (40-hex/floor-equal, or the pre-release placeholder with the floor unset)"
 else
-    deferred_red "C1" "lib.sh has no PIPELINE_SCRIPTS_REV stamp (phase6 T6.4)"
+    deferred_red "C1" "lib.sh's PIPELINE_SCRIPTS_REV stamp is missing or not release-valid (phase6 T6.4 / W-2)"
 fi
 
 # C2 — the floor constant on the daemon side (NOT the superseded pre-B1 name).
@@ -237,12 +267,12 @@ else
             ;;
         3)
             sym="$(printf '%s\n' "$OUT" | grep -m1 '^PF_MISSING_GUARD:' | cut -d: -f2- | sed 's/^ //')"
-            for id in I1 I2 I3 I4 I5 I6 I7 I8; do
+            for id in I1 I2 I3 I4 I5 I6 I7 I8 I13 I14 I15; do
                 deferred_red "$id" "guard absent — ${sym:-PF_MISSING_GUARD}"
             done
             ;;
         *)
-            for id in I1 I2 I3 I4 I5 I6 I7 I8; do
+            for id in I1 I2 I3 I4 I5 I6 I7 I8 I13 I14 I15; do
                 ln="$(printf '%s\n' "$OUT" | grep -m1 "^SCENARIO $id " || true)"
                 if [ -n "$ln" ]; then
                     printf '%s\n' "$ln" | grep -q ' PASS ' && pf_ok "${ln#SCENARIO }" \
@@ -332,6 +362,50 @@ if grep -q 'watchdog token honored' "$ARM_OUT" \
 else
     deferred_red "I11b" "the armed control did not take the honored branch (rc=$ARM_RC; last: $(tail -1 "$ARM_OUT" | cut -c1-140))"
 fi
+
+# ── Section F — I16: the STAGE-TIME stamp gate (W-2), EXECUTED ─────────────
+printf '\n== F. the stage-time stamp gate (W-2/T6.4/D6-8) ==\n'
+# The gate lives in lib.sh as `_pipeline_scripts_stamp_verdict` so it is
+# EXECUTABLE here: the real stage.sh cannot run without a full PyInstaller
+# build. Two assertions together keep the pin honest rather than an
+# extraction-theatre: (a) the helper's own matrix below, and (b) stage.sh
+# really calls it (F-0) — a helper nobody calls would gate nothing.
+if grep -q '_pipeline_scripts_stamp_verdict' "$PF_REPO_ROOT/scripts/upgrade/stage.sh" 2>/dev/null; then
+    pf_ok "F0 stage.sh calls the stamp gate (the executed matrix below gates the release)"
+else
+    pf_bad "F0 stage.sh does NOT call _pipeline_scripts_stamp_verdict — the gate is not wired"
+fi
+HEAD_SHA="$(git -C "$PF_REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+OTHER_SHA="$(git -C "$PF_REPO_ROOT" rev-parse HEAD~1 2>/dev/null || echo 'b1183a637649f94c23b94dfc745df44381dc54ab')"
+stamp_case() { # stamp_case <id> <stamp> <floor> <want-rc> <named symptom>
+    local id="$1" stamp="$2" floor="$3" want="$4" sym="$5" out rc
+    out="$( cd "$PF_REPO_ROOT" && bash -c \
+        '. "$1/scripts/upgrade/lib.sh"; _pipeline_scripts_stamp_verdict "$2" "$3" "$1"' \
+        _ "$PF_REPO_ROOT" "$stamp" "$floor" 2>/dev/null )"
+    rc=$?
+    if [ "$rc" = "$want" ] && { [ "$want" = "0" ] || printf '%s' "$out" | grep -q -- "$sym"; }; then
+        pf_ok "$id stamp gate rc=$rc as expected (${sym:-accepts})"
+    else
+        pf_bad "$id stamp gate MISMATCH rc=$rc want=$want out='$(printf '%s' "$out" | cut -c1-160)'"
+    fi
+}
+stamp_case "I16a" "unreleased-fix-promote-preflight-hang" "" 1 "not a 40-hex commit sha"
+stamp_case "I16b" "" "" 1 "not a 40-hex commit sha"
+stamp_case "I16c" "0000000000000000000000000000000000000000" "" 1 "does not resolve"
+stamp_case "I16d" "$HEAD_SHA" "" 0 ""
+stamp_case "I16e" "$HEAD_SHA" "$HEAD_SHA" 0 ""
+stamp_case "I16f" "$HEAD_SHA" "$OTHER_SHA" 1 "does not equal PIPELINE_SCRIPTS_FLOOR_COMMIT"
+# the shipped tree, judged by its own gate: pre-release (floor unset, stamp a
+# placeholder) the release gate MUST refuse — the release bump replaces both.
+SHIPPED_STAMP="$(sed -n 's/^PIPELINE_SCRIPTS_REV="\{0,1\}\([0-9A-Za-z._/-]*\)"\{0,1\}[[:space:]]*$/\1/p' "$LIB" 2>/dev/null | head -1 || true)"
+SHIPPED_FLOOR="$(sed -n 's/^PIPELINE_SCRIPTS_FLOOR_COMMIT = "\([0-9a-f]*\)"$/\1/p' "$UTOOLS" 2>/dev/null | head -1 || true)"
+case "$SHIPPED_STAMP" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*)
+        [ "${#SHIPPED_STAMP}" = "40" ] && [ -n "$SHIPPED_FLOOR" ] \
+            && pf_ok "I16g the shipped tree is RELEASE-STAMPED (40-hex stamp + floor set)" \
+            || pf_ok "I16g the shipped tree is PRE-RELEASE (stamp/floor split) — the release bump sets both (D-F7/D6-8)" ;;
+    *) pf_ok "I16g the shipped tree is PRE-RELEASE (placeholder stamp) — the release bump sets both (D-F7/D6-8)" ;;
+esac
 
 # ── the state report: NEVER a silent pass ─────────────────────────────────
 printf '\n-- deferrals: %s --\n' "$DEFERRED"

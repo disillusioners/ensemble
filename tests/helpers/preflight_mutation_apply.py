@@ -354,6 +354,79 @@ PLANTS: dict[str, dict] = {
             'if false; then  # PLANT M32: promote.sh ignores ENSEMBLE_PROMOTE_WATCHDOG (T6.6 broken)',
         )],
     },
+    # ── verifier-fix wave (2026-10-30, FIX ITERATION 1): M33–M40 pin the five
+    # verifier findings' fixes. Each leg is the DEFECT RE-INTRODUCED, exactly
+    # as the verifier described it.
+    "M33": {
+        "file": UJ, "mode": "executable",
+        "why": "bounded_git_probe has NO exception guard (W-1: an absent/hung git unwinds the arm's generic handler, which never releases the pipeline lock)",
+        "pairs": [
+            (
+                '    try:\n        proc = subprocess.run(\n            ["git", "-C", str(cwd), *args],',
+                '    if True:  # PLANT M33: the W-1 guard removed (probe exceptions escape)\n        proc = subprocess.run(\n            ["git", "-C", str(cwd), *args],',
+            ),
+            (
+                '    except (OSError, subprocess.SubprocessError) as exc:\n        return GIT_PROBE_ERROR_RC, "", f"{type(exc).__name__}: {exc}"\n',
+                '    # PLANT M33: the except arm deleted\n',
+            ),
+        ],
+    },
+    "M34": {
+        "file": UTOOLS, "mode": "executable",
+        "why": "the probe-error class is dead — a failed git probe is folded into the non-git branch, where a stamped dir ARMS on an unverified ancestry (W-1 verdict half)",
+        "pairs": [(
+            '    if rev_rc == uj.GIT_PROBE_ERROR_RC:',
+            '    if False:  # PLANT M34: probe-error class removed (falls through to the non-git branch)',
+        )],
+    },
+    "M35": {
+        "file": UTOOLS, "mode": "executable",
+        "why": "the scripts-dir-unusable guard is dead — a dir with no lib.sh is judged as a stamped/non-git dir instead of refusing (W-3 branch 3)",
+        "pairs": [(
+            '    if not path.is_dir() or not (path / "lib.sh").is_file():',
+            '    if False:  # PLANT M35: scripts-dir-unusable guard removed (W-3c branch dead)',
+        )],
+    },
+    "M36": {
+        "file": PROMOTE, "mode": "executable",
+        "why": "the command-substituted journal-read caller is back to the `|| {` arm — a step-budget breach writes a SECOND, mislabelled halt row (A-4)",
+        "pairs": [(
+            'J="$(_run_bounded_step journal-read journal_read)"; J_READ_RC=$?\nif [ "$J_READ_RC" -ne 0 ]; then',
+            'J="$(_run_bounded_step journal-read journal_read)" || {\n    J_READ_RC=1\nif [ "$J_READ_RC" -ne 0 ]; then',
+        )],
+    },
+    "M37": {
+        "file": LIB, "mode": "executable",
+        "why": "the stage-time stamp gate no longer requires a 40-hex sha — the pre-release placeholder ships (W-2)",
+        "pairs": [(
+            '''    if ! printf '%s' "$stamp" | grep -Eq '^[0-9a-f]{40}$'; then''',
+            '''    if false; then  # PLANT M37: the 40-hex requirement dropped (W-2 broken)''',
+        )],
+    },
+    "M38": {
+        "file": LIB, "mode": "executable",
+        "why": "the stage-time stamp gate no longer requires the stamp to EQUAL the floor (D6-8's 'the two travel together' broken)",
+        "pairs": [(
+            '    if [ -n "$floor" ] && [ "$stamp" != "$floor" ]; then',
+            '    if false; then  # PLANT M38: floor-equality dropped (D6-8 broken)',
+        )],
+    },
+    "M39": {
+        "file": UTOOLS, "mode": "executable",
+        "why": "an UNSET floor no longer refuses fail-closed on a git-shaped pinned dir (D-31/D6-10 command-error class weakened to a warning)",
+        "pairs": [(
+            '''        if not floor_commit:\n            return (\n                "refuse",''',
+            '''        if not floor_commit:\n            return (\n                "warn",  # PLANT M39: floor-unset downgraded from refuse''',
+        )],
+    },
+    "M40": {
+        "file": UTOOLS, "mode": "executable",
+        "why": "the caller's fallback-dir carve-out is gone — a refusal on an UNPINNED (fallback) scripts dir bricks backward-compatible arms (W-3 branch 2)",
+        "pairs": [(
+            '            if prov_verdict == "refuse" and not os.environ.get(\n                "ENSEMBLE_UPGRADE_SCRIPTS_DIR", ""\n            ).strip():',
+            '            if False:  # PLANT M40: fallback-dir warn downgrade removed',
+        )],
+    },
 }
 
 # ── Pack I legs (phase 6 / wave 4): previously deferred, now EXECUTABLE in

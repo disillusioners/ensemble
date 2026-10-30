@@ -2187,26 +2187,50 @@ def executor_env(extra: dict[str, str] | None = None) -> dict[str]:
     return env
 
 
+# W-1 sentinel: "the probe could not run" — distinct from any git exit code
+# (git uses 128 for its own fatal errors and 129 for usage; 255 is unused).
+GIT_PROBE_ERROR_RC = 255
+
+
 def bounded_git_probe(cwd: Path, *args: str) -> tuple[int, str, str]:
-    """``(rc, stdout, stderr)`` from a read-only, bounded git invocation in
-    ``cwd`` — promote-preflight-hang phase 6 arm-time guard support
-    (D6-10/Q1): ``merge-base --is-ancestor`` / ``rev-parse`` / ``status``
-    probes against the pinned scripts dir. NO fetch, NO checkout, NO
-    write, 30 s bound. Lives HERE and not in upgrade_tools because the
+    """``(rc, stdout, stderr)`` from a bounded git invocation in ``cwd`` —
+    promote-preflight-hang phase 6 arm-time guard support (D6-10/Q1):
+    ``merge-base --is-ancestor`` / ``rev-parse`` / ``status`` probes against
+    the pinned scripts dir. NO fetch, NO checkout and NO mutation of TREE
+    CONTENT, 30 s bound. Lives HERE and not in upgrade_tools because the
     tools module carries a no-direct-process-spawn discipline
     (test_static_no_direct_process_spawn_in_tools_module, D2/D3) — the
-    guard delegates rather than spawning."""
-    proc = subprocess.run(
-        ["git", "-C", str(cwd), *args],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        env={
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": os.environ.get("HOME", "/"),
-            "GIT_CONFIG_NOSYSTEM": "1",
-        },
-    )
+    guard delegates rather than spawning.
+
+    PURITY CAVEAT (A-2, verifier 2026-10-30): ``git status --porcelain`` is
+    read-only with respect to tracked content, but it MAY opportunistically
+    refresh the stat cache in ``.git/index`` and therefore create a
+    transient ``index.lock``. The earlier "NO write" claim overstated the
+    purity: the probe never writes the working tree, the objects or the
+    refs, yet it is not filesystem-inert.
+
+    NEVER RAISES (W-1, verifier 2026-10-30): a probe that cannot run at all
+    — ``git`` absent (``FileNotFoundError``), a resource failure (``OSError``)
+    or the 30 s bound (``subprocess.TimeoutExpired``) — returns the sentinel
+    ``(GIT_PROBE_ERROR_RC, "", "<ExcType>: <message>")``. Callers judge a
+    DIR and must degrade to a refuse/warn verdict; an exception escaping here
+    would unwind the arm path's outer handler, which does NOT release the
+    pipeline lock (the arm-time lock is released by the verdict's callers,
+    never by the generic ``except``)."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": os.environ.get("HOME", "/"),
+                "GIT_CONFIG_NOSYSTEM": "1",
+            },
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return GIT_PROBE_ERROR_RC, "", f"{type(exc).__name__}: {exc}"
     return proc.returncode, proc.stdout, proc.stderr
 
 

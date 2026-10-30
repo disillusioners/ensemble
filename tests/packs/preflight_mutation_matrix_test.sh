@@ -7,7 +7,10 @@
 # PLANTED (the defect is re-introduced), shown to turn RED, then restored and
 # shown to turn GREEN. The planted digest is recorded.
 #
-# The matrix covers M1–M32. The span is COMPLETE and each row states its
+# The matrix covers M1–M32 (the plan-frozen span) PLUS M33–M40, the
+# verifier-fix wave appended by the 2026-10-30 fix iteration
+# (implementation-decisions.md §10 — the plan set's own span claim is left
+# untouched: it is a frozen approval artefact). Each row states its
 # verification mode:
 #   executed   — planted + RED-proven + restored + GREEN-proven (this runner)
 #   deferred   — the pinned behaviour does not exist yet (Pack I / phase 6);
@@ -160,6 +163,14 @@ M26|packi:preflight_ceremony_readiness_test.sh|I2 FAIL|
 M27|packi:preflight_ceremony_readiness_test.sh|I3 FAIL|
 M28|packi:preflight_ceremony_readiness_test.sh|I5 FAIL|
 M32|packi:preflight_ceremony_readiness_test.sh|DEFERRED_RED I11|
+M33|packi:preflight_ceremony_readiness_test.sh|SCENARIO I13 FAIL raised|
+M34|packi:preflight_ceremony_readiness_test.sh|SCENARIO I13 FAIL expected=refuse got=arm|
+M35|packi:preflight_ceremony_readiness_test.sh|I15 FAIL|
+M36|pack:preflight_watchdog_test.sh|A4 halt rows=2|
+M37|packi:preflight_ceremony_readiness_test.sh|I16a stamp gate MISMATCH|
+M38|packi:preflight_ceremony_readiness_test.sh|I16f stamp gate MISMATCH|
+M39|pytest:tests/unit/tools/test_upgrade_tools.py::TestScriptsDirProvenanceArmPath::test_w3a_floor_unset_on_an_explicit_pin_refuses|test_w3a_floor_unset_on_an_explicit_pin_refuses|
+M40|pytest:tests/unit/tools/test_upgrade_tools.py::TestScriptsDirProvenanceArmPath::test_w3b_fallback_dir_downgrades_refusal_to_warning|test_w3b_fallback_dir_downgrades_refusal_to_warning|
 "
 
 deferred_row() { # deferred_row <id> <symptom>

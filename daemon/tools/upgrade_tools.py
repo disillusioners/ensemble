@@ -3994,6 +3994,10 @@ def scripts_dir_provenance_verdict(
       the detail as a journaled WARNING, never a refusal);
     * non-git dir: WARNING-ONLY (Q2/D6-11) — a stamp arms, no stamp
       warns; NO refusal is reachable from that branch (AC11);
+    * a probe that cannot RUN at all (git absent/unusable, 30 s bound) is
+      the W-1 class: a git-SHAPED dir refuses (D6-10 command-error — the
+      ancestry is unverifiable), a non-git dir warns. It is never an
+      exception, and never an "arm" on a claim that could not be checked;
     * ``ENSEMBLE_ALLOW_STALE_SCRIPTS=1`` (per-invocation only, never
       persisted — T6.12) bypasses the check with a loud warn verdict.
 
@@ -4023,15 +4027,42 @@ def scripts_dir_provenance_verdict(
             f"floor={floor_commit or '<unset>'}",
         )
 
-    rev_rc, rev_out, _ = uj.bounded_git_probe(
+    rev_rc, rev_out, rev_err = uj.bounded_git_probe(
         path, "rev-parse", "--verify", "HEAD"
     )
+    if rev_rc == uj.GIT_PROBE_ERROR_RC:
+        # W-1 (verifier 2026-10-30): the PROBE ITSELF failed — git is absent
+        # or unusable, or the 30 s bound tripped. This is NOT the "not a git
+        # dir" observation (git answers 128 for that), so it must never be
+        # silently folded into the non-git branch, where a stamped dir would
+        # ARM on an unverified ancestry. Two classes:
+        #   * git-SHAPED dir (``.git`` present): the D6-10 command-error class
+        #     — ancestry is unverifiable, so REFUSE (an explicitly pinned dir
+        #     is judged, the caller's fallback carve-out still downgrades);
+        #   * non-git dir: Q2/D6-11 — the stamp IS the provenance, so the
+        #     ordinary stamp/no-stamp WARN applies (never a new refusal class,
+        #     and never an "arm" on a claim we could not check).
+        probe_detail = (
+            "git-probe-error: the git probe could not run "
+            f"({rev_err.strip() or 'no detail'}) — ancestry is UNVERIFIABLE; "
+            f"{provenance} floor={floor_commit or '<unset>'}"
+        )
+        if (path / ".git").exists():
+            return (
+                "refuse",
+                f"git-probe-error (git-shaped dir): {probe_detail}; "
+                f"{_SYNC_REMEDY}",
+            )
+        return ("warn", f"git-probe-error (non-git dir): {probe_detail}")
     if rev_rc == 0:
         rev = rev_out.strip()
         _s_rc, status_out, _ = uj.bounded_git_probe(
             path, "status", "--porcelain"
         )
-        edited = bool(status_out.strip())
+        # A status-probe failure leaves the local-edit state UNKNOWN; report
+        # it as dirty rather than claiming a clean tree (the conservative
+        # reading — the row is an audit artefact, never a gate input).
+        edited = bool(status_out.strip()) or _s_rc == uj.GIT_PROBE_ERROR_RC
         prov_git = (
             f"{provenance} git_rev={rev} dirty={'yes' if edited else 'no'}"
         )

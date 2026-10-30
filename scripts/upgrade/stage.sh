@@ -566,6 +566,27 @@ if ! git -C "$REPO_ROOT" merge-base --is-ancestor "$FLOOR_COMMIT" HEAD >/dev/nul
 fi
 _log "floor validated: PIPELINE_SCRIPTS_FLOOR_COMMIT=$FLOOR_COMMIT is an ancestor of the built tree (T6.15)"
 
+# ── W-2 (verifier 2026-10-30): the STAMP half of the same gate ──────────────
+# The floor above is the DAEMON-side input (ancestry). The lib.sh stamp is the
+# OTHER provenance channel: on a NON-GIT pinned dir the stamp IS the whole
+# provenance (Q2/D6-11), so a meaningless value (the pre-release placeholder
+# `unreleased-<lane>`, which the daemon's `_STAMP_RE` happily parses) would
+# ARM with nothing able to detect it. The release bump sets the real value
+# (D-F7/D6-8); this gate refuses to ship anything else. Three conditions, all
+# mechanical:
+#   1. the stamp is a 40-hex commit sha (a placeholder is NOT);
+#   2. the sha RESOLVES in this tree (git cat-file -e <rev>^{commit});
+#   3. when the floor is set it IS the floor commit — D6-8's "the two travel
+#      together": the stamp names the same merge commit the daemon demands.
+STAMP_SRC="$REPO_ROOT/scripts/upgrade/lib.sh"
+STAMP_REV="$(sed -n 's/^PIPELINE_SCRIPTS_REV="\{0,1\}\([0-9A-Za-z._/-]*\)"\{0,1\}[[:space:]]*$/\1/p' "$STAMP_SRC" 2>/dev/null | head -1 || true)"
+if ! STAMP_REFUSAL="$(_pipeline_scripts_stamp_verdict "$STAMP_REV" "$FLOOR_COMMIT" "$REPO_ROOT")"; then
+    _warn "REFUSING TO STAGE: ${STAMP_REFUSAL}"
+    rm -rf "$STAGE_TMP"
+    exit 78
+fi
+_log "stamp validated: PIPELINE_SCRIPTS_REV=$STAMP_REV is a resolvable commit sha == the floor (W-2/T6.4/D6-8)"
+
 cat > "$STAGE_TMP/manifest.json" <<EOF
 {
   "version": "$VERSION",

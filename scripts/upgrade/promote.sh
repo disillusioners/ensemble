@@ -300,7 +300,19 @@ journal_init || { _warn "cannot initialize journal"; exit 1; }
 # corroborating echo — the gating input is the arm-time FILE read, B3).
 journal_history_append promote-start "pipeline-scripts rev=${PIPELINE_SCRIPTS_REV:-<unstamped>} pid=$$ scripts=$SCRIPT_DIR" \
                       || true
-J="$(_run_bounded_step journal-read journal_read)" || {
+J="$(_run_bounded_step journal-read journal_read)"; J_READ_RC=$?
+if [ "$J_READ_RC" -ne 0 ]; then
+    # A-4 (verifier 2026-10-30): this step runs inside a COMMAND SUBSTITUTION,
+    # so a step-budget breach exits only the substitution's subshell — the
+    # breach handler's row/WARN/lock-release already happened and the caller
+    # sees ITS rc (BUDGET_BREACH_RC), never the wrapper's 124. Propagate the
+    # halt WITHOUT a second row here: the old `|| {` arm appended
+    # "journal read REFUSED (size guard …)", which both mislabelled a budget
+    # breach as a read-path refusal and double-recorded one event.
+    if [ "$J_READ_RC" -eq "$BUDGET_BREACH_RC" ]; then
+        _warn "promote preflight: journal read halted by the step-budget breach (the breach row is already journaled) — halting"
+        exit "$BUDGET_BREACH_RC"
+    fi
     _warn "journal unreadable/TORN at $(journal_path) — halt-for-human (repair the journal before any pipeline mutation)"
     # R1 (leader ruling, wave-2): the promote-path size-guard refusal is an
     # exit 78 + a HALT ROW. Best-effort at the CALLER site (never inside
@@ -310,7 +322,7 @@ J="$(_run_bounded_step journal-read journal_read)" || {
     # append too; `|| true` keeps the exit-78 refusal itself unconditional.
     journal_history_append halt "promote preflight: journal read REFUSED (size guard ${JOURNAL_SIZE_GUARD_BYTES}B x legacy class, or unreadable/torn) — halt-for-human" >/dev/null 2>&1 || true
     exit 78
-}
+fi
 # D3-8/D3-9 (phase 3): the RUN-IDENTITY row — one per run, naming the
 # per-run NARRATIVE file the shell writes directly and the PAYLOAD file
 # systemd's append: capture owns (D3-12's two-file sink). Only emitted
@@ -392,7 +404,15 @@ _enforce_deadline "$preflight_deadline" preflight "budget=PREFLIGHT_PHASE_BUDGET
 # fields + no-.env invariant. Same-version re-promote verifies once.
 lock_heartbeat
 _log_phase_marker "plugin-staleness"
-CUR_JSON="$(_run_bounded_step journal-read-current journal_read)"
+CUR_JSON="$(_run_bounded_step journal-read-current journal_read)"; CUR_READ_RC=$?
+# A-4 (verifier 2026-10-30): command substitution ⇒ a step-budget breach ends
+# only the subshell; the handler's row/WARN/release already happened. Without
+# this arm the run continued with an EMPTY CUR_JSON (silently treating the
+# journal as having no `current`) after the breach had halting semantics.
+if [ "$CUR_READ_RC" -eq "$BUDGET_BREACH_RC" ]; then
+    _warn "promote preflight: CURRENT-journal read halted by the step-budget breach (the breach row is already journaled) — halting"
+    exit "$BUDGET_BREACH_RC"
+fi
 # Anchored on the QUOTED-key form (`"current":`) via _json_field_quoted
 # (lib.sh:1355-1364 precedent) — defends against a future key-naming
 # collision where a top-level field named e.g. "current_previous_candidate"

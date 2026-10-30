@@ -25,8 +25,14 @@ and the pack records a PF_DEFERRED_RED state — it can never be mistaken for a
 silent pass (the shell pack's ``--expect-implemented`` mode turns every
 deferral into a hard failure).
 
-Scenario ids are the pack's own (I1–I12); the expected verdicts come from
+Scenario ids are the pack's own (I1–I15); the expected verdicts come from
 ``tests/packs/preflight_ceremony_readiness.txt``.
+
+I13–I15 are the W-1/W-3 (verifier 2026-10-30) legs: a probe that cannot RUN
+at all must degrade to a verdict instead of unwinding the arm path
+(I13 git-shaped ⇒ refuse, I14 non-git ⇒ warn), and an unusable scripts dir
+must refuse (I15) — three branches that previously had zero executed
+coverage.
 
 Usage:  python3 tests/helpers/preflight_ceremony_probe.py --root <scratch-dir>
 Exit:   0 all scenarios pass · 1 a scenario FAILED · 3 guard absent
@@ -117,12 +123,17 @@ def build_fixtures(root: Path) -> dict[str, Path]:
     )
     fx["plain_stamp"] = plain_stamp
 
+    # a dir with NO lib.sh at all (I15: scripts-dir-unusable)
+    no_libsh = root / "no-libsh"
+    no_libsh.mkdir()
+
     plain_nostamp = root / "plain-nostamp"
     plain_nostamp.mkdir()
     (plain_nostamp / "lib.sh").write_text(
         "#!/usr/bin/env bash\necho hi\n", encoding="utf-8"
     )
     fx["plain_nostamp"] = plain_nostamp
+    fx["no_libsh"] = no_libsh
 
     # a DIRTY git checkout that CONTAINS the floor (I7: warn, never refuse).
     # DETERMINISM (phase 6 wave 4): COPY the fresh repo — including its
@@ -197,6 +208,10 @@ def main(argv: list[str]) -> int:
          "stamp absent from <dir>/lib.sh ⇒ refuse (B3 file acquisition)"),
         ("I7", dict(scripts_dir=fx["dirty"], floor_commit=floor), "arm",
          "dirty checkout that CONTAINS the floor ⇒ arms (warn, never refuse)"),
+        # W-3 (verifier 2026-10-30): the scripts-dir-unusable branch — a pinned
+        # dir that is not a pipeline scripts tree at all.
+        ("I15", dict(scripts_dir=fx["no_libsh"], floor_commit=floor), "refuse",
+         "a dir WITHOUT lib.sh ⇒ refuse (scripts-dir-unusable)"),
     ]
 
     failures = 0
@@ -230,6 +245,47 @@ def main(argv: list[str]) -> int:
     except Exception as exc:
         print(f"SCENARIO I8 FAIL raised {type(exc).__name__}: {exc}")
         failures += 1
+
+    # ── I13/I14 — W-1 (verifier 2026-10-30): a probe that CANNOT RUN AT ALL
+    # must degrade to a verdict. The defect being pinned: an exception out of
+    # ``bounded_git_probe`` unwinds the arm path's generic ``except Exception``,
+    # which does NOT release the pipeline lock — an orphaned lock until the
+    # 300 s stale-break. The probe is forced to raise the way an absent/broken
+    # git or the 30 s bound would (TimeoutExpired is a SubprocessError; the
+    # absent-git class is OSError — the same except arm).
+    from daemon.tools import upgrade_journal as _uj
+
+    _real_run = _uj.subprocess.run
+
+    def _boom(*_a, **_k):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=30)
+
+    _uj.subprocess.run = _boom
+    try:
+        for sid, key, expected, note in (
+            ("I13", "fresh", "refuse",
+             "git-SHAPED dir + probe error ⇒ refuse (D6-10 command-error), never an exception"),
+            ("I14", "plain_stamp", "warn",
+             "non-git dir + probe error ⇒ warn (Q2: the stamp IS the provenance), never an exception"),
+        ):
+            try:
+                verdict, detail = seam(
+                    scripts_dir=fx[key], floor_commit=floor, env=dict(os.environ)
+                )
+            except Exception as exc:  # noqa: BLE001 - the pinned defect
+                print(
+                    f"SCENARIO {sid} FAIL raised {type(exc).__name__}: {exc} -- {note}"
+                )
+                failures += 1
+                continue
+            ok = str(verdict) == expected
+            print(
+                f"SCENARIO {sid} {'PASS' if ok else 'FAIL'} expected={expected} "
+                f"got={verdict} :: {detail} -- {note}"
+            )
+            failures += 0 if ok else 1
+    finally:
+        _uj.subprocess.run = _real_run
 
     if not args.keep:
         shutil.rmtree(root, ignore_errors=True)

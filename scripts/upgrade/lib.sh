@@ -495,6 +495,59 @@ _run_bounded_step() {
     return "$rc"
 }
 
+# BUDGET_BREACH_RC — the rc `_budget_breach` exits with, exported to the
+# CALLERS that invoke `_run_bounded_step` inside a COMMAND SUBSTITUTION
+# (A-4, verifier 2026-10-30). `exit` inside `$( )` ends only the
+# substitution's subshell, so such a caller never observes the wrapper's
+# 124: it sees THIS rc, while the breach handler has ALREADY written its
+# `deadline-breach-<step>` halt row, emitted its WARN and released the lock.
+# The caller's contract is therefore: on this rc, propagate the halt
+# (`exit "$BUDGET_BREACH_RC"`) and write NO row of its own — a caller-side
+# row would be mislabelled (it names the step's own failure vocabulary, e.g.
+# the journal size guard) and would double-record a single breach event.
+# Keep in lockstep with `_budget_breach` (which pins the literal 78: its
+# ORDER/shape is asserted by tests/packs/preflight_watchdog_test.sh).
+BUDGET_BREACH_RC=78
+
+# _pipeline_scripts_stamp_verdict <stamp> <floor> <repo_root> — W-2 (verifier
+# 2026-10-30): the RELEASE-TIME validity check for the lib.sh
+# `PIPELINE_SCRIPTS_REV` stamp, the second half of the phase-6 provenance gate
+# (the daemon-side floor is the first half; stage.sh validates both).
+#
+# WHY IT EXISTS: on a NON-GIT pinned scripts dir the stamp IS the provenance
+# (Q2/D6-11), and the daemon's acquisition regex (`_STAMP_RE`) accepts any
+# `[0-9A-Za-z._/-]+` — so the pre-release placeholder
+# (`unreleased-<lane>`) would arm a ceremony with a meaningless value and no
+# git ancestry able to contradict it. Three mechanical conditions:
+#   1. a 40-hex commit sha (a placeholder is NOT one);
+#   2. that sha RESOLVES to a commit in this tree (same rule as the floor: a
+#      release may only name commits it contains);
+#   3. when the floor is set, the stamp IS the floor commit — D6-8's "the two
+#      travel together" (one merge commit names both the floor the daemon
+#      enforces and the revision the scripts tree declares).
+# CONTRACT: prints "" / returns 0 when valid; prints the human REFUSAL REASON
+# (one line, no trailing newline) / returns 1 when not. It writes nothing and
+# exits nothing, so a caller owns the wording prefix and the halt. Extracted
+# from stage.sh's inline block so the gate is EXECUTABLE in a pack (the real
+# stage.sh cannot be run without a full PyInstaller build) — the pack's
+# refusal legs and the mutation matrix drive THIS function.
+_pipeline_scripts_stamp_verdict() {
+    local stamp="${1:-}" floor="${2:-}" repo="${3:-.}"
+    if ! printf '%s' "$stamp" | grep -Eq '^[0-9a-f]{40}$'; then
+        printf 'PIPELINE_SCRIPTS_REV in scripts/upgrade/lib.sh is "%s" — not a 40-hex commit sha (W-2/T6.4). The pre-release placeholder MUST be replaced by the release bump with the merge commit introducing the preflight-hang fix (the SAME commit as PIPELINE_SCRIPTS_FLOOR_COMMIT, cadence D6-8). A non-git pinned scripts dir has NO other provenance than this stamp, so a placeholder would arm silently.' "${stamp:-<absent>}"
+        return 1
+    fi
+    if ! git -C "$repo" cat-file -e "${stamp}^{commit}" >/dev/null 2>&1; then
+        printf 'PIPELINE_SCRIPTS_REV=%s does not resolve to a commit in this tree (W-2 — the stamp must name a commit this release contains, the same rule as the floor). Fix scripts/upgrade/lib.sh and re-stage.' "$stamp"
+        return 1
+    fi
+    if [ -n "$floor" ] && [ "$stamp" != "$floor" ]; then
+        printf 'PIPELINE_SCRIPTS_REV=%s does not equal PIPELINE_SCRIPTS_FLOOR_COMMIT=%s — D6-8 requires the two to travel together (the same merge commit names both the floor the daemon enforces and the revision the scripts tree declares). Align both and re-stage.' "$stamp" "$floor"
+        return 1
+    fi
+    return 0
+}
+
 # _log_phase_marker <step> -- the D3-8/T3.3 mid-phase marker: ONE
 # timestamped line naming the phase, the step and the elapsed seconds
 # since the preflight armed (_PREFLIGHT_T0). Written through _log, so it
