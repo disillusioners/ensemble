@@ -297,5 +297,5 @@ if [ "$DRY" = "1" ]; then
     printf 'MUTATION MATRIX: DRY-RUN (nothing planted)\n'
     exit 0
 fi
-printf 'MUTATION MATRIX: PASS (span M1–M32 complete; deferred rows recorded)\n'
+printf 'MUTATION MATRIX: PASS (span M1–M40 complete — M33–M40 are the 2026-10-30 verifier-fix wave, D-49; deferred rows recorded)\n'
 exit 0

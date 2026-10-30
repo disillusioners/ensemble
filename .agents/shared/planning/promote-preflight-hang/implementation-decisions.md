@@ -157,3 +157,57 @@ decision; the plan text and the D6-* rulings otherwise govern verbatim.
   fixed test-side only).
 * Mutation matrix: full span **32/32 executable, 0 deferred** (M22–M28/M32
   added this wave; see evidence/MUTATION-MATRIX-20261030.tsv).
+
+## 10. Fix iteration 1 (verifier W-1…W-3 + A-2/A-4) — decisions + deviations, 2026-10-30
+
+Base for this wave: `dc70a46a6` (wave-4 close-out). Branch `fix/promote-preflight-hang`.
+Scope: the independent verifier's three WARNINGs and two cheap advisories, surgical
+only — no re-architecture, nothing outside the listed sites.
+
+| # | Decision / deviation | Ruling that wins | Rationale |
+|---|---|---|---|
+| D-40 | **The probe-error class is SPLIT, not folded into the non-git branch**: a `GIT_PROBE_ERROR_RC` (255) from `bounded_git_probe` REFUSES on a git-SHAPED dir (`.git` present — file or dir) and WARNS on a non-git dir. | D6-10 (command-error ⇒ refuse) + Q2/D6-11 (non-git ⇒ stamp is the provenance). | A bare `(255, "", …)` folded into the non-git branch would ARM a stamped dir on an ancestry nobody verified — strictly worse than the exception. Refusing everywhere would invent a new refusal class for git-less hosts and break I4's documented non-git arm. Residual (disclosed): a git-less host judging a stamped dir that is a SUBDIR of a repository (no local `.git`) warns instead of refusing — the stamp is still the provenance there, so the outcome matches Q2. |
+| D-41 | **A status-probe failure reports `dirty=yes`**, not a third "unknown" state. | Audit-row honesty with a one-line diff; M24 plants on the EXACT `prov_git` f-string. | Adding a third state would have moved M24's anchor for no safety gain. `dirty=yes` is the conservative reading (never claims a clean tree) and the row is an audit artefact, never a gate input. |
+| D-42 | **`scripts-dir-unusable` is exercised by INJECTING the dir at the `_resolve_scripts_dir` seam.** | W-3 asks for executed coverage of a branch that had none. | `_resolve_scripts_dir` itself requires `lib.sh`, so through the resolver the branch is reachable only via a TOCTOU (lib.sh removed between resolution and the guard) or a future caller that does not pre-filter. The CALLER's handling — refusal token, lock release, journal row — is identical whichever way the state arises, and that is what the leg pins; Pack I's I15 covers the verdict itself. |
+| D-43 | **stage.sh's stamp gate was EXTRACTED to `lib.sh _pipeline_scripts_stamp_verdict`.** | W-2 asks for a stage.sh refusal leg; the real stage.sh cannot run without a full PyInstaller build (~the whole release lane). | A pack can only execute the gate if the gate is a function. F0 pins that stage.sh really calls it (a helper nobody calls would gate nothing); the mutation matrix drives the function (M37/M38) and the pack drives six stamp shapes (I16a–f). |
+| D-44 | **Pack I C1 accepts the documented `unreleased-<lane>` placeholder while the floor is UNSET**, and requires a 40-hex/resolving/floor-equal stamp otherwise. | The release bump owns both values (D-38/D-F7/D6-8); the pack must be green on the lane's own HEAD. | A blanket "must be 40-hex" would redden the pack pre-release, and the placeholder is *supposed* to survive until the bump. The hole W-2 identified (a placeholder ARMING) is closed where a value can actually ship: the release gate (stage.sh + I16a). C1 also cross-checks the PAIR — a 40-hex stamp must equal a set floor. |
+| D-45 | **A-4's breach rc is inferred from the substitution's rc** (`BUDGET_BREACH_RC=78`) rather than a new signal channel. | Minimal diff; `_budget_breach`'s `exit 78` + its ORDER/shape are pinned by Pack D. | Only the two journal-read sites are affected and `journal_read` returns 0/1 exclusively, so 78 unambiguously means "the breach handler fired". A general channel (marker file / env token) would touch `_budget_breach`'s pinned contract for no extra coverage. |
+| D-46 | **The `journal-read-current` site got the breach arm only** — a non-breach read failure still leaves `CUR` empty (pre-existing). | Brief scope ("keep the loud halt + exit 78"). | The breach case was the one with halting semantics being silently swallowed; the non-breach behaviour is unchanged and out of scope. |
+| D-47 | **A-1 ROUTED (not fixed)**: the three synchronous `bounded_git_probe` calls — up to ~90 s worst case (3 × 30 s bound) — run INLINE inside `async def system_upgrade`, i.e. on the event loop, before a live ceremony. | Out of scope: event-loop offload is the sibling db-offload/loop-lag lane's subject. | Sites: `daemon/tools/upgrade_tools.py::scripts_dir_provenance_verdict` — `rev-parse` (:4027), `status` (:4058), `merge-base` (:4085) — called from the arm path at :3715. A promote ceremony already blocks for minutes; the offload belongs with that commission, not a surgical verifier fix. |
+| D-48 | **A-3 DEFERRED (cosmetic)**: a 14-day-old in-flight log can be deleted by the per-run retention age pass despite the in-flight fence. | Requires a 14-day wedged txn to matter at all. | Site: `daemon/tools/upgrade_journal.py` per-run log retention (the `_UPGRADE_ENV_SCOPES` age pass, A-3's evidence). Fence-vs-age is a retention-policy question, not a defect on this lane's surface. |
+| D-49 | **The plan set's `M1–M32` span claim is left untouched; M33–M40 live in THIS ledger** + the matrix runner + the TSV. | The plan set is a frozen approval artefact and `gate.sh` class (b) asserts ITS span. | Appending legs to the canonical span would mean editing six plan docs + the gate's own constant — noise for a verifier-fix wave, and it would re-open the approval chain. This is the D-25 precedent: record where the evidence lives. `gate.sh` re-run after the change: **12/12 PASS** (unmodified). |
+
+### Wave-5 (fix iteration 1) verification notes
+
+* **Pack I** (`preflight_ceremony_readiness_test.sh`): **38 passed / 0 failed / 0
+  deferrals**, exit 0, in BOTH default and `--expect-implemented` modes. New legs:
+  I13/I14 (W-1 probe-error ⇒ refuse / warn, never an exception), I15
+  (scripts-dir-unusable), I16a–g (the stage-time stamp gate, executed).
+* **Pack D** (`preflight_watchdog_test.sh`): **45 passed / 0 failed**. New leg D11
+  (A-4) runs the REAL `promote.sh` from a scratch scripts-tree copy whose
+  `journal_read` sleeps past `PREFLIGHT_STEP_BUDGET_S=3`, and asserts exactly ONE
+  halt row (`deadline-breach-journal-read`), NO mislabelled "journal read REFUSED"
+  row, ONE breach WARN, rc 78 and the lock released.
+* **Daemon-side** (`test_upgrade_tools.py` + `test_upgrade_preflight_daemon_side.py`
+  + `test_upgrade_executor_systemd_service.py` + `test_upgrade_journal.py`):
+  **357 passed / 1 skipped / 0 failed**. New class
+  `TestScriptsDirProvenanceArmPath` drives the real arm path for W-1 (probe raises ⇒
+  refusal + LOCK RELEASED), W-3a (floor-unset on an explicit pin ⇒ refuse), W-3b
+  (fallback dir ⇒ warn downgrade, arm proceeds) and W-3c (scripts-dir-unusable ⇒
+  refuse) — each asserting the `arm-scripts-provenance` journal row.
+* **Mutation matrix, legs M33–M40** (all executed: plant → named pin RED → restore →
+  GREEN, planted digests recorded in `evidence/MUTATION-MATRIX-20261030.tsv`;
+  leave-no-plant guard: TREE clean). M33 (probe try/except removed) ⇒ I13 raised;
+  M34 (probe-error branch dead) ⇒ I13 `got=arm`; M35 (unusable guard dead) ⇒ I15;
+  M36 (breach rc unrecognised) ⇒ D11 `halt rows=2`; M37 (40-hex requirement dropped)
+  ⇒ I16a; M38 (floor-equality dropped) ⇒ I16f; M39 (floor-unset downgraded to warn)
+  ⇒ W-3a; M40 (fallback downgrade removed) ⇒ W-3b.
+* **Regression sweep, the other preflight packs** (all green at the fix commit):
+  size-guard 24, logging 30, stage-lock 13, journal-parity 60, journal-scale 12,
+  census 10, anchor 42, shasum-batch-parity 4, repro 7 — i.e. the A-4 caller
+  rewrite did not disturb the size-guard refusal path (which still writes its
+  own "journal read REFUSED" row for a NON-breach rc=1), the ledger/parity
+  corpus, the anchor table or the census.
+* **Fence**: zero live contact in this wave — every leg runs under the packs'
+  `preflight_pack_common.sh` fence (scratch install root + `FAKE_HOME` + escape
+  guard + per-variable `POSTGRES_*` scrub); the daemon-side legs are `tmp_path`-only.

@@ -31,3 +31,11 @@ M29	executed	scripts/upgrade/lib.sh	814b8ef4b282ff1cea6d426223c4aa8f69954fc073e4
 M30	executed	scripts/upgrade/lib.sh	e9cb7c45fc005907134d6a3d7aaad724c212b1b724009f8c7c34e0c9c3a648a2	G2 refusal does not name the size	1	0	ok
 M31	executed	scripts/upgrade/lib.sh	931849fbf1818156cf588988dcc6aad9ca529ea3456e6ce2783c4a30e849cba4	G1: rc=	1	0	ok
 M32	executed	scripts/upgrade/promote.sh	4a76aa19ddbb32e4f149c5508e931ead11070046b4a974d49ef3e6de7130636f	DEFERRED_RED I11	1	0	ok
+M33	executed	daemon/tools/upgrade_journal.py	43d9f5ba77dd0c2ff80fbc7ef22f9379ec40a562cfb38f3856f38b3202c7ef00	SCENARIO I13 FAIL raised	1	0	ok
+M34	executed	daemon/tools/upgrade_tools.py	9f3f9144358c45179150362588e22d562b0356744038b5e67111823902ac0598	SCENARIO I13 FAIL expected=refuse got=arm	1	0	ok
+M35	executed	daemon/tools/upgrade_tools.py	ea301101fb2b8800502b5bce30300866c370475b6d1af19d4e200bd66bc0c09b	I15 FAIL	1	0	ok
+M36	executed	scripts/upgrade/promote.sh	1f22d27ae18c4e56f99d1fa9964bd1dc763229f7c7cb1da972ee19775c25bfc4	A4 halt rows=2	1	0	ok
+M37	executed	scripts/upgrade/lib.sh	492c99e1ee4f5aca4b60f5c39f37ecefed640692cc20ce31529b704ca65f39c1	I16a stamp gate MISMATCH	1	0	ok
+M38	executed	scripts/upgrade/lib.sh	0d2b1e34ba67b96230ff76a16c4a7b99655d2178faeb491428be63baada24b22	I16f stamp gate MISMATCH	1	0	ok
+M39	executed	daemon/tools/upgrade_tools.py	b6110f0a488ecf5dc0c86b09f1b605cd55cae1b1f6fdffe58438e0e0f7fb2524	test_w3a_floor_unset_on_an_explicit_pin_refuses	1	0	ok
+M40	executed	daemon/tools/upgrade_tools.py	f4ba649359270ed84deacdfb9eb48b9534c35ee1ac5d6c1a12507350d52cb50c	test_w3b_fallback_dir_downgrades_refusal_to_warning	1	0	ok

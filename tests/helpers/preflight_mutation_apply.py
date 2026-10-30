@@ -389,10 +389,10 @@ PLANTS: dict[str, dict] = {
     },
     "M36": {
         "file": PROMOTE, "mode": "executable",
-        "why": "the command-substituted journal-read caller is back to the `|| {` arm — a step-budget breach writes a SECOND, mislabelled halt row (A-4)",
+        "why": "the command-substituted journal-read caller no longer recognises the breach rc — a step-budget breach falls into the read-failure arm and writes a SECOND, mislabelled halt row (A-4; the defect is the CONSEQUENCE, `|| {` vs `; rc=$?` is the mechanism)",
         "pairs": [(
-            'J="$(_run_bounded_step journal-read journal_read)"; J_READ_RC=$?\nif [ "$J_READ_RC" -ne 0 ]; then',
-            'J="$(_run_bounded_step journal-read journal_read)" || {\n    J_READ_RC=1\nif [ "$J_READ_RC" -ne 0 ]; then',
+            '    if [ "$J_READ_RC" -eq "$BUDGET_BREACH_RC" ]; then',
+            '    if false; then  # PLANT M36: the breach rc is not recognised (second row written)',
         )],
     },
     "M37": {
