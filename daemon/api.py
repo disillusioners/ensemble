@@ -1466,6 +1466,27 @@ async def lifespan(app: FastAPI):
     # One-shot boot log for the Pattern-f1 kill-switch
     # (ENSEMBLE_ORPHAN_F1_ENABLED, default ON, restart-to-flip).
     emit_orphan_f1_boot_log()
+    # Pattern (h) zombie-active close knobs (wi-78967dba) — read
+    # from config ONCE at boot; wired loop → reconcile_drift_states
+    # kwargs exactly like f1_tree_activity_max_age above. One-shot
+    # boot INFO log (the emit_orphan_f1_boot_log /
+    # emit_defer_autopromote_boot_log precedent).
+    zombie_close_enabled = (
+        config.services.drift_reconcile_zombie_close_enabled
+    )
+    zombie_close_age_bound = (
+        config.services.drift_reconcile_zombie_close_age_bound_seconds
+    )
+    zombie_close_batch_cap = (
+        config.services.drift_reconcile_zombie_close_batch_cap
+    )
+    logger.info(
+        f"Pattern (h) zombie-active close boot: "
+        f"enabled={zombie_close_enabled}, "
+        f"age_bound={zombie_close_age_bound}s, "
+        f"batch_cap={zombie_close_batch_cap} "
+        f"(SERVICES_DRIFT_RECONCILE_ZOMBIE_CLOSE_* to override)"
+    )
     # WS3 add-on (WS4 wiring, 2026-09-06): one-shot boot log for the
     # Pattern-g defer-autopromote kill-switch
     # (ENSEMBLE_DEFER_AUTOPROMOTE_ENABLED, default ON,
@@ -1481,6 +1502,9 @@ async def lifespan(app: FastAPI):
             min_pending_age_seconds=min_pending_age,
             min_orphan_age_seconds=min_orphan_age,
             f1_tree_activity_max_age_seconds=f1_tree_activity_max_age,
+            zombie_close_enabled=zombie_close_enabled,
+            zombie_close_age_bound_seconds=zombie_close_age_bound,
+            zombie_close_batch_cap=zombie_close_batch_cap,
         ),
         name="drift-reconciler",
     )
@@ -1489,7 +1513,10 @@ async def lifespan(app: FastAPI):
         f"Drift reconciler started: interval={drift_interval}s, "
         f"min_pending_age={min_pending_age}s, "
         f"min_orphan_age={min_orphan_age}s, "
-        f"f1_tree_activity_max_age={f1_tree_activity_max_age}s"
+        f"f1_tree_activity_max_age={f1_tree_activity_max_age}s, "
+        f"zombie_close_enabled={zombie_close_enabled}, "
+        f"zombie_close_age_bound={zombie_close_age_bound}s, "
+        f"zombie_close_batch_cap={zombie_close_batch_cap}"
     )
 
     # ─────────────────────────────────────────────────────────────
@@ -3881,6 +3908,9 @@ async def _periodic_drift_reconcile_loop(
     min_pending_age_seconds: int,
     min_orphan_age_seconds: int = 900,
     f1_tree_activity_max_age_seconds: int = 900,
+    zombie_close_enabled: bool = True,
+    zombie_close_age_bound_seconds: int = 7200,
+    zombie_close_batch_cap: int = 25,
 ) -> None:
     """Periodic asyncio loop driving ``JobRecoveryService.reconcile_drift_states``.
 
@@ -3920,6 +3950,15 @@ async def _periodic_drift_reconcile_loop(
             MAX ``last_activity_at`` is within this window.
             Configurable via
             ``SERVICES_F1_TREE_ACTIVITY_MAX_AGE_SECONDS``.
+        zombie_close_enabled: Forwarded to ``reconcile_drift_states``
+            for the Pattern (h) zombie-ACTIVE close kill-switch
+            (wi-78967dba). ``False`` ⇒ the leg is a COMPLETE no-op.
+            Configurable via
+            ``SERVICES_DRIFT_RECONCILE_ZOMBIE_CLOSE_ENABLED``.
+        zombie_close_age_bound_seconds: Pattern (h) age bound on the
+            monotone task-terminal-stamp clock (default 7200s).
+        zombie_close_batch_cap: Pattern (h) candidates per pass
+            (default 25).
     """
     # Small startup delay so the first tick fires after the system
     # has stabilized (mirrors MaintenanceService._loop's 60s initial
@@ -3938,6 +3977,11 @@ async def _periodic_drift_reconcile_loop(
                 f1_tree_activity_max_age_seconds=(
                     f1_tree_activity_max_age_seconds
                 ),
+                zombie_close_enabled=zombie_close_enabled,
+                zombie_close_age_bound_seconds=(
+                    zombie_close_age_bound_seconds
+                ),
+                zombie_close_batch_cap=zombie_close_batch_cap,
             )
             reconciled = stats.get("reconciled", 0)
             if reconciled > 0:
@@ -3945,6 +3989,55 @@ async def _periodic_drift_reconcile_loop(
                     f"Drift reconciler: applied {reconciled} corrections "
                     f"(details={len(stats.get('details', []))})"
                 )
+            # A1 (wi-78967dba): the (h) counter block logs whenever
+            # ANY candidate was examined — NOT gated on
+            # reconciled > 0 (a stuck-closed heal with examined > 0
+            # and finalized = 0 must stay VISIBLE; the reconciled>0
+            # gate would hide it).
+            zombie_stats = stats.get("zombie_close") or {}
+            if zombie_stats.get("examined", 0) > 0:
+                logger.info(
+                    "Drift reconciler: Pattern (h) zombie-active "
+                    "close: examined=%(examined)s "
+                    "age_qualified=%(age_qualified)s "
+                    "holds=%(holds)s error_skips=%(error_skips)s "
+                    "finalized=%(finalized)s "
+                    "race_lost_noop=%(race_lost)s "
+                    "zero_watcher_warns=%(zww)s",
+                    {
+                        "examined": zombie_stats.get("examined", 0),
+                        "age_qualified": zombie_stats.get(
+                            "age_qualified", 0
+                        ),
+                        "holds": zombie_stats.get(
+                            "mission_live_holds", 0
+                        ),
+                        "error_skips": zombie_stats.get(
+                            "error_skips", 0
+                        ),
+                        "finalized": zombie_stats.get("finalized", 0),
+                        "race_lost": zombie_stats.get(
+                            "race_lost_noop", 0
+                        ),
+                        "zww": zombie_stats.get(
+                            "zero_watcher_warns", 0
+                        ),
+                    },
+                )
+                if zombie_stats.get("error_skips", 0) > 0:
+                    from daemon.services.job_recovery_service import (
+                        ZOMBIE_CLOSE_STREAK_WARN_THRESHOLD,
+                    )
+
+                    logger.warning(
+                        "Drift reconciler: Pattern (h) zombie-active "
+                        "close recorded %s guard/probe error skip(s) "
+                        "this cycle — candidates held ACTIVE "
+                        "(fail-closed); repeated skips escalate at "
+                        "K=%s consecutive cycles",
+                        zombie_stats.get("error_skips", 0),
+                        ZOMBIE_CLOSE_STREAK_WARN_THRESHOLD,
+                    )
         except asyncio.CancelledError:
             # Shutdown — propagate so the runtime knows the task is done.
             raise
