@@ -120,7 +120,7 @@ logger = logging.getLogger(__name__)
 # M1(c): strong references for fire-and-forget background tasks (the
 # one-shot bash-spawn boot reconcile) — without a live reference a
 # running task can be garbage-collected mid-flight.
-_BASH_RECONCILE_BG_TASKS: set = set()
+_BASH_RECONCILE_BG_TASKS: set[asyncio.Task[None]] = set()
 
 # Import routers
 from daemon.routers import (
@@ -948,15 +948,16 @@ async def lifespan(app: FastAPI):
             f"{type(sweep_err).__name__}: {sweep_err}"
         )
 
-    # bash-tool orphan reaper Phase 1 (plan 1.3): durable-writer wiring.
+    # bash-tool orphan reaper (plan 1.3; SHIPPED): durable-writer wiring.
     # Construct the repository from manager.engine and inject it into the
     # bash process registry singleton (the manager._watcher_repo storage
     # pattern, api.py:962). Tools never import the repo directly (no
     # import cycle; bash.py header note) — they read the injected writer.
     # Writer-unset ordering (plan D3 adjudication 2): bash calls landing
     # BEFORE this wiring produce NO row (pre-wiring callers are
-    # direct-coroutine/test lanes). Kill behavior lands in Phase 2+; this
-    # seam is write-side only.
+    # direct-coroutine/test lanes). THIS seam is write-side only — the
+    # kill lanes (terminal sweep / shutdown / boot reconcile / Phase-4
+    # enumeration) live in daemon/services/bash_spawn_reaper.py.
     bash_spawn_repo = None
     try:
         from daemon.repositories.bash_spawn import BashSpawnRepository

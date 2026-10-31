@@ -13,7 +13,7 @@ from contextvars import ContextVar
 from functools import partial
 from uuid import uuid4
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Dict, List, Optional, Sequence
 
 from langchain_core.tools import tool
 from pydantic import BaseModel
@@ -56,6 +56,12 @@ from daemon.services.bash_spawn_reaper import (
 )
 from daemon.services.timestamps import now_utc_iso as _now_utc_iso
 
+if TYPE_CHECKING:
+    # Writer-injection seam (lifespan wiring): typed here only — importing
+    # the repository at runtime would pull the SQLModel/engine chain into
+    # every bash-tool import (and the seam must stay duck-typed for tests).
+    from daemon.repositories.bash_spawn import BashSpawnRepository
+
 logger = logging.getLogger(__name__)
 
 # bash-tool orphan reaper minor-5: the durable spawn stamp must NOT
@@ -70,6 +76,11 @@ logger = logging.getLogger(__name__)
 _DURABLE_INSERT_EXECUTOR = ThreadPoolExecutor(
     max_workers=2, thread_name_prefix="bash-durable-stamp"
 )
+
+# Spawn-seam bounded wait for the durable stamp (single source: the
+# ``wait_for`` below AND the late-stamp WARNING message interpolate this
+# constant — no duplicated magic number).
+_DURABLE_STAMP_WAIT_SECONDS = 1.5
 
 
 # ── D5 — kind-hint ContextVar (resource-cost-control Phase 2) ───────────────
@@ -457,13 +468,13 @@ class BashProcessRegistry:
         # bash-tool orphan reaper Phase 1: durable writer (injected from
         # the lifespan via set_durable_writer). None ⇒ no row written
         # (writer-unset ordering contract, plan D3 adjudication 2).
-        self._durable_writer = None
+        self._durable_writer: "BashSpawnRepository | None" = None
 
-    def set_durable_writer(self, writer) -> None:
+    def set_durable_writer(self, writer: "BashSpawnRepository | None") -> None:
         """Inject the durable spawn-registry repository (lifespan wiring)."""
         self._durable_writer = writer
 
-    def get_durable_writer(self):
+    def get_durable_writer(self) -> "BashSpawnRepository | None":
         """Return the injected durable writer (or None)."""
         return self._durable_writer
 
@@ -1030,13 +1041,14 @@ async def bash(
                                     ),
                                 )
                             ),
-                            timeout=1.5,
+                            timeout=_DURABLE_STAMP_WAIT_SECONDS,
                         )
                     except asyncio.TimeoutError:
                         logger.warning(
                             "bash: durable stamp late (bounded wait exceeded "
-                            "1.5s); late tombstone lands best-effort "
+                            "%.1fs); late tombstone lands best-effort "
                             "(pid=%d pgid=%s tracking=%.8s)",
+                            _DURABLE_STAMP_WAIT_SECONDS,
                             proc.pid, pgid, tracking_id or "",
                         )
                     except Exception as exc:

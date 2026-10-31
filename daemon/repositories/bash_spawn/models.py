@@ -56,8 +56,6 @@ stamp, so restart-lane processes can never carry a row.
 
 from __future__ import annotations
 
-from typing import Optional
-
 from sqlalchemy import Column, Index, Text, text
 from sqlmodel import Field, SQLModel
 
@@ -104,7 +102,7 @@ class BashSpawnRecord(SQLModel, table=True):
         Index(UQ_TRACKING_ID, "tracking_id", unique=True),
     )
 
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     pid: int = Field(description="Kernel PID of the direct child at spawn.")
     pgid: int = Field(
         description=(
@@ -112,7 +110,7 @@ class BashSpawnRecord(SQLModel, table=True):
             "→ PGID == PID for the direct child). The killpg target."
         )
     )
-    start_time: Optional[int] = Field(
+    start_time: int | None = Field(
         default=None,
         description=(
             "Kernel starttime jiffies (Linux /proc/<pid>/stat field 22), "
@@ -136,7 +134,7 @@ class BashSpawnRecord(SQLModel, table=True):
             "bash tool already computes) — NEVER the env overlay."
         )
     )
-    boot_id: Optional[str] = Field(
+    boot_id: str | None = Field(
         default=None,
         description=(
             "uuid4 hex minted once per daemon process "
@@ -160,14 +158,14 @@ class BashSpawnRecord(SQLModel, table=True):
             "compares member starts against this instant."
         ),
     )
-    reaped_at: Optional[str] = Field(
+    reaped_at: str | None = Field(
         default=None,
         description=(
             "Aware-UTC ISO when the row was closed. NULL == open (the "
             "state machine: open → reaped; rows are never deleted)."
         ),
     )
-    reaped_by: Optional[str] = Field(
+    reaped_by: str | None = Field(
         default=None,
         description=(
             "Cleanup point id + sweeping daemon, suffixed "
@@ -179,7 +177,7 @@ class BashSpawnRecord(SQLModel, table=True):
             "``boot-reconcile``, ``gc``."
         ),
     )
-    reap_reason: Optional[str] = Field(
+    reap_reason: str | None = Field(
         default=None,
         description=(
             "EXACT value set (minor-3): ``NULL`` for a reaped kill, "

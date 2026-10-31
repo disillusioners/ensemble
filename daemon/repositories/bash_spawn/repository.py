@@ -36,13 +36,16 @@ this repository never reaches into the restart lane.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import delete, update
-from sqlmodel import Session, SQLModel, select
+from sqlmodel import Session, select
 
 from daemon.repositories.bash_spawn.models import BashSpawnRecord
 from daemon.services.timestamps import now_utc_iso
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import Engine
 
 # minor-4: closed-row retention window (boot-reconcile housekeeping;
 # keep in lockstep with bash_spawn_reaper.BASH_SPAWN_RETENTION_DAYS).
@@ -52,10 +55,12 @@ BASH_SPAWN_RETENTION_DAYS = 30
 class BashSpawnRepository:
     """Sync repository over ``bash_spawn_registry``."""
 
-    def __init__(self, engine) -> None:
+    def __init__(self, engine: Engine) -> None:
         self.engine = engine
 
-    def insert_open_row(self, record: Optional[BashSpawnRecord] = None, **fields: Any) -> BashSpawnRecord:
+    def insert_open_row(
+        self, record: BashSpawnRecord | None = None, **fields: Any
+    ) -> BashSpawnRecord:
         """Insert one open row. Accepts a record instance or keyword fields."""
         if record is None:
             record = BashSpawnRecord(**fields)
@@ -87,7 +92,7 @@ class BashSpawnRepository:
             return list(session.exec(stmt).all())
 
     def list_open_previous_boot(
-        self, current_boot_id: Optional[str], my_pid: Optional[int] = None
+        self, current_boot_id: str | None, my_pid: int | None = None
     ) -> list[BashSpawnRecord]:
         """Open rows whose boot_id is NULL/empty/foreign (D3 adjudication 2).
 
@@ -115,8 +120,8 @@ class BashSpawnRepository:
         self,
         row_id: int,
         reaped_by: str,
-        reason: Optional[str] = None,
-    ) -> Optional[BashSpawnRecord]:
+        reason: str | None = None,
+    ) -> BashSpawnRecord | None:
         """Close one row — CAS (minor-1).
 
         The close is a conditional ``UPDATE ... WHERE reaped_at IS NULL``

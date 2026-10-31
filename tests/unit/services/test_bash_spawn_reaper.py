@@ -727,7 +727,7 @@ class TestKillLadder:
             pid=777050,
             created_at=datetime.now(timezone.utc) - timedelta(seconds=60),
         )
-        with caplog.at_level(logging.INFO, logger=reaper.__name__):
+        with caplog.at_level(logging.DEBUG, logger=reaper.__name__):
             status, reason = verify_and_kill(
                 row,
                 members=[(777051, datetime.now(timezone.utc) - timedelta(seconds=61))],
@@ -736,6 +736,44 @@ class TestKillLadder:
         assert status == "reaped"
         assert reason == "reaped:pgid-only"
         assert any("attribution=pgid-only" in r.getMessage() for r in caplog.records)
+
+    def test_env_verify_raise_refused_fail_safe(
+        self, monkeypatch, kill_fence, caplog
+    ) -> None:
+        """F-5 (E): an unexpected raise from our own env-verify helper is
+        a DEFECT, not the documented unreadable-env platform limitation.
+        It must NOT be laundered into pgid-only kill permission — the row
+        is refused with the distinct ``refused:env-verify-error`` token
+        and NO signal fires."""
+        def _boom(pid, tid):
+            raise RuntimeError("synthetic env-verify defect")
+
+        monkeypatch.setattr(reaper, "verify_member_env", _boom)
+        monkeypatch.setattr(reaper, "list_group_members", lambda pgid: [777081])
+        row = _row(
+            id=777080,
+            pgid=777080,
+            pid=777080,
+            created_at=datetime.now(timezone.utc) - timedelta(seconds=60),
+        )
+        with caplog.at_level(logging.WARNING, logger=reaper.__name__):
+            status, reason = verify_and_kill(
+                row,
+                members=[(777081, datetime.now(timezone.utc) - timedelta(seconds=61))],
+                my_pid=os.getpid(),
+            )
+        assert status == "refused"
+        assert reason == "refused:env-verify-error"
+        # No REAL signal fired; the only recorded os.kill is the sig-0
+        # liveness probe of the direct child.
+        assert all(sig == 0 for _pid, sig in kill_fence), (
+            f"a real signal fired: {kill_fence}"
+        )
+        assert any(
+            "env-verify raised" in r.getMessage()
+            and "RuntimeError" in r.getMessage()
+            for r in caplog.records
+        )
 
     def test_env_match_beats_mismatch_on_other_member(
         self, monkeypatch, kill_fence
@@ -1692,6 +1730,34 @@ class TestEnumeratedStampSweep:
             out = reaper._enumerate_stamped_member_details([self._row()])
         assert out == []
         assert any("env mismatch" in r.getMessage() for r in caplog.records)
+
+    def test_env_verify_raise_skips_candidate_fail_safe(
+        self, monkeypatch, caplog
+    ) -> None:
+        """F-5 (E) mirror site: a raise from our own env-verify helper is
+        a DEFECT — the candidate is skipped (never kill-unverified) and
+        the event is logged with type+message, NOT reported as the
+        documented "env unreadable" limitation."""
+        monkeypatch.delenv(reaper.ENV_KILL_SWITCH, raising=False)
+        monkeypatch.setattr(
+            reaper, "_scan_process_table", lambda: [self._cand(pid=5031)]
+        )
+
+        def _boom(pid, tid):
+            raise RuntimeError("synthetic env-verify defect")
+
+        monkeypatch.setattr(reaper, "verify_member_env", _boom)
+        with caplog.at_level(logging.DEBUG, logger=reaper.__name__):
+            out = reaper._enumerate_stamped_member_details([self._row()])
+        assert out == []
+        assert any(
+            "env-verify raised" in r.getMessage()
+            and "RuntimeError" in r.getMessage()
+            for r in caplog.records
+        )
+        assert not any(
+            "env unreadable" in r.getMessage() for r in caplog.records
+        )
 
     def test_unreadable_env_skipped_warning(self, monkeypatch, caplog) -> None:
         """P2 darwin leg: unreadable env ⇒ skip, never kill-unverified

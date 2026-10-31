@@ -80,6 +80,30 @@ the boot-leg knob. Documented in plan §4.5 and the rollback story.
   enumeration unit legs (`TestEnumeratedStampSweep`, 8 nodes) plus the
   Phase-5 platform legs (`TestPlatformLegs`, 8 nodes) in
   `tests/unit/services/test_bash_spawn_reaper.py`.
+- **F-5 (E) — env-verify exception polarity (final fix cycle, item 5).**
+  BEHAVIOR CHANGE, the only one in the pre-merge tidier batch.
+  `verify_and_kill` used to map an unexpected raise from
+  `verify_member_env` to `verdict = None` (i.e. "env unreadable"), which
+  fed the F1 pgid-only two-signal fallback — permitting a `killpg` — while
+  the enumeration lane mapped the identical event to a skip. Both sites
+  now treat a raise from our own helper as a DEFECT signal, never as the
+  documented unreadable-env platform limitation:
+    * `verify_and_kill` ⇒ `("refused", "refused:env-verify-error")`, no
+      signal, WARNING with `type(exc).__name__: <msg>` and the row id.
+    * `_enumerate_stamped_member_details` ⇒ candidate skipped (already
+      fail-safe), WARNING with type+message, DEBUG skip line carrying
+      `outcome=refused:env-verify-error` instead of "(env unreadable)".
+  Precedence preserved: an env-EXACT match on another candidate still
+  wins (`reaped:env-match`) — positive attribution is not negated by a
+  defect on a different pid; the C2 foreign-member veto is untouched.
+  Justification for changing rather than keeping: no pinned test and no
+  settled C2/D9 rule requires the old mapping (`test_verify_crash_isolated`
+  exercises the OUTER `asyncio.to_thread` bridge raise in `sweep_rows`,
+  which stays fail-safe and unchanged). Proving pins:
+  `TestKillLadder::test_env_verify_raise_refused_fail_safe` (reason token +
+  zero real signals under the kill fence) and
+  `TestEnumeratedStampSweep::test_env_verify_raise_skips_candidate_fail_safe`
+  (selection empty + defect WARNING + no "env unreadable" line).
 ## Review round 1 findings disposition
 
 Disposition of the constraint review (REQUEST_CHANGES: 1 required + minors),

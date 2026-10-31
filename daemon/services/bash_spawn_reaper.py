@@ -2,18 +2,32 @@
 
 Bash-tool orphan reaper — ``daemon/services/bash_spawn_reaper.py``.
 
-Phase 1 shipped the WRITE-SIDE + DISCRIMINATORS: the boot id, the
-kill-switch parse, the hard guards + D8/D9 start-time gate helpers, and
-the platform env read-backends ported from ``daemon/tools/proc_tools.py``.
+SHIPPED. This module owns every kill decision in the subsystem: the
+verification predicate + attribution, the TERM→grace→KILL ladder, the
+shared per-row sweep executor (:func:`sweep_rows`), the per-instance lane
+(:func:`sweep_instance`, driven by ``BashProcessRegistry.cleanup_instance``),
+the shutdown lane (:func:`sweep_open_rows_for_shutdown`, driven by the
+``manager.shutdown`` block), the one-shot boot reconcile
+(:func:`reconcile_stale_bash_spawns`), and the enumerated stamp sweep
+(:func:`_enumerate_stamped_member_details`).
 
-Phase 2 (this state) completes ``verify_and_kill`` with the FULL
-verification predicate + attribution + the TERM→grace→KILL ladder
-(plan task 2.1), and adds the shared per-row sweep executor
-(:func:`sweep_rows`), the per-instance lane (:func:`sweep_instance`,
-driven by ``BashProcessRegistry.cleanup_instance``), and the shutdown
-lane (:func:`sweep_open_rows_for_shutdown`, driven by the
-``manager.shutdown`` Phase-3 block). The one-shot boot reconcile
-(:func:`reconcile_stale_bash_spawns`) remains Phase 3.
+Phase provenance (history only — every phase below is LIVE): P1 shipped
+the WRITE-SIDE + DISCRIMINATORS — the boot id, the kill-switch parse, the
+hard guards + D8/D9 start-time gate helpers, and the platform env
+read-backends ported from ``daemon/tools/proc_tools.py``. P2 completed
+``verify_and_kill`` with the FULL verification predicate + attribution +
+the TERM→grace→KILL ladder, and added the shared per-row sweep executor
+(:func:`sweep_rows`), the per-instance lane and the shutdown lane. P3
+landed the one-shot boot reconcile; P4 the enumerated stamp sweep; P5 the
+verify/lane completion. Commits ``b585503a5`` (feature) and ``2b3a7cd99``
+(round-2 fix).
+
+Why one module: the five lanes (terminal sweep, shutdown, boot reconcile,
+enumeration, verify) all sit on the SAME private kill-safety core — the
+hard guards, the D9 start-time gate, the attribution ladder and the single
+signal-emitting ladder. Splitting per lane would duplicate that core or
+expose it, and a drifted copy of a kill-safety predicate is precisely the
+failure class this feature exists to prevent.
 
 KNOBS (boot-time env, O1 convention; deliberately NOT app_settings —
 this runs before config load and is boot-lane hygiene, not a managed
@@ -76,9 +90,15 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 from daemon.services.timestamps import now_utc_iso
+
+if TYPE_CHECKING:
+    from daemon.repositories.bash_spawn import (
+        BashSpawnRecord,
+        BashSpawnRepository,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +136,7 @@ BASH_SPAWN_RETENTION_DAYS = 30
 
 
 # ── Kill-switch parse (F6: lane default FLIPPED to ON) ───────────────────────
-def kill_switch_from_env(environ: Optional[dict] = None, *, is_prod: Optional[bool] = None) -> bool:
+def kill_switch_from_env(environ: dict | None = None, *, is_prod: bool | None = None) -> bool:
     """Resolve the master switch.
 
     Explicit-override semantics (mirroring
@@ -135,7 +155,7 @@ def kill_switch_from_env(environ: Optional[dict] = None, *, is_prod: Optional[bo
     return True
 
 
-def boot_sweep_leg_from_env(environ: Optional[dict] = None) -> bool:
+def boot_sweep_leg_from_env(environ: dict | None = None) -> bool:
     """Phase 3 leg knob: master ON + this leg OFF ⇒ boot reconcile no-op."""
     env = os.environ if environ is None else environ
     val = env.get(ENV_BOOT_SWEEP)
@@ -147,7 +167,7 @@ def boot_sweep_leg_from_env(environ: Optional[dict] = None) -> bool:
     return raw not in _DISABLE_VALUES
 
 
-def term_grace_seconds_from_env(environ: Optional[dict] = None) -> float:
+def term_grace_seconds_from_env(environ: dict | None = None) -> float:
     env = os.environ if environ is None else environ
     raw = (env.get(ENV_TERM_GRACE) or "").strip()
     if not raw:
@@ -159,7 +179,7 @@ def term_grace_seconds_from_env(environ: Optional[dict] = None) -> float:
     return max(MIN_TERM_GRACE_SECONDS, min(MAX_TERM_GRACE_SECONDS, value))
 
 
-def start_tolerance_seconds_from_env(environ: Optional[dict] = None) -> float:
+def start_tolerance_seconds_from_env(environ: dict | None = None) -> float:
     env = os.environ if environ is None else environ
     raw = (env.get(ENV_START_TOLERANCE) or "").strip()
     if not raw:
@@ -173,7 +193,7 @@ def start_tolerance_seconds_from_env(environ: Optional[dict] = None) -> float:
     return value
 
 
-def stamp_tolerance_seconds_from_env(environ: Optional[dict] = None) -> float:
+def stamp_tolerance_seconds_from_env(environ: dict | None = None) -> float:
     """M3 knob: HOURS-scale tolerance for env-EXACT-matched enumeration
     candidates only. Default 6 h, clamped to [MIN, MAX]; unparseable ⇒
     default (env-parse convention)."""
@@ -191,7 +211,7 @@ def stamp_tolerance_seconds_from_env(environ: Optional[dict] = None) -> float:
 
 
 # ── Linux jiffies reader (ported from daemon/tools/bash.py) ──────────────────
-def _read_proc_start_time(pid: int) -> Optional[int]:
+def _read_proc_start_time(pid: int) -> int | None:
     if sys.platform == "win32":
         return None
     try:
@@ -211,7 +231,7 @@ def _read_proc_start_time(pid: int) -> Optional[int]:
 
 
 # ── D9: process start wall-clock ─────────────────────────────────────────────
-def process_start_wallclock(pid: int) -> Optional[datetime]:
+def process_start_wallclock(pid: int) -> datetime | None:
     """Return the process's wall-clock start time (UTC) or None.
 
     Linux: /proc/<pid>/stat field-22 jiffies + /proc/uptime wall conversion.
@@ -288,7 +308,7 @@ def process_start_wallclock(pid: int) -> Optional[datetime]:
 
 
 # ── Group member enumeration ──────────────────────────────────────────────────
-def _proc_state_and_ppid(pid: int) -> Optional[tuple[str, Optional[int]]]:
+def _proc_state_and_ppid(pid: int) -> tuple[str, int | None] | None:
     """Return (state, ppid) for a pid, or None when unreadable.
 
     Linux: /proc/<pid>/stat fields 3 (state) + 4 (ppid) — the parts
@@ -359,7 +379,7 @@ def _is_excluded_member(pid: int) -> bool:
     return False
 
 
-def list_group_members(pgid: int) -> Optional[list[int]]:
+def list_group_members(pgid: int) -> list[int] | None:
     """Return live pids whose process group == ``pgid``.
 
     Linux: scan /proc/*/stat field 5 (pgrp). macOS/BSD: ``ps -axo pid=,pgid=,state=``.
@@ -441,7 +461,7 @@ def list_group_members(pgid: int) -> Optional[list[int]]:
 
 
 # ── Env read-backends (ported from daemon/tools/proc_tools.py) ────────────────
-def verify_member_env(pid: int, tracking_id: str) -> Optional[bool]:
+def verify_member_env(pid: int, tracking_id: str) -> bool | None:
     """Verify that ``pid``'s env carries ``BASH_TRACKING_ENV_VAR=tracking_id``.
 
     Linux: /proc/<pid>/environ exact-entry match (fail-closed on readable
@@ -465,7 +485,7 @@ def verify_member_env(pid: int, tracking_id: str) -> Optional[bool]:
     return None
 
 
-def _verify_member_env_procfs(pid: int, tracking_id: str) -> Optional[bool]:
+def _verify_member_env_procfs(pid: int, tracking_id: str) -> bool | None:
     try:
         with open(f"/proc/{pid}/environ", "rb") as fh:
             data = fh.read()
@@ -515,7 +535,7 @@ def _verify_member_env_procfs(pid: int, tracking_id: str) -> Optional[bool]:
     return False
 
 
-def _verify_member_env_ps(pid: int, tracking_id: str) -> Optional[bool]:
+def _verify_member_env_ps(pid: int, tracking_id: str) -> bool | None:
     if pid <= 0:
         return None
     needle = f"{BASH_TRACKING_ENV_VAR}={tracking_id}"
@@ -583,7 +603,7 @@ def _verify_member_env_ps(pid: int, tracking_id: str) -> Optional[bool]:
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
-def _parse_dt(value: Any) -> Optional[datetime]:
+def _parse_dt(value: object) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
@@ -609,7 +629,7 @@ def _row_get(row: Any, attr: str, default: Any = None) -> Any:
 
 
 # ── verify_and_kill: full predicate + attribution + kill ladder (P2) ─────────
-def _clamped_grace(value: Optional[float]) -> float:
+def _clamped_grace(value: float | None) -> float:
     """Clamp a TERM→KILL grace to [MIN, MAX] (env-parse convention)."""
     if value is None:
         return term_grace_seconds_from_env()
@@ -712,13 +732,13 @@ def _kill_ladder(pgid: int, grace_seconds: float) -> tuple[str, str]:
 
 
 def verify_and_kill(
-    row: Any,
+    row: BashSpawnRecord,
     *,
-    members: Optional[list] = None,
-    my_pid: Optional[int] = None,
-    tolerance_seconds: Optional[float] = None,
-    term_grace_seconds: Optional[float] = None,
-    reaped_by: Optional[str] = None,
+    members: list | None = None,
+    my_pid: int | None = None,
+    tolerance_seconds: float | None = None,
+    term_grace_seconds: float | None = None,
+    reaped_by: str | None = None,
 ) -> tuple[str, str]:
     """Verify a durable spawn row and, when safe, reap its process group.
 
@@ -875,7 +895,7 @@ def verify_and_kill(
     # C2: start wall-clock per accepted member — the foreign-member veto
     # needs each readable-mismatch member's start even when ANOTHER
     # member env-matches.
-    member_start_by_pid: dict[int, Optional[datetime]] = {}
+    member_start_by_pid: dict[int, datetime | None] = {}
     for entry in members or []:
         # entry may be (pid, start) or a dict
         if isinstance(entry, (tuple, list)):
@@ -962,13 +982,25 @@ def verify_and_kill(
     # recorded with its start — the scan must NOT stop at the first
     # env-match, or a recycled foreign process's readable mismatch in
     # the same group would be masked by a legitimate member's match.
-    readable_false_members: list[tuple[int, Optional[datetime]]] = []
+    readable_false_members: list[tuple[int, datetime | None]] = []
+    env_verify_error: str | None = None
     if tracking_id:
         for cpid in candidates:
             try:
                 verdict = verify_member_env(cpid, str(tracking_id))
-            except Exception:
-                verdict = None
+            except Exception as exc:  # noqa: BLE001
+                # F-5 (E) polarity: the F1 two-signal fallback exists for an
+                # UNREADABLE env (a documented platform limitation). A raise
+                # from our own helper is a DEFECT signal, so it must never be
+                # laundered into pgid-only kill permission — it fails SAFE and
+                # records a distinct outcome token.
+                env_verify_error = f"{type(exc).__name__}: {exc}"
+                logger.warning(
+                    "bash reaper: env-verify raised for pid=%s (row=%s) — "
+                    "fail-safe, no kill permission: %s",
+                    cpid, _row_get(row, "id"), env_verify_error,
+                )
+                continue
             if verdict is True:
                 matched = True
                 continue  # keep scanning — a later member's readable
@@ -1003,6 +1035,10 @@ def verify_and_kill(
         # readable env disagrees on every candidate: fail-closed veto
         # regardless of the start-time gate (PID-recycle defense).
         return ("refused", "refused:env-mismatch")
+    elif env_verify_error is not None:
+        # F-5 (E): our own helper raised ⇒ defect, not the documented
+        # unreadable-env limitation ⇒ fail SAFE (never pgid-only kill).
+        return ("refused", "refused:env-verify-error")
     else:
         attribution = "pgid-only"
 
@@ -1011,7 +1047,7 @@ def verify_and_kill(
     if direct_ok or member_ok:
         grace = _clamped_grace(term_grace_seconds)
         if attribution == "pgid-only":
-            logger.info(
+            logger.debug(
                 "bash reaper: killpg pgid=%s attribution=pgid-only "
                 "(env unreadable; two-signal via D9 start-time gate) "
                 "row=%s reaped_by=%s",
@@ -1027,7 +1063,9 @@ def verify_and_kill(
     return ("refused", "refused:start-time-gate")
 
 
-def _daemon_pid_guard(daemon_pid: Any, my_pid: int, created_at: Any) -> tuple[bool, str]:
+def _daemon_pid_guard(
+    daemon_pid: int | str | None, my_pid: int, created_at: object
+) -> tuple[bool, str]:
     """D8 live-sibling guard.
 
     Returns (skip, reason). skip=True means a live sibling daemon holds
@@ -1069,17 +1107,23 @@ def _daemon_pid_guard(daemon_pid: Any, my_pid: int, created_at: Any) -> tuple[bo
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# Phase 2 sweeps (tasks 2.2 / 2.4): shared per-row executor + the two
-# event-driven lanes. The one-shot boot reconcile (reconcile_stale_bash_spawns)
-# is Phase 3. EVERY lane: master switch OFF ⇒ complete no-op BEFORE any
-# repository access (m3 — disabled sweeps never consult the repository).
+# Sweep lanes (plan tasks 2.2 / 2.4 + P3): shared per-row executor + the
+# two event-driven lanes; the one-shot boot reconcile
+# (reconcile_stale_bash_spawns) is the boot lane. EVERY lane: master switch
+# OFF ⇒ complete no-op BEFORE any repository access (m3 — disabled sweeps
+# never consult the repository).
 # ════════════════════════════════════════════════════════════════════════════
 
 GC_REAPED_BY = "gc"
 RAM_DEDUP_REASON = "ram-tier-dedup"
 
 
-async def _mark_reaped(repo: Any, row_id: Any, reaped_by: str, reason: Optional[str]) -> None:
+async def _mark_reaped(
+    repo: BashSpawnRepository,
+    row_id: int | None,
+    reaped_by: str,
+    reason: str | None,
+) -> None:
     """Bridge the sync ``mark_reaped`` into the event loop (best-effort).
 
     minor-1: the repository close is a CAS (conditional ``UPDATE ...
@@ -1089,7 +1133,7 @@ async def _mark_reaped(repo: Any, row_id: Any, reaped_by: str, reason: Optional[
     """
     row = await asyncio.to_thread(repo.mark_reaped, row_id, reaped_by, reason)
     if row is not None and getattr(row, "cas_rowcount", 1) == 0:
-        logger.info(
+        logger.debug(
             "bash reaper: row %s close lost the CAS race — already "
             "closed by another sweeper (reaped_by=%s reason=%s); "
             "first close kept",
@@ -1099,13 +1143,13 @@ async def _mark_reaped(repo: Any, row_id: Any, reaped_by: str, reason: Optional[
 
 
 async def sweep_rows(
-    rows: list,
+    rows: list[BashSpawnRecord],
     *,
-    repo: Any,
+    repo: BashSpawnRepository | None,
     reaped_by: str,
-    ram_pgids: Optional[set] = None,
-    my_pid: Optional[int] = None,
-    term_grace_seconds: Optional[float] = None,
+    ram_pgids: set | None = None,
+    my_pid: int | None = None,
+    term_grace_seconds: float | None = None,
 ) -> int:
     """Shared per-row sweep executor: verify-and-kill + row bookkeeping.
 
@@ -1144,7 +1188,7 @@ async def sweep_rows(
         if ram_pgids and row_pgid_i is not None and row_pgid_i in ram_pgids:
             # The RAM tier of THIS sweep just SIGKILLed this group —
             # close the tombstone without a redundant signal.
-            logger.info(
+            logger.debug(
                 "bash reaper: row %s (pgid=%s) dedup'd against the RAM "
                 "killpg tier; closing (writer daemon_pid=%s swept by %s)",
                 row_id, row_pgid_i, _row_get(row, "daemon_pid"), my_pid,
@@ -1181,7 +1225,7 @@ async def sweep_rows(
             continue
 
         if status == "skip":
-            logger.info(
+            logger.debug(
                 "bash reaper: skipped row %s (instance=%.8s writer "
                 "daemon_pid=%s) — %s (swept by daemon pid %s)",
                 row_id, str(_row_get(row, "instance_id") or ""),
@@ -1249,12 +1293,12 @@ async def sweep_rows(
 
 
 async def _run_lane_sweep_with_deadline(
-    rows: list,
+    rows: list[BashSpawnRecord],
     *,
-    repo: Any,
+    repo: BashSpawnRepository | None,
     reaped_by: str,
-    my_pid: Optional[int] = None,
-    term_grace_seconds: Optional[float] = None,
+    my_pid: int | None = None,
+    term_grace_seconds: float | None = None,
 ) -> int:
     """Run ONE lane's full sweep (row-level + enumerated) under the
     M1 aggregate deadline.
@@ -1298,13 +1342,13 @@ async def _run_lane_sweep_with_deadline(
 
 
 async def sweep_instance(
-    repo: Any,
+    repo: BashSpawnRepository | None,
     instance_id: str,
     *,
     reaped_by: str = "terminal-tier",
-    ram_pgids: Optional[set] = None,
-    my_pid: Optional[int] = None,
-    term_grace_seconds: Optional[float] = None,
+    ram_pgids: set | None = None,
+    my_pid: int | None = None,
+    term_grace_seconds: float | None = None,
 ) -> int:
     """Consult open durable rows for ONE instance and reap them (task 2.2).
 
@@ -1340,10 +1384,10 @@ async def sweep_instance(
 
 
 async def sweep_open_rows_for_shutdown(
-    repo: Any,
+    repo: BashSpawnRepository | None,
     *,
-    my_pid: Optional[int] = None,
-    term_grace_seconds: Optional[float] = None,
+    my_pid: int | None = None,
+    term_grace_seconds: float | None = None,
 ) -> int:
     """Shutdown lane (plan task 2.4): sweep ALL open durable rows whose
     writer daemon is dead OR is us.
@@ -1386,12 +1430,12 @@ async def sweep_open_rows_for_shutdown(
 
 
 async def reconcile_stale_bash_spawns(
-    repo: Any = None,
+    repo: BashSpawnRepository | None = None,
     *,
-    current_boot_id: Optional[str] = None,
-    my_pid: Optional[int] = None,
-    term_grace_seconds: Optional[float] = None,
-    tolerance_seconds: Optional[float] = None,
+    current_boot_id: str | None = None,
+    my_pid: int | None = None,
+    term_grace_seconds: float | None = None,
+    tolerance_seconds: float | None = None,
 ) -> int:
     """One-shot boot reconcile (plan task 3.1 / D6).
 
@@ -1499,7 +1543,7 @@ async def reconcile_stale_bash_spawns(
 # per attributed pid. Rides the master switch (no separate enumeration switch).
 # ════════════════════════════════════════════════════════════════════════════
 
-def _parse_etime(value: Any) -> Optional[int]:
+def _parse_etime(value: object) -> int | None:
     """Parse a ``ps`` etime token (``[[dd-]hh:]mm:ss``) into seconds."""
     if value is None:
         return None
@@ -1528,7 +1572,7 @@ def _parse_etime(value: Any) -> Optional[int]:
     return None
 
 
-def _scan_process_table() -> list:
+def _scan_process_table() -> list[dict[str, object]]:
     """ONE fresh full-process-table scan (POSIX only).
 
     Returns a list of dicts: ``{pid, ppid, pgid, etime, start, command}``.
@@ -1561,7 +1605,7 @@ def _scan_process_table() -> list:
         )
         return []
     now = datetime.now(timezone.utc)
-    entries: list = []
+    entries: list[dict[str, object]] = []
     lines = (completed.stdout or "").splitlines()
     # Skip the header line (if present).
     for line in lines[1:]:
@@ -1593,7 +1637,9 @@ def _scan_process_table() -> list:
     return entries
 
 
-def _enumerate_stamped_member_details(open_rows: Any) -> list:
+def _enumerate_stamped_member_details(
+    open_rows: list[BashSpawnRecord],
+) -> list[tuple[int, str]]:
     """Enumerate process-table members carrying one of ``open_rows``'
     tracking ids.
 
@@ -1626,9 +1672,9 @@ def _enumerate_stamped_member_details(open_rows: Any) -> list:
     # D8 sibling-guarded pgids + daemon pids (rows skipped by the guard)
     # — computed FIRST so the tracking-id set below can exclude skipped
     # rows entirely (C1).
-    skipped_pgids: set = set()
-    skipped_daemon_pids: set = set()
-    live_rows: list = []
+    skipped_pgids: set[int] = set()
+    skipped_daemon_pids: set[int] = set()
+    live_rows: list[BashSpawnRecord] = []
     for r in rows:
         skip, _ = _daemon_pid_guard(
             _row_get(r, "daemon_pid"), os.getpid(), _row_get(r, "created_at")
@@ -1647,7 +1693,7 @@ def _enumerate_stamped_member_details(open_rows: Any) -> list:
 
     # Tracking ids from NON-SKIPPED rows only (C1 — a sibling-owned row
     # contributes neither its pgid nor its tracking_id).
-    tids: list = []
+    tids: list[str] = []
     for r in live_rows:
         tid = _row_get(r, "tracking_id")
         if tid is not None and str(tid) not in tids:
@@ -1655,7 +1701,7 @@ def _enumerate_stamped_member_details(open_rows: Any) -> list:
     if not tids:
         return []
 
-    row_by_tid: dict = {}
+    row_by_tid: dict[str, BashSpawnRecord] = {}
     for r in live_rows:
         tid = _row_get(r, "tracking_id")
         if tid is not None:
@@ -1688,7 +1734,7 @@ def _enumerate_stamped_member_details(open_rows: Any) -> list:
     skipped_by_bound = 0
 
     # Pre-filter BEFORE any env read.
-    surviving: list = []
+    surviving: list[dict[str, object]] = []
     for cand in scan:
         pid = cand["pid"]
         pgid = cand["pgid"]
@@ -1725,19 +1771,30 @@ def _enumerate_stamped_member_details(open_rows: Any) -> list:
         surviving.append(cand)
 
     # Attribution.
-    results: list = []
+    results: list[tuple[int, str]] = []
     env_reads = 0
     for cand in surviving:
         pid = cand["pid"]
         matched_tid = None
         any_none = False
         readable_mismatch = False
+        env_verify_error: str | None = None
         for tid in tids:
             env_reads += 1
             try:
                 v = verify_member_env(pid, tid)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                # F-5 (E) polarity, mirror of verify_and_kill: a raise from
+                # our own helper is a DEFECT, not the documented unreadable
+                # env. Both sites now log type+message; this one already
+                # fails safe (never kill-unverified).
                 v = None
+                env_verify_error = f"{type(exc).__name__}: {exc}"
+                logger.warning(
+                    "bash reaper: env-verify raised for pid=%d — "
+                    "fail-safe, skipped: %s",
+                    pid, env_verify_error,
+                )
             if v is True:
                 matched_tid = tid
                 break
@@ -1749,11 +1806,19 @@ def _enumerate_stamped_member_details(open_rows: Any) -> list:
             if any_none:
                 # m2: per-candidate lines are DEBUG — the one-line sweep
                 # census below is the INFO surface.
-                logger.debug(
-                    "bash reaper: enumeration skipped pid=%d (env unreadable) "
-                    "— never kill-unverified",
-                    pid,
-                )
+                if env_verify_error is not None:
+                    logger.debug(
+                        "bash reaper: enumeration skipped pid=%d "
+                        "outcome=refused:env-verify-error — never "
+                        "kill-unverified",
+                        pid,
+                    )
+                else:
+                    logger.debug(
+                        "bash reaper: enumeration skipped pid=%d (env unreadable) "
+                        "— never kill-unverified",
+                        pid,
+                    )
                 continue
             logger.debug(
                 "bash reaper: enumeration refused pid=%d (env mismatch)", pid,
@@ -1800,7 +1865,9 @@ def _enumerate_stamped_member_details(open_rows: Any) -> list:
     return results
 
 
-def _enumerate_stamped_members(open_rows: Any) -> list:
+def _enumerate_stamped_members(
+    open_rows: list[BashSpawnRecord],
+) -> list[tuple[int, str]]:
     """Public-ish enumeration entry point (plan task 4.1).
 
     Returns the list of pids selected for killing (exact env match +
@@ -1857,12 +1924,12 @@ def _kill_enumerated_pid(pid: int, grace_seconds: float) -> None:
 
 
 async def _enumerated_sweep(
-    open_rows: Any,
+    open_rows: list[BashSpawnRecord],
     *,
-    repo: Any,
+    repo: BashSpawnRepository | None,
     reaped_by: str,
-    my_pid: Optional[int] = None,
-    term_grace_seconds: Optional[float] = None,
+    my_pid: int | None = None,
+    term_grace_seconds: float | None = None,
 ) -> int:
     """Phase 4 lane: enumerate stamped members, kill them, close rows."""
     if not kill_switch_from_env():
@@ -1889,7 +1956,7 @@ async def _enumerated_sweep(
     await asyncio.to_thread(_run_kills)
 
     # Close the associated rows.
-    row_by_tid: dict = {}
+    row_by_tid: dict[str, BashSpawnRecord] = {}
     for r in open_now:
         tid = _row_get(r, "tracking_id")
         if tid is not None:

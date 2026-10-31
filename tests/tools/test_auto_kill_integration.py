@@ -77,7 +77,9 @@ Conventions
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
+import logging
 import os
 import signal
 import sys
@@ -95,6 +97,8 @@ from tests.tools.conftest import (  # noqa: E402
     _register_pid,
     _pid_alive,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -187,6 +191,149 @@ def _patch_registries(
         "get_bash_process_registry",
         lambda: bash_reg,
     )
+
+
+# =============================================================================
+# Helpers — real-spawn harness (shared by the stamp-sweep / job-control legs)
+# =============================================================================
+#
+# Pre-merge F-1: the setsid-sweep, timeout-race and job-control classes each
+# copy-pasted the durable-writer wiring, the pid-file poll, the grace-wait and
+# the SIGKILL teardown verbatim. The copies had already drifted (the "≈4s
+# total" note on the poll budget was dropped from two of them), and drift in
+# any one copy leaks a live ``sleep`` burner — the exact incident class this
+# feature exists to prevent. Single home below.
+
+_PIDFILE_POLL_S = 0.05
+_PIDFILE_ATTEMPTS = 80
+
+
+async def _wait_for_pidfile(
+    path: str,
+    *,
+    poll_s: float = _PIDFILE_POLL_S,
+    attempts: int = _PIDFILE_ATTEMPTS,
+) -> int:
+    """Poll ``path`` until it holds a positive pid; return it (0 = timeout).
+
+    ``80 × 0.05s`` ⇒ **≈4s total**. That is generous for a fork + setsid +
+    write on a loaded box, and short enough that a broken harness fails fast
+    instead of hanging the suite.
+    """
+    for _ in range(attempts):
+        if os.path.exists(path):
+            try:
+                with open(path, "r") as f:
+                    pid = int(f.read().strip())
+                if pid > 0:
+                    return pid
+            except (OSError, ValueError):
+                pass
+        await asyncio.sleep(poll_s)
+    return 0
+
+
+class _SpawnTracker:
+    """Mutable handles for one real-spawn test's teardown."""
+
+    def __init__(self, pid_path: str, *, label: str) -> None:
+        self.pid_path = pid_path
+        self.label = label
+        self.pid: int | None = None
+        self.task: asyncio.Task[Any] | None = None
+
+    async def wait_for_pid(self) -> int:
+        """Poll the pid file, register the captured pid, return it."""
+        pid = await _wait_for_pidfile(self.pid_path)
+        if pid:
+            self.pid = pid
+            _register_pid(pid, self.label, self.pid_path)
+        return pid
+
+    async def await_tool(self, timeout: float = 10.0) -> None:
+        """Grace-wait for the bash tool task to unwind on its own."""
+        task = self.task
+        assert task is not None, "await_tool before the tool task was set"
+        try:
+            await asyncio.wait_for(task, timeout=timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            if not task.done():
+                task.cancel()
+        except Exception:  # noqa: BLE001 — a tool error is the test's business
+            logger.debug("%s: bash tool raised during grace-wait", self.label)
+
+
+@contextlib.asynccontextmanager
+async def _spawn_teardown(pid_path: str, *, label: str):
+    """Yield a :class:`_SpawnTracker`; guarantee no leaked burner on exit.
+
+    Teardown order: SIGKILL the captured pid (if alive) → cancel the bash
+    task and wait ≤2s → unlink the pid file. Each step is best-effort and
+    isolated, because a failed assertion must never leak a live ``sleep``
+    into the next test. A task still unwinding after the cancel WARNs rather
+    than being swallowed silently.
+    """
+    tracker = _SpawnTracker(pid_path, label=label)
+    try:
+        yield tracker
+    finally:
+        if tracker.pid is not None and _pid_alive(tracker.pid):
+            try:
+                os.kill(tracker.pid, signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+        if tracker.task is not None and not tracker.task.done():
+            tracker.task.cancel()
+            try:
+                await asyncio.wait_for(tracker.task, timeout=2)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "%s: bash task still unwinding 2s after cancel; "
+                    "teardown continues",
+                    label,
+                )
+            except (asyncio.CancelledError, OSError):
+                pass
+        if os.path.exists(pid_path):
+            try:
+                os.unlink(pid_path)
+            except OSError:
+                pass
+
+
+@pytest.fixture
+def durable_registry():
+    """The REAL bash registry singleton wired to a REAL
+    :class:`BashSpawnRepository` over a fresh in-memory SQLite engine.
+
+    Writer + RAM buckets are restored on teardown. Yields
+    ``(bash_mod, registry, repo)``.
+    """
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, create_engine
+
+    from daemon.repositories.bash_spawn import BashSpawnRepository
+
+    bash_mod = importlib.import_module("daemon.tools.bash")
+    reg = bash_mod.get_bash_process_registry()
+    eng = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(eng)
+    repo = BashSpawnRepository(engine=eng)
+    prev_writer = reg.get_durable_writer()
+    prev_entries = dict(reg._entries)
+    reg._entries.clear()
+    reg.set_durable_writer(repo)
+    try:
+        yield bash_mod, reg, repo
+    finally:
+        reg.set_durable_writer(prev_writer)
+        reg._entries.clear()
+        reg._entries.update(prev_entries)
+        eng.dispose()
 
 
 # =============================================================================
@@ -1698,36 +1845,27 @@ class TestSetsidOrphanReapedByStampSweep:
     """
 
     @pytest.mark.asyncio
-    async def test_setsid_orphan_reaped_by_stamp_sweep(self, monkeypatch):
+    async def test_setsid_orphan_reaped_by_stamp_sweep(
+        self, durable_registry, monkeypatch
+    ):
         """Spawn a setsid grandchild, wire a durable registry, run
         cleanup_instance, assert the escapee is dead (POSIX leg)."""
-        bash_mod = importlib.import_module("daemon.tools.bash")
+        bash_mod, bash_reg, _repo = durable_registry
         bash = bash_mod.bash.coroutine  # type: ignore[attr-defined]
-        bash_reg = bash_mod.get_bash_process_registry()
-
-        from sqlalchemy.pool import StaticPool
-        from sqlmodel import SQLModel, create_engine
-        from daemon.repositories.bash_spawn import BashSpawnRepository
-
-        eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-        SQLModel.metadata.create_all(eng)
-        repo = BashSpawnRepository(engine=eng)
-        prev_writer = bash_reg.get_durable_writer()
-        prev_entries = dict(bash_reg._entries)
-        bash_reg._entries.clear()
-        bash_reg.set_durable_writer(repo)
 
         # Make term grace tiny so the test is fast.
         monkeypatch.setenv("ENSEMBLE_BASH_REAPER_TERM_GRACE_SECONDS", "0.1")
 
         instance_id = f"m8-setsid-{os.urandom(4).hex()}"
-        gc_pid_fd, gc_pid_path = tempfile.mkstemp(prefix="m8-setsid-gc-", suffix=".pid")
+        gc_pid_fd, gc_pid_path = tempfile.mkstemp(
+            prefix="m8-setsid-gc-", suffix=".pid"
+        )
         os.close(gc_pid_fd)
 
-        orphan_pid = None
-        bash_task = None
-        try:
-            bash_task = asyncio.create_task(
+        async with _spawn_teardown(
+            gc_pid_path, label="m8-setsid-grandchild"
+        ) as spawn:
+            spawn.task = asyncio.create_task(
                 bash(
                     command=textwrap.dedent(
                         f"""\
@@ -1749,26 +1887,14 @@ class TestSetsidOrphanReapedByStampSweep:
                 )
             )
 
-            gc_alive = False
-            for _ in range(80):
-                if os.path.exists(gc_pid_path):
-                    try:
-                        with open(gc_pid_path, "r") as f:
-                            orphan_pid = int(f.read().strip())
-                            if orphan_pid > 0:
-                                gc_alive = True
-                                break
-                    except (OSError, ValueError):
-                        pass
-                await asyncio.sleep(0.05)
-
-            assert gc_alive and orphan_pid is not None, "setup failed: setsid grandchild not captured"
+            orphan_pid = await spawn.wait_for_pid()
+            assert orphan_pid, "setup failed: setsid grandchild not captured"
             assert _pid_alive(orphan_pid), "setup failed: grandchild died early"
-            _register_pid(orphan_pid, "m8-setsid-grandchild", instance_id)
 
             assert instance_id in bash_reg._entries, "no registry entry"
 
-            # Give the durable row a moment to land (it is written at the spawn seam).
+            # Give the durable row a moment to land (it is written at the
+            # spawn seam).
             await asyncio.sleep(0.5)
 
             killed = await bash_reg.cleanup_instance(instance_id)
@@ -1777,61 +1903,16 @@ class TestSetsidOrphanReapedByStampSweep:
             # Wait for the enumerated sweep's TERM grace + KILL.
             await asyncio.sleep(1.0)
 
-            # POSIX leg: escapee reaped (where attribution possible).
-            # On macOS env may be unreadable -> skip path; assert either dead
-            # OR (darwin) still alive is acceptable only if skip logged. We
-            # assert the documented contract: on Linux dead; on darwin we
-            # accept skip (alive) because env is positive-only.
+            # POSIX leg: escapee reaped (where attribution possible). On
+            # darwin env is positive-only, so the documented contract is a
+            # fail-open skip — either outcome is accepted there (teardown
+            # still kills the escapee).
             if sys.platform.startswith("linux"):
                 assert not _pid_alive(orphan_pid), (
                     "setsid escapee should have been reaped by the stamp sweep"
                 )
-            else:
-                # darwin: fail-open skip path — escapee may survive; the
-                # row stays open. Accept either outcome but teardown kills it.
-                pass
 
-            try:
-                await asyncio.wait_for(bash_task, timeout=10)
-            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                if not bash_task.done():
-                    bash_task.cancel()
-        finally:
-            if orphan_pid is not None and _pid_alive(orphan_pid):
-                try:
-                    os.kill(orphan_pid, signal.SIGKILL)
-                except (ProcessLookupError, OSError):
-                    pass
-            if bash_task is not None and not bash_task.done():
-                bash_task.cancel()
-                try:
-                    await asyncio.wait_for(bash_task, timeout=2)
-                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                    pass
-            if os.path.exists(gc_pid_path):
-                try:
-                    os.unlink(gc_pid_path)
-                except OSError:
-                    pass
-            bash_reg.set_durable_writer(prev_writer)
-            bash_reg._entries.clear()
-            bash_reg._entries.update(prev_entries)
-            eng.dispose()
-
-# =============================================================================
-# bash-tool orphan reaper Phase 2 — Path A real-process legs (plan task 2.2)
-# =============================================================================
-#
-# Path A: a bash tool spawn whose direct child exits (the success arm
-# unregisters the RAM bucket) leaves an OPEN durable tombstone row in
-# ``bash_spawn_registry``; the NEXT cleanup point reaps the surviving
-# same-group burner via the verify-and-kill ladder and closes the row.
-#
-# REAL signal delivery: these legs run the actual TERM→grace→KILL
-# ladder against a real burner process (the record-and-succeed unit
-# census lives in tests/unit/services/test_bash_spawn_reaper.py). The
-# autouse ``_reap_spawned_subprocesses`` net reaps anything this pack
-# fails to kill itself.
+            await spawn.await_tool(timeout=10)
 
 
 class TestPathDTimeoutRaceEscapee:
@@ -1842,33 +1923,24 @@ class TestPathDTimeoutRaceEscapee:
     itself (constraint 3 / task 4.3)."""
 
     @pytest.mark.asyncio
-    async def test_timeout_race_escapee_reaped_by_next_sweep(self, monkeypatch):
-        bash_mod = importlib.import_module("daemon.tools.bash")
+    async def test_timeout_race_escapee_reaped_by_next_sweep(
+        self, durable_registry, monkeypatch
+    ):
+        bash_mod, bash_reg, repo = durable_registry
         bash = bash_mod.bash.coroutine  # type: ignore[attr-defined]
-        bash_reg = bash_mod.get_bash_process_registry()
-
-        from sqlalchemy.pool import StaticPool
-        from sqlmodel import SQLModel, create_engine
-        from daemon.repositories.bash_spawn import BashSpawnRepository
-
-        eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-        SQLModel.metadata.create_all(eng)
-        repo = BashSpawnRepository(engine=eng)
-        prev_writer = bash_reg.get_durable_writer()
-        prev_entries = dict(bash_reg._entries)
-        bash_reg._entries.clear()
-        bash_reg.set_durable_writer(repo)
 
         monkeypatch.setenv("ENSEMBLE_BASH_REAPER_TERM_GRACE_SECONDS", "0.1")
 
         instance_id = f"m4-timeout-{os.urandom(4).hex()}"
-        gc_pid_fd, gc_pid_path = tempfile.mkstemp(prefix="m4-escapee-", suffix=".pid")
+        gc_pid_fd, gc_pid_path = tempfile.mkstemp(
+            prefix="m4-escapee-", suffix=".pid"
+        )
         os.close(gc_pid_fd)
 
-        orphan_pid = None
-        bash_task = None
-        try:
-            bash_task = asyncio.create_task(
+        async with _spawn_teardown(
+            gc_pid_path, label="m4-timeout-escapee"
+        ) as spawn:
+            spawn.task = asyncio.create_task(
                 bash(
                     command=textwrap.dedent(
                         f"""\
@@ -1890,22 +1962,9 @@ class TestPathDTimeoutRaceEscapee:
                 )
             )
 
-            gc_alive = False
-            for _ in range(80):
-                if os.path.exists(gc_pid_path):
-                    try:
-                        with open(gc_pid_path, "r") as f:
-                            orphan_pid = int(f.read().strip())
-                            if orphan_pid > 0:
-                                gc_alive = True
-                                break
-                    except (OSError, ValueError):
-                        pass
-                await asyncio.sleep(0.05)
-
-            assert gc_alive and orphan_pid is not None, "setup failed: escapee not captured"
+            orphan_pid = await spawn.wait_for_pid()
+            assert orphan_pid, "setup failed: escapee not captured"
             assert _pid_alive(orphan_pid), "setup failed: escapee died early"
-            _register_pid(orphan_pid, "m4-timeout-escapee", instance_id)
 
             # The timeout arm's group kill (simulated, arm body untouched):
             # killpg against the bash tool's own group cannot reach the
@@ -1935,32 +1994,7 @@ class TestPathDTimeoutRaceEscapee:
                 )
             # darwin: positive-only env policy — skip accepted; teardown kills.
 
-            try:
-                await asyncio.wait_for(bash_task, timeout=10)
-            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                if not bash_task.done():
-                    bash_task.cancel()
-        finally:
-            if orphan_pid is not None and _pid_alive(orphan_pid):
-                try:
-                    os.kill(orphan_pid, signal.SIGKILL)
-                except (ProcessLookupError, OSError):
-                    pass
-            if bash_task is not None and not bash_task.done():
-                bash_task.cancel()
-                try:
-                    await asyncio.wait_for(bash_task, timeout=2)
-                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                    pass
-            if os.path.exists(gc_pid_path):
-                try:
-                    os.unlink(gc_pid_path)
-                except OSError:
-                    pass
-            bash_reg.set_durable_writer(prev_writer)
-            bash_reg._entries.clear()
-            bash_reg._entries.update(prev_entries)
-            eng.dispose()
+            await spawn.await_tool(timeout=10)
 
 
 class TestPathCJobControlGroup:
@@ -1969,34 +2003,28 @@ class TestPathCJobControlGroup:
     sweep reaps it — proven with a real process and teardown."""
 
     @pytest.mark.asyncio
-    async def test_job_control_burner_reaped_by_shutdown_sweep(self, monkeypatch):
-        bash_mod = importlib.import_module("daemon.tools.bash")
+    async def test_job_control_burner_reaped_by_shutdown_sweep(
+        self, durable_registry, monkeypatch
+    ):
+        from daemon.services.bash_spawn_reaper import (
+            sweep_open_rows_for_shutdown,
+        )
+
+        bash_mod, bash_reg, repo = durable_registry
         bash = bash_mod.bash.coroutine  # type: ignore[attr-defined]
-        bash_reg = bash_mod.get_bash_process_registry()
-
-        from sqlalchemy.pool import StaticPool
-        from sqlmodel import SQLModel, create_engine
-        from daemon.repositories.bash_spawn import BashSpawnRepository
-        from daemon.services.bash_spawn_reaper import sweep_open_rows_for_shutdown
-
-        eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-        SQLModel.metadata.create_all(eng)
-        repo = BashSpawnRepository(engine=eng)
-        prev_writer = bash_reg.get_durable_writer()
-        prev_entries = dict(bash_reg._entries)
-        bash_reg._entries.clear()
-        bash_reg.set_durable_writer(repo)
 
         monkeypatch.setenv("ENSEMBLE_BASH_REAPER_TERM_GRACE_SECONDS", "0.1")
 
         instance_id = f"m3-jobcontrol-{os.urandom(4).hex()}"
-        burner_pid_fd, burner_pid_path = tempfile.mkstemp(prefix="m3-burner-", suffix=".pid")
+        burner_pid_fd, burner_pid_path = tempfile.mkstemp(
+            prefix="m3-burner-", suffix=".pid"
+        )
         os.close(burner_pid_fd)
 
-        burner_pid = None
-        bash_task = None
-        try:
-            bash_task = asyncio.create_task(
+        async with _spawn_teardown(
+            burner_pid_path, label="m3-job-control-burner"
+        ) as spawn:
+            spawn.task = asyncio.create_task(
                 bash(
                     command=textwrap.dedent(
                         f"""\
@@ -2015,22 +2043,9 @@ class TestPathCJobControlGroup:
                 )
             )
 
-            burner_alive = False
-            for _ in range(80):
-                if os.path.exists(burner_pid_path):
-                    try:
-                        with open(burner_pid_path, "r") as f:
-                            burner_pid = int(f.read().strip())
-                            if burner_pid > 0:
-                                burner_alive = True
-                                break
-                    except (OSError, ValueError):
-                        pass
-                await asyncio.sleep(0.05)
-
-            assert burner_alive and burner_pid is not None, "setup failed: burner not captured"
+            burner_pid = await spawn.wait_for_pid()
+            assert burner_pid, "setup failed: burner not captured"
             assert _pid_alive(burner_pid), "setup failed: burner died early"
-            _register_pid(burner_pid, "m3-job-control-burner", instance_id)
 
             await asyncio.sleep(0.5)
 
@@ -2046,66 +2061,12 @@ class TestPathCJobControlGroup:
                 )
             # darwin: positive-only env policy — skip accepted; teardown kills.
 
-            try:
-                await asyncio.wait_for(bash_task, timeout=10)
-            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                if not bash_task.done():
-                    bash_task.cancel()
-        finally:
-            if burner_pid is not None and _pid_alive(burner_pid):
-                try:
-                    os.kill(burner_pid, signal.SIGKILL)
-                except (ProcessLookupError, OSError):
-                    pass
-            if bash_task is not None and not bash_task.done():
-                bash_task.cancel()
-                try:
-                    await asyncio.wait_for(bash_task, timeout=2)
-                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                    pass
-            if os.path.exists(burner_pid_path):
-                try:
-                    os.unlink(burner_pid_path)
-                except OSError:
-                    pass
-            bash_reg.set_durable_writer(prev_writer)
-            bash_reg._entries.clear()
-            bash_reg._entries.update(prev_entries)
-            eng.dispose()
+            await spawn.await_tool(timeout=10)
 
 
 class TestPathADurableTombstoneReap:
     """Plan task 2.2 acceptance: real-process Path A leg + the
     sibling-alive skip leg, through the extended ``cleanup_instance``."""
-
-    @pytest.fixture
-    def durable_registry(self):
-        """The REAL bash registry singleton wired to a REAL
-        BashSpawnRepository over a fresh in-memory SQLite engine.
-        Writer + RAM buckets restored afterwards."""
-        from sqlalchemy.pool import StaticPool
-        from sqlmodel import SQLModel, create_engine
-
-        bash_mod = importlib.import_module("daemon.tools.bash")
-        from daemon.repositories.bash_spawn import BashSpawnRepository
-
-        reg = bash_mod.get_bash_process_registry()
-        eng = create_engine(
-            "sqlite://",
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
-        )
-        SQLModel.metadata.create_all(eng)
-        repo = BashSpawnRepository(engine=eng)
-        prev_writer = reg.get_durable_writer()
-        prev_entries = dict(reg._entries)
-        reg._entries.clear()
-        reg.set_durable_writer(repo)
-        yield bash_mod, reg, repo
-        reg.set_durable_writer(prev_writer)
-        reg._entries.clear()
-        reg._entries.update(prev_entries)
-        eng.dispose()
 
     @pytest.mark.asyncio
     async def test_burner_reaped_by_cleanup_instance_after_tool_returns(
