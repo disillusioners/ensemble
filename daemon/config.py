@@ -4645,8 +4645,11 @@ class ReportIntegrityConfig(BaseSettings):
     * **Restart required** — the resolver reads + caches the env once
       at boot; flipping mid-flight has no effect until restart.
       Truthy: ``1``/``true``/``yes``/``on``; falsy:
-      ``0``/``false``/``no``/``off``; unset/blank/unknown → ON
-      (unknown non-blank additionally WARNs once).
+      ``0``/``false``/``no``/``off``; unset → ON. A set-but-blank or
+      unknown value FAILS BOOT at config validation (this pydantic
+      bool binding rejects it — ValidationError); the resolver's
+      warn-once→ON fallback for such values is reachable only by
+      config-less readers (tests).
 
     The reserved candidate-(a) kill-switch name (see
     ``daemon/constants.py``, the ``WC_REPORT_INTEGRITY_A_*`` constant)

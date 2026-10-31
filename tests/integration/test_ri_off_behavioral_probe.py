@@ -31,10 +31,12 @@ OFF (under the explicit falsy spellings):
 3. Parity: the same scenario under each explicit falsy spelling
    (``0`` ∥ ``off``) behaves identically (same single log line, same
    zero writes, same completion).
-4. ON-state contrast control: flag ON (explicit ``=1``) + the SAME
-   shape → the enforcement
-   DOES fire (one notice, ledger populated) — giving the OFF assertions
-   teeth (they are discriminating, not tautological).
+4. ON-state contrast control: flag ON (explicit ``=1`` ∥ unset — the new
+   default since the D2.5-FLIP promotion) + the SAME shape → the
+   enforcement DOES fire (one notice, ledger populated) — giving the
+   OFF assertions teeth (they are discriminating, not tautological).
+   The ``unset`` leg pins default-ON BEHAVIORALLY on the real completion
+   path, not only at the resolver level.
 5. S3 scoping spot: with the flag OFF, the ALWAYS-ON Wave-1 instruments
    still fire — a junk-shape report gets the ``[REPORT SANITY: ...]``
    marker appended (suffix-append only, content semantics unchanged,
@@ -577,17 +579,33 @@ async def test_off_means_off_on_real_completion_path(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("on_mode", ["explicit_one", "unset"])
 async def test_flag_on_contrast_enforcement_actually_fires(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
     wire_bus_gate,
+    on_mode: str,
 ):
     """Control (not a shipping-posture claim): flag ON + the SAME incident
     shape → the enforcement DOES fire (notice enqueued, ledger populated).
     This proves the OFF assertions above are DISCRIMINATING — they fail if
     the OFF branch ever regressed into enforcement — i.e. "OFF means OFF"
-    is a real behavioral difference, not a tautology."""
-    monkeypatch.setenv(WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED, "1")
+    is a real behavioral difference, not a tautology.
+
+    ``on_mode="explicit_one"`` pins the env flipped ON; ``on_mode="unset"``
+    pins the NEW default (D2.5-FLIP, landed 2026-10-31) BEHAVIORALLY on
+    the REAL completion path — unset env + cold cache (autouse fixture)
+    must resolve ON and fire enforcement, not just at the resolver level.
+    """
+    if on_mode == "unset":
+        monkeypatch.delenv(
+            WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED,
+            raising=False,
+        )
+    else:
+        monkeypatch.setenv(WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED, "1")
+    # The autouse fixture reset _B_GUARD_ENABLED (W1 discipline) — the
+    # next real read resolves from THIS env state, as a fresh boot would.
 
     parent_id = _seed_parent_declared_waiting(engine)
     child_id = _seed_terminal_child(engine, parent_id)

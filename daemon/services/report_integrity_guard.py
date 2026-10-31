@@ -443,6 +443,13 @@ def resolve_report_integrity_b_guard_enabled() -> bool:
         Unknown non-blank values additionally WARN once (cached on
         first access) and fall back to the NEW default (ON).
 
+        Boot-validation boundary: the lenient blank/unknown branches
+        are reachable by CONFIG-LESS readers (tests, harnesses) only —
+        with a real boot-loaded ``Config``, the pydantic bool binding
+        rejects blank/whitespace/unknown env values at validation (the
+        daemon fails to boot; see
+        ``ReportIntegrityConfig.b_terminal_waiting_guard_enabled``).
+
     The cached value lives for the daemon's lifetime: restart
     required to flip (mirror of the WC-wake / governor-guard
     precedents).
@@ -521,14 +528,20 @@ def emit_report_integrity_b_guard_boot_log() -> None:
         return
     _B_GUARD_BOOT_LOG_EMITTED = True
     enabled = resolve_report_integrity_b_guard_enabled()
+    _ENV_LEG_ONLY = (
+        "(env leg only; explicit "
+        "`report_integrity.b_terminal_waiting_guard_enabled: false` in "
+        "config.yaml still vetoes)"
+    )
     state_line = (
         "ENABLED (default — enforcement: one adjudication notice "
-        "injected to the parent at the completion stamp; never blocks)"
+        "injected to the parent at the completion stamp; never blocks) "
+        + _ENV_LEG_ONLY
         if enabled
         else "DISABLED (explicit =0 — log-only mode: the "
         "[ReportIntegrityGuard] "
         "soak log still fires at completion stamps; no notice is ever "
-        "injected)"
+        "injected) " + _ENV_LEG_ONLY
     )
     logger.info(
         "Report-integrity (b) terminal-waiting guard resolved: %s "

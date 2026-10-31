@@ -226,6 +226,9 @@ class TestBResolverDefaultPromotion:
             assert rig.resolve_report_integrity_b_guard_enabled() is True
             # Cached: a second call returns without re-warning.
             assert rig.resolve_report_integrity_b_guard_enabled() is True
+        # Cache ENGAGED (direct): the fallback boolean is stored, not
+        # re-derived per call — this is what makes the warn-once pin real.
+        assert rig._B_GUARD_ENABLED is True
         warn_records = [
             r
             for r in caplog.records
