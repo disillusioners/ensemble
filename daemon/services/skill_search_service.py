@@ -91,6 +91,45 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
+# Project-file search fusion (Phase 2 — project-skill-loader)
+# ============================================================
+
+#: Fallback max number of NON-shadowing file skills appended to the
+#: fused corpus when ``self._config`` carries no override. Shadowing
+#: file skills are EXEMPT from this budget (architect A7, MUST,
+#: CRITICAL — the "both hidden under overflow" variant is FORBIDDEN
+#: by planner ruling N7: it hides the canonical replacement exactly
+#: when the repo is largest). The DB fetch keeps its own 200/bucket
+#: cap untouched — neither source can crowd the other out of stage 1.
+FILE_CORPUS_BUDGET = 50
+
+#: ``source`` tag stamped on every fused result entry (additive key).
+SOURCE_DB = "db"
+SOURCE_PROJECT_FILE = "project-file"
+
+#: Result-entry keys added by the fusion (additive — consumers that
+#: ignore unknown keys keep working; pinned in the fusion pack).
+_TAG_KEY_SOURCE = "source"
+_TAG_KEY_ADDRESS = "address"
+_TAG_KEY_SHADOWS = "shadows"
+
+
+def _is_project_file_skill(skill: Any) -> bool:
+    """True iff *skill* came from the file-backed project source.
+
+    Uses the ``pf:`` address prefix as the discriminator (a DB row can
+    never carry one — the ``pf:`` address namespace belongs to the
+    file source, see ``project_skill_source.model``), falling back to
+    the duck-typed ``source`` tag. Deliberately duck-typed: the
+    pipeline is duck-typed end to end and tests use light fakes.
+    """
+    address = getattr(skill, "address", None)
+    if isinstance(address, str) and address.startswith("pf:"):
+        return True
+    return getattr(skill, "source", None) == SOURCE_PROJECT_FILE
+
+
+# ============================================================
 # Module-level helpers
 # ============================================================
 
@@ -364,6 +403,7 @@ class SkillSearchService:
         llm_config: dict[str, Any],
         config: Any,  # SkillEvolutionConfig
         skill_bank_repo: Any = None,
+        file_source: Any = None,
     ) -> None:
         """Store dependencies for the three pipeline stages.
 
@@ -382,6 +422,19 @@ class SkillSearchService:
                 preserving the pre-fix behavior for unit-test
                 mocks and older wiring. Expected method:
                 ``get_agent_owners(item_ids) -> dict[str, str | None]``.
+            file_source: Duck-typed
+                :class:`~daemon.services.project_skill_source.service.ProjectSkillSourceService`
+                (Phase 2 of the project-skill-loader commission).
+                Optional — ``None`` (the default) means NO fusion and
+                keeps this service byte-identical to its pre-fusion
+                behavior (NFR-COMPAT-1). Two methods are used:
+                ``resolve_active_project(instance_id, explicit_project_id)``
+                (the sanctioned scope reader — architect A13) and
+                ``corpus_for(project_id, root)`` (fresh disk reads,
+                index-backed + stat-gated). Every fusion failure is
+                caught locally at the seam (architect A8): a broken
+                file source degrades the search to DB-only results and
+                must NEVER surface as a failed search.
         """
         self._skill_repo = skill_repo
         self._embedding_repo = embedding_repo
@@ -391,6 +444,13 @@ class SkillSearchService:
         self._llm_config = dict(llm_config) if llm_config else {}
         self._config = config
         self._skill_bank_repo = skill_bank_repo
+        self._file_source = file_source
+        # Advisory per-assembly snapshot (root census / overflow
+        # counters / last fusion error). Read by the readiness advisory
+        # in Phase 4. Concurrent searches may interleave — the snapshot
+        # is last-writer-wins BY DESIGN (advisory only, never a
+        # correctness input).
+        self._last_file_corpus_stats: dict[str, Any] = {}
 
     # --------------------------------------------------------
     # Public API
@@ -402,6 +462,7 @@ class SkillSearchService:
         project_id: str | None = None,
         max_results: int = 2,
         agent_id: str | None = None,
+        instance_id: str | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         """Run the full three-stage search pipeline.
 
@@ -432,6 +493,14 @@ class SkillSearchService:
                 generic/shared bank templates
                 (``skill_bank.agent_id IS NULL``) are never
                 filtered.
+            instance_id: The requesting instance (Phase 2 of the
+                project-skill-loader commission). Used ONLY by the
+                file-source scope resolver — ``None`` (the default)
+                means no instance-derived project scope, so the file
+                corpus is invisible for this call (this is what keeps
+                the REST search route file-blind in v1: the router
+                has no instance context, architect A6 / leader ruling
+                D1). DB results are unaffected either way.
 
         Returns:
             Dict with keys:
@@ -445,6 +514,11 @@ class SkillSearchService:
 
             Both lists are empty when the corpus is empty or no
             skill scores above zero.
+
+            When a file source is wired, every entry in BOTH lists
+            additionally carries ``"source": "db" | "project-file"``
+            (additive key); file entries also carry ``"address"`` and,
+            when they shadow a same-name DB skill, ``"shadows"``.
         """
         # Stage 1 — BM25.
         candidates = await self._bm25_prefilter(
@@ -452,6 +526,7 @@ class SkillSearchService:
             project_id,
             top_k=getattr(self._config, "bm25_top_k", 10),
             agent_id=agent_id,
+            instance_id=instance_id,
         )
         if not candidates:
             return {"injected": [], "low_match": []}
@@ -475,7 +550,7 @@ class SkillSearchService:
 
         # Stage 3 — LLM final selection (best-effort).
         try:
-            return await self._llm_select(
+            result = await self._llm_select(
                 user_message, reranked, max_results
             )
         except Exception as e:
@@ -483,7 +558,8 @@ class SkillSearchService:
                 "[SkillSearch] LLM select failed, falling back "
                 f"to embedding/BM25: {e}"
             )
-            return self._degraded_select(reranked, max_results)
+            result = self._degraded_select(reranked, max_results)
+        return self._tag_result_sources(result, candidates)
 
     # --------------------------------------------------------
     # Stage 1 — BM25
@@ -594,12 +670,347 @@ class SkillSearchService:
             )
         return visible
 
+    # --------------------------------------------------------
+    # Phase 2 — project-file corpus fusion
+    # --------------------------------------------------------
+
+    def file_corpus_stats(self) -> dict[str, Any]:
+        """Advisory snapshot of the LAST corpus assembly (never a
+        correctness input).
+
+        Consumed by the Phase-4 readiness advisory
+        (``detail.skill_sources``) and by the overflow pins. Keys:
+        ``project_id``, ``roots`` (roots that contributed), ``refused``
+        (A6 explicit-conflict refusal), ``file_total`` (in-canon file
+        skills seen), ``file_included`` (post-budget appended),
+        ``shadowing`` (shadow-exempt file skills), ``budget_dropped``
+        (non-shadowing overflow — the budget counter), and
+        ``shadowed_db_ids`` / ``last_error``.
+        """
+        return dict(self._last_file_corpus_stats)
+
+    async def _merge_project_file_corpus(
+        self,
+        items: list[Any],
+        project_id: str | None,
+        instance_id: str | None,
+    ) -> tuple[list[Any], dict[str, Any]]:
+        """Fuse the file-backed corpus into the DB corpus (A7 order).
+
+        ORDER (architect A7, MUST, CRITICAL — the load-bearing part):
+
+        1. Append source corpus: the file corpus is read for every
+           resolved root (:meth:`corpus_for` — index-backed, stat-gated,
+           fresh body reads; zero directory re-walks per search).
+        2. FULL-corpus shadow pass, computed BEFORE any budget
+           truncation: every in-scope DB name matching ANY in-canon
+           file skill is shadowed (case-insensitive, FR-P4-1) and
+           dropped from the DB corpus. Its ids are stamped on the file
+           twin's ``shadows`` field.
+        3. Budget: the ``FILE_CORPUS_BUDGET`` cap applies to
+           NON-shadowing file skills ONLY. Shadowing names are EXEMPT
+           (A7 preferred variant, mandated by planner ruling N7 — the
+           "both hidden under overflow" variant is FORBIDDEN because it
+           hides the canonical replacement exactly when the repo is
+           largest). Overflow is counted in the returned stats.
+        4. Tokenization happens in the caller on the MERGED list — zero
+           scoring-code changes.
+
+        Scope (architect A6/A13): the project is derived through the
+        sanctioned resolver — ``explicit_project_id`` may only CONFIRM
+        the instance-derived project, never widen it. A conflicting
+        explicit value (or any explicit value with no instance context —
+        the REST shape) refuses the file corpus for this call; DB
+        results are unaffected. That refusal is what keeps
+        ``POST /api/skills/search`` file-blind in v1 (leader ruling D1).
+
+        Args:
+            items: Post-ownership-filter DB corpus (may be empty).
+            project_id: The DB search's project scope (agent-lane
+                derived or caller-supplied).
+            instance_id: The requesting instance, or ``None``.
+
+        Returns:
+            ``(merged_items, stats)``. ``merged_items`` is the DB corpus
+            minus shadowed rows, plus the budgeted file corpus. On ANY
+            failure the DB corpus is returned unchanged (A8 degradation
+            is applied by the caller's local guard; per-root read
+            failures are absorbed here).
+        """
+        stats: dict[str, Any] = {
+            "project_id": None,
+            "roots": [],
+            "refused": False,
+            "file_total": 0,
+            "file_included": 0,
+            "shadowing": 0,
+            "budget_dropped": 0,
+            "shadowed_db_ids": [],
+            "last_error": None,
+        }
+        if self._file_source is None:
+            return items, stats
+
+        resolution = await self._file_source.resolve_active_project(
+            instance_id=instance_id,
+            explicit_project_id=project_id,
+        )
+        scope_pid = getattr(resolution, "project_id", None)
+        roots = [r for r in (getattr(resolution, "roots", None) or []) if r]
+        stats["project_id"] = str(scope_pid) if scope_pid else None
+        if getattr(resolution, "refused", False):
+            # A6: explicit-widening attempt refused. DB results stand.
+            stats["refused"] = True
+            logger.info(
+                "[SkillSearch] project-file corpus refused for this call "
+                "(A6 explicit-conflict; reason=%s) — DB-only results",
+                getattr(resolution, "refusal_reason", None),
+            )
+            self._last_file_corpus_stats = stats
+            return items, stats
+        if not scope_pid or not roots:
+            # FR-P2-4 / FR-P3-3: no resolvable project or root ⇒ the file
+            # corpus contributes nothing. Never an error.
+            logger.debug(
+                "[SkillSearch] no resolvable project/root for the file "
+                "corpus (project_id=%r instance_id=%r) — DB-only results",
+                project_id,
+                instance_id,
+            )
+            self._last_file_corpus_stats = stats
+            return items, stats
+
+        file_skills: list[Any] = []
+        seen_pseudo_ids: set[str] = set()
+        seen_names: set[str] = set()
+        for root in roots:
+            try:
+                corpus = await self._file_source.corpus_for(scope_pid, root)
+            except Exception as exc:  # per-root resilience (A8 layer 1)
+                logger.warning(
+                    "[SkillSearch] project-file corpus failed for root=%s: "
+                    "%s — continuing with the remaining roots",
+                    root,
+                    exc,
+                )
+                stats["last_error"] = f"{type(exc).__name__}: {exc}"
+                continue
+            stats["roots"].append(str(root))
+            for file_skill in corpus or []:
+                pseudo_id = str(getattr(file_skill, "id", "") or "")
+                name_key = (
+                    str(getattr(file_skill, "name", "") or "").strip().lower()
+                )
+                if pseudo_id and pseudo_id in seen_pseudo_ids:
+                    continue
+                if name_key and name_key in seen_names:
+                    # Two roots carrying the same skill name: the first
+                    # contributing root wins (resolver root order).
+                    continue
+                if pseudo_id:
+                    seen_pseudo_ids.add(pseudo_id)
+                if name_key:
+                    seen_names.add(name_key)
+                file_skills.append(file_skill)
+
+        stats["file_total"] = len(file_skills)
+        if not file_skills:
+            self._last_file_corpus_stats = stats
+            return items, stats
+
+        # ---- A7 step 2: FULL-corpus shadow pass (PRE-budget) ----------
+        db_by_name: dict[str, list[Any]] = {}
+        for skill in items:
+            name_key = str(getattr(skill, "name", "") or "").strip().lower()
+            if name_key:
+                db_by_name.setdefault(name_key, []).append(skill)
+
+        # Deterministic budget ordinal: namespace then name. Independent
+        # of root order / directory iteration order.
+        ordered = sorted(
+            file_skills,
+            key=lambda s: (
+                str(getattr(s, "namespace", "") or ""),
+                str(getattr(s, "name", "") or ""),
+            ),
+        )
+
+        merged_files: list[Any] = []
+        shadowed_db_ids: set[str] = set()
+        non_shadowing_count = 0
+        budget_dropped = 0
+        for file_skill in ordered:
+            name_key = str(getattr(file_skill, "name", "") or "").strip().lower()
+            db_twins = db_by_name.get(name_key) or []
+            if db_twins:
+                twin_ids = [
+                    str(getattr(twin, "id", "") or "") for twin in db_twins
+                ]
+                try:
+                    file_skill.shadows = twin_ids
+                except Exception:  # pragma: no cover — frozen custom objects
+                    pass
+                shadowed_db_ids.update(t for t in twin_ids if t)
+                stats["shadowing"] += 1
+                merged_files.append(file_skill)
+                # A18.3: shadowing is the only non-additive effect in the
+                # surface — greppable at WARNING by an operator who does
+                # not know to look.
+                logger.warning(
+                    "[SkillSearch] project-file shadowing: file skill %r "
+                    "(%s) retires DB skill(s) %s",
+                    getattr(file_skill, "name", ""),
+                    getattr(file_skill, "address", ""),
+                    ", ".join(t for t in twin_ids if t) or "?",
+                )
+                continue
+            if non_shadowing_count < FILE_CORPUS_BUDGET:
+                non_shadowing_count += 1
+                merged_files.append(file_skill)
+            else:
+                # Budget applies to NON-shadowing file skills only.
+                budget_dropped += 1
+
+        stats["budget_dropped"] = budget_dropped
+        stats["file_included"] = len(merged_files)
+        stats["shadowed_db_ids"] = sorted(shadowed_db_ids)
+        self._last_file_corpus_stats = stats
+
+        if budget_dropped:
+            logger.info(
+                "[SkillSearch] project-file corpus budget: kept %d "
+                "non-shadowing file skill(s) (budget=%d), dropped %d; "
+                "%d shadowing skill(s) exempt",
+                non_shadowing_count,
+                FILE_CORPUS_BUDGET,
+                budget_dropped,
+                stats["shadowing"],
+            )
+
+        # ---- A7 step 3: drop the shadowed DB rows, append files ------
+        merged: list[Any] = [
+            skill
+            for skill in items
+            if str(getattr(skill, "id", "") or "") not in shadowed_db_ids
+        ]
+        merged.extend(merged_files)
+        return merged, stats
+
+    def _tag_result_sources(
+        self,
+        result: dict[str, list[dict[str, Any]]],
+        candidates: list[Any],
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Stamp ``source`` (and file-only ``address`` / ``shadows``) on
+        the result entries, then run the defensive post-stage-3 dedupe.
+
+        Additive keys only: with ``file_source=None`` the result dict is
+        returned UNTOUCHED (NFR-COMPAT-1 — pre-existing callers and
+        tests see byte-identical output). Consumers that ignore unknown
+        keys keep working; the fusion pack pins that tolerance.
+
+        The dedupe is belt-and-suspenders (task 4): the corpus shadow
+        pass should already have prevented a DB twin from reaching stage
+        3, but if one arrives anyway (a synthetic drift — e.g. a stale
+        stage-3 name map or a candidate built outside the seam) the DB
+        twin is DROPPED and the file shadow survives (P4 in every code
+        path). The reverse never happens.
+        """
+        if self._file_source is None:
+            return result
+
+        file_by_name: dict[str, Any] = {}
+        for skill in candidates or []:
+            if not _is_project_file_skill(skill):
+                continue
+            name_key = str(getattr(skill, "name", "") or "").strip().lower()
+            if name_key:
+                file_by_name[name_key] = skill
+
+        def _stamp_file(entry: dict[str, Any], file_skill: Any) -> None:
+            entry[_TAG_KEY_SOURCE] = SOURCE_PROJECT_FILE
+            address = getattr(file_skill, "address", None)
+            if address:
+                entry[_TAG_KEY_ADDRESS] = str(address)
+            shadows = list(getattr(file_skill, "shadows", None) or [])
+            if shadows:
+                entry[_TAG_KEY_SHADOWS] = shadows
+
+        injected: list[dict[str, Any]] = []
+        for entry in result.get("injected") or []:
+            tagged = dict(entry)
+            skill = tagged.get("skill")
+            if _is_project_file_skill(skill):
+                _stamp_file(tagged, skill)
+            else:
+                tagged[_TAG_KEY_SOURCE] = SOURCE_DB
+            injected.append(tagged)
+
+        low_match: list[dict[str, Any]] = []
+        for entry in result.get("low_match") or []:
+            tagged = dict(entry)
+            name_key = str(tagged.get("name") or "").strip().lower()
+            file_skill = file_by_name.get(name_key)
+            if file_skill is not None:
+                _stamp_file(tagged, file_skill)
+            else:
+                tagged[_TAG_KEY_SOURCE] = SOURCE_DB
+            low_match.append(tagged)
+
+        # ---- Defensive post-stage-3 dedupe (P4 belt-and-suspenders) --
+        file_names: set[str] = set()
+        for entry in injected:
+            if entry.get(_TAG_KEY_SOURCE) == SOURCE_PROJECT_FILE:
+                skill = entry.get("skill")
+                name_key = str(getattr(skill, "name", "") or "").strip().lower()
+                if name_key:
+                    file_names.add(name_key)
+        for entry in low_match:
+            if entry.get(_TAG_KEY_SOURCE) == SOURCE_PROJECT_FILE:
+                name_key = str(entry.get("name") or "").strip().lower()
+                if name_key:
+                    file_names.add(name_key)
+        if file_names:
+            kept_injected: list[dict[str, Any]] = []
+            for entry in injected:
+                skill = entry.get("skill")
+                name_key = str(getattr(skill, "name", "") or "").strip().lower()
+                if (
+                    entry.get(_TAG_KEY_SOURCE) == SOURCE_DB
+                    and name_key in file_names
+                ):
+                    continue
+                kept_injected.append(entry)
+            kept_low: list[dict[str, Any]] = []
+            for entry in low_match:
+                name_key = str(entry.get("name") or "").strip().lower()
+                if (
+                    entry.get(_TAG_KEY_SOURCE) == SOURCE_DB
+                    and name_key in file_names
+                ):
+                    continue
+                kept_low.append(entry)
+            dropped = (len(injected) - len(kept_injected)) + (
+                len(low_match) - len(kept_low)
+            )
+            if dropped:
+                logger.info(
+                    "[SkillSearch] post-stage-3 dedupe dropped %d DB "
+                    "twin(s) shadowed by file skills: %s",
+                    dropped,
+                    ", ".join(sorted(file_names)),
+                )
+            injected, low_match = kept_injected, kept_low
+
+        return {"injected": injected, "low_match": low_match}
+
     async def _bm25_prefilter(
         self,
         query: str,
         project_id: str | None,
         top_k: int = 10,
         agent_id: str | None = None,
+        instance_id: str | None = None,
     ) -> list[Any]:
         """BM25 keyword prefilter over active skills.
 
@@ -620,12 +1031,17 @@ class SkillSearchService:
             agent_id: Requesting agent for the ownership filter —
                 see :meth:`_filter_owner_private`. ``None``
                 disables the filter.
+            instance_id: Requesting instance, forwarded to the
+                file-source scope resolver
+                (:meth:`_merge_project_file_corpus`). ``None``
+                keeps the file corpus invisible.
 
         Returns:
-            List of :class:`Skill` instances ordered by BM25
-            score descending. Empty when no skill shares any
-            tokens with the query, or when the active-skill set
-            is empty.
+            List of :class:`Skill` (and, when a file source is
+            wired, :class:`~daemon.services.project_skill_source.model.ProjectFileSkill`)
+            instances ordered by BM25 score descending. Empty when
+            no skill shares any tokens with the query, or when the
+            active-skill set is empty.
         """
         query_tokens = _tokenize(query)
         if not query_tokens:
@@ -639,6 +1055,14 @@ class SkillSearchService:
         # (``project_id IS NULL``) on top, deduping by ``skill.id``
         # so the project version wins on collisions.
         async def _fetch(pid: str | None) -> list[Any]:
+            if self._skill_repo is None:
+                # ``skill_repo=None`` is the explicit FILE-ONLY corpus
+                # signal (Phase-4 None-safe construction, approver B1):
+                # there is no DB stack to read. Returning [] here — before
+                # the thread-pool hop — avoids an AttributeError that
+                # would otherwise be swallowed as a spurious
+                # "BM25 failed to fetch skills" WARNING on every call.
+                return []
             try:
                 items, _ = await asyncio.to_thread(
                     self._skill_repo.list,
@@ -697,7 +1121,7 @@ class SkillSearchService:
                 seen_ids.add(skill_id)
                 items.append(skill)
 
-        if not items:
+        if not items and self._file_source is None:
             return []
 
         # Agent-ownership filter (2026-10-21): drop bank-cloned
@@ -708,6 +1132,43 @@ class SkillSearchService:
         # never be injectable into a non-owner worker's context.
         items = await self._filter_owner_private(items, agent_id)
 
+        # ------------------------------------------------------------
+        # Project-file corpus fusion (Phase 2 — project-skill-loader).
+        # Seam: post-ownership-filter, pre-tokenization. One corpus, one
+        # scorer — file skills inherit BM25 normalization for free and
+        # the stage-3 ``name.lower()`` collision window is closed at the
+        # root (Q4). A8: the whole call is locally guarded — a broken
+        # file source degrades to DB-only results and never escapes as a
+        # failed search.
+        # ------------------------------------------------------------
+        # A8 LOCAL GUARD (architect, MUST, CRITICAL): an unguarded escape
+        # would propagate out of this method ⇒ ``search`` raises ⇒ the
+        # tool returns the user-visible ``"ERROR: skill_search failed"``
+        # string (``skill_tools.py:167``). A broken file source must
+        # degrade to DB-only results instead.
+        try:
+            items, corpus_stats = await self._merge_project_file_corpus(
+                items, project_id, instance_id
+            )
+        except Exception as exc:
+            logger.warning(
+                "[SkillSearch] project-file corpus fusion failed — "
+                "searching DB-only: %s",
+                exc,
+            )
+            self._last_file_corpus_stats = {
+                "project_id": None,
+                "roots": [],
+                "refused": False,
+                "file_total": 0,
+                "file_included": 0,
+                "shadowing": 0,
+                "budget_dropped": 0,
+                "shadowed_db_ids": [],
+                "last_error": f"{type(exc).__name__}: {exc}",
+            }
+            corpus_stats = self._last_file_corpus_stats
+        logger.debug("[SkillSearch] corpus assembly: %s", corpus_stats)
         if not items:
             return []
 
