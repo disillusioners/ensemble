@@ -4640,16 +4640,16 @@ class ReportIntegrityConfig(BaseSettings):
     * **OFF (kill switch: set env ``=0``)** — log-only mode: the
       stage-ii ``[ReportIntegrityGuard]`` WARNING still fires at the
       completion-stamp sites; NO notice is ever injected. Setting
-      ``=0`` is the revert path (NOT blanking the env — unset/blank
-      ≡ the new ON default).
+      ``=0`` is the revert path — NEVER blanking the env.
     * **Restart required** — the resolver reads + caches the env once
       at boot; flipping mid-flight has no effect until restart.
-      Truthy: ``1``/``true``/``yes``/``on``; falsy:
-      ``0``/``false``/``no``/``off``; unset → ON. A set-but-blank or
-      unknown value FAILS BOOT at config validation (this pydantic
-      bool binding rejects it — ValidationError); the resolver's
-      warn-once→ON fallback for such values is reachable only by
-      config-less readers (tests).
+      Token/blank semantics (AUTHORITATIVE home — ``daemon/constants.py``
+      and the guard-module comment point here): truthy
+      ``1``/``true``/``yes``/``on``; falsy ``0``/``false``/``no``/
+      ``off``; unset → ON; set-but-blank/unknown FAILS BOOT at config
+      validation (this pydantic bool binding rejects it —
+      ValidationError); blank ≡ unset only for config-less readers
+      (the resolver's warn-once→ON fallback — tests/harnesses).
 
     The reserved candidate-(a) kill-switch name (see
     ``daemon/constants.py``, the ``WC_REPORT_INTEGRITY_A_*`` constant)

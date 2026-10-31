@@ -1639,11 +1639,13 @@ REPORT_REPAIR_EXCLUDED_AGENTS: frozenset[str] = frozenset(
 # (b) Terminal-child-aware waiting guard (decisions.md C2-D2.5 LOCKED,
 # C2-D2.6 LOCKED, C2-D2.7 LOCKED, C2-D2.8 LOCKED, C2-D2.18 LOCKED).
 # Wave-2 stage-iii (B.S.1-iii) wires the config.py env binding. The
-# pre-committed D2.5-FLIP default promotion LANDED 2026-10-31:
-# unset/blank now resolves ON (enforcement) and the explicit ``=0``
-# is the retained kill switch back to stage-ii log-only — the
-# resolver caches once per process, so a flip (either direction)
-# requires a restart.
+# pre-committed D2.5-FLIP default promotion LANDED 2026-10-31: unset
+# now resolves ON (enforcement) and the explicit ``=0`` is the
+# retained kill switch back to stage-ii log-only — the resolver
+# caches once per process, so a flip (either direction) requires a
+# restart. Token/blank semantics are single-homed in
+# ``daemon/config.py::ReportIntegrityConfig`` (unset → ON;
+# set-but-blank/unknown FAILS BOOT at config validation).
 #
 # S3 scoping note (council follow-up, 2026-08-30): this flag gates ONLY
 # (b) ENFORCEMENT (notice injection via B.S.1-iii / B.S.2). It does NOT

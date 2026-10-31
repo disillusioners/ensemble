@@ -16,8 +16,9 @@ STAGE-III CONTRACT (D2.6 LOCKED — fail-OPEN, never block):
 * The enforcement ACTION (the adjudication-notice enqueue) happens
   AFTER the stamp has committed, in the caller's async post-commit
   context, wrapped in a bounded 5s wait.
-* Flag OFF (ship default) = byte-parity with stage ii: the ONLY
-  added work is one cached-boolean check; NO notice work happens.
+* Flag ``=0`` (kill switch; default ON since 2026-10-31) = byte-parity
+  with stage ii: the ONLY added work is one cached-boolean check; NO
+  notice work happens.
 
 Why a separate module:
 
@@ -407,9 +408,11 @@ def log_declared_waiting_violations(
 #
 # Mirrors the ``ENSEMBLE_WC_WAKE_ENQUEUE`` resolver shape (env const →
 # resolve-once + cache → boot INFO log). The pre-committed D2.5-FLIP
-# default promotion has LANDED (2026-10-31): unset/blank resolves ON
+# default promotion has LANDED (2026-10-31): unset resolves ON
 # (enforcement) and the explicit ``=0`` value is the retained kill
-# switch back to stage-ii log-only. Restart-required semantics: the
+# switch back to stage-ii log-only (token/blank semantics single-homed
+# in daemon/config.py::ReportIntegrityConfig — set-but-blank/unknown
+# FAILS BOOT at config validation). Restart-required semantics: the
 # resolved boolean is cached for the process lifetime — flipping the
 # env mid-flight has no effect until restart.
 #
@@ -528,7 +531,7 @@ def emit_report_integrity_b_guard_boot_log() -> None:
         return
     _B_GUARD_BOOT_LOG_EMITTED = True
     enabled = resolve_report_integrity_b_guard_enabled()
-    _ENV_LEG_ONLY = (
+    config_veto_note = (
         "(env leg only; explicit "
         "`report_integrity.b_terminal_waiting_guard_enabled: false` in "
         "config.yaml still vetoes)"
@@ -536,12 +539,12 @@ def emit_report_integrity_b_guard_boot_log() -> None:
     state_line = (
         "ENABLED (default — enforcement: one adjudication notice "
         "injected to the parent at the completion stamp; never blocks) "
-        + _ENV_LEG_ONLY
+        + config_veto_note
         if enabled
         else "DISABLED (explicit =0 — log-only mode: the "
         "[ReportIntegrityGuard] "
         "soak log still fires at completion stamps; no notice is ever "
-        "injected) " + _ENV_LEG_ONLY
+        "injected)"
     )
     logger.info(
         "Report-integrity (b) terminal-waiting guard resolved: %s "
@@ -803,8 +806,9 @@ async def enforce_declared_waiting_violations(
 
     Flow per call:
 
-    1. Kill-switch OFF (ship default) → return immediately — zero
-       notice work (the stage-ii hot-path bound is preserved).
+    1. Kill-switch ``=0`` (default is ON since 2026-10-31) → return
+       immediately — zero notice work (the stage-ii hot-path bound is
+       preserved).
     2. ``None`` / healthy / malformed report → no-op (fail-OPEN).
     3. Dedupe: the same violation set already noticed for this
        parent → no-op (ONE notice per completion episode; see
