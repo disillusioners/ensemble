@@ -84,6 +84,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **DB note** — the `mcp_servers` row `computer-use` was soft-deactivated (`is_active=false`) out of band; the boot orphan sweep (`_deactivate_orphaned_builtin_servers`) deactivates any re-appearance.
 - **Tests** — `tests/unit/test_computer_use_mcp.py` (1726 lines) is deleted; its GENERIC half (the S1 built-in availability gate, the privilege-stamp helper's non-stamping contract, `is_mcp_tool`'s standard-shape detection and the empty-allow privileged-category strip) is ported to `tests/unit/test_mcp_builtin_availability_gate.py`. The nine `PRIVILEGED_TOOL_CATEGORIES` same-PR pins drop the `cu` member (16 → 15).
 
+## [0.28.2] — 2026-10-31
+
+### Fixed — terminal-row status strand (the `9f0ed4f5` incident family): a terminal root row stayed `completed` while its child tree was live (`fix/terminal-row-status-strand`, base `61574cc8e`)
+
+- **Turn-start reactivation of terminal root rows** (`daemon/services/instance_messaging.py`) — a message arriving for a root whose row sits in `COMPLETED` / `ERROR` / `FAILED` (TERMINATED excluded — the claim gate already binds it) now flips the row to `RUNNING` at turn start via `manager._revive_terminal_instance`. PAUSED rows stay exempt; the revive is fail-open + logged and never touches the revive budget or attestation counters.
+- **Pre-stamp mission-live hold writes only on terminal rows** (`daemon/services/child_reports.py`) — the WAITING_CHILDREN hold re-arms only rows in `_TERMINAL_REARM_STATUSES = (COMPLETED, ERROR, FAILED)`, hands the heal off with `posture=None` (the healer re-reads the live row and selects `heal_instance` vs `heal_running_zombie`), and the idempotency guard became terminal-aware (a terminal row with a live child tree is no longer silently skipped as already-handled).
+- **Gate evidence** — functional gate PASS-WITH-NOTES / GO (7/7 gates: symptom proven both directions on the real chain at base vs HEAD; 6/6 mutation legs RED as predicted; net-new reds = 0 across 10 files; real-PG 16.15 legs clean with per-variable env scrubs); scoped merged-tree composition gate at the merge commit passed with exactly the 3 ledgered `turn_reconciler` reds and nothing else. Evidence: `.agents/tester/RESULTS/2026-10-31-terminal-row-status-strand-functional-gate.md`.
+
 ## [0.28.1] — 2026-10-31
 
 ### Fixed — restart-arm livelock: own-txn retryable skip + executor-exit closer (`fix/restart-arm-livelock`, base `cbafcc8d9`; commission `wi-6641579b`)
