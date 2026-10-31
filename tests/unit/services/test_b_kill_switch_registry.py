@@ -11,10 +11,12 @@ pins the resolver truthiness; this module pins the NAME REGISTRY):
     reserved strings — renaming or deleting either fails here.
   * The **B** name (``WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED``)
     is WIRED: a ``daemon/config.py`` Pydantic field exists with a
-    FALSY default (0/False — log-only ship state per C2-D2.5), and
-    the section's ``env_prefix`` + field name resolve to EXACTLY the
-    constant's string (no literal env-name fork in either direction).
-    Setting the env flips a fresh settings instance → True.
+    TRUTHY default (True — enforcement ship state since the D2.5-FLIP
+    default promotion landed 2026-10-31), and the section's
+    ``env_prefix`` + field name resolve to EXACTLY the constant's
+    string (no literal env-name fork in either direction). Setting the
+    env is honored by a fresh settings instance in BOTH directions
+    (``=0`` → False — the kill switch).
   * The **A** name (``WC_REPORT_INTEGRITY_A_PREMATURE_TURN_GUARD_ENABLED``)
     is RESERVED-UNUSED (C2-D2.2/D2.3 LOCKED): it is wired to NOTHING —
     no config field consumes it and the only ``daemon/`` occurrence of
@@ -38,7 +40,10 @@ pins the resolver truthiness; this module pins the NAME REGISTRY):
 
 Resolver truthiness semantics themselves (env values → bool, cache,
 restart-required) are pinned beside the resolver in
-``tests/unit/services/test_report_integrity_guard.py``.
+``tests/unit/services/test_report_integrity_guard.py``; the
+D2.5-FLIP default promotion (unset/blank → ON, ``=0`` → OFF) is
+pinned at the resolver level in ``TestBResolverDefaultPromotion``
+below.
 """
 
 from __future__ import annotations
@@ -73,7 +78,8 @@ class TestKillSwitchNameRegistry:
 
 
 class TestBKillSwitchConfigWiring:
-    """The B name is wired to a config field with a FALSY default."""
+    """The B name is wired to a config field with a TRUTHY default
+    (D2.5-FLIP default promotion, landed 2026-10-31)."""
 
     def test_config_section_exists_on_config(self) -> None:
         cfg = Config()
@@ -82,10 +88,11 @@ class TestBKillSwitchConfigWiring:
         )
         assert isinstance(cfg.report_integrity, ReportIntegrityConfig)
 
-    def test_b_field_defaults_falsy(self) -> None:
-        """Default 0/falsy — LOG-ONLY ship state (C2-D2.5)."""
+    def test_b_field_defaults_truthy(self) -> None:
+        """Default True — ENFORCEMENT ship state (D2.5-FLIP landed
+        2026-10-31); the ``=0`` env is the retained kill switch."""
         cfg = Config()
-        assert cfg.report_integrity.b_terminal_waiting_guard_enabled is False
+        assert cfg.report_integrity.b_terminal_waiting_guard_enabled is True
 
     def test_env_name_derivation_matches_constant(self) -> None:
         """No literal env-name fork: prefix + field must resolve to the
@@ -105,16 +112,19 @@ class TestBKillSwitchConfigWiring:
     def test_env_flip_reaches_fresh_settings_instance(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Setting the env var flips a FRESH settings instance — the
-        binding is live, not decorative. (The runtime gate additionally
-        caches at boot: restart required to flip — pinned by the resolver
-        tests in test_report_integrity_guard.py.)
+        """Setting the env var flips a FRESH settings instance in BOTH
+        directions — the binding is live, not decorative (with the
+        default now True, the ``=0`` leg is the discriminating one).
+        (The runtime gate additionally caches at boot: restart required
+        to flip — pinned by the resolver tests in
+        test_report_integrity_guard.py and the default-promotion pins
+        in TestBResolverDefaultPromotion below.)
         """
-        monkeypatch.setenv(
-            constants.WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED,
-            "1",
-        )
+        name = constants.WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED
+        monkeypatch.setenv(name, "1")
         assert ReportIntegrityConfig().b_terminal_waiting_guard_enabled is True
+        monkeypatch.setenv(name, "0")
+        assert ReportIntegrityConfig().b_terminal_waiting_guard_enabled is False
 
     def test_resolver_reads_the_constant_not_a_literal(self) -> None:
         """The guard module's resolver consumes the NAME constant from
@@ -126,6 +136,111 @@ class TestBKillSwitchConfigWiring:
             rig._B_GUARD_ENV
             == constants.WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED
         )
+
+
+class TestBResolverDefaultPromotion:
+    """D2.5-FLIP default promotion (landed 2026-10-31) pinned at the
+    RESOLVER level: unset and set-but-blank resolve ON, explicit
+    ``=0`` resolves OFF, unknown non-blank WARNs once and falls back
+    to ON — a future accidental flip-back of either default fails
+    here.
+
+    Cache discipline (W1-pollution lesson): every test resets the
+    module-global resolver cache via ``monkeypatch.setattr(rig,
+    ``_B_GUARD_ENABLED``, None)`` — monkeypatch restores the original
+    value on teardown, so no resolved state leaks between tests.
+    """
+
+    def test_unset_env_resolves_on(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unset env + cold cache → ON (the new default)."""
+        import daemon.services.report_integrity_guard as rig
+
+        monkeypatch.delenv(
+            constants.WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED,
+            raising=False,
+        )
+        monkeypatch.setattr(rig, "_B_GUARD_ENABLED", None)
+        assert rig.resolve_report_integrity_b_guard_enabled() is True
+
+    def test_set_blank_resolves_on_silently(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Set-but-blank (``""`` / whitespace) ≡ unset ≡ ON — resolved
+        silently, NO unknown-value warning.
+        """
+        import logging
+
+        import daemon.services.report_integrity_guard as rig
+
+        monkeypatch.setenv(
+            constants.WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED,
+            "   ",
+        )
+        monkeypatch.setattr(rig, "_B_GUARD_ENABLED", None)
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.report_integrity_guard"
+        ):
+            assert rig.resolve_report_integrity_b_guard_enabled() is True
+        assert not any(
+            "not a recognized" in r.getMessage() for r in caplog.records
+        ), "blank ≡ unset ≡ default — must not WARN"
+
+    def test_explicit_zero_resolves_off(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The kill switch: explicit ``=0`` → OFF (the revert path —
+        blanking/unsetting the env is NO LONGER the revert path)."""
+        import daemon.services.report_integrity_guard as rig
+
+        monkeypatch.setenv(
+            constants.WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED,
+            "0",
+        )
+        monkeypatch.setattr(rig, "_B_GUARD_ENABLED", None)
+        assert rig.resolve_report_integrity_b_guard_enabled() is False
+
+    def test_unknown_value_warns_once_and_falls_back_on(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Unknown non-blank value → WARN once + fall back to the NEW
+        default (ON); the fallback caches so the warning fires once.
+        """
+        import logging
+
+        import daemon.services.report_integrity_guard as rig
+
+        monkeypatch.setenv(
+            constants.WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED,
+            "banana",
+        )
+        monkeypatch.setattr(rig, "_B_GUARD_ENABLED", None)
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.report_integrity_guard"
+        ):
+            assert rig.resolve_report_integrity_b_guard_enabled() is True
+            # Cached: a second call returns without re-warning.
+            assert rig.resolve_report_integrity_b_guard_enabled() is True
+        # Cache ENGAGED (direct): the fallback boolean is stored, not
+        # re-derived per call — this is what makes the warn-once pin real.
+        assert rig._B_GUARD_ENABLED is True
+        warn_records = [
+            r
+            for r in caplog.records
+            if "not a recognized" in r.getMessage()
+            and r.levelno == logging.WARNING
+        ]
+        assert len(warn_records) == 1, (
+            "unknown value must WARN exactly once (cache) and fall back "
+            f"to the ON default; got {len(warn_records)} warnings"
+        )
+        assert "falling back" in warn_records[0].getMessage()
+        assert "ON (default" in warn_records[0].getMessage()
 
 
 class TestAKillSwitchReservedUnused:

@@ -1215,15 +1215,14 @@ class TestEnforcementAction:
     async def test_flag_off_means_zero_notice_work(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Kill-switch OFF (ship default) → the enforcement action
+        """Kill-switch OFF (explicit ``=0``) → the enforcement action
         short-circuits before ANY notice work — no enqueue, no ledger
         entry (the flag check is the first statement).
         """
         import daemon.services.report_integrity_guard as rig
 
-        monkeypatch.delenv(
-            "WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED",
-            raising=False,
+        monkeypatch.setenv(
+            "WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED", "0"
         )
         monkeypatch.setattr(rig, "_B_GUARD_ENABLED", None)
         rig._B_NOTICE_LEDGER.clear()
@@ -1246,12 +1245,15 @@ class TestEnforcementAction:
 
 
 class TestKillSwitchRevertProof:
-    """Revert path proof: flag OFF + incident shape → NO notice, NO
-    enqueue call, ONLY the ``[ReportIntegrityGuard]`` soak log.
+    """Revert path proof: flag OFF (explicit ``=0``) + incident shape →
+    NO notice, NO enqueue call, ONLY the ``[ReportIntegrityGuard]`` soak
+    log.
 
-    This is the operator-facing guarantee behind D2.5-FLIP: setting
-    ``WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED=0`` (or
-    blanking the env) + restart restores EXACTLY the stage-ii behavior.
+    This is the operator-facing guarantee behind the D2.5-FLIP default
+    promotion (landed 2026-10-31): setting
+    ``WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED=0`` — the
+    ONLY revert path now (blanking/unsetting the env resolves ON, the
+    new default) — + restart restores EXACTLY the stage-ii behavior.
     (Commit-chain proof: each stage is its own commit — ``git revert
     <stage-iii>`` restores stage-ii byte-behavior; with the flag OFF the
     stage-iii diff is unreachable, so the revert is a formality for the
@@ -1262,9 +1264,8 @@ class TestKillSwitchRevertProof:
     def _flag_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import daemon.services.report_integrity_guard as rig
 
-        monkeypatch.delenv(
-            "WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED",
-            raising=False,
+        monkeypatch.setenv(
+            "WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED", "0"
         )
         monkeypatch.setattr(rig, "_B_GUARD_ENABLED", None)
         rig._B_NOTICE_LEDGER.clear()

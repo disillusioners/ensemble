@@ -4,7 +4,8 @@
 # Replays the 43070f6f-class silent-death shape on the dev-authored repro at
 # tests/integration/test_report_integrity_repro.py:
 #   * junk-report child (zero-tool-call no-work opener) + parent declaring wait
-#   * OFF state (ship default) — guard SAW it (declared-waiting violation WARNING),
+#   * OFF state (explicit env "0"; ship default is ON since the 2026-10-31
+#     default promotion) — guard SAW it (declared-waiting violation WARNING),
 #     parent still completes, NO adjudication notice
 #   * ON state (env per-test) — adjudication notice enqueued with
 #     source=system:report-integrity-guard

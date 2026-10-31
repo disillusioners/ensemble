@@ -2,17 +2,21 @@
 # Test Pack: ri_off_behavioral_probe_test — P2 "OFF means OFF" behavioral probe
 #
 # Gate scope 2: THE core shipping-posture proof for the P2 report-integrity
-# gate (branch feature/wc-wake-report-integrity). The shipping state is the
-# kill-switch WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED OFF
-# (unset). This pack authors and runs the BEHAVIORAL probe on the REAL
+# gate (branch feature/wc-wake-report-integrity). Shipping state is
+# DEFAULT-ON since the b-guard default promotion (2026-10-31): unset
+# resolves ON; the explicit kill switch
+# WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED=0 is the OFF path.
+# This pack authors and runs the BEHAVIORAL probe on the REAL
 # completion path (JobFeedbackObserver._finalize_job — the production
 # observer_finalize_job site) over a file-backed SQLite seam:
 #
 #   1. incident shape seeded in durable rows → REAL finalize with flag
-#      UNSET → exactly ONE [ReportIntegrityGuard] soak log line, ZERO
-#      durable writes by the guard, completion PROCEEDS, NO gate delay
-#      (short-circuit < 100 ms; NOTICE budget never awaited);
-#   2. parity: flag explicitly "0" behaves identically;
+#      explicitly "0" (∥ "off") → exactly ONE [ReportIntegrityGuard] soak
+#      log line, ZERO durable writes by the guard, completion PROCEEDS, NO
+#      gate delay (short-circuit < 100 ms; NOTICE budget never awaited);
+#   2. ON-contrast: flag explicitly "1" (∥ unset → promoted default-ON,
+#      2026-10-31) — enforcement fires, proving the OFF assertions
+#      discriminate;
 #   3. S3 scoping spot: flag OFF does NOT touch the always-on Wave-1
 #      instruments ((c) marker suffix-append + NR-3 junk counter).
 #
@@ -22,7 +26,7 @@
 #                      < the 300 s absolute cap)
 #
 # Exit codes: 0=PASS, 1=FAIL, 124=TIMEOUT.
-# Expected: 4 tests (unset / explicit_zero / ON-contrast control / s3 spot)
+# Expected: 5 tests (off[explicit_zero] / off[explicit_off] / on-contrast[explicit_one] / on-contrast[unset] / s3 spot)
 
 PACK_NAME="ri_off_behavioral_probe_test"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,8 +53,9 @@ if [ ! -x ".venv/bin/pytest" ]; then
 fi
 
 # Belt-and-braces: the probe pins the flag per sub-case via monkeypatch,
-# but the baseline process env must NOT pre-flip the switch (ship state =
-# unset). Sub-case "explicit_zero" re-sets it to "0" inside the probe.
+# but the baseline process env must NOT pre-flip the switch (unset now
+# resolves to the promoted default ON; the OFF sub-cases use explicit
+# "0"/"off" inside the probe).
 unset WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED 2>/dev/null || true
 
 # Layer 2 — script-internal timeout interrupts a hung run.

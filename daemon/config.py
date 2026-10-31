@@ -4627,26 +4627,29 @@ class ReportIntegrityConfig(BaseSettings):
     binding below MUST equal it, pinned by
     ``tests/unit/services/test_b_kill_switch_registry.py``).
 
-    Flip semantics (decisions.md C2-D2.5-FLIP, leader-CONFIRMED
-    2026-08-30 — OPERATOR-OWNED, no auto-flip exists anywhere):
+    Flip semantics (D2.5-FLIP default promotion LANDED 2026-10-31;
+    the pre-committed operator flip was executed — no auto-flip
+    exists anywhere, the default simply ships ON now):
 
-    * **OFF (default, ship state)** — log-only mode: the stage-ii
-      ``[ReportIntegrityGuard]`` WARNING still fires at the
-      completion-stamp sites; NO notice is ever injected.
-    * **ON** — enforcement: when the same-tx evaluation finds a
-      declared-waiting violation at a parent-COMPLETED stamp, ONE
-      adjudication notice is injected to the parent via the durable
-      enqueue path (``system:report-integrity-guard``). It NEVER
-      blocks completion (C2-D2.6 fail-OPEN) and never touches the
-      stamp transaction.
+    * **ON (default, ship state since 2026-10-31)** — enforcement:
+      when the same-tx evaluation finds a declared-waiting violation
+      at a parent-COMPLETED stamp, ONE adjudication notice is
+      injected to the parent via the durable enqueue path
+      (``system:report-integrity-guard``). It NEVER blocks completion
+      (C2-D2.6 fail-OPEN) and never touches the stamp transaction.
+    * **OFF (kill switch: set env ``=0``)** — log-only mode: the
+      stage-ii ``[ReportIntegrityGuard]`` WARNING still fires at the
+      completion-stamp sites; NO notice is ever injected. Setting
+      ``=0`` is the revert path — NEVER blanking the env.
     * **Restart required** — the resolver reads + caches the env once
       at boot; flipping mid-flight has no effect until restart.
-      Truthy: ``1``/``true``/``yes``/``on``; falsy:
-      ``0``/``false``/``no``/``off``; unset/blank/unknown → OFF
-      (blanking the env + restart is the revert path). Soak/flip
-      policy: ≤2-week stage-ii log soak, then the OPERATOR flips ON
-      on first deploy; withheld on false-fires; immediate flip on
-      any silent-death incident.
+      Token/blank semantics (AUTHORITATIVE home — ``daemon/constants.py``
+      and the guard-module comment point here): truthy
+      ``1``/``true``/``yes``/``on``; falsy ``0``/``false``/``no``/
+      ``off``; unset → ON; set-but-blank/unknown FAILS BOOT at config
+      validation (this pydantic bool binding rejects it —
+      ValidationError); blank ≡ unset only for config-less readers
+      (the resolver's warn-once→ON fallback — tests/harnesses).
 
     The reserved candidate-(a) kill-switch name (see
     ``daemon/constants.py``, the ``WC_REPORT_INTEGRITY_A_*`` constant)
@@ -4663,17 +4666,18 @@ class ReportIntegrityConfig(BaseSettings):
     # override surface) while the runtime gate
     # (``daemon/services/report_integrity_guard.is_report_integrity_b_enforcement_active``)
     # reads the env via the constants NAME and ANDs this field — an
-    # explicit YAML ``false`` vetoes an env flip (defense-in-depth);
-    # a YAML ``true`` alone never enables (the env flip is the
-    # documented operator path).
+    # explicit YAML ``false`` vetoes an unset/truthy env
+    # (defense-in-depth); a YAML ``true`` never FORCES ON against an
+    # explicit ``=0`` (the env still rules).
     b_terminal_waiting_guard_enabled: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "(b) terminal-child-aware waiting guard: OFF = log-only "
-            "(stage-ii [ReportIntegrityGuard] WARNING still fires); ON = "
-            "enforcement (adjudication notice injected to the parent at "
-            "the completion stamp, never blocks). Restart required to "
-            "flip. Operator-owned flip per C2-D2.5-FLIP."
+            "(b) terminal-child-aware waiting guard: ON (default since "
+            "2026-10-31, D2.5-FLIP landed) = enforcement (adjudication "
+            "notice injected to the parent at the completion stamp, "
+            "never blocks); OFF (set env =0) = log-only (stage-ii "
+            "[ReportIntegrityGuard] WARNING still fires). The =0 kill "
+            "switch is retained. Restart required to flip."
         ),
     )
 

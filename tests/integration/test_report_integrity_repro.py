@@ -513,8 +513,10 @@ async def test_b_predicate_dormant_on_healthy_sibling(engine: Engine):
 # Flag ON in the repro's incident shape → the completion stamp is NOT
 # blocked (fail-OPEN, D2.6) and ONE adjudication notice is injected to
 # the parent via the durable enqueue with the reserved system source.
-# Flag OFF (ship default) → LOG-ONLY byte-parity with stage ii: the
-# [ReportIntegrityGuard] WARNING still fires, NO notice, NO enqueue.
+# Flag OFF (explicit =0 kill switch — NOT the default since the
+# D2.5-FLIP promotion of 2026-10-31) → LOG-ONLY byte-parity with
+# stage ii: the [ReportIntegrityGuard] WARNING still fires, NO notice,
+# NO enqueue.
 # ═════════════════════════════════════════════════════════════════════════════
 
 
@@ -645,7 +647,9 @@ async def test_b_enforcement_notice_injected_with_flag_on(
 async def test_b_flag_off_log_only_byte_parity_with_stage_ii(
     engine: Engine, monkeypatch, caplog
 ):
-    """Flag OFF (ship default) in the SAME incident shape → LOG-ONLY:
+    """Flag OFF (explicit ``=0`` kill switch — NOT the default since
+    the D2.5-FLIP promotion of 2026-10-31) in the SAME incident shape →
+    LOG-ONLY:
     the stage-ii [ReportIntegrityGuard] WARNING fires at the stamp, the
     completion proceeds exactly as stage ii, and NO notice is ever
     attempted (byte-parity with the stage-ii behavior).
@@ -659,9 +663,8 @@ async def test_b_flag_off_log_only_byte_parity_with_stage_ii(
         ReportInjectionRepository,
     )
 
-    monkeypatch.delenv(
-        "WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED",
-        raising=False,
+    monkeypatch.setenv(
+        "WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED", "0"
     )
     monkeypatch.setattr(rig, "_B_GUARD_ENABLED", None)
     monkeypatch.setattr(rig, "_B_NOTICE_LEDGER", {})

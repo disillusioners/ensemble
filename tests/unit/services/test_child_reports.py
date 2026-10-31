@@ -2350,9 +2350,11 @@ class TestReportIntegrityGuardStageIIIEnforcement:
     def test_flag_off_root_path_b_violation_report_is_inert(
         self, engine, monkeypatch
     ):
-        """Flag OFF (ship default): the sync result may still carry the
-        evaluation, but the enforcement branch in the async dispatch is
-        unreachable — byte-parity with stage ii (no enqueue, no notice).
+        """Flag OFF (explicit ``=0`` kill switch — NOT the default since
+        the D2.5-FLIP promotion of 2026-10-31): the sync result may
+        still carry the evaluation, but the enforcement branch in the
+        async dispatch is unreachable — byte-parity with stage ii (no
+        enqueue, no notice).
         """
         import asyncio
         from unittest.mock import AsyncMock
@@ -2368,13 +2370,13 @@ class TestReportIntegrityGuardStageIIIEnforcement:
         _seed_pending_injection(engine, parent_id=root_id, child_id=child_id)
 
         # Override the class-level flag-ON fixture: this test pins the
-        # FLAG-OFF ship default (the test-body monkeypatch wins over the
-        # autouse fixture's env/cache state).
+        # FLAG-OFF kill switch (explicit =0 — the test-body monkeypatch
+        # wins over the autouse fixture's env/cache state; delenv would
+        # now resolve ON, the new default).
         import daemon.services.report_integrity_guard as _rig
 
-        monkeypatch.delenv(
-            "WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED",
-            raising=False,
+        monkeypatch.setenv(
+            "WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED", "0"
         )
         monkeypatch.setattr(_rig, "_B_GUARD_ENABLED", None)
 

@@ -16,8 +16,9 @@ STAGE-III CONTRACT (D2.6 LOCKED — fail-OPEN, never block):
 * The enforcement ACTION (the adjudication-notice enqueue) happens
   AFTER the stamp has committed, in the caller's async post-commit
   context, wrapped in a bounded 5s wait.
-* Flag OFF (ship default) = byte-parity with stage ii: the ONLY
-  added work is one cached-boolean check; NO notice work happens.
+* Flag ``=0`` (kill switch; default ON since 2026-10-31) = byte-parity
+  with stage ii: the ONLY added work is one cached-boolean check; NO
+  notice work happens.
 
 Why a separate module:
 
@@ -401,20 +402,25 @@ def log_declared_waiting_violations(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# B.S.2 — kill-switch wiring (flag-gated enforcement, DORMANT by default)
+# B.S.2 — kill-switch wiring (flag-gated enforcement; default ON as of
+# 2026-10-31, D2.5-FLIP default promotion — ``=0`` is the kill switch)
 # ─────────────────────────────────────────────────────────────────────────────
 #
 # Mirrors the ``ENSEMBLE_WC_WAKE_ENQUEUE`` resolver shape (env const →
-# resolve-once + cache → boot INFO log) with the default-OFF direction
-# of that precedent (NOT the governor's default-ON): the ship state is
-# stage-ii log-only (decisions.md C2-D2.5, C2-D2.5-FLIP). Restart-
-# required semantics: the resolved boolean is cached for the process
-# lifetime — flipping the env mid-flight has no effect until restart.
+# resolve-once + cache → boot INFO log). The pre-committed D2.5-FLIP
+# default promotion has LANDED (2026-10-31): unset resolves ON
+# (enforcement) and the explicit ``=0`` value is the retained kill
+# switch back to stage-ii log-only (token/blank semantics single-homed
+# in daemon/config.py::ReportIntegrityConfig — set-but-blank/unknown
+# FAILS BOOT at config validation). Restart-required semantics: the
+# resolved boolean is cached for the process lifetime — flipping the
+# env mid-flight has no effect until restart.
 #
-# NO AUTO-FLIP EXISTS: nothing in this module (or anywhere in the
+# NO AUTO-FLIP EXISTS (and none is needed any more — the default is
+# already ON): nothing in this module (or anywhere in the
 # daemon) sets the flag truthy, schedules a flip, or reads a clock to
 # decide the flag state. The ONLY writer of the flag is the operator's
-# environment (D2.5-FLIP: operator-owned soak/flip policy). Tests must
+# environment. Tests must
 # reset the cached resolver (``_B_GUARD_ENABLED`` to ``None``, as the
 # test fixtures do via monkeypatch) on teardown to observe env flips
 # within a session.
@@ -422,22 +428,44 @@ def log_declared_waiting_violations(
 # The env NAME comes from daemon/constants.py — no literal fork (pinned
 # by tests/unit/services/test_b_kill_switch_registry.py).
 _B_GUARD_ENV = WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED
+
+# Recognized truthy/falsy tokens — single source for BOTH the resolver
+# membership checks and the warn-once prose. The *_ORDER tuples pin the
+# canonical display order: sorted() alone would emit "1/on/true/yes"
+# (lexicographic) and churn the byte-stable log text.
+_B_FALSY_TOKEN_ORDER = ("0", "false", "no", "off")
+_B_TRUTHY_TOKEN_ORDER = ("1", "true", "yes", "on")
+_B_FALSY_TOKENS = frozenset(_B_FALSY_TOKEN_ORDER)
+_B_TRUTHY_TOKENS = frozenset(_B_TRUTHY_TOKEN_ORDER)
+_B_TOKEN_PROSE = (
+    "Valid falsy: " + "/".join(_B_FALSY_TOKEN_ORDER)
+    + ". Valid truthy: " + "/".join(_B_TRUTHY_TOKEN_ORDER) + "."
+)
+
 _B_GUARD_ENABLED: bool | None = None
 _B_GUARD_BOOT_LOG_EMITTED: bool = False
 
 
 def resolve_report_integrity_b_guard_enabled() -> bool:
-    """Resolve and cache the (b) enforcement kill-switch (B.S.2).
+    """Resolve and cache the (b) enforcement gate (B.S.2).
 
     Returns:
-        ``True`` ONLY when the operator explicitly flipped the env ON
-        (truthy: ``1``/``true``/``yes``/``on``). Unset, blank, falsy
-        (``0``/``false``/``no``/``off``), and unknown values all
-        resolve ``False`` — the OFF default is the ship state
-        (stage-ii log-only) and blanking the env mid-incident is the
-        instant-revert INTENT (the cache still requires a restart to
-        observe the change). Unknown non-blank values additionally
-        WARN once (cached on first access).
+        ``True`` by default (D2.5-FLIP default promotion landed
+        2026-10-31): unset AND set-but-blank (``""`` / whitespace ≡
+        unset ≡ new default) both resolve ``True`` (enforcement,
+        silently — no warn), as do the recognized truthy tokens
+        (``1``/``true``/``yes``/``on``). The recognized falsy tokens
+        (``0``/``false``/``no``/``off``) resolve ``False`` — setting
+        ``=0`` (NOT blanking the env) is the kill-switch revert path.
+        Unknown non-blank values additionally WARN once (cached on
+        first access) and fall back to the NEW default (ON).
+
+        Boot-validation boundary: the lenient blank/unknown branches
+        are reachable by CONFIG-LESS readers (tests, harnesses) only —
+        with a real boot-loaded ``Config``, the pydantic bool binding
+        rejects blank/whitespace/unknown env values at validation (the
+        daemon fails to boot; see
+        ``ReportIntegrityConfig.b_terminal_waiting_guard_enabled``).
 
     The cached value lives for the daemon's lifetime: restart
     required to flip (mirror of the WC-wake / governor-guard
@@ -446,20 +474,23 @@ def resolve_report_integrity_b_guard_enabled() -> bool:
     global _B_GUARD_ENABLED
     if _B_GUARD_ENABLED is not None:
         return _B_GUARD_ENABLED
-    raw = os.environ.get(_B_GUARD_ENV, "0").strip().lower()
-    if raw in ("0", "false", "no", "off"):
+    raw = os.environ.get(_B_GUARD_ENV, "1").strip().lower()
+    if raw in _B_FALSY_TOKENS:
         _B_GUARD_ENABLED = False
-    elif raw in ("1", "true", "yes", "on"):
+    elif raw in _B_TRUTHY_TOKENS or not raw:
+        # Truthy tokens → ON; set-but-blank ("" / whitespace) ≡ unset ≡
+        # the new default — both resolve silently (no warn).
         _B_GUARD_ENABLED = True
     else:
         logger.warning(
             "%s=%r is not a recognized truthy/falsy value; falling back "
-            "to OFF (default — stage-ii log-only mode). Valid falsy: "
-            "0/false/no/off. Valid truthy: 1/true/yes/on.",
+            "to ON (default — enforcement; set =0 for the stage-ii "
+            "log-only mode). %s",
             _B_GUARD_ENV,
             raw,
+            _B_TOKEN_PROSE,
         )
-        _B_GUARD_ENABLED = False
+        _B_GUARD_ENABLED = True
     return _B_GUARD_ENABLED
 
 
@@ -471,12 +502,14 @@ def is_report_integrity_b_enforcement_active(manager: Any = None) -> bool:
     itself an env-bound Pydantic field) — the same dual-read shape as
     the ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED`` precedent:
 
-    * env OFF (default) → ``False`` — log-only, zero notice work.
-    * env ON + config section absent (tests, partial harnesses) →
-      ``True`` — the env flip is the documented operator path.
-    * env ON + explicit config ``false`` → ``False`` — an explicit
-      YAML veto is defense-in-depth; a YAML ``true`` alone NEVER
-      enables (the env must still be flipped).
+    * env unset/blank (default) or truthy → the config field decides:
+      section absent or ``True`` → ``True`` (enforcement — the
+      default posture since the D2.5-FLIP landed 2026-10-31).
+    * env ``=0`` (any recognized falsy token) → ``False`` — log-only,
+      zero notice work: the kill switch, decisive regardless of YAML.
+    * An explicit config ``false`` still vetoes an unset/truthy env
+      (defense-in-depth); a config ``true`` never FORCES ON against
+      an explicit ``=0`` (the env still rules).
 
     Args:
         manager: Optional manager-like object carrying ``.config``
@@ -510,14 +543,23 @@ def emit_report_integrity_b_guard_boot_log() -> None:
         return
     _B_GUARD_BOOT_LOG_EMITTED = True
     enabled = resolve_report_integrity_b_guard_enabled()
-    state_line = (
-        "enabled (enforcement: one adjudication notice injected to the "
-        "parent at the completion stamp; never blocks)"
-        if enabled
-        else "DISABLED (default — log-only mode: the [ReportIntegrityGuard] "
+    config_veto_note = (
+        "(env leg only; explicit "
+        "`report_integrity.b_terminal_waiting_guard_enabled: false` in "
+        "config.yaml still vetoes)"
+    )
+    enabled_line = (
+        "ENABLED (default — enforcement: one adjudication notice "
+        "injected to the parent at the completion stamp; never blocks) "
+        + config_veto_note
+    )
+    disabled_line = (
+        "DISABLED (explicit =0 — log-only mode: the "
+        "[ReportIntegrityGuard] "
         "soak log still fires at completion stamps; no notice is ever "
         "injected)"
     )
+    state_line = enabled_line if enabled else disabled_line
     logger.info(
         "Report-integrity (b) terminal-waiting guard resolved: %s "
         "(env %s=%s). Restart required to flip. See docs/setup.md "
@@ -778,8 +820,9 @@ async def enforce_declared_waiting_violations(
 
     Flow per call:
 
-    1. Kill-switch OFF (ship default) → return immediately — zero
-       notice work (the stage-ii hot-path bound is preserved).
+    1. Kill-switch ``=0`` (default is ON since 2026-10-31) → return
+       immediately — zero notice work (the stage-ii hot-path bound is
+       preserved).
     2. ``None`` / healthy / malformed report → no-op (fail-OPEN).
     3. Dedupe: the same violation set already noticed for this
        parent → no-op (ONE notice per completion episode; see
