@@ -566,7 +566,7 @@ class TestPreCall95InjectionDominatedSkip:
         )
         payload = make_messages(3) + injected
 
-        with caplog.at_level(logging.INFO, logger="daemon.graph"):
+        with caplog.at_level(logging.DEBUG, logger="daemon.graph"):
             # Call 1 — crosses 95%, floor engages, real shrink lands.
             outcome1 = await _run_hook(graph, compactor, payload)
             # Call 2 — same heavy payload (matches pre-Lane-1 test
@@ -629,7 +629,7 @@ class TestPreCall95InjectionDominatedSkip:
         # call lands a "complete" log.
         precall_infos = [
             r for r in caplog.records
-            if "precall-95" in r.getMessage() and r.levelno == logging.INFO
+            if "precall-95" in r.getMessage() and r.levelno == logging.DEBUG
         ]
         assert len(precall_infos) >= 4, (
             f"precall-95 logs: 3 'attempting' (one per call) + 3+ "
