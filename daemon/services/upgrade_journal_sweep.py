@@ -2361,6 +2361,33 @@ class UpgradeJournalSweepService:
                 f"exit_code={exit_code}): {exc!r} — no retry, continuing "
                 "reaper loop"
             )
+        # Incident 2026-10-31 (restart-arm livelock): an OBSERVED
+        # executor exit on an unflipped restart txn is authoritative
+        # death evidence — close the arm HERE (in_flight=None +
+        # pending_op cleared + restart_abandoned event + run_id-matched
+        # lock release) so the next sweep cycle delivers any pending
+        # wake instead of livelocking until a human restarts the
+        # daemon. BOTH reaper exit legs (normal waitpid and
+        # ChildProcessError exit_code=-1) funnel into this method, so
+        # both shapes close. NEVER touches a flipped=true txn (mutation
+        # happened — halt-for-human semantics stay).
+        try:
+            close_note = uj.close_restart_arm_executor_exit(
+                job.install_dir, job.run_id, exit_code, pid=job.pid,
+            )
+        except Exception as close_exc:  # noqa: BLE001 — the reaper loop
+            # must never die on the closure path; a failed closure
+            # leaves boot recovery (close_stale_restart_arm) as the
+            # backstop.
+            close_note = None
+            logger.warning(
+                "UpgradeJournalSweepService: executor-exit arm closure "
+                "FAILED (run_id=%s exit_code=%s): %r — boot recovery "
+                "remains the backstop",
+                job.run_id, exit_code, close_exc,
+            )
+        if close_note:
+            logger.info("UpgradeJournalSweepService: %s", close_note)
 
     async def _journal_executor_still_running(
         self, job: ReaperJob, timeout_s: int
