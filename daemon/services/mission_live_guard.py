@@ -331,6 +331,7 @@ async def evaluate_mission_live(
     bus_pending_count: int | None = None,
     timeout_seconds: int = MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
     skip_root: bool = False,
+    discount_instance_id: str | None = None,
 ) -> MissionLiveVerdict:
     """Evaluate the three-leg mission-live guard (+ zombie backstop).
 
@@ -391,6 +392,18 @@ async def evaluate_mission_live(
             pre-stamp decision. Leg (c) stays active for all other
             consumers (f2, sweeps, the emission gate — where the
             root is already terminal when the gate runs).
+        discount_instance_id: Generalizes ``skip_root`` (Pattern (h),
+            wi-78967dba, 2026-10-31): the named instance's own
+            non-terminal status is NOT a hold reason on this
+            evaluation — circular bookkeeping evidence, not liveness
+            evidence. Unlike ``skip_root`` (which discounts exactly
+            the walk root), this discounts the JOB'S OWN instance
+            wherever it appears in the tree (for a child job that is
+            a non-root member). Every OTHER member's liveness still
+            holds through the normal verdict. Default ``None`` =
+            zero behavioral change for every existing caller; the
+            conjunct is added at the two sites that already carry
+            the ``skip_root`` conjunct.
 
     Returns:
         :class:`MissionLiveVerdict`. NEVER raises — internal TREE-WALK
@@ -406,6 +419,7 @@ async def evaluate_mission_live(
             bus_pending_count=bus_pending_count,
             timeout_seconds=timeout_seconds,
             skip_root=skip_root,
+            discount_instance_id=discount_instance_id,
         )
     except Exception as exc:  # noqa: BLE001 — fail-open is the contract
         logger.warning(
@@ -752,6 +766,7 @@ async def _evaluate_legs(
     bus_pending_count: int | None,
     timeout_seconds: int,
     skip_root: bool = False,
+    discount_instance_id: str | None = None,
 ) -> MissionLiveVerdict:
     """Leg evaluation (async — blocking repo reads go through
     ``asyncio.to_thread`` per the repo's standard pattern). Raises on
@@ -894,6 +909,10 @@ async def _evaluate_legs(
             status is not None
             and status not in TERMINAL_INSTANCE_STATUSES
             and not (skip_root and tree_id == instance_id)
+            and not (
+                discount_instance_id
+                and tree_id == discount_instance_id
+            )
         ):
             any_non_terminal = True
         # ANCHOR SCOPE (2026-10-21, running-zombie cycle 2): the
@@ -980,6 +999,10 @@ async def _evaluate_legs(
                 and st not in TERMINAL_INSTANCE_STATUSES
                 and tid not in stranded_set
                 and not (skip_root and tid == instance_id)
+                and not (
+                    discount_instance_id
+                    and tid == discount_instance_id
+                )
                 for tid, st in member_status.items()
             )
 

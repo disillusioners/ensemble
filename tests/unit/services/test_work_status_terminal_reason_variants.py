@@ -68,12 +68,21 @@ class TestTerminalReasonVariantsFor:
                 f"reverse index of {tgt!r}"
             )
 
-    def test_completed_has_no_aliases_beyond_itself(self) -> None:
-        """``completed`` currently has a single-element variant set —
-        pinned so a future alias addition is a CONSCIOUS map edit
-        picked up by the filter automatically.
+    def test_completed_carries_only_the_zombie_provenance_alias(
+        self,
+    ) -> None:
+        """``completed`` carries EXACTLY one provenance alias —
+        ``zombie_active_completed`` (the pattern-(h) zombie-ACTIVE
+        close token, wi-78967dba; the lane's reverse-index
+        auto-derivation pin covers all three families). Pinned
+        exact-set so any FURTHER alias addition is a CONSCIOUS map
+        edit picked up by the filter automatically. (Set semantics:
+        order follows map insertion, not contract.)
         """
-        assert terminal_reason_variants_for("completed") == ("completed",)
+        assert set(terminal_reason_variants_for("completed")) == {
+            "completed",
+            "zombie_active_completed",
+        }
 
     def test_failed_carries_the_error_alias(self) -> None:
         """``error`` (Instance-status alias) folds onto ``failed`` —

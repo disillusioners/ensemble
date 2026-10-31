@@ -23,27 +23,19 @@ carries ``auto_continued_at`` — the column added by
   error on the same one-shot connection as the executing-turns read
   (driven directly on the two F5-owned reads — see the scoping note).
 
-**SCOPING NOTE — a pre-existing, OUT-OF-LANE defect is disclosed (STOP
-item per the dispatch's spec-vs-tree rule):** the capture path's
-SECOND read — the store census (``_read_store_census``,
-``daemon/services/wedge_capture/db_capture.py:347``) — is BORN-BROKEN
-on real PostgreSQL: its SQL selects ``c.n_live_tup`` from
-``pg_class``, but ``n_live_tup`` is a ``pg_stat_user_tables`` column
-and does not exist on ``pg_class`` in any PG version ⇒ the census
-ALWAYS fails with ``UndefinedColumn`` on a real server (measured on
-the scratch PG16: ``column c.n_live_tup does not exist``), aborting
-the capture connection's transaction and cascading
-``InFailedSqlTransaction`` into the THIRD read (resume history) in
-the full ``capture_db_snapshot`` path. The contract's F5.3 says "No
-other change to the module" and F5-d says the census "still works" —
-that premise is FALSE at tree reality (the census never worked on a
-real server; at BASE its failure was indistinguishable from the
-rename cascade because BOTH read-1 and the census aborted the
-transaction). This pack therefore (a) asserts the census failure mode
-is NOT the F5 cascade signature, (b) drives the two F5-OWNED reads
-directly on one connection for (iii), and (c) does NOT touch the
-census SQL — the born-broken census is reported to the dispatcher as
-a spec-vs-tree STOP item, owner = the wedge-capture lane.
+**SCOPING NOTE — the previously-disclosed born-broken census defect
+was CLOSED by the R-10 rider (wi-78967dba, 2026-10-31): the store
+census now LEFT JOINs pg_stat_user_tables (``s.n_live_tup`` — the
+column never existed on pg_class), so the census is POPULATED on
+real PG and the InFailedSqlTransaction cascade into the third read
+is gone. The pack's (ii) test re-pointed from "failure mode is not
+the F5 cascade" to "census POPULATED" (deterministic ``reltuples``
+via ANALYZE; NULL-safe ``n_live_tup``; ``total_bytes`` >= one page
+for a seeded table). Plantable mutation: restore ``c.n_live_tup``
+in ``daemon/services/wedge_capture/db_capture.py`` ⇒ (ii) flips to
+``failed:UndefinedColumn`` ⇒ RED. The original STOP-item history
+(owner = wedge-capture lane, no active owner lane) is recorded in
+the v0.27.13 staged-release composition metadata.
 
 BASE-vs-HEAD: at BASE (``FROM tasks``) the executing-turns read fails
 swallowed (``[]``/0), the connection's transaction ABORTS, and the
@@ -60,7 +52,7 @@ read-2 aborts ⇒ RED.
 
 Run (house form — scratch PG, per-variable env scrub, marker override)::
 
-    cd /home/nea/ensemble-src-wt-dbpool-idletxn && \
+    cd /home/nea/ensemble-src-wt-missed-finalize && \
     env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD \
         -u POSTGRES_HOST -u POSTGRES_PORT -u DAEMON_PORT \
     HOME="$(mktemp -d)" \
@@ -123,6 +115,73 @@ def _capture(pg_engine) -> dict:
     return capture_db_snapshot(dsn, boot_epoch="f5b-boot-epoch")
 
 
+def _seed_checkpoint_tables(pg_engine) -> None:
+    """R-10 (wi-78967dba): minimal-but-real census targets. The
+    langgraph checkpoint tables are NOT part of the SQLModel
+    metadata (the conftest's ``create_all`` never makes them), so
+    the pack creates minimal shapes for the four CHECKPOINT_TABLES
+    names, seeds rows, and ANALYZEs (``reltuples`` is the
+    deterministic ANALYZE figure; ``n_live_tup`` is the stats-
+    collector estimate — exercised NULL-safely)."""
+    from sqlalchemy import text
+
+    with pg_engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS checkpoints ("
+                "thread_id TEXT NOT NULL, "
+                "checkpoint BYTEA, "
+                "metadata JSONB)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS checkpoint_blobs ("
+                "thread_id TEXT NOT NULL, "
+                "channel TEXT NOT NULL, "
+                "version BIGINT NOT NULL, "
+                "type TEXT NOT NULL, "
+                "blob BYTEA)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS checkpoint_writes ("
+                "thread_id TEXT NOT NULL, "
+                "checkpoint_ns TEXT NOT NULL, "
+                "checkpoint_id TEXT NOT NULL, "
+                "task_id TEXT NOT NULL, "
+                "idx INTEGER NOT NULL, "
+                "channel TEXT NOT NULL, "
+                "type TEXT NOT NULL, "
+                "blob BYTEA)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS checkpoint_migrations ("
+                "version INTEGER NOT NULL, "
+                "name TEXT NOT NULL)"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO checkpoints (thread_id) VALUES "
+                "('f5b-thread-1'), ('f5b-thread-2')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO checkpoint_blobs "
+                "(thread_id, channel, version, type, blob) VALUES "
+                "('f5b-thread-1', '__root__', 1, 'msgpack', "
+                "'\\x00'::bytea)"
+            )
+        )
+        conn.execute(text("ANALYZE checkpoints"))
+        conn.execute(text("ANALYZE checkpoint_blobs"))
+
+
 class TestF5bWedgeCaptureReadPath:
     """F5-b — the reads target ``task`` and the F5 cascade is gone."""
 
@@ -135,21 +194,47 @@ class TestF5bWedgeCaptureReadPath:
         assert payload["executing_turns_count"] >= 1
 
     def test_subsequent_read_not_the_f5_cascade_signature(self, pg_engine):
-        """(ii) — the read AFTER the executing-turns read on the SAME
-        connection must not fail with 'current transaction is aborted'
-        (the F5 cascade signature — DR-34's steps 2-3). The F5-owned
-        first read succeeds, so nothing it did can abort the
-        transaction. (The census's OWN born-broken failure is
-        disclosed in the module docstring — out of lane.)"""
+        """(ii) — R-10 re-point (wi-78967dba): the store census is
+        POPULATED on real PG. The pre-fix ``c.n_live_tup`` from
+        pg_class ALWAYS failed UndefinedColumn (born-broken); now the
+        LEFT JOIN pg_stat_user_tables shape populates per-table
+        entries with NULL-safe values (``reltuples`` deterministic
+        via ANALYZE; ``n_live_tup`` the stats-collector estimate —
+        int or None; ``total_bytes`` >= one page for a seeded table),
+        the cascade signature is absent, and the read AFTER the
+        census on the same connection still works."""
         _seed(pg_engine)
+        _seed_checkpoint_tables(pg_engine)
         payload = _capture(pg_engine)
         assert payload["status"] == STATUS_OK, payload.get("reason")
-        census_status = payload["checkpoint_store_census"].get("status")
-        assert census_status != "failed:InFailedSqlTransaction", (
-            "F5-b: the read after the executing-turns read failed with "
-            "the aborted-transaction cascade — the tasks→task rename "
-            "did not land"
+        census = payload["checkpoint_store_census"]
+        assert "status" not in census, (
+            "the census must be populated, not failed: "
+            f"{census!r} — the R-10 LEFT JOIN is missing (plant: "
+            "restore c.n_live_tup ⇒ UndefinedColumn)"
         )
+        assert "failed:UndefinedColumn" not in repr(census)
+        # Populated: per-table entries for the seeded census targets
+        # with the three documented value keys.
+        for key in ("checkpoints", "checkpoint_blobs"):
+            assert key in census, census
+            entry = census[key]
+            assert set(entry) >= {
+                "reltuples", "n_live_tup", "total_bytes"
+            }, entry
+            assert entry["reltuples"] is None or (
+                entry["reltuples"] >= 1
+            ), entry
+            assert entry["n_live_tup"] is None or (
+                entry["n_live_tup"] >= 0
+            ), entry  # NULL-safe consumer path exercised
+            assert entry["total_bytes"] is None or (
+                entry["total_bytes"] >= 8192
+            ), entry  # one page for a table with rows
+        # The summary keys the consumer derives (:398-400).
+        assert "checkpoints_rows" in census
+        assert "checkpoint_blobs_rows" in census
+        assert "checkpoint_blobs_bytes" in census
         # And the F5 root error is absent from the whole payload.
         dumped = repr(payload)
         assert 'relation "tasks" does not exist' not in dumped

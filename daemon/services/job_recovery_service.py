@@ -11,6 +11,39 @@ cleanup at daemon startup. ``reconcile_drift_states`` is the periodic
 counterpart (60s default, bypasses ``_is_idle``) that catches drift
 *during* active work — exactly the case ``MaintenanceService._loop``
 skips because it gates on ``_is_idle``.
+
+FILE SIZE RATIONALE (tidier fold 2026-10-31): this module is 5,484
+lines at wi-78967dba HEAD (4,946 at the lane base + 538 this lane).
+It is deliberately ONE service file: every drift leg is a pattern of
+the SAME reconciler charter (the admission-state heal object), and
+the pattern family shares the candidate-loop infrastructure, the E1
+gate wiring, the notify composition, and the knob-passing seams.
+The pattern-(h) lane kept its leg strictly additive per the
+architect's process note (land early, keep the blast radius bounded
+by knobs). Decomposition is a standing base-debt item (manager.py
+13.7k-line decomposition precedent) — NOT to be attempted feature-
+by-feature inside a lane.
+
+Pattern-family map of ``reconcile_drift_states`` legs (letter order
+= the in-method execution order):
+
+* **P1 / (a)** — ``active`` JobItem + PENDING Task with NULL
+  heartbeat → deadlock; cancel+finalize when the instance is dead.
+* **F10 / (b)** — ``done`` JobItem + RUNNING Task → force-complete
+  the zombie Task.
+* **(c)** — ``active`` JobItem + stuck instance → log-only.
+* **(d)** — PENDING Task on terminal JobItem → orphan cleanup.
+* **(e)** — PENDING process_report + dead parent → dead-letter.
+* **f1** — active JobItem + NO Task rows + alive/stale instance →
+  DEAD finalize (``orphan_active_no_task_dead``).
+* **f2** — active JobItem + COMPLETED Task → DONE finalize
+  (``orphan_active_completed_task_done``).
+* **(g)** — defer self-witness watchdog (task-state writes only;
+  excluded from the admission reconciled budget).
+* **(h)** — zombie-ACTIVE close (wi-78967dba): task-kind active
+  JobItem + ALL backing Tasks terminal + non-terminal driving
+  instance → DONE finalize with ``zombie_active_<verdict>`` tokens.
+  See :meth:`_pattern_h_zombie_active_close`.
 """
 
 from __future__ import annotations
@@ -29,8 +62,12 @@ from daemon.repositories.job_queue.models import AdmissionState, Decision
 from daemon.repositories.task.models import TaskStatus
 from daemon.services.dependency_bus import get_dependency_bus
 from daemon.services.job_state_machine import InvalidTransitionError
-from daemon.services.mission_live_guard import evaluate_mission_live
+from daemon.services.mission_live_guard import (
+    evaluate_mission_live,
+    parse_completed_at_naive,
+)
 from daemon.services.timestamps import coerce_to_aware_utc, now_utc_naive
+from daemon.services.work_status import canonicalize_status
 from daemon.services.pool_orchestrator import safe_notify_all_pools
 
 if TYPE_CHECKING:
@@ -104,6 +141,29 @@ _F2_COMPLETED_AGE_FLOOR_SECONDS: int = 60
 # quiet stretch on a waiting parent, short enough that a genuinely
 # abandoned tree does not shield a zombie forever (T2 pins that).
 F1_TREE_ACTIVITY_MAX_AGE_DEFAULT_SECONDS: int = 900
+
+# Pattern (h) zombie-ACTIVE close (wi-78967dba). A1/CF-3: the
+# escalating-WARN streak threshold — the same job skipped/held this
+# many CONSECUTIVE drift cycles (~3.3h at the 300s cadence) fires a
+# stuck-closed WARN (operational visibility, not just forensics).
+# Service-level in-memory dict keyed job_id → consecutive count;
+# reset-on-close, evict-when-gone; restart-reset acceptable
+# (disclosed — no persistence by design, D-5).
+ZOMBIE_CLOSE_STREAK_WARN_THRESHOLD: int = 40
+
+# A1 observability: the (h) counter block's canonical key set —
+# spelled ONCE (tidier fold 2026-10-31; the 7-tuple was duplicated
+# at the leg's return-build and the drift-block consumption site).
+# Order matters for display only; both sites iterate this constant.
+ZOMBIE_CLOSE_COUNTER_KEYS: tuple[str, ...] = (
+    "examined",
+    "age_qualified",
+    "mission_live_holds",
+    "error_skips",
+    "finalized",
+    "race_lost_noop",
+    "zero_watcher_warns",
+)
 
 # Pattern (f1) kill-switch (f1-misfire batch). Env-only, default ON,
 # restart-to-flip semantics per the ENSEMBLE_WC_WAKE_ENQUEUE
@@ -492,6 +552,13 @@ class JobRecoveryService:
         # once the manager is universally wired.
         self._worker_pool = worker_pool
         self._instance_manager = instance_manager
+        # Pattern (h) (wi-78967dba): A1/CF-3 streak state —
+        # service-level in-memory holder (the strand-healer
+        # ``_strand_heal_inflight`` precedent, child_reports.py:292):
+        # job_id → consecutive skip/hold count. Reset-on-close,
+        # evict-when-candidate-disappears; restart-reset acceptable
+        # (in-memory, no persistence — D-5).
+        self._zombie_close_streaks: dict[str, int] = {}
 
     def _is_instance_alive(self, instance_status: str | None) -> bool:
         """Check if an instance status indicates the instance is still alive.
@@ -929,6 +996,9 @@ class JobRecoveryService:
         f1_tree_activity_max_age_seconds: int = (
             F1_TREE_ACTIVITY_MAX_AGE_DEFAULT_SECONDS
         ),
+        zombie_close_enabled: bool = True,
+        zombie_close_age_bound_seconds: int = 7200,
+        zombie_close_batch_cap: int = 25,
     ) -> dict[str, Any]:
         """Detect and repair drift between ``job_queue_items`` and ``task``.
 
@@ -1022,6 +1092,23 @@ class JobRecoveryService:
         running Task means the JobItem's work is still in
         flight; Pattern (a) owns that surface.
 
+        **(h)** zombie-ACTIVE JobItem close (wi-78967dba):
+        a task-kind ``active`` JobItem whose backing Task is
+        TERMINAL while the driving instance stays non-terminal
+        (RUNNING-stalled). The f-arms never terminalize it (the
+        E1 gate self-holds on the zombie's own instance —
+        circular bookkeeping); its ``job_locks`` row is immortal
+        and with ``concurrency_limit=1`` queues a single zombie
+        blocks the queue indefinitely. The (h) leg terminalizes
+        exactly this shape (discounted E1 via
+        ``discount_instance_id``; fail-CLOSED on any unprovable
+        leg; hours-wide monotone age bound; batch cap;
+        kill-switch) through the census-registered
+        ``force_finalize_orphan`` seam (finalize FIRST, release
+        LAST, ONE transaction) with one of three provenance
+        tokens ``zombie_active_{completed,failed,cancelled}``.
+        See :meth:`_pattern_h_zombie_active_close`.
+
         Args:
             min_pending_age_seconds: Minimum age (seconds) for a
                 PENDING task to be considered drift-eligible. Tasks
@@ -1059,7 +1146,12 @@ class JobRecoveryService:
                                   | "orphan_active_completed_task_done"
                                   | "orphan_active_skipped_healthy_shape"
                                   | "orphan_active_skipped_grace"
-                                  | "orphan_active_skipped_no_deps",
+                                  | "orphan_active_skipped_no_deps"
+                                  | "zombie_active_closed"
+                                  | "zombie_close_skipped_mission_live"
+                                  | "zombie_close_skipped_age_unmet"
+                                  | "zombie_close_skipped_bus_pending"
+                                  | "zombie_close_skipped_guard_error",
                             "job_id": str | None,
                             "task_id": int | None,
                             "instance_id": str | None,
@@ -1067,6 +1159,18 @@ class JobRecoveryService:
                         },
                         ...
                     ],
+                    # Pattern (h) counter block (A1 — present whenever
+                    # the leg runs; the loop logs it whenever
+                    # ``examined > 0``):
+                    "zombie_close": {
+                        "examined": int,
+                        "age_qualified": int,
+                        "mission_live_holds": int,
+                        "error_skips": int,
+                        "finalized": int,
+                        "race_lost_noop": int,
+                        "zero_watcher_warns": int,
+                    },
                 }
         """
         details: list[dict[str, Any]] = []
@@ -1918,6 +2022,37 @@ class JobRecoveryService:
                 exc_info=True,
             )
 
+        # ── Pattern (h): zombie-ACTIVE JobItem close (wi-78967dba)
+        # ────────────────────────────────────────────────────────
+        # Terminalizes task-kind ACTIVE JobItems whose backing Tasks
+        # are ALL terminal while the driving instance stays
+        # non-terminal (RUNNING-stalled) — the shape every existing
+        # admission writer leaves behind (the f-arms' E1 gate
+        # self-holds on the zombie's own instance). Kill-switched;
+        # OFF ⇒ COMPLETE no-op (no candidate query issued). See
+        # :meth:`_pattern_h_zombie_active_close` for the decision
+        # chain + the A1 counter block contract.
+        zombie_close_stats: dict[str, Any] = {"examined": 0}
+        if zombie_close_enabled:
+            try:
+                h_extra = await self._pattern_h_zombie_active_close(
+                    age_bound_seconds=zombie_close_age_bound_seconds,
+                    batch_cap=zombie_close_batch_cap,
+                )
+                if h_extra:
+                    reconciled += h_extra.get("finalized", 0)
+                    details.extend(h_extra.get("details", []))
+                    zombie_close_stats = {
+                        k: h_extra.get(k, 0)
+                        for k in ZOMBIE_CLOSE_COUNTER_KEYS
+                    }
+            except Exception as e:
+                logger.error(
+                    f"reconcile_drift_states: Pattern (h) check "
+                    f"failed: {e}",
+                    exc_info=True,
+                )
+
         # Final tally — recount from `details` so the summary line
         # reflects patterns (a/b/d/e/f) accurately. Pattern (c) is
         # log-only — ``stuck_instance_log`` entries land in `details`
@@ -1931,7 +2066,9 @@ class JobRecoveryService:
         # NOT job admission state — the brief §3 census discipline
         # explicitly carves it OUT of the ``reconciled`` budget
         # (task writes are out of the KNOWN_ADMISSION_STATE_WRITERS
-        # scope; the constitution stays 23/1/0).
+        # scope; the constitution stays 23/1/0). Pattern (h)
+        # (``zombie_active_closed``) IS an admission finalize — it
+        # counts; its ``skipped_*`` records are observability-only.
         reconciled = sum(
             1 for d in details if d.get("pattern") in (
                 "P1_dead_instance",
@@ -1940,6 +2077,7 @@ class JobRecoveryService:
                 "dead_parent_pending_process_report",
                 "orphan_active_no_task_dead",
                 "orphan_active_completed_task_done",
+                "zombie_active_closed",
             )
         )
 
@@ -1952,7 +2090,11 @@ class JobRecoveryService:
         # periodic cycle completing even when nothing reconciled;
         # DEBUG-only empty cycles read as a hang (prod incident).
         logger.info(msg)
-        return {"reconciled": reconciled, "details": details}
+        return {
+            "reconciled": reconciled,
+            "details": details,
+            "zombie_close": zombie_close_stats,
+        }
 
     async def _pattern_e_dead_letter_dead_parent_process_reports(
         self,
@@ -4874,6 +5016,441 @@ class JobRecoveryService:
                 f"re-checks)."
             )
             return True
+
+    # ─────────────────────────────────────────────────────────────
+    # Pattern (h) — zombie-ACTIVE JobItem close (wi-78967dba)
+    # ─────────────────────────────────────────────────────────────
+
+    async def _pattern_h_zombie_active_close(
+        self,
+        *,
+        age_bound_seconds: int,
+        batch_cap: int,
+    ) -> dict[str, Any]:
+        """Pattern (h): terminalize zombie-ACTIVE task-kind JobItems.
+
+        The class (technical-analysis §1-2): a ``job_type='task'``
+        JobItem stays ``admission_state='active'`` after ALL backing
+        Tasks are terminal while its driving instance remains
+        non-terminal (RUNNING-stalled). No admission writer ever
+        terminalizes it — the f-arms are held by the E1 self-hold
+        every 300s cycle (the zombie's own non-terminal instance
+        counts as live evidence: circular bookkeeping, not
+        liveness). Its ``job_locks`` row is IMMORTAL
+        (``_ACTIVE_JOB_IDS_SUBQUERY`` excludes it from both lock
+        sweeps) and with ``concurrency_limit=1`` queues a single
+        zombie blocks the whole queue indefinitely.
+
+        Decision chain per candidate (D-2; fail-CLOSED — any
+        unprovable leg SKIPS; a deliberate divergence from the
+        f-arms' fail-open WARN: this leg is a LAST-RESORT backstop
+        with an hours-wide age bound, and the cost of a skip is one
+        300s cycle):
+
+        1. Zombie predicate — task-kind + active + not deleted +
+           work_id Task terminal + instance inflight probe empty
+           (SQL-side, ``find_zombie_active_candidates``).
+        2. Age bound — monotone terminal-stamp clock
+           (``MAX(task.completed_at)`` over the instance's Task
+           rows, SQL-side; NOT ``last_activity_at``).
+        3. Bus gate — ``bus_pending == 0``; bus unavailable ⇒
+           fail-safe SKIP (f2 Gate-1 precedent).
+        4. Discounted E1 — ``evaluate_mission_live(
+           discount_instance_id=job.instance_id, bus_pending_count=0)``.
+           ``live=True`` ⇒ HOLD (a genuinely live tree still holds
+           — every OTHER member's liveness). ``live=False`` with
+           ``error or timed_out`` ⇒ SKIP (fail-closed).
+           ``live=False`` clean ⇒ close. A NULL ``instance_id``
+           skips this leg — no tree to consult (the S4
+           NULL-instance close path; the write seam then skips
+           lock release for the virtual row).
+        5. Write — the census-registered ``force_finalize_orphan(
+           job_id, terminal_reason=token, recheck_instance_inflight=
+           True)`` (A2 in-txn recheck ALWAYS on for (h)): guarded
+           UPDATE ``active→done`` + job-scoped ``job_locks`` DELETE
+           in ONE transaction (finalize FIRST, release LAST; loser
+           no-ops INCLUDING the lock side). Admission DONE + one of
+           three provenance tokens ``zombie_active_{completed,
+           failed,cancelled}`` (registered in
+           ``_STATUS_CANONICAL_MAP``; canonical status derived per
+           verdict). NEVER stamps ``failed_at`` (A4:
+           JobRetryEngine reads ``failed_at`` — healing forecloses
+           retry BY DESIGN; re-arming 2h+-stale work is the harm
+           the omission prevents).
+        6. Notify — the f2 helper's NOTIFY composition ONLY (A7:
+           the helper's WRITE half releases the job lock in a
+           SEPARATE step 2 with its own crash window, which is
+           exactly why the write seam above is used instead):
+           ``notify_watchers(job_id, canonicalize_status(token))`` —
+           the status is the CANONICAL task-verdict string (W1),
+           never the raw ``zombie_active_*`` token (absent from
+           ``ALL_TERMINAL_STATES`` ⇒ the terminal-cleanup branch at
+           ``job_queue_service.py:506-509`` would misroute) and
+           never the f2-literal ``'completed'`` (would mislabel
+           failed/cancelled verdicts) — plus the E2 witness event
+           row. Best-effort: a notify failure never rolls back the
+           committed finalize; the close log line carries
+           ``notify=<outcome>`` (A3) so a post-commit notify loss is
+           visible, and "terminal job with surviving watcher rows"
+           routes into the ``watch_reconcile_sweep`` follow-up
+           semantics: its zombie-GC leg (delegated at
+           ``job_queue_service.py:946`` — ``remove_all_watches_for_job``
+           under the predicate "job no longer resolves AND
+           mission-liveness is terminal") retires unresolvable rows,
+           while resolved-but-terminal rows are covered by the
+           held-watcher reconcile, the notify path's own terminal
+           cleanup (``job_queue_service.py:508`` —
+           ``remove_all_watches_for_job`` on
+           ``status in ALL_TERMINAL_STATES``), and the boot-time
+           ``reconcile_terminal_watches`` sweep (``api.py:2482``).
+
+        Returns the counter block (A1 observability — folded into
+        the drift stats the loop logs whenever ``examined > 0``,
+        NOT gated on ``reconciled > 0``): ``examined /
+        age_qualified / mission_live_holds / error_skips /
+        finalized / race_lost_noop / zero_watcher_warns`` plus
+        ``details`` (skip tokens: ``zombie_close_skipped_mission_live
+        / _age_unmet / _bus_pending / _guard_error``).
+        """
+        counters: dict[str, int] = dict.fromkeys(
+            ZOMBIE_CLOSE_COUNTER_KEYS, 0
+        )
+        details: list[dict[str, Any]] = []
+
+        # Wiring guard — the leg needs all three repositories; a
+        # partial-wiring double (legacy test paths) is a clean skip.
+        if (
+            self._job_repository is None
+            or self._instance_repository is None
+            or self._task_repository is None
+        ):
+            logger.debug(
+                "reconcile_drift_states: Pattern (h) zombie-active close "
+                "skipped — repositories not wired"
+            )
+            return {**counters, "details": details}
+
+        # ONE pre-filtered SQL round-trip (D-12) — age-qualified,
+        # oldest-terminal-first, batch-capped; remainder next tick.
+        try:
+            candidates = await asyncio.to_thread(
+                self._job_repository.find_zombie_active_candidates,
+                age_bound_seconds=age_bound_seconds,
+                batch_cap=batch_cap,
+            )
+        except Exception as cand_err:  # noqa: BLE001 — fail-closed
+            counters["error_skips"] += 1
+            logger.warning(
+                "reconcile_drift_states: Pattern (h) zombie-active close candidate "
+                "query failed (%s: %s) — SKIP, next "
+                "cycle retries (fail-closed)",
+                type(cand_err).__name__,
+                cand_err,
+            )
+            return {**counters, "details": details}
+
+        examined_job_ids: set[str] = set()
+        for cand in candidates:
+            counters["examined"] += 1
+            examined_job_ids.add(cand.job_id)
+            job_id = cand.job_id
+            instance_id = cand.instance_id
+            task_id = cand.task_id
+            short_job = job_id[:8]
+
+            # Leg 2 (belt re-check — the SQL pre-filter already
+            # applied the bound): an unparseable stamp is a data gap
+            # ⇒ fail-closed skip with the age token.
+            parsed_stamp = parse_completed_at_naive(cand.terminal_stamp)
+            if parsed_stamp is None or (
+                (now_utc_naive() - parsed_stamp).total_seconds()
+                < age_bound_seconds
+            ):
+                self._zombie_close_streak_bump(job_id, "age")
+                details.append(
+                    self._h_detail(
+                        "zombie_close_skipped_age_unmet",
+                        cand,
+                        "Pattern (h): terminal stamp unparseable or "
+                        "younger than the age bound — SKIP "
+                        "(fail-closed); next cycle retries",
+                    )
+                )
+                continue
+            counters["age_qualified"] += 1
+
+            # Leg 3 — bus gate (the f2 Gate-1 helper; unavailable ⇒
+            # fail-safe skip, never guess).
+            bus_count, bus_unavailable = (
+                await self._pattern_f_check_bus_pending(task_id)
+            )
+            if bus_unavailable or bus_count > 0:
+                self._zombie_close_streak_bump(job_id, "bus")
+                details.append(
+                    self._h_detail(
+                        "zombie_close_skipped_bus_pending",
+                        cand,
+                        f"Pattern (h): dependency bus reports "
+                        f"{bus_count} pending watcher(s)"
+                        f"{' (bus unavailable — fail-safe)' if bus_unavailable else ''}"
+                        " — JobItem left ACTIVE; next cycle retries",
+                    )
+                )
+                continue
+
+            # Leg 4 — discounted E1 (the no-self-hold discount).
+            if instance_id:
+                verdict = await evaluate_mission_live(
+                    instance_repository=self._instance_repository,
+                    instance_id=instance_id,
+                    discount_instance_id=instance_id,
+                    bus_pending_count=0,
+                )
+                if verdict.live:
+                    counters["mission_live_holds"] += 1
+                    self._zombie_close_streak_bump(job_id, "hold")
+                    details.append(
+                        self._h_detail(
+                            "zombie_close_skipped_mission_live",
+                            cand,
+                            f"Pattern (h): discounted mission-live "
+                            f"guard holds JobItem ACTIVE (another "
+                            f"tree member is live) — {verdict.reason}"
+                            f"; next cycle retries",
+                        )
+                    )
+                    continue
+                if verdict.error or verdict.timed_out:
+                    counters["error_skips"] += 1
+                    self._zombie_close_streak_bump(job_id, "guard")
+                    details.append(
+                        self._h_detail(
+                            "zombie_close_skipped_guard_error",
+                            cand,
+                            f"Pattern (h): discounted mission-live "
+                            f"guard unprovable (error={verdict.error}, "
+                            f"timed_out={verdict.timed_out}) — SKIP "
+                            f"(fail-closed); next cycle retries",
+                        )
+                    )
+                    continue
+
+            # Leg 5 — the census-registered write seam, with the A2
+            # in-txn inflight re-check ALWAYS on for (h).
+            token = f"zombie_active_{cand.task_status}"
+            # Advisory-1 fold (code-review council, 2026-10-31): the
+            # candidate SQL's terminal IN-filter is the verdict
+            # source; if an unexpected status ever reaches here
+            # (filter drift), become a LOUD error skip — never a
+            # mis-tokenized terminal write.
+            if cand.task_status not in (
+                "completed",
+                "failed",
+                "cancelled",
+            ):
+                counters["error_skips"] += 1
+                self._zombie_close_streak_bump(job_id, "status")
+                logger.error(
+                    "reconcile_drift_states: Pattern (h) zombie-active "
+                    "close — job %s... candidate carried an unexpected "
+                    "task_status=%r (candidate-SQL terminal filter "
+                    "drift?) — SKIP (fail-closed); next cycle retries",
+                    short_job,
+                    cand.task_status,
+                )
+                continue
+            try:
+                reaped = await asyncio.to_thread(
+                    self._job_repository.force_finalize_orphan,
+                    job_id,
+                    token,
+                    True,
+                )
+            except Exception as reap_err:  # noqa: BLE001 — fail-closed
+                counters["error_skips"] += 1
+                self._zombie_close_streak_bump(job_id, "write")
+                logger.warning(
+                    "reconcile_drift_states: Pattern (h) zombie-active "
+                    "close write failed for job %s... (%s: %s) — SKIP, "
+                    "next cycle retries (fail-closed)",
+                    short_job,
+                    type(reap_err).__name__,
+                    reap_err,
+                )
+                continue
+            if reaped is None:
+                # The guarded UPDATE lost the race (a concurrent
+                # finalize flipped the row — f-arms, observer,
+                # operator) OR the A2 in-txn recheck aborted (a
+                # retry child minted between probe and UPDATE).
+                # Either way: no writes from us, INCLUDING the lock
+                # side; next cycle re-evaluates from scratch.
+                counters["race_lost_noop"] += 1
+                self._zombie_close_streaks.pop(job_id, None)
+                logger.info(
+                    "reconcile_drift_states: Pattern (h) zombie-active "
+                    "close SKIPPED for job %s... — guarded predicate "
+                    "rejected (race lost or in-txn inflight recheck "
+                    "aborted); no write, no lock action",
+                    short_job,
+                )
+                continue
+
+            # Closed — streak reset-on-close (A1/CF-3).
+            counters["finalized"] += 1
+            self._zombie_close_streaks.pop(job_id, None)
+
+            # Leg 6 — notify (f2's NOTIFY composition ONLY, A7) with
+            # the CANONICAL verdict string (W1) — never the raw
+            # token (absent from ALL_TERMINAL_STATES ⇒
+            # terminal-cleanup misroute) and never the f2-literal
+            # 'completed' (would mislabel failed/cancelled).
+            notify_status = canonicalize_status(token)
+            notify_outcome = "notify_skipped_no_service"
+            if self._job_queue_service is not None:
+                try:
+                    notified = await (
+                        self._job_queue_service.notify_watchers(
+                            job_id, notify_status
+                        )
+                    )
+                    notify_outcome = f"notified:{notified}"
+                    if notified == 0:
+                        counters["zero_watcher_warns"] += 1
+                except Exception as notify_err:  # noqa: BLE001
+                    notify_outcome = (
+                        f"notify_failed:{type(notify_err).__name__}"
+                    )
+            # E2 witness row — same soft-fail contract as the f2
+            # helper's notify composition (PP1's WARN points at the
+            # job_completed event row; the (h) close publishes it).
+            await self._publish_finalize_witness_event(
+                instance_id=instance_id,
+                job_id=job_id,
+                status=notify_status,
+                error_message=None,
+            )
+
+            age_seconds = (
+                now_utc_naive() - parsed_stamp
+            ).total_seconds()
+            logger.warning(
+                "reconcile_drift_states: Pattern (h) zombie-active close — "
+                "job %s... (task %s, instance %s..., "
+                "task_status=%s, age_seconds=%.0f) finalized to "
+                "DONE with terminal_reason=%s; lock released "
+                "same-transaction; notify=%s (zero-watcher fires "
+                "carry the PP1 token family for forensics "
+                "correlation)",
+                short_job,
+                task_id,
+                instance_id[:8] if instance_id else "<none>",
+                cand.task_status,
+                age_seconds,
+                token,
+                notify_outcome,
+            )
+            details.append(
+                self._h_detail(
+                    "zombie_active_closed",
+                    cand,
+                    f"Pattern (h): zombie-ACTIVE JobItem (backing "
+                    f"Task {cand.task_id} terminal="
+                    f"{cand.task_status}, age "
+                    f"{age_seconds:.0f}s) finalized to DONE with "
+                    f"terminal_reason={token}; job-scoped lock "
+                    f"released in the same transaction; "
+                    f"notify={notify_outcome}",
+                )
+            )
+
+        # A1/CF-3 streak maintenance: escalate on repeated skips/holds
+        # for the SAME job (inside _zombie_close_streak_bump); evict
+        # entries whose job left the candidate shape. Entries beyond
+        # the batch cap REMAIN candidates — kept (restart resets the
+        # dict; in-memory by design, disclosed).
+        await self._zombie_close_streak_maintain(examined_job_ids)
+
+        return {**counters, "details": details}
+
+    @staticmethod
+    def _h_detail(
+        pattern: str,
+        cand: "Any",
+        reason: str,
+    ) -> dict[str, Any]:
+        """Tidier fold 2026-10-31: the ONE details-dict shape for the
+        (h) leg's per-candidate records (4 skips + the close) — the
+        pattern/job/task/instance envelope is uniform; only the
+        pattern token and the reason vary."""
+        return {
+            "pattern": pattern,
+            "job_id": cand.job_id,
+            "task_id": cand.task_id,
+            "instance_id": cand.instance_id,
+            "reason": reason,
+        }
+
+    def _zombie_close_streak_bump(self, job_id: str, reason: str) -> None:
+        """A1/CF-3: record one consecutive skip/hold for ``job_id``;
+        fire the escalating WARN on the doubling ladder K·2^i
+        (advisory-2 fold, code-review council 2026-10-31: K, 2K, 4K,
+        8K… — a stuck-closed job keeps re-surfacing at geometrically
+        increasing intervals instead of going dark after one WARN)."""
+        n = self._zombie_close_streaks.get(job_id, 0) + 1
+        self._zombie_close_streaks[job_id] = n
+        ladder_multiple, remainder = divmod(
+            n, ZOMBIE_CLOSE_STREAK_WARN_THRESHOLD
+        )
+        if remainder == 0 and ladder_multiple >= 1 and (
+            ladder_multiple & (ladder_multiple - 1)
+        ) == 0:
+            logger.warning(
+                "reconcile_drift_states: Pattern (h) zombie-active close — "
+                "job %s... has now been skipped/held %d "
+                "consecutive cycles (~%.1fh at the 300s cadence, "
+                "last reason class=%s) — stuck-closed escalation: "
+                "inspect the zombie_close_skipped_* tokens and the "
+                "mission tree (operator visibility, not just "
+                "forensics)",
+                job_id[:8],
+                n,
+                n * 300.0 / 3600.0,
+                reason,
+            )
+
+    async def _zombie_close_streak_maintain(
+        self, examined_job_ids: set[str]
+    ) -> None:
+        """A1/CF-3: evict streak entries whose job left the candidate
+        shape (closed by anyone / deleted / shape changed). A cheap
+        existence probe over the (small) streak dict — jobs still
+        active keep their streak even when the batch cap deferred
+        them this tick (they remain candidates).
+
+        W1 (code-review council fold, 2026-10-31): the repository
+        read goes through ``asyncio.to_thread`` — the sync-on-loop
+        form was the exact v0.27.14 loop-starvation class (the
+        file's 30+ existing to_thread sites are the convention)."""
+        if not self._zombie_close_streaks:
+            return
+        stale: list[str] = []
+        for jid in self._zombie_close_streaks:
+            if jid in examined_job_ids:
+                continue
+            try:
+                row = await asyncio.to_thread(
+                    self._job_repository.get, jid  # type: ignore[union-attr]
+                )
+            except Exception:  # noqa: BLE001 — best-effort eviction
+                continue
+            if (
+                row is None
+                or row.admission_state != AdmissionState.ACTIVE.value
+            ):
+                stale.append(jid)
+        for jid in stale:
+            self._zombie_close_streaks.pop(jid, None)
 
     def _pattern_f_check_completed_at_age_floor(
         self,

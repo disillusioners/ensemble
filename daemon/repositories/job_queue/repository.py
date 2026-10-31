@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
 
 from sqlalchemy import and_, delete as sql_delete, func, or_, select as sql_select, text
@@ -14,6 +14,7 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col, update as sqlmodel_update
 
 from .models import ACTIVE_ADMISSION_STATES, AdmissionState, JobItem, JobLock, JobQueue, QueueType
+from daemon.constants import NON_TERMINAL_TASK_STATUSES
 from ._idle_predicate_sql import background_busy_binds, background_busy_statement, defer_busy_binds, defer_busy_statement
 
 logger = logging.getLogger(__name__)
@@ -195,6 +196,66 @@ def _terminal_reason_variants(canonical_token: str) -> tuple[str, ...]:
     from daemon.services.work_status import terminal_reason_variants_for
 
     return terminal_reason_variants_for(canonical_token)
+
+
+def _non_terminal_task_status_binds(prefix: str) -> dict[str, str]:
+    """The SSOT non-terminal task-status IN-binds under ``prefix``.
+
+    Shared by the pattern-(h) candidate query's instance-inflight
+    NOT EXISTS probe and ``force_finalize_orphan``'s A2 in-txn
+    recheck (W2 fold; deduplicated tidier fold 2026-10-31). The
+    SSOT is ``daemon.constants.NON_TERMINAL_TASK_STATUSES``; the
+    binds are FIXED-ARITY, so a drifted SSOT must raise LOUD — a
+    silently truncated live-status set would be fail-OPEN. Bind
+    names carry the truthful spellings.
+    """
+    nt = sorted(NON_TERMINAL_TASK_STATUSES)
+    if len(nt) != 4 or set(nt) != {
+        "pending",
+        "running",
+        "paused",
+        "processing",
+    }:
+        raise RuntimeError(
+            "NON_TERMINAL_TASK_STATUSES cardinality drifted "
+            f"({len(nt)} statuses: {nt}) — the fixed arity-4 "
+            "IN-binds would silently truncate the live-task set "
+            "(fail-open); extend the candidate SQL's NOT EXISTS "
+            "binds, the A2 recheck binds, and the cardinality pin "
+            "TOGETHER"
+        )
+    return {
+        f"{prefix}_pending": "pending",
+        f"{prefix}_running": "running",
+        f"{prefix}_paused": "paused",
+        f"{prefix}_processing": "processing",
+    }
+
+
+#: The shared IN-list fragment for the two probe sites (format with
+#: the site's bind prefix — ``nt`` for the candidate query, ``s``
+#: for the A2 recheck).
+_NON_TERMINAL_IN_SQL_TEMPLATE = (
+    "(:{p}_pending, :{p}_running, :{p}_paused, :{p}_processing)"
+)
+
+
+class ZombieActiveCandidate(NamedTuple):
+    """One pattern-(h) zombie-ACTIVE candidate row (wi-78967dba).
+
+    ``terminal_stamp`` is the age key — ``MAX(completed_at)`` over
+    the instance's Task rows (the monotone terminal-stamp clock;
+    falls back to the backing Task's own stamp only for NULL-instance
+    rows where no instance-scoped MAX exists). ``task_status`` is the
+    backing Task's ORGANIC terminal verdict — the provenance-token
+    source (``zombie_active_<task_status>``).
+    """
+
+    job_id: str
+    instance_id: str | None
+    task_id: int
+    task_status: str
+    terminal_stamp: datetime | None
 
 
 class JobRepository:
@@ -4207,7 +4268,12 @@ SET admission_state = 'queued',
             )
             return list(session.exec(stmt))
 
-    def force_finalize_orphan(self, job_id: str, terminal_reason: str = "cancelled") -> JobItem | None:
+    def force_finalize_orphan(
+        self,
+        job_id: str,
+        terminal_reason: str = "cancelled",
+        recheck_instance_inflight: bool = False,
+    ) -> JobItem | None:
         """Force ``active → done`` on an orphan JobItem.
 
         An *orphan* is an ``admission_state='active'`` row whose
@@ -4304,6 +4370,43 @@ SET admission_state = 'queued',
                 return None
             instance_id_for_release = instance_row[0]
 
+            if recheck_instance_inflight and instance_id_for_release:
+                # A2 probe/commit TOCTOU closure (wi-78967dba, T1.9 —
+                # parameterized per reviewer council W2): a retry
+                # child minted between the caller's candidate inflight
+                # probe and this UPDATE inherits the instance_id but
+                # carries a FRESH work_id — invisible to the guarded
+                # UPDATE below. Re-run the instance inflight probe
+                # (one SELECT) INSIDE this transaction, AFTER the row
+                # capture, BEFORE any write: a live row ⇒ abort (no
+                # writes issued — return None; the caller skips and
+                # the next cycle re-evaluates). A probe EXCEPTION
+                # aborts the transaction via the context manager
+                # (nothing written) and propagates to the caller.
+                # DEFAULT-False: the existing callers
+                # (``cleanup_non_terminal_jobs`` orphan reaper,
+                # ``job_queue_service.py:2180``) issue byte-identical
+                # SQL with the flag absent.
+                # W2 fold (code-review council, 2026-10-31;
+                # deduplicated tidier fold 2026-10-31): the shared
+                # SSOT bind helper raises LOUD on cardinality drift
+                # — never a silently truncated live-status set.
+                inflight = conn.execute(
+                    text(
+                        "SELECT 1 FROM task "
+                        "WHERE instance_id = :iid "
+                        "  AND status IN "
+                        f"{_NON_TERMINAL_IN_SQL_TEMPLATE.format(p='s')} "
+                        "LIMIT 1"
+                    ),
+                    {
+                        "iid": instance_id_for_release,
+                        **_non_terminal_task_status_binds("s"),
+                    },
+                ).first()
+                if inflight is not None:
+                    return None
+
             result = conn.execute(
                 text(
                     "UPDATE job_queue_items "
@@ -4348,6 +4451,135 @@ SET admission_state = 'queued',
 
         with SQLModelSession(self.engine) as session:
             return session.get(JobItem, job_id)
+
+    def find_zombie_active_candidates(
+        self,
+        *,
+        age_bound_seconds: int,
+        batch_cap: int,
+    ) -> list[ZombieActiveCandidate]:
+        """Return pattern-(h) zombie-ACTIVE candidates (wi-78967dba).
+
+        The zombie-ACTIVE shape: a ``job_type='task'`` JobItem that is
+        ``admission_state='active'`` (not soft-deleted) whose backing
+        Task (``task.work_id == job_id``, unique) carries an ORGANIC
+        terminal verdict, while the instance-scoped inflight probe is
+        EMPTY (no PENDING/RUNNING/PAUSED/legacy-processing Task on the
+        job's instance — a pending retry child would fail this leg).
+        Age-qualified in SQL: the monotone terminal-stamp clock
+        (``MAX(task.completed_at)`` over the instance's Task rows —
+        NOT ``instances.last_activity_at``, which is enqueue-
+        refreshable and frozen-by-design for a stalled instance) must
+        be older than ``age_bound_seconds``.
+
+        Deterministic ORDER BY (S5, reviewer council): oldest-terminal-
+        first (``MAX(terminal stamp) ASC``) with ``job_id`` as the
+        tiebreak — ``LIMIT batch_cap`` without ORDER BY is
+        non-deterministic across ticks (starvation/overflow possible);
+        the stable order guarantees progress and reproducibility.
+        Remainder (beyond the cap) re-appears on the next tick.
+
+        ONE SQL round-trip (D-12) — the pre-filtered shape keeps the
+        drift loop's per-candidate work off the round-trip budget
+        (the v0.27.14 incident class). NULL-instance rows (virtual
+        jobs) are eligible: the inflight NOT EXISTS passes vacuously
+        and the age falls back to the backing Task's own stamp; the
+        close then skips lock release (the ``force_finalize_orphan``
+        NULL-instance branch, S4).
+
+        Status sets: non-terminal = ``daemon.constants.
+        NON_TERMINAL_TASK_STATUSES`` (the SSOT incl. legacy
+        ``processing`` — a superset of ``has_instance_busy``; the
+        fail-closed posture keeps MORE shapes held); terminal = the
+        three organic verdicts.
+
+        Args:
+            age_bound_seconds: minimum age (seconds) of the instance's
+                terminal-stamp clock before the row may close.
+            batch_cap: maximum rows returned per pass.
+
+        Returns:
+            Candidates in oldest-terminal-first order, ``job_id``
+            tiebreak, capped at ``batch_cap``.
+        """
+        from daemon.constants import NON_TERMINAL_TASK_STATUSES
+        from daemon.repositories.task.models import TaskStatus
+        from daemon.services.timestamps import now_utc_naive
+
+        # Naive-UTC bind (the tz discipline, daemon/services/
+        # timestamps.py): aware binds into timestamp-without-tz
+        # columns silently shift by the session offset.
+        cutoff = now_utc_naive() - timedelta(seconds=age_bound_seconds)
+        stmt = text(
+            """
+            SELECT j.job_id          AS job_id,
+                   j.instance_id     AS instance_id,
+                   t.id              AS task_id,
+                   t.status          AS task_status,
+                   COALESCE(tm.max_completed_at, t.completed_at)
+                                     AS terminal_stamp
+              FROM job_queue_items j
+              JOIN task t
+                ON t.work_id = j.job_id
+               AND t.status IN (:terminal_completed,
+                                :terminal_failed,
+                                :terminal_cancelled)
+              LEFT JOIN (
+                    SELECT instance_id,
+                           MAX(completed_at) AS max_completed_at
+                      FROM task
+                     WHERE completed_at IS NOT NULL
+                     GROUP BY instance_id
+                   ) tm
+                ON tm.instance_id = j.instance_id
+             WHERE j.job_type = 'task'
+               AND j.admission_state = 'active'
+               AND j.deleted_at IS NULL
+               AND COALESCE(tm.max_completed_at, t.completed_at)
+                       IS NOT NULL
+               AND COALESCE(tm.max_completed_at, t.completed_at)
+                       <= :cutoff
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM task t2
+                     WHERE t2.instance_id = j.instance_id
+                       AND t2.status IN (:nt_pending, :nt_running,
+                                         :nt_paused, :nt_processing)
+                   )
+             ORDER BY COALESCE(tm.max_completed_at, t.completed_at) ASC,
+                      j.job_id ASC
+             LIMIT :batch_cap
+            """
+        )
+        # Explicit bind params (NOT interpolated IN-lists) — the
+        # dual-driver pattern from ``has_instance_busy``: identical
+        # on PostgreSQL (psycopg) and SQLite. The non-terminal binds
+        # come from the shared SSOT helper (W2 fold, deduplicated
+        # tidier fold 2026-10-31 — cardinality drift raises LOUD in
+        # ONE place; the cardinality pin
+        # (test_zombie_active_close_static) locks the contract).
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                stmt,
+                {
+                    "terminal_completed": TaskStatus.COMPLETED.value,
+                    "terminal_failed": TaskStatus.FAILED.value,
+                    "terminal_cancelled": TaskStatus.CANCELLED.value,
+                    "cutoff": cutoff,
+                    **_non_terminal_task_status_binds("nt"),
+                    "batch_cap": batch_cap,
+                },
+            ).all()
+        return [
+            ZombieActiveCandidate(
+                job_id=r[0],
+                instance_id=r[1],
+                task_id=int(r[2]),
+                task_status=r[3],
+                terminal_stamp=r[4],
+            )
+            for r in rows
+        ]
 
     # --------------------------------------------------------
     # DELETE

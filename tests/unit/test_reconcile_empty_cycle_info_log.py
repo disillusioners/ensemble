@@ -18,6 +18,11 @@ the contract:
     operator grepping INFO can distinguish a healthy empty cycle
     from a hung one.
 
+The drift-stats RETURN payload additionally carries the A1
+``zombie_close`` counters block (wi-78967dba) — all-zero on an
+empty cycle, pinned exact-dict via ``ZOMBIE_CLOSE_COUNTER_KEYS``;
+the completion LOG TEXT is unchanged by that addition.
+
 A/B convention: RED on the pre-fix tree (empty cycle logged at
 DEBUG — the ``levelno == INFO`` assertion fails), GREEN on the
 post-fix tree.
@@ -30,7 +35,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from daemon.services.job_recovery_service import JobRecoveryService
+from daemon.services.job_recovery_service import (
+    JobRecoveryService,
+    ZOMBIE_CLOSE_COUNTER_KEYS,
+)
 
 LOGGER_NAME = "daemon.services.job_recovery_service"
 EMPTY_MSG = "reconcile_drift_states: complete — reconciled=0, details=0"
@@ -88,9 +96,18 @@ class TestReconcileEmptyCycleHeartbeatInfo:
         self, mock_repositories, service
     ):
         """Sanity: the mocked wiring really produces an empty cycle —
-        no pattern reconciles anything and no details accumulate."""
+        no pattern reconciles anything and no details accumulate.
+        The drift-stats payload carries the A1 ``zombie_close``
+        counters block (wi-78967dba); on an empty cycle every
+        counter is zero — pinned exact-dict via the spelled-once
+        ``ZOMBIE_CLOSE_COUNTER_KEYS`` constant.
+        """
         result = await service.reconcile_drift_states()
-        assert result == {"reconciled": 0, "details": []}
+        assert result == {
+            "reconciled": 0,
+            "details": [],
+            "zombie_close": dict.fromkeys(ZOMBIE_CLOSE_COUNTER_KEYS, 0),
+        }
 
     @pytest.mark.asyncio
     async def test_empty_cycle_completion_logged_at_info_both_sites(
@@ -103,7 +120,11 @@ class TestReconcileEmptyCycleHeartbeatInfo:
         with caplog.at_level(logging.INFO, logger=LOGGER_NAME):
             result = await service.reconcile_drift_states()
 
-        assert result == {"reconciled": 0, "details": []}
+        assert result == {
+            "reconciled": 0,
+            "details": [],
+            "zombie_close": dict.fromkeys(ZOMBIE_CLOSE_COUNTER_KEYS, 0),
+        }
 
         completion = [
             r

@@ -1,0 +1,38 @@
+== tests/unit/agents rc=0
+52 passed in 10.57s
+== tests/unit/checkpoint_adapter rc=0
+77 passed in 3.48s
+== tests/unit/config rc=0
+29 passed in 0.47s
+== tests/unit/graph rc=0
+30 passed in 0.42s
+== tests/unit/job_queue rc=0
+94 passed, 11 warnings in 43.39s
+== tests/unit/job_state rc=0
+10 passed in 20.01s
+== tests/unit/models rc=0
+39 passed in 1.49s
+== tests/unit/persistence rc=0
+147 passed in 4.01s
+== tests/unit/plugin_subsystem rc=1
+4 failed, 620 passed, 2 errors in 54.78s
+== tests/unit/rag rc=0
+106 passed in 1.39s
+== tests/unit/repositories rc=0
+227 passed in 65.44s (0:01:05)
+== tests/unit/routers rc=1
+72 failed, 755 passed in 192.77s (0:03:12)
+== tests/unit/services rc=1
+13 failed, 3227 passed, 201 warnings in 436.59s (0:07:16)
+== tests/unit/sources rc=0
+3 passed in 0.37s
+== tests/unit/tool_pairing_history rc=0
+64 passed in 0.58s
+== tests/unit/tool_pairing_history_gate rc=0
+8 passed in 0.43s
+== tests/unit/tools rc=1
+16 failed, 4360 passed, 6 skipped, 1 xfailed, 91 warnings in 502.98s (0:08:22)
+== tests/unit-toplevel rc=1
+88 failed, 10265 passed, 59 skipped, 373 warnings, 21 errors in 1715.05s (0:28:35)
+330 /tmp/mfz-phase0/base-failed.txt
+UNIT-DONE

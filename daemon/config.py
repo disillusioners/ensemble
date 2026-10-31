@@ -2268,6 +2268,74 @@ class ServicesConfig(BaseSettings):
             "900s = 15 minutes, matching the f1 grace."
         ),
     )
+    # Pattern (h) — zombie-ACTIVE JobItem close (wi-78967dba,
+    # 2026-10-31). A task-kind JobItem whose backing Task reached an
+    # organic terminal verdict but whose admission finalize was
+    # missed (driving instance RUNNING-stalled) is held ACTIVE
+    # forever: the f-arms' E1 gate self-holds on the zombie's own
+    # non-terminal instance every cycle, its job_locks row is
+    # immortal (excluded from BOTH lock sweeps by the
+    # _ACTIVE_JOB_IDS_SUBQUERY NOT-IN guard — the comment+constant
+    # unit at lock_repository.py:31-35), and with
+    # concurrency_limit=1 queues a single zombie blocks the whole
+    # queue indefinitely. The (h) leg in the drift reconciler
+    # terminalizes exactly this shape through the census-registered
+    # force_finalize_orphan seam (finalize FIRST, release LAST, ONE
+    # transaction). Strand-heal knob template: fail-closed predicate
+    # (any unprovable leg SKIPS), hours-wide monotone age bound on
+    # task terminal stamps (NOT last_activity_at — frozen-by-design
+    # for a stalled instance), small batch cap on terminalizing
+    # writes, guarded single write seam, default-ON posture (the
+    # kill-switch exists for the operator, not as the default
+    # posture — watch_reconcile_sweep.py:37-38 codifies the rule;
+    # job_lock_sweep.py:44, orphan_watcher_sweep.py:24,
+    # eligible_pending_sweep.py:28 carry the same posture).
+    drift_reconcile_zombie_close_enabled: bool = Field(
+        default=True,
+        description=(
+            "Pattern (h) zombie-active close (wi-78967dba): whether "
+            "the drift reconciler may terminalize zombie-ACTIVE "
+            "task-kind JobItems (all backing Tasks terminal, driving "
+            "instance non-terminal, age beyond the bound). Default "
+            "TRUE. When False the leg is a COMPLETE no-op (no "
+            "candidate query, no probe, no write) — pre-fix "
+            "behavior byte-restored. Override via "
+            "SERVICES_DRIFT_RECONCILE_ZOMBIE_CLOSE_ENABLED."
+        ),
+    )
+    drift_reconcile_zombie_close_age_bound_seconds: int = Field(
+        default=7200,
+        ge=1,
+        description=(
+            "Pattern (h) zombie-active close: the monotone age bound "
+            "(seconds) keyed on MAX(task terminal stamps) over the "
+            "instance's Task rows — NOT instances.last_activity_at "
+            "(enqueue-refreshable / frozen-by-design for a stalled "
+            "instance; the strand-healer running-zombie precedent "
+            "keys the SAME evidence class at 7200). A zombie younger "
+            "than this bound is left ACTIVE. Default 7200s (2h) — "
+            "the leg is a last-resort backstop behind the f-arms' "
+            "300s cycles. Floor 1s; out-of-range values FAIL FAST "
+            "AT BOOT. Override via "
+            "SERVICES_DRIFT_RECONCILE_ZOMBIE_CLOSE_AGE_BOUND_SECONDS."
+        ),
+    )
+    drift_reconcile_zombie_close_batch_cap: int = Field(
+        default=25,
+        ge=1,
+        description=(
+            "Pattern (h) zombie-active close: the maximum number of "
+            "zombie-ACTIVE candidates examined per drift pass "
+            "(oldest-terminal-first, deterministic order). "
+            "Deliberately SMALL — the leg performs TERMINALIZING "
+            "WRITES, so a tighter per-tick bound keeps the blast "
+            "radius of a mis-predicate small (the strand-healer "
+            "batch-cap template). A candidate beyond the cap is "
+            "picked up on the next tick. Floor 1; out-of-range "
+            "values FAIL FAST AT BOOT. Override via "
+            "SERVICES_DRIFT_RECONCILE_ZOMBIE_CLOSE_BATCH_CAP."
+        ),
+    )
     # ─── WAITING_CHILDREN hang watchdog (issue #8) ───
     # The watchdog detects parents stuck in WAITING_CHILDREN because a
     # child is hung (non-terminal AND last_activity_at older than the

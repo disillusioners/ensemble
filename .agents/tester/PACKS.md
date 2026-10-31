@@ -1,5 +1,64 @@
 # Test Packs
 
+## Commission FUNCTIONAL GATE VERIFIED — missed-finalize / zombie-ACTIVE close (`fix/missed-finalize-zombie-active`, board `wi-78967dba`) (2026-10-31) — 🟢 VERDICT: **PASS-WITH-NOTES** (independent functional gate @ `9af20578a` + sanctioned pin-fold `defa3d8b5`; net-new ∅ post-fold) — full evidence: RESULTS/2026-10-31-zombie-close-functional-gate.md
+
+> Phase-4 gate, 16 workers, gate window 04:05–05:45Z. All 7 gates green: symptom both
+> directions (committed gap JSONs verified both engines + 60/60 HEAD packs incl. canonical
+> notify on actual await-args + OFF-rerun base-gap held); whole-tree 25,946 ids exact coverage,
+> base 330 → HEAD 301→298, net-new {3} = stale adjacent pins on INTENDED contract widening →
+> folded @ `defa3d8b5` (PD-4.2 fix-and-rerun, +3/−3 fingerprint `40cb823b…`→`ceb69376…`),
+> 5 pre-existing-unlisted (mock-shadowing family, reproduced at base), 37 fixed accounted;
+> real-PG Pack I 3/3 (first true PG leg) + wedge-capture re-pointed 3/3 with live
+> n_live_tup proof; mutations 8/8 RED→GREEN (T3.12-a1v3 planted-sha byte-exact); migrations
+> 115==115 zero delta; envelope G7a CLEAN + G7b fence CLEAN (live epoch continuous, zero
+> residue). Lane tip advanced past the commissioned anchor — stage re-derivation from
+> `defa3d8b5`.
+
+| Gate lane | Pack / scope | Result | Last run |
+|---|---|---|---|
+| g1a base-gap evidence | committed phase-0 JSONs (sqlite+pg) | ✅ verified both engines (A1 no self-attested sha / A2 md prose mis-attribution — disclosed) | 2026-10-31 |
+| g1b HEAD close | 9 packs `test_zombie_active_close_*` 60/60 + T1.7 five legs + T4.4 concordance | ✅ PASS | 2026-10-31 @ `9af20578a` |
+| g2 whole-tree W-A..W-E | tests/integration + unit (toplevel+17 subdirs) + 13 mid dirs + job_queue, chunked `timeout 300` | ✅ 25,946/25,946 exact; net-new ∅ post-fold; classifier artifacts `/tmp/mfz-gate/classify/` | 2026-10-31 @ `9af20578a`→`defa3d8b5` |
+| g2 pin-fold (PD-4.2) | 2 stale-pin files, exact-shape folds, test-only commit `defa3d8b5` | ✅ 8/8 + 9/9 + 60/60 re-verify | 2026-10-31 |
+| g3 PG Pack I | `test_zombie_active_close_pg.py` scratch `ensemble_test_mfz_g3`, serial | ✅ PASS 3/3 (ADV4 drift-guard live) | 2026-10-31 |
+| g4 wedge PG re-pointed | `test_dbpool_wedge_capture_pg.py` scratch `ensemble_test_mfz_g4` | ✅ PASS 3/3 (POPULATED n_live_tup=2/1 from pg_stat_user_tables) | 2026-10-31 |
+| g5 mutation sample | 8 legs in scratch worktree `wt-mfz-mut` | ✅ 8/8 RED-proven (sha-proven; matrix-sha match 1/8 bonus-only) | 2026-10-31 |
+| g6 migrations | `daemon/migrations/versions/` | ✅ 115==115, 0-file delta vs base | 2026-10-31 |
+| g7 envelope | G7a static audit (12-file surface) + G7b final fence | ✅ CLEAN + CLEAN (live untouched, zero residue) | 2026-10-31 |
+
+## missed-finalize / zombie-ACTIVE close path (`fix/missed-finalize-zombie-active`, board `wi-78967dba`) — PIN FAMILY REGISTERED (2026-10-31)
+
+> Implementation lane (phases 0-3) pack family for the pattern-(h)
+> zombie-ACTIVE JobItem close. All packs GREEN (council-fold cycle
+> re-verified at the tidier fold); every pin mutation-verified —
+> TRUE MATRIX SHAPE (re-derived from the authoritative TSV at the
+> tidier fold): 28 planted legs / 25 RED-proven / 3 superseded dead
+> first plants (honestly recorded, never counted as RED; digests per
+> leg in `phase3-artifacts/matrix.tsv`, the AUTHORITATIVE count —
+> prose re-derived from it; a lane-report note claiming 26/23/3
+> double-counted the W2 leg and is superseded)
+> (`/tmp/mfz-phase0/mutation-matrix/matrix.tsv` — carried into the
+> lane evidence). Family-neighborhood re-run: ZERO net-new reds (the
+> 5 failing neighbors are pre-existing at base, proven from the
+> Phase-0 TRUE base FAILED list, sha256 `58cb8201…8027`, 330 ids).
+
+| Pack | Invocation | Scope | Last Run | Status |
+|---|---|---|---|---|
+| `zombie_active_close_core` (A) | `cd <wt> && /home/nea/ensemble-src/.venv/bin/python -m pytest tests/job_queue/test_zombie_active_close_core.py -q --timeout=120` | close both directions x3 verdicts; inclusive age boundary; batch-cap remainder; kill-switch-OFF = BASE gap held | 2026-10-31 @ `88d4a265c` | ✅ PASS 6/0 (T3.1 legs RED-proven) |
+| `zombie_active_close_e1_discount` (B) | same form, `test_zombie_active_close_e1_discount.py` | E1 default-None byte-identity; discount scoping root/member; childless-root starvation vector both directions | 2026-10-31 @ `88d4a265c` | ✅ PASS 4/0 (T3.2) |
+| `zombie_active_close_negatives` (C) | `test_zombie_active_close_negatives.py` | pending/PAUSED/RUNNING-sibling block candidacy; young not examined; live-sibling HOLDS; deleted excluded | 2026-10-31 @ `88d4a265c` | ✅ PASS 6/0 (T3.3) |
+| `zombie_active_close_races` (D) | `test_zombie_active_close_races.py` | two seam callers one winner; preemptive race_lost_noop; same-txn no done-with-lock window | 2026-10-31 @ `88d4a265c` | ✅ PASS 4/0 (T3.4) |
+| `zombie_active_close_failclosed` (E) | `test_zombie_active_close_failclosed.py` | guard error/timeout ⇒ skip ZERO writes; bus-unavailable fail-safe | 2026-10-31 @ `88d4a265c` | ✅ PASS 3/0 (T3.5, shape-aware plant) |
+| `zombie_active_close_knobs` (F) | `test_zombie_active_close_knobs.py` | OFF complete no-op (query spy); defaults; FAIL-FAST ge=1; env prefix; api wiring + boot log + signature | 2026-10-31 @ `88d4a265c` | ✅ PASS 9/0 (T3.6) |
+| `zombie_active_close_tokens_watchers` (G) | `test_zombie_active_close_tokens_watchers.py` | canonical round-trip + reverse index; raw NOT terminal; W1 canonical notify x3 verdicts; PP1 correlation | 2026-10-31 @ `88d4a265c` | ✅ PASS 7/0 (T3.7, both planted forms RED) |
+| `zombie_active_close_static` (H) | `test_zombie_active_close_static.py` | SQL exact-string pins (S5 ORDER BY + tiebreak; MAX(completed_at) age key scoped to the SQL region); log tokens; S4 NULL-instance close; SSOT cardinality pin (W2; tidier-fold re-run) | 2026-10-31 @ tidier fold | ✅ PASS 9/0 (T3.8 + W2) |
+| `zombie_active_close_amendments` (J) | `test_zombie_active_close_amendments.py` | A1 examined>0 colon-terminated gate + K=40 + reset/evict; A3 notify=<outcome>; A5 IN-list; A6 builder + anchor-fallback; A2 both dispositions | 2026-10-31 @ `5eba81487` | ✅ PASS 12/0 (T3.12) |
+| `zombie_active_close_amendments` (J, strengthened) | `test_zombie_active_close_amendments.py` | A1 examined>0 colon-terminated gate + BROADENED forbidden conjunct (a1v3 leg) + K-ladder; A3 TWO precise notify anchors (a3v2 leg); error_skips REQUIRED wording; A5 wrap-tolerant; A6; A2 dispositions | 2026-10-31 @ tidier fold | ✅ PASS 12/0 (T3.12; legs a1v3/a3v2 mutation-proven) |
+| `zombie_active_close_pg` (I) | `env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_HOST -u POSTGRES_PORT <py> -m pytest tests/postgres/test_zombie_active_close_pg.py --override-ini="addopts=" -m postgres -q --timeout=120` (PG_TEST_* DSN; serial-only) | real-PG close under the VERBATIM manager trigger suite (assert-or-install) + the ADOPTED advisory-4 admission-pair drift-guard (ADV4 leg); same-txn lock release; S5 order; 3-verdict e2e | 2026-10-31 @ tidier fold | ✅ PASS 3/0 (T3.9 + ADV4) |
+| `dbpool_wedge_capture_static` (R-10 run-only) | `tests/unit/tools/test_dbpool_wedge_capture_static.py` | UNCHANGED isolation proof of the census fix | 2026-10-31 @ `919928639` | ✅ PASS 6/0 zero edits (T3.10) |
+| `dbpool_wedge_capture_pg` (R-10 re-pointed) | `tests/postgres/test_dbpool_wedge_capture_pg.py` (postgres marker form) | census POPULATED (reltuples via ANALYZE; NULL-safe n_live_tup; total_bytes; summary keys); old-form plant RED | 2026-10-31 @ `6fe3414b1` | ✅ PASS 3/0 (T3.10, T3.9-R10 leg RED-proven) |
+
+
 ## promote-preflight-hang FUNCTIONAL GATE (`fix/promote-preflight-hang` @ `0b6a21236`, base `b1183a637`) — ✅ **LANE VERDICT: PASS-WITH-NOTES — ceremony-ready CONDITIONAL on the G3 1-line pre-stage fold** (2026-10-30)
 
 > Full record: `.agents/tester/RESULTS/2026-10-30-preflight-hang-functional-gate.md`. All 9 gates execution-verified independently (12 workers, sandbox-fenced, lane HEAD pinned). Sole finding: G3 net-new red = stale 1-line test stub (`test_agent_restart.py` `_rec` lacks `unit_properties` kwarg vs `manager.py:5579` widening) — remediation VERIFIED in a disposable tree; the 1-line fold is REQUIRED before stage. Count-growth rows (31/33/68/40/7/469 vs anchors 24/30/38/27/4/236) = fix-cycle pack growth, 0 failed everywhere.

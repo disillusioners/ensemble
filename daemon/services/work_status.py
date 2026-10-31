@@ -125,6 +125,32 @@ _STATUS_CANONICAL_MAP: Final[dict[str, str]] = {
     # Without this mapping ``canonicalize_status()`` would leak the
     # raw ``"watchover_terminated"`` string through to API responses.
     "watchover_terminated": "cancelled",
+    # Pattern (h) zombie-ACTIVE close (wi-78967dba, 2026-10-31): a
+    # task-kind JobItem whose backing Task reached an ORGANIC
+    # terminal verdict but whose admission finalize was missed (the
+    # driving instance is RUNNING-stalled). The provenance token
+    # records HOW the row was closed (the drift reconciler's
+    # pattern-(h) leg); the canonical target preserves the organic
+    # outcome — the work unit DID complete / fail / cancel; only the
+    # bookkeeping finalize was missed. Collapses onto the EXISTING
+    # canonical vocabulary (NOT self-mapped — pass-through is
+    # provably harmful: ``_derive_legacy_status`` fall-through would
+    # misreport failed/cancelled as completed, and
+    # ``work_resolver._job_to_record`` would leak the raw token as
+    # ``record.status``). ``is_terminal`` and the status-filter
+    # surfaces are UNCHANGED (targets already terminal);
+    # ``terminal_reason_variants_for`` picks these up via the
+    # auto-derived reverse index. A4: healed rows carry NO
+    # ``failed_at`` — JobRetryEngine reads ``failed_at`` (not
+    # terminal_reason), so ``zombie_active_failed`` rows FORECLOSE
+    # atomic_retry BY DESIGN (re-arming 2h+-stale work is the harm
+    # the omission prevents). A5: attribution queries use the
+    # explicit IN-list ('zombie_active_completed',
+    # 'zombie_active_failed', 'zombie_active_cancelled'), never a
+    # prefix-LIKE (PG btree is prefix-blind without text_pattern_ops).
+    "zombie_active_completed": "completed",
+    "zombie_active_failed": "failed",
+    "zombie_active_cancelled": "cancelled",
     # FP3 (2026-10-03, report-delivery-bug-family) — the
     # ``reconcile_turn_mirror`` orphan arm stamps
     # ``terminal_reason='orphaned_no_task'`` on a JobItem whose
