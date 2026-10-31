@@ -1,5 +1,11 @@
 # Blast-Radius Leg — Tier-1 Gate Recipe (project canon)
 
+> **v1.0.1 (2026-10-31)** — doctrine maintenance driven by the FIRST real gate run
+> (project-skill-loader Phase-1, Tier-1, ~6 min legs / ~28 min window). Three folds:
+> **(a)** the two-class declaration rule for additive lanes (GAP-1); **(b)** digest
+> capture greps `^(FAILED|ERROR)`, not `^FAILED ` (GAP-2); **(c)** the budget table now
+> carries the measured parallel-legs shape (FRICTION-1). Body unchanged otherwise.
+
 Tier 1 is the DEFAULT regression gate for feature lanes: a **scoped dual-side FAILED-list diff over the declared blast radius**, ≤ 30 min HARD, fail-loud. Canonical, deterministic recipe — load it from `.agents/tester/skills/blast-radius-leg/`, never discover it via `skill_search` (the G2 worker never found the cheaper runner and burned 9h32m; that failure mode is why this file exists).
 
 - Tier contract: `.agents/tester/rules/ensure.md` § Gate Tiers.
@@ -15,17 +21,53 @@ Tier 1 is the DEFAULT regression gate for feature lanes: a **scoped dual-side FA
    - **Pin packs**: PACKS.md packs registered for changed tools/categories (the pin-ceremony packs).
 3. Result = **CANDIDATE set**. The tester declares the FINAL set in the gate report — derivation is generated, declaration is tester-owned. An executor never silently expands or contracts the set.
 
+### Two-class declaration (ADDITIVE lanes) — GAP-1, folded in v1.0.1
+
+A purely-additive lane (new modules / new test packs, no existing seam touched) breaks
+the single-set assumption above: the lane's own pins exist ONLY at HEAD, so a literal
+"executed == declared on both legs" either produces BASE collection errors on absent
+files or invites counting absent-at-base files as net-new. Declare TWO classes:
+
+- **D1 — lane-owned (HEAD-only) pins.** Test files the lane ADDS. Status rule: **MUST PASS
+  at HEAD** (0 failed / 0 error). A base-side "red" is **IMPOSSIBLE BY CONSTRUCTION** and is
+  therefore neither net-new nor "fixed" — record the absence as expected-by-construction,
+  never as a failure and never as a pass.
+- **D2 — dual-side comparable set.** Files existing at BOTH revs, enumerated by the (a)
+  derivation (priority order is tester-owned; cap it and record drops). This is the ONLY
+  set that carries the FAILED-digest diff.
+
+The gate report MUST state both classes, their node counts per leg, and the asymmetry
+explicitly: the HEAD leg runs D1 + D2, the BASE leg runs D2 only. That is **not** a broken
+"identical commands" invariant — the command SHAPE is identical; only the file list differs
+by construction, and the report says so.
+
 ## (b) Slicing proof (mandatory)
 
 `--collect-only -q` over the declared set: **executed == declared**, node counts recorded in the report. A leg without a slicing proof is INVALID.
+
+**Digest capture form — GAP-2, folded in v1.0.1.** Extract failing node ids with
+`grep -E '^(FAILED|ERROR)'` — **NOT** `grep '^FAILED '`. A bare `^FAILED ` grep silently
+drops every `ERROR` line (collection/setup errors), so an additive lane — whose new files
+are ABSENT at BASE and therefore produce collection ERRORS there — can look digest-clean
+while BASE was erroring. Digest BOTH prefixes; explain every `ERROR` id in the report, never
+only the `FAILED` ones. (The sibling `.agents/tester/skills/failed-digest-equality-gate/`
+carries the same corrected form.)
 
 ## (c) Budget mechanics — hard 30-min cap
 
 | Phase | Budget |
 |---|---|
-| Setup (two worktrees, scratch PG(s), collect) | 10–15 min |
-| Legs (BASE + HEAD) | 2 × 5–10 min |
-| Flaky probes (3× isolation, diff nodes ONLY) | ~5 min |
+| Setup (two worktrees, scratch PG(s), collect) | 3–10 min |
+| Legs (BASE + HEAD) — **sequential**, each a scoped set | 2 × **minutes** (measured: 26 s + 40 s on a ~400-node scoped set) |
+| Flaky probes (3× isolation, diff nodes ONLY) | ~5 min, and only when the diff set is non-empty |
+
+**Target wording — FRICTION-1, folded in v1.0.1:** *a scoped leg is MINUTES.* The older
+10–15 min setup + 2 × 5–10 min leg numbers summed to 25–40 min and overran this recipe's own
+30-min cap before anything ran. Measured reality from the first real outing
+(project-skill-loader Phase-1): **gate legs ≈ 6 min**; **total window ≈ 28 min**, and that
+28 min = recon + `max(legs, mutation-lane)` + one discretionary closeout — i.e. **the legs and
+the mutation-verification lane ran in PARALLEL**, so the window is not their sum. Serialising a
+mutation lane behind the legs is what turns a 6-min gate into a 26-min one.
 
 Projected OR actual breach → **STOP + fail-loud report + ONE auto re-scope attempt**. Never silent grinding; never a quiet cap raise.
 
