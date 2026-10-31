@@ -166,14 +166,14 @@ A pin that cannot go RED is worthless. Every pin this gate leans on was mutation
 
 | # | Mutation (file:line, before → after) | Expected pin | Observed |
 |---|---|---|---|
-| M1 | `20261031_120001_create_project_skill_embeddings.sql:58` `skill_id TEXT NOT NULL,` → `skill_id TEXT NOT NULL REFERENCES project_skill_files(id),` | `TestFreshSqliteApply::test_no_foreign_key_clause_anywhere` + `::test_no_fk_constraint_materialized_on_sqlite` | **RED** both — `assert 'REFERENCES' not in ...`; `assert [{'constrained_columns': ['id'], ...}] == []` |
-| M2 | `daemon/repositories/project_skill_file/repository.py` — `ProjectSkillEmbedding` swapped to `daemon.repositories.skill.models.SkillEmbedding` (dedicated path degenerates onto the FK-constrained legacy table) | `TestA1FkWallPin::test_dedicated_table_path_green` | **RED** — `psycopg.errors.ForeignKeyViolation: ... violates foreign key constraint "skill_embeddings_skill_id_fkey"`. `test_pf_insert_into_legacy_skill_embeddings_rejected` correctly stayed GREEN (it targets the legacy table directly, so it is *not* collateral-sensitive — a good sign it is not a duplicate pin). |
-| M3 | `daemon/services/project_skill_source/service.py:1160` `description=meta.description,` → `description=_read_body_bytes(root_path, meta).decode(...)` | `TestP1SentinelPG::test_body_sentinel_never_persisted_on_real_pg` | **RED** — `P1 violated on PG: {violations}` (sentinel windows found in `project_skill_files.description`) |
-| M4 | copy `20261031_120002_create_project_skill_usage_records.sql` → `20261031_120000_create_dup_probe.sql` (duplicate prefix) | `TestRepoVersionsRegistry::test_discovery_has_no_duplicate_prefix_and_carries_lane_files` | **RED** — `DuplicateMigrationVersionError: ... version 20261031_120000 is claimed by 2 files` |
+| P1-M1 | `20261031_120001_create_project_skill_embeddings.sql:58` `skill_id TEXT NOT NULL,` → `skill_id TEXT NOT NULL REFERENCES project_skill_files(id),` | `TestFreshSqliteApply::test_no_foreign_key_clause_anywhere` + `::test_no_fk_constraint_materialized_on_sqlite` | **RED** both — `assert 'REFERENCES' not in ...`; `assert [{'constrained_columns': ['id'], ...}] == []` |
+| P1-M2 | `daemon/repositories/project_skill_file/repository.py` — `ProjectSkillEmbedding` swapped to `daemon.repositories.skill.models.SkillEmbedding` (dedicated path degenerates onto the FK-constrained legacy table) | `TestA1FkWallPin::test_dedicated_table_path_green` | **RED** — `psycopg.errors.ForeignKeyViolation: ... violates foreign key constraint "skill_embeddings_skill_id_fkey"`. `test_pf_insert_into_legacy_skill_embeddings_rejected` correctly stayed GREEN (it targets the legacy table directly, so it is *not* collateral-sensitive — a good sign it is not a duplicate pin). |
+| P1-M3 | `daemon/services/project_skill_source/service.py:1160` `description=meta.description,` → `description=_read_body_bytes(root_path, meta).decode(...)` | `TestP1SentinelPG::test_body_sentinel_never_persisted_on_real_pg` | **RED** — `P1 violated on PG: {violations}` (sentinel windows found in `project_skill_files.description`) |
+| P1-M4 | copy `20261031_120002_create_project_skill_usage_records.sql` → `20261031_120000_create_dup_probe.sql` (duplicate prefix) | `TestRepoVersionsRegistry::test_discovery_has_no_duplicate_prefix_and_carries_lane_files` | **RED** — `DuplicateMigrationVersionError: ... version 20261031_120000 is claimed by 2 files` |
 
 Every mutation reverted (`git checkout -- <path>` / `rm` of the dup probe) with a **GREEN-after-revert** proof (2/3/1/1 passed respectively). No pin went red for the wrong reason; no vacuous pin found.
 
-**One collateral, disclosed (not a defect):** M2 also reddens `test_gc_sweep_on_real_pg`, because that test's `insert_many` now hits the FK wall. That is inherent to the mutation, not pin over-reach.
+**One collateral, disclosed (not a defect):** P1-M2 also reddens `test_gc_sweep_on_real_pg`, because that test's `insert_many` now hits the FK wall. That is inherent to the mutation, not pin over-reach.
 
 **Teardown:** `psl_mut_db` dropped · role `psl_mut` dropped (absent in `\du`/`\l`) · scratch worktree removed (`worktree list | grep -c mut-psl` = 0). Gate worktree porcelain sha `dc9d2fdd4c6a5f35131cc3ec5c01e245cd440fdf15432b43c146ec269eb2b695` unchanged before/after. Main checkout sha `2c85a625…44f02` unchanged.
 
@@ -206,7 +206,7 @@ Every mutation reverted (`git checkout -- <path>` / `rm` of the dup probe) with 
 |---|---|---|
 | Recon (read-only) | ~2 min | `psl-recon` f9d583a2 |
 | **Gate legs** (setup ≈3 min, slicing ≈30 s, probe 4.9 s, BASE 26 s, HEAD 40 s, PG 59/18/59 s, cleanup ~10 s) | **≈6 min** | `psl-gate-legs` bba587eb — measured by the lane |
-| Mutation lane (setup + baseline + M1–M4 + teardown) | ≈12 min | `psl-gate-mutation` b1e8c8ad — ran **in parallel** with the legs lane |
+| Mutation lane (setup + baseline + P1-M1..P1-M4 + teardown) | ≈12 min | `psl-gate-mutation` b1e8c8ad — ran **in parallel** with the legs lane |
 | PG node-id digest closeout | ≈6 min 18 s | `psl-pgdigest` ef656131 (20:19:24 → 20:25:42 UTC) |
 | **TOTAL gate window (dispatch → verdict-ready)** | **≈28 min** | inside the 30-min cap, but only by ~2 min |
 
@@ -229,7 +229,7 @@ Five evidence lines that carry the verdict:
 1. **Premise verified, not trusted** — `git diff`/`git log`/`--diff-filter=RMD` all empty over `skill_search_service.py`, `skill_injection_service.py`, `manager.py`, `config.py`, `services/readiness.py`; **0** core-seam hits → Tier 1 stands, no mechanical Tier-2 escalation.
 2. **Dual-side D2 corpus: 273/273 passed at BASE, 273/273 at HEAD**, node lists byte-identical (273/309 both), FAILED lists **empty** on both legs; digest `e3b0c442…` (empty) on both sides, `cmp` identical, both `comm` directions empty.
 3. **Real PG (mandatory): 12/12 lane PG tests green at HEAD** on a throwaway `ensemble_test_stage3` DB; the one PG file with pre-existing reds reproduced **29 identical FAILED+ERROR node ids** at both revs (`2fad8e8a…`, `cmp_rc=0`) → **zero net-new**, base reds byte-identical.
-4. **Every pin the gate leans on is mutation-meaningful (4/4)** — M1 FK-wall (SQLite) RED, M2 legacy-table degeneration (PG, `ForeignKeyViolation` on `skill_embeddings_skill_id_fkey`) RED, M3 P1 sentinel persisted RED, M4 duplicate migration prefix RED, each with a GREEN-after-revert proof. No vacuous pin.
+4. **Every pin the gate leans on is mutation-meaningful (4/4)** — P1-M1 FK-wall (SQLite) RED, P1-M2 legacy-table degeneration (PG, `ForeignKeyViolation` on `skill_embeddings_skill_id_fkey`) RED, P1-M3 P1 sentinel persisted RED, P1-M4 duplicate migration prefix RED, each with a GREEN-after-revert proof. No vacuous pin.
 5. **Fences held by re-verification, not by assumption** — ambient env was in fact prod-pointing (`ensemble_prod` @ `10.44.0.2`) despite recon claiming otherwise; every invocation scrubbed per-variable, main-checkout porcelain `2c85a625…44f02` byte-identical before/after, all scratch DBs/roles/worktrees dropped with absence proof.
 
 **Why not a clean PASS** — four notes, one of them critical:

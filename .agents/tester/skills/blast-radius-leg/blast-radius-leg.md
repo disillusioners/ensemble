@@ -1,10 +1,19 @@
 # Blast-Radius Leg — Tier-1 Gate Recipe (project canon)
 
-> **v1.0.1 (2026-10-31)** — doctrine maintenance driven by the FIRST real gate run
+> **v1.0.2 (2026-10-31)** — doctrine maintenance driven by the SECOND real gate run
+> (project-skill-loader Phase-2, Tier-1) + the Phase-1 carry-over. Two folds:
+> **(a)** Fences gains the SIBLING-ENV-ASSERTION rule (Phase-1 🔴, re-confirmed by two
+> independent lanes: the ambient env is prod-poisoned — `POSTGRES_DB=ensemble_prod`,
+> `POSTGRES_HOST=10.44.0.2` — and a sibling worker's env claim is NOT evidence about
+> yours); **(b)** mutation-label namespace: every mutation leg is labeled `P{n}-Mn`
+> (phase, mutation) with a mutation→test table in PACKS.md — bare `M1-M4` collided
+> across phases (Phase-2 gate finding F1).
+>
+> v1.0.1 (2026-10-31) — doctrine maintenance driven by the FIRST real gate run
 > (project-skill-loader Phase-1, Tier-1, ~6 min legs / ~28 min window). Three folds:
 > **(a)** the two-class declaration rule for additive lanes (GAP-1); **(b)** digest
 > capture greps `^(FAILED|ERROR)`, not `^FAILED ` (GAP-2); **(c)** the budget table now
-> carries the measured parallel-legs shape (FRICTION-1). Body unchanged otherwise.
+> carries the measured parallel-legs shape (FRICTION-1).
 
 Tier 1 is the DEFAULT regression gate for feature lanes: a **scoped dual-side FAILED-list diff over the declared blast radius**, ≤ 30 min HARD, fail-loud. Canonical, deterministic recipe — load it from `.agents/tester/skills/blast-radius-leg/`, never discover it via `skill_search` (the G2 worker never found the cheaper runner and burned 9h32m; that failure mode is why this file exists).
 
@@ -97,6 +106,20 @@ Each exclusion MUST carry a named compensating pin in the gate report (wedge-cap
 
 The notify-user diff (2026-10-25/26): one new tool file + registration + migration + pin packs. Blast radius ≈ low-hundreds of nodes → Tier-1 leg ≈ **15–30 min total** (setup + 2 legs + probes). What actually ran: whole-tree dual-side, serial, 1300-node shards under 300s caps → **9h32m wall, 89 timeout-splits, 36 rc=124 outer kills, performance/e2e cells pure waste** — for a diff whose blast radius was one tool surface. The tier doctrine exists so this never recurs.
 
-## Fences (house rules, unchanged)
+## Fences (house rules; v1.0.2 adds the sibling-env rule)
 
 Per-variable env scrubs (`env -u POSTGRES_*` globs are a SILENT NO-OP — bash does not glob env names); scrub+fence written ONCE into a runner script file invoked by both legs; `mktemp` FAKE_HOME fences; ports 9797/8079 untouched; never the shared dirty checkout; record the main checkout's porcelain sha before AND after.
+
+**SIBLING-ENV-ASSERTION (v1.0.2, Phase-1 🔴 carry-over — the highest-value fold):** a
+sibling worker's env claim is NOT evidence about YOUR env; verify per-invocation,
+per-variable (`[ "$POSTGRES_DB" != "ensemble_prod" ]` or equivalent assert in the runner;
+the ambient env on this host is prod-poisoned — `POSTGRES_DB=ensemble_prod`,
+`POSTGRES_HOST=10.44.0.2` — re-confirmed by two independent lanes 2026-10-31).
+`PG_TEST_ALLOWED_DBS` is unset by default: set it explicitly per run or the fence's
+intended mechanism is absent.
+
+**Mutation-label namespace (v1.0.2, Phase-2 F1):** every mutation leg carries a
+`P{n}-Mn` label (phase n, mutation m) and lands in the lane's mutation→test table in
+`.agents/tester/PACKS.md`. Bare `M1-M4` labels collided across phases once already —
+do not reintroduce them. (The Phase-4 plan's `M0-M11` degraded-MODE codes are a
+different namespace and are unaffected.)
