@@ -371,14 +371,22 @@ def _read_store_census(cursor: Any) -> dict[str, Any]:
     """The checkpoint-store census — the H2 evidence (D10 / T10)."""
     census: dict[str, Any] = {}
     try:
+        # R-10 (wi-78967dba, 2026-10-31): ``n_live_tup`` lives on
+        # pg_stat_user_tables, NOT pg_class — the pre-fix
+        # ``c.n_live_tup`` ALWAYS failed UndefinedColumn on real PG
+        # (born-broken; measured on scratch PG16). Minimal-join fix:
+        # LEFT JOIN pg_stat_user_tables (NULL-safe — the consumer
+        # below already handles None); everything else verbatim.
+        # Correct-query precedent: ens_db_tools.py:1223.
         cursor.execute(
             """
             SELECT c.relname,
                    c.reltuples::bigint,
-                   c.n_live_tup::bigint,
+                   s.n_live_tup::bigint,
                    pg_total_relation_size(c.oid)
               FROM pg_class c
               JOIN pg_namespace n ON n.oid = c.relnamespace
+              LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
              WHERE n.nspname = current_schema()
                AND c.relname = ANY(%s)
             """,
