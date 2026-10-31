@@ -3997,8 +3997,8 @@ async def _periodic_drift_reconcile_loop(
             zombie_stats = stats.get("zombie_close") or {}
             if zombie_stats.get("examined", 0) > 0:
                 logger.info(
-                    "Drift reconciler: Pattern (h) zombie-active "
-                    "close: examined=%(examined)s "
+                    "Drift reconciler: Pattern (h) zombie-active close: "
+                    "examined=%(examined)s "
                     "age_qualified=%(age_qualified)s "
                     "holds=%(holds)s error_skips=%(error_skips)s "
                     "finalized=%(finalized)s "
@@ -4030,8 +4030,8 @@ async def _periodic_drift_reconcile_loop(
                     )
 
                     logger.warning(
-                        "Drift reconciler: Pattern (h) zombie-active "
-                        "close recorded %s guard/probe error skip(s) "
+                        "Drift reconciler: Pattern (h) zombie-active close "
+                        "recorded %s guard/probe error skip(s) "
                         "this cycle — candidates held ACTIVE "
                         "(fail-closed); repeated skips escalate at "
                         "K=%s consecutive cycles",

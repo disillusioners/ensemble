@@ -5084,8 +5084,8 @@ class JobRecoveryService:
             or self._task_repository is None
         ):
             logger.debug(
-                "reconcile_drift_states: Pattern (h) zombie-active "
-                "close skipped — repositories not wired"
+                "reconcile_drift_states: Pattern (h) zombie-active close "
+                "skipped — repositories not wired"
             )
             return {**counters, "details": details}
 
@@ -5100,8 +5100,8 @@ class JobRecoveryService:
         except Exception as cand_err:  # noqa: BLE001 — fail-closed
             counters["error_skips"] += 1
             logger.warning(
-                "reconcile_drift_states: Pattern (h) zombie-active "
-                "close candidate query failed (%s: %s) — SKIP, next "
+                "reconcile_drift_states: Pattern (h) zombie-active close candidate "
+                "query failed (%s: %s) — SKIP, next "
                 "cycle retries (fail-closed)",
                 type(cand_err).__name__,
                 cand_err,
@@ -5283,8 +5283,8 @@ class JobRecoveryService:
                 now_utc_naive() - parsed_stamp
             ).total_seconds()
             logger.warning(
-                "reconcile_drift_states: Pattern (h) zombie-active "
-                "close — job %s... (task %s, instance %s..., "
+                "reconcile_drift_states: Pattern (h) zombie-active close — "
+                "job %s... (task %s, instance %s..., "
                 "task_status=%s, age_seconds=%.0f) finalized to "
                 "DONE with terminal_reason=%s; lock released "
                 "same-transaction; notify=%s (zero-watcher fires "
@@ -5330,8 +5330,8 @@ class JobRecoveryService:
         self._zombie_close_streaks[job_id] = n
         if n == ZOMBIE_CLOSE_STREAK_WARN_THRESHOLD:
             logger.warning(
-                "reconcile_drift_states: Pattern (h) zombie-active "
-                "close — job %s... has now been skipped/held %d "
+                "reconcile_drift_states: Pattern (h) zombie-active close — "
+                "job %s... has now been skipped/held %d "
                 "consecutive cycles (~%.1fh at the 300s cadence, "
                 "last reason class=%s) — stuck-closed escalation: "
                 "inspect the zombie_close_skipped_* tokens and the "
