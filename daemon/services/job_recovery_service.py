@@ -5063,7 +5063,7 @@ class JobRecoveryService:
            cleanup (``job_queue_service.py:508`` —
            ``remove_all_watches_for_job`` on
            ``status in ALL_TERMINAL_STATES``), and the boot-time
-           ``reconcile_terminal_watches`` sweep (``api.py:2455``).
+           ``reconcile_terminal_watches`` sweep (``api.py:2482``).
 
         Returns the counter block (A1 observability — folded into
         the drift stats the loop logs whenever ``examined > 0``,
@@ -5215,6 +5215,27 @@ class JobRecoveryService:
             # Leg 5 — the census-registered write seam, with the A2
             # in-txn inflight re-check ALWAYS on for (h).
             token = f"zombie_active_{cand.task_status}"
+            # Advisory-1 fold (code-review council, 2026-10-31): the
+            # candidate SQL's terminal IN-filter is the verdict
+            # source; if an unexpected status ever reaches here
+            # (filter drift), become a LOUD error skip — never a
+            # mis-tokenized terminal write.
+            if cand.task_status not in (
+                "completed",
+                "failed",
+                "cancelled",
+            ):
+                counters["error_skips"] += 1
+                self._zombie_close_streak_bump(job_id, "status")
+                logger.error(
+                    "reconcile_drift_states: Pattern (h) zombie-active "
+                    "close — job %s... candidate carried an unexpected "
+                    "task_status=%r (candidate-SQL terminal filter "
+                    "drift?) — SKIP (fail-closed); next cycle retries",
+                    short_job,
+                    cand.task_status,
+                )
+                continue
             try:
                 reaped = await asyncio.to_thread(
                     self._job_repository.force_finalize_orphan,
@@ -5327,16 +5348,24 @@ class JobRecoveryService:
         # entries whose job left the candidate shape. Entries beyond
         # the batch cap REMAIN candidates — kept (restart resets the
         # dict; in-memory by design, disclosed).
-        self._zombie_close_streak_maintain(examined_job_ids)
+        await self._zombie_close_streak_maintain(examined_job_ids)
 
         return {**counters, "details": details}
 
     def _zombie_close_streak_bump(self, job_id: str, reason: str) -> None:
         """A1/CF-3: record one consecutive skip/hold for ``job_id``;
-        fire the escalating WARN exactly at the threshold."""
+        fire the escalating WARN on the doubling ladder K·2^i
+        (advisory-2 fold, code-review council 2026-10-31: K, 2K, 4K,
+        8K… — a stuck-closed job keeps re-surfacing at geometrically
+        increasing intervals instead of going dark after one WARN)."""
         n = self._zombie_close_streaks.get(job_id, 0) + 1
         self._zombie_close_streaks[job_id] = n
-        if n == ZOMBIE_CLOSE_STREAK_WARN_THRESHOLD:
+        ladder_multiple, remainder = divmod(
+            n, ZOMBIE_CLOSE_STREAK_WARN_THRESHOLD
+        )
+        if remainder == 0 and ladder_multiple >= 1 and (
+            ladder_multiple & (ladder_multiple - 1)
+        ) == 0:
             logger.warning(
                 "reconcile_drift_states: Pattern (h) zombie-active close — "
                 "job %s... has now been skipped/held %d "
@@ -5351,14 +5380,19 @@ class JobRecoveryService:
                 reason,
             )
 
-    def _zombie_close_streak_maintain(
+    async def _zombie_close_streak_maintain(
         self, examined_job_ids: set[str]
     ) -> None:
         """A1/CF-3: evict streak entries whose job left the candidate
         shape (closed by anyone / deleted / shape changed). A cheap
         existence probe over the (small) streak dict — jobs still
         active keep their streak even when the batch cap deferred
-        them this tick (they remain candidates)."""
+        them this tick (they remain candidates).
+
+        W1 (code-review council fold, 2026-10-31): the repository
+        read goes through ``asyncio.to_thread`` — the sync-on-loop
+        form was the exact v0.27.14 loop-starvation class (the
+        file's 30+ existing to_thread sites are the convention)."""
         if not self._zombie_close_streaks:
             return
         stale: list[str] = []
@@ -5366,7 +5400,9 @@ class JobRecoveryService:
             if jid in examined_job_ids:
                 continue
             try:
-                row = self._job_repository.get(jid)  # type: ignore[union-attr]
+                row = await asyncio.to_thread(
+                    self._job_repository.get, jid  # type: ignore[union-attr]
+                )
             except Exception:  # noqa: BLE001 — best-effort eviction
                 continue
             if (

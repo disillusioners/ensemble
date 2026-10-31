@@ -185,6 +185,18 @@ class TestA1CounterBlockVisibility:
                 r for r in caplog.records if "stuck-closed" in r.getMessage()
             ]
             assert len(fired) == 1, fired
+            # Advisory-2 ladder (K*2^i): silent 41..79, re-fires at 80
+            for _ in range(39):
+                service._zombie_close_streak_bump(ref["job_id"], "hold")
+            mid = [
+                r for r in caplog.records if "stuck-closed" in r.getMessage()
+            ]
+            assert len(mid) == 1, mid
+            service._zombie_close_streak_bump(ref["job_id"], "hold")  # 80
+            ladder = [
+                r for r in caplog.records if "stuck-closed" in r.getMessage()
+            ]
+            assert len(ladder) == 2, ladder
 
     async def test_streak_resets_on_close_and_evicts_when_gone(
         self, j_engine, j_bus
@@ -203,10 +215,11 @@ class TestA1CounterBlockVisibility:
         )
         assert ref["job_id"] not in service._zombie_close_streaks
         # Eviction: an entry whose job left the candidate shape is
-        # dropped on the next maintain pass.
+        # dropped on the next maintain pass (W1 fold: the helper is
+        # async — the existence probe goes through to_thread).
         other = f"job-zc-gone-{uuid.uuid4().hex[:8]}"
         service._zombie_close_streaks[other] = 3
-        service._zombie_close_streak_maintain(set())
+        await service._zombie_close_streak_maintain(set())
         assert other not in service._zombie_close_streaks
 
 

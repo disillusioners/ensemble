@@ -141,8 +141,11 @@ class TestZombieActiveCoreClose:
         writes. INCLUSIVE per the strand-healer precedent: the
         margins make both halves deterministic (the exact == edge is
         wall-clock-jittered by construction; a planted SHIFTED SQL
-        bound — cutoff pulled 60s older — flips the eligible half
-        RED, the boundary-semantics mutation this pin must catch)."""
+        bound — cutoff pulled +180s older, beyond the 120s margin —
+        flips the eligible half RED, the boundary-semantics mutation
+        this pin must catch; a 60s shift stays inside the margin and
+        is honestly recorded as a superseded dead plant in the
+        matrix)."""
         ref_old = insert_zombie_fixture(
             zc_engine,
             verdict="completed",

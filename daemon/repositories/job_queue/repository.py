@@ -4346,21 +4346,39 @@ SET admission_state = 'queued',
                 # SQL with the flag absent.
                 from daemon.constants import NON_TERMINAL_TASK_STATUSES
 
+                # W2 fold (code-review council, 2026-10-31): same
+                # cardinality contract as the candidate query — a
+                # drifted SSOT must raise LOUD, never silently
+                # truncate the recheck's live-status set (fail-open).
+                _nt = sorted(NON_TERMINAL_TASK_STATUSES)
+                if len(_nt) != 4 or set(_nt) != {
+                    "pending",
+                    "running",
+                    "paused",
+                    "processing",
+                }:
+                    raise RuntimeError(
+                        "force_finalize_orphan recheck: "
+                        "NON_TERMINAL_TASK_STATUSES cardinality "
+                        f"drifted ({len(_nt)} statuses: {_nt}) — "
+                        "the fixed arity-4 IN-binds would silently "
+                        "truncate; extend together with the "
+                        "candidate SQL binds + the cardinality pin"
+                    )
                 inflight = conn.execute(
                     text(
                         "SELECT 1 FROM task "
                         "WHERE instance_id = :iid "
-                        "  AND status IN (:s0, :s1, :s2, :s3) "
+                        "  AND status IN (:s_pending, :s_running, "
+                        "                   :s_paused, :s_processing) "
                         "LIMIT 1"
                     ),
                     {
                         "iid": instance_id_for_release,
-                        **{
-                            f"s{i}": s
-                            for i, s in enumerate(
-                                sorted(NON_TERMINAL_TASK_STATUSES)
-                            )
-                        },
+                        "s_pending": "pending",
+                        "s_running": "running",
+                        "s_paused": "paused",
+                        "s_processing": "processing",
                     },
                 ).first()
                 if inflight is not None:
@@ -4513,7 +4531,33 @@ SET admission_state = 'queued',
         # Explicit bind params (NOT interpolated IN-lists) — the
         # dual-driver pattern from ``has_instance_busy``: identical
         # on PostgreSQL (psycopg) and SQLite.
+        #
+        # W2 fold (code-review council, 2026-10-31): the non-terminal
+        # set is the SSOT (``daemon/constants.py``) but the SQL's
+        # fixed arity-4 IN-binds are a CARDINALITY CONTRACT — if the
+        # SSOT ever grows, a fixed bind list would silently truncate
+        # the set (latent fail-OPEN: a new live status would stop
+        # holding). The guard makes the drift LOUD; the bind names
+        # carry the truthful spellings (the pre-fold sorted-index
+        # binds were mislabeled); the cardinality pin
+        # (test_zombie_active_close_static) locks the contract.
         nt = sorted(NON_TERMINAL_TASK_STATUSES)
+        if len(nt) != 4 or set(nt) != {
+            "pending",
+            "running",
+            "paused",
+            "processing",
+        }:
+            raise RuntimeError(
+                "find_zombie_active_candidates: "
+                "NON_TERMINAL_TASK_STATUSES cardinality drifted "
+                f"({len(nt)} statuses: {nt}) — the fixed arity-4 "
+                "IN-binds would silently truncate the live-task "
+                "set (fail-open); extend the candidate SQL's NOT "
+                "EXISTS binds, the A2 recheck binds in "
+                "force_finalize_orphan, and the cardinality pin "
+                "TOGETHER"
+            )
         with self.engine.connect() as conn:
             rows = conn.execute(
                 stmt,
@@ -4522,10 +4566,10 @@ SET admission_state = 'queued',
                     "terminal_failed": TaskStatus.FAILED.value,
                     "terminal_cancelled": TaskStatus.CANCELLED.value,
                     "cutoff": cutoff,
-                    "nt_pending": nt[0],
-                    "nt_running": nt[1],
-                    "nt_paused": nt[2],
-                    "nt_processing": nt[3],
+                    "nt_pending": "pending",
+                    "nt_running": "running",
+                    "nt_paused": "paused",
+                    "nt_processing": "processing",
                     "batch_cap": batch_cap,
                 },
             ).all()

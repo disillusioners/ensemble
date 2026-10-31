@@ -40,7 +40,7 @@ from tests.job_queue.zombie_close_helpers import (
 )
 
 #: The pack-local declared collected count (NEW packs only).
-EXPECTED_COLLECTED = 8
+EXPECTED_COLLECTED = 9
 
 _SOURCE_ROOT = Path(__file__).resolve().parents[2]
 _REPO_SRC = (
@@ -147,6 +147,27 @@ class TestLogLines:
             assert token in _SERVICE_SRC, (
                 f"skip reason token {token} must be greppable"
             )
+
+
+class TestSsotCardinality:
+    def test_non_terminal_task_statuses_cardinality_four(self):
+        """W2 (code-review council, 2026-10-31): the candidate SQL +
+        the A2 recheck carry FIXED arity-4 IN-binds over the SSOT
+        non-terminal set — a drifted SSOT raises LOUD at both sites;
+        this pin locks the contract so a 5th status can never land
+        silently (planted 5th status ⇒ RED here AND the repository
+        guards raise)."""
+        from daemon.constants import NON_TERMINAL_TASK_STATUSES
+
+        assert len(NON_TERMINAL_TASK_STATUSES) == 4, (
+            sorted(NON_TERMINAL_TASK_STATUSES)
+        )
+        assert set(NON_TERMINAL_TASK_STATUSES) == {
+            "pending",
+            "running",
+            "paused",
+            "processing",
+        }
 
 
 class TestS4NullInstanceClose:
