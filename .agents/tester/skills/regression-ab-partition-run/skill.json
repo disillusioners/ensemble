@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "name": "regression-ab-partition-run",
+  "version": "1.0.0",
+  "description": "Tier-2 TIP-vs-BASE A/B regression partition: scrubbed-env runner script written once and shared by both legs, in-child fence with 4-case self-test matrix, base-leg import proof, chunked aggregation, three-set diff (net-new/pre-existing/fixed), 3x flaky re-proof, shared-scratch-DB serial-only rule (DF-4: 9 fabricated reds).",
+  "category": "gate-runner",
+  "scope": "project",
+  "tiers": [2],
+  "body": "regression-ab-partition-run.md",
+  "assets": [],
+  "loads": ["failed-digest-equality-gate"],
+  "supersedes": { "store": "dynamic-skill", "skill_id": "fd1e01dc-37d5-4a0b-a05e-1933d18a006d" }
+}

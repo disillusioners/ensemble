@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "name": "whole-tree-base-proven-diff",
+  "version": "1.0.0",
+  "description": "Tier-2 whole-tree dual-side regression diff proving net-new failures = 0 vs a base commit, with measured-rate mrpr shard sizing and xdist-within-leg acceleration baked in (no hand-rolled slow runners), recursive-bisection death recovery, pre-exclusions with compensating pins. Budget <= 90 min advisory, fail-loud.",
+  "category": "gate-runner",
+  "scope": "project",
+  "tiers": [2],
+  "body": "whole-tree-base-proven-diff.md",
+  "assets": [],
+  "loads": ["failed-digest-equality-gate"],
+  "supersedes": { "store": "dynamic-skill", "skill_id": "9e79ccad-1e2c-456b-8762-82d7f5eeec0f" }
+}
