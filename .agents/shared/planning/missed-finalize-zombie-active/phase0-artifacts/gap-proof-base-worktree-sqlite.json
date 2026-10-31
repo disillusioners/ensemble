@@ -1,0 +1,87 @@
+{
+  "backend": "sqlite",
+  "cycles": [
+    {
+      "cycle": 1,
+      "reconciled": 0,
+      "states": {
+        "completed": {
+          "admission_state": "active",
+          "terminal_reason": null,
+          "lock_rows": 1
+        },
+        "failed": {
+          "admission_state": "active",
+          "terminal_reason": null,
+          "lock_rows": 1
+        },
+        "cancelled": {
+          "admission_state": "active",
+          "terminal_reason": null,
+          "lock_rows": 1
+        }
+      },
+      "patterns": [
+        "orphan_active_skipped_mission_live",
+        "orphan_active_skipped_mission_live_f1"
+      ]
+    },
+    {
+      "cycle": 2,
+      "reconciled": 0,
+      "states": {
+        "completed": {
+          "admission_state": "active",
+          "terminal_reason": null,
+          "lock_rows": 1
+        },
+        "failed": {
+          "admission_state": "active",
+          "terminal_reason": null,
+          "lock_rows": 1
+        },
+        "cancelled": {
+          "admission_state": "active",
+          "terminal_reason": null,
+          "lock_rows": 1
+        }
+      },
+      "patterns": [
+        "orphan_active_skipped_mission_live",
+        "orphan_active_skipped_mission_live_f1"
+      ]
+    },
+    {
+      "cycle": 3,
+      "reconciled": 0,
+      "states": {
+        "completed": {
+          "admission_state": "active",
+          "terminal_reason": null,
+          "lock_rows": 1
+        },
+        "failed": {
+          "admission_state": "active",
+          "terminal_reason": null,
+          "lock_rows": 1
+        },
+        "cancelled": {
+          "admission_state": "active",
+          "terminal_reason": null,
+          "lock_rows": 1
+        }
+      },
+      "patterns": [
+        "orphan_active_skipped_mission_live",
+        "orphan_active_skipped_mission_live_f1"
+      ]
+    }
+  ],
+  "e1_self_hold": {
+    "live": true,
+    "reason": "non-terminal member present (live leg holds) and freshest tree-member last_activity_at (root excluded) is 10800s old (<21600s threshold) \u2014 mission is plausibly alive; defer to the next tick",
+    "error": false,
+    "timed_out": false
+  },
+  "verdict": "GAP-PROVEN (no writer terminalized the zombie-ACTIVE shape; locks immortal across all cycles)"
+}
