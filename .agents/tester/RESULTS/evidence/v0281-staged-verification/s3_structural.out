@@ -1,0 +1,34 @@
+##### STAGED v0.28.1 #####
+modules loaded: upgrade_journal=YES sweep=YES
+-- reader A (raw byte scan of decompressed module blob) --
+  PRESENT | Deliberately KIND-AGNOSTIC
+  ABSENT  | do NOT add a kind check
+  PRESENT | promote-lane loop protection
+  PRESENT | Boot-lane PLUS ONE sanctioned live-lane exception
+  PRESENT | observed-executor-exit closer
+  ABSENT  | Boot-lane ONLY: never call this from a live turn
+  ABSENT  | own open restart arm (``run_id`` matches AND ``flipped`` is 
+-- reader B (marshal code-object structural read) --
+  FUNC _in_flight_is_own_open_txn: PRESENT  doc[:180]="True iff the journal's ``in_flight`` txn is THIS run's own open UNFLIPPED txn (``run_id`` matches AND ``flipped`` is not true). Deliberately KIND-AGNOSTIC — it matches a restart ar"
+  FUNC lock_release_run_id: PRESENT  doc[:180]="Run_id-matched lock release — the boot-lane authority form (agent-restart §3.3 N5 + rev-5 lock release). ``lock_release`` is OWNERSHIP-guarded (current pid must match the lock's ow"
+  FUNC _mark_wake_delivering_locked: PRESENT  doc[:180]='CAS body of ``mark_wake_delivering`` — caller HOLDS the journal lock; released in ``finally``.'
+  FUNC close_restart_arm_executor_exit: PRESENT  doc[:180]='Live-lane restart-arm closure on an OBSERVED executor exit (incident 2026-10-31 — restart-arm livelock). The reaper journals ``executor_exit`` for BOTH exit legs (normal waitpid an'
+  SWEEP HOOK _journal_executor_exit: PRESENT; calls close_restart_arm_executor_exit in co_names: True
+
+##### LIVE v0.28.0 #####
+modules loaded: upgrade_journal=YES sweep=YES
+-- reader A (raw byte scan of decompressed module blob) --
+  ABSENT  | Deliberately KIND-AGNOSTIC
+  ABSENT  | do NOT add a kind check
+  ABSENT  | promote-lane loop protection
+  ABSENT  | Boot-lane PLUS ONE sanctioned live-lane exception
+  ABSENT  | observed-executor-exit closer
+  PRESENT | Boot-lane ONLY: never call this from a live turn
+  ABSENT  | own open restart arm (``run_id`` matches AND ``flipped`` is 
+-- reader B (marshal code-object structural read) --
+  FUNC _in_flight_is_own_open_txn: ABSENT
+  FUNC lock_release_run_id: PRESENT  doc[:180]="Run_id-matched lock release — the boot-lane authority form (agent-restart §3.3 N5 + rev-5 lock release). ``lock_release`` is OWNERSHIP-guarded (current pid must match the lock's ow"
+  FUNC _mark_wake_delivering_locked: ABSENT
+  FUNC close_restart_arm_executor_exit: ABSENT
+  SWEEP HOOK _journal_executor_exit: PRESENT; calls close_restart_arm_executor_exit in co_names: False
+
