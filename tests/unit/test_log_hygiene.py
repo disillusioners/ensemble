@@ -406,3 +406,74 @@ class TestCheckpointPerfReadSumup:
         log_checkpoint_read("aget", "t-1", bytes_=1234, rows=2)
         assert checkpoint_read_ops_total.get(op="aget") == before_ops + 1
         assert checkpoint_read_bytes_total.get(op="aget") == before_bytes + 1234
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# (e) once-latch lock (NameError regression pin)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestLogInfoOnceLatch:
+    @pytest.fixture(autouse=True)
+    def _clear_once_logged(self):
+        from daemon import graph
+
+        graph._ONCE_LOGGED.clear()
+        yield
+        graph._ONCE_LOGGED.clear()
+
+    def test_once_latch_calls_emit_once_then_silent(self):
+        from daemon import graph
+
+        calls: list[int] = []
+
+        def emit():
+            calls.append(1)
+
+        graph._log_info_once("k1", emit)
+        graph._log_info_once("k1", emit)
+        assert calls == [1]
+
+    def test_distinct_key_emits(self):
+        from daemon import graph
+
+        calls: list[str] = []
+
+        def emit_a():
+            calls.append("a")
+
+        def emit_b():
+            calls.append("b")
+
+        graph._log_info_once("ka", emit_a)
+        graph._log_info_once("kb", emit_b)
+        assert calls == ["a", "b"]
+
+    def test_no_exception_raised_nameerror_pin(self):
+        from daemon import graph
+
+        # This is the exact call shape that raised NameError before the fix.
+        graph._log_info_once("probe", lambda: None)
+        assert "probe" in graph._ONCE_LOGGED
+
+    def test_build_instance_llms_smoke_no_vision(self):
+        import os
+
+        os.environ.setdefault("OPENAI_API_KEY", "sk-test")
+        from daemon import graph
+
+        graph._ONCE_LOGGED.clear()
+        a, b = graph.build_instance_llms({"model": "gpt-4o"}, "gpt-4o", None, [])
+        assert a is not None and b is not None
+
+    def test_build_instance_llms_smoke_vision(self):
+        import os
+
+        os.environ.setdefault("OPENAI_API_KEY", "sk-test")
+        from daemon import graph
+
+        graph._ONCE_LOGGED.clear()
+        a, b = graph.build_instance_llms(
+            {"model": "gpt-4o"}, "gpt-4o", "gpt-4o-vision", []
+        )
+        assert a is not None and b is not None

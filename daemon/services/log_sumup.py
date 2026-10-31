@@ -133,6 +133,9 @@ def ensure_family(
     lookup + early return). Starts the flush timer lazily on the FIRST
     registration so a process that never uses sumups pays nothing.
     """
+    fam = _registry.get(name)
+    if fam is not None:
+        return
     with _registry_lock:
         if name in _registry:
             return

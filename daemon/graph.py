@@ -138,13 +138,14 @@ def _llm_heartbeat(
 # DEBUG was rejected: these are operator-facing posture declarations
 # and should stay on the LCD exactly once per distinct config.
 _ONCE_LOGGED: set = set()
+_ONCE_LOG_LOCK = threading.Lock()
 
 
 def _log_info_once(key: str, emit: Callable[[], None]) -> None:
     """Emit ``emit()`` (an INFO log line) exactly once per process per key."""
     if key in _ONCE_LOGGED:
         return
-    with _llm_sumup_lock:
+    with _ONCE_LOG_LOCK:
         if key in _ONCE_LOGGED:
             return
         _ONCE_LOGGED.add(key)
