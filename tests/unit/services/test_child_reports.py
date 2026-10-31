@@ -177,6 +177,7 @@ def _build_child_reports_service(engine: Engine) -> ChildReportsService:
     service = ChildReportsService.__new__(ChildReportsService)
     service._manager = manager
     service._events_service = None  # lifecycle event publish is guarded
+    service._strand_heal_inflight = set()
     return service
 
 
@@ -2395,3 +2396,115 @@ class TestReportIntegrityGuardStageIIIEnforcement:
         # ZERO notice work with the flag OFF (revert-proof at the dispatch).
         service._manager.enqueue_message.assert_not_called()
         assert root_id not in _rig._B_NOTICE_LEDGER
+
+
+# ---------------------------------------------------------------------------
+# Negative legs for the 9f0ed4f5 terminal-row strand fix (2026-10-31)
+# Canonical effect-level pins: tests/unit/services/test_terminal_row_status_strand.py
+# ---------------------------------------------------------------------------
+
+
+class TestTerminalRowStrandNegativeLegs:
+    """Genuinely-completed / non-terminal rows keep their historical
+    semantics through the strand-fix writers (no churn, no re-arm)."""
+
+    @pytest.mark.asyncio
+    async def test_hold_branch_does_not_write_on_running_root(self, engine: Engine):
+        """Hold branch on a RUNNING root (live tree) writes NOTHING —
+        the 4ebd7f2f1 no-churn contract. Canonical pin:
+        test_terminal_row_status_strand.test_hold_running_root_no_write_no_churn.
+        """
+        import uuid
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from sqlalchemy import select as _sel
+        from sqlmodel import Session as _Session
+        from daemon.repositories.instance.models import Instance, InstanceStatus
+        from daemon.repositories.instance.repository import SQLModelInstanceRepository
+        from daemon.services.child_reports import ChildReportsService
+        from daemon.write_pause_guard import WritePauseGuard
+
+        root_id = f"root-running-nl-{uuid.uuid4().hex[:6]}"
+        child_id = f"child-live-nl-{uuid.uuid4().hex[:6]}"
+        now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+        with _Session(engine) as session:
+            session.add(Instance(instance_id=root_id, agent_id="leader", agent_name="leader",
+                                 agent_dir="/tmp/leader", parent_id=None,
+                                 status=InstanceStatus.RUNNING.value, version=1,
+                                 instance_metadata={}, last_activity_at=now,
+                                 created_at=now.isoformat(), updated_at=now.isoformat()))
+            session.add(Instance(instance_id=child_id, agent_id="worker", agent_name="worker",
+                                 agent_dir="/tmp/worker", parent_id=root_id,
+                                 status=InstanceStatus.RUNNING.value, version=1,
+                                 instance_metadata={}, last_activity_at=now,
+                                 created_at=now.isoformat(), updated_at=now.isoformat()))
+            session.commit()
+
+        with _Session(engine) as session:
+            pre_version = session.get(Instance, root_id).version
+
+        manager = MagicMock(name="InstanceManager")
+        manager.engine = engine
+        manager._engine = engine
+        manager.write_guard = WritePauseGuard()
+        manager._write_guard = manager.write_guard
+        manager._live_hub = None
+        manager._queue_repository = MagicMock()
+        manager._instance_repository = SQLModelInstanceRepository(engine)
+        manager._mission_strand_healer = None
+
+        service = ChildReportsService.__new__(ChildReportsService)
+        service._manager = manager
+        service._events_service = None
+
+        with patch("daemon.services.child_reports.get_instance_messages",
+                   new=AsyncMock(return_value=[{"role": "user", "content": "hi"}])):
+            await service._process_child_completion_and_notify_parent(root_id, "msg-nl")
+
+        with _Session(engine) as session:
+            post = session.get(Instance, root_id)
+        assert post.status == InstanceStatus.RUNNING.value
+        assert post.version == pre_version, "no write on a non-terminal root (no-churn)"
+
+    def test_guard_all_terminal_keeps_skip_in_child_reports(self, engine: Engine):
+        """Genuinely-completed (all-terminal tree) keeps idempotency_skip.
+        Canonical pin: test_terminal_row_status_strand.test_guard_all_terminal_keeps_idempotency_skip.
+        """
+        import uuid
+        from daemon.repositories.instance.models import Instance, InstanceStatus
+        from daemon.services.child_reports import ChildReportsService
+        from daemon.write_pause_guard import WritePauseGuard
+        from sqlmodel import Session as _Session
+
+        root_id = f"root-allterm-{uuid.uuid4().hex[:6]}"
+        child_id = f"child-allterm-{uuid.uuid4().hex[:6]}"
+        with _Session(engine) as session:
+            session.add(Instance(instance_id=root_id, agent_id="leader", agent_name="leader",
+                                 agent_dir="/tmp/leader", parent_id=None,
+                                 status=InstanceStatus.COMPLETED.value, version=1,
+                                 instance_metadata={}))
+            session.add(Instance(instance_id=child_id, agent_id="worker", agent_name="worker",
+                                 agent_dir="/tmp/worker", parent_id=root_id,
+                                 status=InstanceStatus.COMPLETED.value, version=1,
+                                 instance_metadata={}))
+            session.commit()
+
+        manager = MagicMock(name="InstanceManager")
+        manager.engine = engine
+        manager._engine = engine
+        manager.write_guard = WritePauseGuard()
+        manager._write_guard = manager.write_guard
+        manager._live_hub = None
+        manager._queue_repository = MagicMock()
+        manager._instance_repository = __import__(
+            "daemon.repositories.instance.repository", fromlist=["SQLModelInstanceRepository"]
+        ).SQLModelInstanceRepository(engine)
+        manager._mission_strand_healer = None
+
+        service = ChildReportsService.__new__(ChildReportsService)
+        service._manager = manager
+        service._events_service = None
+
+        result = service._process_child_completion_db_sync(root_id, "msg-at", last_content="r")
+        assert result.outcome == "idempotency_skip"
+        with _Session(engine) as session:
+            assert session.get(Instance, root_id).status == InstanceStatus.COMPLETED.value

@@ -1324,6 +1324,91 @@ class TestWaitingChildrenGuard:
         # alongside its lock.
         assert "InvalidTransitionError" not in str(result)
 
+    def test_running_root_keeps_jobitem_active(
+        self, engine: Engine, repo: TaskRepository
+    ) -> None:
+        """INTENDED interplay pin (9f0ed4f5 family, 2026-10-31).
+
+        With the terminal-row strand fix live, a root that is re-armed to
+        a LIVE status (``running`` / ``waiting_children``) keeps the
+        wrapping JobItem mirror from settling to ``done``:
+        ``_LIVE_INSTANCE_NOT_EXISTS_GUARD`` (task/repository.py:338-355)
+        counts ``waiting_children`` / ``paused`` / ``running`` as live, so
+        the reconciler's ``job_queue_items`` handler does NOT stamp
+        ``admission_state='done'`` while the root is live. This is
+        deliberate: the mirror now tracks the live root (it reflects
+        "the tree below me is working"), coupling to the reconciler path
+        (:2236-2314). Canonical effect-level pins:
+        tests/unit/services/test_terminal_row_status_strand.py.
+        """
+        instance_id = _new_id("inst")
+        work_id = _new_id("work")
+        message_id = _new_id("msg")
+        _seed_instance(engine, instance_id, InstanceStatus.RUNNING.value)
+        _seed_task(
+            engine,
+            work_id=work_id,
+            instance_id=instance_id,
+            message_id=message_id,
+            status=TaskStatus.COMPLETED.value,
+        )
+        _seed_job_item(
+            engine,
+            work_id=work_id,
+            instance_id=instance_id,
+            admission_state=AdmissionState.ACTIVE.value,
+        )
+        _seed_job_lock(engine, work_id=work_id, instance_id=instance_id)
+        _seed_message(engine, message_id=message_id, instance_id=instance_id)
+
+        result = repo.reconcile_turn_mirror(work_id)
+
+        assert _read_admission(engine, work_id) == (
+            AdmissionState.ACTIVE.value
+        ), (
+            f"live (running) root must keep the JobItem mirror active, got "
+            f"{_read_admission(engine, work_id)}"
+        )
+        full = _read_admission_full(engine, work_id)
+        assert full["terminal_reason"] is None
+
+    def test_waiting_children_root_keeps_jobitem_active(
+        self, engine: Engine, repo: TaskRepository
+    ) -> None:
+        """A-3: waiting_children is the state the strand fix PRODUCES;
+        the mirror must keep holding (INTENDED interplay, same guard)."""
+        instance_id = _new_id("inst")
+        work_id = _new_id("work")
+        message_id = _new_id("msg")
+        _seed_instance(engine, instance_id, InstanceStatus.WAITING_CHILDREN.value)
+        _seed_task(
+            engine,
+            work_id=work_id,
+            instance_id=instance_id,
+            message_id=message_id,
+            status=TaskStatus.COMPLETED.value,
+        )
+        _seed_job_item(
+            engine,
+            work_id=work_id,
+            instance_id=instance_id,
+            admission_state=AdmissionState.ACTIVE.value,
+        )
+        _seed_job_lock(engine, work_id=work_id, instance_id=instance_id)
+        _seed_message(engine, message_id=message_id, instance_id=instance_id)
+
+        result = repo.reconcile_turn_mirror(work_id)
+
+        assert _read_admission(engine, work_id) == (
+            AdmissionState.ACTIVE.value
+        ), (
+            f"waiting_children root must keep the JobItem mirror active, got "
+            f"{_read_admission(engine, work_id)}"
+        )
+        full = _read_admission_full(engine, work_id)
+        assert full["terminal_reason"] is None
+
+
     def test_non_waiting_children_transitions_jobitem_to_done(
         self, engine: Engine, repo: TaskRepository
     ) -> None:

@@ -10435,20 +10435,37 @@ class InstanceManager:
     # --------------------------------------------------------
 
     async def _revive_terminal_instance(self, instance_id: str) -> bool:
-        """Revive a terminal parent instance for the ORPHAN sweep lane.
+        """Revive a terminal parent instance (guarded row write).
 
-        Phase 2 task 2.4 Lane 5 (W1): a DEFERRED row whose parent is
-        COMPLETED / ERROR / TERMINATED / FAILED needs the parent in
-        RUNNING state to receive its completion_report. Mirrors the
-        instance_messaging.py:1486-1510 precedent
-        (``InstanceMessagingService._prepare_enqueued_message``
-        auto-transitions terminal parents to RUNNING on
-        ``send_message``).
+        TWO production lanes share this write (2026-10-31):
+
+        1. ORPHAN sweep lane (original): a DEFERRED row whose parent is
+           COMPLETED / ERROR / TERMINATED / FAILED needs the parent in
+           RUNNING state to receive its completion_report. Mirrors the
+           instance_messaging.py:1486-1510 precedent
+           (``InstanceMessagingService._prepare_enqueued_message``
+           auto-transitions terminal parents to RUNNING on
+           ``send_message``).
+        2. TURN-START chokepoint (9f0ed4f5 incident family): the top of
+           ``_process_message_with_tracking`` calls this for EVERY
+           dispatched turn, so a terminal row whose child tree is live
+           (the PROCESS_REPORT delivery lane, cascade-resume,
+           resume_processing_job — every lane that bypasses the
+           enqueue-time flip) is flipped terminal → RUNNING before the
+           turn's graph work starts.
+
+        The write is a ROW WRITE, not a revive decision: no revive
+        budget is consumed and F7 revivable-terminal semantics are
+        untouched. PAUSED is not in the terminal set — a paused row is
+        never flipped here.
 
         Returns:
-            ``True`` on successful revival (parent is now RUNNING);
-            ``False`` on revival failure (the caller treats False as
-            ``orphan_disposition`` — observable, never silent).
+            ``True`` on successful revival (parent is now RUNNING) or
+            when no revival was needed (row already non-terminal);
+            ``False`` on revival failure (the orphan-sweep caller
+            treats False as ``orphan_disposition`` — observable, never
+            silent; the turn-start chokepoint is best-effort fail-open
+            and ignores the return value).
         """
         if not hasattr(self, "_instance_repository") or self._instance_repository is None:
             logger.warning(
