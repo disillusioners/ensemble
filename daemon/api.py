@@ -943,6 +943,56 @@ async def lifespan(app: FastAPI):
             f"{type(sweep_err).__name__}: {sweep_err}"
         )
 
+    # bash-tool orphan reaper Phase 1 (plan 1.3): durable-writer wiring.
+    # Construct the repository from manager.engine and inject it into the
+    # bash process registry singleton (the manager._watcher_repo storage
+    # pattern, api.py:962). Tools never import the repo directly (no
+    # import cycle; bash.py header note) — they read the injected writer.
+    # Writer-unset ordering (plan D3 adjudication 2): bash calls landing
+    # BEFORE this wiring produce NO row (pre-wiring callers are
+    # direct-coroutine/test lanes). Kill behavior lands in Phase 2+; this
+    # seam is write-side only.
+    bash_spawn_repo = None
+    try:
+        from daemon.repositories.bash_spawn import BashSpawnRepository
+        from daemon.services.bash_spawn_reaper import (
+            CURRENT_BOOT_ID as _bash_reaper_boot_id,
+        )
+        from daemon.tools.bash import get_bash_process_registry
+
+        bash_spawn_repo = BashSpawnRepository(engine=manager.engine)
+        get_bash_process_registry().set_durable_writer(bash_spawn_repo)
+        daemon_logger.info(
+            f"[Startup] bash spawn durable registry wired "
+            f"(boot_id={_bash_reaper_boot_id[:8]})"
+        )
+    except Exception as bash_spawn_err:  # noqa: BLE001
+        daemon_logger.warning(
+            f"[Startup] bash spawn durable registry wiring failed "
+            f"(non-fatal, bash tool proceeds without durable rows): "
+            f"{type(bash_spawn_err).__name__}: {bash_spawn_err}"
+        )
+
+    # bash-tool orphan reaper Phase 3 (task 3.2): one-shot boot reconcile,
+    # awaited, non-fatal — mirrors the recover_stale_job_locks shape above.
+    # Honors the boot leg knob (ENSEMBLE_BASH_ORPHAN_REAPER_BOOT_SWEEP).
+    try:
+        from daemon.services.bash_spawn_reaper import (
+            reconcile_stale_bash_spawns,
+        )
+
+        cleared_bash = await reconcile_stale_bash_spawns(repo=bash_spawn_repo)
+        if cleared_bash:
+            daemon_logger.info(
+                f"[Startup] Reconciled {cleared_bash} stale bash spawn row(s) "
+                "from previous process"
+            )
+    except Exception as bash_reconcile_err:  # noqa: BLE001
+        daemon_logger.warning(
+            f"[Startup] bash spawn reconcile failed (non-fatal): "
+            f"{type(bash_reconcile_err).__name__}: {bash_reconcile_err}"
+        )
+
     # Create queue repository for job queue management
     queue_repo = JobQueueRepository(engine=manager.engine)
 

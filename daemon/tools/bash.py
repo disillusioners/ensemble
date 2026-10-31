@@ -9,6 +9,7 @@ import signal
 import sys
 import tempfile
 from contextvars import ContextVar
+from uuid import uuid4
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence
 
@@ -41,6 +42,17 @@ from daemon.services.resource_monitor.pid_registry import (
     KIND_CHART_RENDER,
     get_pid_registry,
 )
+# bash-tool orphan reaper Phase 1: durable spawn registry + env stamp.
+# Late-ish import (module-level) — the reaper module has NO dependency on
+# daemon.tools, so there is no import cycle. The kill-switch parse + boot
+# id + env-var name are the only symbols the bash seam needs.
+from daemon.services.bash_spawn_reaper import (
+    BASH_TRACKING_ENV_VAR as _BASH_TRACKING_ENV_VAR,
+    CURRENT_BOOT_ID as _CURRENT_BOOT_ID,
+    kill_switch_from_env as _bash_reaper_switch,
+    sweep_instance as _bash_reaper_sweep_instance,
+)
+from daemon.services.timestamps import now_utc_iso as _now_utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -427,6 +439,18 @@ class BashProcessRegistry:
     def __init__(self) -> None:
         self._entries: Dict[str, List[BashProcessEntry]] = {}
         self._lock = asyncio.Lock()
+        # bash-tool orphan reaper Phase 1: durable writer (injected from
+        # the lifespan via set_durable_writer). None ⇒ no row written
+        # (writer-unset ordering contract, plan D3 adjudication 2).
+        self._durable_writer = None
+
+    def set_durable_writer(self, writer) -> None:
+        """Inject the durable spawn-registry repository (lifespan wiring)."""
+        self._durable_writer = writer
+
+    def get_durable_writer(self):
+        """Return the injected durable writer (or None)."""
+        return self._durable_writer
 
     async def register(self, instance_id: str, pid: int, pgid: int) -> None:
         """Register a bash subprocess under its owning instance."""
@@ -457,8 +481,31 @@ class BashProcessRegistry:
         """
         return sum(len(v) for v in self._entries.values())
 
-    async def cleanup_instance(self, instance_id: str) -> int:
-        """Kill all tracked process groups for one instance."""
+    async def cleanup_instance(
+        self, instance_id: str, *, reaped_by: str = "terminal-tier"
+    ) -> int:
+        """Kill all tracked process groups for one instance.
+
+        Two tiers (bash-tool orphan reaper Phase 2, plan D4):
+
+        1. **RAM tier (unchanged, runs FIRST):** killpg every tracked
+           group bucket, then forget them.
+        2. **Durable tier (strictly additive, AFTER the RAM tier):**
+           consult the OPEN rows of the durable spawn registry
+           (``bash_spawn_registry``) for this instance — dedup'd by
+           pgid against the RAM tier, so a group the RAM tier just
+           SIGKILLed is closed without a second signal — verify each
+           row (hard guards + D8 sibling guard + D9 start-time gate +
+           env attribution) and reap the verified group via the
+           TERM→grace→KILL ladder. Master switch OFF ⇒ complete no-op
+           with ZERO repository access (m3); writer-unset (unit tests
+           / pre-lifespan calls) ⇒ no-op (D3 adjudication 2).
+
+        ``reaped_by`` records the cleanup-point lane in the closed
+        rows (``terminal-tier`` default — terminal Tier-1/Tier-2,
+        terminate, chart all inherit this reach with ZERO call-site
+        changes; ``shutdown`` for the shutdown lane).
+        """
         async with self._lock:
             entries = self._entries.pop(instance_id, [])
 
@@ -472,17 +519,46 @@ class BashProcessRegistry:
                     f"bash cleanup: killpg({entry.pgid}) failed: "
                     f"{type(e).__name__}: {e}"
                 )
+
+        # bash-tool orphan reaper Phase 2 (D4): durable-row reach —
+        # strictly additive AFTER the RAM killpg pass, dedup'd by pgid.
+        # Best-effort: a sweep failure must never break the caller.
+        try:
+            killed += await _bash_reaper_sweep_instance(
+                self._durable_writer,
+                instance_id,
+                reaped_by=reaped_by,
+                ram_pgids={entry.pgid for entry in entries},
+            )
+        except Exception as e:
+            logger.warning(
+                f"bash cleanup: durable-row sweep failed for "
+                f"{instance_id[:8]}: {type(e).__name__}: {e}"
+            )
         return killed
 
-    async def cleanup_all(self) -> int:
+    async def cleanup_all(self, *, reaped_by: str = "shutdown") -> int:
         """Kill every tracked bash process group during daemon shutdown.
 
-        Known limitations:
+        Per tracked instance this runs the same two tiers as
+        :meth:`cleanup_instance` (RAM killpg first, then the durable
+        row consult). Instances whose RAM buckets are already empty
+        (Path A stragglers whose success arm unregistered them) are
+        reached by the manager's shutdown durable sweep
+        (``sweep_open_rows_for_shutdown``), not here — this method
+        only enumerates the instances it still tracks.
 
-        * Truly-detached orphans whose child called ``setsid`` sit outside
-          the original process group, so ``killpg`` cannot reach them.
-        * Crash-recovery leak: this in-memory registry does not survive a
-          daemon restart, so processes from a hard crash cannot be enumerated.
+        Known limitations (bash-tool orphan reaper status, plan §2
+        tasks 2-4): the setsid-escapee gap and the crash-recovery gap
+        are closed by the reaper phases 2-4 — every bash-tool spawn
+        now leaves a durable tombstone row (written at the spawn
+        seam), so setsid escapees are reached by the Phase-4
+        enumerated stamp sweep and crash/cross-boot stragglers by the
+        shutdown durable sweep + the Phase-3 one-shot boot reconcile.
+        The **Path E residual stays**: spawns with
+        ``instance_id=None`` are untracked by design (reachability is
+        direct-coroutine callers only; production wiring always
+        injects an instance_id).
         """
         async with self._lock:
             instance_ids = list(self._entries.keys())
@@ -490,7 +566,7 @@ class BashProcessRegistry:
         total = 0
         for iid in instance_ids:
             try:
-                total += await self.cleanup_instance(iid)
+                total += await self.cleanup_instance(iid, reaped_by=reaped_by)
             except Exception as e:
                 logger.warning(
                     f"bash cleanup_all: failed for {iid[:8]}: "
@@ -711,6 +787,11 @@ async def bash(
     # may already be reaped; the spawn-time snapshot is the
     # closest reliable floor.
     bash_peak_rss_kb_at_spawn: int | None = None
+    # bash-tool orphan reaper Phase 1: tracking id minted pre-spawn so the
+    # env stamp (task 1.4) and the durable row (F4) can both reference it.
+    # Gating (instance_id present AND master switch ON) is applied at the
+    # stamp/write sites; minting itself is inert.
+    tracking_id: str | None = uuid4().hex if instance_id is not None else None
     try:
         # start_new_session=True (Unix) creates a new process group so that
         # backgrounded children (e.g., `nohup ... &`) can be killed together
@@ -780,6 +861,19 @@ async def bash(
                     surface="bash.env",
                 )
                 assembled_env = _kms_resolve_env(assembled_env)
+            # bash-tool orphan reaper Phase 1 (task 1.4): env stamp.
+            # Gated: instance_id present AND master switch ON (F6 default ON).
+            # When no overlay was passed this materializes the inherit-env
+            # copy — byte-identical semantics plus one var.
+            if instance_id is not None and tracking_id is not None:
+                try:
+                    _stamp_on = _bash_reaper_switch()
+                except Exception:
+                    _stamp_on = True
+                if _stamp_on:
+                    if assembled_env is None:
+                        assembled_env = os.environ.copy()
+                    assembled_env[_BASH_TRACKING_ENV_VAR] = tracking_id
             if isinstance(command, list):
                 proc = await asyncio.create_subprocess_exec(
                     *command,
@@ -873,6 +967,48 @@ async def bash(
                     proc.pid, bash_start_time_jiffies,
                     type(exc).__name__, exc,
                 )
+            # ── bash-tool orphan reaper Phase 1 (F4): durable spawn stamp ──
+            # OUTSIDE the registry lock (register() above already returned),
+            # AFTER the RAM append, reusing sanitized_command (no hoist).
+            # Bounded wait_for(shield(to_thread(...))) so a wedged engine
+            # can never hang the tool; shield alone does not cover a stuck
+            # socket — the bounded wait_for is the guarantee. On timeout the
+            # detached inner task still lands a best-effort late tombstone.
+            # Fail-open: DB trouble ⇒ WARNING, tool result unchanged (S4).
+            if _bash_reaper_switch():
+                _durable_writer = get_bash_process_registry().get_durable_writer()
+                if _durable_writer is not None:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(
+                                asyncio.to_thread(
+                                    _durable_writer.insert_open_row,
+                                    pid=proc.pid,
+                                    pgid=pgid,
+                                    start_time=bash_start_time_jiffies,
+                                    tracking_id=tracking_id,
+                                    instance_id=instance_id,
+                                    command_sanitized=sanitized_command,
+                                    boot_id=_CURRENT_BOOT_ID,
+                                    daemon_pid=os.getpid(),
+                                    created_at=_now_utc_iso(),
+                                )
+                            ),
+                            timeout=1.5,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "bash: durable stamp late (bounded wait exceeded "
+                            "1.5s); late tombstone lands best-effort "
+                            "(pid=%d pgid=%s tracking=%.8s)",
+                            proc.pid, pgid, tracking_id or "",
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "bash: durable spawn stamp failed (fail-open): "
+                            "%s: %s (pid=%d pgid=%s)",
+                            type(exc).__name__, exc, proc.pid, pgid,
+                        )
         elif instance_id is None:
             logger.warning("bash: instance_id is None; skipping process registration")
         # timeout=0 means "no timeout" — pass None to wait_for

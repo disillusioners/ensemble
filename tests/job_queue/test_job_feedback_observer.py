@@ -35,6 +35,19 @@ _STATUS_TO_ADMISSION = {
 }
 
 
+def _pid_alive(pid: int) -> bool:
+    """Liveness probe — local mirror of
+    ``tests/tools/conftest.py::_pid_alive`` (that helper lives in the
+    ``tests/tools/`` conftest scope and is not importable here)."""
+    import os
+
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, OSError):
+        return False
+
+
 def make_fake_sync(
     *,
     skip: bool = False,
@@ -3003,3 +3016,276 @@ _EVENT_FAILED_RC2 = {
     "data": {"instance_id": "instance-rc2", "status": "error",
              "error": "child exploded"},
 }
+
+
+# =============================================================================
+# Phase 2: durable-row reach mirror legs (bash-tool orphan reaper task 2.3)
+# =============================================================================
+
+
+class TestDispatchTwoTierBashCleanupDurableRows:
+    """Tier-1 / Tier-2 bash cleanup now ALSO reaps the instance's open
+    durable spawn-registry rows (plan task 2.2 — zero call-site changes;
+    inherited via the extended ``cleanup_instance``). These legs prove the
+    reach with REAL rows in a REAL repo (dead-group rows ⇒ gc close, no
+    signals; sibling-owned rows ⇒ skipped, row stays open)."""
+
+    @staticmethod
+    def _wired_reg_and_repo(monkeypatch):
+        """Return (bash_mod, reg, repo, eng) with the REAL singleton
+        wired to a fresh in-memory repo. Caller restores via teardown."""
+        from sqlalchemy.pool import StaticPool
+        from sqlmodel import SQLModel, create_engine
+
+        import importlib
+
+        bash_mod = importlib.import_module("daemon.tools.bash")
+        from daemon.repositories.bash_spawn import BashSpawnRepository
+
+        reg = bash_mod.get_bash_process_registry()
+        eng = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        SQLModel.metadata.create_all(eng)
+        repo = BashSpawnRepository(engine=eng)
+        prev_writer = reg.get_durable_writer()
+        prev_entries = dict(reg._entries)
+        reg._entries.clear()
+        reg.set_durable_writer(repo)
+        monkeypatch.setattr(
+            bash_mod, "get_bash_process_registry", lambda: reg
+        )
+        return bash_mod, reg, repo, eng, prev_writer, prev_entries
+
+    def _seed_dead_group_row(self, repo, instance_id, pgid, tracking_suffix):
+        from datetime import datetime, timezone
+
+        from daemon.services.bash_spawn_reaper import CURRENT_BOOT_ID
+
+        return repo.insert_open_row(
+            pid=pgid,
+            pgid=pgid,
+            start_time=None,
+            tracking_id=(tracking_suffix * 32)[:32],
+            instance_id=instance_id,
+            command_sanitized="sleep 30",
+            boot_id=CURRENT_BOOT_ID,
+            daemon_pid=999999,  # dead writer ⇒ proceed + gc close
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_tier1_real_row_closed(
+        self, monkeypatch
+    ):
+        from daemon.tools import proc_tools
+
+        bash_mod, reg, repo, eng, prev_writer, prev_entries = (
+            self._wired_reg_and_repo(monkeypatch)
+        )
+        try:
+            proc_mgr = AsyncMock(name="BackgroundProcessManager")
+            proc_mgr.cleanup_instance = AsyncMock()
+            monkeypatch.setattr(
+                proc_tools, "get_background_process_manager",
+                lambda: proc_mgr,
+            )
+            observer, manager = TestDispatchTwoTierBashCleanup._wire_observer_with_bash_manager(
+                reg, monkeypatch
+            )
+            # re-wire the observer's manager to the wired singleton (the
+            # helper re-imports bash_mod inside; ensure it resolves to ours)
+            child_id = "child-durable-12345678"
+            row = self._seed_dead_group_row(repo, child_id, 791001, "d1")
+
+            await observer._dispatch_instance_post_commit_side_effects(
+                instance_id=child_id,
+                terminal_status="completed",
+                error=None,
+                parent_id="parent-durable-87654321",
+                agent_id="developer",
+                last_content="hello",
+            )
+
+            # The real registry's cleanup_instance (not the mock) was
+            # invoked through the wired singleton — verify the row closed.
+            reread = self._get_row(repo, row.id)
+            assert reread.reaped_at is not None, (
+                "Tier-1 durable row must be reaped (dead group ⇒ gc)"
+            )
+            assert reread.reap_reason == "gc"
+            assert (reread.reaped_by or "").startswith("gc@")
+        finally:
+            reg.set_durable_writer(prev_writer)
+            reg._entries.clear()
+            reg._entries.update(prev_entries)
+            eng.dispose()
+
+    @pytest.mark.asyncio
+    async def test_tier1_sibling_owned_row_skipped(
+        self, monkeypatch
+    ):
+        import subprocess
+        import time as _time
+
+        from daemon.tools import proc_tools
+
+        bash_mod, reg, repo, eng, prev_writer, prev_entries = (
+            self._wired_reg_and_repo(monkeypatch)
+        )
+        try:
+            holder = subprocess.Popen(
+                ["sleep", "30"], start_new_session=True
+            )
+            import os as _os
+            try:
+                _os.kill(holder.pid, 0)
+                holder_alive = True
+            except (ProcessLookupError, OSError):
+                holder_alive = False
+            assert holder_alive
+
+            from datetime import datetime, timezone
+
+            from daemon.services.bash_spawn_reaper import CURRENT_BOOT_ID
+
+            row = repo.insert_open_row(
+                pid=holder.pid,
+                pgid=holder.pid,
+                start_time=None,
+                tracking_id=("s" * 32),
+                instance_id="child-sib-12345678",
+                command_sanitized="sleep 30",
+                boot_id=CURRENT_BOOT_ID,
+                daemon_pid=holder.pid,
+                created_at=datetime.now(timezone.utc).isoformat(),
+            )
+
+            proc_mgr = AsyncMock(name="BackgroundProcessManager")
+            proc_mgr.cleanup_instance = AsyncMock()
+            monkeypatch.setattr(
+                proc_tools, "get_background_process_manager",
+                lambda: proc_mgr,
+            )
+            observer, manager = TestDispatchTwoTierBashCleanup._wire_observer_with_bash_manager(
+                reg, monkeypatch
+            )
+            child_id = "child-sib-12345678"
+
+            await observer._dispatch_instance_post_commit_side_effects(
+                instance_id=child_id,
+                terminal_status="completed",
+                error=None,
+                parent_id="parent-sib-87654321",
+                agent_id="developer",
+                last_content="hello",
+            )
+
+            import os as _os
+            try:
+                _os.kill(holder.pid, 0)
+                holder_alive = True
+            except (ProcessLookupError, OSError):
+                holder_alive = False
+            assert holder_alive, (
+                "D8 violation: live-sibling-owned group was signaled by a "
+                "foreign Tier-1 sweep"
+            )
+            reread = self._get_row(repo, row.id)
+            assert reread.reaped_at is None, (
+                "sibling-owned row must stay OPEN"
+            )
+        finally:
+            # Spawn-and-reap-your-own-children: the sibling holder is
+            # only a D8 canary — TERM then KILL it explicitly and wait,
+            # never relying on ``sleep 30`` self-termination.
+            try:
+                if "holder" in locals():
+                    import os as _os
+                    import signal as _signal
+                    try:
+                        _os.kill(holder.pid, _signal.SIGTERM)
+                    except (ProcessLookupError, OSError):
+                        pass
+                    try:
+                        holder.wait(timeout=5)
+                    except Exception:
+                        pass
+                    if holder.poll() is None:
+                        try:
+                            _os.kill(holder.pid, _signal.SIGKILL)
+                        except (ProcessLookupError, OSError):
+                            pass
+                        try:
+                            holder.wait(timeout=5)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            reg.set_durable_writer(prev_writer)
+            reg._entries.clear()
+            reg._entries.update(prev_entries)
+            eng.dispose()
+
+    @pytest.mark.asyncio
+    async def test_tier2_descendant_real_row_closed(
+        self, monkeypatch
+    ):
+        from daemon.tools import proc_tools
+
+        bash_mod, reg, repo, eng, prev_writer, prev_entries = (
+            self._wired_reg_and_repo(monkeypatch)
+        )
+        try:
+            proc_mgr = AsyncMock(name="BackgroundProcessManager")
+            proc_mgr.cleanup_instance = AsyncMock()
+            monkeypatch.setattr(
+                proc_tools, "get_background_process_manager",
+                lambda: proc_mgr,
+            )
+            observer, manager = TestDispatchTwoTierBashCleanup._wire_observer_with_bash_manager(
+                reg, monkeypatch
+            )
+            root_id = "root-durable-aaaaaaaa"
+            descendant = "desc-durable-bbbbbbbb"
+            manager._instance_repository.get_tree_ids = MagicMock(
+                return_value=[root_id, descendant]
+            )
+            row = self._seed_dead_group_row(repo, descendant, 791002, "d2")
+
+            await observer._dispatch_instance_post_commit_side_effects(
+                instance_id=root_id,
+                terminal_status="completed",
+                error=None,
+                parent_id=None,
+                agent_id="developer",
+                last_content="hello",
+            )
+
+            reread = self._get_row(repo, row.id)
+            assert reread.reaped_at is not None, (
+                "Tier-2 descendant durable row must be reaped"
+            )
+            assert reread.reap_reason == "gc"
+        finally:
+            try:
+                if "holder" in locals() and _pid_alive(holder.pid):
+                    import os as _os
+                    _os.kill(holder.pid, 9)
+            except Exception:
+                pass
+            reg.set_durable_writer(prev_writer)
+            reg._entries.clear()
+            reg._entries.update(prev_entries)
+            eng.dispose()
+
+    @staticmethod
+    def _get_row(repo, row_id):
+        from sqlmodel import Session
+
+        from daemon.repositories.bash_spawn import BashSpawnRecord
+
+        with Session(repo.engine) as session:
+            return session.get(BashSpawnRecord, row_id)

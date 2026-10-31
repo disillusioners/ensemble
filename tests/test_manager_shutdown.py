@@ -26,6 +26,7 @@ Run with::
 
 from __future__ import annotations
 
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -362,3 +363,283 @@ class TestManagerShutdownBashCleanup:
             if record.levelname == "INFO"
         ]
         assert not any("killed bash processes" in msg for msg in info_texts)
+
+
+# =============================================================================
+# bash-tool orphan reaper Phase 2 — durable spawn-registry sweep (task 2.4)
+# =============================================================================
+
+
+class TestManagerShutdownDurableBashSweep:
+    """The Phase-3 block in ``manager.shutdown`` (after the bash
+    cleanup_all block): ``sweep_open_rows_for_shutdown`` — awaited,
+    failure-isolated, logged; sibling/dead-writer/self/executor legs."""
+
+    @staticmethod
+    def _build_manager(mock_config):
+        return _build_minimal_manager(mock_config)
+
+    @pytest.mark.asyncio
+    async def test_durable_sweep_awaited_and_logged(
+        self, mock_config, monkeypatch, caplog
+    ):
+        import importlib
+
+        bash_module = importlib.import_module("daemon.tools.bash")
+        sweep_mod = importlib.import_module("daemon.services.bash_spawn_reaper")
+        bash_reg = AsyncMock(name="BashProcessRegistry")
+        bash_reg.cleanup_all = AsyncMock(return_value=0)
+        bash_reg.get_durable_writer = MagicMock(return_value=None)
+        monkeypatch.setattr(
+            bash_module, "get_bash_process_registry", lambda: bash_reg
+        )
+        async_sweep = AsyncMock(return_value=3)
+        monkeypatch.setattr(sweep_mod, "sweep_open_rows_for_shutdown", async_sweep)
+
+        manager = self._build_manager(mock_config)
+        with caplog.at_level("INFO"):
+            await manager.shutdown(grace_period=0.01)
+
+        async_sweep.assert_awaited_once()
+        info_texts = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+        assert any("reaped 3 durable bash spawn row" in m for m in info_texts), (
+            f"expected durable-sweep INFO log with count 3, got: {info_texts}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_durable_sweep_failure_isolated(
+        self, mock_config, monkeypatch, caplog
+    ):
+        import importlib
+
+        bash_module = importlib.import_module("daemon.tools.bash")
+        sweep_mod = importlib.import_module("daemon.services.bash_spawn_reaper")
+        bash_reg = AsyncMock(name="BashProcessRegistry")
+        bash_reg.cleanup_all = AsyncMock(return_value=0)
+        bash_reg.get_durable_writer = MagicMock(return_value=None)
+        monkeypatch.setattr(
+            bash_module, "get_bash_process_registry", lambda: bash_reg
+        )
+        async_sweep = AsyncMock(side_effect=RuntimeError("synthetic sweep fail"))
+        monkeypatch.setattr(sweep_mod, "sweep_open_rows_for_shutdown", async_sweep)
+
+        manager = self._build_manager(mock_config)
+        with caplog.at_level("WARNING"):
+            await manager.shutdown(grace_period=0.01)
+
+        async_sweep.assert_awaited_once()
+        warning_texts = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("bash spawn durable sweep failed" in m for m in warning_texts), (
+            f"expected durable-sweep WARNING, got: {warning_texts}"
+        )
+        manager.stop_sources.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_durable_sweep_zero_count_logs_no_info(
+        self, mock_config, monkeypatch, caplog
+    ):
+        import importlib
+
+        bash_module = importlib.import_module("daemon.tools.bash")
+        sweep_mod = importlib.import_module("daemon.services.bash_spawn_reaper")
+        bash_reg = AsyncMock(name="BashProcessRegistry")
+        bash_reg.cleanup_all = AsyncMock(return_value=0)
+        bash_reg.get_durable_writer = MagicMock(return_value=None)
+        monkeypatch.setattr(
+            bash_module, "get_bash_process_registry", lambda: bash_reg
+        )
+        async_sweep = AsyncMock(return_value=0)
+        monkeypatch.setattr(sweep_mod, "sweep_open_rows_for_shutdown", async_sweep)
+
+        manager = self._build_manager(mock_config)
+        with caplog.at_level("INFO"):
+            await manager.shutdown(grace_period=0.01)
+
+        async_sweep.assert_awaited_once()
+        info_texts = [r.getMessage() for r in caplog.records if r.levelname == "INFO"]
+        assert not any("reaped 0 durable" in m for m in info_texts)
+
+    @pytest.mark.asyncio
+    async def test_durable_sweep_sibling_alive_skip_and_dead_writer_swept(
+        self, mock_config, monkeypatch
+    ):
+        """Service-level legs: live-foreign rows skipped (open), dead-writer
+        rows swept (gc-closed), self-owned current-boot rows swept (gc
+        close proves the self-exemption fired)."""
+        import importlib
+        from sqlalchemy.pool import StaticPool
+        from sqlmodel import SQLModel, create_engine
+
+        bash_module = importlib.import_module("daemon.tools.bash")
+        sweep_mod = importlib.import_module("daemon.services.bash_spawn_reaper")
+
+        # REAL repo over in-memory engine (StaticPool).
+        eng = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        from daemon.repositories.bash_spawn import (  # noqa: F401
+            BashSpawnRecord,
+            BashSpawnRepository,
+        )
+
+        SQLModel.metadata.create_all(eng)
+        repo = BashSpawnRepository(engine=eng)
+        bash_reg = AsyncMock(name="BashProcessRegistry")
+        bash_reg.cleanup_all = AsyncMock(return_value=0)
+        bash_reg.get_durable_writer = MagicMock(return_value=repo)
+        monkeypatch.setattr(
+            bash_module, "get_bash_process_registry", lambda: bash_reg
+        )
+
+        from datetime import datetime, timezone
+        from daemon.services.bash_spawn_reaper import CURRENT_BOOT_ID
+
+        # sibling (live foreign): daemon_pid = a live sleep we spawn now
+        import subprocess
+
+        holder = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        try:
+            row_sibling = repo.insert_open_row(
+                pid=holder.pid,
+                pgid=holder.pid,
+                start_time=None,
+                tracking_id=("s" * 32),
+                instance_id="sib-inst",
+                command_sanitized="sleep 30",
+                boot_id=CURRENT_BOOT_ID,
+                daemon_pid=holder.pid,
+                created_at=datetime.now(timezone.utc).isoformat(),
+            )
+            # dead-writer row: daemon_pid dead (huge pid)
+            row_dead = repo.insert_open_row(
+                pid=999201,
+                pgid=999201,
+                start_time=None,
+                tracking_id=("d" * 32),
+                instance_id="dead-inst",
+                command_sanitized="sleep 30",
+                boot_id="foreign-boot",
+                daemon_pid=999200,
+                created_at=datetime.now(timezone.utc).isoformat(),
+            )
+            # self-owned current-boot row
+            row_self = repo.insert_open_row(
+                pid=999202,
+                pgid=999202,
+                start_time=None,
+                tracking_id=("e" * 32),
+                instance_id="self-inst",
+                command_sanitized="sleep 30",
+                boot_id=CURRENT_BOOT_ID,
+                daemon_pid=os.getpid(),
+                created_at=datetime.now(timezone.utc).isoformat(),
+            )
+
+            manager = self._build_manager(mock_config)
+            await manager.shutdown(grace_period=0.01)
+
+            # sibling row stays OPEN (live foreign daemon owns it)
+            r_sib = self._get_row(repo, row_sibling.id)
+            assert r_sib.reaped_at is None, "live-sibling row must stay OPEN"
+            # dead-writer + self rows swept (closed)
+            r_dead = self._get_row(repo, row_dead.id)
+            r_self = self._get_row(repo, row_self.id)
+            assert r_dead.reaped_at is not None, "dead-writer row must be swept"
+            assert r_self.reaped_at is not None, "self-owned row must be swept (self-exemption)"
+        finally:
+            try:
+                if _pid_alive(holder.pid):
+                    os.kill(holder.pid, 9)
+            except Exception:
+                pass
+            eng.dispose()
+
+    @pytest.mark.asyncio
+    async def test_executor_shaped_child_not_swept_by_shutdown_durable_sweep(
+        self, mock_config, monkeypatch
+    ):
+        """M6 partial: an executor-shaped child (own session, unstamped,
+        NO registry row) survives the shutdown durable sweep; a control
+        row (dead group) is swept. Proves the sweep only reaches rows."""
+        import subprocess
+        from sqlalchemy.pool import StaticPool
+        from sqlmodel import SQLModel, create_engine
+
+        bash_module = importlib if False else __import__("importlib")
+        import importlib as _il
+
+        bash_module = _il.import_module("daemon.tools.bash")
+        sweep_mod = _il.import_module("daemon.services.bash_spawn_reaper")
+
+        eng = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        from daemon.repositories.bash_spawn import (  # noqa: F401
+            BashSpawnRecord,
+            BashSpawnRepository,
+        )
+
+        SQLModel.metadata.create_all(eng)
+        repo = BashSpawnRepository(engine=eng)
+        bash_reg = AsyncMock(name="BashProcessRegistry")
+        bash_reg.cleanup_all = AsyncMock(return_value=0)
+        bash_reg.get_durable_writer = MagicMock(return_value=repo)
+        monkeypatch.setattr(
+            bash_module, "get_bash_process_registry", lambda: bash_reg
+        )
+
+        # Executor-shaped child: own session, unstamped, NO row.
+        executor = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        try:
+            from datetime import datetime, timezone
+
+            from daemon.services.bash_spawn_reaper import CURRENT_BOOT_ID
+
+            # Control row: dead group ⇒ swept.
+            repo.insert_open_row(
+                pid=999301,
+                pgid=999301,
+                start_time=None,
+                tracking_id=("x" * 32),
+                instance_id="ctrl-inst",
+                command_sanitized="sleep 30",
+                boot_id="foreign-boot",
+                daemon_pid=999300,
+                created_at=datetime.now(timezone.utc).isoformat(),
+            )
+
+            manager = self._build_manager(mock_config)
+            await manager.shutdown(grace_period=0.01)
+
+            assert self._pid_alive(executor.pid), (
+                "executor-shaped child (own session, unstamped, no row) "
+                "was swept by the shutdown durable sweep"
+            )
+        finally:
+            try:
+                if _pid_alive(executor.pid):
+                    os.kill(executor.pid, 9)
+            except Exception:
+                pass
+            eng.dispose()
+
+    @staticmethod
+    def _get_row(repo, row_id):
+        from sqlmodel import Session
+
+        from daemon.repositories.bash_spawn import BashSpawnRecord
+
+        with Session(repo.engine) as session:
+            return session.get(BashSpawnRecord, row_id)
+
+    @staticmethod
+    def _pid_alive(pid):
+        try:
+            os.kill(pid, 0)
+            return True
+        except (ProcessLookupError, OSError):
+            return False

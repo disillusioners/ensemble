@@ -905,6 +905,17 @@ class InstanceManager:
             BoardNote,
             BoardItemTag,
         )
+        # bash-tool orphan reaper Phase 1 (plan 1.1): register
+        # BashSpawnRecord BEFORE create_all so the PG boot path lands
+        # the bash_spawn_registry table on existing PG databases
+        # (SQLModel.metadata.create_all is the PG source-of-truth per
+        # the app_settings / resource_monitor / board precedent).
+        # Brand-new table ⇒ NO _ensure_postgres_columns mirror; SQLite
+        # path is the migration runner below
+        # (20261031_110000_create_bash_spawn_registry.sql).
+        from .repositories.bash_spawn.models import (  # noqa: F401  # bash-tool orphan reaper P1
+            BashSpawnRecord,
+        )
 
         SQLModel.metadata.create_all(self._engine)
 
@@ -15210,7 +15221,10 @@ class InstanceManager:
         # per-instance buckets and calls ``cleanup_instance`` on each,
         # which is idempotent (atomic bucket pop). See
         # ``daemon/tools/proc_tools.py`` for the limitations
-        # (``setsid`` orphans, crash-recovery leak).
+        # (``setsid`` orphans, crash-recovery leak). Note: the bash
+        # tool's own crash-recovery gap is closed by the bash-tool
+        # orphan reaper (durable spawn registry, phases 2-4) — the
+        # proc manager's in-memory bookkeeping is unchanged here.
         try:
             from daemon.tools.proc_tools import get_background_process_manager
 
@@ -15227,8 +15241,11 @@ class InstanceManager:
             )
 
         # Phase 2 (2026-07-19): bash cleanup_all alongside proc cleanup_all.
-        # Best-effort. See BashProcessRegistry docstring for known
-        # limitations (``setsid`` orphans, crash-recovery leak).
+        # Best-effort. The RAM tier sweeps the instances still tracked;
+        # the durable spawn-registry sweep below (bash-tool orphan
+        # reaper Phase 2, plan task 2.4) additionally reaches rows for
+        # instances whose RAM buckets are already empty (Path A
+        # stragglers) and rows stranded from a crashed writer daemon.
         try:
             from daemon.tools.bash import get_bash_process_registry
 
@@ -15240,6 +15257,35 @@ class InstanceManager:
         except Exception as e:
             logger.warning(
                 f"shutdown: bash cleanup_all failed: "
+                f"{type(e).__name__}: {e}"
+            )
+
+        # Phase 3 (bash-tool orphan reaper Phase 2, plan task 2.4):
+        # durable spawn-registry sweep — ALL open rows whose writer
+        # daemon is dead or is us. The D8 live-sibling guard applies
+        # exactly as in every lane: rows owned by a live FOREIGN
+        # daemon (holder start ≤ row) are skipped (their bash children
+        # are LIVE, not leaked); self rows (daemon_pid ==
+        # os.getpid()) always proceed. Master switch OFF ⇒ complete
+        # no-op with ZERO repository access (m3). Best-effort — a
+        # sweep failure must never block the rest of shutdown.
+        try:
+            from daemon.services.bash_spawn_reaper import (
+                sweep_open_rows_for_shutdown,
+            )
+            from daemon.tools.bash import get_bash_process_registry
+
+            durable_reaped = await sweep_open_rows_for_shutdown(
+                get_bash_process_registry().get_durable_writer(),
+            )
+            if durable_reaped:
+                logger.info(
+                    f"shutdown: reaped {durable_reaped} durable bash "
+                    f"spawn row(s)"
+                )
+        except Exception as e:
+            logger.warning(
+                f"shutdown: bash spawn durable sweep failed: "
                 f"{type(e).__name__}: {e}"
             )
 

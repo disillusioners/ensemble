@@ -2781,9 +2781,13 @@ class InstanceLifecycleService:
 
             # 2.56. Clean up bash subprocess groups for this instance (async,
             # no DB write). Best-effort — terminates the bash registry's tracked
-            # PIDs/PGIDs that the proc manager does not see. Without this,
-            # TERMINATED instances leak bash-spawned process groups until root
-            # finalizes or daemon shutdown.
+            # PIDs/PGIDs that the proc manager does not see. Bash-tool orphan
+            # reaper Phase 2 (plan D4): this call now ALSO reaps the instance's
+            # OPEN durable spawn-registry rows (verify-and-kill + tombstone
+            # close), so a TERMINATED instance no longer leaks bash-spawned
+            # process groups whose direct child already exited — the reach no
+            # longer depends on the RAM bucket surviving until root finalizes
+            # or daemon shutdown.
             try:
                 from daemon.tools.bash import get_bash_process_registry
                 await get_bash_process_registry().cleanup_instance(instance_id)
