@@ -38,6 +38,7 @@ permits signal 0 (liveness probes).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import signal
@@ -306,11 +307,12 @@ class TestHardGuards:
         status, reason = verify_and_kill(row, members=[], my_pid=os.getpid())
         assert status == "reaped"
         killpg_calls, sleeps = kill_census
-        assert killpg_calls == [
-            (row.pgid, signal.SIGTERM),
-            (row.pgid, signal.SIGKILL),
-        ]
-        assert len(sleeps) == 1  # the grace window between TERM and KILL
+        # M1(b): signal-0 death PROBES interleave between TERM and KILL.
+        assert killpg_calls[0] == (row.pgid, signal.SIGTERM)
+        assert killpg_calls[-1] == (row.pgid, signal.SIGKILL)
+        assert all(sig == 0 for _pgid, sig in killpg_calls[1:-1])
+        # the grace window between TERM and KILL, slept in poll slices
+        assert len(sleeps) >= 1
 
 
 # ── D8 daemon_pid live-sibling guard ────────────────────────────────────────
@@ -559,11 +561,59 @@ class TestKillLadder:
         assert status == "reaped"
         assert reason == "reaped:env-match"
         killpg_calls, sleeps = kill_census
-        assert killpg_calls == [
-            (777001, signal.SIGTERM),
-            (777001, signal.SIGKILL),
-        ]
-        assert sleeps == [2.0]  # the grace window observed between them
+        # M1(b): the grace window now probes the group for death at
+        # short intervals — signal-0 ``killpg`` PROBES (not signals)
+        # interleave between the TERM and the KILL. Order pinned:
+        # TERM first, KILL last, everything between is a probe.
+        assert killpg_calls[0] == (777001, signal.SIGTERM)
+        assert killpg_calls[-1] == (777001, signal.SIGKILL)
+        assert all(sig == 0 for _pgid, sig in killpg_calls[1:-1])
+        # The grace slices still sum to the requested (unclamped-here)
+        # grace — a live group burns the whole window, just in slices.
+        assert sum(sleeps) == pytest.approx(2.0)
+
+    def test_grace_poll_early_exit_when_group_dies_mid_grace(
+        self, monkeypatch, kill_census
+    ) -> None:
+        """M1(b): a group that dies DURING the grace window skips the
+        remaining slices (dead groups don't burn the full grace)."""
+        monkeypatch.setattr(reaper, "verify_member_env", lambda pid, tid: True)
+        monkeypatch.setattr(reaper, "list_group_members", lambda pgid: [777012])
+
+        probe_count = {"n": 0}
+
+        def _dies_after_two_probes(pgid, sig):
+            if sig == signal.SIGTERM:
+                return None  # TERM lands (group "alive" at that point)
+            if sig == 0:
+                probe_count["n"] += 1
+                if probe_count["n"] >= 2:
+                    raise ProcessLookupError(pgid)  # group died mid-grace
+                return None
+            return None  # KILL leg
+
+        monkeypatch.setattr(reaper.os, "killpg", _dies_after_two_probes)
+        sleeps: list[float] = []
+        monkeypatch.setattr(reaper.time, "sleep", lambda s: sleeps.append(s))
+
+        row = _row(
+            pgid=777011,
+            pid=777011,
+            created_at=datetime.now(timezone.utc) - timedelta(seconds=60),
+        )
+        status, reason = verify_and_kill(
+            row,
+            members=[(777012, datetime.now(timezone.utc) - timedelta(seconds=61))],
+            my_pid=os.getpid(),
+            term_grace_seconds=30.0,
+        )
+        assert status == "reaped"
+        # Probe-then-slice: probe #1 alive ⇒ one slice slept; probe #2
+        # sees the group dead ⇒ early exit (2 slices, not 120).
+        assert len(sleeps) == 1
+        assert sum(sleeps) == pytest.approx(
+            reaper._GRACE_POLL_INTERVAL_SECONDS
+        )
 
     def test_term_esrch_skips_grace_and_kill(
         self, monkeypatch, kill_census
@@ -688,31 +738,110 @@ class TestKillLadder:
         assert any("attribution=pgid-only" in r.getMessage() for r in caplog.records)
 
     def test_env_match_beats_mismatch_on_other_member(
-        self, monkeypatch, kill_census
+        self, monkeypatch, kill_fence
     ) -> None:
-        """Any exact match attributes the group (the False on another
-        member cannot veto a proven-exact match)."""
+        """C2 (UPDATED — the old pin proved the WRONG behavior): a
+        readable mismatch on a member that PREDATES the row by more
+        than the D9 tolerance is a pid-recycled FOREIGN process — it
+        vetoes ABSOLUTELY, regardless of another member's proven-exact
+        env-match (``refused:foreign-member``, zero signals)."""
 
         def _mixed(pid, tid):
-            return pid == 777061
+            return pid == 777061  # 777061 matches; 777062 readable-False
 
         monkeypatch.setattr(reaper, "verify_member_env", _mixed)
         monkeypatch.setattr(reaper, "list_group_members", lambda pgid: [777061, 777062])
+        now = datetime.now(timezone.utc)
         row = _row(
             pgid=777060,
             pid=777060,
-            created_at=datetime.now(timezone.utc) - timedelta(seconds=60),
+            created_at=now - timedelta(seconds=60),
         )
         status, reason = verify_and_kill(
             row,
             members=[
-                (777062, datetime.now(timezone.utc) - timedelta(seconds=61)),
-                (777061, datetime.now(timezone.utc) - timedelta(seconds=61)),
+                # the mismatch member predates the row by 60s (> the
+                # 10s tolerance) ⇒ foreign — no legitimate descendant
+                # can predate its own row's write by that much
+                (777062, now - timedelta(seconds=120)),
+                (777061, now - timedelta(seconds=61)),
+            ],
+            my_pid=os.getpid(),
+        )
+        assert status == "refused"
+        assert reason == "refused:foreign-member"
+        # zero SIGNALS — the veto is pre-ladder (signal-0 liveness
+        # probes are permitted by the fence, signals are not)
+        assert all(sig == 0 for _p, sig in kill_fence)
+
+    def test_mixed_group_match_and_younger_mismatch_still_reaps(
+        self, monkeypatch, kill_census
+    ) -> None:
+        """C2 complement (dispatcher ruling — TARGETED tightening): the
+        foreign-member veto fires ONLY for readable-False members whose
+        start predates the row by more than the tolerance. A readable
+        mismatch on a member that does NOT predate the row (started
+        inside the tolerance window — indistinguishable from a fresh
+        legit descendant) does NOT veto a proven-exact match on another
+        member; the two-signal D9 gate still held ⇒ reaped."""
+
+        def _mixed(pid, tid):
+            return pid == 777163  # 777163 matches; 777164 readable-False
+
+        monkeypatch.setattr(reaper, "verify_member_env", _mixed)
+        monkeypatch.setattr(
+            reaper, "list_group_members", lambda pgid: [777163, 777164]
+        )
+        now = datetime.now(timezone.utc)
+        row = _row(
+            pgid=777160,
+            pid=777160,
+            created_at=now - timedelta(seconds=60),
+        )
+        status, reason = verify_and_kill(
+            row,
+            members=[
+                # mismatch member started 61s ago = 1s before the row —
+                # INSIDE the 10s tolerance ⇒ cannot prove predation
+                (777164, now - timedelta(seconds=61)),
+                (777163, now - timedelta(seconds=61)),
             ],
             my_pid=os.getpid(),
         )
         assert status == "reaped"
         assert reason == "reaped:env-match"
+
+    def test_mixed_group_foreign_member_refused_zero_signals(
+        self, monkeypatch, kill_fence
+    ) -> None:
+        """C2 added pin: mixed group — one env-match member + one
+        readable-mismatch OLDER member ⇒ ``refused:foreign-member`` and
+        ZERO signals (hard-raise killpg fence)."""
+
+        def _mixed(pid, tid):
+            return pid == 777171  # 777171 matches; 777172 readable-False
+
+        monkeypatch.setattr(reaper, "verify_member_env", _mixed)
+        monkeypatch.setattr(
+            reaper, "list_group_members", lambda pgid: [777171, 777172]
+        )
+        now = datetime.now(timezone.utc)
+        row = _row(
+            pgid=777170,
+            pid=777170,
+            created_at=now - timedelta(seconds=60),
+        )
+        status, reason = verify_and_kill(
+            row,
+            members=[
+                (777172, now - timedelta(seconds=3600)),  # 1h predating — foreign
+                (777171, now - timedelta(seconds=61)),
+            ],
+            my_pid=os.getpid(),
+        )
+        assert status == "refused"
+        assert reason == "refused:foreign-member"
+        assert all(sig == 0 for _p, sig in kill_fence)  # zero signals
 
     def test_grace_clamped_to_bounds(self, monkeypatch, kill_census) -> None:
         monkeypatch.setattr(reaper, "verify_member_env", lambda pid, tid: True)
@@ -723,11 +852,17 @@ class TestKillLadder:
             created_at=datetime.now(timezone.utc) - timedelta(seconds=60),
         )
         members = [(777071, datetime.now(timezone.utc) - timedelta(seconds=61))]
-        verify_and_kill(row, members=members, my_pid=os.getpid(), term_grace_seconds=0.0)
+        verify_and_kill(row, members=members, my_pid=os.getpid(), term_grace_seconds=0.2)
         verify_and_kill(row, members=members, my_pid=os.getpid(), term_grace_seconds=999.0)
         _calls, sleeps = kill_census
-        assert sleeps[0] == reaper.MIN_TERM_GRACE_SECONDS
-        assert sleeps[1] == reaper.MAX_TERM_GRACE_SECONDS
+        # M1(b): the grace is slept in poll slices — the CLAMP is
+        # observable as the TOTAL slept per ladder run (an alive group
+        # burns the whole window). Run 1 (0.2 requested) clamps UP to
+        # MIN; run 2 (999 requested) clamps DOWN to MAX. A zero grace
+        # burns no window at all.
+        assert sum(sleeps) == pytest.approx(
+            reaper.MIN_TERM_GRACE_SECONDS + reaper.MAX_TERM_GRACE_SECONDS
+        )
 
     def test_win32_platform_refused_no_signals(
         self, monkeypatch, kill_fence
@@ -987,6 +1122,77 @@ class TestShutdownSweepService:
         assert repo._mark_calls == [
             (23, f"shutdown@{os.getpid()}", None)
         ]
+
+    @pytest.mark.asyncio
+    async def test_lane_sweep_deadline_is_non_fatal(
+        self, monkeypatch, caplog
+    ) -> None:
+        """M1(a): the shutdown lane's aggregate sweep runs under a
+        ``wait_for`` deadline — a wedged sweep logs a non-fatal WARNING,
+        returns 0 (shutdown must still complete), and never hangs the
+        caller."""
+        monkeypatch.delenv(reaper.ENV_KILL_SWITCH, raising=False)
+        monkeypatch.delenv(reaper.ENV_BOOT_SWEEP, raising=False)
+        monkeypatch.setattr(reaper, "LANE_SWEEP_DEADLINE_SECONDS", 0.05)
+
+        rows = [
+            _row(id=24, daemon_pid=os.getpid(), pgid=779004, pid=779004,
+                 created_at=datetime.now(timezone.utc) - timedelta(seconds=60)),
+        ]
+        repo = _SpyRepo(rows=rows)
+
+        async def _wedged(*a, **k):  # noqa: ANN002, ANN003
+            await asyncio.sleep(30.0)
+            return 0
+
+        monkeypatch.setattr(reaper, "sweep_rows", _wedged)
+        with caplog.at_level(logging.WARNING, logger=reaper.__name__):
+            actions = await sweep_open_rows_for_shutdown(
+                repo, my_pid=os.getpid()
+            )
+        assert actions == 0
+        assert any(
+            "aggregate deadline" in r.getMessage() for r in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_reconcile_lane_sweep_deadline_is_non_fatal(
+        self, monkeypatch, caplog
+    ) -> None:
+        """M1(a) boot leg: the reconcile's sweep body is also under the
+        aggregate deadline; the DB-fault raise path (S3) is separate and
+        still propagates (pinned by the boot pack)."""
+        monkeypatch.delenv(reaper.ENV_KILL_SWITCH, raising=False)
+        monkeypatch.delenv(reaper.ENV_BOOT_SWEEP, raising=False)
+        monkeypatch.setattr(reaper, "LANE_SWEEP_DEADLINE_SECONDS", 0.05)
+        from daemon.services.bash_spawn_reaper import reconcile_stale_bash_spawns
+
+        class _ListRepo:
+            def list_open_previous_boot(self, boot_id, pid):
+                return [
+                    _row(id=25, daemon_pid=os.getpid(), pgid=779005,
+                         pid=779005, boot_id="previous-boot",
+                         created_at=datetime.now(timezone.utc)
+                         - timedelta(seconds=60)),
+                ]
+
+            def prune_reaped_older_than(self, days=30):
+                return 0
+
+        async def _wedged(*a, **k):  # noqa: ANN002, ANN003
+            await asyncio.sleep(30.0)
+            return 0
+
+        monkeypatch.setattr(reaper, "sweep_rows", _wedged)
+        with caplog.at_level(logging.WARNING, logger=reaper.__name__):
+            closed = await reconcile_stale_bash_spawns(
+                _ListRepo(), current_boot_id="current-boot",
+                my_pid=os.getpid(),
+            )
+        assert closed == 0
+        assert any(
+            "aggregate deadline" in r.getMessage() for r in caplog.records
+        )
 
 
 class TestSwitchEnforcement:
@@ -1327,6 +1533,65 @@ class TestPlatformLegs:
         )
         assert reaper.process_start_wallclock(123) is None
 
+    def test_darwin_lstart_dst_ambiguous_fail_closed(
+        self, monkeypatch
+    ) -> None:
+        """minor-10: a LOCAL lstart inside a fall-back transition occurs
+        TWICE — ``ps`` carries no fold information, so the parse treats
+        the ambiguous instant as UNPARSEABLE (fail-closed per D9)
+        instead of guessing a fold. The enumeration scan is unaffected
+        (it uses the offset-free etime-derived start)."""
+        import time as _time
+
+        class _R:
+            returncode = 0
+            stdout = "Sun Nov  1 01:30:00 2026\n"  # occurs twice in EST/EDT
+
+        monkeypatch.setattr(reaper.sys, "platform", "darwin")
+        monkeypatch.setattr(reaper.subprocess, "run", lambda *a, **k: _R())
+        old_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "America/New_York"
+        try:
+            _time.tzset()
+            assert reaper.process_start_wallclock(123) is None
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            _time.tzset()
+
+    def test_darwin_lstart_dst_unambiguous_converts(
+        self, monkeypatch
+    ) -> None:
+        """minor-10 companion: an unambiguous local lstart still parses
+        and converts correctly under a DST locale (04:30 EST = 09:30
+        UTC on the 2026 fall-back day)."""
+        import time as _time
+        from datetime import timezone as _tz
+
+        class _R:
+            returncode = 0
+            stdout = "Sun Nov  1 04:30:00 2026\n"
+
+        monkeypatch.setattr(reaper.sys, "platform", "darwin")
+        monkeypatch.setattr(reaper.subprocess, "run", lambda *a, **k: _R())
+        old_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "America/New_York"
+        try:
+            _time.tzset()
+            dt = reaper.process_start_wallclock(123)
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            _time.tzset()
+        assert dt is not None
+        assert dt.tzinfo is not None
+        assert dt.astimezone(_tz.utc).hour == 9
+        assert dt.astimezone(_tz.utc).minute == 30
+
     def test_member_scan_linux(self, monkeypatch) -> None:
         monkeypatch.setattr(reaper.sys, "platform", "linux")
 
@@ -1421,21 +1686,23 @@ class TestEnumeratedStampSweep:
         monkeypatch.setattr(
             reaper, "verify_member_env", lambda pid, tid: False
         )
-        with caplog.at_level(logging.WARNING, logger=reaper.__name__):
+        # m2: per-candidate lines are DEBUG (the one aggregate census
+        # line is the INFO surface).
+        with caplog.at_level(logging.DEBUG, logger=reaper.__name__):
             out = reaper._enumerate_stamped_member_details([self._row()])
         assert out == []
         assert any("env mismatch" in r.getMessage() for r in caplog.records)
 
     def test_unreadable_env_skipped_warning(self, monkeypatch, caplog) -> None:
-        """P2 darwin leg: unreadable env ⇒ skip + WARNING, never
-        kill-unverified."""
+        """P2 darwin leg: unreadable env ⇒ skip, never kill-unverified
+        (m2: logged at DEBUG)."""
         monkeypatch.delenv(reaper.ENV_KILL_SWITCH, raising=False)
         monkeypatch.setattr(reaper.sys, "platform", "darwin")
         monkeypatch.setattr(reaper, "_scan_process_table", lambda: [self._cand()])
         monkeypatch.setattr(
             reaper, "verify_member_env", lambda pid, tid: None
         )
-        with caplog.at_level(logging.WARNING, logger=reaper.__name__):
+        with caplog.at_level(logging.DEBUG, logger=reaper.__name__):
             out = reaper._enumerate_stamped_member_details([self._row()])
         assert out == []
         assert any("env unreadable" in r.getMessage() for r in caplog.records)
@@ -1472,11 +1739,18 @@ class TestEnumeratedStampSweep:
 
     def test_start_time_prefilter_shrinks_env_read_set(self, monkeypatch) -> None:
         """A candidate too young for EVERY open row is excluded before
-        any env read (m6 pre-filter)."""
+        any env read (m6 pre-filter). m3 reconciliation: the UPPER bound
+        uses the HOURS-scale stamp tolerance (never exclude what the
+        env-exact gate admits), so the too-young leg is pinned with a
+        row older than the widened window."""
         monkeypatch.delenv(reaper.ENV_KILL_SWITCH, raising=False)
         now = datetime.now(timezone.utc)
-        row = self._row(created_at=now - timedelta(seconds=60))
-        too_young = self._cand(pid=5002, start_age=1)  # 1s old, row 60s
+        # Row written 7h ago: even the M3 6h-wide upper bound ends 1h
+        # ago, so a candidate started 1s ago is provably too young.
+        row = self._row(
+            created_at=now - timedelta(seconds=7 * 3600)
+        )
+        too_young = self._cand(pid=5002, start_age=1)  # 1s old
 
         calls = {"env": 0}
 
@@ -1491,6 +1765,274 @@ class TestEnumeratedStampSweep:
         out = reaper._enumerate_stamped_member_details([row])
         assert out == []
         assert calls["env"] == 0
+
+    def test_lower_bound_skips_candidates_predating_every_row(
+        self, monkeypatch
+    ) -> None:
+        """m2: candidates that predate EVERY open row by more than the
+        10s D9 tolerance are skipped BEFORE any env read (lower bound —
+        a stamp whose uuid4 tracking id did not exist yet cannot be
+        carried by an older process)."""
+        monkeypatch.delenv(reaper.ENV_KILL_SWITCH, raising=False)
+        now = datetime.now(timezone.utc)
+        row = self._row(created_at=now - timedelta(seconds=60))
+        too_old = self._cand(pid=5012, start_age=3600)  # started 1h ago
+
+        calls = {"env": 0}
+
+        def _spy_env(pid, tid):
+            calls["env"] += 1
+            return True
+
+        monkeypatch.setattr(
+            reaper, "_scan_process_table", lambda: [too_old]
+        )
+        monkeypatch.setattr(reaper, "verify_member_env", _spy_env)
+        out = reaper._enumerate_stamped_member_details([row])
+        assert out == []
+        assert calls["env"] == 0
+
+    def test_sweep_census_single_info_line(self, monkeypatch, caplog) -> None:
+        """m2: exactly ONE aggregate census INFO line per sweep
+        (candidates considered / env-reads / selected / skipped-by-bound);
+        per-candidate lines never appear at INFO."""
+        monkeypatch.delenv(reaper.ENV_KILL_SWITCH, raising=False)
+        # Two candidates: one env-exact match, one unreadable (DEBUG
+        # skip path) — proves the census is emitted even on anomalies.
+        monkeypatch.setattr(
+            reaper, "_scan_process_table",
+            lambda: [self._cand(pid=5021), self._cand(pid=5022)],
+        )
+
+        def _env(pid, tid):
+            return True if pid == 5021 else None
+
+        monkeypatch.setattr(reaper, "verify_member_env", _env)
+        with caplog.at_level(logging.INFO, logger=reaper.__name__):
+            out = reaper._enumerate_stamped_member_details([self._row()])
+        assert len(out) == 1
+        census = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO and "enumeration sweep census" in r.getMessage()
+        ]
+        assert len(census) == 1
+        msg = census[0].getMessage()
+        assert "candidates_considered=2" in msg
+        assert "env_reads=" in msg and "selected=1" in msg
+        # per-candidate lines demoted: nothing else at INFO/ WARNING
+        assert not any(
+            r.levelno >= logging.INFO and "enumeration skipped pid" in r.getMessage()
+            for r in caplog.records
+        )
+
+    # ── C1 pins: the tracking-id dimension of the D8 sibling skip ──────
+
+    def test_c1_sibling_row_tid_never_env_read_different_pgids(
+        self, monkeypatch
+    ) -> None:
+        """C1 pin (a): a sibling-owned row + a stamped candidate on a
+        DIFFERENT pgid ⇒ candidate NOT selected AND zero env reads —
+        the sibling's tracking_id never enters the candidate tid set."""
+        monkeypatch.delenv(reaper.ENV_KILL_SWITCH, raising=False)
+        now = datetime.now(timezone.utc)
+        foreign = 987001
+        sibling_row = self._row(
+            daemon_pid=foreign,
+            created_at=now - timedelta(seconds=60),
+        )
+        candidate = self._cand(pid=5031, pgid=777001, start_age=59)  # different pgid
+
+        calls = {"env": 0}
+
+        def _spy_env(pid, tid):
+            calls["env"] += 1
+            return True  # would match the sibling's tid without C1
+
+        def _fake_kill(pid, sig):
+            if sig == 0 and pid == foreign:
+                return None  # sibling holder alive ⇒ row skipped
+            raise ProcessLookupError(pid)
+
+        monkeypatch.setattr(reaper.os, "kill", _fake_kill)
+        monkeypatch.setattr(
+            reaper, "process_start_wallclock",
+            lambda pid: now - timedelta(seconds=120) if pid == foreign else None,
+        )
+        monkeypatch.setattr(
+            reaper, "_scan_process_table", lambda: [candidate]
+        )
+        monkeypatch.setattr(reaper, "verify_member_env", _spy_env)
+        out = reaper._enumerate_stamped_member_details([sibling_row])
+        assert out == []  # NOT selected
+        assert calls["env"] == 0  # zero env reads
+
+    def test_c1_mixed_rows_only_self_row_candidates_selected(
+        self, monkeypatch
+    ) -> None:
+        """C1 pin (b): mixed leg — one self-row + one sibling-row, a
+        stamped candidate for EACH ⇒ only the self-row's candidate is
+        selected; the sibling-row's candidate is never env-read."""
+        monkeypatch.delenv(reaper.ENV_KILL_SWITCH, raising=False)
+        now = datetime.now(timezone.utc)
+        foreign = 987002
+        self_row = self._row(pgid=880001, tracking_id="p" * 32)
+        sibling_row = self._row(
+            pgid=880002,
+            tracking_id="q" * 32,
+            daemon_pid=foreign,
+            created_at=now - timedelta(seconds=60),
+        )
+        self_cand = self._cand(pid=5041, pgid=880001, start_age=59)
+        sibling_cand = self._cand(pid=5042, pgid=880002, start_age=59)
+
+        probed_tids: list[str] = []
+
+        def _spy_env(pid, tid):
+            probed_tids.append(tid)
+            return True  # both candidates would match their tids
+
+        def _fake_kill(pid, sig):
+            if sig == 0 and pid == foreign:
+                return None
+            raise ProcessLookupError(pid)
+
+        monkeypatch.setattr(reaper.os, "kill", _fake_kill)
+        monkeypatch.setattr(
+            reaper, "process_start_wallclock",
+            lambda pid: now - timedelta(seconds=120) if pid == foreign else None,
+        )
+        monkeypatch.setattr(
+            reaper, "_scan_process_table",
+            lambda: [self_cand, sibling_cand],
+        )
+        monkeypatch.setattr(reaper, "verify_member_env", _spy_env)
+        out = reaper._enumerate_stamped_member_details([self_row, sibling_row])
+        assert out == [(5041, "p" * 32)]  # ONLY the self-row's candidate
+        assert probed_tids == ["p" * 32]  # sibling tid NEVER env-read
+
+    def test_c1_sibling_tid_not_selected_when_pgid_matches_no_row(
+        self, monkeypatch
+    ) -> None:
+        """C1 pin (c): the candidate's pgid matches NO row, so the pgid
+        shortcut cannot mask the tid dimension — env-matching the
+        SKIPPED sibling's tracking_id must still NOT select the
+        candidate (the sibling's tid is not in the candidate tid set)."""
+        monkeypatch.delenv(reaper.ENV_KILL_SWITCH, raising=False)
+        now = datetime.now(timezone.utc)
+        foreign = 987003
+        self_row = self._row(pgid=880003, tracking_id="r" * 32)
+        sibling_row = self._row(
+            pgid=880004,
+            tracking_id="s" * 32,
+            daemon_pid=foreign,
+            created_at=now - timedelta(seconds=60),
+        )
+        # pgid 999002 matches NO row — the pgid exclusion set (880004)
+        # cannot catch it; only the tid dimension can.
+        escapee = self._cand(pid=5051, pgid=999002, start_age=59)
+
+        probed_tids: list[str] = []
+
+        def _spy_env(pid, tid):
+            probed_tids.append(tid)
+            return tid == "s" * 32  # would match ONLY the sibling's tid
+
+        def _fake_kill(pid, sig):
+            if sig == 0 and pid == foreign:
+                return None
+            raise ProcessLookupError(pid)
+
+        monkeypatch.setattr(reaper.os, "kill", _fake_kill)
+        monkeypatch.setattr(
+            reaper, "process_start_wallclock",
+            lambda pid: now - timedelta(seconds=120) if pid == foreign else None,
+        )
+        monkeypatch.setattr(
+            reaper, "_scan_process_table", lambda: [escapee]
+        )
+        monkeypatch.setattr(reaper, "verify_member_env", _spy_env)
+        out = reaper._enumerate_stamped_member_details([self_row, sibling_row])
+        assert out == []  # NOT selected via the sibling's tid
+        assert probed_tids == ["r" * 32]  # sibling tid never probed
+
+    # ── M3 pin: delayed-detach reach via the stamp tolerance ──────────
+
+    def test_m3_delayed_detach_escapee_admitted_by_stamp_tolerance(
+        self, monkeypatch
+    ) -> None:
+        """M3: an escapee that detached (started) 1h AFTER the row
+        write — refused under the 10s D9 tolerance — is admitted via
+        the env-EXACT stamp tolerance and selected for the stamp path.
+        Re-pin of the M9 different-pgid leg against the new tolerance
+        lives in the C1 pin (c) above (sibling rows stay skipped
+        tolerance-independently)."""
+        monkeypatch.delenv(reaper.ENV_KILL_SWITCH, raising=False)
+        now = datetime.now(timezone.utc)
+        # Row written 2h ago; the escapee started 1h ago = 1h AFTER the
+        # row write (detached late). 10s tolerance would refuse it.
+        row = self._row(created_at=now - timedelta(seconds=2 * 3600))
+        late_escapee = self._cand(pid=5061, pgid=999009, start_age=3600)
+        monkeypatch.setattr(
+            reaper, "_scan_process_table", lambda: [late_escapee]
+        )
+        monkeypatch.setattr(reaper, "verify_member_env", lambda pid, tid: True)
+        out = reaper._enumerate_stamped_member_details([row])
+        assert out == [(5061, "a" * 32)]
+
+    def test_m3_delayed_detach_refused_when_beyond_stamp_tolerance(
+        self, monkeypatch
+    ) -> None:
+        """M3 clamp: an escapee started beyond even the HOURS-scale
+        window for its MATCHED row is still refused by the per-row D9
+        gate (the pre-filter's global upper bound rides the NEWEST row,
+        so this leg needs a newer row to reach the gate — the bound
+        never excludes what the gate could admit)."""
+        monkeypatch.delenv(reaper.ENV_KILL_SWITCH, raising=False)
+        monkeypatch.setenv(reaper.ENV_STAMP_TOLERANCE, "3600")  # 1h
+        now = datetime.now(timezone.utc)
+        old_row = self._row(
+            tracking_id="r1" + "0" * 30,
+            created_at=now - timedelta(seconds=4 * 3600),
+        )
+        # A NEWER row keeps the global pre-filter bound wide enough for
+        # the escapee to survive to the per-row gate.
+        new_row = self._row(
+            tracking_id="r2" + "0" * 30,
+            pgid=999011,
+            created_at=now - timedelta(seconds=1800),
+        )
+        # started 2h ago: 2h after old_row's write — beyond the 1h knob
+        # for its matched row, but inside new_row's widened bound.
+        too_late = self._cand(pid=5062, pgid=999010, start_age=2 * 3600)
+        calls = {"env": 0}
+
+        def _spy_env(pid, tid):
+            calls["env"] += 1
+            return tid == old_row.tracking_id
+
+        monkeypatch.setattr(
+            reaper, "_scan_process_table", lambda: [too_late]
+        )
+        monkeypatch.setattr(reaper, "verify_member_env", _spy_env)
+        out = reaper._enumerate_stamped_member_details([old_row, new_row])
+        assert out == []
+        assert calls["env"] == 1  # gate refuses AFTER the env match
+
+    def test_m3_stamp_tolerance_knob_clamped(self, monkeypatch) -> None:
+        monkeypatch.delenv(reaper.ENV_STAMP_TOLERANCE, raising=False)
+        assert (
+            reaper.stamp_tolerance_seconds_from_env()
+            == reaper.DEFAULT_STAMP_TOLERANCE_SECONDS
+        )
+        assert reaper.stamp_tolerance_seconds_from_env(
+            {reaper.ENV_STAMP_TOLERANCE: "1"}
+        ) == reaper.MIN_STAMP_TOLERANCE_SECONDS
+        assert reaper.stamp_tolerance_seconds_from_env(
+            {reaper.ENV_STAMP_TOLERANCE: "999999999"}
+        ) == reaper.MAX_STAMP_TOLERANCE_SECONDS
+        assert reaper.stamp_tolerance_seconds_from_env(
+            {reaper.ENV_STAMP_TOLERANCE: "garbage"}
+        ) == reaper.DEFAULT_STAMP_TOLERANCE_SECONDS
 
     def test_single_scan_per_sweep(self, monkeypatch) -> None:
         """Performance bound: ONE process-table scan per sweep."""

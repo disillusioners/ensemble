@@ -170,16 +170,30 @@ class BashSpawnRecord(SQLModel, table=True):
     reaped_by: Optional[str] = Field(
         default=None,
         description=(
-            "Cleanup point id + sweeping daemon: "
-            "``terminal-tier1|terminal-tier2|terminate|shutdown|"
-            "boot-reconcile|timeout-survivor|gc`` suffixed "
-            "``@<sweeping-daemon-pid>`` (plan adjudication 1)."
+            "Cleanup point id + sweeping daemon, suffixed "
+            "``@<sweeping-daemon-pid>``. EXACT value set (minor-3 — the "
+            "per-lane tier distinction is unreachable without call-site "
+            "churn, so the coarse label is SANCTIONED): "
+            "``terminal-tier`` (terminal Tier-1/Tier-2, terminate and "
+            "chart lanes all inherit this one label), ``shutdown``, "
+            "``boot-reconcile``, ``gc``."
         ),
     )
     reap_reason: Optional[str] = Field(
         default=None,
         description=(
-            "Diagnostic when a kill was refused (``refused:<guard>``) or "
-            "the group was already dead (``gc``)."
+            "EXACT value set (minor-3): ``NULL`` for a reaped kill, "
+            "``enumerated`` for a Phase-4 stamp-path kill, "
+            "``ram-tier-dedup`` for a RAM-tier dedup close, ``gc`` for "
+            "a dead-group GC close, or ``refused:<guard>`` when a "
+            "verification refusal closed the row (``refused:pgid-missing`` "
+            "| ``refused:pgid-invalid`` | ``refused:pgid<=1`` | "
+            "``refused:daemon-group`` | ``refused:pid-missing`` | "
+            "``refused:pid-invalid`` | ``refused:self-pid`` | "
+            "``refused:platform-win32`` | "
+            "``refused:direct-child-unprobeable`` | "
+            "``refused:env-mismatch`` | ``refused:foreign-member`` | "
+            "``refused:start-time-unparseable`` | "
+            "``refused:start-time-gate``)."
         ),
     )

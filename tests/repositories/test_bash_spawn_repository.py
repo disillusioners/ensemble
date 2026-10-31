@@ -125,6 +125,82 @@ class TestCrud:
         assert repo.mark_reaped(999999, "gc@1", "gc") is None
 
 
+class TestMarkReapedCas:
+    """minor-1: the close is a CAS — a second sweeper never overwrites
+    the first's reaped_by/reap_reason; the rowcount is exposed for
+    lost-race detection (log, don't fail)."""
+
+    def test_first_close_wins_rowcount_one(self, repo) -> None:
+        row = repo.insert_open_row(_mkrow(tracking_id="g" * 32))
+        out = repo.mark_reaped(row.id, "shutdown@1", None)
+        assert out is not None
+        assert getattr(out, "cas_rowcount", None) == 1
+        assert out.reaped_by == "shutdown@1"
+
+    def test_second_sweeper_cannot_overwrite_first_close(self, repo) -> None:
+        row = repo.insert_open_row(_mkrow(tracking_id="h" * 32))
+        first = repo.mark_reaped(row.id, "shutdown@1", None)
+        assert first is not None and getattr(first, "cas_rowcount", None) == 1
+        second = repo.mark_reaped(row.id, "boot-reconcile@2", "gc")
+        # The CAS close is refused (rowcount 0) and the FIRST sweeper's
+        # close is kept verbatim.
+        assert second is not None
+        assert getattr(second, "cas_rowcount", None) == 0
+        assert second.reaped_by == "shutdown@1"
+        assert second.reap_reason is None
+        # persisted state confirms the first close survived
+        rows = [r for r in repo.list_open_all()]  # reaped ⇒ empty
+        assert rows == []
+        from sqlmodel import Session
+
+        with Session(repo.engine) as session:
+            fresh = session.get(BashSpawnRecord, row.id)
+        assert fresh.reaped_by == "shutdown@1"
+        assert fresh.reap_reason is None
+
+
+class TestRetentionPrune:
+    """minor-4: one-shot retention prune of REAPED rows (boot-reconcile
+    housekeeping) — open rows are NEVER touched."""
+
+    def test_prune_deletes_only_old_reaped_rows(self, repo) -> None:
+        old_reaped = repo.insert_open_row(
+            _mkrow(tracking_id="i" * 32)
+        )
+        repo.mark_reaped(old_reaped.id, "shutdown@1", None)
+        # backdate the reaped row beyond the window
+        from sqlmodel import Session
+
+        with Session(repo.engine) as session:
+            persisted = session.get(BashSpawnRecord, old_reaped.id)
+            persisted.reaped_at = "2026-09-01T00:00:00+00:00"
+            session.add(persisted)
+            session.commit()
+
+        recent_reaped = repo.insert_open_row(
+            _mkrow(tracking_id="j" * 32)
+        )
+        repo.mark_reaped(recent_reaped.id, "shutdown@1", None)
+        still_open = repo.insert_open_row(_mkrow(tracking_id="k" * 32))
+
+        deleted = repo.prune_reaped_older_than(days=30)
+        assert deleted == 1  # only the backdated reaped row
+
+        # open row untouched
+        open_rows = repo.list_open_by_instance("inst-a")
+        assert [r.id for r in open_rows] == [still_open.id]
+        # recent reaped row still present (via a raw read)
+        with Session(repo.engine) as session:
+            assert session.get(BashSpawnRecord, recent_reaped.id) is not None
+            assert session.get(BashSpawnRecord, old_reaped.id) is None
+
+    def test_prune_zero_when_nothing_eligible(self, repo) -> None:
+        row = repo.insert_open_row(_mkrow(tracking_id="l" * 32))
+        assert repo.prune_reaped_older_than(days=30) == 0
+        repo.mark_reaped(row.id, "shutdown@1", None)
+        assert repo.prune_reaped_older_than(days=30) == 0  # just reaped ⇒ keep
+
+
 class TestDialectAndIndexes:
     def test_partial_indexes_declared_dual_dialect(self) -> None:
         """Both sqlite_where AND postgresql_where present on the two

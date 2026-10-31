@@ -117,6 +117,11 @@ uvicorn_access.setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
+# M1(c): strong references for fire-and-forget background tasks (the
+# one-shot bash-spawn boot reconcile) — without a live reference a
+# running task can be garbage-collected mid-flight.
+_BASH_RECONCILE_BG_TASKS: set = set()
+
 # Import routers
 from daemon.routers import (
     agents_router,
@@ -973,23 +978,50 @@ async def lifespan(app: FastAPI):
             f"{type(bash_spawn_err).__name__}: {bash_spawn_err}"
         )
 
-    # bash-tool orphan reaper Phase 3 (task 3.2): one-shot boot reconcile,
-    # awaited, non-fatal — mirrors the recover_stale_job_locks shape above.
-    # Honors the boot leg knob (ENSEMBLE_BASH_ORPHAN_REAPER_BOOT_SWEEP).
+    # bash-tool orphan reaper Phase 3 (task 3.2) — M1(c): the one-shot
+    # boot reconcile is NO LONGER awaited in the lifespan. N rows × full
+    # clamped TERM grace used to run serially on the startup critical
+    # path, blocking API readiness. It stays ONE-SHOT, non-fatal and
+    # failure-isolated: it now runs as a post-startup background task
+    # (created here, never awaited); the S3 semantics (DB fault ⇒
+    # WARNING, boot proceeds) hold — a fault inside the task logs and
+    # dies with the task, never the lifespan. Honors the boot leg knob
+    # (ENSEMBLE_BASH_ORPHAN_REAPER_BOOT_SWEEP) and the lane sweep
+    # deadline (LANE_SWEEP_DEADLINE_SECONDS).
     try:
         from daemon.services.bash_spawn_reaper import (
             reconcile_stale_bash_spawns,
         )
 
-        cleared_bash = await reconcile_stale_bash_spawns(repo=bash_spawn_repo)
-        if cleared_bash:
-            daemon_logger.info(
-                f"[Startup] Reconciled {cleared_bash} stale bash spawn row(s) "
-                "from previous process"
-            )
+        async def _bash_reconcile_background() -> None:
+            try:
+                cleared = await reconcile_stale_bash_spawns(
+                    repo=bash_spawn_repo
+                )
+                if cleared:
+                    daemon_logger.info(
+                        f"[Startup] Reconciled {cleared} stale bash spawn "
+                        "row(s) from previous process"
+                    )
+            except Exception as bash_reconcile_err:  # noqa: BLE001
+                daemon_logger.warning(
+                    f"[Startup] bash spawn reconcile failed (non-fatal): "
+                    f"{type(bash_reconcile_err).__name__}: "
+                    f"{bash_reconcile_err}"
+                )
+
+        _bash_reconcile_task = asyncio.create_task(
+            _bash_reconcile_background()
+        )
+        # Keep a strong reference so the task cannot be GC'd mid-run
+        # (fire-and-forget tasks need a live reference).
+        _BASH_RECONCILE_BG_TASKS.add(_bash_reconcile_task)
+        _bash_reconcile_task.add_done_callback(
+            _BASH_RECONCILE_BG_TASKS.discard
+        )
     except Exception as bash_reconcile_err:  # noqa: BLE001
         daemon_logger.warning(
-            f"[Startup] bash spawn reconcile failed (non-fatal): "
+            f"[Startup] bash spawn reconcile scheduling failed (non-fatal): "
             f"{type(bash_reconcile_err).__name__}: {bash_reconcile_err}"
         )
 

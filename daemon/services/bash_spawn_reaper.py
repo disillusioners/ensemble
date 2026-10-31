@@ -36,6 +36,14 @@ runtime key):
   (Phase 2); default 5.0, clamped to [0.5, 30.0].
 * ``ENSEMBLE_BASH_REAPER_START_TOLERANCE_SECONDS`` — D9 hard start-time
   gate tolerance (default 10.0 s; covers shell fork/exec latency).
+* ``ENSEMBLE_BASH_REAPER_STAMP_TOLERANCE_SECONDS`` — M3: HOURS-scale
+  tolerance applied ONLY to env-EXACT-matched Phase-4 enumeration
+  candidates (positive stamp match — the delayed-detach reach: an
+  escapee that detached long after the row write still carries the
+  exact stamp, so the 10 s D9 window refuses exactly the class Phase 4
+  exists for). Default 21600 s (6 h), clamped to [60, 86400]. The
+  pgid-only attribution path keeps the 10 s
+  ``..._START_TOLERANCE_SECONDS`` gate everywhere.
 
 Restart-lane exclusion is STRUCTURAL (plan D1): the bash seam is the
 ONLY writer of ``bash_spawn_registry``; ``spawn_executor`` deliberately
@@ -82,6 +90,7 @@ ENV_KILL_SWITCH = "ENSEMBLE_BASH_ORPHAN_REAPER"
 ENV_BOOT_SWEEP = "ENSEMBLE_BASH_ORPHAN_REAPER_BOOT_SWEEP"
 ENV_TERM_GRACE = "ENSEMBLE_BASH_REAPER_TERM_GRACE_SECONDS"
 ENV_START_TOLERANCE = "ENSEMBLE_BASH_REAPER_START_TOLERANCE_SECONDS"
+ENV_STAMP_TOLERANCE = "ENSEMBLE_BASH_REAPER_STAMP_TOLERANCE_SECONDS"
 
 # The secondary discriminator injected into the spawned child's env.
 BASH_TRACKING_ENV_VAR: str = "ENSEMBLE_BASH_TRACKING_ID"
@@ -93,6 +102,17 @@ MIN_TERM_GRACE_SECONDS = 0.5
 MAX_TERM_GRACE_SECONDS = 30.0
 
 DEFAULT_START_TOLERANCE_SECONDS = 10.0
+
+# M3 — env-EXACT stamp-match tolerance (delayed-detach reach).
+DEFAULT_STAMP_TOLERANCE_SECONDS = 21600.0  # 6 h
+MIN_STAMP_TOLERANCE_SECONDS = 60.0
+MAX_STAMP_TOLERANCE_SECONDS = 86400.0  # 24 h hard ceiling
+
+# M1 — per-lane aggregate sweep deadline (boot reconcile + shutdown).
+LANE_SWEEP_DEADLINE_SECONDS = 60.0
+
+# minor-4 — closed-row retention window (boot-reconcile housekeeping).
+BASH_SPAWN_RETENTION_DAYS = 30
 
 
 # ── Kill-switch parse (F6: lane default FLIPPED to ON) ───────────────────────
@@ -151,6 +171,23 @@ def start_tolerance_seconds_from_env(environ: Optional[dict] = None) -> float:
     if value < 0:
         return DEFAULT_START_TOLERANCE_SECONDS
     return value
+
+
+def stamp_tolerance_seconds_from_env(environ: Optional[dict] = None) -> float:
+    """M3 knob: HOURS-scale tolerance for env-EXACT-matched enumeration
+    candidates only. Default 6 h, clamped to [MIN, MAX]; unparseable ⇒
+    default (env-parse convention)."""
+    env = os.environ if environ is None else environ
+    raw = (env.get(ENV_STAMP_TOLERANCE) or "").strip()
+    if not raw:
+        return DEFAULT_STAMP_TOLERANCE_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_STAMP_TOLERANCE_SECONDS
+    return max(
+        MIN_STAMP_TOLERANCE_SECONDS, min(MAX_STAMP_TOLERANCE_SECONDS, value)
+    )
 
 
 # ── Linux jiffies reader (ported from daemon/tools/bash.py) ──────────────────
@@ -228,7 +265,23 @@ def process_start_wallclock(pid: int) -> Optional[datetime]:
             # instant — defeating BOTH the D8 live-sibling skip
             # (mis-classified as a recycled holder ⇒ proceed) and the
             # D9 hard gate (members read too young ⇒ spurious refusals).
-            return dt.astimezone(timezone.utc)
+            #
+            # minor-10 (DST): a local wall clock inside a fall-back
+            # transition occurs TWICE; ``ps lstart`` carries no fold
+            # information, so the naive parse cannot disambiguate. The
+            # conservative handling treats an AMBIGUOUS local time as
+            # UNPARSEABLE (⇒ the D9 gate fails closed) rather than
+            # guessing a fold. The Phase-4 enumeration scan is
+            # unaffected — it prefers the offset-free etime-derived
+            # start (now_utc − etime).
+            try:
+                fold0 = dt.replace(fold=0).astimezone(timezone.utc)
+                fold1 = dt.replace(fold=1).astimezone(timezone.utc)
+            except (OSError, OverflowError, ValueError):
+                return None
+            if fold0 != fold1:
+                return None  # DST-ambiguous local instant — fail-closed
+            return fold0
         return None
     # Other platforms: fail-closed (no start time determinable).
     return None
@@ -567,6 +620,41 @@ def _clamped_grace(value: Optional[float]) -> float:
     return max(MIN_TERM_GRACE_SECONDS, min(MAX_TERM_GRACE_SECONDS, value))
 
 
+# M1(b): how often the grace window probes the group for death.
+_GRACE_POLL_INTERVAL_SECONDS = 0.25
+
+
+def _grace_wait_for_death(pgid: int, grace_seconds: float) -> None:
+    """Sleep the TERM→KILL grace in short poll slices, bailing out early
+    when the group is already dead (M1-b).
+
+    N rows × full clamped grace used to run strictly serially with no
+    early exit; a group that died instantly on TERM still burned the
+    whole window. The death probe is ``killpg(pgid, 0)`` — signal 0 is
+    a LIVENESS PROBE, not a signal (kill-site exemption convention):
+    ESRCH ⇒ the group is dead, skip the remaining window. Every other
+    outcome (alive / EPERM / probe failure) keeps sleeping. The slices
+    are computed arithmetically (NOT off a monotonic deadline) so the
+    total converges to exactly ``grace_seconds`` for a live group —
+    including under a mocked ``time.sleep`` in tests.
+    """
+    if grace_seconds <= 0:
+        return
+    interval = _GRACE_POLL_INTERVAL_SECONDS
+    slices = max(1, int(-(-grace_seconds // interval)))  # ceil
+    for i in range(slices):
+        remaining = grace_seconds - i * interval
+        if remaining <= 0:
+            return
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return  # group died mid-grace — don't burn the remainder
+        except OSError:
+            pass  # EPERM / probe failure ⇒ assume alive, keep sleeping
+        time.sleep(min(interval, remaining))
+
+
 def _kill_ladder(pgid: int, grace_seconds: float) -> tuple[str, str]:
     """TERM the group → bounded grace → KILL the group (plan rule 5).
 
@@ -596,7 +684,7 @@ def _kill_ladder(pgid: int, grace_seconds: float) -> tuple[str, str]:
         # to signal; skip the grace + KILL legs.
         return ("reaped", "reaped:term-esrch")
     if grace_seconds > 0:
-        time.sleep(grace_seconds)
+        _grace_wait_for_death(pgid, grace_seconds)
     # Zombie-aware KILL skip: when the group's only remaining members
     # are unreaped ZOMBIES, a SIGKILL against the group returns EPERM
     # on BSD/macOS (macOS refuses SIGKILL to a zombie; killpg aborts
@@ -666,8 +754,13 @@ def verify_and_kill(
          D9 HARD start-time gate: ≥1 member started at or before
          ``row.created_at + tolerance`` (default 10 s — a recycled
          group's members cannot). Fail-closed on unparseable starts.
-      4. Attribution: env-stamp exact match on ≥1 member — readable-
-         but-mismatched env VETOES (refuse) regardless of the gate;
+      4. Attribution: env-stamp exact match on ≥1 member — a readable-
+         mismatch on a member whose start predates the row by more
+         than the D9 tolerance vetoes ABSOLUTELY (``refused:foreign-
+         member``) REGARDLESS of another member's env-match (C2: no
+         legitimate descendant can predate the row — the child→row-
+         write gap is ms…1.5 s, well inside the tolerance); a readable
+         mismatch with NO match refuses (``refused:env-mismatch``);
          env unreadable ⇒ pgid-only attribution IS permitted (F1
          unified rule, any boot scope) but ONLY in combination with
          the D9 gate of rule 3 (two-signal; logged
@@ -779,6 +872,10 @@ def verify_and_kill(
     gate_failed_direct = False
     had_member = False
     member_pids: list[int] = []
+    # C2: start wall-clock per accepted member — the foreign-member veto
+    # needs each readable-mismatch member's start even when ANOTHER
+    # member env-matches.
+    member_start_by_pid: dict[int, Optional[datetime]] = {}
     for entry in members or []:
         # entry may be (pid, start) or a dict
         if isinstance(entry, (tuple, list)):
@@ -806,6 +903,7 @@ def verify_and_kill(
         had_member = True
         member_pids.append(mpid_i)
         mstart_dt = mstart if isinstance(mstart, datetime) else _parse_dt(mstart)
+        member_start_by_pid[mpid_i] = mstart_dt
         if mstart is None:
             unparseable = True
             continue
@@ -845,10 +943,13 @@ def verify_and_kill(
         return ("proceed", "proceed:group-dead-gc")
 
     # 3/4. Attribution (plan rule 3/F1): env-stamp exact match on ≥1
-    # candidate; readable-but-mismatched env VETOES regardless of the
-    # start-time gate; unreadable env everywhere ⇒ pgid-only permitted
-    # (two-signal: the caller only reaches here when the D9 gate of
-    # rule 2/3 held or is about to be enforced below).
+    # candidate; a readable-but-mismatched env on a member that PREDATES
+    # the row by more than the D9 tolerance vetoes ABSOLUTELY (C2 —
+    # ``refused:foreign-member``, regardless of any other member's
+    # env-match); any readable mismatch with NO match refuses
+    # (``refused:env-mismatch``); unreadable env everywhere ⇒ pgid-only
+    # permitted (two-signal: the caller only reaches here when the D9
+    # gate of rule 2/3 held or is about to be enforced below).
     candidates: list[int] = list(member_pids)
     if direct_alive and pid_i not in candidates and not _is_excluded_member(pid_i):
         # zombies/kthreads are never attribution candidates either —
@@ -857,6 +958,11 @@ def verify_and_kill(
         candidates.append(pid_i)
     matched = False
     mismatch = False
+    # C2: EVERY member whose env read returned readable-False is
+    # recorded with its start — the scan must NOT stop at the first
+    # env-match, or a recycled foreign process's readable mismatch in
+    # the same group would be masked by a legitimate member's match.
+    readable_false_members: list[tuple[int, Optional[datetime]]] = []
     if tracking_id:
         for cpid in candidates:
             try:
@@ -865,9 +971,32 @@ def verify_and_kill(
                 verdict = None
             if verdict is True:
                 matched = True
-                break
+                continue  # keep scanning — a later member's readable
+                # mismatch must still be seen (C2)
             if verdict is False:
                 mismatch = True
+                readable_false_members.append(
+                    (cpid, member_start_by_pid.get(cpid))
+                )
+    # C2 absolute veto: a readable-mismatch member whose start predates
+    # the row by more than the D9 tolerance CANNOT be a legitimate
+    # descendant (the child→row-write gap is ms…1.5s, well inside the
+    # tolerance) — it is a pid-recycled same-uid foreign process that
+    # merged into the orphaned group. No legitimate member's env-match
+    # can rehabilitate it: refuse WITHOUT signaling. Unparseable starts
+    # cannot prove predation and stay with the existing refusal paths.
+    if readable_false_members and row_created is not None:
+        for fpid, fstart in readable_false_members:
+            if fstart is None and fpid == pid_i and direct_alive:
+                # direct child: start resolved lazily (one probe, only
+                # when the direct child itself env-mismatched)
+                fstart = process_start_wallclock(pid_i)
+            if (
+                fstart is not None
+                and fstart
+                <= row_created - timedelta(seconds=float(tolerance_seconds))
+            ):
+                return ("refused", "refused:foreign-member")
     if matched:
         attribution = "env-match"
     elif mismatch:
@@ -951,8 +1080,22 @@ RAM_DEDUP_REASON = "ram-tier-dedup"
 
 
 async def _mark_reaped(repo: Any, row_id: Any, reaped_by: str, reason: Optional[str]) -> None:
-    """Bridge the sync ``mark_reaped`` into the event loop (best-effort)."""
-    await asyncio.to_thread(repo.mark_reaped, row_id, reaped_by, reason)
+    """Bridge the sync ``mark_reaped`` into the event loop (best-effort).
+
+    minor-1: the repository close is a CAS (conditional ``UPDATE ...
+    WHERE reaped_at IS NULL``); a lost race (another sweeper closed the
+    row first) is LOGGED here — never failed, and the first sweeper's
+    reaped_by/reap_reason are never overwritten.
+    """
+    row = await asyncio.to_thread(repo.mark_reaped, row_id, reaped_by, reason)
+    if row is not None and getattr(row, "cas_rowcount", 1) == 0:
+        logger.info(
+            "bash reaper: row %s close lost the CAS race — already "
+            "closed by another sweeper (reaped_by=%s reason=%s); "
+            "first close kept",
+            row_id, getattr(row, "reaped_by", None),
+            getattr(row, "reap_reason", None),
+        )
 
 
 async def sweep_rows(
@@ -986,6 +1129,10 @@ async def sweep_rows(
     if my_pid is None:
         my_pid = os.getpid()
     actions = 0
+    # minor-6: truthful per-outcome breakdown for the one-line sweep
+    # census — the aggregate "closed" count is NOT all kills (gc /
+    # refused / dedup closures are not kills).
+    n_killed = n_gc = n_refused = n_dedup = n_skip = 0
     for row in rows:
         row_id = _row_get(row, "id")
         try:
@@ -1005,6 +1152,7 @@ async def sweep_rows(
             if repo is not None and row_id is not None:
                 try:
                     await _mark_reaped(repo, row_id, f"{reaped_by}@{my_pid}", RAM_DEDUP_REASON)
+                    n_dedup += 1
                     try:
                         row.reaped_at = now_utc_iso() if hasattr(row, "reaped_at") else row.reaped_at
                     except Exception:
@@ -1039,6 +1187,7 @@ async def sweep_rows(
                 row_id, str(_row_get(row, "instance_id") or ""),
                 _row_get(row, "daemon_pid"), reason, my_pid,
             )
+            n_skip += 1
             continue  # live sibling owns this row — leave OPEN
 
         if repo is None or row_id is None:
@@ -1057,6 +1206,7 @@ async def sweep_rows(
                     row.reaped_at = now_utc_iso()
                 except Exception:
                     pass
+                n_refused += 1
                 actions += 1
             elif status == "proceed" and str(reason).startswith("proceed:group-dead-gc"):
                 await _mark_reaped(repo, row_id, f"{GC_REAPED_BY}@{my_pid}", "gc")
@@ -1064,6 +1214,7 @@ async def sweep_rows(
                     row.reaped_at = now_utc_iso()
                 except Exception:
                     pass
+                n_gc += 1
                 actions += 1
             elif status == "reaped":
                 await _mark_reaped(repo, row_id, f"{reaped_by}@{my_pid}", None)
@@ -1071,6 +1222,7 @@ async def sweep_rows(
                     row.reaped_at = now_utc_iso()
                 except Exception:
                     pass
+                n_killed += 1
                 actions += 1
             else:
                 logger.warning(
@@ -1083,7 +1235,66 @@ async def sweep_rows(
                 "bash reaper: mark_reaped failed for row %s: %s: %s",
                 row_id, type(exc).__name__, exc,
             )
+    # minor-6: ONE truthful census line per sweep — killed / gc /
+    # refused / dedup / skip are distinct outcomes; the raw closed count
+    # is not an all-kills figure.
+    if rows:
+        logger.info(
+            "bash reaper: sweep census reaped_by=%s closed=%d "
+            "(killed=%d gc=%d refused=%d ram_dedup=%d skipped=%d)",
+            reaped_by, actions, n_killed, n_gc, n_refused, n_dedup,
+            n_skip,
+        )
     return actions
+
+
+async def _run_lane_sweep_with_deadline(
+    rows: list,
+    *,
+    repo: Any,
+    reaped_by: str,
+    my_pid: Optional[int] = None,
+    term_grace_seconds: Optional[float] = None,
+) -> int:
+    """Run ONE lane's full sweep (row-level + enumerated) under the
+    M1 aggregate deadline.
+
+    N rows × full clamped TERM grace used to run strictly serially with
+    no early-exit or aggregate deadline — able to block ``manager.shutdown``
+    (and, pre-M1c, the API lifespan). The whole lane is now wrapped in
+    ``asyncio.wait_for``; on deadline the in-flight ``to_thread`` row
+    finishes detached (a ``to_thread`` call cannot be cancelled
+    mid-flight) but no FURTHER row starts, the outcome is a non-fatal
+    WARNING, and the lane returns whatever closed before the deadline.
+    Remaining rows stay OPEN — the next sweep/lane retries them.
+    """
+    async def _inner() -> int:
+        closed = await sweep_rows(
+            rows,
+            repo=repo,
+            reaped_by=reaped_by,
+            ram_pgids=None,
+            my_pid=my_pid,
+            term_grace_seconds=term_grace_seconds,
+        )
+        closed += await _enumerated_sweep(
+            rows, repo=repo, reaped_by=reaped_by,
+            my_pid=my_pid, term_grace_seconds=term_grace_seconds,
+        )
+        return closed
+
+    try:
+        return await asyncio.wait_for(
+            _inner(), timeout=LANE_SWEEP_DEADLINE_SECONDS
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "bash reaper: %s sweep exceeded its %.0fs aggregate deadline "
+            "(LANE_SWEEP_DEADLINE_SECONDS) — remaining rows left OPEN "
+            "(non-fatal; the next sweep/lane retries them)",
+            reaped_by, LANE_SWEEP_DEADLINE_SECONDS,
+        )
+        return 0
 
 
 async def sweep_instance(
@@ -1158,17 +1369,12 @@ async def sweep_open_rows_for_shutdown(
     rows = await asyncio.to_thread(repo.list_open_all)
     if not rows:
         return 0
-    closed = await sweep_rows(
+    closed = await _run_lane_sweep_with_deadline(
         rows,
         repo=repo,
         reaped_by="shutdown",
-        ram_pgids=None,
         my_pid=my_pid,
         term_grace_seconds=term_grace_seconds,
-    )
-    closed += await _enumerated_sweep(
-        rows, repo=repo, reaped_by="shutdown",
-        my_pid=my_pid, term_grace_seconds=term_grace_seconds,
     )
     if closed:
         logger.info(
@@ -1214,16 +1420,24 @@ async def reconcile_stale_bash_spawns(
         return 0
 
     if repo is None:
+        # minor-8: the STABLE accessor only — the old bound-method
+        # scraping (``getattr(reg, "durable_writer") or getattr(reg,
+        # "get_durable_writer")`` + callable guessing) is gone. The
+        # registry exposes exactly one durable-writer getter; unset ⇒
+        # clean no-op with a WARNING.
         try:
             from daemon.tools.bash import get_bash_process_registry
 
             reg = get_bash_process_registry()
-            repo = getattr(reg, "durable_writer", None) or getattr(reg, "get_durable_writer", None)
-            if callable(repo) and not hasattr(repo, "list_open_previous_boot"):
-                repo = repo()
+            getter = getattr(reg, "get_durable_writer", None)
+            repo = getter() if callable(getter) else None
         except Exception:  # noqa: BLE001
             repo = None
     if repo is None:
+        logger.warning(
+            "bash reaper: durable writer unset — boot reconcile is a "
+            "clean no-op (writer wiring happens at lifespan startup)"
+        )
         return 0
 
     if current_boot_id is None:
@@ -1246,18 +1460,29 @@ async def reconcile_stale_bash_spawns(
     if not rows:
         return 0
 
-    closed = await sweep_rows(
+    closed = await _run_lane_sweep_with_deadline(
         rows,
         repo=repo,
         reaped_by="boot-reconcile",
-        ram_pgids=None,
         my_pid=my_pid,
         term_grace_seconds=term_grace_seconds,
     )
-    closed += await _enumerated_sweep(
-        rows, repo=repo, reaped_by="boot-reconcile",
-        my_pid=my_pid, term_grace_seconds=term_grace_seconds,
-    )
+    # minor-4 housekeeping (ONE-SHOT inside the boot reconcile — NOT a
+    # polling service): prune reaped rows older than the retention
+    # window so closed-row growth stays bounded. Best-effort.
+    try:
+        pruned = await asyncio.to_thread(repo.prune_reaped_older_than)
+        if pruned:
+            logger.info(
+                "bash reaper: boot reconcile pruned %d reaped row(s) "
+                "older than %d day(s)",
+                pruned, BASH_SPAWN_RETENTION_DAYS,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "bash reaper: boot reconcile retention prune failed "
+            "(non-fatal): %s: %s", type(exc).__name__, exc,
+        )
     if closed:
         logger.info(
             "bash reaper: boot reconcile closed %d row(s) "
@@ -1374,13 +1599,21 @@ def _enumerate_stamped_member_details(open_rows: Any) -> list:
 
     Returns a list of ``(pid, tracking_id)`` tuples selected for killing
     (exact env match + D9 start-time gate). Refused/skipped candidates
-    are logged (WARNING) and excluded. Master switch OFF ⇒ ``[]`` with
-    zero scan. Win32 ⇒ ``[]``.
+    are logged (DEBUG — m2 log hygiene) and excluded. Master switch OFF
+    ⇒ ``[]`` with zero scan. Win32 ⇒ ``[]``.
 
     Candidate pre-filter (m6) runs BEFORE any env read: self/daemon/
     kernel-thread/zombie exclusion, pgid>1, daemon-group exclusion, D8
-    sibling-guarded pgids, and a D9 eligibility pre-filter (a candidate
-    too young for EVERY open row cannot belong to any of them).
+    sibling-guarded pgids + daemon pids, an m2 LOWER start bound and a
+    D9 eligibility pre-filter (a candidate too young for EVERY open row
+    cannot belong to any of them).
+
+    C1 (tracking-id dimension of the D8 sibling skip): the D8 partition
+    runs FIRST and the tracking-id set is built from NON-SKIPPED rows
+    only — a sibling-owned row contributes NEITHER its pgid NOR its
+    tracking_id, so a setsid escapee stamped with the SIBLING's tid is
+    never env-read and never selected by this daemon's sweep. The
+    pgid/daemon-pid exclusion sets remain as belt-and-braces.
     """
     if not kill_switch_from_env():
         return []
@@ -1390,24 +1623,12 @@ def _enumerate_stamped_member_details(open_rows: Any) -> list:
     if not rows:
         return []
 
-    # Tracking ids from open rows.
-    tids: list = []
-    for r in rows:
-        tid = _row_get(r, "tracking_id")
-        if tid is not None and str(tid) not in tids:
-            tids.append(str(tid))
-    if not tids:
-        return []
-
-    row_by_tid: dict = {}
-    for r in rows:
-        tid = _row_get(r, "tracking_id")
-        if tid is not None:
-            row_by_tid.setdefault(str(tid), r)
-
-    # D8 sibling-guarded pgids + daemon pids (rows skipped by the guard).
+    # D8 sibling-guarded pgids + daemon pids (rows skipped by the guard)
+    # — computed FIRST so the tracking-id set below can exclude skipped
+    # rows entirely (C1).
     skipped_pgids: set = set()
     skipped_daemon_pids: set = set()
+    live_rows: list = []
     for r in rows:
         skip, _ = _daemon_pid_guard(
             _row_get(r, "daemon_pid"), os.getpid(), _row_get(r, "created_at")
@@ -1421,12 +1642,40 @@ def _enumerate_stamped_member_details(open_rows: Any) -> list:
                 skipped_daemon_pids.add(int(_row_get(r, "daemon_pid")))
             except (TypeError, ValueError):
                 pass
+            continue
+        live_rows.append(r)
+
+    # Tracking ids from NON-SKIPPED rows only (C1 — a sibling-owned row
+    # contributes neither its pgid nor its tracking_id).
+    tids: list = []
+    for r in live_rows:
+        tid = _row_get(r, "tracking_id")
+        if tid is not None and str(tid) not in tids:
+            tids.append(str(tid))
+    if not tids:
+        return []
+
+    row_by_tid: dict = {}
+    for r in live_rows:
+        tid = _row_get(r, "tracking_id")
+        if tid is not None:
+            row_by_tid.setdefault(str(tid), r)
 
     created_dts = [
         d for d in (_parse_dt(_row_get(r, "created_at")) for r in rows) if d is not None
     ]
     max_created = max(created_dts) if created_dts else None
+    min_created = min(created_dts) if created_dts else None
     tolerance = start_tolerance_seconds_from_env()
+    # M3: the HOURS-scale tolerance is the one ACTUALLY applicable to
+    # env-EXACT-matched candidates, so the pre-filter's upper bound must
+    # use it — otherwise the 10 s bound would exclude exactly the
+    # delayed-detach escapees M3 admits before any env read could
+    # positive-match them. The m2 LOWER bound keeps the 10 s tolerance:
+    # M3 widens only the upper (delayed-detach) side; a candidate that
+    # predates every row by more than the 10 s window cannot carry a
+    # legitimate stamp (the uuid4 tracking id did not exist yet).
+    stamp_tolerance = stamp_tolerance_seconds_from_env()
 
     daemon_pgid = None
     try:
@@ -1435,6 +1684,8 @@ def _enumerate_stamped_member_details(open_rows: Any) -> list:
         daemon_pgid = None
 
     scan = _scan_process_table()
+    candidates_considered = len(scan)
+    skipped_by_bound = 0
 
     # Pre-filter BEFORE any env read.
     surviving: list = []
@@ -1456,21 +1707,33 @@ def _enumerate_stamped_member_details(open_rows: Any) -> list:
             continue
         if pid in skipped_daemon_pids:
             continue
-        # D9 eligibility pre-filter: candidate must be able to satisfy
-        # the gate for at least one open row.
-        if max_created is not None and cand.get("start") is not None:
-            if cand["start"] > max_created + timedelta(seconds=tolerance):
+        # D9 eligibility pre-filter (m2 + m3): the candidate must be able
+        # to satisfy the gate for at least one open row — too young for
+        # EVERY row (upper bound, M3-widened) or predating EVERY row
+        # (m2 lower bound) is skipped BEFORE any env read.
+        if cand.get("start") is not None:
+            if max_created is not None and cand["start"] > max_created + timedelta(
+                seconds=stamp_tolerance
+            ):
+                skipped_by_bound += 1
+                continue
+            if min_created is not None and cand["start"] < min_created - timedelta(
+                seconds=tolerance
+            ):
+                skipped_by_bound += 1
                 continue
         surviving.append(cand)
 
     # Attribution.
     results: list = []
+    env_reads = 0
     for cand in surviving:
         pid = cand["pid"]
         matched_tid = None
         any_none = False
         readable_mismatch = False
         for tid in tids:
+            env_reads += 1
             try:
                 v = verify_member_env(pid, tid)
             except Exception:  # noqa: BLE001
@@ -1484,17 +1747,22 @@ def _enumerate_stamped_member_details(open_rows: Any) -> list:
                 readable_mismatch = True
         if matched_tid is None:
             if any_none:
-                logger.warning(
+                # m2: per-candidate lines are DEBUG — the one-line sweep
+                # census below is the INFO surface.
+                logger.debug(
                     "bash reaper: enumeration skipped pid=%d (env unreadable) "
                     "— never kill-unverified",
                     pid,
                 )
                 continue
-            logger.warning(
+            logger.debug(
                 "bash reaper: enumeration refused pid=%d (env mismatch)", pid,
             )
             continue
-        # D9 gate on the matched row.
+        # D9 gate on the matched row — m3: this is the env-EXACT path
+        # (positive stamp match), so the HOURS-scale stamp tolerance
+        # applies (delayed-detach reach). The pgid-only attribution path
+        # keeps the 10 s D9 tolerance in verify_and_kill.
         mrow = row_by_tid.get(matched_tid)
         mcreated = _parse_dt(_row_get(mrow, "created_at")) if mrow is not None else None
         if mcreated is None:
@@ -1504,24 +1772,31 @@ def _enumerate_stamped_member_details(open_rows: Any) -> list:
             # candidates selected on env-match alone. Reachable only
             # via a corrupted row (the writer always stamps
             # now_utc_iso).
-            logger.warning(
+            logger.debug(
                 "bash reaper: enumeration refused pid=%d (row %s "
                 "created_at unparseable) — fail-closed",
                 pid, _row_get(mrow, "id") if mrow is not None else None,
             )
             continue
         if cand.get("start") is not None:
-            if cand["start"] > mcreated + timedelta(seconds=tolerance):
-                logger.warning(
+            if cand["start"] > mcreated + timedelta(seconds=stamp_tolerance):
+                logger.debug(
                     "bash reaper: enumeration refused pid=%d (start-time gate)",
                     pid,
                 )
                 continue
         results.append((pid, matched_tid))
-        logger.info(
+        logger.debug(
             "bash reaper: enumeration selected pid=%d tracking_id=%s",
             pid, matched_tid,
         )
+    # m2: ONE aggregate line per sweep (per-candidate lines are DEBUG).
+    logger.info(
+        "bash reaper: enumeration sweep census — candidates_considered=%d "
+        "env_reads=%d selected=%d skipped_by_bound=%d rows=%d",
+        candidates_considered, env_reads, len(results), skipped_by_bound,
+        len(rows),
+    )
     return results
 
 
@@ -1538,7 +1813,12 @@ def _enumerate_stamped_members(open_rows: Any) -> list:
 
 
 def _kill_enumerated_pid(pid: int, grace_seconds: float) -> None:
-    """TERM → bounded grace → KILL a single enumerated pid (ESRCH swallowed)."""
+    """TERM → bounded grace → KILL a single enumerated pid (ESRCH swallowed).
+
+    M1(b): the grace window probes the pid for death at short intervals
+    (signal-0 liveness probe) so an already-dead escapee does not burn
+    the full clamped grace.
+    """
     if sys.platform == "win32":
         return
     try:
@@ -1551,7 +1831,20 @@ def _kill_enumerated_pid(pid: int, grace_seconds: float) -> None:
             pid, type(exc).__name__, exc,
         )
     if grace_seconds > 0:
-        time.sleep(grace_seconds)
+        deadline_slices = max(
+            1, int(-(-grace_seconds // _GRACE_POLL_INTERVAL_SECONDS))
+        )
+        for i in range(deadline_slices):
+            remaining = grace_seconds - i * _GRACE_POLL_INTERVAL_SECONDS
+            if remaining <= 0:
+                break
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break  # already dead — skip the remaining window
+            except OSError:
+                pass  # EPERM / probe failure ⇒ assume alive
+            time.sleep(min(_GRACE_POLL_INTERVAL_SECONDS, remaining))
     try:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:

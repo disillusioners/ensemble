@@ -20,7 +20,14 @@ both depend on these):
   is accepted for signature parity and is not used to filter rows — the
   service applies the guard.
 * :meth:`mark_reaped` — close one row (set ``reaped_at``/``reaped_by``/
-  ``reap_reason``). Idempotent-ish: a missing row returns ``None``.
+  ``reap_reason``). CAS (minor-1): conditional ``UPDATE ... WHERE
+  reaped_at IS NULL`` guarded by rowcount — a second sweeper never
+  overwrites the first's close; the rowcount is exposed on the returned
+  row as ``cas_rowcount`` (lost-race detection: log, don't fail). A
+  missing row returns ``None``.
+* :meth:`prune_reaped_older_than` — minor-4 one-shot retention prune of
+  REAPED rows older than the window (called by the boot reconcile;
+  open rows are never touched).
 
 Restart-lane exclusion is structural (no writer outside the bash seam);
 this repository never reaches into the restart lane.
@@ -28,12 +35,18 @@ this repository never reaches into the restart lane.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from sqlalchemy import delete, update
 from sqlmodel import Session, SQLModel, select
 
 from daemon.repositories.bash_spawn.models import BashSpawnRecord
 from daemon.services.timestamps import now_utc_iso
+
+# minor-4: closed-row retention window (boot-reconcile housekeeping;
+# keep in lockstep with bash_spawn_reaper.BASH_SPAWN_RETENTION_DAYS).
+BASH_SPAWN_RETENTION_DAYS = 30
 
 
 class BashSpawnRepository:
@@ -104,14 +117,63 @@ class BashSpawnRepository:
         reaped_by: str,
         reason: Optional[str] = None,
     ) -> Optional[BashSpawnRecord]:
+        """Close one row — CAS (minor-1).
+
+        The close is a conditional ``UPDATE ... WHERE reaped_at IS NULL``
+        guarded by rowcount: a SECOND sweeper NEVER overwrites the
+        first's ``reaped_by``/``reap_reason``. Returns the persisted row
+        (post-CAS state) or ``None`` when the row does not exist. The
+        UPDATE rowcount is exposed on the returned row as the
+        ``cas_rowcount`` attribute so callers can DETECT lost races
+        (log, don't fail): ``1`` = this caller performed the close,
+        ``0`` = the row was already closed by another sweeper (the
+        existing close is kept) — or the row was missing.
+        """
+        closed_at = now_utc_iso()
         with Session(self.engine) as session:
+            stmt = (
+                update(BashSpawnRecord)
+                .where(BashSpawnRecord.id == row_id)
+                .where(BashSpawnRecord.reaped_at.is_(None))
+                .values(
+                    reaped_at=closed_at,
+                    reaped_by=reaped_by,
+                    reap_reason=reason,
+                )
+            )
+            result = session.exec(stmt)
+            session.commit()
+            rowcount = int(result.rowcount or 0)
             row = session.get(BashSpawnRecord, row_id)
             if row is None:
                 return None
-            row.reaped_at = now_utc_iso()
-            row.reaped_by = reaped_by
-            row.reap_reason = reason
-            session.add(row)
-            session.commit()
-            session.refresh(row)
+            try:
+                # Expose the CAS outcome (lost-race detection) without
+                # changing the stable return contract. SQLModel's
+                # pydantic setattr silently drops unknown attributes,
+                # so write through ``object.__setattr__``.
+                object.__setattr__(row, "cas_rowcount", rowcount)
+            except Exception:  # noqa: BLE001 — attribute is best-effort
+                pass
             return row
+
+    def prune_reaped_older_than(self, days: int = BASH_SPAWN_RETENTION_DAYS) -> int:
+        """Delete REAPED rows older than ``days`` (minor-4 housekeeping).
+
+        ONE-SHOT — called once inside the boot reconcile (NOT a polling
+        service). OPEN rows are never touched; the partial open-subset
+        indexes are unaffected. ``reaped_at`` is same-format aware-UTC
+        ISO (``now_utc_iso()``), so the bound compares lexicographically
+        correct. Returns the number of rows deleted.
+        """
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=days)
+        ).isoformat()
+        with Session(self.engine) as session:
+            stmt = delete(BashSpawnRecord).where(
+                BashSpawnRecord.reaped_at.is_not(None),
+                BashSpawnRecord.reaped_at < cutoff,
+            )
+            result = session.exec(stmt)
+            session.commit()
+            return int(result.rowcount or 0)

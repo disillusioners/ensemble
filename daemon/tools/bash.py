@@ -8,7 +8,9 @@ import re
 import signal
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
+from functools import partial
 from uuid import uuid4
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence
@@ -55,6 +57,19 @@ from daemon.services.bash_spawn_reaper import (
 from daemon.services.timestamps import now_utc_iso as _now_utc_iso
 
 logger = logging.getLogger(__name__)
+
+# bash-tool orphan reaper minor-5: the durable spawn stamp must NOT
+# queue on the loop's DEFAULT executor. During a PG outage a spawn
+# burst pins default-executor threads for the full 1.5 s bounded-wait
+# each (late-tombstone tasks keep the threads busy after the wait
+# gives up) — starving every other to_thread user. A dedicated BOUNDED
+# executor (2 workers) turns a burst into a short queue: at most 2
+# inserts in flight, the rest wait their turn, and the default
+# executor is never touched. On timeout the detached insert still
+# lands its best-effort late tombstone from this pool.
+_DURABLE_INSERT_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="bash-durable-stamp"
+)
 
 
 # ── D5 — kind-hint ContextVar (resource-cost-control Phase 2) ───────────────
@@ -523,19 +538,32 @@ class BashProcessRegistry:
         # bash-tool orphan reaper Phase 2 (D4): durable-row reach —
         # strictly additive AFTER the RAM killpg pass, dedup'd by pgid.
         # Best-effort: a sweep failure must never break the caller.
+        # minor-6: the durable sweep's closed count is NOT an all-kills
+        # figure (it includes gc / refused / dedup closures), so it is
+        # logged SEPARATELY with a pointer to the per-outcome census
+        # instead of being folded into one inflated "killed" number.
+        durable_closed = 0
         try:
-            killed += await _bash_reaper_sweep_instance(
+            durable_closed = await _bash_reaper_sweep_instance(
                 self._durable_writer,
                 instance_id,
                 reaped_by=reaped_by,
                 ram_pgids={entry.pgid for entry in entries},
             )
+            if durable_closed:
+                logger.info(
+                    "bash cleanup: durable-row sweep closed %d row(s) for "
+                    "%s (killed/gc/refused breakdown in the reaper sweep "
+                    "census)",
+                    durable_closed, instance_id[:8],
+                )
         except Exception as e:
             logger.warning(
                 f"bash cleanup: durable-row sweep failed for "
                 f"{instance_id[:8]}: {type(e).__name__}: {e}"
             )
-        return killed
+        # Int return contract preserved: total lanes-closed actions.
+        return killed + durable_closed
 
     async def cleanup_all(self, *, reaped_by: str = "shutdown") -> int:
         """Kill every tracked bash process group during daemon shutdown.
@@ -979,19 +1007,27 @@ async def bash(
                 _durable_writer = get_bash_process_registry().get_durable_writer()
                 if _durable_writer is not None:
                     try:
+                        # minor-5: route the durable insert through the
+                        # dedicated BOUNDED executor (not the loop's
+                        # default executor) — a PG-outage burst queues
+                        # instead of pinning default-executor threads.
+                        loop = asyncio.get_running_loop()
                         await asyncio.wait_for(
                             asyncio.shield(
-                                asyncio.to_thread(
-                                    _durable_writer.insert_open_row,
-                                    pid=proc.pid,
-                                    pgid=pgid,
-                                    start_time=bash_start_time_jiffies,
-                                    tracking_id=tracking_id,
-                                    instance_id=instance_id,
-                                    command_sanitized=sanitized_command,
-                                    boot_id=_CURRENT_BOOT_ID,
-                                    daemon_pid=os.getpid(),
-                                    created_at=_now_utc_iso(),
+                                loop.run_in_executor(
+                                    _DURABLE_INSERT_EXECUTOR,
+                                    partial(
+                                        _durable_writer.insert_open_row,
+                                        pid=proc.pid,
+                                        pgid=pgid,
+                                        start_time=bash_start_time_jiffies,
+                                        tracking_id=tracking_id,
+                                        instance_id=instance_id,
+                                        command_sanitized=sanitized_command,
+                                        boot_id=_CURRENT_BOOT_ID,
+                                        daemon_pid=os.getpid(),
+                                        created_at=_now_utc_iso(),
+                                    ),
                                 )
                             ),
                             timeout=1.5,
