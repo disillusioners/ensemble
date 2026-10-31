@@ -82,15 +82,17 @@ row present, `examined=0` — pre-fix behavior byte-restored.
 
 ## Phase 3 T3.11 — mutation matrix (TRUE SHAPE: 25 planted / 22 RED-proven / 3 superseded)
 
-> **AUTHORITY NOTE (micro-fold 2026-10-31):** the committed
-> `phase3-artifacts/matrix.tsv` is the AUTHORITATIVE count — prose
-> figures here and in PACKS.md are derived from it and re-derived at
-> every fold. At commit `ec0cf2a6a` it mechanically stands at
-> **25 planted / 22 RED-proven / 3 superseded** (the W2
-> cardinality leg INCLUDED). An earlier lane-report closing note
-> claiming "26/23/3 after this cycle" double-counted the W2 leg and
-> is superseded by this recount — recorded so the false figure
-> never propagates.
+> **AUTHORITY NOTE (micro-fold 2026-10-31, re-derived at the
+> tidier fold):** the committed `phase3-artifacts/matrix.tsv` is the
+> AUTHORITATIVE count — prose figures here and in PACKS.md are
+> derived from it and re-derived at every fold. At the tidier fold
+> it mechanically stands at **28 planted / 25 RED-proven / 3
+> superseded** (the W2 cardinality leg + the three tidier-cycle
+> legs INCLUDED: a1v3 token-between gate conjunct, a3v2
+> detail-notify-outcome dropped, ADV4 admission-pair drift). An
+> earlier lane-report closing note claiming "26/23/3" double-counted
+> the W2 leg and is superseded — recorded so the false figure never
+> propagates.
 
 `phase3-artifacts/matrix.tsv` — every RED-proven leg: planted defect form
 → the named pin(s) RED (ids recorded) → restore → GREEN. Three first
@@ -106,12 +108,18 @@ inside the 120s margin — superseded by the +180s form). The council-fold
 cycle added the W2 cardinality leg (simulated 5th status in the SSOT →
 cardinality pin + S4-close guard-raise RED → restore GREEN).
 
-### Known advisories — RECORDED, not folded (code-review council 2026-10-31, ride the phase-4 record)
+### Known advisories — 4 ADOPTED (tidier fold 2026-10-31); 5-8 RECORDED, not folded
 
-4. **Pack I DDL drift-guard**: the trigger-suite installer carries the
-   manager DDL verbatim-by-copy; a future manager DDL change would not
-   auto-propagate to the pack. Drift-guard (assert the manager source
-   contains the same CREATE statements, or import them) on next touch.
+4. **Pack I DDL drift-guard — ADOPTED at the tidier fold (Shape 1)**:
+   the pack's dead `_ACTIVE_JOB_IDS_SUBQUERY` copy was converted into
+   a live drift-guard — the pack imports the PRODUCTION constant from
+   ``lock_repository`` and asserts its spelled ``('queued', 'active')``
+   pair at import (deliberately NOT a whole-DDL byte-equality pin; the
+   guard lives in exactly this one pack). Mutation-proven: matrix leg
+   ``ADV4-admission-pair-drift-guard`` (plant the production set
+   dropping 'queued' ⇒ the pack errors at collection; restore ⇒
+   green).
+
 5. **A6(a) behavioral upgrade**: the member-alive builder pin is
    anchor-text based (`tid != instance_id` conjuncts); a behavioral
    (drive-the-guard) form would be stronger — upgrade on next touch.
@@ -144,3 +152,15 @@ directory.
   synthetic kms_issue rows from plugin-subsystem tests). Reverted (backup
   at `/tmp/mfz-phase0/install-audit-debris-20261031.jsonl`); flagged for
   the watch list, not committed.
+
+### Tidier fold (2026-10-31) — strengthened pins
+
+The tidier fold strengthened two pins and adopted one guard; each is
+mutation-proven in the matrix (same-commit TSV discipline):
+``T3.12-a1v3-token-between-gate-conjunct`` — the BROADENED A1
+forbidden form catches the token-between conjunct the old narrow
+regex missed (this REPLACES the strength of the disclosed dead first
+plant ``T3.12-a1-log-gated-reconciled``);
+``T3.12-a3v2-detail-notify-outcome-dropped`` — the de-tautologized
+A3 pin's Anchor-2 (the old ``or`` arm stayed GREEN under this plant);
+``ADV4-admission-pair-drift-guard`` — the adopted advisory 4.

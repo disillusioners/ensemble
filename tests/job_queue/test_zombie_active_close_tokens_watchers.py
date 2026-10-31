@@ -20,8 +20,6 @@ Pins (phase3-plan T3.7):
 
 from __future__ import annotations
 
-import asyncio
-import uuid
 
 import pytest
 from sqlalchemy import create_engine

@@ -24,11 +24,9 @@ Pins (phase3-plan T3.12):
 
 from __future__ import annotations
 
-import asyncio
 import re
 import uuid
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -40,17 +38,14 @@ import daemon.repositories.job_queue.models  # noqa: F401
 import daemon.repositories.task.models  # noqa: F401
 
 from daemon.repositories.job_queue.repository import JobRepository
-from daemon.services import job_recovery_service as _jrs
 from daemon.services.dependency_bus import set_dependency_bus
 from daemon.services.job_recovery_service import (
-    JobRecoveryService,
     ZOMBIE_CLOSE_STREAK_WARN_THRESHOLD,
 )
 
 from tests.job_queue.zombie_close_helpers import (
     insert_zombie_fixture,
     make_bus_mock,
-    make_jqs_mock,
     make_recovery_service,
     read_job_state,
 )
@@ -109,9 +104,15 @@ class TestA1CounterBlockVisibility:
             "the (h) log gate must key on examined>0 alone (A1) — "
             "colon-terminated, no appended conjunct"
         )
+        # Tidier fold: the forbidden form is BROADENED to any
+        # `and`-conjunct following the gate predicate on the same
+        # logical line — the narrow `and\s+reconciled` form missed
+        # the token-between shape (e.g. an intermediary
+        # `zombie_stats.get("reconciled", ...)` conjunct).
         assert (
             re.search(
-                r"examined\", 0\) > 0\s+and\s+reconciled", _API_SRC
+                r"examined\", 0\) > 0\s+and\b[^\n]*reconciled",
+                _API_SRC,
             )
             is None
         ), "the examined>0 gate must NOT be conjointed with reconciled"
@@ -149,11 +150,13 @@ class TestA1CounterBlockVisibility:
         assert stats.get("reconciled", 0) == 0
 
     async def test_error_skips_surface_in_warn_line(self):
+        # Tidier fold: REQUIRED match against the actual api.py
+        # wording (no `or` escape hatch).
         assert re.search(
-            r"error_skips.*fail-closed", _API_SRC
-        ) or "error skip(s)" in _API_SRC, (
+            r"error skip\(s\)[\s\S]{0,120}?fail-closed", _API_SRC
+        ), (
             "non-zero error_skips must surface in the drift-stats "
-            "WARN line (A1-ii)"
+            "WARN line with the actual api.py wording (A1-ii)"
         )
 
     async def test_escalating_warn_at_threshold_k(self, j_engine, j_bus, caplog):
@@ -225,7 +228,20 @@ class TestA1CounterBlockVisibility:
 
 class TestA3NotifyOutcomeField:
     async def test_every_close_line_carries_notify_outcome(self):
-        assert "notify=%s" in _SERVICE_SRC or "notify=" in _SERVICE_SRC
+        """Tidier fold: TWO precise anchors (the tautological `or`
+        arm is dropped) — the close LOG line's format placeholder
+        AND the detail record's f-string, the two surfaces A3
+        requires."""
+        # Anchor 1: the close log line's notify=%s placeholder.
+        assert "notify=%s" in _SERVICE_SRC, (
+            "the (h) close log line must carry the notify=<outcome> "
+            "placeholder (A3)"
+        )
+        # Anchor 2: the close detail record's f-string.
+        assert "notify={notify_outcome}" in _SERVICE_SRC, (
+            "the (h) close detail record must carry the notify "
+            "outcome (A3 — the post-commit notify-loss visibility)"
+        )
 
     async def test_followup_token_present(self):
         """Terminal-job-with-surviving-watcher-rows routes into the
@@ -248,14 +264,17 @@ class TestA5AttributionShape:
         assert "zombie_active_completed" in ws_src
         assert "zombie_active_failed" in ws_src
         assert "zombie_active_cancelled" in ws_src
-        assert re.search(
-            r"IN-list \('zombie_active_completed',\s*#\s*"
-            r"'zombie_active_failed',\s*'zombie_active_cancelled'\)",
-            ws_src,
+        # Tidier fold: wrap-tolerant anchor — whitespace-insensitive
+        # match on the token spellings inside the IN-list guidance
+        # (the prior regex depended on the comment's line wrapping).
+        compact = re.sub(r"[\s#]+", "", ws_src)
+        assert (
+            "IN-list('zombie_active_completed','zombie_active_failed',"
+            "'zombie_active_cancelled')" in compact
         ), "the explicit IN-list attribution form must be recorded"
-        assert not re.search(
-            r"LIKE 'zombie_active", ws_src
-        ), "prefix-LIKE attribution is forbidden at the registration"
+        assert "LIKE'zombie_active" not in compact, (
+            "prefix-LIKE attribution is forbidden at the registration"
+        )
 
 class TestA6DefensiveE1Pins:
     async def test_member_alive_builder_never_probes_the_discounted_instance(

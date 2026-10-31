@@ -19,8 +19,6 @@ installed, the pack INSTALLS them via the documented trigger DDL
 from __future__ import annotations
 
 import asyncio
-import uuid
-from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import text
@@ -30,19 +28,12 @@ import daemon.repositories.job_queue.models  # noqa: F401
 import daemon.repositories.job_queue.watcher_models  # noqa: F401
 import daemon.repositories.task.models  # noqa: F401
 
-from daemon.repositories.instance.repository import (
-    SQLModelInstanceRepository,
-)
-from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.job_queue.repository import JobRepository
-from daemon.repositories.task.repository import TaskRepository
-from daemon.services.job_recovery_service import JobRecoveryService
 from daemon.services.dependency_bus import set_dependency_bus
 
 from tests.job_queue.zombie_close_helpers import (
     insert_zombie_fixture,
     make_bus_mock,
-    make_jqs_mock,
     read_job_state,
     make_recovery_service,
 )
@@ -52,11 +43,32 @@ pytestmark = pytest.mark.postgres
 #: The pack-local declared collected count (NEW packs only).
 EXPECTED_COLLECTED = 3
 
-_ACTIVE_JOB_IDS_SUBQUERY = (
-    "SELECT job_id FROM job_queue_items "
-    "WHERE admission_state IN ('queued', 'active') "
-    "  AND deleted_at IS NULL"
+#: Advisory-4 drift-guard, Shape 1 (adopted tidier fold 2026-10-31;
+#: this was a dead copy of the subquery): the pack's trigger DDL
+#: spells the active-admission pair as ('queued', 'active'); the
+#: guard asserts that spelling equals the PRODUCTION-built form
+#: (the shared constant from lock_repository), so a production
+#: change to the active-admission set drifts this pack LOUD instead
+#: of silently. Deliberately NOT a whole-DDL byte-equality pin (the
+#: manager's trigger bodies are free to evolve; only the shared
+#: semantic constant is guarded). The guard lives in EXACTLY this
+#: one pack.
+from daemon.repositories.job_queue.lock_repository import (
+    _ACTIVE_JOB_IDS_SUBQUERY as _PRODUCTION_ACTIVE_JOB_IDS_SUBQUERY,
 )
+
+
+def _assert_admission_pair_matches_production() -> None:
+    prod = _PRODUCTION_ACTIVE_JOB_IDS_SUBQUERY
+    assert "'queued'" in prod and "'active'" in prod, (
+        "drift-guard: the production active-admission subquery no "
+        f"longer spells the ('queued', 'active') pair this pack's "
+        f"trigger DDL installs: {prod!r} — update the pack DDL "
+        f"together with the manager source"
+    )
+
+
+_assert_admission_pair_matches_production()
 
 
 def _ensure_trigger_suite(pg_engine) -> dict:

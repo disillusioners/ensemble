@@ -3,11 +3,12 @@
 
 > Implementation lane (phases 0-3) pack family for the pattern-(h)
 > zombie-ACTIVE JobItem close. All packs GREEN (council-fold cycle
-> re-verified); every pin mutation-verified — TRUE MATRIX SHAPE: 25
-> planted legs / 22 RED-proven / 3 superseded dead first plants
-> (honestly recorded, never counted as RED; digests per leg in
-> `phase3-artifacts/matrix.tsv`, the AUTHORITATIVE count — prose
-> re-derived from it; a lane-report note claiming 26/23/3
+> re-verified at the tidier fold); every pin mutation-verified —
+> TRUE MATRIX SHAPE (re-derived from the authoritative TSV at the
+> tidier fold): 28 planted legs / 25 RED-proven / 3 superseded dead
+> first plants (honestly recorded, never counted as RED; digests per
+> leg in `phase3-artifacts/matrix.tsv`, the AUTHORITATIVE count —
+> prose re-derived from it; a lane-report note claiming 26/23/3
 > double-counted the W2 leg and is superseded)
 > (`/tmp/mfz-phase0/mutation-matrix/matrix.tsv` — carried into the
 > lane evidence). Family-neighborhood re-run: ZERO net-new reds (the
@@ -23,9 +24,10 @@
 | `zombie_active_close_failclosed` (E) | `test_zombie_active_close_failclosed.py` | guard error/timeout ⇒ skip ZERO writes; bus-unavailable fail-safe | 2026-10-31 @ `88d4a265c` | ✅ PASS 3/0 (T3.5, shape-aware plant) |
 | `zombie_active_close_knobs` (F) | `test_zombie_active_close_knobs.py` | OFF complete no-op (query spy); defaults; FAIL-FAST ge=1; env prefix; api wiring + boot log + signature | 2026-10-31 @ `88d4a265c` | ✅ PASS 9/0 (T3.6) |
 | `zombie_active_close_tokens_watchers` (G) | `test_zombie_active_close_tokens_watchers.py` | canonical round-trip + reverse index; raw NOT terminal; W1 canonical notify x3 verdicts; PP1 correlation | 2026-10-31 @ `88d4a265c` | ✅ PASS 7/0 (T3.7, both planted forms RED) |
-| `zombie_active_close_static` (H) | `test_zombie_active_close_static.py` | SQL exact-string pins (S5 ORDER BY + tiebreak; MAX(completed_at) age key scoped to the SQL region); log tokens; S4 NULL-instance close | 2026-10-31 @ `88d4a265c` | ✅ PASS 8/0 (T3.8) |
+| `zombie_active_close_static` (H) | `test_zombie_active_close_static.py` | SQL exact-string pins (S5 ORDER BY + tiebreak; MAX(completed_at) age key scoped to the SQL region); log tokens; S4 NULL-instance close; SSOT cardinality pin (W2; tidier-fold re-run) | 2026-10-31 @ tidier fold | ✅ PASS 9/0 (T3.8 + W2) |
 | `zombie_active_close_amendments` (J) | `test_zombie_active_close_amendments.py` | A1 examined>0 colon-terminated gate + K=40 + reset/evict; A3 notify=<outcome>; A5 IN-list; A6 builder + anchor-fallback; A2 both dispositions | 2026-10-31 @ `5eba81487` | ✅ PASS 12/0 (T3.12) |
-| `zombie_active_close_pg` (I) | `env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_HOST -u POSTGRES_PORT <py> -m pytest tests/postgres/test_zombie_active_close_pg.py --override-ini="addopts=" -m postgres -q --timeout=120` (PG_TEST_* DSN; serial-only) | real-PG close under the VERBATIM manager trigger suite (assert-or-install); same-txn lock release; S5 order; 3-verdict e2e | 2026-10-31 @ `88d4a265c` | ✅ PASS 3/0 (T3.9) |
+| `zombie_active_close_amendments` (J, strengthened) | `test_zombie_active_close_amendments.py` | A1 examined>0 colon-terminated gate + BROADENED forbidden conjunct (a1v3 leg) + K-ladder; A3 TWO precise notify anchors (a3v2 leg); error_skips REQUIRED wording; A5 wrap-tolerant; A6; A2 dispositions | 2026-10-31 @ tidier fold | ✅ PASS 12/0 (T3.12; legs a1v3/a3v2 mutation-proven) |
+| `zombie_active_close_pg` (I) | `env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_HOST -u POSTGRES_PORT <py> -m pytest tests/postgres/test_zombie_active_close_pg.py --override-ini="addopts=" -m postgres -q --timeout=120` (PG_TEST_* DSN; serial-only) | real-PG close under the VERBATIM manager trigger suite (assert-or-install) + the ADOPTED advisory-4 admission-pair drift-guard (ADV4 leg); same-txn lock release; S5 order; 3-verdict e2e | 2026-10-31 @ tidier fold | ✅ PASS 3/0 (T3.9 + ADV4) |
 | `dbpool_wedge_capture_static` (R-10 run-only) | `tests/unit/tools/test_dbpool_wedge_capture_static.py` | UNCHANGED isolation proof of the census fix | 2026-10-31 @ `919928639` | ✅ PASS 6/0 zero edits (T3.10) |
 | `dbpool_wedge_capture_pg` (R-10 re-pointed) | `tests/postgres/test_dbpool_wedge_capture_pg.py` (postgres marker form) | census POPULATED (reltuples via ANALYZE; NULL-safe n_live_tup; total_bytes; summary keys); old-form plant RED | 2026-10-31 @ `6fe3414b1` | ✅ PASS 3/0 (T3.10, T3.9-R10 leg RED-proven) |
 

@@ -14,6 +14,7 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col, update as sqlmodel_update
 
 from .models import ACTIVE_ADMISSION_STATES, AdmissionState, JobItem, JobLock, JobQueue, QueueType
+from daemon.constants import NON_TERMINAL_TASK_STATUSES
 from ._idle_predicate_sql import background_busy_binds, background_busy_statement, defer_busy_binds, defer_busy_statement
 
 logger = logging.getLogger(__name__)
@@ -195,6 +196,48 @@ def _terminal_reason_variants(canonical_token: str) -> tuple[str, ...]:
     from daemon.services.work_status import terminal_reason_variants_for
 
     return terminal_reason_variants_for(canonical_token)
+
+
+def _non_terminal_task_status_binds(prefix: str) -> dict[str, str]:
+    """The SSOT non-terminal task-status IN-binds under ``prefix``.
+
+    Shared by the pattern-(h) candidate query's instance-inflight
+    NOT EXISTS probe and ``force_finalize_orphan``'s A2 in-txn
+    recheck (W2 fold; deduplicated tidier fold 2026-10-31). The
+    SSOT is ``daemon.constants.NON_TERMINAL_TASK_STATUSES``; the
+    binds are FIXED-ARITY, so a drifted SSOT must raise LOUD — a
+    silently truncated live-status set would be fail-OPEN. Bind
+    names carry the truthful spellings.
+    """
+    nt = sorted(NON_TERMINAL_TASK_STATUSES)
+    if len(nt) != 4 or set(nt) != {
+        "pending",
+        "running",
+        "paused",
+        "processing",
+    }:
+        raise RuntimeError(
+            "NON_TERMINAL_TASK_STATUSES cardinality drifted "
+            f"({len(nt)} statuses: {nt}) — the fixed arity-4 "
+            "IN-binds would silently truncate the live-task set "
+            "(fail-open); extend the candidate SQL's NOT EXISTS "
+            "binds, the A2 recheck binds, and the cardinality pin "
+            "TOGETHER"
+        )
+    return {
+        f"{prefix}_pending": "pending",
+        f"{prefix}_running": "running",
+        f"{prefix}_paused": "paused",
+        f"{prefix}_processing": "processing",
+    }
+
+
+#: The shared IN-list fragment for the two probe sites (format with
+#: the site's bind prefix — ``nt`` for the candidate query, ``s``
+#: for the A2 recheck).
+_NON_TERMINAL_IN_SQL_TEMPLATE = (
+    "(:{p}_pending, :{p}_running, :{p}_paused, :{p}_processing)"
+)
 
 
 class ZombieActiveCandidate(NamedTuple):
@@ -4344,41 +4387,21 @@ SET admission_state = 'queued',
                 # (``cleanup_non_terminal_jobs`` orphan reaper,
                 # ``job_queue_service.py:2180``) issue byte-identical
                 # SQL with the flag absent.
-                from daemon.constants import NON_TERMINAL_TASK_STATUSES
-
-                # W2 fold (code-review council, 2026-10-31): same
-                # cardinality contract as the candidate query — a
-                # drifted SSOT must raise LOUD, never silently
-                # truncate the recheck's live-status set (fail-open).
-                _nt = sorted(NON_TERMINAL_TASK_STATUSES)
-                if len(_nt) != 4 or set(_nt) != {
-                    "pending",
-                    "running",
-                    "paused",
-                    "processing",
-                }:
-                    raise RuntimeError(
-                        "force_finalize_orphan recheck: "
-                        "NON_TERMINAL_TASK_STATUSES cardinality "
-                        f"drifted ({len(_nt)} statuses: {_nt}) — "
-                        "the fixed arity-4 IN-binds would silently "
-                        "truncate; extend together with the "
-                        "candidate SQL binds + the cardinality pin"
-                    )
+                # W2 fold (code-review council, 2026-10-31;
+                # deduplicated tidier fold 2026-10-31): the shared
+                # SSOT bind helper raises LOUD on cardinality drift
+                # — never a silently truncated live-status set.
                 inflight = conn.execute(
                     text(
                         "SELECT 1 FROM task "
                         "WHERE instance_id = :iid "
-                        "  AND status IN (:s_pending, :s_running, "
-                        "                   :s_paused, :s_processing) "
+                        "  AND status IN "
+                        f"{_NON_TERMINAL_IN_SQL_TEMPLATE.format(p='s')} "
                         "LIMIT 1"
                     ),
                     {
                         "iid": instance_id_for_release,
-                        "s_pending": "pending",
-                        "s_running": "running",
-                        "s_paused": "paused",
-                        "s_processing": "processing",
+                        **_non_terminal_task_status_binds("s"),
                     },
                 ).first()
                 if inflight is not None:
@@ -4530,34 +4553,11 @@ SET admission_state = 'queued',
         )
         # Explicit bind params (NOT interpolated IN-lists) — the
         # dual-driver pattern from ``has_instance_busy``: identical
-        # on PostgreSQL (psycopg) and SQLite.
-        #
-        # W2 fold (code-review council, 2026-10-31): the non-terminal
-        # set is the SSOT (``daemon/constants.py``) but the SQL's
-        # fixed arity-4 IN-binds are a CARDINALITY CONTRACT — if the
-        # SSOT ever grows, a fixed bind list would silently truncate
-        # the set (latent fail-OPEN: a new live status would stop
-        # holding). The guard makes the drift LOUD; the bind names
-        # carry the truthful spellings (the pre-fold sorted-index
-        # binds were mislabeled); the cardinality pin
-        # (test_zombie_active_close_static) locks the contract.
-        nt = sorted(NON_TERMINAL_TASK_STATUSES)
-        if len(nt) != 4 or set(nt) != {
-            "pending",
-            "running",
-            "paused",
-            "processing",
-        }:
-            raise RuntimeError(
-                "find_zombie_active_candidates: "
-                "NON_TERMINAL_TASK_STATUSES cardinality drifted "
-                f"({len(nt)} statuses: {nt}) — the fixed arity-4 "
-                "IN-binds would silently truncate the live-task "
-                "set (fail-open); extend the candidate SQL's NOT "
-                "EXISTS binds, the A2 recheck binds in "
-                "force_finalize_orphan, and the cardinality pin "
-                "TOGETHER"
-            )
+        # on PostgreSQL (psycopg) and SQLite. The non-terminal binds
+        # come from the shared SSOT helper (W2 fold, deduplicated
+        # tidier fold 2026-10-31 — cardinality drift raises LOUD in
+        # ONE place; the cardinality pin
+        # (test_zombie_active_close_static) locks the contract).
         with self.engine.connect() as conn:
             rows = conn.execute(
                 stmt,
@@ -4566,10 +4566,7 @@ SET admission_state = 'queued',
                     "terminal_failed": TaskStatus.FAILED.value,
                     "terminal_cancelled": TaskStatus.CANCELLED.value,
                     "cutoff": cutoff,
-                    "nt_pending": "pending",
-                    "nt_running": "running",
-                    "nt_paused": "paused",
-                    "nt_processing": "processing",
+                    **_non_terminal_task_status_binds("nt"),
                     "batch_cap": batch_cap,
                 },
             ).all()

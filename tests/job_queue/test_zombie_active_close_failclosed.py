@@ -11,8 +11,6 @@ error/timeout as proceed) ⇒ the error-polarity pin goes RED.
 
 from __future__ import annotations
 
-import asyncio
-import uuid
 from unittest.mock import patch
 
 import pytest

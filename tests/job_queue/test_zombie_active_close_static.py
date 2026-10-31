@@ -17,7 +17,6 @@ the NULL-instance skip ⇒ pin RED.
 
 from __future__ import annotations
 
-import asyncio
 import re
 from pathlib import Path
 
@@ -33,7 +32,6 @@ import daemon.repositories.task.models  # noqa: F401
 from daemon.services.dependency_bus import set_dependency_bus
 
 from tests.job_queue.zombie_close_helpers import (
-    insert_zombie_fixture,
     make_bus_mock,
     make_recovery_service,
     read_job_state,

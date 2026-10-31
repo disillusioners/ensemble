@@ -11,6 +11,39 @@ cleanup at daemon startup. ``reconcile_drift_states`` is the periodic
 counterpart (60s default, bypasses ``_is_idle``) that catches drift
 *during* active work — exactly the case ``MaintenanceService._loop``
 skips because it gates on ``_is_idle``.
+
+FILE SIZE RATIONALE (tidier fold 2026-10-31): this module is 5,484
+lines at wi-78967dba HEAD (4,946 at the lane base + 538 this lane).
+It is deliberately ONE service file: every drift leg is a pattern of
+the SAME reconciler charter (the admission-state heal object), and
+the pattern family shares the candidate-loop infrastructure, the E1
+gate wiring, the notify composition, and the knob-passing seams.
+The pattern-(h) lane kept its leg strictly additive per the
+architect's process note (land early, keep the blast radius bounded
+by knobs). Decomposition is a standing base-debt item (manager.py
+13.7k-line decomposition precedent) — NOT to be attempted feature-
+by-feature inside a lane.
+
+Pattern-family map of ``reconcile_drift_states`` legs (letter order
+= the in-method execution order):
+
+* **P1 / (a)** — ``active`` JobItem + PENDING Task with NULL
+  heartbeat → deadlock; cancel+finalize when the instance is dead.
+* **F10 / (b)** — ``done`` JobItem + RUNNING Task → force-complete
+  the zombie Task.
+* **(c)** — ``active`` JobItem + stuck instance → log-only.
+* **(d)** — PENDING Task on terminal JobItem → orphan cleanup.
+* **(e)** — PENDING process_report + dead parent → dead-letter.
+* **f1** — active JobItem + NO Task rows + alive/stale instance →
+  DEAD finalize (``orphan_active_no_task_dead``).
+* **f2** — active JobItem + COMPLETED Task → DONE finalize
+  (``orphan_active_completed_task_done``).
+* **(g)** — defer self-witness watchdog (task-state writes only;
+  excluded from the admission reconciled budget).
+* **(h)** — zombie-ACTIVE close (wi-78967dba): task-kind active
+  JobItem + ALL backing Tasks terminal + non-terminal driving
+  instance → DONE finalize with ``zombie_active_<verdict>`` tokens.
+  See :meth:`_pattern_h_zombie_active_close`.
 """
 
 from __future__ import annotations
@@ -117,6 +150,20 @@ F1_TREE_ACTIVITY_MAX_AGE_DEFAULT_SECONDS: int = 900
 # reset-on-close, evict-when-gone; restart-reset acceptable
 # (disclosed — no persistence by design, D-5).
 ZOMBIE_CLOSE_STREAK_WARN_THRESHOLD: int = 40
+
+# A1 observability: the (h) counter block's canonical key set —
+# spelled ONCE (tidier fold 2026-10-31; the 7-tuple was duplicated
+# at the leg's return-build and the drift-block consumption site).
+# Order matters for display only; both sites iterate this constant.
+ZOMBIE_CLOSE_COUNTER_KEYS: tuple[str, ...] = (
+    "examined",
+    "age_qualified",
+    "mission_live_holds",
+    "error_skips",
+    "finalized",
+    "race_lost_noop",
+    "zero_watcher_warns",
+)
 
 # Pattern (f1) kill-switch (f1-misfire batch). Env-only, default ON,
 # restart-to-flip semantics per the ENSEMBLE_WC_WAKE_ENQUEUE
@@ -1997,15 +2044,7 @@ class JobRecoveryService:
                     details.extend(h_extra.get("details", []))
                     zombie_close_stats = {
                         k: h_extra.get(k, 0)
-                        for k in (
-                            "examined",
-                            "age_qualified",
-                            "mission_live_holds",
-                            "error_skips",
-                            "finalized",
-                            "race_lost_noop",
-                            "zero_watcher_warns",
-                        )
+                        for k in ZOMBIE_CLOSE_COUNTER_KEYS
                     }
             except Exception as e:
                 logger.error(
@@ -5073,15 +5112,9 @@ class JobRecoveryService:
         ``details`` (skip tokens: ``zombie_close_skipped_mission_live
         / _age_unmet / _bus_pending / _guard_error``).
         """
-        counters: dict[str, int] = {
-            "examined": 0,
-            "age_qualified": 0,
-            "mission_live_holds": 0,
-            "error_skips": 0,
-            "finalized": 0,
-            "race_lost_noop": 0,
-            "zero_watcher_warns": 0,
-        }
+        counters: dict[str, int] = dict.fromkeys(
+            ZOMBIE_CLOSE_COUNTER_KEYS, 0
+        )
         details: list[dict[str, Any]] = []
 
         # Wiring guard — the leg needs all three repositories; a
@@ -5134,17 +5167,15 @@ class JobRecoveryService:
                 < age_bound_seconds
             ):
                 self._zombie_close_streak_bump(job_id, "age")
-                details.append({
-                    "pattern": "zombie_close_skipped_age_unmet",
-                    "job_id": job_id,
-                    "task_id": task_id,
-                    "instance_id": instance_id,
-                    "reason": (
+                details.append(
+                    self._h_detail(
+                        "zombie_close_skipped_age_unmet",
+                        cand,
                         "Pattern (h): terminal stamp unparseable or "
                         "younger than the age bound — SKIP "
-                        "(fail-closed); next cycle retries"
-                    ),
-                })
+                        "(fail-closed); next cycle retries",
+                    )
+                )
                 continue
             counters["age_qualified"] += 1
 
@@ -5155,18 +5186,16 @@ class JobRecoveryService:
             )
             if bus_unavailable or bus_count > 0:
                 self._zombie_close_streak_bump(job_id, "bus")
-                details.append({
-                    "pattern": "zombie_close_skipped_bus_pending",
-                    "job_id": job_id,
-                    "task_id": task_id,
-                    "instance_id": instance_id,
-                    "reason": (
+                details.append(
+                    self._h_detail(
+                        "zombie_close_skipped_bus_pending",
+                        cand,
                         f"Pattern (h): dependency bus reports "
                         f"{bus_count} pending watcher(s)"
                         f"{' (bus unavailable — fail-safe)' if bus_unavailable else ''}"
-                        " — JobItem left ACTIVE; next cycle retries"
-                    ),
-                })
+                        " — JobItem left ACTIVE; next cycle retries",
+                    )
+                )
                 continue
 
             # Leg 4 — discounted E1 (the no-self-hold discount).
@@ -5180,36 +5209,30 @@ class JobRecoveryService:
                 if verdict.live:
                     counters["mission_live_holds"] += 1
                     self._zombie_close_streak_bump(job_id, "hold")
-                    details.append({
-                        "pattern": (
-                            "zombie_close_skipped_mission_live"
-                        ),
-                        "job_id": job_id,
-                        "task_id": task_id,
-                        "instance_id": instance_id,
-                        "reason": (
-                            f"discounted mission-live guard holds "
-                            f"JobItem (another tree member is live): "
-                            f"{verdict.reason}"
-                        ),
-                    })
+                    details.append(
+                        self._h_detail(
+                            "zombie_close_skipped_mission_live",
+                            cand,
+                            f"Pattern (h): discounted mission-live "
+                            f"guard holds JobItem ACTIVE (another "
+                            f"tree member is live) — {verdict.reason}"
+                            f"; next cycle retries",
+                        )
+                    )
                     continue
                 if verdict.error or verdict.timed_out:
                     counters["error_skips"] += 1
                     self._zombie_close_streak_bump(job_id, "guard")
-                    details.append({
-                        "pattern": "zombie_close_skipped_guard_error",
-                        "job_id": job_id,
-                        "task_id": task_id,
-                        "instance_id": instance_id,
-                        "reason": (
+                    details.append(
+                        self._h_detail(
+                            "zombie_close_skipped_guard_error",
+                            cand,
                             f"Pattern (h): discounted mission-live "
-                            f"guard unprovable (error="
-                            f"{verdict.error}, timed_out="
-                            f"{verdict.timed_out}) — SKIP "
-                            f"(fail-closed); next cycle retries"
-                        ),
-                    })
+                            f"guard unprovable (error={verdict.error}, "
+                            f"timed_out={verdict.timed_out}) — SKIP "
+                            f"(fail-closed); next cycle retries",
+                        )
+                    )
                     continue
 
             # Leg 5 — the census-registered write seam, with the A2
@@ -5327,21 +5350,19 @@ class JobRecoveryService:
                 token,
                 notify_outcome,
             )
-            details.append({
-                "pattern": "zombie_active_closed",
-                "job_id": job_id,
-                "task_id": task_id,
-                "instance_id": instance_id,
-                "reason": (
+            details.append(
+                self._h_detail(
+                    "zombie_active_closed",
+                    cand,
                     f"Pattern (h): zombie-ACTIVE JobItem (backing "
-                    f"Task {task_id} terminal="
+                    f"Task {cand.task_id} terminal="
                     f"{cand.task_status}, age "
                     f"{age_seconds:.0f}s) finalized to DONE with "
                     f"terminal_reason={token}; job-scoped lock "
                     f"released in the same transaction; "
-                    f"notify={notify_outcome}"
-                ),
-            })
+                    f"notify={notify_outcome}",
+                )
+            )
 
         # A1/CF-3 streak maintenance: escalate on repeated skips/holds
         # for the SAME job (inside _zombie_close_streak_bump); evict
@@ -5351,6 +5372,24 @@ class JobRecoveryService:
         await self._zombie_close_streak_maintain(examined_job_ids)
 
         return {**counters, "details": details}
+
+    @staticmethod
+    def _h_detail(
+        pattern: str,
+        cand: "Any",
+        reason: str,
+    ) -> dict[str, Any]:
+        """Tidier fold 2026-10-31: the ONE details-dict shape for the
+        (h) leg's per-candidate records (4 skips + the close) — the
+        pattern/job/task/instance envelope is uniform; only the
+        pattern token and the reason vary."""
+        return {
+            "pattern": pattern,
+            "job_id": cand.job_id,
+            "task_id": cand.task_id,
+            "instance_id": cand.instance_id,
+            "reason": reason,
+        }
 
     def _zombie_close_streak_bump(self, job_id: str, reason: str) -> None:
         """A1/CF-3: record one consecutive skip/hold for ``job_id``;

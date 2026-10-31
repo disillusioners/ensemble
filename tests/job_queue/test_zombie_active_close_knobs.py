@@ -15,7 +15,6 @@ remove the ``ge=1`` constraint ⇒ the FAIL-FAST pin goes RED.
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import re
 from pathlib import Path

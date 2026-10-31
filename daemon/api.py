@@ -3996,30 +3996,36 @@ async def _periodic_drift_reconcile_loop(
             # gate would hide it).
             zombie_stats = stats.get("zombie_close") or {}
             if zombie_stats.get("examined", 0) > 0:
+                # Tidier fold 2026-10-31: operator-facing counter
+                # names print the CANONICAL spellings
+                # (mission_live_holds / race_lost_noop /
+                # zero_watcher_warns — the stats-dict keys), not
+                # abbreviations an operator cannot grep back.
                 logger.info(
                     "Drift reconciler: Pattern (h) zombie-active close: "
                     "examined=%(examined)s "
                     "age_qualified=%(age_qualified)s "
-                    "holds=%(holds)s error_skips=%(error_skips)s "
+                    "mission_live_holds=%(mission_live_holds)s "
+                    "error_skips=%(error_skips)s "
                     "finalized=%(finalized)s "
-                    "race_lost_noop=%(race_lost)s "
-                    "zero_watcher_warns=%(zww)s",
+                    "race_lost_noop=%(race_lost_noop)s "
+                    "zero_watcher_warns=%(zero_watcher_warns)s",
                     {
                         "examined": zombie_stats.get("examined", 0),
                         "age_qualified": zombie_stats.get(
                             "age_qualified", 0
                         ),
-                        "holds": zombie_stats.get(
+                        "mission_live_holds": zombie_stats.get(
                             "mission_live_holds", 0
                         ),
                         "error_skips": zombie_stats.get(
                             "error_skips", 0
                         ),
                         "finalized": zombie_stats.get("finalized", 0),
-                        "race_lost": zombie_stats.get(
+                        "race_lost_noop": zombie_stats.get(
                             "race_lost_noop", 0
                         ),
-                        "zww": zombie_stats.get(
+                        "zero_watcher_warns": zombie_stats.get(
                             "zero_watcher_warns", 0
                         ),
                     },

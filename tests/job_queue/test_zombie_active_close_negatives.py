@@ -13,7 +13,6 @@ pending-sibling shape becomes a candidate ⇒ pins go RED.
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 
 import pytest

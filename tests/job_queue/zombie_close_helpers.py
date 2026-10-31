@@ -9,10 +9,8 @@ family harness stays uniform. Imported by the
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from sqlalchemy import text
@@ -21,7 +19,7 @@ from daemon.repositories.instance.repository import (
     SQLModelInstanceRepository,
 )
 from daemon.repositories.job_queue.lock_repository import LockRepository
-from daemon.repositories.job_queue.models import AdmissionState, JobItem
+from daemon.repositories.job_queue.models import AdmissionState
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.task.repository import TaskRepository
 from daemon.services.job_recovery_service import JobRecoveryService

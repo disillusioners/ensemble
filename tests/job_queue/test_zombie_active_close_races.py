@@ -19,7 +19,6 @@ import uuid
 
 import pytest
 from sqlalchemy import create_engine, text
-from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
 import daemon.repositories.instance.models  # noqa: F401
@@ -32,7 +31,6 @@ from daemon.services.dependency_bus import set_dependency_bus
 from tests.job_queue.zombie_close_helpers import (
     insert_zombie_fixture,
     make_bus_mock,
-    make_jqs_mock,
     make_recovery_service,
     read_job_state,
 )
@@ -102,9 +100,12 @@ class TestConcurrentActors:
         assert st["lock_rows"] == 0, st
 
     async def test_losers_counted_as_race_lost_noop(self, rc_engine, rc_bus):
-        """A pre-terminalized row (the operator raced us): the (h)
-        leg's guarded UPDATE loses ⇒ race_lost_noop counter, no
-        writes, no crash."""
+        """Seam-level contract (tidier fold 2026-10-31, renamed to
+        what it pins): a SECOND ``force_finalize_orphan`` caller on
+        an already-terminal row no-ops (returns None) with no
+        lock-side action. The drift-level COUNTER assertion lives in
+        ``test_h_leg_vs_preemptive_finalize_race_lost_noop`` (the
+        full reconcile_drift_states drive)."""
         ref = insert_zombie_fixture(
             rc_engine, verdict="completed", age_hours=3.0
         )
