@@ -339,16 +339,18 @@ class TestNsTrapCLETargeting:
         return has_raise and has_warn
 
     def test_cle_guard_has_warn_and_raise(self):
-        node = self._if_node_at_lineno(9321)
+        # Line pins track daemon/graph.py drift (log-noise-hygiene edits
+        # shifted the module top by ~91 lines): 9321 -> 9412.
+        node = self._if_node_at_lineno(9412)
         assert self._has_warn_and_raise(node), (
-            "CLE empty-snapshot guard (line 9321) must contain BOTH a "
+            "CLE empty-snapshot guard (line 9412) must contain BOTH a "
             "logger.warning call AND a Raise in its body"
         )
 
     def test_empty_replacement_branch_has_warn_and_raise(self):
-        node = self._if_node_at_lineno(9483)
+        node = self._if_node_at_lineno(9574)
         assert self._has_warn_and_raise(node), (
-            "CLE empty-replacement branch (line 9483) must contain BOTH a "
+            "CLE empty-replacement branch (line 9574) must contain BOTH a "
             "logger.warning call AND a Raise in its body"
         )
 
