@@ -69,6 +69,26 @@ rationale, technical-analysis §"Technical Debt" item 1):
 declared-waiting shape lives on the durable report / watcher
 rows, not on the instance status column.
 
+NARROW OVERRIDE (2026-10-31, user-mandated — 9f0ed4f5 incident
+family, terminal-row status strand): the decline above is
+overridden at TWO completion-writer sites ONLY — the
+``child_reports`` pre-stamp hold branch and the
+``child_reports`` idempotency guard: when the row reads
+terminal (COMPLETED / ERROR / FAILED — TERMINATED is EXCLUDED,
+M-2: terminates stay final; the claim gate excludes
+PAUSED/TERMINATED for all task types, so a re-arm would be a
+new resurrection path that touchpoint 1 never triggers) AND live
+descendants exist, the row is re-armed to WAITING_CHILDREN.
+Scope of the override: it re-introduces the status column
+purely as the ROW's visible liveness surface for live trees
+("the tree below me is working") — it is NEVER an input to
+THIS predicate, which stays status-blind, pure, and
+content-blind (D2.18). The detect/notify tripwire (this
+module) keeps firing unchanged — it remains the regression
+signal that the override's conditions are being hit.
+Rationale + write ledger:
+``.agents/shared/planning/terminal-row-status-strand/design-decision.md``.
+
 Structured return shape (OQ-6 disposition, decisions.md
 bottom): :class:`DeclaredWaitingViolationReport` carries the
 per-child detail for stage iii's enforcement notice. The notice
