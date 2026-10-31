@@ -2275,7 +2275,8 @@ class ServicesConfig(BaseSettings):
     # forever: the f-arms' E1 gate self-holds on the zombie's own
     # non-terminal instance every cycle, its job_locks row is
     # immortal (excluded from BOTH lock sweeps by the
-    # _ACTIVE_JOB_IDS_SUBQUERY NOT-IN guard), and with
+    # _ACTIVE_JOB_IDS_SUBQUERY NOT-IN guard — the comment+constant
+    # unit at lock_repository.py:31-35), and with
     # concurrency_limit=1 queues a single zombie blocks the whole
     # queue indefinitely. The (h) leg in the drift reconciler
     # terminalizes exactly this shape through the census-registered

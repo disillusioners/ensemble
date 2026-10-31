@@ -5054,8 +5054,16 @@ class JobRecoveryService:
            ``notify=<outcome>`` (A3) so a post-commit notify loss is
            visible, and "terminal job with surviving watcher rows"
            routes into the ``watch_reconcile_sweep`` follow-up
-           semantics (its zombie-GC leg retires rows whose job no
-           longer resolves and mission-liveness is terminal).
+           semantics: its zombie-GC leg (delegated at
+           ``job_queue_service.py:946`` — ``remove_all_watches_for_job``
+           under the predicate "job no longer resolves AND
+           mission-liveness is terminal") retires unresolvable rows,
+           while resolved-but-terminal rows are covered by the
+           held-watcher reconcile, the notify path's own terminal
+           cleanup (``job_queue_service.py:508`` —
+           ``remove_all_watches_for_job`` on
+           ``status in ALL_TERMINAL_STATES``), and the boot-time
+           ``reconcile_terminal_watches`` sweep (``api.py:2455``).
 
         Returns the counter block (A1 observability — folded into
         the drift stats the loop logs whenever ``examined > 0``,
