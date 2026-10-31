@@ -1,60 +1,26 @@
 leg	plant_file	planted_sha256	red_proof	green_proof
-T3.1a-not-exists-drop	daemon/repositories/job_queue/repository.py	cb12a22a7c5b0421	FAIL(2)
-FAILED tests/job_queue/test_zombie_active_close_negatives.py::TestHealthyShapesNeverClose::test_pending_retry_child_blocks_candidacy
-FAILED tests/job_queue/test_zombie_active_close_negatives.py::TestHealthyShapesNeverClose::test_paused_task_blocks_candidacy	PASS
-T3.1b-discount-conjunct-removed	daemon/services/mission_live_guard.py	617eab607cf2dd04	FAIL(7)
-FAILED tests/job_queue/test_zombie_active_close_e1_discount.py::TestDiscountScoping::test_member_job_shape_discounts_member_root_still_counts
-FAILED tests/job_queue/test_zombie_active_close_e1_discount.py::TestDiscountScoping::test_discount_neutralizes_root_self_count_starvation_vector
-FAILED tests/job_queue/test_zombie_active_close_core.py::TestZombieActiveCoreClose::test_closes_completed_verdict_with_token_and_lock_release
-FAILED tests/job_queue/test_zombie_active_close_core.py::TestZombieActiveCoreClose::test_closes_failed_verdict_with_failed_token	PASS
+T3.1a-not-exists-drop	daemon/repositories/job_queue/repository.py	cb12a22a7c5b0421	FAIL(2) ; FAILED tests/job_queue/test_zombie_active_close_negatives.py::TestHealthyShapesNeverClose::test_pending_retry_child_blocks_candidacy ; FAILED tests/job_queue/test_zombie_active_close_negatives.py::TestHealthyShapesNeverClose::test_paused_task_blocks_candidacy	
+T3.1b-discount-conjunct-removed	daemon/services/mission_live_guard.py	617eab607cf2dd04	FAIL(7) ; FAILED tests/job_queue/test_zombie_active_close_e1_discount.py::TestDiscountScoping::test_member_job_shape_discounts_member_root_still_counts ; FAILED tests/job_queue/test_zombie_active_close_e1_discount.py::TestDiscountScoping::test_discount_neutralizes_root_self_count_starvation_vector	
 T3.1c-age-boundary-exclusive	daemon/repositories/job_queue/repository.py	425f7b7fc1802136	PASS	PASS
-T3.4-rowcount-guard-removed	daemon/repositories/job_queue/repository.py	647916ec40aeb52a	FAIL(3)
-FAILED tests/job_queue/test_zombie_active_close_races.py::TestConcurrentActors::test_two_seam_callers_one_winner
-FAILED tests/job_queue/test_zombie_active_close_races.py::TestConcurrentActors::test_losers_counted_as_race_lost_noop
-FAILED tests/job_queue/test_zombie_active_close_races.py::TestConcurrentActors::test_h_leg_vs_preemptive_finalize_race_lost_noop	PASS
-T3.5-fail-open-polarity	daemon/services/job_recovery_service.py	617b54a10f14c6e4	FAIL(2)
-FAILED tests/job_queue/test_zombie_active_close_failclosed.py::TestFailClosedPolarity::test_guard_error_skips_with_zero_writes
-FAILED tests/job_queue/test_zombie_active_close_failclosed.py::TestFailClosedPolarity::test_guard_timeout_skips_with_zero_writes	PASS
-T3.6a-killswitch-bypassed	daemon/services/job_recovery_service.py	b4d27f5932f27bb4	FAIL(1)
-FAILED tests/job_queue/test_zombie_active_close_knobs.py::TestKillSwitchCompleteNoop::test_off_issues_no_candidate_query	PASS
-T3.6b-ge1-constraint-removed	daemon/config.py	517e267990d852e0	FAIL(1)
-FAILED tests/job_queue/test_zombie_active_close_knobs.py::TestConfigFields::test_out_of_range_fails_fast	PASS
-T3.7-w1-raw-token-notify	daemon/services/job_recovery_service.py	9d9ef1964ad8c1d3	FAIL(3)
-FAILED tests/job_queue/test_zombie_active_close_tokens_watchers.py::TestCanonicalNotifyStatus::test_failed_variant_notifies_canonical_failed
-FAILED tests/job_queue/test_zombie_active_close_tokens_watchers.py::TestCanonicalNotifyStatus::test_completed_variant_notifies_canonical_completed
-FAILED tests/job_queue/test_zombie_active_close_tokens_watchers.py::TestCanonicalNotifyStatus::test_cancelled_variant_notifies_canonical_cancelled	PASS
-T3.7-w1-f2-literal-notify	daemon/services/job_recovery_service.py	1f61ecc22be21347	FAIL(2)
-FAILED tests/job_queue/test_zombie_active_close_tokens_watchers.py::TestCanonicalNotifyStatus::test_failed_variant_notifies_canonical_failed
-FAILED tests/job_queue/test_zombie_active_close_tokens_watchers.py::TestCanonicalNotifyStatus::test_cancelled_variant_notifies_canonical_cancelled	PASS
-T3.8a-orderby-stripped	daemon/repositories/job_queue/repository.py	50e4c9fdcf692fac	FAIL(1)
-FAILED tests/job_queue/test_zombie_active_close_static.py::TestCandidateSqlShape::test_deterministic_order_by_with_tiebreak	PASS
-T3.8b-age-key-last-activity	daemon/repositories/job_queue/repository.py	4eff5d1f3e37b96f	FAIL(2)
-FAILED tests/job_queue/test_zombie_active_close_static.py::TestCandidateSqlShape::test_age_key_is_max_completed_at_not_activity
-FAILED tests/job_queue/test_zombie_active_close_static.py::TestS4NullInstanceClose::test_null_instance_closes_without_lock_release	PASS
-T3.8c-s4-null-instance-held	daemon/services/job_recovery_service.py	3f1bf03f5c2556e5	FAIL(1)
-FAILED tests/job_queue/test_zombie_active_close_static.py::TestS4NullInstanceClose::test_null_instance_closes_without_lock_release	PASS
-T3.9-r10-c-nlive-tup-restored	daemon/services/wedge_capture/db_capture.py	9067946fea0dc526	FAIL(1)
-FAILED tests/postgres/test_dbpool_wedge_capture_pg.py::TestF5bWedgeCaptureReadPath::test_subsequent_read_not_the_f5_cascade_signature	PASS
+T3.4-rowcount-guard-removed	daemon/repositories/job_queue/repository.py	647916ec40aeb52a	FAIL(3) ; FAILED tests/job_queue/test_zombie_active_close_races.py::TestConcurrentActors::test_two_seam_callers_one_winner ; FAILED tests/job_queue/test_zombie_active_close_races.py::TestConcurrentActors::test_losers_counted_as_race_lost_noop	
+T3.5-fail-open-polarity	daemon/services/job_recovery_service.py	617b54a10f14c6e4	FAIL(2) ; FAILED tests/job_queue/test_zombie_active_close_failclosed.py::TestFailClosedPolarity::test_guard_error_skips_with_zero_writes ; FAILED tests/job_queue/test_zombie_active_close_failclosed.py::TestFailClosedPolarity::test_guard_timeout_skips_with_zero_writes	
+T3.6a-killswitch-bypassed	daemon/services/job_recovery_service.py	b4d27f5932f27bb4	FAIL(1) ; FAILED tests/job_queue/test_zombie_active_close_knobs.py::TestKillSwitchCompleteNoop::test_off_issues_no_candidate_query	
+T3.6b-ge1-constraint-removed	daemon/config.py	517e267990d852e0	FAIL(1) ; FAILED tests/job_queue/test_zombie_active_close_knobs.py::TestConfigFields::test_out_of_range_fails_fast	
+T3.7-w1-raw-token-notify	daemon/services/job_recovery_service.py	9d9ef1964ad8c1d3	FAIL(3) ; FAILED tests/job_queue/test_zombie_active_close_tokens_watchers.py::TestCanonicalNotifyStatus::test_failed_variant_notifies_canonical_failed ; FAILED tests/job_queue/test_zombie_active_close_tokens_watchers.py::TestCanonicalNotifyStatus::test_completed_variant_notifies_canonical_completed	
+T3.7-w1-f2-literal-notify	daemon/services/job_recovery_service.py	1f61ecc22be21347	FAIL(2) ; FAILED tests/job_queue/test_zombie_active_close_tokens_watchers.py::TestCanonicalNotifyStatus::test_failed_variant_notifies_canonical_failed ; FAILED tests/job_queue/test_zombie_active_close_tokens_watchers.py::TestCanonicalNotifyStatus::test_cancelled_variant_notifies_canonical_cancelled	
+T3.8a-orderby-stripped	daemon/repositories/job_queue/repository.py	50e4c9fdcf692fac	FAIL(1) ; FAILED tests/job_queue/test_zombie_active_close_static.py::TestCandidateSqlShape::test_deterministic_order_by_with_tiebreak	
+T3.8b-age-key-last-activity	daemon/repositories/job_queue/repository.py	4eff5d1f3e37b96f	FAIL(2) ; FAILED tests/job_queue/test_zombie_active_close_static.py::TestCandidateSqlShape::test_age_key_is_max_completed_at_not_activity ; FAILED tests/job_queue/test_zombie_active_close_static.py::TestS4NullInstanceClose::test_null_instance_closes_without_lock_release	
+T3.8c-s4-null-instance-held	daemon/services/job_recovery_service.py	3f1bf03f5c2556e5	FAIL(1) ; FAILED tests/job_queue/test_zombie_active_close_static.py::TestS4NullInstanceClose::test_null_instance_closes_without_lock_release	
+T3.9-r10-c-nlive-tup-restored	daemon/services/wedge_capture/db_capture.py	9067946fea0dc526	FAIL(1) ; FAILED tests/postgres/test_dbpool_wedge_capture_pg.py::TestF5bWedgeCaptureReadPath::test_subsequent_read_not_the_f5_cascade_signature	
 T3.12-a1-log-gated-reconciled	daemon/api.py	ce4ccf3049fcdd8e	PASS	PASS
-T3.12-a1k-warn-every-bump	daemon/services/job_recovery_service.py	1f5f056935b81cd1	FAIL(1)
-FAILED tests/job_queue/test_zombie_active_close_amendments.py::TestA1CounterBlockVisibility::test_escalating_warn_at_threshold_k	PASS
-T3.12-a3-notify-outcome-dropped	daemon/services/job_recovery_service.py	1169c4a17a2082cc	FAIL(1)
-FAILED tests/job_queue/test_zombie_active_close_tokens_watchers.py::TestZeroWatcherCorrelation::test_zero_watcher_close_counts_and_references_pp1	PASS
-T3.12-a5-prefix-like-attribution	daemon/services/work_status.py	de8bb1a578101772	FAIL(1)
-FAILED tests/job_queue/test_zombie_active_close_amendments.py::TestA5AttributionShape::test_attribution_is_explicit_in_list_never_prefix_like	PASS
-T3.12-a6b-discount-dropped-at-call	daemon/services/job_recovery_service.py	14ea9e7ee727dbd8	FAIL(7)
-FAILED tests/job_queue/test_zombie_active_close_amendments.py::TestA1CounterBlockVisibility::test_streak_resets_on_close_and_evicts_when_gone
-FAILED tests/job_queue/test_zombie_active_close_amendments.py::TestA6DefensiveE1Pins::test_childless_root_fallback_not_on_close_path
-FAILED tests/job_queue/test_zombie_active_close_core.py::TestZombieActiveCoreClose::test_closes_completed_verdict_with_token_and_lock_release
-FAILED tests/job_queue/test_zombie_active_close_core.py::TestZombieActiveCoreClose::test_closes_failed_verdict_with_failed_token	PASS
-T3.12-a2i-recheck-ignored	daemon/repositories/job_queue/repository.py	9650ab5a82538c57	FAIL(1)
-FAILED tests/job_queue/test_zombie_active_close_amendments.py::TestA2Disposition::test_inflight_recheck_true_aborts_on_retry_child	PASS
-T3.12-a2ii-default-flipped-true	daemon/repositories/job_queue/repository.py	892f52256d6e3691	FAIL(1)
-FAILED tests/job_queue/test_zombie_active_close_amendments.py::TestA2Disposition::test_default_false_is_byte_identical_no_recheck	PASS
-T3.5b-bus-unavailable-treated-zero	daemon/services/job_recovery_service.py	1bc960396f289642	FAIL(1)
-FAILED tests/job_queue/test_zombie_active_close_failclosed.py::TestFailClosedPolarity::test_bus_unavailable_fails_safe_skip	PASS
+T3.12-a1k-warn-every-bump	daemon/services/job_recovery_service.py	1f5f056935b81cd1	FAIL(1) ; FAILED tests/job_queue/test_zombie_active_close_amendments.py::TestA1CounterBlockVisibility::test_escalating_warn_at_threshold_k	
+T3.12-a3-notify-outcome-dropped	daemon/services/job_recovery_service.py	1169c4a17a2082cc	FAIL(1) ; FAILED tests/job_queue/test_zombie_active_close_tokens_watchers.py::TestZeroWatcherCorrelation::test_zero_watcher_close_counts_and_references_pp1	
+T3.12-a5-prefix-like-attribution	daemon/services/work_status.py	de8bb1a578101772	FAIL(1) ; FAILED tests/job_queue/test_zombie_active_close_amendments.py::TestA5AttributionShape::test_attribution_is_explicit_in_list_never_prefix_like	
+T3.12-a6b-discount-dropped-at-call	daemon/services/job_recovery_service.py	14ea9e7ee727dbd8	FAIL(7) ; FAILED tests/job_queue/test_zombie_active_close_amendments.py::TestA1CounterBlockVisibility::test_streak_resets_on_close_and_evicts_when_gone ; FAILED tests/job_queue/test_zombie_active_close_amendments.py::TestA6DefensiveE1Pins::test_childless_root_fallback_not_on_close_path	
+T3.12-a2i-recheck-ignored	daemon/repositories/job_queue/repository.py	9650ab5a82538c57	FAIL(1) ; FAILED tests/job_queue/test_zombie_active_close_amendments.py::TestA2Disposition::test_inflight_recheck_true_aborts_on_retry_child	
+T3.12-a2ii-default-flipped-true	daemon/repositories/job_queue/repository.py	892f52256d6e3691	FAIL(1) ; FAILED tests/job_queue/test_zombie_active_close_amendments.py::TestA2Disposition::test_default_false_is_byte_identical_no_recheck	
+T3.5b-bus-unavailable-treated-zero	daemon/services/job_recovery_service.py	1bc960396f289642	FAIL(1) ; FAILED tests/job_queue/test_zombie_active_close_failclosed.py::TestFailClosedPolarity::test_bus_unavailable_fails_safe_skip	
 T3.1c-boundary-shifted-60s	daemon/repositories/job_queue/repository.py	117d4e64f6bdb99b	PASS	PASS
-T3.12-a1-log-gated-reconciled-v2	daemon/api.py	ce4ccf3049fcdd8e	FAIL(1)
-FAILED tests/job_queue/test_zombie_active_close_amendments.py::TestA1CounterBlockVisibility::test_counter_block_logs_when_examined_gt_zero_even_reconciled_0	PASS
-T3.1c-boundary-shifted-180s	daemon/repositories/job_queue/repository.py	21f89ffb5f1060c8	FAIL(1)
-FAILED tests/job_queue/test_zombie_active_close_core.py::TestZombieActiveCoreClose::test_age_boundary_is_inclusive_at_the_bound	PASS
+T3.12-a1-log-gated-reconciled-v2	daemon/api.py	ce4ccf3049fcdd8e	FAIL(1) ; FAILED tests/job_queue/test_zombie_active_close_amendments.py::TestA1CounterBlockVisibility::test_counter_block_logs_when_examined_gt_zero_even_reconciled_0	
+T3.1c-boundary-shifted-180s	daemon/repositories/job_queue/repository.py	21f89ffb5f1060c8	FAIL(1) ; FAILED tests/job_queue/test_zombie_active_close_core.py::TestZombieActiveCoreClose::test_age_boundary_is_inclusive_at_the_bound	
+W2-cardinality-5th-status-plant	daemon/constants.py	ef93172475810b4a	FAIL(2)	PASS

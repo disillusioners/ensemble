@@ -2,10 +2,11 @@
 ## missed-finalize / zombie-ACTIVE close path (`fix/missed-finalize-zombie-active`, board `wi-78967dba`) — PIN FAMILY REGISTERED (2026-10-31)
 
 > Implementation lane (phases 0-3) pack family for the pattern-(h)
-> zombie-ACTIVE JobItem close. All packs GREEN at lane HEAD
-> `5eba81487` (base `0d6489879` / code base `22fe83317`); every pin
-> mutation-verified — 22 matrix legs, each plant→RED→restore→GREEN
-> with planted-file digests recorded
+> zombie-ACTIVE JobItem close. All packs GREEN (council-fold cycle
+> re-verified); every pin mutation-verified — TRUE MATRIX SHAPE: 25
+> planted legs / 22 RED-proven / 3 superseded dead first plants
+> (honestly recorded, never counted as RED; digests per leg in
+> `phase3-artifacts/matrix.tsv`)
 > (`/tmp/mfz-phase0/mutation-matrix/matrix.tsv` — carried into the
 > lane evidence). Family-neighborhood re-run: ZERO net-new reds (the
 > 5 failing neighbors are pre-existing at base, proven from the

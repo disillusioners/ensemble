@@ -80,15 +80,40 @@ quiet — all-terminal tree finalizes immediately (anchor plays no role)").
 Kill-switch OFF rerun on an identical fresh fixture: stays `active`, lock
 row present, `examined=0` — pre-fix behavior byte-restored.
 
-## Phase 3 T3.11 — mutation matrix (22 legs, all RED→GREEN)
+## Phase 3 T3.11 — mutation matrix (TRUE SHAPE: 25 planted / 22 RED-proven / 3 superseded)
 
-`phase3-artifacts/matrix.tsv` — every leg: planted defect form → the named
-pin(s) RED (ids recorded) → restore → GREEN. Includes the two re-proven
-legs after pin hardening: T3.1c (boundary-semantics plant = SQL cutoff
-shifted +180s — the exact-edge `<=`-vs-`<` is wall-clock-jittered by
-construction; the deterministic-margin pin catches a SHIFTED bound) and
-T3.12-a1 (colon-terminated gate form — a substring pin could not catch the
-appended `and reconciled > 0` conjunct).
+`phase3-artifacts/matrix.tsv` — every RED-proven leg: planted defect form
+→ the named pin(s) RED (ids recorded) → restore → GREEN. Three first
+plants are HONESTLY RECORDED as superseded dead forms (pin could not
+discriminate the plant; the plant was re-shaped and re-proven, never
+counted as RED): `T3.1c-age-boundary-exclusive` (the exact-edge
+`<=`-vs-`<` is wall-clock-jittered by construction — superseded by the
++180s shifted-bound plant, beyond the pin's 120s margin),
+`T3.12-a1-log-gated-reconciled` (a substring pin could not catch the
+appended `and reconciled > 0` conjunct — superseded by the
+colon-terminated gate pin), and `T3.1c-boundary-shifted-60s` (60s stays
+inside the 120s margin — superseded by the +180s form). The council-fold
+cycle added the W2 cardinality leg (simulated 5th status in the SSOT →
+cardinality pin + S4-close guard-raise RED → restore GREEN).
+
+### Known advisories — RECORDED, not folded (code-review council 2026-10-31, ride the phase-4 record)
+
+4. **Pack I DDL drift-guard**: the trigger-suite installer carries the
+   manager DDL verbatim-by-copy; a future manager DDL change would not
+   auto-propagate to the pack. Drift-guard (assert the manager source
+   contains the same CREATE statements, or import them) on next touch.
+5. **A6(a) behavioral upgrade**: the member-alive builder pin is
+   anchor-text based (`tid != instance_id` conjuncts); a behavioral
+   (drive-the-guard) form would be stronger — upgrade on next touch.
+6. **TOCTOU comment wording**: the A2 recheck comment could name the
+   RETRY-REARM ORPHAN CORNER explicitly at the seam (currently spelled
+   in the method docstring + the lane plan only).
+7. **Partial-counter merge**: when `examined>0` spans patterns, the
+   stats dict merge could surface per-pattern counters (currently the
+   (h) block is a flat fold — adequate for the loop log).
+8. **Anchor-pin on token**: the three `zombie_active_*` tokens could
+   carry an exact-string registration pin at `_STATUS_CANONICAL_MAP`
+   (currently covered behaviorally by Pack G + the A5 doc pin).
 
 ## Net-new pre-check (informational for Phase 4)
 
