@@ -2926,11 +2926,16 @@ class TestExperienceAutoSave:
 
 
 class TestExploreCallerModelOverrides:
-    """Verify ``caller_model_overrides`` resolves and forwards to the
-    spawned explorer instance.
-
-    The registry lookup MUST follow the project pattern:
-    ``get_version("explorer", None) or get_resolved("explorer")``.
+    """Verify the ``explore()`` tool does NOT forward a caller-supplied
+    ``model=`` to the spawned explorer — resolution of
+    ``caller_model_overrides`` moved to the SPAWN SEAM
+    (``InstanceLifecycleService._resolve_caller_model_override``,
+    ``daemon/services/instance_lifecycle.py:1652``), which runs for
+    EVERY spawn and consults the parent-declares-for-child map (new
+    general pattern) then the child-declares-for-parent map (legacy
+    explorer backward-compat). Forwarding any ``model=`` from the tool
+    would short-circuit the seam's parent-map lookup
+    (``instance_lifecycle.py:1954-1963``).
     """
 
     def _make_explorer_meta(
@@ -2977,12 +2982,15 @@ class TestExploreCallerModelOverrides:
     async def test_coder_with_null_override_forwards_system_default_model(
         self, configured_env, mock_manager
     ):
-        """``{"coder": null}`` means "use the system default model" — the
-        ``explore()`` tool must resolve the actual default model string
-        from ``manager.config.llm.model`` and forward it to
-        ``invoke_agent_and_wait``. Without this resolution, the
-        spawned explorer would fall back to its default ``"quick"``
-        model, defeating the purpose of the override.
+        """``{"coder": null}`` means "use the system default model" — but
+        the resolution now happens at the SPAWN SEAM
+        (``InstanceLifecycleService._resolve_caller_model_override``),
+        not in the ``explore()`` tool. The tool deliberately forwards NO
+        ``model=`` kwarg (``daemon/tools/knowledge_tools.py:747-753``);
+        the seam's parent-map lookup turns the null override into the
+        system default model (``config.llm.model``) at spawn time. This
+        test pins the tool's non-forwarding half of that contract — a
+        forwarded model here would short-circuit the seam.
         """
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project"}
@@ -2991,9 +2999,10 @@ class TestExploreCallerModelOverrides:
             return_value=mock_instance_meta
         )
 
-        # Wire the mock manager's config so the resolve path can
-        # discover the system default model. In production this comes
-        # from ``config.llm.model`` (which defaults to OPENAI_MODEL).
+        # ``config.llm.model`` is what the SPAWN SEAM would resolve the
+        # null override to (parent map ``{"coder": null}`` → system
+        # default). The tool itself never reads it — wired here to prove
+        # the tool forwards nothing even with a default configured.
         mock_manager.config = MagicMock()
         mock_manager.config.llm = MagicMock()
         mock_manager.config.llm.model = "gpt-4o"
@@ -3016,18 +3025,24 @@ class TestExploreCallerModelOverrides:
 
                 await explore_tool.ainvoke({"query": "What is X?"})
 
-                # The resolved system default model MUST be forwarded.
+                # NO model is forwarded — the spawn seam owns resolution
+                # (``{"coder": null}`` → system default at spawn time).
                 mock_invoke.assert_called_once()
-                assert mock_invoke.call_args.kwargs.get("model") == "gpt-4o"
+                assert mock_invoke.call_args.kwargs.get("model") is None
 
     @pytest.mark.asyncio
     async def test_coder_with_string_override_forwards_override_model(
         self, configured_env, mock_manager
     ):
         """``{"coder": "reasoning"}`` means "force the 'reasoning' model"
-        — the explore() tool must forward ``model="reasoning"`` to
-        ``invoke_agent_and_wait``. Spawn-layer allow-list enforcement
-        happens via ``_resolve_model_override``.
+        — resolved at the SPAWN SEAM
+        (``InstanceLifecycleService._resolve_caller_model_override``),
+        NOT in the explore() tool. The tool deliberately forwards NO
+        ``model=`` kwarg (``daemon/tools/knowledge_tools.py:747-753``);
+        the seam consults the parent/child ``caller_model_overrides``
+        maps and allow-list enforcement happens via
+        ``_resolve_model_override`` there. This test pins the tool's
+        non-forwarding half of that contract.
         """
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {"project_id": "test-project"}
@@ -3057,7 +3072,10 @@ class TestExploreCallerModelOverrides:
                 await explore_tool.ainvoke({"query": "What is X?"})
 
                 mock_invoke.assert_called_once()
-                assert mock_invoke.call_args.kwargs.get("model") == "reasoning"
+                # NO model is forwarded — the spawn seam owns resolution
+                # (``{"coder": "reasoning"}`` → forced override at spawn
+                # time, allow-listed by ``_resolve_model_override``).
+                assert mock_invoke.call_args.kwargs.get("model") is None
 
     @pytest.mark.asyncio
     async def test_non_coder_caller_does_not_forward_model(
