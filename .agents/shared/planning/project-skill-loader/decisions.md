@@ -304,3 +304,35 @@ Verdict: **ARCHITECTURE SOUND-WITH-AMENDMENTS** — the fused source, resolver, 
 | 12 | `technical-analysis.md` | **UNCHANGED BY ME — parallel worker owns it (verify; item 4 of the leader's list is theirs)** | Not touched |
 
 **Citations verified/corrected at fold:** `_fetch` at `skill_search_service.py:641`; `except Exception` + "BM25 failed to fetch skills" at ~`:661-665`; first emptiness gate `:700-701`; ownership filter/seam `:709`; second gate `:711-712`; `skill_injection_service.py` early-exit `:467-468` (was :468-470); `routers/skills.py` `body.project_id` at `:1054` (was :1051); `manager.py` else-branch `:2490-2496` (None at :2495); `instance_messaging.py` `<meta>` metadata read `:4570-4573` (was :4574 — leader's boundary confirmed precise); requirements' auto-injection cite `:4310-4316` VERIFIED correct (no change).
+
+---
+
+## Part 8 — Phase-1 execution records (coder lane, 2026-10-31)
+
+### D-Q5 fork decision — RECORDED (D2 Named Gate, Phase 1)
+
+- **Decision:** FORK = **COMPANION TABLE `project_skill_usage_records`** (+1 migration ⇒ lane delta **+3**). Model/repository at `daemon/repositories/project_skill_file/`, migration `20261031_120002_create_project_skill_usage_records.sql`. Phase 3's `skill_feedback` on `pf:` addresses records metrics into the companion table (metrics-only, no lineage, no evolution dispatch — P7 intact).
+- **Census provenance:** the pinned static census artifact `.agents/shared/planning/project-skill-loader/d2-write-census.md` (method per B1(a)-census: base code + the specified Phase-3 STEP-0 contract). A usage write EXISTS on the file path — W1 (the pre-existing `last_injected_skill_ids` injection-tracking merge at `instance_messaging.py:_dedup_merge_skill_ids`/`:173-204`, driven from `:4431-4441`, carries pf-ids on every STEP-0 hit) and W2's `SkillUsageRecord` insert path is reachable-and-driven but guarded (`_record_one`'s skill-row miss returns 0 before any insert — the FK row would be rejected anyway). The rule "ZERO writes into FK-constrained child tables" HOLDS. The "defer pf: feedback" branch's precondition (census proves NO usage write) is NOT met ⇒ the DEFAULT applied.
+- **Re-open trigger carried:** a Phase-3 STEP-0 deviation that changes the write set re-opens this fork before staging.
+
+### Phase-0 census carry (gate input for the stage record)
+
+- In-fence collision census (the instructed DB `ensemble_dev` + all reachable local dev DBs): **zero** canon-name collisions, **zero** known-id hits, **zero** in-scope (83da04de…) rows — the superset falsifier PASSES on all accessible data. The exact-set assertion (`== {9e79ccad, fd1e01dc, 76e3e1a7a}`) requires the LIVE deployment DB (the 3 legacy rows were created through the live daemon), which is outside this lane's fence — routed as a stage-time gate input (SELECT-only live-DB re-check) in `phase0-findings.md`. No halt condition triggered (superset absent); Phase 1 proceeded.
+- S3 promotion condition: cold scan measured 1.323 ms median (≤50 ms) ⇒ **S3 stays SHOULD** (dedicated bounded executor remains advisory for phase2 task 2).
+
+### Phase-1 exit record — replacement coder audit (2026-10-31)
+
+The predecessor lane wedged mid-Phase-1; a replacement coder audited the uncommitted work against phase1-plan tasks 1–11 (verified presence AND correctness, not just presence). Predecessor code was sound on the whole; the audit produced the following **corrections** (all committed with the phase):
+
+1. **Debug residue removed** — `print("DBG-GATE", …)` in the stat-gate (`service.py`) removed.
+2. **Stat-gate transition sync fixed** — a valid→invalid transition, a newly-appearing invalid dir, and a vanished invalid dir now trigger the DB row sync (`invalid_dirty`); previously those transitions left stale `valid=True` rows / lingering indexed-as-listed rows in `project_skill_files`. Now pinned by `TestInvalidTransitionsAtStatGate` (3 tests, mutation-verified).
+3. **A4(vii) digest-stability semantics made deterministic** — the refresh loop's `backoff <= 0` branch previously fell through to GENERATION after an exhausted stability window (only the loop-top exit skipped); the loop now tracks `stable` explicitly and always skips on exhaustion. Pinned by `TestA4ViiDigestStability` (mutation-verified class of the M4/M5 spot checks).
+4. **Q7 warn-once-per-root state made live** — `_RootIndex.invalid_schema_warned` was write-only; the stat gate now consults it (repeat unknown-schema skips log at DEBUG), so the warn-once state lifetime spans full scans and stat-gate passes. Pinned by `TestWarnOnceLifetime` (mutation-verified).
+5. **Unused imports** (`MAX_NAMESPACES`, `MAX_SKILL_DIRS_PER_NAMESPACE`) dropped from `service.py`.
+
+Test evidence at phase exit (worktree `.venv`, Python 3.14.7):
+- **123 unit tests green** across `test_project_skill_source_{model,manifest,resolver,index,embedding,migrations}.py` (the migrations pack is new: fresh-SQLite apply of the three lane `.sql` files, idempotent re-run, zero FK clauses, duplicate-prefix guard over the real versions dir).
+- **12 real-PG tests green** on a FRESH scratch DB (`PG_TEST_DB=ensemble_test_only`, per-variable env scrub; ambient `POSTGRES_DB=ensemble_prod` refused by an explicit pre-command fence): boot-artifact column match, full index→invalidate→reindex cycle, state transitions, **A1 FK-wall pin RED-documented + dedicated-table GREEN**, **P1 sentinel on real PG** (12-char windows, `information_schema` table introspection), A3 two-roots pin, CRUD round-trip (file + usage companion repos).
+- **Mutation spot-checks (apply → RED → revert):** A6 reflex-1 refusal (2 tests red), A5 containment (3 red), stat-gate invalid-sync trigger (3 red), warn-once consult (1 red), **A5(e) read-time containment re-check (1 red — this spot-check exposed the missing pin; `TestReadTimeContainmentSwap` added)**.
+
+Phase-exit invariants asserted: `skill_search_service.py` / `skill_injection_service.py` / `manager.py` / `config.py` / `readiness.py` untouched (no diffs); rollback note N6 stands (git-revert-only until Phase 4's knob). The plan's Tier-1 blast-radius gate is NOT run here (tester lane runs it from this record).
