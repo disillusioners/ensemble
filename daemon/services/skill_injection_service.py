@@ -95,6 +95,11 @@ import hashlib
 import logging
 from typing import Any, Callable
 
+from daemon.services.project_skill_source.model import is_pf_address
+from daemon.services.project_skill_source.service import (
+    ProjectSkillBodyUnavailable,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -219,6 +224,14 @@ class SkillInjectionService:
         # to a direct ``get_by_name`` lookup when the clone path
         # hasn't been wired yet (e.g. older test fixtures).
         self._clone_service: Any = None
+        # Phase-3 project-skill-loader: the file-backed project skill
+        # source (STEP-0 of ``inject_explicit_skill``). Injected
+        # post-construction via ``set_file_source`` — Phase-4 manager
+        # wiring constructs ``ProjectSkillSourceService`` and hands it
+        # here. ``None`` (the default / knob OFF / pre-Phase-4) means
+        # STEP-0 is SKIPPED entirely (approver N8) and the DB path
+        # runs byte-identically.
+        self._file_source: Any = None
         # Per-instance, per-message — the Phase 4 metrics service
         # queries this to attribute a feedback signal back to
         # the skills that were offered for the task.
@@ -256,6 +269,28 @@ class SkillInjectionService:
                 manager.
         """
         self._clone_service = clone_service
+
+    def set_file_source(self, file_source: Any) -> None:
+        """Inject the file-backed project skill source after
+        construction (Phase-3 STEP-0 seam).
+
+        Mirrors :meth:`set_clone_service`. Phase-4 manager wiring
+        (task 2, site 2) constructs
+        :class:`~daemon.services.project_skill_source.service.ProjectSkillSourceService`
+        and calls this when the knob is ON; knob OFF / construction
+        not yet landed leaves the slot ``None``, which SKIPS STEP-0
+        entirely (approver N8, 2026-10-31) — no file lookup is
+        attempted and the DB path proceeds unchanged.
+
+        Args:
+            file_source: Duck-typed
+                ``ProjectSkillSourceService`` — must expose
+                ``resolve_active_project(instance_id=…,
+                explicit_project_id=…)``, ``ensure_index(root,
+                project_id)`` and ``lookup_explicit(name_or_address,
+                project_id)``.
+        """
+        self._file_source = file_source
 
     def set_capability_gate(
         self,
@@ -461,11 +496,56 @@ class SkillInjectionService:
             empty or the skill cannot be resolved from the
             project scope or skill bank.
         """
+        # ------------------------------------------------------------
+        # STEP 0 — file-canon interception (Phase-3,
+        # project-skill-loader). Precedence chain (architect A15,
+        # one sentence): file (STEP 0) → ``clone_on_miss_sync``
+        # (project row → bank template) → repo fallback.
+        #
+        # A15 (MUST): ``pf:``-shaped inputs BYPASS/PRECEDE the silent
+        # early-exit below and FAIL CLOSED with an explicit envelope —
+        # a ``pf:`` address can never name a DB skill, so falling
+        # through to the clone path would be a silent miss. Bare
+        # names keep today's silent-miss semantics.
+        #
+        # N8: ``file_source is None`` ⇒ STEP-0 is skipped entirely —
+        # no file lookup is attempted; the DB path proceeds unchanged
+        # (None-tolerance by construction).
+        # ------------------------------------------------------------
+        if is_pf_address(skill_name or ""):
+            return await self._step0_pf_address(
+                skill_name, project_id, instance_id
+            )
+
         # Early-exit — explicit injection always needs a
         # project scope and a name to look up. Keeping the
         # rest of the method focused on the happy path.
         if not project_id or not skill_name:
             return (None, [])
+
+        if self._file_source is not None:
+            # STEP-0 (bare-name shape): a file skill with this name in
+            # the caller's project scope wins over the DB clone path.
+            # A8 STEP-0 guard (MUST, CRITICAL): ANY exception from the
+            # file source — including a missing/unreadable body — is
+            # treated as a MISS (WARNING + fall through): a broken file
+            # source must never break explicit injection of DB skills.
+            try:
+                file_skill = await self._step0_resolve(
+                    skill_name, project_id, instance_id
+                )
+            except Exception as e:  # noqa: BLE001 — A8 STEP-0 guard
+                logger.warning(
+                    f"[SkillInjection] STEP-0 file lookup failed for "
+                    f"'{skill_name}' (treated as miss; DB path "
+                    f"proceeds): {e}"
+                )
+                file_skill = None
+            if file_skill is not None:
+                return (
+                    self._render_file_skill(file_skill),
+                    [str(file_skill.id)],
+                )
 
         # Stage 1 — resolve the skill. Prefer the clone
         # service so a miss in the project scope gets
@@ -551,6 +631,141 @@ class SkillInjectionService:
         )
 
         return (injection_text, skill_ids)
+
+    # --------------------------------------------------------
+    # STEP-0 helpers (Phase-3 project-skill-loader)
+    # --------------------------------------------------------
+
+    async def _step0_pf_address(
+        self,
+        skill_name: str,
+        project_id: str | None,
+        instance_id: str,
+    ) -> tuple[str | None, list[str]]:
+        """A15 fail-closed branch for ``pf:``-shaped inputs.
+
+        A ``pf:`` address can never name a DB skill, so this shape
+        NEVER falls through to the clone path — every miss is an
+        explicit error envelope (FR-P3-3 / FR-LP §4.2-4.3), never a
+        silent ``(None, [])``.
+        """
+        if not project_id:
+            return (
+                "ERROR: skill load failed: a `pf:` address requires a "
+                f"resolvable project scope, and none was resolved for "
+                f"'{skill_name}'. File skills are invisible without "
+                "project context (fail-closed; no DB fallback for "
+                "`pf:` addresses).",
+                [],
+            )
+        if self._file_source is None:
+            return (
+                "ERROR: skill load failed: the file skill source is "
+                "not available on this deployment, so the file-backed "
+                f"skill '{skill_name}' cannot be loaded (fail-closed; "
+                "no DB fallback for `pf:` addresses).",
+                [],
+            )
+        try:
+            file_skill = await self._step0_resolve(
+                skill_name, project_id, instance_id
+            )
+        except ProjectSkillBodyUnavailable as exc:
+            # Task 9 fail-closed: body deleted/corrupt between index
+            # and load — never serve a stale body, never inject empty.
+            return (
+                f"ERROR: skill load failed: body unreadable for "
+                f"'{skill_name}': {exc.reason}; re-index scheduled. "
+                "(fail-closed; no DB fallback for `pf:` addresses).",
+                [],
+            )
+        except Exception as e:  # noqa: BLE001 — A8 STEP-0 guard
+            logger.warning(
+                f"[SkillInjection] STEP-0 file lookup failed for "
+                f"'{skill_name}' (fail-closed envelope): {e}"
+            )
+            return (
+                f"ERROR: skill load failed: the file skill source "
+                f"raised while resolving '{skill_name}': {e} "
+                "(fail-closed; no DB fallback for `pf:` addresses).",
+                [],
+            )
+        if file_skill is None:
+            return (
+                f"ERROR: skill load failed: no file skill with "
+                f"address '{skill_name}' in the caller's project "
+                "scope. `pf:` addresses never fall through to the DB "
+                "skill path (fail-closed).",
+                [],
+            )
+        return (self._render_file_skill(file_skill), [str(file_skill.id)])
+
+    async def _step0_resolve(
+        self,
+        skill_name: str,
+        project_id: str,
+        instance_id: str,
+    ) -> Any:
+        """Resolve a bare name or ``pf:`` address through the file
+        source against the CALLER's project scope.
+
+        FROZEN DESIGN NOTE (phase3 task 1): ``lookup_explicit``
+        searches ONLY already-indexed roots — STEP-0 must
+        ``ensure_index`` via the resolver roots FIRST. Scope comes
+        from the sanctioned resolver (A6/A13): the caller-supplied
+        ``project_id`` may only CONFIRM the instance-derived project;
+        a refusal (conflict) or an unresolvable scope yields no file
+        skills (``None``) — the DB path stands.
+
+        Raises whatever the file source raises (e.g.
+        :class:`ProjectSkillBodyUnavailable`); the two A8-guarded
+        call sites above decide how a raise is treated per shape.
+        """
+        resolution = await self._file_source.resolve_active_project(
+            instance_id=instance_id,
+            explicit_project_id=project_id,
+        )
+        scope_pid = getattr(resolution, "project_id", None)
+        roots = [r for r in (getattr(resolution, "roots", None) or []) if r]
+        if not scope_pid or getattr(resolution, "refused", False) or not roots:
+            return None
+        for root in roots:
+            try:
+                await self._file_source.ensure_index(root, scope_pid)
+            except Exception as exc:  # per-root resilience
+                logger.warning(
+                    "[SkillInjection] STEP-0 ensure_index failed for "
+                    "root=%s: %s — continuing with remaining roots",
+                    root,
+                    exc,
+                )
+        return await self._file_source.lookup_explicit(skill_name, scope_pid)
+
+    def _render_file_skill(self, file_skill: Any) -> str:
+        """Render a file skill through the UNCHANGED formatter with the
+        S5 provenance header prepended.
+
+        The header carries ``project_id`` + ``root_path`` so a
+        wrong-scope injection becomes self-evident to the receiving
+        agent. FR-P5-3: the body renders FULL — no cap (the formatter
+        never truncates). File skills never enter A/B routing or the
+        capability pre-flight (P7: manifests carry no ``requires:``
+        block in v1) — both are DB-skill machinery.
+        """
+        body = self._format_injection(
+            {
+                "injected": [{"skill": file_skill, "score": 1.0}],
+                "low_match": [],
+            }
+        )
+        header = (
+            f"[Project-File Skill] {getattr(file_skill, 'address', '')} "
+            f"(project_id={getattr(file_skill, 'project_id', '')}, "
+            f"root={getattr(file_skill, 'root_path', '')}) — "
+            "file-backed canon; evolves via git PR against "
+            "`.agents/<ns>/skills/` (skill_fix does not apply, P7)"
+        )
+        return f"{header}\n{body}"
 
     def track_injection(
         self,
