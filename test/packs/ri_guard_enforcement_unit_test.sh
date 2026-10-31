@@ -13,7 +13,7 @@
 # applied at every TestEnforcementAction/TestKillSwitchRevertProof
 # test), wire_bus teardown):
 #
-#   * tests/unit/services/test_report_integrity_guard.py (34 tests) —
+#   * tests/unit/services/test_report_integrity_guard.py (37 tests) —
 #     PRIMARY signal (PENDING/DEFERRED + terminal child), CORROBORATING
 #     signal (FIRED ∧ enqueued_at IS NULL), same-tx repo variant, B.S.7
 #     bus/tasks gates, log helper (B.S.1-ii), enforcement action
@@ -27,9 +27,11 @@
 #     enqueue exception → completion proceeds. Plus None-report and
 #     empty-report no-op edges + log-helper return-value hand-off.
 #
-#   * tests/unit/services/test_b_kill_switch_registry.py (11 tests) —
-#     (b) env-name pinned in constants.py, config wiring (default
-#     falsy = LOG-ONLY ship state C2-D2.5), env-name derivation
+#   * tests/unit/services/test_b_kill_switch_registry.py (15 tests) —
+#     (b) env-name pinned in constants.py, config wiring (TRUTHY
+#     default = ON ship state since the D2.5-FLIP default promotion
+#     2026-10-31; explicit env "0" / config.yaml "false" = OFF path),
+#     env-name derivation
 #     (no literal fork between config.py and constants.py), env
 #     flip reaches fresh settings instance, resolver reads the
 #     constant; (a) reserved-unused (constants exists, no config
@@ -54,7 +56,7 @@
 #     else-branch attach verified by source-grep (bus=None raises
 #     A8 BEFORE control reaches else-branch).
 #
-# Total: 69 tests (per dev review reference).
+# Total: 76 tests (measured @ 0ecdc4fc1, 2026-10-31).
 #
 # Why ONE pytest invocation (not five separate commands): the test
 # harness W1 lesson is "if the 5 files share module-global caches,
@@ -73,18 +75,18 @@
 #   * No -x (continue on first failure — we want the full count).
 #   * Single-process collection (no -n auto).
 #
-# Expected: 69P/0F (dev review reference). Exit 0=PASS, 1=FAIL, 124=TIMEOUT.
+# Expected: 76P/0F (measured @ 0ecdc4fc1, 2026-10-31). Exit 0=PASS, 1=FAIL, 124=TIMEOUT.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 echo "=== Test Pack: ri_guard_enforcement_unit_test ==="
-echo "Surface: 5 test files, 69 tests (scope-4 predicate exactness +"
+echo "Surface: 5 test files, 76 tests (scope-4 predicate exactness +"
 echo "         scope-5 dormant enforcement)"
 echo "Files:"
-echo "  - tests/unit/services/test_report_integrity_guard.py (34)"
+echo "  - tests/unit/services/test_report_integrity_guard.py (37)"
 echo "  - tests/unit/services/test_b_fail_open.py (9)"
-echo "  - tests/unit/services/test_b_kill_switch_registry.py (11)"
+echo "  - tests/unit/services/test_b_kill_switch_registry.py (15)"
 echo "  - tests/unit/services/test_observer_finalize_no_job.py (11)"
 echo "  - tests/unit/services/test_w2_dead_site_symmetry.py (4)"
 cd "$PROJECT_DIR"
@@ -94,6 +96,7 @@ cd "$PROJECT_DIR"
 # Safe-form `|| EXIT_CODE=$?` defeats `set -e` so the RESULT echo prints
 # on failure paths too (the bare `CMD; EXIT_CODE=$?` pattern aborts on
 # non-zero exit before the capture).
+EXIT_CODE=0  # init: pytest success path never assigns via `|| EXIT_CODE=$?` (set -u)
 timeout 180s .venv/bin/pytest \
   tests/unit/services/test_report_integrity_guard.py \
   tests/unit/services/test_b_fail_open.py \
