@@ -1246,3 +1246,153 @@ class TestW3McpClaimOnce:
         finally:
             sw._PROC_ROOT = orig_proc_root
         assert patched_singleton.drain_history() == []
+
+
+# =============================================================================
+# bash-tool orphan reaper Phase 2 — durable lifecycle sibling pins
+# =============================================================================
+# The RAM zero-monotonic-growth pin at TestAC5 (test_n_success_runs_zero_
+# monotonic_growth) is UNCHANGED and stays green as-is (constraint 3:
+# success arm still unregisters the RAM entry). These pins cover the NEW
+# durable lifecycle only — they never alter the RAM lifecycle contract.
+
+
+class TestDurableSpawnLifecycle:
+    """A successful bash call leaves an OPEN durable tombstone row (the
+    success arm leaves the row OPEN by design, plan D4); the next
+    cleanup point (cleanup_instance) closes it. RAM pin unchanged."""
+
+    @pytest.fixture
+    def durable_writer(self, proc_root):
+        """Inject a real BashSpawnRepository into the bash registry
+        singleton over a fresh in-memory engine; restore afterwards."""
+        from sqlalchemy.pool import StaticPool
+        from sqlmodel import SQLModel, create_engine
+
+        from daemon.repositories.bash_spawn import BashSpawnRepository
+        from daemon.tools.bash import get_bash_process_registry
+
+        reg = get_bash_process_registry()
+        eng = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        SQLModel.metadata.create_all(eng)
+        repo = BashSpawnRepository(engine=eng)
+        prev_writer = reg.get_durable_writer()
+        prev_entries = dict(reg._entries)
+        reg._entries.clear()
+        reg.set_durable_writer(repo)
+        yield reg, repo, eng
+        reg.set_durable_writer(prev_writer)
+        reg._entries.clear()
+        reg._entries.update(prev_entries)
+        eng.dispose()
+
+    def test_success_call_leaves_one_open_durable_row(
+        self, durable_writer, proc_root
+    ):
+        from daemon.tools.bash import bash
+
+        reg, repo, eng = durable_writer
+        instance_id = "durable-success-inst"
+
+        async def _run():
+            res = await bash.coroutine(
+                command=["echo", "ok"],
+                timeout=5,
+                instance_id=instance_id,
+            )
+            assert "EXIT CODE: 0" in res
+
+        import asyncio as _asyncio
+
+        _asyncio.run(_run())
+
+        rows = repo.list_open_by_instance(instance_id)
+        assert len(rows) == 1, (
+            f"success arm must leave exactly one OPEN tombstone row; "
+            f"got {len(rows)}"
+        )
+        row = rows[0]
+        assert row.pid > 0
+        assert row.pgid > 1
+        assert row.instance_id == instance_id
+        assert row.daemon_pid == os.getpid()
+        assert row.boot_id
+        assert row.tracking_id
+        assert row.command_sanitized
+        # RAM bucket empty (success arm unregistered — N-1 contract)
+        assert reg.tracked_count() == 0
+
+    def test_cleanup_instance_closes_the_durable_row(
+        self, durable_writer, proc_root
+    ):
+        from daemon.tools.bash import bash
+
+        reg, repo, eng = durable_writer
+        instance_id = "durable-cleanup-inst"
+
+        async def _run():
+            await bash.coroutine(
+                command=["echo", "ok"],
+                timeout=5,
+                instance_id=instance_id,
+            )
+
+        import asyncio as _asyncio
+
+        _asyncio.run(_run())
+
+        assert repo.list_open_by_instance(instance_id)
+        import asyncio as _asyncio2
+
+        _asyncio2.run(reg.cleanup_instance(instance_id))
+
+        assert repo.list_open_by_instance(instance_id) == [], (
+            "cleanup_instance must close the durable tombstone row "
+            "(dead group ⇒ gc)"
+        )
+        rows = repo.list_open_all()
+        assert all(r.instance_id != instance_id for r in rows)
+
+    def test_master_off_writes_no_durable_row(
+        self, monkeypatch, proc_root
+    ):
+        """m3 at the write seam: master OFF ⇒ no stamp, no row."""
+        monkeypatch.setenv("ENSEMBLE_BASH_ORPHAN_REAPER", "0")
+        from daemon.tools.bash import bash, get_bash_process_registry
+
+        reg = get_bash_process_registry()
+        # Inject a spy repo (no real DB access expected).
+        class _Spy:
+            def __init__(self):
+                self.inserts = 0
+
+            def insert_open_row(self, **kw):
+                self.inserts += 1
+                return None
+
+            def get_durable_writer(self):
+                return self
+
+        spy = _Spy()
+        prev = reg.get_durable_writer()
+        reg.set_durable_writer(spy)
+        try:
+            async def _run():
+                await bash.coroutine(
+                    command=["echo", "ok"],
+                    timeout=5,
+                    instance_id="durable-off-inst",
+                )
+
+            import asyncio as _asyncio
+
+            _asyncio.run(_run())
+            assert spy.inserts == 0, (
+                "master OFF must not write any durable row"
+            )
+        finally:
+            reg.set_durable_writer(prev)

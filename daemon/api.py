@@ -72,6 +72,11 @@ install_root_logging()
 
 logger = logging.getLogger(__name__)
 
+# M1(c): strong references for fire-and-forget background tasks (the
+# one-shot bash-spawn boot reconcile) — without a live reference a
+# running task can be garbage-collected mid-flight.
+_BASH_RECONCILE_BG_TASKS: set[asyncio.Task[None]] = set()
+
 # Import routers
 from daemon.routers import (
     agents_router,
@@ -895,6 +900,84 @@ async def lifespan(app: FastAPI):
         daemon_logger.warning(
             f"[Startup] Job lock recovery sweep failed (non-fatal): "
             f"{type(sweep_err).__name__}: {sweep_err}"
+        )
+
+    # bash-tool orphan reaper (plan 1.3; SHIPPED): durable-writer wiring.
+    # Construct the repository from manager.engine and inject it into the
+    # bash process registry singleton (the manager._watcher_repo storage
+    # pattern, api.py:962). Tools never import the repo directly (no
+    # import cycle; bash.py header note) — they read the injected writer.
+    # Writer-unset ordering (plan D3 adjudication 2): bash calls landing
+    # BEFORE this wiring produce NO row (pre-wiring callers are
+    # direct-coroutine/test lanes). THIS seam is write-side only — the
+    # kill lanes (terminal sweep / shutdown / boot reconcile / Phase-4
+    # enumeration) live in daemon/services/bash_spawn_reaper.py.
+    bash_spawn_repo = None
+    try:
+        from daemon.repositories.bash_spawn import BashSpawnRepository
+        from daemon.services.bash_spawn_reaper import (
+            CURRENT_BOOT_ID as _bash_reaper_boot_id,
+        )
+        from daemon.tools.bash import get_bash_process_registry
+
+        bash_spawn_repo = BashSpawnRepository(engine=manager.engine)
+        get_bash_process_registry().set_durable_writer(bash_spawn_repo)
+        daemon_logger.info(
+            f"[Startup] bash spawn durable registry wired "
+            f"(boot_id={_bash_reaper_boot_id[:8]})"
+        )
+    except Exception as bash_spawn_err:  # noqa: BLE001
+        daemon_logger.warning(
+            f"[Startup] bash spawn durable registry wiring failed "
+            f"(non-fatal, bash tool proceeds without durable rows): "
+            f"{type(bash_spawn_err).__name__}: {bash_spawn_err}"
+        )
+
+    # bash-tool orphan reaper Phase 3 (task 3.2) — M1(c): the one-shot
+    # boot reconcile is NO LONGER awaited in the lifespan. N rows × full
+    # clamped TERM grace used to run serially on the startup critical
+    # path, blocking API readiness. It stays ONE-SHOT, non-fatal and
+    # failure-isolated: it now runs as a post-startup background task
+    # (created here, never awaited); the S3 semantics (DB fault ⇒
+    # WARNING, boot proceeds) hold — a fault inside the task logs and
+    # dies with the task, never the lifespan. Honors the boot leg knob
+    # (ENSEMBLE_BASH_ORPHAN_REAPER_BOOT_SWEEP) and the lane sweep
+    # deadline (LANE_SWEEP_DEADLINE_SECONDS).
+    try:
+        from daemon.services.bash_spawn_reaper import (
+            reconcile_stale_bash_spawns,
+        )
+
+        async def _bash_reconcile_background() -> None:
+            try:
+                cleared = await reconcile_stale_bash_spawns(
+                    repo=bash_spawn_repo
+                )
+                if cleared:
+                    daemon_logger.info(
+                        f"[Startup] Reconciled {cleared} stale bash spawn "
+                        "row(s) from previous process"
+                    )
+            except Exception as bash_reconcile_err:  # noqa: BLE001
+                daemon_logger.warning(
+                    f"[Startup] bash spawn reconcile failed (non-fatal): "
+                    f"{type(bash_reconcile_err).__name__}: "
+                    f"{bash_reconcile_err}"
+                )
+
+        _bash_reconcile_task = asyncio.create_task(
+            _bash_reconcile_background()
+        )
+        # Keep a strong reference so the task cannot be GC'd mid-run
+        # (fire-and-forget tasks need a live reference).
+        _BASH_RECONCILE_BG_TASKS.add(_bash_reconcile_task)
+        _bash_reconcile_task.add_done_callback(
+            _BASH_RECONCILE_BG_TASKS.discard
+        )
+    except Exception as bash_reconcile_err:  # noqa: BLE001
+        daemon_logger.warning(
+            f"[Startup] bash spawn reconcile scheduling failed (non-fatal): "
+            f"{type(bash_reconcile_err).__name__}: {bash_reconcile_err}"
         )
 
     # Create queue repository for job queue management

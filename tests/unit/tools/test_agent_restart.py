@@ -191,6 +191,17 @@ class TestT0Preconditions:
         extra_env merge (absent from EXECUTOR_ENV_ALLOWLIST)."""
         assert "ENSEMBLE_UPGRADE_LIVE" not in uj.EXECUTOR_ENV_ALLOWLIST
         assert "ENSEMBLE_RESTART_LIVE" not in uj.EXECUTOR_ENV_ALLOWLIST
+        # bash-tool orphan reaper Phase 1 (plan 1.6): the bash spawn
+        # env stamp must NEVER reach the restart lane — structural
+        # exclusion. The allowlist must not carry the stamp var and
+        # the prefix list must not match it, so `executor_env()`
+        # strips any ambient ENSEMBLE_BASH_TRACKING_ID from the
+        # daemon's environ before Popen/--setenv.
+        assert "ENSEMBLE_BASH_TRACKING_ID" not in uj.EXECUTOR_ENV_ALLOWLIST
+        assert not any(
+            "ENSEMBLE_BASH_TRACKING_ID".startswith(p)
+            for p in uj.EXECUTOR_ENV_PREFIXES
+        )
         import daemon.manager as mgr_mod
 
         msrc = Path(mgr_mod.__file__).read_text(encoding="utf-8")

@@ -160,13 +160,15 @@ class TestCleanupAll:
         original_cleanup = registry.cleanup_instance
         attempted: list[str] = []
 
-        async def cleanup_instance(instance_id: str) -> int:
+        async def cleanup_instance(
+            instance_id: str, *, reaped_by: str = "terminal-tier"
+        ) -> int:
             attempted.append(instance_id)
             if instance_id == "iid-1":
                 async with registry._lock:
                     registry._entries.pop(instance_id, [])
                 raise RuntimeError("synthetic instance failure")
-            return await original_cleanup(instance_id)
+            return await original_cleanup(instance_id, reaped_by=reaped_by)
 
         monkeypatch.setattr(registry, "cleanup_instance", cleanup_instance)
         monkeypatch.setattr(registry, "_kill_group", MagicMock())

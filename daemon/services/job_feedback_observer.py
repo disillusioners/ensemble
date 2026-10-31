@@ -3298,15 +3298,23 @@ class JobFeedbackObserver:
         # this is a ROOT instance (parent_id is None). Tier 1 already
         # cleaned the root's own processes; Tier 2 sweeps descendants.
         #
-        # Known limitations (mirrors ``BackgroundProcessManager.cleanup_all``):
+        # Known limitations (bash-tool orphan reaper status, plan §2
+        # tasks 2-4 — mirrors ``BackgroundProcessManager.cleanup_all``
+        # and ``BashProcessRegistry.cleanup_all``):
         #   * Truly-detached orphans (child called ``setsid``) sit
         #     outside the process group that ``cleanup_instance``
-        #     reaps via ``os.killpg`` — they will not be killed here.
+        #     reaps via ``os.killpg`` — the RAM tier cannot reach
+        #     them here; the bash-tool orphan reaper's Phase-4
+        #     enumerated stamp sweep (same cleanup points) closes
+        #     that gap for bash-tool spawns.
         #   * Crash-recovery leak: the in-memory ``_processes``
         #     registry does not survive a daemon crash. The OS
         #     subprocesses themselves survive; the manager's
-        #     bookkeeping is gone on next start. This sweep cannot
-        #     reach them after a hard restart.
+        #     bookkeeping is gone on next start. For bash-tool spawns
+        #     this is closed by the durable spawn registry (written
+        #     at the spawn seam): the Phase-2 durable rows are reaped
+        #     here, and the shutdown durable sweep + Phase-3 boot
+        #     reconcile reach crash/cross-boot stragglers.
         #
         # Best-effort throughout: every cleanup call is wrapped in its
         # own try/except so a failure in one tier does not block the

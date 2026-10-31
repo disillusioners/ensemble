@@ -77,7 +77,9 @@ Conventions
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
+import logging
 import os
 import signal
 import sys
@@ -95,6 +97,8 @@ from tests.tools.conftest import (  # noqa: E402
     _register_pid,
     _pid_alive,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -187,6 +191,149 @@ def _patch_registries(
         "get_bash_process_registry",
         lambda: bash_reg,
     )
+
+
+# =============================================================================
+# Helpers — real-spawn harness (shared by the stamp-sweep / job-control legs)
+# =============================================================================
+#
+# Pre-merge F-1: the setsid-sweep, timeout-race and job-control classes each
+# copy-pasted the durable-writer wiring, the pid-file poll, the grace-wait and
+# the SIGKILL teardown verbatim. The copies had already drifted (the "≈4s
+# total" note on the poll budget was dropped from two of them), and drift in
+# any one copy leaks a live ``sleep`` burner — the exact incident class this
+# feature exists to prevent. Single home below.
+
+_PIDFILE_POLL_S = 0.05
+_PIDFILE_ATTEMPTS = 80
+
+
+async def _wait_for_pidfile(
+    path: str,
+    *,
+    poll_s: float = _PIDFILE_POLL_S,
+    attempts: int = _PIDFILE_ATTEMPTS,
+) -> int:
+    """Poll ``path`` until it holds a positive pid; return it (0 = timeout).
+
+    ``80 × 0.05s`` ⇒ **≈4s total**. That is generous for a fork + setsid +
+    write on a loaded box, and short enough that a broken harness fails fast
+    instead of hanging the suite.
+    """
+    for _ in range(attempts):
+        if os.path.exists(path):
+            try:
+                with open(path, "r") as f:
+                    pid = int(f.read().strip())
+                if pid > 0:
+                    return pid
+            except (OSError, ValueError):
+                pass
+        await asyncio.sleep(poll_s)
+    return 0
+
+
+class _SpawnTracker:
+    """Mutable handles for one real-spawn test's teardown."""
+
+    def __init__(self, pid_path: str, *, label: str) -> None:
+        self.pid_path = pid_path
+        self.label = label
+        self.pid: int | None = None
+        self.task: asyncio.Task[Any] | None = None
+
+    async def wait_for_pid(self) -> int:
+        """Poll the pid file, register the captured pid, return it."""
+        pid = await _wait_for_pidfile(self.pid_path)
+        if pid:
+            self.pid = pid
+            _register_pid(pid, self.label, self.pid_path)
+        return pid
+
+    async def await_tool(self, timeout: float = 10.0) -> None:
+        """Grace-wait for the bash tool task to unwind on its own."""
+        task = self.task
+        assert task is not None, "await_tool before the tool task was set"
+        try:
+            await asyncio.wait_for(task, timeout=timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            if not task.done():
+                task.cancel()
+        except Exception:  # noqa: BLE001 — a tool error is the test's business
+            logger.debug("%s: bash tool raised during grace-wait", self.label)
+
+
+@contextlib.asynccontextmanager
+async def _spawn_teardown(pid_path: str, *, label: str):
+    """Yield a :class:`_SpawnTracker`; guarantee no leaked burner on exit.
+
+    Teardown order: SIGKILL the captured pid (if alive) → cancel the bash
+    task and wait ≤2s → unlink the pid file. Each step is best-effort and
+    isolated, because a failed assertion must never leak a live ``sleep``
+    into the next test. A task still unwinding after the cancel WARNs rather
+    than being swallowed silently.
+    """
+    tracker = _SpawnTracker(pid_path, label=label)
+    try:
+        yield tracker
+    finally:
+        if tracker.pid is not None and _pid_alive(tracker.pid):
+            try:
+                os.kill(tracker.pid, signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+        if tracker.task is not None and not tracker.task.done():
+            tracker.task.cancel()
+            try:
+                await asyncio.wait_for(tracker.task, timeout=2)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "%s: bash task still unwinding 2s after cancel; "
+                    "teardown continues",
+                    label,
+                )
+            except (asyncio.CancelledError, OSError):
+                pass
+        if os.path.exists(pid_path):
+            try:
+                os.unlink(pid_path)
+            except OSError:
+                pass
+
+
+@pytest.fixture
+def durable_registry():
+    """The REAL bash registry singleton wired to a REAL
+    :class:`BashSpawnRepository` over a fresh in-memory SQLite engine.
+
+    Writer + RAM buckets are restored on teardown. Yields
+    ``(bash_mod, registry, repo)``.
+    """
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, create_engine
+
+    from daemon.repositories.bash_spawn import BashSpawnRepository
+
+    bash_mod = importlib.import_module("daemon.tools.bash")
+    reg = bash_mod.get_bash_process_registry()
+    eng = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(eng)
+    repo = BashSpawnRepository(engine=eng)
+    prev_writer = reg.get_durable_writer()
+    prev_entries = dict(reg._entries)
+    reg._entries.clear()
+    reg.set_durable_writer(repo)
+    try:
+        yield bash_mod, reg, repo
+    finally:
+        reg.set_durable_writer(prev_writer)
+        reg._entries.clear()
+        reg._entries.update(prev_entries)
+        eng.dispose()
 
 
 # =============================================================================
@@ -1672,61 +1819,54 @@ async def test_terminate_instance_cleans_bash_registry(
 
 
 # =============================================================================
-# m8 characterization — setsid grandchild survives killpg (known limitation)
+# m8 supersession — setsid grandchild REAPED by stamp sweep (Phase 4)
 # =============================================================================
 #
-# D4 / approver note documents that ``killpg`` cannot reach a grandchild
-# which detached itself by calling ``setsid()`` — it sits in its own process
-# group as a new session leader. This test pins that boundary so a future
-# claim of "we fixed this" fails here and forces a re-evaluation.
-
+# Lineage: originally characterized as ``TestSetsidOrphanSurvivesCleanup``
+# (``test_setsid_orphan_survives_killpg``) which pinned the pre-feature
+# boundary that ``killpg`` cannot reach a setsid escapee. Phase 4 closes
+# that gap via the enumerated env-stamp sweep: the escapee carries
+# ``ENSEMBLE_BASH_TRACKING_ID`` in its env, so a process-table scan +
+# exact env match selects it and the TERM→grace→KILL ladder reaps it.
+#
+# The pinned invariant is now: setsid escapees ARE reaped where attribution
+# is possible (env readable). On platforms where env cannot be read
+# (macOS positive-only policy) the escapee is skipped + WARNING (never
+# kill-unverified) — that leg is asserted separately.
+#
 
 @pytest.mark.skipif(sys.platform == "win32", reason="setsid is Unix-only")
-class TestSetsidOrphanSurvivesCleanup:
-    """A grandchild that calls ``setsid()`` detaches into its own process
-    group — ``killpg`` on the bash tool's PGID cannot reach it.
+class TestSetsidOrphanReapedByStampSweep:
+    """Phase 4 supersession of ``TestSetsidOrphanSurvivesCleanup``.
 
-    Characterization test: if a future PR claims to fix this, this test
-    will fail and force a re-evaluation of the bash kill model.
+    A grandchild that calls ``setsid()`` detaches into its own process
+    group. Under Phase 4 it is reaped by the enumerated stamp sweep
+    because its env carries ``ENSEMBLE_BASH_TRACKING_ID``.
     """
 
     @pytest.mark.asyncio
-    async def test_setsid_orphan_survives_killpg(self, monkeypatch):
-        """Spawn a setsid grandchild, run cleanup, assert it survived.
-
-        The grandchild ``setsid bash -c 'echo $BASHPID > gc.pid; sleep 5'``
-        becomes a new session leader in its own process group. The bash
-        tool (running start_new_session=True) sits in a different PGID.
-        ``BashProcessRegistry.cleanup_instance`` calls
-        ``os.killpg(bash_shell_pgid, SIGKILL)`` which DOES NOT reach the
-        grandchild.
-
-        Critical: the grandchild MUST be SIGKILLed in teardown regardless
-        of which assertion path the test takes.
-        """
-        bash_mod = importlib.import_module("daemon.tools.bash")
+    async def test_setsid_orphan_reaped_by_stamp_sweep(
+        self, durable_registry, monkeypatch
+    ):
+        """Spawn a setsid grandchild, wire a durable registry, run
+        cleanup_instance, assert the escapee is dead (POSIX leg)."""
+        bash_mod, bash_reg, _repo = durable_registry
         bash = bash_mod.bash.coroutine  # type: ignore[attr-defined]
-        bash_reg = bash_mod.get_bash_process_registry()
+
+        # Make term grace tiny so the test is fast.
+        monkeypatch.setenv("ENSEMBLE_BASH_REAPER_TERM_GRACE_SECONDS", "0.1")
 
         instance_id = f"m8-setsid-{os.urandom(4).hex()}"
-
         gc_pid_fd, gc_pid_path = tempfile.mkstemp(
             prefix="m8-setsid-gc-", suffix=".pid"
         )
         os.close(gc_pid_fd)
 
-        orphan_pid: int | None = None
-        bash_task: asyncio.Task | None = None
-
-        try:
-            bash_task = asyncio.create_task(
+        async with _spawn_teardown(
+            gc_pid_path, label="m8-setsid-grandchild"
+        ) as spawn:
+            spawn.task = asyncio.create_task(
                 bash(
-                    # Use a Python fork+os.setsid() to detach into a NEW
-                    # session/process group, then exec sleep. ``setsid``
-                    # from coreutils is not guaranteed on every Unix
-                    # (macOS lacks it without brew), but Python's
-                    # ``os.setsid`` is POSIX-standard and works
-                    # everywhere.
                     command=textwrap.dedent(
                         f"""\
                         python3 -c '
@@ -1747,66 +1887,381 @@ class TestSetsidOrphanSurvivesCleanup:
                 )
             )
 
-            gc_alive = False
-            for _ in range(80):  # 80 * 50ms = 4s
-                if os.path.exists(gc_pid_path):
-                    try:
-                        with open(gc_pid_path, "r") as f:
-                            orphan_pid = int(f.read().strip())
-                            if orphan_pid > 0:
-                                gc_alive = True
-                                break
-                    except (OSError, ValueError):
-                        pass
-                await asyncio.sleep(0.05)
+            orphan_pid = await spawn.wait_for_pid()
+            assert orphan_pid, "setup failed: setsid grandchild not captured"
+            assert _pid_alive(orphan_pid), "setup failed: grandchild died early"
 
-            assert gc_alive and orphan_pid is not None, (
-                "Test setup failure: setsid grandchild pid not captured "
-                "in time."
-            )
-            assert _pid_alive(orphan_pid), (
-                "Test setup failure: setsid grandchild died before "
-                "cleanup could be tested."
-            )
-            _register_pid(orphan_pid, "m8-setsid-grandchild", instance_id)
+            assert instance_id in bash_reg._entries, "no registry entry"
 
-            assert instance_id in bash_reg._entries, (
-                "Test setup failure: bash registry has no entry for "
-                "instance_id."
-            )
+            # Give the durable row a moment to land (it is written at the
+            # spawn seam).
+            await asyncio.sleep(0.5)
 
             killed = await bash_reg.cleanup_instance(instance_id)
-            assert killed >= 1, (
-                "Bash cleanup should have killed at least the bash "
-                "shell's process group."
+            assert killed >= 1, "cleanup should have killed at least one group"
+
+            # Wait for the enumerated sweep's TERM grace + KILL.
+            await asyncio.sleep(1.0)
+
+            # POSIX leg: escapee reaped (where attribution possible). On
+            # darwin env is positive-only, so the documented contract is a
+            # fail-open skip — either outcome is accepted there (teardown
+            # still kills the escapee).
+            if sys.platform.startswith("linux"):
+                assert not _pid_alive(orphan_pid), (
+                    "setsid escapee should have been reaped by the stamp sweep"
+                )
+
+            await spawn.await_tool(timeout=10)
+
+
+class TestPathDTimeoutRaceEscapee:
+    """M4 (plan §3): a burner that setsid-detaches DURING the timeout
+    grace survives the timeout arm's own ``killpg`` (it is in a new
+    session/group) and is reaped by the NEXT cleanup point's
+    enumerated stamp sweep — WITHOUT any edit to the timeout arm
+    itself (constraint 3 / task 4.3)."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_race_escapee_reaped_by_next_sweep(
+        self, durable_registry, monkeypatch
+    ):
+        bash_mod, bash_reg, repo = durable_registry
+        bash = bash_mod.bash.coroutine  # type: ignore[attr-defined]
+
+        monkeypatch.setenv("ENSEMBLE_BASH_REAPER_TERM_GRACE_SECONDS", "0.1")
+
+        instance_id = f"m4-timeout-{os.urandom(4).hex()}"
+        gc_pid_fd, gc_pid_path = tempfile.mkstemp(
+            prefix="m4-escapee-", suffix=".pid"
+        )
+        os.close(gc_pid_fd)
+
+        async with _spawn_teardown(
+            gc_pid_path, label="m4-timeout-escapee"
+        ) as spawn:
+            spawn.task = asyncio.create_task(
+                bash(
+                    command=textwrap.dedent(
+                        f"""\
+                        python3 -c '
+                        import os
+                        pid = os.fork()
+                        if pid == 0:
+                            os.setsid()
+                            with open("{gc_pid_path}", "w") as f:
+                                f.write(str(os.getpid()))
+                            os.execlp("sleep", "sleep", "5")
+                        else:
+                            os.waitpid(pid, 0)
+                        '
+                        """
+                    ),
+                    instance_id=instance_id,
+                    timeout=30,
+                )
             )
 
-            await asyncio.sleep(0.5)
-            assert _pid_alive(orphan_pid), (
-                "Characterization FAIL: setsid grandchild was killed by "
-                "``os.killpg`` on the bash tool's PGID. This contradicts "
-                "the documented D4 limitation."
-            )
+            orphan_pid = await spawn.wait_for_pid()
+            assert orphan_pid, "setup failed: escapee not captured"
+            assert _pid_alive(orphan_pid), "setup failed: escapee died early"
 
-            try:
-                await asyncio.wait_for(bash_task, timeout=10)
-            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                if not bash_task.done():
-                    bash_task.cancel()
-        finally:
-            if orphan_pid is not None and _pid_alive(orphan_pid):
+            # The timeout arm's group kill (simulated, arm body untouched):
+            # killpg against the bash tool's own group cannot reach the
+            # setsid escapee — it is in a different session/group.
+            row = repo.list_open_by_instance(instance_id)
+            if row:
                 try:
-                    os.kill(orphan_pid, signal.SIGKILL)
+                    os.killpg(row[0].pgid, signal.SIGKILL)
                 except (ProcessLookupError, OSError):
                     pass
-            if bash_task is not None and not bash_task.done():
-                bash_task.cancel()
-                try:
-                    await asyncio.wait_for(bash_task, timeout=2)
-                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                    pass
-            if os.path.exists(gc_pid_path):
-                try:
-                    os.unlink(gc_pid_path)
-                except OSError:
-                    pass
+            # escapee survives the group kill (own session).
+            assert _pid_alive(orphan_pid), (
+                "escapee should survive the timeout-arm group kill"
+            )
+
+            # Give the durable row a moment to land (spawn seam).
+            await asyncio.sleep(0.5)
+
+            # NEXT cleanup point: terminal sweep reaps the escapee by stamp.
+            killed = await bash_reg.cleanup_instance(instance_id)
+            assert killed >= 1, "next sweep should have reaped the escapee"
+            await asyncio.sleep(1.0)
+
+            if sys.platform.startswith("linux"):
+                assert not _pid_alive(orphan_pid), (
+                    "timeout-race escapee should be reaped by the next sweep"
+                )
+            # darwin: positive-only env policy — skip accepted; teardown kills.
+
+            await spawn.await_tool(timeout=10)
+
+
+class TestPathCJobControlGroup:
+    """M3 (plan §3): ``set -m; burner &`` puts the burner in its OWN
+    process group (job control). The shutdown sweep's enumerated stamp
+    sweep reaps it — proven with a real process and teardown."""
+
+    @pytest.mark.asyncio
+    async def test_job_control_burner_reaped_by_shutdown_sweep(
+        self, durable_registry, monkeypatch
+    ):
+        from daemon.services.bash_spawn_reaper import (
+            sweep_open_rows_for_shutdown,
+        )
+
+        bash_mod, bash_reg, repo = durable_registry
+        bash = bash_mod.bash.coroutine  # type: ignore[attr-defined]
+
+        monkeypatch.setenv("ENSEMBLE_BASH_REAPER_TERM_GRACE_SECONDS", "0.1")
+
+        instance_id = f"m3-jobcontrol-{os.urandom(4).hex()}"
+        burner_pid_fd, burner_pid_path = tempfile.mkstemp(
+            prefix="m3-burner-", suffix=".pid"
+        )
+        os.close(burner_pid_fd)
+
+        async with _spawn_teardown(
+            burner_pid_path, label="m3-job-control-burner"
+        ) as spawn:
+            spawn.task = asyncio.create_task(
+                bash(
+                    command=textwrap.dedent(
+                        f"""\
+                        set -m
+                        python3 -c '
+                        import os, time
+                        with open("{burner_pid_path}", "w") as f:
+                            f.write(str(os.getpid()))
+                        time.sleep(5)
+                        ' &
+                        wait
+                        """
+                    ),
+                    instance_id=instance_id,
+                    timeout=30,
+                )
+            )
+
+            burner_pid = await spawn.wait_for_pid()
+            assert burner_pid, "setup failed: burner not captured"
+            assert _pid_alive(burner_pid), "setup failed: burner died early"
+
+            await asyncio.sleep(0.5)
+
+            # shutdown sweep: enumerated stamp sweep reaches the burner
+            # in its own job-control group.
+            closed = await sweep_open_rows_for_shutdown(repo)
+            assert closed >= 1, "shutdown sweep should have closed >= 1 row"
+            await asyncio.sleep(1.0)
+
+            if sys.platform.startswith("linux"):
+                assert not _pid_alive(burner_pid), (
+                    "job-control burner should be reaped by the shutdown sweep"
+                )
+            # darwin: positive-only env policy — skip accepted; teardown kills.
+
+            await spawn.await_tool(timeout=10)
+
+
+class TestPathADurableTombstoneReap:
+    """Plan task 2.2 acceptance: real-process Path A leg + the
+    sibling-alive skip leg, through the extended ``cleanup_instance``."""
+
+    @pytest.mark.asyncio
+    async def test_burner_reaped_by_cleanup_instance_after_tool_returns(
+        self, durable_registry, monkeypatch
+    ):
+        """M1 leg: bash spawns a same-group burner, the tool returns
+        exit 0 (no-hang pins unaffected), then ``cleanup_instance`` ⇒
+        burner DEAD + durable row reaped (Path A closed)."""
+        import re as _re
+
+        bash_mod, reg, repo = durable_registry
+        monkeypatch.delenv("ENSEMBLE_BASH_ORPHAN_REAPER", raising=False)
+        monkeypatch.setenv("ENSEMBLE_BASH_REAPER_TERM_GRACE_SECONDS", "0.5")
+        bash = bash_mod.bash.coroutine
+        instance_id = f"patha-{os.urandom(4).hex()}"
+
+        result = await bash(
+            command=(
+                'python3 -c "import time; time.sleep(60)" & echo '
+                "BURNER_PID=$!"
+            ),
+            instance_id=instance_id,
+            timeout=30,
+        )
+        # The tool returned while the burner lives (no-hang contract).
+        assert "EXIT CODE: 0" in result, f"unexpected result: {result[:200]}"
+        match = _re.search(r"BURNER_PID=(\d+)", result)
+        assert match, f"burner pid not echoed: {result[:200]}"
+        burner_pid = int(match.group(1))
+        _register_pid(burner_pid, "patha-burner", instance_id)
+        assert _pid_alive(burner_pid), "burner died before the sweep leg"
+
+        # Tombstone semantics: exactly one OPEN durable row; the RAM
+        # bucket is GONE (the success arm unregistered it — Path A).
+        open_rows = repo.list_open_by_instance(instance_id)
+        assert len(open_rows) == 1, (
+            f"expected exactly one open tombstone row, got "
+            f"{len(open_rows)}"
+        )
+        row = open_rows[0]
+        assert row.pgid > 1
+        assert row.daemon_pid == os.getpid()
+        assert row.boot_id  # stamped with the writer's boot id
+        assert instance_id not in reg._entries
+
+        # The NEXT cleanup point reaps the surviving group.
+        killed = await reg.cleanup_instance(instance_id)
+        await asyncio.sleep(0.3)  # allow the OS to reap the group
+
+        assert killed >= 1, "durable sweep reaped nothing"
+        assert not _pid_alive(burner_pid), (
+            f"Path A violation: burner pid {burner_pid} survived "
+            f"cleanup_instance with an open durable row"
+        )
+        assert repo.list_open_by_instance(instance_id) == []
+
+        reread = self._get_row(repo, row.id)
+        assert reread.reaped_at is not None
+        assert (reread.reaped_by or "").startswith("terminal-tier@")
+        assert reread.reap_reason is None  # successful kill: no refusal note
+
+    @pytest.mark.asyncio
+    async def test_sibling_alive_row_skipped_by_terminal_lane(
+        self, durable_registry, monkeypatch
+    ):
+        """M9 partial: a row owned by a LIVE FOREIGN daemon (holder
+        start ≤ row — D9-gated) is skipped by this lane: no signal
+        reaches the holder's group and the row stays OPEN."""
+        import subprocess
+
+        bash_mod, reg, repo = durable_registry
+        monkeypatch.delenv("ENSEMBLE_BASH_ORPHAN_REAPER", raising=False)
+        instance_id = f"patha-sib-{os.urandom(4).hex()}"
+
+        # The live foreign "daemon" (holder) in its own session so its
+        # pgid passes the hard guards and the D8 guard is what skips.
+        holder = subprocess.Popen(
+            ["sleep", "30"], start_new_session=True
+        )
+        _register_pid(holder.pid, "patha-sibling-holder", instance_id)
+        assert _pid_alive(holder.pid)
+
+        from datetime import datetime, timezone
+
+        from daemon.services.bash_spawn_reaper import CURRENT_BOOT_ID
+
+        row = repo.insert_open_row(
+            pid=holder.pid,
+            pgid=holder.pid,
+            start_time=None,
+            tracking_id=("f" * 32),
+            instance_id=instance_id,
+            command_sanitized="sleep 30",
+            boot_id=CURRENT_BOOT_ID,
+            daemon_pid=holder.pid,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        # Holder start ≤ row.created_at: the holder was spawned BEFORE
+        # the row was written ⇒ it IS a live sibling daemon ⇒ skip.
+
+        killed = await reg.cleanup_instance(instance_id)
+        await asyncio.sleep(0.2)
+
+        assert killed == 0, (
+            f"D8 violation: a live-sibling-owned row produced actions "
+            f"({killed})"
+        )
+        assert _pid_alive(holder.pid), (
+            f"D8 violation: the live sibling daemon's process "
+            f"(pid {holder.pid}) was signaled by a foreign sweep"
+        )
+        reread = self._get_row(repo, row.id)
+        assert reread.reaped_at is None, (
+            "sibling-owned row must stay OPEN (the owning daemon "
+            "reaps it at its own cleanup points)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_recycled_holder_row_processed_not_signaled_blindly(
+        self, durable_registry, monkeypatch
+    ):
+        """M9 partial (recycled holder): a row whose daemon_pid holder
+        started AFTER the row is a recycled pid ⇒ the sweep proceeds —
+        but the D9 start-time gate then REFUSES the kill (the young
+        group cannot be ours), so nothing is signaled and the row is
+        closed with the refusal reason (an ambiguous row is never
+        retried)."""
+        import subprocess
+
+        bash_mod, reg, repo = durable_registry
+        monkeypatch.delenv("ENSEMBLE_BASH_ORPHAN_REAPER", raising=False)
+        instance_id = f"patha-rec-{os.urandom(4).hex()}"
+
+        from datetime import datetime, timedelta, timezone
+
+        from daemon.services.bash_spawn_reaper import CURRENT_BOOT_ID
+
+        # Row written 60s ago; the "recycled holder" spawns NOW.
+        row = repo.insert_open_row(
+            pid=999123,
+            pgid=999123,
+            start_time=None,
+            tracking_id=("e" * 32),
+            instance_id=instance_id,
+            command_sanitized="sleep 30",
+            boot_id=CURRENT_BOOT_ID,
+            daemon_pid=999122,  # placeholder — replaced below
+            created_at=(
+                datetime.now(timezone.utc) - timedelta(seconds=60)
+            ).isoformat(),
+        )
+        holder = subprocess.Popen(
+            ["sleep", "30"], start_new_session=True
+        )
+        _register_pid(holder.pid, "patha-recycled-holder", instance_id)
+        self._set_row_pid(repo, row.id, holder.pid)
+
+        killed = await reg.cleanup_instance(instance_id)
+        await asyncio.sleep(0.2)
+
+        assert _pid_alive(holder.pid), (
+            "D9 violation: the too-young group of a recycled holder pid "
+            "was signaled"
+        )
+        assert killed == 1  # the row WAS processed (closed)
+        reread = self._get_row(repo, row.id)
+        assert reread.reaped_at is not None
+        assert (reread.reap_reason or "").startswith("refused:")
+
+    # ── helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _get_row(repo, row_id):
+        from sqlmodel import Session
+
+        from daemon.repositories.bash_spawn import BashSpawnRecord
+
+        with Session(repo.engine) as session:
+            return session.get(BashSpawnRecord, row_id)
+
+    @staticmethod
+    def _set_row_pid(repo, row_id, pid):
+        """Point the row at the real holder (spawned after row write).
+
+        ``daemon_pid`` is set too: the LIVE holder that started after
+        the row is the recycled-pid case the D8 guard must proceed
+        through (its start > row.created_at)."""
+        from sqlmodel import Session
+
+        from daemon.repositories.bash_spawn import BashSpawnRecord
+
+        with Session(repo.engine) as session:
+            db_row = session.get(BashSpawnRecord, row_id)
+            db_row.pid = pid
+            db_row.pgid = pid
+            db_row.daemon_pid = pid
+            session.add(db_row)
+            session.commit()
