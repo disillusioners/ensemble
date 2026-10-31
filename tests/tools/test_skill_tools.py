@@ -137,6 +137,15 @@ def skill_tools():
     manager._skill_store_service = None
     manager._skill_job_dispatcher = None
     manager._skill_metrics_service = None
+    # Phase-3 (project-skill-loader): the file-skill manager slots
+    # must ALSO be explicitly None. A plain MagicMock auto-materializes
+    # every attribute, which would fake a wired file source and route
+    # skill_search/skill_list into the A9 file-only branch instead of
+    # the soft-fail branch this suite pins. A REAL manager (pre-Phase-4
+    # wiring) simply lacks the attributes — None is the faithful shape.
+    manager._project_skill_source = None
+    manager._project_skill_file_repository = None
+    manager._project_skill_usage_repository = None
 
     tools_list = create_skill_tools(manager, _FIXTURE_INSTANCE_ID)
     return {getattr(t, "name", None): t for t in tools_list}

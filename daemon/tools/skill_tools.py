@@ -33,12 +33,22 @@ Tools produced
   ``SkillMetricsService.record_feedback``.
 """
 
+import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING
+import os
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.tools import tool
 
+from daemon.repositories.project_skill_file.models import (
+    ProjectSkillUsageRecord,
+)
+from daemon.services.project_skill_source.model import is_pf_address
+from daemon.services.project_skill_source.service import (
+    ProjectSkillBodyUnavailable,
+)
+from daemon.services.skill_search_service import _bm25_score, _tokenize
 from ._tool_registry import register_tool_category
 
 if TYPE_CHECKING:
@@ -83,6 +93,170 @@ def _json_default(obj):
     if isinstance(d, dict):
         return d
     return str(obj)
+
+
+# ============================================================
+# File-backed project-skill surface (Phase-3, project-skill-loader)
+# ============================================================
+#
+# Manager attributes consumed (all None-tolerant; Phase-4 construction
+# wiring populates them — names documented here are the Phase-4
+# contract):
+#
+# * ``manager._project_skill_source``          — ProjectSkillSourceService
+# * ``manager._project_skill_file_repository`` — ProjectSkillFileRepository
+#   (invalid-rows mirror for ``skill_list``; ``skill.json`` D-Q2 rows)
+# * ``manager._project_skill_usage_repository``— ProjectSkillUsageRecordRepository
+#   (D2 companion table — metrics-only ``skill_feedback`` on ``pf:``)
+#
+# Before Phase-4 wiring every attribute is absent ⇒ all file-skill
+# branches below soft-fail exactly like the DB branches (A9
+# None-tolerance, approver P4).
+
+#: Uniform refusal wording for every evolution-facing surface handed a
+#: ``pf:`` address (P7: file skills evolve via git PRs only; mirrors
+#: the ``skill_fix`` tool refusal — architect A14).
+PF_REFUSAL_TEMPLATE = (
+    "File-backed skills evolve via git PRs against `.agents/<ns>/skills/` — "
+    "{action} does not apply to `pf:` addresses (P7)."
+)
+
+
+def _pf_refusal(action: str) -> str:
+    return f"⛔ {PF_REFUSAL_TEMPLATE.format(action=action)}"
+
+
+def _pf_skill_payload(file_skill: Any) -> dict[str, Any]:
+    """JSON-safe payload for one file skill (search/view surfaces).
+
+    Mirrors the DB ``skill.to_dict()`` shape (name/description/content
+    present) plus the additive file keys (``source`` / ``address`` /
+    ``digest`` / namespace / paths). ``content`` is the FRESH disk body
+    attached by ``corpus_for``/``lookup_explicit`` — never cached
+    (FR-P1-3).
+    """
+    manifest = getattr(file_skill, "manifest", None) or {}
+    return {
+        "id": getattr(file_skill, "id", None),
+        "name": getattr(file_skill, "name", ""),
+        "description": getattr(file_skill, "description", ""),
+        "content": getattr(file_skill, "content", ""),
+        "category": getattr(file_skill, "category", None),
+        "version": str(manifest.get("version", "") or ""),
+        "tiers": manifest.get("tiers", []),
+        "namespace": getattr(file_skill, "namespace", ""),
+        "address": getattr(file_skill, "address", ""),
+        "project_id": getattr(file_skill, "project_id", None),
+        "root_path": getattr(file_skill, "root_path", ""),
+        "body_path": getattr(file_skill, "body_path", ""),
+        "digest": getattr(file_skill, "digest", ""),
+        "shadows": list(getattr(file_skill, "shadows", []) or []),
+        "source": "project-file",
+    }
+
+
+async def _file_only_bm25_search(
+    file_source: Any,
+    query: str,
+    instance_id: str,
+    limit: int,
+    project_id: str | None,
+) -> dict[str, Any]:
+    """A9 pinned degraded semantics: file-only search when the DB stack
+    is absent (mode M10 shape, ``manager._skill_search_service is
+    None``).
+
+    Stage-1 BM25 over the FILE corpus ONLY — same tokenizer, same
+    scorer (imported from :mod:`daemon.services.skill_search_service`
+    so the two can never drift) — ``top_k = limit``, NO stage 2, NO
+    stage-3 LLM. Deterministic, zero LLM cost, works with no evolution
+    config. Results use the standard ``{"injected", "low_match"}``
+    shape with ``source: "project-file"`` on every entry plus a
+    ``degraded: "file_only"`` marker on the result dict.
+    """
+    from collections import Counter
+
+    empty = {"injected": [], "low_match": [], "degraded": "file_only"}
+    try:
+        resolution = await file_source.resolve_active_project(
+            instance_id=instance_id,
+            explicit_project_id=project_id,
+        )
+    except Exception as exc:  # A8: broken file source ⇒ empty, no raise
+        logger.warning(
+            "[skill_search] file-only resolution failed: %s — empty result",
+            exc,
+        )
+        return empty
+    scope_pid = getattr(resolution, "project_id", None)
+    roots = [r for r in (getattr(resolution, "roots", None) or []) if r]
+    if not scope_pid or getattr(resolution, "refused", False) or not roots:
+        return empty
+
+    corpus: list[Any] = []
+    for root in roots:
+        try:
+            corpus.extend(await file_source.corpus_for(scope_pid, root) or [])
+        except Exception as exc:  # per-root resilience (A8 layer 1)
+            logger.warning(
+                "[skill_search] file-only corpus failed for root=%s: %s",
+                root,
+                exc,
+            )
+    if not corpus:
+        return empty
+
+    query_tokens = _tokenize(query)
+    if not query_tokens:
+        return empty
+    tokenized = []
+    term_freqs = []
+    for skill in corpus:
+        tokens = _tokenize(
+            f"{getattr(skill, 'name', '') or ''} "
+            f"{getattr(skill, 'description', '') or ''} "
+            f"{getattr(skill, 'content', '') or ''}"
+        )
+        tokenized.append(tokens)
+        term_freqs.append(Counter(tokens))
+    df: dict[str, int] = {}
+    for tokens in tokenized:
+        for term in set(tokens) & set(query_tokens):
+            df[term] = df.get(term, 0) + 1
+    n_docs = len(tokenized)
+    avgdl = sum(len(t) for t in tokenized) / n_docs
+    scored: list[tuple[float, Any]] = []
+    for skill, tokens, freqs in zip(corpus, tokenized, term_freqs):
+        score = _bm25_score(
+            query_tokens=query_tokens,
+            doc_tokens=tokens,
+            doc_freqs=df,
+            total_docs=n_docs,
+            avg_doc_len=avgdl,
+        )
+        if score > 0:
+            scored.append((float(score), skill))
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    top = scored[: max(1, limit)]
+    injected = [
+        {
+            "skill": _pf_skill_payload(skill),
+            "score": score,
+            "source": "project-file",
+        }
+        for score, skill in top
+    ]
+    low_match = [
+        {
+            "name": getattr(skill, "name", ""),
+            "score": score,
+            "description": getattr(skill, "description", ""),
+            "source": "project-file",
+            "address": getattr(skill, "address", ""),
+        }
+        for score, skill in scored[max(1, limit):][:3]
+    ]
+    return {"injected": injected, "low_match": low_match, "degraded": "file_only"}
 
 
 def create_skill_tools(
@@ -138,6 +312,281 @@ def create_skill_tools(
             logger.debug("agent_id lookup failed in dynamic-skill tool: %s", e)
         return None
 
+    # --------------------------------------------------------
+    # File-backed project-skill helpers (Phase-3). All manager
+    # attributes are None-tolerant — pre-Phase-4 wiring they are
+    # absent and every branch below soft-fails (A9 / approver P4).
+    # --------------------------------------------------------
+
+    def _get_file_source() -> Any:
+        """The file-backed project skill source (Phase-4 wires
+        ``manager._project_skill_source``; ``None`` ⇒ file surface
+        soft-fails)."""
+        return getattr(manager, "_project_skill_source", None)
+
+    def _get_pf_file_repo() -> Any:
+        """``project_skill_files`` mirror repo (invalid-rows surface for
+        ``skill_list``). Phase-4 wires
+        ``manager._project_skill_file_repository``."""
+        return getattr(manager, "_project_skill_file_repository", None)
+
+    def _get_pf_usage_repo() -> Any:
+        """D2 companion usage repo (metrics-only ``skill_feedback`` on
+        ``pf:``). Phase-4 wires
+        ``manager._project_skill_usage_repository``."""
+        return getattr(manager, "_project_skill_usage_repository", None)
+
+    async def _resolve_pf_scope(explicit_project_id: str | None = None):
+        """Resolve the file-skill scope through the SANCTIONED scope
+        reader (A13). Returns ``(project_id, roots)`` or ``(None, [])``.
+
+        ``skill_view`` passes NO explicit hint (A13: caller-supplied
+        project hints are forbidden there); the search/list surfaces
+        pass the instance-derived ``project_id`` which may only
+        CONFIRM (A6), never widen.
+        """
+        file_source = _get_file_source()
+        if file_source is None:
+            return (None, [])
+        try:
+            resolution = await file_source.resolve_active_project(
+                instance_id=current_instance_id,
+                explicit_project_id=explicit_project_id,
+            )
+        except Exception as e:
+            logger.warning(
+                "[dynamic-skill] project-scope resolution failed: %s — "
+                "file skills invisible for this call",
+                e,
+            )
+            return (None, [])
+        if getattr(resolution, "refused", False):
+            return (None, [])
+        pid = getattr(resolution, "project_id", None)
+        roots = [r for r in (getattr(resolution, "roots", None) or []) if r]
+        return (pid or None, roots)
+
+    async def _ensure_pf_index(roots: list[str], pid: str) -> None:
+        """``lookup_explicit`` searches only already-indexed roots —
+        ensure_index FIRST (frozen Phase-3 design note)."""
+        file_source = _get_file_source()
+        for root in roots:
+            try:
+                await file_source.ensure_index(root, pid)
+            except Exception as e:
+                logger.warning(
+                    "[dynamic-skill] ensure_index failed for root=%s: %s",
+                    root,
+                    e,
+                )
+
+    async def _render_pf_view(file_skill: Any, file_source: Any, pid: str) -> str:
+        """Render the file-skill view document (task 3 + task 7).
+
+        Header metadata (name / version / category / tiers / namespace
+        / address / body_path / digest + S5 scope fields), body FROM
+        FILE (fresh every call — no cache), ``## Loads`` (each
+        dependency's ``pf:`` address + one-line description, Q6 v1)
+        and ``## Assets`` sections. Uniform 8000-char display cap with
+        the body_path + ``read_file`` hint (file skills have real
+        paths); the BODY ON DISK stays full and the INJECTION path
+        renders it uncapped (FR-P5-3 parity).
+        """
+        manifest = getattr(file_skill, "manifest", None) or {}
+        root = getattr(file_skill, "root_path", "") or ""
+        body_path = getattr(file_skill, "body_path", "") or ""
+        abs_body = os.path.join(root, body_path) if root and body_path else ""
+        lines: list[str] = []
+        lines.append(f"# {getattr(file_skill, 'name', '<unknown>')}")
+        lines.append("")
+        lines.append(f"- address: {getattr(file_skill, 'address', '')}")
+        lines.append(f"- id: {getattr(file_skill, 'id', '')}")
+        lines.append(f"- namespace: {getattr(file_skill, 'namespace', '')}")
+        lines.append(f"- project_id: {getattr(file_skill, 'project_id', '')}")
+        lines.append(f"- root_path: {root}")
+        lines.append(f"- version: {str(manifest.get('version', '') or '?')}")
+        lines.append(
+            f"- category: {getattr(file_skill, 'category', None) or '(none)'}"
+        )
+        tiers = manifest.get("tiers", [])
+        lines.append(f"- tiers: {tiers if tiers else '(none)'}")
+        lines.append(f"- body_path: {abs_body or body_path}")
+        lines.append(f"- digest: {getattr(file_skill, 'digest', '')}")
+        lines.append("- source: project-file")
+        lines.append(
+            "- evolves via: git PR against `.agents/<ns>/skills/` "
+            "(skill_fix does not apply, P7)"
+        )
+        description = getattr(file_skill, "description", "") or ""
+        if description:
+            lines.append("")
+            lines.append(f"> {description}")
+        content = getattr(file_skill, "content", "") or ""
+        if content:
+            lines.append("")
+            lines.append("## Content")
+            lines.append("")
+            if len(content) > 8000:
+                lines.append(content[:8000])
+                lines.append("")
+                lines.append(
+                    "... (truncated at 8000 chars)"
+                )
+            else:
+                lines.append(content)
+        # ---- ## Loads (task 7 / Q6 v1) ----------------------------
+        loads = manifest.get("loads") or []
+        if loads:
+            lines.append("")
+            lines.append("## Loads")
+            lines.append("")
+            ns = getattr(file_skill, "namespace", "")
+            for dep in loads:
+                dep_address = f"pf:{ns}:{dep}"
+                dep_desc = ""
+                try:
+                    dep_skill = await file_source.lookup_explicit(dep, pid)
+                    if dep_skill is not None:
+                        dep_desc = getattr(dep_skill, "description", "") or ""
+                except Exception as e:
+                    logger.debug(
+                        "[skill_view] load-description lookup failed for "
+                        "%s: %s",
+                        dep_address,
+                        e,
+                    )
+                lines.append(
+                    f"- {dep_address}"
+                    f"{' — ' + dep_desc if dep_desc else ''}"
+                )
+            lines.append(
+                "    (explicit load_skill resolves depth-0 only — loads "
+                "are pointers, never auto-injected)"
+            )
+        assets = manifest.get("assets") or []
+        if assets:
+            lines.append("")
+            lines.append("## Assets")
+            lines.append("")
+            for asset in assets:
+                lines.append(f"- {os.path.join(root, str(asset))}")
+        if abs_body:
+            lines.append("")
+            lines.append(
+                f"Full body on disk: {abs_body} — read it via the "
+                "read_file tool for the untruncated document."
+            )
+        return "\n".join(lines)
+
+    async def _feedback_pf_skill(
+        skill_id: str,
+        applied: bool | None,
+        usefulness: int | None,
+        note: str,
+        improvement_note: str,
+    ) -> str:
+        """D2 companion metrics-only path (task 6, P7).
+
+        ``pf:`` addresses (and the ``pf-<hex>`` pseudo-ids explicit
+        injection renders) record feedback into
+        ``project_skill_usage_records`` — NO lineage rows, NO
+        evolution dispatch, NO ``SkillMetricsService`` call. Works
+        with the DB evolution stack absent (A9 degraded mode). The
+        companion table has no dedicated usefulness/improvement
+        columns (D2 migration is frozen), so those fields fold into
+        ``feedback_note`` — the usage signal survives; nothing else
+        is written.
+        """
+        if usefulness is not None:
+            if not isinstance(usefulness, int) or isinstance(usefulness, bool):
+                return (
+                    f"ERROR: skill_feedback 'usefulness' must be an int "
+                    f"1-10, got {type(usefulness).__name__}: {usefulness!r}"
+                )
+            if usefulness < 1 or usefulness > 10:
+                return (
+                    f"ERROR: skill_feedback 'usefulness' must be in "
+                    f"range 1-10, got {usefulness}"
+                )
+        usage_repo = _get_pf_usage_repo()
+        if usage_repo is None:
+            return (
+                "Project-skill usage repository not yet available. "
+                "File-skill feedback (metrics-only) will be enabled "
+                "in a later phase."
+            )
+        pid, roots = await _resolve_pf_scope(_get_project_id())
+        file_source = _get_file_source()
+        pseudo_id: str | None = None
+        address: str = skill_id
+        if skill_id.startswith("pf:"):
+            if file_source is None or not pid or not roots:
+                return (
+                    f"ERROR: skill_feedback: no project scope resolved "
+                    f"for file skill '{skill_id}' — metrics cannot be "
+                    "recorded (fail-closed)."
+                )
+            await _ensure_pf_index(roots, pid)
+            try:
+                fs = await file_source.lookup_explicit(skill_id, pid)
+            except Exception as e:
+                return f"ERROR: skill_feedback failed: {e}"
+            if fs is None:
+                return (
+                    f"ERROR: skill_feedback: no file skill with address "
+                    f"'{skill_id}' in this project scope."
+                )
+            pseudo_id = str(getattr(fs, "id", "") or "")
+            address = getattr(fs, "address", skill_id)
+        else:
+            # The ``pf-<hex16>`` pseudo-id the injection path renders.
+            pseudo_id = skill_id
+        parts: list[str] = []
+        if note:
+            parts.append(str(note))
+        if improvement_note:
+            parts.append(f"improvement: {improvement_note}")
+        if usefulness is not None:
+            parts.append(f"usefulness: {usefulness}/10")
+        note_composite: str | None = " | ".join(parts) or None
+        project_id = pid or _get_project_id() or ""
+        agent_id = _get_agent_id() or ""
+        try:
+            latest = await asyncio.to_thread(
+                usage_repo.get_latest_for_skill_instance,
+                pseudo_id,
+                current_instance_id,
+            )
+            if latest is None:
+                row = ProjectSkillUsageRecord(
+                    skill_id=pseudo_id,
+                    project_id=project_id,
+                    instance_id=current_instance_id,
+                    agent_id=agent_id,
+                    selected=False,
+                    applied=False,
+                    feedback_applied=applied,
+                    feedback_note=note_composite,
+                )
+                await asyncio.to_thread(usage_repo.insert, row)
+            else:
+                await asyncio.to_thread(
+                    usage_repo.update_feedback,
+                    latest.id,
+                    applied,
+                    note_composite,
+                )
+        except Exception as e:
+            return f"ERROR: skill_feedback failed: {e}"
+        usefulness_line = (
+            f" Usefulness: {usefulness}/10." if usefulness is not None else ""
+        )
+        return (
+            f"\u2705 Feedback recorded (metrics-only) for file skill "
+            f"{address}. Applied={applied}.{usefulness_line} No lineage "
+            "rows, no evolution dispatch (P7)."
+        )
+
     @register_tool_category("dynamic-skill")
     @tool
     async def skill_search(query: str, limit: int = 10) -> str:
@@ -151,6 +600,26 @@ def create_skill_tools(
         project_id = _get_project_id()
         service = getattr(manager, "_skill_search_service", None)
         if service is None:
+            # A9 degraded-mode guard (task 10): DB stack absent but a
+            # file source IS available ⇒ answer file-only (BM25-only,
+            # standard shape + ``degraded: "file_only"`` marker) instead
+            # of the blanket "not yet available". Both absent ⇒ soft-fail
+            # as today.
+            file_source = _get_file_source()
+            if file_source is not None:
+                try:
+                    result = await _file_only_bm25_search(
+                        file_source,
+                        query,
+                        current_instance_id,
+                        limit,
+                        project_id,
+                    )
+                    return json.dumps(
+                        result, default=_json_default, indent=2
+                    )
+                except Exception as e:
+                    return f"ERROR: skill_search failed: {e}"
             return (
                 "Skill search service not yet available. "
                 "Search will be enabled in a later phase."
@@ -161,6 +630,13 @@ def create_skill_tools(
                 project_id=project_id,
                 max_results=limit,
                 agent_id=_get_agent_id(),
+                # ACTIVATION (Phase-3, project-skill-loader): threading
+                # the closure's ``current_instance_id`` turns the
+                # Phase-2 fusion from dark to agent-lane-LIVE — the
+                # service's scope resolver derives the caller's project
+                # from it (A6/A13); ``None`` (pre-Phase-3) kept the file
+                # corpus invisible on every tool call.
+                instance_id=current_instance_id,
             )
             return json.dumps(result, default=_json_default, indent=2)
         except Exception as e:
@@ -173,6 +649,20 @@ natural-language query. Delegates to
 prefilter → embedding re-rank → LLM selection) — and returns the
 standard ``{"injected": [...], "low_match": [...]}`` payload as a
 JSON string.
+
+PROJECT-FILE FUSION (Phase-3 activation): the tool threads its
+closure ``current_instance_id`` into ``search(instance_id=...)`` so
+the service's sanctioned scope resolver derives the caller's project
+— file-backed skills (``.agents/*/skills/`` canon) fuse into the
+corpus with ``source: "project-file"`` entries. No instance-derived
+project scope ⇒ the file corpus is invisible for that call (DB
+results unaffected).
+
+DEGRADED FILE-ONLY MODE (A9): when the DB search service is absent
+but a file source is wired, the tool answers file-only — stage-1
+BM25 over the FILE corpus (same tokenizer), ``top_k = limit``, no
+stage 2, no stage-3 LLM — in the standard shape with a
+``degraded: "file_only"`` marker on the result dict.
 
 Args:
     query: Natural-language query to match against active skills.
@@ -219,33 +709,134 @@ Returns:
         """
         project_id = _get_project_id()
         service = getattr(manager, "_skill_store_service", None)
-        if service is None:
+        file_source = _get_file_source()
+        if service is None and file_source is None:
             return (
                 "Skill store service not yet available. "
                 "List will be enabled in a later phase."
             )
-        try:
-            items, total = await service.list_skills(
-                project_id=project_id, active_only=active_only, limit=100
-            )
-            if category is not None:
-                items = [it for it in items if it.get("category") == category]
-            lines = [f"Skills ({len(items)} of {total} total):"]
-            for it in items:
-                skill_id = it.get("id", "")
-                short_id = skill_id[:8] if isinstance(skill_id, str) else "????????"
-                name = it.get("name", "")
-                cat = it.get("category", "")
-                status = it.get("status", "")
-                lines.append(
-                    f"- [{short_id}] {name} — {cat} — {status}"
+        lines: list[str] = []
+        if service is not None:
+            try:
+                items, total = await service.list_skills(
+                    project_id=project_id, active_only=active_only, limit=100
                 )
-            return "\n".join(lines)
-        except Exception as e:
-            return f"ERROR: skill_list failed: {e}"
+                if category is not None:
+                    items = [it for it in items if it.get("category") == category]
+                lines.append(f"Skills ({len(items)} of {total} total):")
+                for it in items:
+                    skill_id = it.get("id", "")
+                    short_id = skill_id[:8] if isinstance(skill_id, str) else "????????"
+                    name = it.get("name", "")
+                    cat = it.get("category", "")
+                    status = it.get("status", "")
+                    lines.append(
+                        f"- [{short_id}] {name} — {cat} — {status} — source: db"
+                    )
+            except Exception as e:
+                return f"ERROR: skill_list failed: {e}"
+        # ---- File-backed project skills (task 4) ------------------
+        # A9: when the DB store is absent but a file source exists,
+        # the file section is the WHOLE answer (file-only list) rather
+        # than the blanket "not yet available".
+        if file_source is not None:
+            try:
+                pid, roots = await _resolve_pf_scope(project_id)
+                file_lines: list[str] = []
+                if pid and roots:
+                    await _ensure_pf_index(roots, pid)
+                    by_ns: dict[str, list[Any]] = {}
+                    for root in roots:
+                        try:
+                            for fs in await file_source.corpus_for(pid, root) or []:
+                                if category is not None and (
+                                    getattr(fs, "category", None) != category
+                                ):
+                                    continue
+                                by_ns.setdefault(
+                                    getattr(fs, "namespace", ""), []
+                                ).append(fs)
+                        except Exception as e:  # per-root resilience
+                            logger.warning(
+                                "[skill_list] corpus failed for root=%s: %s",
+                                root,
+                                e,
+                            )
+                    # D-P4 same-name precedence within the file corpus:
+                    # first contributing root wins (mirrors the search
+                    # seam's dedupe rule).
+                    seen_names: set[str] = set()
+                    total_files = 0
+                    for ns in sorted(by_ns):
+                        for fs in by_ns[ns]:
+                            name_key = (
+                                str(getattr(fs, "name", "") or "")
+                                .strip()
+                                .lower()
+                            )
+                            if name_key and name_key in seen_names:
+                                continue
+                            if name_key:
+                                seen_names.add(name_key)
+                            total_files += 1
+                            file_lines.append(
+                                f"- [{ns}] {getattr(fs, 'address', '')} — "
+                                f"{getattr(fs, 'category', None) or '(no category)'}"
+                                f" — v{getattr(fs, 'version', '') or '?'} — "
+                                "source: project-file"
+                            )
+                    header = (
+                        f"Project-file skills ({total_files} in "
+                        f"{len(by_ns)} namespaces):"
+                    )
+                    # Q7 fail-loud: invalid entries surfaced with
+                    # reasons (indexed-as-listed mirror, D-Q2).
+                    invalid_lines: list[str] = []
+                    pf_file_repo = _get_pf_file_repo()
+                    if pf_file_repo is not None:
+                        try:
+                            rows = await asyncio.to_thread(
+                                pf_file_repo.list_by_project, pid
+                            )
+                            for row in rows or []:
+                                if getattr(row, "valid", True):
+                                    continue
+                                invalid_lines.append(
+                                    f"- {getattr(row, 'address', '')} — "
+                                    f"invalid: {getattr(row, 'last_error', '')}"
+                                )
+                        except Exception as e:
+                            invalid_lines.append(
+                                f"- (invalid-row scan failed: {e})"
+                            )
+                    if file_lines or not lines:
+                        lines.append("")
+                        lines.append(header)
+                        lines.extend(file_lines)
+                    if invalid_lines:
+                        lines.append("")
+                        lines.append(
+                            f"Invalid project-file skills ({len(invalid_lines)}, "
+                            "excluded from corpus):"
+                        )
+                        lines.extend(invalid_lines)
+            except Exception as e:
+                logger.warning(
+                    "[skill_list] project-file section failed: %s", e
+                )
+        return "\n".join(lines)
 
     skill_list._full_doc_ = """\
 List skills in the active project scope (project + global overlay).
+
+FILE SKILLS (Phase-3): file-backed project skills are listed
+alongside DB skills — namespace-grouped ``[<ns>] pf:<ns>:<name>``
+rows tagged ``source: project-file``. Invalid entries (failed
+index-time validation) are surfaced with reasons under an
+"Invalid project-file skills" section (Q7 fail-loud visibility) and
+are excluded from the search corpus. When the DB store is absent
+but a file source is wired, the file section is the whole answer
+(A9 file-only mode) instead of a blanket "not yet available".
 
 Delegates to :meth:`SkillStoreService.list_skills`, which returns a
 metadata-only projection (``id``, ``name``, ``description``, ``category``,
@@ -283,10 +874,53 @@ Returns:
         """View a skill's full body + lineage graph (delegates to skill_store_service).
 
         Args:
-            skill_id: The skill's UUID4 identifier.
+            skill_id: The skill's UUID4 identifier OR a ``pf:<ns>:<name>``
+                project-file address.
         """
+        # ---- File-skill branch (task 3) ---------------------------
+        # ``pf:`` addresses never touch the DB store. A13: resolution
+        # goes through the SANCTIONED resolver(current_instance_id) —
+        # NO caller-supplied project hint.
+        if is_pf_address(skill_id):
+            file_source = _get_file_source()
+            if file_source is None:
+                return (
+                    "Project skill source not yet available. "
+                    "File-skill views will be enabled in a later phase."
+                )
+            try:
+                pid, roots = await _resolve_pf_scope()
+                if not pid or not roots:
+                    return (
+                        f"ERROR: skill_view: no project scope resolved for "
+                        f"file skill '{skill_id}' — file skills are "
+                        "invisible without project context (fail-closed)."
+                    )
+                await _ensure_pf_index(roots, pid)
+                file_skill = await file_source.lookup_explicit(skill_id, pid)
+            except ProjectSkillBodyUnavailable as exc:
+                # Task 9 fail-closed: deleted/corrupt body between
+                # index and view — never a stale body, never empty.
+                return (
+                    f"ERROR: skill_view: body unreadable: {exc.reason}; "
+                    "re-index scheduled."
+                )
+            except Exception as e:
+                return f"ERROR: skill_view failed: {e}"
+            if file_skill is None:
+                return (
+                    f"ERROR: skill_view: no file skill with address "
+                    f"'{skill_id}' in this project scope."
+                )
+            try:
+                return await _render_pf_view(file_skill, file_source, pid)
+            except Exception as e:
+                return f"ERROR: skill_view failed: {e}"
+        # ---- DB branch (unchanged behavior) -----------------------
         service = getattr(manager, "_skill_store_service", None)
         if service is None:
+            # A9: DB store absent + file source available ⇒ pf:-shaped
+            # ids were handled above; a UUID here has nothing to serve.
             return (
                 "Skill store service not yet available. "
                 "View will be enabled in a later phase."
@@ -355,6 +989,20 @@ Returns:
     skill_view._full_doc_ = """\
 View a single skill's full body plus its lineage graph.
 
+FILE SKILLS (Phase-3): ``skill_id`` may be a ``pf:<ns>:<name>``
+address. Resolution goes through the sanctioned scope resolver on
+the CALLING INSTANCE (A13 — no caller-supplied project hint). The
+view renders header metadata (name / version / category / tiers /
+namespace / address / body_path / digest / project scope), the body
+FRESH FROM DISK (never cached), ``## Loads`` (each dependency's
+``pf:`` address + one-line description; explicit loads resolve
+depth-0 only) and ``## Assets`` sections. The displayed body keeps
+the uniform 8000-char cap; file skills append the real
+``body_path`` + a ``read_file`` hint (the injection path renders
+the body UNCAPPED — FR-P5-3 parity). A missing/corrupt body fails
+closed ("body unreadable: <reason>; re-index scheduled") — never a
+stale body, never empty.
+
 Bundles :meth:`SkillStoreService.view_skill` into a Markdown
 document the agent can read directly. The service returns
 ``{"skill": {...}, "lineage": {"parents": [...], "children": [...]}}``;
@@ -396,6 +1044,14 @@ Returns:
             content: The skill body (markdown / instructions).
             category: Free-form category string. Defaults to "workflow".
         """
+        # FR-P7-4 clause 2 (task 5): skill_create MUST NOT accept a
+        # ``source: project-file`` body. VACUITY today: the signature
+        # has NO ``source`` parameter. INVARIANT (pinned): any future
+        # signature change must keep refusing file-skill sources —
+        # a ``pf:``-shaped name is refused here with the same git-PR
+        # guidance the skill_fix refusal carries.
+        if is_pf_address(name):
+            return _pf_refusal("skill_create")
         project_id = _get_project_id()
         service = getattr(manager, "_skill_store_service", None)
         if service is None:
@@ -435,6 +1091,13 @@ Returns:
     skill_create._full_doc_ = """\
 Create a new skill row in the active project (or as a global skill when
 no project context is resolved).
+
+FR-P7-4 CLAUSE 2 (Phase-3, pinned): this tool does NOT accept a
+``source: project-file`` body — the signature has no ``source``
+parameter (vacuously true today). INVARIANT: any future signature
+change must keep refusing file-skill sources; a ``pf:``-shaped
+``name`` is refused here with the same git-PR guidance
+``skill_fix`` carries.
 
 Delegates to :meth:`SkillStoreService.create_skill`, which writes the
 ``skills`` row via :meth:`SkillRepository.create` and then triggers a
@@ -494,6 +1157,12 @@ Note:
             issue_description: Plain-language description of the issue.
             suggested_fix: Optional proposed change.
         """
+        # P7 refusal (task 5): file-backed skills evolve via git PRs —
+        # the evolution dispatcher is NEVER invoked for a ``pf:``
+        # address (mirrored on the A14 surfaces: skill_analyze /
+        # skill_evolve / skill_get_metrics + REST POST /{id}/fix).
+        if is_pf_address(skill_id):
+            return _pf_refusal("skill_fix")
         project_id = _get_project_id()
         dispatcher = getattr(manager, "_skill_job_dispatcher", None)
         dispatch_error: str | None = None
@@ -599,6 +1268,12 @@ Note:
     skill_fix._full_doc_ = """\
 Report a skill defect into the skill-evolution pipeline (GATED dispatch).
 
+P7 REFUSAL (Phase-3): a ``pf:<ns>:<name>`` address is REFUSED with
+git-PR guidance ("File-backed skills evolve via git PRs against
+`.agents/<ns>/skills/` — skill_fix does not apply (P7)") BEFORE any
+dispatcher access — the skill-keeper is never invoked for file
+skills.
+
 DISPATCH BEHAVIOR (corrected 2026-10-22 — the earlier "record-only"
 wording was wrong): when the skill-evolution lane is enabled, this
 tool dispatches a Tier-3 ``skill_evolution`` job IMMEDIATELY through
@@ -698,7 +1373,9 @@ Returns:
         — returns a deterministic string the agent loop can render.
 
         Args:
-            skill_id: The skill's UUID4 identifier.
+            skill_id: The skill's UUID4 identifier, a ``pf:<ns>:<name>``
+                project-file address, or the ``pf-<hex16>`` pseudo-id
+                the injection path renders for a file skill.
             applied: ``True`` if the skill was directly useful, ``False``
                 if it was not relevant, or ``None`` / omitted if unsure.
             usefulness: Optional agent-judged quality score 1-10.
@@ -722,6 +1399,18 @@ Returns:
                 evolution loop directly — write specific, actionable
                 edits you'd want a human reviewer to apply.
         """
+        # D2 companion metrics-only path (task 6): ``pf:`` addresses and
+        # the ``pf-`` pseudo-ids injection renders record into
+        # ``project_skill_usage_records`` — NO lineage rows, NO
+        # evolution dispatch, NO metrics-service call (P7). Runs BEFORE
+        # the metrics-service gate: the companion path works with the
+        # DB evolution stack absent (A9 degraded mode).
+        if isinstance(skill_id, str) and (
+            skill_id.startswith("pf:") or skill_id.startswith("pf-")
+        ):
+            return await _feedback_pf_skill(
+                skill_id, applied, usefulness, note, improvement_note
+            )
         metrics_service = getattr(manager, "_skill_metrics_service", None)
         if metrics_service is None:
             return "Skill metrics service is not yet available."
@@ -786,6 +1475,14 @@ Returns:
 
     skill_feedback._full_doc_ = """\
 Record feedback on a skill's usefulness.
+
+FILE SKILLS (Phase-3, D2 companion): a ``pf:<ns>:<name>`` address
+(or the ``pf-<hex16>`` pseudo-id the injection path renders) records
+METRICS-ONLY into ``project_skill_usage_records`` — no lineage rows,
+no evolution dispatch, no ``SkillMetricsService`` call (P7). The
+``usefulness`` / ``improvement_note`` fields fold into the recorded
+``feedback_note`` (the companion table deliberately has no
+dedicated columns). Works with the DB evolution stack absent.
 
 Delegates to :meth:`SkillMetricsService.record_feedback` (Phase 4
 backend) which locates the latest :class:`SkillUsageRecord` for
