@@ -74,6 +74,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# ── Terminal-row strand (9f0ed4f5 family, 2026-10-31) ──────────────
+# Single source of truth for the T2 re-arm membership set. Hoisted
+# from the duplicated literals at the hold branch (A-6) so the two
+# sites cannot drift. Post-M-2 value: TERMINATED is EXCLUDED — a
+# re-armed TERMINATED root would become claimable (the claim gate
+# excludes only PAUSED/TERMINATED for all task types), a resurrection
+# path that T1 (unreachable for terminated rows) would never trigger.
+_TERMINAL_REARM_STATUSES: tuple[str, ...] = (
+    InstanceStatus.COMPLETED.value,
+    InstanceStatus.ERROR.value,
+    InstanceStatus.FAILED.value,
+)
+
+
 REPORT_REPAIR_PROMPT = """\
 The following are the last {count} assistant messages from a child agent that has \
 just completed its task. The LAST message (message {n}) may be truncated, incomplete, \
@@ -2920,9 +2934,6 @@ Provide a concise summary:"""
                     # cannot become a heal storm) and it is also the
                     # recursion bound — a hold fired from inside a
                     # running heal cannot schedule a second one.
-                    self._schedule_strand_heal(
-                        instance_id, posture=instance_meta.status,
-                    )
                     # ── Terminal-row reactivation (2026-10-31,
                     # 9f0ed4f5 incident family): the hold fired because
                     # the tree is LIVE — a TERMINAL row must not
@@ -2940,29 +2951,22 @@ Provide a concise summary:"""
                     # "waiting, tree live" surface). Non-terminal rows
                     # — the 4ebd7f2f1 no-churn contract — get NO write
                     # (the membership check fails; byte-identical
-                    # historical behavior). The healer hand-off above
-                    # is kept exactly: same call, same coalescing,
-                    # same ``posture``.
+                    # historical behavior). The healer hand-off below
+                    # (after the re-arm) is kept: same call, same
+                    # coalescing; the posture now reflects the live row
+                    # (M-1).
                     try:
                         _held_row = await asyncio.to_thread(
                             self._instance_repository.get, instance_id,
                         )
-                        if _held_row is not None and _held_row.status in (
-                            InstanceStatus.COMPLETED.value,
-                            InstanceStatus.TERMINATED.value,
-                            InstanceStatus.ERROR.value,
-                            InstanceStatus.FAILED.value,
-                        ):
+                        _rearmed = False
+                        if _held_row is not None and _held_row.status in _TERMINAL_REARM_STATUSES:
                             await self._fp4_l6_downgrade_to_waiting(
                                 instance_id,
                                 agent_id,
-                                allowed_statuses=(
-                                    InstanceStatus.COMPLETED.value,
-                                    InstanceStatus.TERMINATED.value,
-                                    InstanceStatus.ERROR.value,
-                                    InstanceStatus.FAILED.value,
-                                ),
+                                allowed_statuses=_TERMINAL_REARM_STATUSES,
                             )
+                            _rearmed = True
                     except Exception as _hold_react_exc:  # noqa: BLE001 — fail-open
                         logger.warning(
                             "root_completion: hold-branch terminal-row "
@@ -2972,6 +2976,22 @@ Provide a concise summary:"""
                             type(_hold_react_exc).__name__,
                             _hold_react_exc,
                         )
+                        _rearmed = False
+                    # Heal hand-off (coalesced per root) — runs AFTER the
+                    # re-arm so the posture reflects the LIVE row: a
+                    # re-armed strand hands the healer the waiting_children
+                    # lane (the running-zombie lane alone would miss a
+                    # waiting root). Non-re-armed rows keep the historical
+                    # posture (instance_meta.status) — same call, same
+                    # coalescing as 4ebd7f2f1.
+                    _heal_posture = (
+                        InstanceStatus.WAITING_CHILDREN.value
+                        if _rearmed
+                        else instance_meta.status
+                    )
+                    self._schedule_strand_heal(
+                        instance_id, posture=_heal_posture,
+                    )
                     return
                 # Not live (all-terminal after strand exclusion, or
                 # timed-out zombie) → fall through to the sync stamp.
@@ -3334,6 +3354,8 @@ Provide a concise summary:"""
                     _live_children = 0
                 if _live_children > 0:
                     _prior_status = instance.status
+                    _captured_agent_id = instance.agent_id
+                    _captured_parent_id = instance.parent_id
                     instance.status = InstanceStatus.WAITING_CHILDREN.value
                     instance.updated_at = datetime.now(timezone.utc).isoformat()
                     instance.version = (instance.version or 1) + 1
@@ -3348,8 +3370,8 @@ Provide a concise summary:"""
                     return _ChildCompletionDbResult(
                         outcome="deferred_waiting_children",
                         instance_id=instance_id,
-                        agent_id=instance.agent_id,
-                        parent_id=instance.parent_id,
+                        agent_id=_captured_agent_id,
+                        parent_id=_captured_parent_id,
                     )
                 logger.info(
                     f"Instance {instance_id[:8]}... already in terminal "

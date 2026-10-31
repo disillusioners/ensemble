@@ -46,19 +46,41 @@ claimable), cascade-resume, and resume_processing_job. All converge on
 this funnel (manager.py:10276-10278). The enqueue-time flip at ~:2569 is
 untouched.
 
+Disclosure (A-2): the chokepoint revive does NOT reset
+`attestation_denied_count` or `completion_gate_escalated` — it mirrors
+the internal-report carve-out at instance_messaging.py:2586-2605, where
+only a fresh user-driven episode resets those counters. Consequence: a
+revived escalated root now runs gate-bearing turns with the escalated
+flag still set (the gate logic reads the flag; the revive does not clear
+it).
+
 ### 2. HOLD BRANCH (child_reports.py pre-stamp recursive-liveness hold)
 
 Where the hold currently does a bare `return` after
 `_schedule_strand_heal` (child_reports.py:2866-2910), a FRESH re-read of
 the row (the `instance_meta` read at the top of the drive can be seconds
 stale) gates a positive WAITING_CHILDREN write: ONLY when the row reads
-terminal (COMPLETED / TERMINATED / ERROR / FAILED). Non-terminal rows
-(the historical `running` hold) keep the 4ebd7f2f1 no-churn semantics —
-NO write, no version bump. The healer hand-off is kept exactly: same
-call, same coalescing, same `posture`. The write reuses
-`_fp4_l6_downgrade_to_waiting` (child_reports.py:2290-2315), extended
-with a keyword-only `allowed_statuses` (default COMPLETED-only, so the
-three existing L6 call sites stay byte-identical).
+terminal. The membership set (hoisted to `_TERMINAL_REARM_STATUSES`,
+A-6) is `(COMPLETED, ERROR, FAILED)` — TERMINATED is EXCLUDED (M-2):
+the claim gate excludes PAUSED/TERMINATED for all task types
+(task/repository.py:3006-3015), so a re-armed TERMINATED root would become
+claimable — a NEW resurrection path that even touchpoint 1 (unreachable
+for terminated rows) would never trigger, contrary to explicit operator
+intent. Non-terminal rows (the historical `running` hold) keep the
+4ebd7f2f1 no-churn semantics — NO write, no version bump.
+
+The healer hand-off runs AFTER a successful re-arm with the LIVE posture
+(`InstanceStatus.WAITING_CHILDREN.value`); a non-re-armed row keeps the
+historical posture (`instance_meta.status`) — same call, same coalescing
+as 4ebd7f2f1 (M-1). The write reuses `_fp4_l6_downgrade_to_waiting`
+(child_reports.py:2290-2315), extended with a keyword-only
+`allowed_statuses` (default COMPLETED-only, so the three existing L6 call
+sites stay byte-identical).
+
+Note (A-5): `_fp4_l6_downgrade_to_waiting` writes via a raw
+`Session(self._manager._engine)` (child_reports.py:~2318), outside a
+`WriteGuardSession` — this was already the L6 contract and is unchanged
+here; this fix adds a hot-path caller but does not re-plumb the guard.
 
 ### 3. IDEMPOTENCY GUARD (child_reports.py `_process_child_completion_db_sync`)
 
@@ -68,10 +90,12 @@ live non-ghost direct children exist (the same-tx COUNT used by the
 :3516 writer), write WAITING_CHILDREN and return
 `deferred_waiting_children` instead of `idempotency_skip`. All-terminal
 trees keep the skip — a genuinely-completed row stays completed. The
-recursive live-tree shape (depth-2+) is owned by the pre-stamp hold
-upstream (touchpoint 2), which never reaches this guard on a live tree.
-COUNT failure fails to the skip (the guard is a dedup net, not the
-completion decision — a transient DB error must not churn a
+recursive live-tree shape (depth-2+) for ROOT rows is owned by the
+pre-stamp hold (touchpoint 2), which never reaches this guard on a live
+tree; non-root mid-tree rows still return `idempotency_skip` on a
+grandchild-only live tree, because the pre-stamp hold is root-gated
+(A-4). COUNT failure fails to the skip (the guard is a dedup net, not
+the completion decision — a transient DB error must not churn a
 genuinely-completed row).
 
 ## D2.7-LOCKED override rationale (narrow)
@@ -98,7 +122,8 @@ reconciler's `job_queue_items` handler does not stamp
 `admission_state='done'` while the root is live. The mirror now tracks
 the live root. This couples to the reconciler path (task/repository.py
 :2236-2314). Pinned as INTENDED in tests/repositories/test_turn_reconciler.py
-(`TestWaitingChildrenGuard.test_running_root_keeps_jobitem_active`).
+(`TestWaitingChildrenGuard.test_running_root_keeps_jobitem_active` and
+`test_waiting_children_root_keeps_jobitem_active`).
 
 ## Disclosures
 
@@ -113,10 +138,11 @@ the live root. This couples to the reconciler path (task/repository.py
   the 9f0ed4f5 race where the row was terminal at hold time but the top-of-drive
   read was stale.
 - Touchpoint 3's COUNT is direct-children only (same as the :3516
-  writer). The recursive (depth-2+) shape is owned by the pre-stamp hold
-  (touchpoint 2), which never reaches this guard on a live tree. A
-  depth-2+-only live tree that somehow reaches the guard returns the skip —
-  a residual, but the hold upstream is the primary net for that shape.
+  writer). The recursive (depth-2+) shape for ROOT rows is owned by the
+  pre-stamp hold (touchpoint 2), which never reaches this guard on a live
+  tree. A depth-2+-only live tree that somehow reaches the guard returns
+  the skip — a residual, but the hold upstream is the primary net for
+  that shape.
 - 3 pre-existing failures in tests/repositories/test_turn_reconciler.py
   (test_missing_task_sets_admission_done_orphan_reason,
   test_missing_task_deletes_lock, test_hard_deleted_task_watcher_deleted)
@@ -125,4 +151,4 @@ the live root. This couples to the reconciler path (task/repository.py
 - No merge / bump / tag / stage / push performed (giter owns v0.28.2
   finalize).
 PY
-echo "written"
+echo written

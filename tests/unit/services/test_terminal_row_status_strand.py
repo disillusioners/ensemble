@@ -137,6 +137,7 @@ def _build_service(engine: Engine, manager: MagicMock | None = None) -> ChildRep
     service = ChildReportsService.__new__(ChildReportsService)
     service._manager = mgr
     service._events_service = None
+    service._strand_heal_inflight = set()
     return service
 
 
@@ -516,3 +517,239 @@ async def test_full_arc_complete_revive_turn_ends_waiting_children(engine: Engin
         "full arc must not leave the row COMPLETED under a live tree"
     )
     assert _read_status(engine, root_id) != InstanceStatus.COMPLETED.value
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix-round-1 pins (M-1, M-2, A-1, A-2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_hold_terminated_root_stays_terminated(engine: Engine):
+    """M-2: a TERMINATED root with a late-arriving live child is NOT
+    re-armed — terminated stays final (no claimability change)."""
+    root_id = "root-terminated-m2"
+    child_id = "child-late-m2"
+    _seed_instance(engine, instance_id=root_id, parent_id=None,
+                   status=InstanceStatus.TERMINATED.value)
+    _seed_instance(engine, instance_id=child_id, parent_id=root_id,
+                   status=InstanceStatus.RUNNING.value,
+                   last_activity_at=__import__("datetime").datetime.now(
+                       __import__("datetime").timezone.utc))
+
+    repo = SQLModelInstanceRepository(engine)
+    manager = _build_manager_shim(engine)
+    manager._instance_repository = repo
+    manager.get_instance = MagicMock(return_value=MagicMock())
+
+    service = _build_service(engine, manager)
+
+    history = [{"role": "user", "content": "hi"}]
+    with patch(
+        "daemon.services.child_reports.get_instance_messages",
+        new=AsyncMock(return_value=history),
+    ):
+        await service._process_child_completion_and_notify_parent(
+            root_id, "msg-terminated-m2",
+        )
+
+    assert _read_status(engine, root_id) == InstanceStatus.TERMINATED.value, (
+        "M-2: terminated root must stay terminated (no re-arm)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_hold_heal_posture_is_live_on_rearm(engine: Engine):
+    """M-1: on a successful re-arm, the healer is invoked with the LIVE
+    posture (waiting_children), not the pre-write terminal posture."""
+    root_id = "root-completed-m1"
+    child_id = "child-live-m1"
+    _seed_instance(engine, instance_id=root_id, parent_id=None,
+                   status=InstanceStatus.COMPLETED.value)
+    _seed_instance(engine, instance_id=child_id, parent_id=root_id,
+                   status=InstanceStatus.RUNNING.value,
+                   last_activity_at=__import__("datetime").datetime.now(
+                       __import__("datetime").timezone.utc))
+
+    repo = SQLModelInstanceRepository(engine)
+    manager = _build_manager_shim(engine)
+    manager._instance_repository = repo
+    manager._mission_strand_healer = MagicMock()
+    manager.get_instance = MagicMock(return_value=MagicMock())
+
+    service = _build_service(engine, manager)
+
+    history = [{"role": "user", "content": "hi"}]
+    with patch(
+        "daemon.services.child_reports.get_instance_messages",
+        new=AsyncMock(return_value=history),
+    ):
+        await service._process_child_completion_and_notify_parent(
+            root_id, "msg-m1",
+        )
+
+    assert manager._mission_strand_healer is not None
+    # The healer scheduling goes through _schedule_strand_heal, which
+    # calls healer... actually _schedule_strand_heal schedules a task.
+    # Instead, verify the heal posture recorded by capturing the call
+    # to _schedule_strand_heal via monkeypatch.
+    # (Re-run with a spy to capture posture.)
+    # Re-drive on a fresh root to capture posture:
+    root_id2 = "root-completed-m1b"
+    child_id2 = "child-live-m1b"
+    _seed_instance(engine, instance_id=root_id2, parent_id=None,
+                   status=InstanceStatus.COMPLETED.value)
+    _seed_instance(engine, instance_id=child_id2, parent_id=root_id2,
+                   status=InstanceStatus.RUNNING.value,
+                   last_activity_at=__import__("datetime").datetime.now(
+                       __import__("datetime").timezone.utc))
+
+    manager2 = _build_manager_shim(engine)
+    manager2._instance_repository = SQLModelInstanceRepository(engine)
+    manager2._mission_strand_healer = MagicMock()
+    manager2.get_instance = MagicMock(return_value=MagicMock())
+    service2 = _build_service(engine, manager2)
+
+    captured = {}
+    orig = service2._schedule_strand_heal
+
+    def _spy(instance_id, *, posture=None):
+        captured["posture"] = posture
+        return orig(instance_id, posture=posture)
+
+    service2._schedule_strand_heal = _spy
+
+    with patch(
+        "daemon.services.child_reports.get_instance_messages",
+        new=AsyncMock(return_value=history),
+    ):
+        await service2._process_child_completion_and_notify_parent(
+            root_id2, "msg-m1b",
+        )
+
+    assert captured.get("posture") == InstanceStatus.WAITING_CHILDREN.value, (
+        f"M-1: healer must receive live posture, got {captured.get('posture')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_hold_non_rearmed_keeps_old_heal_posture(engine: Engine):
+    """M-1: a non-re-armed row (running root) keeps the historical
+    posture (instance_meta.status), i.e. the old call behavior."""
+    root_id = "root-running-m1c"
+    child_id = "child-live-m1c"
+    _seed_instance(engine, instance_id=root_id, parent_id=None,
+                   status=InstanceStatus.RUNNING.value)
+    _seed_instance(engine, instance_id=child_id, parent_id=root_id,
+                   status=InstanceStatus.RUNNING.value,
+                   last_activity_at=__import__("datetime").datetime.now(
+                       __import__("datetime").timezone.utc))
+
+    manager = _build_manager_shim(engine)
+    manager._instance_repository = SQLModelInstanceRepository(engine)
+    manager._mission_strand_healer = MagicMock()
+    manager.get_instance = MagicMock(return_value=MagicMock())
+    service = _build_service(engine, manager)
+
+    captured = {}
+
+    def _spy(instance_id, *, posture=None):
+        captured["posture"] = posture
+
+    service._schedule_strand_heal = _spy
+
+    history = [{"role": "user", "content": "hi"}]
+    with patch(
+        "daemon.services.child_reports.get_instance_messages",
+        new=AsyncMock(return_value=history),
+    ):
+        await service._process_child_completion_and_notify_parent(
+            root_id, "msg-m1c",
+        )
+
+    assert captured.get("posture") == InstanceStatus.RUNNING.value, (
+        f"non-re-armed path must keep old posture, got {captured.get('posture')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_chokepoint_fail_open_on_revive_raise(engine: Engine):
+    """A-1: if the chokepoint revive raises, a warning is logged and the
+    turn proceeds (fail-open) — it reaches the graph load."""
+    root_id = "root-completed-a1"
+    _seed_instance(engine, instance_id=root_id, parent_id=None,
+                   status=InstanceStatus.COMPLETED.value)
+
+    manager = _build_manager_shim(engine)
+    # Force _revive_terminal_instance to raise.
+    async def _boom(instance_id):
+        raise RuntimeError("revive-boom")
+
+    manager._revive_terminal_instance = _boom
+    sentinel = RuntimeError("graph-load-sentinel")
+    manager.get_instance = AsyncMock(side_effect=sentinel)
+
+    cancellation = MagicMock()
+    cancellation.is_shutting_down = False
+    service = InstanceMessagingService(manager=manager,
+                                       cancellation_service=cancellation)
+
+    with patch("daemon.services.instance_messaging.logger") as log_mock:
+        with pytest.raises(RuntimeError, match="graph-load-sentinel"):
+            await service._process_message_with_tracking(
+                instance_id=root_id, message="hi", message_id="m-a1",
+            )
+        # warning logged (fail-open) and turn proceeded to graph load
+        assert any(
+            "terminal-row reactivation failed" in str(c)
+            for c in log_mock.warning.call_args_list
+        ), "fail-open warning must be logged"
+
+
+@pytest.mark.asyncio
+async def test_chokepoint_preserves_attestation_counters(engine: Engine):
+    """A-2: chokepoint revive does NOT reset attestation_denied_count or
+    completion_gate_escalated (mirrors the internal-report carve-out at
+    instance_messaging.py:2586-2605). Both survive the revive."""
+    root_id = "root-completed-a2"
+    from daemon.repositories.instance.models import Instance, InstanceStatus
+    now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+    with __import__("sqlmodel").Session(engine) as session:
+        inst = Instance(
+            instance_id=root_id, agent_id="leader", agent_name="leader",
+            agent_dir="/tmp/leader", parent_id=None,
+            status=InstanceStatus.COMPLETED.value, version=1,
+            instance_metadata={
+                "attestation_denied_count": 7,
+                "completion_gate_escalated": True,
+            },
+            last_activity_at=now,
+            created_at=now.isoformat(), updated_at=now.isoformat(),
+        )
+        session.add(inst)
+        session.commit()
+
+    manager = _build_manager_shim(engine)
+    # stop before graph load
+    manager.get_instance = AsyncMock(side_effect=RuntimeError("gl-sentinel"))
+
+    cancellation = MagicMock()
+    cancellation.is_shutting_down = False
+    service = InstanceMessagingService(manager=manager,
+                                       cancellation_service=cancellation)
+    try:
+        await service._process_message_with_tracking(
+            instance_id=root_id, message="hi", message_id="m-a2",
+        )
+    except RuntimeError:
+        pass
+
+    with __import__("sqlmodel").Session(engine) as session:
+        post = session.get(Instance, root_id)
+    md = post.instance_metadata or {}
+    assert md.get("attestation_denied_count") == 7, (
+        "attestation_denied_count must survive chokepoint revive"
+    )
+    assert md.get("completion_gate_escalated") is True, (
+        "completion_gate_escalated must survive chokepoint revive"
+    )

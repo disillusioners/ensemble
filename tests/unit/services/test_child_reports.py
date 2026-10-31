@@ -177,6 +177,7 @@ def _build_child_reports_service(engine: Engine) -> ChildReportsService:
     service = ChildReportsService.__new__(ChildReportsService)
     service._manager = manager
     service._events_service = None  # lifecycle event publish is guarded
+    service._strand_heal_inflight = set()
     return service
 
 
