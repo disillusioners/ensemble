@@ -214,16 +214,32 @@ async def test_tool_lane_preloads_mcp_for_child(agent_id: str) -> None:
 
 def test_loaded_line_fires_at_construction(caplog: pytest.LogCaptureFixture) -> None:
     """The 'Loaded N MCP tools' line must fire on a populated cache — its
-    total absence was the only live symptom before the fix."""
+    total absence was the only live symptom before the fix.
+
+    Step-5 log hygiene: the line demoted INFO→DEBUG and shortened to
+    count only — capture at DEBUG; the pinned substring still matches
+    (the count-only line keeps the ``Loaded N MCP tools for instance``
+    shape, minus the inline tool-name list).
+    """
     manager = FakeManager()
     child = str(uuid.uuid4())
     manager._mcp_service._tools_cache[child] = [_fake_mcp_tool("mcp_a_b")]
-    with caplog.at_level(logging.INFO, logger="daemon.tools.instance"):
+    with caplog.at_level(logging.DEBUG, logger="daemon.tools.instance"):
         create_instance_tools(manager, child, agent_id="leader")
-    assert any(
-        f"Loaded 1 MCP tools for instance {child[:8]}" in r.message
+    loaded_lines = [
+        r
         for r in caplog.records
-    ), "expected the 'Loaded 1 MCP tools' log line at tool construction"
+        if f"Loaded 1 MCP tools for instance {child[:8]}" in r.message
+    ]
+    assert loaded_lines, (
+        "expected the 'Loaded 1 MCP tools' log line at tool construction"
+    )
+    # Step-5 shortening: count only — no tool-name list, < 200 chars.
+    for rec in loaded_lines:
+        assert "mcp_a_b" not in rec.message, (
+            "the Loaded line must not inline tool names"
+        )
+        assert len(rec.message) < 200, rec.message
 
 
 # ───────────────────────── (c) warn-once cache-miss guard ─────────────────

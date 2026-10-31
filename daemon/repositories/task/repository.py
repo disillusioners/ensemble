@@ -288,22 +288,27 @@ def is_chat_lane_active() -> bool:
 # m1 (2026-10-03, report-delivery-bug-family) — cap on the
 # doomed-id list rendered into the wipe JOURNAL log so a 5k-row
 # wipe does not emit a 180-400KB single log line. The cap emits
-# the first N ids verbatim (the operator can correlate the most-
-# recent wipe by sample), the TOTAL count, and a truncation
-# marker so the post-mortem is honest about what was logged. Both
-# the task and message_queue wipe sites use the same constant so
-# the audit-trail cardinality is consistent across repos.
-_DOOMED_ID_LOG_CAP: int = 500
+# the first N ids verbatim, the TOTAL count (in the log line's
+# ``%d row(s)`` field), and a truncation marker so the post-mortem
+# is honest about what was logged. Both the task and message_queue
+# wipe sites use the same constant so the audit-trail cardinality
+# is consistent across repos.
+# Log-hygiene (step 5, spec item 7): cap lowered 500 → 5 — at 500
+# ids a single line still reached ~30-40KB. The level stays
+# WARNING (this is a shortening, not a demotion); payload capped
+# at first-5 IDs (≤ ~360 chars); full line ≤ ~420.
+_DOOMED_ID_LOG_CAP: int = 5
 
 
 def _capped_doomed_id_repr(ids: list[str]) -> str:
     """Render a doomed-id list for the wipe JOURNAL log, capped.
 
     Returns a string of the form
-    ``"<first 500 ids>"[+ N more truncated]``
-    so the operator sees the first sample verbatim AND the
-    truthful total count. The cap is the same constant for both
-    wipe sites so the audit-trail cardinality is consistent.
+    ``"<first N ids>"[+ M more truncated]`` where N =
+    ``_DOOMED_ID_LOG_CAP``, so the operator sees the first
+    sample verbatim AND the truthful total count. The cap is
+    the same constant for both wipe sites so the audit-trail
+    cardinality is consistent.
     """
     total = len(ids)
     if total <= _DOOMED_ID_LOG_CAP:

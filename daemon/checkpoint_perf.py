@@ -2,10 +2,10 @@
 
 PR1 (C4) of the LangGraph Checkpoint / Message Persistence Performance plan.
 The module is the single source of truth for the ``[CheckpointPerf]`` and
-``[/Messages]`` log lines that PR1 introduces. It is intentionally tiny:
-no daemon state, no I/O, no scheduling — pure functions that emit one log
-line per call and return their inputs unchanged so the call sites stay
-trivial to read.
+``[/Messages]`` log lines that PR1 introduces. Reads fold into a windowed
+sumup (``daemon/services/log_sumup.py``): ONE INFO line per window, and
+the ``CHECKPOINT_PERF_LOGS`` gate silences the whole family. The module
+is no longer stateless — it holds cached sumup state + lock.
 
 Risk-mitigation: when the env var ``CHECKPOINT_PERF_LOGS`` is set to a
 falsy value (e.g. ``"0"`` / ``"false"`` / ``"no"``) every emit is
@@ -37,6 +37,95 @@ from daemon.checkpoint_metrics import (
 )
 
 logger = logging.getLogger("daemon.checkpoint_perf")
+
+# ── read-lane sumup (log-noise-hygiene) ─────────────────────────────────────
+#
+# The per-read INFO lines (``op=read_size`` from the read seam and
+# ``op=cache_hit`` from the read-cache serve seam) are GONE ENTIRELY —
+# nothing per-read may be logged, not even at DEBUG. Each settled read
+# folds into the windowed sumup below instead; ONE INFO line per window
+# (default 180s) carries ops/hits/misses/bytes_total/last-op.
+#
+# GATE CONTRACT (unchanged): the CHECKPOINT_PERF_LOGS kill-switch gates
+# the WHOLE read lane — both emitters return BEFORE folding, so with the
+# gate off the family never registers and the sumup stays silent (NO
+# sumup either). Metrics recording is byte-identical: the five
+# inc/observe calls below are untouched.
+#
+# Hit/miss vocabulary: ``op == "cache_hit"`` is a HIT (read-cache serve);
+# every other read (``aget`` / ``aget_tuple``, including the
+# zero-bytes DB MISS) counts as a MISS — the same once-per-outer-call
+# contract the read seam already follows.
+#
+# The ``daemon.services.log_sumup`` import is LAZY (cached module ref,
+# resolved on first read): ``daemon/services/__init__`` is heavy (it
+# pulls the worker/job/instance-messaging services and, transitively,
+# ``daemon.graph``), and this module previously stayed OUT of that
+# package — mirroring the documented lazy-services-import convention in
+# ``daemon/graph.py``.
+
+_log_sumup_module: Any = None
+_log_sumup_lock = threading.Lock()
+
+
+def _get_log_sumup() -> Any:
+    # twin copy: daemon/graph.py
+    """Cached lazy import of ``daemon.services.log_sumup`` (cycle note above)."""
+    global _log_sumup_module
+    if _log_sumup_module is None:
+        with _log_sumup_lock:
+            if _log_sumup_module is None:
+                from daemon.services import log_sumup as _mod
+
+                _log_sumup_module = _mod
+    return _log_sumup_module
+
+
+def _render_read_sumup(snapshot: dict[str, Any]) -> str:
+    """The ONE per-window read line (format pinned in test_log_hygiene.py)."""
+    sums = snapshot["sums"]
+    lasts = snapshot["lasts"]
+    return (
+        f"[CheckpointPerf] read sumup {snapshot['window_s']}s: "
+        f"ops={sums.get('ops', 0)} hits={sums.get('hits', 0)} "
+        f"misses={sums.get('misses', 0)} bytes_total={sums.get('bytes', 0)} "
+        f"last_op={lasts.get('op', '?')} last_bytes={lasts.get('bytes', '?')} "
+        f"bucket={lasts.get('bucket', '?')}"
+    )
+
+
+def _ensure_read_sumup_family() -> None:
+    """Idempotent family install (log_sumup dedups; safe on every read)."""
+    _get_log_sumup().ensure_family(
+        "checkpoint_read",
+        render=_render_read_sumup,
+        logger=logger,
+        # Gate ON but zero reads in a window ⇒ SILENCE (no idle line —
+        # the whole family must be quiet when the read lane is quiet).
+        emit_idle=False,
+    )
+
+
+def _record_read_sumup(op: str, bytes_: int, rows: int, bucket: str) -> None:
+    """Fold ONE settled read into the windowed sumup. O(1), fail-open."""
+    _ensure_read_sumup_family()
+    is_hit = op == "cache_hit"
+    sums: dict[str, Any] = {
+        "ops": 1,
+        "bytes": bytes_,
+        "hits": 1 if is_hit else 0,
+        "misses": 0 if is_hit else 1,
+    }
+    if not is_hit:
+        # Rows are derived on the read seam only (a cache-hit serve does
+        # not walk rows), so rows_total stays the miss-path sum.
+        sums["rows"] = rows
+    _get_log_sumup().record(
+        "checkpoint_read",
+        count=1,
+        sums=sums,
+        lasts={"op": op, "bytes": bytes_, "bucket": bucket},
+    )
 
 # ── the wedge-capture stall ledger (D18 / A7 / T16) ─────────────────────────
 #
@@ -210,26 +299,27 @@ def log_cache_hit(
     duration_ms: int,
     bytes_: int = 0,
 ) -> None:
-    """Emit the ``[CheckpointPerf] op=cache_hit`` line (read-cache plan §4.4).
+    """Fold ONE cache-hit serve into the windowed read sumup (read-cache plan §4.4).
 
-    Same structured shape as :func:`log_saver_op`, gated by the same
-    ``CHECKPOINT_PERF_LOGS`` switch. DELIBERATELY does NOT observe the
-    ``saver_op_latency_seconds`` histogram: that histogram's ``op``
-    label vocabulary is frozen (``aget``/``aput``/``adelete``/
-    ``alist``/``other`` — ``daemon/checkpoint_metrics.py``), so an
-    ``op=cache_hit`` observation would fold to ``other`` AND increment
-    the invalid-label counter (metric noise, misattributed latency).
-    A cache hit is not a saver op — its µs-scale serve time is carried
-    by this log line alone, and the hit RATE lives in
+    Same ``CHECKPOINT_PERF_LOGS`` gate as every emitter here. DELIBERATELY
+    does NOT observe the ``saver_op_latency_seconds`` histogram: that
+    histogram's ``op`` label vocabulary is frozen (``aget``/``aput``/
+    ``adelete``/``alist``/``other`` — ``daemon/checkpoint_metrics.py``),
+    so an ``op=cache_hit`` observation would fold to ``other`` AND
+    increment the invalid-label counter (metric noise, misattributed
+    latency). The hit RATE lives in
     ``ensemble_checkpoint_cache_hit_total``.
+
+    Log-noise-hygiene: the former per-hit ``[CheckpointPerf]
+    op=cache_hit`` INFO line is GONE (nothing per-read may be logged) —
+    the hit folds into the SAME windowed read sumup as the read seam
+    (``hits`` count + ``last_op=cache_hit``), so the per-hit serve line
+    is replaced by ONE sumup per window. ``duration_ms`` is kept in the
+    signature for call-site stability but is no longer logged.
     """
     if not _logs_enabled():
         return
-    logger.info(
-        f"[CheckpointPerf] op=cache_hit "
-        f"thread={thread_id[:8] if thread_id else '?'} "
-        f"latency_ms={duration_ms} bytes={bytes_} deleted=0"
-    )
+    _record_read_sumup("cache_hit", bytes_, 0, read_size_bucket_label(bytes_))
 
 
 async def time_saver_op(op: str, thread_id: str, coro: Awaitable[Any]) -> Any:
@@ -302,11 +392,7 @@ def log_checkpoint_read(
     checkpoint_read_rows_total.inc(rows, op=op)
     checkpoint_read_size_bucket_hits_total.inc(op=op, bucket=bucket)
     checkpoint_read_size_bytes.labels(op=op).observe(bytes_)
-    logger.info(
-        f"[CheckpointPerf] op=read_size "
-        f"thread={thread_id[:8] if thread_id else '?'} "
-        f"bytes={bytes_} rows={rows} bucket={bucket}"
-    )
+    _record_read_sumup(op, bytes_, rows, bucket)
 
 
 def increment_checkpoint_list_total(amount: int = 1) -> int:

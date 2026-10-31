@@ -3322,15 +3322,10 @@ class ContextCompactor:
                 )
             )
             if not force and not over_budget:
-                logger.info(
-                    "[Compaction] under-budget all-injected skip "
-                    "(n=%d, injected_tokens=%d, threshold=%d%%); "
-                    "no shrinkage (pre-commission stamp-only "
-                    "semantics) — 60s dedup engages",
-                    len(context.messages),
-                    injected_tokens,
-                    int(context.config.threshold * 100),
-                )
+                # Log-hygiene (step 5): under-budget no-op skip — the
+                # stamp-only return is the behavior; the log line is
+                # pure no-op noise (fires every refire tick), removed
+                # entirely per the demotion list.
                 return anti_refire_skip(
                     skip_reason="skipped_injections_dominate"
                 )
@@ -3372,16 +3367,7 @@ class ContextCompactor:
                 )
             )
             if not force and not over_budget:
-                logger.info(
-                    "[Compaction] under-budget min-messages skip "
-                    "(selectable=%d, minimum=%d, preserved_injected=%d, "
-                    "threshold=%d%%); no shrinkage (pre-commission "
-                    "stamp-only semantics) — 60s dedup engages",
-                    len(selectable_messages),
-                    context.config.min_messages_before_compaction,
-                    len(hoisted_injected),
-                    int(context.config.threshold * 100),
-                )
+                # same rationale as the all-injected skip above.
                 return anti_refire_skip(
                     skip_reason="skipped_below_min_messages"
                 )

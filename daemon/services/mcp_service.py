@@ -1022,7 +1022,9 @@ class McpService:
             self._tools_cache[instance_id] = all_tools
             self._session_caches[instance_id] = instance_session_state
 
-            logger.info(
+            # Log-hygiene (step 5): per-preload telemetry demoted
+            # INFO→DEBUG (count-only line, already < 200 chars).
+            logger.debug(
                 f"Lazy-loaded {len(all_tools)} MCP tool schemas "
                 f"from {len(servers)} server(s) for instance "
                 f"{instance_id[:8]}"

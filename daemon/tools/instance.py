@@ -7071,7 +7071,13 @@ Returns:
             for t in mcp_tools
         ]
         mcp_tool_names = [n for n in mcp_tool_names if n]  # Filter None
-        logger.info(f"Loaded {len(mcp_tools)} MCP tools for instance {current_instance_id[:8]}: {mcp_tool_names[:5]}...")
+        # Log-hygiene (step 5): demoted INFO→DEBUG AND shortened to
+        # count only — the inline tool-name list made this line
+        # arbitrarily long on MCP-heavy instances.
+        logger.debug(
+            f"Loaded {len(mcp_tools)} MCP tools for instance "
+            f"{current_instance_id[:8]}"
+        )
 
     # Add MCP tools BEFORE creating help tool so mcp_tool_names are available
     if mcp_tools:

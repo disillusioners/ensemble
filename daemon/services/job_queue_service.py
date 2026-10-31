@@ -2361,13 +2361,26 @@ class JobQueueService:
             )
 
         total = cancelled_queued + cancelled_active
-        logger.info(
+        # Log-hygiene (step 5): outcome-gated summary — INFO only when
+        # the cleanup actually cancelled / reaped / reconciled /
+        # terminated something; a zero-action run logs the same line
+        # at DEBUG.
+        _cleanup_summary = (
             "cleanup_non_terminal_jobs: cancelled_queued=%d cancelled_active=%d "
             "orphaned_reaped=%d reconciled_bad_state=%d "
-            "terminated_instances=%d total=%d",
+            "terminated_instances=%d total=%d"
+        )
+        _cleanup_args = (
             cancelled_queued, cancelled_active, orphaned_reaped,
             reconciled_bad_state, terminated_instances, total,
         )
+        if (
+            cancelled_queued or cancelled_active or orphaned_reaped
+            or reconciled_bad_state or terminated_instances
+        ):
+            logger.info(_cleanup_summary, *_cleanup_args)
+        else:
+            logger.debug(_cleanup_summary, *_cleanup_args)
         return {
             "cancelled_queued": cancelled_queued,
             "cancelled_active": cancelled_active,
@@ -4709,7 +4722,9 @@ class JobQueueService:
                 return None
 
         # [TRACE] Log instance_id being used
-        logger.info(
+        # Log-hygiene (step 5): demoted INFO→DEBUG to match the rest
+        # of the [TRACE] start_job family (already DEBUG).
+        logger.debug(
             f"[TRACE] start_job: using instance_id={instance_id[:8]}... "
             f"for job={job_id[:8]}... (job_type={job.job_type})"
         )
@@ -4730,7 +4745,8 @@ class JobQueueService:
         # needed to release the lock on failure.
         if job.queue_id and job.project_id:
             concurrency_limit = await self._get_concurrency_limit(job.queue_id)
-            logger.info(
+            # Log-hygiene (step 5): demoted INFO→DEBUG ([TRACE] family).
+            logger.debug(
                 f"[TRACE] start_job: acquiring queue lock for job {job_id[:8]}... "
                 f"queue={job.queue_id[:8]}... concurrency_limit={concurrency_limit}"
             )

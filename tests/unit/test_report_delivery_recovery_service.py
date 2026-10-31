@@ -791,6 +791,34 @@ class TestNoRowBackstopFalsePositiveMatrix:
             "recovery_attempted_at (lanes 3/4 retry visibility)"
         )
 
+    def test_lane2_marker_debug_every_pass_info_only_on_recovery(
+        self, engine: Engine, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Q8 pin (log-noise-hygiene tidy pass): the lane-2 marker
+        emits at DEBUG on EVERY pass; the identical INFO copy appears
+        ONLY when ``recovered > 0`` (double emission in that case)."""
+        import logging
+
+        marker = "RDRS lane 2: post-wipe recovery"
+        service, _ = _build_service(engine)
+        caplog.set_level(
+            logging.DEBUG, logger="daemon.services.report_delivery_recovery"
+        )
+        service.recover_now()  # empty pass: recovered == 0
+        assert [
+            r.levelno for r in caplog.records if marker in r.getMessage()
+        ] == [logging.DEBUG]
+        caplog.clear()
+        parent = _seed_instance(engine)
+        self._seed_completed_child_with_message(engine, parent)
+        service.recover_now()  # recovered > 0
+        hits = sorted(
+            (r for r in caplog.records if marker in r.getMessage()),
+            key=lambda r: r.levelno,
+        )
+        assert [r.levelno for r in hits] == [logging.DEBUG, logging.INFO]
+        assert hits[0].getMessage() == hits[1].getMessage()
+
 
 # =============================================================================
 # ORPHAN lane (Lane 5, W1)

@@ -111,16 +111,25 @@ def _build_app() -> FastAPI:
     return app
 
 
-def _records_for_path(records, path: str):
-    """Filter caplog records to daemon.api INFO entries that mention the
-    given path. The middleware's log message is one line with the path
-    text embedded; substring match is sufficient and resilient to the
-    ANSI color codes it wraps around the path-free segments."""
+def _records_for_path(
+    records: list[logging.LogRecord], path: str, levels: tuple[int, ...]
+) -> list[logging.LogRecord]:
+    """Filter captured records to ``daemon.api`` entries at ``levels``
+    that mention ``path``. The middleware emits ONE PLAIN-TEXT line
+    (no ANSI — both surfaces strip it) with the path text embedded;
+    substring match is sufficient.
+
+    Level-aware per case (C2, log-noise-hygiene review cycle 1): the
+    access-log line was demoted INFO → DEBUG, so LOGGED-path cases
+    match at DEBUG while SUPPRESSION cases assert absence at BOTH
+    INFO and DEBUG — a broken suppressor must fail the pin at either
+    level, not just the level it happens to emit at.
+    """
     return [
         r
         for r in records
         if r.name == LOGGER_NAME
-        and r.levelno == logging.INFO
+        and r.levelno in levels
         and path in r.getMessage()
     ]
 
@@ -135,9 +144,11 @@ class TestSelectiveAccessLogPollingSuppression:
             resp = client.get("/api/missions")
 
         assert resp.status_code == 200
-        assert _records_for_path(records, "/api/missions") == [], (
+        assert _records_for_path(
+            records, "/api/missions", (logging.INFO, logging.DEBUG)
+        ) == [], (
             "expected no log record for /api/missions 200, got: "
-            f"{[r.getMessage() for r in _records_for_path(records, '/api/missions')]}"
+            f"{[r.getMessage() for r in _records_for_path(records, '/api/missions', (logging.INFO, logging.DEBUG))]}"
         )
 
     def test_defer_blocked_200_is_suppressed(self):
@@ -148,9 +159,12 @@ class TestSelectiveAccessLogPollingSuppression:
             resp = client.get("/api/queues/defer-blocked")
 
         assert resp.status_code == 200
-        assert _records_for_path(records, "/api/queues/defer-blocked") == [], (
+        assert _records_for_path(
+            records, "/api/queues/defer-blocked", (logging.INFO, logging.DEBUG)
+        ) == [], (
             "expected no log record for /api/queues/defer-blocked 200, "
-            f"got: {[r.getMessage() for r in _records_for_path(records, '/api/queues/defer-blocked')]}"
+            "got: "
+            f"{[r.getMessage() for r in _records_for_path(records, '/api/queues/defer-blocked', (logging.INFO, logging.DEBUG))]}"
         )
 
     def test_missions_500_is_logged(self):
@@ -164,7 +178,7 @@ class TestSelectiveAccessLogPollingSuppression:
             resp = client.get("/api/missions")
 
         assert resp.status_code == 500
-        matching = _records_for_path(records, "/api/missions")
+        matching = _records_for_path(records, "/api/missions", (logging.DEBUG,))
         assert matching, (
             "expected a log record for /api/missions 500 — the "
             "success-only suppression must let error responses through"
@@ -187,9 +201,11 @@ class TestSelectiveAccessLogPollingSuppression:
             resp = client.get("/api/missions")
 
         assert resp.status_code == 307
-        assert _records_for_path(records, "/api/missions") == [], (
+        assert _records_for_path(
+            records, "/api/missions", (logging.INFO, logging.DEBUG)
+        ) == [], (
             "expected no log record for /api/missions 307, got: "
-            f"{[r.getMessage() for r in _records_for_path(records, '/api/missions')]}"
+            f"{[r.getMessage() for r in _records_for_path(records, '/api/missions', (logging.INFO, logging.DEBUG))]}"
         )
 
     def test_defer_blocked_500_is_logged(self):
@@ -201,7 +217,9 @@ class TestSelectiveAccessLogPollingSuppression:
             resp = client.get("/api/queues/defer-blocked")
 
         assert resp.status_code == 500
-        matching = _records_for_path(records, "/api/queues/defer-blocked")
+        matching = _records_for_path(
+            records, "/api/queues/defer-blocked", (logging.DEBUG,)
+        )
         assert matching, (
             "expected a log record for /api/queues/defer-blocked 500"
         )
@@ -221,7 +239,7 @@ class TestSelectiveAccessLogPollingSuppression:
             resp = client.get(UNRELATED_PATH)
 
         assert resp.status_code == 200
-        matching = _records_for_path(records, UNRELATED_PATH)
+        matching = _records_for_path(records, UNRELATED_PATH, (logging.DEBUG,))
         assert matching, (
             f"expected a log record for {UNRELATED_PATH} 200 — unrelated "
             "paths must keep logging"
@@ -237,9 +255,11 @@ class TestSelectiveAccessLogPollingSuppression:
             resp = client.get("/api/missions?some=1&other=2")
 
         assert resp.status_code == 200
-        assert _records_for_path(records, "/api/missions") == [], (
+        assert _records_for_path(
+            records, "/api/missions", (logging.INFO, logging.DEBUG)
+        ) == [], (
             "query string must not break the suppression match: "
-            f"{[r.getMessage() for r in _records_for_path(records, '/api/missions')]}"
+            f"{[r.getMessage() for r in _records_for_path(records, '/api/missions', (logging.INFO, logging.DEBUG))]}"
         )
 
 
@@ -262,13 +282,20 @@ def _capture():
     """
     records: list[logging.LogRecord] = []
     handler = _RecorderHandler(records)
-    handler.setLevel(logging.INFO)
+    # C2 (review cycle 1): the access-log line is DEBUG post-demotion —
+    # capture at DEBUG, and hold the logger itself open at DEBUG for
+    # the block (restored on exit) or ``logger.debug(...)`` would never
+    # create a record under an ambient INFO-level logger.
+    handler.setLevel(logging.DEBUG)
 
     target = logging.getLogger(LOGGER_NAME)
+    old_level = target.level
+    target.setLevel(logging.DEBUG)
     target.addHandler(handler)
     try:
         yield records
     finally:
+        target.setLevel(old_level)
         target.removeHandler(handler)
 
 
