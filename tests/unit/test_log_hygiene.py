@@ -218,12 +218,20 @@ _LOG_ENV_VARS = (
 class _FreshInstall:
     """Install a FRESH logging_setup wiring under controlled env; the
     fixture teardown removes exactly what was added and restores the
-    root level."""
+    levels ``install_root_logging`` mutates — root, ``daemon`` AND
+    ``uvicorn.access`` (M2, review cycle 1: restoring the root level
+    alone left the other two polluted into later tests —
+    ``test_knowledge_tools.py`` failed under default collection
+    order)."""
 
     def __init__(self, monkeypatch, tmp_path):
         self._monkeypatch = monkeypatch
         self._tmp_path = tmp_path
-        self._old_level = logging.getLogger().level
+        self._old_levels = {
+            logging.getLogger().name: logging.getLogger().level,
+            "daemon": logging.getLogger("daemon").level,
+            "uvicorn.access": logging.getLogger("uvicorn.access").level,
+        }
         self._known: list[logging.Handler] = []
         self.module = None
 
@@ -255,7 +263,11 @@ class _FreshInstall:
                 handler.close()
             except Exception:
                 pass
-        root.setLevel(self._old_level)
+        # M2 (review cycle 1): restore ALL the levels install_root_logging
+        # touches — root (:149), daemon (:156), uvicorn.access (:161) —
+        # so no level set by an install survives the fixture teardown.
+        for name, level in self._old_levels.items():
+            logging.getLogger(name).setLevel(level)
 
 
 @pytest.fixture()

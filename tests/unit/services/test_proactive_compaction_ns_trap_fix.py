@@ -313,17 +313,48 @@ class TestNsTrapCLETargeting:
         # guard present at CLE read
         assert "empty snapshot read — suspected" in source or "empty snapshot read" in source
 
+    # ── Content anchors (C1, log-noise-hygiene review cycle 1) ───────────
+    # The two CLE fail-closed guards are located by GUARDED-BODY
+    # SUBSTRING, so line drift above them (every module-top edit in
+    # daemon/graph.py shifts them — the 9321→9412→9425 history) can
+    # never re-break the contract tests. The exact linenos below are a
+    # SECONDARY drift tripwire only: re-compute them (ast.If walk over
+    # the live tree) whenever graph.py changes above the CLE nodes;
+    # they pin the line as of the review-cycle-1 re-pin commit.
+    _GUARD_ANCHOR = "[Compaction][CLE] empty snapshot read"
+    _REPLACEMENT_ANCHOR = "[Compaction][CLE] empty replacement"
+    _CLE_GUARD_LINE = 9425
+    _CLE_REPLACEMENT_LINE = 9587
+
     @staticmethod
-    def _if_node_at_lineno(lineno: int):
+    def _if_node_with_body_constant(substring: str):
+        """The INNERMOST ``ast.If`` whose subtree contains a string
+        constant carrying ``substring`` (the identifying
+        ``logger.warning`` message). Innermost wins so an enclosing
+        block can never shadow the actual guard."""
         import ast
         import inspect
         import daemon.graph as graph_mod
         path = inspect.getsourcefile(graph_mod)
         tree = ast.parse(open(path).read())
+        best = None
         for node in ast.walk(tree):
-            if isinstance(node, ast.If) and getattr(node, "lineno", None) == lineno:
-                return node
-        return None
+            if not isinstance(node, ast.If):
+                continue
+            for n in ast.walk(node):
+                if (
+                    isinstance(n, ast.Constant)
+                    and isinstance(n.value, str)
+                    and substring in n.value
+                ):
+                    if (
+                        best is None
+                        or (node.end_lineno - node.lineno)
+                        < (best.end_lineno - best.lineno)
+                    ):
+                        best = node
+                    break
+        return best
 
     @staticmethod
     def _has_warn_and_raise(if_node) -> bool:
@@ -339,19 +370,54 @@ class TestNsTrapCLETargeting:
         return has_raise and has_warn
 
     def test_cle_guard_has_warn_and_raise(self):
-        # Line pins track daemon/graph.py drift (log-noise-hygiene edits
-        # shifted the module top by ~91 lines): 9321 -> 9412.
-        node = self._if_node_at_lineno(9412)
+        node = self._if_node_with_body_constant(self._GUARD_ANCHOR)
+        assert node is not None, (
+            "no If node guards a body containing "
+            f"{self._GUARD_ANCHOR!r} — the CLE empty-snapshot guard "
+            "moved or its warning text changed"
+        )
         assert self._has_warn_and_raise(node), (
-            "CLE empty-snapshot guard (line 9412) must contain BOTH a "
+            "CLE empty-snapshot guard must contain BOTH a "
             "logger.warning call AND a Raise in its body"
         )
 
     def test_empty_replacement_branch_has_warn_and_raise(self):
-        node = self._if_node_at_lineno(9574)
+        node = self._if_node_with_body_constant(self._REPLACEMENT_ANCHOR)
+        assert node is not None, (
+            "no If node guards a body containing "
+            f"{self._REPLACEMENT_ANCHOR!r} — the CLE empty-replacement "
+            "branch moved or its warning text changed"
+        )
         assert self._has_warn_and_raise(node), (
-            "CLE empty-replacement branch (line 9574) must contain BOTH a "
+            "CLE empty-replacement branch must contain BOTH a "
             "logger.warning call AND a Raise in its body"
+        )
+
+    def test_cle_guard_lineno_pin_secondary(self):
+        """SECONDARY drift tripwire — the content-anchored contract
+        tests above are the primary anchors and never break on line
+        drift. This pins the guard's exact line as of the re-pin
+        commit; a failure means graph.py changed above the CLE nodes
+        and the two ``_CLE_*_LINE`` constants must be re-computed
+        deliberately (ast.If walk), not blindly bumped."""
+        node = self._if_node_with_body_constant(self._GUARD_ANCHOR)
+        assert node is not None
+        assert node.lineno == self._CLE_GUARD_LINE, (
+            f"CLE empty-snapshot guard now sits at line {node.lineno} "
+            f"(pinned: {self._CLE_GUARD_LINE}) — re-compute "
+            "_CLE_GUARD_LINE / _CLE_REPLACEMENT_LINE via an ast.If walk"
+        )
+
+    def test_empty_replacement_lineno_pin_secondary(self):
+        """SECONDARY drift tripwire — see
+        ``test_cle_guard_lineno_pin_secondary``."""
+        node = self._if_node_with_body_constant(self._REPLACEMENT_ANCHOR)
+        assert node is not None
+        assert node.lineno == self._CLE_REPLACEMENT_LINE, (
+            f"CLE empty-replacement branch now sits at line "
+            f"{node.lineno} (pinned: {self._CLE_REPLACEMENT_LINE}) — "
+            "re-compute _CLE_GUARD_LINE / _CLE_REPLACEMENT_LINE via an "
+            "ast.If walk"
         )
 
 
