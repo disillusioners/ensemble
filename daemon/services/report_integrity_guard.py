@@ -428,6 +428,20 @@ def log_declared_waiting_violations(
 # The env NAME comes from daemon/constants.py — no literal fork (pinned
 # by tests/unit/services/test_b_kill_switch_registry.py).
 _B_GUARD_ENV = WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED
+
+# Recognized truthy/falsy tokens — single source for BOTH the resolver
+# membership checks and the warn-once prose. The *_ORDER tuples pin the
+# canonical display order: sorted() alone would emit "1/on/true/yes"
+# (lexicographic) and churn the byte-stable log text.
+_B_FALSY_TOKEN_ORDER = ("0", "false", "no", "off")
+_B_TRUTHY_TOKEN_ORDER = ("1", "true", "yes", "on")
+_B_FALSY_TOKENS = frozenset(_B_FALSY_TOKEN_ORDER)
+_B_TRUTHY_TOKENS = frozenset(_B_TRUTHY_TOKEN_ORDER)
+_B_TOKEN_PROSE = (
+    "Valid falsy: " + "/".join(_B_FALSY_TOKEN_ORDER)
+    + ". Valid truthy: " + "/".join(_B_TRUTHY_TOKEN_ORDER) + "."
+)
+
 _B_GUARD_ENABLED: bool | None = None
 _B_GUARD_BOOT_LOG_EMITTED: bool = False
 
@@ -461,22 +475,20 @@ def resolve_report_integrity_b_guard_enabled() -> bool:
     if _B_GUARD_ENABLED is not None:
         return _B_GUARD_ENABLED
     raw = os.environ.get(_B_GUARD_ENV, "1").strip().lower()
-    if raw in ("0", "false", "no", "off"):
+    if raw in _B_FALSY_TOKENS:
         _B_GUARD_ENABLED = False
-    elif raw in ("1", "true", "yes", "on"):
-        _B_GUARD_ENABLED = True
-    elif not raw:
-        # Set-but-blank ("" / whitespace) ≡ unset ≡ the new default
-        # (ON) — resolves silently, no unknown-value warning.
+    elif raw in _B_TRUTHY_TOKENS or not raw:
+        # Truthy tokens → ON; set-but-blank ("" / whitespace) ≡ unset ≡
+        # the new default — both resolve silently (no warn).
         _B_GUARD_ENABLED = True
     else:
         logger.warning(
             "%s=%r is not a recognized truthy/falsy value; falling back "
             "to ON (default — enforcement; set =0 for the stage-ii "
-            "log-only mode). Valid falsy: 0/false/no/off. Valid "
-            "truthy: 1/true/yes/on.",
+            "log-only mode). %s",
             _B_GUARD_ENV,
             raw,
+            _B_TOKEN_PROSE,
         )
         _B_GUARD_ENABLED = True
     return _B_GUARD_ENABLED
@@ -536,16 +548,18 @@ def emit_report_integrity_b_guard_boot_log() -> None:
         "`report_integrity.b_terminal_waiting_guard_enabled: false` in "
         "config.yaml still vetoes)"
     )
-    state_line = (
+    enabled_line = (
         "ENABLED (default — enforcement: one adjudication notice "
         "injected to the parent at the completion stamp; never blocks) "
         + config_veto_note
-        if enabled
-        else "DISABLED (explicit =0 — log-only mode: the "
+    )
+    disabled_line = (
+        "DISABLED (explicit =0 — log-only mode: the "
         "[ReportIntegrityGuard] "
         "soak log still fires at completion stamps; no notice is ever "
         "injected)"
     )
+    state_line = enabled_line if enabled else disabled_line
     logger.info(
         "Report-integrity (b) terminal-waiting guard resolved: %s "
         "(env %s=%s). Restart required to flip. See docs/setup.md "
