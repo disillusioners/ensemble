@@ -74,6 +74,13 @@ _LOG_DIR = os.environ.get("DAEMON_LOG_DIR", "./data/logs")
 # Shared format for all handlers (unchanged).
 _LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 
+# M1 (log-noise-hygiene review cycle 1): handlers installed by this
+# module carry this attribute so a re-install (module reload, second
+# in-process boot) can REPLACE them instead of stacking a second pair
+# (which double-logged every record). Untagged handlers (e.g. pytest's
+# caplog) are never touched.
+_HANDLER_TAG = "_ensemble_logging_setup_handler"
+
 # ANSI escape sequences (CSI … final-byte) — stripped in both surfaces.
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -112,6 +119,13 @@ def install_root_logging() -> None:
     """Wire the root logger + ``daemon`` logger with the dual-level handlers.
 
     Runs at ``daemon.api`` import time (as the inline setup did).
+
+    Idempotent (M1, log-noise-hygiene review cycle 1): a second call
+    REPLACES the previously installed (tagged) handler pair via
+    remove-before-add, so handler count and emission multiplicity stay
+    exactly as after the first install. Untagged handlers are left
+    untouched — the FIRST install behaves byte-identically to before
+    the guard.
     """
     handlers_min = min(_CONSOLE_LEVEL, _FILE_LEVEL)
 
@@ -122,6 +136,7 @@ def install_root_logging() -> None:
         fmt=_LOG_FORMAT,
         datefmt='%H:%M:%S',
     ))
+    setattr(stderr_handler, _HANDLER_TAG, True)
 
     # File handler — level DEBUG by default; rotation policy UNCHANGED
     # (10 MB × 5). Wrapped in try/except so an unwritable log dir does
@@ -140,12 +155,24 @@ def install_root_logging() -> None:
             fmt=_LOG_FORMAT,
             datefmt='%H:%M:%S',
         ))
+        setattr(file_handler, _HANDLER_TAG, True)
     except OSError as exc:
         # Log to stderr (the only handler guaranteed to work) and continue.
         print(f"WARNING: Could not set up file logging in {_LOG_DIR}: {exc}", file=sys.stderr)
 
     # Configure root logger by adding handlers explicitly (NOT basicConfig).
     root_logger = logging.getLogger()
+    # M1 re-install guard: strip handlers THIS module installed on an
+    # earlier call before adding the fresh pair (replace-before-add —
+    # the tagged pair from a prior install is discarded, and its file
+    # handle closed). Untagged handlers (caplog, app-added) survive.
+    for existing in list(root_logger.handlers):
+        if getattr(existing, _HANDLER_TAG, False):
+            root_logger.removeHandler(existing)
+            try:
+                existing.close()
+            except Exception:  # noqa: BLE001 — a close failure must not break install
+                pass
     root_logger.setLevel(_logger_gate_level(_root_log_level, handlers_min))
     root_logger.addHandler(stderr_handler)
     if file_handler is not None:

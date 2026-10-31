@@ -296,7 +296,8 @@ def is_chat_lane_active() -> bool:
 # Log-hygiene (step 5, spec item 7): cap lowered 500 → 5 — at 500
 # ids a single line still reached ~30-40KB. The level stays
 # WARNING (this is a shortening, not a demotion); 5 sample ids +
-# the truthful count keeps every line < 300 chars.
+# the truthful count keep the payload < 300 chars and the full
+# formatted line < 400 (measured: payload 223, full line 357-377).
 _DOOMED_ID_LOG_CAP: int = 5
 
 

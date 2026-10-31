@@ -348,6 +348,40 @@ class TestDualLevelHandlers:
         assert file_h.maxBytes == 10 * 1024 * 1024
         assert file_h.backupCount == 5
 
+    def test_install_root_logging_is_idempotent(self, fresh_logging, tmp_path):
+        """M1 (log-noise-hygiene review cycle 1): a SECOND
+        ``install_root_logging`` call (module reload / second in-process
+        boot) must REPLACE the tagged handler pair instead of stacking a
+        second copy — handler count unchanged, fresh handler objects,
+        and each record emitted exactly once (no double-logging)."""
+        fresh_logging.install()
+        root = logging.getLogger()
+        tag = fresh_logging.module._HANDLER_TAG
+        added_first = {id(h) for h in fresh_logging.added_handlers()}
+        count_after_first = len(root.handlers)
+        assert added_first, "expected the first install to add handlers"
+
+        fresh_logging.module.install_root_logging()
+
+        assert len(root.handlers) == count_after_first, (
+            "re-install must not stack handlers — the tagged pair is "
+            "replaced (remove-before-add)"
+        )
+        added_second = {id(h) for h in fresh_logging.added_handlers()}
+        assert added_second, "expected the re-install to install a fresh pair"
+        assert not (added_first & added_second), (
+            "the re-install must create NEW handler objects (replaced, "
+            "not reused)"
+        )
+        # All installed handlers carry the tag (so a THIRD install can
+        # still find and replace them).
+        tagged = [h for h in root.handlers if getattr(h, tag, False)]
+        assert len(tagged) == len(added_second)
+        # No double-emission: one INFO record reaches the file exactly once.
+        logging.getLogger("daemon.idem-proof").info("idempotency-payload-1")
+        text = (tmp_path / "ensemble.log").read_text()
+        assert text.count("idempotency-payload-1") == 1
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # (d) CheckpointPerf read lane
@@ -455,6 +489,21 @@ class TestLogInfoOnceLatch:
         # This is the exact call shape that raised NameError before the fix.
         graph._log_info_once("probe", lambda: None)
         assert "probe" in graph._ONCE_LOGGED
+
+    def test_once_latch_is_defensively_bounded(self):
+        """m5 (review cycle 1): the latch set is capped — past
+        ``_ONCE_LOGGED_CAP`` distinct keys it clears (work_notifier PP1
+        bounded-set pattern) but emission is NEVER suppressed: every
+        distinct key still emits exactly once, and the set never
+        exceeds the bound."""
+        from daemon import graph
+
+        calls: list[int] = []
+        total = graph._ONCE_LOGGED_CAP + 10
+        for i in range(total):
+            graph._log_info_once(f"cap-{i}", lambda: calls.append(1))
+        assert len(graph._ONCE_LOGGED) <= graph._ONCE_LOGGED_CAP
+        assert len(calls) == total  # the cap must not eat emissions
 
     def test_build_instance_llms_smoke_no_vision(self):
         import os

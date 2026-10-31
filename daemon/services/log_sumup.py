@@ -115,7 +115,13 @@ _registry: dict[str, _Family] = {}
 _registry_lock = threading.Lock()
 
 _timer: Optional[threading.Thread] = None
-_timer_stop = threading.Event()
+# m3 (log-noise-hygiene review cycle 1): the stop event is OWNED by the
+# live timer thread (rebound on each start, passed to the thread as an
+# arg) — never a shared, cleared-and-reused global. ``reset_for_tests``
+# sets the LIVE thread's own event (immediate wake from ``Event.wait``)
+# and joins it, so a reset inside the wait window can never leave a
+# duplicate scanner running alongside a freshly started one.
+_timer_stop: Optional[threading.Event] = None
 _timer_lock = threading.Lock()
 
 
@@ -259,22 +265,29 @@ def flush_all_for_tests() -> list[str]:
 
 
 def _ensure_timer() -> None:
-    """Start the daemon flush timer (once per process; restart-safe)."""
-    global _timer
+    """Start the daemon flush timer (once per process; restart-safe).
+
+    m3 (review cycle 1): each timer thread captures its OWN stop Event
+    (passed as an arg); the module global merely points at the live
+    thread's event so ``reset_for_tests`` can set it.
+    """
+    global _timer, _timer_stop
     with _timer_lock:
         if _timer is not None and _timer.is_alive():
             return
-        _timer_stop.clear()
+        stop = threading.Event()
+        _timer_stop = stop
         _timer = threading.Thread(
-            target=_timer_loop, name="log-sumup-timer", daemon=True
+            target=_timer_loop, args=(stop,), name="log-sumup-timer", daemon=True
         )
         _timer.start()
 
 
-def _timer_loop() -> None:
+def _timer_loop(stop: threading.Event) -> None:
     """Wake on a fixed cadence and flush every DUE window. One bad family
-    (or one bad tick) must never stop the scan — broad except per family."""
-    while not _timer_stop.wait(_TIMER_INTERVAL_S):
+    (or one bad tick) must never stop the scan — broad except per family.
+    Exits when THIS thread's own stop event is set (immediate wake)."""
+    while not stop.wait(_TIMER_INTERVAL_S):
         try:
             now = time.monotonic()
             for fam in list(_registry.values()):
@@ -291,10 +304,24 @@ def _timer_loop() -> None:
 def reset_for_tests() -> None:
     """Stop the timer + drop every family (test-only — mirrors the
     ``reset_for_tests`` convention). A later ``ensure_family`` restarts
-    a fresh timer."""
-    global _timer
-    _timer_stop.set()
+    a fresh timer.
+
+    m3 (review cycle 1): sets the LIVE thread's OWN stop event (an
+    ``Event.wait`` wakes immediately on set) and joins it with a small
+    budget, so the old scanner is provably gone before a subsequent
+    ``ensure_family`` starts a new one — no duplicate thread can
+    survive a reset inside the wait window. Test seam only; production
+    behavior unchanged.
+    """
+    global _timer, _timer_stop
+    with _timer_lock:
+        stop = _timer_stop
+        old = _timer
+        if stop is not None:
+            stop.set()
+        if old is not None and old.is_alive():
+            old.join(timeout=1.0)  # bounded; a mid-flush thread exits at its next boundary
+        _timer = None
+        _timer_stop = None
     with _registry_lock:
         _registry.clear()
-    with _timer_lock:
-        _timer = None

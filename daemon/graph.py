@@ -137,17 +137,29 @@ def _llm_heartbeat(
 # misreport agents whose config differs from the first spawner's.
 # DEBUG was rejected: these are operator-facing posture declarations
 # and should stay on the LCD exactly once per distinct config.
+# m5 (log-noise-hygiene review cycle 1): the latch set is documented as
+# small-by-construction — keys are operator-config-derived small tuples
+# (vision model / failover URL per instance), so the expected
+# population is tiny. The cap below is a DEFENSIVE clear-at-cap against
+# unbounded growth in a pathological caller, mirroring the work_notifier
+# PP1 bounded-set pattern; after a clear the next distinct config
+# re-announces once (acceptable, rare). Checked inside the existing
+# lock — cheap on the hot path.
 _ONCE_LOGGED: set = set()
+_ONCE_LOGGED_CAP: int = 1024
 _ONCE_LOG_LOCK = threading.Lock()
 
 
 def _log_info_once(key: str, emit: Callable[[], None]) -> None:
-    """Emit ``emit()`` (an INFO log line) exactly once per process per key."""
+    """Emit ``emit()`` (an INFO log line) exactly once per process per
+    key (defensively bounded: clear-at-cap at ``_ONCE_LOGGED_CAP``)."""
     if key in _ONCE_LOGGED:
         return
     with _ONCE_LOG_LOCK:
         if key in _ONCE_LOGGED:
             return
+        if len(_ONCE_LOGGED) >= _ONCE_LOGGED_CAP:
+            _ONCE_LOGGED.clear()
         _ONCE_LOGGED.add(key)
     emit()
 

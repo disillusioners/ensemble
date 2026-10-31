@@ -1706,54 +1706,66 @@ class ReportDeliveryRecoveryService:
         # overwhelmingly common case — one line every 300s) is
         # DEBUG so a quiet daemon no longer floods the console
         # with idle backstop markers. Grep anchor preserved on
-        # both levels; counts are truthful on both paths.
+        # both levels; counts are truthful on both paths. m2
+        # (review cycle 1): the marker lives in a ``finally`` — a
+        # crash mid-lane still emits it, so "ran, found nothing"
+        # stays distinguishable from "crashed"; the always-on
+        # record is DEBUG and upgrades to INFO when the lane
+        # actually recovered a row.
         out = LaneResult()
-        rows = self._report_injection_repo.find_completed_children_without_delivery(
-            parent_not_terminal=True,
-            limit=self._batch_cap,
-        )
-        for row in rows:
-            # F4 (2026-08-20): stop-event check between rows — a
-            # polite ``stop()`` exits the batch promptly without
-            # waiting on the join budget. Cheap (one Event.is_set).
-            if self._stop_event.is_set():
-                logger.info(
-                    "ReportDeliveryRecoveryService._run_no_row_backstop_lane: "
-                    "stop requested mid-batch — exiting loop"
-                )
-                break
-            child_id = row["child_id"]
-            child_msg_id = row["child_msg_id"]
-            parent_id = row["parent_id"]
-            try:
-                self._recover_one_no_row(
-                    child_id=child_id,
-                    child_msg_id=child_msg_id,
-                    parent_id=parent_id,
-                    result=out,
-                )
-            except Exception as exc:
-                logger.warning(
-                    f"sweep no_row_backstop row error "
-                    f"child={child_id[:8]}..., "
-                    f"msg={(child_msg_id or 'NONE')[:8]}..., "
-                    f"parent={parent_id[:8]}...: "
-                    f"{type(exc).__name__}: {exc}"
-                )
-                out.errors += 1
-        # Log-hygiene (step 5): outcome-gated marker — INFO only when
-        # the lane actually recovered a row this pass; idle passes
-        # (the every-300s common case) log the same anchor at DEBUG.
-        _lane2_marker = (
-            "RDRS lane 2: post-wipe recovery (no-row backstop; "
-            "F-2 wedge closure per durability-f1-f2 / phase2 task 2.8) "
-            f"rows={len(rows)} recovered={out.recovered} "
-            f"skipped_busy={out.skipped_busy} errors={out.errors}"
-        )
-        if out.recovered > 0:
-            logger.info(_lane2_marker)
-        else:
+        rows = []  # bound BEFORE the try so the finally can count it on a query crash
+        try:
+            rows = self._report_injection_repo.find_completed_children_without_delivery(
+                parent_not_terminal=True,
+                limit=self._batch_cap,
+            )
+            for row in rows:
+                # F4 (2026-08-20): stop-event check between rows — a
+                # polite ``stop()`` exits the batch promptly without
+                # waiting on the join budget. Cheap (one Event.is_set).
+                if self._stop_event.is_set():
+                    logger.info(
+                        "ReportDeliveryRecoveryService._run_no_row_backstop_lane: "
+                        "stop requested mid-batch — exiting loop"
+                    )
+                    break
+                child_id = row["child_id"]
+                child_msg_id = row["child_msg_id"]
+                parent_id = row["parent_id"]
+                try:
+                    self._recover_one_no_row(
+                        child_id=child_id,
+                        child_msg_id=child_msg_id,
+                        parent_id=parent_id,
+                        result=out,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"sweep no_row_backstop row error "
+                        f"child={child_id[:8]}..., "
+                        f"msg={(child_msg_id or 'NONE')[:8]}..., "
+                        f"parent={parent_id[:8]}...: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    out.errors += 1
+        finally:
+            # m2 (log-noise-hygiene review cycle 1): outcome-gated
+            # marker in a finally — crash-safety. The lane previously
+            # logged the marker only on the success path, so a crash
+            # before the marker emitted NOTHING and a silent crash was
+            # indistinguishable from a healthy idle pass. The marker
+            # text is UNCHANGED (grep anchor); the level contract is:
+            # DEBUG always (the routine every-300s tick), upgraded to
+            # INFO when the lane actually recovered a row.
+            _lane2_marker = (
+                "RDRS lane 2: post-wipe recovery (no-row backstop; "
+                "F-2 wedge closure per durability-f1-f2 / phase2 task 2.8) "
+                f"rows={len(rows)} recovered={out.recovered} "
+                f"skipped_busy={out.skipped_busy} errors={out.errors}"
+            )
             logger.debug(_lane2_marker)
+            if out.recovered > 0:
+                logger.info(_lane2_marker)
         return out
 
     def _recover_one_no_row(
