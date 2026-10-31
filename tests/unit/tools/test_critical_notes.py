@@ -166,8 +166,13 @@ def unique_summary(index: int) -> str:
         "keystone", "lattice", "mosaic", "nimbus", "obelisk",
         "palisade", "quill", "rampart", "spire", "turret",
     ]
-    base = index * 3
-    return f"{word_sets[base]} {word_sets[base + 1]} {word_sets[base + 2]}"
+    # Word-list only has ~150 entries (50 triples); the cap is now 200,
+    # so fall back to an index-derived unique summary to keep the
+    # range()-driven cap tests working at the raised constant.
+    if index * 3 + 2 < len(word_sets):
+        base = index * 3
+        return f"{word_sets[base]} {word_sets[base + 1]} {word_sets[base + 2]}"
+    return f"distinct test summary {index}"
 
 
 # =============================================================================
@@ -1044,7 +1049,7 @@ class TestCapBehavior:
 
         # Pin the cap value: if it silently regresses to 30 (the OLD cap),
         # this test must fail so the silent-eviction regression is caught.
-        assert critical_notes._MAX_ENTRIES == 50
+        assert critical_notes._MAX_ENTRIES == 200
 
         first_summary = unique_summary(0)
 
@@ -1173,8 +1178,8 @@ class TestCapBehavior:
         })
         first_added_id = first_added["id"]
 
-        # Fill with the remaining 48 medium entries
-        for i in range(1, 49):
+        # Fill with the remaining medium entries to reach _MAX_ENTRIES - 1
+        for i in range(1, _MAX_ENTRIES - 1):
             add_tool.invoke({
                 "project_id": "test_project",
                 "category": "convention",
@@ -1274,6 +1279,88 @@ class TestCapBehavior:
         assert upd["source_agent"] == "test_agent"
         # Count unchanged
         assert list_tool.invoke({"project_id": "test_project"})["count"] == _MAX_ENTRIES
+
+    def test_cap_boundary_at_exact_cap_rejected(self, mock_repo):
+        """Exactly _MAX_ENTRIES rows -> next distinct add REJECTED with cap error
+        naming at least one eviction-candidate id line."""
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
+        list_tool = next(t for t in tools if t.name == "project_cn_list")
+
+        for i in range(_MAX_ENTRIES):
+            add_tool.invoke({
+                "project_id": "test_project",
+                "category": "convention",
+                "priority": "medium",
+                "summary": unique_summary(i),
+            })
+            time.sleep(0.002)
+
+        assert list_tool.invoke({"project_id": "test_project"})["count"] == _MAX_ENTRIES
+
+        reject = add_tool.invoke({
+            "project_id": "test_project",
+            "category": "convention",
+            "priority": "medium",
+            "summary": "porcupine quail rabbit salamander turtle",
+        })
+        assert "error" in reject
+        assert f"cap of {_MAX_ENTRIES}" in reject["error"]
+        assert "eviction candidates" in reject["error"]
+        assert "- id=" in reject["error"]
+
+    def test_cap_boundary_one_below_accepted(self, mock_repo):
+        """_MAX_ENTRIES - 1 rows -> next add ACCEPTED (off-by-one guard)."""
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
+        list_tool = next(t for t in tools if t.name == "project_cn_list")
+
+        for i in range(_MAX_ENTRIES - 1):
+            add_tool.invoke({
+                "project_id": "test_project",
+                "category": "convention",
+                "priority": "medium",
+                "summary": unique_summary(i),
+            })
+            time.sleep(0.002)
+
+        assert list_tool.invoke({"project_id": "test_project"})["count"] == _MAX_ENTRIES - 1
+
+        accepted = add_tool.invoke({
+            "project_id": "test_project",
+            "category": "convention",
+            "priority": "medium",
+            "summary": "porcupine quail rabbit salamander turtle",
+        })
+        assert "error" not in accepted, f"Boundary add rejected: {accepted}"
+        assert list_tool.invoke({"project_id": "test_project"})["count"] == _MAX_ENTRIES
+
+    def test_cap_regression_51_preexisting_accepted(self, mock_repo):
+        """A project seeded with 51 pre-existing entries -> add ACCEPTED
+        (regression guard that the raise from 50 to 200 lifts old ceiling)."""
+        tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
+        add_tool = next(t for t in tools if t.name == "project_cn_add")
+        list_tool = next(t for t in tools if t.name == "project_cn_list")
+
+        for i in range(51):
+            add_tool.invoke({
+                "project_id": "test_project",
+                "category": "convention",
+                "priority": "medium",
+                "summary": unique_summary(i),
+            })
+            time.sleep(0.002)
+
+        assert list_tool.invoke({"project_id": "test_project"})["count"] == 51
+
+        accepted = add_tool.invoke({
+            "project_id": "test_project",
+            "category": "convention",
+            "priority": "medium",
+            "summary": "porcupine quail rabbit salamander turtle",
+        })
+        assert "error" not in accepted, f"Add after 51 rejected: {accepted}"
+        assert list_tool.invoke({"project_id": "test_project"})["count"] == 52
 
 
 # =============================================================================
@@ -1431,9 +1518,9 @@ class TestProjectCNRemove:
 class TestConstants:
     """Tests for module constants."""
 
-    def test_max_entries_is_50(self):
-        """Verify _MAX_ENTRIES is 50 (raised from 30 for live-store headroom)."""
-        assert _MAX_ENTRIES == 50
+    def test_max_entries_is_200(self):
+        """Verify _MAX_ENTRIES is 200 (raised from 50 for live-store headroom)."""
+        assert _MAX_ENTRIES == 200
 
     def test_max_summary_len_is_200(self):
         """Verify _MAX_SUMMARY_LEN is 200."""

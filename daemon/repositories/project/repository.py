@@ -26,6 +26,7 @@ from .models import (
     ProjectMetadataRecord,
 )
 from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
+from daemon.repositories.project.critical_note_ids import critical_note_id_matches
 from daemon.repositories.instance.models import Instance, InstanceStatus, InstanceHierarchy
 from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobLock, DeadLetterItem, JobQueue
 from daemon.repositories.task.models import Task
@@ -1562,6 +1563,35 @@ class SQLModelProjectRepository:
 
         return note
 
+    def _resolve_critical_note_id(self, session, project_id: str, entry_id: str) -> str | None:
+        """Resolve a (possibly format-variant) entry_id to the STORED id.
+
+        Read-only: never rewrites a stored id. Returns the stored id string
+        or None (not found / ambiguous).
+        """
+        # 1. cheap exact path
+        note = session.get(CriticalNoteModel, entry_id)
+        if note is not None and note.project_id == project_id:
+            return note.id
+
+        # 2. scan project rows
+        rows = list(session.exec(
+            select(CriticalNoteModel).where(CriticalNoteModel.project_id == project_id)
+        ))
+        matches = [r for r in rows if critical_note_id_matches(r.id, entry_id)]
+        if len(matches) == 1:
+            return matches[0].id
+        if len(matches) >= 2:
+            logger.info(
+                "[CriticalNotes:Degraded] stage=id_resolve reason=ambiguous "
+                "project_id=%s requested=%r match_count=%d",
+                project_id,
+                entry_id,
+                len(matches),
+            )
+            return None
+        return None
+
     def get_critical_note(self, project_id: str, entry_id: str) -> CriticalNoteModel | None:
         """Get a specific critical note by ID.
         
@@ -1573,7 +1603,10 @@ class SQLModelProjectRepository:
             The CriticalNoteModel if found and belongs to project, None otherwise.
         """
         with Session(self.engine) as session:
-            note = session.get(CriticalNoteModel, entry_id)
+            resolved = self._resolve_critical_note_id(session, project_id, entry_id)
+            if resolved is None:
+                return None
+            note = session.get(CriticalNoteModel, resolved)
             if note is None or note.project_id != project_id:
                 return None
             return note
@@ -1710,7 +1743,10 @@ class SQLModelProjectRepository:
             True if removed, False if not found.
         """
         with Session(self.engine) as session:
-            note = session.get(CriticalNoteModel, entry_id)
+            resolved = self._resolve_critical_note_id(session, project_id, entry_id)
+            if resolved is None:
+                return False
+            note = session.get(CriticalNoteModel, resolved)
             if note is None or note.project_id != project_id:
                 return False
             session.delete(note)
@@ -1741,7 +1777,10 @@ class SQLModelProjectRepository:
             The updated CriticalNoteModel if found, None otherwise.
         """
         with Session(self.engine) as session:
-            note = session.get(CriticalNoteModel, entry_id)
+            resolved = self._resolve_critical_note_id(session, project_id, entry_id)
+            if resolved is None:
+                return None
+            note = session.get(CriticalNoteModel, resolved)
             if note is None or note.project_id != project_id:
                 return None
 
@@ -1844,7 +1883,10 @@ class SQLModelProjectRepository:
             The updated CriticalNoteModel if found, None otherwise.
         """
         with Session(self.engine) as session:
-            note = session.get(CriticalNoteModel, entry_id)
+            resolved = self._resolve_critical_note_id(session, project_id, entry_id)
+            if resolved is None:
+                return None
+            note = session.get(CriticalNoteModel, resolved)
             if note is None or note.project_id != project_id:
                 return None
 
@@ -1888,12 +1930,23 @@ class SQLModelProjectRepository:
             The updated old CriticalNoteModel if found, None otherwise.
         """
         with Session(self.engine) as session:
-            note = session.get(CriticalNoteModel, old_id)
+            resolved_old = self._resolve_critical_note_id(session, project_id, old_id)
+            if resolved_old is None:
+                return None
+            resolved_new = self._resolve_critical_note_id(session, project_id, new_id)
+            if resolved_new is None:
+                return None
+            if resolved_old == resolved_new:
+                return None
+            note = session.get(CriticalNoteModel, resolved_old)
             if note is None or note.project_id != project_id:
+                return None
+            new_note = session.get(CriticalNoteModel, resolved_new)
+            if new_note is None or new_note.project_id != project_id:
                 return None
 
             now = datetime.now(timezone.utc).isoformat()
-            note.superseded_by_id = new_id
+            note.superseded_by_id = resolved_new
             # Supersede bumps last_reviewed_at (§4.4 guard list) — the
             # row was just reviewed-and-retired by a leader action.
             note.last_reviewed_at = now
@@ -1944,11 +1997,14 @@ class SQLModelProjectRepository:
             The ids of rows that were re-activated (pointers cleared).
         """
         with Session(self.engine) as session:
-            stmt = select(CriticalNoteModel).where(
-                CriticalNoteModel.project_id == project_id,
-                CriticalNoteModel.superseded_by_id == entry_id,
-            )
-            pointing = list(session.exec(stmt))
+            rows = list(session.exec(
+                select(CriticalNoteModel).where(CriticalNoteModel.project_id == project_id)
+            ))
+            pointing = [
+                r for r in rows
+                if r.superseded_by_id is not None
+                and critical_note_id_matches(r.superseded_by_id, entry_id)
+            ]
             reactivated = [n.id for n in pointing]
             now = datetime.now(timezone.utc).isoformat()
             for note in pointing:

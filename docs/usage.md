@@ -512,7 +512,7 @@ project_cn_add(
 
 **Updates**: To modify an existing entry, pass the optional `entry_id` parameter (exact id match). Updatable fields: `category`, `priority`, `summary`, `reference`, `detail_ref`, `source_agent`. `category` is included so a recategorize is visible, never silent.
 
-**Cap**: At 50 entries the project is full; an add then fails with an explicit error naming eviction candidates — no silent evictions.
+**Cap**: At 200 entries the project is full; an add then fails with an explicit error naming eviction candidates — no silent evictions.
 
 #### project_cn_list
 
@@ -558,7 +558,7 @@ project_cn_backfill_embeddings(
 )
 ```
 
-One-shot embeddings backfill (Phase 2): mints cached embeddings for every note row that still lacks one (legacy pre-Phase-2 rows, or rows whose write-time embed failed). **Idempotent** — only rows without a cached embedding are candidates, so already-minted rows are never re-embedded and a second run is a no-op. Fail-open per row: one bad row never aborts the batch; failures log under `[CriticalNotes:Degraded]` and are counted. Omit `project_id` to sweep ALL projects. Budget: ~250ms/embed (~15s for 50 notes) — run during a quiet window. Returns the counts summary `[CriticalNotes:backfill] minted=N skipped=K failed=M total=T project=X`.
+One-shot embeddings backfill (Phase 2): mints cached embeddings for every note row that still lacks one (legacy pre-Phase-2 rows, or rows whose write-time embed failed). **Idempotent** — only rows without a cached embedding are candidates, so already-minted rows are never re-embedded and a second run is a no-op. Fail-open per row: one bad row never aborts the batch; failures log under `[CriticalNotes:Degraded]` and are counted. Omit `project_id` to sweep ALL projects. Budget: ~250ms/embed (~50s for 200 notes) — run during a quiet window. Returns the counts summary `[CriticalNotes:backfill] minted=N skipped=K failed=M total=T project=X`.
 
 ---
 

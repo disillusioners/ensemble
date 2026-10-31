@@ -739,3 +739,116 @@ class TestProjectCnBackfillEmbeddings:
         # The static fallback universe carries the verb too (frozen
         # binary discoverability — same mechanism as the Phase-1 verbs).
         assert "project_cn_backfill_embeddings" in KNOWN_TOOL_NAMES
+
+
+# =============================================================================
+# Test Class: TestCriticalNoteIdResolutionToolLevel — tool-level id resolution
+# =============================================================================
+
+
+class TestCriticalNoteIdResolutionToolLevel:
+    """Tool-level id-resolution seams (format variants resolve to stored row)."""
+
+    def _seed(self, repo, project_id):
+        return repo.add_critical_note(
+            project_id,
+            source_agent="leader",
+            category="risk",
+            priority="high",
+            summary="seed note for id resolution",
+        )
+
+    def test_remove_format_variant_resolves(self, tools, repo, project_id):
+        note = self._seed(repo, project_id)
+        cid = note.id
+        variants = [cid + " ", cid.upper(), "\u200b" + cid, cid.replace("-", "")]
+        for v in variants:
+            # re-seed for each variant attempt
+            pass
+        # use one variant end-to-end
+        n2 = repo.add_critical_note(
+            project_id, source_agent="leader", category="risk",
+            priority="high", summary="second seed",
+        )
+        cid2 = n2.id
+        variant = cid2 + " "
+        res = tools["project_cn_remove"].invoke({"project_id": project_id, "entry_id": variant})
+        assert res.get("removed") is True, res
+        # row gone
+        assert repo.get_critical_note(project_id, cid2) is None
+
+    def test_pin_format_variant_resolves(self, tools, repo, project_id):
+        note = self._seed(repo, project_id)
+        cid = note.id
+        variant = cid.upper()
+        res = tools["project_cn_pin"].invoke({
+            "project_id": project_id, "entry_id": variant, "pinned": True,
+        })
+        assert "error" not in res, res
+        assert res.get("pinned") is True
+        # persisted on the right row
+        refreshed = repo.get_critical_note(project_id, cid)
+        assert refreshed is not None and refreshed.pinned is True
+
+    def test_supersede_format_variant_resolves_and_self_refusal(self, tools, repo, project_id):
+        old = self._seed(repo, project_id)
+        new = repo.add_critical_note(
+            project_id, source_agent="leader", category="risk",
+            priority="high", summary="successor note",
+        )
+        old_v = old.id + " "
+        new_v = new.id.upper()
+        res = tools["project_cn_supersede"].invoke({
+            "project_id": project_id, "old_id": old_v, "new_id": new_v,
+        })
+        assert "error" not in res, res
+        # self-refusal: variants resolving to the same stored id
+        same = self._seed(repo, project_id)
+        v1 = same.id + " "
+        v2 = same.id.upper()
+        refused = tools["project_cn_supersede"].invoke({
+            "project_id": project_id, "old_id": v1, "new_id": v2,
+        })
+        assert "error" in refused
+        assert "must differ" in refused["error"]
+
+    def test_add_update_path_format_variant(self, tools, repo, project_id):
+        note = self._seed(repo, project_id)
+        cid = note.id
+        variant = "\u200b" + cid
+        res = tools["project_cn_add"].invoke({
+            "project_id": project_id,
+            "category": "risk",
+            "priority": "high",
+            "summary": "updated via variant",
+            "entry_id": variant,
+        })
+        assert "error" not in res, res
+        assert res.get("id") == cid
+        assert res.get("summary") == "updated via variant"
+
+    def test_not_found_hint_and_no_auto_apply(self, tools, repo, project_id):
+        note = self._seed(repo, project_id)
+        cid = note.id
+        before = repo.list_critical_notes(project_id)
+        before_count = len(before)
+
+        # single-edit neighbour -> hint present
+        neighbour = cid[:-1] + ("0" if cid[-1] != "0" else "1")
+        res = tools["project_cn_remove"].invoke({
+            "project_id": project_id, "entry_id": neighbour,
+        })
+        assert "error" in res
+        assert "Near-match(es):" in res["error"]
+        assert repr(cid) in res["error"] or cid in res["error"]
+        # no auto-apply: count unchanged
+        assert len(repo.list_critical_notes(project_id)) == before_count
+
+        # genuinely far id -> no hint
+        far = "00000000-0000-0000-0000-000000000000"
+        res2 = tools["project_cn_remove"].invoke({
+            "project_id": project_id, "entry_id": far,
+        })
+        assert "error" in res2
+        assert "Near-match(es):" not in res2["error"]
+        assert len(repo.list_critical_notes(project_id)) == before_count

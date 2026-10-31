@@ -16,6 +16,7 @@ from sqlmodel import SQLModel, Field
 from pydantic import BaseModel, field_validator
 
 from daemon.repositories.infra.types import JSONBType
+from daemon.repositories.project.critical_note_ids import normalize_critical_note_id
 
 
 def _now_iso() -> str:
@@ -220,6 +221,40 @@ class CriticalNoteModel(SQLModel, table=True):
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     detail_ref: str | None = Field(default=None)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Write-side normalization seam that ACTUALLY RUNS in this stack.
+        # SQLModel table models are SQLAlchemy declarative models: their
+        # generated __init__ does NOT invoke pydantic validators, and ORM
+        # row loads do not call __init__ either (observed empirically).
+        # So this override is the effective normalizer for Python-side
+        # construction. Non-raising by design: a raise here (or on any
+        # load path) would break project_cn_list for legacy malformed
+        # rows — that is the defect class being fixed, not something to
+        # reintroduce. Unparseable legacy values pass through untouched.
+        try:
+            if getattr(self, "id", None) is not None:
+                self.id = normalize_critical_note_id(self.id)
+        except Exception:
+            pass
+
+    # Defensive net only. In the current stack (sqlmodel 0.0.37 /
+    # pydantic 2.12.5 / SQLAlchemy 2.0.48) this validator is INERT for
+    # table-model construction and for ORM loads — neither fires pydantic
+    # validators — and no ``model_validate()`` call targets this model.
+    # It is kept solely for such callers/future stacks. NON-RAISING on
+    # purpose: a raising path on load would break project_cn_list for
+    # legacy malformed rows.
+    @field_validator("id", mode="before")
+    @classmethod
+    def _normalize_id(cls, v):
+        if v is None:
+            return v
+        try:
+            return normalize_critical_note_id(v)
+        except Exception:
+            return v
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — 2026-10-24
 
+### Fixed — critical-notes ids are resolved by representation (cap 50 → 200) (`feature/critical-notes-cap-fix`)
+
+- **Critical-notes ids resolve by representation, not byte-exact** (`daemon/repositories/project/critical_note_ids.py`, `daemon/repositories/project/repository.py`, `daemon/tools/critical_notes.py`) — stored ids are now matched exact → normalized (whitespace/zero-width/dash-variant/uppercase) → 32-hex fingerprint, so a row whose stored id is a format variant can be removed, pinned, updated and superseded again; ambiguous matches refuse with a `[CriticalNotes:Degraded] stage=id_resolve reason=ambiguous` log line, resolution NEVER rewrites a stored id, and not-found remove/pin/supersede errors name `repr()`-escaped near-match ids as diagnostics only (never auto-applied; no fuzzy/edit-distance matching ever writes or merges).
+- **Total entry cap raised 50 → 200** (`daemon/tools/critical_notes.py`, `docs/usage.md`) — the pinned core cap stays 8; reject-don't-evict and eviction-candidate naming are unchanged.
+- **Behavior change — variant supersede pointers are now matched** — `project_cn_remove(cascade=false)` can now REFUSE where it previously succeeded on an exact id whose `superseded_by_id` pointer was stored as a format variant; that refusal is the documented cascade contract (remove-without-orphaning) working, resolved by `cascade=true` or by re-pointing the lineage first.
+
 ### Added — the checkpoint quick-wins batch: the checkpoint-read metrics endpoint plus the read-cost repairs (`feature/checkpoint-quick-wins`, from §quick-wins + §9 of the locked checkpoint read-path fixes plan)
 
 - **`GET /api/metrics` — the checkpoint-read metrics endpoint (Prometheus text format)** — counters and histograms for checkpoint reads (the read walk + the per-op counters), so read cost is observable without a py-spy attach. **Fail-closed by design:** the endpoint REQUIRES auth-ON with the `maintenance:read` scope; in the default auth-OFF posture it returns **503 `AUTH_NOT_CONFIGURED`** — deliberate, because the daemon listens on `0.0.0.0` with CORS-`*`, so an unauthenticated metrics surface would be a public disclosure. Scrapers must mint a **dedicated machine token with `--scopes maintenance:read`**; the bootstrap `auth:admin` token does **NOT** satisfy this scope (it 403s). Operator doc: `docs/runbooks/checkpoint-maintenance.md` (§6 metrics pointer).
