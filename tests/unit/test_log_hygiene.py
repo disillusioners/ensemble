@@ -264,7 +264,7 @@ class _FreshInstall:
             except Exception:
                 pass
         # M2 (review cycle 1): restore ALL the levels install_root_logging
-        # touches — root (:149), daemon (:156), uvicorn.access (:161) —
+        # touches — the "root", "daemon", and "uvicorn.access" loggers —
         # so no level set by an install survives the fixture teardown.
         for name, level in self._old_levels.items():
             logging.getLogger(name).setLevel(level)

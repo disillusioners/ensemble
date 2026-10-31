@@ -1,7 +1,7 @@
 """Canonical daemon logging wiring — dual-level handlers (log-noise-hygiene).
 
 The SINGLE home for the daemon's root logging setup. Extracted from
-``daemon/api.py``'s module top (it ran inline there since PR-era one);
+``daemon/api.py``'s module top (it ran inline there from the original PR);
 ``daemon/api.py`` now calls :func:`install_root_logging` at the same
 point, so import-time semantics are unchanged.
 
@@ -91,7 +91,7 @@ _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 daemon_logger = logging.getLogger("daemon")
 
 
-def strip_ansi(text: str) -> str:
+def _strip_ansi(text: str) -> str:
     """Remove ANSI escape sequences from a formatted log line."""
     return _ANSI_ESCAPE_RE.sub("", text)
 
@@ -100,7 +100,7 @@ class _AnsiStrippingFormatter(logging.Formatter):
     """Formatter that strips ANSI escape sequences from the emitted line."""
 
     def format(self, record: logging.LogRecord) -> str:
-        return strip_ansi(super().format(record))
+        return _strip_ansi(super().format(record))
 
 
 def _logger_gate_level(env_level: int, handlers_min: int) -> int:
@@ -158,7 +158,10 @@ def install_root_logging() -> None:
         setattr(file_handler, _HANDLER_TAG, True)
     except OSError as exc:
         # Log to stderr (the only handler guaranteed to work) and continue.
-        print(f"WARNING: Could not set up file logging in {_LOG_DIR}: {exc}", file=sys.stderr)
+        print(
+            f"WARNING: Could not set up file logging in {_LOG_DIR}: {exc}",
+            file=sys.stderr,
+        )
 
     # Configure root logger by adding handlers explicitly (NOT basicConfig).
     root_logger = logging.getLogger()
@@ -186,3 +189,9 @@ def install_root_logging() -> None:
     # handles selective logging).
     uvicorn_access = logging.getLogger("uvicorn.access")
     uvicorn_access.setLevel(logging.WARNING)
+
+
+__all__ = [
+    "daemon_logger",
+    "install_root_logging",
+]

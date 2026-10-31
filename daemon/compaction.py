@@ -3367,10 +3367,7 @@ class ContextCompactor:
                 )
             )
             if not force and not over_budget:
-                # Log-hygiene (step 5): under-budget no-op skip — the
-                # stamp-only return is the behavior; the log line is
-                # pure no-op noise (fires every refire tick), removed
-                # entirely per the demotion list.
+                # same rationale as the all-injected skip above.
                 return anti_refire_skip(
                     skip_reason="skipped_below_min_messages"
                 )

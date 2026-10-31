@@ -157,7 +157,6 @@ from daemon import constants
 
 # Determine the base path (use working directory for production)
 # PyInstaller runs from INSTALL_DIR where frontend/dist is expected
-import sys
 if getattr(sys, 'frozen', False):
     BASE_DIR = Path(sys.executable).parent
 else:

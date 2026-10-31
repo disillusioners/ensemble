@@ -2,10 +2,10 @@
 
 PR1 (C4) of the LangGraph Checkpoint / Message Persistence Performance plan.
 The module is the single source of truth for the ``[CheckpointPerf]`` and
-``[/Messages]`` log lines that PR1 introduces. It is intentionally tiny:
-no daemon state, no I/O, no scheduling — pure functions that emit one log
-line per call and return their inputs unchanged so the call sites stay
-trivial to read.
+``[/Messages]`` log lines that PR1 introduces. Reads fold into a windowed
+sumup (``daemon/services/log_sumup.py``): ONE INFO line per window, and
+the ``CHECKPOINT_PERF_LOGS`` gate silences the whole family. The module
+is no longer stateless — it holds cached sumup state + lock.
 
 Risk-mitigation: when the env var ``CHECKPOINT_PERF_LOGS`` is set to a
 falsy value (e.g. ``"0"`` / ``"false"`` / ``"no"``) every emit is
@@ -68,7 +68,8 @@ _log_sumup_module: Any = None
 _log_sumup_lock = threading.Lock()
 
 
-def _get_log_sumup():
+def _get_log_sumup() -> Any:
+    # twin copy: daemon/graph.py
     """Cached lazy import of ``daemon.services.log_sumup`` (cycle note above)."""
     global _log_sumup_module
     if _log_sumup_module is None:

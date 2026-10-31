@@ -193,7 +193,9 @@ def record(
         pass
 
 
-def _snapshot_and_reset(fam: _Family, now: float, *, force: bool = False) -> Optional[dict[str, Any]]:
+def _snapshot_and_reset(
+    fam: _Family, now: float, *, force: bool = False
+) -> Optional[dict[str, Any]]:
     """Take the window snapshot under the family lock and reset the
     accumulators. ``None`` when the window is not due (unless forced)."""
     with fam.lock:
@@ -249,7 +251,9 @@ def flush(family: str, *, force: bool = False) -> Optional[str]:
         fam = _registry.get(family)
         if fam is None:
             return None
-        return _emit_family(fam, _snapshot_and_reset(fam, time.monotonic(), force=force))
+        return _emit_family(
+            fam, _snapshot_and_reset(fam, time.monotonic(), force=force)
+        )
     except Exception:  # noqa: BLE001 — fail-open
         return None
 
@@ -320,8 +324,20 @@ def reset_for_tests() -> None:
         if stop is not None:
             stop.set()
         if old is not None and old.is_alive():
-            old.join(timeout=1.0)  # bounded; a mid-flush thread exits at its next boundary
+            # bounded; a mid-flush thread exits at its next boundary
+            old.join(timeout=1.0)
         _timer = None
         _timer_stop = None
     with _registry_lock:
         _registry.clear()
+
+
+__all__ = [
+    "DEFAULT_WINDOW_S",
+    "RenderFn",
+    "ensure_family",
+    "flush",
+    "flush_all_for_tests",
+    "record",
+    "reset_for_tests",
+]

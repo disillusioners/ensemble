@@ -111,7 +111,9 @@ def _build_app() -> FastAPI:
     return app
 
 
-def _records_for_path(records, path: str, levels) -> list:
+def _records_for_path(
+    records: list[logging.LogRecord], path: str, levels: tuple[int, ...]
+) -> list[logging.LogRecord]:
     """Filter captured records to ``daemon.api`` entries at ``levels``
     that mention ``path``. The middleware emits ONE PLAIN-TEXT line
     (no ANSI — both surfaces strip it) with the path text embedded;

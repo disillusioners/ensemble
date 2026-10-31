@@ -557,19 +557,12 @@ async def notify_work_watchers(
             # :data:`site 3 below <claim-site>`) and are NOT warned
             # here — only the terminal case is a delivery gap.
             if _is_terminal(status) and _pp1_zero_watcher_should_warn(work_id):
-                # PP1 (2026-10-03, report-delivery-bug-family) — on a
-                # TERMINAL event with ZERO watchers, the early return
-                # is silent under the pre-fix behaviour: the watcher
-                # missed the event and the operator had no log line
-                # to correlate the dropped report. Non-terminal
-                # statuses stay claim-free by design and are NOT
-                # warned here — only the terminal case is a delivery
-                # gap. Log-hygiene (step 5): deduped to ONCE per
-                # work_id per process (``_pp1_zero_watcher_should_warn``
-                # above) and shortened; the pinned literal prefix
-                # ``PP1 zero-watcher terminal fire`` is a test
-                # contract (test_report_delivery_bug_family_pins)
-                # and must not be reworded.
+                # Delta vs the PP1 rationale above: the warn dedupes to
+                # ONCE per work_id per process
+                # (``_pp1_zero_watcher_should_warn``), and the logged
+                # literal prefix ``PP1 zero-watcher terminal fire`` is a
+                # pinned TEST CONTRACT (test_report_delivery_bug_family_pins)
+                # — do not reword.
                 logger.warning(
                     "PP1 zero-watcher terminal fire: work_id=%s "
                     "status=%s — no watchers found, the terminal "

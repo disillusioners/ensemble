@@ -79,7 +79,8 @@ _log_sumup_module: Any = None
 _log_sumup_lock = threading.Lock()
 
 
-def _get_log_sumup():
+def _get_log_sumup() -> Any:
+    # twin copy: daemon/checkpoint_perf.py
     """Cached lazy import of ``daemon.services.log_sumup`` (cycle note above)."""
     global _log_sumup_module
     if _log_sumup_module is None:
@@ -91,7 +92,7 @@ def _get_log_sumup():
     return _log_sumup_module
 
 
-def _render_llm_heartbeat(snapshot: dict) -> str:
+def _render_llm_heartbeat(snapshot: dict[str, Any]) -> str:
     if not snapshot.get("count"):
         return f"[LLM] heartbeat {snapshot['window_s']}s: 0 invocations (idle)"
     last_age = snapshot.get("last_event_age_s")
@@ -117,8 +118,8 @@ def _ensure_llm_heartbeat_family() -> None:
 
 def _llm_heartbeat(
     *,
-    sums: Optional[dict] = None,
-    sets: Optional[dict] = None,
+    sums: Optional[dict[str, Any]] = None,
+    sets: Optional[dict[str, Any]] = None,
 ) -> None:
     """Fold ONE LLM event into the heartbeat sumup. O(1), fail-open,
     never logs per event (ensure_family is idempotent — safe to call
@@ -145,7 +146,7 @@ def _llm_heartbeat(
 # PP1 bounded-set pattern; after a clear the next distinct config
 # re-announces once (acceptable, rare). Checked inside the existing
 # lock — cheap on the hot path.
-_ONCE_LOGGED: set = set()
+_ONCE_LOGGED: set[str] = set()
 _ONCE_LOGGED_CAP: int = 1024
 _ONCE_LOG_LOCK = threading.Lock()
 

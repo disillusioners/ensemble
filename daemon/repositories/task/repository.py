@@ -295,9 +295,8 @@ def is_chat_lane_active() -> bool:
 # is consistent across repos.
 # Log-hygiene (step 5, spec item 7): cap lowered 500 → 5 — at 500
 # ids a single line still reached ~30-40KB. The level stays
-# WARNING (this is a shortening, not a demotion); 5 sample ids +
-# the truthful count keep the payload < 300 chars and the full
-# formatted line < 400 (measured: payload 223, full line 357-377).
+# WARNING (this is a shortening, not a demotion); payload capped
+# at first-5 IDs (≤ ~360 chars); full line ≤ ~420.
 _DOOMED_ID_LOG_CAP: int = 5
 
 
@@ -305,10 +304,11 @@ def _capped_doomed_id_repr(ids: list[str]) -> str:
     """Render a doomed-id list for the wipe JOURNAL log, capped.
 
     Returns a string of the form
-    ``"<first 500 ids>"[+ N more truncated]``
-    so the operator sees the first sample verbatim AND the
-    truthful total count. The cap is the same constant for both
-    wipe sites so the audit-trail cardinality is consistent.
+    ``"<first N ids>"[+ M more truncated]`` where N =
+    ``_DOOMED_ID_LOG_CAP``, so the operator sees the first
+    sample verbatim AND the truthful total count. The cap is
+    the same constant for both wipe sites so the audit-trail
+    cardinality is consistent.
     """
     total = len(ids)
     if total <= _DOOMED_ID_LOG_CAP:
