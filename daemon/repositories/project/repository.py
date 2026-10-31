@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import delete as sql_delete, insert, func, or_, cast, text
+from sqlalchemy import delete as sql_delete, insert, func, or_, cast, text, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
@@ -26,6 +26,15 @@ from .models import (
     ProjectMetadataRecord,
 )
 from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
+from daemon.repositories.project.critical_note_ids import (
+    AmbiguousCriticalNoteId,
+    ResolvedCriticalNoteId,
+    MissingCriticalNoteId,
+    CriticalNoteIdResolution,
+    critical_note_id_matches,
+    normalize_critical_note_id,
+    stored_id_or_none,
+)
 from daemon.repositories.instance.models import Instance, InstanceStatus, InstanceHierarchy
 from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobLock, DeadLetterItem, JobQueue
 from daemon.repositories.task.models import Task
@@ -1562,6 +1571,79 @@ class SQLModelProjectRepository:
 
         return note
 
+    def _resolve_critical_note_id(
+        self, session, project_id: str, entry_id: str
+    ) -> CriticalNoteIdResolution:
+        """Resolve a (possibly format-variant) entry_id — TRI-STATE (W5).
+
+        Returns:
+            * ``ResolvedCriticalNoteId(stored_id)`` — exactly one row in
+              the project matches the requested representation;
+            * ``AmbiguousCriticalNoteId(match_count)`` — ≥2 rows share
+              the requested representation. NOTHING is selected, nothing
+              changes; one ``[CriticalNotes:Degraded]
+              stage=id_resolve reason=ambiguous`` line is logged here.
+              This check runs on the EXACT-BYTE hit too (W4): a
+              case-variant twin must never let a remove silently pick
+              one of two rows;
+            * ``MissingCriticalNoteId`` — zero matches. A request that
+              normalizes to "" is refused BEFORE the scan (W3): it can
+              never address a row, and stored ""/blank PKs are skipped.
+
+        Read-only: never rewrites a stored id. NO fuzzy matching — ids
+        match by REPRESENTATION only (see ``critical_note_ids``).
+        """
+        requested = "" if entry_id is None else str(entry_id)
+
+        # W3 guard FIRST: an empty-after-normalize request can never
+        # address a real row — if a stored ""/blank PK exists in any
+        # legacy store, the scan must not silently serve it to a remove.
+        if not normalize_critical_note_id(requested):
+            logger.info(
+                "[CriticalNotes:Degraded] stage=id_resolve "
+                "reason=empty_after_normalize project_id=%s requested=%r",
+                project_id,
+                requested,
+            )
+            return MissingCriticalNoteId()
+
+        # Project-scoped scan, id column ONLY (W6): the resolver never
+        # needs the row bodies — detail_ref payloads stay unpaged. The
+        # scan SUBSUMES the old cheap exact-PK path (exact byte equality
+        # is arm 1 of the predicate) and lets the W4 ambiguity check run
+        # on every resolution, exact hit included.
+        rows = list(session.exec(
+            select(CriticalNoteModel.id).where(
+                CriticalNoteModel.project_id == project_id
+            )
+        ))
+        matches = [rid for rid in rows if critical_note_id_matches(rid, requested)]
+        if len(matches) >= 2:
+            logger.info(
+                "[CriticalNotes:Degraded] stage=id_resolve reason=ambiguous "
+                "project_id=%s requested=%r match_count=%d",
+                project_id,
+                requested,
+                len(matches),
+            )
+            return AmbiguousCriticalNoteId(match_count=len(matches))
+        if len(matches) == 1:
+            return ResolvedCriticalNoteId(matches[0])
+        return MissingCriticalNoteId()
+
+    def resolve_critical_note_id(
+        self, project_id: str, entry_id: str
+    ) -> CriticalNoteIdResolution:
+        """Public TRI-STATE probe for the tool layer (W5 diagnostics).
+
+        The write/get seams collapse ambiguity to not-found internally;
+        the tool layer calls THIS on a not-found path to distinguish
+        Missing (may attach the near-match hint) from Ambiguous (refusal
+        message, no hint). Read-only, one id-column scan.
+        """
+        with Session(self.engine) as session:
+            return self._resolve_critical_note_id(session, project_id, entry_id)
+
     def get_critical_note(self, project_id: str, entry_id: str) -> CriticalNoteModel | None:
         """Get a specific critical note by ID.
         
@@ -1573,7 +1655,12 @@ class SQLModelProjectRepository:
             The CriticalNoteModel if found and belongs to project, None otherwise.
         """
         with Session(self.engine) as session:
-            note = session.get(CriticalNoteModel, entry_id)
+            resolved = stored_id_or_none(
+                self._resolve_critical_note_id(session, project_id, entry_id)
+            )
+            if resolved is None:
+                return None
+            note = session.get(CriticalNoteModel, resolved)
             if note is None or note.project_id != project_id:
                 return None
             return note
@@ -1710,7 +1797,12 @@ class SQLModelProjectRepository:
             True if removed, False if not found.
         """
         with Session(self.engine) as session:
-            note = session.get(CriticalNoteModel, entry_id)
+            resolved = stored_id_or_none(
+                self._resolve_critical_note_id(session, project_id, entry_id)
+            )
+            if resolved is None:
+                return False
+            note = session.get(CriticalNoteModel, resolved)
             if note is None or note.project_id != project_id:
                 return False
             session.delete(note)
@@ -1741,7 +1833,12 @@ class SQLModelProjectRepository:
             The updated CriticalNoteModel if found, None otherwise.
         """
         with Session(self.engine) as session:
-            note = session.get(CriticalNoteModel, entry_id)
+            resolved = stored_id_or_none(
+                self._resolve_critical_note_id(session, project_id, entry_id)
+            )
+            if resolved is None:
+                return None
+            note = session.get(CriticalNoteModel, resolved)
             if note is None or note.project_id != project_id:
                 return None
 
@@ -1844,7 +1941,12 @@ class SQLModelProjectRepository:
             The updated CriticalNoteModel if found, None otherwise.
         """
         with Session(self.engine) as session:
-            note = session.get(CriticalNoteModel, entry_id)
+            resolved = stored_id_or_none(
+                self._resolve_critical_note_id(session, project_id, entry_id)
+            )
+            if resolved is None:
+                return None
+            note = session.get(CriticalNoteModel, resolved)
             if note is None or note.project_id != project_id:
                 return None
 
@@ -1888,12 +1990,27 @@ class SQLModelProjectRepository:
             The updated old CriticalNoteModel if found, None otherwise.
         """
         with Session(self.engine) as session:
-            note = session.get(CriticalNoteModel, old_id)
+            resolved_old = stored_id_or_none(
+                self._resolve_critical_note_id(session, project_id, old_id)
+            )
+            if resolved_old is None:
+                return None
+            resolved_new = stored_id_or_none(
+                self._resolve_critical_note_id(session, project_id, new_id)
+            )
+            if resolved_new is None:
+                return None
+            if resolved_old == resolved_new:
+                return None
+            note = session.get(CriticalNoteModel, resolved_old)
             if note is None or note.project_id != project_id:
+                return None
+            new_note = session.get(CriticalNoteModel, resolved_new)
+            if new_note is None or new_note.project_id != project_id:
                 return None
 
             now = datetime.now(timezone.utc).isoformat()
-            note.superseded_by_id = new_id
+            note.superseded_by_id = resolved_new
             # Supersede bumps last_reviewed_at (§4.4 guard list) — the
             # row was just reviewed-and-retired by a leader action.
             note.last_reviewed_at = now
@@ -1944,19 +2061,30 @@ class SQLModelProjectRepository:
             The ids of rows that were re-activated (pointers cleared).
         """
         with Session(self.engine) as session:
-            stmt = select(CriticalNoteModel).where(
-                CriticalNoteModel.project_id == project_id,
-                CriticalNoteModel.superseded_by_id == entry_id,
-            )
-            pointing = list(session.exec(stmt))
-            reactivated = [n.id for n in pointing]
-            now = datetime.now(timezone.utc).isoformat()
-            for note in pointing:
-                note.superseded_by_id = None
-                note.updated_at = now
-            if pointing:
+            # W6 (review 2026-10-31): project ONLY (id, superseded_by_id) —
+            # the old full-entity scan paged every row's unbounded
+            # detail_ref payload just to read one pointer column.
+            rows = list(session.exec(
+                select(
+                    CriticalNoteModel.id,
+                    CriticalNoteModel.superseded_by_id,
+                ).where(CriticalNoteModel.project_id == project_id)
+            ))
+            matching_ids = [
+                rid
+                for rid, pointer in rows
+                if pointer is not None
+                and critical_note_id_matches(pointer, entry_id)
+            ]
+            if matching_ids:
+                now = datetime.now(timezone.utc).isoformat()
+                session.execute(
+                    update(CriticalNoteModel)
+                    .where(CriticalNoteModel.id.in_(matching_ids))
+                    .values(superseded_by_id=None, updated_at=now)
+                )
                 session.commit()
-            return reactivated
+            return matching_ids
 
     def count_critical_notes(self, project_id: str) -> int:
         """Count critical notes for a project.

@@ -250,6 +250,13 @@ async def _maybe_tiered_critical_notes(
         # selection, no hint line, no fusion work). This is the
         # critical case for ops visibility — the gate kept
         # ``[CriticalNotes]`` quiet on a render-all day.
+        # W8 (cap-fix review, 2026-10-31): "no selection" no longer
+        # means "no budget" — the renderer now applies the SAME
+        # section_char_cap to this render-all shape (whole-row drops +
+        # the canonical truncation line), so the 50→200 store-cap raise
+        # cannot quadruple an unpinned project's injected block. This
+        # seam's CONTRACT is unchanged: it still returns the caller's
+        # list verbatim; the bound lives in ``_format_critical_notes_section``.
         # Log-hygiene (step 5): routine per-read telemetry demoted
         # INFO→DEBUG. The ops-alertable ``[CriticalNotes:Degraded]``
         # prefix stays at INFO — only the routine lines demote.

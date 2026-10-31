@@ -7018,6 +7018,7 @@ def load_config(config_path: str | None = None) -> Config:
     )
     install_critical_notes_render_config(
         reference_max=config.critical_notes.reference_max,
+        section_char_cap=config.critical_notes.section_char_cap,
     )
     install_critical_notes_selection_config(
         tail_cap=config.critical_notes.tail_cap,

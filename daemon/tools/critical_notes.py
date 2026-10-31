@@ -13,7 +13,7 @@ Design notes (2026-09-10):
   entry's id and summary. Caller decides whether to remove+re-add or
   pass entry_id explicitly to update.
 - entry_id (optional) supports explicit in-place update. No fuzzy.
-- Cap raised to 50 (live store was already at 31). Past the cap, the
+- Cap raised to 200 (was 50; raised per cap-fix mission). Past the cap, the
   tool REJECTS with an error naming eviction candidates — no silent
   data loss.
 
@@ -47,6 +47,12 @@ from ..repositories.project.models import (
     CriticalNoteModel,
 )
 from ..repositories.project.repository import SQLModelProjectRepository
+from ..repositories.project.critical_note_ids import (
+    AmbiguousCriticalNoteId,
+    critical_note_hex_fingerprint,
+    critical_note_id_matches,
+    normalize_critical_note_id,
+)
 from ..services.critical_note_gate import (
     # R21 canonical home for the entry-gate predicate (cycle-neutral
     # module) — re-exported under the historical private name so the
@@ -59,9 +65,9 @@ from ._tool_registry import register_tool_category
 CATEGORY_NAME = "critical_notes"
 CATEGORY_DOC = "Manage critical notes entries for projects — lessons learned, important observations, and key insights."
 
-# Raised from 30 to 50 (live store was already at 31 on 2026-09-10;
-# silent eviction is removed, so we need headroom for genuine growth).
-_MAX_ENTRIES = 50
+# Raised from 30 to 50 (2026-09-10), then to 200 (cap-fix mission).
+# silent eviction is removed, so we need headroom for genuine growth.
+_MAX_ENTRIES = 200
 _MAX_SUMMARY_LEN = 200
 # Reference bound (architecture-recommendation §4.4, reviewer #11).
 # Write-side REJECT at this tool layer is the AUTHORITATIVE enforcement;
@@ -69,6 +75,11 @@ _MAX_SUMMARY_LEN = 200
 # backstop for legacy/pre-bound rows only.
 _MAX_REFERENCE_LEN = 500
 _MAX_EVICTION_CANDIDATES_NAMED = 3
+# Near-match hint bound (review 2026-10-31, minor #7): the diagnostics
+# hint names at most THIS many candidate ids. Deliberately its own
+# constant — it used to borrow _MAX_EVICTION_CANDIDATES_NAMED, which
+# couples two unrelated budgets (cap-rejection naming vs id hints).
+_MAX_NEAR_ID_HINTS = 3
 # Core-tier cap (D2): max simultaneously-pinned ACTIVE rows. Tunable via
 # ``config.yaml → critical_notes.core_cap`` (installed at boot by
 # ``load_config``; see ``install_critical_notes_config`` below). NOT
@@ -161,6 +172,116 @@ def _load_entries(
     if predicate is None:
         return coerced
     return [e for e in coerced if predicate(e)]
+
+
+# NOTE (review 2026-10-31, minor #6): the local ``_hex_fingerprint_local``
+# duplicate was DELETED. The near-match hint now imports the resolver's
+# STRICT ``critical_note_hex_fingerprint`` — selector and diagnostics
+# fingerprinting are the SAME function, so a hint can never name a row
+# the resolver would refuse to select (and vice versa).
+
+
+def _single_edit_distance(a: str, b: str) -> bool:
+    """True iff a and b differ by at most one insertion/deletion/substitution."""
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    # ensure a is the longer
+    if la < lb:
+        a, b = b, a
+        la, lb = lb, la
+    i = j = 0
+    edits = 0
+    while i < la and j < lb:
+        if a[i] == b[j]:
+            i += 1
+            j += 1
+        else:
+            edits += 1
+            if edits > 1:
+                return False
+            if la != lb:
+                i += 1  # deletion in longer
+            else:
+                i += 1
+                j += 1
+    if i < la or j < lb:
+        edits += 1
+    return edits <= 1
+
+
+def _near_id_candidates(entries, entry_id, limit=_MAX_NEAR_ID_HINTS):
+    """Diagnostics-only near-match ids (never used to select a row).
+
+    Fingerprinting uses the resolver's OWN strict function (minor #6):
+    representation variants match; junk-bearing ids (``zz-<32hex>``)
+    never fingerprint-match here either. Candidates whose id normalizes
+    to "" are skipped — a blank id is unaddressable (W3), so suggesting
+    it for a retry would send the caller into a guaranteed refusal.
+    """
+    requested_norm = normalize_critical_note_id(entry_id)
+    requested_fp = critical_note_hex_fingerprint(entry_id)
+    out = []
+    seen = set()
+    for e in entries:
+        sid = e.id if hasattr(e, "id") else e.get("id") if isinstance(e, dict) else str(e)
+        if sid in seen:
+            continue
+        if not normalize_critical_note_id(sid):
+            continue  # W3: blank stored ids are unaddressable — never hint them
+        norm_sid = normalize_critical_note_id(sid)
+        fp_sid = critical_note_hex_fingerprint(sid)
+        is_near = False
+        if norm_sid == requested_norm:
+            is_near = True
+        elif (
+            requested_fp is not None
+            and fp_sid is not None
+            and requested_fp == fp_sid
+        ):
+            is_near = True
+        elif _single_edit_distance(norm_sid, requested_norm):
+            is_near = True
+        if is_near:
+            seen.add(sid)
+            out.append(sid)
+            if len(out) >= limit:
+                break
+    return out
+
+
+def _not_found_error(
+    repo, project_id: str, entry_id: str, *, which: str = "Entry"
+) -> dict:
+    """Build the unresolved-id error — TRI-STATE aware (W5).
+
+    Asks the repository's public resolver WHY the id did not resolve:
+
+    * ``AmbiguousCriticalNoteId`` → the ambiguity refusal message (NO
+      near-match hint — a hint would invite picking one of several rows
+      sharing the representation, which resolution refuses);
+    * ``MissingCriticalNoteId`` → the classic not-found message, plus
+      the diagnostics-only near-match hint when candidates exist.
+
+    ``which`` names the failing parameter ("Entry", "old_id", "new_id")
+    so multi-id verbs (supersede) say WHICH id failed.
+    """
+    resolution = repo.resolve_critical_note_id(project_id, entry_id)
+    if isinstance(resolution, AmbiguousCriticalNoteId):
+        return {
+            "error": (
+                f"{which} '{entry_id}' matches {resolution.match_count} "
+                "entries' representation — ambiguous, nothing changed; "
+                "use project_cn_list and retry with the exact id"
+            )
+        }
+    cands = _near_id_candidates(_load_entries(repo, project_id), entry_id)
+    hint = ""
+    if cands:
+        hint = " Near-match(es): " + ", ".join(repr(c) for c in cands) + " — retry with the exact id."
+    return {"error": f"{which} '{entry_id}' not found in project '{project_id}'" + hint}
 
 
 def _find_near_duplicate_entry(
@@ -308,10 +429,17 @@ def create_critical_notes_tools(
         """Add or update a critical notes entry for a project. Use tool_help() for details.
 
         Behavior:
-        - If entry_id is provided, that specific row is updated exactly
+        - If entry_id is provided, the target row is resolved by
+          REPRESENTATION (exact bytes → normalized form → strict 32-hex
+          fingerprint), then updated in place
           (summary/priority/reference/detail_ref/category/source_agent).
-          No fuzzy matching. Category is forwarded on update, so a
-          recategorize is visible on the returned dict — never silent.
+          No fuzzy matching. LIMITATION: structurally malformed ids
+          (wrong hex count) are NOT auto-resolved — the not-found error
+          names the stored form (repr()-escaped) for an exact-bytes
+          retry; when several rows share the requested representation
+          the call REFUSES as ambiguous and nothing changes. Category is
+          forwarded on update, so a recategorize is visible on the
+          returned dict — never silent.
         - Otherwise, if a near-duplicate summary already exists among the
           project's ACTIVE notes, the call REJECTS with an error naming
           the colliding entry's id and summary — caller decides next
@@ -321,7 +449,7 @@ def create_critical_notes_tools(
           recategorize path. Superseded rows are invisible to the
           collision scan (R20).
         - Otherwise, a new entry is appended. If the project is at the
-          cap (_MAX_ENTRIES=50), the call REJECTS with an error naming
+          cap (_MAX_ENTRIES=200), the call REJECTS with an error naming
           eviction candidates — no silent data loss.
         - ``reference`` is bounded at 500 chars: the call REJECTS on a
           longer reference (reject-first — put overflow detail in
@@ -367,13 +495,16 @@ def create_critical_notes_tools(
 
         # Step 4: EXPLICIT UPDATE PATH (entry_id provided)
         if entry_id is not None:
-            target = next((e for e in entries if e.id == entry_id), None)
+            target = repo.get_critical_note(project_id, entry_id)
             if target is None:
-                return {"error": f"Entry '{entry_id}' not found in project '{project_id}'"}
+                # Tri-state aware (W5): ambiguous gets its own refusal,
+                # missing may carry the diagnostics-only near-match hint.
+                return _not_found_error(repo, project_id, entry_id)
+            resolved_id = target.id
 
             updated = repo.update_critical_note(
                 project_id,
-                entry_id,
+                resolved_id,
                 priority=priority,
                 summary=summary,
                 category=category,
@@ -412,7 +543,8 @@ def create_critical_notes_tools(
             ]
             return {
                 "error": (
-                    f"Project '{project_id}' is at the cap of {_MAX_ENTRIES} critical notes. "
+                    f"Project '{project_id}' is at the cap of {_MAX_ENTRIES} "
+                    f"(currently {len(entries)}) critical notes. "
                     f"Remove one of the following eviction candidates and re-add, or use "
                     f"project_cn_remove + project_cn_add.\n"
                     + "\n".join(candidate_lines)
@@ -443,9 +575,15 @@ When adding an entry:
   whether to remove it via project_cn_remove or update it via entry_id.
   Superseded rows are invisible to this scan — re-adding knowledge that
   only exists as a superseded row inserts fresh.
-- If the list is full (50 entries), the call REJECTS with an error naming
+- If the list is full (200 entries), the call REJECTS with an error naming
   eviction candidates. No silent eviction.
-- Pass entry_id to update a specific entry in place (exact match, no fuzzy).
+- Pass entry_id to update a specific entry in place. The id is resolved
+  by REPRESENTATION (exact bytes → normalized form → strict 32-hex
+  fingerprint) — no fuzzy matching. Structurally malformed ids (wrong
+  hex count) are NOT auto-resolved: the not-found error names the
+  stored form (repr()-escaped) for an exact-bytes retry, and a
+  representation shared by several rows refuses as ambiguous (nothing
+  changes).
   An entry_id update can change any updatable field including category —
   the returned dict reflects the new category, never silently retaining
   the old one.
@@ -466,9 +604,13 @@ Args:
     priority: One of: critical, high, medium
     summary: Brief description (max 200 chars)
     reference: Optional reference URL or path (max 500 chars)
-    entry_id: Optional. When provided, that entry is updated exactly
-       (no fuzzy match). If omitted, a near-duplicate check rejects the
-       call instead of silently merging.
+    entry_id: Optional. When provided, the target entry is resolved by
+       REPRESENTATION (exact bytes → normalized → strict 32-hex
+       fingerprint; no fuzzy match). Structurally malformed ids (wrong
+       hex count) are NOT auto-resolved — the not-found error names the
+       stored form for an exact-bytes retry; several rows sharing the
+       representation refuse as ambiguous. If omitted, a near-duplicate
+       check rejects the call instead of silently merging.
     detail_ref: Optional unbounded detail text (list-read only; never
        injected into context blocks).
 
@@ -581,31 +723,15 @@ Returns:
         # Get the entry first to return its details
         removed_entry = repo.get_critical_note(project_id, entry_id)
         if removed_entry is None:
-            return {"error": f"Entry '{entry_id}' not found"}
+            return _not_found_error(repo, project_id, entry_id)
 
         # ── Supersede-pointer guard (§4.4; N6 semantics — EXACT contract) ──
-        # If OTHER rows point at THIS row via superseded_by_id, a plain
-        # remove would orphan their pointers. EXACT semantics of
-        # cascade=True: the target row is removed AND every pointer is
-        # NULLIFIED, which returns the pointing rows to ACTIVE — they
-        # re-enter the injection pool immediately. The response names
-        # each re-activated row (``reactivated`` list) so an
-        # un-supersede is never silent. This is the deliberate,
-        # documented choice:
-        #   * Default (cascade=False) REFUSES when any row points here —
-        #     reject-don't-evict conservatism (mirrors R20 / the pin cap).
-        #     Resolve the lineage first: supersede the pointing rows onto
-        #     a current note, or pass cascade=True deliberately.
-        #   * Chain-DELETE (removing the pointing rows too) was REJECTED:
-        #     it silently destroys rows the leader did not name — the
-        #     exact eviction shape this tool family forbids.
-        #   * Leaving dangling pointers was REJECTED: the pointing rows
-        #     would stay hidden from injection forever (silent data
-        #     loss), pointing at a ghost id.
         pointing = _load_entries(
             repo,
             project_id,
-            predicate=lambda e: e.superseded_by_id == entry_id,
+            predicate=lambda e: critical_note_id_matches(
+                e.superseded_by_id or "", removed_entry.id
+            ),
         )
         if pointing and not cascade:
             pointer_lines = "\n".join(
@@ -629,14 +755,14 @@ Returns:
         # survive as ACTIVE; only their pointers die with the target).
         reactivated: list[str] = []
         if pointing and cascade:
-            reactivated = repo.clear_superseded_by_pointers(project_id, entry_id)
+            reactivated = repo.clear_superseded_by_pointers(project_id, removed_entry.id)
 
         # Remove via repository
-        removed = repo.remove_critical_note(project_id, entry_id)
+        removed = repo.remove_critical_note(project_id, removed_entry.id)
 
         return {
             "removed": removed,
-            "entry_id": entry_id,
+            "entry_id": removed_entry.id,
             "summary": summary,
             "cascade": bool(pointing and cascade),
             "reactivated": reactivated,
@@ -672,7 +798,7 @@ Returns:
 
         target = repo.get_critical_note(project_id, entry_id)
         if target is None:
-            return {"error": f"Entry '{entry_id}' not found"}
+            return _not_found_error(repo, project_id, entry_id)
 
         if pinned and target.superseded_by_id is not None:
             return {
@@ -696,7 +822,7 @@ Returns:
                     predicate=lambda c: (
                         c.pinned
                         and c.superseded_by_id is None
-                        and c.id != entry_id
+                        and c.id != target.id  # minor #8: resolved id, not the raw variant
                     ),
                 )
                 demotion = sorted(
@@ -719,7 +845,7 @@ Returns:
                     )
                 }
 
-        updated = repo.pin_critical_note(project_id, entry_id, pinned=pinned, pinned_by=agent_id)
+        updated = repo.pin_critical_note(project_id, target.id, pinned=pinned, pinned_by=agent_id)
         if updated is None:
             return {"error": f"Entry '{entry_id}' no longer exists; pin not applied"}
         return updated.to_dict()
@@ -760,10 +886,12 @@ Returns:
 
         old = repo.get_critical_note(project_id, old_id)
         if old is None:
-            return {"error": f"Entry '{old_id}' not found in project '{project_id}'"}
+            return _not_found_error(repo, project_id, old_id, which="old_id")
         new = repo.get_critical_note(project_id, new_id)
+        if old is not None and new is not None and old.id == new.id:
+            return {"error": "old_id and new_id must differ (a note cannot supersede itself)"}
         if new is None:
-            return {"error": f"Entry '{new_id}' not found in project '{project_id}'"}
+            return _not_found_error(repo, project_id, new_id, which="new_id")
 
         # Guard 2: same-project (both ids must live in the target
         # project). ``get_critical_note`` already enforces membership, so
@@ -802,7 +930,7 @@ Returns:
                 )
             }
 
-        updated = repo.supersede_critical_note(project_id, old_id, new_id)
+        updated = repo.supersede_critical_note(project_id, old.id, new.id)
         if updated is None:
             return {"error": f"Entry '{old_id}' no longer exists; supersede not applied"}
         return updated.to_dict()
@@ -858,7 +986,7 @@ surface — there is deliberately NO HTTP write endpoint for backfill
 (hard constraint). Runtime laziness stays bounded by the per-read
 mint cap; this command is the unbounded, deliberate complement.
 
-Budget: ~250ms/embed at the shared recipe (~15s for 50 notes). Run
+Budget: ~250ms/embed at the shared recipe (~50s for 200 notes). Run
 during a quiet window; each embed call is synchronous here (unlike
 the fire-and-forget write path) so the returned counts are exact.
 

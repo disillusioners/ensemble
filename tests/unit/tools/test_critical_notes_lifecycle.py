@@ -296,21 +296,59 @@ class TestProjectCnSupersede:
         assert repo.get_critical_note(project_id, b.id).superseded_by_id is None
 
     def test_rejects_cross_project_ids(self, tools, repo, project_id):
+        """W9: cross-project REAL ids refuse with no hint and no leak.
+
+        Seeds a REAL note in project B, then calls remove/pin/supersede
+        scoped to project A with B's REAL id. Each refuses; the error
+        carries NO near-match hint (resolution is project-scoped, so B's
+        id can never be suggested as a candidate); B's id appears only
+        as the requested-id echo in the message (exactly once — never
+        re-surfaced as a hint candidate); B's row is untouched.
+        """
         other = repo.create(name="cn-other-project")
         a = repo.add_critical_note(
             project_id, source_agent="l", category="risk", priority="high",
             summary="Note in the first project",
         )
-        repo.add_critical_note(
+        b = repo.add_critical_note(
             other.project_id, source_agent="l", category="risk", priority="high",
             summary="Note in the second project",
         )
-        result = tools["project_cn_supersede"].invoke(
-            {"project_id": project_id, "old_id": a.id, "new_id": "nonexistent-id"}
+
+        # REMOVE scoped to A with B's real id.
+        res_remove = tools["project_cn_remove"].invoke(
+            {"project_id": project_id, "entry_id": b.id}
         )
-        assert "error" in result
-        # The pointer must NOT be written.
+        assert "error" in res_remove
+        assert "Near-match(es):" not in res_remove["error"]
+        assert res_remove["error"].count(b.id) == 1  # echo only, never a hint
+
+        # PIN scoped to A with B's real id.
+        res_pin = tools["project_cn_pin"].invoke(
+            {"project_id": project_id, "entry_id": b.id, "pinned": True}
+        )
+        assert "error" in res_pin
+        assert "Near-match(es):" not in res_pin["error"]
+        assert res_pin["error"].count(b.id) == 1
+
+        # SUPERSEDE scoped to A: old = A's real note, new = B's real id.
+        res_sup = tools["project_cn_supersede"].invoke(
+            {"project_id": project_id, "old_id": a.id, "new_id": b.id}
+        )
+        assert "error" in res_sup
+        assert "Near-match(es):" not in res_sup["error"]
+        assert res_sup["error"].count(b.id) == 1
+
+        # No pointer written; both rows untouched in their projects.
         assert repo.get_critical_note(project_id, a.id).superseded_by_id is None
+        b_row = repo.get_critical_note(other.project_id, b.id)
+        assert b_row is not None
+        assert b_row.superseded_by_id is None
+        assert b_row.pinned is False
+        assert repo.get_critical_note(other.project_id, b.id).summary == (
+            "Note in the second project"
+        )
+        assert repo.count_critical_notes(other.project_id) == 1
 
 
 # ─── Remove cascade (N6 exact semantics) ─────────────────────────────────────
@@ -739,3 +777,116 @@ class TestProjectCnBackfillEmbeddings:
         # The static fallback universe carries the verb too (frozen
         # binary discoverability — same mechanism as the Phase-1 verbs).
         assert "project_cn_backfill_embeddings" in KNOWN_TOOL_NAMES
+
+
+# =============================================================================
+# Test Class: TestCriticalNoteIdResolutionToolLevel — tool-level id resolution
+# =============================================================================
+
+
+class TestCriticalNoteIdResolutionToolLevel:
+    """Tool-level id-resolution seams (format variants resolve to stored row)."""
+
+    def _seed(self, repo, project_id):
+        return repo.add_critical_note(
+            project_id,
+            source_agent="leader",
+            category="risk",
+            priority="high",
+            summary="seed note for id resolution",
+        )
+
+    def test_remove_format_variant_resolves(self, tools, repo, project_id):
+        """Format variants of the stored id resolve; the stored bytes stay.
+
+        (Minor #11: the previous phantom ``for v in variants: pass`` loop
+        was deleted — the variant matrix is pinned at the repository seam
+        (``tests/unit/repositories/test_critical_note_id_resolution.py``,
+        parametrized) and by the per-verb tests below.)
+        """
+        repo.add_critical_note(
+            project_id, source_agent="leader", category="risk",
+            priority="high", summary="second seed",
+        )
+        cid2 = repo.list_critical_notes(project_id)[-1].id
+        variant = cid2 + " "
+        res = tools["project_cn_remove"].invoke({"project_id": project_id, "entry_id": variant})
+        assert res.get("removed") is True, res
+        # row gone
+        assert repo.get_critical_note(project_id, cid2) is None
+
+    def test_pin_format_variant_resolves(self, tools, repo, project_id):
+        note = self._seed(repo, project_id)
+        cid = note.id
+        variant = cid.upper()
+        res = tools["project_cn_pin"].invoke({
+            "project_id": project_id, "entry_id": variant, "pinned": True,
+        })
+        assert "error" not in res, res
+        assert res.get("pinned") is True
+        # persisted on the right row
+        refreshed = repo.get_critical_note(project_id, cid)
+        assert refreshed is not None and refreshed.pinned is True
+
+    def test_supersede_format_variant_resolves_and_self_refusal(self, tools, repo, project_id):
+        old = self._seed(repo, project_id)
+        new = repo.add_critical_note(
+            project_id, source_agent="leader", category="risk",
+            priority="high", summary="successor note",
+        )
+        old_v = old.id + " "
+        new_v = new.id.upper()
+        res = tools["project_cn_supersede"].invoke({
+            "project_id": project_id, "old_id": old_v, "new_id": new_v,
+        })
+        assert "error" not in res, res
+        # self-refusal: variants resolving to the same stored id
+        same = self._seed(repo, project_id)
+        v1 = same.id + " "
+        v2 = same.id.upper()
+        refused = tools["project_cn_supersede"].invoke({
+            "project_id": project_id, "old_id": v1, "new_id": v2,
+        })
+        assert "error" in refused
+        assert "must differ" in refused["error"]
+
+    def test_add_update_path_format_variant(self, tools, repo, project_id):
+        note = self._seed(repo, project_id)
+        cid = note.id
+        variant = "\u200b" + cid
+        res = tools["project_cn_add"].invoke({
+            "project_id": project_id,
+            "category": "risk",
+            "priority": "high",
+            "summary": "updated via variant",
+            "entry_id": variant,
+        })
+        assert "error" not in res, res
+        assert res.get("id") == cid
+        assert res.get("summary") == "updated via variant"
+
+    def test_not_found_hint_and_no_auto_apply(self, tools, repo, project_id):
+        note = self._seed(repo, project_id)
+        cid = note.id
+        before = repo.list_critical_notes(project_id)
+        before_count = len(before)
+
+        # single-edit neighbour -> hint present
+        neighbour = cid[:-1] + ("0" if cid[-1] != "0" else "1")
+        res = tools["project_cn_remove"].invoke({
+            "project_id": project_id, "entry_id": neighbour,
+        })
+        assert "error" in res
+        assert "Near-match(es):" in res["error"]
+        assert repr(cid) in res["error"] or cid in res["error"]
+        # no auto-apply: count unchanged
+        assert len(repo.list_critical_notes(project_id)) == before_count
+
+        # genuinely far id -> no hint
+        far = "00000000-0000-0000-0000-000000000000"
+        res2 = tools["project_cn_remove"].invoke({
+            "project_id": project_id, "entry_id": far,
+        })
+        assert "error" in res2
+        assert "Near-match(es):" not in res2["error"]
+        assert len(repo.list_critical_notes(project_id)) == before_count
