@@ -1,4 +1,31 @@
 # Test Packs
+## missed-finalize / zombie-ACTIVE close path (`fix/missed-finalize-zombie-active`, board `wi-78967dba`) — PIN FAMILY REGISTERED (2026-10-31)
+
+> Implementation lane (phases 0-3) pack family for the pattern-(h)
+> zombie-ACTIVE JobItem close. All packs GREEN at lane HEAD
+> `5eba81487` (base `0d6489879` / code base `22fe83317`); every pin
+> mutation-verified — 22 matrix legs, each plant→RED→restore→GREEN
+> with planted-file digests recorded
+> (`/tmp/mfz-phase0/mutation-matrix/matrix.tsv` — carried into the
+> lane evidence). Family-neighborhood re-run: ZERO net-new reds (the
+> 5 failing neighbors are pre-existing at base, proven from the
+> Phase-0 TRUE base FAILED list, sha256 `58cb8201…8027`, 330 ids).
+
+| Pack | Invocation | Scope | Last Run | Status |
+|---|---|---|---|---|
+| `zombie_active_close_core` (A) | `cd <wt> && /home/nea/ensemble-src/.venv/bin/python -m pytest tests/job_queue/test_zombie_active_close_core.py -q --timeout=120` | close both directions x3 verdicts; inclusive age boundary; batch-cap remainder; kill-switch-OFF = BASE gap held | 2026-10-31 @ `88d4a265c` | ✅ PASS 6/0 (T3.1 legs RED-proven) |
+| `zombie_active_close_e1_discount` (B) | same form, `test_zombie_active_close_e1_discount.py` | E1 default-None byte-identity; discount scoping root/member; childless-root starvation vector both directions | 2026-10-31 @ `88d4a265c` | ✅ PASS 4/0 (T3.2) |
+| `zombie_active_close_negatives` (C) | `test_zombie_active_close_negatives.py` | pending/PAUSED/RUNNING-sibling block candidacy; young not examined; live-sibling HOLDS; deleted excluded | 2026-10-31 @ `88d4a265c` | ✅ PASS 6/0 (T3.3) |
+| `zombie_active_close_races` (D) | `test_zombie_active_close_races.py` | two seam callers one winner; preemptive race_lost_noop; same-txn no done-with-lock window | 2026-10-31 @ `88d4a265c` | ✅ PASS 4/0 (T3.4) |
+| `zombie_active_close_failclosed` (E) | `test_zombie_active_close_failclosed.py` | guard error/timeout ⇒ skip ZERO writes; bus-unavailable fail-safe | 2026-10-31 @ `88d4a265c` | ✅ PASS 3/0 (T3.5, shape-aware plant) |
+| `zombie_active_close_knobs` (F) | `test_zombie_active_close_knobs.py` | OFF complete no-op (query spy); defaults; FAIL-FAST ge=1; env prefix; api wiring + boot log + signature | 2026-10-31 @ `88d4a265c` | ✅ PASS 9/0 (T3.6) |
+| `zombie_active_close_tokens_watchers` (G) | `test_zombie_active_close_tokens_watchers.py` | canonical round-trip + reverse index; raw NOT terminal; W1 canonical notify x3 verdicts; PP1 correlation | 2026-10-31 @ `88d4a265c` | ✅ PASS 7/0 (T3.7, both planted forms RED) |
+| `zombie_active_close_static` (H) | `test_zombie_active_close_static.py` | SQL exact-string pins (S5 ORDER BY + tiebreak; MAX(completed_at) age key scoped to the SQL region); log tokens; S4 NULL-instance close | 2026-10-31 @ `88d4a265c` | ✅ PASS 8/0 (T3.8) |
+| `zombie_active_close_amendments` (J) | `test_zombie_active_close_amendments.py` | A1 examined>0 colon-terminated gate + K=40 + reset/evict; A3 notify=<outcome>; A5 IN-list; A6 builder + anchor-fallback; A2 both dispositions | 2026-10-31 @ `5eba81487` | ✅ PASS 12/0 (T3.12) |
+| `zombie_active_close_pg` (I) | `env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_HOST -u POSTGRES_PORT <py> -m pytest tests/postgres/test_zombie_active_close_pg.py --override-ini="addopts=" -m postgres -q --timeout=120` (PG_TEST_* DSN; serial-only) | real-PG close under the VERBATIM manager trigger suite (assert-or-install); same-txn lock release; S5 order; 3-verdict e2e | 2026-10-31 @ `88d4a265c` | ✅ PASS 3/0 (T3.9) |
+| `dbpool_wedge_capture_static` (R-10 run-only) | `tests/unit/tools/test_dbpool_wedge_capture_static.py` | UNCHANGED isolation proof of the census fix | 2026-10-31 @ `919928639` | ✅ PASS 6/0 zero edits (T3.10) |
+| `dbpool_wedge_capture_pg` (R-10 re-pointed) | `tests/postgres/test_dbpool_wedge_capture_pg.py` (postgres marker form) | census POPULATED (reltuples via ANALYZE; NULL-safe n_live_tup; total_bytes; summary keys); old-form plant RED | 2026-10-31 @ `6fe3414b1` | ✅ PASS 3/0 (T3.10, T3.9-R10 leg RED-proven) |
+
 
 ## promote-preflight-hang FUNCTIONAL GATE (`fix/promote-preflight-hang` @ `0b6a21236`, base `b1183a637`) — ✅ **LANE VERDICT: PASS-WITH-NOTES — ceremony-ready CONDITIONAL on the G3 1-line pre-stage fold** (2026-10-30)
 
