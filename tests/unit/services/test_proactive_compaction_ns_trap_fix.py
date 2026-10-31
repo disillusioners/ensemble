@@ -323,8 +323,8 @@ class TestNsTrapCLETargeting:
     # they pin the line as of the review-cycle-1 re-pin commit.
     _GUARD_ANCHOR = "[Compaction][CLE] empty snapshot read"
     _REPLACEMENT_ANCHOR = "[Compaction][CLE] empty replacement"
-    _CLE_GUARD_LINE = 9425
-    _CLE_REPLACEMENT_LINE = 9587
+    _CLE_GUARD_LINE = 9426
+    _CLE_REPLACEMENT_LINE = 9588
 
     @staticmethod
     def _if_node_with_body_constant(substring: str):
