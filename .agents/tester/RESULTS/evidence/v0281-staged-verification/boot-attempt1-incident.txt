@@ -1,0 +1,15 @@
+Boot preflight: auth config check skipped (fail-open, proceeding): Config file not found: ./config.yaml. Set ENSEMBLE_CONFIG environment variable or create config.yaml
+Boot sweep: SIGTERM stale child pid=202649 age=8867s cmdline='/bin/bash /home/nea/agents-ensemble/launcher.sh' cgroup=/system.slice/ensemble-main.service (prior-incarnation orphan)
+Boot sweep: SIGTERM stale child pid=203445 age=8778s cmdline='/home/nea/agents-ensemble/current/ensemble-prod' cgroup=/system.slice/ensemble-main.service (prior-incarnation orphan)
+Boot sweep: SIGTERM stale child pid=203447 age=8777s cmdline='/home/nea/agents-ensemble/current/ensemble-prod' cgroup=/system.slice/ensemble-main.service (prior-incarnation orphan)
+Boot sweep: SIGTERM stale child pid=203682 age=8756s cmdline='/usr/local/lib/code-server/lib/node /usr/local/lib/code-server --bind-addr 127.0.0.1:0 --auth none --disable-workspace-trust --user-data-dir data/vscode-user-data /home/nea/agents-ensemble' cgroup=/system.slice/ensemble-main.service (prior-incarnation orphan)
+Boot sweep: SIGTERM stale child pid=203724 age=8755s cmdline='/usr/local/lib/code-server/lib/node /usr/local/lib/code-server/out/node/entry' cgroup=/system.slice/ensemble-main.service (prior-incarnation orphan)
+Boot sweep: SIGTERM stale child pid=225887 age=1379s cmdline='npm exec @upstash/context7-mcp' cgroup=/system.slice/ensemble-main.service (prior-incarnation orphan)
+Boot sweep: SIGTERM stale child pid=225903 age=1377s cmdline='sh -c context7-mcp' cgroup=/system.slice/ensemble-main.service (prior-incarnation orphan)
+Boot sweep: SIGTERM stale child pid=225904 age=1377s cmdline='node /home/nea/.npm/_npx/eea2bd7412d4593b/node_modules/.bin/context7-mcp' cgroup=/system.slice/ensemble-main.service (prior-incarnation orphan)
+Boot sweep: SIGKILL stale child pid=202649 (survived 5.0 grace) cmdline='/bin/bash /home/nea/agents-ensemble/launcher.sh'
+Boot sweep: SIGKILL stale child pid=203445 (survived 5.0 grace) cmdline='/home/nea/agents-ensemble/current/ensemble-prod'
+Boot sweep: SIGKILL stale child pid=203447 (survived 5.0 grace) cmdline='/home/nea/agents-ensemble/current/ensemble-prod'
+Boot sweep: KILL phase skip pid=203682 (guard: vanished)
+Boot sweep: KILL phase skip pid=203724 (guard: vanished)
+Boot sweep: KILL phase skip pid=225887 (guard: vanished)

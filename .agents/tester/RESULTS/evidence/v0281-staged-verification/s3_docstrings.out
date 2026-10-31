@@ -1,0 +1,9 @@
+== normalized-whitespace docstring checks (staged / live) ==
+OK   _in_flight_is_own_open_txn: 'do NOT add a kind check' staged=True(exp True) live=False(exp False)
+OK   _in_flight_is_own_open_txn: 'own open UNFLIPPED txn' staged=True(exp True) live=False(exp False)
+OK   _in_flight_is_own_open_txn: 'own open restart arm' staged=False(exp False) live=False(exp False)
+OK   _in_flight_is_own_open_txn: 'Deliberately KIND-AGNOSTIC' staged=True(exp True) live=False(exp False)
+OK   lock_release_run_id: 'Boot-lane PLUS ONE sanctioned live-lane exception' staged=True(exp True) live=False(exp False)
+OK   lock_release_run_id: 'Boot-lane ONLY: never call this from a live turn' staged=False(exp False) live=True(exp True)
+OK   lock_release_run_id: 'the actor that would legitimately hold the lock is DEAD by' staged=True(exp True) live=False(exp False)
+DOCSTRING-VERDICT: PASS
