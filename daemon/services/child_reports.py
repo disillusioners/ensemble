@@ -2291,20 +2291,35 @@ Provide a concise summary:"""
         self,
         instance_id: str,
         agent_id: str,
+        *,
+        allowed_statuses: tuple[str, ...] = (
+            InstanceStatus.COMPLETED.value,
+        ),
     ) -> None:
-        """FP4 L6 helper — downgrade COMPLETED → WAITING_CHILDREN.
+        """FP4 L6 helper — downgrade a terminal row → WAITING_CHILDREN.
 
         Mirrors the gate-block downgrade pattern at the emission-
         time call site (single session, defensive against None /
         status mismatch). Used by the L6 HOLD branch.
+
+        ``allowed_statuses`` (2026-10-31, 9f0ed4f5 incident family):
+        keyword-only membership set for the guarded write. The
+        default keeps the historical COMPLETED-only behavior for the
+        existing L6 call sites byte-identically; the pre-stamp hold
+        site passes the full terminal set so a terminal strand root
+        (COMPLETED / TERMINATED / ERROR / FAILED) is reactivated to
+        WAITING_CHILDREN while its tree is live. Non-terminal rows
+        (e.g. the historical ``running`` hold) never match and get
+        NO write — the 4ebd7f2f1 no-churn contract holds.
         """
         try:
             with Session(self._manager._engine) as _session:
                 _inst = _session.get(Instance, instance_id)
                 if (
                     _inst is not None
-                    and _inst.status == InstanceStatus.COMPLETED.value
+                    and _inst.status in allowed_statuses
                 ):
+                    _prior = _inst.status
                     _inst.status = InstanceStatus.WAITING_CHILDREN.value
                     _inst.updated_at = datetime.now(timezone.utc).isoformat()
                     _inst.version = (_inst.version or 1) + 1
@@ -2312,8 +2327,9 @@ Provide a concise summary:"""
                     _session.commit()
                     logger.info(
                         "FP4 L6: instance %s... downgraded "
-                        "COMPLETED → WAITING_CHILDREN (HOLD)",
+                        "%s → WAITING_CHILDREN (HOLD)",
                         instance_id[:8],
+                        _prior,
                     )
         except Exception as _dg_exc:
             logger.error(
@@ -2907,6 +2923,55 @@ Provide a concise summary:"""
                     self._schedule_strand_heal(
                         instance_id, posture=instance_meta.status,
                     )
+                    # ── Terminal-row reactivation (2026-10-31,
+                    # 9f0ed4f5 incident family): the hold fired because
+                    # the tree is LIVE — a TERMINAL row must not
+                    # survive the hold. Historical shape (the live
+                    # repro): an earlier gate-passed closure stamped
+                    # the root COMPLETED at a quiet moment, the tree
+                    # went live again, and every subsequent hold
+                    # returned with NO positive write — the row stayed
+                    # COMPLETED under a live tree indefinitely. A
+                    # fresh re-read (the ``instance_meta`` read at the
+                    # top of this drive can be seconds stale) gates
+                    # the write on the terminal set: only a
+                    # COMPLETED / TERMINATED / ERROR / FAILED row is
+                    # downgraded to WAITING_CHILDREN (the visible
+                    # "waiting, tree live" surface). Non-terminal rows
+                    # — the 4ebd7f2f1 no-churn contract — get NO write
+                    # (the membership check fails; byte-identical
+                    # historical behavior). The healer hand-off above
+                    # is kept exactly: same call, same coalescing,
+                    # same ``posture``.
+                    try:
+                        _held_row = await asyncio.to_thread(
+                            self._instance_repository.get, instance_id,
+                        )
+                        if _held_row is not None and _held_row.status in (
+                            InstanceStatus.COMPLETED.value,
+                            InstanceStatus.TERMINATED.value,
+                            InstanceStatus.ERROR.value,
+                            InstanceStatus.FAILED.value,
+                        ):
+                            await self._fp4_l6_downgrade_to_waiting(
+                                instance_id,
+                                agent_id,
+                                allowed_statuses=(
+                                    InstanceStatus.COMPLETED.value,
+                                    InstanceStatus.TERMINATED.value,
+                                    InstanceStatus.ERROR.value,
+                                    InstanceStatus.FAILED.value,
+                                ),
+                            )
+                    except Exception as _hold_react_exc:  # noqa: BLE001 — fail-open
+                        logger.warning(
+                            "root_completion: hold-branch terminal-row "
+                            "reactivation failed for %s... (non-fatal, "
+                            "hold stands): %s: %s",
+                            instance_id[:8],
+                            type(_hold_react_exc).__name__,
+                            _hold_react_exc,
+                        )
                     return
                 # Not live (all-terminal after strand exclusion, or
                 # timed-out zombie) → fall through to the sync stamp.
@@ -3209,6 +3274,83 @@ Provide a concise summary:"""
                 InstanceStatus.COMPLETED.value,
                 InstanceStatus.ERROR.value,
             ):
+                # ── Terminal-row exception (2026-10-31, 9f0ed4f5
+                # incident family — narrow OVERRIDE of the D2.7-LOCKED
+                # decline, user-mandated; see
+                # report_integrity_guard.py and
+                # .agents/shared/planning/terminal-row-status-strand/
+                # design-decision.md): a terminal row with LIVE
+                # direct children must not keep the idempotency skip
+                # from re-arming the row. Historically this guard sat
+                # ABOVE the WAITING_CHILDREN writers below (the bus
+                # gate, the live-children cross-check, the
+                # pending-own-queue gate), so a re-entered completion
+                # drive on an already-terminal row structurally
+                # could not re-arm it — the row stayed COMPLETED
+                # while its tree was live. The exception: terminal
+                # row + live (non-ghost, non-terminal) direct
+                # children → write WAITING_CHILDREN and return
+                # ``deferred_waiting_children`` (same outcome shape
+                # the writers below use — SSE-only, no report
+                # delivery, no terminal event). ALL-terminal trees
+                # keep the skip: a genuinely-completed row stays
+                # completed (pin contract). The recursive live-tree
+                # shape (depth-2+ only) is owned by the pre-stamp
+                # hold upstream in the async caller, which never
+                # reaches this guard on a live tree.
+                #
+                # COUNT failure posture: fail to the SKIP (the guard
+                # is a dedup net, not the completion decision — a
+                # transient DB error must not churn a
+                # genuinely-completed row into WAITING_CHILDREN).
+                # This differs deliberately from the :3516 writer's
+                # fail-CLOSED posture (that gate decides the FIRST
+                # stamp; this one only re-arms).
+                _live_children = 0
+                try:
+                    _live_children_stmt = (
+                        select(func.count())
+                        .select_from(Instance)
+                        .where(Instance.parent_id == instance_id)
+                        .where(
+                            Instance.status.notin_([
+                                InstanceStatus.COMPLETED.value,
+                                InstanceStatus.ERROR.value,
+                                InstanceStatus.TERMINATED.value,
+                                InstanceStatus.FAILED.value,
+                            ])
+                        )
+                        .where(~ChildReportsService._ghost_child_filter())
+                    )
+                    _live_children = int(
+                        session.scalar(_live_children_stmt) or 0
+                    )
+                except Exception as _live_exc:  # noqa: BLE001 — fail to skip
+                    logger.warning(
+                        f"Instance {instance_id[:8]}... terminal-row "
+                        f"liveness COUNT failed ({_live_exc}); keeping "
+                        f"the idempotency skip (fail-to-skip posture)"
+                    )
+                    _live_children = 0
+                if _live_children > 0:
+                    _prior_status = instance.status
+                    instance.status = InstanceStatus.WAITING_CHILDREN.value
+                    instance.updated_at = datetime.now(timezone.utc).isoformat()
+                    instance.version = (instance.version or 1) + 1
+                    session.commit()
+                    logger.info(
+                        f"Instance {instance_id[:8]}... terminal-row "
+                        f"reactivation: was {_prior_status} with "
+                        f"{_live_children} live child instance(s) — "
+                        f"re-armed to WAITING_CHILDREN instead of "
+                        f"idempotency_skip"
+                    )
+                    return _ChildCompletionDbResult(
+                        outcome="deferred_waiting_children",
+                        instance_id=instance_id,
+                        agent_id=instance.agent_id,
+                        parent_id=instance.parent_id,
+                    )
                 logger.info(
                     f"Instance {instance_id[:8]}... already in terminal "
                     f"state ({instance.status}), skipping "

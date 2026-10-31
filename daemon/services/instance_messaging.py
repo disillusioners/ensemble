@@ -3849,6 +3849,42 @@ class InstanceMessagingService:
         """
         from ..manager import MessageResult
 
+        # ── Terminal-row reactivation (turn-start chokepoint,
+        # 2026-10-31 — 9f0ed4f5 incident family) ────────────────────
+        # A root whose row reads terminal (COMPLETED / TERMINATED /
+        # ERROR / FAILED) while its child tree is LIVE must not run
+        # turns with zero status writes. The enqueue-time flip in
+        # ``_prepare_enqueued_message`` (below, ~:2569) covers the
+        # enqueue leg only; lanes that bypass enqueue — the
+        # child-completion PROCESS_REPORT delivery Task (minted in the
+        # child's completion txn; the claim gate excludes only
+        # PAUSED/TERMINATED so a COMPLETED root's report Task IS
+        # claimable and its delivery turn previously ran with NO
+        # status write at all), cascade-resume, and
+        # resume_processing_job — all converge on this funnel. At
+        # turn start a terminal row is flipped to RUNNING via the
+        # ``_revive_terminal_instance`` pattern (manager.py):
+        # PAUSED-exempt by construction (PAUSED is not in the
+        # terminal set), guarded row write with an explicit commit,
+        # version bump + ``last_activity_at`` refresh. This is a ROW
+        # WRITE, not a revive decision: no revive budget is consumed
+        # and F7 revivable-terminal semantics are untouched.
+        # Best-effort fail-open: a failed flip never blocks the turn.
+        _reactivate = getattr(
+            self._manager, "_revive_terminal_instance", None
+        )
+        if _reactivate is not None:
+            try:
+                await _reactivate(instance_id)
+            except Exception as _reactivate_exc:  # noqa: BLE001 — fail-open
+                logger.warning(
+                    "turn-start terminal-row reactivation failed for "
+                    "%s... (non-fatal, delivery proceeds): %s: %s",
+                    instance_id[:8],
+                    type(_reactivate_exc).__name__,
+                    _reactivate_exc,
+                )
+
         # ── <meta> tag parsing (parent-dispatch only) ────────────
         # Strip ``<meta>...</meta>`` control blocks ONLY when the
         # message came from a parent agent dispatching to this child
