@@ -42,6 +42,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import uuid
 import httpx
 import openai
@@ -59,6 +60,95 @@ from tenacity import Retrying, stop_after_attempt, wait_exponential_jitter
 # pattern below.
 
 logger = logging.getLogger(__name__)
+
+
+# ── LLM heartbeat + once-per-config INFO latches (log-noise-hygiene) ────────
+#
+# The per-call [LLM] lines (invoke / tool call / response) are DEMOTED to
+# DEBUG; operator liveness rides the windowed heartbeat instead — ONE
+# INFO line per window via ``daemon.services.log_sumup``:
+#
+#   [LLM] heartbeat 180s: invocations=N tool_calls=T last=<age>s ago model=<m>
+#   [LLM] heartbeat 180s: 0 invocations (idle)
+#
+# The idle variant is REQUIRED (emit_idle=True): a QUIET window is exactly
+# the signal an operator needs. The import is LAZY — same cycle note as
+# above (``daemon.services.__init__`` pulls child_reports → graph).
+
+_log_sumup_module: Any = None
+_log_sumup_lock = threading.Lock()
+
+
+def _get_log_sumup():
+    """Cached lazy import of ``daemon.services.log_sumup`` (cycle note above)."""
+    global _log_sumup_module
+    if _log_sumup_module is None:
+        with _log_sumup_lock:
+            if _log_sumup_module is None:
+                from daemon.services import log_sumup as _mod
+
+                _log_sumup_module = _mod
+    return _log_sumup_module
+
+
+def _render_llm_heartbeat(snapshot: dict) -> str:
+    if not snapshot.get("count"):
+        return f"[LLM] heartbeat {snapshot['window_s']}s: 0 invocations (idle)"
+    last_age = snapshot.get("last_event_age_s")
+    last = f"{int(last_age)}s" if last_age is not None else "?"
+    return (
+        f"[LLM] heartbeat {snapshot['window_s']}s: "
+        f"invocations={snapshot['sums'].get('invocations', 0)} "
+        f"tool_calls={snapshot['sums'].get('tool_calls', 0)} "
+        f"last={last} ago model={snapshot['sets'].get('model', 'unknown')}"
+    )
+
+
+def _ensure_llm_heartbeat_family() -> None:
+    """Idempotent family install (emit_idle=True: a QUIET window is a
+    signal — the idle variant must still flush)."""
+    _get_log_sumup().ensure_family(
+        "llm",
+        render=_render_llm_heartbeat,
+        logger=logger,
+        emit_idle=True,
+    )
+
+
+def _llm_heartbeat(
+    *,
+    sums: Optional[dict] = None,
+    sets: Optional[dict] = None,
+) -> None:
+    """Fold ONE LLM event into the heartbeat sumup. O(1), fail-open,
+    never logs per event (ensure_family is idempotent — safe to call
+    unconditionally on every hot-path site)."""
+    _ensure_llm_heartbeat_family()
+    _get_log_sumup().record("llm", count=1, sums=sums, sets=sets)
+
+
+# Once-per-process INFO latches — ``log_deferral_once`` pattern
+# (``daemon/services/metrics_gate.py:500``) generalized PER KEY. The
+# [Graph] Vision-model and [LLM-HA] Failover lines are config
+# DECLARATIONS that re-fire on every instance graph build; the choice
+# here is once-per-DISTINCT-config (the latch key carries the config
+# values) rather than a plain boolean latch: vision models / failover
+# URLs are per-instance config, so a first-wins-only latch would
+# misreport agents whose config differs from the first spawner's.
+# DEBUG was rejected: these are operator-facing posture declarations
+# and should stay on the LCD exactly once per distinct config.
+_ONCE_LOGGED: set = set()
+
+
+def _log_info_once(key: str, emit: Callable[[], None]) -> None:
+    """Emit ``emit()`` (an INFO log line) exactly once per process per key."""
+    if key in _ONCE_LOGGED:
+        return
+    with _llm_sumup_lock:
+        if key in _ONCE_LOGGED:
+            return
+        _ONCE_LOGGED.add(key)
+    emit()
 
 
 # ============================================================================
@@ -7718,7 +7808,7 @@ async def _maybe_precall_compact_95(
         if payload_tokens < trigger_window * gate_ratio:
             return _PRECALL_NOOP
 
-        logger.info(
+        logger.debug(
             "[Compaction][obs] precall-95 instance=%s payload_tokens=%d "
             "trigger_window=%d ratio=%.2f (%s) headroom=%d — attempting "
             "pre-call compaction (%d messages)",
@@ -7856,7 +7946,7 @@ async def _maybe_precall_compact_95(
                     # value; see the agent_node_return site).
                     mission_id=resolve_turn_mission_id(full_messages),
                 )
-            logger.info(
+            logger.debug(
                 "[Compaction][precall-95] complete: instance=%s, "
                 "%d -> %d messages, "
                 "%d tokens saved (%s)",
@@ -8932,7 +9022,8 @@ def create_agent_node(
         model_name = model_vision if use_vision_model else llm_config.get("model", "unknown") if llm_config else "unknown"
         vision_log = f", vision={model_vision}" if model_vision and has_images else ""
         call_type = "VISION" if use_vision_model else "STANDARD"
-        logger.info(f'[LLM][{instance_short}] Invoking LLM ({call_type}) with {len(full_messages)} messages (model={model_name}, transient_attempts={transient}, timeout_attempts={timeout}{vision_log})')
+        logger.debug(f'[LLM][{instance_short}] Invoking LLM ({call_type}) with {len(full_messages)} messages (model={model_name}, transient_attempts={transient}, timeout_attempts={timeout}{vision_log})')
+        _llm_heartbeat(sums={"invocations": 1}, sets={"model": model_name})
 
         # ── get_instance_info throttling ─────────────────────────────────
         # Counts consecutive gii tool messages so we can inject escalating
@@ -9303,7 +9394,7 @@ def create_agent_node(
                 logger.warning('[LLM] Context length exceeded (no compactor available)')
                 raise
 
-            logger.info(f'[LLM] Context length exceeded, attempting reactive compaction for {len(messages)} messages')
+            logger.debug(f'[LLM] Context length exceeded, attempting reactive compaction for {len(messages)} messages')
 
             graph = graph_ref[0]
             # Namespace trap fix: resolve the REAL root-namespace
@@ -9515,7 +9606,7 @@ def create_agent_node(
                     mission_id=resolve_turn_mission_id(full_messages),
                 )
 
-            logger.info(f'[LLM] Reactive compaction complete: {result.messages_before} -> {result.messages_after} messages, {result.tokens_saved} tokens saved ({result.compaction_type})')
+            logger.debug(f'[LLM] Reactive compaction complete: {result.messages_before} -> {result.messages_after} messages, {result.tokens_saved} tokens saved ({result.compaction_type})')
 
             updated_state = await graph.aget_state(thread_config)
             compact_messages = [SystemMessage(content=system_prompt)] + updated_state.values.get('messages', [])
@@ -9929,11 +10020,12 @@ def create_agent_node(
             first_tc = response.tool_calls[0]
             tc_args = first_tc.get('args', getattr(first_tc, 'args', {}))
             tc_args_str = str(tc_args)[:80] if tc_args else ''
-            logger.info(f'[LLM] Tool call: {tool_names[0]} — {tc_args_str}..., tools: {tool_names}')
+            logger.debug(f'[LLM] Tool call: {tool_names[0]} — {tc_args_str}..., tools: {tool_names}')
+            _llm_heartbeat(sums={"tool_calls": 1})
         elif response.content:
-            logger.info(f'[LLM] Response: {response.content[:80]}...')
+            logger.debug(f'[LLM] Response: {response.content[:80]}...')
         else:
-            logger.info('[LLM] Response: empty')
+            logger.debug('[LLM] Response: empty')
 
         # ── Empty-response streak TELEMETRY (empty-response-guard Phase 1, item 4) ──
         # Manager-scoped, RAM-only, NON-GATING (never routes — the S1
@@ -10404,7 +10496,14 @@ def build_instance_llms(
     llm_vision_chat = None
 
     if model_vision:
-        logger.info(f"[Graph] Vision model configured: {model_vision}")
+        # log-noise-hygiene: once per DISTINCT vision-model value (the
+        # line re-fires on every instance graph build; see the latch
+        # note at module top — per-key, not first-wins, because vision
+        # config is per-instance).
+        _log_info_once(
+            f"vision-model:{model_vision}",
+            lambda mv=model_vision: logger.info(f"[Graph] Vision model configured: {mv}"),
+        )
         # Filter model_vision from config to avoid passing it to the API
         # (``clean_llm_config`` also strips ``base_url_backup`` — the HA
         # wiring below reads it from the ORIGINAL
@@ -10417,7 +10516,13 @@ def build_instance_llms(
         llm_vision_chat = ThinkingChatOpenAI(**vision_config)
         llm_with_tools = llm_vision_chat.bind_tools(tools)
     else:
-        logger.info("[Graph] No vision model configured, using standard model for all calls")
+        # log-noise-hygiene: same once-per-process latch as the vision
+        # line above (this is the COMMON branch — it re-fired on every
+        # instance graph build).
+        _log_info_once(
+            "vision-model:none",
+            lambda: logger.info("[Graph] No vision model configured, using standard model for all calls"),
+        )
 
     # Create standard LLM (always needed, even if vision is configured)
     # Filter model_vision from config to avoid noisy LangChain warnings
@@ -10510,14 +10615,22 @@ def build_instance_llms(
             )
             eff_primary_transient = min(PRIMARY_TRANSIENT_MAX, transient_attempts) - 1
             eff_primary_timeout = min(PRIMARY_TIMEOUT_MAX, timeout_attempts) - 1
-            logger.info(
-                f"[LLM-HA] Failover enabled: primary={primary_url} "
-                f"backup={backup_url} "
-                f"({controller_count} controller(s): standard"
-                f"{'+vision' if model_vision and llm_vision_chat is not None else ''}; "
-                f"primary slice: {eff_primary_transient} transient / "
-                f"{eff_primary_timeout} timeout, "
-                f"backup gets full {transient_attempts}/{timeout_attempts})"
+            # log-noise-hygiene: once per DISTINCT failover posture
+            # (primary/backup pair + budgets) — the line re-fires per
+            # instance graph build; per-key latch, see module-top note.
+            _log_info_once(
+                f"llm-ha:{primary_url}->{backup_url}"
+                f":{eff_primary_transient}/{eff_primary_timeout}"
+                f":{transient_attempts}/{timeout_attempts}",
+                lambda: logger.info(
+                    f"[LLM-HA] Failover enabled: primary={primary_url} "
+                    f"backup={backup_url} "
+                    f"({controller_count} controller(s): standard"
+                    f"{'+vision' if model_vision and llm_vision_chat is not None else ''}; "
+                    f"primary slice: {eff_primary_transient} transient / "
+                    f"{eff_primary_timeout} timeout, "
+                    f"backup gets full {transient_attempts}/{timeout_attempts})"
+                ),
             )
         logger.debug(
             f"LLM configured with {transient_attempts} transient retries, "

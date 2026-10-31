@@ -47,7 +47,6 @@ import time
 import sys
 import logging
 import threading
-from logging.handlers import RotatingFileHandler
 import asyncio
 import json
 import os
@@ -62,58 +61,14 @@ from pathlib import Path
 if TYPE_CHECKING:  # annotation-only: avoids a runtime import cycle with daemon.manager
     from daemon.manager import InstanceManager
 
-_LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").upper()
-_daemon_log_level = os.environ.get("LOG_LEVEL_DAEMON", "info").upper()
-_root_log_level = getattr(logging, _LOG_LEVEL, logging.INFO)
-_daemon_log_level = getattr(logging, _daemon_log_level, logging.INFO)
+# Root logging wiring lives in its canonical home (log-noise-hygiene:
+# dual-level handlers — console INFO / file DEBUG, per-surface env knobs
+# ENSEMBLE_LOG_CONSOLE_LEVEL / ENSEMBLE_LOG_FILE_LEVEL, ANSI stripped).
+# The install runs here at import time, at the same point the former
+# inline setup ran (semantics otherwise unchanged).
+from daemon.logging_setup import daemon_logger, install_root_logging  # noqa: E402
 
-# Resolve log directory from env directly (no DaemonConfig import — avoids
-# circular import, no dead config field).
-_LOG_DIR = os.environ.get("DAEMON_LOG_DIR", "./data/logs")
-
-# Shared format for all handlers.
-_LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-
-# Stderr handler — format unchanged for backward compatibility.
-_stderr_handler = logging.StreamHandler(sys.stderr)
-_stderr_handler.setFormatter(logging.Formatter(
-    fmt=_LOG_FORMAT,
-    datefmt='%H:%M:%S',
-))
-
-# File handler — same format with full date. Wrapped in try/except so
-# unwritable log dir does NOT crash the daemon (graceful degradation).
-_file_handler = None
-try:
-    os.makedirs(_LOG_DIR, exist_ok=True)
-    _file_handler = RotatingFileHandler(
-        filename=os.path.join(_LOG_DIR, "ensemble.log"),
-        maxBytes=10 * 1024 * 1024,  # 10 MB
-        backupCount=5,
-        encoding="utf-8",
-    )
-    _file_handler.setFormatter(logging.Formatter(
-        fmt=_LOG_FORMAT,
-        datefmt='%H:%M:%S',
-    ))
-except OSError as exc:
-    # Log to stderr (the only handler guaranteed to work) and continue.
-    print(f"WARNING: Could not set up file logging in {_LOG_DIR}: {exc}", file=sys.stderr)
-
-# Configure root logger by adding handlers explicitly (NOT basicConfig).
-_root_logger = logging.getLogger()
-_root_logger.setLevel(_root_log_level)
-_root_logger.addHandler(_stderr_handler)
-if _file_handler is not None:
-    _root_logger.addHandler(_file_handler)
-
-# Daemon logger hierarchy: respects LOG_LEVEL_DAEMON for our app logs
-daemon_logger = logging.getLogger("daemon")
-daemon_logger.setLevel(_daemon_log_level)
-
-# Suppress uvicorn access logs by default (our SelectiveAccessLogMiddleware handles selective logging)
-uvicorn_access = logging.getLogger("uvicorn.access")
-uvicorn_access.setLevel(logging.WARNING)
+install_root_logging()
 
 logger = logging.getLogger(__name__)
 
@@ -4913,28 +4868,11 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
             "/api/queues/defer-blocked",
         ]
 
-        # ANSI color codes
-        RESET = "\033[0m"
-        BOLD = "\033[1m"
-        
-        # Method colors
-        COLORS = {
-            "GET": "\033[92m",      # Green
-            "POST": "\033[96m",     # Cyan
-            "PUT": "\033[93m",      # Yellow
-            "PATCH": "\033[93m",    # Yellow
-            "DELETE": "\033[91m",   # Red
-        }
-        
-        def status_color(self, code: int) -> str:
-            if 200 <= code < 300:
-                return "\033[92m"   # Green
-            elif 300 <= code < 400:
-                return "\033[94m"   # Blue
-            elif 400 <= code < 500:
-                return "\033[93m"   # Yellow
-            else:
-                return "\033[91m"   # Red
+        # NOTE (log-noise-hygiene): the former ANSI color machinery
+        # (RESET/BOLD/COLORS/status_color) is GONE — both log surfaces
+        # (console + ensemble.log) are plain text now, and the line is
+        # DEBUG (FE polling must not flood the LCD; ensemble.log keeps
+        # it at DEBUG).
 
         def __init__(self, app):
             self.app = app
@@ -4969,16 +4907,8 @@ def create_app(auth_config: "AuthConfig | None" = None) -> FastAPI:
             ):
                 return
 
-            method_color = self.COLORS.get(method, self.RESET)
-            status_color = self.status_color(status_code)
-
-            log_msg = (
-                f"{self.BOLD}{client_addr}{self.RESET} "
-                f"{method_color}{method}{self.RESET} "
-                f"{path} "
-                f"{status_color}{status_code}{self.RESET}"
-            )
-            logger.info(log_msg)
+            log_msg = f"{client_addr} {method} {path} {status_code}"
+            logger.debug(log_msg)
 
     # Add CORS
     # OAuth2 Phase 3 (T3.7 / D15 / OOS-5): when auth is ON and the
