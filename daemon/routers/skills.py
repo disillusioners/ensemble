@@ -1364,6 +1364,23 @@ async def post_fix(
         HTTPException: 400 on ``ValueError``; 503 when the lane is
         gated off (``job_id is None``); 500 on unexpected failure.
     """
+    # A14 (architect, MUST, 2026-10-31 — P7 hole): ``pf:`` addresses
+    # are REFUSED before any dispatch. This endpoint dispatches with
+    # NO existence check, so without this guard a ``pf:`` id would be
+    # admitted as a fix job whenever the lane is enabled — running
+    # evolution machinery against a file skill, exactly what P7
+    # forbids. Mirrors the ``skill_fix`` tool refusal.
+    if isinstance(skill_id, str) and skill_id.startswith("pf:"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    "File-backed skills evolve via git PRs against "
+                    "`.agents/<ns>/skills/` — skill_fix does not apply "
+                    "to `pf:` addresses (P7)."
+                )
+            },
+        )
     try:
         job_id = await dispatcher.dispatch_fix(
             project_id=project_id,

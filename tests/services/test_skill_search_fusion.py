@@ -753,6 +753,112 @@ class TestCrossProjectLeak:
         assert "alpha-secret-skill" not in _entry_names(result)
         assert service.file_corpus_stats()["refused"] is True
 
+    # ------------------------------------------------------------------
+    # R3 (Phase-2 gate finding F3, folded 2026-10-31): the HARD
+    # policy-exclusion shape. The pins above prove absence-by-no-root
+    # (project B has no root binding in the fixture ⇒ ``roots=[]``,
+    # ``refused=False`` — absence is INCIDENTAL). Here project B HAS
+    # its own canon root; the exclusion under test is POLICY (the A6
+    # refusal), proven by a same-fixture positive control where B's
+    # own canon IS served.
+    # ------------------------------------------------------------------
+
+    async def _setup_two_canons(self, tmp_path, sqlite_engine):  # noqa: F811
+        """Two projects, each with its OWN canon root + instance."""
+        root_a = str(tmp_path / "proj-a-root")
+        write_skill(
+            root_a, "tester", "alpha-secret-skill",
+            body_text="alpha alpha\n",
+        )
+        root_b = str(tmp_path / "proj-b-root")
+        write_skill(
+            root_b, "tester", "bravo-own-skill", body_text="bravo bravo\n"
+        )
+        instance_repo = FakeInstanceRepository(
+            {
+                INSTANCE_ID: FakeInstance(
+                    INSTANCE_ID,
+                    {"project_id": TEST_PROJECT_ID},
+                    TEST_PROJECT_ID,
+                ),
+                OTHER_INSTANCE_ID: FakeInstance(
+                    OTHER_INSTANCE_ID,
+                    {"project_id": OTHER_PROJECT_ID},
+                    OTHER_PROJECT_ID,
+                ),
+            }
+        )
+        project_repo = FakeProjectRepository(
+            [
+                FakeProject(TEST_PROJECT_ID, main_directory=root_a),
+                FakeProject(OTHER_PROJECT_ID, main_directory=root_b),
+            ]
+        )
+        file_source = make_service(
+            sqlite_engine,
+            instance_repo=instance_repo,
+            project_repo=project_repo,
+        )
+        return make_search_service(
+            skills=[
+                make_skill(skill_id="db-b-1", name="alpha-db-b", content="alpha")
+            ],
+            file_source=file_source,
+        )
+
+    async def test_r3_positive_control_project_b_sees_its_own_canon(
+        self, tmp_path, monkeypatch, sqlite_engine  # noqa: F811
+    ):
+        """Positive control: B's instance + B's project (no conflict)
+        ⇒ B's OWN canon IS fused (file_included > 0). Proves the
+        corpus machinery works for B — the exclusion pins below are
+        policy, not absence."""
+        service = await self._setup_two_canons(tmp_path, sqlite_engine)
+        install_selector(
+            monkeypatch,
+            {"selected": [{"name": "bravo-own-skill", "score": 0.9}]},
+        )
+        result = await service.search(
+            "bravo",
+            project_id=OTHER_PROJECT_ID,
+            instance_id=OTHER_INSTANCE_ID,
+        )
+        assert "bravo-own-skill" in _entry_names(result)
+        stats = service.file_corpus_stats()
+        assert stats["refused"] is False
+        assert stats["file_included"] >= 1
+        assert stats["project_id"] == OTHER_PROJECT_ID
+
+    async def test_r3_hard_shape_b_canon_exists_but_conflict_refuses_all(
+        self, tmp_path, monkeypatch, sqlite_engine  # noqa: F811
+    ):
+        """The hard shape: B HAS its own canon (proven by the positive
+        control), but B's instance + caller-supplied project A ⇒ the
+        resolver REFUSES the file corpus for the call — B's OWN canon
+        is excluded too (refused=True, file_included==0), and project
+        A's canon never leaks."""
+        service = await self._setup_two_canons(tmp_path, sqlite_engine)
+        install_selector(
+            monkeypatch,
+            {"selected": [{"name": "alpha-secret-skill", "score": 0.9}]},
+        )
+        result = await service.search(
+            "alpha",
+            project_id=TEST_PROJECT_ID,  # conflicts with B's derived
+            instance_id=OTHER_INSTANCE_ID,
+        )
+        names = _entry_names(result)
+        assert "alpha-secret-skill" not in names  # A's canon never leaks
+        assert "bravo-own-skill" not in names  # B's OWN canon excluded too
+        assert all(
+            e.get("source") != SOURCE_PROJECT_FILE
+            for e in result["injected"] + result["low_match"]
+        )
+        stats = service.file_corpus_stats()
+        assert stats["refused"] is True
+        assert stats["file_included"] == 0
+        assert stats["roots"] == []
+
 
 # ============================================================
 # Task 4 — defensive post-stage-3 dedupe (synthetic drift)
