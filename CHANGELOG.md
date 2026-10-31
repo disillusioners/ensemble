@@ -84,6 +84,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **DB note** — the `mcp_servers` row `computer-use` was soft-deactivated (`is_active=false`) out of band; the boot orphan sweep (`_deactivate_orphaned_builtin_servers`) deactivates any re-appearance.
 - **Tests** — `tests/unit/test_computer_use_mcp.py` (1726 lines) is deleted; its GENERIC half (the S1 built-in availability gate, the privilege-stamp helper's non-stamping contract, `is_mcp_tool`'s standard-shape detection and the empty-allow privileged-category strip) is ported to `tests/unit/test_mcp_builtin_availability_gate.py`. The nine `PRIVILEGED_TOOL_CATEGORIES` same-PR pins drop the `cu` member (16 → 15).
 
+## [0.28.1] — 2026-10-31
+
+### Fixed — restart-arm livelock: own-txn retryable skip + executor-exit closer (`fix/restart-arm-livelock`, base `cbafcc8d9`; commission `wi-6641579b`)
+
+> **CHANGELOG (livelock):** *Incident `r-20261031-071535-d526`: a restart arm whose executor died pre-adoption (`exit_code=-1`) left `in_flight` + `pending_op` + the journal lock held in the LIVE daemon's own name — `lock_acquire`'s stale-break can never fire (owner alive), and every 90 s sweep cycle fired the pending wake into `mark_wake_delivering`'s synchronous 30 s lock wait ON THE EVENT LOOP — CAS lost every cycle, wake undelivered, txn unclosed: livelock until a human restarts the daemon. Both legs fixed here; the generic FOREIGN-holder 30 s event-loop block is explicitly NOT folded (own commission).*
+
+- **Part 1 — own-txn retryable skip** (`daemon/tools/upgrade_journal.py::mark_wake_delivering`, fix `f392b18f1`) — the lock is probed non-blocking FIRST; when the holder is THIS run's own open `in_flight` txn (`run_id` matches AND `flipped` is not true), it logs and returns `None` immediately — the 30 s wait loop is never entered for this class. Foreign holders and `flipped=true` keep the original wait-then-skip semantics.
+- **Part 2 — observed-executor-exit closer** (`daemon/services/upgrade_journal_sweep.py::_journal_executor_exit`, same commit) — an OBSERVED executor exit on an UNFLIPPED restart txn closes the arm right there: `in_flight=None` + `clear_pending_op` + `restart_abandoned` event (boot-lane vocabulary, `RESTART_TERMINAL_EVENTS` member) + run_id-matched lock release — the next sweep cycle delivers the pending wake. Both reaper exit legs (normal `waitpid` and the `ChildProcessError` `exit_code=-1` path) funnel into the same site. NEVER touches a `flipped=true` txn (mutation happened — halt-for-human semantics stay).
+- **Known follow-up, disclosed** — the promote-kind `flipped=false` executor death is NOT closed by Part 2 (the inherited restart-only kind guard in the `close_stale_restart_arm` pattern); leader-flagged as a potential small follow-up with the same shape.
+- **Tests** — `tests/unit/services/test_restart_arm_livelock_pins.py` (8/8, mutation-verified; `d02fe3a1a`); docstring corrections `4be66e44c`. Migration delta **EMPTY** (pure code fix). Functional gate PASS (G1–G4) — `.agents/tester/RESULTS/2026-10-31-restart-livelock-functional-gate.md`.
+
 ## [0.28.0] — 2026-10-31
 
 ### The stability-era milestone — one release carrying the whole v0.27.12 → v0.28.0 arc (board `wi-1af1127d`; commission `wi-78967dba`)
