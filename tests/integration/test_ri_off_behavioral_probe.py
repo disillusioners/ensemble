@@ -1,16 +1,19 @@
 """P2 "OFF means OFF" behavioral probe — WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED.
 
 Gate-authored evidence (P2 report-integrity gate, branch
-feature/wc-wake-report-integrity). The shipping posture is the flag OFF
-(unset). This probe proves BEHAVIORALLY — on the REAL completion path,
-not via flag-reading introspection — that OFF means OFF:
+feature/wc-wake-report-integrity). Premise retargeted for the
+D2.5-FLIP default promotion (landed 2026-10-31): the shipping posture
+is the flag ON (unset/blank resolve ON); the kill switch is the
+explicit ``=0`` value. This probe proves BEHAVIORALLY — on the REAL
+completion path, not via flag-reading introspection — that OFF means
+OFF (under the explicit falsy spellings):
 
 1. Incident shape seeded in durable rows (report_injections PENDING with a
    terminal child + a FIRED-unenqueued dependency_watchers row), then the
    REAL observer finalize site (``JobFeedbackObserver._finalize_job`` —
    the production parent-COMPLETED path at
    ``daemon/services/job_feedback_observer.py`` observer_finalize_job)
-   runs with the flag UNSET:
+   runs with the flag OFF (explicit falsy: ``0`` ∥ ``off``):
      a. exactly ONE ``[ReportIntegrityGuard]`` log line (the stage-ii
         declared-waiting violation WARNING) — zero predicate-FAILED /
         MALFORMED / enforcement lines;
@@ -25,9 +28,11 @@ not via flag-reading introspection — that OFF means OFF:
         instantly (< 100 ms) and ``asyncio.wait_for`` (the
         NOTICE_ENQUEUE_BUDGET wrapper) is NEVER awaited — the flag-off
         branch returns before the budget.
-3. Parity: the same scenario with the flag explicitly ``0`` behaves
-   identically (same single log line, same zero writes, same completion).
-4. ON-state contrast control: flag ON + the SAME shape → the enforcement
+3. Parity: the same scenario under each explicit falsy spelling
+   (``0`` ∥ ``off``) behaves identically (same single log line, same
+   zero writes, same completion).
+4. ON-state contrast control: flag ON (explicit ``=1``) + the SAME
+   shape → the enforcement
    DOES fire (one notice, ledger populated) — giving the OFF assertions
    teeth (they are discriminating, not tautological).
 5. S3 scoping spot: with the flag OFF, the ALWAYS-ON Wave-1 instruments
@@ -157,12 +162,15 @@ def _junk_counter_hygiene():
 
 
 def _force_flag_off(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
-    """Put the kill-switch env in one of the two OFF shapes."""
-    assert mode in ("unset", "explicit_zero")
-    if mode == "unset":
-        monkeypatch.delenv(WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED, raising=False)
-    else:
-        monkeypatch.setenv(WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED, "0")
+    """Put the kill-switch env in one of the two explicit OFF shapes.
+
+    Since the D2.5-FLIP default promotion (2026-10-31) the UNSET env
+    resolves ON (the new default), so both OFF modes pin the env to an
+    explicit falsy spelling — ``=0`` is the documented kill switch.
+    """
+    assert mode in ("explicit_zero", "explicit_off")
+    value = "0" if mode == "explicit_zero" else "off"
+    monkeypatch.setenv(WC_REPORT_INTEGRITY_B_TERMINAL_WAITING_GUARD_ENABLED, value)
     # The resolver cache is None (fixture) — the NEXT real read resolves
     # from THIS env state, exactly as a fresh daemon boot would.
 
@@ -401,11 +409,11 @@ async def _drive_real_finalize(observer: JobFeedbackObserver, parent_id: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Sub-cases 1–3: OFF means OFF on the REAL completion path (unset ∥ "0")
+# Sub-cases 1–3: OFF means OFF on the REAL completion path (explicit "0" ∥ "off")
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("off_mode", ["unset", "explicit_zero"])
+@pytest.mark.parametrize("off_mode", ["explicit_zero", "explicit_off"])
 async def test_off_means_off_on_real_completion_path(
     engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
@@ -413,9 +421,9 @@ async def test_off_means_off_on_real_completion_path(
     wire_bus_gate,
     off_mode: str,
 ):
-    """Flag OFF (unset AND explicit "0") + incident shape → stage-ii log
-    ONLY: one guard line, zero durable writes, completion proceeds, no
-    budget await, ledger empty."""
+    """Flag OFF (explicit falsy: ``0`` ∥ ``off``) + incident shape →
+    stage-ii log ONLY: one guard line, zero durable writes, completion
+    proceeds, no budget await, ledger empty."""
     _force_flag_off(monkeypatch, off_mode)
 
     # ── Seed the incident shape ──────────────────────────────────────────
@@ -621,7 +629,7 @@ async def test_s3_always_on_instruments_fire_with_flag_off(
     fire on a junk-shape report — the B-flag gates ONLY the (b)
     enforcement. The marker is a SUFFIX APPEND only: content semantics are
     unchanged beyond the suffix, and nothing is blocked."""
-    _force_flag_off(monkeypatch, "unset")
+    _force_flag_off(monkeypatch, "explicit_zero")
     # Lock the OFF resolution for this test's scope (cache was reset by the
     # autouse fixture; this pre-resolves so any accidental ON would show).
     assert rig.resolve_report_integrity_b_guard_enabled() is False

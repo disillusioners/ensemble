@@ -1638,10 +1638,12 @@ REPORT_REPAIR_EXCLUDED_AGENTS: frozenset[str] = frozenset(
 
 # (b) Terminal-child-aware waiting guard (decisions.md C2-D2.5 LOCKED,
 # C2-D2.6 LOCKED, C2-D2.7 LOCKED, C2-D2.8 LOCKED, C2-D2.18 LOCKED).
-# Wave-2 stage-iii (B.S.1-iii) wires the config.py env binding; the
-# default-0 semantics here match the ``LIMITS_GOVERNOR_RECURSION_GUARD_ENABLED``
-# precedent (kill-switch default OFF — the revert path; pre-committed
-# enforcement flip per D2.5-FLIP).
+# Wave-2 stage-iii (B.S.1-iii) wires the config.py env binding. The
+# pre-committed D2.5-FLIP default promotion LANDED 2026-10-31:
+# unset/blank now resolves ON (enforcement) and the explicit ``=0``
+# is the retained kill switch back to stage-ii log-only — the
+# resolver caches once per process, so a flip (either direction)
+# requires a restart.
 #
 # S3 scoping note (council follow-up, 2026-08-30): this flag gates ONLY
 # (b) ENFORCEMENT (notice injection via B.S.1-iii / B.S.2). It does NOT

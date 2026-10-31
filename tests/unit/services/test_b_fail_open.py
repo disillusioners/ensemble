@@ -101,8 +101,13 @@ def flag_on(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def flag_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Force the (b) enforcement kill-switch OFF (ship default)."""
-    monkeypatch.delenv(B_FLAG_ENV, raising=False)
+    """Force the (b) enforcement kill-switch OFF (explicit ``=0``).
+
+    Since the D2.5-FLIP default promotion (2026-10-31) the UNSET env
+    resolves ON, so the OFF state must be pinned explicitly: blanking
+    the env is no longer the revert path — ``=0`` is.
+    """
+    monkeypatch.setenv(B_FLAG_ENV, "0")
     monkeypatch.setattr(rig, "_B_GUARD_ENABLED", None)
     yield
 
