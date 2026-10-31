@@ -1,5 +1,7 @@
 {
   "backend": "sqlite",
+  "base_sha": "0d64898794047a8221c6d71ad46ef5b49d9bb197",
+  "base_sha_note": "attested post-capture (G1a A1 fold, 2026-10-31): corroborated via evidence-phase0-phase3.md header + read-only ancestry (docs-only child of 22fe83317, code-identical); key absent at capture time",
   "cycles": [
     {
       "cycle": 1,

@@ -41,9 +41,12 @@ as a foot-gun).
 Result: 3 drift cycles × 3 variants on BOTH SQLite and real PG — the
 JobItem stays `active`, `terminal_reason` NULL, `job_locks` row present
 every cycle. E1 self-hold verdict captured verbatim: `live=True` via the
-childless-root fallback ("freshest tree-member last_activity_at (root
+LIVE-LEG branch (`mission_live_guard.py:1110-1116` — "non-terminal member
+present (live leg holds) and freshest tree-member last_activity_at (root
 excluded) is 10800s old (<21600s threshold) — mission is plausibly
-alive"). Per-cycle detail patterns show only `orphan_active_skipped_
+alive"). (Prose corrected 2026-10-31, G1a A2 fold: the earlier text
+mis-attributed the hold to the "childless-root fallback"; the JSON reason
+was always verbatim-correct.) Per-cycle detail patterns show only `orphan_active_skipped_
 mission_live{,_f1}` — ZERO P1-class warnings for the class (findings-core
 Q6 confirmed).
 

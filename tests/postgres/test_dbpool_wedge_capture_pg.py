@@ -52,7 +52,7 @@ read-2 aborts ⇒ RED.
 
 Run (house form — scratch PG, per-variable env scrub, marker override)::
 
-    cd /home/nea/ensemble-src-wt-dbpool-idletxn && \
+    cd /home/nea/ensemble-src-wt-missed-finalize && \
     env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD \
         -u POSTGRES_HOST -u POSTGRES_PORT -u DAEMON_PORT \
     HOME="$(mktemp -d)" \
