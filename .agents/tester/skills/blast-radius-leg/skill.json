@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "name": "blast-radius-leg",
+  "version": "1.0.0",
+  "description": "Tier-1 DEFAULT regression gate: scoped dual-side FAILED-list diff over the declared blast radius; hard 30-min fail-loud budget; mechanical derivation with tester-owned declaration; collect-only slicing proof; xdist-within-leg or mrpr sizing; pre-exclusions with compensating pins.",
+  "category": "gate-runner",
+  "scope": "project",
+  "tiers": [1],
+  "body": "blast-radius-leg.md",
+  "assets": [],
+  "loads": ["failed-digest-equality-gate"]
+}
