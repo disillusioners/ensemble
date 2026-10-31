@@ -1,5 +1,7 @@
 # Test Packs
 
+## Commission STAGED VERIFICATION — v0.28.0 MILESTONE @ tag 3e8454052 (2026-10-31) — 🟢 VERDICT: **STAGED-VERIFIED PASS-WITH-NOTES** (S1 7/7 sha/sidecars/tag/manifest-4-scalars/115==115; S2 one-way lane+era symbols at bytecode level; S3 functional PASS — banner/livez/readyz/knob-trio/(h)-leg on fenced scratch boot — with the live-fence sub-check FAIL routed as a PRE-EXISTING init_guard install-root fallback defect, 2 append-only rows, promote fields intact, ceremony-neutral; S4 4/4 rollback posture zero-new-tables; S5 8/8 changelog truths + D7 exclusion) — full evidence: RESULTS/2026-10-31-v0280-staged-verification.md — evidence branch tester/v0280-staged-verification (pushed).
+
 ## Commission FUNCTIONAL GATE VERIFIED — missed-finalize / zombie-ACTIVE close (`fix/missed-finalize-zombie-active`, board `wi-78967dba`) (2026-10-31) — 🟢 VERDICT: **PASS-WITH-NOTES** (independent functional gate @ `9af20578a` + sanctioned pin-fold `defa3d8b5`; net-new ∅ post-fold) — full evidence: RESULTS/2026-10-31-zombie-close-functional-gate.md
 
 > Phase-4 gate, 16 workers, gate window 04:05–05:45Z. All 7 gates green: symptom both
