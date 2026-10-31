@@ -6,7 +6,9 @@
 > re-verified); every pin mutation-verified — TRUE MATRIX SHAPE: 25
 > planted legs / 22 RED-proven / 3 superseded dead first plants
 > (honestly recorded, never counted as RED; digests per leg in
-> `phase3-artifacts/matrix.tsv`)
+> `phase3-artifacts/matrix.tsv`, the AUTHORITATIVE count — prose
+> re-derived from it; a lane-report note claiming 26/23/3
+> double-counted the W2 leg and is superseded)
 > (`/tmp/mfz-phase0/mutation-matrix/matrix.tsv` — carried into the
 > lane evidence). Family-neighborhood re-run: ZERO net-new reds (the
 > 5 failing neighbors are pre-existing at base, proven from the

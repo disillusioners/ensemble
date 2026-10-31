@@ -82,6 +82,16 @@ row present, `examined=0` — pre-fix behavior byte-restored.
 
 ## Phase 3 T3.11 — mutation matrix (TRUE SHAPE: 25 planted / 22 RED-proven / 3 superseded)
 
+> **AUTHORITY NOTE (micro-fold 2026-10-31):** the committed
+> `phase3-artifacts/matrix.tsv` is the AUTHORITATIVE count — prose
+> figures here and in PACKS.md are derived from it and re-derived at
+> every fold. At commit `ec0cf2a6a` it mechanically stands at
+> **25 planted / 22 RED-proven / 3 superseded** (the W2
+> cardinality leg INCLUDED). An earlier lane-report closing note
+> claiming "26/23/3 after this cycle" double-counted the W2 leg and
+> is superseded by this recount — recorded so the false figure
+> never propagates.
+
 `phase3-artifacts/matrix.tsv` — every RED-proven leg: planted defect form
 → the named pin(s) RED (ids recorded) → restore → GREEN. Three first
 plants are HONESTLY RECORDED as superseded dead forms (pin could not
