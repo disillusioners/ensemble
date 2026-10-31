@@ -16,7 +16,7 @@ Three tables, ONE package (the lane's repo home):
   pins that wall RED as documentation.
 * :class:`ProjectSkillUsageRecord` — ``project_skill_usage_records`` —
   the D2 companion table (the census chose the companion fork; see
-  ``.agents/shared/planning/project_skill_source/../../d2-write-census.md``).
+  ``.agents/shared/planning/project-skill-loader/d2-write-census.md``).
   Mirrors the ``skill_usage_records`` column set minus the FK so the
   Phase-3 ``skill_feedback`` acceptance can keep D-Q5's metrics value
   without ever touching an FK-constrained child table.
