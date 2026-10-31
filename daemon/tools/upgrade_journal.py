@@ -1318,7 +1318,34 @@ def mark_wake_delivering(
     The lock is the existing ``journal_lock_acquire`` (same primitive
     ``pending_op`` uses); on contention the sweep blocks until the
     holder releases (mirroring the other journal-protocol CAS sites).
+
+    Incident 2026-10-31 (restart-arm livelock) hardening: BEFORE the
+    30 s wait the lock is probed non-blocking (``wait_s=0.0``). When
+    the probe loses to THIS run's own open ``in_flight`` txn
+    (``run_id`` matches, ``flipped`` not true), the call returns
+    ``None`` IMMEDIATELY as a retryable skip — that holder is the
+    arming daemon's own dead-by-construction restart arm (the executor
+    that would adopt/release the lock died without closing it), and
+    burning the 30 s wait on the caller's event loop every sweep cycle
+    is the livelock shape. Any OTHER holder (a foreign run, or this
+    run with ``flipped=true`` — a mutation happened) keeps the original
+    wait-then-skip semantics unchanged.
     """
+    # Incident-2026-10-31 identity check BEFORE the 30 s wait: the
+    # own-open-txn class must NOT enter the wait loop (the wait runs
+    # synchronously on the sweep's event loop).
+    probe_acquired, busy = lock_acquire(install_dir, run_id, wait_s=0.0)
+    if probe_acquired:
+        return _mark_wake_delivering_locked(install_dir, run_id)
+    if busy == run_id and _in_flight_is_own_open_txn(install_dir, run_id):
+        logger.warning(
+            "upgrade_journal: mark_wake_delivering lock held by THIS "
+            "run's own open in_flight txn (flipped=false — no mutation "
+            "happened) run_id=%s — retryable skip (no 30s wait; the "
+            "executor-exit closer releases the lock)",
+            run_id,
+        )
+        return None
     acquired, busy = lock_acquire(install_dir, run_id, wait_s=30.0)
     if not acquired:
         logger.warning(
@@ -1327,6 +1354,34 @@ def mark_wake_delivering(
             run_id, busy,
         )
         return None
+    return _mark_wake_delivering_locked(install_dir, run_id)
+
+
+def _in_flight_is_own_open_txn(install_dir: Path, run_id: str) -> bool:
+    """True iff the journal's ``in_flight`` txn is THIS run's own open
+    restart arm (``run_id`` matches AND ``flipped`` is not true).
+
+    The ``flipped`` read is house-normalized (upgrade_tools.py:847 /
+    :2522 style): the python mint writes JSON ``false`` (bool) while
+    the shell splice path writes ``"true"``/``"false"`` strings — only
+    a case-insensitive ``"true"`` counts as flipped. The lock-free read
+    is safe: ``journal_write`` is atomic (temp + fsync + os.replace).
+    """
+    try:
+        data = journal_read(install_dir)
+    except (JournalTorn, OSError):
+        return False  # unverifiable — never claim identity on a torn read
+    inf = data.get("in_flight")
+    if not isinstance(inf, dict) or inf.get("run_id") != run_id:
+        return False
+    return str(inf.get("flipped", "")).lower() != "true"
+
+
+def _mark_wake_delivering_locked(
+    install_dir: Path, run_id: str
+) -> PendingWake | None:
+    """CAS body of ``mark_wake_delivering`` — caller HOLDS the journal
+    lock; released in ``finally``."""
     try:
         data = ensure_extensions(install_dir)
         pending = data.get("pending_wakes")
@@ -2131,6 +2186,111 @@ def close_stale_restart_arm(install_dir: Path) -> str | None:
     return (
         f"stale restart arm run_id={op.run_id} closed at boot "
         f"(variant {variant}); lock freed"
+    )
+
+
+def close_restart_arm_executor_exit(
+    install_dir: Path,
+    run_id: str,
+    exit_code: int,
+    pid: int | None = None,
+) -> str | None:
+    """Live-lane restart-arm closure on an OBSERVED executor exit
+    (incident 2026-10-31 — restart-arm livelock).
+
+    The reaper journals ``executor_exit`` for BOTH exit legs (normal
+    waitpid and ChildProcessError ``exit_code=-1``) but closes nothing:
+    an arm whose executor died WITHOUT flipping (``in_flight.flipped``
+    false — no mutation happened) keeps ``in_flight`` + ``pending_op``
+    + the journal lock, and the lock's owner pid is the LIVE arming
+    daemon — so ``lock_acquire``'s stale-break can never fire, every
+    wake-sweep cycle hits the run's own open txn, and the pipeline
+    wedges until a human restarts the daemon (boot recovery's
+    ``close_stale_restart_arm`` being the only existing closer).
+
+    This is that closer for the live lane: the executor exit was just
+    OBSERVED (stronger evidence than the boot lane's pid-deadness
+    probe — no live-executor skip is needed or possible here), so the
+    SAME action set as ``close_stale_restart_arm`` runs: clear
+    ``in_flight`` (when set), ``clear_pending_op``, journal a
+    ``restart_abandoned`` event (a RESTART_TERMINAL_EVENTS member —
+    the same vocabulary the boot lane uses), and
+    ``lock_release_run_id``.
+
+    Guards (leave everything untouched, return ``None``):
+      * ``pending_op`` missing, not restart-kind, or its ``run_id`` ≠
+        the observed exit's ``run_id``;
+      * ``in_flight`` set with ``run_id`` ≠ the observed exit's (never
+        close another run's txn);
+      * ``in_flight`` set with ``flipped=true`` — a mutation happened;
+        the halt-for-human semantics stay (boot/manual owns it).
+    A torn journal is a logged no-op. Never raises. Returns a one-line
+    note when a closure happened.
+    """
+    try:
+        data = journal_read(install_dir)
+    except (JournalTorn, OSError) as exc:
+        logger.warning(
+            "upgrade_journal: close_restart_arm_executor_exit journal "
+            "read FAILED (leaving any open arm untouched): %s",
+            exc,
+        )
+        return None
+    op = PendingOp.from_json(data.get("pending_op"))
+    if op is None or op.kind != "restart" or op.run_id != run_id:
+        return None
+    in_flight = data.get("in_flight")
+    if isinstance(in_flight, dict):
+        if in_flight.get("run_id") != run_id:
+            return None
+        if str(in_flight.get("flipped", "")).lower() == "true":
+            logger.info(
+                "upgrade_journal: close_restart_arm_executor_exit "
+                "skipped — in_flight flipped=true for run_id=%s "
+                "(mutation happened; halt-for-human stays)",
+                run_id,
+            )
+            return None
+        variant = "b (in_flight set)"
+    else:
+        variant = "a (no in_flight)"
+    try:
+        ensure_extensions(install_dir)
+        if isinstance(in_flight, dict):
+            journal_update_field(install_dir, "in_flight", None)
+        clear_pending_op(install_dir)
+        journal_history_append(
+            install_dir,
+            "restart_abandoned",
+            f"stale restart arm run_id={run_id} closed after executor "
+            f"exit observed (variant {variant}; executor pid={pid} "
+            f"exit_code={exit_code}; in_flight flipped=false — no "
+            f"mutation happened; NEVER auto-executed; pipeline + "
+            f"lock freed for the next arm)",
+        )
+    except (JournalTorn, OSError, KeyError) as exc:
+        logger.warning(
+            "upgrade_journal: close_restart_arm_executor_exit closure "
+            "write FAILED (arm left as-is — operator inspects %s): %s",
+            journal_path(install_dir),
+            exc,
+        )
+        return None
+    # run_id-matched lock release — a mismatched/absent lock is a
+    # logged no-op (never free another run's lock). SAFE here despite
+    # the boot-lane-only note on ``lock_release_run_id``: the executor
+    # exit was just observed, so no live executor holds this lock.
+    try:
+        lock_release_run_id(install_dir, run_id)
+    except OSError as exc:
+        logger.warning(
+            "upgrade_journal: close_restart_arm_executor_exit lock "
+            "release FAILED for run_id=%s: %s",
+            run_id, exc,
+        )
+    return (
+        f"stale restart arm run_id={run_id} closed after executor exit "
+        f"observed (variant {variant}); lock freed"
     )
 
 
