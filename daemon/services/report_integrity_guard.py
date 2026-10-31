@@ -74,7 +74,10 @@ family, terminal-row status strand): the decline above is
 overridden at TWO completion-writer sites ONLY — the
 ``child_reports`` pre-stamp hold branch and the
 ``child_reports`` idempotency guard: when the row reads
-terminal (COMPLETED / TERMINATED / ERROR / FAILED) AND live
+terminal (COMPLETED / ERROR / FAILED — TERMINATED is EXCLUDED,
+M-2: terminates stay final; the claim gate excludes
+PAUSED/TERMINATED for all task types, so a re-arm would be a
+new resurrection path that touchpoint 1 never triggers) AND live
 descendants exist, the row is re-armed to WAITING_CHILDREN.
 Scope of the override: it re-introduces the status column
 purely as the ROW's visible liveness surface for live trees

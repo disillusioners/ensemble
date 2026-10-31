@@ -69,7 +69,9 @@ for terminated rows) would never trigger, contrary to explicit operator
 intent. Non-terminal rows (the historical `running` hold) keep the
 4ebd7f2f1 no-churn semantics — NO write, no version bump.
 
-The healer hand-off runs AFTER a successful re-arm with the LIVE posture
+The healer hand-off runs after the re-arm attempt; posture=None makes
+`_heal_by_posture` RE-READ the live row (A-N1) instead of trusting
+the pre-write status
 (`InstanceStatus.WAITING_CHILDREN.value`); a non-re-armed row keeps the
 historical posture (`instance_meta.status`) — same call, same coalescing
 as 4ebd7f2f1 (M-1). The write reuses `_fp4_l6_downgrade_to_waiting`
@@ -137,6 +139,7 @@ the live root. This couples to the reconciler path (task/repository.py
   between them is small (content fetch in between); the re-read closes
   the 9f0ed4f5 race where the row was terminal at hold time but the top-of-drive
   read was stale.
+- Note (A-N4): `_fp4_l6_downgrade_to_waiting` is `async def` but performs a synchronous `Session`/`commit` inside; touchpoint 2 now runs it before the heal hand-off (ms-range delay). Not re-plumbed.
 - Touchpoint 3's COUNT is direct-children only (same as the :3516
   writer). The recursive (depth-2+) shape for ROOT rows is owned by the
   pre-stamp hold (touchpoint 2), which never reaches this guard on a live
@@ -150,5 +153,3 @@ the live root. This couples to the reconciler path (task/repository.py
 - Daemon-only: no agents/ files touched; prompt-artifact baseline unchanged.
 - No merge / bump / tag / stage / push performed (giter owns v0.28.2
   finalize).
-PY
-echo written

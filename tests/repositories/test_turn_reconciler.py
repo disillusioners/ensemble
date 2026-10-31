@@ -1371,7 +1371,6 @@ class TestWaitingChildrenGuard:
         )
         full = _read_admission_full(engine, work_id)
         assert full["terminal_reason"] is None
-        assert full["terminal_reason"] is None
 
     def test_waiting_children_root_keeps_jobitem_active(
         self, engine: Engine, repo: TaskRepository

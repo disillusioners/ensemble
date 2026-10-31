@@ -2320,11 +2320,12 @@ Provide a concise summary:"""
         keyword-only membership set for the guarded write. The
         default keeps the historical COMPLETED-only behavior for the
         existing L6 call sites byte-identically; the pre-stamp hold
-        site passes the full terminal set so a terminal strand root
-        (COMPLETED / TERMINATED / ERROR / FAILED) is reactivated to
-        WAITING_CHILDREN while its tree is live. Non-terminal rows
-        (e.g. the historical ``running`` hold) never match and get
-        NO write — the 4ebd7f2f1 no-churn contract holds.
+        site passes _TERMINAL_REARM_STATUSES (COMPLETED / ERROR /
+        FAILED — TERMINATED excluded, M-2) so a terminal strand root
+        is reactivated to WAITING_CHILDREN while its tree is live.
+        Non-terminal rows (e.g. the historical ``running`` hold) never
+        match and get NO write — the 4ebd7f2f1 no-churn contract
+        holds.
         """
         try:
             with Session(self._manager._engine) as _session:
@@ -2946,9 +2947,10 @@ Provide a concise summary:"""
                     # fresh re-read (the ``instance_meta`` read at the
                     # top of this drive can be seconds stale) gates
                     # the write on the terminal set: only a
-                    # COMPLETED / TERMINATED / ERROR / FAILED row is
-                    # downgraded to WAITING_CHILDREN (the visible
-                    # "waiting, tree live" surface). Non-terminal rows
+                    # COMPLETED / ERROR / FAILED row is downgraded to
+                    # WAITING_CHILDREN (the visible "waiting, tree live"
+                    # surface). TERMINATED is excluded (M-2): terminates
+                    # stay final. Non-terminal rows
                     # — the 4ebd7f2f1 no-churn contract — get NO write
                     # (the membership check fails; byte-identical
                     # historical behavior). The healer hand-off below
@@ -2977,20 +2979,15 @@ Provide a concise summary:"""
                             _hold_react_exc,
                         )
                         _rearmed = False
-                    # Heal hand-off (coalesced per root) — runs AFTER the
-                    # re-arm so the posture reflects the LIVE row: a
-                    # re-armed strand hands the healer the waiting_children
-                    # lane (the running-zombie lane alone would miss a
-                    # waiting root). Non-re-armed rows keep the historical
-                    # posture (instance_meta.status) — same call, same
-                    # coalescing as 4ebd7f2f1.
-                    _heal_posture = (
-                        InstanceStatus.WAITING_CHILDREN.value
-                        if _rearmed
-                        else instance_meta.status
-                    )
+                    # Heal hand-off (coalesced per root) — runs after the
+                    # re-arm; posture=None makes _heal_by_posture RE-READ
+                    # the live row (A-N1) instead of trusting the
+                    # pre-write status, so the waiting_children lane is
+                    # selected when the re-arm landed. Non-re-armed rows
+                    # also re-read (None) and resolve to their current
+                    # status — same call, same coalescing as 4ebd7f2f1.
                     self._schedule_strand_heal(
-                        instance_id, posture=_heal_posture,
+                        instance_id, posture=None,
                     )
                     return
                 # Not live (all-terminal after strand exclusion, or
