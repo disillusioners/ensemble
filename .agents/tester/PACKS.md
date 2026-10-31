@@ -1,4 +1,31 @@
 # Test Packs
+
+## Commission FUNCTIONAL GATE VERIFIED — missed-finalize / zombie-ACTIVE close (`fix/missed-finalize-zombie-active`, board `wi-78967dba`) (2026-10-31) — 🟢 VERDICT: **PASS-WITH-NOTES** (independent functional gate @ `9af20578a` + sanctioned pin-fold `defa3d8b5`; net-new ∅ post-fold) — full evidence: RESULTS/2026-10-31-zombie-close-functional-gate.md
+
+> Phase-4 gate, 16 workers, gate window 04:05–05:45Z. All 7 gates green: symptom both
+> directions (committed gap JSONs verified both engines + 60/60 HEAD packs incl. canonical
+> notify on actual await-args + OFF-rerun base-gap held); whole-tree 25,946 ids exact coverage,
+> base 330 → HEAD 301→298, net-new {3} = stale adjacent pins on INTENDED contract widening →
+> folded @ `defa3d8b5` (PD-4.2 fix-and-rerun, +3/−3 fingerprint `40cb823b…`→`ceb69376…`),
+> 5 pre-existing-unlisted (mock-shadowing family, reproduced at base), 37 fixed accounted;
+> real-PG Pack I 3/3 (first true PG leg) + wedge-capture re-pointed 3/3 with live
+> n_live_tup proof; mutations 8/8 RED→GREEN (T3.12-a1v3 planted-sha byte-exact); migrations
+> 115==115 zero delta; envelope G7a CLEAN + G7b fence CLEAN (live epoch continuous, zero
+> residue). Lane tip advanced past the commissioned anchor — stage re-derivation from
+> `defa3d8b5`.
+
+| Gate lane | Pack / scope | Result | Last run |
+|---|---|---|---|
+| g1a base-gap evidence | committed phase-0 JSONs (sqlite+pg) | ✅ verified both engines (A1 no self-attested sha / A2 md prose mis-attribution — disclosed) | 2026-10-31 |
+| g1b HEAD close | 9 packs `test_zombie_active_close_*` 60/60 + T1.7 five legs + T4.4 concordance | ✅ PASS | 2026-10-31 @ `9af20578a` |
+| g2 whole-tree W-A..W-E | tests/integration + unit (toplevel+17 subdirs) + 13 mid dirs + job_queue, chunked `timeout 300` | ✅ 25,946/25,946 exact; net-new ∅ post-fold; classifier artifacts `/tmp/mfz-gate/classify/` | 2026-10-31 @ `9af20578a`→`defa3d8b5` |
+| g2 pin-fold (PD-4.2) | 2 stale-pin files, exact-shape folds, test-only commit `defa3d8b5` | ✅ 8/8 + 9/9 + 60/60 re-verify | 2026-10-31 |
+| g3 PG Pack I | `test_zombie_active_close_pg.py` scratch `ensemble_test_mfz_g3`, serial | ✅ PASS 3/3 (ADV4 drift-guard live) | 2026-10-31 |
+| g4 wedge PG re-pointed | `test_dbpool_wedge_capture_pg.py` scratch `ensemble_test_mfz_g4` | ✅ PASS 3/3 (POPULATED n_live_tup=2/1 from pg_stat_user_tables) | 2026-10-31 |
+| g5 mutation sample | 8 legs in scratch worktree `wt-mfz-mut` | ✅ 8/8 RED-proven (sha-proven; matrix-sha match 1/8 bonus-only) | 2026-10-31 |
+| g6 migrations | `daemon/migrations/versions/` | ✅ 115==115, 0-file delta vs base | 2026-10-31 |
+| g7 envelope | G7a static audit (12-file surface) + G7b final fence | ✅ CLEAN + CLEAN (live untouched, zero residue) | 2026-10-31 |
+
 ## missed-finalize / zombie-ACTIVE close path (`fix/missed-finalize-zombie-active`, board `wi-78967dba`) — PIN FAMILY REGISTERED (2026-10-31)
 
 > Implementation lane (phases 0-3) pack family for the pattern-(h)
