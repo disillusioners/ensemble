@@ -944,8 +944,15 @@ def lock_release_run_id(install_dir: Path, run_id: str) -> bool:
     which is the boot lane's equivalent proof of authority. A mismatch
     or missing lock is a no-op (never releases someone else's lock).
 
-    Boot-lane ONLY: never call this from a live turn — a live executor
-    legitimately holds the lock while its run is in flight.
+    Boot-lane PLUS ONE sanctioned live-lane exception: the
+    observed-executor-exit closer ``close_restart_arm_executor_exit``
+    (incident 2026-10-31, wi-6641579b) calls this from a live turn —
+    but only AFTER the reaper observed the executor's exit, i.e. the
+    actor that would legitimately hold the lock is DEAD by observation
+    with no other closer (the exact livelock shape that fix closes:
+    lock owner = the live arming daemon ⇒ stale-break can never fire).
+    A live turn must NOT call this while its executor is genuinely in
+    flight.
     """
     lock = lock_dir(install_dir)
     if not lock.is_dir():
@@ -1359,7 +1366,19 @@ def mark_wake_delivering(
 
 def _in_flight_is_own_open_txn(install_dir: Path, run_id: str) -> bool:
     """True iff the journal's ``in_flight`` txn is THIS run's own open
-    restart arm (``run_id`` matches AND ``flipped`` is not true).
+    UNFLIPPED txn (``run_id`` matches AND ``flipped`` is not true).
+
+    Deliberately KIND-AGNOSTIC — it matches a restart arm AND a promote
+    arm alike (reviewer ruling, wi-6641579b fold: do NOT add a kind
+    check; it would silently drop promote-lane loop protection). Any
+    own open unflipped txn whose executor died pre-adoption leaves the
+    journal lock held in the live daemon's own name, and the immediate
+    retryable skip is behaviorally beneficial and safe for BOTH kinds:
+    the lock's holder is this run's own dead-by-construction actor, the
+    skip is retryable (next cycle re-checks), and no legitimate
+    concurrent writer for THIS run is ever starved — a live holder
+    keeps the record pending exactly as the old wait-then-skip did,
+    minus the 30s event-loop burn.
 
     The ``flipped`` read is house-normalized (upgrade_tools.py:847 /
     :2522 style): the python mint writes JSON ``false`` (bool) while
