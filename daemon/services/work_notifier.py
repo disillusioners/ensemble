@@ -223,6 +223,36 @@ def _format_status_display(status: str) -> str:
     return _STATUS_DISPLAY_MAP.get(status, status)
 
 
+# ── PP1 zero-watcher WARN dedupe (log-hygiene step 5) ────────────────
+# A terminal fire with zero watchers used to WARN every notify call —
+# a multi-kind root mission fires the same work_id 3-4x per terminal
+# (per-kind fan-out), each carrying an ~800B recovery essay. Dedupe:
+# ONCE per work_id, PROCESS-LIFETIME (chosen over a TTL — the gap
+# class this WARN covers is per-terminal, and a process-lifetime set
+# keeps the "warned already?" answer exact with no eviction tuning).
+# Bounded by a clear-at-cap safeguard so a pathological flood cannot
+# grow the set without limit; after a clear the next fire re-warns
+# once (acceptable, rare).
+_PP1_ZERO_WATCHER_WARN_SEEN: set[str] = set()
+_PP1_ZERO_WATCHER_WARN_SEEN_CAP: int = 4096
+
+
+def _pp1_zero_watcher_should_warn(work_id: str | None) -> bool:
+    """Return True only on the FIRST zero-watcher terminal fire per
+    ``work_id`` for this process (log-hygiene step 5 dedupe).
+
+    A ``None``/empty ``work_id`` is treated as its own key so the
+    un-keyed edge path still warns exactly once per process.
+    """
+    key = work_id or "<none>"
+    if key in _PP1_ZERO_WATCHER_WARN_SEEN:
+        return False
+    if len(_PP1_ZERO_WATCHER_WARN_SEEN) >= _PP1_ZERO_WATCHER_WARN_SEEN_CAP:
+        _PP1_ZERO_WATCHER_WARN_SEEN.clear()
+    _PP1_ZERO_WATCHER_WARN_SEEN.add(key)
+    return True
+
+
 def _job_event_source(work_id: str, status: str) -> str:
     """Return the canonical ``[JOB_EVENT]`` enqueue ``source`` string.
 
@@ -526,19 +556,28 @@ async def notify_work_watchers(
             # ``in_progress``) stay claim-free by design (see
             # :data:`site 3 below <claim-site>`) and are NOT warned
             # here — only the terminal case is a delivery gap.
-            if _is_terminal(status):
+            if _is_terminal(status) and _pp1_zero_watcher_should_warn(work_id):
+                # PP1 (2026-10-03, report-delivery-bug-family) — on a
+                # TERMINAL event with ZERO watchers, the early return
+                # is silent under the pre-fix behaviour: the watcher
+                # missed the event and the operator had no log line
+                # to correlate the dropped report. Non-terminal
+                # statuses stay claim-free by design and are NOT
+                # warned here — only the terminal case is a delivery
+                # gap. Log-hygiene (step 5): deduped to ONCE per
+                # work_id per process (``_pp1_zero_watcher_should_warn``
+                # above) and shortened; the pinned literal prefix
+                # ``PP1 zero-watcher terminal fire`` is a test
+                # contract (test_report_delivery_bug_family_pins)
+                # and must not be reworded.
                 logger.warning(
                     "PP1 zero-watcher terminal fire: work_id=%s "
                     "status=%s — no watchers found, the terminal "
-                    "report is NOT being delivered. The producer of "
-                    "this terminal is expected to publish a "
-                    "job_completed event row carrying the "
-                    "result_summary / error payload (it has not been "
-                    "verified at this layer; this WARN never queries "
-                    "the events table). For recovery, look up the "
-                    "instance's events in the events table by "
-                    "instance_id, or consult the producer-side log "
-                    "for the published event id.",
+                    "report is NOT being delivered. Recovery: the "
+                    "job_completed event row carries the "
+                    "result_summary / error payload (events table "
+                    "by instance_id, or the producer-side log). "
+                    "Warns once per work_id per process.",
                     work_id[:8] if work_id else "<none>",
                     status,
                 )

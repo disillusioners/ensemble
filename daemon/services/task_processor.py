@@ -378,7 +378,9 @@ class ProcessMessageProcessor(BaseProcessor):
         if not task.message_id:
             raise ValueError(f"Task {task.id} has no message_id")
 
-        logger.info(
+        # Log-hygiene (step 5): per-task routine telemetry demoted
+        # INFO→DEBUG.
+        logger.debug(
             f"Processing message task {task.id}: "
             f"message={task.message_id[:8]}..., instance={task.instance_id[:8]}..."
         )

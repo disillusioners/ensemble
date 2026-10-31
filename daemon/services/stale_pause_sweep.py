@@ -385,7 +385,9 @@ async def sweep_stale_pauses(
 
     summary["candidates"] = len(candidates)
     if not candidates:
-        logger.info(
+        # Log-hygiene (step 5): idle pass (zero candidates) demoted
+        # INFO→DEBUG — fires every sweep tick with no action.
+        logger.debug(
             "stale-pause sweep: candidates=0 resumed=0 "
             "(cutoff=%s, age_bound=%ss)",
             cutoff,
@@ -448,9 +450,14 @@ async def sweep_stale_pauses(
                 exc,
             )
 
-    logger.info(
+    # Log-hygiene (step 5): outcome-gated summary — INFO only when the
+    # sweep actually resumed / skipped / errored on a candidate; a
+    # zero-action pass logs the same line at DEBUG.
+    _stale_pause_summary = (
         "stale-pause sweep: candidates=%d resumed=%d skipped_protected=%d "
-        "errors=%d (cutoff=%s, age_bound=%ss)",
+        "errors=%d (cutoff=%s, age_bound=%ss)"
+    )
+    _stale_pause_args = (
         summary["candidates"],
         summary["resumed"],
         summary["skipped_protected"],
@@ -458,6 +465,14 @@ async def sweep_stale_pauses(
         cutoff,
         age_bound_seconds,
     )
+    if (
+        summary["resumed"]
+        or summary["skipped_protected"]
+        or summary["errors"]
+    ):
+        logger.info(_stale_pause_summary, *_stale_pause_args)
+    else:
+        logger.debug(_stale_pause_summary, *_stale_pause_args)
     return summary
 
 

@@ -1686,7 +1686,10 @@ class InstanceMessagingService:
                         f"WARNING: summarization_error={result.summarization_error}"
                     )
 
-                logger.info(" ".join(log_parts))
+                # Log-hygiene (step 5): demoted INFO→DEBUG — per-turn
+                # compaction telemetry is not operator-signal; the
+                # file handler still captures it at DEBUG.
+                logger.debug(" ".join(log_parts))
 
             # COMPACTION NEVER-BLOCKED (Verdict A) — successful
             # compaction (real OR floor) clears the per-instance

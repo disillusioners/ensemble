@@ -250,7 +250,10 @@ async def _maybe_tiered_critical_notes(
         # selection, no hint line, no fusion work). This is the
         # critical case for ops visibility — the gate kept
         # ``[CriticalNotes]`` quiet on a render-all day.
-        logger.info(
+        # Log-hygiene (step 5): routine per-read telemetry demoted
+        # INFO→DEBUG. The ops-alertable ``[CriticalNotes:Degraded]``
+        # prefix stays at INFO — only the routine lines demote.
+        logger.debug(
             "[CriticalNotes] tiered=gated_off total=%d pinned_count=%d "
             "instance=%s (render-all fallback per §4.2 #8 — no pin to "
             "anchor the core tier).",
@@ -352,17 +355,19 @@ async def _maybe_tiered_critical_notes(
 
 
 def _emit_critical_notes_log(telemetry: dict[str, Any]) -> None:
-    """Emit the routine ``[CriticalNotes]`` INFO line per §4.6.
+    """Emit the routine ``[CriticalNotes]`` DEBUG line per §4.6.
 
     Separate from the :attr:`Degraded` prefix so ops can alert on
-    the prefix alone and grep the routine line for the
-    selected / total / floor counters in clean-window reviews.
+    the prefix alone and grep the routine line (at DEBUG level)
+    for the selected / total / floor counters in clean-window
+    reviews. Log-hygiene (step 5): demoted INFO→DEBUG — routine
+    per-read telemetry; the Degraded prefix stays ops-alertable.
     """
     selected = telemetry.get("selected", 0)
     total = telemetry.get("total", 0)
     floor_applied = telemetry.get("floor_applied", False)
     instance = telemetry.get("instance_id", "")
-    logger.info(
+    logger.debug(
         "[CriticalNotes] selected=%d total=%d floor_applied=%s instance=%s",
         selected,
         total,
@@ -384,14 +389,17 @@ def _emit_critical_notes_log(telemetry: dict[str, Any]) -> None:
 
 
 def _emit_critical_notes_hint(dropped: int) -> None:
-    """Emit the routine hint line as a separate INFO when notes are dropped.
+    """Emit the routine hint line as a separate DEBUG when notes are dropped.
 
     The hint line in the rendered block is the operator-visible
-    cue; this log line is the observability counterpart for
-    grep-friendly triage (e.g. ``grep "[CriticalNotes] hint"``).
+    cue; this log line (DEBUG after the step-5 log-hygiene
+    demotion) is the observability counterpart for grep-friendly
+    triage (e.g. ``grep "[CriticalNotes] hint"``).
     """
     if dropped > 0:
-        logger.info(
+        # Log-hygiene (step 5): routine hint telemetry demoted
+        # INFO→DEBUG (the rendered hint line itself is unchanged).
+        logger.debug(
             "[CriticalNotes] hint_drop_count=%d (use project_cn_list "
             "for full view)",
             dropped,

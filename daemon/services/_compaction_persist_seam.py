@@ -159,7 +159,9 @@ async def persist_compaction_result(
                 )
             else:
                 await graph.aupdate_state(config, stamp_update)
-            logger.info(
+            # Log-hygiene (step 5): stamp-only anti-refire marker is
+            # routine per-skip telemetry — demoted INFO→DEBUG.
+            logger.debug(
                 "[Compaction seam] stamp-only anti-refire for "
                 "instance=%s compacted_at=%s (mid_turn=%s)",
                 instance_id[:8],

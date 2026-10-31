@@ -268,7 +268,7 @@ class TestRoutineTelemetry:
             "skipped_query_embed": False,
             "instance_id": "deadbeef0001",
         }
-        with caplog.at_level(logging.INFO):
+        with caplog.at_level(logging.DEBUG):
             _emit_critical_notes_log(telemetry)
         assert any(
             "[CriticalNotes] selected=7 total=12 floor_applied=True instance=deadbeef0001"
@@ -277,7 +277,7 @@ class TestRoutineTelemetry:
         )
 
     def test_hint_line_emitted_when_dropped(self, caplog):
-        with caplog.at_level(logging.INFO):
+        with caplog.at_level(logging.DEBUG):
             _emit_critical_notes_hint(8)
         assert any(
             "[CriticalNotes] hint_drop_count=8" in rec.message
@@ -316,7 +316,9 @@ class TestRoutineTelemetry:
             "floor_applied": False,
             "instance_id": "deadbeef0002",
         }
-        with caplog.at_level(logging.INFO):
+        # The routine line is DEBUG-level after the step-5 demotion —
+        # capture at DEBUG to see it; the Degraded line stays INFO.
+        with caplog.at_level(logging.DEBUG):
             _emit_critical_notes_log(telemetry)
         assert not any(
             "stage=floor" in rec.message for rec in caplog.records
@@ -327,7 +329,7 @@ class TestRoutineTelemetry:
         )
 
     def test_hint_not_emitted_when_zero(self, caplog):
-        with caplog.at_level(logging.INFO):
+        with caplog.at_level(logging.DEBUG):
             _emit_critical_notes_hint(0)
         # No hint line — zero drops means the legacy render-all
         # shape hasn't been throttled.
@@ -388,7 +390,10 @@ class TestDegradationLadder:
 
         monkeypatch.setattr(emb_mod, "build_critical_notes_embedder", _stub)
 
-        with caplog.at_level(logging.INFO):
+        # DEBUG capture: the routine line demoted to DEBUG in the
+        # step-5 log-hygiene pass; the Degraded line stays INFO and
+        # DEBUG-level capture still sees it.
+        with caplog.at_level(logging.DEBUG):
             out, _pre = await _maybe_tiered_critical_notes(
                 project_id="proj-test",
                 active_notes=[

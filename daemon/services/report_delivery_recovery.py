@@ -1699,14 +1699,14 @@ class ReportDeliveryRecoveryService:
         # F-2 (task 2.8): one-line boot log marker so the operator
         # can confirm lane 2 ran on the boot path (post-wipe
         # recovery, per the phase-2 plan task 2.8 acceptance). The
-        # marker is emitted ONCE PER LANE-2 INVOCATION (at lane
-        # entry, before any row is processed — the comment
-        # previously claimed "first row's first call", which did
-        # not match the code; iteration-2 cheap-item fix).
-        logger.info(
-            "RDRS lane 2: post-wipe recovery (no-row backstop; "
-            "F-2 wedge closure per durability-f1-f2 / phase2 task 2.8)"
-        )
+        # marker is emitted ONCE PER LANE-2 INVOCATION with the
+        # lane outcome appended. Log-hygiene (step 5): the marker
+        # is INFO only when the lane actually recovered something
+        # (``recovered > 0``); the routine zero-action tick (the
+        # overwhelmingly common case — one line every 300s) is
+        # DEBUG so a quiet daemon no longer floods the console
+        # with idle backstop markers. Grep anchor preserved on
+        # both levels; counts are truthful on both paths.
         out = LaneResult()
         rows = self._report_injection_repo.find_completed_children_without_delivery(
             parent_not_terminal=True,
@@ -1741,6 +1741,19 @@ class ReportDeliveryRecoveryService:
                     f"{type(exc).__name__}: {exc}"
                 )
                 out.errors += 1
+        # Log-hygiene (step 5): outcome-gated marker — INFO only when
+        # the lane actually recovered a row this pass; idle passes
+        # (the every-300s common case) log the same anchor at DEBUG.
+        _lane2_marker = (
+            "RDRS lane 2: post-wipe recovery (no-row backstop; "
+            "F-2 wedge closure per durability-f1-f2 / phase2 task 2.8) "
+            f"rows={len(rows)} recovered={out.recovered} "
+            f"skipped_busy={out.skipped_busy} errors={out.errors}"
+        )
+        if out.recovered > 0:
+            logger.info(_lane2_marker)
+        else:
+            logger.debug(_lane2_marker)
         return out
 
     def _recover_one_no_row(
