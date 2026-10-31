@@ -29,9 +29,11 @@ from langchain_core.messages import HumanMessage
 from daemon.services.context_messages import (
     build_project_context_message,
     install_critical_notes_render_config,
+    reset_critical_notes_render_config,
     _format_critical_notes_section,
     _order_critical_notes_for_injection,
     _resolve_critical_notes_reference_max,
+    _resolve_critical_notes_section_char_cap,
 )
 from tests.helpers.critical_notes_fixtures import reset_module_state
 
@@ -227,3 +229,110 @@ class TestPreOrderedRenderMode:
         idx_second = content.index("FUSION-SECOND")
         idx_third = content.index("FUSION-THIRD")
         assert idx_pinned < idx_first < idx_second < idx_third
+
+
+class TestRenderAllSectionCap:
+    """W8 (cap-fix review, 2026-10-31): the render-ALL path (zero pins,
+    ``pre_ordered=False``) has NO selector-side budget — the renderer now
+    applies the SAME ``section_char_cap`` (default 12000), dropping whole
+    rows and ALWAYS closing with the canonical truncation line. The
+    tiered path is NEVER re-capped here (its last surviving row may carry
+    the ``__hint_drop_count`` sentinel; re-capping could cut it).
+    """
+
+    CANONICAL_TRUNCATION = (
+        "additional notes not shown — use project_cn_list for the full view"
+    )
+
+    @staticmethod
+    def _large_set(n: int) -> list[dict]:
+        return [
+            _note(id=f"n{i}", summary=f"note summary number {i} " + "x" * 120)
+            for i in range(n)
+        ]
+
+    def test_render_all_large_set_bounded_with_exactly_one_truncation_line(self):
+        notes = self._large_set(200)
+        section = _format_critical_notes_section(notes)
+        # Exactly ONE truncation line, canonical wording.
+        assert section.count(self.CANONICAL_TRUNCATION) == 1
+        # The line names the hidden count (whichever rows were dropped).
+        import re
+
+        match = re.search(r"- …\((\d+) additional notes not shown", section)
+        assert match, section[-400:]
+        hidden = int(match.group(1))
+        # Bounded: total section length stays within cap + the trailing
+        # line (the ONLY overage the contract allows).
+        cap = _resolve_critical_notes_section_char_cap()
+        line_len = len(match.group(0)) + 1
+        assert len(section) <= cap + line_len + 1  # +1 trailing newline
+        # Every rendered row is intact — whole-row drops, no partial cut.
+        assert hidden >= 1
+        # R19 legacy re-sort is recency-DESC within a tier: the NEWEST
+        # row (199) renders first; a row always renders.
+        assert "note summary number 199" in section
+
+    def test_render_all_small_set_renders_in_full(self):
+        notes = self._large_set(5)
+        section = _format_critical_notes_section(notes)
+        assert self.CANONICAL_TRUNCATION not in section
+        for i in range(5):
+            assert f"note summary number {i}" in section
+
+    def test_cap_cannot_cut_the_trailing_line(self):
+        """Even when NO row fits the cap (greedy selector semantics allow
+        the zero-row degenerate), the section closes with the canonical
+        truncation line naming every hidden row — the cap can never cut
+        the line itself (appended after the budget check)."""
+        install_critical_notes_render_config(section_char_cap=10)
+        try:
+            notes = self._large_set(3)
+            section = _format_critical_notes_section(notes)
+            assert section.count(self.CANONICAL_TRUNCATION) == 1
+            assert "3 additional notes not shown" in section
+        finally:
+            reset_critical_notes_render_config()
+
+    def test_cap_is_installable_no_env(self):
+        assert _resolve_critical_notes_section_char_cap() == 12000
+        install_critical_notes_render_config(section_char_cap=500)
+        try:
+            assert _resolve_critical_notes_section_char_cap() == 500
+            notes = self._large_set(30)
+            section = _format_critical_notes_section(notes)
+            assert self.CANONICAL_TRUNCATION in section
+        finally:
+            reset_critical_notes_render_config()
+
+    def test_tiered_path_is_never_re_capped_sentinel_survives(self):
+        """pre_ordered=True (tiered): the renderer must NOT apply the cap —
+        a large tiered set whose final row carries the sentinel keeps the
+        hint line and renders every selected row, byte-identical to the
+        pre-W8 contract."""
+        notes = [
+            _note(id="p-1", pinned=True, priority="critical", summary="PINNED-ROW")
+        ]
+        notes += [
+            _note(id=f"t-{i}", priority="high", summary=f"TIERED-ROW-{i} " + "y" * 300)
+            for i in range(40)
+        ]
+        notes[-1]["__hint_drop_count"] = 3
+        section = _format_critical_notes_section(notes, pre_ordered=True)
+        # No render-all cap applied on the tiered path.
+        assert len(section) > 12000
+        assert "3 additional notes not shown" in section  # sentinel survives
+        assert "TIERED-ROW-0" in section
+        assert f"TIERED-ROW-39" in section  # last selected row renders in full
+
+    def test_build_message_render_all_path_bounded(self):
+        """Builder-level pin: the render-all builder path inherits the cap
+        (zero-pin projects cannot inject an unbounded block)."""
+        from unittest.mock import MagicMock
+
+        project = MagicMock()
+        project.to_dict.return_value = {"project_id": "p1"}
+        notes = self._large_set(200)
+        msg = build_project_context_message(project, notes, [], instance_id="i-cap")
+        assert msg is not None
+        assert msg.content.count(self.CANONICAL_TRUNCATION) == 1

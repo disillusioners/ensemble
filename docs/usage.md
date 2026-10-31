@@ -510,7 +510,7 @@ project_cn_add(
 
 **Duplicate Handling**: Only exact normalized-summary matches count as near-duplicates — there is no automatic merging. A colliding add is REJECTED with an error naming the collided entry (id + summary). Near-duplicate detection is **cross-category** by design: the matcher compares normalized summary text only, so a re-tag of the same wording in a different category still collides. To recategorize, pass `entry_id` of the colliding entry on a follow-up `project_cn_add` call — `category` is now forwarded on the explicit update path, so the change is visible on the returned dict.
 
-**Updates**: To modify an existing entry, pass the optional `entry_id` parameter (exact id match). Updatable fields: `category`, `priority`, `summary`, `reference`, `detail_ref`, `source_agent`. `category` is included so a recategorize is visible, never silent.
+**Updates**: To modify an existing entry, pass the optional `entry_id` parameter. The id is resolved **by representation** — exact bytes, then normalized form (whitespace / zero-width / unicode dash / case / hyphenless 32-hex), then a strict 32-hex fingerprint; there is no fuzzy matching. Two limits: structurally malformed ids (wrong hex count) are **not** auto-resolved — the not-found error names the stored form (`repr()`-escaped) for an exact-bytes retry — and when several entries share the requested id's representation the call **refuses as ambiguous** and nothing changes (use `project_cn_list` and retry with the exact id). Updatable fields: `category`, `priority`, `summary`, `reference`, `detail_ref`, `source_agent`. `category` is included so a recategorize is visible, never silent.
 
 **Cap**: At 200 entries the project is full; an add then fails with an explicit error naming eviction candidates — no silent evictions.
 
@@ -525,9 +525,16 @@ project_cn_list(project_id="550e8400-e29b-41d4-a716-446655440000")
 ```javascript
 project_cn_remove(
   project_id="550e8400-e29b-41d4-a716-446655440000",
-  entry_id="entry-uuid"
+  entry_id="entry-uuid",
+  cascade=false
 )
 ```
+
+**Removal refusal (default)**: when another entry's `superseded_by_id` pointer targets the entry, the removal is REFUSED and the pointing entries are named — resolve their lineage first (via `project_cn_supersede`) or re-run with `cascade=true`.
+
+**`cascade: bool = false`**: when `true`, the target entry is removed AND each pointing entry's `superseded_by_id` pointer is nullified, returning those entries to ACTIVE (they re-enter the injected context). Every re-activated entry id is named in the response — an un-supersede is never silent.
+
+`entry_id` follows the same representation-based resolution as `project_cn_add` updates (see **Updates** above): format variants resolve, malformed ids are not auto-resolved, and an ambiguous representation refuses with nothing changed.
 
 #### project_cn_pin
 

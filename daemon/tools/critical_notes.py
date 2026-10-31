@@ -48,6 +48,8 @@ from ..repositories.project.models import (
 )
 from ..repositories.project.repository import SQLModelProjectRepository
 from ..repositories.project.critical_note_ids import (
+    AmbiguousCriticalNoteId,
+    critical_note_hex_fingerprint,
     critical_note_id_matches,
     normalize_critical_note_id,
 )
@@ -73,6 +75,11 @@ _MAX_SUMMARY_LEN = 200
 # backstop for legacy/pre-bound rows only.
 _MAX_REFERENCE_LEN = 500
 _MAX_EVICTION_CANDIDATES_NAMED = 3
+# Near-match hint bound (review 2026-10-31, minor #7): the diagnostics
+# hint names at most THIS many candidate ids. Deliberately its own
+# constant — it used to borrow _MAX_EVICTION_CANDIDATES_NAMED, which
+# couples two unrelated budgets (cap-rejection naming vs id hints).
+_MAX_NEAR_ID_HINTS = 3
 # Core-tier cap (D2): max simultaneously-pinned ACTIVE rows. Tunable via
 # ``config.yaml → critical_notes.core_cap`` (installed at boot by
 # ``load_config``; see ``install_critical_notes_config`` below). NOT
@@ -167,8 +174,11 @@ def _load_entries(
     return [e for e in coerced if predicate(e)]
 
 
-def _hex_fingerprint_local(value: str) -> str:
-    return "".join(ch for ch in str(value).lower() if ch in "0123456789abcdef")
+# NOTE (review 2026-10-31, minor #6): the local ``_hex_fingerprint_local``
+# duplicate was DELETED. The near-match hint now imports the resolver's
+# STRICT ``critical_note_hex_fingerprint`` — selector and diagnostics
+# fingerprinting are the SAME function, so a hint can never name a row
+# the resolver would refuse to select (and vice versa).
 
 
 def _single_edit_distance(a: str, b: str) -> bool:
@@ -202,22 +212,35 @@ def _single_edit_distance(a: str, b: str) -> bool:
     return edits <= 1
 
 
-def _near_id_candidates(entries, entry_id, limit=_MAX_EVICTION_CANDIDATES_NAMED):
-    """Diagnostics-only near-match ids (never used to select a row)."""
+def _near_id_candidates(entries, entry_id, limit=_MAX_NEAR_ID_HINTS):
+    """Diagnostics-only near-match ids (never used to select a row).
+
+    Fingerprinting uses the resolver's OWN strict function (minor #6):
+    representation variants match; junk-bearing ids (``zz-<32hex>``)
+    never fingerprint-match here either. Candidates whose id normalizes
+    to "" are skipped — a blank id is unaddressable (W3), so suggesting
+    it for a retry would send the caller into a guaranteed refusal.
+    """
     requested_norm = normalize_critical_note_id(entry_id)
-    requested_fp = _hex_fingerprint_local(entry_id)
+    requested_fp = critical_note_hex_fingerprint(entry_id)
     out = []
     seen = set()
     for e in entries:
         sid = e.id if hasattr(e, "id") else e.get("id") if isinstance(e, dict) else str(e)
         if sid in seen:
             continue
+        if not normalize_critical_note_id(sid):
+            continue  # W3: blank stored ids are unaddressable — never hint them
         norm_sid = normalize_critical_note_id(sid)
-        fp_sid = _hex_fingerprint_local(sid)
+        fp_sid = critical_note_hex_fingerprint(sid)
         is_near = False
         if norm_sid == requested_norm:
             is_near = True
-        elif len(requested_fp) == 32 and requested_fp == fp_sid and len(fp_sid) == 32:
+        elif (
+            requested_fp is not None
+            and fp_sid is not None
+            and requested_fp == fp_sid
+        ):
             is_near = True
         elif _single_edit_distance(norm_sid, requested_norm):
             is_near = True
@@ -227,6 +250,38 @@ def _near_id_candidates(entries, entry_id, limit=_MAX_EVICTION_CANDIDATES_NAMED)
             if len(out) >= limit:
                 break
     return out
+
+
+def _not_found_error(
+    repo, project_id: str, entry_id: str, *, which: str = "Entry"
+) -> dict:
+    """Build the unresolved-id error — TRI-STATE aware (W5).
+
+    Asks the repository's public resolver WHY the id did not resolve:
+
+    * ``AmbiguousCriticalNoteId`` → the ambiguity refusal message (NO
+      near-match hint — a hint would invite picking one of several rows
+      sharing the representation, which resolution refuses);
+    * ``MissingCriticalNoteId`` → the classic not-found message, plus
+      the diagnostics-only near-match hint when candidates exist.
+
+    ``which`` names the failing parameter ("Entry", "old_id", "new_id")
+    so multi-id verbs (supersede) say WHICH id failed.
+    """
+    resolution = repo.resolve_critical_note_id(project_id, entry_id)
+    if isinstance(resolution, AmbiguousCriticalNoteId):
+        return {
+            "error": (
+                f"{which} '{entry_id}' matches {resolution.match_count} "
+                "entries' representation — ambiguous, nothing changed; "
+                "use project_cn_list and retry with the exact id"
+            )
+        }
+    cands = _near_id_candidates(_load_entries(repo, project_id), entry_id)
+    hint = ""
+    if cands:
+        hint = " Near-match(es): " + ", ".join(repr(c) for c in cands) + " — retry with the exact id."
+    return {"error": f"{which} '{entry_id}' not found in project '{project_id}'" + hint}
 
 
 def _find_near_duplicate_entry(
@@ -374,10 +429,17 @@ def create_critical_notes_tools(
         """Add or update a critical notes entry for a project. Use tool_help() for details.
 
         Behavior:
-        - If entry_id is provided, that specific row is updated exactly
+        - If entry_id is provided, the target row is resolved by
+          REPRESENTATION (exact bytes → normalized form → strict 32-hex
+          fingerprint), then updated in place
           (summary/priority/reference/detail_ref/category/source_agent).
-          No fuzzy matching. Category is forwarded on update, so a
-          recategorize is visible on the returned dict — never silent.
+          No fuzzy matching. LIMITATION: structurally malformed ids
+          (wrong hex count) are NOT auto-resolved — the not-found error
+          names the stored form (repr()-escaped) for an exact-bytes
+          retry; when several rows share the requested representation
+          the call REFUSES as ambiguous and nothing changes. Category is
+          forwarded on update, so a recategorize is visible on the
+          returned dict — never silent.
         - Otherwise, if a near-duplicate summary already exists among the
           project's ACTIVE notes, the call REJECTS with an error naming
           the colliding entry's id and summary — caller decides next
@@ -435,11 +497,9 @@ def create_critical_notes_tools(
         if entry_id is not None:
             target = repo.get_critical_note(project_id, entry_id)
             if target is None:
-                cands = _near_id_candidates(entries, entry_id)
-                hint = ""
-                if cands:
-                    hint = " Near-match(es): " + ", ".join(repr(c) for c in cands) + " — retry with the exact id."
-                return {"error": f"Entry '{entry_id}' not found in project '{project_id}'." + hint}
+                # Tri-state aware (W5): ambiguous gets its own refusal,
+                # missing may carry the diagnostics-only near-match hint.
+                return _not_found_error(repo, project_id, entry_id)
             resolved_id = target.id
 
             updated = repo.update_critical_note(
@@ -483,7 +543,8 @@ def create_critical_notes_tools(
             ]
             return {
                 "error": (
-                    f"Project '{project_id}' is at the cap of {_MAX_ENTRIES} critical notes. "
+                    f"Project '{project_id}' is at the cap of {_MAX_ENTRIES} "
+                    f"(currently {len(entries)}) critical notes. "
                     f"Remove one of the following eviction candidates and re-add, or use "
                     f"project_cn_remove + project_cn_add.\n"
                     + "\n".join(candidate_lines)
@@ -516,7 +577,13 @@ When adding an entry:
   only exists as a superseded row inserts fresh.
 - If the list is full (200 entries), the call REJECTS with an error naming
   eviction candidates. No silent eviction.
-- Pass entry_id to update a specific entry in place (exact match, no fuzzy).
+- Pass entry_id to update a specific entry in place. The id is resolved
+  by REPRESENTATION (exact bytes → normalized form → strict 32-hex
+  fingerprint) — no fuzzy matching. Structurally malformed ids (wrong
+  hex count) are NOT auto-resolved: the not-found error names the
+  stored form (repr()-escaped) for an exact-bytes retry, and a
+  representation shared by several rows refuses as ambiguous (nothing
+  changes).
   An entry_id update can change any updatable field including category —
   the returned dict reflects the new category, never silently retaining
   the old one.
@@ -537,9 +604,13 @@ Args:
     priority: One of: critical, high, medium
     summary: Brief description (max 200 chars)
     reference: Optional reference URL or path (max 500 chars)
-    entry_id: Optional. When provided, that entry is updated exactly
-       (no fuzzy match). If omitted, a near-duplicate check rejects the
-       call instead of silently merging.
+    entry_id: Optional. When provided, the target entry is resolved by
+       REPRESENTATION (exact bytes → normalized → strict 32-hex
+       fingerprint; no fuzzy match). Structurally malformed ids (wrong
+       hex count) are NOT auto-resolved — the not-found error names the
+       stored form for an exact-bytes retry; several rows sharing the
+       representation refuse as ambiguous. If omitted, a near-duplicate
+       check rejects the call instead of silently merging.
     detail_ref: Optional unbounded detail text (list-read only; never
        injected into context blocks).
 
@@ -652,11 +723,7 @@ Returns:
         # Get the entry first to return its details
         removed_entry = repo.get_critical_note(project_id, entry_id)
         if removed_entry is None:
-            cands = _near_id_candidates(_load_entries(repo, project_id), entry_id)
-            hint = ""
-            if cands:
-                hint = " Near-match(es): " + ", ".join(repr(c) for c in cands) + " — retry with the exact id."
-            return {"error": f"Entry '{entry_id}' not found" + hint}
+            return _not_found_error(repo, project_id, entry_id)
 
         # ── Supersede-pointer guard (§4.4; N6 semantics — EXACT contract) ──
         pointing = _load_entries(
@@ -731,11 +798,7 @@ Returns:
 
         target = repo.get_critical_note(project_id, entry_id)
         if target is None:
-            cands = _near_id_candidates(_load_entries(repo, project_id), entry_id)
-            hint = ""
-            if cands:
-                hint = " Near-match(es): " + ", ".join(repr(c) for c in cands) + " — retry with the exact id."
-            return {"error": f"Entry '{entry_id}' not found" + hint}
+            return _not_found_error(repo, project_id, entry_id)
 
         if pinned and target.superseded_by_id is not None:
             return {
@@ -759,7 +822,7 @@ Returns:
                     predicate=lambda c: (
                         c.pinned
                         and c.superseded_by_id is None
-                        and c.id != entry_id
+                        and c.id != target.id  # minor #8: resolved id, not the raw variant
                     ),
                 )
                 demotion = sorted(
@@ -823,20 +886,12 @@ Returns:
 
         old = repo.get_critical_note(project_id, old_id)
         if old is None:
-            cands = _near_id_candidates(_load_entries(repo, project_id), old_id)
-            hint = ""
-            if cands:
-                hint = " Near-match(es): " + ", ".join(repr(c) for c in cands) + " — retry with the exact id."
-            return {"error": f"Entry '{old_id}' not found in project '{project_id}'" + hint}
+            return _not_found_error(repo, project_id, old_id, which="old_id")
         new = repo.get_critical_note(project_id, new_id)
         if old is not None and new is not None and old.id == new.id:
             return {"error": "old_id and new_id must differ (a note cannot supersede itself)"}
         if new is None:
-            cands = _near_id_candidates(_load_entries(repo, project_id), new_id)
-            hint = ""
-            if cands:
-                hint = " Near-match(es): " + ", ".join(repr(c) for c in cands) + " — retry with the exact id."
-            return {"error": f"Entry '{new_id}' not found in project '{project_id}'" + hint}
+            return _not_found_error(repo, project_id, new_id, which="new_id")
 
         # Guard 2: same-project (both ids must live in the target
         # project). ``get_critical_note`` already enforces membership, so

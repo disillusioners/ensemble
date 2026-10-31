@@ -48,7 +48,20 @@ def create_entry(category: str, priority: str, summary: str, reference: str | No
 
 
 def make_mock_repo(initial_entries: list = None):
-    """Create a properly isolated mock repository."""
+    """Create a properly isolated mock repository.
+
+    Mirrors the REAL repository's tri-state id-resolution contract
+    (review 2026-10-31, W5): ``get/update/remove_critical_note`` refuse
+    when ≥2 rows share the requested representation, exactly like
+    ``SQLModelProjectRepository``. ``resolve_critical_note_id`` exposes
+    the tri-state probe the tool layer consults on not-found paths.
+
+    Raw-PK seeding (minor #10): an entry dict may carry ``raw_id``
+    instead of ``id`` — the value is written straight into the model's
+    ``__dict__`` AFTER construction, bypassing the write-side
+    ``__init__`` normalization, so a row whose STORED id is a format
+    variant can be mocked faithfully.
+    """
     repo = MagicMock()
     project = MagicMock()
     repo.get.return_value = project
@@ -60,7 +73,13 @@ def make_mock_repo(initial_entries: list = None):
     if initial_entries:
         for entry in initial_entries:
             if isinstance(entry, dict):
-                notes_storage.append(CriticalNoteModel(**entry))
+                entry = dict(entry)
+                raw_id = entry.pop("raw_id", None)
+                note = CriticalNoteModel(**entry)
+                if raw_id is not None:
+                    # Bypass __init__ normalization: seed the RAW PK.
+                    note.__dict__["id"] = raw_id
+                notes_storage.append(note)
             elif isinstance(entry, CriticalNotes):
                 notes_storage.append(CriticalNoteModel(**entry.to_dict()))
             elif isinstance(entry, CriticalNoteModel):
@@ -68,6 +87,36 @@ def make_mock_repo(initial_entries: list = None):
 
     def list_critical_notes(pid):
         return list(notes_storage)
+
+    def _match_ids(pid, entry_id):
+        """Tri-state scan over the mock storage (real-repo parity)."""
+        from daemon.repositories.project.critical_note_ids import (
+            critical_note_id_matches,
+        )
+        return [
+            n.id for n in notes_storage
+            if n.project_id == pid and critical_note_id_matches(n.id, entry_id)
+        ]
+
+    def resolve_critical_note_id(pid, entry_id):
+        from daemon.repositories.project.critical_note_ids import (
+            AmbiguousCriticalNoteId,
+            MissingCriticalNoteId,
+            ResolvedCriticalNoteId,
+        )
+        matches = _match_ids(pid, entry_id)
+        if len(matches) >= 2:
+            return AmbiguousCriticalNoteId(match_count=len(matches))
+        if len(matches) == 1:
+            return ResolvedCriticalNoteId(matches[0])
+        return MissingCriticalNoteId()
+
+    def _resolve_one(pid, entry_id):
+        """None on missing OR ambiguous (real-repo collapse)."""
+        from daemon.repositories.project.critical_note_ids import (
+            stored_id_or_none,
+        )
+        return stored_id_or_none(resolve_critical_note_id(pid, entry_id))
 
     def add_critical_note(pid, source_agent, category, priority, summary, reference=None, detail_ref=None):
         note = CriticalNoteModel(
@@ -83,8 +132,11 @@ def make_mock_repo(initial_entries: list = None):
         return note
 
     def update_critical_note(pid, entry_id, **updates):
+        resolved = _resolve_one(pid, entry_id)
+        if resolved is None:
+            return None
         for note in notes_storage:
-            if note.id == entry_id and note.project_id == pid:
+            if note.id == resolved and note.project_id == pid:
                 for key, value in updates.items():
                     if value is not None and hasattr(note, key):
                         setattr(note, key, value)
@@ -92,14 +144,20 @@ def make_mock_repo(initial_entries: list = None):
         return None
 
     def get_critical_note(pid, entry_id):
+        resolved = _resolve_one(pid, entry_id)
+        if resolved is None:
+            return None
         for note in notes_storage:
-            if note.id == entry_id and note.project_id == pid:
+            if note.id == resolved and note.project_id == pid:
                 return note
         return None
 
     def remove_critical_note(pid, entry_id):
+        resolved = _resolve_one(pid, entry_id)
+        if resolved is None:
+            return False
         for i, note in enumerate(notes_storage):
-            if note.id == entry_id and note.project_id == pid:
+            if note.id == resolved and note.project_id == pid:
                 notes_storage.pop(i)
                 return True
         return False
@@ -109,6 +167,7 @@ def make_mock_repo(initial_entries: list = None):
     repo.update_critical_note.side_effect = update_critical_note
     repo.get_critical_note.side_effect = get_critical_note
     repo.remove_critical_note.side_effect = remove_critical_note
+    repo.resolve_critical_note_id.side_effect = resolve_critical_note_id
 
     return repo
 
@@ -1044,12 +1103,8 @@ class TestCapBehavior:
     """
 
     def test_add_below_cap_succeeds(self, mock_repo):
-        """49 entries -> add 50th distinct summary -> succeeds, count=50."""
+        """199 entries -> add the 200th distinct summary -> succeeds, count=200."""
         from daemon.tools import critical_notes
-
-        # Pin the cap value: if it silently regresses to 30 (the OLD cap),
-        # this test must fail so the silent-eviction regression is caught.
-        assert critical_notes._MAX_ENTRIES == 200
 
         first_summary = unique_summary(0)
 
@@ -1127,13 +1182,14 @@ class TestCapBehavior:
         )
 
     def test_add_above_old_30_threshold_still_succeeds(self, mock_repo):
-        """Live-store behavior: with new cap=50, entry #31 (which used to evict)
-        is added normally — no silent eviction."""
+        """Live-store behavior: with the current cap=200, entry #31 (which
+        the ORIGINAL cap of 30 would have evicted) is added normally —
+        no silent eviction."""
         tools = create_critical_notes_tools(mock_repo, agent_id="test_agent")
         add_tool = next(t for t in tools if t.name == "project_cn_add")
         list_tool = next(t for t in tools if t.name == "project_cn_list")
 
-        # Fill to 30 (the OLD cap)
+        # Fill to 30 (the ORIGINAL cap that used to silently evict)
         for i in range(30):
             add_tool.invoke({
                 "project_id": "test_project",
@@ -1143,8 +1199,8 @@ class TestCapBehavior:
             })
             time.sleep(0.002)
 
-        # Add #31 — under old code this would have triggered silent eviction.
-        # Under new code, this must succeed (cap is now 50).
+        # Add #31 — under the ORIGINAL cap of 30 this would have triggered
+        # silent eviction. Under the current cap of 200 it must succeed.
         r31 = add_tool.invoke({
             "project_id": "test_project",
             "category": "convention",
@@ -1525,3 +1581,128 @@ class TestConstants:
     def test_max_summary_len_is_200(self):
         """Verify _MAX_SUMMARY_LEN is 200."""
         assert _MAX_SUMMARY_LEN == 200
+
+
+# =============================================================================
+# Test Class: TestIdResolutionReviewPins — cap-fix review round (2026-10-31)
+# =============================================================================
+
+
+class TestIdResolutionReviewPins:
+    """Pins from the external review of the cap-fix branch (W2/W5/minors).
+
+    All mock-seam: the fixture mirrors the real repository's tri-state
+    resolution contract, so these pins transfer to the real seams.
+    """
+
+    CANON = "d0371008-a55d-4b86-831d-1c76b381a920"
+
+    def test_ambiguous_representation_refuses_with_no_hint(self, mock_repo):
+        """W5 (tool seam): ≥2 rows sharing the representation refuse as
+        ambiguous — the message carries NO near-match hint (a hint would
+        invite picking one of the colliding rows)."""
+        repo = make_mock_repo([
+            {"id": self.CANON, "project_id": "test_project", "category": "risk", "priority": "high", "summary": "first"},
+            {"id": self.CANON.upper(), "project_id": "test_project", "category": "risk", "priority": "high", "summary": "twin"},
+        ])
+        tools = {t.name: t for t in create_critical_notes_tools(repo, agent_id="test_agent")}
+        result = tools["project_cn_remove"].invoke(
+            {"project_id": "test_project", "entry_id": self.CANON}
+        )
+        assert "error" in result
+        assert "matches 2 entries' representation" in result["error"]
+        assert "ambiguous, nothing changed" in result["error"]
+        assert "Near-match(es):" not in result["error"]
+        # Both rows survive.
+        assert len(repo.list_critical_notes.side_effect("test_project")) == 2
+
+    def test_supersede_ambiguous_names_which_param(self, mock_repo):
+        """W5: on supersede the ambiguous refusal names WHICH id failed."""
+        repo = make_mock_repo([
+            {"id": self.CANON, "project_id": "test_project", "category": "risk", "priority": "high", "summary": "first"},
+            {"id": self.CANON.upper(), "project_id": "test_project", "category": "risk", "priority": "high", "summary": "twin"},
+        ])
+        tools = {t.name: t for t in create_critical_notes_tools(repo, agent_id="test_agent")}
+        other = "11111111-2222-3333-4444-555555555555"
+        repo.add_critical_note(
+            "test_project", source_agent="t", category="risk",
+            priority="high", summary="successor",
+        )
+        result = tools["project_cn_supersede"].invoke(
+            {"project_id": "test_project", "old_id": self.CANON, "new_id": other}
+        )
+        assert "error" in result
+        assert result["error"].startswith("old_id ")
+        assert "ambiguous, nothing changed" in result["error"]
+
+    def test_raw_pk_seed_resolves_by_representation_without_rewrite(self, mock_repo):
+        """Minor #10: the fixture can seed a RAW stored PK (bypassing
+        __init__ normalization). The canonical request resolves to the
+        row and NO write ever rewrites the stored bytes."""
+        raw = self.CANON.upper()
+        repo = make_mock_repo([
+            {"raw_id": raw, "project_id": "test_project", "category": "risk", "priority": "high", "summary": "raw-stored"},
+        ])
+        tools = {t.name: t for t in create_critical_notes_tools(repo, agent_id="test_agent")}
+        # Update via the CANONICAL form hits the raw row...
+        result = tools["project_cn_add"].invoke({
+            "project_id": "test_project",
+            "category": "risk",
+            "priority": "high",
+            "summary": "updated via canonical form",
+            "entry_id": self.CANON,
+        })
+        assert "error" not in result, result
+        # The response echoes the STORED bytes (resolution never rewrites
+        # a stored id — the caller's canonical spelling is not echoed).
+        assert result["id"] == raw
+        # ...and the STORED bytes stay raw after the update, too.
+        stored = repo.list_critical_notes.side_effect("test_project")[0]
+        assert stored.id == raw
+
+    def test_cap_message_names_current_count(self, mock_repo):
+        """Minor #9 (message honesty only): the cap error states the cap
+        AND the current count."""
+        repo = make_mock_repo()
+        tools = {t.name: t for t in create_critical_notes_tools(repo, agent_id="test_agent")}
+        add_tool = tools["project_cn_add"]
+        for i in range(_MAX_ENTRIES):
+            add_tool.invoke({
+                "project_id": "test_project",
+                "category": "convention",
+                "priority": "medium",
+                "summary": unique_summary(i),
+            })
+        result = add_tool.invoke({
+            "project_id": "test_project",
+            "category": "convention",
+            "priority": "medium",
+            "summary": "brand new distinct summary text",
+        })
+        assert "error" in result
+        assert f"cap of {_MAX_ENTRIES} (currently {_MAX_ENTRIES})" in result["error"]
+
+    def test_near_id_hint_bound_is_three(self):
+        """Minor #7: the hint budget is its own constant (3), no longer
+        borrowing the eviction-candidates constant."""
+        from daemon.tools.critical_notes import _MAX_NEAR_ID_HINTS
+
+        assert _MAX_NEAR_ID_HINTS == 3
+        from daemon.repositories.project.critical_note_ids import (
+            normalize_critical_note_id,
+        )
+        canon = self.CANON
+        # 4 single-edit neighbours of the same stored id → hint names 3.
+        variants = [
+            canon[:-1] + ("0" if canon[-1] != "0" else "1"),
+            " " + canon,
+            canon + " ",
+            "\u200b" + canon,
+        ]
+        entries = [
+            type("E", (), {"id": canon})(),  # single stored row
+        ]
+        from daemon.tools.critical_notes import _near_id_candidates
+        cands = _near_id_candidates(entries * 5, canon[:-1] + ("0" if canon[-1] != "0" else "1"))
+        assert len(cands) <= 3
+        assert all(normalize_critical_note_id(c) for c in cands)  # never blank

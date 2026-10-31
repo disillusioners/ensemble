@@ -687,13 +687,25 @@ def _format_relative_time_standalone(created_at: Any) -> str:
 #
 # N5 — Phase-1 budget derivation: with summaries tool-capped at 200
 # chars and references render-bounded at 500, the injected notes block
-# worst case ≈ store cap 50 × (summary 200 + reference 500 + per-row
-# markdown overhead ≈ 30) ≈ **35k chars** (~9k tokens) — down from the
-# unbounded ≈100k+ legacy worst case. Phase 2 adds the 12k
-# ``section_char_cap`` on top; this phase's bound alone already cuts
-# the ceiling roughly 3×.
+# worst case at the OLD store cap 50 was ≈ 35k chars (~9k tokens) —
+# down from the unbounded ≈100k+ legacy worst case. Phase 2 adds the 12k
+# ``section_char_cap`` on the TIERED path. W8 (cap-fix review) extends
+# the same 12k cap to the RENDER-ALL path inside the renderer, so the
+# store-cap raise 50 → 200 cannot quadruple an unpinned project's
+# injected block: the block now closes with the canonical truncation
+# line instead.
 _CRITICAL_NOTES_DEFAULT_REFERENCE_MAX = 500
 _critical_notes_reference_max = _CRITICAL_NOTES_DEFAULT_REFERENCE_MAX
+
+# W8 (cap-fix review, 2026-10-31): the render-ALL path (zero pins) has
+# no selector-side budget — the 12k ``section_char_cap`` covers the
+# TIERED path only. At the raised 200-entry store cap an unpinned
+# project would inject ~4× the old block unbounded. The renderer now
+# applies the SAME section cap to the render-all shape, closing with the
+# canonical truncation line. Config-installed like reference_max (D4 —
+# no env var); default mirrors ``CriticalNotesConfig.section_char_cap``.
+_CRITICAL_NOTES_DEFAULT_SECTION_CHAR_CAP = 12000
+_critical_notes_section_char_cap = _CRITICAL_NOTES_DEFAULT_SECTION_CHAR_CAP
 
 # R19 injected-block ordering: pinned tier first (priority
 # critical→high→medium, recency within tier), then the remainder
@@ -702,27 +714,39 @@ _critical_notes_reference_max = _CRITICAL_NOTES_DEFAULT_REFERENCE_MAX
 _CRITICAL_NOTES_PRIORITY_RANK = {"critical": 0, "high": 1, "medium": 2}
 
 
-def install_critical_notes_render_config(*, reference_max: int | None = None) -> None:
+def install_critical_notes_render_config(
+    *,
+    reference_max: int | None = None,
+    section_char_cap: int | None = None,
+) -> None:
     """Install boot-resolved render knobs (called once from ``load_config``).
 
     ``None`` leaves the current value untouched (partial yaml block →
     documented default). Mirrors the ``_install_vscode_webview_csp_fix``
     module-cache pattern.
     """
-    global _critical_notes_reference_max
+    global _critical_notes_reference_max, _critical_notes_section_char_cap
     if reference_max is not None:
         _critical_notes_reference_max = int(reference_max)
+    if section_char_cap is not None:
+        _critical_notes_section_char_cap = int(section_char_cap)
 
 
 def reset_critical_notes_render_config() -> None:
     """Restore documented defaults (test isolation helper)."""
-    global _critical_notes_reference_max
+    global _critical_notes_reference_max, _critical_notes_section_char_cap
     _critical_notes_reference_max = _CRITICAL_NOTES_DEFAULT_REFERENCE_MAX
+    _critical_notes_section_char_cap = _CRITICAL_NOTES_DEFAULT_SECTION_CHAR_CAP
 
 
 def _resolve_critical_notes_reference_max() -> int:
     """Return the effective render-side reference bound."""
     return _critical_notes_reference_max
+
+
+def _resolve_critical_notes_section_char_cap() -> int:
+    """Return the effective render-all section char cap (W8)."""
+    return _critical_notes_section_char_cap
 
 
 def _order_critical_notes_for_injection(notes: list[dict]) -> list[dict]:
@@ -789,6 +813,15 @@ def _format_critical_notes_section(
       the full view)`` is emitted at the END of the block. The
       sentinel is consumed by this renderer and stripped from the
       row dict before serialization.
+    - **Render-all section cap (W8, cap-fix review 2026-10-31)**:
+      the ``pre_ordered=False`` (render-all) shape now applies the
+      config-installed ``section_char_cap`` (default 12000 — the
+      SAME knob the tiered selector uses), dropping whole rows and
+      closing with the SAME canonical truncation line. The cap can
+      never cut the trailing line (appended after the budget
+      check), and the tiered path is never re-capped here (the
+      selector already bounded it; re-capping could cut the row
+      carrying the ``__hint_drop_count`` sentinel).
 
     Args:
         critical_notes: List of dicts with ``priority``, ``category``,
@@ -836,6 +869,22 @@ def _format_critical_notes_section(
         injected if pre_ordered
         else _order_critical_notes_for_injection(injected)
     )
+    # W8 (cap-fix review, 2026-10-31): the render-ALL shape
+    # (``pre_ordered=False``) reaches this renderer with NO selector
+    # budget — at a 200-entry store the block would roughly quadruple.
+    # Apply the SAME section_char_cap here (config-installed), dropping
+    # WHOLE rows (selector ``_enforce_char_cap`` semantics) and always
+    # closing with the canonical truncation line. The TIERED path
+    # (``pre_ordered=True``) is already bounded by the selector and its
+    # last surviving row may carry the ``__hint_drop_count`` sentinel —
+    # the renderer MUST NOT re-cap there, or it could cut the row that
+    # carries the sentinel and lose the hint line.
+    section_cap = (
+        None if pre_ordered else _resolve_critical_notes_section_char_cap()
+    )
+    used_chars = len(rendered[0])
+    rendered_row_count = 0
+    hidden_count = 0
     for entry in ordered:
         # Phase-2 sentinel: the orchestrator attaches
         # ``__hint_drop_count`` to the last surviving row when the
@@ -858,7 +907,27 @@ def _format_critical_notes_section(
                 + "… (truncated — project_cn_list for full text)"
             )
         ref_str = f" *(ref: {reference})*" if reference else ""
-        rendered.append(f"- {icon} **[{category}]** {summary}{ref_str}")
+        line = f"- {icon} **[{category}]** {summary}{ref_str}"
+        if section_cap is not None and used_chars + len(line) + 1 > section_cap:
+            # W8: whole-row drop; every remaining row is named by the
+            # count in the canonical truncation line below. (+1 = the
+            # "\n" join separator, so the FINAL text — not just the row
+            # budget — stays inside the cap.)
+            hidden_count = len(ordered) - rendered_row_count
+            break
+        rendered.append(line)
+        rendered_row_count += 1
+        used_chars += len(line) + 1
+
+    if hidden_count > 0:
+        # W8 render-all truncation line — the EXISTING canonical copy
+        # (same wording the Phase-2 hint line uses, so operator greps
+        # match either path). The cap can never cut this line: it is
+        # appended unconditionally AFTER the budget check.
+        rendered.append(
+            f"- …({hidden_count} additional notes not shown — use "
+            "project_cn_list for the full view)"
+        )
 
     if hint_drop_count and hint_drop_count > 0:
         # Phase-2 hint line (architect §4.2 — "ALWAYS when notes
