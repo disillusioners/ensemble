@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "name": "ab-base-leg-provisioning-artifacts",
+  "version": "1.0.0",
+  "description": "Adjudicate BASE-only failures in A/B regression runs: 3 known base-leg provisioning artifacts (checkout-family dir-name assertion, fixture requiring <repo_root>/.venv, pytest assertion-rewrite cache writes) that masquerade as branch fixes, plus the isolation re-proof procedure that separates artifact from real fix.",
+  "category": "gate-runner",
+  "scope": "project",
+  "tiers": [2],
+  "body": "ab-base-leg-provisioning-artifacts.md",
+  "assets": [],
+  "loads": [],
+  "supersedes": { "store": "dynamic-skill", "skill_id": "08e67030-1c11-498b-a451-04da3e552982" }
+}

@@ -10,7 +10,7 @@
 
 ## Gate Tiers (tiered gate doctrine — user-approved 2026-10-26/31)
 
-Every regression gate picks its tier BEFORE running. Escalation Tier 1→2 is MECHANICAL (seam list below), never a judgment call. This section is the contract; execution detail lives in the recipe skill bodies under `.agents/tester/skills/` — those dirs are THE gate recipes.
+Every regression gate picks its tier BEFORE running. Escalation Tier 1→2 via the core-seam list is MECHANICAL, never a judgment call; the promote-blocking (release-gate) arm inherits the Release Gate's pre-existing judgment trigger. This section is the contract; execution detail lives in the recipe skill bodies under `.agents/tester/skills/` — those dirs are THE gate recipes.
 
 - **Tier 0 — no regression leg.** Docs-only / `.agents/` / test-only diffs. Changed-pack PASS covers the gate.
 - **Tier 1 — DEFAULT for feature lanes.** Blast-radius leg: scoped dual-side FAILED-list diff over the declared blast radius.
@@ -23,7 +23,7 @@ Every regression gate picks its tier BEFORE running. Escalation Tier 1→2 is ME
 All tiers — non-negotiable:
 - **Mandatory recipe load:** before executing any gate leg, READ the recipe skill body for that tier. Gate-critical recipes must not depend on probabilistic `skill_search` discovery.
 - **Node-cap + measured-rate projection guard:** before legs, project wall-clock from measured collection/test rate; projected OR actual breach → STOP + report + one re-scope.
-- **Pre-exclusion registry** (excluded by default, WITH compensating pin coverage — wedge-capture pattern): `tests/performance/test_message_api_cost.py` (>300s solo, rc=124 at every bisection level); e2e cells requiring a live `:8079` daemon; `tests/packs/g7` sys.exit(0) collection trap.
+- **Pre-exclusion registry** (REGRESSION legs only — the Release Gate's live-daemon E2E items below are the sanctioned exception). Excluded by default, WITH named compensating pins: `tests/performance/test_message_api_cost.py` (>300s solo, rc=124 at every bisection level; pin: `regression_performance` pack); e2e cells requiring a live `:8079` daemon (pin: `e2e_workflows_ensure_test`, Release Gate); `tests/packs/g7` sys.exit(0) collection trap (pin: packs run via their registered scripts, never via collection).
 - **Proof form (unchanged):** mechanical derivation → declared set → `--collect-only` slicing proof (executed == declared, counts recorded) → identical commands both legs → red-at-base ≠ net-new → 3× flaky isolation on diff nodes only. FAILED-digest comparison per `.agents/tester/skills/failed-digest-equality-gate/`.
 - **Budget tension resolved:** the 5-min cap stays for individual test PACKS; gate-level budgets are the Tier budgets above (30/90 min). A gate leg composes packs/shards — each shard still runs under its own explicit timeout.
 

@@ -2,7 +2,7 @@
 
 Proves a candidate tree introduces **zero net-new test failures** vs a true pre-fix base, by running the identical suite on both legs and comparing the sorted FAILED node-id digests.
 
-> Canonical in-repo version. Supersedes dynamic-skill `76e3e1a7-1a5a-4228-957f-f8e556e04213` (DB copy retained for searchability with a SUPERSEDED pointer; canonized 2026-10-31, commission tiered-gate-doctrine). Serves BOTH tiers — on Tier-1 (blast-radius) legs the identical discipline applies over the DECLARED set from `.agents/tester/skills/blast-radius-leg/`.
+> Canonical in-repo version. Supersedes dynamic-skill `76e3e1a7-1a5a-4228-957f-f8e556e04213` (DB copy retained for searchability; SUPERSEDED preamble requested via `skill_fix`, pending evolution-lane enablement — not yet applied; canonized 2026-10-31, commission tiered-gate-doctrine). Serves BOTH tiers — on Tier-1 (blast-radius) legs the identical discipline applies over the DECLARED set from `.agents/tester/skills/blast-radius-leg/`.
 
 ## When to use
 
@@ -43,8 +43,10 @@ comm -13 base.nodeids.txt head.nodeids.txt   # head-only  -> NET-NEW reds
 #    node COUNT or only assertions — per-file counts are the attribution primitive).
 .venv/bin/pytest tests/<dir>/<file>.py -q --collect-only -p no:randomly | grep -E '^[0-9]+(/[0-9]+)? tests collected'
 
-# 7. 3x isolated SEQUENTIAL re-run of the shared reds (no -n) proves determinism
-#    and rules out load-order flakes. Classification ladder: byte-identical to
+# 7. 3x isolated SEQUENTIAL re-run of the diff reds under adjudication (no -n) —
+#    net-new ∪ fixed ∪ any surprising pre-existing red before classification
+#    (ensure.md SSOT: diff nodes only). Proves determinism and rules out
+#    load-order flakes. Classification ladder: byte-identical to
 #    base => pre-existing; order/load-sensitive => 3x per side; genuinely new =>
 #    fix-and-rerun until net-new = empty, with a +N/-N fingerprint.
 

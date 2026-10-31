@@ -2,7 +2,7 @@
 
 Runs the FULL `tests/` tree at HEAD and proves **net-new failures = 0** against a BASE commit, with shard-level incremental persistence so a stall never loses work.
 
-> Canonical in-repo version. Supersedes dynamic-skill `9e79ccad-1e2c-456b-8762-82d7f5eeec0f` (DB copy retained for searchability with a SUPERSEDED pointer). Refined 2026-10-31 (commission tiered-gate-doctrine) with the G2 learnings: **fast execution is baked in below — consumers must NOT hand-roll slow runners.** The G2 hand-roll (serial 1300-node shards under 300s caps) cost 9h32m wall, 89 timeout-splits, 36 rc=124 outer kills for a guarantee this recipe produces in ~15–35 min/leg.
+> Canonical in-repo version. Supersedes dynamic-skill `9e79ccad-1e2c-456b-8762-82d7f5eeec0f` (DB copy retained for searchability; SUPERSEDED preamble requested via `skill_fix`, pending evolution-lane enablement — not yet applied). Refined 2026-10-31 (commission tiered-gate-doctrine) with the G2 learnings: **fast execution is baked in below — consumers must NOT hand-roll slow runners.** The G2 hand-roll (serial 1300-node shards under 300s caps) cost 9h32m wall, 89 timeout-splits, 36 rc=124 outer kills for a guarantee this recipe produces in ~15–35 min/leg.
 
 - Tier contract: `.agents/tester/rules/ensure.md` § Gate Tiers (Tier 2 trigger = core-seam path-prefix OR promote-blocking gate; budget ≤ 90 min ADVISORY — breaches are always reported loudly, never silent).
 - Digest comparison: `.agents/tester/skills/failed-digest-equality-gate/`.
@@ -88,10 +88,12 @@ Per-shard summary lines give `passed/failed/error/skipped/xfailed` — include `
 sum(shard summary counts) + (individually-resolved nodes) == collected node count
 ```
 
-## Pre-exclusions (with compensating pins — wedge-capture pattern)
+## Pre-exclusions (with named compensating pins)
 
-- `tests/performance/test_message_api_cost.py` — >300s solo, rc=124 at every bisection level; excluded by default, pinned elsewhere.
-- e2e cells requiring a live `:8079` daemon — excluded by default (mock/pin coverage instead).
-- `tests/packs/g7` sys.exit(0) collection trap — excluded at collection via `--ignore=tests/packs`.
+| Excluded family | Why excluded | Compensating pin |
+|---|---|---|
+| `tests/performance/test_message_api_cost.py` | >300s solo, rc=124 at every bisection level — unschedulable | `regression_performance` pack (registered, serial, `tests/performance/`) |
+| e2e cells requiring a live `:8079` daemon | need a live daemon; regression legs never boot one | `e2e_workflows_ensure_test` (Release Gate sanctioned lane) |
+| `tests/packs/g7` sys.exit(0) collection trap | module-level sys.exit aborts collection | packs execute via their own registered scripts (PACKS.md) — never via collection |
 
 Every exclusion MUST name its compensating pin in the gate report.
