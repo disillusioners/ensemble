@@ -24,15 +24,22 @@ Covered scenarios (REQUIRED — see task spec):
   the cap are NOT counted).
 * (f) Log row carries ``live_descendants`` (canonical-schema drift pin).
 * (g) P95 timing sanity (gate stays inside the 20ms NFR-1 budget).
-* (h) TWO-SET live semantics (2026-09-11 amendment — incident
-  b08f40fe): the former single live-set pin
-  (``test_live_set_includes_idle_queued_running_waiting_children_paused``)
-  is SPLIT — ``RUNNING``/``WAITING``/``WAITING_CHILDREN``/``PAUSED``
-  stay UNCONDITIONALLY live; dormant ``IDLE``/``QUEUED`` are live ONLY
-  with work en route (an unprocessed ``message_queue`` row OR an
-  unsettled QUEUED/ACTIVE ``job_queue_items`` row). An IDLE orphan
-  with neither is NOT live — it can never report, so it must never
-  look like delegation-in-flight.
+* (h) LIVE semantics — WIDENED (wi-1fbee2ec, leader adjudication
+  2026-11-01, binding): the b08f40fe two-set amendment (dormant
+  ``IDLE``/``QUEUED`` live ONLY with work en route) is SUPERSEDED for
+  the live count — ANY NON-TERMINAL descendant now counts as
+  NON-QUIET (the dispatch→RUNNING micro-race — child row committed
+  while its message/job evidence rows are not yet visible; live
+  receipt: leader 7ceb4685 verified-clean ~08:25Z while child
+  fea6f7be sat minted-not-yet-RUNNING — must never verify-clean).
+  An aged never-dispatched IDLE orphan therefore reads live; its
+  reaping belongs to the strand healer / the WC-orphan detector
+  lane, not to the gate guessing dormancy. Terminal statuses stay
+  excluded; the BUSY subset (``count_busy_descendants`` — LCA
+  trigger suppression) KEEPS the strict two-set semantics (dormant
+  is never busy). The superseded posture is pinned honestly in the
+  lane's own packs (``test_b08f40fe_orphan_now_reads_nonquiet_
+  superseded``) and the PG counterpart.
 
 The canonical decision enum is NOT extended — same five values,
 ``ALLOWED_LEGITIMATE_PENDING_WAKEUP`` is reused for the third-input
@@ -725,8 +732,10 @@ class TestFacadeBfsCap:
     def test_terminal_message_does_not_count_live(self, file_sqlite_engine):
         """(h) A COMPLETED message row is processed — not work en route.
 
-        An IDLE descendant whose only message row is terminal
-        (completed) must NOT count live.
+        wi-1fbee2ec widened posture: the IDLE child itself is
+        NON-TERMINAL and therefore counts live regardless of its
+        message evidence (the message lanes are no longer consulted
+        by the gate walk); the test name is historical.
         """
         repo = SQLModelInstanceRepository(file_sqlite_engine)
         _seed_instance(file_sqlite_engine, "root-done-msg", None, InstanceStatus.IDLE.value)
@@ -735,7 +744,7 @@ class TestFacadeBfsCap:
         manager = self._build_manager(
             file_sqlite_engine, repo, with_message_lane=True
         )
-        assert manager.count_live_descendants("root-done-msg") == 0
+        assert manager.count_live_descendants("root-done-msg") == 1
 
     @pytest.mark.parametrize("admission", [AdmissionState.QUEUED.value, AdmissionState.ACTIVE.value])
     def test_idle_with_active_job_only_counts_live(
@@ -759,7 +768,13 @@ class TestFacadeBfsCap:
 
     @pytest.mark.parametrize("admission", [AdmissionState.DONE.value, AdmissionState.DEAD.value])
     def test_idle_with_settled_job_is_not_live(self, file_sqlite_engine, admission):
-        """(h) DONE/DEAD jobs are settled — they do NOT make dormant live."""
+        """(h) DONE/DEAD jobs are settled — they do NOT make dormant live.
+
+        wi-1fbee2ec widened posture: the IDLE child itself is
+        NON-TERMINAL and therefore counts live regardless of its job
+        evidence (the job lane is no longer consulted by the gate
+        walk); the test name is historical.
+        """
         repo = SQLModelInstanceRepository(file_sqlite_engine)
         _seed_instance(file_sqlite_engine, "root-settled", None, InstanceStatus.IDLE.value)
         _seed_instance(file_sqlite_engine, "idle-child", "root-settled", InstanceStatus.IDLE.value)
@@ -767,24 +782,24 @@ class TestFacadeBfsCap:
         manager = self._build_manager(
             file_sqlite_engine, repo, with_job_lane=True
         )
-        assert manager.count_live_descendants("root-settled") == 0
+        assert manager.count_live_descendants("root-settled") == 1
 
     def test_idle_orphan_without_message_or_job_is_not_live(
         self, file_sqlite_engine
     ):
-        """(c) THE b08f40fe regression at the count level.
+        """(c) THE b08f40fe shape at the count level — SUPERSEDED posture.
 
-        IDLE-orphan descendants with NO message row and NO unsettled
-        job are NOT live. The incident leader (b08f40fe, 2026-09-11
-        14:50:10 UTC) completed via ``allowed_legitimate_pending_wakeup``
-        because four never-dispatched IDLE-orphan grandchildren were
-        counted live; branch 5's rationale ("a child report will revive
-        the leader") cannot apply — orphans never report. Pinned in
-        BOTH wiring shapes:
-
-        * both lanes WIRED but empty (the honest zero), and
-        * NO lanes wired (the pre-amendment stub shape — the dormant
-          member alone can no longer hold the count up).
+        wi-1fbee2ec (leader adjudication 2026-11-01, binding): the
+        conditional-dormancy check is RETIRED for the live count —
+        ANY NON-TERMINAL descendant (incl. never-dispatched IDLE
+        orphans with zero message/job evidence) now reads NON-QUIET
+        (the dispatch→RUNNING micro-race must never verify-clean;
+        dogfood receipt 7ceb4685/fea6f7be). The b08f40fe orphan
+        reaping belongs to the strand healer + the WC-orphan
+        detector lane. Updated expectation: the four IDLE orphans
+        COUNT — pinned in BOTH wiring shapes (the widened walk no
+        longer consults the evidence lanes at all, so wired and
+        bare agree by construction).
         """
         repo = SQLModelInstanceRepository(file_sqlite_engine)
         # Incident tree shape at the count level: a terminal child
@@ -801,30 +816,37 @@ class TestFacadeBfsCap:
         wired = self._build_manager(
             file_sqlite_engine, repo, with_message_lane=True, with_job_lane=True
         )
-        assert wired.count_live_descendants("root-orphan") == 0, (
-            "IDLE orphans (no message, no job) MUST NOT count live — b08f40fe"
+        assert wired.count_live_descendants("root-orphan") == 4, (
+            "any NON-TERMINAL descendant counts live — the wi-1fbee2ec "
+            "widened input set (b08f40fe superseded for the live count)"
         )
         bare = self._build_manager(file_sqlite_engine, repo)
-        assert bare.count_live_descendants("root-orphan") == 0
+        assert bare.count_live_descendants("root-orphan") == 4
 
     def test_queued_orphan_without_work_is_not_live(self, file_sqlite_engine):
-        """(h) QUEUED (dormant) orphan with no work en route → NOT live."""
+        """(h) QUEUED (dormant) orphan with no work en route — widened.
+
+        wi-1fbee2ec widened posture: the QUEUED child itself is
+        NON-TERMINAL and therefore counts live regardless of work
+        evidence; the test name is historical.
+        """
         repo = SQLModelInstanceRepository(file_sqlite_engine)
         _seed_instance(file_sqlite_engine, "root-q-orphan", None, InstanceStatus.IDLE.value)
         _seed_instance(file_sqlite_engine, "q-orphan", "root-q-orphan", InstanceStatus.QUEUED.value)
         manager = self._build_manager(
             file_sqlite_engine, repo, with_message_lane=True, with_job_lane=True
         )
-        assert manager.count_live_descendants("root-q-orphan") == 0
+        assert manager.count_live_descendants("root-q-orphan") == 1
 
     def test_mixed_dormant_tree_counts_only_work_bearing(
         self, file_sqlite_engine
     ):
-        """(h) Per-descendant conditionality — mixed tree pins exactly 1.
+        """(h) Mixed tree — every NON-TERMINAL child counts (widened).
 
-        One IDLE child WITH an unprocessed message + one IDLE orphan
-        + one RUNNING child → count is exactly 2 (the messaged dormant
-        one and the running one); the orphan contributes nothing.
+        wi-1fbee2ec widened posture: messaged IDLE + orphan IDLE +
+        RUNNING → 3 — the orphan no longer reads quiet (b08f40fe
+        superseded for the live count by the 2026-11-01 adjudication;
+        reaping is the healer / detector's business).
         """
         repo = SQLModelInstanceRepository(file_sqlite_engine)
         _seed_instance(file_sqlite_engine, "root-mix", None, InstanceStatus.IDLE.value)
@@ -835,7 +857,7 @@ class TestFacadeBfsCap:
         manager = self._build_manager(
             file_sqlite_engine, repo, with_message_lane=True, with_job_lane=True
         )
-        assert manager.count_live_descendants("root-mix") == 2
+        assert manager.count_live_descendants("root-mix") == 3
 
     def test_terminal_set_excludes_completed_terminated_error_failed(
         self, file_sqlite_engine
@@ -1199,14 +1221,15 @@ class TestBusyClassification:
         assert manager.count_busy_descendants("root-q") == 0
 
     def test_idle_without_work_not_live_not_busy(self, file_sqlite_engine):
-        """IDLE orphan (no message, no unsettled job) — live=0,
-        busy=0.
+        """IDLE orphan (no message, no unsettled job) — live=1
+        (widened), busy=0.
 
-        Regression guard for the b08f40fe amendment — an IDLE
-        orphan is NOT live (no work en route ⇒ conditional-live arm
-        does NOT fire) and NOT busy (dormant is never busy). The
-        LCA busy trigger suppression does NOT change this — the
-        idle-orphan two-set live semantics are untouched.
+        wi-1fbee2ec widened posture: the IDLE orphan is NON-TERMINAL
+        and therefore LIVE (b08f40fe conditional-dormancy superseded
+        for the live count by the 2026-11-01 adjudication); it is
+        still NEVER busy (the LCA trigger-suppression semantics are
+        unchanged — dormant is never busy). The test name is
+        historical.
         """
         repo = SQLModelInstanceRepository(file_sqlite_engine)
         _seed_instance(file_sqlite_engine, "root-orphan", None, InstanceStatus.IDLE.value)
@@ -1220,7 +1243,7 @@ class TestBusyClassification:
             file_sqlite_engine, repo,
             with_message_lane=True, with_job_lane=True,
         )
-        assert manager.count_live_descendants("root-orphan") == 0
+        assert manager.count_live_descendants("root-orphan") == 1
         assert manager.count_busy_descendants("root-orphan") == 0
 
     # ── (f) Terminal — busy==0, live==0 (regression guard) ────────────
