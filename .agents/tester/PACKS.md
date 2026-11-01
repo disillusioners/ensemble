@@ -106,7 +106,7 @@ leg set below is the claim.
 | W2 | `skill_search_service.py` | `to_thread` bridge reverted to a direct sync call | `TestStage2DualSourceAdapter::test_file_embeddings_bridged_off_the_loop_thread` |
 | W3 | `manager.py` | `project_skill_gc` maintenance registration removed | `TestGcMaintenanceWiring::test_gcjob_registered` |
 | W4 | `skill_tools.py` | `source: db` suffix made unconditional again | `TestSkillListFiles::test_dbrows_tag_only_when_file_source_wired` |
-| W5 | `skill_tools.py` | knob-OFF guard + index validation removed from the `pf-` feedback branch | `TestSkillFeedbackPf::test_pseudo_id_refused_under_knob_off` |
+| W5 | `skill_tools.py` | `pf-` id/project validation removed (`if False:`) | `TestSkillFeedbackPf::test_pseudo_id_refused_when_not_indexed`. Companion leg `W5-off-guard` (knob-OFF guard removed) is **BELT**: non-discriminating by construction — with no file source `_resolve_pf_scope` already returns `(None, [])`; recorded, not hidden |
 | W6 | `project_skill_source/service.py` | body-file re-check + `O_NOFOLLOW` reverted to a plain `open()` | `TestReadTimeContainmentSwap::test_body_file_only_symlink_refused_at_read` |
 | P4-M1 | `manager.py` | site-1 `file_source=` kwarg dropped | `TestWiringSites::test_site_1_search_ctor_threads_file_source` |
 | P4-M3 | `skill_search_service.py` | stage-3 deterministic skip disabled | `TestM10FileOnly::test_stage3_skipped_no_llm_call` |
