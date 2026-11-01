@@ -121,10 +121,24 @@ def rest_client():
 
 
 class TestRestFixRefusal:
-    def test_post_fix_pf_refused_400_dispatcher_never_invoked(self, rest_client):
+    @pytest.mark.parametrize(
+        "skill_id",
+        [PF_ID, "pf:foo", "pf:"],
+        ids=["well-formed-pf-address", "malformed-pf-foo", "malformed-bare-prefix"],
+    )
+    def test_post_fix_pf_refused_400_dispatcher_never_invoked(
+        self, rest_client, skill_id
+    ):
+        """Low-3 (pre-gate follow-up): the ``["pf:foo", "pf:"]``
+        parametrize mirrored from the tool-path refusal
+        (``test_skill_tools_pf_surface.py`` — A4) onto the REST pin,
+        which previously covered only the well-formed
+        ``pf:<ns>:<name>`` spelling. The REST refusal keys on the
+        prefix, so every file-skill-shaped spelling must 400 with the
+        same guidance and never reach ``dispatch_fix``."""
         client, dispatcher, _ = rest_client
         resp = client.post(
-            f"/api/skills/{PF_ID}/fix",
+            f"/api/skills/{skill_id}/fix",
             json={"issue_description": "stale paths"},
         )
         assert resp.status_code == 400

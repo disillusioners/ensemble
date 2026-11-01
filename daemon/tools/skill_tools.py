@@ -516,7 +516,7 @@ def create_skill_tools(
         file_source = _get_file_source()
         pseudo_id: str | None = None
         address: str = skill_id
-        if skill_id.startswith("pf:"):
+        if skill_id.startswith(ADDRESS_PREFIX):
             if file_source is None or not pid or not roots:
                 return (
                     f"ERROR: skill_feedback: no project scope resolved "

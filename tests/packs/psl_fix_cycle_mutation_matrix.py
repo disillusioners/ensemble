@@ -208,6 +208,34 @@ LEGS: list[Leg] = [
         note="body-file re-check + O_NOFOLLOW reverted (plain open)",
     ),
     # ------------------------------------------------------------------
+    # A3(a) — accessor delegation (tidier fold; the leg the fix-cycle
+    # report CLAIMED but the harness did not carry — retracted and
+    # landed here. The pin was also strengthened with a delegation
+    # sentinel: without it a re-drift mutation re-embedding ``or {}``
+    # in the property stayed GREEN — both-accessors-tolerant held while
+    # the delegation was gone.)
+    # ------------------------------------------------------------------
+    Leg(
+        id="A3a",
+        path="daemon/services/skill_search_service.py",
+        old="        return self.file_corpus_stats()",
+        new=(
+            "        return dict(  # MUTANT (A3a): delegation dropped, the\n"
+            "            # tolerant form re-embedded in the property\n"
+            "            self._last_file_corpus_stats or {}\n"
+            "        )"
+        ),
+        node=(
+            "tests/tools/test_skill_search_fusion_guard.py::"
+            "test_fusion_stats_accessors_unified_and_none_tolerant"
+        ),
+        note=(
+            "property re-embeds its own tolerant form — every "
+            "both-accessors-tolerant assertion still passes; ONLY the "
+            "delegation sentinel (monkeypatched method) discriminates"
+        ),
+    ),
+    # ------------------------------------------------------------------
     # Pre-existing tabulated legs (re-proven here; PACKS mutation table)
     # ------------------------------------------------------------------
     Leg(

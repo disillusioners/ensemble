@@ -699,9 +699,12 @@ class SkillInjectionService:
             # The agent-visible envelope carries a STABLE reason token —
             # an exception string is provider/FS text an agent must not
             # have to parse (and must not be able to mistake for
-            # guidance). This is the lane's own site: the 12
-            # PRE-EXISTING `{e}`-in-envelope sites elsewhere in the tool
-            # layer are OUT of this lane.
+            # guidance). This is the lane's own site: 13 pre-existing
+            # sites lane-wide — 12 in skill_tools.py (:530…:1510) +
+            # skill_evolution_tools.py:149 — are ROUTED OUT of this
+            # lane (see the routed {e}-envelope sweep; a 14th
+            # raw-exception path via an intermediate variable at
+            # skill_tools.py:1247→:1304 is recorded in the same sweep).
             logger.warning(
                 "[SkillInjection] STEP-0 file lookup failed for '%s' "
                 "(fail-closed envelope, reason=resolve_failed)",

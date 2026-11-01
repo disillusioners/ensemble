@@ -4176,6 +4176,9 @@ def _read_skill_sources_snapshot(manager: "InstanceManager") -> dict[str, Any]:
         # Config shape unreadable: the knob value is unknown, so the
         # honest reading is the conservative False (the pre-existing
         # behavior) — flagged as degraded by the caller path below.
+        # Low-6: realistic trigger is the ``cfg.enabled`` property
+        # RAISING (config object present, its knob accessor broken) —
+        # not merely a missing ``project_skill_source`` attribute.
         logger.debug(
             "[Readiness] skill-source config unreadable: %s: %s",
             type(exc).__name__, exc,

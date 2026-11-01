@@ -806,6 +806,65 @@ class ProjectSkillSourceService:
     # Corpus + explicit lookup (the Phase-2/Phase-3 frozen contracts)
     # ------------------------------------------------------------------
 
+    async def _ensure_scoped_index(
+        self, root: str, project_id: str, *, caller: str, noun: str
+    ) -> Optional[_RootIndex]:
+        """``ensure_index`` + the W1 project-binding re-assert, shared
+        by :meth:`corpus_for` and :meth:`metadata_for`.
+
+        Low-2 (pre-gate follow-up): the two methods carried this block
+        verbatim twice; extracted here BEFORE a third copy appears. Log
+        output is byte-identical to the inlined form (``caller`` /
+        ``noun`` name the calling seam).
+
+        W1 (code-review fix-cycle, SECURITY-GRADE): ``ensure_index``
+        releases the per-root lock before the caller reads the entry,
+        so a concurrent index of a DIFFERENT project bound to the same
+        realpath can have replaced the entry in the window — handing
+        project X project Y's corpus. Re-assert the project binding
+        before serving anything (the re-check ``lookup_explicit``
+        performs at its post-gate re-fetch). Mismatch ⇒ contribute
+        nothing.
+
+        Returns the project-bound index, or ``None`` when the index
+        build failed or the entry is bound to a different project —
+        callers contribute nothing in either case. The mismatch logs
+        at INFO, not WARNING: two projects legitimately sharing one
+        root (monorepo main_directory) alternate this entry on every
+        call — alarming on it would be noise. The escape class itself
+        is the ERROR-level leak-guard elsewhere.
+
+        Longer-term form (deferred to the gc/keys follow-up): key
+        ``_roots`` by ``(root_real, project_id)`` so the swap class
+        disappears structurally instead of being re-checked per read.
+        """
+        root_real = os.path.realpath(root)
+        try:
+            await self.ensure_index(root_real, project_id)
+        except Exception as exc:
+            logger.warning(
+                "[ProjectSkillSource] ensure_index failed for root=%s: %s — "
+                "contributing nothing to this %s",
+                root_real,
+                exc,
+                noun,
+            )
+            return None
+        index = self._roots.get(root_real)
+        if index is None or index.project_id != project_id:
+            if index is not None:
+                logger.info(
+                    "[ProjectSkillSource] %s project mismatch at "
+                    "root=%s: index bound to %s, caller scoped to %s — "
+                    "contributing nothing (TOCTOU guard)",
+                    caller,
+                    root_real,
+                    index.project_id,
+                    project_id,
+                )
+            return None
+        return index
+
     async def corpus_for(self, project_id: str, root: str) -> list[ProjectFileSkill]:
         """The fused-search corpus (Phase 2 seam calls this).
 
@@ -817,44 +876,15 @@ class ProjectSkillSourceService:
         canon) + INFO + async re-index; unreadable body ⇒ that skill is
         skipped with a WARNING (fail-loud per skill; one bad skill never
         poisons the corpus)."""
+        # Low-2 (pre-gate follow-up): the inlined ``ensure_index`` +
+        # W1 re-assert block now lives in ``_ensure_scoped_index``
+        # (shared with ``metadata_for``; log output byte-identical).
+        index = await self._ensure_scoped_index(
+            root, project_id, caller="corpus_for", noun="corpus"
+        )
+        if index is None:
+            return []
         root_real = os.path.realpath(root)
-        try:
-            await self.ensure_index(root_real, project_id)
-        except Exception as exc:
-            logger.warning(
-                "[ProjectSkillSource] ensure_index failed for root=%s: %s — "
-                "contributing nothing to this corpus",
-                root_real,
-                exc,
-            )
-            return []
-        index = self._roots.get(root_real)
-        # W1 (code-review fix-cycle, SECURITY-GRADE): ``ensure_index``
-        # released the per-root lock before this read, so a concurrent
-        # index of a DIFFERENT project bound to the same realpath can
-        # have replaced the entry in the window — handing project X
-        # project Y's corpus. Re-assert the project binding before
-        # serving anything (the re-check ``lookup_explicit`` performs at
-        # its post-gate re-fetch). Mismatch ⇒ contribute nothing.
-        #
-        # Longer-term form (deferred to the gc/keys follow-up): key
-        # ``_roots`` by ``(root_real, project_id)`` so the swap class
-        # disappears structurally instead of being re-checked per read.
-        if index is None or index.project_id != project_id:
-            if index is not None:
-                # INFO, not WARNING: two projects legitimately sharing one
-                # root (monorepo main_directory) alternate this entry on
-                # every call — alarming on it would be noise. The escape
-                # class itself is the ERROR-level leak-guard trip below.
-                logger.info(
-                    "[ProjectSkillSource] corpus_for project mismatch at "
-                    "root=%s: index bound to %s, caller scoped to %s — "
-                    "contributing nothing (TOCTOU guard)",
-                    root_real,
-                    index.project_id,
-                    project_id,
-                )
-            return []
         # A4-i readers take the CURRENT dict entry; a concurrent swap
         # replaces the entry, never mutates the list we hold.
         metas = list(index.metas.values())
@@ -896,31 +926,13 @@ class ProjectSkillSourceService:
         swap the entry inside that window (identical TOCTOU class);
         mismatch ⇒ contribute nothing.
         """
-        root_real = os.path.realpath(root)
-        try:
-            await self.ensure_index(root_real, project_id)
-        except Exception as exc:
-            logger.warning(
-                "[ProjectSkillSource] ensure_index failed for root=%s: %s — "
-                "contributing nothing to this listing",
-                root_real,
-                exc,
-            )
-            return []
-        index = self._roots.get(root_real)
-        if index is None or index.project_id != project_id:
-            if index is not None:
-                # INFO for the same reason as ``corpus_for``: two
-                # projects legitimately sharing one root alternate the
-                # entry on every call — noise, not a fault.
-                logger.info(
-                    "[ProjectSkillSource] metadata_for project mismatch at "
-                    "root=%s: index bound to %s, caller scoped to %s — "
-                    "contributing nothing (TOCTOU guard)",
-                    root_real,
-                    index.project_id,
-                    project_id,
-                )
+        # Low-2 (pre-gate follow-up): the inlined ``ensure_index`` +
+        # W1 re-assert block now lives in ``_ensure_scoped_index``
+        # (shared with ``corpus_for``; log output byte-identical).
+        index = await self._ensure_scoped_index(
+            root, project_id, caller="metadata_for", noun="listing"
+        )
+        if index is None:
             return []
         return list(index.metas.values())
 
@@ -1379,7 +1391,11 @@ class ProjectSkillSourceService:
             except asyncio.CancelledError:
                 pass
             except Exception as exc:  # never let a refresh abort teardown
-                logger.debug(
+                # Low-5 (pre-gate follow-up): WARNING, not DEBUG — a
+                # refresh that raises (rather than cancels) during the
+                # shutdown drain is an operator-visible anomaly, and a
+                # DEBUG line is indistinguishable from "no anomaly".
+                logger.warning(
                     "[ProjectSkillSource] refresh task raised during "
                     "shutdown drain: %s",
                     exc,

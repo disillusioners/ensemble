@@ -338,15 +338,108 @@ class TestDegradedEnabledShape:
 
 
 class TestShutdownDrainWiring:
-    """A5 (tidier fold) — the drain must be wired, not merely available."""
+    """A5 (tidier fold) — the drain must be wired, not merely available.
 
-    def test_manager_shutdown_drains_the_skill_source(self):
-        import inspect
+    Low-4 (pre-gate follow-up): behavioral sentinel REPLACING the
+    source-inspection pin (``"aclose()" in inspect.getsource(...)``),
+    which caught REMOVAL of the drain call but not SHORT-CIRCUITING
+    it — ``if False: await svc.aclose()`` keeps the literal in source
+    while never awaiting it, and the old pin stayed GREEN. The
+    sentinel drives the REAL ``InstanceManager.shutdown`` and asserts
+    the service's ``aclose`` was actually AWAITED.
+    """
+
+    @pytest.mark.asyncio
+    async def test_manager_shutdown_awaits_the_skill_source_aclose(
+        self, monkeypatch
+    ):
+        import asyncio
+        import importlib
+        from unittest.mock import AsyncMock, MagicMock
 
         from daemon.manager import InstanceManager
 
-        src = inspect.getsource(InstanceManager.shutdown)
-        assert "aclose()" in src, (
-            "manager.shutdown must drain the project-skill source's "
-            "embedding-refresh tasks (A5)"
+        # Hermetic: the two module-level cleanup singletons shutdown
+        # calls right after the drain are swapped for stubs. NOTE:
+        # ``import daemon.tools.bash as m`` binds the TOOL object the
+        # package re-exports (name shadow), so resolve the real module
+        # via importlib — the same module shutdown's function-local
+        # ``from daemon.tools.bash import …`` reads.
+        proc_mod = importlib.import_module("daemon.tools.proc_tools")
+        bash_mod = importlib.import_module("daemon.tools.bash")
+        proc_stub = MagicMock()
+        proc_stub.cleanup_all = AsyncMock(return_value=0)
+        bash_stub = MagicMock()
+        bash_stub.cleanup_all = AsyncMock(return_value=0)
+        monkeypatch.setattr(
+            proc_mod, "get_background_process_manager", lambda: proc_stub
         )
+        monkeypatch.setattr(
+            bash_mod, "get_bash_process_registry", lambda: bash_stub
+        )
+
+        # Bare instance (the house ``__new__`` pattern) + the minimal
+        # attribute set the shutdown path touches BEFORE and AT the
+        # drain; every later step is individually try/except-wrapped
+        # in shutdown itself, so stubs only need to exist, not work.
+        mgr = InstanceManager.__new__(InstanceManager)
+        mgr._cancellation_service = MagicMock(is_shutting_down=False)
+        mgr._warmup_task = None
+        mgr._background_tasks = []
+        mgr._event_bus = MagicMock()
+        mgr._maintenance_service = None
+        mgr._mcp_service = MagicMock()
+        sentinel = AsyncMock()
+        mgr._project_skill_source_service = sentinel
+
+        await asyncio.wait_for(mgr.shutdown(grace_period=0.1), timeout=30)
+
+        assert sentinel.aclose.await_count == 1, (
+            "manager.shutdown must AWAIT the project-skill source's "
+            "aclose() (A5 wiring) — a short-circuited drain (call "
+            "present but never awaited) fails here, which the old "
+            "source-inspection pin could not catch"
+        )
+
+    @pytest.mark.asyncio
+    async def test_shutdown_is_idempotent_and_drain_absent_is_noop(
+        self, monkeypatch
+    ):
+        """Belt: with NO service wired the same shutdown path completes
+        without raising (the getattr-None guard), and a second
+        shutdown() call is skipped by the _shutting_down flag."""
+        import asyncio
+        import importlib
+        from unittest.mock import AsyncMock, MagicMock
+
+        from daemon.manager import InstanceManager
+
+        proc_mod = importlib.import_module("daemon.tools.proc_tools")
+        bash_mod = importlib.import_module("daemon.tools.bash")
+        proc_stub = MagicMock()
+        proc_stub.cleanup_all = AsyncMock(return_value=0)
+        bash_stub = MagicMock()
+        bash_stub.cleanup_all = AsyncMock(return_value=0)
+        monkeypatch.setattr(
+            proc_mod, "get_background_process_manager", lambda: proc_stub
+        )
+        monkeypatch.setattr(
+            bash_mod, "get_bash_process_registry", lambda: bash_stub
+        )
+
+        mgr = InstanceManager.__new__(InstanceManager)
+        mgr._cancellation_service = MagicMock(is_shutting_down=False)
+        mgr._warmup_task = None
+        mgr._background_tasks = []
+        mgr._event_bus = MagicMock()
+        mgr._maintenance_service = None
+        mgr._mcp_service = MagicMock()
+        # NOTE: no _project_skill_source_service attribute at all.
+        mgr2_cancel = MagicMock(is_shutting_down=True)
+
+        await asyncio.wait_for(mgr.shutdown(grace_period=0.1), timeout=30)
+
+        # Second call: is_shutting_down now True -> early return.
+        mgr._cancellation_service = mgr2_cancel
+        await asyncio.wait_for(mgr.shutdown(grace_period=0.1), timeout=30)
+        assert not mgr2_cancel.method_calls  # returned before any step

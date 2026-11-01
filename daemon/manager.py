@@ -15523,8 +15523,14 @@ class InstanceManager:
             if skill_source_service is not None:
                 await skill_source_service.aclose()
         except Exception as e:
+            # Low-5 (pre-gate follow-up): lazy %s + exc_info (matching
+            # the A1 site in skill_injection_service) — the eager
+            # f-string forced interpolation on EVERY shutdown, and the
+            # failure path had no traceback.
             logger.warning(
-                f"shutdown: project-skill source drain failed: {e}"
+                "shutdown: project-skill source drain failed: %s",
+                e,
+                exc_info=True,
             )
         
         # Phase 1 (2026-07-19): kill all background processes BEFORE

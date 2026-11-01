@@ -86,6 +86,7 @@ from typing import Any
 import openai
 
 from .llm_failover import current_failover_url, invoke_raw_with_failover
+from .project_skill_source.model import ADDRESS_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +125,7 @@ def _is_project_file_skill(skill: Any) -> bool:
     pipeline is duck-typed end to end and tests use light fakes.
     """
     address = getattr(skill, "address", None)
-    if isinstance(address, str) and address.startswith("pf:"):
+    if isinstance(address, str) and address.startswith(ADDRESS_PREFIX):
         return True
     return getattr(skill, "source", None) == SOURCE_PROJECT_FILE
 

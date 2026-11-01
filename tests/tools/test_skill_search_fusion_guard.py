@@ -242,7 +242,7 @@ async def test_outer_a8_seam_service_level_sibling(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fusion_stats_accessors_unified_and_none_tolerant():
+async def test_fusion_stats_accessors_unified_and_none_tolerant(monkeypatch):
     """A3(a): the property DELEGATES to the method, and the single
     tolerant ``or {}`` form lives in ONE place.
 
@@ -250,6 +250,13 @@ async def test_fusion_stats_accessors_unified_and_none_tolerant():
     ``None`` snapshot, the method did not, so a partially-constructed
     service (or a test double assigning ``None``) raised on exactly one
     of the two paths. Both must read the honest empty zero.
+
+    Delegation sentinel (pre-gate follow-up, mutation leg A3a): the
+    property must ROUTE THROUGH the method — monkeypatch it and assert
+    the property returns exactly the sentinel. Without this half the
+    pin only proved both-accessors-tolerant: a re-drift mutation
+    re-embedding ``or {}`` in the property itself kept every assertion
+    above GREEN while the delegation was gone.
     """
     tools, service = _make_tools(file_source=None)
     assert service.file_corpus_stats() == {}
@@ -258,3 +265,13 @@ async def test_fusion_stats_accessors_unified_and_none_tolerant():
     service._last_file_corpus_stats = None  # the drifted shape
     assert service.file_corpus_stats() == {}
     assert service.last_file_corpus_stats == {}
+
+    sentinel = {"delegation": "sentinel"}
+    monkeypatch.setattr(
+        service, "file_corpus_stats", lambda: sentinel, raising=True
+    )
+    assert service.last_file_corpus_stats is sentinel, (
+        "last_file_corpus_stats must delegate to file_corpus_stats() — "
+        "a property that computes its own tolerant copy no longer "
+        "shares the single tolerant form (A3a re-drift)"
+    )
