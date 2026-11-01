@@ -1,0 +1,2 @@
+FAILED tests/postgres/test_report_delivery_recovery_pg.py::TestLaneKillSwitchesPG::test_all_lanes_disabled_returns_empty_result
+FAILED tests/postgres/test_report_delivery_recovery_pg.py::TestLaneKillSwitchesPG::test_lane1_disabled_absent_from_sweep_on_pg

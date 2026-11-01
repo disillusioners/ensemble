@@ -1,0 +1,12 @@
+...........................................                              [100%]
+=============================== warnings summary ===============================
+tests/unit/test_report_delivery_recovery_service.py::TestG4R3StuckWakeParentScheduleSeam::test_lane6_heal_dispatches_parent_via_ping_seam_and_turn_runs
+tests/unit/test_report_delivery_recovery_service.py::TestG4R3StuckWakeParentScheduleSeam::test_lane6_heal_dispatches_parent_via_ping_seam_and_turn_runs
+tests/unit/test_report_delivery_recovery_service.py::TestG4R3StuckWakeParentScheduleSeam::test_lane6_heal_dispatches_parent_via_ping_seam_and_turn_runs
+tests/unit/test_report_delivery_recovery_service.py::TestG4R3StuckWakeParentScheduleSeam::test_lane6_heal_dispatches_parent_via_ping_seam_and_turn_runs
+tests/unit/test_report_delivery_recovery_service.py::TestG4R3StuckWakeParentScheduleSeam::test_lane6_heal_dispatches_parent_via_ping_seam_and_turn_runs
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+43 passed, 5 warnings in 3.77s

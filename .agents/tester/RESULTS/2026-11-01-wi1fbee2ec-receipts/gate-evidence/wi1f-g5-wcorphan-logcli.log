@@ -1,0 +1,41 @@
+
+tests/unit/services/test_wc_orphan_and_suppression_pins.py::TestRootTerminalSuppression::test_terminal_root_suppresses_revival_holds_deferred 
+-------------------------------- live log call ---------------------------------
+WARNING  daemon.services.report_delivery_recovery:report_delivery_recovery.py:1576 sweep orphan suppressed_root_terminal: recipient=aaaaaaaa... is terminal and its tree root aaaaaaaa... is TERMINAL — revival SUPPRESSED, row held DEFERRED (injection_id=4486085a..., child=c-1..., msg=child-ms..., reason=RESUME_ROUTER); the obligation cannot deliver in-session (the 10:35 apparition shape — real message flow via T1/send_message is unaffected)
+PASSED                                                                   [  7%]
+tests/unit/services/test_wc_orphan_and_suppression_pins.py::TestRootTerminalSuppression::test_live_root_lets_revival_proceed_composes_not_fights PASSED [ 14%]
+tests/unit/services/test_wc_orphan_and_suppression_pins.py::TestRootTerminalSuppression::test_try_revive_terminal_parent_returns_false_on_terminal_root 
+-------------------------------- live log call ---------------------------------
+WARNING  daemon.services.report_delivery_recovery:report_delivery_recovery.py:1706 sweep suppressed_root_terminal: recipient=aaaaaaaa... is terminal AND its tree root aaaaaaaa... is TERMINAL — revival suppressed (the obligation cannot deliver in-session; row held DEFERRED per D3; the 10:35 apparition shape). Real message flow (T1 funnel-top reactivation / send_message) is NOT affected — this check lives at the RDRS revival seam only.
+PASSED                                                                   [ 21%]
+tests/unit/services/test_wc_orphan_and_suppression_pins.py::TestRootTerminalSuppression::test_ancestor_walk_failopen_on_broken_chain PASSED [ 28%]
+tests/unit/services/test_wc_orphan_and_suppression_pins.py::TestRootTerminalSuppression::test_ancestor_walk_root_live_reads_not_terminal PASSED [ 35%]
+tests/unit/services/test_wc_orphan_and_suppression_pins.py::TestRootTerminalSuppression::test_lane_result_carries_the_new_counter PASSED [ 42%]
+tests/unit/services/test_wc_orphan_and_suppression_pins.py::TestWcOrphanDetector::test_direct_shape_fires 
+-------------------------------- live log call ---------------------------------
+WARNING  daemon.services.report_delivery_recovery:report_delivery_recovery.py:1855 sweep wc_orphan_detector FIRE (direct): instance=aaaaaaaa... is WAITING_CHILDREN and its DIRECT parent aaaaaaaa... is TERMINAL (completed) — NO existing lane sees this shape; disposition surfaced for operator review (detection-only, no action taken)
+PASSED                                                                   [ 50%]
+tests/unit/services/test_wc_orphan_and_suppression_pins.py::TestWcOrphanDetector::test_pure_wc_grandchildren_subshape_fires 
+-------------------------------- live log call ---------------------------------
+WARNING  daemon.services.report_delivery_recovery:report_delivery_recovery.py:1855 sweep wc_orphan_detector FIRE (direct): instance=aaaaaaaa... is WAITING_CHILDREN and its DIRECT parent aaaaaaaa... is TERMINAL (completed) — NO existing lane sees this shape; disposition surfaced for operator review (detection-only, no action taken)
+WARNING  daemon.services.report_delivery_recovery:report_delivery_recovery.py:1866 sweep wc_orphan_detector FIRE (pure_chain): instance=aaaaaaaa... is WAITING_CHILDREN under a WC chain (depth=2) whose structural authority aaaaaaaa... is TERMINAL (completed) — the pure-WC-grandchildren sub-shape (double-blind to every existing lane); disposition surfaced for operator review (detection-only, no action taken)
+PASSED                                                                   [ 57%]
+tests/unit/services/test_wc_orphan_and_suppression_pins.py::TestWcOrphanDetector::test_live_authority_does_not_fire PASSED [ 64%]
+tests/unit/services/test_wc_orphan_and_suppression_pins.py::TestWcOrphanDetector::test_root_wc_itself_is_healer_territory_not_fired PASSED [ 71%]
+tests/unit/services/test_wc_orphan_and_suppression_pins.py::TestWcOrphanDetector::test_detector_is_detection_only_no_state_writes 
+-------------------------------- live log call ---------------------------------
+WARNING  daemon.services.report_delivery_recovery:report_delivery_recovery.py:1855 sweep wc_orphan_detector FIRE (direct): instance=aaaaaaaa... is WAITING_CHILDREN and its DIRECT parent aaaaaaaa... is TERMINAL (completed) — NO existing lane sees this shape; disposition surfaced for operator review (detection-only, no action taken)
+PASSED                                                                   [ 78%]
+tests/unit/services/test_wc_orphan_and_suppression_pins.py::TestWcOrphanDetector::test_kill_switch_disables_the_lane 
+-------------------------------- live log call ---------------------------------
+WARNING  daemon.services.report_delivery_recovery:report_delivery_recovery.py:1855 sweep wc_orphan_detector FIRE (direct): instance=aaaaaaaa... is WAITING_CHILDREN and its DIRECT parent aaaaaaaa... is TERMINAL (completed) — NO existing lane sees this shape; disposition surfaced for operator review (detection-only, no action taken)
+PASSED                                                                   [ 85%]
+tests/unit/services/test_wc_orphan_and_suppression_pins.py::TestWcOrphanDetector::test_batch_cap_bounds_the_feed 
+-------------------------------- live log call ---------------------------------
+WARNING  daemon.services.report_delivery_recovery:report_delivery_recovery.py:1855 sweep wc_orphan_detector FIRE (direct): instance=bbbbbbbb... is WAITING_CHILDREN and its DIRECT parent aaaaaaaa... is TERMINAL (completed) — NO existing lane sees this shape; disposition surfaced for operator review (detection-only, no action taken)
+WARNING  daemon.services.report_delivery_recovery:report_delivery_recovery.py:1855 sweep wc_orphan_detector FIRE (direct): instance=bbbbbbbb... is WAITING_CHILDREN and its DIRECT parent aaaaaaaa... is TERMINAL (completed) — NO existing lane sees this shape; disposition surfaced for operator review (detection-only, no action taken)
+WARNING  daemon.services.report_delivery_recovery:report_delivery_recovery.py:1855 sweep wc_orphan_detector FIRE (direct): instance=bbbbbbbb... is WAITING_CHILDREN and its DIRECT parent aaaaaaaa... is TERMINAL (completed) — NO existing lane sees this shape; disposition surfaced for operator review (detection-only, no action taken)
+PASSED                                                                   [ 92%]
+tests/unit/services/test_wc_orphan_and_suppression_pins.py::TestWcOrphanDetector::test_classifier_shapes_directly PASSED [100%]
+
+============================= 14 passed in 15.07s ==============================

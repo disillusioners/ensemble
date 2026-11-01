@@ -1,0 +1,24 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ TestWcOrphanDetector.test_direct_shape_fires _________________
+
+self = <tests.unit.services.test_wc_orphan_and_suppression_pins.TestWcOrphanDetector object at 0x7b10f9d3b4d0>
+engine = Engine(sqlite:////tmp/pytest-of-nea/pytest-682/test_direct_shape_fires0/wc-pins.db)
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7b10f9ddfe00>
+
+    def test_direct_shape_fires(self, engine, caplog):
+        """THE pin-(c) direct shape: WC instance + TERMINAL direct
+        parent ⇒ the detector FIRES (counter + structured log)."""
+        insert_instance(engine, ROOT, status=TERMINAL)
+        insert_instance(engine, WC_CHILD, status=WC, parent_id=ROOT)
+        service = make_service(engine)
+        with caplog.at_level(logging.WARNING):
+            out = service._run_wc_orphan_detector_lane()
+>       assert out.wc_orphan_direct == 1
+E       assert 0 == 1
+E        +  where 0 = WcOrphanDetectorLaneResult(recovered=0, skipped_busy=0, busy_check_failed=0, already_recovered=0, orphan_disposition=0...d=0, errors=0, wc_orphan_direct=0, wc_orphan_pure_chain=0, skipped_live_authority=0, skipped_root_wc=0, probe_errors=1).wc_orphan_direct
+
+tests/unit/services/test_wc_orphan_and_suppression_pins.py:289: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/services/test_wc_orphan_and_suppression_pins.py::TestWcOrphanDetector::test_direct_shape_fires
+1 failed in 1.75s

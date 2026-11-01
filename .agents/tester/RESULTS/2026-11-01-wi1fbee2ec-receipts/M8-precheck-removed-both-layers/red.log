@@ -1,0 +1,44 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_ TestRootTerminalSuppression.test_terminal_root_suppresses_revival_holds_deferred _
+
+self = <tests.unit.services.test_wc_orphan_and_suppression_pins.TestRootTerminalSuppression object at 0x738cf875f390>
+engine = Engine(sqlite:////tmp/pytest-of-nea/pytest-684/test_terminal_root_suppresses_0/wc-pins.db)
+caplog = <_pytest.logging.LogCaptureFixture object at 0x738cf87ffe00>
+
+    def test_terminal_root_suppresses_revival_holds_deferred(
+        self, engine, caplog,
+    ):
+        """THE pin-(d) suppression leg: recipient terminal AND its tree
+        root terminal ⇒ NO revival (the apparition prevented); the row
+        stays DEFERRED (D3 — held convergence record, never FAILED)."""
+        # Tree: ROOT (terminal) → MID (terminal, the recipient).
+        insert_instance(engine, ROOT, status=TERMINAL)
+        insert_instance(engine, MID, status=TERMINAL, parent_id=ROOT)
+        insert_deferred(engine, parent_id=MID, child_id="c-1")
+        service = make_service(engine)
+        # busy-check must pass (idle recipient).
+        service._task_repo = MagicMock()
+        service._task_repo.has_instance_busy = MagicMock(return_value=False)
+    
+        with caplog.at_level(logging.WARNING):
+            result = self._drive_orphan_row(service, engine, MID)
+    
+>       assert result.suppressed_root_terminal == 1
+E       assert 0 == 1
+E        +  where 0 = LaneResult(recovered=0, skipped_busy=0, busy_check_failed=0, already_recovered=0, orphan_disposition=1, suppressed_root_terminal=0, skipped_already_reported=0, errors=0).suppressed_root_terminal
+
+tests/unit/services/test_wc_orphan_and_suppression_pins.py:178: AssertionError
+------------------------------ Captured log call -------------------------------
+WARNING  daemon.services.report_delivery_recovery:report_delivery_recovery.py:1946 ReportDeliveryRecoveryService._get_event_loop: manager._loop is closed — falling back to asyncio.get_event_loop()
+WARNING  daemon.services.report_delivery_recovery:report_delivery_recovery.py:1686 sweep revival failed parent=aaaaaaaa...: TypeError: A coroutine object is required
+WARNING  daemon.services.report_delivery_recovery:report_delivery_recovery.py:1562 sweep orphan_disposition: parent=aaaaaaaa... is TERMINAL and revival failed — DEFERRED row injection_id=b34d89de... left for explicit disposition (child=c-1..., msg=child-ms..., reason=RESUME_ROUTER)
+=============================== warnings summary ===============================
+tests/unit/services/test_wc_orphan_and_suppression_pins.py::TestRootTerminalSuppression::test_terminal_root_suppresses_revival_holds_deferred
+  /home/nea/ensemble-src-wt-obligation/daemon/services/report_delivery_recovery.py:1952: DeprecationWarning: There is no current event loop
+    return asyncio.get_event_loop()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/unit/services/test_wc_orphan_and_suppression_pins.py::TestRootTerminalSuppression::test_terminal_root_suppresses_revival_holds_deferred
+1 failed, 1 warning in 1.74s

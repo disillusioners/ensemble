@@ -1,0 +1,23 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_ TestWidenedLivenessWalk.test_minted_dormant_idie_child_is_live_the_dogfood_window _
+
+self = <tests.unit.services.test_report_obligation_emission_pins.TestWidenedLivenessWalk object at 0x7c14adf316d0>
+engine = Engine(sqlite:////tmp/pytest-of-nea/pytest-701/test_minted_dormant_idie_child0/obligation-pins.db)
+
+    def test_minted_dormant_idie_child_is_live_the_dogfood_window(self, engine):
+        """THE pin-(e) in-turn leg: child MINTED (IDLE), NO message /
+        task evidence rows (the dispatch→RUNNING micro-race) — OLD
+        read 0 (verify-clean); NEW reads 1 (non-quiet)."""
+        insert_instance(engine, ROOT, status="running")
+        insert_instance(
+            engine, CHILD, status=InstanceStatus.IDLE.value, parent_id=ROOT
+        )
+        busy, live = self.call_walk(self.make_shell(engine), ROOT)
+>       assert live == 1
+E       assert 0 == 1
+
+tests/unit/services/test_report_obligation_emission_pins.py:319: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/services/test_report_obligation_emission_pins.py::TestWidenedLivenessWalk::test_minted_dormant_idie_child_is_live_the_dogfood_window
+1 failed in 2.96s

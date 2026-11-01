@@ -1,0 +1,14 @@
+--- /tmp/wi1fbee2ec-receipts/M3-d1-inturn-isolation/original.attestation_gate.py	2026-11-01 16:12:24.972207155 +0000
++++ /home/nea/ensemble-src-wt-obligation/daemon/services/attestation_gate.py	2026-11-01 16:12:25.040208639 +0000
+@@ -1652,10 +1652,8 @@
+                 manager, "count_outstanding_report_obligations", None
+             )
+             if callable(_obligation_reader):
+-                try:
++                if True:
+                     _obligation_value = _obligation_reader(instance_id)
+-                except Exception:  # noqa: BLE001 — D1: isolated error path, NEVER the whole-eval fail-open
+-                    report_obligation_read_error = True
+                 else:
+                     if (
+                         isinstance(_obligation_value, int)

@@ -1,0 +1,33 @@
+--- /tmp/wi1fbee2ec-receipts/M4-d1-emission-isolation/original.child_reports.py	2026-11-01 16:12:33.693396669 +0000
++++ /home/nea/ensemble-src-wt-obligation/daemon/services/child_reports.py	2026-11-01 16:12:33.748397859 +0000
+@@ -2816,26 +2816,11 @@
+             # happens BEFORE the ``> 0`` comparison (a Mock
+             # comparison raises TypeError, which would masquerade as
+             # a query error).
+-            try:
+-                _obligation_value = (
+-                    self._manager.count_outstanding_report_obligations(
+-                        instance_id
+-                    )
+-                )
+-            except Exception as _obl_exc:  # noqa: BLE001 — D1 fail-closed (isolated from every fail-open catch)
+-                logger.warning(
+-                    "root_completion_gate: obligation leg read raised "
+-                    "for %s... (%s: %s); DENY per D1 fail-closed "
+-                    "(hold; never rides the caller-wrap fail-open)",
+-                    instance_id[:8],
+-                    type(_obl_exc).__name__,
+-                    _obl_exc,
+-                )
+-                return (
+-                    False,
+-                    "outstanding_report_obligations=unknown(read_error)",
+-                    False,
++            _obligation_value = (
++                self._manager.count_outstanding_report_obligations(
++                    instance_id
+                 )
++            )
+             if isinstance(_obligation_value, int) and _obligation_value >= 0:
+                 _obligation_count = _obligation_value
+             else:

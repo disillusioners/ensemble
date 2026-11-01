@@ -1,0 +1,10 @@
+--- /tmp/wi1fbee2ec-receipts/M6-syncmint-stamp-removed/original.child_reports.py	2026-11-01 16:13:01.171982807 +0000
++++ /home/nea/ensemble-src-wt-obligation/daemon/services/child_reports.py	2026-11-01 16:13:01.225983943 +0000
+@@ -4791,7 +4791,6 @@
+                         # …) — best-effort under the race (a later
+                         # ``ensure_deferred`` touch may flip the reason
+                         # in place; the ROW identity is what wins).
+-                        deferred_reason=DEFERRED_REASON_SYNC_MINT,
+                         # D1 — the durable fallback row names the
+                         # RECIPIENT (the instance the report is delivered
+                         # to), not the structural parent.

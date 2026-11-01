@@ -1,0 +1,189 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+________ test_b08f40fe_idle_orphan_tree_denies_instead_of_branch5_allow ________
+
+real_graph_module = <module 'daemon.graph' from '/home/nea/ensemble-src-wt-obligation/daemon/graph.py'>
+memory_saver = <langgraph.checkpoint.memory.InMemorySaver object at 0x7c043cf97b60>
+file_sqlite_engine = Engine(sqlite:////tmp/pytest-of-nea/pytest-749/test_b08f40fe_idle_orphan_tree0/attestation_e2e.sqlite)
+attestation_repository = (<daemon.repositories.instance.repository.SQLModelInstanceRepository object at 0x7c043ccc6120>, Instance(agent_name='L...nstance_metadata={}, last_activity_at=None, updated_at='2026-11-01T18:33:11.049266+00:00', attestation_denied_count=0))
+attestation_manager_factory = <function attestation_manager_factory.<locals>.factory at 0x7c043c9cbec0>
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7c043c8516a0>
+
+    @pytest.mark.asyncio
+    async def test_b08f40fe_idle_orphan_tree_denies_instead_of_branch5_allow(
+        real_graph_module,
+        memory_saver,
+        file_sqlite_engine,
+        attestation_repository,
+        attestation_manager_factory,
+        caplog,
+    ):
+        """THE incident regression (gate level).
+    
+        Tree: 8 terminal children + 4 never-dispatched IDLE-orphan
+        grandchildren; watchers FIRED (``pending_children=0``), no held
+        wakeups, delegation anchored (send_message after the real user
+        message), NO attestation, mode=enforce.
+    
+        Pre-fix this exact shape returned
+        ``allowed_legitimate_pending_wakeup`` (branch 5) on
+        ``live_descendants=4`` and the leader completed prematurely.
+        Post-fix the four orphans carry no work en route ⇒
+        ``live_descendants=0`` ⇒ DENIED + nudge, counter increments.
+        """
+        repo, _leader = attestation_repository
+        _seed_incident_tree(file_sqlite_engine, InstanceStatus.IDLE.value)
+    
+        manager = attestation_manager_factory(
+            file_sqlite_engine,
+            repo,
+            pending_children=0,  # all watchers FIRED (incident fact)
+            queued_wakeups=0,    # orphans never scheduled anything
+            # live_descendants=None → REAL two-set facade via delegation.
+        )
+    
+        model = ScriptedChatModel(
+            # Bound is 3 ⇒ after the first deny the graph routes back to
+            # ``agent``; script enough un-attested turn-ends for the deny
+            # loop (mirrors ``test_all_descendants_terminal_still_denies``).
+            responses=[
+                _delegate_ai(),
+                *[AIMessage(content=f"hallucinated {i}") for i in range(4)],
+                AIMessage(content="final hallucinated"),
+            ],
+            i=0,
+        )
+        graph = _build(real_graph_module, model, manager, memory_saver, tools=[])
+        with caplog.at_level(logging.INFO):
+            state = await graph.ainvoke(
+                {"messages": [HumanMessage(content="finish the mission")]},
+                config={
+                    "configurable": {"thread_id": INSTANCE_ID},
+                    "recursion_limit": 30,
+                },
+            )
+    
+        log_text = caplog.text
+        # (1.i) Branch (5) must NOT fire — the b08f40fe premature-allow.
+>       assert "decision=allowed_legitimate_pending_wakeup" not in log_text
+E       AssertionError: assert 'decision=al...nding_wakeup' not in 'INFO     da...allow_hint\n'
+E         
+E         'decision=allowed_l...mate_pending_wakeup' is contained here:
+E           tion_gate decision=allowed_legitimate_pending_wakeup instance_id=attestation-leader-e2e gate_location=graph_end_candidate leader_prompt_version= mode=enforce attestation_present=False denied_count=0 next_denied_count=0 pending_children=0 queued_or_expected_wakeups=0 live_descendants=4 busy_descendants=0 outstanding_commissions=0 attestation_required=True last_real_user_found=True last_real_user_index=0 first_delegation_after_last_user_index=1 delegation_tool_call_total=1 messages_scanned=2 scanned_window_siz...
+E         
+E         ...Full output truncated (13 lines hidden), use '-vv' to show
+
+tests/integration/test_attestation_idle_orphan_incident.py:294: AssertionError
+------------------------------ Captured log call -------------------------------
+INFO     daemon.services.attestation_gate:attestation_gate.py:2094 event=leader_completion_gate decision=allowed_legitimate_pending_wakeup instance_id=attestation-leader-e2e gate_location=graph_end_candidate leader_prompt_version= mode=enforce attestation_present=False denied_count=0 next_denied_count=0 pending_children=0 queued_or_expected_wakeups=0 live_descendants=4 busy_descendants=0 outstanding_commissions=0 attestation_required=True last_real_user_found=True last_real_user_index=0 first_delegation_after_last_user_index=1 delegation_tool_call_total=1 messages_scanned=2 scanned_window_size=3 scanner_window_truncated=True scanner_summary_seen=False should_inject_nudge=False marker_hit=False marker_terms=<none> length_trigger=True final_word_count=2 user_answer_pending=False
+WARNING  daemon.services.attestation_resolver_activation:attestation_resolver_activation.py:1568 attestation resolver: the SOURCE C tree-rows provider failed (AttributeError: 'GraphTestManager' object has no attribute 'get_tree_ids_permanent') — fail-OPEN to counts-only C evidence
+INFO     daemon.config:config.py:7054 [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+INFO     daemon.config:config.py:7074 [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+INFO     daemon.config:config.py:7093 [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+INFO     daemon.config:config.py:7140 [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+INFO     daemon.config:config.py:7147 [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+INFO     daemon.config:config.py:7193 [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+INFO     daemon.config:config.py:7219 [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+INFO     daemon.graph:graph.py:6355 event=leader_completion_gate_fused_judge instance_id=attestation-leader-e2e band=marker verdict=not_complete llm_judge_model=quick llm_judge_latency_ms=10613 llm_judge_attempt=1 llm_judge_first_unparsable_excerpt=<none> llm_judge_reason=The lead's final message is a two-word mid-work delegation notice with no attested completion, while 4 live descendants remain in the tree and no concrete outcomes are shown. llm_judge_error_class=<none> judge_invoked=True
+INFO     daemon.graph:graph.py:6537 [AttestationGate] fused-judge not-complete instance=attestation-leader-e2e band=marker verdict=not_complete; allowing END (log-only — note hint retired 2026-09-23, would_be_route=allow_hint)
+INFO     daemon.services.attestation_resolver_activation:attestation_resolver_activation.py:1880 event=leader_completion_resolver_eval instance_id=attestation-leader-e2e gate_location=graph_end_candidate leader_prompt_version= mode=enforce fired=True band=marker terms_fired=b_fires bypass_reason=none attestation_required=True attested=False user_answer_pending=False pending_children=0 queued_or_expected_wakeups=0 live_descendants=4 busy_descendants=0 marker_hit=False length_trigger=True final_word_count=2 a_advisory_present=False a_notes=0 a_kwargs_seen=False would_be_outcome=would_hint old_decision_value=allowed_legitimate_pending_wakeup agreement=False fail_open=False bundle_sha256=21bf83d7610b6254073c3f7a200f233b8f6fcbea7a025c7bc01c1c540da61471 bundle_size_chars=645 bundle_a_chars=108 bundle_b_chars=237 bundle_c_chars=184 bundle_u_chars=82 user_message_included=True judge_invoked=True judge_verdict=not_complete resolver_outcome=allow_hint
+_____ test_lca_b08f40fe_phase1_incident_phrase_denies_no_silent_completion _____
+
+real_graph_module = <module 'daemon.graph' from '/home/nea/ensemble-src-wt-obligation/daemon/graph.py'>
+memory_saver = <langgraph.checkpoint.memory.InMemorySaver object at 0x7c043ce7fed0>
+file_sqlite_engine = Engine(sqlite:////tmp/pytest-of-nea/pytest-749/test_lca_b08f40fe_phase1_incid0/attestation_e2e.sqlite)
+attestation_repository = (<daemon.repositories.instance.repository.SQLModelInstanceRepository object at 0x7c0436e98410>, Instance(agent_name='L...nstance_metadata={}, last_activity_at=None, updated_at='2026-11-01T18:33:22.912975+00:00', attestation_denied_count=0))
+attestation_manager_factory = <function attestation_manager_factory.<locals>.factory at 0x7c0436ece980>
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7c0436e987d0>
+
+    @pytest.mark.asyncio
+    async def test_lca_b08f40fe_phase1_incident_phrase_denies_no_silent_completion(
+        real_graph_module,
+        memory_saver,
+        file_sqlite_engine,
+        attestation_repository,
+        attestation_manager_factory,
+        caplog,
+    ):
+        """PHASE 1 ACCEPTANCE — incident phrase → DENY + nudge + no silent completion.
+    
+        Reconstructs the EXACT b08f40fe tree at the gate level: 8 terminal
+        children + tester COMPLETED + 4 IDLE-orphan grandchildren. The
+        leader's final message carries the verbatim incident phrase. The
+        gate MUST:
+    
+        * deny (``decision=denied`` in log)
+        * inject the nudge (in-graph attestation nudge)
+        * increment ``attestation_denied_count`` from 0 → 1 (first-deny pin)
+        * NOT fire branch (5) ``allowed_legitimate_pending_wakeup`` (the
+          silent-completion path the fix kills)
+        * leave the leader's instance row status != COMPLETED (defense in
+          depth on the silent-completion invariant)
+        * contain the verbatim phrase somewhere in the message tape
+          (pins the test against an unfaithful synthetic rephrase)
+        """
+        repo, _leader = attestation_repository
+        _seed_incident_tree(file_sqlite_engine, InstanceStatus.IDLE.value)
+    
+        manager = attestation_manager_factory(
+            file_sqlite_engine,
+            repo,
+            pending_children=0,  # all watchers FIRED (incident fact)
+            queued_wakeups=0,    # orphans never scheduled anything
+            # live_descendants=None → REAL two-set facade via delegation.
+        )
+    
+        model = ScriptedChatModel(
+            # Bound is 3 ⇒ after the first deny the graph routes back to
+            # ``agent``; script enough un-attested turn-ends for the deny
+            # loop. The FIRST post-dispatch AIMessage carries the verbatim
+            # incident phrase — the content the leader "would have completed
+            # with" pre-fix.
+            responses=[
+                _delegate_ai(),
+                _verbatim_phrase_ai(),
+                *[AIMessage(content=f"hallucinated continuation {i}") for i in range(3)],
+                AIMessage(content="final hallucinated"),
+            ],
+            i=0,
+        )
+        graph = _build(real_graph_module, model, manager, memory_saver, tools=[])
+        before_status = repo.get(INSTANCE_ID).status
+    
+        with caplog.at_level(logging.INFO):
+            state = await graph.ainvoke(
+                {"messages": [HumanMessage(content="finish the mission")]},
+                config={
+                    "configurable": {"thread_id": INSTANCE_ID},
+                    "recursion_limit": 30,
+                },
+            )
+    
+        log_text = caplog.text
+        ai_contents = _ai_contents(state["messages"])
+    
+        # 1.a — gate DENIES.
+>       assert "decision=denied" in log_text, (
+            "Phase 1 acceptance: gate must deny the un-attested leader."
+        )
+E       AssertionError: Phase 1 acceptance: gate must deny the un-attested leader.
+E       assert 'decision=denied' in 'INFO     daemon.services.attestation_gate:attestation_gate.py:2094 event=leader_completion_gate decision=allowed_legi...ndle_u_chars=82 user_message_included=True judge_invoked=True judge_verdict=not_complete resolver_outcome=allow_hint\n'
+
+tests/integration/test_attestation_incident_acceptance_lca.py:310: AssertionError
+------------------------------ Captured log call -------------------------------
+INFO     daemon.services.attestation_gate:attestation_gate.py:2094 event=leader_completion_gate decision=allowed_legitimate_pending_wakeup instance_id=attestation-leader-e2e gate_location=graph_end_candidate leader_prompt_version= mode=enforce attestation_present=False denied_count=0 next_denied_count=0 pending_children=0 queued_or_expected_wakeups=0 live_descendants=4 busy_descendants=0 outstanding_commissions=0 attestation_required=True last_real_user_found=True last_real_user_index=0 first_delegation_after_last_user_index=1 delegation_tool_call_total=1 messages_scanned=2 scanned_window_size=3 scanner_window_truncated=True scanner_summary_seen=False should_inject_nudge=False marker_hit=True marker_terms=ending turn,awaiting,then i aggregate length_trigger=True final_word_count=14 user_answer_pending=False
+WARNING  daemon.services.attestation_resolver_activation:attestation_resolver_activation.py:1568 attestation resolver: the SOURCE C tree-rows provider failed (AttributeError: 'GraphTestManager' object has no attribute 'get_tree_ids_permanent') — fail-OPEN to counts-only C evidence
+INFO     daemon.config:config.py:7054 [ServiceTool] service_tool_enabled=True (env ENSEMBLE_SERVICE_TOOL_ENABLED), max_concurrent=10, reconcile_interval=90s
+INFO     daemon.config:config.py:7074 [ContextMessages] kv_ambient_system_default_enabled=True (env ENSEMBLE_KV_AMBIENT_SYSTEM_DEFAULT_ENABLED)
+INFO     daemon.config:config.py:7093 [VSCode] webview_csp_fix=True (env ENSEMBLE_VSCODE_WEBVIEW_CSP_FIX)
+INFO     daemon.config:config.py:7140 [CriticalNotes] core_cap=8 reference_max=500 stale_days=90 (always-on per D4 — no ENSEMBLE_* env flag)
+INFO     daemon.config:config.py:7147 [CriticalNotes:reserved] tail_cap=6 section_char_cap=12000 floor_count=2 query_max_chars=2000 mint_cap_per_read=10 fusion_bm25_weight=0.4 fusion_vector_weight=0.6 fusion_threshold=0.3 llm_select=False (all CONSUMED Phase-2; defaults only — no ENSEMBLE_* env flag, D4)
+INFO     daemon.config:config.py:7193 [ResponseValidation] empty_response_guard=True (env ENSEMBLE_EMPTY_RESPONSE_GUARD), empty_guard_compaction_skip=False (env ENSEMBLE_EMPTY_GUARD_COMPACTION_SKIP)
+INFO     daemon.config:config.py:7219 [SymptomRepair] symptom_repair_ladder=True (env ENSEMBLE_SYMPTOM_REPAIR_LADDER), repair_loop_durable=True (env ENSEMBLE_REPAIR_LOOP_DURABLE)
+INFO     daemon.graph:graph.py:6355 event=leader_completion_gate_fused_judge instance_id=attestation-leader-e2e band=marker verdict=not_complete llm_judge_model=quick llm_judge_latency_ms=13932 llm_judge_attempt=1 llm_judge_first_unparsable_excerpt=<none> llm_judge_reason=The lead's own last message explicitly states it is awaiting four child outputs before aggregating and writing RESULTS, with attested=False and four live descendants, so the mission is mid-work and the user's 'finish the mission' request... llm_judge_error_class=<none> judge_invoked=True
+INFO     daemon.graph:graph.py:6537 [AttestationGate] fused-judge not-complete instance=attestation-leader-e2e band=marker verdict=not_complete; allowing END (log-only — note hint retired 2026-09-23, would_be_route=allow_hint)
+INFO     daemon.services.attestation_resolver_activation:attestation_resolver_activation.py:1880 event=leader_completion_resolver_eval instance_id=attestation-leader-e2e gate_location=graph_end_candidate leader_prompt_version= mode=enforce fired=True band=marker terms_fired=b_fires bypass_reason=none attestation_required=True attested=False user_answer_pending=False pending_children=0 queued_or_expected_wakeups=0 live_descendants=4 busy_descendants=0 marker_hit=True length_trigger=True final_word_count=14 a_advisory_present=False a_notes=0 a_kwargs_seen=False would_be_outcome=would_hint old_decision_value=allowed_legitimate_pending_wakeup agreement=False fail_open=False bundle_sha256=e41364598671f32f491c13bce5c01ea50f7b3d3fd05e1a1542de0fa21156aa35 bundle_size_chars=756 bundle_a_chars=108 bundle_b_chars=348 bundle_c_chars=184 bundle_u_chars=82 user_message_included=True judge_invoked=True judge_verdict=not_complete resolver_outcome=allow_hint
+=========================== short test summary info ============================
+FAILED tests/integration/test_attestation_idle_orphan_incident.py::test_b08f40fe_idle_orphan_tree_denies_instead_of_branch5_allow
+FAILED tests/integration/test_attestation_incident_acceptance_lca.py::test_lca_b08f40fe_phase1_incident_phrase_denies_no_silent_completion
+2 failed in 28.19s

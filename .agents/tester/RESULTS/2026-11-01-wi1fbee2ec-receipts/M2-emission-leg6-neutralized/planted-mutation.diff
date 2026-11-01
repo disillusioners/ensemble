@@ -1,0 +1,11 @@
+--- /tmp/wi1fbee2ec-receipts/M2-emission-leg6-neutralized/original.child_reports.py	2026-11-01 16:12:11.400908789 +0000
++++ /home/nea/ensemble-src-wt-obligation/daemon/services/child_reports.py	2026-11-01 16:12:11.444909764 +0000
+@@ -2840,7 +2840,7 @@
+                 _obligation_count = _obligation_value
+             else:
+                 _obligation_count = 0
+-            if _obligation_count > 0:
++            if False and _obligation_count > 0:
+                 return (
+                     False,
+                     f"outstanding_report_obligations={_obligation_count}",

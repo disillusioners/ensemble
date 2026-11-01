@@ -1,0 +1,11 @@
+--- /tmp/wi1fbee2ec-receipts/M5-liveness-widening-reverted/original.manager.py	2026-11-01 16:12:47.403691173 +0000
++++ /home/nea/ensemble-src-wt-obligation/daemon/manager.py	2026-11-01 16:12:47.464692474 +0000
+@@ -12993,7 +12993,7 @@
+                 # not to the gate guessing dormancy). Dormant is
+                 # still NEVER busy (no execution happening — the LCA
+                 # trigger-suppression semantics are unchanged).
+-                live_count += 1
++                pass
+             else:
+                 # Unknown status — preserve the historical default
+                 # (not terminal ⇒ live) so a future enum member can

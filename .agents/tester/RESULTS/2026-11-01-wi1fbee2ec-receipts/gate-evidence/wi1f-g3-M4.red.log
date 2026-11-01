@@ -1,0 +1,43 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_ TestEmissionGateLeg6.test_d1_read_error_holds_inside_the_leg_never_fail_open _
+
+self = <tests.unit.services.test_report_obligation_emission_pins.TestEmissionGateLeg6 object at 0x7e2ce0c63100>
+engine = Engine(sqlite:////tmp/pytest-of-nea/pytest-690/test_d1_read_error_holds_insid0/obligation-pins.db)
+
+    @pytest.mark.asyncio
+    async def test_d1_read_error_holds_inside_the_leg_never_fail_open(
+        self, engine,
+    ):
+        """D1 at the emission leg: the facade RAISES → the leg converts
+        to a HOLD verdict INSIDE the leg (never rides the caller-wrap
+        fail-open — which would return (True, None, False))."""
+        insert_instance(
+            engine, ROOT, status=InstanceStatus.COMPLETED.value
+        )
+        service = make_gate_service(engine)
+    
+        def _explode(_iid):
+            raise RuntimeError("obligation read exploded")
+    
+        service._manager.count_outstanding_report_obligations = _explode
+>       allowed, reason, _ = await service._root_completion_gate(
+            None, ROOT
+        )
+
+tests/unit/services/test_report_obligation_emission_pins.py:484: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+daemon/services/child_reports.py:2820: in _root_completion_gate
+    self._manager.count_outstanding_report_obligations(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+_iid = '11111111-1111-4111-8111-111111111111'
+
+    def _explode(_iid):
+>       raise RuntimeError("obligation read exploded")
+E       RuntimeError: obligation read exploded
+
+tests/unit/services/test_report_obligation_emission_pins.py:481: RuntimeError
+=========================== short test summary info ============================
+FAILED tests/unit/services/test_report_obligation_emission_pins.py::TestEmissionGateLeg6::test_d1_read_error_holds_inside_the_leg_never_fail_open
+1 failed in 2.44s

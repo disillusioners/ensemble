@@ -1,0 +1,34 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+____ TestEmissionGateLeg6.test_pin_a_outstanding_obligation_denies_the_root ____
+
+self = <tests.unit.services.test_report_obligation_emission_pins.TestEmissionGateLeg6 object at 0x758042678690>
+engine = Engine(sqlite:////tmp/pytest-of-nea/pytest-674/test_pin_a_outstanding_obligat0/obligation-pins.db)
+
+    @pytest.mark.asyncio
+    async def test_pin_a_outstanding_obligation_denies_the_root(self, engine):
+        """THE pin-(a) emission leg: terminal child, undelivered
+        report owed to the gated root, tree otherwise quiet → the
+        gate DENIES with the obligation reason (the downgrade path's
+        trigger)."""
+        insert_instance(
+            engine, ROOT, status=InstanceStatus.COMPLETED.value
+        )
+        insert_instance(
+            engine, CHILD, status=InstanceStatus.COMPLETED.value,
+            parent_id=ROOT,
+        )
+        insert_injection(
+            engine, parent_id=ROOT, child_id=CHILD, child_msg="anchor-1"
+        )
+        service = make_gate_service(engine)
+        allowed, reason, declared = await service._root_completion_gate(
+            None, ROOT
+        )
+>       assert allowed is False
+E       assert True is False
+
+tests/unit/services/test_report_obligation_emission_pins.py:422: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/services/test_report_obligation_emission_pins.py::TestEmissionGateLeg6::test_pin_a_outstanding_obligation_denies_the_root
+1 failed in 2.36s

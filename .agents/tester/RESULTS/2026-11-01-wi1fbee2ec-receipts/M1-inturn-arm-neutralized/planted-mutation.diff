@@ -1,0 +1,10 @@
+--- /tmp/wi1fbee2ec-receipts/M1-inturn-arm-neutralized/original.attestation_gate.py	2026-11-01 16:12:02.574712445 +0000
++++ /home/nea/ensemble-src-wt-obligation/daemon/services/attestation_gate.py	2026-11-01 16:12:02.632713742 +0000
+@@ -904,7 +904,6 @@
+         or queued_or_expected_wakeups > 0
+         or live_descendants > 0
+         or outstanding_commissions > 0
+-        or outstanding_report_obligations > 0
+     ):
+         return GateDecision(
+             decision=Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP,

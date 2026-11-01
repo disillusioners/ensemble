@@ -1,0 +1,18 @@
+# wi-1fbee2ec G3 re-proof — drift evidence (tester lane, 2026-11-01T17:29:03Z)
+# Receipts minted 16:12:02-16:13:27Z at tree 701c6c27e; drift commits: 918cdec7e (16:37:15Z), aa5f2cd6c (16:39:11Z).
+# Baselines for legs M1/M3/M5/M7/M8 = HEAD git objects (Option A, tester-adjudicated).
+
+ daemon/manager.py                           |  7 +++--
+ daemon/services/attestation_gate.py         | 41 ++++++++++++++++++-----------
+ daemon/services/report_delivery_recovery.py | 36 ++++++++++++++-----------
+ 3 files changed, 49 insertions(+), 35 deletions(-)
+
+# per-file hunk classification:
+# attestation_gate.py (41 lines): comment/docstring-only — R2 ordinal prose (FIVE->SIX), sentinel docstring expansion; NO executable change.
+# manager.py (7 lines): value-identical refactor — line-continuation backslash reformat of the _report_injection_repo.count_outstanding_for_subtree return; NO semantic change.
+# report_delivery_recovery.py (36 lines): value-identical anchoring — literal 256 -> _ANCESTOR_WALK_DEPTH_CAP const, "waiting_children" -> InstanceStatus.WAITING_CHILDREN.value, deferred-import reformat; NO semantic change.
+
+# HEAD git-object baselines used:
+# daemon/services/attestation_gate.py      c8bcec7ddafac25304b8cd754f06d3a193274dbd33637021ef5b605e9e2dba9e
+# daemon/manager.py                        5c5f688b6a7e2cd2d73b134305244d7f5b638cc5d60473241e03a2fdc05c0864
+# daemon/services/report_delivery_recovery.py 9c4ef52dc1631fbe622284ea79295e937947fc07cf21b2cdfe34c5c34d3ca389

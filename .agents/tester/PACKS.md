@@ -1,5 +1,21 @@
 # Test Packs
 
+## Commission report-obligation-visibility (wi-1fbee2ec) — gate packs REGISTERED (2026-11-01)
+
+> Tester functional gate @ HEAD `8e76897e3` (base `f7039c3ff`). Same fences as the block below: explicit
+> per-variable `env -u POSTGRES_*` scrubs (glob form is a SILENT NO-OP), `timeout 300` + `--timeout=120`
+> dual layer, `-p no:randomly`, main-checkout `.venv` interpreter with `cd` into the lane worktree
+> (worktrees carry no `.venv`). **Census disclosure:** dispatched expectation was "59 tests / 3 packs";
+> actual collected = **60** (22 + 14 + 24 — the gate_pins pack expands 15 nominal → 24 via the 9-case
+> polarity matrix). All three packs PASS 60/60 at HEAD; receipts + gate evidence archived under
+> `RESULTS/2026-11-01-wi1fbee2ec-*`.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `report_obligation_emission_unit` | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT /home/nea/ensemble-src/.venv/bin/python -m pytest tests/unit/services/test_report_obligation_emission_pins.py -q --tb=short -rfE -p no:randomly --timeout=120` | Emission checkpoint: pin (a) leg-6 both directions + counterfactual; pin (b) TestSyncMint (mint single-row+provenance / re-entrant no-second-row / rollback no-orphan / sync-vs-backfill race); pin (e) emission leg + counterfactual; D1 emission isolation (fail-closed HOLD inside the leg); TestWidenedLivenessWalk (dogfood minted-not-RUNNING window, b08f40fe superseded, paused/queued/terminal polarity); subtree counting; manager facade wiring. | 2026-11-01 | ✅ **22/22 PASS** (31.6 s) @ 8e76897e3 |
+| `wc_orphan_suppression_unit` | same fences → `… -m pytest tests/unit/services/test_wc_orphan_and_suppression_pins.py -q …` | Pin (c) TestWcOrphanDetector — direct shape fires, pure-WC-grandchildren sub-shape fires, live-authority no-fire, root-WC healer-territory skip, **detection-only no-state-writes**, kill-switch (default ON asserted + disabled removes lane), batch cap, classifier shapes; pin (d) TestRootTerminalSuppression — terminal root suppresses revival + holds DEFERRED, live root lets revival proceed (composes-not-fights T1), `_try_revive_terminal_parent` false-on-terminal-root, ancestor-walk fail-open, counter surface. | 2026-11-01 | ✅ **14/14 PASS** (18.3 s) @ 8e76897e3 |
+| `report_obligation_gate_unit` | same fences → `… -m pytest tests/unit/services/test_report_obligation_gate_pins.py -q …` | In-turn checkpoint: pin (a) `holds_at_bound_the_1035_repro` (+4 repro legs); pin (e) `minted_dormant_child_holds_at_bound_not_verify_clean` (+2); D1 fail-closed isolation ×7 (decide() step-2b + evaluate() isolation); TestExistingLegsUnchanged polarity matrix — 1 nominal → **9 parametrized cases** (6 hold / 2 close / 1 denied), the per-leg unchanged-polarity pin. | 2026-11-01 | ✅ **24/24 PASS** (0.5 s) @ 8e76897e3 |
+
 ## Commission project-skill-loader — Phase-1/Phase-2 packs REGISTERED (2026-10-31) — 🟢 registration closes the Tier-1-gate PACKS gap
 
 > **Why this block exists.** The Phase-1 Tier-1 gate found the 8 new lane files reachable from **no

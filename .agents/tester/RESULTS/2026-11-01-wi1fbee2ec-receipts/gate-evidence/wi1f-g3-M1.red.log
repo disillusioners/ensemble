@@ -1,0 +1,29 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_ TestReproQuietTreeObligationHold.test_obligation_outstanding_holds_at_bound_the_1035_repro _
+
+self = <tests.unit.services.test_report_obligation_gate_pins.TestReproQuietTreeObligationHold object at 0x7c281be03110>
+
+    def test_obligation_outstanding_holds_at_bound_the_1035_repro(self):
+        """THE pin-(a) core: denied_count == 3 == bound with an
+        outstanding obligation → the hold PERSISTS; the 4th evaluation
+        does NOT trip TERMINAL_AFTER_BOUND (OLD shape closed here)."""
+        d = decide(
+            attested=False,
+            pending_children=0,
+            queued_or_expected_wakeups=0,
+            live_descendants=0,
+            denied_count=3,
+            bound=3,
+            attestation_required=True,
+            outstanding_report_obligations=1,
+        )
+>       assert d.decision is Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP
+E       AssertionError: assert <Decision.TERMINAL_AFTER_BOUND: 'terminal_after_bound'> is <Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP: 'allowed_legitimate_pending_wakeup'>
+E        +  where <Decision.TERMINAL_AFTER_BOUND: 'terminal_after_bound'> = GateDecision(decision=<Decision.TERMINAL_AFTER_BOUND: 'terminal_after_bound'>, next_denied_count=0, should_inject_nudg...False, outstanding_commissions=0, outstanding_report_obligations=-1, report_obligation_read_error=False, resolver=None).decision
+E        +  and   <Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP: 'allowed_legitimate_pending_wakeup'> = Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP
+
+tests/unit/services/test_report_obligation_gate_pins.py:140: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/services/test_report_obligation_gate_pins.py::TestReproQuietTreeObligationHold::test_obligation_outstanding_holds_at_bound_the_1035_repro
+1 failed in 0.47s
