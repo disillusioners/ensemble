@@ -375,7 +375,7 @@ class _KMSStore:
         Registry-empty state does NOT bypass anything special: the
         fetch is a single attribute read either way. The per-record
         hygiene of this method (no lock, no imports) is pinned by
-        ``tests/unit/test_log_redaction_filter.py``.
+        ``tests/unit/test_log_redaction_filter_deadlock_regressions.py``.
         """
         return list(self._plaintext_registry)
 
@@ -392,15 +392,30 @@ _store_lock = threading.Lock()
 def _get_store() -> _KMSStore:
     """Return the process-wide :class:`_KMSStore`, initialising on first call.
 
-    The constructor reads ``SYSTEM_ENCRYPTION_KEY`` from the environment at
+    The constructor reads ``SYSTEM_ENCRYPTION_KEY`` (env or key file) at
     first call. Subsequent calls return the cached store.
+
+    CONSTRUCTION IS OUTSIDE ``_store_lock`` (v0.28.3 deadlock follow-up,
+    review finding #1): ``_KMSStore()`` performs allocation-heavy work —
+    key-file reads and Fernet setup — and the lock is NON-reentrant. With
+    construction inside the lock, a GC ``__del__`` finalizer logging
+    during construction re-enters ``_get_store()`` and same-thread
+    re-acquires the held lock: the exact P0 mechanism, with an exposure
+    window of process boot. Concurrent duplicate construction is
+    acceptable and bounded (rare first-call race); the publish below is
+    idempotent and first-wins — every caller receives a fully
+    constructed store. This invariant is pinned by the hygiene test
+    in ``tests/unit/test_log_redaction_filter_deadlock_regressions.py``
+    (no call nodes inside the publish-lock region).
     """
     global _store
-    if _store is not None:
-        return _store
+    store = _store
+    if store is not None:
+        return store
+    constructed = _KMSStore()
     with _store_lock:
         if _store is None:
-            _store = _KMSStore()
+            _store = constructed
     return _store
 
 
