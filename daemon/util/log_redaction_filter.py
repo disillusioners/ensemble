@@ -32,12 +32,27 @@ attached to a named logger in ``logging.root.manager.loggerDict``.
 :func:`patch_addhandler_to_install_filter` keeps the coverage live as
 handlers are attached later in the boot sequence (notably by
 ``daemon/api.py`` which configures the root logger with two handlers).
+
+Per-record hygiene contract (v0.28.3 deadlock fix, 2026-11-01): this
+filter runs INSIDE the logging emit path on every record, so its
+per-record path (:meth:`KMSRedactionFilter.filter` and
+:func:`iter_registered_plaintexts`) must NEVER acquire a blocking
+lock, run import machinery, or mutate ``sys.modules``. On v0.28.3 the
+filter's per-record lock acquires self-deadlocked the whole process
+when a GC ``__del__`` finalizer logged mid-scrub and re-entered the
+filter on the same thread (63 threads frozen; py-spy pid 518745).
+The registry read is satisfied by the store's lock-free copy-on-write
+snapshot (``kms_lite._KMSStore._iter_registered_plaintexts``), and the
+store getter is resolved once via :func:`_resolve_get_store`. These
+properties are pinned by static AST + behavioral tests in
+``tests/unit/test_log_redaction_filter.py``.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+from typing import Any, Callable
 
 __all__ = [
     "SENTINEL",
@@ -68,6 +83,47 @@ _FILTER_NAME = "kms_redaction_filter"
 # Registry accessor
 # ---------------------------------------------------------------------------
 
+#: Cached first-use resolution of the KMS store getter (v0.28.3
+#: deadlock fix). The lazy import is a FIRST-USE-ONLY event: once
+#: resolved, the per-record path performs NO import machinery and NO
+#: ``sys.modules`` churn — that hygiene is pinned (static AST +
+#: behavioral) by ``tests/unit/test_log_redaction_filter.py``. An
+#: import failure is cached as a permanent no-op
+#: (``_GET_STORE_UNRESOLVED``) rather than re-attempted per record.
+#: The first-use resolution is deliberately lock-free: racing threads
+#: would each import (idempotent) and publish the identical function
+#: object, so no latch lock is needed on the per-record path.
+_get_store_fn: Callable[[], Any] | None = None
+_GET_STORE_UNRESOLVED = object()
+
+
+def _resolve_get_store() -> Callable[[], Any] | None:
+    """Resolve (once) and return ``kms_lite._get_store``.
+
+    The store GETTER is cached rather than the store instance itself:
+    ``kms_lite`` owns the process-wide singleton (and its test-reset
+    contract), so resolving per call is two plain attribute reads —
+    and the filter always observes the CURRENT store, even across a
+    ``reset_store_for_tests()``. The per-call cost after first use is
+    a function call and a branch; there is no lock on this path.
+
+    Returns:
+        The cached ``kms_lite._get_store`` callable, or ``None`` when
+        ``daemon.services.kms_lite`` cannot be imported (caller treats
+        that as the documented no-op pass-through branch).
+    """
+    global _get_store_fn
+    if _get_store_fn is None:
+        try:
+            from daemon.services.kms_lite import _get_store
+
+            _get_store_fn = _get_store
+        except Exception:
+            _get_store_fn = _GET_STORE_UNRESOLVED
+    if _get_store_fn is _GET_STORE_UNRESOLVED:
+        return None
+    return _get_store_fn
+
 
 def iter_registered_plaintexts() -> list[str]:
     """Return a snapshot list of all registered plaintexts.
@@ -78,10 +134,17 @@ def iter_registered_plaintexts() -> list[str]:
     Returns an empty list when the KMS store is uninitialised or the
     registry API is absent — this is the "no-op pass-through" branch
     of the filter contract.
+
+    LOCK-FREE and import-free per call (v0.28.3 deadlock fix): the
+    getter is resolved once via :func:`_resolve_get_store`; every
+    subsequent call is plain function calls into the store's lock-free
+    snapshot read. No blocking lock is ever acquired on this path.
     """
+    get_store = _resolve_get_store()
+    if get_store is None:
+        return []
     try:
-        from daemon.services.kms_lite import _get_store
-        store = _get_store()
+        store = get_store()
     except Exception:
         return []
     iter_method = getattr(store, "_iter_registered_plaintexts", None)
@@ -119,14 +182,24 @@ class KMSRedactionFilter(logging.Filter):
     which returns a snapshot list. The list copy is cheap (handful of
     entries in day-1) and gives the filter a stable view even under
     concurrent mints.
+
+    Deliberately LOCK-FREE (v0.28.3 deadlock fix): LogRecords are
+    per-call objects that are never shared across threads, and the
+    sentinel replacement is idempotent, so no per-record lock is
+    needed — the previous ``self._lock`` around ``record.getMessage()``
+    was itself a re-entrancy deadlock site (a nested emission from
+    inside ``getMessage()`` re-entered :meth:`filter` and re-acquired
+    the non-reentrant lock on the same thread). Every blocking acquire
+    on the per-record filter path is pinned against by the hygiene
+    tests in ``tests/unit/test_log_redaction_filter.py``.
+
+    .. versionchanged:: v0.28.3-deadlock-fix
+       Removed ``self._lock``; the per-record path is now lock-free,
+       import-free, and ``sys.modules``-stable.
     """
 
     def __init__(self, name: str = _FILTER_NAME) -> None:
         super().__init__(name=name)
-        # Lock guards the cached-sentinel check so two threads don't
-        # double-replace under contention. Cheap; only held while we
-        # build the rendered string.
-        self._lock = threading.Lock()
 
     def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
         """Return True (records are never blocked) after scrubbing.
@@ -142,19 +215,18 @@ class KMSRedactionFilter(logging.Filter):
             plaintexts = iter_registered_plaintexts()
             if not plaintexts:
                 return True
-            with self._lock:
-                rendered = record.getMessage()
-                redacted = rendered
-                for pt in plaintexts:
-                    if not pt:
-                        continue
-                    if pt in redacted:
-                        redacted = redacted.replace(pt, SENTINEL)
-                if redacted is not rendered:
-                    # Mutate the record so every subsequent handler /
-                    # formatter sees the redacted text.
-                    record.msg = redacted
-                    record.args = ()
+            rendered = record.getMessage()
+            redacted = rendered
+            for pt in plaintexts:
+                if not pt:
+                    continue
+                if pt in redacted:
+                    redacted = redacted.replace(pt, SENTINEL)
+            if redacted is not rendered:
+                # Mutate the record so every subsequent handler /
+                # formatter sees the redacted text.
+                record.msg = redacted
+                record.args = ()
         except Exception:
             # Never crash logging. The filter is best-effort; if any
             # step fails, fall through and pass the record through

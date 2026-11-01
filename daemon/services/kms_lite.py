@@ -161,15 +161,28 @@ class _KMSStore:
         # handle -> {"service", "reason", "actor", "fingerprint", "encrypted"}
         self._handles: dict[str, dict[str, Any]] = {}
         self._fernet = self._build_fernet(encryption_key)
-        # P3-WP10 redaction-use registry. Holds a thread-safe set of the
-        # plaintexts currently held by this store, so the logging
-        # redaction filter (daemon.util.log_redaction_filter) can scrub
-        # any plaintext that accidentally reaches a log record.
+        # P3-WP10 redaction-use registry. Holds the plaintexts currently
+        # held by this store, so the logging redaction filter
+        # (daemon.util.log_redaction_filter) can scrub any plaintext
+        # that accidentally reaches a log record.
+        #
+        # COPY-ON-WRITE (v0.28.3 deadlock fix, 2026-11-01): the registry
+        # is an IMMUTABLE TUPLE and every read is LOCK-FREE. The read
+        # path (_iter_registered_plaintexts) executes inside the logging
+        # emit path on every log record — when it took ``_registry_lock``
+        # it self-deadlocked the whole process (py-spy pid 518745,
+        # thread 519948): a GC ``__del__`` finalizer logged from inside
+        # the snapshot copy and the resulting redaction-filter pass
+        # re-entered the read on the same thread while the
+        # non-reentrant lock was still held. Writers publish a fresh
+        # tuple with one atomic attribute assignment; ``_registry_lock``
+        # wraps ONLY the read-merge-publish — never logging, never
+        # crypto, never any allocation-heavy region.
         #
         # Internal/redaction-use ONLY. NEVER exposed to tool callers or
         # to agent-facing surfaces. Snapshot semantics on read — callers
         # never see live mutations.
-        self._plaintext_registry: set[str] = set()
+        self._plaintext_registry: tuple[str, ...] = ()
         self._registry_lock = threading.Lock()
 
     @staticmethod
@@ -319,7 +332,8 @@ class _KMSStore:
             return len(self._handles)
 
     # P3-WP10 — internal redaction-use registry -----------------------
-    # Thread-safe accessors used ONLY by
+    # Copy-on-write snapshot registry: writers publish immutable
+    # tuples, readers fetch WITHOUT any lock. Used ONLY by
     # ``daemon.util.log_redaction_filter``. Not exported to agent tools.
 
     def _register_plaintext(self, plaintext: str) -> None:
@@ -327,20 +341,43 @@ class _KMSStore:
 
         Internal/redaction-use ONLY. Called from :meth:`mint` immediately
         after the plaintext is generated. Safe to call multiple times —
-        the registry is a set.
+        the snapshot has set semantics (duplicates collapse).
+
+        Copy-on-write publish: ``_registry_lock`` guards ONLY the
+        read-merge-publish of the immutable snapshot tuple. It MUST
+        stay free of logging, crypto, imports, and any other
+        allocation-heavy work — mints run concurrently with log
+        emission through the lock-free read below, and wrapping a
+        heavier region would only widen the write-side critical
+        section. (Pinned: the hygiene test asserts the ``with`` block
+        contains no calls at all.)
         """
         with self._registry_lock:
-            self._plaintext_registry.add(plaintext)
+            if plaintext not in self._plaintext_registry:
+                self._plaintext_registry = self._plaintext_registry + (
+                    plaintext,
+                )
 
     def _iter_registered_plaintexts(self) -> list[str]:
         """Return a snapshot list of all registered plaintexts.
 
-        Internal/redaction-use ONLY. The list is a per-call copy so the
-        redaction filter sees a stable view even if a concurrent mint
-        mutates the registry mid-scrub.
+        Internal/redaction-use ONLY — and LOCK-FREE by contract: this
+        executes inside the logging emit path on EVERY log record, and
+        a blocking acquire here re-entered from the same thread on
+        v0.28.3 (a GC ``__del__`` finalizer logged from inside the
+        snapshot copy, its debug record ran the handler-level
+        redaction filter, and the filter re-entered this method while
+        the non-reentrant lock was still held — freezing all 63
+        threads of the process). The snapshot tuple is published
+        atomically by the write side, so a plain attribute fetch plus
+        list copy is always a consistent snapshot.
+
+        Registry-empty state does NOT bypass anything special: the
+        fetch is a single attribute read either way. The per-record
+        hygiene of this method (no lock, no imports) is pinned by
+        ``tests/unit/test_log_redaction_filter.py``.
         """
-        with self._registry_lock:
-            return list(self._plaintext_registry)
+        return list(self._plaintext_registry)
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +434,7 @@ def reset_plaintext_registry_for_tests() -> None:
     if store is None:
         return
     with store._registry_lock:
-        store._plaintext_registry.clear()
+        store._plaintext_registry = ()
 
 
 # ---------------------------------------------------------------------------
