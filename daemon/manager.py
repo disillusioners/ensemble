@@ -2310,9 +2310,9 @@ class InstanceManager:
             # Boot-time EXTRA_ROOTS hygiene (task 6): log-loud on
             # nonexistent configured paths — dev-only knob, but a
             # silently-absent root is undiagnosable at 2am.
+            cfg = getattr(self.config, "project_skill_source", None)
             for _extra in (
-                getattr(self.config, "project_skill_source", None).extra_roots
-                or []
+                cfg.extra_roots if cfg is not None else []
             ):
                 if not os.path.isabs(_extra):
                     logger.warning(
