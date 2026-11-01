@@ -150,6 +150,7 @@ External ordering constraint (brief, binding): this commission lands **BEFORE co
 | R4 | Double-delivery (sync mint × backfill mint × drain/task claim) | medium | write-once triple index + claim guards; pin (b) race leg + pin (d) no-double-delivery |
 | R5 | Part-3 check fights T1/T3 (over-suppresses live-message flow) | medium | check confined to the RDRS revival caller; pin (d) T1/T2/T3 canonical pins + suppression pin both directions |
 | R6 | WC-orphan detector false positives sweeping legitimately-paused shapes | medium | D2 surface posture (observe → fire, disposition before act); pure-WC-grandchildren variant pinned separately |
+| R8 | ORPHAN-lane rows under terminal roots are now held DEFERRED indefinitely (part-3 suppression has no reaping/disposition machinery) — accumulation of convergence records with observability only (``suppressed_root_terminal`` counter + structured log); a live-root tree can never produce this shape, but a tree whose root terminalizes with outstanding deferred rows stays on the books until an operator/future lane acts | low | D3 disposition (hold DEFERRED + observability — never a FAILED dead-letter); the rows remain queryable + re-examinable every 300s cycle; disposition machinery = a future commission (the detector lane (part 4) already surfaces the adjacent WC-orphan shape) |
 | R7 | Stale anchors (the files move fast; brief receipts already stale) | low | §5 moved-anchors table; directory-scoped grep / direct reads for oversized files; re-verify anchors at implementation start |
 
 ## 12. Out of scope (binding)
