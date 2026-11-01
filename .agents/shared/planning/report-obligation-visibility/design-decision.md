@@ -15,8 +15,11 @@ The obligation IS a `report_injections` row (non-terminal `PENDING`/`DEFERRED`).
 
 ### DEC-2 — Same-tx mint riding the existing SAVEPOINT region (transactional outbox)
 The mint attaches adjacent to the ReportInjection INSERT region `:4700-4751` (inside the `begin_nested()` SAVEPOINT) and is released before the outer commit `:5173` — obligation row persists **iff** the terminalization transaction persists. The outbox pattern ALREADY exists at this seam: the completion txn covers CAS `:4334-4350` + report msg `:4392-4407` + PROCESS_REPORT task `:4532-4543` + ReportInjection `:4700-4751` + events `:5136-5160`, one commit `:5173`.
+
+**IMPLEMENTATION REALITY (2026-11-01, verified at implementation):** the natural-path ReportInjection INSERT *already mints* the obligation row same-transaction (the F3-era crash-consistency work) — every Part-1 invariant (i)–(iv) is already enforced by the CAS + the frozen guards + the write-once triple index. Part 1 therefore landed as: (a) the **provenance stamp** `deferred_reason=SYNC_MINT` (new `DEFERRED_REASON_SYNC_MINT` constant, `daemon/constants.py`; models.py docstring extended — zero DDL, the TEXT column is an open vocabulary by design) so a row's sync-vs-backfill origin is readable from the row itself; (b) the invariant documentation at the mint site (who-wins: first writer wins the triple index; the loser — either side — takes IntegrityError → SAVEPOINT rollback → skip; a later `ensure_deferred` touch may flip the reason in place — provenance best-effort under the race); (c) pins (b) asserting the pre-existing mint's same-tx semantics. NO second INSERT was added — a duplicate row would violate the write-once substrate the commission ruled to reuse.
 - Rejected: post-commit mint — loses the atomicity guarantee (the pattern's whole point); reopens the orphan-row window.
 - Rejected: dedicated-session mint — that shape is reserved for the two DEFERRED skip-path markers (`:3395-3422`, `:4076-4091`, deliberate best-effort semantics per 1d); NOT refactored here.
+- Rejected: minting on the dead-parent branch (recipient None/TERMINATED) — that path's FAILED-message disposition is the designed T8 (a) semantics; out of scope.
 
 ### DEC-3 — Idempotency = CAS + frozen guard + write-once triple index; races benign
 Three independent, already-frozen layers make the sync mint once-per-lifecycle:
@@ -53,6 +56,7 @@ Both annotations recorded as ready-to-place text in §4 below; NO code scope; DR
 ## 3. OPEN DECISIONS (recommendation-only; the plan proceeds on the recommended defaults unless the leader overrides)
 
 ### D1 — Obligation-leg polarity when the obligation QUERY ITSELF errors
+**RESOLVED (leader adjudication 2026-11-01, BINDING): (ii) fail-closed.** Implemented: DENY → bound-composed degradation; the read's error path is an isolated try/except (never the whole-eval fail-open-ALLOW catch, never a −1 sentinel); mutation-pinned. The original analysis is retained below for the record.
 The commission said "follow the brief"; the brief is SILENT on obligation-input error polarity — a genuine open decision.
 - **(i) fail-open** — consistent with emission-time legs 1–2 (bus error returns 0 `:2636-2638`; unknown commission sentinel → inactive → proceed `:2690-2694`): a query error reads as zero → the gate proceeds.
 - **(ii) fail-closed HOLD-until-bound** — consistent with the brief doctrine "the record may only HOLD, never RELEASE" (`arch-rec:177-179`), the leg-3 member-probe-error→HOLD precedent (`:2729-2735`), and the incident class itself (fail-open legs are exactly what allowed all-zero inputs to close the root). The arm contributes a DENY on query error, composing with the existing deny-bound-3 so a persistent error degrades to `terminal_after_bound` — never wedges forever; same degradation as any persistent deny.
@@ -60,6 +64,7 @@ The commission said "follow the brief"; the brief is SILENT on obligation-input 
 - **Structural requirement (either way):** the new arm's error path must be EXPLICITLY isolated from the in-turn whole-eval fail-open-ALLOW catch (`:1550-1636` / `:1638-1649`) and from the emission-time caller-wrap fail-open (`:5426-5451`, FP4-L5 `:5403-5425`) — under (ii) by converting the error to a HOLD/DENY verdict INSIDE the arm; under (i) by explicit propagation. Whichever posture is chosen gets a mutation pin.
 
 ### D2 — Part-4 WC-orphan detector firing surface
+**RESOLVED (leader adjudication 2026-11-01, BINDING): (a) sweep-side detector** — implemented as a new RDRS-family lane (`wc_orphan_detector`), observability-only, wedge captures diagnostic-only. The original analysis is retained below for the record.
 The commission said "follow the brief (wedge/sweep)"; the brief is silent.
 - **(a) sweep-side detector** — a new RDRS-family lane or an adjacent periodic sweep. Composes with part 3; matches the PATTERN NOTES framing of RDRS as the level-triggered reconciler; the ORPHAN lane is already "the terminal-parent entry path" (`repository.py:1180-1186`), so a terminal-parent posture has an established home in that family.
 - **(b) extend `mission_strand_healer` posture to non-roots** — structurally hostile: roots-only predicate (`:546-553`), ghost-signature fail-closed abort rejects WC members bearing execution evidence (`:650-662`), terminal-parent bound (`:663-679`).
@@ -67,6 +72,7 @@ The commission said "follow the brief (wedge/sweep)"; the brief is silent.
 - **RECOMMENDED DEFAULT: (a) sweep-side detector; wedge captures remain diagnostic.**
 
 ### D3 — part-3 sub-decision: disposition of a suppressed terminal obligation row
+**RESOLVED (leader adjudication 2026-11-01, BINDING): (α) hold DEFERRED + observability surface** — implemented as the `suppressed_root_terminal` LaneResult counter + structured WARNING log; no FAILED dead-letter. The original analysis is retained below for the record.
 When revival is suppressed because the root is terminal and the obligation can never deliver in-session:
 - **(α) hold DEFERRED as durable convergence record + surface in observability** (sweep result counters + structured log per lane conventions) — the level-triggered reconciler keeps the row as a convergence record; it remains queryable and re-examinable.
 - **(β) dead-letter to FAILED** — FAILED is the dead-letter SENTINEL (`models.py:83-122`, T8 dead-parent seam); using it here conflates "parent is dead, delivery impossible" (T8 semantics) with "root closed, nothing to converge toward".
@@ -79,7 +85,34 @@ When revival is suppressed because the root is terminal and the obligation can n
 - **The completion gate = checkpoint aggregate with deliberately MIXED failure polarities** (fail-OPEN legs 1–2 + caller wrap; split-polarity leg 3; resolver-decides leg 5; fail-CLOSED same-tx writer legs). **This commission EXTENDS the aggregate WITHOUT harmonizing polarities** — each existing leg keeps its verdict and polarity byte-for-byte (`sequencing-detail.md:71-78`; `risk-register.md` R3); the new obligation leg carries its own declared posture (hold-on-outstanding; error posture per D1).
 - Purpose: the next reader sees the pattern names instead of re-deriving them mid-incident.
 
+## 3a. MID-FLIGHT LEADER ADJUDICATION (2026-11-01, ~08:4xZ — BINDING; folded into the in-flight part-2 work)
+
+**DISPATCH-WINDOW NOTE (live receipt, v0.28.3 dogfood):** leader row `7ceb4685` read COMPLETED ~08:25Z 2026-11-01 while child developer `fea6f7be` was LIVE (waiting_children, own children running); planner+giter terminal; `completion_gate_escalated=FALSE` — the in-turn gate verified-clean on an all-quiet snapshot. Likeliest shape (leader diagnosis): the gate sampled during the **DISPATCH→RUNNING window** — the child was MINTED but not yet RUNNING when `live_descendants`/`outstanding_commissions` were counted → all-zero → verified-clean. The live v0.28.2 T2 WC re-arm does NOT cover this micro-race (the parent turn ended before the child flipped RUNNING).
+
+**Adjudication dispositions (implemented):**
+
+1. **Liveness input-set widening (a deliberate leg-extension, same doctrine as the obligation leg).** Verified at implementation: the EMISSION-time liveness leg (`evaluate_mission_live` leg b/c) ALREADY counts any non-terminal descendant as live (IDLE canonicalized to live; only the aged strand exception — which requires a TERMINAL direct parent, not this window — drops out) → documented + pinned, no change needed. The IN-TURN arm (`count_live_descendants`) did NOT — dormant IDLE/QUEUED were conditional on message/job evidence, leaving the micro-race → **WIDENED**: any NON-TERMINAL descendant now counts as NON-QUIET (`_count_descendants_busy_and_live`; the b08f40fe conditional-dormancy check retired for the LIVE count — an aged never-dispatched IDLE orphan now reads non-quiet to the in-turn arm; reaping belongs to the strand healer + the new WC-orphan detector lane). The BUSY subset (LCA trigger suppression) keeps the strict two-set semantics — UNCHANGED.
+2. **New mutation pin (e)** — the dogfood window: child minted, NOT yet RUNNING, tree otherwise quiet → OLD verify-clean, NEW must NOT verify-clean (both checkpoints' liveness surfaces). Red-green per house rule.
+3. **Scope guard honored:** part 1's mint seam UNMOVED — obligation rows stay minted at CHILD TERMINALIZATION. The dispatch-spanning alternative ("obligation/commission row from DISPATCH" — an outbox spanning the whole round trip) is a **DOCUMENTED CONSIDERATION ONLY** (below), NOT implemented.
+4. **Orthogonality:** the 10:35 mutation shape (terminal children + undelivered reports → the OBLIGATION leg) and the dogfood window (non-terminal children pre-RUNNING → the LIVENESS leg) are two different windows on two different legs — pins (a) and (e) each prove their OWN window.
+
+**Documented future consideration (NOT implemented):** a dispatch-spanning outbox — minting the delivery obligation (or a commission-row sibling) at DISPATCH time so the round trip (dispatch → execution → report) is covered end-to-end by durable intent, rather than only from child terminalization onward. This would structurally subsume the liveness-leg widening (the obligation leg would cover the dispatch window too), but changes the write path for EVERY spawn (write amplification + a new retraction semantics for never-completed children). Cited incident: the 2026-11-01 dogfood window above. Deferred to a future commission; this lane's mint stays at child terminalization per the commission text.
+
+**Updated matrices (superseding the plan §6/§7 rows they amend; all other rows unchanged):**
+
+| Gate | Leg/arm | Amendment |
+|---|---|---|
+| emission-time (§6) | leg 3 tree liveness | UNCHANGED in code — verified as ALREADY counting minted-not-yet-RUNNING descendants (leg b/c canonicalizes IDLE → live; the strand exception requires a TERMINAL direct parent + age, orthogonal to the dispatch window). Pin (e) emission-side asserts the window. |
+| emission-time (§6) | **leg 6 obligations (NEW)** | implemented as planned: count > 0 → DENY (reason carries the count) joining the existing downgrade path; D1-ii fail-closed — the leg catches its OWN query error INSIDE the leg and converts to a HOLD verdict, never riding the caller-wrap fail-open. |
+| in-turn (§7) | live_descendants arm | **INPUT-SET WIDENED** (adjudication #1): any NON-TERMINAL descendant = NON-QUIET (dormant IDLE/QUEUED unconditional). Posture stays ALLOW-leg; the −1 sentinel contract, the busy subset, and every other arm unchanged. This row supersedes the plan §7 "two-set … unchanged" assertion for THIS arm only. |
+| in-turn (§7) | **outstanding_report_obligations arm (NEW)** | implemented as planned + leader-endorsed: > 0 → ALLOWED_LEGITIMATE_PENDING_WAKEUP hold, counter UNCHANGED (bound-exempt — holds at/past the bound while an obligation is outstanding); D1 fail-closed error flag → decide() step (2b): bound-composed DENY (DENIED + increment + nudge below the bound; TERMINAL_AFTER_BOUND at/past it), isolated from the whole-eval fail-open-ALLOW catch and from the −1 sentinel short-circuit. |
+
 ## 5. Part-5 annotation texts (annotate-only; ready to place; DROP if time-boxed)
+
+**SITES LOCATED AT IMPLEMENTATION (2026-11-01, this commission):**
+
+* **(i)** the `epochs[]` read-model construction site = `daemon/tools/missions.py:326-342` (the best-effort single-element `epoch_entry` construction inside the mission-detail renderer; the array is returned at `:349`). The renderer derives the entry from `record.started_at` / `record.last_activity_at` — a PROJECTION of the mission-record read, exactly the twin shape the annotation names. NO code was touched (annotate-only disposition).
+* **(ii)** the report-delivery re-cycle path = the two exactly-once claim seams on `ReportInjectionRepository` — `claim_for_injection` (`daemon/repositories/report_injection/repository.py:1509`, driven by the graph's `ReportInjectionSlot` drain at `daemon/graph.py:680/737`) and `claim_for_task_delivery` (`:1798`, the PROCESS_REPORT fallback). A re-cycle delivery lands through one of these two claims OUTSIDE the revive-on-send reset trigger (`instance_messaging.py:2568-2580`) and outside `safe_set_escalated_and_reset` (`graph.py:6908-6918`) — the two ledger-clearing sites the annotation names. NO code was touched.
 
 **(i) `epochs[]` read-model µs-twin annotation** — place at the `epochs[]` read-model construction site (implementer locates the exact site during implementation; low-priority):
 > NOTE (µs-twin): `epochs[]` is a read-model twin of the epoch state derived from the underlying mission-epoch records — it can diverge from the source at µs granularity (stale twin within a tick). It is a PROJECTION, not a second authority: readers needing the authoritative epoch state must read the epoch records, not this array. Do not add writers to this shape without reconciling the twin.
