@@ -1184,7 +1184,7 @@ class ReportInjectionRepository:
                 stmt = stmt.where(
                     ReportInjection.child_instance_id != exclude_child_id
                 )
-            return int(session.exec(stmt).scalar_one() or 0)
+            return int(session.exec(stmt).one() or 0)
 
     def find_completed_children_without_delivery(
         self,
