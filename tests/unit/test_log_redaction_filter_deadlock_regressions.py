@@ -347,6 +347,22 @@ def _assert_per_record_hygiene(fn: ast.FunctionDef, label: str) -> None:
         f"(with-stmt found at lines {[n.lineno for n in withs]}) — this "
         f"is the v0.28.3 self-deadlock class"
     )
+    # Bare (non-``with``) lock operations are the same class: an
+    # explicit ``.acquire()`` blocks just as hard as a with-statement
+    # and a ``.release()`` implies an acquire elsewhere on the path
+    # (review finding #6).
+    bare_lock_ops = [
+        n
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr in {"acquire", "release"}
+    ]
+    assert not bare_lock_ops, (
+        f"{label}: per-record path must not call .acquire()/.release() "
+        f"(found at lines {[n.lineno for n in bare_lock_ops]}) — same "
+        f"blocking class as a with-stmt"
+    )
     assert not imports, (
         f"{label}: per-record path must not run import machinery "
         f"(import found at lines {[n.lineno for n in imports]})"
@@ -553,6 +569,64 @@ class TestKmsLiteHygienePins:
             "_iter_registered_plaintexts must read the "
             "_plaintext_registry copy-on-write snapshot"
         )
+        # Bare .acquire()/.release() are the same blocking class as a
+        # with-stmt (review finding #6).
+        bare_lock_ops = [
+            n
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr in {"acquire", "release"}
+        ]
+        assert not bare_lock_ops, (
+            "_iter_registered_plaintexts must not call "
+            f".acquire()/.release() (found at lines "
+            f"{[n.lineno for n in bare_lock_ops]})"
+        )
+
+    def test_store_construction_is_outside_the_publish_lock(self) -> None:
+        """_get_store publishes under _store_lock but must CONSTRUCT
+        the store outside it (review finding #1): _KMSStore() does
+        key-file reads + Fernet setup (allocation-heavy) and the lock
+        is non-reentrant — construction inside the lock reopens the
+        P0 self-deadlock mechanism with an exposure window of process
+        boot (a GC finalizer logging during construction re-enters
+        _get_store() and same-thread re-acquires the held lock).
+        """
+        tree = _module_ast("daemon/services/kms_lite.py")
+        fn = _module_function(tree, "_get_store")
+        withs = _withs(fn)
+        assert len(withs) == 1, (
+            f"_get_store must use exactly one with-stmt (the publish "
+            f"lock), got {len(withs)}"
+        )
+        inside = list(ast.walk(withs[0]))
+        inside_calls = [n for n in inside if isinstance(n, ast.Call)]
+        inside_imports = [
+            n for n in inside if isinstance(n, (ast.Import, ast.ImportFrom))
+        ]
+        assert not inside_calls, (
+            "the _store_lock critical section must contain NO call "
+            "nodes (no store construction, no allocation-heavy work) — "
+            "construct outside, publish first-wins inside"
+        )
+        assert not inside_imports, (
+            "the _store_lock critical section must not import"
+        )
+        # Positive anchor: the construction call still exists in the
+        # function, OUTSIDE the with-body.
+        construction_calls = [
+            n
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id == "_KMSStore"
+            and n not in inside
+        ]
+        assert construction_calls, (
+            "_get_store must still construct _KMSStore (outside the "
+            "publish lock)"
+        )
 
     def test_registry_write_lock_is_small(self) -> None:
         """The write-side lock wraps ONLY the read-merge-publish: no
@@ -626,6 +700,76 @@ class TestPerRecordPathBehavioralHygiene:
         )
         snapshot = iter_registered_plaintexts()
         assert isinstance(snapshot, list)
+
+    def test_import_failure_retries_bounded_then_latches_with_one_warning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Review finding #2 (NEW-INVARIANT): a failing
+        ``daemon.services.kms_lite`` import must retry a bounded number
+        of times, then latch permanently with exactly ONE warning —
+        silent permanent latch on a secrets-redaction control is
+        fail-open. The latch flag must be set BEFORE the warning (the
+        warning runs inside the logging emit path; a resolve re-entry
+        during the warning must observe the latch and return, not
+        recurse).
+
+        Module-level latch state is isolated via monkeypatch (no
+        production reset hook — deferred finding #8). The poisoned
+        ``sys.modules`` entry makes the lazy import raise ImportError
+        deterministically.
+        """
+        monkeypatch.setattr(lrf, "_get_store_fn", None)
+        monkeypatch.setattr(lrf, "_get_store_attempts", 0)
+        monkeypatch.setattr(lrf, "_store_import_latched", False)
+        monkeypatch.setitem(sys.modules, "daemon.services.kms_lite", None)
+
+        max_attempts = lrf._GET_STORE_MAX_ATTEMPTS
+
+        # First (max - 1) calls: bounded retries, no latch, no warning.
+        for _ in range(max_attempts - 1):
+            assert lrf._resolve_get_store() is None
+        assert lrf._get_store_attempts == max_attempts - 1
+        assert lrf._store_import_latched is False
+
+        # Recursion-safety probe: re-enter the resolve path DURING the
+        # warning emission. Latch-before-log must make that re-entry
+        # return None immediately (a non-latched order would recurse
+        # into another warning — infinite).
+        orig_warning = lrf.logger.warning
+        reentrant_results: list[object] = []
+
+        def _reentering_warning(msg, *args, **kwargs):
+            reentrant_results.append(lrf._resolve_get_store())
+            orig_warning(msg, *args, **kwargs)
+
+        monkeypatch.setattr(lrf.logger, "warning", _reentering_warning)
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.util.log_redaction_filter"
+        ):
+            # The latching call: last attempt consumed -> permanent
+            # latch + exactly one warning.
+            assert lrf._resolve_get_store() is None
+            assert lrf._get_store_attempts == max_attempts
+            assert lrf._store_import_latched is True
+            assert reentrant_results == [None], (
+                "re-entry during the warning did not observe the "
+                "latch-first order"
+            )
+            # Permanent no-op afterwards: nothing re-attempts.
+            assert lrf._resolve_get_store() is None
+            assert lrf._resolve_get_store() is None
+
+        warnings = [
+            r for r in caplog.records if "latched OFF" in r.getMessage()
+        ]
+        assert len(warnings) == 1, (
+            f"expected exactly one latch warning, got {len(warnings)}"
+        )
+        assert warnings[0].levelno == logging.WARNING
+        assert warnings[0].name == "daemon.util.log_redaction_filter"
 
 
 # ---------------------------------------------------------------------------
