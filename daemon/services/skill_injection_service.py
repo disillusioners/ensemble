@@ -385,6 +385,18 @@ class SkillInjectionService:
             project_id=project_id,
             max_results=max_results,
             agent_id=agent_id,
+            # PHASE-4 ACTIVATION (project-skill-loader): threading the
+            # method's own ``instance_id`` turns file-skill
+            # AUTO-INJECTION from dark to live — the search service's
+            # sanctioned scope resolver (A6/A13) derives the caller's
+            # project from it, fusing the file corpus into the
+            # auto-injection candidates exactly as the explicit
+            # ``skill_search`` tool already does. ``instance_id`` was
+            # already a required parameter here (A/B hash key) — only
+            # the forwarding was missing. With ``file_source=None``
+            # (knob OFF / pre-Phase-4 wiring) the search is
+            # byte-identical (the resolver short-circuits).
+            instance_id=instance_id,
         )
 
         injected = list(results.get("injected") or [])

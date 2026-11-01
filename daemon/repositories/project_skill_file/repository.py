@@ -178,6 +178,46 @@ class ProjectSkillFileRepository:
             session.commit()
             return True
 
+    def purge_orphan_projects(self) -> int:
+        """A17 one-statement orphan purge (Phase 4).
+
+        Deletes every ``project_skill_files`` row whose ``project_id``
+        no longer exists in ``projects`` — a deleted project must not
+        leave durable index rows behind — and (A4-iv, same statement's
+        transaction) the embedding rows riding those ids. ``projects``
+        is the daemon's canonical project table on the same engine, so
+        the NOT EXISTS subquery is the single source of truth for
+        "project still alive".
+
+        Returns the number of index rows removed (embedding removals
+        ride along and are not counted separately).
+        """
+        with Session(self.engine) as session:
+            result = session.exec(
+                delete(ProjectSkillFile).where(
+                    text(
+                        "NOT EXISTS ("
+                        "SELECT 1 FROM projects p "
+                        "WHERE p.project_id = project_skill_files.project_id"
+                        ")"
+                    )
+                )
+            )
+            removed = int(getattr(result, "rowcount", 0) or 0)
+            if removed:
+                session.exec(
+                    delete(ProjectSkillEmbedding).where(
+                        text(
+                            "NOT EXISTS ("
+                            "SELECT 1 FROM project_skill_files f "
+                            "WHERE f.id = project_skill_embeddings.skill_id"
+                            ")"
+                        )
+                    )
+                )
+            session.commit()
+            return removed
+
 
 class ProjectSkillEmbeddingRepository:
     """CRUD for ``project_skill_embeddings`` (A1 dedicated table, no FK)."""

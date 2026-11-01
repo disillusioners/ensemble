@@ -453,6 +453,31 @@ class SkillSearchService:
         self._last_file_corpus_stats: dict[str, Any] = {}
 
     # --------------------------------------------------------
+    # Public accessors (Phase-4 observability)
+    # --------------------------------------------------------
+
+    @property
+    def has_db_corpus(self) -> bool:
+        """Whether the DB skill corpus is wired (``skill_repo`` set).
+
+        ``False`` in the B1 None-safe file-only construction (M10) —
+        the readiness advisory's ``db_stack_present`` reads this, and
+        the tool layer can distinguish "file-only degraded" from
+        "full fusion" without poking privates.
+        """
+        return self._skill_repo is not None
+
+    @property
+    def last_file_corpus_stats(self) -> dict[str, Any]:
+        """Last-writer-wins advisory snapshot of the last fusion pass
+        (roots seen, shadowing ids, overflow counts + names, errors).
+
+        Read by the readiness advisory (``detail.skill_sources``).
+        Empty dict when no fusion has run yet — an honest zero.
+        """
+        return dict(self._last_file_corpus_stats or {})
+
+    # --------------------------------------------------------
     # Public API
     # --------------------------------------------------------
 
@@ -520,45 +545,76 @@ class SkillSearchService:
             (additive key); file entries also carry ``"address"`` and,
             when they shadow a same-name DB skill, ``"shadows"``.
         """
-        # Stage 1 — BM25.
+        # Stage 1 — BM25. A9/B1 (Phase 4): in the None-config
+        # (file-only, M10) construction the stage-1 cut is pinned to
+        # ``max_results`` — the deterministic degraded semantics have
+        # no config-derived pre-cut before the degraded select.
+        stage1_top_k = (
+            max_results
+            if self._config is None
+            else getattr(self._config, "bm25_top_k", 10)
+        )
         candidates = await self._bm25_prefilter(
             user_message,
             project_id,
-            top_k=getattr(self._config, "bm25_top_k", 10),
+            top_k=stage1_top_k,
             agent_id=agent_id,
             instance_id=instance_id,
         )
         if not candidates:
             return {"injected": [], "low_match": []}
 
-        # Stage 2 — Embedding re-rank (best-effort).
-        try:
-            reranked = await self._embedding_rerank(
-                user_message,
-                candidates,
-                top_k=getattr(self._config, "llm_select_top_k", 5),
-            )
-        except Exception as e:
-            logger.warning(
-                "[SkillSearch] Embedding re-rank failed, falling "
-                f"back to BM25: {e}"
-            )
-            reranked = [(s, 0.0) for s in candidates[:5]]
+        # Stage 2 — Embedding re-rank (best-effort). B1 None-tolerance
+        # delta (i), Phase 4: SKIPPED explicitly when no embedding
+        # service is wired (the None-safe M10 construction) — neutral
+        # scores, never a try/except lottery on ``None.embed_user_message``.
+        if self._embedding_service is None:
+            if self._config is None:
+                # File-only: stage 1 already capped at ``max_results``
+                # — keep every candidate (a stage-2-shape cut would
+                # silently under-deliver).
+                reranked = [(s, 0.0) for s in candidates]
+            else:
+                _skip_k = getattr(self._config, "llm_select_top_k", 5)
+                reranked = [(s, 0.0) for s in candidates[:_skip_k]]
+        else:
+            try:
+                reranked = await self._embedding_rerank(
+                    user_message,
+                    candidates,
+                    top_k=getattr(self._config, "llm_select_top_k", 5),
+                )
+            except Exception as e:
+                logger.warning(
+                    "[SkillSearch] Embedding re-rank failed, falling "
+                    f"back to BM25: {e}"
+                )
+                reranked = [(s, 0.0) for s in candidates[:5]]
 
         if not reranked:
             return {"injected": [], "low_match": []}
 
-        # Stage 3 — LLM final selection (best-effort).
-        try:
-            result = await self._llm_select(
-                user_message, reranked, max_results
-            )
-        except Exception as e:
-            logger.warning(
-                "[SkillSearch] LLM select failed, falling back "
-                f"to embedding/BM25: {e}"
-            )
+        # Stage 3 — LLM final selection (best-effort). B1
+        # None-tolerance delta (ii), Phase 4: ``_config is None`` (the
+        # None-safe file-only construction) ⇒ SKIPPED deterministically
+        # — degraded selection over the BM25 order plus the
+        # ``degraded: "file_only"`` marker on the result dict (the A9
+        # pinned semantics; identical shape to the tool-layer
+        # ``_file_only_bm25_search`` marker).
+        if self._config is None:
             result = self._degraded_select(reranked, max_results)
+            result["degraded"] = "file_only"
+        else:
+            try:
+                result = await self._llm_select(
+                    user_message, reranked, max_results
+                )
+            except Exception as e:
+                logger.warning(
+                    "[SkillSearch] LLM select failed, falling back "
+                    f"to embedding/BM25: {e}"
+                )
+                result = self._degraded_select(reranked, max_results)
         return self._tag_result_sources(result, candidates)
 
     # --------------------------------------------------------
@@ -745,6 +801,7 @@ class SkillSearchService:
             "file_included": 0,
             "shadowing": 0,
             "budget_dropped": 0,
+            "budget_dropped_names": [],
             "shadowed_db_ids": [],
             "last_error": None,
         }
@@ -870,6 +927,14 @@ class SkillSearchService:
             else:
                 # Budget applies to NON-shadowing file skills only.
                 budget_dropped += 1
+                # S5: name the overflow-dropped skills so the readiness
+                # advisory can distinguish them (shadowing names are
+                # EXEMPT from the budget by A7 — an operator seeing a
+                # dropped name here knows it is ordinary overflow, not
+                # a shadowed replacement going missing).
+                stats["budget_dropped_names"].append(
+                    str(getattr(file_skill, "name", "") or "")
+                )
 
         stats["budget_dropped"] = budget_dropped
         stats["file_included"] = len(merged_files)
@@ -1002,7 +1067,17 @@ class SkillSearchService:
                 )
             injected, low_match = kept_injected, kept_low
 
-        return {"injected": injected, "low_match": low_match}
+        # Preserve any ADDITIVE result keys (``degraded`` from the B1
+        # file-only path, future markers) — the tagged dict is the
+        # caller's dict plus re-stamped lists, never a lossy rebuild.
+        out: dict[str, Any] = {
+            k: v
+            for k, v in result.items()
+            if k not in ("injected", "low_match")
+        }
+        out["injected"] = injected
+        out["low_match"] = low_match
+        return out
 
     async def _bm25_prefilter(
         self,
@@ -1274,18 +1349,30 @@ class SkillSearchService:
                 scored.append((skill, 0.0))
                 continue
 
-            # Per-skill embeddings: list of SkillEmbedding rows.
-            # Fetch is sync; bridge through the thread pool.
-            try:
-                embeddings = await asyncio.to_thread(
-                    self._embedding_repo.get_by_skill, skill_id
-                )
-            except Exception as e:
-                logger.warning(
-                    "[SkillSearch] embedding fetch failed for "
-                    f"skill id={skill_id}: {e}"
-                )
-                embeddings = []
+            # Per-skill embeddings: list of embedding rows. Fetch is
+            # sync; bridge through the thread pool. DUAL-SOURCE
+            # (Phase 4, leader-commissioned): a file skill's cached
+            # trigger embeddings live in the DEDICATED
+            # ``project_skill_embeddings`` table (A1 — the legacy
+            # ``skill_embeddings`` table is FK-walled against ``pf-``
+            # ids), read through the file source's fail-soft adapter.
+            # DB skills keep their EXISTING fetch path byte-identical —
+            # this seam only gives file skills the same rerank
+            # participation DB skills already had (pre-adapter they
+            # scored neutral 0.0).
+            if _is_project_file_skill(skill) and self._file_source is not None:
+                embeddings = self._file_source.file_embeddings_for(skill_id)
+            else:
+                try:
+                    embeddings = await asyncio.to_thread(
+                        self._embedding_repo.get_by_skill, skill_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "[SkillSearch] embedding fetch failed for "
+                        f"skill id={skill_id}: {e}"
+                    )
+                    embeddings = []
 
             if not embeddings:
                 # No cached embeddings yet (the skill hasn't

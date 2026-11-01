@@ -85,6 +85,13 @@ from daemon.services.project_skill_source.model import (
 
 logger = logging.getLogger(__name__)
 
+#: A17 insurance cap — accept-unbounded WITH instruments, but refuse
+#: (INFO, not error) roots beyond this many for one project. No
+#: legitimate project canon approaches this; the cap exists so a
+#: misconfigured EXTRA_ROOTS/monorepo cannot turn one resolution into
+#: an unbounded directory walk.
+MAX_ROOTS = 32
+
 #: Env knob for the W-5 dev-only extra roots (comma-separated absolute
 #: paths). Binding is enforced per-entry against the caller's resolved
 #: project — fail-closed.
@@ -197,6 +204,55 @@ class ProjectSkillSourceService:
         self._root_locks: dict[str, asyncio.Lock] = {}
         self._inflight_refreshes: set[str] = set()
         self._refresh_tasks: set[asyncio.Task[Any]] = set()
+
+    def set_embedding_service(self, embedding_service: Any) -> None:
+        """Inject the (optional) trigger-query embedding service post-
+        construction (Phase-4 manager wiring).
+
+        The manager constructs this service UNCONDITIONALLY but the
+        skill-evolution embedding service is only built when the
+        evolution config is present. This setter lets the manager bind
+        it later without reordering its init sequence (the
+        ``set_file_source`` / ``set_clone_service`` pattern). Left
+        ``None`` (evolution absent) the A4(vii) refresh degrades
+        fail-soft — file skills stay BM25-only with neutral rerank
+        scores.
+
+        Args:
+            embedding_service: Duck-typed
+                :class:`~daemon.services.skill_embedding_service.SkillEmbeddingService`
+                (``embed_text``-shaped) or ``None``.
+        """
+        self._embedding_service = embedding_service
+
+    def file_embeddings_for(self, skill_id: str) -> list[Any]:
+        """Stage-2 dual-source adapter (Phase 4, leader-commissioned).
+
+        Returns the cached trigger-query embedding rows for a FILE
+        skill from the DEDICATED ``project_skill_embeddings`` table
+        (A1 — the legacy ``skill_embeddings`` table is FK-walled
+        against ``pf-`` ids). Rows carry ``.embedding`` (list[float]),
+        the same consumption shape as the DB repo's rows, so
+        ``SkillSearchService._embedding_rerank`` scores them through
+        the identical cosine path.
+
+        Fail-soft: no embedding repository, a missing table, or a read
+        error all return ``[]`` (neutral 0.0 in the rerank — the
+        pre-adapter behavior for file skills). Never raises into the
+        search path.
+        """
+        if self._embeddings is None:
+            return []
+        try:
+            return list(self._embeddings.list_by_skill(skill_id) or [])
+        except Exception as exc:  # neutral — DB rerank must not wobble
+            logger.debug(
+                "[ProjectSkillSource] file-embedding lookup failed for "
+                "%s: %s (neutral rerank)",
+                skill_id,
+                exc,
+            )
+            return []
 
     # ------------------------------------------------------------------
     # Resolver (D-Q1 + A6 + W-5) — the SANCTIONED SCOPE READER for new code
@@ -330,6 +386,25 @@ class ProjectSkillSourceService:
             if root not in seen:
                 seen.add(root)
                 ordered.append(root)
+        # A17 insurance: INFO-refuse roots beyond MAX_ROOTS. Legit
+        # projects never approach this; a runaway EXTRA_ROOTS /
+        # monorepo misconfig must not turn one resolution into an
+        # unbounded walk. Refusal is INFO-level (misconfiguration
+        # signal, not a health event) and deterministic (first-32 in
+        # resolver order).
+        if len(ordered) > MAX_ROOTS:
+            dropped = ordered[MAX_ROOTS:]
+            logger.info(
+                "[ProjectSkillSource] root cap: project %s resolved %d "
+                "roots — refusing %d beyond MAX_ROOTS=%d (first refused: "
+                "%s)",
+                project_id[:8],
+                len(ordered),
+                len(dropped),
+                MAX_ROOTS,
+                dropped[0],
+            )
+            ordered = ordered[:MAX_ROOTS]
         return ordered
 
     async def _bind_extra_root(self, entry: str, project_id: str) -> Optional[str]:
@@ -844,10 +919,34 @@ class ProjectSkillSourceService:
             validate_containment, root_real, meta.namespace, meta.name
         )
         if containment:
+            # Task 8 (§4.5): the cross-project-leak guard TRIPPED — a
+            # would-be escape from the canon root was blocked. ERROR,
+            # not WARNING: this is a security signal (an operator must
+            # see it even without knowing to look), and it is the only
+            # way to distinguish "skill body vanished" (expected
+            # churn, WARNING elsewhere) from "containment invariant
+            # violated" (never expected).
+            logger.error(
+                "[ProjectSkillSource] LEAK GUARD TRIP: read-time containment "
+                "re-check FAILED for %s (root=%s ns=%s name=%s): %s — "
+                "refusing the read (fail-closed)",
+                meta.address,
+                root_real,
+                meta.namespace,
+                meta.name,
+                containment,
+            )
             raise ProjectSkillBodyUnavailable(meta.address, containment)
         body_path = _skill_file_path(root_real, meta, meta.body_path)
         pre = _reject_body_relpath(meta.body_path)
         if pre:
+            logger.error(
+                "[ProjectSkillSource] LEAK GUARD TRIP: body relpath rejected "
+                "for %s (relpath=%r): %s — refusing the read (fail-closed)",
+                meta.address,
+                meta.body_path,
+                pre,
+            )
             raise ProjectSkillBodyUnavailable(meta.address, pre)
 
         def _read() -> bytes:
@@ -1052,12 +1151,44 @@ class ProjectSkillSourceService:
     # ------------------------------------------------------------------
 
     async def gc_sweep(self) -> int:
-        """A4(v): remove ``project_skill_embeddings`` rows whose
-        ``skill_id`` is no longer present in ``project_skill_files``
-        (covers project deletion, root changes, project_id changes)."""
-        if self._embeddings is None:
-            return 0
-        return await asyncio.to_thread(self._embeddings.gc_orphans)
+        """A4(v) + A17 (Phase 4): the gc tick.
+
+        Two additive passes, both one-statement and idempotent:
+
+        1. **A17 orphan-project purge** — ``project_skill_files`` rows
+           whose ``project_id`` no longer exists in ``projects`` (a
+           deleted project must not leave index rows behind; the census
+           in ``detail.skill_sources.roots`` reads the live index, not
+           the DB, so this purge is what keeps the durable view
+           convergent after project deletion).
+        2. **A4(v) embedding gc** — ``project_skill_embeddings`` rows
+           whose ``skill_id`` is no longer present in
+           ``project_skill_files`` (covers root changes, project_id
+           changes, and everything pass 1 just deleted).
+
+        Returns the total number of rows removed. Both passes are
+        independently None-safe (no file repo / no embedding repo ⇒
+        that pass is skipped).
+        """
+        removed = 0
+        if self._files is not None:
+            try:
+                removed += await asyncio.to_thread(
+                    self._files.purge_orphan_projects
+                )
+            except Exception as exc:  # advisory gc — never raise
+                logger.warning(
+                    "[ProjectSkillSource] A17 orphan-project purge failed: %s",
+                    exc,
+                )
+        if self._embeddings is not None:
+            try:
+                removed += await asyncio.to_thread(self._embeddings.gc_orphans)
+            except Exception as exc:  # advisory gc — never raise
+                logger.warning(
+                    "[ProjectSkillSource] A4(v) embedding gc failed: %s", exc
+                )
+        return removed
 
     def snapshot_status(self) -> dict[str, Any]:
         """Advisory-shaped status (Phase-4's ``detail.skill_sources``
