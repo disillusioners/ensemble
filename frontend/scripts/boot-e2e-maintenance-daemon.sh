@@ -94,6 +94,14 @@ action_start() {
   #    cannot bleed through. The daemon reads POSTGRES_* at boot, so we
   #    MUST clear them before invoking uvicorn.
   unset POSTGRES_HOST POSTGRES_PORT POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD POSTGRES_URL
+  # Plane workspace hygiene (2026-11): an unset-or-'nea' workspace
+  # selection resolves to the PROD Plane workspace — a daemon armed with
+  # ambient sync config would mirror E2E projects into PROD. Scrub the
+  # two vars both Plane lanes target (REST sync REQUIRES slug + base
+  # URL; the MCP lane sends the slug header too): without them sync is
+  # structurally unavailable. Credentials deliberately stay through —
+  # the same user-scoped key serves both workspaces.
+  unset PLANE_MCP_WORKSPACE_SLUG PLANE_BASE_URL
   unset ENSEMBLE_DB_DSN
 
   # Item 3 — refuse to silently adopt a stale cluster. If the port
