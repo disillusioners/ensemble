@@ -905,6 +905,20 @@ class InstanceManager:
             BoardNote,
             BoardItemTag,
         )
+        # project-skill-loader Phase 4 — A10 SITE 5: register the 3
+        # lane tables BEFORE create_all. Per the corrected A10 ruling
+        # this registration (not the ``_ensure_postgres_columns``
+        # mirror) is the OPERATIVE fresh-PG-table artifact — create_all
+        # runs next and lands the tables on existing PG databases
+        # exactly like the board tables above. The SQLite path is the
+        # Phase-1 .sql files (20261031_120000/120001/120002); the
+        # mirror entries in ``_ensure_postgres_columns`` are the
+        # defense-in-depth belt.
+        from .repositories.project_skill_file.models import (  # noqa: F401  # psl P4: register before create_all
+            ProjectSkillEmbedding,
+            ProjectSkillFile,
+            ProjectSkillUsageRecord,
+        )
 
         SQLModel.metadata.create_all(self._engine)
 
@@ -2219,6 +2233,103 @@ class InstanceManager:
         from .services.mcp_service import McpService
         self._mcp_service = McpService(manager=self)
 
+        # ── Project Skill Source (project-skill-loader Phase 4) ────────
+        # Constructed UNCONDITIONALLY (A10 SITE 4 — the Agent-Snapshot
+        # precedent, ``manager.py:2499-2553`` flavor: repositories +
+        # services built ALONGSIDE the other repositories, decoupled
+        # from ``config.skill_evolution``). Construction is CHEAP by
+        # design (Q8b: no LLM, no DB, no filesystem reads — the first
+        # scan is lazy per root on first touch). The knob
+        # (``ENSEMBLE_PROJECT_SKILL_SOURCE_ENABLED``, boot-time only)
+        # does NOT gate construction — it gates INJECTION: knob OFF ⇒
+        # ``_project_skill_source`` (the Phase-3 tool contract
+        # attribute) stays ``None`` and every service gets
+        # ``file_source=None`` (byte-identical search/list/view
+        # results, zero ``pf-`` rows). ``_project_skill_source_service``
+        # always holds the constructed service for observability
+        # (``detail.skill_sources`` publishes ``enabled:false`` with an
+        # honest empty-roots census under OFF — A11).
+        from .services.project_skill_source.service import (
+            ProjectSkillSourceService,
+        )
+        from .repositories.project_skill_file.repository import (
+            ProjectSkillEmbeddingRepository,
+            ProjectSkillFileRepository,
+            ProjectSkillUsageRecordRepository,
+        )
+        self._project_skill_source_file_repo = ProjectSkillFileRepository(
+            self._engine
+        )
+        self._project_skill_source_embedding_repo = (
+            ProjectSkillEmbeddingRepository(self._engine)
+        )
+        self._project_skill_source_usage_repo = (
+            ProjectSkillUsageRecordRepository(self._engine)
+        )
+        self._project_skill_source_service = ProjectSkillSourceService(
+            instance_repository=self._instance_repository,
+            project_repository=self._project_repository,
+            file_repository=self._project_skill_source_file_repo,
+            embedding_repository=self._project_skill_source_embedding_repo,
+            # The evolution-lane embedding service doesn't exist yet at
+            # this point in init; bound post-cluster via
+            # ``set_embedding_service`` when the evolution config
+            # present (None stays None in the M10 shape — file skills
+            # degrade to BM25-only, A4 fail-soft).
+            embedding_service=None,
+            llm_config={},
+        )
+        # Phase-3 tool-contract attributes (``skill_tools.py`` reads
+        # these via getattr; absent ⇒ soft-fail):
+        #   * ``_project_skill_source``            — knob-gated
+        #   * ``_project_skill_file_repository``   — invalid-rows mirror
+        #   * ``_project_skill_usage_repository``  — metrics-only feedback
+        self._project_skill_file_repository = (
+            self._project_skill_source_file_repo
+        )
+        self._project_skill_usage_repository = (
+            self._project_skill_source_usage_repo
+        )
+        _pfss_enabled = bool(
+            getattr(
+                self.config, "project_skill_source", None
+            ).enabled
+            if getattr(self.config, "project_skill_source", None) is not None
+            else True
+        )
+        if _pfss_enabled:
+            self._project_skill_source = self._project_skill_source_service
+            # Boot-time EXTRA_ROOTS hygiene (task 6): log-loud on
+            # nonexistent configured paths — dev-only knob, but a
+            # silently-absent root is undiagnosable at 2am.
+            for _extra in (
+                getattr(self.config, "project_skill_source", None).extra_roots
+                or []
+            ):
+                if not os.path.isabs(_extra):
+                    logger.warning(
+                        "[ProjectSkillSource] EXTRA_ROOTS entry %r is not "
+                        "absolute — ignored (fail-closed, W-5)",
+                        _extra,
+                    )
+                elif not os.path.isdir(_extra):
+                    logger.warning(
+                        "[ProjectSkillSource] EXTRA_ROOTS entry %r does not "
+                        "exist on disk — the resolver will never bind it "
+                        "(W-5 binding still applies per-project)",
+                        _extra,
+                    )
+        else:
+            self._project_skill_source = None
+            logger.info(
+                "[ProjectSkillSource] file source DISABLED via "
+                "ENSEMBLE_PROJECT_SKILL_SOURCE_ENABLED (boot-time only, "
+                "restart required) — file_source=None on every service; "
+                "search/list/view results are byte-identical to the "
+                "pre-loader daemon; zero pf- rows expected in any skill "
+                "table."
+            )
+
         # Skill Evolution services (Phase 2 — wire through to manager facade)
         if self.config.skill_evolution is not None:
             # ``base_url_backup`` reaches the raw-SDK/embedding consumers
@@ -2269,6 +2380,13 @@ class InstanceManager:
                 # skill_bank.id to keep owner-private planner
                 # skills out of other agents' injection results.
                 skill_bank_repo=self._skill_bank_repo,
+                # A10 SITE 1 (project-skill-loader Phase 4): the file
+                # source is fused into the search corpus when the knob
+                # is ON (``_project_skill_source`` is the knob-gated
+                # Phase-3 tool-contract attribute — ``None`` under OFF
+                # keeps this service byte-identical to its pre-fusion
+                # behavior, NFR-COMPAT-1).
+                file_source=self._project_skill_source,
             )
         else:
             self._skill_embedding_service = None
@@ -2429,6 +2547,17 @@ class InstanceManager:
                 ab_test_repo=self._skill_ab_test_repo,
                 skill_repo=self._skill_repo,
             )
+            # A10 SITE 2 (project-skill-loader Phase 4): hand the file
+            # source to the injection service through the Phase-3
+            # ``set_file_source`` seam — this is what makes STEP-0
+            # (file-canon interception in ``inject_explicit_skill``)
+            # and the Phase-4 ``inject_skills`` instance threading
+            # LIVE in production wiring. Knob OFF ⇒ ``None`` ⇒ STEP-0
+            # skipped entirely (approver N8) — byte-identical DB path.
+            if self._project_skill_source is not None:
+                self._skill_injection_service.set_file_source(
+                    self._project_skill_source
+                )
 
             # Skill Evolution Phase 5: evolution service (Tier 2/3
             # analysis, evolution, CAPTURED gate, A/B resolution).
@@ -2501,6 +2630,56 @@ class InstanceManager:
             # lookups (``getattr(manager, '_skill_job_dispatcher',
             # None)``) still see ``None`` rather than ``AttributeError``.
             self._skill_job_dispatcher = None
+
+            # ── A10 SITE 3 + B1 None-safe construction ────────────────
+            # (project-skill-loader Phase 4). Knob ON + evolution
+            # absent ⇒ the M10 FILE-ONLY mode: the services are
+            # CONSTRUCTED with None-shaped deps instead of left dark
+            # (planner ruling B1 option (a)). This overrides the
+            # ``_skill_search_service = None`` the search-cluster
+            # else-branch set above — "attribute exists" was verified
+            # to mean EXISTS-AS-None at this site; the CONSTRUCTION
+            # here is the fix. ``skill_repo=None`` is the explicit
+            # file-only corpus signal; stage 2 skips (no embedding
+            # service), stage 3 skips (no config) ⇒ deterministic
+            # degraded selection with the ``degraded: "file_only"``
+            # marker (A9 pinned semantics). Knob OFF ⇒ everything
+            # stays None (M4: today's "not yet available" soft-fail).
+            if self._project_skill_source is not None:
+                self._skill_search_service = SkillSearchService(
+                    skill_repo=None,
+                    embedding_repo=None,
+                    embedding_service=None,
+                    llm_config={},
+                    config=None,
+                    skill_bank_repo=None,
+                    file_source=self._project_skill_source,
+                )
+                self._skill_injection_service = SkillInjectionService(
+                    search_service=self._skill_search_service,
+                    config=None,
+                    ab_test_repo=None,
+                    skill_repo=None,
+                )
+                self._skill_injection_service.set_file_source(
+                    self._project_skill_source
+                )
+                logger.info(
+                    "[ProjectSkillSource] M10 file-only mode ACTIVE "
+                    "(skill_evolution absent, knob ON): file-skill "
+                    "search/view/list live with BM25-only ranking "
+                    "(degraded: file_only); create/fix stay DB-gated."
+                )
+
+        # Phase-4 wiring close-out: bind the evolution-lane embedding
+        # service into the file source NOW that the cluster has run
+        # (construction was cheap/None-shaped above; the A4(vii)
+        # trigger-query embedding refresh needs it). Evolution absent ⇒
+        # stays None (fail-soft BM25-only file skills).
+        if self._skill_embedding_service is not None:
+            self._project_skill_source_service.set_embedding_service(
+                self._skill_embedding_service
+            )
 
         # ── Agent Snapshot v1 (Wave 2b — Wave 1b review NIT #6) ────────
         # Snapshot repository + services constructed ALONGSIDE the other
@@ -8818,6 +8997,75 @@ class InstanceManager:
                 "ALTER TABLE secrets_audit ADD COLUMN IF NOT EXISTS "
                 "context TEXT"
             ),
+            # ── Project skill source tables (project-skill-loader P4) ──
+            # A10 BELT-ONLY mirror for the 3 lane tables. The OPERATIVE
+            # fresh-PG artifact is the pre-``create_all`` model
+            # registration (manager init, the board-tables pattern) —
+            # these ``CREATE TABLE IF NOT EXISTS`` statements are
+            # defense-in-depth for a table-absent pre-existing-PG
+            # shape where create_all somehow skipped (belt per the
+            # two-artifact rule; brand-new tables need no ALTER
+            # mirror). Shapes mirror the Phase-1 .sql files verbatim
+            # (20261031_120000/120001/120002 — the persistent record);
+            # PG variant of the embeddings column is JSON (the
+            # JSONBType storage — plain JSON array of floats). Zero
+            # FK clauses by the frozen A1 ruling; zero body columns
+            # (P1 — manifest metadata only).
+            (
+                "CREATE TABLE IF NOT EXISTS project_skill_files ("
+                "id TEXT PRIMARY KEY, "
+                "project_id TEXT NOT NULL, "
+                "root_path TEXT NOT NULL, "
+                "namespace TEXT NOT NULL, "
+                "name TEXT NOT NULL, "
+                "address TEXT NOT NULL, "
+                "description TEXT NOT NULL DEFAULT '', "
+                "category TEXT, "
+                "body_path TEXT NOT NULL, "
+                "manifest_sha256 TEXT NOT NULL, "
+                "body_sha256 TEXT NOT NULL, "
+                "body_char_len INTEGER NOT NULL DEFAULT 0, "
+                "manifest_json TEXT, "
+                "valid BOOLEAN NOT NULL DEFAULT true, "
+                "last_error TEXT, "
+                "embedded_at TEXT, "
+                "indexed_at TEXT NOT NULL, "
+                "updated_at TEXT)"
+            ),
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_psf_root_project_ns_name ON project_skill_files (root_path, project_id, namespace, name)",
+            "CREATE INDEX IF NOT EXISTS idx_psf_project_id ON project_skill_files (project_id)",
+            "CREATE INDEX IF NOT EXISTS idx_psf_root_path ON project_skill_files (root_path)",
+            (
+                "CREATE TABLE IF NOT EXISTS project_skill_embeddings ("
+                "id TEXT PRIMARY KEY, "
+                "skill_id TEXT NOT NULL, "
+                "trigger_query TEXT NOT NULL, "
+                "embedding JSON NOT NULL, "
+                "created_at TEXT NOT NULL)"
+            ),
+            "CREATE INDEX IF NOT EXISTS idx_pse_skill_id ON project_skill_embeddings (skill_id)",
+            (
+                "CREATE TABLE IF NOT EXISTS project_skill_usage_records ("
+                "id TEXT PRIMARY KEY, "
+                "skill_id TEXT NOT NULL, "
+                "project_id TEXT NOT NULL, "
+                "instance_id TEXT NOT NULL, "
+                "agent_id TEXT NOT NULL, "
+                "task_message TEXT, "
+                "selected BOOLEAN NOT NULL DEFAULT false, "
+                "applied BOOLEAN NOT NULL DEFAULT false, "
+                "task_succeeded BOOLEAN NOT NULL DEFAULT false, "
+                "iterations INTEGER NOT NULL DEFAULT 0, "
+                "duration_seconds INTEGER NOT NULL DEFAULT 0, "
+                "fallback BOOLEAN NOT NULL DEFAULT false, "
+                "feedback_applied BOOLEAN, "
+                "feedback_note TEXT, "
+                "created_at TEXT NOT NULL)"
+            ),
+            "CREATE INDEX IF NOT EXISTS idx_psur_skill_id ON project_skill_usage_records (skill_id)",
+            "CREATE INDEX IF NOT EXISTS idx_psur_instance_id ON project_skill_usage_records (instance_id)",
+            "CREATE INDEX IF NOT EXISTS idx_psur_instance_feedback ON project_skill_usage_records (instance_id, feedback_applied)",
+            "CREATE INDEX IF NOT EXISTS idx_psur_skill_created ON project_skill_usage_records (skill_id, created_at)",
         ]
         with self._engine.begin() as conn:
             for stmt in statements:

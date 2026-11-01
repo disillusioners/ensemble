@@ -434,6 +434,19 @@ class ReadinessComposite:
     # holding observability back — it never feeds the verdict. Published
     # so the buffer is not invisible (council A1).
     mcp_buffered_transitions: Optional[int] = None
+    # ── project-skill-loader additive field (Phase 4, A11) ────────
+    # ``skill_sources`` — the file-backed project skill source's
+    # observability block (``{enabled, db_stack_present, roots:[...],
+    # shadowed_db_skills, embeddings_pending}``). ADVISORY ONLY, in the
+    # ``detail.grace``/``detail.mcp`` family: it NEVER feeds
+    # ``ready``/``reasons``/``components`` — a broken canon root is
+    # visible in ``roots[].last_error`` while the daemon stays READY
+    # (a dead skill canon must not take the readiness gate down). The
+    # block is ALWAYS published by callers that have the feature
+    # (``enabled: true|false``; empty roots = honest zero, never an
+    # absent key). ``None`` (older callers/tests) ⇒ key absent —
+    # consumers fail-closed on absence.
+    skill_sources: Optional[dict] = None
 
     @property
     def ready(self) -> bool:
@@ -580,6 +593,17 @@ class ReadinessComposite:
             payload["detail"]["mcp_buffered_transitions"] = int(
                 self.mcp_buffered_transitions
             )
+        # ── project-skill-loader additive detail key (Phase 4, A11) ──
+        # ``detail.skill_sources`` — the file-backed project skill
+        # source's census. ADVISORY ONLY (the ``detail.grace``/
+        # ``detail.mcp`` precedent at :511-535): NEVER touches
+        # ``status``/``components``/``detail.reasons`` — a broken canon
+        # root populates ``roots[].last_error`` and the daemon stays
+        # READY. Published whenever the caller passed the block
+        # (api.py ALWAYS passes it — ``enabled: true|false``; empty
+        # roots = honest zero, never an absent key).
+        if self.skill_sources is not None:
+            payload["detail"]["skill_sources"] = dict(self.skill_sources)
         return payload
 
 
@@ -1167,6 +1191,10 @@ def compute_readiness_composite(
     burst_signals: Optional[dict] = None,
     mcp_servers: Optional[dict] = None,
     mcp_buffered_transitions: Optional[int] = None,
+    # project-skill-loader Phase 4 (A10 site 6, daemon half): the
+    # ALWAYS-published advisory block; ``None`` (older callers) keeps
+    # the key absent from ``detail``.
+    skill_sources: Optional[dict] = None,
     queue_max_age_seconds_reason: Optional[str] = None,
 ) -> ReadinessComposite:
     """Assemble a composite from component outcomes.
@@ -1251,6 +1279,7 @@ def compute_readiness_composite(
         burst_signals=burst_signals,
         mcp_servers=mcp_servers,
         mcp_buffered_transitions=mcp_buffered_transitions,
+        skill_sources=skill_sources,
     )
 
 
@@ -1276,6 +1305,9 @@ _A1_COMPOSITE_FIELD_NAMES = (
     # silently drop the operator's MCP visibility).
     "mcp_servers",
     "mcp_buffered_transitions",
+    # project-skill-loader Phase 4: the skill-source census must
+    # survive the forced-degradation drill rebuild like the MCP map.
+    "skill_sources",
 )
 
 
@@ -1358,6 +1390,9 @@ async def refresh_readiness_composite(
     burst_signals: Optional[dict] = None,
     mcp_servers: Optional[dict] = None,
     mcp_buffered_transitions: Optional[int] = None,
+    # project-skill-loader Phase 4 (A10 site 6): threaded verbatim into
+    # the composite; built by api.py's ``_read_skill_sources_snapshot``.
+    skill_sources: Optional[dict] = None,
 ) -> ReadinessComposite:
     """Run one refresh cycle and return the composite.
 
@@ -1637,6 +1672,7 @@ async def refresh_readiness_composite(
         resume_hold=resume_hold,
         burst_signals=burst_signals,
         mcp_servers=mcp_servers,
+        skill_sources=skill_sources,
         # F2: the buffered-transition count MUST be forwarded here —
         # accepting it on the orchestrator and dropping it here made
         # ``detail.mcp_buffered_transitions`` DEAD on the live path
