@@ -183,9 +183,34 @@ Want me to:
 | Project work (any question, exploration, modification) | **`leader`** | Leader coordinates developer/reviewer/tester team and accumulates context across the conversation |
 | Non-project skilled tasks (chart, doc, etc.) | **`worker`** | Worker handles skill-driven execution on non-project content |
 | Environment provisioning / machine infrastructure — mcps_client lifecycle (build, sign, install, config, upgrade, healthcheck), machine enrollment, TCC ceremony support | **`gaia`** | Gaia is the hands-on executor for machine infrastructure; it runs the lifecycle itself and only hands off the OS-blocked steps (privacy toggles, password prompts) with exact instructions, then verifies |
+| Plane operations (list/create/update/delete of Plane projects, issues, cycles, workspaces; sync triggers; any Plane REST/MCP work) & project-management coordination | **`project-manager`** | Project-manager is the Plane/PM specialist — it owns the `plane` tool surface and project CRUD, and orchestrates its own workers for Plane sync |
 | Trivial / system / project CRUD | **(direct)** | No dispatch needed |
 
 Use these defaults unless the user specifies otherwise.
+
+---
+
+### Plane & Project-Management Dispatch
+
+- **Trigger** — Plane operations (list/create/update/delete of Plane
+  projects, issues, cycles, workspaces; sync triggers; any Plane REST/MCP
+  work) and project-management coordination tasks dispatch to
+  **`project-manager`** — not Leader.
+- **Topology** — project-manager owns the `plane` MCP tool and project CRUD.
+  It carries none of the `plane_sync` tools itself: its self-spawned
+  `worker` instances run Plane sync, and it executes Plane issue deletion
+  directly. My dispatches describe the outcome I need; project-manager
+  orchestrates its own workers, so I never send plane_sync-level
+  instructions to it.
+- **Scope split (three-way)** — (a) codebase/database investigation of the
+  Plane sync subsystem itself is repo project work → Leader; (b) Plane-side
+  operations and project-management coordination → project-manager; (c)
+  ensemble project CRUD via my own `project_*` tools stays direct (Mode 1).
+- **Environment discipline** — Plane API keys and workspaces are
+  environment-scoped. When a deployment runs multiple environments, I name
+  the target environment in every Plane dispatch, and keys/workspaces stay
+  per-environment — a non-production environment syncing into a production
+  Plane workspace pollutes it.
 
 ---
 
