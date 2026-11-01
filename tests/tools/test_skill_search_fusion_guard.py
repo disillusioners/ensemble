@@ -234,3 +234,27 @@ async def test_outer_a8_seam_service_level_sibling(monkeypatch):
     assert "RuntimeError: service sibling outer seam" == (
         service.file_corpus_stats().get("last_error")
     )
+
+
+# ============================================================
+# A3(a) — accessor unification (tidier fold)
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_fusion_stats_accessors_unified_and_none_tolerant():
+    """A3(a): the property DELEGATES to the method, and the single
+    tolerant ``or {}`` form lives in ONE place.
+
+    Pre-fold the two accessors had drifted — the property guarded a
+    ``None`` snapshot, the method did not, so a partially-constructed
+    service (or a test double assigning ``None``) raised on exactly one
+    of the two paths. Both must read the honest empty zero.
+    """
+    tools, service = _make_tools(file_source=None)
+    assert service.file_corpus_stats() == {}
+    assert service.last_file_corpus_stats == {}
+
+    service._last_file_corpus_stats = None  # the drifted shape
+    assert service.file_corpus_stats() == {}
+    assert service.last_file_corpus_stats == {}
