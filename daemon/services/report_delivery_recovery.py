@@ -456,6 +456,11 @@ _PARENT_TERMINAL_STATUSES: frozenset[str] = frozenset(
     }
 )
 
+# Ancestor-walk depth guard (the repository traversal-cap discipline —
+# ``_MAX_TRAVERSAL_DEPTH = 256`` at repositories/instance/repository.py)
+# — cycle/corrupt-tree defense for the RDRS chain walks.
+_ANCESTOR_WALK_DEPTH_CAP = 256
+
 
 # ── Lane 7 (Proposal B PR3) — the mission-commission reconciliation ──
 #
@@ -1738,7 +1743,8 @@ class ReportDeliveryRecoveryService:
         tree root and report whether the ROOT is terminal.
 
         Walks ``instances.parent_id`` upward (the permanent record —
-        survives revive) with a depth guard (256, the repository
+        survives revive) with a depth guard
+        (``_ANCESTOR_WALK_DEPTH_CAP``, the repository
         traversal-cap discipline). The recipient row itself is
         skipped (the caller already knows it is terminal — the ORPHAN
         lane premise); the verdict concerns the ROOT only:
@@ -1761,7 +1767,7 @@ class ReportDeliveryRecoveryService:
             visited: set[str] = set()
             while current_id is not None and current_id not in visited:
                 visited.add(current_id)
-                if len(visited) > 256:
+                if len(visited) > _ANCESTOR_WALK_DEPTH_CAP:
                     # Depth guard (the repository traversal-cap
                     # discipline) — cycle/corrupt-tree defense.
                     return (False, None)
@@ -1902,7 +1908,8 @@ class ReportDeliveryRecoveryService:
 
         Returns ``(classification, context)``; ``None`` classification
         (context carries the reason) means the walk could not
-        classify (missing row mid-chain / depth cap) — the caller
+        classify (missing row mid-chain / depth cap
+        ``_ANCESTOR_WALK_DEPTH_CAP``) — the caller
         counts a probe error. Raises are NOT caught here (the lane's
         per-row guard owns them).
         """
@@ -1917,13 +1924,13 @@ class ReportDeliveryRecoveryService:
         while current_id is not None and current_id not in visited:
             visited.add(current_id)
             chain_depth += 1
-            if len(visited) > 256:
+            if len(visited) > _ANCESTOR_WALK_DEPTH_CAP:
                 return (None, {"reason": "depth_cap"})
             ancestor = self._instance_repo.get(current_id)
             if ancestor is None:
                 return (None, {"reason": "chain_broken"})
             status = ancestor.status
-            if status == "waiting_children":
+            if status == InstanceStatus.WAITING_CHILDREN.value:
                 # WC chain member — keep walking toward the authority.
                 if ancestor.parent_id is None:
                     # A WC ROOT — the strand healer's territory.

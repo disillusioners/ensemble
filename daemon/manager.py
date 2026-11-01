@@ -13247,10 +13247,9 @@ class InstanceManager:
             return 0
         cap = self.LIVE_DESCENDANTS_BFS_CAP
         subtree_ids = tree_ids[:cap]
-        return self._report_injection_repo \
-            .count_outstanding_for_subtree(
-                subtree_ids, exclude_child_id=instance_id
-            )
+        return self._report_injection_repo.count_outstanding_for_subtree(
+            subtree_ids, exclude_child_id=instance_id
+        )
 
     def has_open_user_answer(self, instance_id: str) -> bool:
         """Does this instance have an OPEN awaiting-answer suspension
