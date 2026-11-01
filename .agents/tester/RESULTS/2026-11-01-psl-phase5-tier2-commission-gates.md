@@ -97,6 +97,26 @@ One session, 5 SELECTs, `transaction_read_only=on` proven in-session, `--single-
 
 **Gate input: STOP — fusion ON / shadowing gated re-adjudication required before staging (A18.4).** The live DB was NOT mutated.
 
+### §6a Adjudication support audit (2026-11-01, read-only SELECT lane `be23c351`; same authorization frame)
+
+Follow-up audit for the adjudicator. Same session discipline (one session, `transaction_read_only=on` proven twice, 7 SELECTs, porcelain untouched).
+
+**The two "foreign" rows are NOT foreign skills and NOT delete+re-create duplicates — they are the SAME skill's A/B-evolution lineage:**
+
+| id | gen | lineage_origin | status / is_active | ab_test_group | created_at |
+|---|---|---|---|---|---|
+| `978ae5cc-…` | 0 | imported | **inactive / false** | `b9422dc3-…` (older group) | 2026-10-21 15:18:08 |
+| `08a4332f-…` | 1 | evolved | **ab_testing / true** | `2600329e-…` | 2026-10-21 17:45:48 |
+| `fd1e01dc-…` (canon-known) | 2 | evolved | **ab_testing / true** | `2600329e-…` (shared) | 2026-10-22 15:58:20 |
+
+All three: same name, same `project_id` (agents-ensemble), identical description, identical 500-char content head. Generations strictly ascend with created_at; `fd1e01dc.created_at` precedes `08a4332f.updated_at` by **0.110 s** — the documented evolution FIX signature (gen+1 created + predecessor flipped to `ab_testing`, staying active).
+
+**Census-break mechanism identified:** gen-1 (`08a4332f`) and gen-2 (`fd1e01dc`) were **never A/B-resolved** — both remain `status=ab_testing, is_active=true` in shared group `2600329e-…`, so two ACTIVE rows share the name. Same-name precedence in the loader would shadow *an ambiguous member of the pair*. Gen-0 (`978ae5cc`) is already inactive.
+
+**Complete same-name inventory:** `regression-ab-partition-run`=3 (the lineage above) · every other canon name = exactly 1 (gen-0 imported, active) · **`blast-radius-leg` = 0 live rows** (the canon file skill has no DB copy — consistent with the file-canon-is-authoritative state while the evolution lane is disabled).
+
+**Not provable in authorized scope:** direct parent linkage (`skill_lineage` table, unqueried) and content differences beyond char 500 (heads identical). Adjudication options the facts support: (a) resolve the A/B pair (deactivate gen-1 — note the evolution lane is currently disabled/paused, so resolution is a manual/user action); (b) amend the A18.4 census rule to lineage-aware semantics (count the resolved/latest active row per lineage, not exact-id sets); (c) keep shadowing gated as the rule already contemplates. Decision: NOT the tester's.
+
 ---
 
 ## 7. Net-new defect + authorized quick-fix — LANDED
