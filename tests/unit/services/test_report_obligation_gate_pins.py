@@ -350,17 +350,22 @@ class TestD1ObligationReadErrorFailClosed:
         assert result.report_obligation_read_error is True
         assert result.should_inject_nudge
 
-    def test_evaluate_isolation_garbage_return_denies(self):
-        """A non-int (garbage) facade return reads as unknown → error
-        flag → DENY (unknown ≠ quiet)."""
+    def test_evaluate_isolation_garbage_return_reads_inactive(self):
+        """A non-int (garbage / test-double Mock) facade return reads
+        INACTIVE per the FIX-2 duck-typing discipline (a mocked facade
+        can never fake a deny input — the same guard as the
+        commissions arm): the legacy deny path stays reachable, no
+        error flag. Only a genuine RAISE arms the D1 fail-closed flag
+        (see the raising test above)."""
         m = make_manager()
         m.count_outstanding_report_obligations = MagicMock(
             return_value="not-a-count"
         )
         msgs = [real("run the mission"), delegating_ai(), plain_ai()]
-        result = evaluate("inst-d1-garbage", 0, msgs, ENFORCE, m)
-        assert result.decision is Decision.DENIED
-        assert result.report_obligation_read_error is True
+        result = evaluate("inst-garbage", 0, msgs, ENFORCE, m)
+        assert result.decision is Decision.DENIED  # legacy deny path
+        assert result.report_obligation_read_error is False
+        assert result.outstanding_report_obligations == 0
 
     def test_evaluate_missing_facade_reads_inactive_legacy(self):
         """Duck-typing guard: a manager WITHOUT the facade (legacy /

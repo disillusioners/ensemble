@@ -1634,13 +1634,18 @@ def evaluate(
             # fail-open DB-seam catch below (which would plain-allow
             # and discard every other input), and NO ``-1`` sentinel
             # is constructed (which would ride the per-input
-            # fail-open short-circuit). A failure sets the
+            # fail-open short-circuit). A RAISE sets the
             # ``report_obligation_read_error`` flag → decide() step
-            # (2b) converts it to a bound-composed DENY. Duck-typing
-            # guard mirrors the sibling reads: a MISSING facade reads
-            # INACTIVE (``0`` — test doubles / legacy managers keep
-            # the legacy predicate); a garbage non-int / negative
-            # return reads as an ERROR (unknown ≠ quiet).
+            # (2b) converts it to a bound-composed DENY.
+            # Duck-typing guard (the FIX-2 discipline, mirroring the
+            # commissions arm): a MISSING facade reads INACTIVE
+            # (``0`` — test doubles / legacy managers keep the legacy
+            # predicate); a NON-INT return (a test-double Mock or a
+            # broken facade contract) ALSO reads INACTIVE — a mocked
+            # facade can never fake a deny input, exactly like
+            # ``user_answer_pending``'s ``is True`` guard. Only a
+            # genuine RAISE (the real facade's query failure) arms
+            # the D1 fail-closed flag.
             outstanding_report_obligations = 0
             report_obligation_read_error = False
             _obligation_reader = getattr(
@@ -1657,8 +1662,8 @@ def evaluate(
                         and _obligation_value >= 0
                     ):
                         outstanding_report_obligations = _obligation_value
-                    else:
-                        report_obligation_read_error = True
+                    # else: non-int / negative garbage — INACTIVE (the
+                    # FIX-2 duck-typing discipline above).
         except Exception as db_exc:  # noqa: BLE001 — fail-open at the DB seam (whole-eval C-read failure ⇒ plain allow; the predicate's §4.2 C-read branch mirrors this)
             error_class = type(db_exc).__name__
             logger.error(

@@ -2803,8 +2803,16 @@ Provide a concise summary:"""
             # once re-drive (each completed message re-invokes this
             # gate), so a persistent error degrades via the in-turn
             # deny bound — never a silent verify-clean.
+            # Duck-typing guard (the FIX-2 discipline, identical to the
+            # in-turn read): a non-int return (a test-double Mock or a
+            # broken facade contract) reads INACTIVE (0) — a mocked
+            # facade can never fake a hold; only a genuine RAISE (the
+            # real facade's query failure) arms the D1 fail-closed
+            # hold below. The isinstance check happens BEFORE the
+            # ``> 0`` comparison (a Mock comparison raises TypeError,
+            # which would masquerade as a query error).
             try:
-                _obligation_count = (
+                _obligation_value = (
                     self._manager.count_outstanding_report_obligations(
                         instance_id
                     )
@@ -2823,6 +2831,10 @@ Provide a concise summary:"""
                     "outstanding_report_obligations=unknown(read_error)",
                     False,
                 )
+            if isinstance(_obligation_value, int) and _obligation_value >= 0:
+                _obligation_count = _obligation_value
+            else:
+                _obligation_count = 0
             if _obligation_count > 0:
                 return (
                     False,

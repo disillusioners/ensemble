@@ -485,6 +485,31 @@ class TestEmissionGateLeg6:
         assert reason == "outstanding_report_obligations=unknown(read_error)"
 
     @pytest.mark.asyncio
+    async def test_mock_facade_return_reads_inactive_fix2(self, engine):
+        """FIX-2 duck-typing at the emission leg: a non-int return (a
+        MagicMock manager's auto-facade) reads INACTIVE (0) — the gate
+        proceeds on a quiet tree; the comparison never sees the Mock
+        (a Mock ``> 0`` raises TypeError, which must not masquerade as
+        a D1 query error)."""
+        insert_instance(
+            engine, ROOT, status=InstanceStatus.COMPLETED.value
+        )
+        insert_instance(
+            engine, CHILD, status=InstanceStatus.COMPLETED.value,
+            parent_id=ROOT,
+        )
+        service = make_gate_service(engine)
+        # A bare MagicMock facade (test-double manager shape).
+        service._manager.count_outstanding_report_obligations = MagicMock(
+            return_value=MagicMock()
+        )
+        allowed, reason, _ = await service._root_completion_gate(
+            None, ROOT
+        )
+        assert allowed is True
+        assert reason is None
+
+    @pytest.mark.asyncio
     async def test_pin_e_minted_dormant_child_blocks_via_tree_liveness(
         self, engine,
     ):

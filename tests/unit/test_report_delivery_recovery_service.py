@@ -325,6 +325,9 @@ class TestSweepServiceShape:
             # reconciliation): must be disabled too for the
             # empty-lane-dict assertion.
             lane_mission_reconciliation=False,
+            # wi-1fbee2ec part 4 — the WC-orphan detector lane: must
+            # be disabled too for the empty-lane-dict assertion.
+            lane_wc_orphan_detector=False,
         )
         result = svc.recover_now()
         assert result.lanes == {}
