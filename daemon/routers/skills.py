@@ -88,6 +88,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from daemon.services.skill_job_dispatcher import SkillJobDispatcher
+from daemon.services.project_skill_source.model import ADDRESS_PREFIX
 from daemon.services.skill_store_service import SkillStoreService
 from daemon.services.skill_search_service import SkillSearchService
 from daemon.services.skill_metrics_service import SkillMetricsService
@@ -1364,6 +1365,28 @@ async def post_fix(
         HTTPException: 400 on ``ValueError``; 503 when the lane is
         gated off (``job_id is None``); 500 on unexpected failure.
     """
+    # A14 (architect, MUST, 2026-10-31 — P7 hole): ``pf:`` addresses
+    # are REFUSED before any dispatch. This endpoint dispatches with
+    # NO existence check, so without this guard a ``pf:`` id would be
+    # admitted as a fix job whenever the lane is enabled — running
+    # evolution machinery against a file skill, exactly what P7
+    # forbids. Mirrors the ``skill_fix`` tool refusal.
+    #
+    # A4 (tidier fold): refusal keys on the PREFIX, not on
+    # ``is_pf_address`` parseability — a malformed ``pf:foo`` / ``pf:``
+    # is still a file-skill-shaped id and must never be dispatched as
+    # a DB id. The tool path now uses this exact predicate.
+    if isinstance(skill_id, str) and skill_id.startswith(ADDRESS_PREFIX):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": (
+                    "File-backed skills evolve via git PRs against "
+                    "`.agents/<ns>/skills/` — skill_fix does not apply "
+                    "to `pf:` addresses (P7)."
+                )
+            },
+        )
     try:
         job_id = await dispatcher.dispatch_fix(
             project_id=project_id,

@@ -55,7 +55,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request, APIRouter
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from typing import AsyncGenerator, Optional, TYPE_CHECKING
+from typing import Any, AsyncGenerator, Optional, TYPE_CHECKING
 from pathlib import Path
 
 if TYPE_CHECKING:  # annotation-only: avoids a runtime import cycle with daemon.manager
@@ -4175,6 +4175,118 @@ def _read_mcp_buffered_count() -> Optional[int]:
         return None
 
 
+def _read_skill_sources_snapshot(manager: "InstanceManager") -> dict[str, Any]:
+    """The file-backed project skill source census (readiness ``detail.skill_sources``).
+
+    project-skill-loader Phase 4 (A11 — the block publishes ALWAYS).
+    Built per readiness tick from three in-memory reads — the config
+    knob (``enabled``), the file source's ``snapshot_status()``
+    (``roots[]`` census + ``embeddings_pending``), and the search
+    service's last-writer-wins fusion stats (``shadowed_db_skills`` +
+    overflow names). ZERO filesystem reads here: the census reports
+    what the lazy index already knows; an untouched project reads as
+    an honest empty-roots zero.
+
+    ADVISORY ONLY (the ``detail.grace``/``detail.mcp`` family): never
+    feeds a readiness component; a broken canon root populates
+    ``roots[].last_error`` while the daemon stays READY.
+
+    A2 (tidier fold — READINESS HONESTY): the config read is hoisted
+    ABOVE the builder ``try`` so ``enabled`` survives a builder
+    failure. When the builder DOES fail the block reports the TRUE
+    knob value plus ``degraded: True`` and a STABLE
+    ``degraded_reason`` token (the exception CLASS name — never
+    ``str(exc)``, which is provider text and can carry paths or
+    payload fragments). Reporting ``enabled: False`` on a builder
+    crash told an operator the feature was off when it was on.
+
+    Returns the block dict — callers on this build ALWAYS get one
+    (``enabled: true|false``); the exception path also returns an
+    honest census (never ``None``), because A11 requires the key
+    present whenever this builder runs.
+    """
+    enabled = False
+    try:
+        cfg = getattr(getattr(manager, "config", None), "project_skill_source", None)
+        enabled = bool(cfg.enabled) if cfg is not None else False
+    except Exception as exc:  # noqa: BLE001 — advisory only
+        # Config shape unreadable: the knob value is unknown, so the
+        # honest reading is the conservative False (the pre-existing
+        # behavior) — flagged as degraded by the caller path below.
+        # Low-6: realistic trigger is the ``cfg.enabled`` property
+        # RAISING (config object present, its knob accessor broken) —
+        # not merely a missing ``project_skill_source`` attribute.
+        logger.debug(
+            "[Readiness] skill-source config unreadable: %s: %s",
+            type(exc).__name__, exc,
+        )
+        enabled = False
+    try:
+        service = getattr(manager, "_project_skill_source_service", None)
+        search = getattr(manager, "_skill_search_service", None)
+
+        roots: list[dict] = []
+        embeddings_pending = 0
+        if service is not None:
+            status = service.snapshot_status() or {}
+            roots = list(status.get("roots") or [])
+            embeddings_pending = int(status.get("embeddings_pending") or 0)
+
+        shadowed_db_skills: list[str] = []
+        overflow_dropped: list[str] = []
+        if search is not None:
+            stats = search.last_file_corpus_stats or {}
+            shadowed_db_skills = [
+                str(i) for i in (stats.get("shadowed_db_ids") or [])
+            ]
+            overflow_dropped = [
+                str(n)
+                for n in (stats.get("budget_dropped_names") or [])
+            ]
+
+        return {
+            "enabled": enabled,
+            "db_stack_present": bool(
+                getattr(search, "has_db_corpus", False)
+            ),
+            "roots": roots,
+            "shadowed_db_skills": shadowed_db_skills,
+            # S5: ordinary overflow (non-shadowing file skills beyond
+            # the A7 budget) named separately from shadowing — an
+            # operator seeing a name here knows the shadowing
+            # replacements are all still present (shadowing names are
+            # budget-EXEMPT).
+            "overflow_dropped": overflow_dropped,
+            "embeddings_pending": embeddings_pending,
+        }
+    except Exception as exc:  # noqa: BLE001 — advisory only
+        logger.debug(
+            "[Readiness] skill-sources snapshot unavailable: %s: %s",
+            type(exc).__name__, exc,
+        )
+        # A11 — the block publishes ALWAYS: a manager shape this
+        # builder cannot read still gets an honest census, never an
+        # absent key (the None-tolerance contract for older callers is
+        # exercised ONLY by passing skill_sources=None explicitly,
+        # which this helper never does).
+        #
+        # A2 — HONESTY on the failure path: ``enabled`` is the TRUE
+        # hoisted knob value (not a hardcoded False), and the failure
+        # itself is surfaced as a stable token. ``degraded_reason`` is
+        # the exception CLASS name — never ``str(exc)`` (provider text
+        # can smuggle paths/payload into an operator-visible payload).
+        return {
+            "enabled": enabled,
+            "degraded": True,
+            "degraded_reason": type(exc).__name__,
+            "db_stack_present": False,
+            "roots": [],
+            "shadowed_db_skills": [],
+            "overflow_dropped": [],
+            "embeddings_pending": 0,
+        }
+
+
 def _read_mcp_snapshot() -> Optional[dict]:
     """The per-built-in MCP server health map (readiness ``detail.mcp``).
 
@@ -4323,6 +4435,11 @@ async def _periodic_readiness_refresh_loop(
                 # take the readiness gate down with it).
                 mcp_servers=_read_mcp_snapshot(),
                 mcp_buffered_transitions=_read_mcp_buffered_count(),
+                # A10 SITE 6 (project-skill-loader Phase 4): the
+                # ALWAYS-published skill-source census. Readiness
+                # pulls per tick; first tick lands after the manager
+                # is built (no lifespan hazard).
+                skill_sources=_read_skill_sources_snapshot(manager),
             )
             # Drill knob (deferred tester probe P7): read PER TICK from
             # the environment so flipping it between ticks of an

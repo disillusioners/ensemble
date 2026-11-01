@@ -1,5 +1,18 @@
 # Base-vs-Head FAILED-Digest Equality Gate (project canon)
 
+> **v1.0.2 (2026-10-31)** — FORM-TAG fold (R3 rider, project-skill-loader Phase-4 gate
+> finding F5): every recorded digest carries its FORM — `BARE-ID` (sorted node ids,
+> prefix stripped; this skill's native form) or `GREP-FULL` (raw `grep -E
+> '^(FAILED|ERROR)'` including non-summary LOG lines). The Phase-3 gate measured a naive
+> grep adding 5 LOG lines to the 29-id report-deferred block (digest `2fad8e8a…` matches
+> in BARE-ID form ONLY) — a cross-form comparison false-mismatches. Record `(form, sha)`
+> pairs, never a bare sha.
+
+> **v1.0.1 (2026-10-31)** — GAP-2 fold: digest capture greps `^(FAILED|ERROR)`; the
+> pre-v1.0.1 `^FAILED ` grep silently dropped collection/setup ERROR lines (an additive
+> lane could look digest-clean while BASE was erroring). Doctrine maintenance driven by
+> the first real gate run (project-skill-loader Phase-1, Tier-1).
+
 Proves a candidate tree introduces **zero net-new test failures** vs a true pre-fix base, by running the identical suite on both legs and comparing the sorted FAILED node-id digests.
 
 > Canonical in-repo version. Supersedes dynamic-skill `76e3e1a7-1a5a-4228-957f-f8e556e04213` (DB copy retained for searchability; SUPERSEDED preamble requested via `skill_fix`, pending evolution-lane enablement — not yet applied; canonized 2026-10-31, commission tiered-gate-doctrine). Serves BOTH tiers — on Tier-1 (blast-radius) legs the identical discipline applies over the DECLARED set from `.agents/tester/skills/blast-radius-leg/`.
@@ -29,9 +42,13 @@ timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST \
   .venv/bin/pytest <SUITE> -q --tb=short -p no:randomly -n 8 > base.out 2>&1
 # ...then the same in <HEAD_WT> -> head.out
 
-# 4. Digest the SORTED FAILED node-id list.
-grep -E '^FAILED ' base.out | sort | sed 's/^FAILED //' > base.nodeids.txt
-grep -E '^FAILED ' head.out | sort | sed 's/^FAILED //' > head.nodeids.txt
+# 4. Digest the SORTED failing-node-id list.
+#    GAP-2 (v1.0.1): capture BOTH prefixes. A bare '^FAILED ' grep silently
+#    drops every ERROR line (collection/setup errors), so an additive lane —
+#    whose new files are ABSENT at BASE and therefore ERROR there — can look
+#    digest-clean while BASE was erroring.
+grep -E '^(FAILED|ERROR)' base.out | sort | sed -E 's/^(FAILED|ERROR) //' > base.nodeids.txt
+grep -E '^(FAILED|ERROR)' head.out | sort | sed -E 's/^(FAILED|ERROR) //' > head.nodeids.txt
 sha256sum base.nodeids.txt head.nodeids.txt
 
 # 5. Verify BOTH ways: cmp AND comm in both directions.
@@ -59,7 +76,14 @@ git -C /home/nea/ensemble-src worktree list | grep -c <slug>   # expect 0
 
 ## Digest form — the trap
 
-**Canonical form: the sorted node-id list with the `FAILED ` prefix STRIPPED** (one per line, trailing newline). The raw `grep '^FAILED '` output is a DIFFERENT digest for the same run.
+**Canonical form: the sorted node-id list with the `FAILED `/`ERROR ` prefix STRIPPED** (one per line, trailing newline). The raw `grep '^(FAILED|ERROR)'` output is a DIFFERENT digest for the same run.
+
+**GAP-2 (v1.0.1) — the ERROR blind spot.** The pre-v1.0.1 procedure grepped `'^FAILED '`.
+`pytest -q` reports collection/setup failures as `ERROR <node id>`, so those lines were
+silently omitted from BOTH digests: a lane whose new test files do not exist at BASE (the
+normal ADDITIVE shape) errors at BASE and can look digest-clean. Always capture
+`grep -E '^(FAILED|ERROR)'`, and explain every `ERROR` id rather than only the `FAILED` ones.
+A `FAILED`-only digest may still be REPORTED alongside, labelled as such.
 
 Always label which form a digest uses. Cross-gate comparisons are only valid within one form — comparing a raw-FAILED-lines digest against a nodeids-only digest fakes an "environment shifted" conclusion. Within-run base-vs-head equality holds under either form.
 

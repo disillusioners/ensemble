@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING
 
 from langchain_core.tools import tool
 
+from daemon.services.project_skill_source.model import is_pf_address
 from daemon.services.skill_job_dispatcher import (
     SKILL_CAPTURE_KILL_SWITCH_ENV,
     _resolve_capture_enabled,
@@ -71,6 +72,21 @@ manage skill A/B tests. These tools are NOT for regular agents.
 - skill_get_metrics — Metrics retrieval wrapper.
 - skill_execute_capture — CAPTURED flow wrapper.
 """
+
+#: A14 (architect, MUST, 2026-10-31 — P7 hole closure): one-line
+#: refusal for every id-accepting evolution surface handed a ``pf:``
+#: address. The skill-keeper lane is currently OFF, but on
+#: re-enable these tools would run evolution machinery against file
+#: skills — exactly what P7 forbids. Mirrors the ``skill_fix`` tool
+#: refusal (``daemon/tools/skill_tools.py``).
+PF_REFUSAL_TEMPLATE = (
+    "File-backed skills evolve via git PRs against `.agents/<ns>/skills/` — "
+    "{action} does not apply to `pf:` addresses (P7)."
+)
+
+
+def _pf_refusal(action: str) -> str:
+    return f"⛔ {PF_REFUSAL_TEMPLATE.format(action=action)}"
 
 
 async def _invoke_service(manager, service_name, method_name, *args, **kwargs):
@@ -170,6 +186,9 @@ def create_skill_evolution_tools(
         feedback) to decide whether the skill should evolve, and if so
         in what direction.
         """
+        # A14 (P7): file-backed skills never enter evolution machinery.
+        if is_pf_address(skill_id or ""):
+            return _pf_refusal("skill_analyze")
         return await _invoke_service(
             manager,
             "_skill_evolution_service",
@@ -220,6 +239,9 @@ stub message instead of raising.
         wraps ``direction`` + the skill into a task-details dict and
         runs the capture flow.
         """
+        # A14 (P7): file-backed skills never enter evolution machinery.
+        if is_pf_address(skill_id or ""):
+            return _pf_refusal("skill_evolve")
         return await _invoke_service(
             manager,
             "_skill_evolution_service",
@@ -330,6 +352,9 @@ metrics snapshot, decision timestamp).
         count, and any open A/B test cohort — a single convenience
         round-trip for the metrics / admin UI.
         """
+        # A14 (P7): file-backed skills never enter evolution machinery.
+        if is_pf_address(skill_id or ""):
+            return _pf_refusal("skill_get_metrics")
         return await _invoke_service(
             manager,
             "_skill_evolution_service",

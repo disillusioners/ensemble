@@ -4382,6 +4382,75 @@ class EmbeddingConfig(BaseSettings):
         return values
 
 
+class ProjectSkillSourceConfig(BaseSettings):
+    """File-backed project skill source (project-skill-loader Phase 4).
+
+    Two knobs, both BOOT-TIME only (restart-required — no hot switch in
+    v1; the services are constructed once during manager init):
+
+    * ``ENSEMBLE_PROJECT_SKILL_SOURCE_ENABLED`` — the kill-switch.
+      Default **ON** per the corrected two-class rule (architect A18 +
+      leader ruling, 2026-10-31): the house kill-switch family is MIXED
+      — evolution lane default-OFF (``SkillEvolutionConfig.evolution_lane_enabled``,
+      incident-driven), notify-user ON (``NotifyUserConfig.enabled``),
+      hard-reboot boot-pass ON (``message_queue_boot_recovery.py``) —
+      and the governing rule is **ON for zero-user-action read/serve
+      surfaces, OFF for agent-authored mutation lanes**. The file source
+      is a read/serve surface (search/list/view read repo files the
+      daemon already owns; create/fix stay DB-gated), so it lands in
+      the ON class. Projects without an ``.agents/*/skills/`` canon
+      contribute nothing (inert-absent).
+    * ``ENSEMBLE_PROJECT_SKILL_SOURCE_EXTRA_ROOTS`` — comma-separated
+      ABSOLUTE roots (dev/testing only, default empty). Every entry is
+      still bound through the W-5 resolver rule (a root is accepted
+      only when it binds to the caller's resolved project; non-binding
+      entries are ignored with a WARNING — fail-closed), so this can
+      never widen scope, only surface a second canon directory for the
+      SAME project (e.g. a dev worktree root). Documented
+      non-production: operators should not point this at foreign trees.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="ENSEMBLE_PROJECT_SKILL_SOURCE_")
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Kill-switch for the file-backed project skill source "
+            "(boot-time only, restart-required). Default ON (A18 "
+            "two-class rule: read/serve surface). OFF ⇒ "
+            "file_source=None on every service (byte-identical "
+            "search/list/view results) and zero `pf-` rows in any "
+            "skill table. Env: ENSEMBLE_PROJECT_SKILL_SOURCE_ENABLED."
+        ),
+    )
+    # The NoDecode annotation prevents pydantic-settings from
+    # auto-JSON-decoding the env string; the validator below parses
+    # comma-separated (or JSON-list) values — the shared house CSV
+    # idiom (see LLMConfig.reasoning_echo_disabled_models).
+    extra_roots: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        description=(
+            "Comma-separated ABSOLUTE extra canon roots (dev/testing "
+            "only; default empty). Each entry is W-5-bound to the "
+            "caller's resolved project at resolve time — non-binding "
+            "entries are ignored with a WARNING (fail-closed). "
+            "Env: ENSEMBLE_PROJECT_SKILL_SOURCE_EXTRA_ROOTS."
+        ),
+    )
+
+    @field_validator("extra_roots", mode="before")
+    @classmethod
+    def _parse_extra_roots(cls, value: Any) -> Any:
+        """Parse the CSV/JSON env form into ``list[str]``.
+
+        Delegates to ``_parse_csv_or_json_list`` for the shared parsing
+        logic. The ``NoDecode`` annotation prevents pydantic-settings
+        from JSON-decoding the raw env string before the validator
+        sees it.
+        """
+        return _parse_csv_or_json_list(value)
+
+
 class SkillEvolutionConfig(EmbeddingConfig):
     """Configuration for the skill evolution system."""
 
@@ -5086,6 +5155,17 @@ class Config(BaseSettings):
     mcp_pool: McpPoolConfig = Field(default_factory=McpPoolConfig)
     live_views: LiveViewsConfig = Field(default_factory=LiveViewsConfig)
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig)
+    # project-skill-loader (2026-10-31 Phase 4): the file-backed project
+    # skill source knob section (env prefix
+    # ENSEMBLE_PROJECT_SKILL_SOURCE_). Peers with ``skill_evolution:``
+    # — deliberately a SEPARATE section: the file source is ON-class
+    # (A18) and must stay live when the evolution lane is OFF
+    # (D-Q8b: gating file skills behind evolution would defeat the
+    # commission's purpose — the file canon is the only authoritative
+    # copy of the gate recipes while the evolution lane is disabled).
+    project_skill_source: ProjectSkillSourceConfig = Field(
+        default_factory=ProjectSkillSourceConfig
+    )
     loop_breaker: LoopBreakerConfig = Field(default_factory=LoopBreakerConfig)
     long_tool_nudge: LongToolCallNudgeConfig = Field(default_factory=LongToolCallNudgeConfig)
     report_repair: ReportRepairConfig = Field(default_factory=ReportRepairConfig)

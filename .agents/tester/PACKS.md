@@ -1,5 +1,118 @@
 # Test Packs
 
+## Commission project-skill-loader — Phase-1/Phase-2 packs REGISTERED (2026-10-31) — 🟢 registration closes the Tier-1-gate PACKS gap
+
+> **Why this block exists.** The Phase-1 Tier-1 gate found the 8 new lane files reachable from **no
+> registered pack** (`RESULTS/2026-10-31-project-skill-loader-tier1-blast-radius-gate.md` §9 🟠 "PACKS.md
+> registration gap"): the pins were excellent but nothing routine ran them — they only executed when
+> someone named the files. Per `rules/ensure.md` § How to use this file ("Pack-mapped: requirements
+> reference packs in PACKS.md"), each pack below is a runnable invocation with its own timeout.
+> **The four Phase-2 packs are registered in the same block** (same gap class; the Phase-2 gate would
+> otherwise inherit it) — disclosed as a rider extension.
+>
+> Fences for every invocation: worktree-local `.venv/bin/python` (never the main checkout's), explicit
+> per-variable `env -u POSTGRES_*` scrubs (the glob form is a SILENT NO-OP), `-p no:randomly`,
+> `timeout 300`. PG packs additionally need `PG_TEST_DB`/`PG_TEST_USER`/`PG_TEST_PASSWORD`
+> (scratch role+DB owned by a non-live role, `PG_TEST_ALLOWED_DBS=<name>`) and
+> `--override-ini="addopts=" -m postgres` (the default addopts deselect the marker ⇒ vacuous green);
+> serial only.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `project_skill_source_unit` (P1) | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL .venv/bin/python -m pytest tests/unit/test_project_skill_source_model.py tests/unit/test_project_skill_source_manifest.py tests/unit/test_project_skill_source_resolver.py tests/unit/test_project_skill_source_embedding.py tests/unit/test_project_skill_source_index.py tests/unit/test_project_skill_source_migrations.py -q --tb=short -p no:randomly` | Phase-1 data layer: P1 body sentinel, A5 validation matrix (absolute/`../`/symlink-swap), A12 discovery legs, resolver rungs + A6 confirm-only refusal, A4 i-vii index/stat-gate/digest-stability, caps (128 dirs / 16 KB manifest / 64 KB body), idempotency + concurrent coalescing, CRUD round-trip, migration registry (no duplicate prefix, `.sql` == models). Shared fixtures: `tests/helpers/project_skill_source_fixtures.py` (canon builders + fake repos + fake embedding service; the helper-trio convention — registered as THE fixture module for this family). | 2026-10-31 | ✅ **126/126 PASS** (12/48/18/7/32/9 per file — index file 29→32 with the W1 corpus/lookup project-binding pins + the W6 body-file-symlink pin, fix-cycle 2026-11-01; Phase-1 gate HEAD leg 396 nodes incl. D2) |
+| `project_skill_source_pg` (P1) | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL PG_TEST_DB=<scratch> PG_TEST_USER=<role> PG_TEST_PASSWORD=<pw> PG_TEST_ALLOWED_DBS=<scratch> .venv/bin/python -m pytest tests/postgres/test_project_skill_source_pg.py --override-ini="addopts=" -m postgres -q --tb=short -p no:randomly` | Real-PG half of Phase 1: `.sql` CREATE TABLE vs `information_schema` column-for-column (two-artifact rule); full index → invalidation → re-index cycle; `embedded_at`/`last_error`/`valid` transitions; **A1 FK-wall pin** (`pf-` insert into legacy `skill_embeddings` must violate the FK — documents WHY the dedicated no-FK table exists); dedicated-table path GREEN; A3 two-roots identity; gc sweep. | 2026-10-31 | ✅ **12/12 PASS** (12.7 s, PG16.15, throwaway DB) |
+| `skill_search_fusion_unit` (P2) | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL .venv/bin/python -m pytest tests/services/test_skill_search_fusion.py -q --tb=short -p no:randomly` | Phase-2 fusion: NFR-COMPAT-1 (`file_source=None` byte-identical shape), source tagging + additive-key tolerance, shadow e2e (file twin retires DB twin, stage-3 resolves the shadowed name to the FILE object, the 3 legacy ids retired), **A7 pre-budget shadow** (>50 file skills incl. one DB twin, twin ordered LAST), budget counter, combined caps + no-padding, no-context invisibility, **cross-project leak** (4 shapes incl. conflicting caller `project_id`, with positive control), defensive post-stage-3 dedupe, degraded parity (embeddings-down + LLM-failure), A8 seam guard (service level). | 2026-10-31 | ✅ **22/22 PASS**; mutation legs P2-M1..P2-M4 RED→GREEN |
+| `skill_search_fusion_guard_tool` (P2) | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL .venv/bin/python -m pytest tests/tools/test_skill_search_fusion_guard.py -q --tb=short -p no:randomly` | **A8 at the TOOL RESULT SURFACE** (architect A8 / approver N9): a file source raising at the seam (`resolve` mode = M3, `corpus` mode = M8) must never let `"ERROR: skill_search failed"` reach the agent — DB results returned as JSON. `skill_tools.py` deliberately unmodified; the pin asserts on the returned string. | 2026-10-31 | ✅ **2/2 PASS** (mutation P2-M2 RED at the surface) |
+| `skills_rest_invisibility` (P2) | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL .venv/bin/python -m pytest tests/unit/routers/test_skills_search_invisibility.py -q --tb=short -p no:randomly` | REST task 10 (architect A6 + leader ruling D1): `POST /api/skills/search` with an arbitrary caller `project_id` ⇒ zero file entries + `refused=True` observable; router forwards NO `instance_id` (structural pin); paired POSITIVE CONTROL that the same fixture DOES yield file skills on the instance lane (anti-vacuous); `_LIST_SKILL_FIELDS` allowlist excludes `source`/`address`/`shadows`/`content` (REST list stays DB-only, S2). | 2026-10-31 | ✅ **5/5 PASS** |
+| `project_skill_fusion_pg` (P2) | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL PG_TEST_DB=<scratch> PG_TEST_USER=<role> PG_TEST_PASSWORD=<pw> PG_TEST_ALLOWED_DBS=<scratch> .venv/bin/python -m pytest tests/postgres/test_project_skill_fusion_pg.py --override-ini="addopts=" -m postgres -q --tb=short -p no:randomly` | Real-PG fusion legs (the corpus is index-backed ⇒ SQLite cannot prove the PG half): index rows + dedicated embedding rows on PG (metadata only, no body bytes), fused search tagged `project-file`, DB twin shadow-retired with `shadows` populated, legacy `skill_embeddings` untouched (P1 read-only search), no-context DB-only, A7 over-budget twin on PG. | 2026-10-31 | ✅ **3/3 PASS** (6.0 s, PG16.15, throwaway DB) |
+
+
+## Commission project-skill-loader — Phase-4 packs REGISTERED (2026-10-31) — 🟢 + node-count CONVENTION (R2 fold)
+
+> **NODE-COUNT CONVENTION (R2 fold, Phase-4 rider, 2026-10-31 — closes gate F2):** every
+> node count in this file is the **MECHANICAL collect-only count** (`pytest <paths>
+> --collect-only -q` tail line) — parametrized functions count their parametrized nodes.
+> Any annotation that is a FUNCTION count is explicitly labeled `fn-count`. Parametrization
+> widening therefore updates the annotation, never silently invalidates it. The mechanical
+> numbers for the Phase-3 files per the Phase-3 gate §3 slicing proof (authoritative over
+> any prose): guard 4 · step0 20 · pf_surface 32 (29 + W4 byte-identity + W5 ×2, fix-cycle 2026-11-01) · pf_refusals 10 (the gate's brief said
+> 3/18/8 — stale function counts; the slicing proof trumps annotations either way).
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `project_skill_phase4_wiring_unit` (P4) | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL .venv/bin/python -m pytest tests/unit/test_project_skill_source_phase4_wiring.py -q --tb=short -p no:randomly` | Phase-4 wiring: A10 six-site structural guards, knob matrix all four cells (M0/M4/M9/M10; OFF legs byte-identical RESULTS + zero pf- rows), M10 acceptance (BM25-only, top_k=max_results, stage-2/3 explicit skips, degraded:"file_only", ab_test_repo=None explicit inject), stage-2 dual-source adapter (dedicated table + DB path unchanged), inject_skills instance_id threading (last dark path), construction-cheap (zero FS reads), A17 orphan purge + MAX_ROOTS cap, knob config surface. | 2026-10-31 (fix-cycle 2026-11-01) | ✅ **33/33 PASS** (collect-only 33 exact; +4 = W2 off-loop adapter pin, W3 gc-job registration ×2 structural + wrapper behavioral); mutations P4-M1/P4-M2/P4-M3/P4-M5 + W2/W3 RED→GREEN |
+| `project_skill_phase4_readiness_unit` (P4) | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL .venv/bin/python -m pytest tests/unit/test_project_skill_source_phase4_readiness.py -q --tb=short -p no:randomly` | Phase-4 readiness: detail.skill_sources advisory shape (A11 always-publish incl. enabled:false + honest-zero roots; None-param key-absent tolerance), status invariance (broken root / disabled / no new component / no 500 = NFR-SAFE-5), soft-fail OFF+absent (NFR-SAFE-4), api helper shape + bare-manager never-raises, forced-degradation drill survival, api seam wiring pin (site 6). | 2026-10-31 | ✅ **13/13 PASS** (collect-only 13 exact); mutation P4-M4 RED→GREEN |
+| `project_skill_phase4_pg` (P4) | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL PG_TEST_DB=<scratch> PG_TEST_USER=<role> PG_TEST_PASSWORD=<pw> PG_TEST_ALLOWED_DBS=<scratch> .venv/bin/python -m pytest tests/postgres/test_project_skill_source_phase4_pg.py --override-ini="addopts=" -m postgres -q --tb=short -p no:randomly` | Phase-4 real-PG: the `_ensure_postgres_columns` MIRROR BELT driven through the REAL production hook on a table-absent pre-existing-PG shape (proxy carries the no-op `_migrate_overloaded_image_refs_rows` — the quarantined report-deferred fixture debt), idempotent re-run, fresh-PG column parity vs the .sql record, OFF-leg zero pf- rows on PG. Scratch run evidence: role `p4_gate` + DB `ensemble_test_p4gate`, both dropped with 0-row absence proof. | 2026-10-31 | ✅ **3/3 PASS** (6.3 s, PG16.15 local, scratch role+DB dropped) |
+
+## Commission project-skill-loader — MUTATION TABLE (P{n}-Mn namespace; R1 fold 2026-10-31)
+
+> **Why this table exists.** Phase-2 gate finding F1: bare "M1-M4" labels collided across
+> phases (four DIFFERENT Phase-1 mutations vs four Phase-2 mutations). The lane namespace is
+> `P{n}-Mn` (phase n, mutation m) — adopted retroactively for P1/P2 and natively for P3.
+> The Phase-4 mode table's `M0-M11` codes (phase4-plan.md Appendix A) are a DIFFERENT
+> namespace (degraded-mode matrix cells, not mutations) and are unaffected.
+
+| ID | Phase | Mutation (planted defect) | Discriminating pin(s) | Evidence |
+|---|---|---|---|---|
+| P1-M1 | 1 | `20261031_120001…sql:58` gains `REFERENCES project_skill_files(id)` (FK smuggled into the dedicated table) | `TestFreshSqliteApply::test_no_foreign_key_clause_anywhere` + `::test_no_fk_constraint_materialized_on_sqlite` | Phase-1 gate §mutations, RED both |
+| P1-M2 | 1 | `ProjectSkillEmbedding` swapped onto the legacy FK-constrained `SkillEmbedding` table | `TestA1FkWallPin::test_dedicated_table_path_green` (PG `ForeignKeyViolation`) | Phase-1 gate §mutations |
+| P1-M3 | 1 | `service.py:1160` `description=` replaced with the raw body bytes (P1 body smuggle) | `TestP1SentinelPG::test_body_sentinel_never_persisted_on_real_pg` | Phase-1 gate §mutations |
+| P1-M4 | 1 | duplicate migration prefix `20261031_120000` copy of the usage-records .sql | `TestRepoVersionsRegistry::test_discovery_has_no_duplicate_prefix_and_carries_lane_files` (`DuplicateMigrationVersionError`) | Phase-1 gate §mutations |
+| P2-M1 | 2 | `skill_search_service.py:841` budget truncation moved BEFORE the shadow pass | `test_over_budget_twin_still_shadowed` (SQLite + PG legs) | Phase-2 gate §8 |
+| P2-M2 | 2 | `skill_search_service.py:1153` outer A8 guard narrowed to `except ZeroDivisionError` | `test_broken_file_source_never_surfaces_the_error_string[outer-a8-seam-resolver-raises]` + service sibling | Phase-2 gate §8 (labels split per R2/F2) |
+| P2-M3 | 2 | shadowed DB rows kept in the corpus | both shadow pins | Phase-2 commit 0f895a79b message (RED→GREEN, sha-verified) |
+| P2-M4 | 2 | `_tag_result_sources` disabled | 4 tag/shadow pins | Phase-2 commit 0f895a79b message (RED→GREEN, sha-verified) |
+| P3-M1 | 3 | STEP-0 bypassed for bare names (`clone_service is None and` conjunct added — clone-first precedence defect) | `TestStep0BareName::test_zero_db_writes_clone_never_invoked` (clone invoked + DB twin body injected) | Phase-3 execution record (this lane) |
+| P3-M2 | 3 | A15 `pf:` bypass of the silent early-exit removed (`if False:`) | `TestStep0PfAddress::test_pf_no_project_fails_closed` (silent `(None, [])` instead of the envelope) | Phase-3 execution record |
+| P3-M3 | 3 | ACTIVATION dropped — `skill_search` tool no longer threads `instance_id` | `TestActivation::test_search_threads_instance_id` (fusion goes dark again) | Phase-3 execution record |
+| P3-M4 | 3 | `skill_fix` `pf:` refusal removed (dispatcher would run on a file skill) | `TestSkillFixRefusal::test_pf_refused_dispatcher_never_invoked` | Phase-3 execution record |
+| P3-M5 | 3 | A8 STEP-0 guard removed (bare-name `try/except` around `_step0_resolve`) | `TestStep0A8Guard::test_raising_file_source_is_a_miss_db_injection_unaffected` (raise escapes ⇒ DB injection breaks) | Phase-3 execution record |
+
+(Provenance note: the Phase-2 gate doc §8 tabulated only P2-M1/P2-M2 in detail; P2-M3/P2-M4
+were executed and recorded in the Phase-2 commit 0f895a79b message (the F1 gap this table
+closes). Keep-both applied: no prior table existed.)
+
+**DIGEST FORM TAG (R3 fold, Phase-4 rider, 2026-10-31 — closes gate F5):** every recorded
+sha256 over a FAILED/ERROR list must carry its FORM tag — `BARE-ID` (sorted node ids,
+prefix-stripped, e.g. the 29-id report-deferred digest `2fad8e8a…`) or `GREP-FULL` (raw
+`grep -E '^(FAILED|ERROR)'` lines incl. LOG lines). Cross-form comparison false-mismatches
+(the Phase-3 gate §6 proved a naive grep adds 5 non-summary lines to the 29-id block).
+Recipe `blast-radius-leg` v1.0.3 carries the rule. PACKS node counts follow the R2
+convention above (mechanical collect-only; `fn-count` labeled where applicable).
+
+| ID | Phase | Mutation (planted defect) | Discriminating pin(s) | Evidence |
+|---|---|---|---|---|
+| P4-M1 | 4 | manager site-1 kwarg dropped (`file_source=None,` in the fusion ctor) | `TestWiringSites::test_site_1_search_ctor_threads_file_source` (2-site occurrence count — the single-occurrence form passed vacuously via site 3; strengthened same day) | Phase-4 execution record |
+| P4-M2 | 4 | `inject_skills` instance_id threading dropped | `TestInjectSkillsThreading::test_inject_skills_threads_instance_id` (spy kwarg) | Phase-4 execution record |
+| P4-M3 | 4 | stage-3 deterministic skip disabled (`if False:`) | `TestM10FileOnly::test_stage3_skipped_no_llm_call` (degraded-marker discrimination — the swallow-path variant passed vacuously; strengthened same day) | Phase-4 execution record |
+| P4-M4 | 4 | api site-6 param dropped (`skill_sources=None,`) | `TestApiSeamWiring::test_refresh_call_threads_skill_sources` (F2 family: true-in-unit-dead-in-prod) | Phase-4 execution record |
+| P4-M5 | 4 | stage-2 dual-source adapter branch disabled | `TestStage2DualSourceAdapter::test_file_skill_uses_dedicated_table` | Phase-4 execution record |
+
+**FIX-CYCLE MUTATION MATRIX (Phase-4 code review, 2026-11-01) — ARTIFACT:**
+`tests/packs/psl_fix_cycle_mutation_matrix.py` (committed; run
+`cd <wt> && .venv/bin/python tests/packs/psl_fix_cycle_mutation_matrix.py
+[--legs <ids>] [--out <tsv>]`). Plants each defect, requires its named pin to
+go RED, `git checkout`-restores, requires the same pin GREEN, and records the
+planted/restored shas. Exit 0 only when every leg discriminates. Captured
+output: `.agents/tester/RESULTS/2026-11-01-psl-fix-cycle-mutation-matrix.md`
+(12/12 RED→GREEN). This REPLACES the unlocatable "42/42" figure carried by an
+earlier report — that number had no artifact and is retracted; the enumerated
+leg set below is the claim.
+
+| ID | File | Mutation (planted defect) | Discriminating pin |
+|---|---|---|---|
+| W1-corpus | `project_skill_source/service.py` | project re-check dropped from `corpus_for` | `TestCorpusProjectBinding::test_corpus_empty_when_index_rebound_to_other_project` |
+| W1-lookup | same | post-gate re-fetch project re-check dropped | `TestCorpusProjectBinding::test_lookup_explicit_miss_when_index_rebound` |
+| W2 | `skill_search_service.py` | `to_thread` bridge reverted to a direct sync call | `TestStage2DualSourceAdapter::test_file_embeddings_bridged_off_the_loop_thread` |
+| W3 | `manager.py` | `project_skill_gc` maintenance registration removed | `TestGcMaintenanceWiring::test_gcjob_registered` |
+| W4 | `skill_tools.py` | `source: db` suffix made unconditional again | `TestSkillListFiles::test_dbrows_tag_only_when_file_source_wired` |
+| W5 | `skill_tools.py` | `pf-` id/project validation removed (`if False:`) | `TestSkillFeedbackPf::test_pseudo_id_refused_when_not_indexed`. Companion leg `W5-off-guard` (knob-OFF guard removed) is **BELT**: non-discriminating by construction — with no file source `_resolve_pf_scope` already returns `(None, [])`; recorded, not hidden |
+| W6 | `project_skill_source/service.py` | body-file re-check + `O_NOFOLLOW` reverted to a plain `open()` | `TestReadTimeContainmentSwap::test_body_file_only_symlink_refused_at_read` |
+| P4-M1 | `manager.py` | site-1 `file_source=` kwarg dropped | `TestWiringSites::test_site_1_search_ctor_threads_file_source` |
+| P4-M3 | `skill_search_service.py` | stage-3 deterministic skip disabled | `TestM10FileOnly::test_stage3_skipped_no_llm_call` |
+| P4-M4 | `api.py` | site-6 `skill_sources=` kwarg dropped | `TestApiSeamWiring::test_refresh_call_threads_skill_sources` |
+| P3-M3 | `skill_tools.py` | ACTIVATION `instance_id` threading dropped | `TestActivation::test_search_threads_instance_id` |
+| P2-M4 | `skill_search_service.py` | tagging seam disabled (`return result`) | `TestDbEntriesTagged…` (fusion pack, DB-entry tag pin) |
 - **FUNCTIONAL GATE — CRITICAL-NOTES CAP-FIX + REMOVE-BY-ID RESOLVER (2026-10-31)** on `feature/critical-notes-cap-fix` @ **`c8252f916`** (base `78f1aaead`; lane worktree `-wt-critical-notes-cap-fix`, fenced `.env` → ensemble_dev server, own `.venv` 3.13.3; 10 worker lanes, 0 re-dispatch-loops) → **✅ VERDICT: SHIP — 0 branch-caused failures, 0 reds anywhere.** Chain 78f1aaead → 5aa92c915 (initial) → c8252f916 (review fix round; all W1–W9 claims CONFIRMED on tree, EVIDENCE/2026-10-31-cn-capfix-delta-map.md). **A/B defect proof** (identical harness sha `0a18b9cc…574c` both legs, import-proven): BASE reproduces the defect for all 4 representation variants (UPPER / trailing-space / U+200B / un-hyphenated — listed but UNREMOVABLE, get→None); HEAD closes all 4 (remove→True, row gone, stored bytes never rewritten); malformed 5-char-4th-group = asserted W1 limitation on BOTH legs (byte-exact stored-bytes retry still removes). **Mutation gate (scratch-clone, canon recipe): 5/5 MUTATION-PROVEN** — M1 W4 exact-fast-path restore → twin-ambiguous node RED; M2 W2 fullmatch→search → junk-prefix nodes RED; M3 W8 cap bypass → 4 TestRenderAllSectionCap RED; M4 routing bypass → 7 RED at repository seam (tool seam green = documented double-cover: tool calls resolver-routed get first); M5 cap 200→50 → 51-preexisting + value-pin RED (2 boundary nodes cap-value-agnostic BY CONSTRUCTION — killers exist); **PK-immutability probe = LOAD-PATH-REAL + WRITE-PATH-REAL** (M6 mutation-killed). **PG-dialect parity** (PG 14.22, throwaway `ensemble_test_cncap_parity_43592`, torn down FORCE, prod 17-conn census unchanged): registered PG file 2P+2P both marker forms; 11/11 harness probes identical to SQLite matrix (junk refused, twin→Ambiguous match_count=2 both rows untouched). **Cap boundary**: exact-cap reject / one-below(199) accept / 51-preexisting accept / `_MAX_ENTRIES==200` pin / pinned-cap-8 nodes all green; **0 stale 50-cap hits** repo-wide (FE has no CN surface); dead constant `CRITICAL_NOTES_MAX_ENTRIES` deleted. Packs (all @ c8252f916, `timeout 300`, env-scrubbed, census-first): int4_repositories **242P** (re-baselined from stale 116) · cn resolver file **15P** (NEW pack scope) · cn tools+lifecycle **88P** · cn schema+api **37P** · render phase1 **23P** · phase2 family **66P** · project adjacents **121P + 271P** · PG lane **2P×2 forms** — **unit-side union 729 executed / 0 failed / 0 skipped**, + 11 PG probes. Registry repairs: `cn_injection_unit_test` row marked DEFECTIVE (file deleted pre-base `eeef8845a` — NOT branch-caused). Follow-ups (non-blocking): F1 M4 tool-seam routing pin is double-covered by repository seam — add a tool-only pin if independent detection wanted; F2 M5 two boundary nodes are cap-value-agnostic (`range(_MAX_ENTRIES)`-built) — value pin + 51-row pin are the real killers; F3 PACKS.md `cn_injection` successor row (render phase1/phase2 registered under this banner). Full evidence: `RESULTS/2026-10-31-critical-notes-capfix-verification.md` + 6 EVIDENCE files.
 
 

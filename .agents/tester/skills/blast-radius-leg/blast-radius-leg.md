@@ -1,5 +1,34 @@
 # Blast-Radius Leg — Tier-1 Gate Recipe (project canon)
 
+> **v1.0.2 (2026-10-31)** — doctrine maintenance driven by the SECOND real gate run
+> (project-skill-loader Phase-2, Tier-1) + the Phase-1 carry-over. Two folds:
+> **(a)** Fences gains the SIBLING-ENV-ASSERTION rule (Phase-1 🔴, re-confirmed by two
+> independent lanes: the ambient env is prod-poisoned — `POSTGRES_DB=ensemble_prod`,
+> `POSTGRES_HOST=10.44.0.2` — and a sibling worker's env claim is NOT evidence about
+> yours); **(b)** mutation-label namespace: every mutation leg is labeled `P{n}-Mn`
+> (phase, mutation) with a mutation→test table in PACKS.md — bare `M1-M4` collided
+> across phases (Phase-2 gate finding F1).
+>
+> v1.0.3 (2026-10-31) — Phase-3 gate folds F5 + F2 (R3 rider, project-skill-loader
+> Phase 4): **(d)** every recorded sha256 over a FAILED/ERROR list carries a FORM TAG —
+> `BARE-ID` (sorted node ids, prefix stripped; the sibling failed-digest-equality-gate's
+> native form) or `GREP-FULL` (raw `grep -E '^(FAILED|ERROR)'` incl. non-summary LOG
+> lines). Cross-form comparison false-mismatches: the Phase-3 gate §6 measured a naive
+> grep adding 5 LOG lines to the 29-id report-deferred block (digest `2fad8e8a…` matches
+> in BARE-ID form ONLY). Record `(form, sha)` pairs, never a bare sha. **(e)** PACKS.md
+> node counts follow the mechanical collect-only convention (parametrize widening updates
+> the annotation; `fn-count` must be labeled) — the Phase-3 gate's 3→4/18→20/8→10 drift
+> is the motivating case.
+>
+> v1.0.2 (2026-10-31) — blast-radius canary recipe: per-variable `env -u` scrubs with an
+> assertable fence form; `P{n}-Mn` mutation namespace adoption.
+>
+> v1.0.1 (2026-10-31) — doctrine maintenance driven by the FIRST real gate run
+> (project-skill-loader Phase-1, Tier-1, ~6 min legs / ~28 min window). Three folds:
+> **(a)** the two-class declaration rule for additive lanes (GAP-1); **(b)** digest
+> capture greps `^(FAILED|ERROR)`, not `^FAILED ` (GAP-2); **(c)** the budget table now
+> carries the measured parallel-legs shape (FRICTION-1).
+
 Tier 1 is the DEFAULT regression gate for feature lanes: a **scoped dual-side FAILED-list diff over the declared blast radius**, ≤ 30 min HARD, fail-loud. Canonical, deterministic recipe — load it from `.agents/tester/skills/blast-radius-leg/`, never discover it via `skill_search` (the G2 worker never found the cheaper runner and burned 9h32m; that failure mode is why this file exists).
 
 - Tier contract: `.agents/tester/rules/ensure.md` § Gate Tiers.
@@ -15,17 +44,53 @@ Tier 1 is the DEFAULT regression gate for feature lanes: a **scoped dual-side FA
    - **Pin packs**: PACKS.md packs registered for changed tools/categories (the pin-ceremony packs).
 3. Result = **CANDIDATE set**. The tester declares the FINAL set in the gate report — derivation is generated, declaration is tester-owned. An executor never silently expands or contracts the set.
 
+### Two-class declaration (ADDITIVE lanes) — GAP-1, folded in v1.0.1
+
+A purely-additive lane (new modules / new test packs, no existing seam touched) breaks
+the single-set assumption above: the lane's own pins exist ONLY at HEAD, so a literal
+"executed == declared on both legs" either produces BASE collection errors on absent
+files or invites counting absent-at-base files as net-new. Declare TWO classes:
+
+- **D1 — lane-owned (HEAD-only) pins.** Test files the lane ADDS. Status rule: **MUST PASS
+  at HEAD** (0 failed / 0 error). A base-side "red" is **IMPOSSIBLE BY CONSTRUCTION** and is
+  therefore neither net-new nor "fixed" — record the absence as expected-by-construction,
+  never as a failure and never as a pass.
+- **D2 — dual-side comparable set.** Files existing at BOTH revs, enumerated by the (a)
+  derivation (priority order is tester-owned; cap it and record drops). This is the ONLY
+  set that carries the FAILED-digest diff.
+
+The gate report MUST state both classes, their node counts per leg, and the asymmetry
+explicitly: the HEAD leg runs D1 + D2, the BASE leg runs D2 only. That is **not** a broken
+"identical commands" invariant — the command SHAPE is identical; only the file list differs
+by construction, and the report says so.
+
 ## (b) Slicing proof (mandatory)
 
 `--collect-only -q` over the declared set: **executed == declared**, node counts recorded in the report. A leg without a slicing proof is INVALID.
+
+**Digest capture form — GAP-2, folded in v1.0.1.** Extract failing node ids with
+`grep -E '^(FAILED|ERROR)'` — **NOT** `grep '^FAILED '`. A bare `^FAILED ` grep silently
+drops every `ERROR` line (collection/setup errors), so an additive lane — whose new files
+are ABSENT at BASE and therefore produce collection ERRORS there — can look digest-clean
+while BASE was erroring. Digest BOTH prefixes; explain every `ERROR` id in the report, never
+only the `FAILED` ones. (The sibling `.agents/tester/skills/failed-digest-equality-gate/`
+carries the same corrected form.)
 
 ## (c) Budget mechanics — hard 30-min cap
 
 | Phase | Budget |
 |---|---|
-| Setup (two worktrees, scratch PG(s), collect) | 10–15 min |
-| Legs (BASE + HEAD) | 2 × 5–10 min |
-| Flaky probes (3× isolation, diff nodes ONLY) | ~5 min |
+| Setup (two worktrees, scratch PG(s), collect) | 3–10 min |
+| Legs (BASE + HEAD) — **sequential**, each a scoped set | 2 × **minutes** (measured: 26 s + 40 s on a ~400-node scoped set) |
+| Flaky probes (3× isolation, diff nodes ONLY) | ~5 min, and only when the diff set is non-empty |
+
+**Target wording — FRICTION-1, folded in v1.0.1:** *a scoped leg is MINUTES.* The older
+10–15 min setup + 2 × 5–10 min leg numbers summed to 25–40 min and overran this recipe's own
+30-min cap before anything ran. Measured reality from the first real outing
+(project-skill-loader Phase-1): **gate legs ≈ 6 min**; **total window ≈ 28 min**, and that
+28 min = recon + `max(legs, mutation-lane)` + one discretionary closeout — i.e. **the legs and
+the mutation-verification lane ran in PARALLEL**, so the window is not their sum. Serialising a
+mutation lane behind the legs is what turns a 6-min gate into a 26-min one.
 
 Projected OR actual breach → **STOP + fail-loud report + ONE auto re-scope attempt**. Never silent grinding; never a quiet cap raise.
 
@@ -55,6 +120,20 @@ Each exclusion MUST carry a named compensating pin in the gate report (wedge-cap
 
 The notify-user diff (2026-10-25/26): one new tool file + registration + migration + pin packs. Blast radius ≈ low-hundreds of nodes → Tier-1 leg ≈ **15–30 min total** (setup + 2 legs + probes). What actually ran: whole-tree dual-side, serial, 1300-node shards under 300s caps → **9h32m wall, 89 timeout-splits, 36 rc=124 outer kills, performance/e2e cells pure waste** — for a diff whose blast radius was one tool surface. The tier doctrine exists so this never recurs.
 
-## Fences (house rules, unchanged)
+## Fences (house rules; v1.0.2 adds the sibling-env rule)
 
 Per-variable env scrubs (`env -u POSTGRES_*` globs are a SILENT NO-OP — bash does not glob env names); scrub+fence written ONCE into a runner script file invoked by both legs; `mktemp` FAKE_HOME fences; ports 9797/8079 untouched; never the shared dirty checkout; record the main checkout's porcelain sha before AND after.
+
+**SIBLING-ENV-ASSERTION (v1.0.2, Phase-1 🔴 carry-over — the highest-value fold):** a
+sibling worker's env claim is NOT evidence about YOUR env; verify per-invocation,
+per-variable (`[ "$POSTGRES_DB" != "ensemble_prod" ]` or equivalent assert in the runner;
+the ambient env on this host is prod-poisoned — `POSTGRES_DB=ensemble_prod`,
+`POSTGRES_HOST=10.44.0.2` — re-confirmed by two independent lanes 2026-10-31).
+`PG_TEST_ALLOWED_DBS` is unset by default: set it explicitly per run or the fence's
+intended mechanism is absent.
+
+**Mutation-label namespace (v1.0.2, Phase-2 F1):** every mutation leg carries a
+`P{n}-Mn` label (phase n, mutation m) and lands in the lane's mutation→test table in
+`.agents/tester/PACKS.md`. Bare `M1-M4` labels collided across phases once already —
+do not reintroduce them. (The Phase-4 plan's `M0-M11` degraded-MODE codes are a
+different namespace and are unaffected.)

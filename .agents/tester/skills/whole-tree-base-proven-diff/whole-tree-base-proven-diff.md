@@ -2,7 +2,7 @@
 
 Runs the FULL `tests/` tree at HEAD and proves **net-new failures = 0** against a BASE commit, with shard-level incremental persistence so a stall never loses work.
 
-> Canonical in-repo version. Supersedes dynamic-skill `9e79ccad-1e2c-456b-8762-82d7f5eeec0f` (DB copy retained for searchability; SUPERSEDED preamble requested via `skill_fix`, pending evolution-lane enablement — not yet applied). Refined 2026-10-31 (commission tiered-gate-doctrine) with the G2 learnings: **fast execution is baked in below — consumers must NOT hand-roll slow runners.** The G2 hand-roll (serial 1300-node shards under 300s caps) cost 9h32m wall, 89 timeout-splits, 36 rc=124 outer kills for a guarantee this recipe produces in ~15–35 min/leg.
+> Canonical in-repo version. Supersedes dynamic-skill `9e79ccad-1e2c-456b-8762-82d7f5eeec0f` (DB copy retained for searchability; SUPERSEDED preamble requested via `skill_fix`, pending evolution-lane enablement — not yet applied). Refined 2026-10-31 (commission tiered-gate-doctrine) with the G2 learnings: **fast execution is baked in below — consumers must NOT hand-roll slow runners.** The G2 hand-roll (serial 1300-node shards under 300s caps) cost 9h32m wall, 89 timeout-splits, 36 rc=124 outer kills for a guarantee this recipe produces in ~15–35 min/leg. **Revised v1.0.1 (2026-11-01, Phase-5 feedback — doctrine maintenance):** (a) the ≈9–15 min/leg rate calibration is CORPUS/HOST-DEPENDENT, not a universal constant; (b) projection guard hardened with a ≥1,000-node probe floor + shard-0 re-projection checkpoint after it fired a FALSE 3× breach on the Phase-5 leg (probe rate ~250/min under-projected steady state ~4×; actual 1,021–1,050 nodes/min).
 
 - Tier contract: `.agents/tester/rules/ensure.md` § Gate Tiers (Tier 2 trigger = core-seam path-prefix OR promote-blocking gate; budget ≤ 90 min ADVISORY — breaches are always reported loudly, never silent).
 - Digest comparison: `.agents/tester/skills/failed-digest-equality-gate/`.
@@ -34,10 +34,11 @@ timeout 180 .venv/bin/python -m pytest --collect-only -q tests/ \
 1. Collect once → total node count N.
 2. Probe ONE small shard → measured tests/min rate.
 3. **Default shard sizing (mrpr form): size shards so projected shard wall ≈ 25–30 min** — house calibration ≈3300 nodes/shard with per-shard `timeout 1750`. The legacy ≤100-node/`timeout 300` shards are for BISECTION ONLY, never the main sweep.
-4. **xdist `-n auto` WITHIN one leg** is the preferred accelerator for the non-PG corpus (measured ≈9–15 min/leg class). Exclusions from intra-leg parallelism:
+4. **xdist `-n auto` WITHIN one leg** is the preferred accelerator for the non-PG corpus. **The ≈9–15 min/leg figure is a CORPUS/HOST-DEPENDENT calibration from the tiered-gate-doctrine corpus (2026-10-31) — NOT a universal constant** (the Phase-5 project-skill-loader corpus sustained 1,021–1,050 nodes/min — ~4× faster per node); always re-derive the expected rate from THIS run's probe/shard-0 data. Exclusions from intra-leg parallelism:
    - PG packs (`-m postgres`): SERIAL only — schema races.
    - Shared-scratch-DB chunks (`dual_backend_engine` / `auth_pg_scratch_helper` / `scratch_pg` greps): one-leg-at-a-time (DF-4: 9 fabricated reds under parallel legs).
 5. **Projection guard (fail-loud):** projected total = setup + legs + bisection reserve + flaky probes, compared against the 90-min advisory budget BEFORE running. Projected OR actual breach → STOP + report + one re-scope. Advisory ≠ silent.
+   - **Probe-rate floor + re-projection checkpoint (v1.0.1, Phase-5 lesson — a small-shard probe produced a FALSE 3× breach):** a small-shard probe rate (~250 nodes/min observed) under-projects steady state by ~4× (actual 1,021–1,050 nodes/min on the same corpus). Therefore: project from a probe of **≥1,000 nodes**, AND after the FIRST shard (shard-0) completes, RE-PROJECT the total from its measured rate before judging the budget. A breach verdict rendered BEFORE the shard-0 re-projection checkpoint is **ADVISORY-ONLY** — report it, do NOT stop on it; a breach that SURVIVES the re-projection is a true STOP + one re-scope.
 
 ## 3. Fence the LLM (else shards hang) — identical on both legs
 
