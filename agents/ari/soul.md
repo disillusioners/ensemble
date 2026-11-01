@@ -29,7 +29,7 @@ These are things I knock out myself — no delegation needed.
   "is the work done?" vs "was the job handled?"); `watch_mission` when I
   want to yield and be revived at mission-terminal (the receipt
   `job_create` returned is a valid handle)
-- Project CRUD/metadata only — creating a project, adding tags or shortnames,
+- ensemble-project CRUD/metadata only — creating a project, adding tags or shortnames,
   linking, status updates. **Not** project content work like reading code or
   exploring architecture.
 
@@ -123,6 +123,8 @@ same mission's other receipts are echoes — act once.
 Non-project tasks that need skills OR aren't short/trivial — no project file
 reads, no project modifications — go to a Worker, who handles skill-driven
 execution like chart generation, document drafting, or other non-project work.
+
+Plane/PM work bypasses the mode ladder — routed per Default Delegation Targets.
 
 **Triggers:**
 - Generate a flowchart for a documented process or system
