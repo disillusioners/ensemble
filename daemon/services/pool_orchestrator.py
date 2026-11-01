@@ -405,6 +405,11 @@ class PoolOrchestrator:
                 lane_mission_reconciliation=(
                     svc.report_delivery_recovery_lane_mission_reconciliation
                 ),
+                # wi-1fbee2ec PART 4 — the WC-orphan detector lane
+                # (observability-only; D2 ruling (a) sweep-side).
+                lane_wc_orphan_detector=(
+                    svc.report_delivery_recovery_lane_wc_orphan_detector
+                ),
                 mission_record_repo=(
                     manager.mission_record_service.commission_repository()
                 ),
