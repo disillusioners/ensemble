@@ -463,6 +463,22 @@ class GateDecision:
     #: to the whole-evaluation fail-open allow when it sees ``-1``, so
     #: this field never reaches the decision with ``-1``.
     outstanding_commissions: int = 0
+    #: wi-1fbee2ec (2026-11-01) — the SIXTH R2 input: the count of
+    #: outstanding (non-terminal PENDING/DEFERRED) report-delivery
+    #: obligations keyed to the instance's mission subtree (the
+    #: transactional-outbox hold input). Additive forensic field —
+    #: the same shape as ``outstanding_commissions``. ``>= 0`` is a
+    #: real count; ``-1`` means the read never ran (the whole-eval
+    #: DB-seam fail-open fired on an EARLIER read — the obligation
+    #: read itself can never contribute here, its error path is the
+    #: isolated flag below). NOT in the canonical log-schema tuple.
+    outstanding_report_obligations: int = -1
+    #: wi-1fbee2ec — D1 fail-closed marker: the obligation read
+    #: FAILED (isolated try/except at the read; never the whole-eval
+    #: fail-open). ``True`` drove decide() step (2b) — a bound-
+    #: composed DENY, never a verify-clean allow. Forensic surface
+    #: for the mutation pin.
+    report_obligation_read_error: bool = False
     #: 2026-09-16 LCA resolver Stage-2 flip — the unified resolver's
     #: evaluation snapshot (``ResolverEvalSnapshot``: activation
     #: result with the fused bundle, would-be outcome, agreement, row
@@ -641,6 +657,8 @@ def decide(
     reminder_text_clean: str = "",
     reminder_text_bundled: str = "",
     outstanding_commissions: int = 0,
+    outstanding_report_obligations: int = 0,
+    report_obligation_read_error: bool = False,
 ) -> GateDecision:
     """Pure ENFORCE-tree decision over the R2 inputs (Stage 3 shape).
 
@@ -660,12 +678,15 @@ def decide(
        other branch deliberately: the plain-allow contract is ZERO
        counter movement — an attested-allow reset (trigger 1) does not
        run while an answer is pending.
-    2. any pending wakeup input > 0 (FOUR-input R2 —
+    2. any pending wakeup input > 0 (the R2 family —
        ``pending_children``, ``queued_or_expected_wakeups``, OR
-       ``live_descendants``, OR ``outstanding_commissions``) →
+       ``live_descendants``, OR ``outstanding_commissions``, OR
+       wi-1fbee2ec's ``outstanding_report_obligations``) →
        :attr:`Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP` with the
        counter UNCHANGED (ruling 1: the R2 non-reset IS the loop
-       protection). Fires BEFORE the attested-split step (3)
+       protection — for the obligation arm the non-advance is
+       BOUND-EXEMPT by construction, see the arg docs). Fires BEFORE
+       the attested-split step (3)
        deliberately (2026-09-20, N1 ratification): an attest issued
        DURING an active mission is premature — the mission
        continues, the attest either stays in-window or falls out
@@ -797,6 +818,34 @@ def decide(
             pre-PR2 three-counter predicate is preserved exactly. The
             fail-open ``-1`` sentinel is CONSTRUCTED by the READ, never
             defaulted here.
+        outstanding_report_obligations: wi-1fbee2ec (2026-11-01) — the
+            SIXTH R2 input. Count of non-terminal (PENDING/DEFERRED)
+            ``report_injections`` rows owed to or from the instance's
+            mission subtree (the transactional-outbox signal: a
+            descendant's completed work product has not reached its
+            recipient — the 10:35 incident class where every legacy
+            arm read a REAL zero while a report was undelivered).
+            ``> 0`` arms the SAME legitimate-pending allow as the
+            sibling counters — BOUND-EXEMPT (the hold does NOT
+            advance ``denied_count``; a bound-advancing arm would
+            reproduce the ``terminal_after_bound`` closure it exists
+            to prevent — the commission's pin (a) derivation). The
+            default ``0`` preserves the legacy predicate for callers
+            that do not pass it.
+        report_obligation_read_error: wi-1fbee2ec — D1 polarity
+            (leader adjudication, BINDING): the obligation read
+            FAILED at the caller (``True``). Fail-closed: the error
+            contributes a DENY that composes with the deny bound —
+            below the bound → ``DENIED`` (increment + nudge), at/past
+            the bound → ``TERMINAL_AFTER_BOUND``. A persistent query
+            error therefore degrades exactly like any persistent deny
+            (bounded) and never wedges forever — while a SINGLE error
+            can never verify-clean a possibly-owing tree (the
+            fail-open class that allowed the 10:35 closure). The flag
+            fires BEFORE the attested split so the error can never be
+            laundered into an attested-allow; it is constructed ONLY
+            by the read's own isolated ``except`` (never by the
+            whole-eval fail-open catch, never as a ``-1`` sentinel).
 
     Returns:
         :class:`GateDecision` — the decision core.
@@ -855,12 +904,42 @@ def decide(
         or queued_or_expected_wakeups > 0
         or live_descendants > 0
         or outstanding_commissions > 0
+        or outstanding_report_obligations > 0
     ):
         return GateDecision(
             decision=Decision.ALLOWED_LEGITIMATE_PENDING_WAKEUP,
             next_denied_count=denied_count,
             should_inject_nudge=False,
             should_inject_reminder=False,  # premature-attest: no reminder (the leader is not done)
+            attestation_required=attestation_required,
+        )
+
+    # (2b) wi-1fbee2ec — D1 FAIL-CLOSED obligation-read error. The
+    # read of ``outstanding_report_obligations`` itself failed at the
+    # caller (the flag is constructed ONLY by the read's own isolated
+    # ``except`` — never by the whole-eval fail-open DB-seam catch,
+    # never as a ``-1`` sentinel). "Obligation state UNKNOWN" is NOT
+    # evidence of a quiet tree, so it must never verify-clean: the
+    # error contributes a DENY composing with the deny bound (the
+    # same degradation as any persistent deny — bounded, never a
+    # forever-wedge; a transient error costs one nudge cycle and the
+    # next evaluation re-reads). Fires AFTER the legit-pending family
+    # (step 2 — genuinely-pending inputs are real allows regardless
+    # of the obligation read's health) and BEFORE the attested split
+    # (step 3 — the error can never be laundered into an
+    # attested-allow reset).
+    if report_obligation_read_error:
+        if deny_bound_exceeded(denied_count, bound):
+            return GateDecision(
+                decision=Decision.TERMINAL_AFTER_BOUND,
+                next_denied_count=0,
+                should_inject_nudge=False,
+                attestation_required=attestation_required,
+            )
+        return GateDecision(
+            decision=Decision.DENIED,
+            next_denied_count=denied_count + 1,
+            should_inject_nudge=True,
             attestation_required=attestation_required,
         )
 
@@ -1547,6 +1626,39 @@ def evaluate(
                     outstanding_commissions = MISSION_READ_UNKNOWN
             else:
                 outstanding_commissions = 0
+            # ── wi-1fbee2ec — the SIXTH R2 input: outstanding report
+            # obligations (transactional-outbox hold input). ────────
+            # D1 (leader adjudication, BINDING): FAIL-CLOSED with an
+            # ISOLATED error path. The read carries its OWN
+            # try/except so a failure can NEVER reach the whole-eval
+            # fail-open DB-seam catch below (which would plain-allow
+            # and discard every other input), and NO ``-1`` sentinel
+            # is constructed (which would ride the per-input
+            # fail-open short-circuit). A failure sets the
+            # ``report_obligation_read_error`` flag → decide() step
+            # (2b) converts it to a bound-composed DENY. Duck-typing
+            # guard mirrors the sibling reads: a MISSING facade reads
+            # INACTIVE (``0`` — test doubles / legacy managers keep
+            # the legacy predicate); a garbage non-int / negative
+            # return reads as an ERROR (unknown ≠ quiet).
+            outstanding_report_obligations = 0
+            report_obligation_read_error = False
+            _obligation_reader = getattr(
+                manager, "count_outstanding_report_obligations", None
+            )
+            if callable(_obligation_reader):
+                try:
+                    _obligation_value = _obligation_reader(instance_id)
+                except Exception:  # noqa: BLE001 — D1: isolated error path, NEVER the whole-eval fail-open
+                    report_obligation_read_error = True
+                else:
+                    if (
+                        isinstance(_obligation_value, int)
+                        and _obligation_value >= 0
+                    ):
+                        outstanding_report_obligations = _obligation_value
+                    else:
+                        report_obligation_read_error = True
         except Exception as db_exc:  # noqa: BLE001 — fail-open at the DB seam (whole-eval C-read failure ⇒ plain allow; the predicate's §4.2 C-read branch mirrors this)
             error_class = type(db_exc).__name__
             logger.error(
@@ -1768,6 +1880,14 @@ def evaluate(
                 reminder_text_bundled=ATTESTATION_BUNDLED_REMINDER,
                 # Proposal B PR2 — the FIFTH R2 input (mission-scoped).
                 outstanding_commissions=outstanding_commissions,
+                # wi-1fbee2ec — the SIXTH R2 input (transactional
+                # outbox) + the D1 fail-closed error flag.
+                outstanding_report_obligations=(
+                    outstanding_report_obligations
+                ),
+                report_obligation_read_error=(
+                    report_obligation_read_error
+                ),
             )
         if mode_resolver.mode == "dry":
             # R3 fold: dry is a property of the resolver/mode layer —
@@ -1843,6 +1963,14 @@ def evaluate(
             user_answer_pending=user_answer_pending,
             # Proposal B PR2 — the FIFTH R2 input (mission-scoped).
             outstanding_commissions=outstanding_commissions,
+            # wi-1fbee2ec — the SIXTH R2 input (transactional
+            # outbox) + the D1 fail-closed error flag (forensics).
+            outstanding_report_obligations=(
+                outstanding_report_obligations
+            ),
+            report_obligation_read_error=(
+                report_obligation_read_error
+            ),
             denied_count=denied_count,
             delegation_since_last_user=delegation_scan.delegation_since_last_user,
             last_real_user_found=delegation_scan.last_real_user_found,

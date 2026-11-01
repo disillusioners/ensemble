@@ -41,6 +41,7 @@ from ..write_pause_guard import WriteGuardSession
 from ..constants import (
     DEFERRED_REASON_IDEMPOTENCY_SKIP,
     DEFERRED_REASON_PENDING_MESSAGES,
+    DEFERRED_REASON_SYNC_MINT,
     REPORT_SANITY_MARKER,
     SANITY_FLAG_VERSION,
 )
@@ -2778,6 +2779,57 @@ Provide a concise summary:"""
             if pending_count > 0:
                 return False, f"pending_count={pending_count}", False
 
+            # ── wi-1fbee2ec (2026-11-01) — LEG 6: outstanding
+            # descendant report obligations. ──────────────────────
+            # The transactional-outbox hold input: while ANY
+            # non-terminal (PENDING/DEFERRED) ``report_injections``
+            # row is owed to or from a member of this instance's
+            # subtree, a descendant's completed work product has not
+            # reached its recipient — the 10:35 incident class (the
+            # root closed ``terminal_after_bound`` on an all-quiet
+            # snapshot while a report was undelivered; RDRS then
+            # revived the terminal recipient into the apparition).
+            # This leg DENIES the publish → the caller's existing
+            # downgrade path (COMPLETED→WAITING_CHILDREN + suppressed
+            # publish) holds the emission until the obligation
+            # delivers (the delivery lanes transition the row
+            # terminal; the event-driven re-check re-evaluates).
+            #
+            # D1 polarity (leader adjudication, BINDING): FAIL-CLOSED.
+            # A query error on THIS leg converts to a HOLD verdict
+            # INSIDE the leg — it must NEVER ride the caller-wrap
+            # fail-open (:5426-5451 / FP4-L5) nor the whole-eval
+            # fail-open family. The hold composes with the at-least-
+            # once re-drive (each completed message re-invokes this
+            # gate), so a persistent error degrades via the in-turn
+            # deny bound — never a silent verify-clean.
+            try:
+                _obligation_count = (
+                    self._manager.count_outstanding_report_obligations(
+                        instance_id
+                    )
+                )
+            except Exception as _obl_exc:  # noqa: BLE001 — D1 fail-closed (isolated from every fail-open catch)
+                logger.warning(
+                    "root_completion_gate: obligation leg read raised "
+                    "for %s... (%s: %s); DENY per D1 fail-closed "
+                    "(hold; never rides the caller-wrap fail-open)",
+                    instance_id[:8],
+                    type(_obl_exc).__name__,
+                    _obl_exc,
+                )
+                return (
+                    False,
+                    "outstanding_report_obligations=unknown(read_error)",
+                    False,
+                )
+            if _obligation_count > 0:
+                return (
+                    False,
+                    f"outstanding_report_obligations={_obligation_count}",
+                    False,
+                )
+
             # DEADLOCK GUARD: route the freshness leg through the wedge resolver
             # so dead-letter / empty-final-turn / stale-readable wedge paths
             # close event-driven (no polling). The wedge resolver's 3-tuple
@@ -4701,6 +4753,28 @@ Provide a concise summary:"""
                 nested_already_committed = False
                 try:
                     report_injection_row = ReportInjection(
+                        # wi-1fbee2ec PART 1 — the transactional-outbox
+                        # MINT: this row IS the synchronous report-
+                        # delivery obligation, minted in the SAME
+                        # transaction as the child terminalization
+                        # (CAS UPDATE + report msg + PROCESS_REPORT
+                        # task + this row + events — one commit), so
+                        # the obligation exists the instant the
+                        # terminalization is guaranteed (no detection
+                        # lag, no loss window). Idempotency = the
+                        # three frozen layers (child CAS rowcount +
+                        # status-level guard upstream; the
+                        # ``uq_report_injections_oblig_triple`` partial
+                        # unique index on this INSERT — a racing RDRS
+                        # backfill mint takes the IntegrityError and
+                        # skips, first writer wins). Provenance:
+                        # ``deferred_reason=SYNC_MINT`` distinguishes
+                        # this sync outbox mint from the RDRS backfill
+                        # vocabulary (RESUME_ROUTER / PAUSE_TOCTOU /
+                        # …) — best-effort under the race (a later
+                        # ``ensure_deferred`` touch may flip the reason
+                        # in place; the ROW identity is what wins).
+                        deferred_reason=DEFERRED_REASON_SYNC_MINT,
                         # D1 — the durable fallback row names the
                         # RECIPIENT (the instance the report is delivered
                         # to), not the structural parent.

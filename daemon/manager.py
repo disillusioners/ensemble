@@ -12905,11 +12905,13 @@ class InstanceManager:
         Returns:
             Tuple ``(busy_count, live_count)``. busy = status in
             ``{RUNNING, WAITING, WAITING_CHILDREN}`` (the
-            unconditional-busy subset). live = the existing two-set
-            live definition (inc. PAUSED + conditional-live dormant
-            with work en route). Both 0 when the root is not found,
-            has no descendants, or every descendant is terminal.
-            Both bounded by :data:`LIVE_DESCENDANTS_BFS_CAP`.
+            unconditional-busy subset). live = the wi-1fbee2ec
+            widened definition — ANY non-terminal descendant (the
+            b08f40fe conditional-dormancy check retired for the live
+            count by the 2026-11-01 leader adjudication; see
+            :meth:`count_live_descendants`). Both 0 when the root is
+            not found, has no descendants, or every descendant is
+            terminal. Both bounded by :data:`LIVE_DESCENDANTS_BFS_CAP`.
         """
         repo = getattr(self, "_instance_repository", None)
         if repo is None:
@@ -12959,7 +12961,6 @@ class InstanceManager:
         }
         busy_count = 0
         live_count = 0
-        dormant_ids: list[str] = []
         for iid in scanned:
             row = repo.get(iid)
             if row is None:
@@ -12975,10 +12976,24 @@ class InstanceManager:
                 # PAUSED: live-for-deny but NOT busy-for-suppression.
                 live_count += 1
             elif status in conditional_live_statuses:
-                # Dormant — live only if work is en route (checked in
-                # one batch after the walk; incident b08f40fe).
-                # Dormant is never busy (no execution happening).
-                dormant_ids.append(iid)
+                # Dormant (IDLE/QUEUED) — NON-TERMINAL, therefore
+                # LIVE for the deny-protection count (wi-1fbee2ec
+                # leg-extension, leader adjudication 2026-11-01: the
+                # dispatch→RUNNING micro-race — child instance row
+                # committed while its message/task evidence rows are
+                # not yet visible — must NEVER verify-clean on the
+                # gate. Live receipt: leader row 7ceb4685 read
+                # COMPLETED ~08:25Z 2026-11-01 while child developer
+                # fea6f7be was minted-not-yet-RUNNING in the
+                # ~08:14-08:19Z dispatch window). This SUPERSEDES the
+                # b08f40fe two-set conditional for the LIVE count —
+                # an aged never-dispatched IDLE orphan now reads
+                # NON-QUIET to the in-turn arm (reaping belongs to
+                # the strand healer + the WC-orphan detector lane,
+                # not to the gate guessing dormancy). Dormant is
+                # still NEVER busy (no execution happening — the LCA
+                # trigger-suppression semantics are unchanged).
+                live_count += 1
             else:
                 # Unknown status — preserve the historical default
                 # (not terminal ⇒ live) so a future enum member can
@@ -12986,25 +13001,13 @@ class InstanceManager:
                 # treated as live (PAUSED-like — suspect) and
                 # therefore NOT busy (strict-subset rule).
                 live_count += 1
-        if dormant_ids:
-            # Resolve the two work-en-route lanes (production wiring:
-            # manager-level message-queue repo; job repo behind the
-            # late-bound JobQueueService — see the helper's wiring
-            # notes) and count only the dormant ids that carry work.
-            # Dormant-with-work is live (existing two-set) but NOT
-            # busy (still no execution — work is merely en route).
-            msg_repo = getattr(self, "_queue_repository", None)
-            job_service = getattr(self, "_job_queue_service", None)
-            job_repo = (
-                getattr(job_service, "_repository", None)
-                if job_service is not None
-                else None
-            )
-            live_count += len(
-                _dormant_descendants_with_work_en_route(
-                    msg_repo, job_repo, dormant_ids
-                )
-            )
+        # wi-1fbee2ec: the dormant work-en-route resolution is RETIRED
+        # from the live count (every dormant id is counted live above —
+        # unconditional non-terminal liveness).
+        # ``_dormant_descendants_with_work_en_route`` remains a
+        # module-level utility (pinned by
+        # tests/postgres/test_attestation_live_descendants_pg_lca.py)
+        # but is no longer consulted by the gate walk.
         return (busy_count, live_count)
 
     def count_live_descendants(self, instance_id: str) -> int:
@@ -13051,6 +13054,24 @@ class InstanceManager:
           terminal (excluded) — an IDLE orphan with no message row and
           no unsettled job is therefore NOT live and the deny/nudge
           ladder sees the TRUE zero.
+
+        **wi-1fbee2ec WIDENING (leader adjudication 2026-11-01,
+        binding):** the CONDITIONAL-live dormancy check is RETIRED
+        for this count — ANY NON-TERMINAL descendant (minted IDLE /
+        QUEUED / dispatched / PAUSED / RUNNING — anything not in the
+        terminal set) now counts as NON-QUIET. Rationale: the
+        dispatch→RUNNING micro-race (child instance row committed
+        while its message/task evidence rows are not yet visible —
+        live receipt: leader 7ceb4685 verified-clean ~08:25Z
+        2026-11-01 while child fea6f7be sat minted-not-yet-RUNNING in
+        the ~08:14-08:19Z dispatch window) must NEVER verify-clean on
+        the gate. The b08f40fe two-set rationale is superseded for
+        this arm: an aged never-dispatched IDLE orphan now reads
+        NON-QUIET here, and its reaping belongs to the strand healer
+        / the WC-orphan detector lane — not to the gate guessing
+        dormancy. The BUSY subset (``count_busy_descendants`` — LCA
+        trigger suppression) keeps the strict two-set semantics and
+        is UNCHANGED.
 
         Fail-open contract: DB errors do NOT fail toward orphan=not-live.
         A read error inside the conditional work-en-route sub-checks
@@ -13169,6 +13190,65 @@ class InstanceManager:
         """
         busy_count, _ = self._count_descendants_busy_and_live(instance_id)
         return busy_count
+
+    def count_outstanding_report_obligations(self, instance_id: str) -> int:
+        """Count outstanding report-delivery obligations in the subtree.
+
+        wi-1fbee2ec (report-obligation visibility, 2026-11-01) — the
+        SIXTH in-turn gate input (``outstanding_report_obligations``)
+        and the read behind the emission-time gate's obligation leg
+        (``child_reports._root_completion_gate`` leg 6). Counts
+        ``report_injections`` rows in a NON-TERMINAL state
+        (``PENDING`` / ``DEFERRED``) whose delivery is owed to or
+        from a member of this instance's permanent subtree — the
+        transactional-outbox signal that a descendant's completed
+        work product has NOT yet reached its recipient (the 10:35
+        incident class: a terminal child, an undelivered report, and
+        every legacy liveness arm reading a REAL zero).
+
+        Subtree source: ``get_tree_ids_permanent`` (the permanent
+        ``instances.parent_id`` lineage — survives terminal churn and
+        revive), root INCLUDED as a RECIPIENT (the gated instance's
+        own children report to it), capped at
+        :data:`LIVE_DESCENDANTS_BFS_CAP` (the same hot-path cap the
+        sibling R2 walks apply). The gated instance's OWN upward
+        obligation is excluded (child == instance_id — that row is
+        its parent's gate concern, and counting it would hold the
+        very emission that drives its delivery). See
+        :meth:`ReportInjectionRepository.count_outstanding_for_subtree`
+        for the full keying rationale.
+
+        Error contract: DB errors PROPAGATE (mirrors
+        :meth:`count_live_descendants` — the caller owns the posture;
+        the attestation read converts to the D1 fail-closed
+        error flag INSIDE its own isolated try/except, and the
+        emission leg converts to a HOLD verdict inside the leg —
+        neither rides a fail-open catch). A missing instance
+        repository reads as ``0`` (no tree ⇒ no obligations known —
+        the ``count_pending_children`` no-bus precedent).
+
+        Args:
+            instance_id: The gated instance whose subtree to scan.
+
+        Returns:
+            Non-negative int count of outstanding obligations. 0 when
+            no repository is wired, the tree is empty, or every
+            obligation row in scope is terminal (delivered /
+            dead-lettered).
+        """
+        repo = getattr(self, "_instance_repository", None)
+        if repo is None:
+            return 0
+        tree_ids = repo.get_tree_ids_permanent(instance_id)
+        if not tree_ids:
+            return 0
+        cap = self.LIVE_DESCENDANTS_BFS_CAP
+        subtree_ids = tree_ids[:cap]
+        return ReportInjectionRepository(
+            engine=self._engine
+        ).count_outstanding_for_subtree(
+            subtree_ids, exclude_child_id=instance_id
+        )
 
     def has_open_user_answer(self, instance_id: str) -> bool:
         """Does this instance have an OPEN awaiting-answer suspension

@@ -184,7 +184,14 @@ class ReportInjection(SQLModel, table=True):
             ``PENDING_MESSAGES``, ``IDEMPOTENCY_SKIP``,
             ``RESUME_ROUTER``). ``None`` for non-DEFERRED rows. TEXT
             (not VARCHAR) — open-ended vocabulary, future reasons
-            without a schema change.
+            without a schema change. PROVENANCE EXTENSION
+            (wi-1fbee2ec, 2026-11-01): the synchronous
+            terminalization outbox mint stamps
+            ``DEFERRED_REASON_SYNC_MINT`` on its state=PENDING row so
+            the sync-vs-backfill origin of any obligation row is
+            readable from the row itself (the race loser's reason may
+            be flipped in place by a later ``ensure_deferred`` touch —
+            first-writer-wins on the ROW, provenance best-effort).
         recovery_attempted_at: Phase 1. ISO-8601 timestamp set by
             :meth:`ReportInjectionRepository.transition_deferred_to_pending`
             on ``DEFERRED → PENDING``. Partial index over PENDING

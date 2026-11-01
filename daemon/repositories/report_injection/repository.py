@@ -1106,6 +1106,86 @@ class ReportInjectionRepository:
             # for filtering only.
             return [row for row, _parent_id in rows]
 
+    def count_outstanding_for_subtree(
+        self,
+        subtree_ids: list[str],
+        *,
+        exclude_child_id: str | None = None,
+    ) -> int:
+        """Count non-terminal obligation rows keyed to a mission subtree.
+
+        wi-1fbee2ec (report-obligation visibility, 2026-11-01) — the
+        read behind BOTH completion-gate hold inputs (the in-turn
+        attestation arm and the emission-time ``_root_completion_gate``
+        leg 6). "Outstanding descendant report obligation" = a
+        ``report_injections`` row in a NON-TERMINAL state (``PENDING``
+        or ``DEFERRED`` — the write-once index's obligation set) whose
+        delivery is owed to or from a member of the gated instance's
+        permanent subtree:
+
+        * ``parent_instance_id IN subtree_ids`` — a member of the
+          subtree (including the gated instance itself) is the
+          RECIPIENT of an undelivered report (the 10:35 shape: the
+          terminal child's report owed to the gated root).
+        * ``child_instance_id IN subtree_ids`` — a DESCENDANT of the
+          gated instance completed and its work product is still
+          undelivered (covers cross-tree recipient routing, where the
+          recipient sits outside the subtree but the obligation
+          originates inside it).
+
+        ``exclude_child_id`` drops the gated instance's OWN report
+        obligation (child == gated instance, recipient == its parent
+        outside the subtree): a mid-level instance's own undelivered
+        upward report is its PARENT's gate concern, never a reason to
+        hold this instance's emission — and counting it would deny
+        the very emission that drives the delivery.
+
+        Delivered rows (``INJECTED`` / ``TASK_DELIVERED``) and the
+        ``FAILED`` dead-letter sentinel are excluded (terminal
+        states — no obligation outstanding). Re-owed cycles mint a
+        FRESH non-terminal row (the partial index covers PENDING /
+        DEFERRED only), so a revived obligation re-arms the count
+        naturally.
+
+        Args:
+            subtree_ids: Permanent-lineage tree ids (root INCLUDED —
+                ``get_tree_ids_permanent`` shape). Callers apply their
+                own hot-path caps before calling.
+            exclude_child_id: The gated instance id (its own upward
+                obligation is excluded; ``None`` counts everything).
+
+        Returns:
+            Non-negative count. Raises on DB errors — the callers'
+                D1 error postures (fail-closed HOLD/DENY, error path
+                isolated from every fail-open catch) own the
+                conversion; this method never guesses.
+        """
+        from sqlalchemy import func, or_
+
+        if not subtree_ids:
+            return 0
+        with Session(self.engine) as session:
+            stmt = (
+                select(func.count())
+                .select_from(ReportInjection)
+                .where(
+                    ReportInjection.state.in_(
+                        (_PENDING_STATE, _DEFERRED_STATE)
+                    )
+                )
+                .where(
+                    or_(
+                        ReportInjection.parent_instance_id.in_(subtree_ids),
+                        ReportInjection.child_instance_id.in_(subtree_ids),
+                    )
+                )
+            )
+            if exclude_child_id is not None:
+                stmt = stmt.where(
+                    ReportInjection.child_instance_id != exclude_child_id
+                )
+            return int(session.exec(stmt).scalar_one() or 0)
+
     def find_completed_children_without_delivery(
         self,
         *,
