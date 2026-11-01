@@ -1,0 +1,16 @@
+live native pool: 234948 strings
+=== NATIVE-READER SYMBOL MATRIX (live v0.28.4) ===
+  count_outstanding_report_obligations                    native_live=False
+  count_outstanding_for_subtree                           native_live=False
+  DEFERRED_REASON_SYNC_MINT                               native_live=False
+  outstanding_report_obligations                          native_live=False
+  report_delivery_recovery_lane_wc_orphan_detector        native_live=False
+  wc_orphan_detector                                      native_live=False
+  wc_orphan_direct                                        native_live=False
+  wc_orphan_pure_chain                                    native_live=False
+  suppressed_root_terminal                                native_live=False
+  report_obligation_read_error                            native_live=False
+  _resolve_get_store                                      native_live=True
+  _GET_STORE_MAX_ATTEMPTS                                 native_live=True
+  _store_import_latched                                   native_live=True
+  _get_store_fn                                           native_live=True

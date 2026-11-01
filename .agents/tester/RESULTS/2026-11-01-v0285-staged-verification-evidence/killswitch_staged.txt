@@ -1,0 +1,29 @@
+code object: 'ServicesConfig' (from daemon.config); STORE_NAME report_delivery_recovery_lane_wc_orphan_detector at instruction #194
+daemon.config dis — instructions 172..197 (STORE_NAME target at #194):
+     476 CALL_KW                     
+     484 STORE_NAME                  
+     486 LOAD_NAME                   
+     488 PUSH_NULL                   
+     490 LOAD_CONST                   = True
+     492 LOAD_CONST                   = 'Lane 6 (stuck_wake heal — Block-1 G4 merge-gate) per-lane kill-switch. Defaults to True; the lane force-cancels a dead-worker wake task whose worker died with the daemon (F-1 epoch-belt preserves the wake row + the marker row + the RUNNING task status, but the per-instance busy guard at task/repository.py:2648-2650 blocks new claims until the stale-task-recovery F-1 boot_epoch amendment at task/repository.py:3411 elapses — typically after the parent has been wedged in waiting_children for the full F-1 15-minute DEFAULT_STALE_THRESHOLD_MINUTES). Setting this to False (env ENSEMBLE_REPORT_DELIVERY_RECOVERY_LANE_STUCK_WAKE=0) restores the pre-fix behavior — the wedge heals via stale_task_recovery once the F-1 boot_epoch amendment elapses, but the parent stays wedged for that interval. Production should leave this True (the lane is the heal frontier for the captured wedge shape).'
+     494 LOAD_CONST                   = ('default', 'description')
+     496 CALL_KW                     
+     504 STORE_NAME                  
+     506 LOAD_NAME                   
+     508 PUSH_NULL                   
+     510 LOAD_CONST                   = True
+     512 LOAD_CONST                   = "Lane 7 (mission-commission reconciliation — Proposal B PR3) per-lane kill-switch. The lane resolves the provably-dead outstanding commissions to 'abandoned' (and the provably-delivered ones to 'satisfied') so the settle-hold can release. Its OWN posture is fail-MISS: every probe error HOLDS the row. Defaults to True; the ENSEMBLE_MISSION_RECORDS mode ladder still gates it (off → the lane is not even queried, dry → counters only, no writes)."
+     514 LOAD_CONST                   = ('default', 'description')
+     516 CALL_KW                     
+     524 STORE_NAME                  
+     526 LOAD_NAME                   
+     528 PUSH_NULL                   
+     530 LOAD_CONST                   = True
+     532 LOAD_CONST                   = "wi-1fbee2ec PART 4 — the WC-orphan DETECTOR lane (observability-only; sweep-side per D2 ruling (a)). Fires a structured log + counter for every non-root WAITING_CHILDREN instance whose nearest non-WC ancestor (the chain's structural authority) is TERMINAL — the direct shape (WC child of a terminal parent) and the pure-WC-grandchildren sub-shape (a WC chain under a terminal root). NO lane sees these shapes today (healer roots-only; RDRS L2 excludes terminal parents; L5 sees only existing DEFERRED rows). DETECTION ONLY — never acts, never revives, never writes instance state; disposition is surfaced for the operator / a future lane. Default True (never-silent posture); env SERVICES_REPORT_DELIVERY_RECOVERY_LANE_WC_ORPHAN_DETECTOR=0 disables."
+     534 LOAD_CONST                   = ('default', 'description')
+     536 CALL_KW                     
+     544 STORE_NAME                    <<<
+     546 LOAD_NAME                   
+     548 PUSH_NULL                   
+
+VERDICT: LOAD_CONST True in feeding window = True; KW_NAMES contains 'default' = False
