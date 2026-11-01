@@ -27,6 +27,7 @@ from daemon.services.project_skill_source.manifest import (
 from daemon.services.project_skill_source.model import mint_pseudo_id
 
 from tests.helpers.project_skill_source_fixtures import (
+    OTHER_PROJECT_ID,
     TEST_PROJECT_ID,
     VALID_MANIFEST,
     FakeEmbeddingService,
@@ -652,3 +653,126 @@ class TestReadTimeContainmentSwap:
         # the corpus also refuses to serve through the swapped path
         corpus = await svc.corpus_for(TEST_PROJECT_ID, root)
         assert corpus == []
+
+
+    @pytest.mark.asyncio
+    async def test_body_file_only_symlink_refused_at_read(self, tmp_path, sqlite_engine):
+        """W6 (Phase-4 code-review fix cycle) — the A5(e) re-check
+        validated the skill DIR; a symlink planted on the BODY FILE alone
+        after indexing was served in the stat↔open window. The read path
+        now re-validates the body file itself and opens O_NOFOLLOW.
+
+        Driven at ``_read_body_fresh`` directly so the assertion targets
+        the read-time gate (a corpus call would first stat-gate and
+        re-parse, which is a DIFFERENT refusal). Mutation leg W6 removes
+        the body-file re-check and the evil body is served → RED.
+        """
+        from daemon.services.project_skill_source.service import (
+            ProjectSkillBodyUnavailable,
+        )
+
+        root = str(tmp_path)
+        write_skill(tmp_path, "tester", "body-slip", body_text="Legit body.\n")
+        svc = make_service(sqlite_engine=sqlite_engine)
+        await svc.ensure_index(root, TEST_PROJECT_ID)
+        root_real = os.path.realpath(root)
+        meta = next(
+            m
+            for m in svc._roots[root_real].metas.values()
+            if m.name == "body-slip"
+        )
+        # Positive control: the legit read works.
+        assert await svc._read_body_fresh(root_real, meta) == "Legit body.\n"
+
+        # Attacker replaces ONLY the body file with a symlink escaping
+        # the skill dir (manifest untouched — a dir-level check passes).
+        outside = tmp_path / "outside-body.md"
+        outside.write_text("EVIL BODY.\n")
+        body = tmp_path / ".agents" / "tester" / "skills" / "body-slip" / "body-slip.md"
+        body.unlink()
+        body.symlink_to(outside)
+
+        with pytest.raises(ProjectSkillBodyUnavailable) as excinfo:
+            await svc._read_body_fresh(root_real, meta)
+        low = str(excinfo.value).lower()
+        assert "symlink" in low or "outside" in low, str(excinfo.value)
+        assert "EVIL BODY" not in str(excinfo.value)
+
+
+class TestCorpusProjectBinding:
+    """W1 (Phase-4 code-review fix cycle) — ``corpus_for`` must never
+    hand project X project Y's corpus.
+
+    The window: ``ensure_index`` releases the per-root lock, then the
+    reader does ``self._roots.get(root_real)``. A concurrent index of a
+    DIFFERENT project bound to the same realpath can replace the entry
+    in between. The pin simulates exactly that swap (wrapping
+    ``ensure_index`` so the foreign entry is installed before it
+    returns) — mutation leg W1 removes the project re-check and this
+    test goes RED with a non-empty corpus.
+    """
+
+    @pytest.mark.asyncio
+    async def test_corpus_empty_when_index_rebound_to_other_project(
+        self, canon_root, sqlite_engine, caplog
+    ):
+        from daemon.services.project_skill_source.service import _RootIndex
+
+        svc = make_service(sqlite_engine=sqlite_engine)
+        root_real = os.path.realpath(canon_root)
+        # Positive control: with the binding intact the corpus is real.
+        assert len(await svc.corpus_for(TEST_PROJECT_ID, canon_root)) == 3
+
+        real_ensure = svc.ensure_index
+
+        async def _swapping_ensure(root, project_id):
+            stats = await real_ensure(root, project_id)
+            # The concurrent swap happens INSIDE the window: the entry
+            # the reader is about to fetch is now bound to another
+            # project (same realpath, same metas — the nastiest shape).
+            idx = svc._roots[root_real]
+            svc._roots[root_real] = _RootIndex(
+                root_path=idx.root_path,
+                project_id=OTHER_PROJECT_ID,
+                metas=idx.metas,
+                invalid=list(idx.invalid),
+                stats=idx.stats,
+            )
+            return stats
+
+        svc.ensure_index = _swapping_ensure  # type: ignore[method-assign]
+        corpus = await svc.corpus_for(TEST_PROJECT_ID, canon_root)
+        assert corpus == [], (
+            "corpus_for served a corpus whose index was bound to "
+            f"{OTHER_PROJECT_ID} (W1 TOCTOU)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_lookup_explicit_miss_when_index_rebound(
+        self, canon_root, sqlite_engine
+    ):
+        """The sibling of the same window: the post-gate re-fetch must
+        not resolve a body out of a foreign-index entry."""
+        from daemon.services.project_skill_source.service import _RootIndex
+
+        svc = make_service(sqlite_engine=sqlite_engine)
+        root_real = os.path.realpath(canon_root)
+        await svc.ensure_index(canon_root, TEST_PROJECT_ID)
+        assert await svc.lookup_explicit("alpha-skill", TEST_PROJECT_ID) is not None
+
+        real_ensure = svc.ensure_index
+
+        async def _swapping_ensure(root, project_id):
+            stats = await real_ensure(root, project_id)
+            idx = svc._roots[root_real]
+            svc._roots[root_real] = _RootIndex(
+                root_path=idx.root_path,
+                project_id=OTHER_PROJECT_ID,
+                metas=idx.metas,
+                invalid=list(idx.invalid),
+                stats=idx.stats,
+            )
+            return stats
+
+        svc.ensure_index = _swapping_ensure  # type: ignore[method-assign]
+        assert await svc.lookup_explicit("alpha-skill", TEST_PROJECT_ID) is None

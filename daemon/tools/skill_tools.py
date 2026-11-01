@@ -540,6 +540,38 @@ def create_skill_tools(
             address = getattr(fs, "address", skill_id)
         else:
             # The ``pf-<hex16>`` pseudo-id the injection path renders.
+            #
+            # W5 (code-review fix-cycle): this branch USED to write a
+            # usage row for ANY caller string shaped ``pf-…`` — the
+            # "nothing is written under OFF" invariant was false, and a
+            # typo'd/hostile id could mint a durable row. Require (a)
+            # the knob to be ON (a file source exists) and (b) the id
+            # to be a REAL indexed file skill of the resolved project.
+            if file_source is None or not pid or not roots:
+                return (
+                    f"ERROR: skill_feedback: no project scope resolved "
+                    f"for file skill '{skill_id}' — metrics cannot be "
+                    "recorded (fail-closed)."
+                )
+            await _ensure_pf_index(roots, pid)
+            pf_repo = _get_pf_file_repo()
+            if pf_repo is None:
+                return (
+                    "ERROR: skill_feedback: project-skill index "
+                    f"unavailable — cannot validate '{skill_id}' "
+                    "(fail-closed)."
+                )
+            try:
+                known_row = await asyncio.to_thread(pf_repo.get, skill_id)
+            except Exception as e:
+                return f"ERROR: skill_feedback failed: {e}"
+            if known_row is None or (
+                getattr(known_row, "project_id", None) != pid
+            ):
+                return (
+                    f"ERROR: skill_feedback: no indexed file skill with "
+                    f"pseudo id '{skill_id}' in this project scope."
+                )
             pseudo_id = skill_id
         parts: list[str] = []
         if note:
@@ -724,6 +756,13 @@ Returns:
                 if category is not None:
                     items = [it for it in items if it.get("category") == category]
                 lines.append(f"Skills ({len(items)} of {total} total):")
+                # W4 (code-review fix-cycle): the ``source: db`` tag is
+                # ADDITIVE to the pre-lane line shape. Under the knob
+                # OFF no file source exists, so no cross-source
+                # disambiguation is needed — emit NOTHING extra and the
+                # line stays byte-identical to the pre-lane output
+                # (A11's "byte-identical RESULTS" claim restored).
+                db_suffix = " — source: db" if file_source is not None else ""
                 for it in items:
                     skill_id = it.get("id", "")
                     short_id = skill_id[:8] if isinstance(skill_id, str) else "????????"
@@ -731,7 +770,7 @@ Returns:
                     cat = it.get("category", "")
                     status = it.get("status", "")
                     lines.append(
-                        f"- [{short_id}] {name} — {cat} — {status} — source: db"
+                        f"- [{short_id}] {name} — {cat} — {status}{db_suffix}"
                     )
             except Exception as e:
                 return f"ERROR: skill_list failed: {e}"

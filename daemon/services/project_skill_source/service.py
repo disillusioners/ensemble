@@ -50,6 +50,7 @@ three tables.
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import logging
 import os
@@ -70,6 +71,7 @@ from daemon.services.project_skill_source.manifest import (
     REASON_BODY_TOO_LARGE,
     REASON_UNKNOWN_SCHEMA,
     ParsedSkill,
+    _validate_file_inside_skill_dir,
     discover_skill_dirs,
     parse_and_validate,
     validate_containment,
@@ -826,7 +828,27 @@ class ProjectSkillSourceService:
             )
             return []
         index = self._roots.get(root_real)
-        if index is None:
+        # W1 (code-review fix-cycle, SECURITY-GRADE): ``ensure_index``
+        # released the per-root lock before this read, so a concurrent
+        # index of a DIFFERENT project bound to the same realpath can
+        # have replaced the entry in the window — handing project X
+        # project Y's corpus. Re-assert the project binding before
+        # serving anything (the re-check ``lookup_explicit`` performs at
+        # its post-gate re-fetch). Mismatch ⇒ contribute nothing.
+        #
+        # Longer-term form (deferred to the gc/keys follow-up): key
+        # ``_roots`` by ``(root_real, project_id)`` so the swap class
+        # disappears structurally instead of being re-checked per read.
+        if index is None or index.project_id != project_id:
+            if index is not None:
+                logger.warning(
+                    "[ProjectSkillSource] corpus_for project mismatch at "
+                    "root=%s: index bound to %s, caller scoped to %s — "
+                    "contributing nothing (TOCTOU guard)",
+                    root_real,
+                    index.project_id,
+                    project_id,
+                )
             return []
         # A4-i readers take the CURRENT dict entry; a concurrent swap
         # replaces the entry, never mutates the list we hold.
@@ -892,6 +914,12 @@ class ProjectSkillSourceService:
             try:
                 await self.ensure_index(root_real, project_id)
                 index = self._roots.get(root_real) or index
+                if index.project_id != project_id:
+                    # W1 sibling (same TOCTOU window as ``corpus_for``):
+                    # the re-fetched entry may now be bound to a
+                    # DIFFERENT project on the same realpath — never
+                    # resolve a body out of it (fail-closed miss).
+                    return None
                 match = next(
                     (
                         m
@@ -950,8 +978,41 @@ class ProjectSkillSourceService:
             raise ProjectSkillBodyUnavailable(meta.address, pre)
 
         def _read() -> bytes:
-            with open(body_path, "rb") as fh:
-                return fh.read()
+            # W6 (code-review fix-cycle): the A5(e) re-check above
+            # validates the SKILL DIR, not the body FILE — a symlink
+            # planted on the body path AFTER indexing was served in the
+            # stat↔open window. Re-validate the body file itself and
+            # open it O_NOFOLLOW, INSIDE this single thread pass, so the
+            # final component can never be a symlink escape.
+            skill_dir_real = os.path.realpath(
+                os.path.join(
+                    root_real, ".agents", meta.namespace, "skills", meta.name
+                )
+            )
+            body_fail, body_real = _validate_file_inside_skill_dir(
+                skill_dir_real, meta.body_path, "body"
+            )
+            if body_fail:
+                raise ProjectSkillBodyUnavailable(meta.address, body_fail)
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(body_real or body_path, flags)
+            try:
+                chunks: list[bytes] = []
+                while True:
+                    chunk = os.read(fd, 1 << 16)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                return b"".join(chunks)
+            except OSError as exc:
+                if getattr(exc, "errno", None) == errno.ELOOP:
+                    raise ProjectSkillBodyUnavailable(
+                        meta.address,
+                        f"symlink_refused: body path is a symlink ({meta.body_path!r})",
+                    ) from None
+                raise
+            finally:
+                os.close(fd)
 
         try:
             raw = await asyncio.to_thread(_read)

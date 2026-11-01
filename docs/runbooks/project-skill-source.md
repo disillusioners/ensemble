@@ -29,7 +29,7 @@ DB table; load/inject reads the file from disk at call time.
 
 | Env | Default | Meaning |
 |---|---|---|
-| `ENSEMBLE_PROJECT_SKILL_SOURCE_ENABLED` | `1` (ON) | Kill-switch. Default ON per the **two-class rule (A18)**: ON for zero-user-action read/serve surfaces, OFF for agent-authored mutation lanes — the file source is read/serve. OFF ⇒ `file_source=None` everywhere: byte-identical search/list/view RESULTS, zero `pf-` rows in any skill table. |
+| `ENSEMBLE_PROJECT_SKILL_SOURCE_ENABLED` | `1` (ON) | Kill-switch. Default ON per the **two-class rule (A18)**: ON for zero-user-action read/serve surfaces, OFF for agent-authored mutation lanes — the file source is read/serve. OFF ⇒ `file_source=None` everywhere: byte-identical search/list/view RESULTS (the additive `source: db` tag on `skill_list` rows is emitted ONLY when the source is wired — OFF renders the pre-lane line verbatim), zero `pf-` rows in any skill table. |
 | `ENSEMBLE_PROJECT_SKILL_SOURCE_EXTRA_ROOTS` | empty | Comma-separated ABSOLUTE extra canon roots, **dev/testing only**. Each entry is W-5-bound to the caller's resolved project (fail-closed; non-binding entries ignored with a WARNING). Boot logs WARN on nonexistent paths. |
 
 Knob-off posture is fully reversible: nothing is written under OFF (no index ⇒
@@ -41,7 +41,7 @@ no refresh ⇒ no `pf-` rows), so flipping OFF and back on is clean.
 |---|---|---|
 | OFF | any | Today's daemon exactly: DB-only search, `pf:` load refused ("file skill source is not available on this deployment"), `/readyz` shows `enabled:false`. |
 | ON | present | **Full fusion** — DB + file corpus, shadow pass (file wins same-name), embedding rerank participates for both sources. |
-| ON | absent | **File-only degraded (M10)** — `skill_search` answers BM25-only over the file corpus with the `degraded: "file_only"` marker; `skill_view`/`skill_list` serve files; create/fix stay gated. `/readyz` shows `enabled:true, db_stack_present:false`. |
+| ON | absent | **File-only degraded (M10)** — `skill_search` answers BM25-only over the file corpus with the `degraded: "file_only"` marker; `skill_view`/`skill_list` serve files; create/fix stay gated. `/readyz` shows `enabled:true, db_stack_present:false`. **REACHABILITY (code-review W7):** on a `load_config`-built daemon `config.skill_evolution` is non-Optional (`Field(default_factory=SkillEvolutionConfig)`), so this cell is a **test/defensive seam** — exercised by the wiring pack, not reachable through the shipped config path. It is NOT what "evolution lane disabled" means; see the A18.2 note below. |
 
 ## ⚠️ DUAL CEREMONY DISCLOSURE (A18.2 — read before the next promote)
 
@@ -54,9 +54,10 @@ no refresh ⇒ no `pf-` rows), so flipping OFF and back on is clean.
    retires DB skill(s) …`) — greppable by an operator who doesn't know to look.
 2. **First boot activates the file source where it was dark.** Two shapes:
    - **Evolution-config-ABSENT installs** (``skill_evolution`` None — the
-     M10 cell): `skill_search`/`skill_list`/`skill_view` go from "not yet
-     available" to live FILE-ONLY results (`degraded: "file_only"`,
-     BM25-only).
+     M10 cell; a **test/defensive seam only**, see the W7 note at the end —
+     not reachable through ``load_config``): `skill_search`/`skill_list`/
+     `skill_view` go from "not yet available" to live FILE-ONLY results
+     (`degraded: "file_only"`, BM25-only).
    - **Evolution-config-PRESENT installs — including THIS one** (the
      shipped `config.yaml` carries a `skill_evolution:` section, so
      `config.skill_evolution` is never None through `load_config`): the
@@ -82,21 +83,31 @@ owns the names now.
   leak-guard trips ERROR; EXTRA_ROOTS hygiene WARNINGs at boot.
 - **GC.** `gc_sweep()` runs the A17 orphan-project purge (index rows for
   deleted projects) plus the A4 embedding gc; both idempotent, advisory-grade.
+  **It is wired** (code-review W3): `MaintenanceService` job
+  `project_skill_gc`, every `PROJECT_SKILL_GC_INTERVAL_HOURS` (24h, idle-gated,
+  failure WARN-logged and retried next tick). No operator action needed; the
+  first run fires on the first maintenance tick after boot. On-demand
+  equivalent (manual, same effect, run against the daemon's DB): call
+  `ProjectSkillSourceService.gc_sweep()` from a REPL holding the manager's
+  file/embedding repositories — the maintenance job simply schedules that.
 - **Root cap.** `MAX_ROOTS=32` per project (INFO-refuse beyond) — insurance
   against a runaway EXTRA_ROOTS/monorepo misconfig.
 - **Rollback.** The lane is additive-only (3 new tables, zero FK, zero body
   columns). An old binary simply never references the tables — inert on
   rollback. Git-revert of the lane commits is a clean rollback.
 
-> **A18.2 wording note (Phase-4 structural finding):** the original
-> decisions.md sentence ("THIS install runs evolution-OFF ⇒ first boot
+> **A18.2 wording note (Phase-4 structural finding; W7 code-review fold):** the
+> original decisions.md sentence ("THIS install runs evolution-OFF ⇒ first boot
 > activates file-only search/list/view") describes the M10
-> (evolution-config-absent) shape. On THIS install the shipped
-> `config.yaml` carries a `skill_evolution:` section and
-> `Config.skill_evolution` is non-Optional (`Field(default_factory=…)`), so
-> the first boot actually runs FULL FUSION (M9) with shadowing — the
-> STRONGER activation. Both shapes are disclosed above; the Phase-4 report
-> carries the derivation.
+> (evolution-config-ABSENT) shape — which, because `Config.skill_evolution` is
+> non-Optional (`Field(default_factory=SkillEvolutionConfig)`), is **a
+> test/defensive seam, not a production reachable mode**. So that sentence is
+> wrong on two counts: (i) the config is never absent through `load_config`, and
+> (ii) **"evolution lane disabled" ≠ "evolution config absent"** —
+> `evolution_lane_enabled=false` gates evolution JOBS, and the shipped
+> `config.yaml` carries a `skill_evolution:` section, so the first boot actually
+> runs FULL FUSION (M9) with shadowing — the STRONGER activation. Both shapes
+> are disclosed above; the Phase-4 report carries the derivation.
 
 ## Rollback
 

@@ -310,6 +310,70 @@ class TestWiringSites:
         assert "file source DISABLED" in src
 
 
+class TestGcMaintenanceWiring:
+    """W3 (Phase-4 code-review fix cycle) — ``gc_sweep()`` had ZERO
+    production callers while A17/runbook claimed GC ran. Folded as
+    option (a): a ``MaintenanceService`` job, registered OUTSIDE the
+    ``skill_evolution`` gate (the file source is ON-class) and guarded
+    by the file-source presence (knob OFF ⇒ nothing was ever written ⇒
+    nothing to reap).
+    """
+
+    def test_gcjob_registered(self):
+        import daemon.manager as m
+
+        src = inspect.getsource(m)
+        assert '"project_skill_gc"' in src
+        assert "PROJECT_SKILL_GC_INTERVAL_HOURS" in src
+        assert "_run_projectskill_gc" in src
+        assert "if self._project_skill_source is not None:" in src
+
+    def test_gcjob_sits_outside_the_evolution_gate(self):
+        import daemon.manager as m
+
+        src = inspect.getsource(m)
+        reg = src.index('"project_skill_gc"')
+        # After the evolution-cluster sweep registration …
+        assert reg > src.index('"skill_orphan_sweep"')
+        # … and BEFORE the next independent maintenance block, i.e. it
+        # is not nested inside ``if self.config.skill_evolution is not
+        # None:`` (that block's last statement is the orphan sweep).
+        assert reg < src.index("Project Blueprint Phase 3: daily scan")
+        # The interval is a module-level constant (the registration
+        # reads it; the behavioral leg below imports and drives both).
+        assert "PROJECT_SKILL_GC_INTERVAL_HOURS: float = " in src
+
+    @pytest.mark.asyncio
+    async def test_wrapper_calls_gc_sweep_and_never_raises(self):
+        from daemon.manager import InstanceManager, PROJECT_SKILL_GC_INTERVAL_HOURS
+
+        assert PROJECT_SKILL_GC_INTERVAL_HOURS > 0
+        calls: list[str] = []
+
+        class _Ok:
+            async def gc_sweep(self):
+                calls.append("ok")
+                return 2
+
+        class _Boom:
+            async def gc_sweep(self):
+                calls.append("boom")
+                raise RuntimeError("db gone")
+
+        assert await InstanceManager._run_projectskill_gc(
+            SimpleNamespace(_project_skill_source=_Ok())
+        ) is None
+        # Advisory: a failing sweep must never break the maintenance loop.
+        assert await InstanceManager._run_projectskill_gc(
+            SimpleNamespace(_project_skill_source=_Boom())
+        ) is None
+        # Missing source (knob OFF / partial init) is a silent skip.
+        assert await InstanceManager._run_projectskill_gc(
+            SimpleNamespace(_project_skill_source=None)
+        ) is None
+        assert calls == ["ok", "boom"]
+
+
 # ============================================================
 # Task 5 — the knob matrix (all four cells, per M0–M11)
 # ============================================================
@@ -698,6 +762,49 @@ class TestStage2DualSourceAdapter:
         assert svc.file_embeddings_for("pf-doesnotexist") == []
         none_repo = ProjectSkillSourceService()
         assert none_repo.file_embeddings_for("pf-x") == []
+
+    @pytest.mark.asyncio
+    async def test_file_embeddings_bridged_off_the_loop_thread(self):
+        """W2 (Phase-4 code-review fix cycle) — ``file_embeddings_for`` is
+        a SYNC DB read; inside async ``_embedding_rerank`` it must be
+        bridged through ``asyncio.to_thread`` (the v0.27.14 on-loop-DB
+        defect class). Instrumentation pin: the adapter records the
+        thread it ran on; the test body runs on the loop thread, so a
+        direct (unbridged) call records THAT ident.
+
+        Mutation leg W2 reverts to the direct call → RED.
+        """
+        import threading
+
+        loop_thread = threading.get_ident()
+        seen: list[int] = []
+
+        class _SpyFileSource:
+            def file_embeddings_for(self, skill_id: str):
+                seen.append(threading.get_ident())
+                return []
+
+        search = SkillSearchService(
+            skill_repo=_StaticSkillRepo([]),
+            embedding_repo=_RecordingEmbeddingRepo(),
+            embedding_service=_RecordingEmbeddingService(),
+            llm_config={},
+            config=SimpleNamespace(bm25_top_k=10),
+            file_source=_SpyFileSource(),
+        )
+        pf_skill = SimpleNamespace(
+            id="pf-abcdef0123456789",
+            name="alpha-skill",
+            address="pf:tester:alpha-skill",
+            content="body",
+            source="project-file",
+        )
+        await search._embedding_rerank("alpha", [pf_skill])
+        assert seen, "the file adapter was never consulted"
+        assert seen[0] != loop_thread, (
+            "file_embeddings_for ran ON the event-loop thread — the sync "
+            "DB read must be bridged with asyncio.to_thread (W2)"
+        )
 
 
 # ============================================================

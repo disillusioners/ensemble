@@ -465,6 +465,38 @@ class TestSkillListFiles:
         assert "pf:tester:broken-skill" in r
         assert "body_missing" in r
 
+    async def test_dbrows_tag_only_when_file_source_wired(self, tmp_path, engine, canon):
+        """W4 (Phase-4 code-review fix cycle) — the ``— source: db``
+        suffix is ADDITIVE and must be emitted ONLY when a file source
+        exists. Under the knob OFF the DB row line is byte-identical to
+        the pre-lane output (A11's list half, previously unpinned).
+
+        Mutation leg W4 restores the unconditional suffix → RED.
+        """
+        manager, fs, _ = _make_manager(tmp_path, engine, canon)
+        manager._skill_store_service.list_skills = AsyncMock(
+            return_value=(
+                [{
+                    "id": "abcdef0123456789",
+                    "name": "code-review",
+                    "category": "workflow",
+                    "status": "active",
+                }],
+                1,
+            )
+        )
+        legacy_line = "- [abcdef01] code-review — workflow — active"
+
+        # Knob ON: the tag is present (cross-source disambiguation).
+        on_out = await _tools(manager)["skill_list"].ainvoke({})
+        assert legacy_line + " — source: db" in on_out
+
+        # Knob OFF: file_source is None ⇒ the pre-lane line, verbatim.
+        manager._project_skill_source = None
+        off_out = await _tools(manager)["skill_list"].ainvoke({})
+        assert "source: db" not in off_out
+        assert off_out.splitlines()[1] == legacy_line
+
     async def test_no_mutable_db_rows_for_files(self, tmp_path, engine, canon):
         manager, fs, _ = _make_manager(tmp_path, engine, canon)
         store = manager._skill_store_service
@@ -642,16 +674,49 @@ class TestSkillFeedbackPf:
 
     async def test_pseudo_id_form_accepted(self, tmp_path, engine, canon):
         """The ``pf-<hex16>`` pseudo-id the injection path renders is
-        accepted directly (metrics keyed on it)."""
+        accepted directly — but only when it is a REAL indexed file skill
+        of this project (W5)."""
         manager, fs, usage_repo = _make_manager(tmp_path, engine, canon)
+        await fs.ensure_index(canon, PROJECT_ID)
+        pseudo = manager._project_skill_file_repository.list_by_project(
+            PROJECT_ID
+        )[0].id
+        assert pseudo.startswith("pf-")
         tools = _tools(manager)
-        pseudo = "pf-abcdef0123456789"
         r = await tools["skill_feedback"].ainvoke(
             {"skill_id": pseudo, "applied": True}
         )
         assert "metrics-only" in r
         rows = usage_repo.list_by_skill(pseudo)
         assert len(rows) == 1
+
+    async def test_pseudo_id_refused_under_knob_off(self, tmp_path, engine, canon):
+        """W5 (Phase-4 code-review fix cycle): with no file source the
+        bare pseudo-id branch must REFUSE — "nothing is written under
+        OFF" has to be literally true. Mutation leg W5 removes the
+        guard and a usage row is minted → RED."""
+        manager, fs, usage_repo = _make_manager(tmp_path, engine, canon)
+        await fs.ensure_index(canon, PROJECT_ID)
+        pseudo = manager._project_skill_file_repository.list_by_project(
+            PROJECT_ID
+        )[0].id
+        manager._project_skill_source = None  # the knob-OFF shape
+        tools = _tools(manager)
+        r = await tools["skill_feedback"].ainvoke(
+            {"skill_id": pseudo, "applied": True}
+        )
+        assert "no project scope resolved" in r
+        assert usage_repo.list_by_skill(pseudo) == []
+
+    async def test_pseudo_id_refused_when_not_indexed(self, tmp_path, engine, canon):
+        """W5: an arbitrary ``pf-…`` string never mints a row."""
+        manager, fs, usage_repo = _make_manager(tmp_path, engine, canon)
+        tools = _tools(manager)
+        r = await tools["skill_feedback"].ainvoke(
+            {"skill_id": "pf-deadbeefdeadbeef", "applied": True}
+        )
+        assert "no indexed file skill with pseudo id" in r
+        assert usage_repo.list_by_skill("pf-deadbeefdeadbeef") == []
 
     async def test_range_validation_mirrored(self, tmp_path, engine, canon):
         manager, fs, _ = _make_manager(tmp_path, engine, canon)

@@ -1361,7 +1361,14 @@ class SkillSearchService:
             # participation DB skills already had (pre-adapter they
             # scored neutral 0.0).
             if _is_project_file_skill(skill) and self._file_source is not None:
-                embeddings = self._file_source.file_embeddings_for(skill_id)
+                # W2 (code-review fix-cycle): ``file_embeddings_for`` is
+                # a SYNC DB read on the dedicated table — the exact
+                # v0.27.14 on-loop-DB defect class. Bridge it through
+                # the thread pool exactly like the DB sibling below;
+                # the adapter is fail-soft so the bridge inherits that.
+                embeddings = await asyncio.to_thread(
+                    self._file_source.file_embeddings_for, skill_id
+                )
             else:
                 try:
                     embeddings = await asyncio.to_thread(

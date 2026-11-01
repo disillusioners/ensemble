@@ -336,3 +336,27 @@ Test evidence at phase exit (worktree `.venv`, Python 3.14.7):
 - **Mutation spot-checks (apply → RED → revert):** A6 reflex-1 refusal (2 tests red), A5 containment (3 red), stat-gate invalid-sync trigger (3 red), warn-once consult (1 red), **A5(e) read-time containment re-check (1 red — this spot-check exposed the missing pin; `TestReadTimeContainmentSwap` added)**.
 
 Phase-exit invariants asserted: `skill_search_service.py` / `skill_injection_service.py` / `manager.py` / `config.py` / `readiness.py` untouched (no diffs); rollback note N6 stands (git-revert-only until Phase 4's knob). The plan's Tier-1 blast-radius gate is NOT run here (tester lane runs it from this record).
+
+---
+
+## Part 9 — Phase-4 code-review fix cycle (W1–W7) — 2026-11-01
+
+Council verdict folded here: **APPROVE-WITH-ADVISORIES, 0 critical / 7 warnings / 8 advisories**.
+This part records the SEVEN WARNING dispositions only (advisories → tidier pass).
+
+| # | Disposition | Where |
+|---|---|---|
+| W1 | **FIXED** — `corpus_for` re-asserts `index.project_id == project_id` after the post-lock `_roots.get()` (TOCTOU: a concurrent index of a different project on the same realpath could hand project X project Y's corpus). Sibling hardening at `lookup_explicit`'s post-gate re-fetch (same window, same file). Longer-term form recorded in-code: key `_roots` by `(root_real, project_id)`. | `daemon/services/project_skill_source/service.py` |
+| W2 | **FIXED** — `file_embeddings_for` (sync DB read on the dedicated table) bridged with `await asyncio.to_thread(...)` inside async `_embedding_rerank` — the v0.27.14 on-loop-DB defect class. Loop-thread instrumentation pin added. | `daemon/services/skill_search_service.py` |
+| W3 | **FIXED — option (a): WIRED.** `gc_sweep()` now has a production caller: `MaintenanceService` job `project_skill_gc`, every `PROJECT_SKILL_GC_INTERVAL_HOURS` (24h; idle-gated; advisory try/except). Registered OUTSIDE the `skill_evolution` gate (file source is ON-class, A18) and guarded by `_project_skill_source is not None` (knob OFF ⇒ not registered — nothing was ever written). Rationale for (a) over (b): the defect is real data (orphan `project_skill_files`/embeddings rows accumulate after project deletion), the wiring follows an existing in-house precedent (`skill_metric_scan`, `skill_orphan_sweep`), and it is ~25 lines of advisory code — documenting a manual-only invocation would have left A17's convergence claim false while adding an operator burden with no invocation surface. | `daemon/manager.py` + runbook |
+| W4 | **FIXED — option (a): SUFFIX GATED.** The `— source: db` tag on `skill_list` DB rows is emitted ONLY when a file source is wired. Under OFF the line is byte-identical to the pre-lane output ⇒ A11's "byte-identical search/list/view RESULTS" claim is literally true again (previously only the SEARCH half was pinned). Chosen over (b) because the tag's purpose is cross-SOURCE disambiguation, which cannot exist when there is one source; weakening a documented invariant to accommodate a cosmetic tag is the worse trade. M0 cell extended to pin `skill_list` byte-identity under OFF. | `daemon/tools/skill_tools.py` + tests |
+| W5 | **FIXED** — the bare `pf-<hex16>` feedback branch now requires (a) a wired file source (knob ON) and (b) the id to be a real `project_skill_files` row bound to the resolved project. Previously ANY `pf-…` string minted a usage row, including under the knob OFF (contradicting "nothing is written under OFF"). OFF-cell pin extended to exercise `skill_feedback(pf-…)`. | `daemon/tools/skill_tools.py` + tests |
+| W6 | **FIXED** — `_read_body_fresh` re-validates the BODY FILE (not just the skill dir) via `_validate_file_inside_skill_dir` and opens it `O_NOFOLLOW`, inside the same thread pass ⇒ a post-index body-file symlink can no longer be served in the stat↔open window. Body-only-symlink leg added to `TestReadTimeContainmentSwap`. | `daemon/services/project_skill_source/service.py` + tests |
+| W7 | **FIXED — DOC-ONLY.** M10 (evolution-config-ABSENT file-only mode) re-framed as a **test/defensive seam**: `Config.skill_evolution` is non-Optional (`Field(default_factory=...)`), so the else-branch is unreachable through `load_config`. The runbook's A18.2 note now also distinguishes **"evolution lane disabled" ≠ "evolution config absent"**. No behavior change — re-purposing the gate on `evolution_lane_enabled` would be a separate commissioning. | `docs/runbooks/project-skill-source.md` (this Part) |
+
+**A17 text correction (W3):** earlier text implied GC already ran. It now runs — on the
+maintenance tick — and the runbook says so with the interval and the advisory posture.
+**A11 text correction (W4):** the byte-identity claim is now true as written; the additive
+tag is ON-only and documented in the knob table.
+**A18.2 text correction (W7):** the derivation stands; the M10 shape is labelled
+test/defensive, and "lane disabled" is explicitly NOT the absent-config case.

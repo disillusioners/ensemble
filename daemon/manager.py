@@ -268,6 +268,14 @@ INSTANCE_CACHE_TTL_HOURS = 6
 # graph ACCESS/reuse (see ``_touch_cached_instance``), not creation.
 INSTANCE_CACHE_MAX_ENTRIES = 64
 
+# ── project-skill-loader A17: the orphan-purge gc tick interval ─────────────
+# Hours between ``ProjectSkillSourceService.gc_sweep()`` runs. The purge is
+# one idempotent statement pair (``project_skill_files`` rows whose project
+# no longer exists + the embeddings orphaned by it), so daily is ample; the
+# job is idle-gated by ``MaintenanceService`` and advisory-grade (a failure
+# is WARN-logged and retried next cycle, never raised).
+PROJECT_SKILL_GC_INTERVAL_HOURS: float = 24.0
+
 
 def _effective_instance_cache_ttl_hours(manager: Any) -> int:
     """Effective post-terminal TTL (hours) for ``manager``'s graph cache.
@@ -4028,6 +4036,25 @@ class InstanceManager:
                 self._run_skill_orphan_sweep,
             )
 
+        # ── project-skill-loader A17 — orphan-purge gc tick ───────────
+        # Code-review W3: ``ProjectSkillSourceService.gc_sweep()`` had NO
+        # production caller, so the A17 claim ("the durable view stays
+        # convergent after project deletion") was doc-only and orphaned
+        # index rows accumulated. Registered on the SAME maintenance
+        # service as the sweeps above (idle-gated, advisory): on the next
+        # tick a deleted project's ``project_skill_files`` rows and their
+        # embedding rows are purged. Deliberately OUTSIDE the
+        # ``skill_evolution`` gate — the file source is ON-class (A18)
+        # and its gc must run on evolution-absent installs too.
+        # Knob OFF ⇒ no source ⇒ not registered (M4: nothing was ever
+        # written, nothing to reap).
+        if self._project_skill_source is not None:
+            self._maintenance_service.register(
+                "project_skill_gc",
+                PROJECT_SKILL_GC_INTERVAL_HOURS,
+                self._run_projectskill_gc,
+            )
+
         # ── Project Blueprint Phase 3: daily scan ─────────────────────
         # The daily scan is the daemon-side counterpart to manual
         # ``/rebuild`` / ``/update`` triggers — same chokepoint
@@ -6803,6 +6830,37 @@ class InstanceManager:
                 f"_run_dependency_bus_lock_reap skipped: "
                 f"{type(exc).__name__}: {exc}"
             )
+
+    async def _run_projectskill_gc(self) -> None:
+        """Periodic A17 orphan purge (project-skill-loader, code-review W3).
+
+        Registered with :class:`MaintenanceService` so the ``_is_idle``
+        gate keeps it off a busy system. The sweep itself is on
+        :meth:`ProjectSkillSourceService.gc_sweep` (two idempotent
+        one-statement passes: ``project_skill_files`` rows whose project
+        was deleted, then the embeddings orphaned by that deletion).
+
+        Advisory-grade by construction: a missing source is a debug-skip
+        (partial init / tests) and a failing sweep is WARN-logged and
+        retried next cycle — it must never break the maintenance loop.
+        """
+        svc = getattr(self, "_project_skill_source", None)
+        if svc is None:
+            logger.debug(
+                "_run_projectskill_gc: no project skill source wired — "
+                "skipping"
+            )
+            return
+        try:
+            removed = await svc.gc_sweep()
+            if removed:
+                logger.info(
+                    "_run_projectskill_gc: purged %d orphaned "
+                    "project-skill row(s)",
+                    removed,
+                )
+        except Exception as exc:  # noqa: BLE001 — advisory gc
+            logger.warning(f"_run_projectskill_gc failed: {exc}")
 
     async def _run_skill_orphan_sweep(self) -> None:
         """Periodic sweep of stale ``selected=True`` usage records.
