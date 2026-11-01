@@ -42,6 +42,11 @@ Test buckets:
    ``_resolve_get_store``.
 3. **COW correctness** — concurrent mint + iterate + emit smoke: no
    lost entries, snapshot consistency, monotone growth, no exceptions.
+4. **COW deterministic fault injection (#7)** — a FULL publish landed
+   DURING one in-flight read-consume at a chosen instant (Event
+   handshake on a real second thread, no sleeps, no race retries):
+   monotone snapshot, no lost publish, no torn state, zero exceptions.
+   Post-deploy commission T3 leg; complements the statistical smoke.
 
 Constraints:
 
@@ -880,3 +885,200 @@ class TestCopyOnWriteConcurrencySmoke:
             f"expected {emitted_records} emitted records to reach the "
             f"handler, got {handler.record_count}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 4) COW correctness — deterministic lost-publish fault injection (#7)
+# ---------------------------------------------------------------------------
+
+
+class TestCopyOnWriteLostPublishDeterministic:
+    """Deterministic (sleep-free) fault-injection leg for the COW registry.
+
+    The smoke class above proves the contract STATISTICALLY. This class
+    forces the exact interleave: a full ``_register_plaintext`` publish
+    on a REAL second thread lands DURING one in-flight read-consume, at
+    a chosen instant — strictly after the first snapshot element has
+    been consumed — sequenced by ``threading.Event`` handshakes so
+    there is no sleeping and no race retry. The REAL seams are hooked
+    (not re-implemented): ``_KMSStore._iter_registered_plaintexts()``
+    (the lock-free reader) and ``_KMSStore._register_plaintext()`` (the
+    COW publisher that rebinds ``_plaintext_registry`` under
+    ``_registry_lock``).
+
+    Contract under that interleave:
+
+    (a) the in-flight reader's snapshot is monotone/consistent — never
+        shrinks, never repeats, every observed element was a real
+        published state;
+    (b) ALL publishes are eventually visible — a fresh read after the
+        interleaved publish completes observes it (no lost publish);
+    (c) zero exceptions from the reader path;
+    (d) the interleaved publish itself succeeds.
+
+    Pre-fix negative control (reasoned, NOT run — the pre-v0.28.4
+    registry was a live ``set[str]`` mutated in place under
+    ``_registry_lock``, reader a locked ``list(...)`` copy): this class
+    would fail it at the torn-state node — the captured published state
+    IS mutated by the in-place ``.add()`` (``pre_state`` no longer
+    equals the tuple shape it was captured as) and no fresh-object
+    rebind ever occurs; any variant that hands the live container to
+    the consumer fails the no-mid-flight-growth and zero-exceptions
+    contracts (``RuntimeError: Set changed size during iteration``).
+    """
+
+    #: Progress budget for the Event handshake / thread joins. Well
+    #: under the global pytest-timeout (30s) backstop; bounded and
+    #: sleep-free — an unbounded writer side fails LOUD here instead.
+    _HANDSHAKE_TIMEOUT_S = 5.0
+
+    def _publish_on_side_thread(
+        self, store: kms_lite._KMSStore, plaintext: str
+    ) -> list[str]:
+        """Perform a FULL real publish on a real second thread and
+        block the caller (bounded) until it has completely landed.
+
+        Deterministic interleave primitive: the caller resumes only
+        after the publish has finished, so consumption ordering is
+        exact. Returns collected error strings — empty on success.
+        """
+        errors: list[str] = []
+        done = threading.Event()
+
+        def _publish() -> None:
+            try:
+                store._register_plaintext(plaintext)
+            except Exception as exc:  # noqa: BLE001 — collected below
+                errors.append(f"{type(exc).__name__}: {exc}")
+            finally:
+                done.set()
+
+        publisher = threading.Thread(
+            target=_publish, name="cow-t3-publisher", daemon=True
+        )
+        publisher.start()
+        if not done.wait(self._HANDSHAKE_TIMEOUT_S):
+            errors.append(
+                "publish did not complete within "
+                f"{self._HANDSHAKE_TIMEOUT_S}s — writer side blocked"
+            )
+        publisher.join(self._HANDSHAKE_TIMEOUT_S)
+        if publisher.is_alive():
+            errors.append("publisher thread did not finish — writer blocked")
+        return errors
+
+    def test_publish_during_inflight_iteration_snapshot_stays_monotone(
+        self,
+    ) -> None:
+        """A publish landing mid-consumption leaves every view the
+        reader takes monotone and append-only, and the in-flight
+        consumption exact (no shrinks, no repeats, no drops)."""
+        store = kms_lite._KMSStore(encryption_key=Fernet.generate_key().decode())
+        published = ["cow-t3-alpha", "cow-t3-beta", "cow-t3-gamma"]
+        for plaintext in published:
+            store._register_plaintext(plaintext)
+
+        # REAL read seam — the in-flight consumer's snapshot.
+        snapshot = store._iter_registered_plaintexts()
+        assert snapshot == published
+
+        iterator = iter(snapshot)
+        consumed: list[str] = []
+        views: list[list[str]] = [list(snapshot)]
+
+        # Chosen instant: consume exactly the FIRST element, then land
+        # the interleaved publish (deterministic Event handshake).
+        consumed.append(next(iterator))
+        publish_errors = self._publish_on_side_thread(store, "cow-t3-delta")
+
+        # Fresh REAL reads taken during the remaining in-flight
+        # consumption — strictly after the publish completed.
+        views.append(store._iter_registered_plaintexts())
+        consumed.append(next(iterator))
+        views.append(store._iter_registered_plaintexts())
+        consumed.extend(iterator)  # drain the in-flight snapshot
+        views.append(store._iter_registered_plaintexts())
+
+        # (d) the interleaved publish succeeded.
+        assert not publish_errors, f"publish errors: {publish_errors}"
+
+        # (a) monotone + append-only: no view ever shrinks, and every
+        # earlier view is an order-preserving prefix of every later one
+        # (a published state is never reordered or dropped).
+        for earlier, later in zip(views, views[1:]):
+            assert len(later) >= len(earlier), (
+                f"snapshot regressed {len(earlier)} -> {len(later)}: "
+                f"{earlier} -> {later}"
+            )
+            assert later[: len(earlier)] == earlier, (
+                f"snapshot reordered/rewrote earlier state: {earlier} "
+                f"vs {later}"
+            )
+        # The in-flight consumption is exact: whole snapshot, in order,
+        # no repeats, no drops.
+        assert consumed == snapshot
+        assert len(set(consumed)) == len(consumed)
+        # Every observed element was a real published state.
+        assert set(consumed) <= set(published)
+
+    def test_publish_during_inflight_iteration_is_not_lost(self) -> None:
+        """A publish completed while a consumer is mid-iteration is
+        EVENTUALLY visible: a fresh read observes it exactly once, in
+        append order (no lost publish)."""
+        store = kms_lite._KMSStore(encryption_key=Fernet.generate_key().decode())
+        for plaintext in ("cow-t3-one", "cow-t3-two"):
+            store._register_plaintext(plaintext)
+
+        snapshot = store._iter_registered_plaintexts()
+        assert snapshot == ["cow-t3-one", "cow-t3-two"]
+
+        iterator = iter(snapshot)
+        consumed: list[str] = [next(iterator)]  # chosen instant
+
+        publish_errors = self._publish_on_side_thread(store, "cow-t3-late")
+        consumed.extend(iterator)  # in-flight iteration finishes AFTER publish
+
+        assert not publish_errors, f"publish errors: {publish_errors}"
+        assert consumed == snapshot
+
+        # (b) no lost publish: fresh REAL read after the interleaved
+        # publish completed contains it, exactly once, appended last.
+        fresh = store._iter_registered_plaintexts()
+        assert fresh == ["cow-t3-one", "cow-t3-two", "cow-t3-late"], (
+            f"LOST OR MISORDERED PUBLISH: expected "
+            f"['cow-t3-one', 'cow-t3-two', 'cow-t3-late'], got {fresh}"
+        )
+        assert fresh.count("cow-t3-late") == 1
+
+    def test_reader_never_sees_torn_state(self) -> None:
+        """The published state an in-flight reader consumes is never
+        mutated in place and never gains/loses elements mid-flight:
+        the COW publish rebinds a fresh object instead."""
+        store = kms_lite._KMSStore(encryption_key=Fernet.generate_key().decode())
+        store._register_plaintext("cow-t3-pub0")
+
+        # The exact immutable published state the reader will consume.
+        pre_state = store._plaintext_registry
+        assert pre_state == ("cow-t3-pub0",)
+
+        reader_view = store._iter_registered_plaintexts()
+        iterator = iter(reader_view)
+        consumed: list[str] = [next(iterator)]  # chosen instant
+
+        publish_errors = self._publish_on_side_thread(store, "cow-t3-pub1")
+        consumed.extend(iterator)
+
+        assert not publish_errors, f"publish errors: {publish_errors}"
+
+        # The captured published state was NEVER mutated in place: the
+        # publish rebound the attribute to a fresh tuple (pre-fix code
+        # mutated the live set in place — this is the sharpest pin).
+        assert pre_state == ("cow-t3-pub0",)
+        assert store._plaintext_registry is not pre_state
+        assert store._plaintext_registry == ("cow-t3-pub0", "cow-t3-pub1")
+
+        # The active in-flight snapshot never gained/lost elements
+        # mid-flight and holds only genuinely published material.
+        assert reader_view == ["cow-t3-pub0"]
+        assert consumed == reader_view
+        assert set(consumed) <= set(store._iter_registered_plaintexts())
