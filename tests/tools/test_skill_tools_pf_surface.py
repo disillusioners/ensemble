@@ -512,6 +512,34 @@ class TestSkillListFiles:
         with Session(engine) as session:
             assert list(session.exec(select(Skill))) == []
 
+    async def test_list_reads_metadata_only_never_bodies(
+        self, tmp_path, engine, canon
+    ):
+        """A6 (tidier fold) — ``skill_list`` renders name / address /
+        category / version, so the listing path must NOT pay a body read.
+
+        ``corpus_for`` is replaced with a tripwire: the pre-fold list
+        called it (reading every body just to discard it, inverting
+        A16's metadata-only invariant). The list must keep working
+        through ``metadata_for`` with the tripwire untouched.
+        """
+        manager, fs, _ = _make_manager(tmp_path, engine, canon)
+        manager._skill_store_service.list_skills = AsyncMock(
+            return_value=([], 0)
+        )
+
+        async def _tripwire(project_id, root):  # pragma: no cover - must not run
+            raise AssertionError(
+                "skill_list read skill BODIES (corpus_for) instead of "
+                "metadata (A6 metadata-only list path)"
+            )
+
+        fs.corpus_for = _tripwire  # type: ignore[method-assign]
+        r = await _tools(manager)["skill_list"].ainvoke({})
+        assert "pf:tester:alpha-skill" in r
+        assert "v1.0.0" in r
+        assert "source: project-file" in r
+
     async def test_db_absent_file_source_answers_file_only(
         self, tmp_path, engine, canon
     ):
@@ -543,6 +571,29 @@ class TestSkillFixRefusal:
         assert "git PR" in r
         assert "P7" in r
         assert "`pf:`" in r or "pf:" in r
+        dispatcher.dispatch_fix.assert_not_called()
+
+    @pytest.mark.parametrize("malformed", ["pf:foo", "pf:"])
+    async def test_malformed_pf_spellings_refused_on_tool_path(
+        self, tmp_path, engine, canon, malformed
+    ):
+        """A4 (tidier fold) — refusal keys on the PREFIX, never on
+        ``is_pf_address`` parseability.
+
+        Pre-fold the tool used the STRICT ``pf:<ns>:<name>`` parser, so
+        a malformed ``pf:foo`` / ``pf:`` fell through and reached
+        ``dispatch_fix`` as if it were a DB id — a REAL P7 bypass
+        (evolution machinery aimed at a file-skill-shaped id). The REST
+        endpoint has always refused on the prefix; the tool now uses the
+        identical predicate.
+        """
+        manager, fs, _ = _make_manager(tmp_path, engine, canon)
+        dispatcher = manager._skill_job_dispatcher
+        tools = _tools(manager)
+        r = await tools["skill_fix"].ainvoke(
+            {"skill_id": malformed, "issue_description": "x"}
+        )
+        assert "git PR" in r and "P7" in r
         dispatcher.dispatch_fix.assert_not_called()
 
     async def test_uuid_still_dispatches_as_before(
@@ -767,3 +818,51 @@ class TestNoneTolerance:
         )
         for r in (r_search, r_view, r_list, r_feedback):
             assert "not yet available" in r
+
+
+# ============================================================
+# A7 — project-scope precedence (tidier fold + LEADER RULING)
+# ============================================================
+
+
+class TestScopePrecedenceA7:
+    """A7: the SERVICE's precedence WINS — ``instance_metadata``
+    ``["project_id"]`` first, then the ``instances.project_id`` row.
+
+    The ruling is a *single-precedence* rule, not a preference: the
+    file-skill resolver (``resolve_active_project``, D-Q1) derives the
+    project in that order, and an ``explicit`` hint may only CONFIRM it
+    (A6). The tools used to read the ROW ONLY, so on a drifted instance
+    the DB half of a call saw one project while the resolver derived
+    another — and the resolver refused the file corpus as an "explicit
+    project conflict" the caller never supplied.
+    """
+
+    DRIFT_PID = "99999999-8888-7777-6666-555555555555"
+
+    async def test_metadata_project_wins_over_row(
+        self, tmp_path, engine, canon
+    ):
+        manager, _, _ = _make_manager(tmp_path, engine, canon)
+        manager._instance_repository = FakeInstanceRepository(
+            {
+                INSTANCE_ID: FakeInstance(
+                    INSTANCE_ID, {"project_id": self.DRIFT_PID}, PROJECT_ID
+                )
+            }
+        )
+        await _tools(manager)["skill_search"].ainvoke({"query": "alpha"})
+        kwargs = manager._skill_search_service.search.call_args.kwargs
+        assert kwargs.get("project_id") == self.DRIFT_PID, (
+            "A7: metadata project must WIN over the drifted row column "
+            "(the service's precedence)"
+        )
+
+    async def test_row_used_when_metadata_absent(self, tmp_path, engine, canon):
+        manager, _, _ = _make_manager(tmp_path, engine, canon)
+        manager._instance_repository = FakeInstanceRepository(
+            {INSTANCE_ID: FakeInstance(INSTANCE_ID, {}, PROJECT_ID)}
+        )
+        await _tools(manager)["skill_search"].ainvoke({"query": "alpha"})
+        kwargs = manager._skill_search_service.search.call_args.kwargs
+        assert kwargs.get("project_id") == PROJECT_ID

@@ -93,9 +93,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
-from daemon.services.project_skill_source.model import is_pf_address
+from daemon.services.project_skill_source.model import (
+    ProjectFileSkill,
+    is_pf_address,
+)
 from daemon.services.project_skill_source.service import (
     ProjectSkillBodyUnavailable,
 )
@@ -692,14 +695,23 @@ class SkillInjectionService:
                 [],
             )
         except Exception as e:  # noqa: BLE001 — A8 STEP-0 guard
+            # A1 lane site: the raw exception text goes to the LOG ONLY.
+            # The agent-visible envelope carries a STABLE reason token —
+            # an exception string is provider/FS text an agent must not
+            # have to parse (and must not be able to mistake for
+            # guidance). This is the lane's own site: the 12
+            # PRE-EXISTING `{e}`-in-envelope sites elsewhere in the tool
+            # layer are OUT of this lane.
             logger.warning(
-                f"[SkillInjection] STEP-0 file lookup failed for "
-                f"'{skill_name}' (fail-closed envelope): {e}"
+                "[SkillInjection] STEP-0 file lookup failed for '%s' "
+                "(fail-closed envelope, reason=resolve_failed)",
+                skill_name,
+                exc_info=True,
             )
             return (
                 f"ERROR: skill load failed: the file skill source "
-                f"raised while resolving '{skill_name}': {e} "
-                "(fail-closed; no DB fallback for `pf:` addresses).",
+                f"could not resolve '{skill_name}' (reason=resolve_failed; "
+                "fail-closed; no DB fallback for `pf:` addresses).",
                 [],
             )
         if file_skill is None:
@@ -717,7 +729,7 @@ class SkillInjectionService:
         skill_name: str,
         project_id: str,
         instance_id: str,
-    ) -> Any:
+    ) -> Optional[ProjectFileSkill]:
         """Resolve a bare name or ``pf:`` address through the file
         source against the CALLER's project scope.
 

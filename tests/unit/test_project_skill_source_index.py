@@ -776,3 +776,94 @@ class TestCorpusProjectBinding:
 
         svc.ensure_index = _swapping_ensure  # type: ignore[method-assign]
         assert await svc.lookup_explicit("alpha-skill", TEST_PROJECT_ID) is None
+
+
+class TestMetadataForListing:
+    """A6 (tidier fold) — the metadata-only listing accessor.
+
+    ``skill_list`` renders name / address / category / version and never
+    a body. It now calls ``metadata_for``: same index path as
+    ``corpus_for``, minus the per-skill disk read, and carrying the SAME
+    W1 project-binding re-assert (identical TOCTOU class — ``ensure_index``
+    releases the per-root lock before the read).
+    """
+
+    @pytest.mark.asyncio
+    async def test_metadata_for_reads_no_bodies(
+        self, canon_root, sqlite_engine, monkeypatch
+    ):
+        svc = make_service(sqlite_engine=sqlite_engine)
+        await svc.ensure_index(canon_root, TEST_PROJECT_ID)
+
+        async def _tripwire(root_real, meta):  # pragma: no cover - must not run
+            raise AssertionError(
+                "metadata_for read a skill BODY — the listing path is "
+                "metadata-only (A6 / A16)"
+            )
+
+        monkeypatch.setattr(svc, "_read_body_fresh", _tripwire)
+        metas = await svc.metadata_for(TEST_PROJECT_ID, canon_root)
+        assert len(metas) == 3
+        # A16 by construction: the listing objects carry no body field,
+        # and the version the list renders comes from the manifest.
+        assert all(not hasattr(m, "content") for m in metas)
+        assert all(m.version for m in metas)
+
+    @pytest.mark.asyncio
+    async def test_metadata_for_empty_when_index_rebound_to_other_project(
+        self, canon_root, sqlite_engine
+    ):
+        """The W1 sibling: a concurrent index of ANOTHER project bound to
+        the same realpath swaps the entry inside ``ensure_index``'s
+        release window. Same guard, same silence."""
+        from daemon.services.project_skill_source.service import _RootIndex
+
+        svc = make_service(sqlite_engine=sqlite_engine)
+        root_real = os.path.realpath(canon_root)
+        # Positive control: with the binding intact the listing is real.
+        assert len(await svc.metadata_for(TEST_PROJECT_ID, canon_root)) == 3
+
+        real_ensure = svc.ensure_index
+
+        async def _swapping_ensure(root, project_id):
+            stats = await real_ensure(root, project_id)
+            idx = svc._roots[root_real]
+            svc._roots[root_real] = _RootIndex(
+                root_path=idx.root_path,
+                project_id=OTHER_PROJECT_ID,
+                metas=idx.metas,
+                invalid=list(idx.invalid),
+                stats=idx.stats,
+            )
+            return stats
+
+        svc.ensure_index = _swapping_ensure  # type: ignore[method-assign]
+        assert await svc.metadata_for(TEST_PROJECT_ID, canon_root) == [], (
+            "metadata_for served an index bound to another project (W1 TOCTOU)"
+        )
+
+
+class TestACloseDrain:
+    """A5 (tidier fold) — shutdown drains the fire-and-forget refreshes."""
+
+    @pytest.mark.asyncio
+    async def test_aclose_cancels_and_awaits_refresh_tasks(self):
+        svc = make_service()
+        started = asyncio.Event()
+
+        async def _forever():  # pragma: no cover - cancelled by aclose
+            started.set()
+            await asyncio.sleep(3600)
+
+        task = asyncio.create_task(_forever())
+        svc._refresh_tasks.add(task)
+        svc._inflight_refreshes.add("pf-0123456789abcdef")
+        await started.wait()
+
+        await svc.aclose()
+
+        assert task.done() and task.cancelled(), (
+            "aclose must cancel AND await the pending refresh tasks"
+        )
+        assert svc._refresh_tasks == set()
+        assert svc._inflight_refreshes == set()

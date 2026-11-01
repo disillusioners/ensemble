@@ -283,6 +283,87 @@ def _bm25_score(
     return score
 
 
+def _bm25_rank(
+    corpus: list[Any],
+    query: str,
+    limit: int | None = None,
+) -> list[tuple[float, Any]]:
+    """Rank *corpus* against *query* with BM25 — the ONE scoring loop.
+
+    A3(b) (tidier fold): this loop existed THREE times (the DB
+    prefilter in this module, the Phase-2 fusion prefilter, and
+    ``daemon/tools/skill_tools.py::_file_only_bm25_search``) and the
+    ``avgdl`` form had already drifted between the copies
+    (``total_tokens / n_docs if n_docs else 1.0`` vs an unguarded
+    ``sum(len(t) …) / n_docs``). Every caller now ranks through HERE:
+
+    * document text = ``name + description + content`` — the three
+      attributes every corpus object in this codebase exposes.
+    * ``df`` is tracked over QUERY terms only (no other term's
+      statistics are needed).
+    * ``avgdl = total_tokens / n_docs if n_docs else 1.0`` — the
+      zero-doc-safe form.
+    * only ``score > 0`` survives, ordered descending; ties keep
+      corpus order (``list.sort`` is stable).
+
+    Args:
+        corpus: Objects exposing ``name`` / ``description`` /
+            ``content`` (``Skill`` or ``ProjectFileSkill``).
+        query: Raw query text — tokenized here so every caller gets
+            the same tokenizer.
+        limit: Cap on the returned pairs. ``None`` returns the FULL
+            scored list, which callers that render a low-match tail
+            (``_file_only_bm25_search``) slice themselves.
+
+    Returns:
+        ``(score, obj)`` pairs, highest score first. Empty when the
+        query yields no tokens or no document shares a term.
+    """
+    query_tokens = _tokenize(query)
+    if not query_tokens:
+        return []
+
+    tokenized_docs: list[tuple[Any, list[str]]] = []
+    for skill in corpus:
+        doc_text = (
+            f"{getattr(skill, 'name', '') or ''} "
+            f"{getattr(skill, 'description', '') or ''} "
+            f"{getattr(skill, 'content', '') or ''}"
+        )
+        tokenized_docs.append((skill, _tokenize(doc_text)))
+    if not tokenized_docs:
+        return []
+
+    # Document frequency per term across the corpus. Only query
+    # terms are tracked — we don't need global stats for any other
+    # term.
+    df: dict[str, int] = {}
+    for _, tokens in tokenized_docs:
+        unique_terms = set(tokens)
+        for term in query_tokens:
+            if term in unique_terms:
+                df[term] = df.get(term, 0) + 1
+
+    n_docs = len(tokenized_docs)
+    total_tokens = sum(len(tokens) for _, tokens in tokenized_docs)
+    avgdl = total_tokens / n_docs if n_docs else 1.0
+
+    scored: list[tuple[float, Any]] = []
+    for skill, tokens in tokenized_docs:
+        score = _bm25_score(
+            query_tokens=query_tokens,
+            doc_tokens=tokens,
+            doc_freqs=df,
+            total_docs=n_docs,
+            avg_doc_len=avgdl,
+        )
+        if score > 0:
+            scored.append((float(score), skill))
+
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return scored if limit is None else scored[:limit]
+
+
 def _extract_json_object(text: str) -> str | None:
     r"""Pull the first JSON object out of ``text``.
 
@@ -474,8 +555,14 @@ class SkillSearchService:
 
         Read by the readiness advisory (``detail.skill_sources``).
         Empty dict when no fusion has run yet — an honest zero.
+
+        A3(a): DELEGATES to :meth:`file_corpus_stats` — one tolerant
+        form in one place. The two accessors had drifted (this one
+        guarded a ``None`` snapshot, the method did not), so a
+        ``None``-assigned snapshot raised on exactly one of the two
+        paths.
         """
-        return dict(self._last_file_corpus_stats or {})
+        return self.file_corpus_stats()
 
     # --------------------------------------------------------
     # Public API
@@ -742,8 +829,12 @@ class SkillSearchService:
         ``shadowing`` (shadow-exempt file skills), ``budget_dropped``
         (non-shadowing overflow — the budget counter), and
         ``shadowed_db_ids`` / ``last_error``.
+
+        A3(a): the SINGLE tolerant form — ``dict(... or {})`` — so a
+        ``None`` snapshot reads as the honest empty zero instead of
+        raising. :attr:`last_file_corpus_stats` delegates here.
         """
-        return dict(self._last_file_corpus_stats)
+        return dict(self._last_file_corpus_stats or {})
 
     async def _merge_project_file_corpus(
         self,
@@ -1247,50 +1338,11 @@ class SkillSearchService:
         if not items:
             return []
 
-        # Tokenize every doc once. Re-tokenizing on every term
-        # would be O(query_tokens * doc_tokens) — pre-compute is
-        # O(total_tokens) and avoids re-splitting.
-        tokenized_docs: list[tuple[Any, list[str]]] = []
-        doc_term_freqs: list[Counter[str]] = []
-        for skill in items:
-            name = getattr(skill, "name", "") or ""
-            description = getattr(skill, "description", "") or ""
-            content = getattr(skill, "content", "") or ""
-            doc_text = f"{name} {description} {content}"
-            tokens = _tokenize(doc_text)
-            tokenized_docs.append((skill, tokens))
-            doc_term_freqs.append(Counter(tokens))
-
-        # Document frequency per term across the corpus. Only
-        # query terms are tracked — we don't need global stats
-        # for any other term.
-        df: dict[str, int] = {}
-        for tokens in (toks for _, toks in tokenized_docs):
-            unique_terms = set(tokens)
-            for term in query_tokens:
-                if term in unique_terms:
-                    df[term] = df.get(term, 0) + 1
-
-        n_docs = len(tokenized_docs)
-        total_tokens = sum(len(toks) for _, toks in tokenized_docs)
-        avgdl = total_tokens / n_docs if n_docs else 1.0
-
-        scored: list[tuple[float, Any]] = []
-        for (skill, tokens), term_freq in zip(tokenized_docs, doc_term_freqs):
-            score = _bm25_score(
-                query_tokens=query_tokens,
-                doc_tokens=tokens,
-                doc_freqs=df,
-                total_docs=n_docs,
-                avg_doc_len=avgdl,
-            )
-            if score > 0:
-                scored.append((score, skill))
-
-        scored.sort(key=lambda pair: pair[0], reverse=True)
-        # Return just the skill rows — ordering carries the BM25
-        # ranking forward into stage 2.
-        return [s for _, s in scored[:top_k]]
+        # A3(b): ranking runs through :func:`_bm25_rank` — the single
+        # scoring loop shared with ``_file_only_bm25_search``. This
+        # method owns only the corpus-assembly semantics around it
+        # (project + global overlay, ownership filter, file fusion).
+        return [skill for _, skill in _bm25_rank(items, query, top_k)]
 
     # --------------------------------------------------------
     # Stage 2 — Embedding re-rank

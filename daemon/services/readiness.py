@@ -427,7 +427,7 @@ class ReadinessComposite:
     # degraded (or quarantined) MCP server must NEVER flip a readiness
     # component or make ``/readyz`` 503 (decisions §3h H2/H4). The
     # daemon stays up and says so; the GATE decides what to do with it.
-    mcp_servers: Optional[dict] = None
+    mcp_servers: Optional[dict[str, Any]] = None
     # ``mcp_buffered_transitions`` — how many MCP state-transition journal
     # entries are currently BUFFERED (suppressed because a promote
     # transaction was live). ADVISORY: it says whether the daemon is
@@ -446,7 +446,7 @@ class ReadinessComposite:
     # (``enabled: true|false``; empty roots = honest zero, never an
     # absent key). ``None`` (older callers/tests) ⇒ key absent —
     # consumers fail-closed on absence.
-    skill_sources: Optional[dict] = None
+    skill_sources: Optional[dict[str, Any]] = None
 
     @property
     def ready(self) -> bool:
@@ -1189,12 +1189,12 @@ def compute_readiness_composite(
     grace_holds: int = 0,
     resume_hold: Optional[dict] = None,
     burst_signals: Optional[dict] = None,
-    mcp_servers: Optional[dict] = None,
+    mcp_servers: Optional[dict[str, Any]] = None,
     mcp_buffered_transitions: Optional[int] = None,
     # project-skill-loader Phase 4 (A10 site 6, daemon half): the
     # ALWAYS-published advisory block; ``None`` (older callers) keeps
     # the key absent from ``detail``.
-    skill_sources: Optional[dict] = None,
+    skill_sources: Optional[dict[str, Any]] = None,
     queue_max_age_seconds_reason: Optional[str] = None,
 ) -> ReadinessComposite:
     """Assemble a composite from component outcomes.
@@ -1349,7 +1349,7 @@ def apply_forced_degradation(
         return composite
     # The shared degraded-copy kwargs — the drill preserves every real
     # reading; only the `reasons` list differs between the two shapes.
-    degraded_copy = dict(
+    degraded_copy: dict[str, Any] = dict(
         database=composite.database,
         queue_freshness=composite.queue_freshness,
         services=composite.services,
@@ -1388,11 +1388,11 @@ async def refresh_readiness_composite(
     psycopg_pool: Any = None,
     resume_hold: Optional[dict] = None,
     burst_signals: Optional[dict] = None,
-    mcp_servers: Optional[dict] = None,
+    mcp_servers: Optional[dict[str, Any]] = None,
     mcp_buffered_transitions: Optional[int] = None,
     # project-skill-loader Phase 4 (A10 site 6): threaded verbatim into
     # the composite; built by api.py's ``_read_skill_sources_snapshot``.
-    skill_sources: Optional[dict] = None,
+    skill_sources: Optional[dict[str, Any]] = None,
 ) -> ReadinessComposite:
     """Run one refresh cycle and return the composite.
 

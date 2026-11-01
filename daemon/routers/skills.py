@@ -88,6 +88,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from daemon.services.skill_job_dispatcher import SkillJobDispatcher
+from daemon.services.project_skill_source.model import ADDRESS_PREFIX
 from daemon.services.skill_store_service import SkillStoreService
 from daemon.services.skill_search_service import SkillSearchService
 from daemon.services.skill_metrics_service import SkillMetricsService
@@ -1370,7 +1371,12 @@ async def post_fix(
     # admitted as a fix job whenever the lane is enabled — running
     # evolution machinery against a file skill, exactly what P7
     # forbids. Mirrors the ``skill_fix`` tool refusal.
-    if isinstance(skill_id, str) and skill_id.startswith("pf:"):
+    #
+    # A4 (tidier fold): refusal keys on the PREFIX, not on
+    # ``is_pf_address`` parseability — a malformed ``pf:foo`` / ``pf:``
+    # is still a file-skill-shaped id and must never be dispatched as
+    # a DB id. The tool path now uses this exact predicate.
+    if isinstance(skill_id, str) and skill_id.startswith(ADDRESS_PREFIX):
         raise HTTPException(
             status_code=400,
             detail={

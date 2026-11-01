@@ -77,6 +77,7 @@ from daemon.services.project_skill_source.manifest import (
     validate_containment,
 )
 from daemon.services.project_skill_source.model import (
+    ADDRESS_PREFIX,
     ProjectFileSkill,
     SkillIndexMeta,
     is_pf_address,
@@ -159,7 +160,7 @@ class _RootIndex:
     project_id: str
     metas: dict[str, SkillIndexMeta] = field(default_factory=dict)  # by pseudo-id
     invalid: list[dict[str, str]] = field(default_factory=list)
-    stats: RootScanStats = field(default=None)  # type: ignore[assignment]
+    stats: Optional[RootScanStats] = field(default=None)
     invalid_schema_warned: bool = False  # warn-once-per-root state (Q7)
 
 
@@ -876,6 +877,53 @@ class ProjectSkillSourceService:
             out.append(self._to_file_skill(root_real, meta, content))
         return out
 
+    async def metadata_for(
+        self, project_id: str, root: str
+    ) -> list[SkillIndexMeta]:
+        """METADATA-ONLY listing corpus — the ``skill_list`` seam (A6).
+
+        ``skill_list`` renders name / address / category / version only:
+        body bytes it never uses. It read ``corpus_for`` anyway, paying
+        one fresh disk read per skill and minting content-bearing
+        objects purely to discard them (the inverse of A16's
+        metadata-only cache invariant).
+
+        This is the SAME index path without the body read: index-backed
+        and stat-gated, and — critically — carrying the SAME W1
+        project-binding re-assert as ``corpus_for``. ``ensure_index``
+        releases the per-root lock before the read, so a concurrent
+        index of a DIFFERENT project bound to the same realpath can
+        swap the entry inside that window (identical TOCTOU class);
+        mismatch ⇒ contribute nothing.
+        """
+        root_real = os.path.realpath(root)
+        try:
+            await self.ensure_index(root_real, project_id)
+        except Exception as exc:
+            logger.warning(
+                "[ProjectSkillSource] ensure_index failed for root=%s: %s — "
+                "contributing nothing to this listing",
+                root_real,
+                exc,
+            )
+            return []
+        index = self._roots.get(root_real)
+        if index is None or index.project_id != project_id:
+            if index is not None:
+                # INFO for the same reason as ``corpus_for``: two
+                # projects legitimately sharing one root alternate the
+                # entry on every call — noise, not a fault.
+                logger.info(
+                    "[ProjectSkillSource] metadata_for project mismatch at "
+                    "root=%s: index bound to %s, caller scoped to %s — "
+                    "contributing nothing (TOCTOU guard)",
+                    root_real,
+                    index.project_id,
+                    project_id,
+                )
+            return []
+        return list(index.metas.values())
+
     async def lookup_explicit(
         self, name_or_address: str, project_id: str
     ) -> Optional[ProjectFileSkill]:
@@ -1188,8 +1236,15 @@ class ProjectSkillSourceService:
             )
             try:
                 await self._record_refresh_failure(meta, f"refresh_crashed: {exc}")
-            except Exception:
-                pass
+            except Exception as record_exc:
+                # Best-effort: the failure is already logged above; the
+                # persistence attempt must never mask it with a raise.
+                logger.debug(
+                    "[ProjectSkillSource] refresh-failure persistence failed "
+                    "for %s: %s",
+                    meta.address,
+                    record_exc,
+                )
         finally:
             self._inflight_refreshes.discard(meta.pseudo_id)
 
@@ -1287,15 +1342,50 @@ class ProjectSkillSourceService:
     # A16 assertion helper
     # ------------------------------------------------------------------
 
-    def cached_objects(self) -> list[Any]:
+    def cached_objects(self) -> list[SkillIndexMeta]:
         """Every object the in-process cache currently holds (A16: all
         metadata-only). The unit pack asserts none exposes non-empty
         ``content`` — enforced structurally (``SkillIndexMeta`` has no
         ``content`` field), asserted here for the pin."""
-        out: list[Any] = []
+        out: list[SkillIndexMeta] = []
         for index in self._roots.values():
             out.extend(index.metas.values())
         return out
+
+    async def aclose(self) -> None:
+        """Cancel + await every in-flight embedding refresh (A5).
+
+        The refreshes are FIRE-AND-FORGET (``_schedule_refresh_for``
+        spawns a task and forgets it), so without this a shutdown can
+        strand pending tasks behind the event loop's teardown
+        ("Task was destroyed but it is pending!") and leak the
+        single-flight slots.
+
+        Safe to drop them: a refresh is DIGEST-IDEMPOTENT — A4(vi)
+        writes only AFTER a successful generation, so a cancelled
+        refresh leaves the stored rows untouched and the next index
+        touch re-schedules it (``embedded_at`` stays ``None`` ⇒
+        ``embeddings_pending`` keeps reporting it). A lost refresh is
+        never lost data.
+
+        Idempotent; never raises.
+        """
+        tasks = [task for task in self._refresh_tasks if not task.done()]
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # never let a refresh abort teardown
+                logger.debug(
+                    "[ProjectSkillSource] refresh task raised during "
+                    "shutdown drain: %s",
+                    exc,
+                )
+        self._refresh_tasks.clear()
+        self._inflight_refreshes.clear()
 
 
 # ----------------------------------------------------------------------
@@ -1390,7 +1480,9 @@ def _invalid_rows(
                 root_path=root_path,
                 namespace=ns,
                 name=name,
-                address=mint_address(ns, name) if ns and name else f"pf:{ns}:{name}",
+                address=mint_address(ns, name)
+                if ns and name
+                else f"{ADDRESS_PREFIX}{ns}:{name}",
                 description="",
                 category=None,
                 body_path="",

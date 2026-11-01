@@ -429,7 +429,7 @@ def parse_and_validate(
         return ParsedSkill(
             ok=False, reason=REASON_UNRESOLVED_LOAD, detail="loads[] must be an array"
         )
-    skills_dir = os.path.join(os.path.dirname(naive_dir))  # .../skills
+    skills_dir = os.path.dirname(naive_dir)  # .../skills
     for dep in loads:
         if not isinstance(dep, str) or not valid_component(dep):
             return ParsedSkill(

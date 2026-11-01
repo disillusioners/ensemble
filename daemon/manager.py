@@ -15509,6 +15509,23 @@ class InstanceManager:
             if not task.done():
                 task.cancel()
         self._background_tasks.clear()
+
+        # project-skill-loader Phase 4 (A5): drain the file-skill
+        # embedding-refresh tasks. They are fire-and-forget (spawned by
+        # ``_schedule_refresh_for``), so leaving them pending strands
+        # tasks past loop teardown. Refreshes are digest-idempotent —
+        # one cut short writes nothing and re-schedules on the next
+        # index touch — so a cancelled refresh is never lost data.
+        try:
+            skill_source_service = getattr(
+                self, "_project_skill_source_service", None
+            )
+            if skill_source_service is not None:
+                await skill_source_service.aclose()
+        except Exception as e:
+            logger.warning(
+                f"shutdown: project-skill source drain failed: {e}"
+            )
         
         # Phase 1 (2026-07-19): kill all background processes BEFORE
         # tearing down workers / sources. Best-effort — failures must

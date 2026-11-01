@@ -214,6 +214,18 @@ class SkillIndexMeta:
     last_error: Optional[str] = None
     embedded_at: Optional[str] = None
 
+    @property
+    def version(self) -> str:
+        """The manifest semver string (empty when absent).
+
+        Mirrors :attr:`ProjectFileSkill.version` so a listing surface
+        renders either object type identically — the A6 metadata-only
+        list path hands callers THIS object where the search path
+        hands ``ProjectFileSkill``. Still metadata-only (A16: no
+        ``content`` field, by construction).
+        """
+        return str((self.manifest or {}).get("version", "") or "")
+
     def to_row(self, root_path: str, indexed_at: str) -> dict[str, Any]:
         """Flatten into a ``project_skill_files`` row dict (metadata only)."""
         return {

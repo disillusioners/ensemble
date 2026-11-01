@@ -25,12 +25,11 @@ A4 lifecycle rules implemented here (acceptance criteria, phase1 task 7):
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Optional, Sequence
+from typing import Optional, Sequence
 
-from sqlalchemy import Engine, delete, text
+from sqlalchemy import Engine, delete, desc, text
 from sqlmodel import Session, select
 
 from .models import (
@@ -351,7 +350,7 @@ class ProjectSkillUsageRecordRepository:
                         ProjectSkillUsageRecord.skill_id == skill_id,
                         ProjectSkillUsageRecord.instance_id == instance_id,
                     )
-                    .order_by(ProjectSkillUsageRecord.created_at.desc())  # type: ignore[attr-defined]
+                    .order_by(desc(ProjectSkillUsageRecord.created_at))
                 )
             )
             return rows[0] if rows else None

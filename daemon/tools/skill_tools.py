@@ -44,11 +44,16 @@ from langchain_core.tools import tool
 from daemon.repositories.project_skill_file.models import (
     ProjectSkillUsageRecord,
 )
-from daemon.services.project_skill_source.model import is_pf_address
+from daemon.services.project_skill_source.model import (
+    ADDRESS_PREFIX,
+    PSEUDO_ID_PREFIX,
+    is_pf_address,
+    mint_address,
+)
 from daemon.services.project_skill_source.service import (
     ProjectSkillBodyUnavailable,
 )
-from daemon.services.skill_search_service import _bm25_score, _tokenize
+from daemon.services.skill_search_service import _bm25_rank
 from ._tool_registry import register_tool_category
 
 if TYPE_CHECKING:
@@ -167,15 +172,13 @@ async def _file_only_bm25_search(
     None``).
 
     Stage-1 BM25 over the FILE corpus ONLY — same tokenizer, same
-    scorer (imported from :mod:`daemon.services.skill_search_service`
-    so the two can never drift) — ``top_k = limit``, NO stage 2, NO
-    stage-3 LLM. Deterministic, zero LLM cost, works with no evolution
-    config. Results use the standard ``{"injected", "low_match"}``
+    scorer (the shared :func:`~daemon.services.skill_search_service._bm25_rank`
+    loop, imported so the two can never drift) — ``top_k = limit``, NO
+    stage 2, NO stage-3 LLM. Deterministic, zero LLM cost, works with no
+    evolution config. Results use the standard ``{"injected", "low_match"}``
     shape with ``source: "project-file"`` on every entry plus a
     ``degraded: "file_only"`` marker on the result dict.
     """
-    from collections import Counter
-
     empty = {"injected": [], "low_match": [], "degraded": "file_only"}
     try:
         resolution = await file_source.resolve_active_project(
@@ -206,37 +209,10 @@ async def _file_only_bm25_search(
     if not corpus:
         return empty
 
-    query_tokens = _tokenize(query)
-    if not query_tokens:
-        return empty
-    tokenized = []
-    term_freqs = []
-    for skill in corpus:
-        tokens = _tokenize(
-            f"{getattr(skill, 'name', '') or ''} "
-            f"{getattr(skill, 'description', '') or ''} "
-            f"{getattr(skill, 'content', '') or ''}"
-        )
-        tokenized.append(tokens)
-        term_freqs.append(Counter(tokens))
-    df: dict[str, int] = {}
-    for tokens in tokenized:
-        for term in set(tokens) & set(query_tokens):
-            df[term] = df.get(term, 0) + 1
-    n_docs = len(tokenized)
-    avgdl = sum(len(t) for t in tokenized) / n_docs
-    scored: list[tuple[float, Any]] = []
-    for skill, tokens, freqs in zip(corpus, tokenized, term_freqs):
-        score = _bm25_score(
-            query_tokens=query_tokens,
-            doc_tokens=tokens,
-            doc_freqs=df,
-            total_docs=n_docs,
-            avg_doc_len=avgdl,
-        )
-        if score > 0:
-            scored.append((float(score), skill))
-    scored.sort(key=lambda pair: pair[0], reverse=True)
+    # A3(b): the ONE BM25 loop (no local tokenizer/scorer copy). The
+    # full ranked list is requested because the low-match tail renders
+    # the first three entries PAST the injection cap.
+    scored = _bm25_rank(corpus, query)
     top = scored[: max(1, limit)]
     injected = [
         {
@@ -280,14 +256,33 @@ def create_skill_tools(
     """
 
     def _get_project_id() -> str | None:
-        """Auto-inject project_id from instance context. Returns None on any failure."""
+        """Auto-inject project_id from instance context. Returns None on any failure.
+
+        A7 (tidier fold + LEADER RULING — the SERVICE's precedence
+        WINS): ``instance_metadata["project_id"]`` FIRST, then the
+        ``instances.project_id`` row column. That is the exact drift
+        order :meth:`ProjectSkillSourceService.resolve_active_project`
+        uses (D-Q1). This helper used to read the ROW ONLY, so on a
+        drifted instance the DB-skill tools saw one project while the
+        file-skill resolver derived another — and the resolver then
+        REFUSED the file corpus as an A6 "explicit project conflict"
+        on a pill the caller never supplied. One precedence, one
+        project, both halves of the call.
+        """
         try:
             repo = getattr(manager, "_instance_repository", None)
             if repo is None:
                 return None
             instance_meta = repo.get(current_instance_id)
-            if instance_meta is not None and getattr(instance_meta, "project_id", None):
-                return instance_meta.project_id
+            if instance_meta is None:
+                return None
+            meta = getattr(instance_meta, "instance_metadata", None) or {}
+            meta_pid = meta.get("project_id") if isinstance(meta, dict) else None
+            if meta_pid:
+                return str(meta_pid)
+            row_pid = getattr(instance_meta, "project_id", None)
+            if row_pid:
+                return str(row_pid)
         except Exception as e:
             logger.debug("project_id lookup failed in dynamic-skill tool: %s", e)
         return None
@@ -336,7 +331,9 @@ def create_skill_tools(
         ``manager._project_skill_usage_repository``."""
         return getattr(manager, "_project_skill_usage_repository", None)
 
-    async def _resolve_pf_scope(explicit_project_id: str | None = None):
+    async def _resolve_pf_scope(
+        explicit_project_id: str | None = None,
+    ) -> tuple[str | None, list[str]]:
         """Resolve the file-skill scope through the SANCTIONED scope
         reader (A13). Returns ``(project_id, roots)`` or ``(None, [])``.
 
@@ -442,7 +439,7 @@ def create_skill_tools(
             lines.append("")
             ns = getattr(file_skill, "namespace", "")
             for dep in loads:
-                dep_address = f"pf:{ns}:{dep}"
+                dep_address = mint_address(ns, dep)
                 dep_desc = ""
                 try:
                     dep_skill = await file_source.lookup_explicit(dep, pid)
@@ -554,15 +551,15 @@ def create_skill_tools(
                     "recorded (fail-closed)."
                 )
             await _ensure_pf_index(roots, pid)
-            pf_repo = _get_pf_file_repo()
-            if pf_repo is None:
+            pf_file_repo = _get_pf_file_repo()
+            if pf_file_repo is None:
                 return (
                     "ERROR: skill_feedback: project-skill index "
                     f"unavailable — cannot validate '{skill_id}' "
                     "(fail-closed)."
                 )
             try:
-                known_row = await asyncio.to_thread(pf_repo.get, skill_id)
+                known_row = await asyncio.to_thread(pf_file_repo.get, skill_id)
             except Exception as e:
                 return f"ERROR: skill_feedback failed: {e}"
             if known_row is None or (
@@ -787,7 +784,11 @@ Returns:
                     by_ns: dict[str, list[Any]] = {}
                     for root in roots:
                         try:
-                            for fs in await file_source.corpus_for(pid, root) or []:
+                            # A6: METADATA-ONLY — the list renders
+                            # name/address/category/version, so no body
+                            # read is paid (same W1 project-binding
+                            # re-assert inside the accessor).
+                            for fs in await file_source.metadata_for(pid, root) or []:
                                 if category is not None and (
                                     getattr(fs, "category", None) != category
                                 ):
@@ -1200,7 +1201,14 @@ Note:
         # the evolution dispatcher is NEVER invoked for a ``pf:``
         # address (mirrored on the A14 surfaces: skill_analyze /
         # skill_evolve / skill_get_metrics + REST POST /{id}/fix).
-        if is_pf_address(skill_id):
+        #
+        # A4 (tidier fold): the predicate is the BROAD prefix form —
+        # ``is_pf_address`` below is the STRICT ``pf:<ns>:<name>``
+        # parser, so a malformed ``pf:foo`` / ``pf:`` slipped through
+        # to ``dispatch_fix`` as if it were a DB id: a real P7 bypass.
+        # Refusal keys on the prefix, never on parseability (the REST
+        # endpoint has always refused this way).
+        if isinstance(skill_id, str) and skill_id.startswith(ADDRESS_PREFIX):
             return _pf_refusal("skill_fix")
         project_id = _get_project_id()
         dispatcher = getattr(manager, "_skill_job_dispatcher", None)
@@ -1444,8 +1452,17 @@ Returns:
         # evolution dispatch, NO metrics-service call (P7). Runs BEFORE
         # the metrics-service gate: the companion path works with the
         # DB evolution stack absent (A9 degraded mode).
+        #
+        # A4: this prefix test is BROAD ON PURPOSE and must stay wider
+        # than the ``skill_fix`` refusal above — the ``pf-<hex16>``
+        # pseudo-id is a legitimately routable file-skill id on this
+        # surface (metrics-only), and the branch FAILS CLOSED on an
+        # unknown/typo'd id after index validation (W5). The
+        # ``skill_fix`` refusal is prefix-only for the same reason: a
+        # malformed ``pf:`` spelling must never reach evolution.
         if isinstance(skill_id, str) and (
-            skill_id.startswith("pf:") or skill_id.startswith("pf-")
+            skill_id.startswith(ADDRESS_PREFIX)
+            or skill_id.startswith(PSEUDO_ID_PREFIX)
         ):
             return await _feedback_pf_skill(
                 skill_id, applied, usefulness, note, improvement_note

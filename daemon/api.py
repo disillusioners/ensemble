@@ -56,7 +56,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request, APIRouter
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from typing import AsyncGenerator, Optional, TYPE_CHECKING
+from typing import Any, AsyncGenerator, Optional, TYPE_CHECKING
 from pathlib import Path
 
 if TYPE_CHECKING:  # annotation-only: avoids a runtime import cycle with daemon.manager
@@ -4138,7 +4138,7 @@ def _read_mcp_buffered_count() -> Optional[int]:
         return None
 
 
-def _read_skill_sources_snapshot(manager: "InstanceManager") -> Optional[dict]:
+def _read_skill_sources_snapshot(manager: "InstanceManager") -> dict[str, Any]:
     """The file-backed project skill source census (readiness ``detail.skill_sources``).
 
     project-skill-loader Phase 4 (A11 — the block publishes ALWAYS).
@@ -4154,14 +4154,34 @@ def _read_skill_sources_snapshot(manager: "InstanceManager") -> Optional[dict]:
     feeds a readiness component; a broken canon root populates
     ``roots[].last_error`` while the daemon stays READY.
 
+    A2 (tidier fold — READINESS HONESTY): the config read is hoisted
+    ABOVE the builder ``try`` so ``enabled`` survives a builder
+    failure. When the builder DOES fail the block reports the TRUE
+    knob value plus ``degraded: True`` and a STABLE
+    ``degraded_reason`` token (the exception CLASS name — never
+    ``str(exc)``, which is provider text and can carry paths or
+    payload fragments). Reporting ``enabled: False`` on a builder
+    crash told an operator the feature was off when it was on.
+
     Returns the block dict — callers on this build ALWAYS get one
-    (``enabled: true|false``); the exception path also returns the
-    honest disabled census (never ``None``), because A11 requires the
-    key present whenever this builder runs.
+    (``enabled: true|false``); the exception path also returns an
+    honest census (never ``None``), because A11 requires the key
+    present whenever this builder runs.
     """
+    enabled = False
     try:
-        cfg = getattr(manager.config, "project_skill_source", None)
+        cfg = getattr(getattr(manager, "config", None), "project_skill_source", None)
         enabled = bool(cfg.enabled) if cfg is not None else False
+    except Exception as exc:  # noqa: BLE001 — advisory only
+        # Config shape unreadable: the knob value is unknown, so the
+        # honest reading is the conservative False (the pre-existing
+        # behavior) — flagged as degraded by the caller path below.
+        logger.debug(
+            "[Readiness] skill-source config unreadable: %s: %s",
+            type(exc).__name__, exc,
+        )
+        enabled = False
+    try:
         service = getattr(manager, "_project_skill_source_service", None)
         search = getattr(manager, "_skill_search_service", None)
 
@@ -4205,12 +4225,20 @@ def _read_skill_sources_snapshot(manager: "InstanceManager") -> Optional[dict]:
             type(exc).__name__, exc,
         )
         # A11 — the block publishes ALWAYS: a manager shape this
-        # builder cannot read still gets the honest disabled census,
-        # never an absent key (the None-tolerance contract for older
-        # callers is exercised ONLY by passing skill_sources=None
-        # explicitly, which this helper never does).
+        # builder cannot read still gets an honest census, never an
+        # absent key (the None-tolerance contract for older callers is
+        # exercised ONLY by passing skill_sources=None explicitly,
+        # which this helper never does).
+        #
+        # A2 — HONESTY on the failure path: ``enabled`` is the TRUE
+        # hoisted knob value (not a hardcoded False), and the failure
+        # itself is surfaced as a stable token. ``degraded_reason`` is
+        # the exception CLASS name — never ``str(exc)`` (provider text
+        # can smuggle paths/payload into an operator-visible payload).
         return {
-            "enabled": False,
+            "enabled": enabled,
+            "degraded": True,
+            "degraded_reason": type(exc).__name__,
             "db_stack_present": False,
             "roots": [],
             "shadowed_db_skills": [],

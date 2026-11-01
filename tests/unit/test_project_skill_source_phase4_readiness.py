@@ -281,3 +281,72 @@ class TestApiSeamWiring:
 
         src = inspect.getsource(api_module)
         assert "skill_sources=_read_skill_sources_snapshot(manager)," in src
+
+
+class TestDegradedEnabledShape:
+    """A2 (tidier fold) — READINESS HONESTY on the builder-failure path.
+
+    Pre-fold the exception path hardcoded ``enabled: False``: a builder
+    crash told an operator the feature was OFF while the knob was ON.
+    A ``dict``-key check cannot see that lie — these pins assert the
+    TRUE knob value survives, that the failure is surfaced as a stable
+    token, and that no raw exception text reaches the payload.
+    """
+
+    def _mgr(self, *, enabled: bool, failure: Exception):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        return SimpleNamespace(
+            config=SimpleNamespace(
+                project_skill_source=SimpleNamespace(enabled=enabled)
+            ),
+            _project_skill_source_service=MagicMock(
+                **{"snapshot_status.side_effect": failure}
+            ),
+            _skill_search_service=None,
+        )
+
+    def test_builder_failure_reports_true_enabled_and_stable_token(self):
+        import json
+
+        from daemon.api import _read_skill_sources_snapshot
+
+        mgr = self._mgr(
+            enabled=True,
+            failure=RuntimeError("provider exploded at /home/nea/secret.db"),
+        )
+        block = _read_skill_sources_snapshot(mgr)
+        assert block["enabled"] is True, (
+            "A2: a builder failure must not report the knob as disabled"
+        )
+        assert block["degraded"] is True
+        assert block["degraded_reason"] == "RuntimeError"
+        dumped = json.dumps(block)
+        assert "exploded" not in dumped and "/home/nea/secret.db" not in dumped, (
+            "A2: degraded_reason must be the exception CLASS name — never str(exc)"
+        )
+
+    def test_disabled_knob_failure_stays_disabled(self):
+        from daemon.api import _read_skill_sources_snapshot
+
+        mgr = self._mgr(enabled=False, failure=ValueError("nope"))
+        block = _read_skill_sources_snapshot(mgr)
+        assert block["enabled"] is False
+        assert block["degraded"] is True
+        assert block["degraded_reason"] == "ValueError"
+
+
+class TestShutdownDrainWiring:
+    """A5 (tidier fold) — the drain must be wired, not merely available."""
+
+    def test_manager_shutdown_drains_the_skill_source(self):
+        import inspect
+
+        from daemon.manager import InstanceManager
+
+        src = inspect.getsource(InstanceManager.shutdown)
+        assert "aclose()" in src, (
+            "manager.shutdown must drain the project-skill source's "
+            "embedding-refresh tasks (A5)"
+        )
