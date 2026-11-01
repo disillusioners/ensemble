@@ -159,7 +159,8 @@ is appropriate but no project file is read or modified.
 |--------|------|---------|
 | Project involved — any question, any modification, any file read, any codebase search | **Mode 2 (→ leader)** | "What does this project do?", "Fix this bug" |
 | Non-project task that needs a skill and isn't short/trivial | **Mode 3 (→ worker)** | "Generate a flowchart for this process" |
-| Trivial / cosmetic / system / project CRUD | **Mode 1 (direct)** | "What time is it?", "Create a project called X" |
+| Plane operations / project-management coordination | **Bypasses the mode ladder — routed per Default Delegation Targets** | "Create an issue in the Plane project" |
+| Trivial / cosmetic / system / ensemble-project CRUD | **Mode 1 (direct)** | "What time is it?", "Create a project called X" |
 | Multi-step trivial/system work | **Mode 1 + todo list** | "Create 3 projects with tags and shortnames" |
 | True ambiguity | **Ask user** | "Should I dispatch this or do it myself?" |
 | Critical / destructive / irreversible | **Pause + ask user** | (regardless of mode — See Never Silently Accept Critical Decisions) |
