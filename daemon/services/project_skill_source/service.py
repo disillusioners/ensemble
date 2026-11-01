@@ -841,7 +841,11 @@ class ProjectSkillSourceService:
         # disappears structurally instead of being re-checked per read.
         if index is None or index.project_id != project_id:
             if index is not None:
-                logger.warning(
+                # INFO, not WARNING: two projects legitimately sharing one
+                # root (monorepo main_directory) alternate this entry on
+                # every call — alarming on it would be noise. The escape
+                # class itself is the ERROR-level leak-guard trip below.
+                logger.info(
                     "[ProjectSkillSource] corpus_for project mismatch at "
                     "root=%s: index bound to %s, caller scoped to %s — "
                     "contributing nothing (TOCTOU guard)",
