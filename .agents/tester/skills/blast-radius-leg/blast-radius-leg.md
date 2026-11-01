@@ -9,6 +9,20 @@
 > (phase, mutation) with a mutation→test table in PACKS.md — bare `M1-M4` collided
 > across phases (Phase-2 gate finding F1).
 >
+> v1.0.3 (2026-10-31) — Phase-3 gate folds F5 + F2 (R3 rider, project-skill-loader
+> Phase 4): **(d)** every recorded sha256 over a FAILED/ERROR list carries a FORM TAG —
+> `BARE-ID` (sorted node ids, prefix stripped; the sibling failed-digest-equality-gate's
+> native form) or `GREP-FULL` (raw `grep -E '^(FAILED|ERROR)'` incl. non-summary LOG
+> lines). Cross-form comparison false-mismatches: the Phase-3 gate §6 measured a naive
+> grep adding 5 LOG lines to the 29-id report-deferred block (digest `2fad8e8a…` matches
+> in BARE-ID form ONLY). Record `(form, sha)` pairs, never a bare sha. **(e)** PACKS.md
+> node counts follow the mechanical collect-only convention (parametrize widening updates
+> the annotation; `fn-count` must be labeled) — the Phase-3 gate's 3→4/18→20/8→10 drift
+> is the motivating case.
+>
+> v1.0.2 (2026-10-31) — blast-radius canary recipe: per-variable `env -u` scrubs with an
+> assertable fence form; `P{n}-Mn` mutation namespace adoption.
+>
 > v1.0.1 (2026-10-31) — doctrine maintenance driven by the FIRST real gate run
 > (project-skill-loader Phase-1, Tier-1, ~6 min legs / ~28 min window). Three folds:
 > **(a)** the two-class declaration rule for additive lanes (GAP-1); **(b)** digest

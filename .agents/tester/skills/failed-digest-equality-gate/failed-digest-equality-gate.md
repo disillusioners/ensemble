@@ -1,5 +1,13 @@
 # Base-vs-Head FAILED-Digest Equality Gate (project canon)
 
+> **v1.0.2 (2026-10-31)** — FORM-TAG fold (R3 rider, project-skill-loader Phase-4 gate
+> finding F5): every recorded digest carries its FORM — `BARE-ID` (sorted node ids,
+> prefix stripped; this skill's native form) or `GREP-FULL` (raw `grep -E
+> '^(FAILED|ERROR)'` including non-summary LOG lines). The Phase-3 gate measured a naive
+> grep adding 5 LOG lines to the 29-id report-deferred block (digest `2fad8e8a…` matches
+> in BARE-ID form ONLY) — a cross-form comparison false-mismatches. Record `(form, sha)`
+> pairs, never a bare sha.
+
 > **v1.0.1 (2026-10-31)** — GAP-2 fold: digest capture greps `^(FAILED|ERROR)`; the
 > pre-v1.0.1 `^FAILED ` grep silently dropped collection/setup ERROR lines (an additive
 > lane could look digest-clean while BASE was erroring). Doctrine maintenance driven by

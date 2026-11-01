@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "name": "failed-digest-equality-gate",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Proof primitive shared by Tier-1 and Tier-2 gates: run the identical suite on both legs and compare sorted FAILED node-id sha256 digests (cmp + comm both directions), per-file count attribution, 3x flake adjudication. Digest-form discipline: sorted node ids with the FAILED prefix stripped.",
   "category": "gate-runner",
   "scope": "project",
