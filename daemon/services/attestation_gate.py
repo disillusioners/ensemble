@@ -450,10 +450,11 @@ class GateDecision:
     #: count is surfaced for forensics and consumed by the predicate's
     #: ``c_quiet`` term.
     #:
-    #: ORDINAL NOTE: this is the FIFTH of the FIVE R2 inputs
+    #: ORDINAL NOTE: this is the FIFTH of the SIX R2 inputs
     #: (``pending_children`` / ``queued_or_expected_wakeups`` /
     #: ``live_descendants`` / ``busy_descendants`` /
-    #: ``outstanding_commissions``). It is NOT the "FIFTH
+    #: ``outstanding_commissions`` /
+    #: ``outstanding_report_obligations``). It is NOT the "FIFTH
     #: legitimate-pending input" (``user_answer_pending`` above) — two
     #: different enumerations, two different FIFTHs.
     #:
@@ -468,16 +469,24 @@ class GateDecision:
     #: obligations keyed to the instance's mission subtree (the
     #: transactional-outbox hold input). Additive forensic field —
     #: the same shape as ``outstanding_commissions``. ``>= 0`` is a
-    #: real count; ``-1`` means the read never ran (the whole-eval
-    #: DB-seam fail-open fired on an EARLIER read — the obligation
-    #: read itself can never contribute here, its error path is the
-    #: isolated flag below). NOT in the canonical log-schema tuple.
+    #: real count. ``-1`` = the row carries NO obligation value:
+    #: EITHER the whole-eval DB-seam fail-open fired on an EARLIER
+    #: read (this read never ran — its error path is the isolated
+    #: flag below), OR the row was built by an early-return that
+    #: does not attach this field (the ``outstanding_commissions``
+    #: UNKNOWN fail-open and the meta-bypass rows) — there the read
+    #: DID run and any real count was discarded from the row.
+    #: ``-1`` therefore means "not carried / unknown", never "the
+    #: tree is quiet". NOT in the canonical log-schema tuple.
     outstanding_report_obligations: int = -1
     #: wi-1fbee2ec — D1 fail-closed marker: the obligation read
     #: FAILED (isolated try/except at the read; never the whole-eval
-    #: fail-open). ``True`` drove decide() step (2b) — a bound-
-    #: composed DENY, never a verify-clean allow. Forensic surface
-    #: for the mutation pin.
+    #: fail-open). When ``decide()`` is REACHED, ``True`` drove step
+    #: (2b) — a bound-composed DENY, never a verify-clean allow.
+    #: Caveat: an early-return row built BEFORE ``decide()`` (the
+    #: ``outstanding_commissions`` UNKNOWN fail-open et al.) omits
+    #: this field, so a ``False`` there means "not carried", not
+    #: "no error occurred". Forensic surface for the mutation pin.
     report_obligation_read_error: bool = False
     #: 2026-09-16 LCA resolver Stage-2 flip — the unified resolver's
     #: evaluation snapshot (``ResolverEvalSnapshot``: activation
@@ -869,9 +878,10 @@ def decide(
             attestation_required=attestation_required,
         )
 
-    # (2) R2 allow — legitimate pending wakeup (FOUR-input predicate:
-    # pending_children OR queued_or_expected_wakeups OR live_descendants
-    # OR outstanding_commissions).
+    # (2) R2 allow — legitimate pending wakeup (the R2 family
+    # predicate: pending_children OR queued_or_expected_wakeups OR
+    # live_descendants OR outstanding_commissions OR
+    # outstanding_report_obligations).
     # Fires BEFORE the attested-split step (3) deliberately
     # (2026-09-20, N1 ratification): a premature attest during an
     # active mission would otherwise fight the R2 legit-pending
@@ -1351,11 +1361,12 @@ def evaluate(
         messages: In-node ``state["messages"]`` — NEVER an
             ``aget_state`` result (see module docstring).
         mode_resolver: :class:`GateSettings` (window/bound/mode).
-        manager: Handle exposing the FIVE R2 facades
+        manager: Handle exposing the SIX R2 facades
             (``count_pending_children`` / ``get_queued_or_expected_
             wakeups`` / ``count_live_descendants`` /
             ``count_busy_descendants`` /
-            ``count_outstanding_commissions``). May be ``None`` ONLY
+            ``count_outstanding_commissions`` /
+            ``count_outstanding_report_obligations``). May be ``None`` ONLY
             in degenerate embeddings — the response is fail-open allow
             (R2 inputs unreadable).
         attestation_enabled: C2 flag — Term-0 input to the unified
@@ -1551,7 +1562,7 @@ def evaluate(
                 mission_census or delegation_scan.delegation_since_last_user
             )
 
-        # (ii) R2 inputs — the FIVE R2 manager facades (SYNC reads; the
+        # (ii) R2 inputs — the SIX R2 manager facades (SYNC reads; the
         # graph node bridges this whole function via asyncio.to_thread).
         # DB seam: `except Exception` (KeyboardInterrupt stays fail-closed).
         # ``busy_descendants`` (2026-09-12) is the FOURTH input — the

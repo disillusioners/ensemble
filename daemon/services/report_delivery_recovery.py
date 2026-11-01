@@ -636,9 +636,11 @@ class WcOrphanDetectorLaneResult(LaneResult):
     DETECTION-ONLY lane (D2 ruling (a): sweep-side detector; the
     strand-healer widening was rejected as structurally hostile and
     wedge captures stay diagnostic-only). Every classified row
-    reaches ONE of the counters below + a structured log line —
-    NEVER silent, NEVER acting (no revival, no state write; the
-    disposition is surfaced for the operator / a future lane).
+    reaches ONE of the counters below; every FIRE-class row
+    (``direct`` / ``pure_chain``) also gets a structured log line,
+    while the skip-classes are counter-only by design — no revival,
+    no state write (the disposition is surfaced for the operator / a
+    future lane).
 
     Counter semantics:
 
@@ -660,7 +662,9 @@ class WcOrphanDetectorLaneResult(LaneResult):
       out of this lane's domain).
     * ``probe_errors`` — per-row walk failures (chain broken /
       unreadable rows). Counted, never silent; the row is retried
-      next cycle.
+      next cycle. Feed-level failures also count ONE probe error (a
+      whole-cycle feed outage reads as a single count, retried next
+      tick).
     """
 
     wc_orphan_direct: int = 0
@@ -1767,9 +1771,6 @@ class ReportDeliveryRecoveryService:
                     # unreadable tree).
                     return (False, None)
                 if row.parent_id is None:
-                    from daemon.repositories.report_injection.repository \
-                        import _PARENT_TERMINAL_STATUSES
-
                     return (
                         row.status in _PARENT_TERMINAL_STATUSES,
                         current_id,
@@ -1905,10 +1906,6 @@ class ReportDeliveryRecoveryService:
         counts a probe error. Raises are NOT caught here (the lane's
         per-row guard owns them).
         """
-        from daemon.repositories.report_injection.repository import (
-            _PARENT_TERMINAL_STATUSES,
-        )
-
         first_parent = True
         chain_depth = 0
         current_id: str | None = None

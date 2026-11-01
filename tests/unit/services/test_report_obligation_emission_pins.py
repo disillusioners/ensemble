@@ -36,7 +36,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import create_engine, event
-from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, select
 
 from daemon.constants import DEFERRED_REASON_SYNC_MINT
