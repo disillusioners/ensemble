@@ -274,7 +274,10 @@ class TestWiringSites:
 
     def test_site_1_search_ctor_threads_file_source(self):
         src = self._manager_source()
-        assert "file_source=self._project_skill_source," in src
+        # TWO occurrences exactly: site 1 (fusion ctor) + site 3 (the
+        # B1 M10 construction). One-only = a site went dark.
+        assert src.count("file_source=self._project_skill_source,") == 2
+        assert "A10 SITE 1" in src
 
     def test_site_2_injection_set_file_source(self):
         src = self._manager_source()
@@ -536,6 +539,11 @@ class TestM10FileOnly:
         assert json.dumps(r1, default=str, sort_keys=True) == json.dumps(
             r2, default=str, sort_keys=True
         )
+        # The marker is set ONLY on the deterministic skip path — if
+        # stage 3 ran (and its exception was swallowed by the
+        # best-effort except), the marker vanishes.
+        assert r1.get("degraded") == "file_only"
+        assert r2.get("degraded") == "file_only"
 
     @pytest.mark.asyncio
     async def test_top_k_equals_max_results(self, m10):
