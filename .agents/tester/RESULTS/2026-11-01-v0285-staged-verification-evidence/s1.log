@@ -1,0 +1,398 @@
+### wi-1fbee2ec S1 run start 2026-11-01T20:37:07Z
+
+## S1 STEP 1 - 4-WAY SHA
+--- (a) release dir listing ---
+total 80352
+drwxr-xr-x  5 nea nea     4096 Nov  1 20:27 .
+drwxrwxr-x  8 nea nea     4096 Nov  1 20:27 ..
+drwxr-xr-x 45 nea nea     4096 Nov  1 20:25 agents
+-rw-r--r--  1 nea nea    35747 Nov  1 20:25 config.yaml
+-rwxr-xr-x  1 nea nea 81392816 Nov  1 20:25 ensemble-prod
+drwxr-xr-x  3 nea nea     4096 Nov  1 20:25 frontend
+-rwxr-xr-x  1 nea nea    83321 Nov  1 20:25 launcher.sh
+-rw-r--r--  1 nea nea   733738 Nov  1 20:27 manifest.json
+drwxr-xr-x  3 nea nea     4096 Nov  1 20:25 plugins
+--- (a) release binary sha256 ---
+a59e09a40958d267fb2942722830ff77673b84d38d212dfb28291f5c2f52a369  /home/nea/agents-ensemble/releases/v0.28.5/ensemble-prod
+--- (b) staging worktree dist listing ---
+total 79504
+drwxr-xr-x  2 nea nea     4096 Nov  1 20:25 .
+drwxr-xr-x 25 nea nea     4096 Nov  1 20:23 ..
+-rwxr-xr-x  1 nea nea 81392816 Nov  1 20:25 ensemble-prod
+-rw-r--r--  1 nea nea      332 Nov  1 20:25 ensemble-prod.build-provenance.json
+--- (b) dist binary sha256 ---
+a59e09a40958d267fb2942722830ff77673b84d38d212dfb28291f5c2f52a369  /home/nea/ensemble-src-wt-stage-v0285/dist/ensemble-prod
+--- (d) provenance sidecars under dist (maxdepth 3) ---
+/home/nea/ensemble-src-wt-stage-v0285/dist/ensemble-prod.build-provenance.json
+--- (d) sidecar contents ---
+== /home/nea/ensemble-src-wt-stage-v0285/dist/ensemble-prod.build-provenance.json ==
+{
+  "git_head": "600057a83bacf494e97e473b19bd2e1a0d2fe2f4",
+  "git_head_short": "600057a83bac",
+  "git_dirty": false,
+  "build_at": "2026-11-01T20:25:42Z",
+  "build_tool": "pyinstaller:ensemble.spec",
+  "artifact_sha256": "a59e09a40958d267fb2942722830ff77673b84d38d212dfb28291f5c2f52a369",
+  "artifact_path": "dist/ensemble-prod"
+}
+
+--- (c) manifest key scalars ---
+version = v0.28.5
+binary_version = 0.28.5
+binary_sha256 = a59e09a40958d267fb2942722830ff77673b84d38d212dfb28291f5c2f52a369
+staged_at = 2026-11-01T20:27:11Z
+rollback_safe = True
+known_schema_gen = 20261031_120002_create_project_skill_usage_records.sql
+config_sha256 = 0f0875bdca2ef83497b3b07181cbfde917b37235c05601e79fa746d2548eb768
+launcher_sha256 = a3a44461b39270744917a0017123870dca62b6293273da699e6dfb15bffebd3f
+fe_index_sha256 = None
+contains_contract_phase = True
+top-level keys: ['agents_manifest', 'agents_tree_sha256', 'binary_sha256', 'binary_version', 'config_sha256', 'contains_contract_phase', 'frontend_manifest', 'frontend_tree_sha256', 'known_schema_gen', 'launcher_sha256', 'pipeline_scripts_floor_commit', 'plugins_manifest', 'plugins_tree_sha256', 'rollback_safe', 'staged_at', 'version']
+--- sidecar search: whole staging worktree (excluding .git), name '*provenance*' ---
+/home/nea/ensemble-src-wt-stage-v0285/.agents/shared/planning/df4-provenance-closure
+/home/nea/ensemble-src-wt-stage-v0285/.agents/tester/LESSONS/2026-08-21-concurrent-branch-switch-provenance.md
+/home/nea/ensemble-src-wt-stage-v0285/.agents/tester/RESULTS/assets/2026-10-18-liveview-passcode/parity/s1-wrapper-provenance.txt
+/home/nea/ensemble-src-wt-stage-v0285/daemon/migrations/versions/20261025_122730_add_mission_provenance_columns.sql
+/home/nea/ensemble-src-wt-stage-v0285/daemon/tools/provenance.py
+/home/nea/ensemble-src-wt-stage-v0285/dist/ensemble-prod.build-provenance.json
+/home/nea/ensemble-src-wt-stage-v0285/frontend/dist/frontend/browser/index.html.build-provenance.json
+/home/nea/ensemble-src-wt-stage-v0285/plugins/opendesign/copy_freely/design-templates/github-dashboard/references/provenance-example.json
+/home/nea/ensemble-src-wt-stage-v0285/plugins/opendesign/copy_freely/design-templates/live-artifact/examples/stock-portfolio-live/provenance.json
+/home/nea/ensemble-src-wt-stage-v0285/tests/integration/test_chat_source_mixed_provenance.py
+/home/nea/ensemble-src-wt-stage-v0285/tests/postgres/test_df4_provenance_closure.py
+--- dist/ recursive full listing (maxdepth 4) ---
+/home/nea/ensemble-src-wt-stage-v0285/dist
+/home/nea/ensemble-src-wt-stage-v0285/dist/ensemble-prod
+/home/nea/ensemble-src-wt-stage-v0285/dist/ensemble-prod.build-provenance.json
+--- FE sidecar candidates anywhere in worktree ---
+/home/nea/ensemble-src-wt-stage-v0285/.venv/lib/python3.14/site-packages/setuptools/tests/indexes/test_links_priority/simple/foobar/index.html
+/home/nea/ensemble-src-wt-stage-v0285/frontend/dist/frontend/browser/index.html
+/home/nea/ensemble-src-wt-stage-v0285/frontend/dist/frontend/browser/index.html.build-provenance.json
+/home/nea/ensemble-src-wt-stage-v0285/frontend/node_modules/@schematics/angular/application/files/common-files/src/index.html.template
+/home/nea/ensemble-src-wt-stage-v0285/frontend/node_modules/cytoscape/playwright-page/index.html
+/home/nea/ensemble-src-wt-stage-v0285/frontend/node_modules/katex/contrib/auto-render/index.html
+/home/nea/ensemble-src-wt-stage-v0285/frontend/node_modules/katex/contrib/copy-tex/index.html
+/home/nea/ensemble-src-wt-stage-v0285/frontend/node_modules/playwright-core/lib/vite/dashboard/index.html
+/home/nea/ensemble-src-wt-stage-v0285/frontend/node_modules/playwright-core/lib/vite/htmlReport/index.html
+/home/nea/ensemble-src-wt-stage-v0285/frontend/node_modules/playwright-core/lib/vite/recorder/index.html
+--- manifest: pipeline_scripts_floor_commit + tree hashes + frontend_manifest keys + counts ---
+pipeline_scripts_floor_commit = 953603108fa35d4f59031818c3091eecda8c1663
+agents_tree_sha256   = 45e7be32e8516b64e0e47991940fd97d9125018db90582bd058cbb45aa0f466c
+frontend_tree_sha256 = bb076dc0240cb1a4578fa20ce844530d9e803a8d62678e641754a631299cf57e
+plugins_tree_sha256  = 4715cf64dad62d209c91206c560e475d7fa4cec8f67f6182ffbcd21b723685a7
+frontend_manifest type: dict
+frontend_manifest keys: ['dist/frontend/browser/apple-touch-icon.png', 'dist/frontend/browser/chunk-2ZIBNHV6.js', 'dist/frontend/browser/chunk-3EYTFU4D.js', 'dist/frontend/browser/chunk-3UL5BDJW.js', 'dist/frontend/browser/chunk-3W2U25OC.js', 'dist/frontend/browser/chunk-4GYBPFOT.js', 'dist/frontend/browser/chunk-4N3ENBVP.js', 'dist/frontend/browser/chunk-4NTO3VJ4.js', 'dist/frontend/browser/chunk-4PMHU4RI.js', 'dist/frontend/browser/chunk-4YZRC42S.js', 'dist/frontend/browser/chunk-5EYPAZ4S.js', 'dist/frontend/browser/chunk-5WCLEEFM.js', 'dist/frontend/browser/chunk-5XY6N6C4.js', 'dist/frontend/browser/chunk-67TD4M7D.js', 'dist/frontend/browser/chunk-6PGOO3MU.js', 'dist/frontend/browser/chunk-6RN5WGJ2.js', 'dist/frontend/browser/chunk-6TCGSFHG.js', 'dist/frontend/browser/chunk-7V7WIJUM.js', 'dist/frontend/browser/chunk-7YPDBNHR.js', 'dist/frontend/browser/chunk-A3GMSH7T.js']
+  frontend_manifest.dist/frontend/browser/apple-touch-icon.png = ebf4cd549f7ebd1540fa2e6e4ce6668a0a48b12bb9f8cd7e0eb844efc996816c
+  frontend_manifest.dist/frontend/browser/chunk-2ZIBNHV6.js = 03a8db62765e437fc3fe7a1e287c2e5e309f7c7c1a9ce49ee73d33d4042746a7
+  frontend_manifest.dist/frontend/browser/chunk-3EYTFU4D.js = 7bd6e171bef0f6c0b52eb0dc20c542e39db968b8428e988621b752c591523d36
+  frontend_manifest.dist/frontend/browser/chunk-3UL5BDJW.js = 781e753fe9615860cd48d66e40f89fe69bd2b8f183fcdb598a2266815dd023eb
+  frontend_manifest.dist/frontend/browser/chunk-3W2U25OC.js = 78a099a2708b8e06d821cdded87c6ef043ff3aed397472af49ff81227930d255
+  frontend_manifest.dist/frontend/browser/chunk-4GYBPFOT.js = 0375cbeefa3ccc34927c46ce1fdbd4b2f016343b7e41f58fde6b8c669cb95986
+  frontend_manifest.dist/frontend/browser/chunk-4N3ENBVP.js = ad6170ccc90fbe55b08868d7e55a4348bfa44ab75d223e85cbe677bec6bb7104
+  frontend_manifest.dist/frontend/browser/chunk-4NTO3VJ4.js = a4a503be41f68b21e9317725f256a3d320eabefc61f7edb809636144b11793d4
+  frontend_manifest.dist/frontend/browser/chunk-4PMHU4RI.js = 31d882f2f4042c60b06fe3d7fbb70d1d7b0e274a9a70e0bf03ed4b5034ed1fb7
+  frontend_manifest.dist/frontend/browser/chunk-4YZRC42S.js = b37fa44255e9adff526dd06cce93daced647dc040db05dc0f8431c9862301765
+  frontend_manifest.dist/frontend/browser/chunk-5EYPAZ4S.js = 96f78b2d85f535907c9b6d168711625fa9015d74b0843279ca68c463431eb98b
+  frontend_manifest.dist/frontend/browser/chunk-5WCLEEFM.js = 02350525dbef04ea9b793f1ba553e4b7926499acbf5e1029f6fb6a37fa7f3915
+  frontend_manifest.dist/frontend/browser/chunk-5XY6N6C4.js = a14db8e47ec249bd8e61915a0974fe5eae323b0993e82603330463379aade812
+  frontend_manifest.dist/frontend/browser/chunk-67TD4M7D.js = e89e9decf4bd9e12f8a477f47dd520b070b865eac10bf33a4bc6224d20c14596
+  frontend_manifest.dist/frontend/browser/chunk-6PGOO3MU.js = f010380f4768de2ce7182881c2baebb8cbf9ef5657837934c0dfb7b5f20f6b95
+  frontend_manifest.dist/frontend/browser/chunk-6RN5WGJ2.js = aa72d8e9e9de4a205a364c26a998d62566f0c0a74ce1f17d164067f68106a675
+  frontend_manifest.dist/frontend/browser/chunk-6TCGSFHG.js = 542d9653384e85818d85b8ac3aa06d547b45da85f06dde6fe7379bb262f10898
+  frontend_manifest.dist/frontend/browser/chunk-7V7WIJUM.js = e983ef51b494f80db9ddd957582546fee72a86aaf6d10d5f949426775a8e8b00
+  frontend_manifest.dist/frontend/browser/chunk-7YPDBNHR.js = 4e4b75287c155f59fa7a3af0b0ff287b121dbc18dbb79fbb6c94a86b8d20d18a
+  frontend_manifest.dist/frontend/browser/chunk-A3GMSH7T.js = 6845bb011b3e561545df4bdbb4bc7fde129bf20efe99eb0dfbe8f966e3c05717
+  frontend_manifest.dist/frontend/browser/chunk-A4SZGIXC.js = 36f65c4f4c55766400f31f0dbb0e25cfca9a4105fb887c9051619e86cd7e43d6
+  frontend_manifest.dist/frontend/browser/chunk-AFE5IYDF.js = 56623a025be514ab433ba29df6799e17ae79f67681226b9b37f6523ff5498e88
+  frontend_manifest.dist/frontend/browser/chunk-AHWWJSA6.js = a49efc340ded1f0cf87d710067344a127f459dd32f9ed02101e33f57fe9a7bfe
+  frontend_manifest.dist/frontend/browser/chunk-B4S2GZE2.js = 882400f0ef5790cfc3fa3fef648595c53a4fe8bffed914b8e430ca6640aa8af6
+  frontend_manifest.dist/frontend/browser/chunk-B647NB4X.js = c433aa84e723393ea1045af30a4344c441a819eed13bcbb59c6768ce5ba95465
+  frontend_manifest.dist/frontend/browser/chunk-BLYEJX3E.js = eba38b23c7676ce1a7513485a7bf33069a4f545e0c71d6ea649aa06988c1c8ab
+  frontend_manifest.dist/frontend/browser/chunk-BNSKB6EZ.js = 9ce58ef8426cade822d0edc7d846b420db5cc7b53663cfb6cb49e4392a1f4917
+  frontend_manifest.dist/frontend/browser/chunk-C22LU5L4.js = 2af6849d04acfe0734f47cdc0c5d05ecaeb119ada1916a9b039aed7d1880c0a9
+  frontend_manifest.dist/frontend/browser/chunk-C2OKJ57T.js = 6c28267ba9b839bf04282dd09496a7208c5bbe49736230afbb564ee57007069d
+  frontend_manifest.dist/frontend/browser/chunk-CBSXGPYH.js = e6798e8888e704aee7e763fdeec481c23ceda8f90ce66384af05882f060f6aa8
+  frontend_manifest.dist/frontend/browser/chunk-D6SZZOCV.js = ee687b92365ddcf5b2c29443e1fb8a938548516ed528e89163324f31c6302992
+  frontend_manifest.dist/frontend/browser/chunk-DLTWBXXZ.js = 7e86fa4d3f6753c21c252e30732fcd07aa94b0b00d608f0baf88587438b26359
+  frontend_manifest.dist/frontend/browser/chunk-DVV23VVJ.js = 8ee02413c85480f244c43b7e051e11902070f44fe67ab8126f11eda287f42a61
+  frontend_manifest.dist/frontend/browser/chunk-E2FMGBEN.js = a82d1b506f3f56815f198bdd72f7621d3a535aa3ed26a2e142dba757a8772e14
+  frontend_manifest.dist/frontend/browser/chunk-ELB5YHKI.js = c2632f93a8de472f918b66015a6b46a8c6a0e0a347844add1016730ff2671764
+  frontend_manifest.dist/frontend/browser/chunk-F6GVQAJ3.js = ea7ba9b9eae18b2637060e9a0f03ff9d3387f3c89c193118625571860bb6be93
+  frontend_manifest.dist/frontend/browser/chunk-FD5RE4DV.js = 4286a41f4cb017b9081bbed0c73e8d18bb53015663b6e1cdc0494fe3658a217f
+  frontend_manifest.dist/frontend/browser/chunk-FH65AM5W.js = f8afffb47942afe29b830d4e182a56fa9c13f8a8e8108287e0f7eaf246739fed
+  frontend_manifest.dist/frontend/browser/chunk-FRJ46PBA.js = 717048d077c77adcb505190e9d02fe736a608ec04574af7be73f6d0e99ed1e2b
+  frontend_manifest.dist/frontend/browser/chunk-GAJ6E7X2.js = bf553d1c9f9af910afa4948f60d4e2296f1279fd1323e4b5c0e3ea2bbe57764f
+  frontend_manifest.dist/frontend/browser/chunk-GCPQBAQA.js = 428783067b234a820c80a577114d66894975698403847309cf6d600fe7300b7c
+  frontend_manifest.dist/frontend/browser/chunk-GJR26XQB.js = 9b127cfa93ddbb7cf44d4f3f64cf535eb3bd4835c1b188aa5ffb172cbd5ffe82
+  frontend_manifest.dist/frontend/browser/chunk-HHL5DAU7.js = 8d2c5e28b39c4402bd48156ff2f380dadf53dba9d28e7dfa4d616e202425a72d
+  frontend_manifest.dist/frontend/browser/chunk-HMJNHQQP.js = b7b6f2c212ffe7cffee7d8b022a57d137836af1a5c5249ab00ad9d11d883b2f2
+  frontend_manifest.dist/frontend/browser/chunk-HZ2FSDB2.js = 0ff64ce52daeff41ddd0270d89060fc2dc69210e3f44150d512f7259b3eb88ac
+  frontend_manifest.dist/frontend/browser/chunk-I2ZHGNVO.js = 5ae06c641ad41a127323855aafc35fa31976154ada8275d89aa0e28d36297967
+  frontend_manifest.dist/frontend/browser/chunk-ILIOTJJY.js = 4f46896361107fe5cb7be8bfc60446ef0e876464eabd9e50fff25d0de5ebec94
+  frontend_manifest.dist/frontend/browser/chunk-INTLO5F6.js = 12b53fdab307d3fe0b7f74ceeae368ecb81ccda3b6dae8bec96c8e11fe18415a
+  frontend_manifest.dist/frontend/browser/chunk-IRNJXVMW.js = 9816a973965a3ad1c02576e4f812b373de477f4a678d904120a2df6f4a10afcd
+  frontend_manifest.dist/frontend/browser/chunk-IRWNJPGG.js = 72d5acd36a9897e8a28674a58a374f87c083039c4c8d5406e0aff0280851a8b4
+  frontend_manifest.dist/frontend/browser/chunk-ITQ6JS7K.js = 5980bb794667b8a7285a6a7f0284f0f4e573612767a062a70e034a61399c7580
+  frontend_manifest.dist/frontend/browser/chunk-KXS36IUH.js = 595204945c2c3bb8b683a88f5fb2e36f3cf400a5e9b2ba07cc390d51feb0295d
+  frontend_manifest.dist/frontend/browser/chunk-L3ZDSHHH.js = 298b075c41499bdc2a91a1f2e012362d233b3ac667a9f1f54a82eb5e676f1856
+  frontend_manifest.dist/frontend/browser/chunk-L7ECMGCN.js = f763b033d7ce17f756e3e7300161897d5b0c266c8e0b4ef910ec9740db1ea39c
+  frontend_manifest.dist/frontend/browser/chunk-LBCSZNB4.js = bb603ff86c514c2ffdc08b3489254760395a7128f8c0967724053817cddc7c73
+  frontend_manifest.dist/frontend/browser/chunk-LXPIP22L.js = d99b00b83903a71cd636e1e6e2636115e168f9c9ce32e0512c18e0974f466e99
+  frontend_manifest.dist/frontend/browser/chunk-LYTAZOZI.js = 35dc8d05fad2b6870174d4e78a23f8c44247cc8f61d47c92eb065a3c3b7b8091
+  frontend_manifest.dist/frontend/browser/chunk-M5SWXRZS.js = 274290f9a6aae60bf828ba8edd64457c2d0e555c41c76ec52a9e5ad77f9d7400
+  frontend_manifest.dist/frontend/browser/chunk-MRLD6BLK.js = 84e295c4a07b257a161e4c37660ed8dcb4918d0121748281ecc7aca99ffbcf7a
+  frontend_manifest.dist/frontend/browser/chunk-MVVOFKRO.js = c800fc9abf7346400f2457662a8e9d93f31c3e8dc7a6bb66bcdd433cd2ca6e57
+  frontend_manifest.dist/frontend/browser/chunk-NEF5LQUI.js = 2736954f1ec909e91633ad3af41c9cf7000716a25ab0fb55af93fb2076284a02
+  frontend_manifest.dist/frontend/browser/chunk-QXTTBPCB.js = 0aeb884c919a551bce57ef369e53be1db364ba096ea0d713e1f189b8b3e5a4ff
+  frontend_manifest.dist/frontend/browser/chunk-RVZNBKFA.js = 9bbd5c35fa705e991a0af8da9aa22be074622b4f1b3eb448b173933cd296a903
+  frontend_manifest.dist/frontend/browser/chunk-SOKMQODN.js = 82c35071ad7d8f7a32e1171ea11758f1f50615ccfcf32b88ebe5eedafd4a99a9
+  frontend_manifest.dist/frontend/browser/chunk-STRY6GEE.js = c8248322ca13cd1414ac896deb526e7d7c5b7ec742fff868be71d18ca9453d52
+  frontend_manifest.dist/frontend/browser/chunk-SUP2CECG.js = 8f0c342ddfbd565abc65be1843588ea25c82d441767eedbba48ae1b1db067f89
+  frontend_manifest.dist/frontend/browser/chunk-T47LDKCK.js = 5031b60732dbef8bf9de5bab018298442827bd19fcb29db6c4f2cf54b56a8a2f
+  frontend_manifest.dist/frontend/browser/chunk-TDPIVRPQ.js = 913881c13ae5a47737c60b17649c5e0661b8fb50a380908457a1211684218f17
+  frontend_manifest.dist/frontend/browser/chunk-TS7CYRQ7.js = 35a558fbd612d558951bfaccc2ce8cefa611dd8971749cc0488f7c1cc3b95546
+  frontend_manifest.dist/frontend/browser/chunk-U2ELLEET.js = 3ca69684acc098f7a9060e69decd9d61988575a77298a8de691a4a96716f7d9c
+  frontend_manifest.dist/frontend/browser/chunk-UQSBFRY2.js = 6524c323db03296f3f128f682db25eb2b75c2c7c11f75966b6614564c53aed8a
+  frontend_manifest.dist/frontend/browser/chunk-USENODA2.js = 0d135417fbd4b02bbc87c5004e5d39133715959edf426a723810d449ea0587c7
+  frontend_manifest.dist/frontend/browser/chunk-VJVIVBYB.js = 1f69cf5543b6d8754c54102e8ee7f54fce276fbaafb34c39e7b7bb8029f01149
+  frontend_manifest.dist/frontend/browser/chunk-VN4EN6T4.js = 1fb610192ea86127aca17edf9b4f3eb96be4fc89178a3be3a6ce7cce48d83179
+  frontend_manifest.dist/frontend/browser/chunk-WAMPWPAN.js = cbbb0723009fc9efde0d0a64556bbbcea44170482772e3c5076f005e577c3132
+  frontend_manifest.dist/frontend/browser/chunk-XNAFQ5ZA.js = 4746f5d5cecfc833e98277ce5a74bbc891ace79b781c2257da58fecb146136e1
+  frontend_manifest.dist/frontend/browser/chunk-XNVGAEF5.js = 185520f5161768cf446991b70ec721266616dc752fc44c0bde4703bed4766a4d
+  frontend_manifest.dist/frontend/browser/chunk-XQ2QCTPI.js = 3c5aaef669c5307958c65a4b0620bd4f0b35579f84d28e09b56f52cf328fceff
+  frontend_manifest.dist/frontend/browser/chunk-Y2KZQMEB.js = 35513559931b5ce48b0275c69f03ccdc033f70b1e7ca960cb4ed6d36502f5315
+  frontend_manifest.dist/frontend/browser/chunk-YJGFSQZF.js = 4423545803a6869fd532db8cf89dca2b2207d94b67b58223f94ac8fedd475728
+  frontend_manifest.dist/frontend/browser/chunk-YSOH4RL4.js = 18aea3e59321567a9ed9566fa47034a1dec9b167e25c900a3286bb4990fa88e7
+  frontend_manifest.dist/frontend/browser/chunk-YUNPSTZ4.js = bdc3895e27ce0b995b52e65cef1eac94b4fd8c7829c24580111bb8bae3f2a8d7
+  frontend_manifest.dist/frontend/browser/chunk-ZBO4TUJ6.js = 404a0b50d871e72a84e44db3cc88feadbb257cacf348bacfd979da278f8598ee
+  frontend_manifest.dist/frontend/browser/chunk-ZK2HJVX4.js = d9520be462b4658fbdfe175c18aed3d0cee7a68a7d1be8f7902599340bda97cb
+  frontend_manifest.dist/frontend/browser/favicon.ico = 1e7491b55745e15b74a6abbb4d1a9ad5f06e9b2cb9e55ede9d07be030fc7c41a
+  frontend_manifest.dist/frontend/browser/favicon.svg = fd949cf24977d18c3d980f8967ccfafa43be8f68363e98b04571c72ce1278a27
+  frontend_manifest.dist/frontend/browser/icons/favicon-16.png = 1e23cf8ff7386d5b82503a45931434e213dd8285cbff8271ed3406ef9a0bb275
+  frontend_manifest.dist/frontend/browser/icons/favicon-32.png = ac78d1abfb646a4c75b9f4583cdc6ed5ba38dd28b0ef74d176778d5f27454680
+  frontend_manifest.dist/frontend/browser/icons/favicon-48.png = 8b63dfc94c6416e07f5a7d06d5e82cb56b434e49ddce3e1074625997475260e1
+  frontend_manifest.dist/frontend/browser/index.html = 5531cbe4da0c026d0fdcf7f10ea348f7c20f6abd9e5d703912a4805ad1bb0ddd
+  frontend_manifest.dist/frontend/browser/main-ONWS2OZT.js = 7d00b294c5f72d9b024868bfe0d5c2250941a442c51aceddfca968844f9cd760
+  frontend_manifest.dist/frontend/browser/scripts-DN54Y2NQ.js = 9e511a8eab085c7afac7fc2f9bd534e1741a513d11752e850315ec8ea0c697a4
+  frontend_manifest.dist/frontend/browser/styles-S2UMLXTA.css = 8acde7040f2e8e8fb0d1925cf9a7f3be9c869bda0d097a794a9e0feb7c3ba94f
+agents_manifest type: dict len: 338
+frontend_manifest collection lens:
+plugins_manifest type: dict len: 4930
+COUNTS agents/frontend/plugins = 338 / 93 / 4930  TOTAL = 5361
+--- (d) FE sidecar contents ---
+{
+  "git_head": "600057a83bacf494e97e473b19bd2e1a0d2fe2f4",
+  "git_head_short": "600057a83bac",
+  "git_dirty": false,
+  "build_at": "2026-11-01T20:23:22Z",
+  "build_tool": "npm run build:frontend",
+  "artifact_sha256": "5531cbe4da0c026d0fdcf7f10ea348f7c20f6abd9e5d703912a4805ad1bb0ddd",
+  "artifact_path": "frontend/dist/frontend/browser/index.html"
+}
+
+
+## S1 STEP 2 - TAG PEEL (local)
+--- git rev-parse v0.28.5^{} ---
+600057a83bacf494e97e473b19bd2e1a0d2fe2f4
+--- git rev-parse v0.28.5^{commit} ---
+600057a83bacf494e97e473b19bd2e1a0d2fe2f4
+--- git rev-parse v0.28.5 (raw, should be the annotated TAG object) ---
+58ba56ef994f828e83a891e6a4398b01c4002d42
+--- git cat-file -t v0.28.5 ---
+tag
+--- git cat-file -p v0.28.5 | head -8 (tag header) ---
+object 600057a83bacf494e97e473b19bd2e1a0d2fe2f4
+type commit
+tag v0.28.5
+tagger giter <giter@ensemble.local> 1793564490 +0000
+
+v0.28.5 — report-obligation visibility + WC-orphan detection (commission wi-1fbee2ec)
+
+COMPOSITION (five parts): P1/P2 transactional-outbox delivery intent minted atomically AT child terminalization (same transaction); descendant-liveness widening — ANY non-terminal descendant counts non-quiet (mutation pin (e)); bound-exempt in-turn obligation arm holds WITHOUT advancing denied_count (R2 pin holds at/past bound while obligation outstanding). D1 obligation-query-error polarity FAIL-CLOSED (DENY -> bound-composed degradation, isolated from both fail-open catches, pinned). D2 WC-orphan detector SWEEP-SIDE (RDRS-adjacent sweep, detection-only, counters wc_orphan_direct/pure_chain/skipped_*/suppressed_root_terminal, kill-switch default-on). D3 suppressed terminal obligation row = HOLD DEFERRED + observability. R1 remediation folded: 3 integration attestation files rewritten to the widened doctrine (47 tests green at merged tree).
+--- HEAD of staging worktree ---
+600057a83bacf494e97e473b19bd2e1a0d2fe2f4
+
+## S1 STEP 2 - TAG PEEL (remote)
+--- git ls-remote origin refs/tags/v0.28.5 ---
+58ba56ef994f828e83a891e6a4398b01c4002d42	refs/tags/v0.28.5
+--- git ls-remote origin 'refs/tags/v0.28.5^{}' ---
+600057a83bacf494e97e473b19bd2e1a0d2fe2f4	refs/tags/v0.28.5^{}
+
+## S1 STEP 3 - TIP IDENTITY
+--- git fetch origin (remote-tracking refs only) ---
+--- git rev-parse origin/latest ---
+600057a83bacf494e97e473b19bd2e1a0d2fe2f4
+--- git rev-parse HEAD (staging worktree) ---
+600057a83bacf494e97e473b19bd2e1a0d2fe2f4
+--- identity check: HEAD == origin/latest == tag target? ---
+ZERO TIP AMBIGUITY: HEAD == origin/latest == v0.28.5^{commit} == 600057a83bacf494e97e473b19bd2e1a0d2fe2f4
+--- HEAD subject ---
+600057a83 chore(release): bump version to 0.28.5
+
+## S1 STEP 5 - TREE MIGRATION CENSUS (staged tree)
+--- file count ---
+119
+--- distinct YYYYMMDD_HHMMSS prefixes ---
+119
+--- duplicate prefixes (expect EMPTY) ---
+(end dup list)
+--- 2026-10/11 tail (the newest files, sanity for this lane's zero-DDL claim) ---
+20261022_000001_create_mcp_gateway_audit.sql
+20261022_000002_create_wedge_captures.sql
+20261025_000001_create_notify_audit.sql
+20261025_122631_create_mission_records.sql
+20261025_122700_create_mission_commissions.sql
+20261025_122730_add_mission_provenance_columns.sql
+20261025_140000_add_mission_open_epoch_unique_index.sql
+20261026_060000_add_mission_commission_resolved_at.sql
+20261031_110000_create_bash_spawn_registry.sql
+20261031_120000_create_project_skill_files.sql
+20261031_120001_create_project_skill_embeddings.sql
+20261031_120002_create_project_skill_usage_records.sql
+
+## S1 STEP 6 - PAYLOAD SOURCE-LESS (release dir full file listing, maxdepth 2)
+/home/nea/agents-ensemble/releases/v0.28.5/agents/.prompt-artifacts.sha256
+/home/nea/agents-ensemble/releases/v0.28.5/config.yaml
+/home/nea/agents-ensemble/releases/v0.28.5/ensemble-prod
+/home/nea/agents-ensemble/releases/v0.28.5/launcher.sh
+/home/nea/agents-ensemble/releases/v0.28.5/manifest.json
+--- end listing ---
+--- negative asserts (expect NO output = clean) ---
+[scripts/ inside release dir:]
+[.env inside release dir:]
+[provenance/*.build-provenance.json inside release dir:]
+[.staging.* / .aside.* residue:]
+--- also: leftover .staging.* dirs beside releases/ (stage temp dirs live at releases/ level) ---
+total 1648
+drwxrwxr-x 8 nea nea   4096 Nov  1 20:27 .
+drwxrwxr-x 5 nea nea   4096 Nov  1 20:27 ..
+drwxr-xr-x 2 nea nea   4096 Oct 28 09:57 rollback.lock.d.stale.2480459
+-rw-r--r-- 1 nea nea  91130 Nov  1 20:00 state.json
+-rw-rw-r-- 1 nea nea 435464 Oct 28 17:49 state.json.pre-hardtrim.20261028T175234Z.bak
+-rw-r--r-- 1 nea nea 455783 Oct 28 17:43 state.json.pre-manual-v02711.20261028T174405Z.bak
+-rw-r--r-- 1 nea nea  21737 Oct 28 20:21 state.json.pre-manual-v02712.20261028T222632Z.bak
+-rw-r--r-- 1 nea nea  27632 Oct 30 19:17 state.json.pre-manual-v02715.20261030T193642Z.bak
+-rw-r--r-- 1 nea nea  40406 Oct 26 21:02 state.json.pre-manual-v0278.20261026T210414Z.bak
+-rw-r--r-- 1 nea nea  90123 Nov  1 08:01 state.json.pre-manual-v0284.20261101T134420Z.bak
+-rw-rw-r-- 1 nea nea 474557 Oct 28 17:44 state.json.pre-trim.20261028T174902Z.bak
+drwxr-xr-x 5 nea nea   4096 Oct 31 06:08 v0.28.0
+drwxr-xr-x 5 nea nea   4096 Oct 31 17:38 v0.28.2
+drwxr-xr-x 5 nea nea   4096 Nov  1 06:37 v0.28.3
+drwxrwxr-x 5 nea nea   4096 Nov  1 13:22 v0.28.4
+drwxr-xr-x 5 nea nea   4096 Nov  1 20:27 v0.28.5
+(end residue check)
+
+## S1 STEP 7 - STAGING WORKTREE PORCELAIN + HEAD
+--- git status --porcelain (expect EMPTY; any output below is a FAIL) ---
+--- end porcelain ---
+--- HEAD + branch state ---
+600057a83bacf494e97e473b19bd2e1a0d2fe2f4  (HEAD, tag: v0.28.5, origin/latest) chore(release): bump version to 0.28.5
+--- git symbolic-ref -q HEAD (expect failure = detached) ---
+symbolic-ref rc=1 (nonzero = detached HEAD, expected)
+
+## S1 STEP 8 - PROMPT-BASELINE script discovery
+--- ls scripts/*baseline* ---
+--- fallback grep ---
+scripts/deploy.sh
+scripts/protection/README.md
+scripts/protection/generate_prompt_artifact_baseline.py
+scripts/systemd/ensemble-daemon.service
+scripts/upgrade/ledger_check.py
+--- main venv interpreter exists? ---
+lrwxrwxrwx 1 nea nea 77 Aug 24 16:57 /home/nea/ensemble-src/.venv/bin/python -> /home/nea/.local/share/uv/python/cpython-3.13-linux-x86_64-gnu/bin/python3.13
+
+## S1 STEP 8 - PROMPT-BASELINE --check RUN
+--- command: cd staging-wt && env -u POSTGRES_DB -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_HOST -u POSTGRES_PORT -u DATABASE_URL -u PORT main-venv-python scripts/protection/generate_prompt_artifact_baseline.py --check ---
+PROMPT-BASELINE: OK — 161 versioned artifact(s) match .prompt-artifacts.sha256
+--- baseline check rc above; tail done ---
+
+## S4 STEP 9 - CEREMONY INPUTS RECORD
+--- (a) promote command (verbatim, as staged for the ceremony) ---
+ENSEMBLE_UPGRADE_LIVE=1 VERSION=v0.28.5 bash scripts/upgrade/promote.sh live --f2-verified-closed
+--- (b) tag/remote states (from steps 2-3) ---
+local annotated object: 58ba56ef994f828e83a891e6a4398b01c4002d42 (type: tag)
+local peeled commit:    600057a83bacf494e97e473b19bd2e1a0d2fe2f4
+remote annotated:       58ba56ef994f828e83a891e6a4398b01c4002d42
+remote peeled:          600057a83bacf494e97e473b19bd2e1a0d2fe2f4
+origin/latest:          600057a83bacf494e97e473b19bd2e1a0d2fe2f4
+--- (c) tag annotation FULL contents (head -40) ---
+v0.28.5 — report-obligation visibility + WC-orphan detection (commission wi-1fbee2ec)
+
+COMPOSITION (five parts): P1/P2 transactional-outbox delivery intent minted atomically AT child terminalization (same transaction); descendant-liveness widening — ANY non-terminal descendant counts non-quiet (mutation pin (e)); bound-exempt in-turn obligation arm holds WITHOUT advancing denied_count (R2 pin holds at/past bound while obligation outstanding). D1 obligation-query-error polarity FAIL-CLOSED (DENY -> bound-composed degradation, isolated from both fail-open catches, pinned). D2 WC-orphan detector SWEEP-SIDE (RDRS-adjacent sweep, detection-only, counters wc_orphan_direct/pure_chain/skipped_*/suppressed_root_terminal, kill-switch default-on). D3 suppressed terminal obligation row = HOLD DEFERRED + observability. R1 remediation folded: 3 integration attestation files rewritten to the widened doctrine (47 tests green at merged tree).
+
+LINEAGE: merge 8a884912af (parents 9a984493a + 40bfc6d43) — MERGE ruled over rebase (preserves tester-GO sha anchors); scoped merged-tree sanity 107/107 green (60 pin corpus + 47 folded; 0 failures vs <=18 known-red ceiling).
+
+GATES CHAIN: planner-light verified; leader adjudications binding (D1-D3 + bound-exempt arm); reviewer council APPROVE-WITH-ADVISORIES + DELTA-CLEAR (2/2, 0 critical; polarity verified 2 methods — structural git-object + execution 103 unit + 21 PG, net-new EMPTY); tidier PASS; tester functional gate PASS-WITH-DISCLOSURES GO (G1-G10; R1 closed by scoped confirm 4/4); merged-tree sanity 107/107.
+
+ROLLBACK ADJUDICATION (standing rule, source=explicit): migration delta EMPTY — lane zero-DDL (git diff f7039c3ff..40bfc6d43 daemon/migrations/versions/ empty), drift zero-DDL, merged tree vs live v0.28.4 (62627265f) empty; behavior-only payload; report_injections substrate predates; old binary references no new symbols => ENSEMBLE_ROLLBACK_SAFE=1; auto-rollback may fire safely on a failed gate.
+
+NO-PROMOTE DISCLOSURE: staged only — the user 3-factor nonce ceremony owns the flip.
+Ceremony: ENSEMBLE_UPGRADE_LIVE=1 VERSION=v0.28.5 bash scripts/upgrade/promote.sh live --f2-verified-closed
+
+--- manifest rollback_safe ---
+rollback_safe = True
+--- grep rollback_safe inside release payload (expect none) ---
+/home/nea/agents-ensemble/releases/v0.28.5/manifest.json
+/home/nea/agents-ensemble/releases/v0.28.5/launcher.sh
+(end grep; no lines above = none inside payload — stage log lives with giter, noted as not-found, not a failure)
+--- launcher.sh rollback_safe occurrence (characterize: house launcher consumes the field) ---
+202:#       rollback itself: previous must be rollback_safe:true (D-FA4.5
+987:        # by setting ``rollback_safe:"false"`` in the release manifest
+1008:        #   (c) previous release's manifest rollback_safe is EXPLICITLY
+
+## S4 STEP 10 - LIVE FENCE BASELINE (read-only)
+--- readlink /home/nea/agents-ensemble/releases/current ---
+--- state.json location probe ---
+rc-root=2
+-rw-r--r-- 1 nea nea 91130 Nov  1 20:00 /home/nea/agents-ensemble/releases/state.json
+rc-releases=0
+--- sha256 of live state.json (PRE fence value for the record) ---
+72be3af75834886614f288d5baff3d38936acbddf931907e4619a97686132273  /home/nea/agents-ensemble/releases/state.json
+--- state.json promote fields (read-only python) ---
+top: {'current': 'v0.28.4', 'previous': 'v0.28.3', 'in_flight': None, 'pending_op': None}
+quarantined: []
+--- livez (read-only probe) ---
+{"status":"alive","uptime_seconds":24756.31897521019,"version":"0.28.4"}
+(end livez)
+--- locate the 'current' symlink (install root level) ---
+total 176
+drwxrwxr-x  5 nea nea  4096 Nov  1 20:27 .
+drwxr-x--- 79 nea nea  4096 Nov  1 20:30 ..
+-rw-------  1 nea nea  4996 Nov  1 20:27 .env
+-rw-------  1 nea nea  4329 Oct 20 20:43 .env.bak-2026-10-20T21:30:40Z
+-rw-------  1 nea nea  4710 Oct 26 20:31 .env.bak.20261026T211534Z
+-rw-------  1 nea nea  4710 Oct 26 21:15 .env.bak.20261026T213931Z
+-rw-------  1 nea nea  4791 Oct 29 00:46 .env.pre-p2knobs.20261029T004602Z.bak
+-rw-r--r--  1 nea nea   100 Nov  1 13:44 .launcher-state
+-rw-r--r--  1 nea nea 28321 Oct 12 19:13 config.yaml
+lrwxrwxrwx  1 nea nea    16 Nov  1 13:44 current -> releases/v0.28.4
+drwxrwxr-x  7 nea nea  4096 Nov  1 13:47 data
+drwxrwxr-x  2 nea nea  4096 Oct 12 19:13 docs
+-rwxr-xr-x  1 nea nea 83321 Nov  1 07:56 launcher.sh
+drwxrwxr-x  8 nea nea  4096 Nov  1 20:27 releases
+--- readlink /home/nea/agents-ensemble/current ---
+releases/v0.28.4
+--- resolved target dir ---
+/home/nea/agents-ensemble/releases/v0.28.4
+
+## FINAL DEFENSIVE RE-VERIFY (post all reads: worktree must still be pristine)
+--- porcelain (expect EMPTY) ---
+--- end porcelain ---
+--- HEAD unchanged ---
+600057a83bacf494e97e473b19bd2e1a0d2fe2f4
+--- release binary sha unchanged (re-hash) ---
+a59e09a40958d267fb2942722830ff77673b84d38d212dfb28291f5c2f52a369  /home/nea/agents-ensemble/releases/v0.28.5/ensemble-prod
+--- live state.json sha UNCHANGED vs PRE (fence held through this lane) ---
+72be3af75834886614f288d5baff3d38936acbddf931907e4619a97686132273  /home/nea/agents-ensemble/releases/state.json
+
+## SUMMARY COMPARISON vs GITER-REPORTED
+PASS release binary
+PASS manifest binary_sha256
+PASS binary sidecar artifact_sha256
+PASS sidecar git_head
+PASS sidecar git_dirty
+PASS manifest counts 338/93/4930
+PASS total 5361
+PASS rollback_safe True
+PASS fe_index (manifest per-file map) == FE sidecar sha
+### run end 2026-11-01T20:40:21Z

@@ -1,0 +1,24 @@
+PYZ TOC key set: native=4649 custom=4649 symmetric_diff=0
+CArchive embedded .sql: native=119 custom=119 equal=True
+key-module string-set equality (native walk vs custom pool): 9/9 identical; diffs=[]
+marshal round-trip of daemon.config: 268126 bytes ok
+native global pool: 235018 strings
+
+=== NATIVE-READER SYMBOL MATRIX (staged) ===
+  count_outstanding_report_obligations                    native=True   custom=True   agree=True
+  count_outstanding_for_subtree                           native=True   custom=True   agree=True
+  DEFERRED_REASON_SYNC_MINT                               native=True   custom=True   agree=True
+  outstanding_report_obligations                          native=True   custom=True   agree=True
+  report_delivery_recovery_lane_wc_orphan_detector        native=True   custom=True   agree=True
+  wc_orphan_detector                                      native=True   custom=True   agree=True
+  wc_orphan_direct                                        native=True   custom=True   agree=True
+  wc_orphan_pure_chain                                    native=True   custom=True   agree=True
+  suppressed_root_terminal                                native=True   custom=True   agree=True
+  report_obligation_read_error                            native=True   custom=True   agree=True
+  _resolve_get_store                                      native=True   custom=True   agree=True
+  _GET_STORE_MAX_ATTEMPTS                                 native=True   custom=True   agree=True
+  _store_import_latched                                   native=True   custom=True   agree=True
+  _get_store_fn                                           native=True   custom=True   agree=True
+
+MATRIX AGREEMENT (native vs custom, 14 symbols): True
+full global pool equality native==custom: True (native 235018 vs custom 235018)
