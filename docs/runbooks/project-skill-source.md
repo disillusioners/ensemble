@@ -52,6 +52,21 @@ no refresh ⇒ no `pf-` rows), so flipping OFF and back on is clean.
    hidden — absence plus the `shadows` tag, never a visible "deprecated" marker).
    The shadow decisions log at WARNING (`project-file shadowing: file skill …
    retires DB skill(s) …`) — greppable by an operator who doesn't know to look.
+
+   **ENUMERATED active shadow set at promote (leader adjudication 2026-11-01,
+   decisions.md Part 10 — the Phase-5 live-DB census resolved the exact diff):**
+   the `regression-ab-partition-run` name is carried by ONE lineage (gen-0
+   `978ae5cc` inactive → gen-1 `08a4332f` → gen-2 `fd1e01dc`; unresolved A/B
+   pair, identical content — NOT a name collision; correct P4 shadow-by-name
+   covers the lineage). The full enumerated set of ACTIVE DB rows shadowed at
+   first enable is FOUR ids:
+   - `08a4332f` — regression-ab-partition-run (gen-1, lineage member)
+   - `fd1e01dc` — regression-ab-partition-run (gen-2, lineage member)
+   - `9e79ccad` — whole-tree-base-proven-diff
+   - `76e3e1a7a` — failed-digest-equality-gate
+   - blast-radius-leg has NO DB copy (nothing to shadow).
+   The unresolved gen-1/gen-2 A/B pair is user-owned cosmetic cleanup (evolution
+   lane when re-enabled, or manual gen-1 deactivation) — zero shadow-set effect.
 2. **First boot activates the file source where it was dark.** Two shapes:
    - **Evolution-config-ABSENT installs** (``skill_evolution`` None — the
      M10 cell; a **test/defensive seam only**, see the W7 note at the end —

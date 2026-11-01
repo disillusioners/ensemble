@@ -360,3 +360,42 @@ maintenance tick — and the runbook says so with the interval and the advisory 
 tag is ON-only and documented in the knob table.
 **A18.2 text correction (W7):** the derivation stands; the M10 shape is labelled
 test/defensive, and "lane disabled" is explicitly NOT the absent-config case.
+
+---
+
+## Part 10 — Phase-5 census adjudication (leader ruling amending A18.4, 2026-11-01)
+
+**Tester facts of record (context, self-contained):** the Phase-5 live-DB census found the
+`regression-ab-partition-run` name carried by ONE lineage — gen-0 `978ae5cc` (inactive,
+imported) → gen-1 `08a4332f` → gen-2 `fd1e01dc` (canon-known) — plus an unresolved A/B
+pair `2600329e` (gen-1 and gen-2 both `status=ab_testing, is_active=true` in that shared
+group), identical content (same name, same project, identical description and 500-char
+content head). Not a name collision.
+
+> Leader adjudication 2026-11-01, on tester §6a facts: the regression-ab-partition-run
+> census superset is ONE lineage's unresolved A/B pair (gen-1 08a4332f + gen-2 fd1e01dc
+> active, gen-0 inactive), not a name collision. P4 shadow-by-name covers the lineage
+> correctly. A18.4 census invariant amended: exact-set = every canon-named live row
+> belongs to a KNOWN lineage AND the shadow set enumerates every ACTIVE row per name;
+> STOP fires only on an unknown lineage/name. Active shadow set at promote (enumerated,
+> disclosed): 08a4332f + fd1e01dc (lineage) + 9e79ccad (whole-tree-base-proven-diff) +
+> 76e3e1a7a (failed-digest-equality-gate); blast-radius-leg has no DB copy. The
+> unresolved A/B pair: user-owned cleanup via the evolution lane when re-enabled (or
+> manual gen-1 deactivation) — cosmetic, zero shadow-set effect.
+
+- **Provenance:** leader adjudication 2026-11-01, on tester §6a facts @ `3abad46b5`
+  (`.agents/tester/RESULTS/2026-11-01-psl-phase5-tier2-commission-gates.md` §6a +
+  addendum; census lane `4b45cf1c`). Recorded verbatim above.
+- **Effect — staging STOP LIFTED:** the Phase-5 census SUPERSET finding (03d53b1fb,
+  "census SUPERSET/STOP (PASS-WITH-NOTES)") is adjudicated as a KNOWN lineage ⇒ NOT a
+  STOP condition under the amended invariant; staging may proceed on this record.
+- **Folded inline annotations (original text retained, superseding block + provenance
+  line per the established convention):** `technical-analysis.md` (A18.4 falsifiability
+  condition + §G census bullet + Phase-0/gate interplay line), `phase0-plan.md` (FAIL
+  condition + approver exit criteria), `phase0-findings.md` (routed exact-set gate
+  input), `plan-overview.md` (Rollout item 5 ceremony disclosure). Runbook A18.2 dual
+  disclosure now carries the ENUMERATED shadow set (`docs/runbooks/project-skill-source.md`).
+- **Unresolved A/B pair disposition:** USER-OWNED cosmetic cleanup (evolution lane when
+  re-enabled, or manual gen-1 deactivation) — NOT this lane's work (evolution lane
+  disabled); zero shadow-set effect either way.
+
