@@ -2139,6 +2139,27 @@ class ServicesConfig(BaseSettings):
             "writes)."
         ),
     )
+    report_delivery_recovery_lane_wc_orphan_detector: bool = Field(
+        default=True,
+        description=(
+            "wi-1fbee2ec PART 4 — the WC-orphan DETECTOR lane "
+            "(observability-only; sweep-side per D2 ruling (a)). "
+            "Fires a structured log + counter for every non-root "
+            "WAITING_CHILDREN instance whose nearest non-WC "
+            "ancestor (the chain's structural authority) is "
+            "TERMINAL — the direct shape (WC child of a terminal "
+            "parent) and the pure-WC-grandchildren sub-shape (a WC "
+            "chain under a terminal root). NO lane sees these "
+            "shapes today (healer roots-only; RDRS L2 excludes "
+            "terminal parents; L5 sees only existing DEFERRED "
+            "rows). DETECTION ONLY — never acts, never revives, "
+            "never writes instance state; disposition is surfaced "
+            "for the operator / a future lane. Default True "
+            "(never-silent posture); env "
+            "SERVICES_REPORT_DELIVERY_RECOVERY_LANE_WC_ORPHAN_"
+            "DETECTOR=0 disables."
+        ),
+    )
     report_delivery_recovery_mission_commission_ttl_seconds: int = Field(
         default=21600,
         ge=1,

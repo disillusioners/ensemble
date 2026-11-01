@@ -1,0 +1,42 @@
+
+========================================================================
+PART 1 — 10:35 shape at BASE _root_completion_gate
+========================================================================
+[1a] base repo primitives SEE the obligation (data shape sane):
+     find_deferred_for_parent(ROOT)              -> 1 row(s)
+     count_pending_for_parent(ROOT)              -> 1
+     count_pending_for_parent_with_terminal_child -> 1 row(s) [{'injection_id': '2b48b380-6822-46e1-b0a9-9c210063742b', 'child_instance_id': '22222222-2222-4222-8222-222222222222', 'state': 'DEFERRED', 'child_terminal_status': 'completed'}]
+[1b] drive BASE _root_completion_gate(None, ROOT):
+     BASE VERDICT (with obligation outstanding): (True, None, False)
+[1c] counterfactual — obligation row terminal (delivered):
+     BASE VERDICT (obligation delivered):        (True, None, False)
+     IDENTICAL VERDICTS -> base gate CANNOT see the obligation: True
+
+========================================================================
+PART 2 — base decide() 4-evaluation arc (quiet tree, the 10:35 in-turn shape)
+========================================================================
+     eval 1: denied_count=0 -> DENIED (next=1)
+     eval 2: denied_count=1 -> DENIED (next=2)
+     eval 3: denied_count=2 -> DENIED (next=3)
+     eval 4: denied_count=3 == bound -> TERMINAL_AFTER_BOUND (next=0)
+     OLD BOUND CLOSURE at 4th evaluation: True
+[2b] base evaluate() end-to-end on the same quiet shape (the
+     manager carries an obligations facade the base gate never reads):
+     BASE evaluate() -> TERMINAL_AFTER_BOUND (next=0)
+     obligations=1 changed nothing (blind): True
+
+========================================================================
+PART 3 — G2 base direction: minted IDLE child, quiet tree
+========================================================================
+     BASE walk _count_descendants_busy_and_live(55555555…)
+       -> busy=0 live=0   (minted IDLE child, NO evidence rows)
+       OLD all-zero liveness read: True
+     decide(live_descendants=0, denied=3==bound) -> TERMINAL_AFTER_BOUND
+     G2 BASE verify-clean closure: True
+     BASE evaluate() end-to-end -> TERMINAL_AFTER_BOUND (next=0)
+[3b] asymmetry note — the EMISSION gate at base DOES block the
+     same minted-IDLE tree via its tree-liveness leg:
+     BASE emission gate on minted-IDLE tree: (False, 'tree_liveness: non-terminal member present but no last_activity_at anchor on any non-root tree member — backstop disarmed (data gap, not zombie evidence); the live leg holds by default', False)
+       blocked=True (emission-side leg already counts non-terminal)
+
+STEP-2 BASE REPRO COMPLETE

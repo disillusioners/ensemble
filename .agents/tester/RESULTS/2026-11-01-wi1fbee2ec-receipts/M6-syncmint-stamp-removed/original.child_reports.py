@@ -1,0 +1,6585 @@
+"""Child reports service for handling child instance completion reports."""
+
+import asyncio
+import json
+import logging
+import uuid
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, NamedTuple
+
+from daemon.services.timestamps import now_utc, now_utc_naive
+
+from sqlalchemy import exists, func, select, text, update as sa_update
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import Session
+from sqlmodel import select as sqlmodel_select
+
+from ..graph import ThinkingChatOpenAI, clean_llm_config
+from ..persistence import get_instance_messages
+from ..repositories.instance.models import Instance, InstanceStatus
+from ..repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
+from ..repositories.report_injection.repository import (
+    ReportInjectionRepository,
+)
+from ..repositories.task.models import Task, TaskType, TaskStatus
+from ..repositories.event.models import Event, EventKind
+from ..repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState
+from ..repositories.report_injection.models import ReportInjection, ReportInjectionState
+from ..registry import get_registry
+from .mission_record_service import (
+    MissionRecordService,
+    satisfy_commission_fail_open,
+)
+from .mission_record_reads import MISSION_READ_UNKNOWN
+from .report_recipient import resolve_report_recipient_with_commission
+from .completion_content import (
+    event_created_at_as_utc,
+    get_last_assistant_timestamp,
+    parse_checkpoint_ts,
+)
+from ..write_pause_guard import WriteGuardSession
+from ..constants import (
+    DEFERRED_REASON_IDEMPOTENCY_SKIP,
+    DEFERRED_REASON_PENDING_MESSAGES,
+    DEFERRED_REASON_SYNC_MINT,
+    REPORT_SANITY_MARKER,
+    SANITY_FLAG_VERSION,
+)
+from .report_integrity_metrics import record_junk_report
+from .report_integrity_guard import (
+    _clear_b_notice_if_clean,
+    enforce_declared_waiting_violations,
+    log_declared_waiting_violations,
+)
+from .context_messages import _resolve_tree_root_id
+# Stage-0 mint-with-delivery was REMOVED 2026-09-18 (user decision --
+# the LCA "Child Report Check" advisory note was killed: high-FP UX
+# legacy predating the fused judge, its task-less mint caused the
+# strand-wedge class; the LLM judge now subsumes the gate role). The
+# 17-pattern catalog (:data:`CHILD_TERMINAL_PROMISE_MARKERS`) and the
+# scanner function are kept for tests + future re-attachment;
+# ``_resolve_tree_root_id`` remains used by ``_dispatch_post_commit_side_effects`` for lifecycle-hook context_key resolution.
+from .lifecycle_hooks import LifecycleHookContext, dispatch_lifecycle_hooks
+from .llm_failover import wrap_langchain_failover
+from .job_queue_service import TERMINAL_STATUSES
+from .main_loop_bridge import MainLoopBridge
+from .pool_orchestrator import safe_notify_all_pools
+
+if TYPE_CHECKING:
+    from ..config import Config, ReportRepairConfig
+    from ..repositories.instance.repository import SQLModelInstanceRepository
+    from .event_publisher import EventPublisherService
+    from .error_reporting import ErrorReportingService
+
+
+logger = logging.getLogger(__name__)
+
+
+# ── Terminal-row strand (9f0ed4f5 family, 2026-10-31) ──────────────
+# Single source of truth for the T2 re-arm membership set. Hoisted
+# from the duplicated literals at the hold branch (A-6) so the two
+# sites cannot drift. Post-M-2 value: TERMINATED is EXCLUDED — a
+# re-armed TERMINATED root would become claimable (the claim gate
+# excludes only PAUSED/TERMINATED for all task types), a resurrection
+# path that T1 (unreachable for terminated rows) would never trigger.
+_TERMINAL_REARM_STATUSES: tuple[str, ...] = (
+    InstanceStatus.COMPLETED.value,
+    InstanceStatus.ERROR.value,
+    InstanceStatus.FAILED.value,
+)
+
+
+REPORT_REPAIR_PROMPT = """\
+The following are the last {count} assistant messages from a child agent that has \
+just completed its task. The LAST message (message {n}) may be truncated, incomplete, \
+or a short sign-off, while the substantive report content may be in an earlier message.
+
+Your job: produce a SINGLE coherent report message that captures the real completion \
+content. If the last message is a valid summary, return it. If the real content is \
+in an earlier message, extract and compose the correct report. Be concise — your \
+output REPLACES the report content sent to the parent agent.
+
+Return ONLY the report text, no preamble."""
+
+
+# W3: Hard cap on combined-report output to keep the parent context window
+# bounded. Large tool output or stack traces otherwise blow up the parent's
+# next prompt. Mirrors the 500-char cap at child_reports.py:563 but uses a
+# larger ceiling because combined text replaces the last assistant message
+# rather than sitting inline in a conversation.
+MAX_COMBINED_REPORT_CHARS = 10_000
+
+
+# Obligation-triple partial unique index identifier (Phase 1
+# write-once gate). Same name on SQLite and PG — verified by
+# ``tests/repositories/test_report_injection_migration_parity.py``.
+_OBLIGATION_TRIPLE_INDEX_NAME = "uq_report_injections_oblig_triple"
+
+# Columns covered by the obligation-triple index — used as the
+# SQLite fallback discriminator when the index name is absent from
+# the error message.
+_OBLIGATION_TRIPLE_COLUMNS = (
+    "parent_instance_id",
+    "child_instance_id",
+    "child_message_id",
+)
+
+
+def _is_obligation_triple_integrity_error(exc: IntegrityError) -> bool:
+    """Return ``True`` iff ``exc`` was raised by the obligation-triple
+    partial unique index ``uq_report_injections_oblig_triple``.
+
+    Dialect-aware discrimination:
+
+    * **PostgreSQL** — the constraint NAME is embedded in
+      ``str(exc.orig)`` (driver renders it as
+      ``"duplicate key value violates unique constraint
+      \"uq_report_injections_oblig_triple\""``). A SQLSTATE ``23505``
+      (unique_violation) is also a hint, but other unique constraints
+      on ``report_injections`` could yield the same code — the
+      constraint-NAME match is the discriminator.
+    * **SQLite** — the index NAME is NOT in the error message.
+      Instead, the columns covered by the index appear:
+      ``"UNIQUE constraint failed: report_injections.parent_instance_id,
+      report_injections.child_instance_id, report_injections.child_message_id"``.
+      The simultaneous presence of all three column names is the
+      SQLite discriminator. This is sound because no OTHER UNIQUE
+      constraint on ``report_injections`` covers all three columns
+      (the PK is on ``injection_id``; the other indexes are
+      non-unique).
+
+    POST-DEEP-REVIEW (Y2, 2026-08-20): a broad ``except IntegrityError``
+    on the obligation-triple INSERT would mis-treat a foreign-key or
+    other constraint violation as ``idempotency_skip`` and silently
+    swallow a real bug. This helper narrows the catch.
+
+    Args:
+        exc: The :class:`sqlalchemy.exc.IntegrityError` raised by
+            ``session.flush()`` on the obligation-triple INSERT.
+
+    Returns:
+        ``True`` iff the error is from the obligation-triple index.
+        Any other IntegrityError (FK violation, NOT NULL violation,
+        a different UNIQUE) returns ``False`` and the caller MUST
+        re-raise so the bug is surfaced.
+    """
+    orig = getattr(exc, "orig", None)
+    msg = str(orig) if orig is not None else str(exc)
+
+    # Constraint-name match (PG; SQLite future-proof if the driver
+    # ever starts emitting the index name).
+    if _OBLIGATION_TRIPLE_INDEX_NAME in msg:
+        return True
+
+    # Column-set match (SQLite). All three obligation-triple columns
+    # must appear together — a UNIQUE on a strict subset (none
+    # exist on ``report_injections`` today) would not match all
+    # three, and a multi-column UNIQUE that includes all three
+    # alongside an extra column would still match — which is
+    # acceptable (the obligation triple is still violated).
+    return all(col in msg for col in _OBLIGATION_TRIPLE_COLUMNS)
+
+
+class _ChildCompletionDbResult(NamedTuple):
+    """Result of the sync DB half of ``_process_child_completion_and_notify_parent``.
+
+    Carries the outcome + data the async caller needs to fire
+    post-commit side effects (SSE / CompletionRegistry / lifecycle event /
+    CM resolve hook) AFTER ``asyncio.to_thread`` returns to the event loop.
+
+    The sync helper that produces this runs the entire ``WriteGuardSession``
+    block on a worker thread so ``session.commit()`` cannot wedge the event
+    loop under SQLite WAL write contention (the same deadlock chain fixed
+    in ``job_feedback_observer._finalize_instance``).
+
+    Outcomes:
+        ``"instance_not_found"`` — no instance row, nothing to do.
+        ``"deferred_waiting_children"`` — root has pending children (bus),
+            SSE ``waiting_children`` only, no commit.
+        ``"root_waiting_children"`` — root carve-out: own-queue pending,
+            commit + SSE ``waiting_children``.
+        ``"root_completed"`` — root completed cleanly, commit + SSE
+            ``completed`` + CompletionRegistry + lifecycle event + title gen.
+        ``"idempotency_skip"`` — already reported (terminal
+            COMPLETED/ERROR state). B4 cycle-2 (W5 obligation re-mint):
+            when the obligation IS met (no PENDING watcher for the
+            (parent, child) pair, or the instance is NOT yet in
+            COMPLETED status) this branch is a no-op. When the
+            obligation IS unmet (parent alive, instance COMPLETED,
+            PENDING watcher present — the 84563a03 wedge), the
+            corrective multi-turn emit re-mints the obligation.
+            Phase 1: no marker for terminal-failed delivery.
+        ``"deferred_pause"`` — Phase 1 (pause-report-recovery Variant B
+            fix 2): CHILD is PAUSED at completion. The helper persists
+            a DEFERRED marker on ``report_injections`` so the parent's
+            delivery obligation can be recovered by the Phase 2
+            router/sweep. Outcome is an ``_ChildCompletionDbResult``
+            label only — NOT a ``message_queue.terminal_reason``;
+            no MIRROR_SET implication. C5 scope: this outcome ONLY
+            fires for child-PAUSED; child-COMPLETED/parent-PAUSED
+            uses the Site-1 pipeline lane (1.4) instead.
+        ``"tool_invocation_completed"`` — tool-invocation child, commit
+            + SSE ``completed`` + CompletionRegistry + lifecycle event +
+            title gen.
+        ``"regular_child_completed"`` — regular child, commit + SSE
+            ``completed`` + CompletionRegistry + lifecycle event + title
+            gen + child_completed lifecycle broadcast + (optional) parent
+            completion event when all children resolved.
+        ``"child_still_running_defer"`` — non-root instance has
+            non-terminal children (active in ``instances.parent_id``
+            working set), defer; no commit, no report, no event. Mirrors
+            ``deferred_waiting_children`` for the non-root parent case.
+    """
+
+    outcome: str
+    instance_id: str
+    agent_id: str | None
+    parent_id: str | None
+    # For regular_child_completed
+    child_agent_id: str | None = None
+    report_message_id: str | None = None
+    completed_parent_id: str | None = None
+    completed_parent_parent_id: str | None = None
+    parent_agent_id: str | None = None
+    # True if the parent cascade set status to WAITING_CHILDREN (CM-disabled
+    # legacy path with pending own-queue messages). The async caller emits
+    # the ``waiting_children`` SSE for the parent after the commit.
+    parent_waiting_children_sse: bool = False
+    waiting_children_parent_agent_id: str | None = None
+    # B.S.1-iii (stage iii): the (b) declared-waiting violation report
+    # evaluated at the INLINE SAME-TX position (B.S.7 — one evaluation,
+    # never re-read post-commit), handed to the async caller so the
+    # enforcement action (adjudication notice, flag-gated, fail-OPEN)
+    # runs AFTER the stamp transaction committed. ``None`` unless the
+    # root-COMPLETED stamp actually proceeded (rowcount > 0) AND the
+    # same-tx evaluation found violations. The enforcement itself is
+    # dormant behind the kill-switch — with the flag OFF this field is
+    # dead weight (one object reference, zero notice work).
+    b_violation_report: Any = None
+    # D1 (completion-subsystem Phase 1) — the RESOLVED report recipient.
+    #
+    # The instance that should receive this child's completion report.
+    # Normally the child's STRUCTURAL parent (``parent_id``); the
+    # resolver (``daemon/services/report_recipient.py``) overrides it
+    # with the COMMISSIONER when a fresh committed ``instance_nudge``
+    # exists.
+    #
+    # The STRUCTURAL parent is NEVER overloaded — ``parent_id`` above
+    # keeps its meaning (the bus corrective emit and the
+    # ``child_completed`` SSE express the WATCHER obligation, which is
+    # structural; they must NOT follow the report's destination).
+    #
+    # ``None`` means "no recipient was resolved" — the consumers fall
+    # back to ``parent_id``.
+    report_recipient_id: str | None = None
+
+
+class ChildReportsService:
+    """Service for handling child instance completion reports.
+
+    Handles:
+    - Idempotency per-message (won't send duplicate reports for same message)
+    - Parent's children[] cache update (FIX: W6)
+    - Cascade: bus authoritative for parent completion
+    """
+
+    def __init__(
+        self,
+        manager: "InstanceManager",
+        events_service: "EventPublisherService | None" = None,
+    ):
+        """Initialize the child reports service.
+
+        Args:
+            manager: The InstanceManager facade.
+            events_service: Optional event publisher service for lifecycle events.
+        """
+        self._manager = manager
+        self._events_service = events_service
+        # Per-root in-flight marker for the strand-heal hand-off
+        # (2026-10-21, running-zombie cycle 2). The hand-off is
+        # COALESCED: N holds on the same root MUST produce ONE
+        # scheduled heal, not N. It is also the RECURSION BOUND: the
+        # heal drive re-enters this completion path, so a hold fired
+        # from INSIDE a running heal can never schedule a second
+        # concurrent heal for the same root (the marker is held for
+        # the whole lifetime of the scheduled task).
+        self._strand_heal_inflight: set[str] = set()
+
+    @property
+    def _config(self) -> "Config":
+        """Access config through manager for test mockability."""
+        return self._manager.config
+
+    def _bus_count_pending_for_target_sync(
+        self, target_instance_id: str
+    ) -> int:
+        """Sync helper: count PENDING watchers targeting ``target_instance_id`` in the bus.
+
+        **Fail-OPEN semantics (warning)**: this helper catches all
+        exceptions and returns ``0`` (treated as "no pending
+        watchers"). This is fail-OPEN — a transient DB failure
+        passes the gate and may allow premature completion.
+
+        **Caller contract**: only use this helper for **defense-in-
+        depth checks** that have a separate safety net (the in-
+        session bus gate inside ``WriteGuardSession``, a parent bus-pending
+        check, etc.). The **authoritative bus
+        gate** at the completion decision point must use the inline
+        COUNT query directly on the ``WriteGuardSession``'s session
+        object (see ``_process_child_completion_db_sync``), so the
+        COUNT and UPDATE share one transaction. The inline query
+        lets exceptions propagate to the caller's fail-safe path
+        instead of silently returning ``0``.
+
+        Kept for: (a) tests that exercise the bus counter path
+        directly without going through the completion gate, (b)
+        the early defense-in-depth check at line 1718 in
+        ``job_feedback_observer.py`` (which has its own in-session
+        gate as the authoritative decision point).
+
+        Used by the sync completion gate in
+        :meth:`_process_child_completion_db_sync` (which runs inside
+        ``WriteGuardSession`` on a worker thread — an ``await`` is
+        impossible there) to consult the bus. The bus is the SOLE
+        pending-children source — its DB-backed ``dependency_watchers``
+        table is authoritative. Without this check, the root-instance
+        completion gate falls through to COMPLETED prematurely while
+        children are still running — the exact bug the bus was
+        designed to prevent.
+
+        Bus singleton missing → returns 0. This treats the gate as a
+        no-op when the bus is not wired (bus singleton missing is a
+        hard error), so the caller falls through to its own safe
+        default rather than blocking on an unavailable authority.
+
+        The implementation delegates to
+        :meth:`DependencyBus.count_pending_for_target_sync` which
+        wraps the sync repository's ``count_pending_for_target``
+        COUNT(*) query (dialect-portable — works on both SQLite
+        and PostgreSQL).
+
+        Args:
+            target_instance_id: The parent instance ID whose
+                PENDING watcher count is being queried.
+
+        Returns:
+            Non-negative integer count of PENDING watchers for
+            the given target. Returns 0 when the bus singleton is
+            not wired or the DB query fails.
+        """
+        from .dependency_bus import get_dependency_bus
+
+        bus = get_dependency_bus()
+        if bus is None:
+            return 0
+
+        try:
+            return bus.count_pending_for_target_sync(target_instance_id)
+        except Exception as e:
+            # FAIL-OPEN (see method docstring): a DB failure here
+            # returns 0 and PASSES the gate. Callers that use this
+            # helper at the completion decision point MUST have a
+            # separate safety net (typically the in-session bus
+            # gate inline query that shares a transaction with the
+            # UPDATE). Logged at warning level so persistent
+            # failures surface in observability without taking
+            # down the completion path.
+            logger.warning(
+                f"bus.count_pending_for_target_sync failed for "
+                f"{target_instance_id[:8]}...: {e} — treating as 0 "
+                f"(FAIL-OPEN: bus pending-children check skipped, "
+                f"may cause premature completion if persistent)"
+            )
+            return 0
+
+    async def _emit_terminal_via_bus(
+        self,
+        task_id: int | None,
+        status: str,
+        summary: str | None = None,
+        error: str | None = None,
+    ) -> list:
+        """Emit a terminal event via the DependencyBus and re-trigger parent finalization.
+
+        This helper atomically transitions PENDING watchers for
+        ``task_id`` to FIRED via the bus, then **directly** re-triggers
+        ``JobFeedbackObserver._finalize_job`` on any parent whose
+        watchers are all FIRED.
+
+        The bus is a state machine — it does NOT enqueue messages.
+        The leader's LLM path is NEVER injected with a synthetic
+        ``[dependency_bus] child XXX completed`` message; the parent
+        learns about child completion through the normal
+        ``child_reports`` mechanism (the ``internal_report:`` message
+        enqueued by ``_process_child_completion_and_notify_parent``)
+        and the user's own prompts.
+
+        Args:
+            task_id: The child task id whose terminal event is firing.
+                ``None`` short-circuits — the bus is keyed on a string
+                task id and a missing id means we can't match any
+                watchers (this can happen if the task row was already
+                GC'd; we log and return an empty list).
+            status: One of ``"completed"``, ``"error"``,
+                ``"terminated"``. Currently the bus only uses this for
+                structured logging — all PENDING watchers fire
+                regardless of outcome (the parent needs to know about
+                both success and failure).
+            summary: Optional human-readable summary of the terminal
+                event. Used for structured logging only.
+            error: Optional error message when ``status == "error"``.
+
+        Returns:
+            List of FollowUps that were atomically transitioned from
+            PENDING to FIRED. The list is returned for backward
+            compatibility and observability (callers can log how many
+            watchers fired), but the FollowUps are NOT enqueued as
+            messages — finalization flows through the report Task
+            (``PROCESS_REPORT``) → ``_process_event`` path. Empty
+            list when no watchers existed.
+        """
+        from .dependency_bus import (
+            Outcome,
+            get_dependency_bus,
+        )
+
+        bus = get_dependency_bus()
+        if bus is None:
+            # Bus singleton missing — genuine wiring failure. Return
+            # empty list (no fallback exists; the bus is the sole
+            # authority).
+            logger.warning(
+                "_emit_terminal_via_bus: bus singleton is None — "
+                "wiring failure, returning empty FollowUp list "
+                "(no fallback)"
+            )
+            return []
+
+        if task_id is None:
+            logger.warning(
+                "_emit_terminal_via_bus: task_id is None — cannot fire "
+                "watchers (no key to match); returning empty FollowUp list"
+            )
+            return []
+
+        outcome = Outcome(status=status, error=error, summary=summary)
+        fired = await bus.emit_terminal(task_id=str(task_id), outcome=outcome)
+
+        # Phase 1 (2026-06-24, report-lane decoupling): the bus no
+        # longer re-triggers ``_finalize_job`` directly. The old
+        # loop below used to iterate the fired FollowUps, check
+        # ``count_pending_for_target == 0`` and call the deleted
+        # ``_retrigger_parent_finalize`` shortcut (which itself
+        # called ``_finalize_job`` on the JobFeedbackObserver) to
+        # short-circuit the natural finalize path.
+        #
+        # That shortcut was the source of the orphan-Task bug: a
+        # finalize fired by the bus would terminate the parent's job
+        # while its report Task was still PENDING, leaving the Task
+        # with no JobItem to drive it.
+        #
+        # The natural path is now the only path: the report Task
+        # runs (Phase 1.1: ``notify_work()`` wakes the worker; Phase
+        # 1.2: ``PROCESS_REPORT`` TaskType uses the same
+        # ProcessMessageProcessor delivery), emits a lifecycle
+        # event, and ``JobFeedbackObserver._process_event`` checks
+        # the bus pending count and finalizes the job when 0.
+        # Per-child error status is threaded into the finalize path
+        # from the bus's ``had_parent_error`` + new
+        # ``parent_error_message`` (Step 1.7).
+
+        # ─── Crash-recovery dedup stamp (C1, 2026-06-22 reorder) ───
+        # Stamp ``enqueued_at`` on every fired FollowUp AFTER the
+        # finalization loop. Once stamped, a future restart's
+        # :meth:`DependencyBus._recover_fired_unsent` will NOT
+        # re-deliver this row — the dedup invariant the crash-
+        # recovery path relies on. The async wrapper
+        # ``bus.mark_enqueued_by_source_target`` runs the repo's
+        # sync method on a worker thread so the event loop is not
+        # blocked.
+        #
+        # Why AFTER finalization (not before, as the pre-fix code
+        # did): stamping before finalization would leave a
+        # ``enqueued_at IS NOT NULL`` row in the DB if the process
+        # crashed between stamp and retrigger — recovery would skip
+        # the row and the parent would stay PROCESSING forever.
+        # Stamping after finalization means a crash before
+        # finalization leaves the row un-stamped → next restart
+        # retries the finalization (idempotent). See the comment
+        # block above for the full invariant.
+        # Phase 2 round 2 (2026-08-24, Blocker 1): the stamp is now
+        # gated on the parent NOT being paused. The pre-fix code
+        # stamped ``enqueued_at`` UNCONDITIONALLY at fire time, which
+        # left stamped rows invisible to
+        # ``_compact_fired_watchers_for_paused``'s Pass 1
+        # (``enqueued_at IS NULL`` predicate) — a paused parent's
+        # buffered FollowUps were stranded until the ~10-15 min
+        # ``report_delivery_recovery`` Lane 3/4 sweep picked them up.
+        #
+        # Stamp semantics are now HONEST: ``enqueued_at`` means
+        # "delivered via the normal enqueue path". Rows fired while
+        # the parent is paused stay un-stamped, so resume's Pass 1
+        # selects them, re-enqueues each FollowUp, and stamps
+        # immediately after the successful enqueue. Pass 2 then
+        # DELETEs by the unchanged ``enqueued_at IS NOT NULL``
+        # predicate. The DELETE safety predicate is preserved
+        # EXACTLY — only the row population entering the predicate
+        # shifts (the un-stamped rows are the ones the production
+        # delivery loop just stamped).
+        #
+        # Composition with the durable ``report_injections`` row
+        # (created in ``_process_child_completion_and_notify_parent``
+        # at ~:2864-2875): Pass 1's ``manager.enqueue_message`` call
+        # creates a fresh ``MessageQueue`` + ``Task`` for the parent
+        # — when the parent's turn runs it drains the PENDING
+        # ``report_injections`` row via ``claim_for_injection`` (the
+        # natural idempotency mechanism, guarded ``WHERE state='PENDING'``
+        # UPDATE). The pair is deduplicated by the tri-state guards
+        # (claimed / already_delivered / missing); there is exactly-one
+        # delivery to the parent.
+        for fu in fired:
+            # Phase 2 round 2 (2026-08-24, Blocker 1) parent-liveness
+            # stamp-gate: skip the stamp when the parent is PAUSED so
+            # resume's Pass 1 selects this row.
+            #
+            # Trade-off is FAIL-OPEN by design: when the status
+            # lookup itself fails (a DB hiccup, a transient
+            # ``_instance_repository.get`` error, or the parent row
+            # being None — deleted/never-existed), we fall through
+            # to the stamp and treat the lookup result as
+            # "not paused". The opposite choice — fail-closed,
+            # skipping the stamp on ANY lookup failure — would
+            # block the FIRED row behind the status-lookup
+            # availability: a stuck lookup leaves the row
+            # un-stamped AND stuck, with no visible progress to a
+            # restart's ``_recover_fired_unsent`` (it cannot
+            # distinguish "parent paused" from "lookup failed").
+            # The acceptable cost is a POSSIBLE OVER-FIRE: a row
+            # may be stamped for a parent that was actually paused
+            # when the lookup failed, leaving resume's Pass 1 to
+            # miss this row. The durable ``report_injections`` row
+            # (created by ``_process_child_completion_and_notify_parent``
+            # at ~:2864-2875) is the backstop — the ~10-15 min
+            # ``report_delivery_recovery`` Lane 3/4 sweep eventually
+            # delivers it via ``claim_for_injection``, exactly-once
+            # guarded. Fail-open therefore trades a possible
+            # LATE delivery (the Lane 3/4 sweep) for not deadlocking
+            # the FIRED row behind transient lookup failures. The
+            # P2 round 2 council verdict locked this trade-off —
+            # it is the parent-liveness dead-letter sibling of the
+            # ``_cancel_bus_watchers_for`` WARNING 1 dead-letter
+            # at ``instance_lifecycle.py:138-194``.
+            _parent_status = None
+            try:
+                # ``_instance_repository.get`` is a sync SQLModel
+                # read (matches the precedent at :1572 below) —
+                # wrap in ``asyncio.to_thread`` so the event loop
+                # is not blocked. Best-effort — see the fail-open
+                # trade-off note above.
+                _parent = await asyncio.to_thread(
+                    self._instance_repository.get,
+                    fu.target_instance_id,
+                )
+                _parent_status = (
+                    _parent.status if _parent is not None else None
+                )
+            except Exception as gate_err:
+                # Fail-open branch — see the trade-off comment
+                # above. We log at DEBUG so a lookup hiccup is
+                # observable without aborting the stamp loop, and
+                # leave ``_parent_status = None`` so the gate does
+                # not trip (``None != "paused"`` falls through to
+                # the stamp).
+                logger.debug(
+                    f"_emit_terminal_via_bus: parent-status gate "
+                    f"lookup failed (non-fatal, fail-open — "
+                    f"proceeding with stamp) for "
+                    f"{fu.target_instance_id[:8]}...: {gate_err}"
+                )
+            if _parent_status == "paused":
+                logger.debug(
+                    f"_emit_terminal_via_bus: skipping C1 stamp — "
+                    f"parent {fu.target_instance_id[:8]}... is "
+                    f"PAUSED (resume's Pass 1 will deliver the "
+                    f"FollowUp + stamp; per Blocker 1 fix)"
+                )
+                continue
+            try:
+                # ``enqueued_at`` is the C1 dedup marker — once
+                # stamped, ``_recover_fired_unsent`` won't return
+                # this row on the next restart.
+                await bus.mark_enqueued_by_source_target(
+                    str(task_id), fu.target_instance_id
+                )
+            except Exception as stamp_err:
+                logger.debug(
+                    f"bus follow-up stamp failed (non-fatal): "
+                    f"source_task={str(task_id)[:8]}..., "
+                    f"target={fu.target_instance_id[:8]}...: {stamp_err}"
+                )
+
+        return fired
+
+    async def _emit_terminal_for_child_instance_via_bus(
+        self,
+        parent_instance_id: str | None,
+        child_instance_id: str,
+        status: str,
+        summary: str | None = None,
+        error: str | None = None,
+    ) -> list:
+        """Fire PENDING watchers for a (parent, child) instance pair.
+
+        Corrective companion to :meth:`_emit_terminal_via_bus` for
+        multi-turn non-root children (Wanderer-class). The
+        task-keyed helper above matches watchers on the child task
+        id of the *current* graph turn — which is correct for
+        single-turn children but misses the parent's watcher when
+        the child registers the watcher on its FIRST
+        ``process_message`` task and reaches its terminal graph
+        turn on a LATER ``PROCESS_REPORT`` task. See the call site
+        in ``_dispatch_post_commit_side_effects`` (``regular_child_completed``
+        outcome) for the full timeline.
+
+        This helper routes the corrective emit through the bus's
+        instance-pair matcher (:meth:`DependencyBus.emit_terminal_for_child_instance`).
+        Exactly-once is preserved by the bus's underlying
+        ``transition_state`` guarded UPDATE — when the task-keyed
+        emit already fired the watcher, this call is a no-op.
+
+        Mirrors :meth:`_emit_terminal_via_bus`'s fail-safe shape:
+        ``bus is None`` / ``parent_instance_id is None`` short-
+        circuits with an empty list (logged at WARNING / DEBUG so
+        the wiring failure is observable without aborting the
+        parent's finalization).
+
+        Args:
+            parent_instance_id: The parent instance id (the watcher's
+                ``target_instance_id``). ``None`` short-circuits
+                (root instances have no parent to fire watchers for).
+            child_instance_id: The just-completed child instance id.
+            status: Terminal status string (``"completed"`` /
+                ``"error"`` / ``"terminated"``) — logging only; all
+                PENDING watchers fire regardless of outcome.
+            summary: Optional human-readable summary for structured
+                logging.
+            error: Optional error message when ``status == "error"``.
+
+        Returns:
+            List of FollowUps atomically transitioned from PENDING
+            to FIRED by this call (informational — finalization flows
+            through the report ``Task`` the DB-sync helper already
+            committed). Empty list when bus is None, parent is None,
+            no watchers exist, or the task-keyed emit already fired.
+        """
+        if parent_instance_id is None:
+            # Root instances have no parent → no watcher to fire.
+            logger.debug(
+                "_emit_terminal_for_child_instance_via_bus: "
+                "parent_instance_id is None — no watcher to fire "
+                "(root instance); returning empty FollowUp list"
+            )
+            return []
+
+        from .dependency_bus import (
+            Outcome,
+            get_dependency_bus,
+        )
+
+        bus = get_dependency_bus()
+        if bus is None:
+            logger.warning(
+                "_emit_terminal_for_child_instance_via_bus: bus "
+                "singleton is None — wiring failure, returning "
+                "empty FollowUp list (no fallback)"
+            )
+            return []
+
+        outcome = Outcome(status=status, error=error, summary=summary)
+        fired = await bus.emit_terminal_for_child_instance(
+            parent_instance_id=parent_instance_id,
+            child_instance_id=child_instance_id,
+            outcome=outcome,
+        )
+        # The bus's ``emit_terminal_for_child_instance`` stamps the
+        # ``enqueued_at`` dedup marker itself (per-row, by watch_id);
+        # no stamp loop is needed in this caller. The marker keeps a
+        # future restart's ``_recover_fired_unsent`` from re-delivering
+        # rows this method already fired — same invariant the
+        # task-keyed helper's stamp loop in ``_emit_terminal_via_bus``
+        # preserves.
+        return fired
+
+    @property
+    def _instance_repository(self) -> "SQLModelInstanceRepository":
+        """Access instance repository through manager for test mockability."""
+        return self._manager._instance_repository
+
+    @property
+    def _checkpointer(self) -> "Any | None":
+        """Access the underlying LangGraph checkpointer (saver) through manager.
+
+        Phase 2 migration: the manager now stores a ``CheckpointerAdapter``;
+        services that need the raw saver (passed to ``get_instance_messages``)
+        reach it via ``raw_saver``. ``maintenance.py`` uses the adapter
+        interface directly.
+
+        Returns ``None`` if the checkpointer has not been initialized yet.
+        """
+        adapter = self._manager._checkpointer
+        return adapter.raw_saver if adapter is not None else None
+
+    def _trigger_title_generation(self, instance_id: str, completed_message_id: str) -> None:
+        """Trigger title generation for an instance after message completion.
+        
+        This is fire-and-forget - runs asynchronously without blocking the caller.
+        Title generation checks if title already exists before generating.
+        
+        Args:
+            instance_id: The instance ID that completed.
+            completed_message_id: The message ID that completed (to get user content).
+        """
+        # Get the original user message content for title generation
+        message = self._manager._queue_repository.get(completed_message_id)
+        if message is None:
+            logger.warning(
+                f"Cannot trigger title generation for {instance_id[:8]}...: "
+                f"message {completed_message_id[:8]}... not found"
+            )
+            return
+        
+        message_content = message.content or ""
+        
+        # Use MainLoopBridge for fire-and-forget async execution
+        MainLoopBridge.run_async_no_wait(
+            self._manager._generate_and_broadcast_title(instance_id, message_content)
+        )
+        logger.debug(f"Title generation triggered for instance {instance_id[:8]}...")
+
+    def _get_instance_report_prefix(self, instance_id: str, agent_id: str) -> str:
+        """Get formatted prefix for instance completion reports.
+        
+        Args:
+            instance_id: The instance ID.
+            agent_id: The agent ID.
+        
+        Returns:
+            Formatted prefix like "Developer agent (id=xxx) has done" or
+            "Developer agent (name=create-feature-a, id=xxx) has done"
+        """
+        # Get agent display name from meta.json
+        registry = get_registry()
+        agent_name = agent_id.capitalize()
+
+        try:
+            metadata = registry.get_resolved(agent_id)
+            if metadata and metadata.name:
+                agent_name = metadata.name
+        except Exception:
+            pass
+        
+        # Get instance_name from metadata
+        instance_meta = self._instance_repository.get(instance_id)
+        instance_name = None
+        if instance_meta and instance_meta.instance_metadata:
+            instance_name = instance_meta.instance_metadata.get("instance_name")
+        
+        # Format based on whether instance_name is set
+        if instance_name:
+            return f"{agent_name} agent (name={instance_name}, id={instance_id}) has done"
+        else:
+            return f"{agent_name} agent (id={instance_id}) has done"
+
+    async def _summarize_instance(self, instance_id: str, agent_id: str) -> str:
+        """Summarize instance messages using LLM.
+        
+        Args:
+            instance_id: The instance ID to summarize.
+            agent_id: The agent ID (e.g., "developer", "leader").
+            
+        Returns:
+            Formatted summary string with instance info.
+        """
+        from langchain_core.messages import HumanMessage, SystemMessage
+        
+        # Get the report prefix
+        prefix = self._get_instance_report_prefix(instance_id, agent_id)
+        
+        # Get instance messages
+        if self._checkpointer:
+            messages = await get_instance_messages(self._checkpointer, instance_id)
+            # Exclude both synthetic system messages (is_synthetic) and real checkpointed
+            # context messages (context_kind: project/shared/skills) so they do not leak
+            # into report summaries.
+            messages = [m for m in messages if not (m.get("is_synthetic") or m.get("context_kind"))]
+        else:
+            messages = []
+        
+        if not messages:
+            return f"{prefix}, below is the response: No activity recorded."
+        
+        # Build conversation summary for the LLM
+        conversation_text = []
+        for msg in messages:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            if content:
+                # Truncate very long messages
+                if len(content) > 500:
+                    content = content[:500] + "..."
+                conversation_text.append(f"{role}: {content}")
+        
+        if not conversation_text:
+            return f"{prefix}, below is the response: No messages to summarize."
+        
+        conversation = "\n".join(conversation_text)
+        
+        # ``base_url_backup`` is consumed by the HA facade from the raw
+        # config dict. See ``daemon/services/llm_failover.py``.
+        llm_config = {
+            "base_url": self._config.llm.base_url,
+            "base_url_backup": self._config.llm.base_url_backup,
+            "api_key": self._config.llm.api_key,
+            "model": self._config.llm.model,
+            "temperature": 0.3,  # Lower temperature for more focused summaries
+            "default_headers": {
+                "x-proxy-app": "ensemble",
+                "x-proxy-interleaved-thinking": "True",
+                # X-LLMProxy-Buffer-Response: sent by default; omitted
+                # entirely (never "false") when disabled in LLMConfig
+                # (OPENAI_BUFFER_RESPONSE_HEADER=false).
+                **(
+                    {"X-LLMProxy-Buffer-Response": "true"}
+                    if self._config.llm.buffer_response_header
+                    else {}
+                ),
+            },
+        }
+        # F1: clean at constructor only — facade needs the RAW dict.
+        # See ``daemon.services.llm_failover`` (F1 kwarg hygiene).
+        llm = ThinkingChatOpenAI(**clean_llm_config(dict(llm_config)))
+        # v2 HA: route through the shared facade. See
+        # ``daemon.services.llm_failover``.
+        llm_wrapper = wrap_langchain_failover(llm, llm_config)
+
+        summarization_prompt = f"""Summarize what this agent accomplished in 2-3 sentences. Focus on the outcomes and key actions taken, not the process.
+
+Agent conversation:
+{conversation}
+
+Provide a concise summary:"""
+
+        try:
+            # Belt-and-braces: the 30s ``asyncio.wait_for`` is a
+            # backstop that cancels the inner task on timeout.
+            # The REAL cap home is the facade's
+            # ``wall_clock_cap_s`` (tenacity ``stop_after_delay``
+            # inside the retry loop) — see
+            # ``daemon.services.llm_failover`` docstring "Wall-clock
+            # cap". Belt-and-braces decision: keep the site-level
+            # cap so a future site bypass of the facade still gets
+            # cancellation; the facade cap is the primary line of
+            # defense. ``asyncio.TimeoutError`` lands in the
+            # ``except Exception`` below, preserving the graceful
+            # count-fallback semantics.
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    llm_wrapper.invoke,
+                    [SystemMessage(content="You are a helpful assistant that summarizes agent conversations concisely."),
+                     HumanMessage(content=summarization_prompt)]
+                ),
+                timeout=30.0,
+            )
+            # Handle both string and list content types
+            content = response.content
+            if isinstance(content, list):
+                # Extract text from list of content blocks
+                text_parts = []
+                for block in content:
+                    if isinstance(block, dict):
+                        text_parts.append(block.get("text", ""))
+                    else:
+                        text_parts.append(str(block))
+                summary = " ".join(text_parts)
+            else:
+                summary = str(content) if content else ""
+            return f"{prefix}, below is the response: {summary}"
+        except Exception as e:
+            logger.warning(f"Failed to summarize instance {instance_id}: {e}")
+            # Fallback: count messages and provide basic summary
+            return f"{prefix}, below is the response: Completed {len(messages)} message(s)."
+
+    async def _should_send_completion_report(self, session, instance_id: str, completed_message_id: str | None) -> tuple[bool, str | None]:
+        """Check if completion report should be sent (idempotency checks).
+        
+        Performs two checks to ensure we do not send duplicate completion reports:
+        1. No pending messages (PROCESSING, RETRYING) for the instance
+        2. No existing completion report for this specific message
+        
+        The idempotency key includes the message_id so each message completion
+        generates a unique report (allowing multiple completions from the same child).
+        
+        DEPRECATION NOTE (pause-report-recovery Phase 1, 2026-08-19):
+        This helper is superseded by the inlined check at
+        ``_process_child_completion_db_sync`` around line ~2106 (the live
+        reachable production guard). The inlined check is the
+        authoritative parent-completion guard after Phase 2's B2
+        reachability audit; this helper is dead code in production
+        (only tests exercise it). It is kept verbatim (no deletion, no
+        edits to the logic) so the existing test surface remains
+        green. Do NOT extend this helper — add the production change to
+        the inlined check instead.
+        
+        Args:
+            session: Database session.
+            instance_id: The child instance ID to check.
+            completed_message_id: The message ID that just completed (can be None).
+            
+        Returns:
+            Tuple of (should_send, stale_report_reason): 
+            - should_send: True if should proceed with sending report, False to skip.
+            - stale_report_reason: None if should_send=True, or reason string if skipped.
+        """
+        logger.debug(
+            f"_should_send_completion_report called: instance_id={instance_id[:8] if instance_id else None}, "
+            f"completed_message_id={completed_message_id[:8] if completed_message_id else None}"
+        )
+        
+        # Guard: Can't do idempotency check without message_id
+        if completed_message_id is None:
+            # Just count all pending messages for the instance
+            pending_count = session.exec(
+                select(func.count())
+                .select_from(MessageQueue)
+                .where(MessageQueue.instance_id == instance_id)
+                .where(MessageQueue.status.in_([
+                    MessageStatus.PROCESSING.value,
+                    MessageStatus.RETRYING.value,
+                ]))
+            ).scalar_one()
+            return pending_count > 0, "no_completed_message_id"
+        
+        # Check for pending/processing messages for this instance
+        # Exclude only the completed message by ID (not by status) so that
+        # newly sent messages with PROCESSING status are properly counted
+        pending_count = session.exec(
+            select(func.count())
+            .select_from(MessageQueue)
+            .where(MessageQueue.instance_id == instance_id)
+            .where(MessageQueue.message_id != completed_message_id)
+            .where(MessageQueue.status.in_([
+                MessageStatus.PROCESSING.value,  # Include - excluded by ID instead
+                MessageStatus.RETRYING.value,
+            ]))
+        ).scalar_one()
+        
+        if pending_count > 0:
+            logger.info(
+                f"Instance {instance_id[:8]}... has {pending_count} pending messages "
+                f"(PROCESSING/RETRYING), skipping completion report"
+            )
+            return False, "pending_messages_exist"
+        
+        # Idempotency: Check if completion report already sent for THIS message
+        instance = session.get(Instance, instance_id)
+        if instance is None:
+            logger.info(f"Instance {instance_id[:8]}... not found, skipping completion report")
+            return False, "instance_not_found"
+        
+        if instance.parent_id is None:
+            logger.info(f"Instance {instance_id[:8]}... has no parent_id, skipping completion report")
+            return False, "no_parent_id"
+            
+        # Use message_id in source so each completion generates a unique report
+        existing_report = session.exec(
+            select(MessageQueue)
+            .where(MessageQueue.instance_id == instance.parent_id)
+            .where(MessageQueue.source == f"internal_report:{instance_id}:{completed_message_id}")
+            .where(MessageQueue.status.in_([
+                MessageStatus.READY.value,
+                MessageStatus.PROCESSING.value,
+                MessageStatus.COMPLETED.value,
+            ]))
+        ).first()
+        
+        if existing_report is not None:
+            logger.debug(
+                f"Completion report already queued for child {instance_id[:8]}... "
+                f"message {completed_message_id[:8]}..., skipping duplicate"
+            )
+            return False, "idempotency_skip"
+        
+        logger.info(
+            f"Idempotency check PASSED: child {instance_id[:8]}..., "
+            f"message {completed_message_id[:8]}..., no existing report found"
+        )
+        return True, "all_checks_passed"
+
+    async def _update_parent_on_child_complete(self, session, instance, completed_message_id: str | None = None) -> tuple[bool, str | None, str | None]:
+        """Update parent state when child completes.
+
+        Handles:
+        - Update parent's children cache (FIX: W6)
+        - Delete from instance_hierarchy table
+        - Cascade: bus authoritative for parent completion
+
+        Args:
+            session: Database session.
+            instance: The child Instance object.
+            completed_message_id: The message ID that just completed (for bus hook).
+
+        Returns:
+            Tuple of (transitioned_to_running, completed_parent_id, completed_parent_parent_id):
+            - transitioned_to_running: True if parent transitioned to RUNNING (has more work)
+            - completed_parent_id: Instance ID if parent completed (for event publishing), None otherwise
+            - completed_parent_parent_id: Parent's parent_id if parent completed, None otherwise
+        """
+        parent = session.get(Instance, instance.parent_id)
+        if not parent:
+            return False, None, None
+
+        # Phase 5: the bus is the SOLE completion authority. CM is
+        # removed. The hook below (``_emit_terminal_via_bus``) asks
+        # the bus to atomically transition PENDING watchers for the
+        # child task id to FIRED, then directly re-triggers
+        # ``_finalize_job`` on any parent whose watchers are all
+        # FIRED. The bus DB is authoritative — there is no
+        # ``SELECT COUNT(*)`` fallback, no TOCTOU window (Race #1 /
+        # #3 eliminated).
+        #
+        # MUST NOT affect control flow — the bus helper is fail-safe
+        # (returns ``[]`` on bus=None or missing task) so a wiring
+        # failure cannot break the child-completion path. The inline
+        # cascade below this hook is only reached when the bus is
+        # None — bus singleton missing is a hard error.
+        #
+        # Calling context: this method has NO production callers (only a
+        # zero-caller Manager wrapper); the live non-root parent-completion
+        # path is the bus callback → job_feedback_observer._finalize_job,
+        # which carries the (b) enforcement.
+        #
+        # Skip the hook when message_id is missing/empty: the bus keys
+        # correlations on the child task id (looked up from
+        # message_id) and cannot fire watchers with a None/empty
+        # message_id. ``_emit_terminal_via_bus`` itself logs and
+        # returns ``[]`` on a missing task — so this guard is
+        # only a fast-path skip.
+        #
+        # The bus is the SOLE completion authority. At completion
+        # time we always route through the bus; the helper handles
+        # the no-watchers case as a no-op.
+        if completed_message_id:
+            # Look up the child task id from the message_id — the
+            # bus is keyed on task id, not message_id. The lookup
+            # runs on a worker thread (sync DB call) so it doesn't
+            # block the event loop. When the task row is missing
+            # (e.g. cleared by a stale-task sweep before this
+            # completion was reported), ``_emit_terminal_via_bus``
+            # logs and returns an empty list — no FollowUps to
+            # enqueue, no harm done.
+            _child_task = None
+            _task_repo = getattr(self._manager, "_task_repo", None)
+            if _task_repo is not None:
+                _child_task = await asyncio.to_thread(
+                    _task_repo.get_by_message, completed_message_id
+                )
+            await self._emit_terminal_via_bus(
+                task_id=getattr(_child_task, "id", None),
+                status="completed",
+                summary="child completed",
+            )
+        else:
+            logger.debug(
+                f"Bus hook: skipping terminal emit for parent="
+                f"{instance.parent_id[:8] if instance.parent_id else '?'}..., "
+                f"child={instance.instance_id[:8]}... "
+                f"(no message_id — child completed without a tracked send)"
+            )
+
+        # Naive-UTC digits (DC-A fix): last_activity_at is a
+        # tz-naive column on PostgreSQL.
+        parent.last_activity_at = now_utc_naive()
+        parent.version = (parent.version or 1) + 1
+
+        # NOTE: parent.children cache column was dropped in Phase 4.
+
+        # Remove from instance_hierarchy junction table
+        # NOTE: Do NOT delete the instance from instances table - terminate means stop tasks, not delete
+        session.execute(
+            text("DELETE FROM instance_hierarchy WHERE child_id = :child_id"),
+            {"child_id": instance.instance_id}
+        )
+        
+        # Cascade check: if bus says complete, check if parent can complete
+        # FIX: Removed status restriction - cascade should run whenever all children done,
+        # regardless of current status (e.g., RUNNING from previous cascade). This ensures
+        # parent waits for ALL children before completing, not just the first batch.
+        # W1 FIX: Also preserve ERROR status during cascade — a parent whose last child
+        # completed successfully should still report as ERROR (it errored first, and that
+        # state is more useful for diagnostics than overwriting it with COMPLETED).
+        #
+        from .dependency_bus import get_dependency_bus
+        bus = get_dependency_bus()
+        if bus is not None:
+            # Bus is wired up — it is the SOLE completion authority. The
+            # pending count is read from the bus's DB (PENDING watchers
+            # — no in-memory CM set, no TOCTOU window — Race #1 / #3
+            # eliminated). The ``_sync`` variant runs the COUNT(*)
+            # directly on the helper's session, so the bus state and
+            # the in-memory decision share a consistent read at this
+            # call site (the bus helper also fails-closed on DB
+            # errors, but the bus singleton being non-None means the
+            # DB is reachable).
+            is_parent_complete = bus.count_pending_for_target_sync(parent.instance_id) == 0
+        else:
+            # ─── A8: HARD ERROR (not graceful degradation) ─────────────
+            # Bus is None is an INVALID state. The ``SELECT COUNT(*)``
+            # fallback (Race #3) is the exact bug we are fixing — it MUST
+            # NOT be reachable. The bus must be initialized for the new
+            # architecture to work; we raise rather than silently degrade
+            # into the TOCTOU fallback.
+            #
+            # Honest propagation note: this RuntimeError is caught by the
+            # W3 fail-safe (``except Exception``) in
+            # ``_finalize_job`` and results in a per-job FAILED transition.
+            # It is NOT a process-level crash — the daemon stays alive and
+            # only the affected job fails. For production, the bus must be
+            # initialized before any traffic (the startup invariant
+            # enforced in ``daemon/main.py`` via
+            # ``init_dependency_bus``).
+            raise RuntimeError(
+                f"DependencyBus is not initialized for parent="
+                f"{parent.instance_id[:8]}...; bus must be initialized. "
+                f"This is a hard error — the SELECT COUNT(*) TOCTOU fallback "
+                f"(Race #3) is disabled by design."
+            )
+        # PAUSED excluded too: a paused question() parent must not be
+        # auto-completed by a child's completion (resume() owns its
+        # terminal transition). This is a skip guard, not a legitimate
+        # transition write.
+        if (
+            is_parent_complete
+            and parent.status != InstanceStatus.COMPLETED.value
+            and parent.status != InstanceStatus.ERROR.value
+            and parent.status != InstanceStatus.PAUSED.value
+        ):
+            # Phase 3 (Cascade Unification): when the bus is active,
+            # the inline cascade + SELECT COUNT(*) + inline status
+            # transition are SKIPPED. The bus's ``emit_terminal`` (called
+            # via the hook above) already atomically transitioned matching
+            # PENDING watchers to FIRED, and if that was the last
+            # watcher the bus re-triggers
+            # ``_finalize_job`` directly. The bus DB is the source
+            # of truth (no TOCTOU window — Race #3 eliminated).
+            #
+            # When bus is None (bus singleton missing — hard error),
+            # keep the existing logic with the SELECT COUNT(*)
+            # fallback. This path is also the one exercised by every
+            # test that does not wire a bus fixture (e.g.
+            # tests/job_queue/test_in_progress_guard.py).
+            if bus is not None:
+                # Bus is active — bus callback handles completion.
+                # No count_pending query, no inline status transition,
+                # no inline lifecycle event (the caller at line ~914-931
+                # is also skipped because we return completed_parent_id=None).
+                logger.info(
+                    f"Bus-active: skipping inline cascade for parent "
+                    f"{parent.instance_id[:8]}... — bus callback owns completion"
+                )
+                return False, None, None
+
+            # (dead-code fallback — bus-active path bypasses) Phase 2
+            # hardening: the ``parent_pending`` count uses the shared
+            # positive-polarity predicate
+            # ``message_queue_counts_as_pending`` so that any
+            # ``processing``/``retrying`` row whose backing work is
+            # terminal (e.g. cancelled by the resume cascade) does not
+            # block the parent from completing. The reachable production
+            # site at ``child_reports.py:1459`` uses the same helper —
+            # the production bus path bypasses this branch entirely
+            # (return above), so this is future-proofing.
+            from ..repositories.message_queue.predicates import (
+                message_queue_counts_as_pending,
+            )
+            _fallback_candidates_1 = session.exec(
+                select(MessageQueue)
+                .where(MessageQueue.instance_id == parent.instance_id)
+                .where(MessageQueue.status.in_([
+                    MessageStatus.READY.value,
+                    MessageStatus.PROCESSING.value,
+                    MessageStatus.RETRYING.value,
+                ]))
+            ).scalars().all()
+            parent_pending = sum(
+                1
+                for _r in _fallback_candidates_1
+                if message_queue_counts_as_pending(_r, self._manager.engine)
+            )
+            del _fallback_candidates_1
+
+            if parent_pending == 0:
+                # No pending messages, parent is truly complete
+                # Publish lifecycle event to mark job as completed
+                #
+                # B.S.1-ii (stage ii, LOG ONLY) / B.S.1-iii (stage iii,
+                # flag-gated): (b) declared-waiting log at the
+                # parent-COMPLETED stamp. D2.8 (LOCKED): the bus count
+                # (is_parent_complete, above) and the own-queue count
+                # (parent_pending) are both zero here — the
+                # both-counts-zero precondition (B.S.7). Fail-OPEN:
+                # the helper never raises into the completion path.
+                # Stage iii: the SAME evaluation is captured; the
+                # enforcement action runs after the status write below.
+                _b_violation_report = log_declared_waiting_violations(
+                    session,
+                    parent.instance_id,
+                    context_tag="child_reports.update_parent_on_child_complete",
+                )
+                _clear_b_notice_if_clean(
+                    parent.instance_id, _b_violation_report
+                )
+                parent.status = InstanceStatus.COMPLETED.value
+                parent.updated_at = datetime.now(timezone.utc).isoformat()
+                logger.info(f"Parent {parent.instance_id[:8]}... completed after all children done")
+
+                # B.S.1-iii: post-stamp enforcement (fail-OPEN, D2.6 —
+                # the stamp above ALWAYS proceeds). The notice is
+                # enqueued only when the kill-switch is ON. Note: this
+                # site's transaction commit belongs to the caller; the
+                # notice is advisory and the enqueue opens its own
+                # transaction, so an (accepted, documented) residual is
+                # a notice for a stamp whose enclosing transaction the
+                # caller later rolls back — bounded to this site (the
+                # root/observer sites enforce strictly post-commit).
+                # D2.reconciler-bridge: the notice turn's work_id
+                # reconciles like any turn (see the root site's dispatch
+                # seam comment + the reconciler test module).
+                if _b_violation_report is not None:
+                    await enforce_declared_waiting_violations(
+                        _b_violation_report,
+                        manager=self._manager,
+                        parent_instance_id=parent.instance_id,
+                        context_tag=(
+                            "child_reports.update_parent_on_child_complete"
+                        ),
+                    )
+
+                # Capture parent_id for event publishing (instance will be detached after session closes)
+                completed_parent_id = parent.instance_id
+                completed_parent_parent_id = parent.parent_id
+
+                return False, completed_parent_id, completed_parent_parent_id
+            else:
+                # Has pending messages but all children done - transition to WAITING_CHILDREN
+                # FIX: Changed from RUNNING to WAITING_CHILDREN. Parent should wait for its own
+                # message processing to complete before marking job done. When parent completes
+                # its message, the status check will keep it in WAITING_CHILDREN, and the cascade
+                # will run again to mark it COMPLETED.
+                #
+                # Phase 4: WAITING_CHILDREN is DEPRECATED as a control-flow
+                # signal — the DependencyBus is the authoritative source
+                # of correlation state. The status set is RETAINED for
+                # graceful-degradation (bus singleton None) and for the
+                # FIFO carve-out SQL compatibility
+                # (daemon/repositories/task/repository.py). The
+                # ``transitioned_to_running`` return value remains ``True``
+                # because the parent is still alive (will process more
+                # messages) — contract required by
+                # ``tests/test_cascade_integration.py``.
+                #
+                # Defense-in-depth (F8): was a ``_has_no_active_message_job``
+                # carve-out check here. Removed in Phase 5: after D13 there
+                # are no MESSAGE ``JobItem`` rows, so the guard was a
+                # permanent no-op. The Task-level coordination guard in
+                # ``claim_pending_task`` (one RUNNING task per instance)
+                # is the post-D13 invariant that replaces it.
+                parent.status = InstanceStatus.WAITING_CHILDREN.value
+                logger.info(
+                    f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
+                    f"pending messages, status=WAITING_CHILDREN (deprecated; bus is authoritative)"
+                )
+                # Emit status_change SSE event for parent waiting_children
+                # (display only — status field is being phased out).
+                if self._manager._live_hub:
+                    try:
+                        await self._manager._live_hub.stream_status_change(parent.instance_id, "waiting_children", agent_id=parent.agent_id)
+                    except Exception as e:
+                        logger.warning(f"Failed to emit status_change for waiting_children parent: {e}")
+                return True, None, None
+
+        return False, None, None
+
+    async def _create_completion_events(
+        self,
+        session,
+        instance_id: str,
+        parent_id: str,
+        report_message_id: str,
+        pending_for_parent: int,
+    ) -> tuple[Event, Event]:
+        """Create completion events for child and parent.
+
+        Args:
+            session: Database session.
+            instance_id: The child instance ID.
+            parent_id: The parent instance ID.
+            report_message_id: The report message ID for the parent event.
+            pending_for_parent: PENDING-watcher count for the parent
+                (from the DependencyBus).
+
+        Returns:
+            Tuple of (completion_event, parent_event).
+        """
+        # Create completion event for child
+        completion_event = Event(
+            instance_id=instance_id,
+            kind=EventKind.INSTANCE_COMPLETED.value,
+            data=json.dumps({
+                "parent_id": parent_id,
+                "report_message_id": report_message_id,
+            }),
+            # Naive-UTC digits (DC-A fix) — naive column bind.
+            created_at=now_utc_naive(),
+        )
+        session.add(completion_event)
+
+        # Also create event for parent about child completion
+        parent_event = Event(
+            instance_id=parent_id,
+            message_id=report_message_id,
+            kind=EventKind.CHILD_COMPLETED.value,
+            data=json.dumps({
+                "child_instance_id": instance_id,
+                "pending_for_parent": pending_for_parent,
+            }),
+            # Naive-UTC digits (DC-A fix) — naive column bind.
+            created_at=now_utc_naive(),
+        )
+        session.add(parent_event)
+
+        return completion_event, parent_event
+
+    async def _get_last_assistant_message(
+        self,
+        instance_id: str,
+        agent_id: str,
+        *,
+        skip_repair: bool = False,
+    ) -> str | None:
+        """Get the last assistant message from instance history.
+
+        This is the default/simple approach for completion reports - just
+        pass the agent's last response to the parent.
+
+        Args:
+            instance_id: The instance ID to get message from.
+            agent_id: The agent ID (e.g., "developer", "leader"). Also
+                drives the exclusion check in the raw call: when
+                ``agent_id`` is in ``report_repair.repair_excluded_agents``
+                (default derives from
+                ``daemon.constants.REPORT_REPAIR_EXCLUDED_AGENTS``), repair
+                is skipped and the (c) sanity marker is suppressed.
+            skip_repair: When True, propagate to the raw call so the
+                truncation check + LLM repair + combine fallback are
+                all skipped. Used by interim paths (e.g.,
+                ``_emit_in_progress``) that can fire on a non-terminal
+                turn and must not double-repair alongside the terminal
+                completion path.
+
+        Returns:
+            Formatted string with instance info and last message.
+        """
+        # Get the report prefix
+        prefix = self._get_instance_report_prefix(instance_id, agent_id)
+
+        raw_content = await self._get_last_assistant_message_raw(
+            instance_id,
+            skip_repair=skip_repair,
+            agent_id=agent_id,
+        )
+
+        if raw_content:
+            return f"{prefix}, below is the response:\n{raw_content}"
+        return None
+
+    @staticmethod
+    def _is_likely_truncated_report(messages: list[dict], *, ratio: float = 5.0) -> bool:
+        """Check if the last assistant message is likely truncated.
+
+        Returns True if any of the penultimate messages (n-1 or n-2) has a
+        word count > ``ratio`` × the last message's word count, indicating
+        the real content may be in an earlier message.
+
+        The strict greater-than comparison (``earlier_wc > ratio * last_wc``)
+        means the boundary (``wc(n-1) == ratio * wc(n)``) does NOT trigger
+        — only messages that are strictly larger than the multiple count.
+        This is the same as ``wc(n-1) > 5 * wc(n)`` for the default.
+
+        The factor-5 ratio (default) is an accuracy guard to prevent
+        false positives on legitimately-concise reports. Was 2.0 prior
+        to 2026-08-11; a prod incident (36-word final message after
+        143-word prior turn → ratio 4×) triggered repair on an
+        intentional short report, wasting ~19s of LLM time AND
+        firing twice on the same message (once on interim in-progress
+        turn, once on terminal completion). Factor 5 absorbs the
+        intentional case while still catching mid-sentence truncation
+        (e.g., a 5-word fragment after a 100-word turn → 20× ratio).
+
+        Slicing: ``messages[-3:-1]`` yields the 3rd-from-last and
+        2nd-from-last messages (n-2 and n-1 when the list has at
+        least 3 messages). For a 2-element list, ``[-3:-1]`` yields
+        just the first element (n-1), which is the correct
+        comparison — there is no n-2 to inspect.
+
+        Args:
+            messages: List of message dicts (already filtered to real
+                assistant messages — no synthetic/context_kind). Must be
+                in chronological order.
+            ratio: Size ratio threshold (default 5.0).
+
+        Returns:
+            True if the report looks truncated and should trigger repair.
+        """
+        if len(messages) < 2:
+            return False
+        last_content = messages[-1].get("content", "")
+        if not last_content or not last_content.strip():
+            return True  # empty last message → definitely truncated
+        last_wc = len(last_content.split())
+        for msg in messages[-3:-1]:  # n-1 and n-2 (if present)
+            earlier_wc = len((msg.get("content", "") or "").split())
+            if earlier_wc > ratio * last_wc:
+                return True
+        logger.debug(
+            f"[ReportRepairer] Repair skipped: last_wc={last_wc}, "
+            f"earlier_wcs={[len((m.get('content', '') or '').split()) for m in messages[-3:-1]]}"
+        )
+        return False
+
+    async def _repair_report_with_llm(
+        self, messages: list[dict], config: "ReportRepairConfig", *, instance_id: str
+    ) -> str | None:
+        """Call the LLM to compose a repaired report from the last messages.
+
+        Mirrors ``LoopRepairer._summarize_loop`` (graph.py:1455) and the
+        existing ``_generate_completion_report`` LLM-call pattern
+        (child_reports.py:549). Returns the repaired text, or None on
+        failure/timeout (caller falls back to combining messages).
+
+        W1 fix: indexing uses NEGATIVE offsets so n=2 lands the earlier
+        message in ``msg_n_minus_1`` correctly (previously ``_get(1)`` and
+        ``_get(n-1)`` both resolved to the same last message when n=2).
+
+        Args:
+            messages: Last N assistant message dicts (chronological).
+            config: Report repair config for timeout/threshold.
+            instance_id: Instance ID for log correlation (W2).
+
+        Returns:
+            Repaired report text, or None if LLM failed/timed out.
+        """
+        # S5: lazy import — mirrors the convention at graph.py:1011-1017.
+        # Keeps the module-level import surface small and avoids the cycle
+        # risk if compaction ever imports child_reports.
+        # PR1: resolved via daemon._content_hardening (the canonical home).
+        from .._content_hardening import extract_text_from_content
+
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        n = len(messages)
+
+        # Build message sections dynamically so the prompt can scale to
+        # any number of lookback messages (default 5, configurable via
+        # ``lookback_messages``). The last message is marked LAST so the
+        # LLM knows which one might be truncated.
+        sections: list[str] = []
+        for i, msg in enumerate(messages, start=1):
+            content = (msg.get("content", "") or "")
+            wc = len(content.split())
+            header = f"--- Message {i}/{n} (word count: {wc}) ---"
+            if i == n:
+                header = f"--- Message {i}/{n} — LAST (word count: {wc}) ---"
+            sections.append(f"{header}\n{content}")
+        messages_block = "\n\n".join(sections)
+
+        prompt = (
+            REPORT_REPAIR_PROMPT.format(count=n, n=n)
+            + "\n\n"
+            + messages_block
+        )
+
+        timeout = config.timeout_seconds
+        try:
+            # Mirror ``_summarize_instance`` (above) — manual dict
+            # + ``clean_llm_config`` at the constructor only; the
+            # HA facade consumes ``base_url_backup`` from the raw dict.
+            # See ``daemon.services.llm_failover`` (F1 kwarg hygiene).
+            llm_config = {
+                "base_url": self._config.llm.base_url,
+                "base_url_backup": self._config.llm.base_url_backup,
+                "api_key": self._config.llm.api_key,
+                "model": self._config.llm.model,
+                "temperature": 0.3,
+                "default_headers": {
+                    "x-proxy-app": "ensemble",
+                    "x-proxy-interleaved-thinking": "True",
+                    # X-LLMProxy-Buffer-Response: sent by default; omitted
+                    # entirely (never "false") when disabled in LLMConfig
+                    # (OPENAI_BUFFER_RESPONSE_HEADER=false). Mirrors the
+                    # ``_summarize_instance`` site above.
+                    **(
+                        {"X-LLMProxy-Buffer-Response": "true"}
+                        if self._config.llm.buffer_response_header
+                        else {}
+                    ),
+                },
+            }
+            # Defensive ``dict()`` wrap matches the 4 sibling sites
+            # (``_summarize_instance``, ``_generate_and_broadcast_title``,
+            # ``extract_keywords``, ``_call_summarization_llm``) — the
+            # local ``llm_config`` name invariantly refers to the
+            # raw (backup-bearing) dict even if a future
+            # ``clean_llm_config`` implementation mutates in place.
+            llm = ThinkingChatOpenAI(**clean_llm_config(dict(llm_config)))
+            # v2 HA: route through the shared facade. See
+            # ``daemon.services.llm_failover``. ``wall_clock_cap_s``
+            # is the operator-tunable knob from
+            # ``ReportRepairConfig``; the site-level wait_for below
+            # is a belt-and-braces backstop (cancels the inner
+            # task on timeout) — the real cap is the facade.
+            llm_wrapper = wrap_langchain_failover(
+                llm, llm_config, wall_clock_cap_s=timeout,
+            )
+
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    llm_wrapper.invoke,
+                    [
+                        SystemMessage(
+                            content="You are a report summarizer. Compose the single best report message from the given child agent messages."
+                        ),
+                        HumanMessage(content=prompt),
+                    ],
+                ),
+                timeout=timeout,
+            )
+            return extract_text_from_content(response.content)
+
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[ReportRepairer] LLM timed out after {timeout}s for instance "
+                f"{instance_id[:8]}..., using combine-fallback"
+            )
+            return None
+        except Exception as e:
+            # S7: include instance_id in the generic exception log too.
+            logger.warning(
+                f"[ReportRepairer] LLM failed for instance {instance_id[:8]}...: "
+                f"{type(e).__name__}: {e}"
+            )
+            return None
+
+    @staticmethod
+    def _combine_messages(messages: list[dict]) -> str:
+        """Combine multiple messages into a single report text (fallback).
+
+        Chronological order: earliest first, last message last. Output is
+        capped at :data:`MAX_COMBINED_REPORT_CHARS` (10_000) to keep the
+        parent context window from blowing up on large tool output or stack
+        traces — the LLM-side truncation pattern at child_reports.py:563
+        (``_summarize_instance_conversation``) caps at 500 chars; this
+        fallback cap is much higher because the combined text replaces the
+        last assistant message rather than sitting inline in a conversation.
+
+        When truncation kicks in, a warning is logged and the suffix
+        ``…[truncated]…`` is appended so the parent can see the report
+        was cut short.
+        """
+        combined = "\n\n---\n\n".join(
+            (m.get("content", "") or "").strip()
+            for m in messages
+            if (m.get("content", "") or "").strip()
+        )
+        if len(combined) > MAX_COMBINED_REPORT_CHARS:
+            logger.warning(
+                f"[ReportRepairer] Combined report truncated: "
+                f"{len(combined)} -> {MAX_COMBINED_REPORT_CHARS} chars"
+            )
+            combined = combined[:MAX_COMBINED_REPORT_CHARS] + "…[truncated]…"
+        return combined
+
+    async def _get_last_assistant_message_raw(
+        self,
+        instance_id: str,
+        *,
+        skip_repair: bool = False,
+        agent_id: str | None = None,
+    ) -> str | None:
+        """Get the raw last assistant message content (no formatting).
+
+        Returns just the actual agent response content, matching the format
+        used by MessageJobHandler when setting result_summary=result.content.
+
+        When unhappy-path report repair is enabled (``report_repair.enabled``),
+        checks whether the last message looks truncated (an earlier message
+        is much larger). If so, attempts LLM repair; on LLM failure/timeout,
+        combines the last messages into one report.
+
+        Args:
+            instance_id: The instance ID to get message from.
+            skip_repair: When True, return the raw last content immediately
+                after fetching — skip the truncation check, LLM repair,
+                and combine fallback entirely. Used by the interim
+                ``_emit_in_progress`` path (which can fire on a
+                non-terminal turn) to prevent the double-repair bug
+                where interim notification + terminal completion both
+                trigger repair on the same message.
+            agent_id: Optional agent ID for the exclusion check. When
+                the agent_id is in ``report_repair.repair_excluded_agents``
+                (default derives from
+                ``daemon.constants.REPORT_REPAIR_EXCLUDED_AGENTS``), repair
+                is skipped and the (c) sanity marker is suppressed —
+                text-only-by-design agents (wanderer, explorer, watcher)
+                naturally produce short, legitimately-concise reports and
+                repairing them wastes LLM time and corrupts the report
+                with hallucinated content. ``None`` means "unknown agent"
+                — repair runs (safe default).
+
+                Wave-1 (wc-wake-report-integrity) behavior added here:
+                  * NR-3 — when the returned message has zero tool-call
+                    evidence in a short history, the
+                    ``report_integrity_junk_report_total`` counter
+                    increments BEFORE the ``skip_repair`` and
+                    ``report_repair.enabled`` short-circuits so ALL
+                    terminal completions count (observability only).
+                  * (c) — on the TERMINAL path (``skip_repair=False``),
+                    the same low-evidence shape appends the
+                    DESCRIPTIVE-ONLY ``REPORT_SANITY_MARKER`` to the
+                    returned content (suppressed for excluded agents or
+                    when ``SANITY_FLAG_VERSION != 1``). Interim callers
+                    never carry the marker, and the terminal path marks
+                    exactly once.
+
+        Returns:
+            The raw assistant message content, or None if not found.
+        """
+        # --- Fetch and filter messages (existing logic) ---
+        if self._checkpointer:
+            messages = await get_instance_messages(self._checkpointer, instance_id)
+            # Exclude both synthetic system messages (is_synthetic) and real checkpointed
+            # context messages (context_kind: project/shared/skills) so they do not leak
+            # into report content.
+            messages = [m for m in messages if not (m.get("is_synthetic") or m.get("context_kind"))]
+        else:
+            messages = []
+
+        # Collect ALL assistant messages (unfiltered) for the tool-evidence
+        # half of the low-evidence predicate (W1 council fix, 2026-08-30).
+        # ``content=""`` ASSISTANT messages carry ``tool_calls`` — they are
+        # the canonical pure tool-call AIMessage shape — and MUST count as
+        # tool evidence even though the width filter below drops them.
+        # Filter ordering was the W1 defect: the tool-evidence half used to
+        # inherit this filter and lost the work signal.
+        all_assistant_msgs = [m for m in messages if m.get("role") == "assistant"]
+
+        # Collect real assistant messages with content (chronological)
+        assistant_msgs = [
+            m for m in all_assistant_msgs
+            if (m.get("content", "") or "").strip()
+        ]
+        if not assistant_msgs:
+            return None
+
+        last = assistant_msgs[-1]
+        last_content = (last.get("content", "") or "").strip()
+
+        # --- Repair skip flag (interim path) ---
+        # 2026-08-11: PRIMARY fix for the double-repair bug. The interim
+        # in-progress notification path can fire on a non-terminal turn
+        # AND the terminal completion path can fire on the same message
+        # — both were running repair, wasting ~19s of LLM time and
+        # discarding both outputs. Interim callers MUST pass
+        # ``skip_repair=True`` so repair runs only on the terminal path.
+
+        # --- Report-integrity instruments (NR-3 counter + (c) marker) ---
+        # Shared low-evidence predicate, computed ONCE (C2-D2.18 LOCKED:
+        # work signal = last assistant message's ``tool_calls`` empty;
+        # width = exactly the ``_is_likely_truncated_report`` short-circuit
+        # input per C2-NR-4 CONFIRMED). The exclusion read stays on the
+        # config (its default derives from the shared NR-2 constant, so
+        # env overrides still apply — one source of truth = the constant).
+        report_repair_cfg = self._config.report_repair
+        excluded = report_repair_cfg.repair_excluded_agents
+        agent_excluded = agent_id is not None and agent_id in excluded
+        low_evidence = self._is_zero_tool_short_history(
+            last, assistant_msgs, all_assistant_msgs
+        )
+
+        # NR-3 junk-rate counter — placed BEFORE the ``skip_repair`` and
+        # ``report_repair.enabled`` short-circuits (§6 adjustment,
+        # 2026-08-30) so ALL terminal completions count, not only
+        # repair-eligible ones. Observability only — never changes content.
+        if low_evidence:
+            record_junk_report(instance_id=instance_id, agent_id=agent_id)
+
+        # (c) Passive report-sanity marker (C2-D2.9 LOCKED, DESCRIPTIVE-ONLY).
+        # TERMINAL path only: interim ``skip_repair=True`` callers (the
+        # in-progress notification path) must NOT carry it, and the
+        # terminal path marks exactly once via this single suffix.
+        # ``SANITY_FLAG_VERSION`` is the rollback seam — any value other
+        # than 1 suppresses the marker while the code stays live.
+        sanity_suffix = ""
+        if (
+            low_evidence
+            and not skip_repair
+            and not agent_excluded
+            and SANITY_FLAG_VERSION == 1
+        ):
+            sanity_suffix = f"\n\n{REPORT_SANITY_MARKER}"
+
+        if skip_repair:
+            return last_content
+
+        # --- Repair disable short-circuit ---
+        # S4: Config has ``default_factory`` for ``report_repair`` — always
+        # present, no need for ``getattr`` defensive guard.
+        if not report_repair_cfg.enabled:
+            return last_content + sanity_suffix  # happy path, skip repair entirely
+
+        # --- Agent exclusion check ---
+        # 2026-08-11: exploration agents (wanderer, explorer) produce
+        # short, intentionally-concise reports. Repairing them wastes
+        # LLM time and can corrupt the report with hallucinated content.
+        # The exclusion set is configured via REPORT_REPAIR_EXCLUDED_AGENTS
+        # (default derives from ``daemon.constants.REPORT_REPAIR_EXCLUDED_AGENTS``
+        # — NR-2 lift; watcher included since 2026-08-30).
+        if agent_excluded:
+            logger.info(
+                f"[ReportRepairer] Skipping repair for instance {instance_id[:8]}... "
+                f"agent_id={agent_id!r} (in repair_excluded_agents)"
+            )
+            return last_content + sanity_suffix
+
+        # --- Truncation check ---
+        # ``lookback_messages`` controls the slice passed to both the
+        # truncation heuristic and the LLM repair (which formats every
+        # message in the slice). The heuristic only inspects n-1 and n-2
+        # from that slice (``messages[-3:-1]``); the rest provides the
+        # LLM with extra context to reconstruct the report.
+        lookback = report_repair_cfg.lookback_messages
+        recent = assistant_msgs[-lookback:] if len(assistant_msgs) >= lookback else assistant_msgs
+        if not self._is_likely_truncated_report(recent, ratio=report_repair_cfg.size_ratio_threshold):
+            return last_content + sanity_suffix  # happy path — sizes are similar
+
+        logger.info(
+            f"[ReportRepairer] Unhappy path triggered for instance {instance_id[:8]}... "
+            f"({len(recent)} recent messages, ratio>{report_repair_cfg.size_ratio_threshold})"
+        )
+
+        # --- LLM repair ---
+        repaired = await self._repair_report_with_llm(
+            recent, report_repair_cfg, instance_id=instance_id
+        )
+        if repaired and repaired.strip():
+            logger.info(f"[ReportRepairer] LLM repair succeeded for instance {instance_id[:8]}...")
+            return repaired.strip() + sanity_suffix
+
+        # --- Fallback: combine messages ---
+        logger.info(f"[ReportRepairer] Using combine-fallback for instance {instance_id[:8]}...")
+        combined = self._combine_messages(recent)
+        return (combined if combined.strip() else last_content) + sanity_suffix
+
+    @staticmethod
+    def _is_zero_tool_short_history(
+        last_msg: dict,
+        assistant_msgs: list[dict],
+        all_assistant_msgs: list[dict] | None = None,
+    ) -> bool:
+        """True when the report shows the ZERO-EVIDENCE junk shape.
+
+        Shape (C2-D2.18 LOCKED — the work signal): the LAST assistant
+        message has no tool calls, AND the content-bearing assistant
+        history is short (fewer than 2 messages) — exactly the input where
+        ``_is_likely_truncated_report`` short-circuits
+        (``len(messages) < 2 → False``) per C2-NR-4 CONFIRMED. The NR-4
+        pin test
+        (``tests/unit/services/test_child_reports.py::
+        TestMarkerPredicatePinnedToTruncationShortCircuit``) enforces that
+        boundary — widening the width would mark legitimate multi-message
+        reports and duplicate the (c) signal.
+
+        W1 amendment (council, 2026-08-30): the tool-evidence half now
+        scans UNFILTERED assistant messages (``all_assistant_msgs``) for
+        any ``tool_calls``. ``content=""`` ASSISTANT messages carry
+        ``tool_calls`` (canonical pure tool-call AIMessage shape) and must
+        count as tool evidence even though the width filter drops them.
+        Without this fix a legitimate minimal-tool history
+        ``[task] → [AIMessage(tool_calls=[…], content="")] → [final text]``
+        was marked ``low_evidence=True`` ⇒ marker falsely fired, NR-3
+        counter inflated, (d) parents spuriously re-verified.
+
+        The WIDTH half (``len(assistant_msgs) < 2``, content-bearing only)
+        is unchanged — C2-NR-4 remains LOAD-BEARING for the boundary.
+
+        ``tool_calls`` absent / ``None`` / ``[]`` all count as zero
+        evidence (``serialize_message`` emits ``[]`` for tool-less AIMessages).
+
+        Consumers: the NR-3 junk counter and the (c) report-sanity marker
+        in ``_get_last_assistant_message_raw``. Observability only.
+        """
+        # Back-compat: callers that pre-date the W1 amendment pass only
+        # ``(last_msg, assistant_msgs)``. Fall back to the width-only scan
+        # so legacy behavior is preserved where ``all_assistant_msgs`` is
+        # unavailable.
+        if all_assistant_msgs is None:
+            all_assistant_msgs = assistant_msgs
+        # W1: tool-evidence half scans UNFILTERED assistant messages —
+        # any assistant message with tool calls ⇒ tool evidence present.
+        if any(m.get("tool_calls") for m in all_assistant_msgs):
+            return False
+        # Width half: content-bearing assistant count < 2 — unchanged
+        # per C2-NR-4 (TestMarkerPredicatePinnedToTruncationShortCircuit).
+        return len(assistant_msgs) < 2
+
+    # ── Root-completion predicate (DEFECT-2 fix: premature terminal emission) ──
+
+    async def _assistant_message_fresh(self, session, instance_id: str) -> tuple[bool, str | None]:
+        """Check the instance produced an assistant message after its last child_completed.
+
+        The root may only complete a task job once it has responded AFTER every
+        child completion report — otherwise its "final" message predates the
+        last child's report and the subtree isn't truly done (job 5e197a30).
+
+        Uses ``get_last_assistant_timestamp`` (NOT ``get_last_assistant_message``)
+        so empty-content AI turns (e.g. pure tool-call responses) still count as
+        a fresh response. This closes the empty-final-turn wedge where the parent
+        processed the report but produced no visible content.
+
+        Args:
+            session: Open DB session (used for the child_completed lookup).
+            instance_id: The instance (root/parent) to check.
+
+        Returns:
+            (is_fresh, reason): reason is a short diagnostic when not fresh.
+            Fail-open (True) when the instance has no child_completed events
+            (nothing to be fresh after — also the fast path for childless
+            roots) or when checkpoint timestamps are unreadable: a missing
+            timestamp must never wedge the job into eternal PROCESSING
+            (see DEADLOCK GUARD in the fix design).
+        """
+        last_child_completed_at = session.exec(
+            select(func.max(Event.created_at))
+            .where(Event.instance_id == instance_id)
+            .where(Event.kind == EventKind.CHILD_COMPLETED.value)
+        ).scalar_one_or_none()
+
+        if last_child_completed_at is None:
+            # No child ever reported to this instance — freshness is vacuous.
+            return True, None
+
+        try:
+            # EMPTY-FINAL-TURN WEDGE CLOSURE: any AI message (even empty content)
+            # counts as fresh. A pure tool-call response still indicates the
+            # instance responded AFTER the child_completed event.
+            last_assistant_ts = await get_last_assistant_timestamp(
+                self._checkpointer, instance_id
+            )
+
+            last_assistant_dt = parse_checkpoint_ts(last_assistant_ts)
+        except Exception as e:
+            # Fail-open: an unusable checkpointer must never wedge the job into
+            # eternal PROCESSING (DEADLOCK GUARD). The waiting_for/pending legs
+            # above remain authoritative; this leg is anti-premature-emission
+            # belt-and-suspenders.
+            logger.warning(
+                "Freshness check failed for instance %s... (%s); treating as "
+                "fresh (fail-open)",
+                instance_id[:8], e,
+            )
+            return True, None
+
+        if last_assistant_dt is None:
+            # Unreadable/absent checkpoint timestamp — fail open (no deadlock).
+            logger.warning(
+                "Instance %s... has child_completed events but no readable "
+                "assistant timestamp; treating freshness as satisfied",
+                instance_id[:8],
+            )
+            return True, None
+
+        last_child_dt = event_created_at_as_utc(last_child_completed_at)
+        if last_assistant_dt >= last_child_dt:
+            return True, None
+
+        return False, (
+            f"last assistant message ({last_assistant_ts}) predates last "
+            f"child_completed ({last_child_dt.isoformat()})"
+        )
+
+    async def _gate_wedge_resolver(
+        self,
+        session,
+        instance_id: str,
+    ) -> tuple[bool, str | None, bool]:
+        """Wedge resolver: close the stale-readable / dead-letter wedge paths.
+
+        Wedge paths occur when ``_assistant_message_fresh`` returns False (the
+        parent has a stale assistant timestamp) BUT pending_count is already 0
+        — the gate cannot wait for a response that will never come. In that
+        situation, if the most recent message for this instance is in a
+        TERMINAL state (COMPLETED or FAILED), the parent has done all it can
+        and the job must terminate. We allow the gate to pass with a best-
+        effort empty result; the result_summary will be None or whatever the
+        checkpointer returns.
+
+        Three wedge paths close via this resolver (all event-driven, no polling):
+
+        (a) STALE-READABLE: parent's last assistant timestamp is readable but
+            predates the most recent child_completed (no new AI response).
+            If the report message that triggered the child_completed has been
+            processed to a terminal state, the parent is wedged: allow.
+
+        (b) EMPTY-FINAL-TURN: parent processed the report and produced only
+            tool calls (no content). With the empty-content-aware
+            ``get_last_assistant_timestamp`` change, the freshness check now
+            returns True for this case — the wedge resolver is a belt-and-
+            suspenders for the race where the AI message is unparseable.
+
+        (c) DEAD-LETTER: the completion report message transitions to FAILED
+            after max retries. The parent never had a chance to respond. If
+            the FAILED message is the most recent for this instance, the
+            parent is wedged: allow with empty result.
+
+        Trigger: the existing message-completed signal (for paths a/b) and
+        the new ``_on_stale_task_permanent_failure`` wedge hook in
+        ``manager.py`` (for path c, fires on the FAILED transition).
+
+        Args:
+            session: Open DB session with the staged child_completed event.
+            instance_id: The instance to evaluate.
+
+        Returns:
+            ``(allowed, reason, declared_wait_outstanding)``:
+            ``allowed`` (bool) — True when the wedge is closed; False +
+            ``reason`` (str | None) when neither freshness nor
+            terminal-state apply;
+            ``declared_wait_outstanding`` (bool) — the L2b verdict (True
+            iff the declared-waiting predicate flagged this instance as
+            carrying an outstanding declared-wait obligation). Threaded
+            through the return contract (P1-2 fix) so concurrent
+            ``_gate_wedge_resolver`` calls for different instances no
+            longer race over the service-singleton
+            ``_declared_wait_outstanding`` flag — each gate call now
+            returns its own verdict atomically with its decision.
+        """
+        is_fresh, reason = await self._assistant_message_fresh(session, instance_id)
+        if is_fresh:
+            # Freshness passed — no L2b discharge path consulted.
+            return True, None, False
+
+        # ── FP4 (2026-10-03) — L2b: declared-wait discharge.
+        # ── A parent that DECLARED waiting and received its interim
+        # report DELIVERED must NOT be classified as "wedged" — the
+        # declared-wait obligation is a legitimate hold reason, and
+        # collapsing it to "wedged" would re-create the 3826ab28
+        # eternal-block class (the incident: a parent's declared-wait
+        # obligation held the parent in WAITING_CHILDREN; the wedge
+        # resolver's old behavior was to escalate-to-annotate via the
+        # (b) log-only helper, but the parent had no way to be
+        # resolved; the job stayed stuck and the retry budget was
+        # never spent — the done+retry-0/0 wedge).
+        #
+        # Discharge: when the freshness check fails AND no terminal
+        # message exists, the resolver consults the (b) declared-
+        # waiting predicate (``evaluate_declared_waiting_violations``)
+        # on the SAME session (same-tx, fail-OPEN at the predicate
+        # library layer). When the predicate reports an outstanding
+        # declared-wait obligation, the resolver does NOT block —
+        # the gate transitions to the L6 escalate-and-HOLD path
+        # (the caller at line 4145+ dispatches L6 on this signal).
+        # The L2b return is ``(True, None, True)`` so the gate's
+        # "allowed" verdict is preserved AND the L6 caller can pick
+        # up the declared-wait verdict via the return tuple (P1-2
+        # — the verdict flows with the decision; concurrent
+        # resolvers for different instances no longer share state).
+        try:
+            from .report_integrity_guard import (
+                evaluate_declared_waiting_violations,
+            )
+            _b_report = evaluate_declared_waiting_violations(
+                session, instance_id, engine=self._manager.engine,
+            )
+            if (
+                _b_report is not None
+                and _b_report.is_violation
+            ):
+                logger.info(
+                    "FP4 L2b: instance %s... wedge-resolver "
+                    "discharge — declared-wait violation "
+                    "outstanding (count=%d); gate allows the "
+                    "stamp and L6 escalate-and-hold takes over",
+                    instance_id[:8], _b_report.count,
+                )
+                # Allow the stamp; L6 is the next stop.
+                # Third element carries the L2b verdict for the
+                # L6 caller (no singleton state).
+                return True, None, True
+        except Exception as _b_exc:  # noqa: BLE001 — fail-OPEN
+            # The (b) predicate is itself fail-OPEN (D2.6 LOCKED).
+            # A predicate failure here must not block the gate —
+            # the at-least-once contract holds.
+            logger.warning(
+                "FP4 L2b: declared-wait predicate raised for "
+                "%s... (%s); fail-OPEN, wedge-resolver continues",
+                instance_id[:8], _b_exc,
+            )
+
+        # Wedge detected: freshness failed but pending_count is already 0
+        # (gate's pending_count leg already passed). Check the most recent
+        # terminal-state message for this instance. The FULL row is fetched
+        # so its status is available — the publish site branches on it
+        # (terminal FAILED → "failed" event with error body).
+        last_terminal_msg = self._latest_terminal_message(session, instance_id)
+
+        if last_terminal_msg is not None:
+            logger.warning(
+                "Wedge-resolver: instance %s... freshness failed but most "
+                "recent message is terminal (message_id=%s, status=%s); "
+                "allowing completion with best-effort empty result",
+                instance_id[:8],
+                last_terminal_msg.message_id[:8],
+                last_terminal_msg.status,
+            )
+            # Terminal-message wedge close — no L2b discharge.
+            return True, None, False
+
+        return False, reason, False
+
+    @staticmethod
+    def _latest_terminal_message(session, instance_id: str) -> MessageQueue | None:
+        """Most recent terminal (COMPLETED/FAILED) message for an instance.
+
+        Shared by the wedge resolver (does a terminal message close the
+        wedge?) and the root-lane terminal publish site (did that terminal
+        message FAIL? → the job's terminal event must carry the error body
+        instead of an empty "completed").
+
+        Uses sqlmodel's select (aliased — module-level ``select`` is
+        sqlalchemy's) so ``session.exec(...).first()`` yields actual
+        MessageQueue instances, per the message_queue repository convention.
+        """
+        return session.exec(
+            sqlmodel_select(MessageQueue)
+            .where(MessageQueue.instance_id == instance_id)
+            .where(MessageQueue.status.in_([
+                MessageStatus.COMPLETED.value,
+                MessageStatus.FAILED.value,
+            ]))
+            .order_by(MessageQueue.completed_at.desc())
+            .limit(1)
+        ).first()
+
+    async def _fp4_l6_check_and_apply(
+        self,
+        *,
+        instance_id: str,
+        agent_id: str,
+    ) -> str:
+        """FP4 (2026-10-03) — L6 escalate-and-hold implementation.
+
+        Called by the root-completion emission-time handler when the
+        L2b discharge flag (``_declared_wait_outstanding``) is True.
+        Implements the three-step L6 flow described at the call site:
+
+        1. Increment the attestation ledger via ``safe_increment`` (C3
+           fail-OPEN: a DB error degrades the increment to None and
+           the L6 path proceeds).
+        2. Read the dedicated ``L6_ANCHOR_META_KEY`` key in
+           ``instance_metadata`` — this is the hold-start anchor. The
+           first L6 invocation writes the anchor; subsequent
+           invocations re-use it as the bind anchor (P1-1 fix —
+           the previous ``attestation:denial_epochs[0]`` source was
+           polluted by the attestation gate's non-L6 epoch appends
+           and could prematurely release the bind).
+        3. Compare the anchor + ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS``
+           to ``now``:
+           * within bound: downgrade to WAITING_CHILDREN + suppress
+             publish (return ``"hold"``);
+           * bound reached: set ``completion_gate_escalated=True`` via
+             the ledger atomic op + let the publish proceed (return
+             ``"release"``).
+
+        The instance is stamped COMPLETED by the sync helper BEFORE
+        this method runs (the L1 stamp guard sees the gate-passing
+        pre-discharge; the discharge fires after the stamp). The
+        downgrade to WAITING_CHILDREN in the HOLD branch is the same
+        pattern as the gate-block downgrade at the call site
+        (COMPLETED → WAITING_CHILDREN via a single session).
+
+        Args:
+            instance_id: The root instance under evaluation.
+            agent_id: The instance's agent id (for SSE stream metadata).
+
+        Returns:
+            ``"hold"`` when the declared-wait is still within the
+            settle bound (the caller suppresses the publish and
+            returns); ``"release"`` when the bound is reached (the
+            caller proceeds with the publish + escalated display).
+        """
+        from .attestation_ledger import (
+            L6_ANCHOR_META_KEY,
+            safe_increment,
+            safe_set_escalated_and_reset,
+        )
+        from .mission_live_guard import MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS
+        from daemon.services.timestamps import now_utc_iso, now_utc_naive
+        from ..repositories.instance.repository import (
+            SQLModelInstanceRepository,
+        )
+        from sqlmodel import Session as _SqlmodelSession
+
+        # (1) Increment the ledger — the "escalate" action.
+        # denial_epoch is the SAME key for every L6 invocation on
+        # the same stamp episode (the gate evaluation / message
+        # completion). O4 idempotency on the ledger means a replay
+        # of the same epoch is a no-op.
+        denial_epoch = f"fp4.l6.{instance_id}"
+        ledger = getattr(self._manager, "_instance_repository", None)
+        if isinstance(ledger, SQLModelInstanceRepository):
+            try:
+                _denied_count = safe_increment(
+                    ledger,
+                    instance_id,
+                    denial_epoch,
+                    log_context={"path": "fp4_l6"},
+                )
+            except Exception as _inc_exc:  # noqa: BLE001
+                # C3 fail-OPEN (widens W4).
+                logger.warning(
+                    "FP4 L6: safe_increment raised for %s... "
+                    "(%s); fail-OPEN, escalate action skipped",
+                    instance_id[:8], _inc_exc,
+                )
+                _denied_count = None
+        else:
+            # No instance repo wired (test double / partial init).
+            # Proceed with the bind check using the in-memory
+            # epoch anchor; the actual ledger write is a no-op
+            # until a real repo is wired (fail-OPEN at this seam).
+            _denied_count = None
+
+        # (2) Bind anchor — read-or-set the dedicated ``L6_ANCHOR_META_KEY``
+        # metadata key owned by L6 alone.
+        #
+        # P1-1 fix: the previous code used ``attestation:denial_epochs[0]``
+        # as the bind anchor. That list is ALSO appended to by the
+        # attestation gate (with non-L6 epochs like ``fp4.l5.*``); a
+        # stale non-L6 epoch >6h old let the bind RELEASEs on the first
+        # L6 invocation (premature release = the commissioned settle
+        # contract broken). The dedicated ``L6_ANCHOR_META_KEY`` key
+        # is written only here and read only here — the bind math
+        # consults a single, L6-owned source of truth.
+        #
+        # P1-3 consolidation: the read-or-set is one canonical path
+        # (no dead ``elif denial_epoch not in _epochs`` branch —
+        # ``safe_increment`` runs FIRST above and populates the
+        # shared list with the denial_epoch regardless, so the old
+        # elif was unreachable on first invocation). The first L6
+        # invocation writes the anchor NOW; subsequent invocations
+        # read the anchor as the bind math. C3 fail-OPEN posture
+        # preserved.
+        bind_anchor_iso: str | None = None
+        try:
+            with _SqlmodelSession(self._manager._engine) as _sess:
+                _inst = _sess.get(Instance, instance_id)
+                if _inst is not None:
+                    _meta = _inst.instance_metadata or {}
+                    _existing_anchor = _meta.get(L6_ANCHOR_META_KEY)
+                    if _existing_anchor:
+                        bind_anchor_iso = str(_existing_anchor)
+                    else:
+                        # First L6 invocation: write the anchor NOW.
+                        # The ORM write REASSIGNS instance_metadata
+                        # (the JSONB column is not mutable-tracked —
+                        # the same pattern the ledger.increment uses
+                        # in ``daemon/repositories/instance/
+                        # repository.py:1401-1408" — see the
+                        # ``new_metadata = dict(...)`` rebind).
+                        _now_anchor = now_utc_iso()
+                        _new_meta = dict(_meta)
+                        _new_meta[L6_ANCHOR_META_KEY] = _now_anchor
+                        _inst.instance_metadata = _new_meta
+                        _sess.add(_inst)
+                        _sess.commit()
+                        bind_anchor_iso = _now_anchor
+        except Exception as _anchor_exc:  # noqa: BLE001 — fail-OPEN
+            logger.warning(
+                "FP4 L6: bind-anchor read/write raised for %s... "
+                "(%s); fail-OPEN, treat as first-invocation",
+                instance_id[:8], _anchor_exc,
+            )
+            bind_anchor_iso = None
+
+        # (3) Bind check.
+        if bind_anchor_iso is None:
+            # No anchor (anchor was never written; first-invocation
+            # write failed; or repo not wired). Treat as
+            # first-invocation: HOLD until the next call.
+            logger.info(
+                "FP4 L6: instance %s... no bind anchor; "
+                "HOLD (first-invocation default)",
+                instance_id[:8],
+            )
+            await self._fp4_l6_downgrade_to_waiting(
+                instance_id, agent_id,
+            )
+            return "hold"
+
+        # Parse the anchor (ISO-8601 string) and compare to now.
+        from .mission_live_guard import parse_completed_at_naive
+        anchor_dt = parse_completed_at_naive(bind_anchor_iso)
+        if anchor_dt is None:
+            # Unparseable anchor — treat as first-invocation.
+            logger.warning(
+                "FP4 L6: instance %s... unparseable bind "
+                "anchor %r; HOLD (defensive)",
+                instance_id[:8], bind_anchor_iso,
+            )
+            await self._fp4_l6_downgrade_to_waiting(
+                instance_id, agent_id,
+            )
+            return "hold"
+
+        age_seconds = (
+            now_utc_naive() - anchor_dt
+        ).total_seconds()
+        if age_seconds < MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS:
+            # Within the settle bound: HOLD.
+            logger.info(
+                "FP4 L6: instance %s... declared-wait "
+                "outstanding for %ds (within %ds bound); "
+                "HOLD (WAITING_CHILDREN, publish suppressed)",
+                instance_id[:8],
+                int(age_seconds),
+                MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+            )
+            await self._fp4_l6_downgrade_to_waiting(
+                instance_id, agent_id,
+            )
+            return "hold"
+
+        # (4) Bound reached: release — terminal fires ONCE.
+        # Set completion_gate_escalated=True via the ledger atomic
+        # op; the work_notifier.py layer renders the escalated
+        # display (COMPLETION_GATE_ESCALATED_DISPLAY) instead of
+        # plain "completed" because the
+        # ``completion_gate_escalated`` flag is on the work
+        # record. fail-OPEN: a DB error does NOT block the
+        # publish (the at-least-once contract holds).
+        logger.warning(
+            "FP4 L6: instance %s... declared-wait outstanding "
+            "for %ds (>= %ds bound); RELEASE — terminal fires "
+            "ONCE with escalated display (unverified)",
+            instance_id[:8],
+            int(age_seconds),
+            MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+        )
+        if isinstance(ledger, SQLModelInstanceRepository):
+            try:
+                safe_set_escalated_and_reset(
+                    ledger,
+                    instance_id,
+                    log_context={"path": "fp4_l6_release"},
+                )
+            except Exception as _esc_exc:  # noqa: BLE001
+                logger.warning(
+                    "FP4 L6: safe_set_escalated_and_reset raised "
+                    "for %s... (%s); fail-OPEN, terminal "
+                    "proceeds (escalated display may render "
+                    "without the flag)",
+                    instance_id[:8], _esc_exc,
+                )
+        return "release"
+
+    async def _fp4_l6_downgrade_to_waiting(
+        self,
+        instance_id: str,
+        agent_id: str,
+        *,
+        allowed_statuses: tuple[str, ...] = (
+            InstanceStatus.COMPLETED.value,
+        ),
+    ) -> None:
+        """FP4 L6 helper — downgrade a terminal row → WAITING_CHILDREN.
+
+        Mirrors the gate-block downgrade pattern at the emission-
+        time call site (single session, defensive against None /
+        status mismatch). Used by the L6 HOLD branch.
+
+        ``allowed_statuses`` (2026-10-31, 9f0ed4f5 incident family):
+        keyword-only membership set for the guarded write. The
+        default keeps the historical COMPLETED-only behavior for the
+        existing L6 call sites byte-identically; the pre-stamp hold
+        site passes _TERMINAL_REARM_STATUSES (COMPLETED / ERROR /
+        FAILED — TERMINATED excluded, M-2) so a terminal strand root
+        is reactivated to WAITING_CHILDREN while its tree is live.
+        Non-terminal rows (e.g. the historical ``running`` hold) never
+        match and get NO write — the 4ebd7f2f1 no-churn contract
+        holds.
+        """
+        try:
+            with Session(self._manager._engine) as _session:
+                _inst = _session.get(Instance, instance_id)
+                if (
+                    _inst is not None
+                    and _inst.status in allowed_statuses
+                ):
+                    _prior = _inst.status
+                    _inst.status = InstanceStatus.WAITING_CHILDREN.value
+                    _inst.updated_at = datetime.now(timezone.utc).isoformat()
+                    _inst.version = (_inst.version or 1) + 1
+                    _session.add(_inst)
+                    _session.commit()
+                    logger.info(
+                        "FP4 L6: instance %s... downgraded "
+                        "%s → WAITING_CHILDREN (HOLD)",
+                        instance_id[:8],
+                        _prior,
+                    )
+        except Exception as _dg_exc:
+            logger.error(
+                f"FP4 L6: downgrade failed for "
+                f"{instance_id[:8]}...: {_dg_exc}"
+            )
+        if self._manager._live_hub:
+            try:
+                await self._manager._live_hub.stream_status_change(
+                    instance_id, "waiting_children",
+                    agent_id=agent_id,
+                )
+            except Exception as _sse_exc:
+                logger.warning(
+                    f"FP4 L6: downgrade SSE failed for "
+                    f"{instance_id[:8]}...: {_sse_exc}"
+                )
+
+    def _schedule_strand_heal(
+        self, instance_id: str, *, posture: str | None = None,
+    ) -> None:
+        """Fire-and-forget hand-off of a tree_liveness-blocked root to
+        the MissionStrandHealer (watcher-loss terminal strand,
+        2026-10-14 — the event-driven arm of the asymmetry fix).
+
+        Called from TWO sites (2026-10-21, running-zombie cycle 2):
+
+        1. the post-stamp downgrade path when the emission gate blocked
+           with ``reason=tree_liveness`` — the one block class with NO
+           future message-completed signal on a stranded tree;
+        2. the PRE-STAMP recursive-liveness hold
+           (``_process_child_completion_and_notify_parent``) — the
+           "completion EVENT lost" class: the stamp is refused, and
+           the historical contract ("the next message-completed signal
+           will re-check") provably never fires on a stranded tree
+           (no children, no queued messages — no future signal
+           exists). The hold now hands the root to the healer instead
+           of waiting for a signal that never comes.
+
+        The healer re-checks its full invariant set (zero obligations +
+        strand-only tree + race guards for the waiting_children lane;
+        the completion proof + age bound + tree guard for the
+        running-zombie lane) and is a no-op when any leg fails, so
+        scheduling is always safe and cannot loop (a re-block after a
+        heal means a genuinely-live member appeared — the healer
+        refuses to touch it, and the 300s sweep + zombie backstop
+        remain the remaining nets).
+
+        LANE DISPATCH (2026-10-21): the two healer lanes have
+        DIFFERENT postures — the waiting_children lane requires a
+        ``waiting_children`` root, the running-zombie lane a
+        ``running`` one. The root's CURRENT posture selects the lane.
+        The caller passes the posture it already knows (the hold site
+        read the row at the top of the drive; the downgrade site just
+        wrote ``waiting_children``); when it is not supplied the task
+        reads it from the DB (off the event loop). Any other posture
+        is a no-op for both lanes.
+
+        COALESCING (2026-10-21): the hand-off is per-root
+        IN-FLIGHT — a second hold for the same root while a hand-off
+        is still running is DROPPED (logged at DEBUG), never queued.
+        Two reasons:
+
+        * a hold storm (the live 2026-10-19 repro logged 455 hold
+          lines across ~40 roots) must not become a heal storm; and
+        * the marker is the RECURSION BOUND — the heal drive re-enters
+          this same completion path, so a hold fired from INSIDE a
+          running heal can never schedule a second, concurrent heal
+          for the same root.
+
+        BOUND (2026-10-21, cycle-4 review F7 — DISCLOSED, not bounded
+        by code): the coalescing is PER-ROOT, so N DISTINCT stranded
+        roots ⇒ N concurrent hand-offs — the event-driven arm is NOT
+        bounded by the healer's per-tick ``batch_cap``. The
+        amplification is bounded in practice (every hand-off re-checks
+        every leg and writes only a provably dead root), but there is
+        no global ceiling on in-flight event-arm hand-offs in this
+        train; a ceiling is a named follow-up.
+
+        TEARDOWN CAVEAT (2026-10-21, cycle-4 review F8): the in-flight
+        marker is released ONLY by the scheduled task's done-callback.
+        If the event loop tears down before that callback fires, that
+        root's event arm stays WEDGED — no further hand-off is
+        scheduled for it from the hold site. The 300s sweep remains
+        the net (the sweep does not use the marker).
+
+        Fail-soft: an unwired healer (partial boot, tests) is a
+        silent no-op; task failures are logged by the done-callback.
+        """
+        healer = getattr(self._manager, "_mission_strand_healer", None)
+        if healer is None:
+            logger.debug(
+                "strand heal hand-off skipped for %s...: healer "
+                "unwired (the 300s sweep remains the net)",
+                instance_id[:8],
+            )
+            return
+        if instance_id in self._strand_heal_inflight:
+            # COALESCED — a hand-off for this root is already in
+            # flight. The in-flight attempt re-checks every leg
+            # against the CURRENT state, so a dropped duplicate can
+            # never lose a heal.
+            logger.debug(
+                "strand heal hand-off for %s...: COALESCED (a "
+                "hand-off for this root is already in flight)",
+                instance_id[:8],
+            )
+            return
+        self._strand_heal_inflight.add(instance_id)
+
+        async def _heal_by_posture() -> dict:
+            """Dispatch to the healer lane that matches the root's
+            posture (the DB read happens off the event loop)."""
+            resolved = posture
+            if resolved is None:
+                repo = getattr(
+                    self._manager, "_instance_repository", None,
+                )
+                if repo is not None:
+                    try:
+                        row = await asyncio.to_thread(
+                            repo.get, instance_id,
+                        )
+                        resolved = (
+                            getattr(row, "status", None)
+                            if row is not None else None
+                        )
+                    except Exception as _pose_exc:  # noqa: BLE001
+                        logger.warning(
+                            "strand heal hand-off for %s...: posture "
+                            "read failed (%s: %s) — no lane selected",
+                            instance_id[:8], type(_pose_exc).__name__,
+                            _pose_exc,
+                        )
+            if resolved == InstanceStatus.RUNNING.value:
+                # The running-zombie lane (2026-10-21): a ``running``
+                # root whose completion signal was lost.
+                return await healer.heal_running_zombie(instance_id)
+            if resolved == InstanceStatus.WAITING_CHILDREN.value:
+                # The waiting_children / ghost lane.
+                return await healer.heal_instance(instance_id)
+            logger.debug(
+                "strand heal hand-off for %s...: no lane for posture "
+                "%r (both lanes require running / waiting_children)",
+                instance_id[:8], resolved,
+            )
+            return {"healed": False, "reason": f"no-lane:{resolved!r}"}
+
+        def _log_heal_done(task: "asyncio.Task") -> None:
+            # The marker is released FIRST — the root is free for the
+            # next hand-off even if the task failed.
+            self._strand_heal_inflight.discard(instance_id)
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is not None:
+                logger.warning(
+                    "strand heal hand-off failed for %s...: %s: %s "
+                    "(non-fatal — the 300s sweep remains the net)",
+                    instance_id[:8], type(exc).__name__, exc,
+                )
+            else:
+                outcome = task.result() or {}
+                logger.info(
+                    "strand heal hand-off for %s...: healed=%s "
+                    "(%s)", instance_id[:8], outcome.get("healed"),
+                    outcome.get("reason"),
+                )
+
+        try:
+            task = asyncio.get_running_loop().create_task(
+                _heal_by_posture(),
+                name=f"strand-heal-{instance_id[:8]}",
+            )
+            task.add_done_callback(_log_heal_done)
+        except RuntimeError as _loop_exc:
+            # No running loop (defensive — this site is async-context
+            # only). The periodic sweep covers the root.
+            self._strand_heal_inflight.discard(instance_id)
+            logger.warning(
+                "strand heal hand-off for %s... could not schedule: %s",
+                instance_id[:8], _loop_exc,
+            )
+
+    def _count_outstanding_mission_commissions(self, instance_id: str) -> int:
+        """The open mission's outstanding-commission count (L3 leg read).
+
+        Proposal B PR2 — the mission-scoped liveness leg's read. The
+        count comes from the manager facade
+        (``InstanceManager.count_outstanding_commissions``), which is
+        MODE-AWARE (the mission-record ladder must be in ``enforce``
+        mode for the leg to be armed) and FAIL-OPEN (a read failure
+        constructs the ``MISSION_READ_UNKNOWN`` "unknown" sentinel).
+
+        Returns:
+            ``0``  — inactive / quiet / no open mission.
+            ``N>0``— the mission has N outstanding commissions.
+            ``MISSION_READ_UNKNOWN`` (``-1``) — UNKNOWN (the read
+                      failed) → the caller proceeds (the gate's
+                      fail-open posture).
+        """
+        try:
+            reader = getattr(
+                self._manager, "count_outstanding_commissions", None
+            )
+            if not callable(reader):
+                return 0
+            value = reader(instance_id)
+            if not isinstance(value, int):
+                return 0
+            return value
+        except Exception as count_exc:  # noqa: BLE001 — fail-open (never hold on a read fault)
+            # The fail-open is LOGGED (parity with the attestation gate's
+            # own short-circuit log): an unknown count must never be
+            # silent — the operator has to be able to see that the L3
+            # mission leg degraded to "proceed" on a read fault.
+            logger.warning(
+                "root_completion_gate: mission-commission count failed for "
+                "%s… (%s: %s) — fail-OPEN, the publish proceeds (the leg "
+                "cannot hold on an unknown count)",
+                instance_id[:8],
+                type(count_exc).__name__,
+                count_exc,
+            )
+            return MISSION_READ_UNKNOWN
+
+    async def _root_completion_gate(
+        self,
+        session,
+        instance_id: str,
+    ) -> tuple[bool, str | None, bool]:
+        """Full emission predicate for marking a root/parent's job terminal.
+
+        A terminal "completed" lifecycle event (which JobFeedbackObserver maps
+        to job completion) may only be published when ALL of:
+          1. bus pending == 0 — no outstanding PENDING ``DependencyWatcher``
+             rows targeting this instance (the Dependency Bus is the SOLE
+             pending-children authority post-D10; the legacy
+             ``Instance.waiting_for`` column was dropped by migration
+             ``20260621_000002_drop_legacy_completion_columns.sql``).
+          2. pending_count == 0 — no queued/processing messages
+          3. fresh assistant message after the last child_completed event —
+             the instance has responded to every child report. Wedge-resolved
+             by ``_gate_wedge_resolver`` when freshness fails but the most
+             recent message is terminal (best-effort empty result).
+
+        Suppressed instances are held in WAITING_CHILDREN; the predicate is
+        re-evaluated on the existing message-completed signal (each completed
+        message for the instance re-invokes _process_child_completion_and_
+        notify_parent via task_processor / message_job_handler). This is an
+        event-driven re-check on signal — NOT a poll loop.
+
+        The bus-pending leg uses the existing fail-OPEN helper
+        :meth:`_bus_count_pending_for_target_sync` — same as the observer
+        bus-defer path at ``job_feedback_observer.py:3364``. Bus singleton
+        missing or DB error → returns 0 → gate proceeds to the
+        freshness/pending legs. This composes with the two runtime-proven
+        mechanisms (sync-helper deferral at
+        ``_process_child_completion_db_sync`` and observer bus-defer) without
+        double-counting: each gate operates on a distinct transition point
+        (helper-thread stamp, sync job-finalize, async root-emission), and
+        all three consult the same ``dependency_watchers`` table — so a
+        pending watcher blocks ALL three gates in lockstep, not redundantly.
+
+        Args:
+            session: Open DB session; when None an ephemeral session is opened.
+            instance_id: The instance to evaluate.
+
+        Returns:
+            ``(allowed, block_reason, declared_wait_outstanding)``: the
+            third element is the L2b declared-wait verdict, threaded
+            through from ``_gate_wedge_resolver`` (P1-2). The early-leg
+            blocks (bus / tree-liveness / pending_count) carry ``False``
+            for the third element — those legs are not L2b-relevant.
+        """
+        owns_session = session is None
+        if owns_session:
+            session = Session(self._manager._engine)
+
+        try:
+            # Bus-pending leg (replaces the dropped ``Instance.waiting_for``
+            # column). The bus DB is the authoritative source of
+            # pending-children truth — see
+            # ``daemon/migrations/versions/20260621_000002_drop_legacy_completion_columns.sql``.
+            # Fail-OPEN contract via the helper matches the observer bus-defer
+            # path; the caller wrap at child_reports.py:4133-4143 catches any
+            # unexpected exception and fails the gate open too, so a missing
+            # bus or DB hiccup cannot block the publish permanently.
+            bus_pending = self._bus_count_pending_for_target_sync(instance_id)
+            if bus_pending > 0:
+                return False, f"bus_pending={bus_pending}", False
+
+            # ── Proposal B PR2 — the MISSION-SCOPED commission leg ──
+            # The bus-pending leg above is TREE-scoped: it counts the
+            # PENDING ``dependency_watchers`` rows targeting THIS
+            # instance. An OUT-OF-TREE commissioned worker (the
+            # ``instance_nudge`` lane — the demonstrated D2 premature
+            # -settle shape) mints NO watcher and is therefore invisible
+            # to it: the gate sees a fake quiescence and publishes the
+            # terminal "completed" event while the commissioned work is
+            # still running.
+            #
+            # The mission-scoped leg closes that hole: the OUTSTANDING
+            # commission rows are the record-side truth ("this mission
+            # commissioned work that has not reported yet"). While any
+            # commission is outstanding, the publish is HELD.
+            #
+            # MAJOR-1 = ruling (c) CROSS-EPOCH HOLD (PR3): the count is
+            # ANCHOR-scoped — a commission orphaned on a SUPERSEDED
+            # epoch (the job_continue continuation superseded the epoch
+            # that minted it) STILL holds the publish. No re-pointing,
+            # no auto-supersede of the orphaned rows (attribution stays
+            # with the owning epoch); the hold releases only when a
+            # terminator retires the row (the PR3 delivery terminator
+            # on ``satisfied``; the reconciliation sweep's
+            # ``abandoned`` + TTL is the escape valve — RDRS lane 7).
+            # The attestation CENSUS stays open-epoch-scoped (the
+            # scope ruling — this leg is NOT the census).
+            #
+            # FAIL-OPEN (the gate's posture — a missing terminal is
+            # worse than an extra premature one): the read returns the
+            # ``MISSION_READ_UNKNOWN`` ("unknown") sentinel on failure
+            # and ``0`` when the mission is quiet (or the mission ladder
+            # is not in ``enforce`` mode — the input is INACTIVE, the
+            # legacy publish path is preserved exactly). Only a POSITIVE
+            # count holds the publish.
+            #
+            # WATCHERS STAY AS THEY ARE: this leg is ADDITIVE — the
+            # bus-pending leg, the tree-liveness leg and the freshness
+            # leg are untouched.
+            #
+            # TERMINATOR (PR3): the natural completion write path now
+            # SATISFIES the routing commission when the report is
+            # actually delivered to its commissioner (child_reports
+            # ``_process_child_completion_db_sync``, the ReportInjection
+            # writer region — guarded ``UPDATE ... WHERE
+            # state='outstanding'``, in-transaction, fail-open). The
+            # ``abandoned`` write + the TTL backstop are the
+            # reconciliation sweep's (RDRS lane 7): a commission whose
+            # report is NEVER delivered still holds until the sweep
+            # retires it (the sweep resolves it through the
+            # mission-record service).
+            mission_commissions = self._count_outstanding_mission_commissions(
+                instance_id
+            )
+            if mission_commissions > 0:
+                return False, f"mission_commissions={mission_commissions}", False
+
+            # ── FP4 (2026-10-03) — L2: tree-liveness leg.
+            # ── The bus-pending leg above is FAIL-OPEN (a missing bus
+            # singleton or a transient DB error returns 0 — see
+            # ``_bus_count_pending_for_target_sync``). A child
+            # whose watcher row was never INSERTed in the first place
+            # (orphan-watch class — dispatch failure, cold-load
+            # ``None``-read, unattributed cache eviction) cannot
+            # surface through the bus count: the bus's PENDING
+            # ``dependency_watchers`` row is simply absent, the count
+            # is 0, and the gate sees a fake quiescence.
+            #
+            # The mitigation is a parallel tree-liveness leg
+            # (canonical ``evaluate_mission_live`` leg-b/c via
+            # ``get_tree_ids_permanent``): walk the permanent
+            # ``instances.parent_id`` record, classify each member
+            # against ``TERMINAL_INSTANCE_STATUSES``, and BLOCK the
+            # gate when ANY non-terminal member is present. The
+            # ``bus_pending_count`` argument passes the bus count
+            # we already obtained (``bus_pending`` — a real int, or
+            # 0 when no watcher was reported) to the guard's
+            # leg (a) so the two legs agree at the same seam;
+            # the tree walk (b/c) is the orphan safety net.
+            #
+            # Leg-direction: ``live=True`` ⇒ BLOCK (the mission is
+            # plausibly alive — children may still be running even
+            # if no bus row exists). ``live=False`` (all-terminal
+            # tree OR timeout-elapsed zombie) ⇒ PROCEED. The
+            # guard's TREE-WALK error path returns ``live=False,
+            # error=True`` — fail-OPEN for the at-least-once
+            # guarantee (mirrors the U7 contract). On any guard
+            # call failure we proceed; a missing terminal is worse
+            # than an extra premature one.
+            #
+            # W-2 — the OPPOSITE polarity, stated honestly: a
+            # MEMBER-ALIVE probe error yields ``live=True`` +
+            # ``error=True`` ⇒ THIS GATE HOLDS the publish. That
+            # hold is NOT a permanent strand: the observer / the
+            # next pass re-drives the completion, so the
+            # at-least-once guarantee still holds (a held publish
+            # is retried; a lost one is not).
+            try:
+                from .mission_live_guard import (
+                    evaluate_mission_live,
+                    MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+                )
+                _mission_verdict = await evaluate_mission_live(
+                    instance_repository=self._instance_repository,
+                    instance_id=instance_id,
+                    bus_pending_count=bus_pending if bus_pending > 0 else 0,
+                    timeout_seconds=MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS,
+                )
+                if _mission_verdict.live:
+                    return False, (
+                        f"tree_liveness: {_mission_verdict.reason}"
+                    ), False
+                # live=False (all-terminal tree OR timed-out zombie)
+                # — proceed to the remaining legs.
+            except Exception as _tree_exc:  # noqa: BLE001 — fail-OPEN
+                # C3 fail-OPEN (widens W4): a guard exception must
+                # NOT block the publish; the at-least-once contract
+                # holds. Log at WARNING so the operator sees the
+                # regression. The existing caller wrap at
+                # child_reports.py:4133-4143 also catches this and
+                # fails the gate open.
+                logger.warning(
+                    "root_completion_gate: tree-liveness leg "
+                    "raised for %s... (%s); fail-OPEN, gate "
+                    "proceeds (per C3 fail-OPEN contract)",
+                    instance_id[:8], _tree_exc,
+                )
+
+            pending_count = session.exec(
+                select(func.count())
+                .select_from(MessageQueue)
+                .where(MessageQueue.instance_id == instance_id)
+                .where(MessageQueue.status.in_([
+                    MessageStatus.READY.value,
+                    MessageStatus.PROCESSING.value,
+                    MessageStatus.RETRYING.value,
+                ]))
+            ).scalar_one()
+
+            if pending_count > 0:
+                return False, f"pending_count={pending_count}", False
+
+            # ── wi-1fbee2ec (2026-11-01) — LEG 6: outstanding
+            # descendant report obligations. ──────────────────────
+            # The transactional-outbox hold input: while ANY
+            # non-terminal (PENDING/DEFERRED) ``report_injections``
+            # row is owed to or from a member of this instance's
+            # subtree, a descendant's completed work product has not
+            # reached its recipient — the 10:35 incident class (the
+            # root closed ``terminal_after_bound`` on an all-quiet
+            # snapshot while a report was undelivered; RDRS then
+            # revived the terminal recipient into the apparition).
+            # This leg DENIES the publish → the caller's existing
+            # downgrade path (COMPLETED→WAITING_CHILDREN + suppressed
+            # publish) holds the emission until the obligation
+            # delivers (the delivery lanes transition the row
+            # terminal; the event-driven re-check re-evaluates).
+            #
+            # D1 polarity (leader adjudication, BINDING): FAIL-CLOSED.
+            # A query error on THIS leg converts to a HOLD verdict
+            # INSIDE the leg — it must NEVER ride the caller-wrap
+            # fail-open (:5426-5451 / FP4-L5) nor the whole-eval
+            # fail-open family. The hold composes with the at-least-
+            # once re-drive (each completed message re-invokes this
+            # gate), so a persistent error degrades via the in-turn
+            # deny bound — never a silent verify-clean.
+            # Duck-typing guard (the FIX-2 discipline). The non-int →
+            # INACTIVE posture matches the in-turn read; the
+            # MISSING-facade posture is a DELIBERATE divergence from
+            # it (reviewer ruling ③, accept-as-is): emission-side a
+            # raise — including a missing-attribute raise — converts
+            # to the D1 HOLD below, while the in-turn getattr guard
+            # reads INACTIVE; both directions are fail-safe, the
+            # divergence is unreachable in production (every real
+            # manager carries the facade), so no test-double shape
+            # can fake a hold either way. The isinstance check
+            # happens BEFORE the ``> 0`` comparison (a Mock
+            # comparison raises TypeError, which would masquerade as
+            # a query error).
+            try:
+                _obligation_value = (
+                    self._manager.count_outstanding_report_obligations(
+                        instance_id
+                    )
+                )
+            except Exception as _obl_exc:  # noqa: BLE001 — D1 fail-closed (isolated from every fail-open catch)
+                logger.warning(
+                    "root_completion_gate: obligation leg read raised "
+                    "for %s... (%s: %s); DENY per D1 fail-closed "
+                    "(hold; never rides the caller-wrap fail-open)",
+                    instance_id[:8],
+                    type(_obl_exc).__name__,
+                    _obl_exc,
+                )
+                return (
+                    False,
+                    "outstanding_report_obligations=unknown(read_error)",
+                    False,
+                )
+            if isinstance(_obligation_value, int) and _obligation_value >= 0:
+                _obligation_count = _obligation_value
+            else:
+                _obligation_count = 0
+            if _obligation_count > 0:
+                return (
+                    False,
+                    f"outstanding_report_obligations={_obligation_count}",
+                    False,
+                )
+
+            # DEADLOCK GUARD: route the freshness leg through the wedge resolver
+            # so dead-letter / empty-final-turn / stale-readable wedge paths
+            # close event-driven (no polling). The wedge resolver's 3-tuple
+            # return threads the declared-wait verdict; this gate forwards
+            # all three elements unchanged (P1-2 — verdict flows with the
+            # decision, no singleton state).
+            return await self._gate_wedge_resolver(session, instance_id)
+        finally:
+            if owns_session:
+                session.close()
+
+    async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str, *, skip_repair: bool = False) -> None:
+        """Check if child instance is done and send completion report to parent.
+        
+        CRITICAL FIX C3: Content is fetched BEFORE the transaction to avoid
+        leaving the instance in COMPLETED state without a report if the fetch fails.
+        
+        The entire ``WriteGuardSession`` block (DB reads, writes, commits) now
+        runs on a worker thread via ``asyncio.to_thread`` — mirrors the
+        ``_finalize_instance_db_sync`` fix in ``job_feedback_observer.py``.
+        Under SQLite WAL write contention (busy_timeout=30s), a sync
+        ``session.commit()`` on the event loop thread wedges the loop
+        completely — Ctrl+C ignored, all APIs frozen. Moving it to a
+        worker thread keeps the loop responsive.
+        
+        Post-commit side effects (SSE, CompletionRegistry, lifecycle events,
+        CM resolve hook) remain on the event loop — they fire AFTER
+        ``asyncio.to_thread`` returns.
+        
+        Args:
+            instance_id: The child instance that completed.
+            completed_message_id: The message ID that just completed (for idempotency).
+            skip_repair: When True, propagate to the content fetch so the
+                truncation check + LLM repair + combine fallback are all
+                skipped. Used by the running-zombie heal lane, whose
+                transcript can be 25h stale — repairing it would spend a
+                30s LLM call on a transcript nobody will read. Additive
+                keyword-only flag with a False default: every existing
+                caller keeps the current behaviour.
+        """
+        logger.info(f"_process_child_completion_and_notify_parent called: instance={instance_id[:8]}..., message_id={completed_message_id[:8] if completed_message_id else None}")
+        
+        # FIX C3: Fetch content BEFORE transaction — avoid orphaned COMPLETED state
+        # Get instance's agent_id for the report (sync DB read → wrap in to_thread)
+        instance_meta = await asyncio.to_thread(
+            self._instance_repository.get, instance_id
+        )
+        agent_id = instance_meta.agent_id if instance_meta else "agent"
+        last_content = await self._get_last_assistant_message(
+            instance_id, agent_id, skip_repair=skip_repair,
+        )
+        if last_content is None:
+            logger.warning(f"No assistant content found for instance {instance_id[:8]}..., using empty content for completion check")
+            last_content = "[No response content]"  # Proceed with empty content — state transition must still happen
+
+        # ─── Phase 2 task 2.13 (W4) — child_outcome payload surfacing ───
+        # If the bus FIRED this child's watcher with a terminal
+        # outcome marker (``FollowUp.metadata["child_outcome"]`` —
+        # set by ``fire_for_terminated_target`` on the terminate
+        # path), copy it into the report content so the parent's
+        # LLM can distinguish terminated from errored from completed
+        # and take the right follow-up action. ADDITIVE field only:
+        # the marker is appended to the content; existing payload
+        # fields are untouched, and a missing marker (row compacted
+        # 60s after delivery, or bus unwired) changes nothing.
+        from .dependency_bus import get_dependency_bus as _get_bus_t13
+
+        _bus_t13 = _get_bus_t13()
+        if _bus_t13 is not None:
+            try:
+                _child_outcome = await asyncio.to_thread(
+                    _bus_t13._repo.fetch_child_outcome_for_fired,
+                    instance_id,
+                )
+                if _child_outcome and "child_outcome:" not in (last_content or ""):
+                    last_content = (
+                        f"{last_content or ''}\n\n"
+                        f"[child_outcome: {_child_outcome}]"
+                    ).lstrip("\n")
+                    logger.info(
+                        f"_process_child_completion_and_notify_parent: "
+                        f"surfaced child_outcome={_child_outcome} marker "
+                        f"for child {instance_id[:8]}... into the report "
+                        f"payload (task 2.13 W4)"
+                    )
+            except Exception as marker_err:
+                # Additive, best-effort — never block the completion
+                # path on the marker lookup.
+                logger.debug(
+                    f"_process_child_completion_and_notify_parent: "
+                    f"child_outcome lookup failed (non-fatal) for "
+                    f"{instance_id[:8]}...: {marker_err}"
+                )
+
+        # ── Component 2 (watcher-loss terminal strand, 2026-10-14) ──
+        # Asymmetry fix, first half: evaluate the RECURSIVE tree
+        # liveness BEFORE the COMPLETED stamp. The sync helper's
+        # live-children cross-check counts DIRECT children only; the
+        # emission-time ``_root_completion_gate`` re-checks the
+        # RECURSIVE tree. With a live depth-2+ member, the historical
+        # sequence was stamp COMPLETED → gate blocks → downgrade to
+        # WAITING_CHILDREN + suppressed publish (stamp-then-downgrade
+        # churn; on a stranded-tree shape the suppressed publish then
+        # never re-arms — the watcher-loss wedge). Evaluating the same
+        # recursive predicate the gate uses BEFORE the sync helper
+        # runs means a live-tree root never reaches the stamp at all:
+        # no discharge, no stamp, no downgrade write. The stage-6
+        # gate below remains as the defense-in-depth emission check
+        # (unchanged) for regressions between this eval and publish.
+        #
+        # Fail-OPEN (C3 contract): any exception here logs a WARNING
+        # and proceeds to the sync helper — the at-least-once
+        # terminal-delivery guarantee outranks the churn optimization.
+        # ROOT lane only (``parent_id is None``): child lanes have no
+        # stamp-vs-gate asymmetry (their reports ride the parent's
+        # gates).
+        if instance_meta is not None and instance_meta.parent_id is None:
+            try:
+                from .mission_live_guard import (
+                    evaluate_mission_live as _pre_eval,
+                    MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS as _pre_timeout,
+                )
+                _pre_verdict = await _pre_eval(
+                    instance_repository=self._instance_repository,
+                    instance_id=instance_id,
+                    # Bus leg not consulted here (the sync helper's
+                    # bus gate owns it, same seam); only the
+                    # recursive tree legs gate this early-out.
+                    bus_pending_count=None,
+                    timeout_seconds=_pre_timeout,
+                    # skip_root: the root's own (non-terminal) status
+                    # is what the stamp is about to flip — only
+                    # DESCENDANT liveness gates the pre-stamp
+                    # decision.
+                    skip_root=True,
+                )
+                if _pre_verdict.live:
+                    logger.info(
+                        "root_completion: pre-stamp recursive liveness "
+                        "holds for %s... (%s) — skipping the COMPLETED "
+                        "stamp entirely (no stamp→downgrade churn)",
+                        instance_id[:8], _pre_verdict.reason,
+                    )
+                    # RE-ARM (2026-10-21, running-zombie cycle 2): the
+                    # historical contract was "the next message-completed
+                    # signal re-checks" — but on a STRANDED tree that
+                    # signal provably never comes (no children, no
+                    # queued messages; the live 2026-10-21 repro logged
+                    # 455 hold lines across ~40 roots and the root
+                    # stayed ``running`` for 25h). The hold therefore
+                    # hands the root to the strand healer NOW: the heal
+                    # re-checks every leg against the current state and
+                    # is a no-op unless the shape is provably dead. The
+                    # hand-off is COALESCED per root (a hold storm
+                    # cannot become a heal storm) and it is also the
+                    # recursion bound — a hold fired from inside a
+                    # running heal cannot schedule a second one.
+                    # ── Terminal-row reactivation (2026-10-31,
+                    # 9f0ed4f5 incident family): the hold fired because
+                    # the tree is LIVE — a TERMINAL row must not
+                    # survive the hold. Historical shape (the live
+                    # repro): an earlier gate-passed closure stamped
+                    # the root COMPLETED at a quiet moment, the tree
+                    # went live again, and every subsequent hold
+                    # returned with NO positive write — the row stayed
+                    # COMPLETED under a live tree indefinitely. A
+                    # fresh re-read (the ``instance_meta`` read at the
+                    # top of this drive can be seconds stale) gates
+                    # the write on the terminal set: only a
+                    # COMPLETED / ERROR / FAILED row is downgraded to
+                    # WAITING_CHILDREN (the visible "waiting, tree live"
+                    # surface). TERMINATED is excluded (M-2): terminates
+                    # stay final. Non-terminal rows
+                    # — the 4ebd7f2f1 no-churn contract — get NO write
+                    # (the membership check fails; byte-identical
+                    # historical behavior). The healer hand-off below
+                    # (after the re-arm) is kept: same call, same
+                    # coalescing; the posture now reflects the live row
+                    # (M-1).
+                    try:
+                        _held_row = await asyncio.to_thread(
+                            self._instance_repository.get, instance_id,
+                        )
+                        _rearmed = False
+                        if _held_row is not None and _held_row.status in _TERMINAL_REARM_STATUSES:
+                            await self._fp4_l6_downgrade_to_waiting(
+                                instance_id,
+                                agent_id,
+                                allowed_statuses=_TERMINAL_REARM_STATUSES,
+                            )
+                            _rearmed = True
+                    except Exception as _hold_react_exc:  # noqa: BLE001 — fail-open
+                        logger.warning(
+                            "root_completion: hold-branch terminal-row "
+                            "reactivation failed for %s... (non-fatal, "
+                            "hold stands): %s: %s",
+                            instance_id[:8],
+                            type(_hold_react_exc).__name__,
+                            _hold_react_exc,
+                        )
+                        _rearmed = False
+                    # Heal hand-off (coalesced per root) — runs after the
+                    # re-arm; posture=None makes _heal_by_posture RE-READ
+                    # the live row (A-N1) instead of trusting the
+                    # pre-write status, so the waiting_children lane is
+                    # selected when the re-arm landed. Non-re-armed rows
+                    # also re-read (None) and resolve to their current
+                    # status — same call, same coalescing as 4ebd7f2f1.
+                    self._schedule_strand_heal(
+                        instance_id, posture=None,
+                    )
+                    return
+                # Not live (all-terminal after strand exclusion, or
+                # timed-out zombie) → fall through to the sync stamp.
+            except Exception as _pre_exc:  # noqa: BLE001 — fail-OPEN
+                logger.warning(
+                    "root_completion: pre-stamp liveness eval raised "
+                    "for %s... (%s); proceeding to the sync stamp "
+                    "(fail-open per C3 contract)",
+                    instance_id[:8], _pre_exc,
+                )
+
+        # MAJOR A fix (re-arm safety net, 2026-06-22; Phase 1 bus
+        # migration 2026-06-23): wrap the ``asyncio.to_thread`` call in
+        # the per-parent ``asyncio.Lock`` when the bus is wired. After
+        # Phase 1 the lock lives on the bus (see
+        # ``DependencyBus._get_parent_lock``); CM's ``_get_lock`` is a
+        # deprecated passthrough and will be removed in Phase 5. The
+        # lock is held on the EVENT LOOP for the entire duration of the
+        # worker-thread sync helper, blocking ``bus.watch()`` (which
+        # also acquires ``bus._get_parent_lock(parent_id)``) from
+        # running on the loop and committing a new watcher row between
+        # the in-session bus gate inside the sync helper and the
+        # terminal status UPDATE that follows it.
+        #
+        # Why this works (no deadlock risk):
+        #   * ``asyncio.Lock`` is event-loop-bound — the worker
+        #     thread that ``asyncio.to_thread`` runs in NEVER
+        #     acquires it; it only runs the sync SQLAlchemy code
+        #     while the GIL is released during I/O.
+        #   * The lock serializes coroutines on the loop, not
+        #     threads.
+        #   * ``bus.watch()`` acquires per-parent lock → bus task
+        #     lock (sequential, never nested). We acquire the
+        #     per-parent lock only here. No cycle exists.
+        #   * WriteGuardSession is a Python-level counter, not a DB
+        #     lock — no interaction.
+        #
+        # When the bus is None (legacy path / not initialized), no
+        # lock is acquired — no concurrent writer to race against.
+        from .dependency_bus import get_dependency_bus
+        bus = get_dependency_bus()
+        if bus is not None:
+            async with await bus._get_parent_lock(instance_id):
+                # Run the ENTIRE WriteGuardSession block on a
+                # worker thread so session.commit() cannot deadlock
+                # the event loop. The per-parent lock is held on the
+                # event loop for the duration — see the comment
+                # above.
+                result = await asyncio.to_thread(
+                    self._process_child_completion_db_sync,
+                    instance_id,
+                    completed_message_id,
+                    last_content,
+                )
+        else:
+            result = await asyncio.to_thread(
+                self._process_child_completion_db_sync,
+                instance_id,
+                completed_message_id,
+                last_content,
+            )
+
+        # Stage-0 mint-with-delivery wake removed 2026-09-18: the
+        # ``child_report_check`` advisory note is no longer minted, so
+        # the wake flag is moot at this seam (the strand-wedge class it
+        # closed is gone with the note). The note mint + delivery
+        # Task path is deleted (see D-CTD-7); nothing left to wake.
+
+        # Dispatch post-commit side effects on the event loop.
+        await self._dispatch_post_commit_side_effects(
+            result, last_content, completed_message_id
+        )
+
+    @staticmethod
+    def _ghost_child_filter():
+        """Boolean SQL expr: True when an ``Instance`` child row is a ghost.
+
+        A ghost (Inc 2026-08-03 ``tester-stuck-waiting-children-orphaned-idle-worker``)
+        is a child that was spawned but whose dispatch FAILED — it sits at
+        ``status='idle'``, ``version=1``, and has NEVER received a
+        ``message_queue`` or ``task`` row (no work was ever queued, no turn
+        ever ran). Because ``idle`` is not in ``TERMINAL_STATUSES``, both
+        completion guards count such a child as "active" forever and
+        permanently wedge its parent at ``waiting_children`` — the child
+        can never produce a completion report on its own (its dispatch
+        already failed), so the parent must not wait for it.
+
+        Excluding ghosts via this filter unblocks the wedge regardless of
+        which spawn/send failure mode produced the orphan (cold-load
+        ``None``-read, unattributed cache eviction, etc. — all left the row
+        idle/v1/empty). The filter is intentionally EMPTY-state-based so a
+        genuinely-dispatched ``idle`` child (has queued work but has not
+        started its first turn yet) is NOT treated as a ghost — its
+        ``message_queue``/``task`` rows keep it blocking as intended.
+
+        Returns the ``Instance``-scoped boolean expression; callers wrap it
+        with ``~`` (NOT) to exclude ghosts from an active-children count.
+        """
+        no_messages = ~exists(
+            select(MessageQueue.message_id).where(
+                MessageQueue.instance_id == Instance.instance_id
+            )
+        )
+        no_tasks = ~exists(
+            select(Task.id).where(Task.instance_id == Instance.instance_id)
+        )
+        return (
+            (Instance.status == InstanceStatus.IDLE.value)
+            & (Instance.version == 1)
+            & no_messages
+            & no_tasks
+        )
+
+    def _count_actionable_pending_tasks(self, session: Session, instance_id: str) -> int:
+        """Count PENDING tasks for an instance that will actually run a turn.
+        Used by both completion guards (root + non-root) to decide whether
+        to defer completion. A PENDING ``process_report`` task whose report
+        was ALREADY delivered via the report-injection hot path
+        (``state = INJECTED``) is EXCLUDED: the task processor skips such
+        tasks (no graph turn runs), so they are no-ops that must NOT defer
+        completion — otherwise the parent stalls in ``waiting_children``
+        forever, because the skipped task never produces a turn to
+        re-evaluate completion. Reports still awaiting delivery
+        (``PENDING`` / ``TASK_DELIVERED``) ARE counted, since their
+        ``process_report`` turn will run and may spawn more children.
+
+        Correlation: ``Task.message_id`` of a ``process_report`` task IS
+        the ``completion_report`` message id, which is also
+        ``ReportInjection.report_message_id``. For non-report tasks
+        (``process_message``) there is no matching ``report_injections``
+        row, so the EXISTS is false and the task is counted.
+
+        Args:
+            session: An open (WriteGuard)Session.
+            instance_id: The instance whose pending tasks to count.
+
+        Returns:
+            Count of PENDING tasks that will run a real graph turn.
+        """
+        injected_report_exists = (
+            select(ReportInjection.injection_id)
+            .where(ReportInjection.report_message_id == Task.message_id)
+            .where(ReportInjection.state == ReportInjectionState.INJECTED.value)
+            .exists()
+        )
+        return session.exec(
+            select(func.count())
+            .select_from(Task)
+            .where(Task.instance_id == instance_id)
+            .where(Task.status == TaskStatus.PENDING.value)
+            .where(~injected_report_exists)
+        ).scalar_one()
+
+    def _process_child_completion_db_sync(
+        self,
+        instance_id: str,
+        completed_message_id: str | None = None,
+        last_content: str = "",
+    ) -> _ChildCompletionDbResult:
+        """Sync DB half of ``_process_child_completion_and_notify_parent``.
+        
+        Opens a ``WriteGuardSession`` and performs ALL DB reads/writes/commits
+        for the four child-completion branches (root, idempotency-skip,
+        tool-invocation, regular-child). Returns a ``_ChildCompletionDbResult``
+        describing the outcome so the async caller can fire the post-commit
+        side effects (SSE / CompletionRegistry / lifecycle event / CM resolve
+        hook) on the event loop.
+        
+        Runs on a worker thread via ``asyncio.to_thread`` from
+        ``_process_child_completion_and_notify_parent``. This keeps
+        ``session.commit()`` off the event loop so SQLite WAL write contention
+        cannot deadlock the daemon (see the deadlock analysis in the
+        experience docs — same chain as ``_finalize_instance``).
+        
+        The DB operations are EXACTLY the same as the pre-refactor inline
+        block — same order, same conditions, same commits. Only the call
+        site changed (inline → extracted helper + ``to_thread``).
+        
+        Args:
+            instance_id: The child instance that completed.
+            completed_message_id: The message ID that just completed.
+            last_content: The assistant message content (pre-fetched to avoid
+                orphaned COMPLETED state — see Fix C3).
+            
+        Returns:
+            ``_ChildCompletionDbResult`` with the outcome + data the async
+            caller needs for side effects.
+        """
+        with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
+            # Get instance metadata
+            instance = session.get(Instance, instance_id)
+            if instance is None:
+                logger.info(f"Instance {instance_id[:8]}... not found in DB, skipping")
+                return _ChildCompletionDbResult(
+                    outcome="instance_not_found",
+                    instance_id=instance_id,
+                    agent_id=None,
+                    parent_id=None,
+                )
+
+            logger.info(f"Instance {instance_id[:8]}... parent_id={instance.parent_id}, status={instance.status}")
+
+            # ─── D1 (completion-subsystem Phase 1): resolve the report
+            # recipient ONCE, right here — right after the instance
+            # fetch, before ANY write-path site runs.
+            #
+            # PR3 (Proposal B §3 D1) — THE ROUTING FLIP: the resolution
+            # is now THREE-LEGGED (see report_recipient.py). LEG 1
+            # (armed ONLY in ``enforce``): the child's OLDEST
+            # outstanding commission row (``mission_commissions.
+            # worker_instance_id == child``, ``advisory_backfill=False``
+            # — excluded from routing authority FOREVER) routes the
+            # report to its ``commissioner_instance_id`` (ruling ④:
+            # oldest-outstanding tie-break). LEG 2: the audit-recency
+            # heuristic — the DECLARED LEGACY FALLBACK, byte-identical.
+            # LEG 3: the structural parent. In ``dry``/``off`` the
+            # resolution is byte-for-byte the Phase-1 behavior.
+            #
+            # The resolver reads the ``instance_ops_audit`` ledger for a
+            # fresh COMMITTED ``instance_nudge`` against this child (leg
+            # 2) and returns the COMMISSIONER (the nudger) instead of
+            # the structural parent — the byte-level no-op for every
+            # child that was never nudged nor commissioned.
+            #
+            # POSTURE: fail-open at every leg (leg 1 → leg 2 → leg 3) —
+            # a delivery-path routing decision, not a heal-probe; the
+            # documented posture is at-least-once.
+            #
+            # The resolved value is CARRIED on the result
+            # (``report_recipient_id``) and threaded to every write-path
+            # site below. The deciding commission row (leg 1 only) rides
+            # the local for the ``report_injections`` mission-provenance
+            # writers + the PR3 delivery terminator further below. The
+            # STRUCTURAL parent (``instance.parent_id``) is NEVER
+            # overloaded — the bus corrective emit and the
+            # ``child_completed`` SSE stay structural.
+            _resolved_destination = resolve_report_recipient_with_commission(
+                engine=self._manager.engine,
+                # NO ``session=`` — the resolver opens its OWN session
+                # (F1: a failed audit read must not poison this write
+                # transaction on PG — see report_recipient.py). The
+                # commission leg ALWAYS opens its own session.
+                child_instance_id=instance_id,
+                structural_parent_id=instance.parent_id,
+            )
+            report_recipient_id = _resolved_destination.recipient_id
+            _routing_commission = _resolved_destination.commission
+
+            # ─── Fix 2 idempotency short-circuit ─────────────────────────
+            # If the instance is already in a terminal state (COMPLETED
+            # or ERROR), short-circuit immediately. Re-running this
+            # function on a terminal instance would otherwise re-write
+            # status, re-emit a completion_report, re-emit an
+            # INSTANCE_COMPLETED event, and re-trigger the bus terminal
+            # hook — duplicating every observable side effect on each
+            # re-entry (the Wanderer per-graph-turn pattern).
+            #
+            # This is a status-level idempotency guard: the existing
+            # in-branch idempotency check (existing_report query)
+            # catches the duplicate-message case via the report message
+            # source, but it does NOT catch re-entries with a different
+            # ``completed_message_id`` (or with None) where the row has
+            # already been finalized. The status check is the
+            # coarser-grained safety net that supersedes both.
+            #
+            # Phase 1 (pause-report-recovery Variant B fix 2 + C5 SCOPE
+            # NOTE): the guard fires in TWO shapes now:
+            #
+            # * ``status in (COMPLETED, ERROR)`` — unchanged
+            #   ``idempotency_skip`` outcome, no marker. Delivery has
+            #   already happened (or is terminal-failed); no obligation
+            #   to recover.
+            #
+            # * ``status == PAUSED`` — new outcome ``deferred_pause``
+            #   on ``_ChildCompletionDbResult`` (NOT a terminal_reason;
+            #   no MIRROR_SET implication) + ``ensure_deferred`` marker
+            #   on the obligation triple. The child was paused while
+            #   completing (typically the question() tool's pause
+            #   cascade); without the marker, the parent's delivery
+            #   obligation would be silently lost. The marker is
+            #   recoverable in Phase 2's router/sweep.
+            #
+            # C5 SCOPE NOTE: this guard fires ONLY when the CHILD
+            # instance is PAUSED. The canonical Site-1 shape (child
+            # COMPLETED, parent PAUSED) NEVER reaches this branch —
+            # that is 1.4's pipeline lane
+            # (``message_processing_pipeline.py``: the pause-check
+            # there observes the child's status, not the parent's).
+            # The 3.2(d) test pins this scope separation.
+            #
+            # The PAUSED branch performs the marker write on a
+            # DEDICATED repository session over the same engine as the
+            # status read (``ReportInjectionRepository(engine)`` opens
+            # its own session; the enclosing WriteGuardSession is NOT
+            # shared) — not the same transaction. Correctness rests on
+            # the W6 IntegrityError absorption (write-once obligation
+            # triple index) + best-effort error handling below, not
+            # shared-transaction atomicity.
+            if instance.status in (
+                InstanceStatus.COMPLETED.value,
+                InstanceStatus.ERROR.value,
+            ):
+                # ── Terminal-row exception (2026-10-31, 9f0ed4f5
+                # incident family — narrow OVERRIDE of the D2.7-LOCKED
+                # decline, user-mandated; see
+                # report_integrity_guard.py and
+                # .agents/shared/planning/terminal-row-status-strand/
+                # design-decision.md): a terminal row with LIVE
+                # direct children must not keep the idempotency skip
+                # from re-arming the row. Historically this guard sat
+                # ABOVE the WAITING_CHILDREN writers below (the bus
+                # gate, the live-children cross-check, the
+                # pending-own-queue gate), so a re-entered completion
+                # drive on an already-terminal row structurally
+                # could not re-arm it — the row stayed COMPLETED
+                # while its tree was live. The exception: terminal
+                # row + live (non-ghost, non-terminal) direct
+                # children → write WAITING_CHILDREN and return
+                # ``deferred_waiting_children`` (same outcome shape
+                # the writers below use — SSE-only, no report
+                # delivery, no terminal event). ALL-terminal trees
+                # keep the skip: a genuinely-completed row stays
+                # completed (pin contract). The recursive live-tree
+                # shape (depth-2+ only) is owned by the pre-stamp
+                # hold upstream in the async caller, which never
+                # reaches this guard on a live tree.
+                #
+                # COUNT failure posture: fail to the SKIP (the guard
+                # is a dedup net, not the completion decision — a
+                # transient DB error must not churn a
+                # genuinely-completed row into WAITING_CHILDREN).
+                # This differs deliberately from the :3516 writer's
+                # fail-CLOSED posture (that gate decides the FIRST
+                # stamp; this one only re-arms).
+                _live_children = 0
+                try:
+                    _live_children_stmt = (
+                        select(func.count())
+                        .select_from(Instance)
+                        .where(Instance.parent_id == instance_id)
+                        .where(
+                            Instance.status.notin_([
+                                InstanceStatus.COMPLETED.value,
+                                InstanceStatus.ERROR.value,
+                                InstanceStatus.TERMINATED.value,
+                                InstanceStatus.FAILED.value,
+                            ])
+                        )
+                        .where(~ChildReportsService._ghost_child_filter())
+                    )
+                    _live_children = int(
+                        session.scalar(_live_children_stmt) or 0
+                    )
+                except Exception as _live_exc:  # noqa: BLE001 — fail to skip
+                    logger.warning(
+                        f"Instance {instance_id[:8]}... terminal-row "
+                        f"liveness COUNT failed ({_live_exc}); keeping "
+                        f"the idempotency skip (fail-to-skip posture)"
+                    )
+                    _live_children = 0
+                if _live_children > 0:
+                    _prior_status = instance.status
+                    _captured_agent_id = instance.agent_id
+                    _captured_parent_id = instance.parent_id
+                    instance.status = InstanceStatus.WAITING_CHILDREN.value
+                    instance.updated_at = datetime.now(timezone.utc).isoformat()
+                    instance.version = (instance.version or 1) + 1
+                    session.commit()
+                    logger.info(
+                        f"Instance {instance_id[:8]}... terminal-row "
+                        f"reactivation: was {_prior_status} with "
+                        f"{_live_children} live child instance(s) — "
+                        f"re-armed to WAITING_CHILDREN instead of "
+                        f"idempotency_skip"
+                    )
+                    return _ChildCompletionDbResult(
+                        outcome="deferred_waiting_children",
+                        instance_id=instance_id,
+                        agent_id=_captured_agent_id,
+                        parent_id=_captured_parent_id,
+                    )
+                logger.info(
+                    f"Instance {instance_id[:8]}... already in terminal "
+                    f"state ({instance.status}), skipping "
+                    f"_process_child_completion_db_sync (idempotency)"
+                )
+                return _ChildCompletionDbResult(
+                    outcome="idempotency_skip",
+                    instance_id=instance_id,
+                    agent_id=instance.agent_id,
+                    parent_id=instance.parent_id,
+                )
+            if instance.status == InstanceStatus.PAUSED.value:
+                # Variant B fix 2 — CHILD-PAUSED shape: persist a
+                # DEFERRED marker so the parent's delivery obligation
+                # survives the pause. Dedicated repository session on
+                # the same engine as the status read (not the same
+                # transaction — see the comment above).
+                logger.info(
+                    f"Instance {instance_id[:8]}... is PAUSED at "
+                    f"completion, persisting DEFERRED marker for parent "
+                    f"{instance.parent_id[:8] if instance.parent_id else 'None'}..."
+                )
+                if instance.parent_id is not None:
+                    try:
+                        ReportInjectionRepository(
+                            self._manager.engine
+                        ).ensure_deferred(
+                            # D1 — the RECIPIENT (the commissioner when a
+                            # fresh committed nudge exists), not the
+                            # structural parent. The marker carries the
+                            # delivery obligation, so it MUST name the
+                            # instance the report will be delivered to —
+                            # otherwise the obligation is stranded on the
+                            # structural parent while the report goes to
+                            # the commissioner (split-brain).
+                            parent_instance_id=(
+                                report_recipient_id or instance.parent_id
+                            ),
+                            child_instance_id=instance_id,
+                            child_message_id=(
+                                completed_message_id or ""
+                            ),
+                            deferred_reason=DEFERRED_REASON_IDEMPOTENCY_SKIP,
+                        )
+                    except Exception as marker_err:
+                        logger.warning(
+                            f"Instance {instance_id[:8]}... DEFERRED "
+                            f"marker write failed for paused-state "
+                            f"idempotency_skip (non-fatal): {marker_err}"
+                        )
+                return _ChildCompletionDbResult(
+                    outcome="deferred_pause",
+                    instance_id=instance_id,
+                    agent_id=instance.agent_id,
+                    parent_id=instance.parent_id,
+                )
+
+            # Not a child? Instance completed (no parent to send report to)
+            # Check if we have active children - if so, wait for them before completing.
+            #
+            # Phase 5: bus is the SOLE completion authority.
+            if instance.parent_id is None:
+                from .dependency_bus import get_dependency_bus
+                bus = get_dependency_bus()
+                if bus is not None:
+                    # Phase 5: bus is the SOLE completion authority. The
+                    # ``_sync`` variant runs the COUNT(*) directly on
+                    # the helper's session (no event-loop hop, safe to
+                    # call from this worker-thread sync function).
+                    pending_children = bus.count_pending_for_target_sync(instance_id)
+                else:
+                    # ─── A8: HARD ERROR (not graceful degradation) ─────────
+                    # Bus is None is an INVALID state. Mirrors the
+                    # A8 hard error at site 2.
+                    raise RuntimeError(
+                        f"DependencyBus is not initialized for instance="
+                        f"{instance_id[:8]}...; bus must be initialized "
+                        f"(Phase 5)."
+                    )
+                if pending_children > 0:
+                    # Has children still running — defer completion.
+                    # Phase 4: do NOT transition status to WAITING_CHILDREN;
+                    # the bus is the authoritative source of pending
+                    # children and instances stay PROCESSING while
+                    # children run. The ``waiting_children`` SSE event
+                    # is kept for watcher compatibility (display only).
+                    logger.info(
+                        f"Instance {instance_id[:8]}... completed message but waiting for "
+                        f"{pending_children} children (bus={bus is not None}), deferring completion"
+                    )
+                    # SSE side effect is dispatched by the async caller.
+                    return _ChildCompletionDbResult(
+                        outcome="deferred_waiting_children",
+                        instance_id=instance_id,
+                        agent_id=instance.agent_id,
+                        parent_id=None,
+                    )
+
+                # Pending-task guard (TOCTOU fix, 2026-07-22) — symmetric to
+                # the non-root guard below. ``pending_children == 0`` is
+                # necessary but not sufficient: a root instance can end a
+                # turn with zero pending children while it still has a
+                # PENDING task queued (e.g. a ``PROCESS_REPORT`` turn from
+                # a child that just reported). Marking it COMPLETED now
+                # would be premature and the idempotency guard would later
+                # drop the real final completion. Defer until the queued
+                # turn drains. See the non-root guard for the full rationale.
+                pending_tasks = self._count_actionable_pending_tasks(session, instance_id)
+                if pending_tasks > 0:
+                    logger.info(
+                        f"Instance {instance_id[:8]}... completed message "
+                        f"with 0 pending children but {pending_tasks} "
+                        f"pending task(s), deferring completion "
+                        f"(pending-tasks guard)"
+                    )
+                    return _ChildCompletionDbResult(
+                        outcome="deferred_waiting_children",
+                        instance_id=instance_id,
+                        agent_id=instance.agent_id,
+                        parent_id=None,
+                    )
+
+                # Phase 5 (Cascade Unification — Fix A2): root completion
+                # is NOT a child response, so we MUST NOT call any
+                # ``resolve_response`` hook here (a self-referential
+                # key would never match any registered watcher and
+                # would silently no-op). Instead, we use
+                # ``bus.count_pending_for_target_sync(...) == 0`` as
+                # a read-only check (Condition 1): are all child
+                # responses received?
+                # The bus DB is the authoritative source.
+                #
+                # Note: ``bus`` is reused from the earlier lookup above
+                # (it remains in scope after the ``return`` guard at
+                # the end of the previous block).
+                if bus is not None:
+                    all_children_done = bus.count_pending_for_target_sync(instance_id) == 0
+                    if not all_children_done:
+                        # Bus still has pending watchers for this root.
+                        #
+                        # Phase 4: do NOT set status to WAITING_CHILDREN
+                        # — instances stay PROCESSING while children run.
+                        # The ``waiting_children`` SSE event is kept below
+                        # for watcher compatibility (display only).
+                        logger.info(
+                            f"Instance {instance_id[:8]}... bus has "
+                            f"unresolved child responses, status=PROCESSING (bus tracks pending)"
+                        )
+                        # SSE side effect is dispatched by the async caller.
+                        return _ChildCompletionDbResult(
+                            outcome="deferred_waiting_children",
+                            instance_id=instance_id,
+                            agent_id=instance.agent_id,
+                            parent_id=None,
+                        )
+
+                # ─── Bus gate (premature-completion fix) ───────────
+                # The bus DB is the authoritative source of pending-
+                # children truth — we MUST consult it here, before
+                # falling through to COMPLETED, or the root instance
+                # will be marked COMPLETED while a child is still
+                # working (the exact premature-completion bug the bus
+                # was designed to prevent).
+                #
+                # C2 fix (TOCTOU hardening, 2026-06-22): inline the
+                # COUNT query directly on the WriteGuardSession's
+                # ``session`` object so the COUNT and the in-session
+                # status UPDATE below share the SAME transaction.
+                # The previous helper
+                # (``_bus_count_pending_for_target_sync``) opened its
+                # own short-lived Session via the bus repository,
+                # creating transaction A — while the UPDATE below
+                # commits in transaction B (the WriteGuardSession).
+                # A concurrent ``bus.watch()`` INSERT on a different
+                # connection could commit between A and B,
+                # re-opening the premature-completion window this
+                # gate exists to close. With the inline query, the
+                # COUNT and UPDATE are atomic at the DB level (on
+                # SQLite full write lock; on PostgreSQL READ
+                # COMMITTED within a single transaction).
+                #
+                # The query is the same dialect-portable COUNT(*)
+                # the helper uses, but executed on the existing
+                # ``session`` so it joins this transaction. No try/
+                # except — exceptions propagate to the existing
+                # W3 fail-safe path in the async caller
+                # (``_process_child_completion_and_notify_parent``).
+                # This is fail-CLOSED (a transient DB failure aborts
+                # the transition, not silently passes the gate).
+                #
+                # B fix (2026-06-22): the inline query must NOT
+                # catch exceptions — see MEDIUM B in the review.
+                # Catching and returning 0 would silently pass the
+                # gate, reintroducing the premature-completion bug
+                # on transient DB errors.
+                #
+                # The per-parent CM lock from Fix A (above the
+                # ``asyncio.to_thread`` call) serializes this gate
+                # against ``bus.watch()`` — a watch INSERT that
+                # commits inside the lock is guaranteed visible to
+                # the COUNT here, regardless of who wins the race.
+                #
+                # Defensive wiring check: only consult the bus when
+                # the bus singleton is wired. When the singleton is
+                # None (testing, missing init, config drift), the
+                # gate is dormant — same semantics as the original
+                # ``_bus_count_pending_for_target_sync`` helper
+                # before the C2 inline refactor. Without this guard,
+                # a test or config that doesn't wire the bus
+                # singleton would still execute the inline COUNT
+                # against an empty table — usually harmless (returns
+                # 0), but in degraded states (mock MagicMock
+                # truthiness, partial migrations) it could defer a
+                # completion that should proceed.
+                from .dependency_bus import get_dependency_bus as _get_bus
+                if _get_bus() is not None:
+                    # D2.8 (LOCKED) defense-in-depth gate ordering:
+                    # bus (fail-CLOSED, same-tx — THIS gate) > tasks
+                    # (fail-OPEN, checked above) > (b) declared-waiting
+                    # (fail-OPEN, LAST — B.S.6/B.S.7). The (b) LOG attach
+                    # at the COMPLETED stamp below runs ONLY when this
+                    # gate and the tasks gate both reported zero.
+                    _bus_pending_stmt = (
+                        select(func.count())
+                        .select_from(DependencyWatcher)
+                        .where(DependencyWatcher.target_instance_id == instance_id)
+                        .where(
+                            DependencyWatcher.state
+                            == DependencyWatcherState.PENDING.value
+                        )
+                    )
+                    bus_pending = int(session.scalar(_bus_pending_stmt) or 0)
+                    if bus_pending > 0:
+                        # Bug fix (2026-06-22): transition
+                        # ``instance.status`` to ``WAITING_CHILDREN``
+                        # so the frontend reflects the "leader is
+                        # waiting for children" state on the bus
+                        # path. Previously the status stayed at
+                        # whatever it was (typically ``running``)
+                        # so the UI showed ``running`` even though
+                        # no LLM call was in flight. The
+                        # bus_pending count is the authoritative
+                        # signal that real pending children exist;
+                        # the legacy ``_has_no_active_message_job``
+                        # carve-out was removed in Phase 5 (no
+                        # MESSAGE ``JobItem`` rows exist post-D13).
+                        instance.status = InstanceStatus.WAITING_CHILDREN.value
+                        instance.updated_at = datetime.now(timezone.utc).isoformat()
+                        instance.version = (instance.version or 1) + 1
+                        session.commit()
+                        logger.info(
+                            f"Instance {instance_id[:8]}... CM says "
+                            f"complete but bus has {bus_pending} "
+                            f"PENDING watchers, "
+                            f"deferring completion, "
+                            f"status=WAITING_CHILDREN"
+                        )
+                        # SSE side effect is dispatched by the
+                        # async caller.
+                        return _ChildCompletionDbResult(
+                            outcome="deferred_waiting_children",
+                            instance_id=instance_id,
+                            agent_id=instance.agent_id,
+                            parent_id=None,
+                        )
+
+                # Defense-in-depth: live-children cross-check (Inc
+                # 2026-08-02 "leader completed while tester child still
+                # running"). The bus gate above trusts
+                # ``count_pending_for_target_sync == 0`` as the
+                # authoritative "all children done" signal. But the bus
+                # ``dependency_watchers`` rows can be moved out of PENDING
+                # by silent raw-SQL writers (e.g. the ``reconcile_turn_mirror``
+                # cancel guard in ``daemon/repositories/task/repository.py``),
+                # which would zero the bus count while a child instance is
+                # genuinely still working. This second gate consults the
+                # ``instances`` table directly: a root with any
+                # non-terminal child must NEVER reach COMPLETED, regardless
+                # of what the bus reports.
+                #
+                # Same-transaction guarantee: this COUNT runs on the
+                # existing ``WriteGuardSession`` / ``session`` so it shares
+                # the SAME transaction as the bus COUNT above and the
+                # ``Instance`` status UPDATE below — closing the TOCTOU
+                # window between the read and the write (mirrors the C2
+                # inline-bus-COUNT pattern at :1417-1428). A transient
+                # failure propagates to the existing W3 fail-safe path
+                # (fail-CLOSED) rather than silently passing the gate.
+                live_children_stmt = (
+                    select(func.count())
+                    .select_from(Instance)
+                    .where(Instance.parent_id == instance_id)
+                    .where(
+                        Instance.status.notin_([
+                            InstanceStatus.COMPLETED.value,
+                            InstanceStatus.ERROR.value,
+                            InstanceStatus.TERMINATED.value,
+                            InstanceStatus.FAILED.value,
+                        ])
+                    )
+                    .where(~ChildReportsService._ghost_child_filter())
+                )
+                live_children = int(session.scalar(live_children_stmt) or 0)
+                if live_children > 0:
+                    instance.status = InstanceStatus.WAITING_CHILDREN.value
+                    instance.updated_at = datetime.now(timezone.utc).isoformat()
+                    instance.version = (instance.version or 1) + 1
+                    session.commit()
+                    logger.info(
+                        f"Instance {instance_id[:8]}... bus reports 0 "
+                        f"pending but {live_children} live child instance(s) "
+                        f"found, deferring completion, "
+                        f"status=WAITING_CHILDREN"
+                    )
+                    return _ChildCompletionDbResult(
+                        outcome="deferred_waiting_children",
+                        instance_id=instance_id,
+                        agent_id=instance.agent_id,
+                        parent_id=None,
+                    )
+
+                # Check pending messages before completing.
+                # Exclude the just-completed message by ID (mirrors
+                # _should_send_completion_report at line 270-279) to avoid the
+                # double-count hazard when message_queue.complete() has not
+                # committed yet.
+                #
+                # Phase 3: this ``SELECT COUNT(*)`` is RETAINED. It checks
+                # a different concern (root's OWN queue pending work —
+                # messages from external sources like HTTP, scheduler),
+                # not child-response correlation. Per ADR-012 and the plan,
+                # this is NOT subject to Race #3.
+                #
+                # Phase 4: WAITING_CHILDREN is DEPRECATED — display/log only.
+                #
+                # Phase 2 (Bug B): this site is the **1 reachable
+                # production parent-completion guard** (the 3 dead-code
+                # fallbacks at ``child_reports.py:863`` / ``:2058`` /
+                # ``error_reporting.py:270`` are gated behind bus-active
+                # early-returns and are dead code in production). The
+                # ``pending_count`` uses the hardened finalizer variant
+                # ``finalizer_counts_as_pending`` (see
+                # ``daemon/repositories/message_queue/predicates.py``); the
+                # base predicate ``message_queue_counts_as_pending`` only
+                # lives in the dead-code fallbacks below (bus-active
+                # early-return gated).
+                # The base status filter (READY/PROCESSING/RETRYING) is
+                # unchanged; the predicate handles the terminal/live
+                # decision per row using ``work_id`` as the identity
+                # key. This closes the production incident where two
+                # ``completion_report`` rows were orphaned at
+                # ``processing`` with terminal backing Tasks and the
+                # parent stayed stuck at ``WAITING_CHILDREN`` forever.
+                from ..repositories.message_queue.predicates import (
+                    finalizer_counts_as_pending,
+                )
+                # ``.scalars().all()`` ensures we get MessageQueue
+                # instances (not ``Row`` objects) on every dialect —
+                # ``select(MessageQueue).all()`` is documented but the
+                # ``Row``-object fallback was observed in tests under
+                # ``WriteGuardSession`` (the proxy's ``__getattr__`` on
+                # ``exec`` may bypass SQLModel's row-mapping path on
+                # some versions). ``scalars()`` is the supported API.
+                _candidate_rows = session.exec(
+                    select(MessageQueue)
+                    .where(MessageQueue.instance_id == instance_id)
+                    .where(MessageQueue.message_id != completed_message_id)
+                    .where(MessageQueue.status.in_([
+                        MessageStatus.READY.value,
+                        MessageStatus.PROCESSING.value,
+                        MessageStatus.RETRYING.value,
+                    ]))
+                ).scalars().all()
+                # Stage-0 strand wedge fix (2026-09-17, kept 2026-09-18):
+                # the hardened finalizer variant (``finalizer_counts_as_pending``)
+                # is the predicate this site consults. Refinement 1 (the
+                # task-less ``child_report_check:`` advisory exclusion) is now
+                # effectively dead — no advisory rows are minted after
+                # D-CTD-7 — but the predicate keeps it as defense-in-depth for
+                # any future task-less row producer. Refinement 2 (unknown
+                # task-less READY rows count conservatively with a WARNING)
+                # is untouched and remains the live hardening.
+                pending_count = sum(
+                    1
+                    for _row in _candidate_rows
+                    if finalizer_counts_as_pending(_row, self._manager.engine)
+                )
+                del _candidate_rows  # scope hygiene
+
+                # WHY ROOT GETS WAITING_CHILDREN BUT NON-ROOT DOES NOT:
+                # This branch is reached only when ``instance.parent_id is None``
+                # (a root instance). The semantic concern here is the root's OWN
+                # message queue — messages from external sources (HTTP, scheduler,
+                # direct user input) that are not child-response correlations.
+                # The CM tracks parent→child correlation; it does NOT track a
+                # root's own-queue work. So we still set WAITING_CHILDREN to
+                # signal "this root has queued work to process" even though
+                # there is no child correlation pending.
+                #
+                # Non-root parents (handled in ``_update_parent_on_child_complete``
+                # at line ~565) are gated by the bus pending-count check — they
+                # stay PROCESSING because the bus tracks their pending children.
+                # They never reach the SELECT COUNT branch
+                # for their own queue because the bus path keeps the parent in
+                # PROCESSING until the bus reports no pending children.
+                #
+                # The root carve-out is intentional and aligned with Site 1B
+                # (ADR-012) two-condition check: root completion requires BOTH
+                # no pending children AND no own-queue messages.
+                if pending_count > 0:
+                    # Single pending_count guard is sufficient. Do NOT
+                    # transition to COMPLETED — there is queued work that
+                    # the worker must still process.
+                    #
+                    # Phase 4: WAITING_CHILDREN status set is retained
+                    # for graceful-degradation watchers and FIFO
+                    # carve-out SQL compatibility (display only).
+                    #
+                    # Phase 5: the legacy
+                    # ``_has_no_active_message_job`` carve-out check
+                    # was removed. After D13 there are no MESSAGE
+                    # ``JobItem`` rows, so the guard was a permanent
+                    # no-op. The own-queue ``pending_count`` is the
+                    # authoritative signal that real queued work
+                    # exists.
+                    instance.status = InstanceStatus.WAITING_CHILDREN.value
+                    session.commit()
+                    logger.info(
+                        f"Instance {instance_id[:8]}... has {pending_count} pending "
+                        f"messages, status=WAITING_CHILDREN (deprecated)"
+                    )
+                    # SSE side effect is dispatched by the async caller.
+                    return _ChildCompletionDbResult(
+                        outcome="root_waiting_children",
+                        instance_id=instance_id,
+                        agent_id=instance.agent_id,
+                        parent_id=None,
+                    )
+
+                # No children, no pending messages - safe to complete
+                logger.info(f"Instance {instance_id[:8]}... no parent, skipping notification")
+
+                # No children, no pending messages - safe to complete
+                logger.info(f"Instance {instance_id[:8]}... completed (no parent, no children), status=COMPLETED")
+
+                # Defense-in-depth: if this instance became PAUSED during processing
+                # (e.g. question() tool), do NOT overwrite with COMPLETED.
+                # The primary cross-session race protection is the pipeline's
+                # _is_instance_paused() fresh-DB check before _check_child_completion.
+                if instance.status == InstanceStatus.PAUSED.value:
+                    logger.info(
+                        f"Instance {instance_id[:8]}... is PAUSED at root-completion "
+                        f"write, skipping COMPLETED transition (idempotency)"
+                    )
+                    return _ChildCompletionDbResult(
+                        outcome="idempotency_skip",
+                        instance_id=instance_id,
+                        agent_id=instance.agent_id,
+                        parent_id=None,
+                    )
+
+                # B.S.1-ii (stage ii, LOG ONLY) / B.S.1-iii (stage iii,
+                # flag-gated): (b) declared-waiting predicate-attached
+                # log at the root-COMPLETED stamp. D2.8 (LOCKED)
+                # ordering: bus (fail-CLOSED, same-tx) > tasks
+                # (fail-OPEN) > (b) (fail-OPEN, LAST) — this line
+                # is reached ONLY when every prior gate above reported
+                # zero (both-counts-zero bound, B.S.6/B.S.7). Fail-OPEN:
+                # the helper never raises into the completion path.
+                # Stage iii: the SAME evaluation (never re-read) is
+                # captured and handed to the post-commit enforcement
+                # via the result payload — the notice itself is
+                # enqueued ONLY after the stamp below commits, and
+                # ONLY when the kill-switch is ON.
+                _b_violation_report = log_declared_waiting_violations(
+                    session,
+                    instance_id,
+                    context_tag="child_reports.root_completion",
+                )
+                _clear_b_notice_if_clean(instance_id, _b_violation_report)
+                # ── FP4 (2026-10-03) — L1: root COMPLETED stamp guard
+                # ── WAITING_CHILDREN inclusion + discharge escape.
+                #
+                # Before this fix the where-not-in set was the canonical
+                # {PAUSED, COMPLETED, ERROR} terminal-and-paused set, but
+                # ``WAITING_CHILDREN`` was NOT in the set. Two failure
+                # modes:
+                #
+                #   (a) Premature terminal: a parent in WAITING_CHILDREN
+                #       whose children are still running could be
+                #       silently over-stamped to COMPLETED because the
+                #       ``UPDATE ... SET status='completed' WHERE status
+                #       NOT IN (paused, completed, error)`` matched rows
+                #       in WAITING_CHILDREN (the incident class for
+                #       c264aa8a + 3826ab28).
+                #
+                #   (b) Eternal-waiting wedge: a parent that reached the
+                #       stamp with status=WAITING_CHILDREN but where the
+                #       sync gates (bus, pending_count, pending_tasks,
+                #       live_children) have ALL passed must still be
+                #       allowed to terminal — the gate-cleared
+                #       WAITING_CHILDREN is a true terminal candidate.
+                #
+                # The fix: add ``WAITING_CHILDREN`` to the where-not-in
+                # set (closes the (a) hole) AND add an explicit
+                # WAITING_CHILDREN → RUNNING discharge UPDATE before the
+                # stamp (the "discharge escape" that closes the (b)
+                # wedge). The discharge is gated on the sync gates
+                # having passed — the only path that reaches this point
+                # is the post-gate-cleanup line, so the discharge only
+                # fires for legitimate terminal-cleared WAITING_CHILDREN
+                # instances.
+                #
+                # Race discipline (CAS): both the discharge UPDATE and
+                # the stamp UPDATE are guarded by where-clauses on the
+                # expected prior status. A concurrent pause cascade
+                # that commits PAUSED between the discharge and the
+                # stamp makes the stamp's where-not-in false, the
+                # stamp's rowcount=0, and the stamp returns
+                # ``idempotency_skip`` (the eternal-waiting wedge class
+                # is preserved as a defensive default). The L2 / L2b
+                # legs below are the re-evaluation triggers that
+                # re-fire the sync helper on the next message-completed
+                # signal — the discharge runs again on the next pass.
+                _now = now_utc()
+                now_iso = _now.isoformat()
+                now_dt = _now.replace(tzinfo=None)
+                # FP4 L1 discharge: WAITING_CHILDREN → RUNNING, gated on
+                # the instance being IN WAITING_CHILDREN at the time of
+                # the discharge UPDATE. Atomic CAS via where-clause;
+                # rowcount==0 means the instance was concurrently
+                # transitioned elsewhere (e.g. PAUSED by a question()
+                # cascade) and we must NOT proceed with the stamp.
+                if instance.status == InstanceStatus.WAITING_CHILDREN.value:
+                    _discharge_result = session.execute(
+                        sa_update(Instance)
+                        .where(Instance.instance_id == instance_id)
+                        .where(Instance.status == InstanceStatus.WAITING_CHILDREN.value)
+                        .values(
+                            status=InstanceStatus.RUNNING.value,
+                            updated_at=now_iso,
+                            last_activity_at=now_dt,
+                            version=Instance.version + 1,
+                        )
+                    )
+                    if _discharge_result.rowcount > 0:
+                        logger.info(
+                            "FP4 L1 discharge: instance %s... "
+                            "WAITING_CHILDREN → RUNNING (sync gates "
+                            "cleared, root-completion stamp proceeds)",
+                            instance_id[:8],
+                        )
+                        # Bump in-memory version so the stamp's
+                        # ``version + 1`` reflects the post-discharge
+                        # baseline.
+                        instance.version = (instance.version or 1) + 1
+                    # If rowcount==0, a concurrent writer moved the
+                    # row out of WAITING_CHILDREN; fall through to the
+                    # stamp which will skip via where-not-in (TOCTOU
+                    # defense — same as PAUSED/COMPLETED/ERROR).
+
+                # Defense-in-depth atomic guard: use SQLAlchemy Core
+                # ``UPDATE ... WHERE status NOT IN (...)`` so a pause
+                # cascade that commits PAUSED between the ``session.get``
+                # above and this write cannot be silently overwritten.
+                # The where-not-in set is the canonical {PAUSED, COMPLETED,
+                # ERROR, WAITING_CHILDREN} terminal-and-paused set; rowcount == 0 means
+                # another writer (e.g. question() pause cascade) already
+                # finalized the row and we must skip the rest of the
+                # completion logic for this path.
+                # µs-twin mint (tz fix): ONE aware instant; the TEXT
+                # twin keeps the aware-ISO format, the naive-column
+                # twin carries naive-UTC digits of the SAME instant
+                # (the µs-match between the twins is a D7 backfill
+                # detection heuristic and must survive).
+                update_result = session.execute(
+                    sa_update(Instance)
+                    .where(Instance.instance_id == instance_id)
+                    .where(
+                        Instance.status.notin_([
+                            InstanceStatus.PAUSED.value,
+                            InstanceStatus.COMPLETED.value,
+                            InstanceStatus.ERROR.value,
+                            InstanceStatus.WAITING_CHILDREN.value,
+                        ])
+                    )
+                    .values(
+                        status=InstanceStatus.COMPLETED.value,
+                        updated_at=now_iso,
+                        last_activity_at=now_dt,
+                        # M1b (2026-10-03, report-delivery-bug-family):
+                        # restore SQL-side ``Instance.version + 1`` —
+                        # this site was regressed to a Python-side
+                        # constant ``instance.version + 1`` (lowercase
+                        # ``i``), which evaluates the in-memory ORM
+                        # attribute and stamps the LITERAL value into
+                        # the SET clause (``SET version = 42`` for
+                        # example). The capital-``I`` ``Instance.version``
+                        # form is a SQLAlchemy column expression that
+                        # compiles to ``SET version = version + 1`` —
+                        # the correct post-discharge, race-safe
+                        # increment. Do NOT add a 5th occurrence of
+                        # the python-side pattern.
+                        version=Instance.version + 1,
+                    )
+                )
+                session.commit()
+                if update_result.rowcount == 0:
+                    logger.warning(
+                        f"Instance {instance_id[:8]}... root-completion "
+                        f"UPDATE matched 0 rows (status already in "
+                        f"{{paused,completed,error,waiting_children}}); "
+                        f"skipping completion side effects (TOCTOU defense)"
+                    )
+                    return _ChildCompletionDbResult(
+                        outcome="idempotency_skip",
+                        instance_id=instance_id,
+                        agent_id=instance.agent_id,
+                        parent_id=None,
+                    )
+
+                # Post-commit side effects (SSE, CompletionRegistry, lifecycle, title)
+                # are dispatched by the async caller.
+                return _ChildCompletionDbResult(
+                    outcome="root_completed",
+                    instance_id=instance_id,
+                    agent_id=instance.agent_id,
+                    parent_id=None,
+                    # B.S.1-iii: handed off ONLY when the stamp actually
+                    # proceeded (rowcount > 0 — the idempotency-skip path
+                    # above returns without it), so the notice fires
+                    # exactly once per completion event.
+                    b_violation_report=_b_violation_report,
+                )
+            
+            # Idempotency checks — inlined from _should_send_completion_report
+            # (no await needed; runs on worker thread inside WriteGuardSession).
+            #
+            # Phase 1 (pause-report-recovery Variant B fix 1): the live
+            # ``pending_messages_exist`` skip path now persists a DEFERRED
+            # marker on ``report_injections`` so the parent's eventual
+            # delivery obligation survives pause/cancel/recovery. The
+            # marker write commits on a DEDICATED repository session
+            # over the same engine as the skip decision
+            # (``ReportInjectionRepository(engine)`` opens its own
+            # session; the enclosing WriteGuardSession is NOT shared)
+            # — not the same transaction. Correctness rests on the W6
+            # IntegrityError absorption (write-once obligation triple
+            # index) + best-effort error handling, not
+            # shared-transaction atomicity. The
+            # inline check is the live reachable production guard — the
+            # 665-695 helper is dead (tests only) and kept convergent via
+            # a deprecation comment.
+            #
+            # N1 (cycle-2 patch): load ``inst_check`` BEFORE the if/else
+            # split (single load, used by both branches). The W5 root
+            # guard (``parent_id is None`` → return) is BEFORE
+            # ``ensure_deferred`` (not else-only) so a root instance
+            # cannot crash the marker writer. ID orientation:
+            # ``parent_instance_id = inst_check.parent_id``,
+            # ``child_instance_id = instance_id``,
+            # ``child_message_id = completed_message_id``,
+            # ``reason = DEFERRED_REASON_PENDING_MESSAGES``.
+            if completed_message_id is None:
+                pending_count = session.exec(
+                    select(func.count())
+                    .select_from(MessageQueue)
+                    .where(MessageQueue.instance_id == instance_id)
+                    .where(MessageQueue.status.in_([
+                        MessageStatus.PROCESSING.value,
+                        MessageStatus.RETRYING.value,
+                    ]))
+                ).scalar_one()
+                should_send = pending_count > 0
+                skip_reason = "no_completed_message_id"
+            else:
+                pending_count = session.exec(
+                    select(func.count())
+                    .select_from(MessageQueue)
+                    .where(MessageQueue.instance_id == instance_id)
+                    .where(MessageQueue.message_id != completed_message_id)
+                    .where(MessageQueue.status.in_([
+                        MessageStatus.PROCESSING.value,
+                        MessageStatus.RETRYING.value,
+                    ]))
+                ).scalar_one()
+                # N1 (cycle-2 patch): load ``inst_check`` BEFORE the
+                # if/else so both branches share a single load.
+                inst_check = session.get(Instance, instance_id)
+                if pending_count > 0:
+                    should_send = False
+                    skip_reason = "pending_messages_exist"
+                    # Variant B fix 1 (live site): persist a DEFERRED
+                    # marker so the parent's delivery obligation
+                    # survives the skip. The sibling completion is
+                    # the natural re-entry (no inline re-queue here).
+                    # ROOT GUARD (W5): skip the marker for root
+                    # instances (parent_id is None) — they have no
+                    # parent and therefore no delivery obligation.
+                    if (
+                        inst_check is not None
+                        and inst_check.parent_id is not None
+                    ):
+                        try:
+                            ReportInjectionRepository(
+                                self._manager.engine
+                            ).ensure_deferred(
+                                # D1 — the RECIPIENT, not the structural
+                                # parent (the marker carries the delivery
+                                # obligation; it must name the instance the
+                                # report will be delivered to).
+                                parent_instance_id=(
+                                    report_recipient_id
+                                    or inst_check.parent_id
+                                ),
+                                child_instance_id=instance_id,
+                                child_message_id=completed_message_id,
+                                deferred_reason=DEFERRED_REASON_PENDING_MESSAGES,
+                            )
+                        except Exception as marker_err:
+                            # Marker write is best-effort: the natural
+                            # sibling completion is the re-entry path;
+                            # a failure here is logged but does not
+                            # block the existing skip decision.
+                            logger.warning(
+                                f"Instance {instance_id[:8]}... DEFERRED "
+                                f"marker write failed for "
+                                f"pending_messages_exist skip "
+                                f"(non-fatal): {marker_err}"
+                            )
+                else:
+                    if inst_check is None:
+                        should_send = False
+                        skip_reason = "instance_not_found"
+                    elif inst_check.parent_id is None:
+                        should_send = False
+                        skip_reason = "no_parent_id"
+                    else:
+                        existing_report = session.exec(
+                            select(MessageQueue)
+                            .where(
+                                MessageQueue.instance_id
+                                == (report_recipient_id or inst_check.parent_id)
+                            )
+                            .where(MessageQueue.source == f"internal_report:{instance_id}:{completed_message_id}")
+                            .where(MessageQueue.status.in_([
+                                MessageStatus.READY.value,
+                                MessageStatus.PROCESSING.value,
+                                MessageStatus.COMPLETED.value,
+                            ]))
+                        ).first()
+                        if existing_report is not None:
+                            should_send = False
+                            skip_reason = "idempotency_skip"
+                        else:
+                            should_send = True
+                            skip_reason = "all_checks_passed"
+            
+            if not should_send:
+                logger.info(f"Instance {instance_id[:8]}... completion report skipped: reason={skip_reason}")
+                return _ChildCompletionDbResult(
+                    outcome="idempotency_skip",
+                    instance_id=instance_id,
+                    agent_id=instance.agent_id,
+                    parent_id=instance.parent_id,
+                )
+
+            # Check if this is a tool invocation (explore/experience)
+            # If so, skip parent notification but still update status and signal CompletionRegistry
+            if instance.instance_metadata and instance.instance_metadata.get("invoked_as_tool", False):
+                logger.info(
+                    f"Instance {instance_id[:8]}... completed (tool invocation, skipping parent report)"
+                )
+                logger.info(f"Instance {instance_id[:8]}... is tool invocation, skipping parent notification")
+
+                # Capture parent_id before any further writes; the ORM
+                # ``Instance`` reference stays valid through commit
+                # because the WriteGuardSession owns this session.
+                parent_id = instance.parent_id
+
+                # Defense-in-depth atomic guard: use SQLAlchemy Core
+                # ``UPDATE ... WHERE status NOT IN (...)`` so a pause
+                # cascade that commits PAUSED between the ``session.get``
+                # above and this write cannot be silently overwritten.
+                # rowcount == 0 means another writer already finalized
+                # the row and we must skip the rest of the completion
+                # logic for this path.
+                # µs-twin mint (tz fix): ONE aware instant; the TEXT
+                # twin keeps the aware-ISO format, the naive-column
+                # twin carries naive-UTC digits of the SAME instant
+                # (the µs-match between the twins is a D7 backfill
+                # detection heuristic and must survive).
+                _now = now_utc()
+                now_iso = _now.isoformat()
+                now_dt = _now.replace(tzinfo=None)
+                update_result = session.execute(
+                    sa_update(Instance)
+                    .where(Instance.instance_id == instance_id)
+                    .where(
+                        Instance.status.notin_([
+                            InstanceStatus.PAUSED.value,
+                            InstanceStatus.COMPLETED.value,
+                            InstanceStatus.ERROR.value,
+                        ])
+                    )
+                    .values(
+                        status=InstanceStatus.COMPLETED.value,
+                        updated_at=now_iso,
+                        last_activity_at=now_dt,
+                        version=Instance.version + 1,
+                    )
+                )
+                session.commit()
+                if update_result.rowcount == 0:
+                    logger.warning(
+                        f"Instance {instance_id[:8]}... tool-invocation "
+                        f"UPDATE matched 0 rows (status already in "
+                        f"{{paused,completed,error}}); skipping "
+                        f"completion side effects (TOCTOU defense)"
+                    )
+                    return _ChildCompletionDbResult(
+                        outcome="idempotency_skip",
+                        instance_id=instance_id,
+                        agent_id=instance.agent_id,
+                        parent_id=parent_id,
+                    )
+
+                # Post-commit side effects are dispatched by the async caller.
+                return _ChildCompletionDbResult(
+                    outcome="tool_invocation_completed",
+                    instance_id=instance_id,
+                    agent_id=instance.agent_id,
+                    parent_id=parent_id,
+                )
+
+            # ─── Wanderer active-children guard ────────────────────────────
+            # Symmetric to the root-instance ``deferred_waiting_children``
+            # branch above (lines ~1146-1163): if this non-root instance
+            # still has children with non-terminal status, defer the
+            # completion_report emission. Without this guard, a non-root
+            # parent like Wanderer emits a completion_report to its
+            # parent (leader) on every graph turn while its own spawned
+            # children are still running — corrupting the leader's
+            # understanding of child completion and risking premature
+            # finalization.
+            #
+            # Source of truth: ``instances.parent_id`` (the permanent
+            # record), NOT the bus ``DependencyWatcher`` counter. The bus
+            # under-counts because ``spawn_instance`` does not register
+            # bus watchers for every spawn — using it here would let
+            # the defer gate leak. ``instances.parent_id`` is the
+            # source-of-truth working set the cascade code already
+            # maintains (insert on spawn, status transitions on
+            # completion/error).
+            #
+            # The guard checks whether the just-completed instance
+            # ITSELF has non-terminal children (rows whose
+            # ``parent_id == instance_id``). When Wanderer emits its own
+            # completion_report to leader, Wanderer's spawned coders
+            # are rows with ``parent_id == wanderer_id``. Without this
+            # check, Wanderer would emit a completion_report on every
+            # graph turn even while its coders are still running.
+            #
+            # Status filter: ``status NOT IN (COMPLETED, ERROR,
+            # TERMINATED, FAILED)`` — the canonical terminal set
+            # (``daemon.services.job_queue_service.TERMINAL_STATUSES``).
+            # Without TERMINATED / FAILED here, a single TERMINATED or
+            # FAILED sibling would be counted as active and permanently
+            # wedge the parent (it would never emit a completion_report).
+            # These states are terminal — the child will not resume
+            # normal work, so the parent must not wait for it. Mirrors
+            # the cascade completion check (Fix 1).
+            #
+            # Note: this is the ONLY Fix-1 site we expand. Fix 2's
+            # idempotency set (``child_reports.py:1144-1147``) and the
+            # parent-cascade check (``child_reports.py:1682-1684``) have
+            # the same COMPLETED/ERROR-only omission but that is
+            # PRE-EXISTING and out of scope for this PR — leaving them
+            # untouched keeps the diff focused.
+            active_children = session.exec(
+                select(func.count())
+                .select_from(Instance)
+                .where(Instance.parent_id == instance_id)
+                .where(Instance.instance_id != instance_id)
+                .where(
+                    Instance.status.not_in(TERMINAL_STATUSES)
+                )
+                .where(~self._ghost_child_filter())
+            ).scalar_one()
+            # ─── Pending-task guard (TOCTOU fix, 2026-07-22) ──────────────
+            # ``active_children == 0`` is necessary but NOT sufficient for
+            # true completion: a non-root parent can end a turn with zero
+            # active children while it STILL has queued work — a PENDING
+            # task (e.g. a ``PROCESS_REPORT`` turn from a child that just
+            # reported) that will run next and spawn more children. Without
+            # this check, the parent is prematurely marked COMPLETED and
+            # reports to its own parent; when the queued task then runs and
+            # the parent truly finishes, the idempotency guard
+            # ("already in terminal state") silently drops the real final
+            # report. Reproduced with the tester (777eff96): turn 9287 ended
+            # at 07:28:50 with 0 children while task 9288 was still PENDING
+            # (it later spawned worker 78b04db6); the premature completion
+            # at 07:28:50 then suppressed the real completion at 07:32:58.
+            #
+            # Count PENDING tasks for this instance only. The CURRENT turn's
+            # task is RUNNING (the task processor claims pending→running
+            # before driving the graph, and only marks it COMPLETED after
+            # this helper returns), so it is excluded by the status filter.
+            # The per-instance serialization guard (one RUNNING task per
+            # instance) guarantees no second RUNNING task exists, so every
+            # non-current queued task is PENDING and is counted here.
+            #
+            # CRITICAL: a pending ``process_report`` whose report was
+            # already delivered via the report-injection hot path
+            # (INJECTED) is a NO-OP (the task processor skips it) and is
+            # EXCLUDED by ``_count_actionable_pending_tasks`` — counting
+            # it would defer completion forever because the skipped task
+            # never produces a turn to re-evaluate completion.
+            pending_tasks = self._count_actionable_pending_tasks(session, instance_id)
+            if active_children > 0 or pending_tasks > 0:
+                # The just-completed instance (e.g., Wanderer / a tester)
+                # still has non-terminal children OR queued turns of its
+                # own. Mirror the root branch's defer outcome — no status
+                # transition, no report, no events. The child's status stays
+                # in its pre-call value (typically RUNNING) until the parent
+                # actually finalizes the subtree.
+                logger.info(
+                    f"Non-root instance {instance_id[:8]}... has "
+                    f"{active_children} active children / {pending_tasks} "
+                    f"pending task(s), deferring completion_report to "
+                    f"parent (parent={instance.parent_id[:8]}..., "
+                    f"active-children/pending-tasks guard)"
+                )
+                return _ChildCompletionDbResult(
+                    outcome="child_still_running_defer",
+                    instance_id=instance_id,
+                    agent_id=instance.agent_id,
+                    parent_id=instance.parent_id,
+                )
+
+            # ATOMIC: Instance completed — create completion report for parent
+            logger.info(f"Instance {instance_id[:8]}... completed, sending report to parent {instance.parent_id[:8]}...")
+
+            # --- Inline: _create_completion_report (no await needed) ---
+            # Defense-in-depth atomic guard: use SQLAlchemy Core
+            # ``UPDATE ... WHERE status NOT IN (...)`` so a pause
+            # cascade that commits PAUSED between the ``session.get``
+            # above and this write cannot be silently overwritten by
+            # a child completion. rowcount == 0 means another writer
+            # (e.g. question() pause cascade) already finalized the
+            # row and we must skip the entire completion_report
+            # emission (message + task + report_injection + parent
+            # cascade) for this path.
+            # µs-twin mint (tz fix): ONE aware instant; the TEXT
+            # twin keeps the aware-ISO format, the naive-column
+            # twin carries naive-UTC digits of the SAME instant
+            # (the µs-match between the twins is a D7 backfill
+            # detection heuristic and must survive).
+            _now = now_utc()
+            now_iso = _now.isoformat()
+            now_dt = _now.replace(tzinfo=None)
+            update_result = session.execute(
+                sa_update(Instance)
+                .where(Instance.instance_id == instance_id)
+                .where(
+                    Instance.status.notin_([
+                        InstanceStatus.PAUSED.value,
+                        InstanceStatus.COMPLETED.value,
+                        InstanceStatus.ERROR.value,
+                    ])
+                )
+                .values(
+                    status=InstanceStatus.COMPLETED.value,
+                    updated_at=now_iso,
+                    last_activity_at=now_dt,
+                    version=Instance.version + 1,
+                )
+            )
+            if update_result.rowcount == 0:
+                # Roll back any implicit session state from the failed
+                # UPDATE attempt so the idempotency_skip return is
+                # clean. (No session.add() calls have happened yet at
+                # this point in the function.)
+                session.rollback()
+                logger.warning(
+                    f"Instance {instance_id[:8]}... inlined "
+                    f"cascade UPDATE matched 0 rows (status already "
+                    f"in {{paused,completed,error}}); skipping "
+                    f"completion_report + parent cascade "
+                    f"(TOCTOU defense)"
+                )
+                return _ChildCompletionDbResult(
+                    outcome="idempotency_skip",
+                    instance_id=instance_id,
+                    agent_id=instance.agent_id,
+                    parent_id=instance.parent_id,
+                )
+
+            # Create completion report message for parent
+            # Include message_id in source for per-message idempotency
+            #
+            # GUARD (D3 fusion pin, 2026-10-24) — the ``source`` shape
+            # below is ``internal_report:{child_instance_id}:{anchor}``.
+            # The COLON terminator is what makes the consumer-side
+            # delivery-evidence LIKE an EXACT-BOUNDARY comparison:
+            # ``source LIKE 'internal_report:' || c.instance_id || ':%'``
+            # (``daemon/repositories/report_injection/repository.py``
+            # ~:1105 and ~:1145-1147). A sibling child whose id EXTENDS
+            # this child's id therefore does NOT alias onto it — its
+            # source is ``internal_report:{child_id}2:...``, and the
+            # character after the child's id is ``2``, not ``:``. The
+            # repository documents this at ~:2098-2108.
+            #
+            # Do NOT "simplify" this shape by dropping the trailing
+            # ``:`` or by prefix-matching on the bare id — that re-opens
+            # the aliasing hole. The regression pin lives in
+            # ``tests/repositories/test_report_injection_prefix_boundary.py``
+            # (sibling-prefix source must NOT count as this child's
+            # delivery evidence; the child's own source MUST).
+            report_message_id = str(uuid.uuid4())
+            report_message = MessageQueue(
+                message_id=report_message_id,
+                # D1 — the report goes to the RESOLVED RECIPIENT (the
+                # commissioner when a fresh committed nudge exists),
+                # NOT the structural parent.
+                instance_id=(report_recipient_id or instance.parent_id),
+                content=last_content,
+                source=f"internal_report:{instance.instance_id}:{completed_message_id}",
+                type=MessageType.COMPLETION_REPORT.value,
+                status=MessageStatus.READY.value,
+                priority=0,
+                # Naive-UTC digits (DC-A fix) — naive column bind.
+                enqueued_at=now_utc_naive(),
+            )
+            session.add(report_message)
+
+            # Create task for parent to process the report.
+            #
+            # C2 torn-state guard: the deferred-pause pattern exists because
+            # a graph task cannot call the pause cascade itself (the cascade
+            # would cancel the task while its transaction is still active).
+            # ``question_pause_node`` therefore calls
+            # ``set_deferred_question_pause`` before the post-graph callback
+            # starts the cascade. The DB commit in ``_pause_cascade_db_sync``
+            # happens on a worker thread, leaving a short race window where
+            # the marker is set but the parent's status still reads RUNNING.
+            # We need both checks: the marker catches that window, while the
+            # DB check catches the Path 4 user-click-stop cascade, which has
+            # no marker.
+            #
+            # **Marker lifetime (C1 fix, 2026-07)**: the marker is set in
+            # ``question_pause_node``, **peeked** in the post-graph completion
+            # path via ``has_deferred_question_pause`` BEFORE awaiting
+            # ``pause_instance_cascade``, and **popped** in the inner
+            # ``finally`` block AFTER the cascade's DB commit completes. The
+            # old "pop before cascade" ordering left the marker empty during
+            # the cascade's DB-commit window — both this guard (Phase 1) and
+            # the ``_prepare_enqueued_message`` guard (Phase 2) would see
+            # ``marker=False, db=RUNNING`` and CREATE a spurious Task.
+            # Extending the marker lifetime past the cascade closes that race.
+            #
+            # MessageQueue and ReportInjection are intentionally created
+            # regardless of this decision.  ReportInjection is the durable
+            # fallback, drained before EVERY LLM call (not only on resume) by
+            # claim_for_injection (graph.py:2566-2590).  A terminated parent
+            # can still leave an orphaned PENDING row; cleanup is deferred to
+            # the follow-up reconcile_terminal_report_injections work.
+            # Phase 2 adds the companion guard in
+            # instance_messaging.py:_prepare_enqueued_message.
+            parent = session.get(Instance, instance.parent_id)
+            # D1 — the guard validates the RECIPIENT, not the structural
+            # parent. A TERMINATED recipient can never claim the
+            # PROCESS_REPORT task (the pause gate filters
+            # ``status IN (paused, terminated)`` for ALL task types),
+            # so routing the report at a dead commissioner would LOSE
+            # the report. One line: fall back to the structural parent
+            # when the recipient is gone/terminal.
+            recipient_for_report = report_recipient_id or instance.parent_id
+            recipient_row = parent
+            if (
+                recipient_for_report
+                and recipient_for_report != instance.parent_id
+            ):
+                candidate_row = session.get(Instance, recipient_for_report)
+                if (
+                    candidate_row is None
+                    or candidate_row.status == InstanceStatus.TERMINATED.value
+                ):
+                    logger.info(
+                        "child_reports: recipient %s... is terminal/missing "
+                        "— falling back to the structural parent %s...",
+                        recipient_for_report[:8],
+                        (instance.parent_id or "")[:8],
+                    )
+                    recipient_for_report = instance.parent_id
+                    report_recipient_id = instance.parent_id
+                    report_message.instance_id = recipient_for_report
+                    recipient_row = parent
+                else:
+                    recipient_row = candidate_row
+            marker_paused = (
+                instance.parent_id in self._manager._deferred_question_pause
+            )
+            db_paused = (
+                recipient_row is not None
+                and recipient_row.status == InstanceStatus.PAUSED.value
+            )
+            # Phase 1 / T8 (a) dead-parent guard (plan
+            # ``.agents/shared/planning/pause-resume-terminate-tree-fix/phase1-plan.md``
+            # Rev 2.1 AF2 C1). The parent is "dead" when:
+            #   * it was deleted out from under the child (parent is
+            #     ``None`` — the missing-instance case, d14cbde5-class
+            #     signature), OR
+            #   * it has reached the TERMINATED terminal state.
+            # A dead parent can never claim a PENDING process_report
+            # Task (the pause gate at ``task/repository.py`` ~:1315-
+            # 1336 filters ``status IN (paused, terminated)`` uniformly
+            # for ALL task types), and the ``report_injection`` drain
+            # path also has no live agent-node to inject into. So the
+            # creation-time skip suppresses BOTH the Task INSERT and
+            # the report_injections INSERT; the message row is
+            # RETAINED but marked ``MessageStatus.FAILED`` (audit +
+            # payload retention, plan §Axis 2 = 2a); one structured
+            # log line carries ``report_message_id`` so operators can
+            # trace the dead-lettered delivery.
+            db_dead_parent = (
+                recipient_row is None
+                or recipient_row.status == InstanceStatus.TERMINATED.value
+            )
+            if marker_paused or db_paused or db_dead_parent:
+                if marker_paused:
+                    skip_reason = "marker"
+                elif db_paused:
+                    skip_reason = "db_status"
+                else:
+                    # Plan §T8 (a) — dead-parent branch. Mark the
+                    # message row FAILED here (BEFORE the
+                    # pre-SAVEPOINT flush) so the failure state
+                    # commits atomically with the message row.
+                    skip_reason = "dead_parent"
+                    report_message.status = MessageStatus.FAILED.value
+                    logger.info(
+                        f"child_reports: dead-parent skip — message "
+                        f"marked FAILED, no PROCESS_REPORT Task created "
+                        f"for parent "
+                        f"{instance.parent_id[:8] if instance.parent_id else '?'}... "
+                        f"(reason={skip_reason}, "
+                        f"parent_status={parent.status if parent else 'missing'}, "
+                        f"report_message_id={report_message_id}); "
+                        f"report_injection INSERT below is also skipped"
+                    )
+                logger.info(
+                    f"child_reports: skipping PROCESS_REPORT Task creation for parent "
+                    f"{instance.parent_id[:8]}... — reason={skip_reason}; "
+                    f"report_injection row will deliver on resume via "
+                    f"claim_for_injection (graph.py:2566-2590)"
+                )
+            else:
+                # Phase 1 (2026-06-24): PROCESS_REPORT — see TaskType docstring.
+                report_task = Task(
+                    task_type=TaskType.PROCESS_REPORT.value,
+                    # D1 — the PROCESS_REPORT task belongs to the
+                    # RECIPIENT (the instance that will consume the
+                    # report).
+                    instance_id=recipient_for_report,
+                    message_id=report_message_id,
+                    status=TaskStatus.PENDING.value,
+                    # Naive-UTC digits (DC-A fix) — naive column bind.
+                    created_at=now_utc_naive(),
+                )
+                session.add(report_task)
+            # ─── Child-terminal contradiction note REMOVED (D-CTD-7) ────
+            # 2026-09-18 user decision: the LCA "Child Report Check"
+            # advisory note is gone. Previously this block:
+            #   * ran ``scan_child_terminal_report_for_promises`` over the
+            #     child's terminal report,
+            #   * built a ``[SYSTEM CONTEXT: Child Report Check]``
+            #     ``HumanMessage`` via ``_make_context_message`` (stable id
+            #     ``child_report_check:{parent}:{child}``),
+            #   * stamped ``child_report_check=True`` +
+            #     ``child_report_check_terms=[...]`` kwargs,
+            #   * INSERTed a SECOND ``MessageQueue`` row on the parent's
+            #     queue + a ``PROCESS_MESSAGE`` delivery ``Task`` in a
+            #     SAVEPOINT (the mint-with-delivery fix, commit 222eddba),
+            #   * logged
+            #     ``event=leader_completion_gate_child_report_check_fired`` /
+            #     ``_failed`` on commit / SAVEPOINT rollback.
+            # All of that is removed. The 17-pattern catalog
+            # (:data:`CHILD_TERMINAL_PROMISE_MARKERS`) and the scanner
+            # function are KEPT — the catalog is a public module surface
+            # pinned by ``tests/unit/test_attestation_marker_scanner.py``
+            # and is the future re-attach point if a different consumer is
+            # ever wanted. The LLM judge now subsumes the gate role (the
+            # ``fused_judge`` filters false positives at the cost of one
+            # quick call).
+            #
+            # Strand-fix commit 222eddba parts preserved (per task brief):
+            #   * mint-with-delivery carve-out — moot at this seam
+            #     (no note to deliver), so the literal Task mint is
+            #     deleted with the note.
+            #   * finalizer count-guard predicate hardening — KEPT
+            #     (defense-in-depth for any future task-less row
+            #     producer; refinement 1's ``child_report_check:``
+            #     prefix check is now dead-but-harmless; refinement 2
+            #     — the unknown task-less READY WARNING — is the
+            #     live hardening). See
+            #     ``daemon/repositories/message_queue/predicates.py``
+            #     and the call-site comment at :2485-2492.
+            # ─── Report-injection queue (deadlock fix) ───────────────────
+            # Enqueue a row in ``report_injections`` in the SAME
+            # transaction as the completion_report message + the
+            # PROCESS_REPORT task, so the three are crash-consistent.
+            # The parent's LIVE agent-node drains PENDING rows from
+            # this queue (via the ``ReportInjectionSlot`` factory
+            # closure) right before each LLM call and injects them as
+            # ``HumanMessage``\s — delivering the report ASAP, WITHOUT
+            # waiting for the parent's turn to end.
+            #
+            # This fixes the deadlock where a parent that held its
+            # graph turn open (polling / sleeping for child reports)
+            # blocked the PROCESS_REPORT task via the per-instance
+            # serialization guard (one RUNNING task per instance) —
+            # the report sat in ``pending`` forever. With this queue,
+            # the live turn pulls the report on its next LLM call;
+            # the PROCESS_REPORT task remains as the fallback for when
+            # no turn is live (and as the crash-recovery path).
+            #
+            # Exactly-once between the two paths is enforced by the
+            # atomic ``state = PENDING → terminal`` claim in
+            # ``ReportInjectionRepository`` (drain marks ``INJECTED``;
+            # the fallback task claims ``TASK_DELIVERED``; the loser
+            # sees no PENDING row and skips). See the package docstring
+            # in ``daemon/repositories/report_injection/``.
+            #
+            # F3 FIX (2026-08-20, SAVEPOINT-scoped rollback):
+            # natural completion racing a recovered PENDING marker.
+            # The Phase 2 sweep / router may have just transitioned a
+            # DEFERRED marker → PENDING via
+            # ``transition_deferred_to_pending``, leaving a
+            # non-terminal row with the same obligation triple. The
+            # natural INSERT hits the
+            # ``uq_report_injections_oblig_triple`` partial unique
+            # index (PENDING/DEFERRED) and raises
+            # ``sqlalchemy.exc.IntegrityError``.
+            #
+            # PREVIOUS (buggy) behaviour: ``session.rollback()``
+            # discarded the WHOLE transaction — including the
+            # child's ``status=COMPLETED`` UPDATE made earlier in
+            # the same session. The child was wedged non-terminal
+            # forever, the parent deferral was permanent, and the
+            # sweep re-hit the same error every cycle (F1/F2's
+            # vacuous tests hid this — see review 2026-08-20).
+            #
+            # NEW (F3) behaviour: wrap the injection INSERT in a
+            # SAVEPOINT via ``session.begin_nested()``. On
+            # ``IntegrityError`` matching the obligation-triple
+            # index, ``nested.rollback()`` discards ONLY the
+            # injection INSERT; ``session.commit()`` then commits
+            # the outer transaction so the COMPLETED transition +
+            # completion_report message + PROCESS_REPORT task all
+            # survive. On any OTHER ``IntegrityError``, the catch
+            # re-raises (no swallowing of FK / NOT NULL / other
+            # UNIQUE violations) — the Y2 discriminator
+            # ``_is_obligation_triple_integrity_error`` narrows
+            # the catch.
+            #
+            # Implementation note: the report_message + PROCESS_REPORT
+            # task INSERTs are flushed to the OUTER transaction
+            # BEFORE the SAVEPOINT so they are NOT pending when the
+            # SAVEPOINT flush fires (only the injection is pending
+            # inside the SAVEPOINT). If the outer flush raises
+            # (e.g. a real FK violation on message_queue / task),
+            # we re-raise — those are real bugs, not the
+            # obligation-triple race.
+            try:
+                # Flush report_message + (optional) report_task to
+                # the outer transaction FIRST. After this returns,
+                # the only ORM-pending object is the ReportInjection
+                # we add next (the Core UPDATE on Instance was
+                # already executed via session.execute at ~:2547 and
+                # is in the transaction directly, not via ORM).
+                session.flush()
+            except IntegrityError:
+                # FK or other constraint on message_queue / task —
+                # surface the bug, do NOT swallow. No SAVEPOINT is
+                # active yet so nothing to roll back.
+                raise
+
+            if db_dead_parent:
+                # Plan §T8 (a) companion-artifact disposition (AF2 C3):
+                # the dead-parent skip above already marked the message
+                # row FAILED and skipped the Task INSERT. The injection
+                # INSERT must also be skipped — a stranded injection
+                # row would otherwise be matched by Lane-3/4's
+                # ``find_pending_past_age`` past the 10-min bound and
+                # re-claim forever (inflated ``recovered`` metric, the
+                # AF2 C3 trap). The companion row is honestly omitted
+                # (``uq_report_injections_oblig_triple`` never violated
+                # because the row never enters INJECTED/TASK_DELIVERED —
+                # honestly reflecting non-delivery). Mirror the skip
+                # by short-circuiting through the same nested SAVEPOINT
+                # so the outer transaction stays clean and the F4
+                # SAVEPOINT-exception-leak hardening still applies
+                # (no-op nested commit, then drop straight to the
+                # success path below).
+                nested = session.begin_nested()
+                logger.info(
+                    f"child_reports: skipping report_injections INSERT "
+                    f"for dead parent "
+                    f"{instance.parent_id[:8] if instance.parent_id else '?'}... "
+                    f"(reason=dead_parent, report_message_id={report_message_id})"
+                )
+                nested.commit()
+                # F5 FIX (W1 bug): ``nested.commit()`` above CLOSES the
+                # SAVEPOINT (SessionTransaction moves to ``CLOSED``). The
+                # generic success-path ``nested.commit()`` below would
+                # raise ``sqlalchemy.exc.ResourceClosedError`` and abort
+                # the whole transaction — a previously masked production
+                # defect (37f6402b introduced the dead_parent branch
+                # without restructuring the success-path commit). Flag the
+                # commit so the success-path branch skips it. The empty
+                # SAVEPOINT was already released; the outer commit at
+                # ~:2959 below persists the FAILED message + child
+                # COMPLETED transition.
+                nested_already_committed = True
+                report_injection_row = None
+            else:
+                nested = session.begin_nested()
+                nested_already_committed = False
+                try:
+                    report_injection_row = ReportInjection(
+                        # wi-1fbee2ec PART 1 — the transactional-outbox
+                        # MINT: this row IS the synchronous report-
+                        # delivery obligation, minted in the SAME
+                        # transaction as the child terminalization
+                        # (CAS UPDATE + report msg + PROCESS_REPORT
+                        # task + this row + events — one commit), so
+                        # the obligation exists the instant the
+                        # terminalization is guaranteed (no detection
+                        # lag, no loss window). Idempotency = the
+                        # three frozen layers (child CAS rowcount +
+                        # status-level guard upstream; the
+                        # ``uq_report_injections_oblig_triple`` partial
+                        # unique index on this INSERT — a racing RDRS
+                        # backfill mint takes the IntegrityError and
+                        # skips, first writer wins). Provenance:
+                        # ``deferred_reason=SYNC_MINT`` distinguishes
+                        # this sync outbox mint from the RDRS backfill
+                        # vocabulary (RESUME_ROUTER / PAUSE_TOCTOU /
+                        # …) — best-effort under the race (a later
+                        # ``ensure_deferred`` touch may flip the reason
+                        # in place; the ROW identity is what wins).
+                        deferred_reason=DEFERRED_REASON_SYNC_MINT,
+                        # D1 — the durable fallback row names the
+                        # RECIPIENT (the instance the report is delivered
+                        # to), not the structural parent.
+                        parent_instance_id=recipient_for_report,
+                        child_instance_id=instance.instance_id,
+                        child_message_id=completed_message_id,
+                        report_message_id=report_message_id,
+                        content=last_content,
+                        # ── PR3 D1 — the mission-provenance WRITERS ──
+                        # (the PR1 columns finally gain them). The
+                        # semantics, each with ONE meaning:
+                        # * ``commissioner_instance_id`` = the
+                        #   COMMISSION-SCOPED attribution: the
+                        #   deciding LEG-1 commission row's
+                        #   commissioner id, written ONLY when the
+                        #   commission leg decided the routing. A
+                        #   legacy-leg delivery (the audit-recency
+                        #   heuristic / the structural parent) is an
+                        #   honest NULL — the report's actual
+                        #   destination is ``parent_instance_id``, and
+                        #   this column never carries a
+                        #   non-commissioner id (the dead-recipient
+                        #   fallback is exactly that case).
+                        # * ``mission_id`` = the deciding LEG-1
+                        #   commission row's mission — set ONLY when the
+                        #   mission-record leg decided the routing
+                        #   (enforce mode); a legacy-leg delivery is an
+                        #   honest NULL (no record-based attribution).
+                        mission_id=(
+                            _routing_commission.mission_id
+                            if _routing_commission is not None
+                            else None
+                        ),
+                        commissioner_instance_id=(
+                            _routing_commission.commissioner_instance_id
+                            if _routing_commission is not None
+                            else None
+                        ),
+                    )
+                    session.add(report_injection_row)
+                    # Flush to surface the IntegrityError early. Only
+                    # the injection is pending inside the SAVEPOINT —
+                    # the message_queue + task INSERTs are already in
+                    # the outer transaction from the pre-SAVEPOINT
+                    # flush above, so they survive ``nested.rollback()``.
+                    session.flush()
+                except Exception as err:
+                    # F4 FIX (2026-08-20, SAVEPOINT exception-leak hardening):
+                    # broad catch (was ``except IntegrityError``). A
+                    # non-IntegrityError raised at the inner flush (e.g.
+                    # ``OperationalError`` on a DB disconnect, downstream
+                    # ``RuntimeError``) OR at the ``ReportInjection(...)``
+                    # constructor (attribute error, type error) previously
+                    # propagated WITHOUT ``nested.rollback()`` — the
+                    # SAVEPOINT was left open and was contained only by the
+                    # outer ``WriteGuardSession`` close, which rolls back
+                    # the WHOLE transaction. That is data-safe but coarse,
+                    # and the leaked SAVEPOINT relied on close-time cleanup.
+                    #
+                    # Constructor-failure window: the ``ReportInjection(...)``
+                    # constructor call (~line 2959) is INSIDE the
+                    # ``try`` block, so the broadened ``except Exception``
+                    # catches it and triggers ``nested.rollback()``. The
+                    # window is closed.
+                    #
+                    # Y2 discriminator semantics preserved EXACTLY:
+                    #   * obligation-triple IntegrityError → rollback savepoint
+                    #     + commit outer + idempotency_skip (F3 savepoint
+                    #     fence, COMPLETED transition preserved).
+                    #   * unrelated IntegrityError → rollback savepoint + bare
+                    #     raise (no swallowing, bug surfaces — Y2 semantics).
+                    #   * non-IntegrityError → rollback savepoint + bare raise
+                    #     (preserve original identity; new branch — was
+                    #     previously silent on the SAVEPOINT leak).
+                    #
+                    # Always roll back the SAVEPOINT FIRST so any exception
+                    # (IntegrityError OR non-IntegrityError) is contained.
+                    # Must call ``nested.rollback()`` explicitly — leaving the
+                    # SessionTransaction to go out of scope without
+                    # commit/rollback only RELEASES the SAVEPOINT (the
+                    # injection would persist in the outer transaction).
+                    nested.rollback()
+                    if not isinstance(err, IntegrityError) or not _is_obligation_triple_integrity_error(err):
+                        # Non-IntegrityError OR unrelated IntegrityError:
+                        # surface the bug. The log line discriminates the
+                        # two cases for operator visibility, but both
+                        # branches trigger bare ``raise`` — the original
+                        # exception identity is preserved (no wrapping).
+                        if isinstance(err, IntegrityError):
+                            logger.warning(
+                                f"child_reports: unexpected IntegrityError on "
+                                f"ReportInjection INSERT (not obligation-triple "
+                                f"— FK / NOT NULL / other UNIQUE?). Surfacing "
+                                f"instead of swallowing. parent="
+                                f"{instance.parent_id[:8]}..., child="
+                                f"{instance.instance_id[:8]}..., msg="
+                                f"{completed_message_id[:8]}...: "
+                                f"{type(err).__name__}: {err.orig}"
+                            )
+                        else:
+                            logger.warning(
+                                f"child_reports: non-IntegrityError raised "
+                                f"during ReportInjection INSERT (savepoint "
+                                f"rolled back, exception propagates). "
+                                f"Surfacing. parent="
+                                f"{instance.parent_id[:8]}..., child="
+                                f"{instance.instance_id[:8]}..., msg="
+                                f"{completed_message_id[:8]}...: "
+                                f"{type(err).__name__}: {err}"
+                            )
+                        raise
+                    # Natural × recovered PENDING race: the recovered
+                    # row's worker_pool / claim_for_task_delivery owns
+                    # delivery. Commit the outer transaction so the
+                    # child COMPLETED transition + completion_report
+                    # message + PROCESS_REPORT task survive; only the
+                    # injection INSERT was rolled back via the SAVEPOINT.
+                    # Without this explicit commit the WriteGuardSession
+                    # ``__exit__`` would close() → rollback() the outer
+                    # transaction and the COMPLETED transition would
+                    # STILL be lost (the bug F3 fixes).
+                    logger.info(
+                        f"child_reports: natural completion races a "
+                        f"recovered PENDING marker for "
+                        f"parent={instance.parent_id[:8]}..., "
+                        f"child={instance.instance_id[:8]}..., "
+                        f"msg={completed_message_id[:8]}...; treating as "
+                        f"already-delivered (idempotency_skip, savepoint "
+                        f"rollback preserves COMPLETED transition): "
+                        f"{type(err).__name__}"
+                    )
+                    session.commit()
+                    return _ChildCompletionDbResult(
+                        outcome="idempotency_skip",
+                        instance_id=instance_id,
+                        agent_id=instance.agent_id,
+                        parent_id=instance.parent_id,
+                    )
+            # Success path — release the SAVEPOINT so the injection
+            # INSERT is promoted into the outer transaction. The
+            # outer commit at ~:2959 (below) persists everything.
+            #
+            # F5 FIX (W1 bug): skip when the dead_parent branch already
+            # released the empty SAVEPOINT above — re-committing a
+            # CLOSED SessionTransaction raises ``ResourceClosedError``
+            # and aborts the outer transaction.
+            if not nested_already_committed:
+                nested.commit()
+
+            # Plan §T8 (a) dead-parent early return.
+            # When ``db_dead_parent`` is True the message row is already
+            # marked FAILED, no Task was created, no injection row was
+            # created. The downstream parent-cascade path is invalid
+            # (parent is None or TERMINATED) — skip it and return a
+            # dedicated outcome so the async caller can suppress the
+            # post-commit side effects (SSE / CompletionRegistry /
+            # lifecycle event / CM resolve hook) on the event loop.
+            # Commit the message's FAILED status atomically here so it
+            # survives even when the parent row is missing entirely.
+            if db_dead_parent:
+                logger.info(
+                    f"child_reports: dead-parent early return after "
+                    f"SAVEPOINT release — message row marked FAILED, "
+                    f"no Task/injection created, no parent cascade "
+                    f"triggered. parent="
+                    f"{instance.parent_id[:8] if instance.parent_id else '?'}..., "
+                    f"report_message_id={report_message_id}"
+                )
+                session.commit()
+                return _ChildCompletionDbResult(
+                    outcome="dead_parent_skip",
+                    instance_id=instance_id,
+                    agent_id=instance.agent_id,
+                    parent_id=instance.parent_id,
+                )
+
+            # ── PR3 — THE COMMISSION TERMINATOR (delivery-side) ──────
+            # When the LEG-1 mission-commission leg decided the routing
+            # AND the report is actually addressed to its commissioner
+            # (the dead-recipient guard did NOT fall back), the routing
+            # commission is SATISFIED: ``outstanding → satisfied``, the
+            # guarded ``UPDATE ... WHERE state='outstanding'`` shape —
+            # a rowcount 0 (another actor won) is counted, never
+            # retried in place.
+            #
+            # ATOMIC with the delivery write: the satisfy rides THIS
+            # WriteGuardSession via a SAVEPOINT
+            # (``satisfy_commission_fail_open(session=…)``), so a
+            # rolled-back delivery can never leave a satisfied
+            # commission behind — and a satisfy failure rolls back ONLY
+            # the savepoint (fail-OPEN: delivery proceeds with the
+            # commission outstanding; the reconciliation sweep's probes
+            # — RDRS lane 7 — are the net).
+            #
+            # Deliberately NOT satisfied here (each stays the sweep's /
+            # another path's):
+            # * a dead/TERMINATED commissioner (the guard fell back to
+            #   the structural parent — the report never reached the
+            #   commissioner; the row stays outstanding, honestly);
+            # * deferred-pause / pending-messages markers (no delivery
+            #   happened);
+            # * idempotency / recovered-marker race skips (a prior or
+            #   concurrent path owns the delivery).
+            if (
+                _routing_commission is not None
+                and recipient_for_report
+                == _routing_commission.commissioner_instance_id
+                and report_injection_row is not None
+            ):
+                _mission_service = MissionRecordService(self._manager.engine)
+                _satisfied = satisfy_commission_fail_open(
+                    _mission_service,
+                    _routing_commission.commission_id,
+                    session=session,
+                )
+                if _satisfied:
+                    logger.info(
+                        "child_reports: routing commission %s… SATISFIED "
+                        "on delivery (child=%s… commissioner=%s… "
+                        "mission=%s…) — staged with this transaction",
+                        _routing_commission.commission_id[:8],
+                        instance_id[:8],
+                        recipient_for_report[:8],
+                        str(_routing_commission.mission_id)[:8],
+                    )
+
+            # --- Inline: _update_parent_on_child_complete (no await needed) ---
+            # The bus is the SOLE completion authority.
+            if parent is None:
+                raise RuntimeError(
+                    f"Parent {instance.parent_id} disappeared during child completion"
+                )
+            # Naive-UTC digits (DC-A fix): last_activity_at is a
+            # tz-naive column on PostgreSQL.
+            parent.last_activity_at = now_utc_naive()
+            parent.version = (parent.version or 1) + 1
+
+            # NOTE: parent.children cache column was dropped in Phase 4.
+
+            # Remove from instance_hierarchy junction table
+            # NOTE: Do NOT delete the instance from instances table - terminate means stop tasks, not delete
+            session.execute(
+                text("DELETE FROM instance_hierarchy WHERE child_id = :child_id"),
+                {"child_id": instance.instance_id}
+            )
+
+            # Cascade check — DependencyBus is the SOLE completion
+            # authority (Phase 5). The inlined copy here exists because
+            # ``_process_child_completion_db_sync`` runs on a worker
+            # thread via ``asyncio.to_thread`` and cannot ``await`` the
+            # async helper. Both call sites enforce the same A8
+            # invariant.
+            from .dependency_bus import get_dependency_bus
+            bus = get_dependency_bus()
+            if bus is not None:
+                is_parent_complete = bus.count_pending_for_target_sync(parent.instance_id) == 0
+            else:
+                # ─── A8: HARD ERROR (not graceful degradation) ─────────────
+                # Bus is None is an INVALID state. The ``SELECT COUNT(*)``
+                # fallback (Race #3) is the exact bug we are fixing — it
+                # MUST NOT be reachable. Mirrors the hard error at the
+                # ``_update_parent_on_child_complete`` call site.
+                #
+                # Honest propagation note: this RuntimeError is caught by
+                # the W3 fail-safe (``except Exception``) in
+                # ``_finalize_job`` and results in a per-job FAILED
+                # transition. It is NOT a process-level crash. For
+                # production, the bus must be initialized before any
+                # traffic.
+                raise RuntimeError(
+                    f"DependencyBus is not initialized for parent="
+                    f"{instance.parent_id[:8] if instance.parent_id else '?'}...; "
+                    f"bus must be initialized. "
+                    f"This is a hard error — the SELECT COUNT(*) TOCTOU fallback "
+                    f"(Race #3) is disabled by design."
+                )
+            
+            completed_parent_id: str | None = None
+            completed_parent_parent_id: str | None = None
+            parent_waiting_children_sse: bool = False
+            waiting_children_parent_agent_id: str | None = None
+            
+            # PAUSED excluded too: a paused question() parent must not be
+            # auto-completed by a child's completion (resume() owns its
+            # terminal transition). This is a skip guard, not a legitimate
+            # transition write.
+            if (
+                is_parent_complete
+                and parent.status != InstanceStatus.COMPLETED.value
+                and parent.status != InstanceStatus.ERROR.value
+                and parent.status != InstanceStatus.PAUSED.value
+            ):
+                if bus is not None:
+                    # Bus is active — no inline status transition here.
+                    #
+                    # TRUTH CORRECTION (Debug Phase 4 fix #1,
+                    # 2026-09-07): the previous text — "bus callback
+                    # owns completion" — was misleading. The bus is a
+                    # pure state machine: it flips this child's PENDING
+                    # watchers to FIRED (bookkeeping only) and NEVER
+                    # wakes the parent or finalizes its job directly
+                    # (the Phase 1 report-lane decoupling removed the
+                    # re-trigger shortcut). The parent's terminal
+                    # transition rides the natural PROCESS_REPORT task
+                    # delivery: a worker claims the report Task, the
+                    # report is delivered to the parent's turn
+                    # (claim_for_task_delivery / live drain), and
+                    # JobFeedbackObserver._process_event finalizes the
+                    # job when the bus pending count reaches 0. Claim
+                    # latency is governed by the worker pool's claim
+                    # path — see the PROCESS_REPORT wake lane in
+                    # ``TaskRepository.claim_pending_task`` (the
+                    # 7807e521 fix): under pool saturation the wake
+                    # rests on that claim, not on any bus callback.
+                    logger.info(
+                        f"Bus-active: skipping inline cascade for parent "
+                        f"{parent.instance_id[:8]}... — no inline status "
+                        f"write; parent terminal transition completes "
+                        f"when the PROCESS_REPORT task delivery "
+                        f"completes (bus is "
+                        f"state-machine only — it does not own "
+                        f"completion and does not wake the parent)"
+                    )
+                else:
+                    # (dead-code fallback — bus-active path bypasses)
+                    # Phase 2 hardening: ``parent_pending`` uses the
+                    # shared positive-polarity predicate so terminal
+                    # backing work does not block parent completion.
+                    # The reachable production site is
+                    # ``child_reports.py:1459``; this is future-proofing
+                    # for any code path that bypasses the bus.
+                    from ..repositories.message_queue.predicates import (
+                        message_queue_counts_as_pending,
+                    )
+                    _fallback_candidates_2 = session.exec(
+                        select(MessageQueue)
+                        .where(MessageQueue.instance_id == parent.instance_id)
+                        .where(MessageQueue.status.in_([
+                            MessageStatus.READY.value,
+                            MessageStatus.PROCESSING.value,
+                            MessageStatus.RETRYING.value,
+                        ]))
+                    ).scalars().all()
+                    parent_pending = sum(
+                        1
+                        for _r in _fallback_candidates_2
+                        if message_queue_counts_as_pending(_r, self._manager.engine)
+                    )
+                    del _fallback_candidates_2
+
+                    if parent_pending == 0:
+                        # No pending messages, parent is truly complete
+                        #
+                        # NOTE: dead-code fallback — bus=None raises A8 (RuntimeError) above before reaching here; the log-only attach below is symmetry with the stage-ii log position and does not fire in production.
+                        # Non-root (b) enforcement lives at the observer's
+                        # ``_finalize_job`` (post-finalize-commit), NOT in
+                        # the zero-caller ``_update_parent_on_child_complete``.
+                        # B.S.1-ii (stage ii, LOG ONLY): (b) declared-waiting
+                        # log at the inlined parent-COMPLETED stamp.
+                        # D2.8 (LOCKED): bus count (is_parent_complete) and
+                        # own-queue count (parent_pending) are both zero here
+                        # — both-counts-zero precondition (B.S.7). Fail-OPEN.
+                        # B.S.1-iii (stage iii): enforcement is deliberately
+                        # NOT attached here (task ruling — symmetry-only, do
+                        # not extend the dead-code twin). If this branch ever
+                        # becomes live, port the enforcement call.
+                        log_declared_waiting_violations(
+                            session,
+                            parent.instance_id,
+                            context_tag=(
+                                "child_reports.inline_parent_cascade"
+                            ),
+                        )
+                        parent.status = InstanceStatus.COMPLETED.value
+                        parent.updated_at = datetime.now(timezone.utc).isoformat()
+                        logger.info(f"Parent {parent.instance_id[:8]}... completed after all children done")
+                        completed_parent_id = parent.instance_id
+                        completed_parent_parent_id = parent.parent_id
+                    else:
+                        # Has pending messages but all children done - transition to WAITING_CHILDREN
+                        #
+                        # Phase 5: the previous ``_has_no_active_message_job``
+                        # carve-out (defense-in-depth against stale/duplicate
+                        # ``message_queue`` rows from a task-claim race) was
+                        # REMOVED. After D13 there are no MESSAGE
+                        # ``JobItem`` rows, so the guard was a permanent
+                        # no-op. The bus ``count_pending_for_target_sync``
+                        # already gates the inline cascade above; once we
+                        # cross into the pending-messages branch the
+                        # ``message_queue`` own-queue count is the
+                        # authoritative signal. The child-completion work
+                        # above (report message, task, hierarchy delete)
+                        # is still real and we let the function proceed to
+                        # commit + emit events — just write the parent
+                        # status here.
+                        parent.status = InstanceStatus.WAITING_CHILDREN.value
+                        logger.info(
+                            f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
+                            f"pending messages, status=WAITING_CHILDREN (deprecated; bus is authoritative)"
+                        )
+                        # Flag SSE emission for the async caller (was at
+                        # line 624-627 in the pre-refactor inline block).
+                        parent_waiting_children_sse = True
+                        waiting_children_parent_agent_id = parent.agent_id
+            
+            # --- Inline: _create_completion_events (no await needed) ---
+            # Source of ``pending_for_parent``: DependencyBus (SOLE completion
+            # authority). When bus is None the error-reporting path raises
+            # A9 hard error above, so we only ever reach here with a bus.
+            #
+            # Fix 3 (off-by-1 correction): the snapshot below is taken
+            # INSIDE the WriteGuardSession transaction, BEFORE the
+            # post-commit bus terminal hook fires (called from
+            # ``_dispatch_post_commit_side_effects`` for the
+            # ``regular_child_completed`` outcome — see ~lines 1880-1900).
+            # That hook atomically transitions the just-completed child's
+            # PENDING watcher to FIRED, decrementing the parent's
+            # pending count by exactly 1. The CHILD_COMPLETED event
+            # emitted here is intended for the parent's UI / observers —
+            # it should reflect the parent's pending-children count
+            # AFTER the watcher fires (the post-commit reality), not
+            # the pre-commit snapshot.
+            #
+            # The minimal, least-invasive fix: subtract 1 with a
+            # ``max(0, ...)`` clamp. We know exactly one watcher was
+            # just fired (the current child's task), so the corrected
+            # post-fire count is ``current_count - 1``. ``max(0, ...)``
+            # is defensive — should never underflow, but a transient
+            # race that drops the count below 0 must not produce a
+            # negative value in the event payload.
+            _raw_pending = bus.count_pending_for_target_sync(instance.parent_id)
+            pending_for_parent = max(0, int(_raw_pending or 0) - 1)
+            completion_event = Event(
+                instance_id=instance_id,
+                kind=EventKind.INSTANCE_COMPLETED.value,
+                data=json.dumps({
+                    "parent_id": instance.parent_id,
+                    "report_message_id": report_message_id,
+                }),
+                # Naive-UTC digits (DC-A fix) — naive column bind.
+                created_at=now_utc_naive(),
+            )
+            session.add(completion_event)
+            
+            # Also create event for parent about child completion
+            parent_event = Event(
+                instance_id=instance.parent_id,
+                message_id=report_message_id,
+                kind=EventKind.CHILD_COMPLETED.value,
+                data=json.dumps({
+                    "child_instance_id": instance_id,
+                    "pending_for_parent": pending_for_parent,
+                }),
+                # Naive-UTC digits (DC-A fix) — naive column bind.
+                created_at=now_utc_naive(),
+            )
+            session.add(parent_event)
+            
+            # Capture IDs before session closes (instance will be detached)
+            parent_id = instance.parent_id
+            child_agent_id = instance.agent_id
+            
+            # Capture parent's agent_id for status_change event
+            parent_agent_id: str | None = None
+            if completed_parent_id:
+                parent_for_event = session.get(Instance, completed_parent_id)
+                if parent_for_event:
+                    parent_agent_id = parent_for_event.agent_id
+            
+            session.commit()
+            # Post-commit side effects are dispatched by the async caller.
+            return _ChildCompletionDbResult(
+                outcome="regular_child_completed",
+                instance_id=instance_id,
+                agent_id=instance.agent_id,
+                parent_id=parent_id,
+                child_agent_id=child_agent_id,
+                report_message_id=report_message_id,
+                completed_parent_id=completed_parent_id,
+                completed_parent_parent_id=completed_parent_parent_id,
+                parent_agent_id=parent_agent_id,
+                parent_waiting_children_sse=parent_waiting_children_sse,
+                waiting_children_parent_agent_id=waiting_children_parent_agent_id,
+                # D1 — the resolved report recipient (the commissioner
+                # when a fresh committed nudge exists, else the
+                # structural parent). The async half uses it for the
+                # Lane-A fast-path hint.
+                report_recipient_id=report_recipient_id,
+            )
+
+    async def _dispatch_post_commit_side_effects(
+        self,
+        result: _ChildCompletionDbResult,
+        last_content: str,
+        completed_message_id: str,
+    ) -> None:
+        """Fire post-commit side effects for ``_process_child_completion_and_notify_parent``.
+
+        Called on the event loop AFTER ``asyncio.to_thread`` returns from
+        ``_process_child_completion_db_sync``. Dispatches SSE, CompletionRegistry,
+        lifecycle events, and the bus terminal hook based on the DB outcome.
+
+        The bus terminal hook (``bus.emit_terminal``) fires AFTER the
+        commit so that the bus's DB-backed watcher state is updated
+        after the DB state is consistent. Finalization then flows
+        through the report ``Task`` (PROCESS_REPORT) →
+        ``JobFeedbackObserver._process_event`` path — the bus is a
+        pure state machine, the observer handles terminal
+        transitions. There is no longer a separate bus-callback DB
+        transaction.
+
+        Args:
+            result: The outcome from the sync DB helper.
+            last_content: The assistant message content (used for CompletionRegistry).
+            completed_message_id: The completed message ID (used for bus hook).
+        """
+        outcome = result.outcome
+        instance_id = result.instance_id
+        agent_id = result.agent_id
+        parent_id = result.parent_id
+
+        # B4 RESOLVED 2026-09-11: child report obligation backstop.
+        # Track whether the natural path emitted a terminal via the
+        # bus. The backstop at the bottom of the function fires a
+        # corrective emit if the natural path DID NOT emit but the
+        # child is actually completed with a parent. This closes the
+        # 84563a03 wedge (turn done 10:59:15+07, no terminal report,
+        # parent parked ~4.5h): the natural path returned early via
+        # some silent outcome (or was bypassed entirely by a race),
+        # leaving the parent's PENDING watcher un-fired. The backstop
+        # is the last line of defense — soft-fail (logged warning,
+        # never block the success path) and exactly-once preserved by
+        # the bus's ``transition_state`` guarded UPDATE.
+        bus_terminal_emitted = False
+
+        # Emit SSE for deferred waiting_children (no commit happened)
+        if outcome in ("deferred_waiting_children",):
+            if self._manager._live_hub:
+                try:
+                    await self._manager._live_hub.stream_status_change(
+                        instance_id, "waiting_children", agent_id=agent_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to emit status_change for waiting_children: {e}"
+                    )
+            # B4: defer cases do NOT emit a terminal report — the
+            # child is not actually completed yet (active children /
+            # pending tasks / deferred marker covers the obligation).
+            # No backstop fire needed here.
+            return
+
+        # Root waiting_children: commit + SSE
+        if outcome == "root_waiting_children":
+            if self._manager._live_hub:
+                try:
+                    await self._manager._live_hub.stream_status_change(
+                        instance_id, "waiting_children", agent_id=agent_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to emit status_change for waiting_children: {e}"
+                    )
+            # B4: root_waiting_children is a root instance — no
+            # parent, no obligation.
+            return
+
+        # Child still running defer (Fix 1, Wanderer active-children guard):
+        # non-root instance has non-terminal children → no commit, no
+        # report, no events fired. Same dispatch shape as
+        # ``deferred_waiting_children`` (SSE only) so the UI can reflect
+        # the wait state without emitting a duplicate
+        # ``child_completed`` lifecycle event to the parent.
+        #
+        # ─── Bus terminal hook (incident 02fb2e01 fix) ──────────────
+        # Pre-fix on base ``b4dbfda2``: this branch emitted SSE ONLY
+        # and skipped ``bus.emit_terminal`` — the parent's PENDING
+        # watcher on this child's task stayed PENDING forever, the
+        # parent's JobItem never finalized, and the leader's
+        # completion-gate wedged in ``waiting_children``. The
+        # corrective (parent, child)-keyed bus emit (commit ``16553972``,
+        # added for the ``regular_child_completed`` outcome) is exactly
+        # the primitive the defer needs: it fires the parent's watcher
+        # by ``(target_instance_id, metadata.child_id)`` regardless of
+        # which task id was the terminal one (multi-turn safe), and
+        # ``transition_state``'s guarded ``WHERE state = 'PENDING'``
+        # Core UPDATE enforces exactly-once — a later
+        # ``regular_child_completed`` turn whose corrective emit lands
+        # on the same watcher is a safe no-op.
+        #
+        # The task-keyed emit on the current task is also added so the
+        # single-turn case (watcher keyed on the current task) is
+        # covered by the same primitive the non-defer path uses. The
+        # defer STILL does NOT update ``Instance.status``, does NOT
+        # create a ``MessageQueue`` ``internal_report:`` row, does NOT
+        # enqueue a ``PROCESS_REPORT`` ``Task`` for the parent, does
+        # NOT call ``CompletionRegistry.complete``, and does NOT
+        # publish a ``child_completed`` lifecycle event — those are
+        # the legitimate-defer preservations tested by
+        # ``tests/unit/test_child_still_running_defer_bus_terminal.py``.
+        if outcome == "child_still_running_defer":
+            # Existing SSE: UI reflection of the wait state. Preserved.
+            if self._manager._live_hub:
+                try:
+                    await self._manager._live_hub.stream_status_change(
+                        instance_id, "waiting_children", agent_id=agent_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to emit status_change for "
+                        f"child_still_running_defer: {e}"
+                    )
+
+            # Bus terminal hook — fires the parent's PENDING watcher
+            # so the parent's pending count drops (otherwise the parent
+            # stays wedged in ``waiting_children`` forever; see the
+            # ``child_still_running_defer`` docstring block above for
+            # the full incident analysis). Mirrors the inline pattern
+            # at lines 3516-3570 in the ``regular_child_completed``
+            # branch — same DB-sync helper shape, same exactly-once
+            # guarantee via ``transition_state``'s guarded UPDATE.
+            #
+            # The task-keyed emit fires watchers on the CURRENT task
+            # id (single-turn case). The corrective (parent, child)
+            # emit fires watchers by instance pair (multi-turn case).
+            # Both are unconditionally safe — ``transition_state``
+            # returns rowcount==0 when the watcher is already FIRED,
+            # so a later ``regular_child_completed`` turn's emit is a
+            # no-op.
+            if completed_message_id:
+                _child_task_post = None
+                _task_repo_post = getattr(self._manager, "_task_repo", None)
+                if _task_repo_post is not None:
+                    _child_task_post = await asyncio.to_thread(
+                        _task_repo_post.get_by_message, completed_message_id
+                    )
+                await self._emit_terminal_via_bus(
+                    task_id=getattr(_child_task_post, "id", None),
+                    status="completed",
+                    summary="child_still_running_defer (waiting_children, defer cleared on next turn)",
+                )
+            await self._emit_terminal_for_child_instance_via_bus(
+                parent_instance_id=parent_id,
+                child_instance_id=instance_id,
+                status="completed",
+                summary="child_still_running_defer (corrective multi-turn emit; parent watcher release)",
+            )
+            # B4: terminal WAS emitted — the corrective multi-turn
+            # emit covers the obligation. The backstop below MUST
+            # NOT re-emit (exactly-once preserved by the bus's
+            # transition_state guarded UPDATE; the backstop is a
+            # no-op for this outcome).
+            bus_terminal_emitted = True
+            return
+
+        # Phase 5: "root_skipped_terminal_job" outcome removed — guard is gone
+
+        # Root completed: commit + SSE + CompletionRegistry + lifecycle + title.
+        #
+        # v0.13.9 iteration-2 fix — DEFECT 2 (5e197a30 premature terminal) +
+        # DEFECT 4 (dead-letter failed-terminal):
+        #
+        # The sync helper at ``_process_child_completion_db_sync`` has already
+        # committed ``Instance.status = COMPLETED`` by the time we reach this
+        # branch. The cascade path is bus-authoritative — pending-children
+        # counting is owned by the bus (``count_pending_for_target_sync``),
+        # and the cascade no longer has an inline completion decision on this
+        # lineage. For the ROOT lane, however, the bus's pending-count model
+        # does not apply (a root has no parent to be pending on). The
+        # freshness leg of the gate — "did the root respond AFTER its last
+        # child report?" — is therefore NOT covered by the bus and must be
+        # evaluated here. We re-run the full predicate (waiting_for + pending
+        # count + freshness, the latter wedge-resolved by terminal-message
+        # detection) before publishing the terminal lifecycle event; if the
+        # gate regressed between the helper's stamp and emission (a new
+        # message landed during the awaits above), we downgrade the instance
+        # back to WAITING_CHILDREN and suppress the publish. The next
+        # message-completed signal will re-invoke this handler and re-check.
+        #
+        # Additionally, the publish site branches on the LATEST terminal
+        # message's state: if the root's last terminal message is FAILED
+        # (the dead-letter wedge path — completion-report transitioned to
+        # FAILED after max retries), we emit ``status="failed"`` with the
+        # dead-letter's error body so the JobFeedbackObserver finalizes the
+        # job as ERROR via ``_resolve_finalize_status`` (which normalizes
+        # ``"failed"`` → ``InstanceStatus.ERROR.value``). The instance row
+        # stays COMPLETED (the helper already stamped it); the job-level
+        # terminal event carries the failure, not the instance.
+        if outcome == "root_completed":
+            # ── Emission-time gate: re-verify the full predicate.
+            # The helper at ``_process_child_completion_db_sync`` did NOT
+            # call this gate (sync thread cannot await); the cascade path
+            # is bus-driven. ROOT is the only path that needs the gate,
+            # so the call site lives here at the root emission point.
+            # Single call (matching the test's reality once Finding 6
+            # adapts the assertion). Fail-open wrap: a gate exception must
+            # never block the publish — the production fail-open contract
+            # is mirrored from the cascade emission-time block.
+            #
+            # ── FP4 (2026-10-03) — L5: fail-OPEN decision rationale.
+            # The emission-time gate at this site uses fail-OPEN (an
+            # exception → ``(True, None)`` → publish proceeds). This
+            # is the EXISTING production contract — the cascade
+            # emission-time block at ``child_reports.py:~950`` (see
+            # ``TestCascadeEmissionGateFailOpen``) uses the same
+            # fail-OPEN shape, and the 39607e12 commission
+            # (mission-terminal watcher blind + report publication
+            # gap, 2026-09-25) C1 seam mandated fail-OPEN at the
+            # gate-emit boundary because the gate's purpose is
+            # DEFENSIVE (catch regressions between the helper stamp
+            # and the publish), not load-bearing (the load-bearing
+            # completion is owned by the bus + sync helper).
+            #
+            # Decision (FP4-L5): KEEP fail-OPEN with a loud WARNING
+            # on exception. The reviewer-pending choice is between
+            # this and fail-CLOSED. Fail-CLOSED would risk
+            # permanent stranded publishes on any transient gate
+            # error (DB hiccup, repo wiring gap, etc.); fail-OPEN
+            # risks a false-publish on a regression but the at-least-
+            # once terminal delivery guarantee (the bound on this
+            # site's blast radius) is preserved. Net direction:
+            # fail-OPEN, warning loud.
+            _gate_pass = None
+            _gate_block_reason: str | None = None
+            _declared_wait_outstanding: bool = False
+            try:
+                _gate_pass = await self._root_completion_gate(
+                    None, instance_id
+                )
+            except Exception as _gate_exc:
+                # Fail-open: a gate exception must NOT block the publish
+                # (mirrors the cascade emission-time wrap at the production
+                # fail-open contract). Log at WARNING so the operator sees
+                # the regression. FP4-L5 decision (see the block above):
+                # the production contract is fail-OPEN; a fail-CLOSED
+                # flip is deferred to a future commission (would
+                # require a separate kill-switch with its own blast-
+                # radius audit).
+                logger.warning(
+                    "root_completion: gate raised for %s... (%s); "
+                    "treating as passed (fail-open per FP4-L5; "
+                    "see 39607e12 C1 seam for the production contract)",
+                    instance_id[:8], _gate_exc,
+                )
+                # Fail-OPEN: the gate did not actually run, so no L2b
+                # verdict — third element is False (no declared-wait
+                # discharge to honour).
+                _gate_pass = (True, None, False)
+
+            # Thread the L2b declared-wait verdict from the gate's
+            # 3-tuple return into the local variable the L6 read
+            # site consults (P1-2). The flag no longer lives on
+            # ``self`` — concurrent gate calls for different
+            # instances no longer race over a service-singleton
+            # mutation; each verdict flows atomically with its
+            # decision.
+            _declared_wait_outstanding = bool(_gate_pass[2])
+
+            if not _gate_pass[0]:
+                _gate_block_reason = _gate_pass[1]
+                logger.warning(
+                    "root_completion: emission-time gate blocked for %s... "
+                    "(reason=%s); downgrading to WAITING_CHILDREN and "
+                    "suppressing publish",
+                    instance_id[:8], _gate_block_reason,
+                )
+                try:
+                    with Session(self._manager._engine) as _downgrade_session:
+                        _inst = _downgrade_session.get(Instance, instance_id)
+                        if (
+                            _inst is not None
+                            and _inst.status == InstanceStatus.COMPLETED.value
+                        ):
+                            _inst.status = InstanceStatus.WAITING_CHILDREN.value
+                            _inst.updated_at = datetime.now(timezone.utc).isoformat()
+                            _inst.version = (_inst.version or 1) + 1
+                            _downgrade_session.add(_inst)
+                            _downgrade_session.commit()
+                except Exception as _dg_exc:
+                    logger.error(
+                        f"root_completion: downgrade failed for "
+                        f"{instance_id[:8]}...: {_dg_exc}"
+                    )
+                # Emit the SSE waiting_children reflection so the UI sees
+                # the held state, then return (skip the lifecycle publish
+                # AND the watcher notify below).
+                if self._manager._live_hub:
+                    try:
+                        await self._manager._live_hub.stream_status_change(
+                            instance_id, "waiting_children", agent_id=agent_id
+                        )
+                    except Exception as _sse_exc:
+                        logger.warning(
+                            f"root_completion: downgrade SSE failed for "
+                            f"{instance_id[:8]}...: {_sse_exc}"
+                        )
+                # ── Component 2 (watcher-loss terminal strand,
+                # 2026-10-14) — second half of the asymmetry fix:
+                # schedule an EVENT-DRIVEN re-check. The historical
+                # contract — "the next message-completed signal will
+                # re-invoke this handler and re-check" — provably
+                # never fires for the tree_liveness block on a
+                # stranded tree (0 children, 0 queued messages — no
+                # future signal exists; the strand can never produce
+                # one). When the block reason is tree_liveness, hand
+                # the root to the strand healer immediately (the
+                # same heal the 300s sweep would run, zero sweep
+                # latency). The healer's own invariant legs are
+                # fail-closed: if the tree does not match the
+                # strand-only signature it is a no-op, so the
+                # schedule cannot loop (a re-block after a heal
+                # means a genuinely-live member appeared, which the
+                # healer refuses to touch).
+                if (
+                    _gate_block_reason
+                    and str(_gate_block_reason).startswith(
+                        "tree_liveness"
+                    )
+                ):
+                    # The root was just downgraded to WAITING_CHILDREN
+                    # above — that IS the waiting_children lane's
+                    # posture (the caller knows it; the task does not
+                    # have to re-read the row).
+                    self._schedule_strand_heal(
+                        instance_id,
+                        posture=InstanceStatus.WAITING_CHILDREN.value,
+                    )
+                return
+
+            # ── FP4 (2026-10-03) — L6: escalate-and-HOLD not annotate.
+            # ── When the L2b discharge flag (``_declared_wait_outstanding``)
+            # is True, the gate passed but the declared-wait obligation
+            # is unresolved (3826ab28 mechanism: parent declared waiting
+            # and the interim report was delivered, but the obligation
+            # is still open). The spec: do NOT silently flip the
+            # (b) kill-switch globally (the existing chassis gates ALL
+            # stamp sites — root + non-root + observer — broader blast
+            # radius). Instead, scope the L6 path at THIS call site.
+            #
+            # L6 logic:
+            #   1. Increment the attestation ledger (the "escalate" part).
+            #      Uses the canonical safe_increment from
+            #      ``attestation_ledger.py`` (C3 fail-OPEN — a DB error
+            #      degrades the increment to None and the L6 path
+            #      proceeds; the at-least-once contract holds).
+            #   2. Check the settle bound (6h — reuses
+            #      ``MISSION_LIVE_ORPHAN_TIMEOUT_SECONDS`` from
+            #      ``mission_live_guard.py:110``). The bind math reads
+            #      the dedicated ``L6_ANCHOR_META_KEY`` key in the
+            #      instance metadata — the first L6 invocation writes
+            #      the anchor; subsequent L6 invocations re-use it as
+            #      the bind anchor (P1-1 fix — the previous code used
+            #      ``attestation:denial_epochs[0]``, which the
+            #      attestation gate ALSO appends to with non-L6 epochs
+            #      like ``fp4.l5.*``; a stale non-L6 epoch >6h old let
+            #      the bind release on the first L6 invocation).
+            #   3. Within bound (anchor + 6h > now): HOLD — set
+            #      WAITING_CHILDREN, suppress publish, JobItem stays
+            #      ACTIVE (the done+retry-0/0 wedge is the bug; the
+            #      ACTIVE state is what makes retry/continue paths
+            #      still admit on the next message-completed signal).
+            #   4. Bound reached (anchor + 6h ≤ now): terminal
+            #      fires ONCE — set completion_gate_escalated=True via
+            #      the canonical ledger atomic op, let the publish
+            #      proceed; the work_notifier.py layer renders the
+            #      escalated display (COMPLETION_GATE_ESCALATED_DISPLAY)
+            #      instead of plain "completed" because the
+            #      ``completion_gate_escalated`` flag is on the work
+            #      record (see work_notifier.py:460-467).
+            #
+            # Scope discipline (mirrors the spec's blast-radius note):
+            # the L6 call here is local to the ROOT stamp site. Other
+            # stamp sites (non-root in this file, observer finalize in
+            # ``job_feedback_observer.py``, reconcile in
+            # ``job_recovery_service.py``) are UNTOUCHED — they keep
+            # the existing log-only annotation via
+            # ``log_declared_waiting_violations``. Flipping the (b)
+            # kill-switch globally is the operator's call, not this
+            # commission's.
+            #
+            # The verdict is read from the local variable populated
+            # above (P1-2 — the ``_root_completion_gate`` 3-tuple
+            # return threaded the L2b verdict; reading
+            # ``self._declared_wait_outstanding`` here would race
+            # against concurrent gate calls for different instances).
+            if _declared_wait_outstanding:
+                _l6_decision = await self._fp4_l6_check_and_apply(
+                    instance_id=instance_id,
+                    agent_id=agent_id,
+                )
+                if _l6_decision == "hold":
+                    # Within the settle bound: HOLD. The instance
+                    # was stamped COMPLETED by the sync helper; the
+                    # L6 path downgrades to WAITING_CHILDREN to
+                    # preserve the active-mission semantics, then
+                    # returns (skip the publish). The next
+                    # message-completed signal re-evaluates the
+                    # gate; the L6 path re-runs and either HOLDs
+                    # again or releases at the bind.
+                    return
+                # _l6_decision == "release": bind reached, escalate
+                # + proceed with the publish below. The
+                # ``_publish_status`` variable is the standard
+                # "completed" — the escalated display is rendered
+                # at the work_notifier layer via the
+                # ``completion_gate_escalated`` flag on the
+                # instance (already set by
+                # ``reset_attestation_ledger_with_escalation`` in
+                # the ledger call).
+                # Continue to the publish block below.
+
+            # ── Terminal-status determination: branch on the latest
+            # terminal message for this instance. FAILED → "failed" with
+            # error body (dead-letter); COMPLETED or no terminal message
+            # → "completed" with no error (normal root terminal).
+            _publish_status = "completed"
+            _publish_error: str | None = None
+            try:
+                with Session(self._manager._engine) as _publish_session:
+                    _last_terminal = self._latest_terminal_message(
+                        _publish_session, instance_id
+                    )
+                    if (
+                        _last_terminal is not None
+                        and _last_terminal.status == MessageStatus.FAILED.value
+                    ):
+                        _publish_status = "failed"
+                        _publish_error = (
+                            getattr(_last_terminal, "error_message", None)
+                            or "dead-letter terminal message"
+                        )
+            except Exception as _lt_exc:
+                # Fail-open: if the terminal-message lookup fails (DB
+                # hiccup, etc.), default to "completed" — better than
+                # over-reporting failure for a root that may have just
+                # finished cleanly.
+                logger.warning(
+                    "root_completion: terminal-message lookup failed for "
+                    "%s... (%s); defaulting to 'completed'",
+                    instance_id[:8], _lt_exc,
+                )
+
+            if self._manager._live_hub:
+                try:
+                    await self._manager._live_hub.stream_status_change(
+                        instance_id, _publish_status, agent_id=agent_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to emit status_change for root instance: {e}"
+                    )
+            from .completion_registry import get_completion_registry
+            get_completion_registry().complete(instance_id, result=last_content)
+            if self._events_service:
+                try:
+                    # v0.13.9 fix (fix/job-completed-result-arm,
+                    # 2026-09-22): thread ``result_summary=last_content``
+                    # so the lifecycle event + global notification
+                    # broadcaster carry the agent's last assistant
+                    # message (Item 3c). Pre-fix this call omitted the
+                    # kwarg and the notification dict never carried
+                    # ``result_summary``. ``last_content`` is already
+                    # in scope from the inline cascade above.
+                    await self._events_service._publish_instance_lifecycle_event(
+                        instance_id=instance_id,
+                        status=_publish_status,
+                        error=_publish_error,
+                        parent_id=None,
+                        result_summary=last_content,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to publish lifecycle event for root {instance_id[:8]}...: {e}"
+                    )
+            # ── Engine phase (Shape (b) follow-up — watch-notify fix
+            # round 2): root-completion watcher notify. The no-parent
+            # completion path finalizes the instance's Task + JobItem
+            # work with ZERO canonical notify (live incident
+            # 2026-09-20: stranded mission_terminal row 8ade5d22 —
+            # watch registered 20:18:47, terminal 20:18:54, never
+            # claimed, no [JOB_EVENT]). Fan out over the completed
+            # instance's work set (Task work_ids + JobItem receipts —
+            # the same candidate-set shape the observer's finalize
+            # fan-out uses) and fire the canonical facade per work_id;
+            # per-kind token via the work resolver (task rows →
+            # terminal outcome token; message mirrors → 'settled');
+            # non-terminal tokens never fire (§3 guard). The observer
+            # belt stays as the redundant second fire — the CAS claim
+            # dedups exactly-once (§5).
+            _notify_service = getattr(
+                self._manager, "_job_queue_service", None
+            )
+            if _notify_service is not None:
+                from daemon.services.work_status import (
+                    is_terminal as _work_status_is_terminal,
+                )
+
+                _work_ids: set[str] = set()
+                _root_task_repo = getattr(self._manager, "_task_repo", None)
+                if _root_task_repo is not None:
+                    try:
+                        _rows = await asyncio.to_thread(
+                            _root_task_repo.get_by_instance, instance_id
+                        )
+                        _work_ids.update(
+                            _row.work_id for _row in _rows if _row.work_id
+                        )
+                    except Exception as work_scan_err:
+                        logger.warning(
+                            f"root_completed: task work scan failed for "
+                            f"{instance_id[:8]}...: {work_scan_err}"
+                        )
+                try:
+                    _jobs = await asyncio.to_thread(
+                        _notify_service._repository.find_jobs_by_instance,
+                        instance_id,
+                        job_type=None,
+                    )
+                    _work_ids.update(
+                        _job.job_id for _job in _jobs if _job.job_id
+                    )
+                except Exception as job_scan_err:
+                    logger.warning(
+                        f"root_completed: job work scan failed for "
+                        f"{instance_id[:8]}...: {job_scan_err}"
+                    )
+                _resolver = getattr(_notify_service, "_work_resolver", None)
+                for _work_id in sorted(_work_ids):
+                    _token = "completed"
+                    if _resolver is not None:
+                        try:
+                            _token = _resolver.per_kind_status_for(
+                                _work_id, default="completed"
+                            )
+                        except Exception as per_kind_err:
+                            logger.warning(
+                                f"root_completed: per-kind resolve failed "
+                                f"for {_work_id[:8]}...: {per_kind_err} — "
+                                f"defaulting to 'completed'"
+                            )
+                            _token = "completed"
+                    if not _work_status_is_terminal(_token):
+                        # §3 guard — never fire non-terminal.
+                        continue
+                    try:
+                        # DEFECT-1 round-3 fix (2026-09-24,
+                        # fix/watch-notify-delivery-gaps): thread the
+                        # in-scope ``last_content`` into the watcher
+                        # envelope. Instrumented arbitration on the dev
+                        # daemon (work c383bdbd..., [watch-cas] log)
+                        # proved THIS fan-out wins the CAS claim for
+                        # root message-task completions — pre-fix it
+                        # passed NO ``result_summary``, so
+                        # ``effective_result`` fell through to the
+                        # resolver's (pre-commit, None) Task.result
+                        # read and the delivered body was the
+                        # byte-exact 55-byte ``Result:``-less envelope
+                        # while the ⟳ mid-flight leg on the SAME job
+                        # carried full content. ``last_content`` is the
+                        # assistant reply pre-fetched BEFORE the DB
+                        # sync (``_process_child_completion_and_notify_parent``
+                        # :2083) — the exact value the v0.13.9
+                        # result-arm already threads into the lifecycle
+                        # event + CompletionRegistry above.
+                        #
+                        # ROUND-3 REVIEW NARROW (2026-09-24, broadened
+                        # by C3 2026-09-25, NARROWED BY F-5 2026-09-25):
+                        # the pre-C3 narrow restricted threading to the
+                        # ``completed`` token only — every other token
+                        # (settled, cancelled, dead_letter, failed)
+                        # reverted to its pre-5292eb99 shape in this
+                        # fan-out.
+                        #
+                        # C3 reversed the narrow for the ``settled``
+                        # mirror token — settled envelopes SHOULD carry
+                        # the ``Result:`` line (user-ratified,
+                        # 2026-09-25), threaded via the same
+                        # ``last_content`` in-memory payload that the
+                        # completed arm uses.
+                        #
+                        # F-5 NARROWS THE C3 SCOPE BACK TO
+                        # ``{completed, settled}``: stale mid-flight
+                        # ``last_content`` captured while the mission
+                        # was alive would render under ``Result:`` for
+                        # ``cancelled`` and ``dead_letter`` envelopes
+                        # — content from a still-running mission paired
+                        # with a terminal-cancel / dead-letter token is
+                        # misleading. The ratified C3 scope is settled
+                        # bodies only (the M3-mirror rename); every
+                        # OTHER non-completed token (cancelled /
+                        # dead_letter) reverts to the pre-C3 NO-Result
+                        # shape. ``failed`` keeps the no-content branch
+                        # because it has its own error-lane emission
+                        # in ``error_reporting.py`` (separate code path,
+                        # not this fan-out) — F2 slot discipline
+                        # (failed → ``error=``; everything else
+                        # → ``result_summary=`` or no kwarg) preserved.
+                        #
+                        # C3 race-safety note: ``last_content`` is the
+                        # in-memory agent's last assistant message,
+                        # fetched BEFORE this fan-out runs
+                        # (``self._get_last_assistant_message`` at
+                        # child_reports.py:2083). Threading it as a
+                        # ``result_summary`` kwarg bypasses the
+                        # resolver's ``task.result`` read that races
+                        # the ``complete_task`` commit-visibility
+                        # window (the live E2E race the DEFECT-1b
+                        # close documented at
+                        # task_processor.py:1010-1020). The resolver
+                        # fallback (work_notifier.effective_result at
+                        # work_notifier.py:429) is still active for
+                        # callers that don't thread — same race risk
+                        # as the pre-C3 code path; documented, not
+                        # closed.
+                        if _token in {"completed", "settled"}:
+                            await _notify_service.notify_watchers(
+                                _work_id, _token,
+                                result_summary=last_content,
+                            )
+                        else:
+                            # ``failed`` / ``cancelled`` /
+                            # ``dead_letter`` — keep the pre-C3
+                            # NO-Result shape. The ``failed`` token
+                            # has its own error-lane emission (F2
+                            # slot discipline, ``error=``); the
+                            # ``cancelled`` and ``dead_letter``
+                            # tokens have no canonical content
+                            # payload and would render stale
+                            # mid-flight ``last_content`` under
+                            # ``Result:`` if threaded (the F-5
+                            # stale-content stranding class).
+                            await _notify_service.notify_watchers(
+                                _work_id, _token,
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            f"root_completed: notify_watchers failed for "
+                            f"{_work_id[:8]}... ({_token}): {e}"
+                        )
+
+            # ── S15 + U7 (2026-09-28, fix/u7-orphan-anchor-s15): ──
+            # LIFECYCLE-COMPLETED hook (b) for no_job-linkage
+            # terminals. The observer's hook (b) at
+            # ``job_feedback_observer.py:~2430`` lives inside
+            # ``_finalize_job`` — the COMPLETED/ERROR outbox that
+            # only runs WHEN a JobItem exists for the work row.
+            # For a ``no_job`` linkage turn-end there is no
+            # JobItem, so the post-commit outbox never runs, so
+            # the observer hook (b) never fires, so a held
+            # ``mission_terminal`` watcher row subscribed to that
+            # turn-end has no carrier until the 300s periodic
+            # sweep picks it up (the very gap the U1 cycle-4
+            # fixback was meant to close for in-session delivery).
+            # The lifecycle-COMPLETED event here fires on the
+            # terminal-only root_completed fan-out (NOT on every
+            # per-turn flip — it is the root-side COMPLETED outbox,
+            # distinct from the per-turn ``_update_turn`` reactor
+            # which may carry idempotent wake/sleep pings), so it is
+            # the natural no_job carrier for the root-terminal
+            # shape. The hook uses the GLOBAL scan
+            # (``instance_id=None``) — same axis hook (a) uses per
+            # the U1 cycle-4 fixback — so a held watcher whose
+            # parent is EXTERNAL to the completing instance's tree
+            # still gets visited.
+            # Idempotent: a held row the helper has already
+            # claimed returns CAS rowcount == 0 on the second
+            # call, so back-to-back hook (a/b) firing from any
+            # other path on the same row cannot double-fire
+            # delivery (the N1 exactly-once invariant survives).
+            # Fail-soft: the lifecycle event has already been
+            # emitted, so an exception here must not undo the
+            # publish; logged at WARNING and swallowed.
+            try:
+                _jq_service = getattr(
+                    self._manager, "_job_queue_service", None
+                )
+                if _jq_service is not None:
+                    await _jq_service.reconcile_held_watches_for_instance(
+                        instance_id=None,  # global work-side scan
+                    )
+            except Exception as s15_hook_err:
+                logger.warning(
+                    f"ChildReportsService: lifecycle-COMPLETED hook "
+                    f"(b) no_job carrier failed for "
+                    f"{instance_id[:8]}... (non-fatal, swept by "
+                    f"WatchReconcileSweepService next tick): "
+                    f"{s15_hook_err}"
+                )
+
+            self._trigger_title_generation(instance_id, completed_message_id)
+
+            # ─── B.S.1-iii: (b) enforcement (flag-gated, fail-OPEN) ───
+            # The stamp transaction has ALREADY committed (the sync
+            # helper returned outcome="root_completed"). If the inline
+            # same-tx evaluation (B.S.7 position, unchanged) found
+            # violations, inject ONE adjudication notice to the parent.
+            # D2.6 LOCKED: notice, NEVER block — every failure inside
+            # the enforcement is absorbed (WARNING + continue). Dormant
+            # entirely when the kill-switch is OFF (ship default).
+            #
+            # D2.reconciler-bridge (B.S.4): THIS is the notice-turn
+            # seam. The notice below travels the durable enqueue path
+            # (``manager.enqueue_message`` → MessageQueue + Task rows),
+            # which re-opens the parent's turn; that new turn's
+            # work_id threads through ``reconcile_turn_mirror(work_id)``
+            # exactly like any other turn (authoritative mirror
+            # reconcile — see the reconcile_turn_mirror call sites in
+            # the message pipeline / observer finalize paths). Pinned
+            # by tests/repositories/test_turn_reconciler.py::
+            # TestReportIntegrityNoticeTurnReconciles (seam-level: the
+            # (b)-notice turn's work_id reconciles the mirror
+            # tables like any PROCESS_MESSAGE turn).
+            if result.b_violation_report is not None:
+                await enforce_declared_waiting_violations(
+                    result.b_violation_report,
+                    manager=self._manager,
+                    parent_instance_id=result.instance_id,
+                    context_tag="child_reports.root_completion",
+                )
+            return
+
+        # B4 cycle-2 (W5 obligation re-mint; incident pointer:
+        # 84563a03 wedge — parent parked ~4.5h in waiting_children).
+        # ``idempotency_skip`` usually no-ops (obligation already
+        # honored by the natural path's bus emit). When the obligation
+        # is UNMET (parent alive + instance COMPLETED + a PENDING
+        # (parent, child) watcher), the corrective multi-turn emit
+        # ``_emit_terminal_for_child_instance_via_bus`` re-mints it —
+        # exactly-once via the bus helper's transition_state guarded
+        # UPDATE (matched_rows == [] on the natural path → no-op).
+        # COMPLETED-only by design: ERROR-terminal children are covered
+        # by the error-lane pair at ``error_reporting.py:636`` (accepted
+        # residual: a failing error-lane hook stays unhealed — backlog).
+        if outcome == "idempotency_skip":
+            if parent_id is not None:
+                try:
+                    inst = await asyncio.to_thread(
+                        self._manager._instance_repository.get, instance_id
+                    )
+                except Exception as fetch_exc:
+                    # Forensics: a parent-repo read failure here means
+                    # the wedge-shape re-mint is silently skipped (no
+                    # caller-visible error). Surface at DEBUG so
+                    # operators can correlate with downstream parent-
+                    # still-parked symptoms.
+                    logger.debug(
+                        f"B4 cycle-2 re-mint: instance repo fetch "
+                        f"failed for {instance_id[:8]}...; "
+                        f"deferring re-mint (no-op): {fetch_exc!r}"
+                    )
+                    inst = None
+                if inst is not None and inst.status == (
+                    InstanceStatus.COMPLETED.value
+                ):
+                    try:
+                        # Capture the helper's returned FollowUp list
+                        # to distinguish "wedge healed" (non-empty) from
+                        # "legit skip / watcher already FIRED"
+                        # (empty list — see
+                        # ``_emit_terminal_for_child_instance_via_bus``
+                        # docstring at child_reports.py:608-613). The
+                        # helper returns ``[]`` when:
+                        #   * parent_instance_id is None (root)
+                        #   * bus singleton is None (wiring failure)
+                        #   * matched_rows → 0 (no PENDING watcher)
+                        #   * task-keyed emit already fired
+                        #     (transition_state's guarded UPDATE
+                        #     yielded rowcount == 0)
+                        # In all four cases the obligation is already
+                        # satisfied or inapplicable — a WARNING here
+                        # would be a misleading ops-log overclaim under
+                        # the recurring RESUME_ROUTER ×4-dup shape
+                        # (each post-resume turn reruns the natural
+                        # path → idempotency_skip → helper returns []).
+                        fired_followups = (
+                            await self._emit_terminal_for_child_instance_via_bus(
+                                parent_instance_id=parent_id,
+                                child_instance_id=instance_id,
+                                status="completed",
+                                summary=(
+                                    "idempotency_skip obligation re-mint "
+                                    "(B4 cycle-2 wedge fix; 84563a03)"
+                                ),
+                            )
+                        )
+                        # Only log the WARNING when the helper
+                        # actually healed a PENDING watcher (the wedge
+                        # case). Empty list = legit skip / natural
+                        # path already fired — silent no-op (the
+                        # expected common case under RESUME_ROUTER
+                        # dup-shapes and post-completion revives).
+                        if fired_followups:
+                            logger.warning(
+                                f"B4 cycle-2: idempotency_skip wedge "
+                                f"re-mit for child {instance_id[:8]}... "
+                                f"/ parent {parent_id[:8]}... — instance "
+                                f"COMPLETED, PENDING watcher obligation "
+                                f"honored via corrective multi-turn emit "
+                                f"({len(fired_followups)} watcher(s) FIRED)."
+                            )
+                    except Exception as remit_exc:
+                        # Defense-in-depth: the helper itself logs
+                        # exceptions and returns an empty FollowUp
+                        # list, but a top-level catch here keeps the
+                        # flow returning clean so no caller sees a
+                        # half-fired obligation.
+                        logger.warning(
+                            f"B4 cycle-2 re-mint failed for "
+                            f"{instance_id[:8]}... / "
+                            f"{parent_id[:8]}...: {remit_exc!r}"
+                        )
+            # Structural mutual exclusion (N5, R2 polish 2026-09-11):
+            # the inline ``return`` here is the ONLY outcome class
+            # the cycle-2 re-mint covers. The backstop at
+            # ``child_reports.py:~4195`` is structurally unreachable
+            # for ``idempotency_skip`` — every other canonical
+            # outcome (``root_completed``, ``deferred_pause``,
+            # ``dead_parent_skip``, ``tool_invocation_completed``,
+            # ``deferred_waiting_children``,
+            # ``root_waiting_children``, ``child_still_running_defer``,
+            # ``regular_child_completed``,
+            # ``instance_not_found``) early-returns ABOVE this branch
+            # too. The backstop is therefore reachable ONLY for
+            # outcome strings NOT in the canonical set (unknown /
+            # synthetic outcomes) — the legacy "idempotency_skip
+            # backstop" claim from the cycle-1 commit message is no
+            # longer accurate; the re-mint owns the obligation path
+            # for the canonical ``idempotency_skip`` shape.
+            return
+
+        # Phase 1 (pause-report-recovery Variant B fix 2): the
+        # ``deferred_pause`` outcome means a DEFERRED marker has
+        # already been persisted on ``report_injections`` by the sync
+        # helper (dedicated repository session over the same engine
+        # as the status read — not the same transaction). The
+        # async dispatcher has no additional side effects to fire —
+        # the Phase 2 router/sweep will recover the marker when the
+        # parent resumes. Side-effect-free return.
+        if outcome == "deferred_pause":
+            logger.info(
+                f"ChildReportsService: deferred_pause outcome for "
+                f"{instance_id[:8]}... — DEFERRED marker persisted by "
+                f"sync helper; Phase 2 recovery will pick up"
+            )
+            return
+
+        # Phase 1 / T8 (a) dead-parent skip (plan
+        # ``.agents/shared/planning/pause-resume-terminate-tree-fix/``):
+        # the message row was marked FAILED, no PROCESS_REPORT Task
+        # was created, no ``report_injections`` row was created. There
+        # is no live parent to notify, no CompletionRegistry entry to
+        # mark complete, no SSE status_change to emit. Side-effect-
+        # free return — the work row is dead (or will be dead-lettered
+        # by the T8 (d) sweep if a stranded row from a prior version
+        # of the seam exists).
+        if outcome == "dead_parent_skip":
+            logger.info(
+                f"ChildReportsService: dead_parent_skip outcome for "
+                f"{instance_id[:8]}... — message marked FAILED in sync "
+                f"helper, no parent cascade (parent is "
+                f"{parent_id[:8] if parent_id else 'missing'}... — "
+                f"TERMINATED or missing); no side effects to fire"
+            )
+            return
+
+        # Tool invocation completed: commit + SSE + CompletionRegistry + lifecycle + title
+        if outcome == "tool_invocation_completed":
+            if self._manager._live_hub:
+                try:
+                    await self._manager._live_hub.stream_status_change(
+                        instance_id, "completed", agent_id=agent_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to emit status_change for completed tool invocation: {e}"
+                    )
+            from .completion_registry import get_completion_registry
+            get_completion_registry().complete(instance_id, result=last_content)
+            if self._events_service:
+                try:
+                    # v0.13.9 fix (fix/job-completed-result-arm,
+                    # 2026-09-22): thread ``result_summary=last_content``
+                    # — same Item 3c contract as the root-completion
+                    # call site above. ``last_content`` is already in
+                    # scope from the tool-invocation completion flow.
+                    await self._events_service._publish_instance_lifecycle_event(
+                        instance_id=instance_id,
+                        status="completed",
+                        error=None,
+                        parent_id=parent_id,
+                        result_summary=last_content,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to publish lifecycle event for tool invocation {instance_id[:8]}...: {e}"
+                    )
+            self._trigger_title_generation(instance_id, completed_message_id)
+            return
+
+        # Regular child completed: commit + bus hook + SSE + CompletionRegistry + lifecycle + title
+        if outcome == "regular_child_completed":
+            # Bus terminal hook: fires AFTER the commit so the DB state
+            # is consistent before the bus's ``emit_terminal`` runs its
+            # own transaction. Mirrors the inline branch above
+            # (``_update_parent_on_child_complete``) — both call sites
+            # converge on ``_emit_terminal_via_bus`` to keep the bus
+            # wiring in one place.
+            #
+            # Phase 5: CM is removed. Bus is the SOLE completion
+            # authority. We always route through the bus at completion
+            # time; the helper handles the no-watchers case as a
+            # no-op.
+            if completed_message_id:
+                # Look up the child task id from the message_id — the
+                # bus is keyed on task id, not message_id. The lookup
+                # runs on a worker thread (sync DB call) so it doesn't
+                # block the event loop. When the task row is missing
+                # (e.g. cleared by a stale-task sweep before this
+                # completion was reported), ``_emit_terminal_via_bus``
+                # logs and returns an empty list — no FollowUps to
+                # enqueue, no harm done.
+                _child_task_post = None
+                _task_repo_post = getattr(self._manager, "_task_repo", None)
+                if _task_repo_post is not None:
+                    _child_task_post = await asyncio.to_thread(
+                        _task_repo_post.get_by_message, completed_message_id
+                    )
+                await self._emit_terminal_via_bus(
+                    task_id=getattr(_child_task_post, "id", None),
+                    status="completed",
+                    summary="regular child completed",
+                )
+
+            # ─── Corrective emit for multi-turn children ───────────────
+            # ``_emit_terminal_via_bus`` keys watchers on the CHILD
+            # TASK id of the current graph turn. That matches
+            # watchers whose source_task_id is the just-completed
+            # task — the single-turn case. It MISSES watchers whose
+            # source_task_id is the child's FIRST ``process_message``
+            # task (registered by ``send_message`` when the parent
+            # first sent the child a message), but the child reached
+            # its terminal graph turn on a LATER ``PROCESS_REPORT``
+            # task. This happens to multi-turn non-root children
+            # like Wanderer: parent → wanderer (task T0 registers
+            # the watcher), then wanderer → spawns coders → coder
+            # → wanderer re-runs on PROCESS_REPORT tasks T1, T2, …
+            # until finally wanderer emits its own completion_report
+            # to its parent from task TN.
+            #
+            # Without this corrective emit the parent's PENDING
+            # watcher keyed on T0 never fires — the parent stays
+            # PENDING forever and wedges in ``waiting_children``.
+            # The corrective emit matches the watcher on the
+            # (parent, child) instance pair (via the
+            # ``follow_up_payload.metadata.child_id`` field that
+            # ``send_message`` stamps on every watcher), so it
+            # fires regardless of which task id was the terminal
+            # one. ``transition_state``'s guarded ``WHERE state =
+            # 'PENDING'`` Core UPDATE enforces exactly-once: when
+            # the task-keyed emit above already fired the watcher
+            # (single-turn case), this is a safe no-op.
+            await self._emit_terminal_for_child_instance_via_bus(
+                parent_instance_id=parent_id,
+                child_instance_id=instance_id,
+                status="completed",
+                summary="regular child completed (corrective multi-turn emit)",
+            )
+            # B4: terminal WAS emitted — the task-keyed + corrective
+            # multi-turn emit covers the obligation. The backstop
+            # below MUST NOT re-emit.
+            bus_terminal_emitted = True
+
+            # Phase 1 (2026-06-24, report-lane decoupling): Wake the
+            # worker pool after the report Task is committed. Before
+            # this, the report Task sat PENDING until the worker pool's
+            # 3-second poll noticed it — that delay meant the parent's
+            # next graph turn could lag noticeably behind the child's
+            # completion. The worker pool's ``notify_work()`` is
+            # thread-safe and best-effort: a missing pool is tolerated
+            # (tests may build a bare InstanceManager without one).
+            #
+            # Phase 2 / chat-source-worker-lane (D5): route through
+            # the manager helper — both default + chat pools receive
+            # the wake so a registry-minted chat row (or any chat-origin
+            # carrier enqueued by this seam) is picked up by the chat
+            # pool even when the default pool is saturated. The helper
+            # None-guards every pool and per-pool exceptions are
+            # swallowed so a transient blip does NOT abort the report
+            # flow. Consolidated via :func:`safe_notify_all_pools`
+            # (Phase B) — the per-site Mock-compat ``__dict__``-probe
+            # + try/except + legacy-fixture fallback blocks collapse
+            # to one helper call. Test fixtures that build a Mock
+            # manager and assert on ``_worker_pool.notify_work``
+            # (the legacy singleton reach) keep working: the helper
+            # falls through to ``manager._worker_pool.notify_work()``
+            # when the bound helper is absent from
+            # ``manager.__dict__``.
+            safe_notify_all_pools(
+                self._manager,
+                site_label="child_reports",
+            )
+
+            # Fast-path hint for the report-injection drain: mark this
+            # parent as having a pending report so the parent's next
+            # live LLM call knows to hit the DB drain. Post-commit (the
+            # report_injections row is already committed in the same tx
+            # as the message+task above). Best-effort — runs on the
+            # event loop, serialized against the drain's set check, so
+            # the worst case of a missed bump is a one-LLM-call delivery
+            # delay, never a lost report.
+            #
+            # D1 — the hint names the RECIPIENT (the commissioner when a
+            # fresh committed nudge exists). Hinting the structural
+            # parent would never drain the report for the commissioner:
+            # Lane A would never fire for the instance the report was
+            # actually addressed to.
+            pending_set = getattr(self._manager, "_report_injection_pending", None)
+            report_hint_target = result.report_recipient_id or parent_id
+            if pending_set is not None and report_hint_target:
+                pending_set.add(report_hint_target)
+
+            # CompletionRegistry
+            from .completion_registry import get_completion_registry
+            get_completion_registry().complete(instance_id, result=last_content)
+            
+            # SSE for child completed
+            if self._manager._live_hub:
+                try:
+                    await self._manager._live_hub.stream_status_change(
+                        instance_id, "completed", agent_id=result.child_agent_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to emit status_change for completed instance: {e}"
+                    )
+            
+            # Broadcast child completion event
+            try:
+                await self._manager._live_hub.stream_lifecycle(
+                    instance_id=parent_id,
+                    event_type="child_completed",
+                    data={
+                        "child_instance_id": instance_id,
+                        "report_message_id": result.report_message_id,
+                    },
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to broadcast child completion event: {e}"
+                )
+            
+            # If parent completed (all children done)
+            if result.completed_parent_id:
+                if self._manager._live_hub:
+                    try:
+                        await self._manager._live_hub.stream_status_change(
+                            result.completed_parent_id, "completed", agent_id=result.parent_agent_id
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to emit status_change for completed parent: {e}"
+                        )
+                if self._events_service:
+                    try:
+                        # v0.13.9 fix (fix/job-completed-result-arm,
+                        # 2026-09-22): the ``last_content`` for this
+                        # completed-parent emit is the parent's last
+                        # assistant message — same Item 3c contract.
+                        # The completed-parent cascade fires on the
+                        # bus callback path; without this kwarg the
+                        # parent-completion notification reaches the
+                        # SSE /notifications/stream without
+                        # ``result_summary``.
+                        await self._events_service._publish_instance_lifecycle_event(
+                            instance_id=result.completed_parent_id,
+                            status="completed",
+                            error=None,
+                            parent_id=result.completed_parent_parent_id,
+                            result_summary=last_content,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to publish lifecycle event for completed parent "
+                            f"{result.completed_parent_id[:8]}...: {e}"
+                        )
+
+            # Emit SSE for parent WAITING_CHILDREN (CM-disabled legacy path
+            # with pending own-queue messages — was inside the WriteGuardSession
+            # at line 624-627 in the pre-refactor inline block).
+            if result.parent_waiting_children_sse and result.parent_id:
+                if self._manager._live_hub:
+                    try:
+                        await self._manager._live_hub.stream_status_change(
+                            result.parent_id, "waiting_children",
+                            agent_id=result.waiting_children_parent_agent_id,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to emit status_change for waiting_children parent: {e}"
+                        )
+            
+            # Title generation
+            self._trigger_title_generation(instance_id, completed_message_id)
+
+            # --- Lifecycle hooks (on_complete) ------------------------------
+            # Only ``regular_child_completed`` reaches here (W6); every other
+            # outcome returns earlier. The dispatch is bounded by
+            # ``asyncio.wait_for(..., timeout=5.0)`` (W2) and uses
+            # ``except asyncio.CancelledError: raise`` (W3) so cancellation
+            # propagates rather than being swallowed. The bus terminal hook
+            # above has already fired by this point, so a slow/hanging hook
+            # does not block it.
+            try:
+                child_agent_id = result.child_agent_id or agent_id
+                registry = get_registry()
+                agent_meta = registry.get_version(child_agent_id, None)
+                if agent_meta is None:
+                    agent_meta = registry.get_resolved(child_agent_id)
+                if agent_meta is not None:
+                    lifecycle_hooks = getattr(agent_meta, "lifecycle_hooks", {})
+                    hook_names = lifecycle_hooks.get("on_complete", [])
+                    if hook_names:
+                        # Resolve context_key per W7 — try tree-root, fall
+                        # back to instance_id, skip if no repo at all.
+                        context_key: str | None = None
+                        instance_repo = getattr(
+                            self._manager, "_instance_repository", None
+                        )
+                        if instance_repo is not None:
+                            try:
+                                context_key = await asyncio.to_thread(
+                                    _resolve_tree_root_id,
+                                    instance_id,
+                                    parent_id,
+                                    instance_repo,
+                                )
+                            except Exception as e:
+                                logger.debug(
+                                    f"hook context_key resolution failed: {e}"
+                                )
+                                context_key = instance_id
+                        else:
+                            logger.debug(
+                                "context_key unavailable; hook dispatch skipped"
+                            )
+                        if context_key is not None:
+                            ctx = LifecycleHookContext(
+                                instance_id=instance_id,
+                                agent_id=child_agent_id,
+                                parent_id=parent_id,
+                                last_content=last_content,
+                                outcome=outcome,
+                                context_key=context_key,
+                                manager=self._manager,
+                            )
+                            try:
+                                await asyncio.wait_for(
+                                    dispatch_lifecycle_hooks(
+                                        "on_complete", hook_names, ctx
+                                    ),
+                                    timeout=5.0,
+                                )
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception as e:
+                                logger.warning(f"lifecycle hook failed: {e}")
+            except Exception as e:
+                logger.warning(f"lifecycle hook dispatch setup failed: {e}")
+
+            return
+
+        # instance_not_found: no obligation (no parent reachable,
+        # no child to report).
+        if outcome in ("instance_not_found",):
+            return
+
+        # B4 RESOLVED 2026-09-11: child report obligation BACKSTOP.
+        # Reachable ONLY for UNKNOWN outcome strings at HEAD (R2
+        # polish 2026-09-11) — every canonical outcome now early-
+        # returns BEFORE this site:
+        #
+        #   * ``regular_child_completed`` and
+        #     ``child_still_running_defer`` → set
+        #     ``bus_terminal_emitted=True`` and return via their own
+        #     branches; the backstop's ``not bus_terminal_emitted``
+        #     guard short-circuits.
+        #   * ``idempotency_skip`` → handled INLINE by the cycle-2
+        #     re-mint at ``child_reports.py:~3843`` (W5 obligation
+        #     re-mint) when parent ∧ COMPLETED ∧ PENDING watcher.
+        #     When those conditions are absent (no parent, not
+        #     COMPLETED, no PENDING watcher) the branch is a silent
+        #     legit-skip — see the structural mutual-exclusion
+        #     comment above the inline ``return``.
+        #   * ``root_completed`` → root has no parent obligation.
+        #   * ``tool_invocation_completed`` → lifecycle events, no
+        #     bus emit.
+        #   * ``deferred_pause`` → DEFERRED marker persisted in
+        #     DB-sync helper.
+        #   * ``dead_parent_skip`` → no live parent.
+        #   * ``deferred_waiting_children`` /
+        #     ``root_waiting_children`` → SSE-only paths.
+        #   * ``instance_not_found`` → no instance, no obligation.
+        #
+        # So this backstop is structurally reachable ONLY for
+        # synthetic / unknown outcome strings — the legacy cycle-1
+        # claim "backstop handles idempotency_skip" is no longer
+        # accurate (the inline re-mint owns that path now). The
+        # backstop exists as a safety net for future outcome shapes
+        # added without a dedicated handler; it's also the wedge
+        # closure for the 84563a03 class when the inline re-mint
+        # ever fails silently (defense-in-depth).
+        #
+        # Skip conditions (each is a legitimate non-emit):
+        #  * No parent — root instance, no obligation.
+        #  * bus_terminal_emitted already True — the natural path
+        #    emitted; exactly-once is preserved, do NOT re-emit.
+        #  * The instance is NOT in a terminal status — the defer
+        #    was legitimate (the child isn't actually done yet).
+        #
+        # Exactly-once preservation: the bus's
+        # transition_state guarded WHERE state = 'PENDING'
+        # Core UPDATE makes a redundant backstop emit a safe no-op.
+        if (
+            not bus_terminal_emitted
+            and parent_id is not None
+            and outcome not in (
+                "root_completed",
+                "tool_invocation_completed",
+                "child_still_running_defer",
+                "deferred_waiting_children",
+                "root_waiting_children",
+                "dead_parent_skip",
+                "deferred_pause",
+            )
+        ):
+            # Verify the instance is actually COMPLETED — only
+            # then is the obligation unmet.
+            try:
+                inst = await asyncio.to_thread(
+                    self._manager._instance_repository.get, instance_id
+                )
+            except Exception as fetch_exc:
+                # Forensics: a parent-repo read failure here means
+                # the backstop's force-emit is silently skipped. At
+                # HEAD this site is only reachable for unknown
+                # outcome strings (see comment above), so a silent
+                # skip here is a defense-in-depth safety net —
+                # surface at DEBUG so operators can correlate with
+                # downstream parent-still-parked symptoms.
+                logger.debug(
+                    f"B4 backstop: instance repo fetch failed for "
+                    f"{instance_id[:8]}...; deferring force-emit "
+                    f"(no-op): {fetch_exc!r}"
+                )
+                inst = None
+            if inst is not None and inst.status == (
+                InstanceStatus.COMPLETED.value
+            ):
+                # The instance is COMPLETED but no terminal was
+                # emitted. Force-emit via the corrective multi-turn
+                # primitive — it fires the parent's PENDING watcher
+                # keyed on the (parent, child) instance pair. Logged
+                # at WARNING so a regression in the natural path
+                # surfaces in the operator logs.
+                logger.warning(
+                    f"B4 BACKSTOP: child {instance_id[:8]}... is "
+                    f"COMPLETED but no terminal report was emitted "
+                    f"(outcome={outcome!r}). Force-emitting corrective "
+                    f"terminal for parent {parent_id[:8]}... — "
+                    f"this is the 84563a03 wedge fix."
+                )
+                try:
+                    await self._emit_terminal_for_child_instance_via_bus(
+                        parent_instance_id=parent_id,
+                        child_instance_id=instance_id,
+                        status="completed",
+                        summary=(
+                            f"B4 backstop force-emit (outcome={outcome!r})"
+                        ),
+                    )
+                except Exception as backstop_exc:
+                    logger.warning(
+                        f"B4 backstop force-emit failed for "
+                        f"{instance_id[:8]}... / parent "
+                        f"{parent_id[:8]}...: {backstop_exc!r}"
+                    )
+
+        logger.warning(
+            f"Unknown child completion outcome '{outcome}' for "
+            f"instance {instance_id[:8]}..."
+        )

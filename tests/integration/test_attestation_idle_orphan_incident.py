@@ -244,18 +244,25 @@ async def test_b08f40fe_idle_orphan_tree_denies_instead_of_branch5_allow(
     attestation_manager_factory,
     caplog,
 ):
-    """THE incident regression (gate level).
+    """THE incident regression (gate level) — WIDENED expectation.
 
     Tree: 8 terminal children + 4 never-dispatched IDLE-orphan
     grandchildren; watchers FIRED (``pending_children=0``), no held
     wakeups, delegation anchored (send_message after the real user
     message), NO attestation, mode=enforce.
 
-    Pre-fix this exact shape returned
-    ``allowed_legitimate_pending_wakeup`` (branch 5) on
-    ``live_descendants=4`` and the leader completed prematurely.
-    Post-fix the four orphans carry no work en route ⇒
-    ``live_descendants=0`` ⇒ DENIED + nudge, counter increments.
+    wi-1fbee2ec (leader adjudication 2026-11-01, binding): the
+    b08f40fe conditional-dormancy posture is SUPERSEDED for the live
+    count — ANY non-terminal descendant reads NON-QUIET, so the four
+    IDLE orphans now yield ``live_descendants=4`` and branch (5)
+    ``allowed_legitimate_pending_wakeup`` IS the expected outcome
+    for this shape (the allow-hold; the deny ladder is for the QUIET
+    tree; orphan reaping belongs to the strand healer / WC-orphan
+    detector lane). The pre-widening expectation (deny on the true
+    zero) is preserved by the lane's own pins and the PG
+    counterpart; this gate-level test asserts the widened doctrine.
+    The test NAME is historical (renames forbidden — the receipts
+    archive cites this id).
     """
     repo, _leader = attestation_repository
     _seed_incident_tree(file_sqlite_engine, InstanceStatus.IDLE.value)
@@ -290,19 +297,17 @@ async def test_b08f40fe_idle_orphan_tree_denies_instead_of_branch5_allow(
         )
 
     log_text = caplog.text
-    # (1.i) Branch (5) must NOT fire — the b08f40fe premature-allow.
-    assert "decision=allowed_legitimate_pending_wakeup" not in log_text
-    # (1.ii) The TRUE zero is visible in the canonical schema row.
-    assert "live_descendants=0" in log_text
-    # (1.iii) DENIED + nudge (the deny ladder fires instead).
-    assert "decision=denied" in log_text
-    assert _nudge_count(state["messages"]) >= 1
-    # (1.iv) The denied counter increments from the true zero — the
-    # first deny is pinned by its ledger log line (the deny loop
-    # continues to bound/escalation afterwards, so the FINAL counter
-    # depends on loop length; the 0→1 increment is the incident-relevant
-    # pin).
-    assert "denied_count=0 -> next=1" in log_text
+    # (1.i) Branch (5) NOW fires — the widened NON-QUIET outcome for
+    # the incident shape (the four IDLE orphans read live).
+    assert "decision=allowed_legitimate_pending_wakeup" in log_text
+    # (1.ii) The widened count is visible in the canonical schema row.
+    assert "live_descendants=4" in log_text
+    # (1.iii) No deny on the non-quiet tree (the allow-hold owns the
+    # turn-end; the deny ladder is for the QUIET tree) — no nudge.
+    assert "decision=denied" not in log_text
+    assert _nudge_count(state["messages"]) == 0
+    # (1.iv) Counter UNCHANGED on the allow-hold (the R2 non-advance).
+    assert "denied_count=0 -> next=1" not in log_text
     # (1.v) The third-input facade was actually consulted.
     manager.count_live_descendants.assert_called()
 

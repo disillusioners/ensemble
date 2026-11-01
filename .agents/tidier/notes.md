@@ -1,5 +1,16 @@
 # Tidier Review Notes — agents-ensemble
 
+## 2026-11-01 — report-obligation visibility tidy pass (worktree fix/report-obligation-visibility @ aa5f2cd6c, reviewed range f7039c3ff..17d45fd5c, 17 files +2799/−54), Iteration 001
+- Commission: quality-only pass post-reviewer-APPROVE; polarity-sensitive gate aggregate → behavior findings REPORT-ONLY; two developer-routed items (b)/(d) with text-only fix authority.
+- Dispatch: 2 parallel read-only workers (readable e406e8fb, hygiene 5d53921a) + apply phase reusing worker A (revived, context intact). All reported fully, no gaps.
+- Verdict: PASS after in-lane fold. 14 merged findings: 0 High / 7 Medium / 7 Low; 9 fixed (commits 918cdec7e + aa5f2cd6c, no push), 5 reported.
+- Routed (b): docstring was WRONG for per-input fail-open rows (−1 lands though the read ran and may have found obligations) — "dense-but-accurate" held only for the db_exc row; exact Block1/Block2 replacements applied.
+- Routed (d): premise CORRECTED — sites were function-local deferred imports shadowing the module's own member-identical _PARENT_TERMINAL_STATUSES (:450), NOT comment restatements; deletion dedup applied (member-identity proven by both workers independently). Triple-definition debt routed to reviewer.
+- Cross-worker: 1 merge (shadowed constant, found by both); 1 conflict resolved (readable's func/or_ deferred-import Medium refuted by hygiene's verified pre-existing deferred-import sites in same file → downgraded, no change).
+- Reported-only: caller/callee suppression-check dup + orphan_disposition mis-attribution trap (control-flow ruling); idie→idle typo blocked by evidence-stability (receipts may cite the test id); Any-bag TypedDict future; log-fstring legibility Consider.
+- Process: apply-phase edit_file false-positive "found 2 times" on a uniquely-matching indented literal → count-asserted python replacement (assert count==1) is the reliable fold mechanism. skill_feedback relay visibility nit recurring (~12th).
+- Deliverable: .agents/shared/planning/report-obligation-visibility/tidier-report.md + this note, docs(tidy) commit, single targeted add, no push.
+
 ## 2026-10-29 — db-pool idle-in-txn quality pass (worktree fix/db-pool-idle-txn @ 1641f7189, range 19fc11c8b..1641f7189, 42 files +8019/−238), Iteration 001
 - Commission: craftsmanship-only pass AFTER code-review council (0 critical, 6 warnings fixed) and BEFORE the tester gate. Caller's 7 focus checks: dead code, naming, twin duplication (P0/P1/P2 sync/async + two probes), comment accuracy (F9.1 class), test-pack hygiene (25 packs), script hygiene (fence = safety instrument), placement. Correctness adjudicated; adjudicated constraints honored (D-47/D-59/Δ3 constants, F8 shape, strict-False consumer, backstop, frozen 46-pin/26-pack inventory, DO-NOT-TOUCH byte-identical surfaces).
 - Dispatch: 3 parallel read-only workers (readable fdc16fba, hygiene aaccec22, robustness edd04224); all reported fully, no gaps, no re-dispatches. Verdicts: all three NEEDS WORK.

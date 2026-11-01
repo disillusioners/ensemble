@@ -456,6 +456,11 @@ _PARENT_TERMINAL_STATUSES: frozenset[str] = frozenset(
     }
 )
 
+# Ancestor-walk depth guard (the repository traversal-cap discipline —
+# ``_MAX_TRAVERSAL_DEPTH = 256`` at repositories/instance/repository.py)
+# — cycle/corrupt-tree defense for the RDRS chain walks.
+_ANCESTOR_WALK_DEPTH_CAP = 256
+
 
 # ── Lane 7 (Proposal B PR3) — the mission-commission reconciliation ──
 #
@@ -513,6 +518,16 @@ class LaneResult:
     busy_check_failed: int = 0
     already_recovered: int = 0
     orphan_disposition: int = 0
+    # wi-1fbee2ec PART 3 (D3): ORPHAN-lane rows whose revival was
+    # SUPPRESSED because the recipient's tree ROOT is terminal (the
+    # obligation cannot deliver in-session — the 10:35 apparition
+    # shape). The row is HELD DEFERRED (durable convergence record
+    # — the level-triggered reconciler re-examines it every cycle)
+    # and the suppression is surfaced here + in the structured log;
+    # NEVER dead-lettered to FAILED (sentinel-semantics conflation
+    # refused). Distinct from ``orphan_disposition`` (genuine
+    # revival failures).
+    suppressed_root_terminal: int = 0
     # F-2 (durability-f1-f2 / phase2 task 2.5): PREFIX-ledger
     # cross-path dedup match count. The lane did NOT mint a
     # report because the natural path already delivered or is
@@ -528,6 +543,7 @@ class LaneResult:
             "busy_check_failed": self.busy_check_failed,
             "already_recovered": self.already_recovered,
             "orphan_disposition": self.orphan_disposition,
+            "suppressed_root_terminal": self.suppressed_root_terminal,
             "skipped_already_reported": self.skipped_already_reported,
             "errors": self.errors,
         }
@@ -619,6 +635,64 @@ class MissionReconciliationLaneResult(LaneResult):
 
 
 @dataclass
+class WcOrphanDetectorLaneResult(LaneResult):
+    """wi-1fbee2ec PART 4 — the WC-orphan detector lane's counters.
+
+    DETECTION-ONLY lane (D2 ruling (a): sweep-side detector; the
+    strand-healer widening was rejected as structurally hostile and
+    wedge captures stay diagnostic-only). Every classified row
+    reaches ONE of the counters below; every FIRE-class row
+    (``direct`` / ``pure_chain``) also gets a structured log line,
+    while the skip-classes are counter-only by design — no revival,
+    no state write (the disposition is surfaced for the operator / a
+    future lane).
+
+    Counter semantics:
+
+    * ``wc_orphan_direct`` — a WC instance whose DIRECT parent is
+      TERMINAL (the primary shape).
+    * ``wc_orphan_pure_chain`` — a WC instance whose ancestor chain
+      passes through one or more WC members before reaching a
+      TERMINAL structural authority (the pure-WC-grandchildren
+      sub-shape — double-blind to every existing lane: the healer's
+      tree leg aborts fail-closed on WC members bearing execution
+      evidence, its terminal-parent bound and roots-only posture
+      exclude it upstream).
+    * ``skipped_live_authority`` — the chain reached a NON-terminal
+      non-WC ancestor (a live mission member owns the row — normal
+      waiting state; fired nowhere, counted for lane-shape
+      visibility).
+    * ``skipped_root_wc`` — the chain reached a ROOT that is itself
+      WC (the strand healer's roots-only territory — deliberately
+      out of this lane's domain).
+    * ``probe_errors`` — per-row walk failures (chain broken /
+      unreadable rows). Counted, never silent; the row is retried
+      next cycle. Feed-level failures also count ONE probe error (a
+      whole-cycle feed outage reads as a single count, retried next
+      tick).
+    """
+
+    wc_orphan_direct: int = 0
+    wc_orphan_pure_chain: int = 0
+    skipped_live_authority: int = 0
+    skipped_root_wc: int = 0
+    probe_errors: int = 0
+
+    def to_dict(self) -> dict[str, int]:
+        base = super().to_dict()
+        base.update(
+            {
+                "wc_orphan_direct": self.wc_orphan_direct,
+                "wc_orphan_pure_chain": self.wc_orphan_pure_chain,
+                "skipped_live_authority": self.skipped_live_authority,
+                "skipped_root_wc": self.skipped_root_wc,
+                "probe_errors": self.probe_errors,
+            }
+        )
+        return base
+
+
+@dataclass
 class SweepResult:
     """Top-level structured result of a single sweep pass.
 
@@ -669,6 +743,7 @@ class ReportDeliveryRecoveryService:
         lane_orphan: bool = True,
         lane_stuck_wake: bool = True,
         lane_mission_reconciliation: bool = True,
+        lane_wc_orphan_detector: bool = True,
         mission_record_repo: Any = None,
         mission_record_service: Any = None,
         dependency_bus: Any = None,
@@ -754,6 +829,7 @@ class ReportDeliveryRecoveryService:
         self._lane_orphan = bool(lane_orphan)
         self._lane_stuck_wake = bool(lane_stuck_wake)
         self._lane_mission_reconciliation = bool(lane_mission_reconciliation)
+        self._lane_wc_orphan_detector = bool(lane_wc_orphan_detector)
         self._mission_record_repo = mission_record_repo
         self._mission_record_service = mission_record_service
         self._dependency_bus = dependency_bus
@@ -867,7 +943,8 @@ class ReportDeliveryRecoveryService:
             f"recovery_retry={self._lane_recovery_retry}, "
             f"orphan={self._lane_orphan}, "
             f"stuck_wake={self._lane_stuck_wake}, "
-            f"mission_reconciliation={self._lane_mission_reconciliation}]"
+            f"mission_reconciliation={self._lane_mission_reconciliation}, "
+            f"wc_orphan_detector={self._lane_wc_orphan_detector}]"
         )
 
     def stop(self, timeout: float | None = None) -> None:
@@ -1087,6 +1164,16 @@ class ReportDeliveryRecoveryService:
         # (state='PENDING') and the wake is preserved.
         if self._lane_stuck_wake:
             result.lanes["stuck_wake"] = self._run_stuck_wake_lane()
+        # wi-1fbee2ec PART 4 — the WC-orphan detector (observability
+        # only; before lane 7 which must stay LAST — it judges the
+        # POST-HEAL state).
+        if self._lane_wc_orphan_detector:
+            result.lanes["wc_orphan_detector"] = (
+                self._run_wc_orphan_detector_lane()
+            )
+            if self._stop_event.is_set():
+                self._finalize_sweep_result(result)
+                return result
         # Lane 7 (Proposal B PR3): the mission-commission reconciliation
         # sweep. LAST — lanes 1-6 are DELIVERY healing, so a commission
         # whose report is re-delivered by them in this same pass must be
@@ -1476,6 +1563,30 @@ class ReportDeliveryRecoveryService:
 
         # Step 2 (ORPHAN lane only): try revival first.
         if not parent_not_terminal:
+            # ── wi-1fbee2ec PART 3: pre-revival ROOT-TERMINAL check ──
+            # (the D3 disposition surface: HOLD DEFERRED + structured
+            # observability — a dedicated counter so operators can
+            # distinguish root-terminal suppression from genuine
+            # revival failure; NEVER a FAILED dead-letter).
+            _root_terminal, _root_id = self._ancestor_root_is_terminal(
+                parent_id
+            )
+            if _root_terminal:
+                result.suppressed_root_terminal += 1
+                logger.warning(
+                    f"sweep orphan suppressed_root_terminal: "
+                    f"recipient={parent_id[:8]}... is terminal and its "
+                    f"tree root {_root_id[:8] if _root_id else '?'}... "
+                    f"is TERMINAL — revival SUPPRESSED, row held "
+                    f"DEFERRED (injection_id={row.injection_id[:8]}..., "
+                    f"child={child_id[:8]}..., "
+                    f"msg={child_msg_id[:8]}..., "
+                    f"reason={row.deferred_reason}); the obligation "
+                    f"cannot deliver in-session (the 10:35 apparition "
+                    f"shape — real message flow via T1/send_message is "
+                    f"unaffected)"
+                )
+                return
             revived = self._try_revive_terminal_parent(parent_id)
             if not revived:
                 # Revive failed — observable disposition. Plan W1
@@ -1550,8 +1661,35 @@ class ReportDeliveryRecoveryService:
         ``_process_child_completion_and_notify_parent`` which
         enqueues a completion_report via the normal path).
 
+        wi-1fbee2ec PART 3 (2026-11-01) — pre-revival ROOT-TERMINAL
+        check, at THIS seam ONLY. Before reviving, walk the
+        recipient's permanent ancestor chain (``instances.parent_id``)
+        to the tree root; when the ROOT is TERMINAL the revival is
+        SUPPRESSED (returns ``False``) — the obligation cannot
+        deliver in-session (the mission is closed; reviving a
+        terminal recipient under a terminal root is the 10:35
+        apparition shape: completed-root + revived-terminal-recipient
+        41s after a correct bound-closure). Per D3 the row is held
+        DEFERRED (the caller's existing orphan-disposition surface —
+        now distinguished by the ``suppressed_root_terminal``
+        counter) — observability, never a FAILED dead-letter
+        (sentinel-semantics conflation refused). A LIVE root
+        suppresses NOTHING: revival proceeds and the root's gates
+        (part 2's obligation hold inputs) keep the mission open
+        until the report delivers. COMPOSITION, not opposition: T1
+        funnel-top reactivation (instance_messaging.py:3855-3889),
+        the send_message carve-out (:2432-2466 / :2562-2580), and
+        ``manager._revive_terminal_instance`` itself are UNTOUCHED —
+        real message flow keeps reviving terminal rows through its
+        own seams; only the RDRS backfill path (where the recipient
+        has NO live message driving it) is narrowed. Ancestor-walk
+        errors fail-open-to-REVIVE (an unreadable tree must not
+        strand a live-root obligation; the walk is a suppression
+        filter, not a liveness authority).
+
         Returns ``True`` on successful revival, ``False`` on
-        failure (the caller treats False as orphan_disposition).
+        failure or root-terminal suppression (the caller treats
+        False as orphan_disposition / suppressed_root_terminal).
 
         POST-DEEP-REVIEW (W3, 2026-08-20): per-row timeout aligned
         with the sweep ``stop()`` thread-join budget. The prior
@@ -1562,6 +1700,20 @@ class ReportDeliveryRecoveryService:
         (the lane's structured logging handles the
         non-silent-required-by-W1 disposition).
         """
+        # ── PART 3: the root-terminal pre-check (BEFORE reviving). ──
+        _root_terminal, _root_id = self._ancestor_root_is_terminal(parent_id)
+        if _root_terminal:
+            logger.warning(
+                f"sweep suppressed_root_terminal: recipient="
+                f"{parent_id[:8]}... is terminal AND its tree root "
+                f"{_root_id[:8] if _root_id else '?'}... is TERMINAL — "
+                f"revival suppressed (the obligation cannot deliver "
+                f"in-session; row held DEFERRED per D3; the 10:35 "
+                f"apparition shape). Real message flow (T1 funnel-top "
+                f"reactivation / send_message) is NOT affected — this "
+                f"check lives at the RDRS revival seam only."
+            )
+            return False
         try:
             # The instance-messaging path is the canonical revival;
             # calling it with a marker message (no source content) is
@@ -1583,6 +1735,221 @@ class ReportDeliveryRecoveryService:
                 f"{type(exc).__name__}: {exc}"
             )
             return False
+
+    def _ancestor_root_is_terminal(
+        self, instance_id: str
+    ) -> tuple[bool, str | None]:
+        """wi-1fbee2ec PART 3 — walk the permanent ancestor chain to the
+        tree root and report whether the ROOT is terminal.
+
+        Walks ``instances.parent_id`` upward (the permanent record —
+        survives revive) with a depth guard
+        (``_ANCESTOR_WALK_DEPTH_CAP``, the repository
+        traversal-cap discipline). The recipient row itself is
+        skipped (the caller already knows it is terminal — the ORPHAN
+        lane premise); the verdict concerns the ROOT only:
+
+        * root terminal → ``(True, root_id)`` — revival suppressed.
+        * root non-terminal → ``(False, root_id)`` — revival proceeds
+          (the root's obligation hold inputs keep the mission open).
+        * chain broken (missing row) / depth cap / repo unreadable →
+          ``(False, None)`` — FAIL-OPEN-TO-REVIVE: an unreadable tree
+          must never strand a live-root obligation; the walk is a
+          suppression filter, not a liveness authority.
+
+        Uses the same canonical terminal set as the sibling seams
+        (``_PARENT_TERMINAL_STATUSES`` mirrors job_queue_service's
+        ``TERMINAL_STATUSES``: COMPLETED / ERROR / TERMINATED /
+        FAILED).
+        """
+        try:
+            current_id: str | None = instance_id
+            visited: set[str] = set()
+            while current_id is not None and current_id not in visited:
+                visited.add(current_id)
+                if len(visited) > _ANCESTOR_WALK_DEPTH_CAP:
+                    # Depth guard (the repository traversal-cap
+                    # discipline) — cycle/corrupt-tree defense.
+                    return (False, None)
+                row = self._instance_repo.get(current_id)
+                if row is None:
+                    # Chain broken — fail-open (never suppress on an
+                    # unreadable tree).
+                    return (False, None)
+                if row.parent_id is None:
+                    return (
+                        row.status in _PARENT_TERMINAL_STATUSES,
+                        current_id,
+                    )
+                current_id = row.parent_id
+            return (False, None)
+        except Exception as exc:
+            logger.warning(
+                f"sweep ancestor-walk failed for {instance_id[:8]}...: "
+                f"{type(exc).__name__}: {exc} — fail-open-to-revive"
+            )
+            return (False, None)
+
+    # --------------------------------------------------------
+    # wi-1fbee2ec PART 4 — WC-orphan detector lane (D2 ruling (a):
+    # sweep-side, observability-only)
+    # --------------------------------------------------------
+
+    def _run_wc_orphan_detector_lane(self) -> WcOrphanDetectorLaneResult:
+        """Detect WC-instance-with-TERMINAL-authority shapes (observe
+        → fire, NEVER silent, NEVER act).
+
+        The gap this lane closes (plan §4): a WAITING_CHILDREN
+        instance whose structural authority chain ends in a TERMINAL
+        row is seen by NOBODY — the strand healer excludes non-roots
+        (:546-553) and aborts fail-closed on WC members bearing
+        execution evidence (:650-662, the pure-WC-grandchildren
+        double-blind); RDRS L2 excludes terminal parents
+        (:1717-1720); the ORPHAN lane sees only existing DEFERRED
+        rows (:1146-1156) — a WC instance with NO marker row is
+        invisible; the other sweeps touch watcher/job rows, not WC
+        status.
+
+        Posture (D2 + R6): DETECTION ONLY. Each classified row gets
+        a structured log line + a counter; the lane never revives,
+        never writes instance state, never mints markers — the
+        disposition is surfaced for the operator / a future
+        commission. The healer's roots-only predicate,
+        ghost-signature abort, and terminal-parent bound are NOT
+        relaxed (option (b) rejected as structurally hostile); wedge
+        captures remain diagnostic-only (option (c) rejected — no
+        disposition machinery).
+        """
+        out = WcOrphanDetectorLaneResult()
+        try:
+            candidate_ids = (
+                self._instance_repo.list_non_root_waiting_children(
+                    limit=self._batch_cap
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "sweep wc_orphan_detector candidate feed failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            out.probe_errors += 1
+            return out
+        for wc_id in candidate_ids:
+            if self._stop_event.is_set():
+                logger.info(
+                    "ReportDeliveryRecoveryService._run_wc_orphan_"
+                    "detector_lane: stop requested mid-batch — exiting"
+                )
+                break
+            try:
+                classification, context = self._classify_wc_orphan(wc_id)
+            except Exception as exc:
+                out.probe_errors += 1
+                logger.warning(
+                    f"sweep wc_orphan_detector walk failed for "
+                    f"{wc_id[:8]}...: {type(exc).__name__}: {exc}"
+                )
+                continue
+            if classification == "direct":
+                out.wc_orphan_direct += 1
+                logger.warning(
+                    f"sweep wc_orphan_detector FIRE (direct): instance="
+                    f"{wc_id[:8]}... is WAITING_CHILDREN and its DIRECT "
+                    f"parent {context['authority_id'][:8] if context.get('authority_id') else '?'}... "
+                    f"is TERMINAL ({context.get('authority_status')}) — "
+                    f"NO existing lane sees this shape; disposition "
+                    f"surfaced for operator review (detection-only, no "
+                    f"action taken)"
+                )
+            elif classification == "pure_chain":
+                out.wc_orphan_pure_chain += 1
+                logger.warning(
+                    f"sweep wc_orphan_detector FIRE (pure_chain): "
+                    f"instance={wc_id[:8]}... is WAITING_CHILDREN under "
+                    f"a WC chain (depth={context.get('chain_depth')}) "
+                    f"whose structural authority "
+                    f"{context['authority_id'][:8] if context.get('authority_id') else '?'}... "
+                    f"is TERMINAL ({context.get('authority_status')}) — "
+                    f"the pure-WC-grandchildren sub-shape (double-blind "
+                    f"to every existing lane); disposition surfaced for "
+                    f"operator review (detection-only, no action taken)"
+                )
+            elif classification == "live_authority":
+                out.skipped_live_authority += 1
+            elif classification == "root_wc":
+                out.skipped_root_wc += 1
+            elif classification is None:
+                # None = the walk could not classify (chain broken /
+                # unreadable — the classifier returns None with a
+                # reason context); count a probe error, retry next
+                # cycle.
+                out.probe_errors += 1
+        return out
+
+    def _classify_wc_orphan(
+        self, instance_id: str
+    ) -> tuple[str | None, dict[str, Any]]:
+        """Classify one non-root WC candidate against its ancestor chain.
+
+        Walks ``instances.parent_id`` upward from the candidate's
+        PARENT (the candidate's own WC status is the feed's premise).
+        The first ancestor whose status is NOT ``WAITING_CHILDREN``
+        is the chain's STRUCTURAL AUTHORITY:
+
+        * authority TERMINAL → orphan. ``direct`` when the authority
+          is the candidate's direct parent; ``pure_chain`` when one
+          or more WC members sit between (the pure-WC-grandchildren
+          sub-shape).
+        * authority non-terminal (RUNNING / WAITING / PAUSED / IDLE /
+          QUEUED / …) → ``live_authority`` — a live mission member
+          owns the row (normal waiting state; not fired).
+        * the chain reaches a ROOT while still WC → ``root_wc`` —
+          the strand healer's roots-only territory (not fired here).
+
+        Returns ``(classification, context)``; ``None`` classification
+        (context carries the reason) means the walk could not
+        classify (missing row mid-chain / depth cap
+        ``_ANCESTOR_WALK_DEPTH_CAP``) — the caller
+        counts a probe error. Raises are NOT caught here (the lane's
+        per-row guard owns them).
+        """
+        first_parent = True
+        chain_depth = 0
+        current_id: str | None = None
+        row = self._instance_repo.get(instance_id)
+        if row is None or row.parent_id is None:
+            return (None, {"reason": "candidate_missing_or_root"})
+        current_id = row.parent_id
+        visited: set[str] = {instance_id}
+        while current_id is not None and current_id not in visited:
+            visited.add(current_id)
+            chain_depth += 1
+            if len(visited) > _ANCESTOR_WALK_DEPTH_CAP:
+                return (None, {"reason": "depth_cap"})
+            ancestor = self._instance_repo.get(current_id)
+            if ancestor is None:
+                return (None, {"reason": "chain_broken"})
+            status = ancestor.status
+            if status == InstanceStatus.WAITING_CHILDREN.value:
+                # WC chain member — keep walking toward the authority.
+                if ancestor.parent_id is None:
+                    # A WC ROOT — the strand healer's territory.
+                    return ("root_wc", {"authority_id": current_id,
+                                        "authority_status": status,
+                                        "chain_depth": chain_depth})
+                current_id = ancestor.parent_id
+                first_parent = False
+                continue
+            context = {
+                "authority_id": current_id,
+                "authority_status": status,
+                "chain_depth": chain_depth,
+            }
+            if status in _PARENT_TERMINAL_STATUSES:
+                return ("direct" if first_parent else "pure_chain", context)
+            return ("live_authority", context)
+        # Loop exhausted without an authority verdict (cycle guard).
+        return (None, {"reason": "cycle_or_exhausted"})
 
     def _get_event_loop(self) -> asyncio.AbstractEventLoop:
         """Resolve the manager's event loop (sync accessor).

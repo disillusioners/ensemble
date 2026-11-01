@@ -1,0 +1,30 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______ TestSyncMint.test_mint_on_completion_single_row_with_provenance ________
+
+self = <tests.unit.services.test_report_obligation_emission_pins.TestSyncMint object at 0x710f7be5c690>
+engine = Engine(sqlite:////tmp/pytest-of-nea/pytest-696/test_mint_on_completion_single0/obligation-pins.db)
+bus = <daemon.services.dependency_bus.DependencyBus object at 0x710f7c00d940>
+
+    def test_mint_on_completion_single_row_with_provenance(self, engine, bus):
+        """THE pin-(b) GREEN: terminalization ⇒ exactly ONE obligation
+        row, same transaction as the COMPLETED stamp, state=PENDING,
+        provenance SYNC_MINT, artifact fields set."""
+        self._seed_running_child(engine)
+        service = make_mint_service(engine)
+        result = service._process_child_completion_db_sync(
+            CHILD, "child-msg-1", "the final report content"
+        )
+        assert result.outcome == "regular_child_completed"
+        rows = all_injections(engine)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.state == ReportInjectionState.PENDING.value
+>       assert row.deferred_reason == DEFERRED_REASON_SYNC_MINT
+E       AssertionError: assert None == 'SYNC_MINT'
+E        +  where None = ReportInjection(child_instance_id='22222222-2222-4222-8222-222222222222', report_message_id='a43bed5d-63fb-492c-a75c-c...-4111-8111-111111111111', content='the final report content', delivered_at=None, deferred_reason=None, mission_id=None).deferred_reason
+
+tests/unit/services/test_report_obligation_emission_pins.py:635: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/services/test_report_obligation_emission_pins.py::TestSyncMint::test_mint_on_completion_single_row_with_provenance
+1 failed in 2.74s

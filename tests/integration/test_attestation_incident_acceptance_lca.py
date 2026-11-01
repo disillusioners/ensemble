@@ -249,22 +249,31 @@ async def test_lca_b08f40fe_phase1_incident_phrase_denies_no_silent_completion(
     attestation_manager_factory,
     caplog,
 ):
-    """PHASE 1 ACCEPTANCE — incident phrase → DENY + nudge + no silent completion.
+    """PHASE 1 ACCEPTANCE — incident phrase → the widened NON-QUIET
+    allow-hold + no silent completion.
 
     Reconstructs the EXACT b08f40fe tree at the gate level: 8 terminal
     children + tester COMPLETED + 4 IDLE-orphan grandchildren. The
-    leader's final message carries the verbatim incident phrase. The
-    gate MUST:
+    leader's final message carries the verbatim incident phrase.
+    wi-1fbee2ec (leader adjudication 2026-11-01, binding): the
+    conditional-dormancy posture is SUPERSEDED for the live count —
+    the four IDLE orphans read ``live_descendants=4`` and the gate
+    MUST:
 
-    * deny (``decision=denied`` in log)
-    * inject the nudge (in-graph attestation nudge)
-    * increment ``attestation_denied_count`` from 0 → 1 (first-deny pin)
-    * NOT fire branch (5) ``allowed_legitimate_pending_wakeup`` (the
-      silent-completion path the fix kills)
+    * fire branch (5) ``allowed_legitimate_pending_wakeup`` (the
+      widened NON-QUIET outcome for the incident shape — the
+      allow-hold, never a silent completion)
+    * NOT deny and NOT nudge (the deny ladder is for the QUIET tree)
+    * keep the counter unchanged (the R2 non-advance)
     * leave the leader's instance row status != COMPLETED (defense in
-      depth on the silent-completion invariant)
+      depth on the silent-completion invariant — unchanged by the
+      widening)
     * contain the verbatim phrase somewhere in the message tape
       (pins the test against an unfaithful synthetic rephrase)
+
+    The pre-widening deny expectations are preserved by the lane's
+    own pins + the PG counterpart; the test NAME is historical
+    (renames forbidden — the receipts archive cites this id).
     """
     repo, _leader = attestation_repository
     _seed_incident_tree(file_sqlite_engine, InstanceStatus.IDLE.value)
@@ -306,25 +315,27 @@ async def test_lca_b08f40fe_phase1_incident_phrase_denies_no_silent_completion(
     log_text = caplog.text
     ai_contents = _ai_contents(state["messages"])
 
-    # 1.a — gate DENIES.
-    assert "decision=denied" in log_text, (
-        "Phase 1 acceptance: gate must deny the un-attested leader."
+    # 1.a — gate does NOT deny (the widened non-quiet allow-hold owns
+    # the turn-end; the deny ladder is for the QUIET tree).
+    assert "decision=denied" not in log_text, (
+        "Phase 1 acceptance (widened): the non-quiet tree must not deny."
     )
-    # 1.b — in-graph nudge injected.
-    assert _nudge_count(state["messages"]) >= 1, (
-        "Phase 1 acceptance: gate must inject the attestation nudge."
+    # 1.b — NO in-graph nudge under the allow family.
+    assert _nudge_count(state["messages"]) == 0, (
+        "Phase 1 acceptance (widened): no nudge on the allow-hold."
     )
-    # 1.c — first-deny counter pin (0 → 1).
-    assert "denied_count=0 -> next=1" in log_text, (
-        "Phase 1 acceptance: counter must increment from the true zero."
+    # 1.c — counter UNCHANGED (the R2 non-advance on the allow-hold).
+    assert "denied_count=0 -> next=1" not in log_text, (
+        "Phase 1 acceptance (widened): counter must not advance."
     )
-    # 1.d — branch (5) MUST NOT fire (the silent-completion path).
-    assert "decision=allowed_legitimate_pending_wakeup" not in log_text, (
-        "Phase 1 acceptance: branch (5) MUST NOT fire — the pre-fix defect."
+    # 1.d — branch (5) MUST fire (the widened non-quiet outcome).
+    assert "decision=allowed_legitimate_pending_wakeup" in log_text, (
+        "Phase 1 acceptance (widened): branch (5) must fire — the four "
+        "IDLE orphans read live."
     )
-    # 1.e — the two-set live semantics surface the true zero.
-    assert "live_descendants=0" in log_text, (
-        "Phase 1 acceptance: idle orphans (no work en route) count zero live."
+    # 1.e — the widened live semantics surface the non-quiet count.
+    assert "live_descendants=4" in log_text, (
+        "Phase 1 acceptance (widened): idle orphans count live (4)."
     )
     # 1.f — verbatim incident phrase present in the message tape.
     assert any(INCIDENT_PHRASE in c for c in ai_contents), (
@@ -340,7 +351,7 @@ async def test_lca_b08f40fe_phase1_incident_phrase_denies_no_silent_completion(
         f"would be a fatal regression. before={before_status!r} after={after_status!r}"
     )
     # Third-input facade was actually consulted (proves we're exercising
-    # the production two-set semantics end-to-end).
+    # the production widened walk end-to-end).
     manager.count_live_descendants.assert_called()
 
 

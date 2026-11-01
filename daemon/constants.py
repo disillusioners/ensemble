@@ -825,6 +825,20 @@ DEFERRED_REASON_PAUSE_TOCTOU: str = "PAUSE_TOCTOU"
 DEFERRED_REASON_PENDING_MESSAGES: str = "PENDING_MESSAGES"
 DEFERRED_REASON_IDEMPOTENCY_SKIP: str = "IDEMPOTENCY_SKIP"
 DEFERRED_REASON_RESUME_ROUTER: str = "RESUME_ROUTER"
+# ── wi-1fbee2ec (report-obligation visibility, 2026-11-01) ──────────
+# PROVENANCE value stamped by the SYNCHRONOUS terminalization mint
+# (``child_reports._process_child_completion_db_sync``, the natural
+# ReportInjection INSERT inside the ``begin_nested()`` SAVEPOINT).
+# The row itself is state=PENDING (it carries the full artifact —
+# ``report_message_id`` + content); the ``deferred_reason`` value
+# distinguishes the SYNC outbox mint from the RDRS BACKFILL mints
+# (``RESUME_ROUTER`` / ``PAUSE_TOCTOU`` / …) per the transactional
+# -outbox provenance ruling (plan §8 part-1 invariant iii / DEC-3).
+# This stretches the column's original "rationale for a DEFERRED
+# marker" doc into a general row-provenance vocabulary — documented
+# at the model (``report_injection/models.py``); zero DDL (TEXT,
+# open-ended by design).
+DEFERRED_REASON_SYNC_MINT: str = "SYNC_MINT"
 
 # ── Injection routing (agent-instance-tools Phase 1) ────────────────────────────
 # Phase 1 (agent-instance-tools) hoists the eligibility set that governs

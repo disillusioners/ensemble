@@ -3802,6 +3802,39 @@ class SQLModelInstanceRepository:
             ).all()
             return list(rows)
 
+    def list_non_root_waiting_children(self, limit: int = 100) -> list[str]:
+        """Non-root ``WAITING_CHILDREN`` instance ids, oldest-first
+        (wi-1fbee2ec part 4 — the WC-orphan detector's candidate feed).
+
+        Cheap status-only enumeration (the same shape as
+        :meth:`list_waiting_children_parents`) restricted to NON-ROOT
+        rows (``parent_id IS NOT NULL`` — the detector's domain; a
+        root in WC is the strand healer's roots-only territory and is
+        deliberately excluded here). Batch-capped, oldest-first: a
+        pass beyond the cap resumes on the next sweep cycle (the
+        300s cadence is the retry mechanism — the same MVP growth
+        rule the sibling RDRS finders apply).
+
+        Args:
+            limit: Batch cap (the caller's lane cap).
+
+        Returns:
+            List of instance ids (NOT hydrated — callers classify via
+            their own ancestor walks).
+        """
+        with SQLModelSession(self.engine) as db_session:
+            rows = db_session.exec(
+                select(Instance.instance_id)
+                .where(
+                    Instance.status
+                    == InstanceStatus.WAITING_CHILDREN.value
+                )
+                .where(Instance.parent_id.is_not(None))
+                .order_by(Instance.created_at.asc())
+                .limit(limit)
+            ).all()
+            return list(rows)
+
     def parents_with_non_terminal_children(
         self, parent_ids: list[str],
     ) -> set[str]:

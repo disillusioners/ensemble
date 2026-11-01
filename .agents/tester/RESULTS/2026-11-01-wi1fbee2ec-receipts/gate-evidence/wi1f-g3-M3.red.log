@@ -1,0 +1,30 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_ TestD1ObligationReadErrorFailClosed.test_evaluate_isolation_raising_facade_denies_not_fail_open _
+
+self = <tests.unit.services.test_report_obligation_gate_pins.TestD1ObligationReadErrorFailClosed object at 0x7c86ba2727b0>
+
+    def test_evaluate_isolation_raising_facade_denies_not_fail_open(self):
+        """THE D1 mutation pin: a facade that RAISES produces a DENIED
+        decision — NOT the whole-eval fail-open ALLOWED (which the
+        outer DB-seam catch would return for the sibling reads), NOT
+        the −1-sentinel per-input fail-open."""
+        msgs = [real("run the mission"), delegating_ai(), plain_ai()]
+        result = evaluate(
+            "inst-d1",
+            0,
+            msgs,
+            ENFORCE,
+            make_manager(obligation_error=True),
+        )
+>       assert result.decision is Decision.DENIED
+E       AssertionError: assert <Decision.ALLOWED: 'allowed'> is <Decision.DENIED: 'denied'>
+E        +  where <Decision.ALLOWED: 'allowed'> = GateDecision(decision=<Decision.ALLOWED: 'allowed'>, next_denied_count=0, should_inject_nudge=False, should_inject_rem...False, outstanding_commissions=0, outstanding_report_obligations=-1, report_obligation_read_error=False, resolver=None).decision
+E        +  and   <Decision.DENIED: 'denied'> = Decision.DENIED
+
+tests/unit/services/test_report_obligation_gate_pins.py:348: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    daemon.services.attestation_gate:attestation_gate.py:1678 event=leader_completion_gate_db_error error_class=RuntimeError instance_id=inst-d1 gate_location=graph_end_candidate mode=enforce leader_prompt_version= attestation_present=False denied_count=0 pending_children=-1 queued_or_expected_wakeups=-1 live_descendants=-1 busy_descendants=-1 messages_scanned=2 scanned_window_size=3 scanner_window_truncated=True scanner_summary_seen=False decision=fail_open_allowed detail=RuntimeError: obligation read exploded
+=========================== short test summary info ============================
+FAILED tests/unit/services/test_report_obligation_gate_pins.py::TestD1ObligationReadErrorFailClosed::test_evaluate_isolation_raising_facade_denies_not_fail_open
+1 failed in 0.47s

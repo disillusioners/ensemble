@@ -1,0 +1,34 @@
+..........F.F.............                                               [100%]
+=================================== FAILURES ===================================
+______ TestLaneKillSwitchesPG.test_lane1_disabled_absent_from_sweep_on_pg ______
+tests/postgres/test_report_delivery_recovery_pg.py:1116: in test_lane1_disabled_absent_from_sweep_on_pg
+    assert result.lanes == {}, (
+E   AssertionError: all-lanes-disabled sweep must produce an empty lanes map (Lane 1 disabled too); got {'mission_reconciliation': MissionReconciliationLaneResult(recovered=0, skipped_busy=0, busy_check_failed=0, already_recovered=0, orphan_disposition=0, skipped_already_reported=0, errors=0, abandoned_worker_terminal=0, abandoned_ttl=0, abandoned_worker_missing=0, satisfied_on_evidence=0, skipped_live=0, skipped_watcher_pending=0, below_ttl_hold=0, already_resolved=0, masked_suspected=0, probe_errors=0, masked_probe_errors=0, diagnostic_probe_errors=0)}
+E   assert {'mission_rec...obe_errors=0)} == {}
+E     
+E     Left contains 1 more item:
+E     {'mission_reconciliation': MissionReconciliationLaneResult(recovered=0,
+E                                                                skipped_busy=0,
+E                                                                busy_check_failed=0,
+E                                                                already_recovered=0,
+E                                                                orphan_disposition=0,...
+E     
+E     ...Full output truncated (15 lines hidden), use '-vv' to show
+_____ TestLaneKillSwitchesPG.test_all_lanes_disabled_returns_empty_result ______
+tests/postgres/test_report_delivery_recovery_pg.py:1212: in test_all_lanes_disabled_returns_empty_result
+    assert result.lanes == {}, (
+E   AssertionError: all-lane-disabled sweep must produce an empty lanes map; got {'mission_reconciliation': MissionReconciliationLaneResult(recovered=0, skipped_busy=0, busy_check_failed=0, already_recovered=0, orphan_disposition=0, skipped_already_reported=0, errors=0, abandoned_worker_terminal=0, abandoned_ttl=0, abandoned_worker_missing=0, satisfied_on_evidence=0, skipped_live=0, skipped_watcher_pending=0, below_ttl_hold=0, already_resolved=0, masked_suspected=0, probe_errors=0, masked_probe_errors=0, diagnostic_probe_errors=0)}
+E   assert {'mission_rec...obe_errors=0)} == {}
+E     
+E     Left contains 1 more item:
+E     {'mission_reconciliation': MissionReconciliationLaneResult(recovered=0,
+E                                                                skipped_busy=0,
+E                                                                busy_check_failed=0,
+E                                                                already_recovered=0,
+E                                                                orphan_disposition=0,...
+E     
+E     ...Full output truncated (15 lines hidden), use '-vv' to show
+=========================== short test summary info ============================
+FAILED tests/postgres/test_report_delivery_recovery_pg.py::TestLaneKillSwitchesPG::test_lane1_disabled_absent_from_sweep_on_pg
+FAILED tests/postgres/test_report_delivery_recovery_pg.py::TestLaneKillSwitchesPG::test_all_lanes_disabled_returns_empty_result
+2 failed, 24 passed in 44.81s

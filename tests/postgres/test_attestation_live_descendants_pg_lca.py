@@ -409,13 +409,18 @@ class TestPGCountLiveDescendantsFacade:
     """The production facade driven through a stub manager on PG."""
 
     def test_idle_orphan_without_message_or_job_is_not_live(self, pg_engine):
-        """THE b08f40fe regression at the count level — on PG.
+        """b08f40fe at the count level — SUPERSEDED posture, on PG.
 
-        IDLE-orphan descendants with NO message row and NO unsettled
-        job are NOT live. This is the core two-set semantics: the old
-        unconditional-live code wrongly counted these live, holding the
-        leader's gate open via ``live_descendants=4`` for never-
-        dispatched orphans. Must hold on PG as on SQLite.
+        wi-1fbee2ec (leader adjudication 2026-11-01, binding): the
+        conditional-dormancy check is RETIRED for the live count — ANY
+        NON-TERMINAL descendant (incl. never-dispatched IDLE orphans
+        with zero message/job evidence) now reads NON-QUIET. Rationale:
+        the dispatch→RUNNING micro-race (child row committed while its
+        evidence rows are not yet visible — the 7ceb4685/fea6f7be
+        dogfood receipt) must never verify-clean on the gate. The
+        b08f40fe orphan-shape reaping belongs to the strand healer +
+        the WC-orphan detector lane, not to the gate guessing
+        dormancy. Updated expectation: the four IDLE orphans COUNT.
         """
         _seed_instance(pg_engine, "pg-root", None, InstanceStatus.RUNNING.value)
         _seed_instance(pg_engine, "pg-tester", "pg-root", InstanceStatus.COMPLETED.value)
@@ -426,8 +431,10 @@ class TestPGCountLiveDescendantsFacade:
         manager = _build_pg_manager(
             pg_engine, with_message_lane=True, with_job_lane=True
         )
-        assert manager.count_live_descendants("pg-root") == 0, (
-            "PG dialect: IDLE orphans MUST NOT count live — b08f40fe regression"
+        assert manager.count_live_descendants("pg-root") == 4, (
+            "PG dialect: any NON-TERMINAL descendant counts live — the "
+            "wi-1fbee2ec widened input set (b08f40fe superseded for the "
+            "live count by the 2026-11-01 leader adjudication)"
         )
 
     def test_idle_with_unprocessed_message_counts_live(self, pg_engine):
@@ -459,20 +466,32 @@ class TestPGCountLiveDescendantsFacade:
         assert manager.count_live_descendants("pg-root") == 1
 
     def test_terminal_message_does_not_count_live(self, pg_engine):
-        """COMPLETED message is processed — NOT work en route (on PG)."""
+        """COMPLETED message is processed — NOT work en route (on PG).
+
+        wi-1fbee2ec widened posture: the IDLE child itself is
+        NON-TERMINAL and therefore counts live regardless of its
+        message evidence (the message lanes are no longer consulted —
+        the dispatch→RUNNING window must never verify-clean).
+        """
         _seed_instance(pg_engine, "pg-root", None, InstanceStatus.IDLE.value)
         _seed_instance(pg_engine, "pg-child", "pg-root", InstanceStatus.IDLE.value)
         _seed_message(pg_engine, "pg-child", MessageStatus.COMPLETED.value)
         manager = _build_pg_manager(pg_engine, with_message_lane=True)
-        assert manager.count_live_descendants("pg-root") == 0
+        assert manager.count_live_descendants("pg-root") == 1
 
     def test_done_job_does_not_count_live(self, pg_engine):
-        """DONE job is settled — NOT work en route (on PG)."""
+        """DONE job is settled — NOT work en route (on PG).
+
+        wi-1fbee2ec widened posture: the IDLE child itself is
+        NON-TERMINAL and therefore counts live regardless of its job
+        evidence (the job lane is no longer consulted by the gate
+        walk).
+        """
         _seed_instance(pg_engine, "pg-root", None, InstanceStatus.IDLE.value)
         _seed_instance(pg_engine, "pg-child", "pg-root", InstanceStatus.IDLE.value)
         _seed_job(pg_engine, "pg-child", AdmissionState.DONE.value)
         manager = _build_pg_manager(pg_engine, with_job_lane=True)
-        assert manager.count_live_descendants("pg-root") == 0
+        assert manager.count_live_descendants("pg-root") == 1
 
     def test_unconditional_live_set_counts_without_work_checks(self, pg_engine):
         """RUNNING / WAITING / WAITING_CHILDREN / PAUSED are UNCONDITIONAL.
@@ -493,11 +512,13 @@ class TestPGCountLiveDescendantsFacade:
         assert manager.count_live_descendants("pg-root") == 4
 
     def test_mixed_dormant_tree_counts_only_work_bearing_on_pg(self, pg_engine):
-        """Mixed tree: messaged IDLE + IDLE orphan + RUNNING → count is 2.
+        """Mixed tree: messaged IDLE + IDLE orphan + RUNNING → count is 3.
 
-        One IDLE child WITH an unprocessed message + one IDLE orphan +
-        one RUNNING child → count is exactly 2 (the messaged dormant
-        one and the running one); the orphan contributes nothing.
+        wi-1fbee2ec widened posture: every NON-TERMINAL child counts
+        (messaged IDLE + orphan IDLE + RUNNING = 3) — the orphan no
+        longer reads quiet (b08f40fe superseded for the live count by
+        the 2026-11-01 leader adjudication; reaping is the healer /
+        detector's business).
         """
         _seed_instance(pg_engine, "pg-root", None, InstanceStatus.IDLE.value)
         _seed_instance(pg_engine, "pg-mix-idle-msg", "pg-root", InstanceStatus.IDLE.value)
@@ -507,4 +528,4 @@ class TestPGCountLiveDescendantsFacade:
         manager = _build_pg_manager(
             pg_engine, with_message_lane=True, with_job_lane=True
         )
-        assert manager.count_live_descendants("pg-root") == 2
+        assert manager.count_live_descendants("pg-root") == 3
