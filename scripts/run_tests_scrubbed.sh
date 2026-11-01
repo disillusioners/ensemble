@@ -39,6 +39,17 @@ unset DATABASE_URL_POSTGRES
 # PG_TEST_* only (tests/helpers/checkpoint_prune_pg.py:22-27).
 unset PGHOST PGPORT PGDATABASE PGUSER PGPASSWORD PGPASSFILE
 unset PGSSLMODE PGSERVICE PGSERVICEFILE
+# Plane workspace hygiene (2026-11, dev-lane): an unset-or-'nea' Plane
+# workspace selection resolves to the PROD Plane workspace, so a test
+# child armed with ambient sync config can mirror E2E projects into
+# PROD. Scrub exactly the two vars the REST sync path REQUIRES for
+# availability (PLANE_MCP_WORKSPACE_SLUG + PLANE_BASE_URL) — unsetting
+# them structurally disables sync in test children. Plane credentials
+# are deliberately NOT scrubbed: the same user-scoped key legitimately
+# serves prod and e2e workspaces, so key handling is not the mechanism.
+# Sync on/off flags are left alone too — workspace selection is the
+# whole invariant. The leak gate below checks exactly these two names.
+unset PLANE_MCP_WORKSPACE_SLUG PLANE_BASE_URL
 
 # 2. Echo-verify ZERO survivors — FAMILY-WIDE, not enumerated (W2,
 #    2026-09-28). The old loop re-listed the 7 known names, so any NEW
@@ -64,6 +75,7 @@ while IFS= read -r v; do
         DATABASE_URL_POSTGRES)                                   LEAKED+="$v"$'\n' ;;
         PGHOST|PGPORT|PGDATABASE|PGUSER|PGPASSWORD|PGPASSFILE)   LEAKED+="$v"$'\n' ;;
         PGSSLMODE|PGSERVICE|PGSERVICEFILE)                       LEAKED+="$v"$'\n' ;;
+        PLANE_MCP_WORKSPACE_SLUG|PLANE_BASE_URL)                 LEAKED+="$v"$'\n' ;;
     esac
 done < <(compgen -v)
 # Drop any candidate that became unset between compgen -v enumeration
@@ -85,7 +97,7 @@ fi
 if [ -n "$LEAKED" ]; then
     echo "ENV-SCRUB FAILURE: leaked connection vars still set:" >&2
     printf '%s\n' "$LEAKED" | sed 's/^/  /' >&2
-    echo "Refusing to run tests with leaked POSTGRES_*/libpq vars." >&2
+    echo "Refusing to run tests with leaked POSTGRES_*/libpq/Plane-workspace vars." >&2
     exit 78  # EX_CONFIG — mirrors lib.sh exit-78 convention
 fi
 

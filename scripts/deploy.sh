@@ -229,7 +229,8 @@ fi
 _log "phase 2/5 stage → $INSTALL_DIR"
 
 # 2a. demo env-source generation (on demand, gitignored, real keys — the
-# ONLY sed-permitting step: PORT + POSTGRES_DB overridden from .env.prod).
+# ONLY sed-permitting step: PORT + POSTGRES_DB overridden, PLANE
+# workspace pinned to e2e, from .env.prod).
 # Generates to a temp path and MOVES, so the redirection itself can never
 # leak into the target file on a dry-run (a caller-side `>` executes even
 # when the command is suppressed).
@@ -253,7 +254,13 @@ if [ "$TARGET" = "demo" ] && [ ! -f "$ENV_SOURCE" ]; then
         umask 077
         if sed -e "s/^PORT=.*/PORT=$PORT/" \
                -e "s/^POSTGRES_DB=.*/POSTGRES_DB=$DB_NAME/" \
+               -e "s/^PLANE_MCP_WORKSPACE_SLUG=.*/PLANE_MCP_WORKSPACE_SLUG=e2e/" \
+               -e '$a\
+\
+# Non-prod: must pin PLANE_MCP_WORKSPACE_SLUG=e2e when armed — never nea/unset\
+PLANE_MCP_WORKSPACE_SLUG=e2e' \
                "$ENV_BASE" > "$ENV_TMP" \
+               && grep -q '^PLANE_MCP_WORKSPACE_SLUG=e2e$' "$ENV_TMP" \
                && mv -f "$ENV_TMP" "$ENV_SOURCE"; then
             # A4: the chmod failure gets its OWN message, in this file's
             # FAILED: style — it must not be mislabeled as a generation
@@ -262,9 +269,12 @@ if [ "$TARGET" = "demo" ] && [ ! -f "$ENV_SOURCE" ]; then
                 _log "FAILED: chmod 600 $ENV_SOURCE (source ALREADY replaced; install dir NOT updated — re-run to converge)"
                 exit 1
             fi
+            # e2e-pin claim is emitted ONLY here — after the grep above
+            # asserted the active slug line in the written file.
+            _log "e2e slug pin verified in $ENV_SOURCE (PLANE_MCP_WORKSPACE_SLUG=e2e)"
         else
             rm -f "$ENV_TMP" 2>/dev/null
-            _log "FAILED: generating/installing $ENV_SOURCE (sed or mv)"
+            _log "FAILED: generating/installing $ENV_SOURCE (sed, e2e-slug pin check, or mv)"
             exit 1
         fi
         umask "$_PREV_UMASK"
