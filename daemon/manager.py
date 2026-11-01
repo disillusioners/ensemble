@@ -13053,7 +13053,10 @@ class InstanceManager:
         * ``COMPLETED``, ``TERMINATED``, ``ERROR``, ``FAILED`` are
           terminal (excluded) — an IDLE orphan with no message row and
           no unsettled job is therefore NOT live and the deny/nudge
-          ladder sees the TRUE zero.
+          ladder sees the TRUE zero. [The two bullets above are the
+          HISTORICAL b08f40fe rationale, superseded for THIS count by
+          the widening below; the BUSY subset
+          (``count_busy_descendants``) still excludes dormant rows.]
 
         **wi-1fbee2ec WIDENING (leader adjudication 2026-11-01,
         binding):** the CONDITIONAL-live dormancy check is RETIRED
@@ -13244,11 +13247,10 @@ class InstanceManager:
             return 0
         cap = self.LIVE_DESCENDANTS_BFS_CAP
         subtree_ids = tree_ids[:cap]
-        return ReportInjectionRepository(
-            engine=self._engine
-        ).count_outstanding_for_subtree(
-            subtree_ids, exclude_child_id=instance_id
-        )
+        return self._report_injection_repo \
+            .count_outstanding_for_subtree(
+                subtree_ids, exclude_child_id=instance_id
+            )
 
     def has_open_user_answer(self, instance_id: str) -> bool:
         """Does this instance have an OPEN awaiting-answer suspension

@@ -1871,9 +1871,11 @@ class ReportDeliveryRecoveryService:
                 out.skipped_live_authority += 1
             elif classification == "root_wc":
                 out.skipped_root_wc += 1
-            # classification None (chain broken / unreadable) —
-            # counted as probe error inside the classifier.
             elif classification is None:
+                # None = the walk could not classify (chain broken /
+                # unreadable — the classifier returns None with a
+                # reason context); count a probe error, retry next
+                # cycle.
                 out.probe_errors += 1
         return out
 

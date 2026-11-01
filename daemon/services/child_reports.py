@@ -2803,14 +2803,19 @@ Provide a concise summary:"""
             # once re-drive (each completed message re-invokes this
             # gate), so a persistent error degrades via the in-turn
             # deny bound — never a silent verify-clean.
-            # Duck-typing guard (the FIX-2 discipline, identical to the
-            # in-turn read): a non-int return (a test-double Mock or a
-            # broken facade contract) reads INACTIVE (0) — a mocked
-            # facade can never fake a hold; only a genuine RAISE (the
-            # real facade's query failure) arms the D1 fail-closed
-            # hold below. The isinstance check happens BEFORE the
-            # ``> 0`` comparison (a Mock comparison raises TypeError,
-            # which would masquerade as a query error).
+            # Duck-typing guard (the FIX-2 discipline). The non-int →
+            # INACTIVE posture matches the in-turn read; the
+            # MISSING-facade posture is a DELIBERATE divergence from
+            # it (reviewer ruling ③, accept-as-is): emission-side a
+            # raise — including a missing-attribute raise — converts
+            # to the D1 HOLD below, while the in-turn getattr guard
+            # reads INACTIVE; both directions are fail-safe, the
+            # divergence is unreachable in production (every real
+            # manager carries the facade), so no test-double shape
+            # can fake a hold either way. The isinstance check
+            # happens BEFORE the ``> 0`` comparison (a Mock
+            # comparison raises TypeError, which would masquerade as
+            # a query error).
             try:
                 _obligation_value = (
                     self._manager.count_outstanding_report_obligations(

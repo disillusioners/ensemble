@@ -236,6 +236,7 @@ def make_manager_shell(engine):
     shell = MagicMock()
     shell._instance_repository = SQLModelInstanceRepository(engine)
     shell._engine = engine
+    shell._report_injection_repo = ReportInjectionRepository(engine=engine)
     shell.LIVE_DESCENDANTS_BFS_CAP = InstanceManager.LIVE_DESCENDANTS_BFS_CAP
     shell.count_outstanding_report_obligations = MethodType(
         InstanceManager.count_outstanding_report_obligations, shell
@@ -273,6 +274,9 @@ class TestManagerFacade:
     def test_facade_no_repo_reads_zero(self, engine):
         shell = MagicMock()
         shell._instance_repository = None
+        shell._report_injection_repo = ReportInjectionRepository(
+            engine=engine
+        )
         shell.count_outstanding_report_obligations = MethodType(
             InstanceManager.count_outstanding_report_obligations, shell
         )
