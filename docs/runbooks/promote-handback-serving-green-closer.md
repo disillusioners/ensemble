@@ -78,7 +78,7 @@ OPEN; no quarantine, no counter, no cooldown, no rollback).
 |---|---|---|
 | `serving_green_commit` | a stale flipped txn was closed because the target is **serving green** — no rollback, no quarantine, no counter, no cooldown | none — this is the healthy outcome |
 | `quarantine_cleared_serving_green` | a wrongful quarantine was **cleared** (the target was serving green) — the explicit clearance event the promote-entry gate accepts | none (the next promote is accepted) |
-| `sweep_deferred` | the sweep saw the txn and **deferred** — the detail carries a greppable reason (`ambiguous-absent`, `ambiguous-mismatch`, `ambiguous-unready`, `green-without-intent-flip`, `green-owner-alive`, `never-green-observed-violated`, `observation-not-qualifying`, `journal-size-guard`, `request-green-without-intent-flip`, `tempfail-exit-not-counted`) | read the reason: `green-without-intent-flip` ⇒ the flip was **unauthenticated** (operator resolution needed); `ambiguous-*` ⇒ the target is not serving (the ceiling will fire) |
+| `sweep_deferred` | the sweep saw the txn and **deferred** — the detail carries a greppable reason (`ambiguous-absent`, `ambiguous-mismatch`, `ambiguous-unready`, `ambiguous-probe-unprobeable-<detail>`, `request-probe-unprobeable-<detail>`, `green-without-intent-flip`, `request-green-without-intent-flip`, `green-owner-alive` (currently **UNREACHABLE** — AM-P2-18 returns on owner-alive ∧ hb-fresh before this arm; retained defensively), `never-green-observed-violated`, `observation-not-qualifying`, `journal-size-guard`, `tempfail-exit-not-counted`) | read the reason: `green-without-intent-flip` ⇒ the flip was **unauthenticated** (operator resolution needed); `ambiguous-*` ⇒ the target is not serving (the ceiling will fire); `*-probe-unprobeable-<detail>` ⇒ the probe could not answer (the detail names the class — e.g. `no-port`, `port-out-of-range`) |
 | `serving_unhealthy` | the daemon judged the target **not serving** (outside grace) | the launcher executes the rollback at its next boot |
 | `rollback_requested` | the daemon's rollback **request** (a request, never an execution) | the launcher executes it at its next boot; a **request** never pages "auto-rollback happened" (the alert kind is `upgrade_serving_unhealthy_requested`) |
 | `sweep_rollback` | a rollback was **EXECUTED** (the existing chain) | the anti-flapping counter moved; at 3/24h promotes are refused |
@@ -106,6 +106,15 @@ A third knob exists for the daemon's boot-grace horizon:
 — it may never be lowered below the hand-back budget's 300 s floor, because
 both windows must cover the same measured unit-active→serving boot).
 
+Note the two windows are DIFFERENT knobs with a shared floor:
+`HANDBACK_VERIFY_BUDGET_S` (default 300) is the **shell-side verify-budget
+ceiling** — how long the hand-back verifier waits for the unit to serve —
+while `UPGRADE_CLOSER_BOOT_GRACE_S` is the **daemon-side boot-grace
+horizon**. The daemon's effective grace is floored at
+`max(UPGRADE_CLOSER_BOOT_GRACE_S, HANDBACK_VERIFY_BUDGET_S)`, so raising the
+verify budget can never leave the closer judging NOT-GREEN before the
+verifier has finished waiting.
+
 ---
 
 ## 5. The bounded absent-ceiling (and the large-journal regime)
@@ -113,16 +122,21 @@ both windows must cover the same measured unit-active→serving boot).
 The launcher counts **qualifying AMBIGUOUS observations** in a
 **launcher-local** file `<INSTALL_DIR>/.sweep-defer-<run_id>` (not a journal
 field — the launcher cannot create one; the file is O(1) and survives launcher
-restarts). The file records `absent=`, `mismatch=`, `unready=`, `broken=` and
-the **sticky** `green=` flag.
+restarts). The file records `absent=`, `mismatch=`, `unready=` and `broken=`.
+There is **no** `green=` flag: the plan-mandated sticky `green=` counter was
+dropped (it was never implemented — the ladder's increment case covers only
+absent/mismatch/unready) and `intent_flip` is the declared mechanism. The
+never-green predicate is therefore a **journal-row** check (below).
 
 * The ceiling fires at **3** qualifying observations (`SWEEP_DEFER_CEILING`).
 * A **qualifying** observation requires `owner-dead` ∧ `intent_flip` ∧
   `never-green-observed` — all three.
 * **never-green-observed** = no GREEN observation has EVER been recorded for
-  this txn (the sticky flag **or** a `serving_green_commit` /
-  `quarantine_cleared_serving_green` row in the history). Once a GREEN
-  observation exists the ceiling is **permanently ineligible** for that txn.
+  this txn — judged **solely from the journal history** (a
+  `serving_green_commit` / `quarantine_cleared_serving_green` row for this
+  target; the AM-P2-1 crash-prefix shape — the row landed while the txn was
+  still open — is included). Once such a row exists the ceiling is
+  **permanently ineligible** for that txn.
 * The counter file is **deleted** when the txn commits or rolls back.
 
 **The large-journal regime.** The launcher has a journal-size guard

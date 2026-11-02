@@ -16,7 +16,12 @@
 # mutation matrix plants each defect in a COPY of lib.sh and proves the leg
 # turns RED (label namespace P1-Mn per the blast-radius recipe v1.0.2).
 #
-# FENCES (house rules): mktemp FAKE_HOME; the sibling-env assertion
+# FENCES (house rules): mktemp FAKE_HOME **with the escape guard** (the
+# shared tests/upgrade_test_lib.sh fence — setup_fake_home +
+# preflight_guard; the guard is mandatory: an unfenced HOME-derived
+# fixture deleted two live installs on 2026-10-12); every fixture dir is
+# registered with the lib's fixture registry so its ONE EXIT trap tears
+# them down; the sibling-env assertion
 # (POSTGRES_DB must not be ensemble_prod — per-variable scrubs are the
 # CALLER's job, `env -u POSTGRES_*` is a silent no-op); ports 9797/8079
 # untouched (lsof/curl are PATH stubs — nothing binds); fixtures are
@@ -30,13 +35,26 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 UPGRADE_DIR="$REPO_ROOT/scripts/upgrade"
 LIBSH="$UPGRADE_DIR/lib.sh"
 
+# The shared prologue helpers — the ONE canonical home for
+# assert_contains / assert_not_contains, the fixture registry + its ONE
+# EXIT trap, and the F1 fake-HOME fence with its 4-stage escape guard.
+# The pack's local copies of the two assertion helpers were removed (they
+# were byte-identical drifts of the lib's).
+. "$REPO_ROOT/tests/upgrade_test_lib.sh"
+
 # ── fences ──────────────────────────────────────────────────────────────────
 if [ "${POSTGRES_DB:-}" = "ensemble_prod" ]; then
     echo "FENCE ABORT: ambient POSTGRES_DB=ensemble_prod (prod-poisoned env; scrub per-variable and re-run)" >&2
     exit 78
 fi
-FAKE_HOME="$(mktemp -d -t hbv-fakehome.XXXXXX)"
-export HOME="$FAKE_HOME"
+# F1 fake-HOME fence — mktemp FAKE_HOME **plus** the escape guard (house
+# rule: an unfenced HOME-derived fixture deleted two live installs on
+# 2026-10-12). setup_fake_home registers the dir with the fixture
+# registry; preflight_guard refuses to continue unless the export took,
+# the dir lives under /tmp, the resolved live-install parent stays under
+# /tmp, and it never touches the real user home.
+setup_fake_home
+preflight_guard
 
 PASS=0
 FAIL=0
@@ -53,20 +71,8 @@ assert_eq() {
     local name="$1" expected="$2" actual="$3"
     if [ "$expected" = "$actual" ]; then _pass "$name"; else _fail "$name" "$expected" "$actual"; fi
 }
-assert_contains() {
-    local name="$1" needle="$2" haystack="$3"
-    case "$haystack" in
-        *"$needle"*) _pass "$name" ;;
-        *) _fail "$name" "contains '$needle'" "$haystack" ;;
-    esac
-}
-assert_not_contains() {
-    local name="$1" needle="$2" haystack="$3"
-    case "$haystack" in
-        *"$needle"*) _fail "$name" "absent '$needle'" "$haystack" ;;
-        *) _pass "$name" ;;
-    esac
-}
+# assert_contains / assert_not_contains now come from the shared
+# tests/upgrade_test_lib.sh (sourced above) — the ONE canonical home.
 section() { printf '\n== %s ==\n' "$1"; }
 
 HOST_HAS_SYSTEMD=0
@@ -197,7 +203,7 @@ make_nolsof_dir() {
 }
 
 # ── fixture + runner ────────────────────────────────────────────────────────
-HBFIX="$(mktemp -d -t hbv-fix.XXXXXX)"
+HBFIX="$(mktemp -d -t hbv-fix.XXXXXX)"; _register_fixture "$HBFIX"
 mkdir -p "$HBFIX/releases"
 cat > "$HBFIX/releases/state.json" <<'JOURNAL'
 {"current":"v1","previous":null,"in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}
@@ -205,13 +211,13 @@ JOURNAL
 printf '#!/bin/bash\nexit 0\n' > "$HBFIX/launcher.sh"
 chmod +x "$HBFIX/launcher.sh"
 
-STUBBIN="$(mktemp -d -t hbv-stub.XXXXXX)"
+STUBBIN="$(mktemp -d -t hbv-stub.XXXXXX)"; _register_fixture "$STUBBIN"
 make_systemctl_stub "$STUBBIN"
 SC="$STUBBIN/systemctl"
-LSOF_OK="$(mktemp -d -t hbv-lsofok.XXXXXX)";  make_lsof_stub "$LSOF_OK" 0
-LSOF_NO="$(mktemp -d -t hbv-lsofno.XXXXXX)";  make_lsof_stub "$LSOF_NO" 1
-CURL_DIR="$(mktemp -d -t hbv-curl.XXXXXX)";   make_curl_stub "$CURL_DIR"
-NOLSOF_DIR="$(mktemp -d -t hbv-nolsof.XXXXXX)"; make_nolsof_dir "$NOLSOF_DIR"
+LSOF_OK="$(mktemp -d -t hbv-lsofok.XXXXXX)";  _register_fixture "$LSOF_OK"; make_lsof_stub "$LSOF_OK" 0
+LSOF_NO="$(mktemp -d -t hbv-lsofno.XXXXXX)";  _register_fixture "$LSOF_NO"; make_lsof_stub "$LSOF_NO" 1
+CURL_DIR="$(mktemp -d -t hbv-curl.XXXXXX)";   _register_fixture "$CURL_DIR"; make_curl_stub "$CURL_DIR"
+NOLSOF_DIR="$(mktemp -d -t hbv-nolsof.XXXXXX)"; _register_fixture "$NOLSOF_DIR"; make_nolsof_dir "$NOLSOF_DIR"
 
 reset_stub_state() {
     local log="$1"
@@ -255,7 +261,7 @@ run_hb() {
 rvl_rc() { printf '%s' "$1" | grep -o 'rvl-rc=[0-9]*' | head -1; }
 
 # ── mutation plumbing ───────────────────────────────────────────────────────
-MUTROOT="$(mktemp -d -t hbv-mut.XXXXXX)"
+MUTROOT="$(mktemp -d -t hbv-mut.XXXXXX)"; _register_fixture "$MUTROOT"
 # make_mut <name> <sed-expr> — plants a defect in a copy of lib.sh; prints
 # the mutated path. Every pattern is grep-proven unique in lib.sh (the
 # ceremony-time-exhausted string appears exactly twice — both floor-band
@@ -480,7 +486,7 @@ if [ "$HOST_HAS_SYSTEMD" = "1" ]; then
     # with a LOUD stderr line. (a) direct _numeric_knob unit pin (the
     # source-time stderr is visible here — run_hb swallows it at source
     # time); (b) end-to-end: effective=300 reaches the verifier.
-    L11_ERR="$(mktemp -t hbv-l11err.XXXXXX)"
+    L11_ERR="$(mktemp -t hbv-l11err.XXXXXX)"; _register_fixture "$L11_ERR"
     L11_VAL="$(bash -c '
         export INSTALL_DIR="$(mktemp -d -t hbv-l11.XXXXXX)"
         . "'"$LIBSH"'" >/dev/null 2>/dev/null
@@ -785,8 +791,10 @@ if [ -n "${SKIP:-}" ]; then
 fi
 if [ "$FAIL" -gt 0 ]; then
     printf 'FAILED TESTS:%s\n' "$FAILED_TESTS"
-    rm -rf "$FAKE_HOME" "$MUTROOT"
+    teardown_fake_home
+    rm -rf "$MUTROOT"
     exit 1
 fi
-rm -rf "$FAKE_HOME" "$MUTROOT"
+teardown_fake_home
+rm -rf "$MUTROOT"
 printf '\n=== ALL PHASE-1 HAND-BACK VERIFY LEGS PASSED ===\n'

@@ -43,15 +43,18 @@ Lifecycle mirrors :class:`~daemon.services.job_lock_sweep.JobLockSweepService`:
 (CancelledError is the normal shutdown path — FM-11: never swallow it).
 """
 
-# Size rationale (~2417 lines, refreshed 2026-10-30 — grew with the
-# promote-preflight-hang rows: the typed `PerRunObservation` record and
-# the delegating per-run resolver): the sweep service
-# owns FIVE janitor lanes in one loop by design — periodic reconcile/GC
+# Size rationale (~3286 lines, refreshed 2026-11-02 — grew with the
+# promote-handback-halt rows: the serving-green stale-txn closer): the
+# sweep service
+# owns SIX janitor lanes in one loop by design — periodic reconcile/GC
 # tick, the two-signal (W4) liveness predicate, the wake-record sweep,
-# the bounded reaper (waitpid + signal attribution), and the
+# the bounded reaper (waitpid + signal attribution), the
 # agent-restart wake lane (kind-partitioned coalescing, reserved-source
 # delivery, §5.3 body render, restart-audit settle, supervision_scope
-# classifier). They share the install-dir lock + journal-read
+# classifier), and the serving-green stale-txn closer (the P1-P9
+# predicate, the journal lock + under-lock re-validation, and the
+# commit-close / verdict-request dispositions). They share the install-dir
+# lock + journal-read
 # conventions; separating them would re-introduce the tick-ordering
 # races the single loop exists to kill. Do NOT split.
 
@@ -72,6 +75,7 @@ from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 from daemon.tools import upgrade_journal as uj
 from daemon.tools.upgrade_journal import (
     RESTART_WAKE_SOURCE,
+    SERVING_GREEN_COMMIT_EVENT,
     SWEEP_NO_USER_ORIGIN_WAKE_SOURCE,
 )
 
@@ -89,6 +93,7 @@ def _outcome_labels() -> dict[str, str]:
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
+    from daemon.services.readiness import ReadinessComposite
 
 logger = logging.getLogger(__name__)
 
@@ -157,12 +162,18 @@ sweep-local constants — NOT in ``daemon/constants.py`` (that module is
 cited only as the site whose pool-busy horizon is NOT borrowed)."""
 
 UPGRADE_CLOSER_BOOT_GRACE_ENV: str = "UPGRADE_CLOSER_BOOT_GRACE_S"
+"""Env name of the daemon-side boot-grace horizon (the closer's OWN
+window) — read by ``_closer_boot_grace_s``. RAISE-ONLY: the effective
+grace may be raised above ``UPGRADE_CLOSER_BOOT_GRACE_S`` (and above the
+hand-back budget), never lowered below it (the one-way derivation rule,
+AM-P2-24)."""
+HANDBACK_VERIFY_BUDGET_ENV: str = "HANDBACK_VERIFY_BUDGET_S"
 """Env name of the shell-side hand-back verify budget (F4) — read by
 ``_handback_verify_budget_s`` so the closer's grace floor is EFFECTIVE,
-not just declared."""
-HANDBACK_VERIFY_BUDGET_ENV: str = "HANDBACK_VERIFY_BUDGET_S"
-"""Env override for the closer's boot-grace horizon (RAISE-ONLY — see
-``UPGRADE_CLOSER_BOOT_GRACE_S``'s derivation rule)."""
+not just declared. It is the VERIFY-BUDGET CEILING (how long the
+hand-back verifier waits for the unit to serve); the daemon's effective
+boot grace is floored at
+``max(UPGRADE_CLOSER_BOOT_GRACE_S, HANDBACK_VERIFY_BUDGET_S)``."""
 
 SERVING_GREEN_CLOSER_ENV: str = "ENSEMBLE_UPGRADE_SERVING_GREEN_CLOSER"
 """Daemon-side kill-switch for the serving-green closer lane (REV-R-3).
@@ -181,10 +192,6 @@ ladder) and this daemon-side ``ENSEMBLE_UPGRADE_SERVING_GREEN_CLOSER``
 are named in the operator runbook, and the launcher-side switch is the
 second enumerated hard ceremony pre-step. ``=0`` is an escape hatch for
 an unverified platform — NEVER a permanent state."""
-
-SERVING_GREEN_COMMIT_EVENT: str = "serving_green_commit"
-"""The commit-close event name (single home; the shell writers use the
-same literal)."""
 
 ROLLBACK_REQUESTED_EVENT: str = "rollback_requested"
 """The daemon→launcher rollback-REQUEST event (T14 handoff)."""
@@ -245,7 +252,7 @@ class UpgradeJournalSweepService:
         ),
         reaper_timeout_seconds: int = DEFAULT_REAPER_TIMEOUT_SECONDS,
         manager: "InstanceManager | None" = None,
-        readiness_provider: "Callable[[], Any] | None" = None,
+        readiness_provider: 'Callable[[], "ReadinessComposite | None"] | None' = None,
         closer_boot_grace_seconds: int | None = None,
     ) -> None:
         """Initialize the sweep service.
@@ -304,7 +311,9 @@ class UpgradeJournalSweepService:
         # the composite is refreshed on a cadence and a captured value
         # would go stale (the closer would judge a long-dead snapshot).
         # ``None`` ⇒ the closer lane no-ops (dev/unwired installs).
-        self._readiness_provider: "Callable[[], Any] | None" = readiness_provider
+        self._readiness_provider: (
+            'Callable[[], "ReadinessComposite | None"] | None'
+        ) = readiness_provider
         # Phase 2 — the internal test seam for the boot-grace horizon (see
         # the constructor docstring). ``None`` ⇒ the env/default applies.
         self._closer_boot_grace_override: int | None = (
@@ -2230,7 +2239,11 @@ class UpgradeJournalSweepService:
             return True
 
     def _closer_symlink_flipped(self, data: dict[str, Any], target: str) -> bool:
-        """P5's symlink-heal arm — the launcher twin (``launcher.sh:975-982``).
+        """P5's symlink-heal arm — the launcher twin (the kill-window
+        symlink heal: ``launcher.sh``'s "the symlink is the authoritative
+        flip evidence" block — the ``cur_link``/``jcur`` comparison that
+        heals ``flipped=false`` when ``current`` already resolves to
+        ``releases/<target>``).
 
         The journal's ``flipped`` marker can be false while the atomic
         flip ALREADY happened (promote died between the flip and the
@@ -2386,8 +2399,8 @@ class UpgradeJournalSweepService:
             )
             return result
         # The closer's OWN boot-grace window (P8, first conjunct) — armed
-        # on the FIRST tick where the pre-grace predicates (P1-P7) hold
-        # ("it is armed on the first tick where P1-P7 hold, and it does not
+        # on the FIRST tick where the pre-grace predicates (P1-P9) hold
+        # ("it is armed on the first tick where P1-P9 hold, and it does not
         # re-arm per tick"). It is evaluated HERE, before the health read,
         # so the window starts at the first OBSERVATION of the txn — not at
         # the first tick that happens to reach the verdict branch.
@@ -2437,7 +2450,7 @@ class UpgradeJournalSweepService:
             # outcome would only keep the txn open (and grow the
             # launcher's defer counter) for no safety gain.
             action = await self._closer_commit_green(
-                data, in_flight, target, run_id, age_s, _daemon_version
+                target, run_id, age_s, _daemon_version
             )
             result.update(action)
             return result
@@ -2453,15 +2466,13 @@ class UpgradeJournalSweepService:
             return result
         reason = "version-mismatch" if not version_match else "not-ready"
         action = await self._closer_verdict_unhealthy(
-            data, in_flight, target, run_id, reason, age_s
+            target, run_id, reason, age_s
         )
         result.update(action)
         return result
 
     async def _closer_commit_green(
         self,
-        data: dict[str, Any],
-        in_flight: dict[str, Any],
         target: str,
         run_id: str,
         age_s: int,
@@ -2544,7 +2555,10 @@ class UpgradeJournalSweepService:
             if not isinstance(displaced, str) or not displaced \
                     or displaced == "null":
                 # Old-format / ambiguous txn — HALT-FOR-HUMAN (the
-                # launcher's twin at launcher.sh:1094-1106): no silent
+                # launcher's twin: the "no in_flight.displaced_version"
+                # halt-for-human arm of the launcher's serving-green
+                # commit branch — the `sweep-halt-old-format` notify and
+                # the "halt" history row): no silent
                 # commit, nothing mutated, the txn stays in place.
                 uj.journal_history_append(
                     install_dir,
@@ -2635,8 +2649,6 @@ class UpgradeJournalSweepService:
 
     async def _closer_verdict_unhealthy(
         self,
-        data: dict[str, Any],
-        in_flight: dict[str, Any],
         target: str,
         run_id: str,
         reason: str,
@@ -2764,13 +2776,13 @@ class UpgradeJournalSweepService:
 
     # ── periodic sweep ───────────────────────────────────────────────────
 
-    async def sweep_once(self) -> dict[str, Any]:
+    async def sweep_once(self) -> dict[str, int | str | None | dict[str, Any]]:
         """One reconcile + closer + GC + wake-sweep tick. Returns a small
         visibility dict: ``{"reconcile": <note|None>, "gc_pruned": <int>,
         "skipped": <0|1>, "wake": <WakeSweepResult>, "closer": <dict>}``.
         Never raises — a failed tick logs and returns; the next tick
         retries by simply happening."""
-        result: dict[str, Any] = {
+        result: dict[str, int | str | None | dict[str, Any]] = {
             "reconcile": None,
             "gc_pruned": 0,
             "skipped": 0,

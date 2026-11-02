@@ -608,13 +608,10 @@ _js_history_has_intent_flip() {
     local jp="$1" target="$2"
     # F8 (code-council A1, LEADER DECISION: fold in this lane) — DELEGATES
     # to the per-entry, delimiter-anchored reader
-    # `_js_history_has_event_for_target`. The whole-array conjunction this
-    # function used to implement carried BOTH named hazards, and it was
-    # STILL LIVE on the rung-2 operator-escape path: a cross-entry false
-    # positive there COMMIT-AND-CONTINUES a flip whose authorization
-    # evidence names a DIFFERENT target (and a prefix collision matches
-    # v0.28.5 inside v0.28.55). ONE reader, ONE contract — the same one
-    # the daemon (`history_entry_matches`) and lib.sh implement.
+    # `_js_history_has_event_for_target`; the rationale (BOTH named hazards
+    # and the rung-2 live path) is in the block comment above this
+    # function — ONE reader, ONE contract, the same one the daemon
+    # (`history_entry_matches`) and lib.sh implement.
     _js_history_has_event_for_target "$jp" "intent_flip" "$target" ""
 }
 
@@ -928,6 +925,7 @@ _js_defer_counter_read() {
 # conjunct fails) and a GREEN-and-authorized txn is COMMITTED (the
 # journal row exists from then on). Nothing safety-relevant is lost.
 _js_defer_counter_write() {
+    # broken= is carried for format stability (AM-P2-10.2) and never incremented — BROKEN observations fire the chain immediately, bypassing the tally.
     local path="$1" absent="$2" mismatch="$3" unready="$4" broken="$5" tmp
     tmp="$path.tmp.$$"
     {
@@ -1031,7 +1029,7 @@ _js_http_request() {
 # (this branch) is the ONLY path that may update `previous`
 # from boot-sweep land; promote.sh owns `previous` writes
 # from the live lane via `journal_set_previous ${OLD_CUR}`
-# at promote.sh:438 (and will move to the splice helper
+# at promote.sh:765 (and will move to the splice helper
 # `set-previous` op in P2 PR-2 — see
 # scripts/upgrade/journal_splice.py). DO NOT add a python3
 # dep here — launcher purity is a hard constraint (R-08).
@@ -1080,7 +1078,7 @@ _js_http_request() {
 # in-file purity guard at the end of this file is the backstop).
 _js_serving_probe() {
     local port="$1" target="$2"
-    local budget="${SWEEP_SERVING_PROBE_BUDGET_S:-5}"
+    local budget="${SWEEP_SERVING_PROBE_BUDGET_S}"
     local v_target deadline status body version rstatus
     v_target="$(_js_serving_version_strip "$target")"
     if [ -z "$v_target" ]; then
@@ -1816,7 +1814,7 @@ _js_sweep_flipped_disposition() {
     _JS_SWEEP_LOCK_OWNED=0
     local probe_out probe_class probe_detail intent_flip=0 request_present=0
     local counter_path absent mismatch unready broken total
-    local jsize displaced_v
+    local jsize
     [ -f "$journal" ] || return 0
     json="$(_js_journal_read "$journal")" || return 0
     inf="$(_js_json_sub "$json" "in_flight")"
@@ -1918,7 +1916,7 @@ _js_sweep_flipped_disposition() {
     # commit-and-continuing — i.e. the switch silently changed the
     # behaviour it documents as restoring. ⇒ the legacy arm is now
     # rung 2 THEN the chain, exactly as at base.
-    if [ "${SWEEP_SERVING_GREEN_ENABLED:-1}" = "0" ]; then
+    if [ "${SWEEP_SERVING_GREEN_ENABLED}" = "0" ]; then
         _log "journal sweep: SWEEP_SERVING_GREEN_ENABLED=0 — the serving-green ladder is DISABLED; the LEGACY (base) disposition applies: rung 2 (the operator escape) FIRST, then the auto-rollback chain"
         if _js_sweep_operator_escape "$install_dir" "$journal" "$json" "$inf" "$target" \
              "$prev" "$age" "$owner" "$kind" "$lock_held" "$run_id"; then
@@ -2005,6 +2003,7 @@ _js_sweep_flipped_disposition() {
             _js_sweep_release "$install_dir" "$lock_held"
             return 0
         fi
+        # UNREACHABLE by construction — AM-P2-18 (:1853) returns on owner-alive ∧ hb-fresh; retained defensively.
         _js_serving_defer "$journal" "$target" "$run_id" "$age" \
             "green-owner-alive" \
             "the target is serving green but its owner is still alive — the txn belongs to a live owner; not the sweep's to dispose of"

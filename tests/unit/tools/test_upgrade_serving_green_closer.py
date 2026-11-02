@@ -42,12 +42,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import daemon as _daemon  # noqa: E402
 from daemon.services import upgrade_journal_sweep as svm  # noqa: E402
 from daemon.tools import upgrade_journal as uj  # noqa: E402
 
@@ -61,8 +60,6 @@ STALE_STARTED_AT = "2026-10-07T09:00:00Z"
 # against the v-stripped target (the version-string asymmetry — R-1). A
 # fixture version that does not match the daemon's own is the MISMATCH
 # class by construction.
-import daemon as _daemon  # noqa: E402
-
 DAEMON_VERSION = getattr(_daemon, "__version__", "0.0.0")
 TARGET = f"v{DAEMON_VERSION}"
 PREV = "v0.0.1-test-prev"
@@ -542,15 +539,13 @@ def test_p18_request_has_no_symlink_or_counter_effects(tmp_path: Path) -> None:
 # ── P-34: the alert-kind split ─────────────────────────────────────────────
 
 
-def test_p34_alert_kinds_are_split(tmp_path: Path) -> None:
+def test_p34_alert_kinds_are_split() -> None:
     """A REQUEST never pages "auto-rollback happened".
 
     ``serving_unhealthy`` / ``rollback_requested`` ⇒ the NEW request-stage
     kind; the EXECUTED ``sweep_rollback`` keeps the pre-existing kind.
     """
-    from daemon.tools import upgrade_journal as uj_mod
-
-    kinds = uj_mod.ALERT_KIND_BY_EVENT
+    kinds = uj.ALERT_KIND_BY_EVENT
     assert kinds["serving_unhealthy"] == "upgrade_serving_unhealthy_requested"
     assert kinds["rollback_requested"] == "upgrade_serving_unhealthy_requested"
     assert kinds["sweep_rollback"] == "upgrade_auto_rollback"

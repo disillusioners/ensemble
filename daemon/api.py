@@ -2852,7 +2852,7 @@ async def lifespan(app: FastAPI):
     # It reads the SAME cached composite /readyz serves (O(1), zero DB).
     # ``None`` before the first readiness tick ⇒ the closer treats the
     # composite as missing ⇒ DEFER (never a verdict — AM-P2-8).
-    def _readiness_composite_provider() -> Any:
+    def _readiness_composite_provider() -> ReadinessComposite | None:
         return getattr(app.state, "readiness_composite", None)
 
     upgrade_journal_sweep = UpgradeJournalSweepService(

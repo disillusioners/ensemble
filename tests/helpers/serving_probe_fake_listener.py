@@ -49,10 +49,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import socket
-import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 
 MODE_GREEN = "green"
 MODE_WRONG_VERSION = "wrong-version"
@@ -71,7 +70,7 @@ class _Handler(BaseHTTPRequestHandler):
     log_path: str | None = None
     http10: bool = False
 
-    def log_message(self, fmt, *args):  # noqa: A003 — silence the default
+    def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A003 — silence the default
         pass
 
     def _record(self, path: str) -> None:
@@ -88,7 +87,7 @@ class _Handler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
-    def _send_json(self, code: int, payload: dict) -> None:
+    def _send_json(self, code: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
@@ -136,7 +135,7 @@ class _Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def handle_error(self, request, client_address):  # noqa: D102
+    def handle_error(self, request: Any, client_address: Any) -> None:  # noqa: D102
         """Silence the default traceback.
 
         The probe closes the connection as soon as it has what it needs
