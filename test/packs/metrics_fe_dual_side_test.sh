@@ -71,9 +71,17 @@ echo "BRANCH=$CURRENT_BRANCH"
 echo "GIT_SHA=$START_SHA"
 echo "EXPECTED_BRANCH=$EXPECTED_BRANCH"
 echo "BASE_REF=$BASE_REF"
+# A DETACHED worktree is the BASE leg of a dual-side comparison (the
+# house recipe: two throwaway detached worktrees). ALLOW_DETACHED=1
+# waives the branch-name gate for that leg ONLY; the SHA bracket still
+# holds.
 if [ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]; then
-    echo "RESULT: FAIL (DRIFT) — branch=$CURRENT_BRANCH expected=$EXPECTED_BRANCH"
-    exit 1
+    if [ "${ALLOW_DETACHED:-0}" = "1" ] && [ "$CURRENT_BRANCH" = "HEAD" ]; then
+        echo "DETACHED: the branch gate is waived for this leg (ALLOW_DETACHED=1)"
+    else
+        echo "RESULT: FAIL (DRIFT) — branch=$CURRENT_BRANCH expected=$EXPECTED_BRANCH"
+        exit 1
+    fi
 fi
 
 check_cap() {
