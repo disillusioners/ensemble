@@ -180,9 +180,9 @@ oldest point) returns **`400 invalid_cursor`**. When the byte ceiling is reached
 (each page builder calls `_expire_cursor` before any other check). On
 `GET /api/metrics/snapshot` the unknown-family check sits downstream of it, so **an expired
 cursor combined with an unknown `family` answers `400 invalid_cursor` — not `404
-unknown_family`** (`daemon/routers/metrics.py:478` — the probe precedes the family check at
-`:479-482`). **The pin for this precedence is routed to the tidier; this page documents the
-semantics and adds no pin.**
+unknown_family`** (`daemon/routers/metrics.py:504` — the probe precedes the family check at
+`:505-508`). **The precedence is now pinned behaviourally** — `tests/unit/metrics/test_metrics_query_pagination.py::TestCursorPrecedence` (three legs: the load-bearing one plus two controls proving neither mechanism is dead; the discriminating mutation swaps the family check above the expiry probe, which turns the load-bearing leg RED while the two controls stay GREEN). **This page documents the
+semantics.**
 
 ---
 

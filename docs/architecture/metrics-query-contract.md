@@ -28,7 +28,7 @@ the *behavioural check site* as `<file>:<call line>`):
 | # | Surface | Switch-gated? | Auth-gated? | Off-state semantics | Anchor |
 |---|---|---|---|---|---|
 | 1 | `:9798` exposition **listener body** | YES — default-OFF **at the body level**: the socket still binds and serves a valid empty 200 while OFF (AM-19(a)) | NO — unauthenticated, loopback-only in-constructor (`metrics_listener.py:361-368`) | HTTP 200 with a VALID EMPTY body — no `ensemble_metrics_up`, no family series; the socket is still bound | gate method `metrics_listener.py:408-419`; call line `:419` |
-| 2 | `/api/metrics` **text exposition** | NO — never consults the switch | YES — `maintenance:read` (`daemon/routers/metrics.py:70`, `:113`) | served in both switch states | auth seam `metrics.py:91-107` |
+| 2 | `/api/metrics` **text exposition** | NO — never consults the switch | YES — `maintenance:read` (`daemon/routers/metrics.py:96`, `:143`) | served in both switch states | auth seam `metrics.py:117-133` |
 | 3 | **Query routes** (`families` / `snapshot` / `series`) | NO — never switch-gated (D-11b / D1(b) wins; AM-17) | YES — `maintenance:read` on all three + the same fail-closed 503 seam | **availability, not emptiness** — the door serves live registry data in both switch states | this contract §6 |
 | 4 | **Census DB work** | YES — the census sampler performs NO database work while OFF | n/a (internal thread) | the sampler keeps ticking; its DB leg is skipped; F6 families go dark with `availability.reason="census_gated"` | gate method `metrics_census.py:332-340`; call line `:340` |
 | 5 | **Registry accumulation** | NO — ungated, always on | n/a (in-process) | writers flip dirty flags and increment regardless of the switch; switch-OFF does NOT stop data collection | `checkpoint_metrics.py` observe paths carry no gate |
@@ -295,10 +295,10 @@ bounded the same way. (AC-A.8 is unsatisfiable without this.)
 
 **Cursor precedence (ND-5).** The cursor-expiry probe runs **FIRST**: all three page
 builders call `_expire_cursor(provider, cursor)` before any other check
-(`daemon/routers/metrics.py:439` families · `:478` snapshot · `:513` series). On
+(`daemon/routers/metrics.py:465` families · `:504` snapshot · `:539` series). On
 `GET /api/metrics/snapshot` the **unknown-family check sits downstream of it** — so an
 **expired cursor combined with an unknown `family` answers `400 invalid_cursor`, not
-`404 unknown_family`** (the probe at `:478` precedes the family check at `:479-482`, so the
+`404 unknown_family`** (the probe at `:504` precedes the family check at `:505-508`, so the
 expiry wins). `/snapshot` is the only route with a family check downstream of the probe; the
 other two routes have no family check in the builder at all.
 
