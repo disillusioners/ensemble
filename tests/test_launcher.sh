@@ -402,11 +402,33 @@ _js_fixture() {
     ln -sfn "releases/v0.10.6" "$1/current"
 }
 
-# _js_seed <dir> <started_iso> <flipped> [count] [window_start_iso] [cooldown_raw] [kind]
+# _js_seed <dir> <started_iso> <flipped> [count] [window_start_iso] [cooldown_raw] [kind] [request]
+#
+# Phase 2 (promote-handback-halt, P-3's re-shape discipline): the optional
+# `request` flag seeds the DAEMON'S rollback REQUEST (the T14 handoff
+# event). Under the new disposition table the existing sweep-rollback
+# chain is reached in three ways — a BROKEN observation, a
+# `rollback_requested`, or the bounded absent-ceiling — so a pin that
+# asserts the CHAIN's effects (the repoint, the quarantine, the counter,
+# the cooldown, the halt gates) must drive one of them. The request is
+# the deterministic one (a single sweep; the daemon's own verdict is the
+# affirmative evidence). The pins that assert the DEFER shape drive the
+# AMBIGUOUS class instead (no request ⇒ no chain).
+#
+# The request's run_id MUST match the txn identity the launcher derives
+# ("<target>@<started_at>", or the bare target when started_at is empty —
+# the SAME rule the launcher and the daemon use).
 _js_seed() {
-    local d="$1" started="$2" flipped="$3" cnt="${4:-1}" wstart="${5:-$2}" cd_raw="${6:-null}" kind="${7:-promote}"
-    printf '{"current":"v0.10.5","previous":"v0.10.5","in_flight":{"kind":"%s","target":"v0.10.6","started_at":"%s","flipped":%s,"owner_pid":999999},"rollback_window_count":{"24h":%s,"window_start":"%s"},"cooldown_until":%s,"quarantined":[],"history":[]}\n' \
-        "$kind" "$started" "$flipped" "$cnt" "$wstart" "$cd_raw" > "$d/releases/state.json"
+    local d="$1" started="$2" flipped="$3" cnt="${4:-1}" wstart="${5:-$2}" cd_raw="${6:-null}" kind="${7:-promote}" request="${8:-0}"
+    local hist="[]" req_ident="v0.10.6"
+    if [ -n "$started" ]; then
+        req_ident="v0.10.6@$started"
+    fi
+    if [ "$request" = "1" ]; then
+        hist="[{\"ts\":\"$started\",\"event\":\"rollback_requested\",\"detail\":\"target v0.10.6 run_id $req_ident reason not-ready\"}]"
+    fi
+    printf '{"current":"v0.10.5","previous":"v0.10.5","in_flight":{"kind":"%s","target":"v0.10.6","started_at":"%s","flipped":%s,"owner_pid":999999},"rollback_window_count":{"24h":%s,"window_start":"%s"},"cooldown_until":%s,"quarantined":[],"history":%s}\n' \
+        "$kind" "$started" "$flipped" "$cnt" "$wstart" "$cd_raw" "$hist" > "$d/releases/state.json"
 }
 
 _js_run() {  # run the sweep against <dir> in a fresh launcher shell
@@ -432,7 +454,7 @@ OLD25H_TS="$(date -ju -v-90000S +%Y-%m-%dT%H:%M:%SZ)"
 # 8a. stale + flipped:true → sweep-rollback: current repointed to previous,
 #     sweep_rollback history event, counter incremented, cooldown armed,
 #     target quarantined, in_flight cleared (ADR-012/024).
-JS_A="$JS_TEST_DIR/a"; _js_fixture "$JS_A"; _js_seed "$JS_A" "$STALE_TS" true
+JS_A="$JS_TEST_DIR/a"; _js_fixture "$JS_A"; _js_seed "$JS_A" "$STALE_TS" true 1 "$STALE_TS" null promote 1
 _js_run "$JS_A"
 assert_eq "8a sweep-rollback: rc 0 (boot proceeds)" "0" "$?"
 assert_eq "8a current repointed to previous" "releases/v0.10.5" "$(readlink "$JS_A/current")"
@@ -482,7 +504,7 @@ assert_eq "8d no journal → silent success" "0" "$?"
 
 # 8e. D-FA4.2: the sweep NEVER refuses on cap — count already AT cap (3)
 #     + stale flipped → rollback STILL executes, count → 4, halt event armed.
-JS_E="$JS_TEST_DIR/e"; _js_fixture "$JS_E"; _js_seed "$JS_E" "$STALE_TS" true 3 "$STALE_TS"
+JS_E="$JS_TEST_DIR/e"; _js_fixture "$JS_E"; _js_seed "$JS_E" "$STALE_TS" true 3 "$STALE_TS" null promote 1
 _js_run "$JS_E"
 assert_eq "8e at-cap sweep-rollback still executes: rc 0" "0" "$?"
 assert_eq "8e current repointed past cap" "releases/v0.10.5" "$(readlink "$JS_E/current")"
@@ -493,7 +515,7 @@ assert_eq "8e in_flight cleared (recovery completed)" "null" "$(_js_field "$JS_E
 # 8f. D-FA4.2: active cooldown NEVER refuses the sweep — cooldown_until in
 #     the FUTURE + stale flipped → rollback still executes + cooldown re-armed.
 JS_F="$JS_TEST_DIR/f"; _js_fixture "$JS_F"
-_js_seed "$JS_F" "$STALE_TS" true 1 "$STALE_TS" "\"$(date -ju -v+300S +%Y-%m-%dT%H:%M:%SZ)\""
+_js_seed "$JS_F" "$STALE_TS" true 1 "$STALE_TS" "\"$(date -ju -v+300S +%Y-%m-%dT%H:%M:%SZ)\"" promote 1
 _js_run "$JS_F"
 assert_eq "8f cooldown-active sweep-rollback still executes: rc 0" "0" "$?"
 assert_eq "8f current repointed despite cooldown" "releases/v0.10.5" "$(readlink "$JS_F/current")"
@@ -501,7 +523,7 @@ assert_eq "8f in_flight cleared" "null" "$(_js_field "$JS_F" in_flight)"
 
 # 8g. ADR-005 window rollover (R1.4): window_start >24h old → count resets,
 #     this sweep-rollback re-opens the window at 1.
-JS_G="$JS_TEST_DIR/g"; _js_fixture "$JS_G"; _js_seed "$JS_G" "$STALE_TS" true 2 "$OLD25H_TS"
+JS_G="$JS_TEST_DIR/g"; _js_fixture "$JS_G"; _js_seed "$JS_G" "$STALE_TS" true 2 "$OLD25H_TS" null promote 1
 _js_run "$JS_G"
 assert_eq "8g stale window rollover → count re-opened at 1" "1" "$(_js_count "$JS_G")"
 
@@ -530,7 +552,7 @@ assert_eq "8i torn journal byte-identical" "$JS_I2_RAW" "$(_js_journal "$JS_I2")
 
 # 8j. halt-for-human: stale flipped but previous release DIR missing → NO
 #     flip, halt history event, txn left in place (T8 explicit check).
-JS_J="$JS_TEST_DIR/j"; _js_fixture "$JS_J"; _js_seed "$JS_J" "$STALE_TS" true
+JS_J="$JS_TEST_DIR/j"; _js_fixture "$JS_J"; _js_seed "$JS_J" "$STALE_TS" true 1 "$STALE_TS" null promote 1
 rm -rf "$JS_J/releases/v0.10.5"
 _js_run "$JS_J"
 assert_eq "8j missing previous: rc 0 (boot proceeds)" "0" "$?"
@@ -553,7 +575,7 @@ assert_eq "8k foreign lock left in place" "present" "$([ -d "$JS_K/releases/roll
 
 # 8l. D5 stale-break: lock dir with DEAD owner + heartbeat >300s old →
 #     sweep breaks it (mv to rollback.lock.stale.*) and proceeds.
-JS_L="$JS_TEST_DIR/l"; _js_fixture "$JS_L"; _js_seed "$JS_L" "$STALE_TS" true
+JS_L="$JS_TEST_DIR/l"; _js_fixture "$JS_L"; _js_seed "$JS_L" "$STALE_TS" true 1 "$STALE_TS" null promote 1
 mkdir -p "$JS_L/releases/rollback.lock.d"
 printf '%s\n' "999999" > "$JS_L/releases/rollback.lock.d/owner"
 printf '%s\n' "$(( $(date +%s) - 400 ))" > "$JS_L/releases/rollback.lock.d/heartbeat"
@@ -601,7 +623,7 @@ esac
 #     possibly migrated DB, R1.2), halt event citing the guard, txn left
 #     in place, sweep-halt notify, boot proceeds (rc 0). Mirrors the halt
 #     promote auto-rollback / rollback.sh / adopt_stale_txn enforce.
-JS_O="$JS_TEST_DIR/o"; _js_fixture "$JS_O"; _js_seed "$JS_O" "$STALE_TS" true
+JS_O="$JS_TEST_DIR/o"; _js_fixture "$JS_O"; _js_seed "$JS_O" "$STALE_TS" true 1 "$STALE_TS" null promote 1
 printf '{"version":"v0.10.5","binary_version":"v0.10.5","rollback_safe":false}\n' \
     > "$JS_O/releases/v0.10.5/manifest.json"
 JS_O_LOG="$( . "$LAUNCHER"; INSTALL_DIR="$JS_O" _journal_sweep 2>&1 >/dev/null )"; JS_O_RC=$?
@@ -619,7 +641,7 @@ fi
 assert_eq "8o rollback counter NOT incremented" "1" "$(_js_count "$JS_O")"
 
 # 8p. B1 fail-closed: previous manifest MISSING → same halt shape.
-JS_P="$JS_TEST_DIR/p"; _js_fixture "$JS_P"; _js_seed "$JS_P" "$STALE_TS" true
+JS_P="$JS_TEST_DIR/p"; _js_fixture "$JS_P"; _js_seed "$JS_P" "$STALE_TS" true 1 "$STALE_TS" null promote 1
 rm "$JS_P/releases/v0.10.5/manifest.json"
 JS_P_LOG="$( . "$LAUNCHER"; INSTALL_DIR="$JS_P" _journal_sweep 2>&1 >/dev/null )"; JS_P_RC=$?
 assert_eq "8p missing manifest: rc 0" "0" "$JS_P_RC"
@@ -630,7 +652,7 @@ assert_contains "8p txn left in place" '"kind":"promote"' "$(_js_journal "$JS_P"
 assert_contains "8p sweep-halt notified" 'NOTIFY[sweep-halt]' "$JS_P_LOG"
 
 # 8q. B1 fail-closed: previous manifest GARBAGE (unparseable) → same halt.
-JS_Q="$JS_TEST_DIR/q"; _js_fixture "$JS_Q"; _js_seed "$JS_Q" "$STALE_TS" true
+JS_Q="$JS_TEST_DIR/q"; _js_fixture "$JS_Q"; _js_seed "$JS_Q" "$STALE_TS" true 1 "$STALE_TS" null promote 1
 printf 'not json at all {{{ torn\n' > "$JS_Q/releases/v0.10.5/manifest.json"
 JS_Q_LOG="$( . "$LAUNCHER"; INSTALL_DIR="$JS_Q" _journal_sweep 2>&1 >/dev/null )"; JS_Q_RC=$?
 assert_eq "8q garbage manifest: rc 0" "0" "$JS_Q_RC"
@@ -645,7 +667,7 @@ assert_contains "8q sweep-halt notified" 'NOTIFY[sweep-halt]' "$JS_Q_LOG"
 #     treats the txn as flipped and runs the FULL rollback branch: repoint
 #     to previous, sweep_rollback event, counter+cooldown, quarantine,
 #     txn cleared. Never boots the ungated release.
-JS_R="$JS_TEST_DIR/r"; _js_fixture "$JS_R"; _js_seed "$JS_R" "$STALE_TS" false
+JS_R="$JS_TEST_DIR/r"; _js_fixture "$JS_R"; _js_seed "$JS_R" "$STALE_TS" false 1 "$STALE_TS" null promote 1
 # fixture already leaves current -> releases/v0.10.6 (the orphaned flip)
 _js_run "$JS_R"
 assert_eq "8r kill-window heal: rc 0" "0" "$?"
@@ -763,8 +785,10 @@ assert_eq "8u healthy version NOT quarantined" "[]" \
 #      DID move the symlink off the baseline) → the heal still fires (the
 #      genuine kill-window case, pinned against the 8u over-correction).
 JS_U2="$JS_TEST_DIR/u2"; _js_fixture "$JS_U2"
-printf '{"current":"v0.10.5","previous":"v0.10.5","in_flight":{"kind":"promote","target":"v0.10.6","started_at":"%s","flipped":false,"owner_pid":999999},"rollback_window_count":{"24h":1,"window_start":"%s"},"cooldown_until":null,"quarantined":[],"history":[]}\n' \
-    "$STALE_TS" "$STALE_TS" > "$JS_U2/releases/state.json"
+JS_U2_IDENT="v0.10.6"
+[ -n "$STALE_TS" ] && JS_U2_IDENT="v0.10.6@$STALE_TS"
+printf '{"current":"v0.10.5","previous":"v0.10.5","in_flight":{"kind":"promote","target":"v0.10.6","started_at":"%s","flipped":false,"owner_pid":999999},"rollback_window_count":{"24h":1,"window_start":"%s"},"cooldown_until":null,"quarantined":[],"history":[{"ts":"%s","event":"rollback_requested","detail":"target v0.10.6 run_id %s reason not-ready"}]}\n' \
+    "$STALE_TS" "$STALE_TS" "$STALE_TS" "$JS_U2_IDENT" > "$JS_U2/releases/state.json"
 _js_run "$JS_U2"
 assert_eq "8u2 kill-window control: rc 0" "0" "$?"
 assert_eq "8u2 heal still fires when journal current ≠ target" "releases/v0.10.5" "$(readlink "$JS_U2/current")"
@@ -773,7 +797,7 @@ assert_contains "8u2 sweep_rollback event (heal ran the rollback branch)" '"even
 # 8v. W1: stale lock heartbeat + LIVE owner (the un-heartbeated stop span)
 #      → the sweep's lock acquire must NOT break the lock — defer instead
 #      (journal untouched, rc 0, boot proceeds). Owner = a real live child.
-JS_V="$JS_TEST_DIR/v"; _js_fixture "$JS_V"; _js_seed "$JS_V" "$STALE_TS" true
+JS_V="$JS_TEST_DIR/v"; _js_fixture "$JS_V"; _js_seed "$JS_V" "$STALE_TS" true 1 "$STALE_TS" null promote 1
 sleep 30 & JS_V_OWNER=$!
 mkdir -p "$JS_V/releases/rollback.lock.d"
 printf '%s\n' "$JS_V_OWNER" > "$JS_V/releases/rollback.lock.d/owner"
@@ -927,7 +951,7 @@ esac
 # bounded cat on the journal + bounded date -p on started_at + bounded
 # kill -0 on the (deceased) owner pid). Each bounded call must NOT
 # wedge the sweep; the sweep must complete with rc 0.
-JS_F4="$JS_TEST_DIR/f4"; _js_fixture "$JS_F4"; _js_seed "$JS_F4" "$STALE_TS" true
+JS_F4="$JS_TEST_DIR/f4"; _js_fixture "$JS_F4"; _js_seed "$JS_F4" "$STALE_TS" true 1 "$STALE_TS" null promote 1
 ( . "$LAUNCHER"; INSTALL_DIR="$JS_F4" _journal_sweep >/dev/null 2>&1 )
 F4_RC=$?
 assert_eq "8b-c5 sweep survives bounded subprocess calls" "0" "$F4_RC"
