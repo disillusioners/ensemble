@@ -2027,6 +2027,146 @@ journal_quarantine_clear() {
     journal_update "quarantined" "$new"
 }
 
+# ── Phase 2 (promote-handback-halt): the PER-ENTRY history readers ──────────
+#
+# THE ONE reader contract (phase2-plan.md §D.3's contract box + AM-P2-14):
+# a history row matches an (event, target[, run_id]) triple ONLY when ALL
+# of its parts appear INSIDE ONE history entry. The entry-object boundary
+# is `{"ts":` — the reader splits the history array on it and requires the
+# event kind, the delimiter-anchored `target <VER>` and (when supplied)
+# the `run_id <ID>` to appear in the SAME entry.
+#
+# TWO hazards, BOTH closed by that shape:
+#   (1) PREFIX COLLISION — `target v0.28.5` occurs inside `target
+#       v0.28.55`; the delimiter anchor (a space, or the end of the detail
+#       string) closes it.
+#   (2) CROSS-ENTRY FALSE POSITIVE — a whole-array conjunction matches
+#       "event kind in entry A" AND "target string in entry B". On the
+#       CLEARANCE reader a false positive would UN-QUARANTINE a version
+#       that was never cleared; on the AUTHORIZATION reader it would make
+#       an unauthenticated flip look authorized.
+#
+# The version literal is UNQUOTED in the house detail convention (the
+# promote.sh intent_flip emit is `preflight: intentional promote target
+# $VERSION — …`) — a quote-anchored match would NEVER fire (the
+# §D.3 contract box records that hazard).
+
+# _journal_history_entries <history_array> — split the raw history array
+# into its entries (one per line). The boundary is the entry-object
+# marker `{"ts":`.
+_journal_history_entries() {
+    local rest="$1" entry
+    while :; do
+        case "$rest" in
+            *'{"ts":'*) rest="${rest#*'{"ts":'}" ;;
+            *) break ;;
+        esac
+        case "$rest" in
+            *'{"ts":'*) entry="${rest%%'{"ts":'*}" ;;
+            *) entry="$rest" ;;
+        esac
+        printf '%s\n' "$entry"
+    done
+}
+
+# _journal_history_has_event <event> <target> [run_id] — the ONE per-entry,
+# delimiter-anchored reader (the shell twin of the daemon's
+# `uj.journal_history_has_event` and of the launcher's
+# `_js_history_has_event_for_target`). Reads the journal itself.
+_journal_history_has_event() {
+    local event="$1" target="$2" run_id="${3:-}"
+    local json hist entry
+    [ -n "$event" ] || return 1
+    [ -n "$target" ] || return 1
+    json="$(journal_read)" || return 1
+    hist="$(_json_sub "$json" "history")" || return 1
+    case "$hist" in
+        ''|null|'[]') return 1 ;;
+    esac
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        case "$entry" in
+            *"\"event\":\"$event\""*) ;;
+            *) continue ;;
+        esac
+        case "$entry" in
+            *"target $target "*|*"target $target\"") ;;
+            *) continue ;;
+        esac
+        if [ -n "$run_id" ]; then
+            case "$entry" in
+                *"run_id $run_id "*|*"run_id $run_id\"") ;;
+                *) continue ;;
+            esac
+        fi
+        return 0
+    done < <(_journal_history_entries "$hist")
+    return 1
+}
+
+# _version_strip_v <ver> — strip ONE leading "v" from a version literal
+# (idempotent; digit-guarded so a non-version string is never mangled).
+# The release dir/target is "v0.28.5"; the daemon reports "0.28.5". A
+# naive compare is ALWAYS false ⇒ every healthy target reads unhealthy ⇒
+# the wrongful rollback returns (R-1). ONE helper per side (the launcher's
+# twin is `_js_serving_version_strip`; the daemon's is
+# `sweep_serving_green_closer`'s inline strip).
+_version_strip_v() {
+    local v="$1"
+    case "$v" in
+        v[0-9]*) printf '%s' "${v#v}" ;;
+        *) printf '%s' "$v" ;;
+    esac
+}
+
+# _journal_txn_identity <in_flight_json> <target> — the txn identity used by
+# the write-once key, the request detail and the readers. The RESTART lane
+# stamps `run_id` into in_flight; the PROMOTE lane does NOT (the promote
+# run_id lives in the pipeline LOCK, gone by the time a stale txn is swept)
+# ⇒ the identity falls back to "<target>@<started_at>". THE LAUNCHER AND THE
+# DAEMON MUST DERIVE THE SAME STRING (launcher.sh's
+# `_js_serving_txn_identity`, upgrade_journal_sweep.py's
+# `_closer_txn_identity`) — the request reader matches on it.
+_journal_txn_identity() {
+    local inf="$1" target="$2" run_id started
+    run_id="$(_json_field "$inf" "run_id" 2>/dev/null)" || run_id=""
+    case "$run_id" in
+        ''|null) run_id="" ;;
+    esac
+    if [ -n "$run_id" ]; then
+        printf '%s' "$run_id"
+        return 0
+    fi
+    started="$(_json_field "$inf" "started_at" 2>/dev/null)" || started=""
+    case "$started" in
+        ''|null) started="" ;;
+    esac
+    if [ -n "$started" ]; then
+        printf '%s@%s' "$target" "$started"
+    else
+        printf '%s' "$target"
+    fi
+}
+
+# journal_history_has_intent_flip <ver> — the AUTHORIZATION reader (the
+# T11 conjunct: a serving-green commit-close fires only when BOTH a
+# positive serving verdict AND an `intent_flip` event naming that same
+# target exist). lib.sh had ZERO intent_flip readers before this lane
+# (it has history WRITERS and the quarantined[] array reader only) ⇒
+# this is NEW work, not a copy of an existing reader.
+journal_history_has_intent_flip() {
+    _journal_history_has_event "intent_flip" "$1"
+}
+
+# journal_quarantine_cleared_serving_green <ver> [<run_id>] — the
+# CLEARANCE reader: the shell gate that refuses a quarantined target
+# accepts it when this event names the version. The frozen rule is
+# EXTENDED ("cleared by re-staging OR by an explicit serving-green
+# clearance event"), never bypassed.
+journal_quarantine_cleared_serving_green() {
+    _journal_history_has_event "quarantine_cleared_serving_green" "$1" "${2:-}"
+}
+
 # journal_is_quarantined <ver>.
 journal_is_quarantined() {
     local json
@@ -6803,9 +6943,23 @@ promote_entry_check() {
         until="$(_json_field "$(journal_read)" cooldown_until)"
         _refuse cooldown "promote refused: rollback cooldown active until $until (ADR-005: 10-min anti-flapping)"
     fi
-    # quarantined target
+    # quarantined target — the frozen "cleared only by re-staging" rule is
+    # EXTENDED, never bypassed (promote-handback-halt Phase 2, §D.3): the
+    # gate now ALSO accepts an explicit `quarantine_cleared_serving_green`
+    # history event naming this version. That event is written ONLY by the
+    # serving-green closer, after a positive serving-green verdict that is
+    # itself gated on intent_flip evidence + txn staleness + owner-deadness
+    # + the health probes — so it is evidence-backed, journaled, and
+    # explicit. Two surfaces carry the clearance (the event AND the array
+    # rewrite) and EITHER satisfies the gate — belt-and-braces against a
+    # half-written clearance. The refusal message is UNCHANGED when neither
+    # signal is present (the frozen vocabulary).
     if journal_is_quarantined "$target_ver"; then
-        _refuse quarantine "promote refused: version '$target_ver' is QUARANTINED (prior gate failure) — quarantine is cleared only by re-staging the version"
+        if journal_quarantine_cleared_serving_green "$target_ver"; then
+            _log "promote entry: version '$target_ver' is in quarantined[] BUT the journal carries a quarantine_cleared_serving_green event for it — accepting (the explicit serving-green clearance; the frozen rule is extended, not bypassed)"
+        else
+            _refuse quarantine "promote refused: version '$target_ver' is QUARANTINED (prior gate failure) — quarantine is cleared only by re-staging the version"
+        fi
     fi
     # adoption-in-progress marker (commission v0.16.6 component 2, Layer ii).
     # Symmetric refusal: a half-staged adoption (.env staged, unit NOT
@@ -6931,6 +7085,81 @@ adopt_stale_txn() {
         _log "adopt_stale_txn: comp3 audit — heartbeat-stale + owner-dead (hb_stale=$hb_stale, owner_dead=$owner_dead) reclaimed via the standard recovery"
     fi
     if [ "$flipped" = "true" ]; then
+        # ── Phase 2 (T11): the SERVING-GREEN branch ────────────────────────
+        # The promote-entry mirror of the same decision table. lib.sh is NOT
+        # purity-constrained ⇒ the mature classified probe
+        # (`_probe_once_classified`, the house 0/1/2 taxonomy) is REUSED —
+        # never a second taxonomy.
+        #
+        # GREEN (the CANONICAL predicate: /livez 200 ∧ version == the
+        # v-stripped target ∧ /readyz 200 whose body reports ready) ∧
+        # `intent_flip` evidence ⇒ COMMIT-CLOSE (AM-P2-1's
+        # history-before-close order) and the promote CONTINUES — no
+        # quarantine, no counter, no cooldown.
+        #
+        # The GREEN-without-`intent_flip` arm takes the EXISTING chain
+        # BELOW (the documented divergence, §D.4 (a-i)): the launcher
+        # DEFERS and the daemon takes no action this tick, but this
+        # promote-entry path keeps its pre-ruling behaviour — this lane
+        # does not rewrite it. The NOT-GREEN arm ALSO takes the existing
+        # chain UNCHANGED, and that is correct here: this path engages only
+        # a txn already PAST the 600s staleness gate (strictly older than
+        # the 210–360s slow-boot class the daemon-side boot grace covers)
+        # and the operator is present (§D.4 (a-ii)) — no defer, no grace.
+        local _sp_livez_rc _sp_readyz_rc _sp_version _sp_readyz_status _sp_green _sp_displaced
+        _sp_livez_rc=0
+        _probe_once_classified "/livez" "${PORT:-}" || _sp_livez_rc=$?
+        _sp_version=""
+        if [ "$_sp_livez_rc" = "0" ] && [ "$_PROBE_CODE" = "200" ]; then
+            _sp_version="$(_json_field "$_PROBE_BODY" "version" 2>/dev/null)" || _sp_version=""
+        fi
+        _sp_readyz_rc=0
+        _probe_once_classified "/readyz" "${PORT:-}" || _sp_readyz_rc=$?
+        _sp_readyz_status=""
+        if [ "$_sp_readyz_rc" = "0" ] && [ "$_PROBE_CODE" = "200" ]; then
+            _sp_readyz_status="$(_json_field "$_PROBE_BODY" "status" 2>/dev/null)" || _sp_readyz_status=""
+        fi
+        _sp_green=0
+        if [ "$_sp_livez_rc" = "0" ] && [ "$_sp_readyz_rc" = "0" ] \
+           && [ -n "$_sp_version" ] \
+           && [ "$_sp_version" = "$(_version_strip_v "$target")" ] \
+           && [ "$_sp_readyz_status" = "ready" ]; then
+            _sp_green=1
+        fi
+        if [ "$_sp_green" = "1" ] && journal_history_has_intent_flip "$target"; then
+            # ALL conjuncts hold — commit-close (history-before-close) and
+            # let the promote continue.
+            _sp_displaced="$(_json_field "$inf" "displaced_version" 2>/dev/null)" || _sp_displaced=""
+            case "$_sp_displaced" in
+                ''|null)
+                    journal_history_append halt "adopt: stale flipped $kind txn (target=$target) is SERVING GREEN but has no in_flight.displaced_version (old-format txn) — halt-for-human, txn left in place"
+                    _warn "HALT-FOR-HUMAN: serving-green txn (target=$target) has no displaced_version (old-format) — no silent commit; txn left for the sweep/human"
+                    exit 78
+                    ;;
+            esac
+            _log "adopt_stale_txn: target=$target is SERVING GREEN (/livez 200 + version match + /readyz 200 ready) with intent_flip evidence — committing (history-before-close); the promote continues"
+            journal_set_current "$target" || {
+                _warn "adopt: serving-green commit — journal_set_current $target FAILED; txn LEFT OPEN; promote refusing (W3)"
+                exit 78
+            }
+            journal_set_previous "$_sp_displaced" || {
+                _warn "adopt: serving-green commit — journal_set_previous $_sp_displaced FAILED; txn LEFT OPEN; promote refusing (W3)"
+                exit 78
+            }
+            if journal_is_quarantined "$target"; then
+                journal_history_append quarantine_cleared_serving_green \
+                    "target $target run_id $(_journal_txn_identity "$inf" "$target") serving_green_commit prev $_sp_displaced"
+                journal_quarantine_clear "$target" \
+                    || _warn "adopt: quarantined[] rewrite FAILED (the clearance EVENT is the gate's acceptance signal — the array is hygiene)"
+            fi
+            journal_history_append serving_green_commit \
+                "target $target run_id $(_journal_txn_identity "$inf" "$target") prev $_sp_displaced owner pid ${owner:-?} age ${age}s — serving green (adopt-path classified probe: /livez 200 + version match + /readyz 200 ready); committed at promote entry — NOT rolled back, NOT quarantined, counter NOT incremented, no cooldown (intent_flip evidence present)"
+            journal_close_txn || {
+                _warn "adopt: serving-green commit — txn close FAILED; txn LEFT OPEN for the sweep to retry; promote refusing (W3)"
+                exit 78
+            }
+            return 0
+        fi
         # ── stale flipped → adopt via the sweep-rollback recovery ──────────
         # Manifest gate on previous FIRST (halt-for-human, NO repoint, txn
         # left in place — mirrors the sweep's no-previous / missing-dir /

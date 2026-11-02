@@ -452,6 +452,126 @@ def ensure_extensions(install_dir: Path) -> dict[str, Any]:
     return data
 
 
+# ── promote-handback-halt Phase 2 — per-entry history readers ───────────────
+#
+# THE ONE reader contract (phase2-plan.md §D.3's contract box + AM-P2-14):
+# a history row matches a (event, target[, run_id]) triple ONLY when all
+# of its parts appear INSIDE ONE history entry. Two hazards are closed by
+# that shape, and BOTH are live in the pre-existing whole-array readers:
+#
+#   (1) PREFIX COLLISION (R-15's class) — the substring ``target v0.28.5``
+#       occurs inside ``target v0.28.55``. The DELIMITER ANCHOR closes
+#       it: the match must be followed by a space or the end of the
+#       detail string.
+#   (2) CROSS-ENTRY FALSE POSITIVE (AM-P2-14) — a whole-array conjunction
+#       matches "event kind in entry A" AND "target string in entry B".
+#       PER-ENTRY matching closes it. A cross-entry false positive on
+#       the REQUEST reader would execute a rollback of a serving-green
+#       release; on the AUTHORIZATION reader it would make an
+#       unauthenticated flip look authorized.
+#
+# The Python side parses the journal IN-PROCESS (the daemon already
+# parses it — no launcher-side O(N^2) extraction cost), so the "one
+# entry" boundary is structural here (a list element), not a text split.
+
+
+def history_detail_names_target(detail: Any, target: str) -> bool:
+    """Delimiter-anchored ``target <VER>`` matcher (R-15's prefix class).
+
+    True iff ``detail`` contains ``target <target>`` followed by a
+    space or the END of the string. ``target v0.28.5`` therefore does
+    NOT match inside ``target v0.28.55``."""
+    if not isinstance(detail, str) or not target:
+        return False
+    needle = f"target {target}"
+    start = 0
+    while True:
+        idx = detail.find(needle, start)
+        if idx < 0:
+            return False
+        end = idx + len(needle)
+        if end == len(detail) or detail[end] == " ":
+            return True
+        start = idx + 1
+
+
+def history_detail_names_run_id(detail: Any, run_id: str) -> bool:
+    """Delimiter-anchored ``run_id <ID>`` matcher (same anchor shape)."""
+    if not isinstance(detail, str) or not run_id:
+        return False
+    needle = f"run_id {run_id}"
+    start = 0
+    while True:
+        idx = detail.find(needle, start)
+        if idx < 0:
+            return False
+        end = idx + len(needle)
+        if end == len(detail) or detail[end] == " ":
+            return True
+        start = idx + 1
+
+
+def history_entry_matches(
+    entry: Any,
+    event: str,
+    target: str,
+    run_id: str | None = None,
+) -> bool:
+    """True iff ONE history entry carries the event kind AND names the
+    target (AND, when supplied, the run_id) — per-entry matching."""
+    if not isinstance(entry, dict):
+        return False
+    if str(entry.get("event", "")) != event:
+        return False
+    detail = entry.get("detail")
+    if not history_detail_names_target(detail, target):
+        return False
+    if run_id is not None and not history_detail_names_run_id(detail, run_id):
+        return False
+    return True
+
+
+def journal_history_has_event(
+    install_dir: Path,
+    event: str,
+    target: str,
+    run_id: str | None = None,
+) -> bool:
+    """True iff the journal history carries an ``event`` row naming
+    ``target`` (and ``run_id`` when supplied) INSIDE ONE entry.
+
+    The daemon-side counterpart of the shell readers
+    (``_js_history_has_rollback_request`` in launcher.sh,
+    ``journal_quarantine_cleared_serving_green`` /
+    ``journal_history_has_intent_flip`` in scripts/upgrade/lib.sh) — all
+    three implement the SAME per-entry, delimiter-anchored contract.
+
+    A torn journal ⇒ False (the degradation principle: absent / torn ⇒
+    "no evidence", never a spurious authorization or a spurious request).
+    """
+    if not target:
+        return False
+    try:
+        data = journal_read(install_dir)
+    except (JournalTorn, OSError):
+        return False
+    history = data.get("history")
+    if not isinstance(history, list):
+        return False
+    return any(
+        history_entry_matches(entry, event, target, run_id)
+        for entry in history
+    )
+
+
+def journal_quarantined_contains(data: dict[str, Any], version: str) -> bool:
+    """True iff ``version`` is in the journal's ``quarantined[]`` array."""
+    quarantined = data.get("quarantined")
+    if not isinstance(quarantined, list):
+        return False
+    return version in quarantined
+
+
 # ── restart_audits + restart_window (agent-restart §6.2 — file-backed,
 # additive-only; zero .sql migration ⇒ rollback_safe stays true) ────────────
 
@@ -647,6 +767,24 @@ ALERT_KIND_BY_EVENT: dict[str, str] = {
     "rollback": "upgrade_auto_rollback",
     "sweep_rollback": "upgrade_auto_rollback",
     "quarantine": "upgrade_auto_rollback",
+    # ── promote-handback-halt Phase 2 (AM-P2-8 / AM-P2-19) ─────────────
+    # The alert-kind SPLIT (AM-P2-19): a REQUEST must never page
+    # "auto-rollback happened". ``serving_unhealthy`` (the daemon
+    # closer's verdict) and ``rollback_requested`` (its T14 handoff
+    # event) are REQUEST-stage events — the launcher re-probes and may
+    # SUPERSEDE them (serving-green ⇒ commit-close). Paging
+    # ``upgrade_auto_rollback`` for a possibly-superseded verdict is a
+    # FALSE page (the operator would see a rollback alert for a release
+    # that stayed up). Both therefore carry the NEW request-stage kind.
+    "serving_unhealthy": "upgrade_serving_unhealthy_requested",
+    "rollback_requested": "upgrade_serving_unhealthy_requested",
+    # The clearance REVERSES a verdict the operator already saw
+    # (``quarantine`` → ``upgrade_auto_rollback``): silence would leave
+    # the operator believing the release is still condemned. NEW kind.
+    "quarantine_cleared_serving_green": "upgrade_serving_green_restored",
+    # ``serving_green_commit`` is SILENT — a good outcome emits nothing
+    # (the house policy at upgrade_journal.py:590-596; the commit /
+    # restart / sweep / nonce_consumed family is silent).
 }
 
 # The registered sink (sync callable, receives the alert payload dict).
@@ -1881,6 +2019,16 @@ _TERMINAL_EVENTS: tuple[str, ...] = (
     "refusal",
     "executor_exit",
     "boot_sweep_commit_and_continue",
+    # promote-handback-halt Phase 2 (T12 / OQ-C-9 (a)): the serving-green
+    # commit-close is TERMINAL for the PROMOTE reconcile — it closes a
+    # pending_op exactly like ``commit`` (the txn is closed; the pipeline
+    # is over; no live evidence, no in_flight). The precedent is
+    # ``boot_sweep_commit_and_continue`` (the boot sweep's own
+    # commit-close) — the SAME shape. NOT terminal:
+    # ``sweep_deferred`` (a HOLD — it closes nothing; a deferral must
+    # never close a pending_op) and ``quarantine_cleared_serving_green``
+    # (an annotation on an already-terminal outcome).
+    "serving_green_commit",
 )
 
 
@@ -1939,7 +2087,40 @@ RESTART_TERMINAL_EVENTS: tuple[str, ...] = (
 # kind-aware reader (``wake_terminal_event_after(kind=...)``) matches
 # promote-kind wakes against exactly this tuple; the restart-kind full
 # superset derives from it.
-PROMOTE_WAKE_TERMINAL_EVENTS: tuple[str, ...] = _TERMINAL_EVENTS + ("restart",)
+#
+# promote-handback-halt Phase 2 (AM-P2-8, P-21) — the WAKE-EXCLUSION
+# construction. ``serving_green_commit`` IS terminal for the PROMOTE
+# reconcile (it closes a pending_op exactly like ``commit``) but it is
+# EXCLUDED from the WAKE set by EXPLICIT construction. Why: the wake
+# reader (``wake_terminal_event_after``) is TS-scoped and RUN-ID-BLIND —
+# it matches any terminal-class event at/after the wake's ``armed_at``.
+# A commit-close belonging to an UNRELATED txn would therefore complete
+# a pending promote-wake that never actually finished (the instance
+# resumes on a stranger's outcome; the genuine completion never
+# delivers). AM-P2-8 named two admissible closures: (a) the closer's
+# rows carry a run_id AND the promote-lane wake reader gains a
+# run_id-scoped tie-break, or (b) the event is EXCLUDED from the wake
+# set by explicit pinned construction. (a) is NOT constructible on the
+# promote lane: promote-lane terminal history events carry NO ``run_id``
+# FIELD (only the RESTART lane embeds one in its detail prose — see
+# ``wake_terminal_event_after``'s docstring), so a reader-side tie-break
+# has nothing to match on. (b) is the constructible closure and is
+# therefore ADOPTED. The closer's rows DO carry the txn identity in
+# their detail (``run_id <id>``) for forensic correlation — the
+# exclusion is a DELIVERY decision, not an erasure of the evidence.
+SERVING_GREEN_COMMIT_EVENT: str = "serving_green_commit"
+"""The serving-green commit-close event name (single home — the closer,
+the launcher and the shell writers all use this literal)."""
+
+WAKE_EXCLUDED_EVENTS: tuple[str, ...] = (SERVING_GREEN_COMMIT_EVENT,)
+"""Terminal-for-reconcile events EXCLUDED from the WAKE set (P-21).
+
+Explicitly listed (never derived implicitly) so a reviewer can see the
+exclusion instead of inferring it from a comprehension."""
+
+PROMOTE_WAKE_TERMINAL_EVENTS: tuple[str, ...] = tuple(
+    e for e in _TERMINAL_EVENTS if e not in WAKE_EXCLUDED_EVENTS
+) + ("restart",)
 
 WAKE_TERMINAL_EVENTS: tuple[str, ...] = (
     PROMOTE_WAKE_TERMINAL_EVENTS + RESTART_TERMINAL_EVENTS

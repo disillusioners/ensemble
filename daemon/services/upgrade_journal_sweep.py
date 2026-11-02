@@ -67,7 +67,7 @@ import signal
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 
 from daemon.tools import upgrade_journal as uj
 from daemon.tools.upgrade_journal import (
@@ -110,6 +110,87 @@ DEFAULT_REAPER_TIMEOUT_SECONDS: int = 660
 # (600s + 600s), so a genuinely-live executor is protected for its whole
 # normal lifetime and reconcile's own guards own the rest.
 EXECUTOR_STALENESS_WINDOW_S: int = 900
+
+# ── Phase 2 (promote-handback-halt) — the serving-green stale-txn closer ────
+#
+# The incident this lane exists for: incident run r-20261101-212542-8279
+# (2026-11-01, target v0.28.5) — a promote HALTED at hand-back (Phase 1
+# owns that verifier), leaving the txn OPEN with flipped=true. The target
+# was SERVING ALL-GREEN. At the next launcher boot the launcher's sweep
+# saw a stale flipped txn and AUTO-ROLLED BACK + QUARANTINED the healthy
+# release (the OWNER RULING: "Don't roll back if that isn't needed — when
+# the new version is working and living, there is no reason to roll
+# back"). The launcher sweep is structurally BLIND to serving health (it
+# runs PRE-daemon — "port down" is ambiguous: broken release, or THIS
+# boot starting the daemon). THIS lane is the daemon-side half of the
+# split closer: the daemon CAN observe its own serving health
+# in-process, so it disposes of the stale txn on OBSERVED health.
+
+SWEEP_STALE_S: int = 600
+"""PROTOCOL MIRROR of the launcher's staleness gate (``launcher.sh:69``):
+an ``in_flight`` txn older than this is STALE. The daemon had no
+equivalent before this lane — ``EXECUTOR_STALENESS_WINDOW_S`` (above) is
+the REAPER liveness predicate (executor liveness, a DIFFERENT question).
+The PROTOCOL is the shared contract (the launcher implements it
+self-contained: it never sources lib.sh, so the constant is mirrored,
+not shared)."""
+
+UPGRADE_CLOSER_BOOT_GRACE_S: int = 300
+"""The closer's OWN boot-grace horizon (AM-P2-24 fold (b)).
+
+NOT the borrowed ``READINESS_GRACE_HORIZON_S`` (=120.0,
+``daemon/constants.py:165``) — that constant answers a DIFFERENT question
+(the readiness service's POOL-BUSY load horizon). 120s cannot cover the
+measured 210–360s slow-boot class (MCP warmup + auto-continue resume)
+⇒ the warmup observation would land OUTSIDE the grace ⇒ the NOT-GREEN
+verdict would fire ⇒ the WRITE-ONCE ``rollback_requested`` would stand
+even after the daemon turned green ⇒ tonight's class, reproduced.
+
+DERIVATION (one-way, normative): ``UPGRADE_CLOSER_BOOT_GRACE_S`` ≥
+``HANDBACK_VERIFY_BUDGET_S`` (the shell knob, default 300, lib.sh) —
+both windows must cover the SAME measured unit-active→serving boot. The
+closer's horizon may be RAISED above the hand-back budget; it may NEVER
+be lowered below it. The env override can therefore only RAISE it.
+
+DECLARED IN EXACTLY ONE PLACE (AM-P2-24 note (c)): here, beside the other
+sweep-local constants — NOT in ``daemon/constants.py`` (that module is
+cited only as the site whose pool-busy horizon is NOT borrowed)."""
+
+UPGRADE_CLOSER_BOOT_GRACE_ENV: str = "UPGRADE_CLOSER_BOOT_GRACE_S"
+"""Env override for the closer's boot-grace horizon (RAISE-ONLY — see
+``UPGRADE_CLOSER_BOOT_GRACE_S``'s derivation rule)."""
+
+SERVING_GREEN_CLOSER_ENV: str = "ENSEMBLE_UPGRADE_SERVING_GREEN_CLOSER"
+"""Daemon-side kill-switch for the serving-green closer lane (REV-R-3).
+
+Read PER TICK (never cached) so an operator can disable the lane without
+a rebuild — the per-tick precedent is ``ENSEMBLE_POST_RESTART_ARM_NOTIFY``
+(``_post_restart_arm_notify_enabled`` below). ``=0`` ⇒ the lane writes NO
+``serving_green_commit``, NO ``serving_unhealthy`` and NO
+``rollback_requested``; the stale txn is left untouched. Default ``1``.
+
+THE TWO KILL-SWITCHES OF THIS LANE (REV-R-3 — one sentence, both sides):
+the launcher-side ``SWEEP_SERVING_GREEN_ENABLED`` (=0 restores today's
+unconditional auto-rollback disposition; =1, the default, installs the new
+ladder) and this daemon-side ``ENSEMBLE_UPGRADE_SERVING_GREEN_CLOSER``
+(=0 disables the closer lane entirely); BOTH default to 1 (enabled), both
+are named in the operator runbook, and the launcher-side switch is the
+second enumerated hard ceremony pre-step. ``=0`` is an escape hatch for
+an unverified platform — NEVER a permanent state."""
+
+SERVING_GREEN_COMMIT_EVENT: str = "serving_green_commit"
+"""The commit-close event name (single home; the shell writers use the
+same literal)."""
+
+ROLLBACK_REQUESTED_EVENT: str = "rollback_requested"
+"""The daemon→launcher rollback-REQUEST event (T14 handoff)."""
+
+SERVING_UNHEALTHY_EVENT: str = "serving_unhealthy"
+"""The daemon closer's NOT-GREEN verdict event."""
+
+QUARANTINE_CLEARED_SERVING_GREEN_EVENT: str = "quarantine_cleared_serving_green"
+"""The explicit serving-green quarantine-clearance event (owner-ratified
+verbatim — OQ-C-3; the amended shell gate's acceptance signal)."""
 
 # Log-tail bounds for the ``executor_exit`` payload.
 _LOG_TAIL_MAX_BYTES = 4096
@@ -160,6 +241,7 @@ class UpgradeJournalSweepService:
         ),
         reaper_timeout_seconds: int = DEFAULT_REAPER_TIMEOUT_SECONDS,
         manager: "InstanceManager | None" = None,
+        readiness_provider: "Callable[[], Any] | None" = None,
     ) -> None:
         """Initialize the sweep service.
 
@@ -180,6 +262,14 @@ class UpgradeJournalSweepService:
                 stored on ``self._manager``; the api.py:1489-1496 lifespan
                 block wires the live ``manager`` singleton at construction
                 (one-step, no setter API — invariant: no half-built state).
+            readiness_provider: optional callable returning the daemon's
+                CACHED readiness composite (the serving-green closer's
+                health read — promote-handback-halt Phase 2 T6). It is a
+                PROVIDER, not a captured value: the composite is refreshed
+                periodically and a captured value would go stale. ``None``
+                ⇒ the closer lane is a no-op (the same posture as
+                ``manager=None`` — dev/unwired installs). Wired at the
+                SAME lifespan seam as the manager (api.py).
         """
         self._install_dir = install_dir
         self._interval_seconds = max(1, int(reconcile_interval_seconds))
@@ -195,6 +285,16 @@ class UpgradeJournalSweepService:
         # dev-mode no-op (the wake branch short-circuits; the existing
         # reconcile / GC / reaper sub-routines are unaffected).
         self._manager: "InstanceManager | None" = manager
+        # promote-handback-halt Phase 2 T6 — the serving-green closer's
+        # health seam. A PROVIDER (callable), never a captured composite:
+        # the composite is refreshed on a cadence and a captured value
+        # would go stale (the closer would judge a long-dead snapshot).
+        # ``None`` ⇒ the closer lane no-ops (dev/unwired installs).
+        self._readiness_provider: "Callable[[], Any] | None" = readiness_provider
+        # Phase 2 — the closer's OWN boot-grace state (observation-relative
+        # arm, never extended, re-armed only for a NEW txn identity).
+        self._closer_grace_key: str | None = None
+        self._closer_grace_armed_at: datetime | None = None
         self._reaper_queue: asyncio.Queue[ReaperJob] = asyncio.Queue()
         self._sweep_task: asyncio.Task[None] | None = None
         self._reaper_task: asyncio.Task[None] | None = None
@@ -1945,19 +2045,540 @@ class UpgradeJournalSweepService:
                 coalesce_overflows=result.coalesce_overflows,
             )
 
+    # ── Phase 2 (promote-handback-halt): the serving-green closer ─────────
+
+    def _closer_enabled(self) -> bool:
+        """Per-tick kill-switch read (``ENSEMBLE_UPGRADE_SERVING_GREEN_CLOSER``).
+
+        NEVER cached — the operator must be able to flip it without a
+        rebuild (the per-tick precedent:
+        ``_post_restart_arm_notify_enabled``). ``=0`` disables the whole
+        lane: no ``serving_green_commit``, no ``serving_unhealthy``, no
+        ``rollback_requested`` (the stale txn is left untouched)."""
+        return os.environ.get(SERVING_GREEN_CLOSER_ENV, "1") != "0"
+
+    @staticmethod
+    def _closer_boot_grace_s() -> int:
+        """The closer's effective boot-grace horizon (seconds).
+
+        The env override can only RAISE the horizon above the declared
+        default — the one-way derivation rule (AM-P2-24 fold (b)):
+        ``UPGRADE_CLOSER_BOOT_GRACE_S`` ≥ ``HANDBACK_VERIFY_BUDGET_S``."""
+        raw = os.environ.get(UPGRADE_CLOSER_BOOT_GRACE_ENV, "")
+        try:
+            value = int(float(raw))
+        except (TypeError, ValueError):
+            return UPGRADE_CLOSER_BOOT_GRACE_S
+        if value < UPGRADE_CLOSER_BOOT_GRACE_S:
+            return UPGRADE_CLOSER_BOOT_GRACE_S
+        return value
+
+    @staticmethod
+    def _closer_txn_identity(in_flight: dict[str, Any], target: str) -> str:
+        """The txn identity used by the write-once key, the request detail
+        and the launcher-side reader.
+
+        The RESTART lane stamps ``run_id`` into ``in_flight``; the
+        PROMOTE lane does NOT (``journal_open_txn`` in lib.sh writes
+        {kind,target,started_at,flipped,owner_pid,last_heartbeat,
+        displaced_version} — the promote run_id lives in the pipeline
+        LOCK, which is gone by the time a stale txn is swept). ⇒ the
+        identity falls back to ``<target>@<started_at>`` — stable across
+        ticks AND across launcher boots (the same txn keeps the same
+        started_at), and distinct per txn (a re-promote stamps a new
+        started_at ⇒ a fresh write-once key, per AM-P2-13's rule).
+
+        THE SHELL SIDE MUST DERIVE THE SAME STRING (launcher.sh's
+        ``_js_serving_txn_identity``): the request reader matches on
+        (target, run_id) inside ONE history entry."""
+        run_id = str(in_flight.get("run_id") or "").strip()
+        if run_id:
+            return run_id
+        started = str(in_flight.get("started_at") or "").strip()
+        return f"{target}@{started}" if started else target
+
+    @staticmethod
+    def _closer_owner_dead(in_flight: dict[str, Any]) -> bool:
+        """Owner liveness (P7) — the daemon's own os.kill-based shape.
+
+        EPERM ⇒ ALIVE (the process exists under another user — the same
+        contract as ``upgrade_journal._pid_alive`` and lib.sh's
+        ``_pid_alive``): a foreign-owned owner is never presumed dead."""
+        owner = in_flight.get("owner_pid")
+        try:
+            pid = int(owner)
+        except (TypeError, ValueError):
+            return True  # missing/garbage owner pid = unverifiable ⇒ dead
+        if pid <= 0:
+            return True
+        try:
+            os.kill(pid, 0)
+            return False
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        except OSError:
+            return True
+
+    def _closer_symlink_flipped(self, data: dict[str, Any], target: str) -> bool:
+        """P5's symlink-heal arm — the launcher twin (``launcher.sh:975-982``).
+
+        The journal's ``flipped`` marker can be false while the atomic
+        flip ALREADY happened (promote died between the flip and the
+        marker). The SYMLINK is the authoritative flip evidence: if
+        ``current`` → ``releases/<target>`` while the journal's own
+        ``current`` still names the PREVIOUS version, the flip happened."""
+        try:
+            link = os.readlink(self._install_dir / "current")
+        except OSError:
+            return False
+        if link != f"releases/{target}":
+            return False
+        current = data.get("current")
+        return not (isinstance(current, str) and current == target)
+
+    def _closer_grace_elapsed(self, key: str) -> bool:
+        """The closer's OWN boot-grace window (P8, first conjunct).
+
+        OBSERVATION-RELATIVE: armed on the FIRST tick where the pre-grace
+        predicates hold; NEVER extended; re-armed only for a NEW txn
+        identity (a full lapse does not re-arm the SAME txn — the verdict
+        is write-once, so a re-arm would only defer ticks that have
+        nothing left to decide)."""
+        now = datetime.now(tz=timezone.utc)
+        if self._closer_grace_key != key or self._closer_grace_armed_at is None:
+            self._closer_grace_key = key
+            self._closer_grace_armed_at = now
+            return False
+        elapsed = (now - self._closer_grace_armed_at).total_seconds()
+        return elapsed >= float(self._closer_boot_grace_s())
+
+    async def sweep_serving_green_closer(self) -> dict[str, Any]:
+        """Phase 2 — the serving-green stale-txn closer (the daemon half of
+        the SPLIT closer).
+
+        A stale, already-FLIPPED promote txn is disposed of on OBSERVED
+        serving health: serving-green ⇒ commit-close (stay on the release,
+        undo any wrongful quarantine, NO rollback / quarantine / counter /
+        cooldown); genuinely unhealthy ⇒ a journaled verdict + a rollback
+        REQUEST for the launcher to execute at its next boot.
+
+        THE PREDICATE (P1-P9 — ALL must hold; ANY miss ⇒ NO ACTION THIS
+        TICK — never a commit, never a verdict, never a request):
+
+        ======  ==================================================================
+        P1      ``self._install_dir is not None``
+        P2      the journal is readable and untorn
+        P3      ``in_flight`` is a dict (an OPEN txn)
+        P4      ``kind != "restart"`` (the daemon boot sweep owns restarts)
+        P5      ``flipped == "true"`` OR the symlink-heal says so
+        P6      ``age > SWEEP_STALE_S`` (600s — the protocol mirror)
+        P7      the txn's ``owner_pid`` is dead
+        P8      the boot-grace window elapsed AND ``grace_active == False``
+        P9      the journal history carries an ``intent_flip`` event naming
+                THIS txn's target — the AUTHORIZATION conjunct
+        ======  ==================================================================
+
+        P9 is the security hinge (OQ-C-11, RATIFIED): a positive health
+        read proves the daemon is RUNNING the target — it does NOT prove
+        the flip was operator-authorized. Absent P9 ⇒ the lane takes NO
+        action at all (no commit, no verdict, no request).
+
+        THE RESTORED INVARIANT (AM-P2-24, normative): *``rollback_requested``
+        is writable ONLY when genuinely unhealthy OUTSIDE grace
+        (``grace_active == False``); no path may write it during warmup.*
+        ⇒ degraded-but-grace-held ⇒ DEFER.
+
+        The daemon NEVER rolls back by itself: it repoints no symlink,
+        stops nothing, counts nothing. The rollback EXECUTION is the
+        launcher's existing chain (Option 2 of the plan's disposition
+        table — a journaled request, executed at the next launcher boot).
+
+        Never raises (janitor contract): a failed tick logs and the next
+        tick retries."""
+        result: dict[str, Any] = {
+            "action": "none",
+            "reason": None,
+            "target": None,
+            "run_id": None,
+        }
+        install_dir = self._install_dir
+        if install_dir is None:                       # P1
+            result["reason"] = "no_install_dir"
+            return result
+        if not self._closer_enabled():
+            result["action"] = "disabled"
+            result["reason"] = "kill_switch"
+            return result
+        try:
+            data = uj.journal_read(install_dir)       # P2
+        except Exception as read_err:  # noqa: BLE001 — janitor, never gates
+            result["reason"] = "journal_unreadable"
+            logger.warning(
+                "UpgradeJournalSweepService: serving-green closer journal "
+                "read FAILED (%s: %s) — no action this tick",
+                type(read_err).__name__, read_err,
+            )
+            return result
+        in_flight = data.get("in_flight")
+        if not isinstance(in_flight, dict):           # P3
+            result["reason"] = "no_in_flight"
+            return result
+        if str(in_flight.get("kind", "")) == "restart":   # P4
+            result["reason"] = "restart_kind"
+            return result
+        target = str(in_flight.get("target") or "").strip()
+        if not target:
+            result["reason"] = "no_target"
+            return result
+        result["target"] = target
+        # P5 — flipped (marker OR symlink evidence)
+        flipped = str(in_flight.get("flipped", "")).lower() == "true"
+        if not flipped:
+            flipped = self._closer_symlink_flipped(data, target)
+        if not flipped:
+            result["reason"] = "not_flipped"
+            return result
+        # P6 — age
+        started = in_flight.get("started_at")
+        started_dt = uj.parse_iso_utc(started)
+        if started_dt is None:
+            result["reason"] = "unparseable_started_at"
+            return result
+        age_s = int(
+            (datetime.now(tz=timezone.utc) - started_dt).total_seconds()
+        )
+        if age_s <= SWEEP_STALE_S:
+            result["reason"] = "fresh"
+            return result
+        # P7 — owner dead
+        if not self._closer_owner_dead(in_flight):
+            result["reason"] = "owner_alive"
+            return result
+        run_id = self._closer_txn_identity(in_flight, target)
+        result["run_id"] = run_id
+        # P9 — the authorization conjunct. ABSENT ⇒ NO ACTION THIS TICK
+        # (never a commit, never a verdict, never a request).
+        if not uj.journal_history_has_event(
+            install_dir, "intent_flip", target
+        ):
+            result["reason"] = "no_intent_flip"
+            logger.info(
+                "UpgradeJournalSweepService: serving-green closer — stale "
+                "flipped txn target=%s run_id=%s has NO intent_flip evidence "
+                "— no action this tick (P9: never commit, never request)",
+                target, run_id,
+            )
+            return result
+        # Health read (in-process — no HTTP self-call, no DB).
+        composite = None
+        provider = self._readiness_provider
+        if provider is not None:
+            try:
+                composite = provider()
+            except Exception as provider_err:  # noqa: BLE001
+                logger.warning(
+                    "UpgradeJournalSweepService: serving-green closer "
+                    "readiness_provider FAILED (%s: %s) — treating the "
+                    "composite as missing (DEFER, never a verdict)",
+                    type(provider_err).__name__, provider_err,
+                )
+                composite = None
+        if composite is None:
+            # composite-missing is a CANNOT-TELL, not an unhealthy verdict
+            # (AM-P2-8) — the composite is None until the first readiness
+            # tick; an in-process wiring defect must never become a
+            # rollback request. ⇒ DEFER.
+            result["action"] = "deferred"
+            result["reason"] = "composite-missing"
+            return result
+        try:
+            from daemon import __version__ as _daemon_version
+        except Exception:  # noqa: BLE001 — fail-closed to "no version"
+            _daemon_version = ""
+        v_target = target[1:] if target.startswith("v") else target
+        version_match = bool(_daemon_version) and _daemon_version == v_target
+        try:
+            ready = bool(getattr(composite, "ready", False))
+            grace_active = bool(getattr(composite, "grace_active", False))
+        except Exception:  # noqa: BLE001 — an unreadable composite = not ready
+            ready = False
+            grace_active = True
+        # P8 (second conjunct) + the RESTORED INVARIANT: a grace-held
+        # observation NEVER produces a verdict or a request.
+        if grace_active:
+            result["action"] = "deferred"
+            result["reason"] = "grace-held"
+            return result
+        if not self._closer_grace_elapsed(run_id):
+            result["action"] = "deferred"
+            result["reason"] = "boot-grace"
+            return result
+        if version_match and ready:
+            action = await self._closer_commit_green(
+                data, in_flight, target, run_id, age_s, _daemon_version
+            )
+            result.update(action)
+            return result
+        reason = "version-mismatch" if not version_match else "not-ready"
+        action = await self._closer_verdict_unhealthy(
+            data, in_flight, target, run_id, reason, age_s
+        )
+        result.update(action)
+        return result
+
+    async def _closer_commit_green(
+        self,
+        data: dict[str, Any],
+        in_flight: dict[str, Any],
+        target: str,
+        run_id: str,
+        age_s: int,
+        version: str,
+    ) -> dict[str, Any]:
+        """The GREEN commit-close (AM-P2-1's history-before-close order).
+
+        1. ``current`` → target
+        2. ``previous`` → ``in_flight.displaced_version`` (absent/null ⇒
+           HALT-FOR-HUMAN — the txn is old-format/ambiguous, so no silent
+           commit; nothing is mutated)
+        3. history append ``serving_green_commit`` — and FIRST, when the
+           target is in ``quarantined[]``, append
+           ``quarantine_cleared_serving_green`` (the EVENT is the amended
+           shell gate's acceptance signal ⇒ event-before-close makes the
+           clearance crash-proof)
+        4. ``in_flight`` → null  ← the txn closes ONLY here
+        5. ``quarantined[]`` array rewrite (hygiene; idempotent)
+
+        NOT done on GREEN: quarantine marking, rollback counter increment,
+        cooldown arming — the cap/cooldown are anti-flapping responses to
+        BAD outcomes and a successful-and-declared flip is not one.
+
+        Lock discipline (AM-P2-3): the journal lock is taken with
+        ``wait_s=0`` and the txn is RE-READ + RE-CHECKED under it; a busy
+        lock ⇒ no action this tick (never block the sweep)."""
+        result: dict[str, Any] = {"action": "none", "reason": None}
+        install_dir = self._install_dir
+        assert install_dir is not None
+        acquired, busy_run = uj.lock_acquire(
+            install_dir, run_id, wait_s=0.0
+        )
+        if not acquired:
+            result["action"] = "deferred"
+            result["reason"] = "lock_busy"
+            logger.info(
+                "UpgradeJournalSweepService: serving-green closer — "
+                "pipeline lock busy (run_id=%s) — no action this tick",
+                busy_run or "?",
+            )
+            return result
+        try:
+            # RE-READ + RE-VALIDATE under the lock (AM-P2-3).
+            try:
+                fresh = uj.journal_read(install_dir)
+            except Exception as read_err:  # noqa: BLE001
+                result["reason"] = "journal_unreadable_under_lock"
+                logger.warning(
+                    "UpgradeJournalSweepService: serving-green closer "
+                    "journal re-read FAILED under the lock (%s) — no action",
+                    type(read_err).__name__,
+                )
+                return result
+            fresh_in_flight = fresh.get("in_flight")
+            if not isinstance(fresh_in_flight, dict):
+                result["reason"] = "txn_closed_under_lock"
+                return result
+            if str(fresh_in_flight.get("target") or "") != target:
+                result["reason"] = "txn_changed_under_lock"
+                return result
+            if str(fresh_in_flight.get("flipped", "")).lower() != "true" \
+                    and not self._closer_symlink_flipped(fresh, target):
+                result["reason"] = "not_flipped_under_lock"
+                return result
+            displaced = fresh_in_flight.get("displaced_version")
+            if not isinstance(displaced, str) or not displaced \
+                    or displaced == "null":
+                # Old-format / ambiguous txn — HALT-FOR-HUMAN (the
+                # launcher's twin at launcher.sh:1094-1106): no silent
+                # commit, nothing mutated, the txn stays in place.
+                uj.journal_history_append(
+                    install_dir,
+                    "halt",
+                    f"closer: stale flipped txn (target={target}, run_id={run_id}) "
+                    f"has no in_flight.displaced_version (old-format txn) — "
+                    f"halt-for-human, txn left in place",
+                )
+                result["action"] = "halted"
+                result["reason"] = "no_displaced_version"
+                logger.warning(
+                    "UpgradeJournalSweepService: serving-green closer — "
+                    "stale flipped txn target=%s has no displaced_version — "
+                    "halt-for-human, txn left open", target,
+                )
+                return result
+            try:
+                uj.journal_update_field(install_dir, "current", target)
+                uj.journal_update_field(install_dir, "previous", displaced)
+                if uj.journal_quarantined_contains(fresh, target):
+                    uj.journal_history_append(
+                        install_dir,
+                        QUARANTINE_CLEARED_SERVING_GREEN_EVENT,
+                        f"target {target} run_id {run_id} "
+                        f"serving_green_commit prev {displaced}",
+                    )
+                uj.journal_history_append(
+                    install_dir,
+                    SERVING_GREEN_COMMIT_EVENT,
+                    f"target {target} run_id {run_id} prev {displaced} "
+                    f"version {version} — serving green (in-process health "
+                    f"read: version match + readiness composite ready); "
+                    f"committed and continued — NOT rolled back, NOT "
+                    f"quarantined, counter NOT incremented, no cooldown",
+                )
+                uj.journal_update_field(install_dir, "in_flight", None)
+                quarantined = fresh.get("quarantined")
+                if isinstance(quarantined, list) and target in quarantined:
+                    uj.journal_update_field(
+                        install_dir,
+                        "quarantined",
+                        [v for v in quarantined if v != target],
+                    )
+            except (uj.JournalTorn, OSError, KeyError) as write_err:
+                result["action"] = "deferred"
+                result["reason"] = "journal_write_failed"
+                logger.warning(
+                    "UpgradeJournalSweepService: serving-green closer "
+                    "commit-close write FAILED (%s: %s) — the txn is left "
+                    "as-is; the next tick retries",
+                    type(write_err).__name__, write_err,
+                )
+                return result
+            result["action"] = "committed"
+            result["reason"] = "serving_green"
+            logger.info(
+                "UpgradeJournalSweepService: serving-green closer — stale "
+                "flipped txn target=%s run_id=%s (age %ss) is SERVING GREEN "
+                "— committed and continued (no rollback, no quarantine, no "
+                "counter, no cooldown)",
+                target, run_id, age_s,
+            )
+            return result
+        finally:
+            uj.lock_release(install_dir)
+
+    async def _closer_verdict_unhealthy(
+        self,
+        data: dict[str, Any],
+        in_flight: dict[str, Any],
+        target: str,
+        run_id: str,
+        reason: str,
+        age_s: int,
+    ) -> dict[str, Any]:
+        """The NOT-GREEN branch — a journaled VERDICT + a rollback REQUEST.
+
+        The daemon does NOT roll back: it repoints no symlink, stops
+        nothing, counts nothing. It journals (a) the ``serving_unhealthy``
+        verdict and (b) the ``rollback_requested`` disposition that the
+        LAUNCHER executes at its next boot (the plan's Option 2 — zero new
+        execution surface; the launcher already owns the chain).
+
+        WRITE-ONCE per ``(run_id, target)`` (AM-P2-13): the closer ticks
+        every 90s and the journal must NOT grow one row per tick. The
+        scan is over the PARSED history (matching on event + target +
+        run_id inside ONE entry — never a substring conjunction over the
+        raw document, the same cross-entry hazard the shell readers
+        avoid)."""
+        result: dict[str, Any] = {"action": "none", "reason": reason}
+        install_dir = self._install_dir
+        assert install_dir is not None
+        acquired, busy_run = uj.lock_acquire(
+            install_dir, run_id, wait_s=0.0
+        )
+        if not acquired:
+            result["action"] = "deferred"
+            result["reason"] = "lock_busy"
+            logger.info(
+                "UpgradeJournalSweepService: serving-green closer — "
+                "pipeline lock busy (run_id=%s) — no action this tick",
+                busy_run or "?",
+            )
+            return result
+        try:
+            try:
+                fresh = uj.journal_read(install_dir)
+            except Exception as read_err:  # noqa: BLE001
+                result["reason"] = "journal_unreadable_under_lock"
+                logger.warning(
+                    "UpgradeJournalSweepService: serving-green closer "
+                    "journal re-read FAILED under the lock (%s) — no action",
+                    type(read_err).__name__,
+                )
+                return result
+            fresh_in_flight = fresh.get("in_flight")
+            if not isinstance(fresh_in_flight, dict):
+                result["reason"] = "txn_closed_under_lock"
+                return result
+            if str(fresh_in_flight.get("target") or "") != target:
+                result["reason"] = "txn_changed_under_lock"
+                return result
+            try:
+                if not uj.journal_history_has_event(
+                    install_dir, SERVING_UNHEALTHY_EVENT, target, run_id
+                ):
+                    uj.journal_history_append(
+                        install_dir,
+                        SERVING_UNHEALTHY_EVENT,
+                        f"target {target} run_id {run_id} reason {reason} — "
+                        f"serving unhealthy (age {age}s); NOT rolled back by "
+                        f"the daemon — the launcher executes the disposition "
+                        f"at its next boot",
+                    )
+                if not uj.journal_history_has_event(
+                    install_dir, ROLLBACK_REQUESTED_EVENT, target, run_id
+                ):
+                    uj.journal_history_append(
+                        install_dir,
+                        ROLLBACK_REQUESTED_EVENT,
+                        f"target {target} run_id {run_id} reason {reason}",
+                    )
+            except (uj.JournalTorn, OSError, KeyError) as write_err:
+                result["action"] = "deferred"
+                result["reason"] = "journal_write_failed"
+                logger.warning(
+                    "UpgradeJournalSweepService: serving-green closer "
+                    "unhealthy-verdict write FAILED (%s: %s) — next tick "
+                    "retries",
+                    type(write_err).__name__, write_err,
+                )
+                return result
+            result["action"] = "unhealthy"
+            logger.warning(
+                "UpgradeJournalSweepService: serving-green closer — stale "
+                "flipped txn target=%s run_id=%s is NOT SERVING GREEN "
+                "(reason=%s, age %ss) — verdict + rollback request journaled "
+                "(the launcher executes it at its next boot)",
+                target, run_id, reason, age_s,
+            )
+            return result
+        finally:
+            uj.lock_release(install_dir)
+
     # ── periodic sweep ───────────────────────────────────────────────────
 
-    async def sweep_once(self) -> dict[str, int | str | None]:
-        """One reconcile + GC + wake-sweep tick. Returns a small visibility
-        dict: ``{"reconcile": <note|None>, "gc_pruned": <int>,
-        "skipped": <0|1>, "wake": <WakeSweepResult>}``. Never raises — a
-        failed tick logs and returns; the next tick retries by simply
-        happening."""
-        result: dict[str, int | str | None] = {
+    async def sweep_once(self) -> dict[str, Any]:
+        """One reconcile + closer + GC + wake-sweep tick. Returns a small
+        visibility dict: ``{"reconcile": <note|None>, "gc_pruned": <int>,
+        "skipped": <0|1>, "wake": <WakeSweepResult>, "closer": <dict>}``.
+        Never raises — a failed tick logs and returns; the next tick
+        retries by simply happening."""
+        result: dict[str, Any] = {
             "reconcile": None,
             "gc_pruned": 0,
             "skipped": 0,
             "wake": self.WakeSweepResult(),
+            "closer": None,
         }
         if self._install_dir is None:
             return result
@@ -1991,6 +2612,28 @@ class UpgradeJournalSweepService:
             logger.warning(
                 "UpgradeJournalSweepService: reconcile tick failed: "
                 f"{type(rec_err).__name__}: {rec_err} — next tick will retry"
+            )
+        # Phase 2 (promote-handback-halt) — the serving-green closer lane.
+        # It runs AFTER the reconcile and BEFORE the GC. It is a SEPARATE
+        # lane with its OWN narrow predicate (P1-P9): `reconcile_pending_op`
+        # returns None whenever `in_flight` is a dict (upgrade_journal.py's
+        # in_flight-dict guard) and the restart-arm lane's flipped=true
+        # never-touch guard is CORRECT for THAT lane — carving an
+        # exception into those proven fail-closed guards would widen
+        # them, so the closer does not touch them at all.
+        try:
+            closer = await self.sweep_serving_green_closer()
+            result["closer"] = closer
+            if closer.get("action") in ("committed", "unhealthy", "halted"):
+                logger.info(
+                    "UpgradeJournalSweepService: serving-green closer — %s",
+                    closer,
+                )
+        except Exception as closer_err:  # noqa: BLE001 — never wedge boot
+            logger.warning(
+                "UpgradeJournalSweepService: serving-green closer tick "
+                "failed: %s: %s — next tick will retry",
+                type(closer_err).__name__, closer_err,
             )
         try:
             pruned = uj.gc_pending_actions(self._install_dir, keep_run_id=None)
