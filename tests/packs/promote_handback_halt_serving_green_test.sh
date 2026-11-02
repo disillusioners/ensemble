@@ -645,6 +645,105 @@ assert_contains "P-30 =1 installs the new ladder (defer)" '"event":"sweep_deferr
 assert_not_contains "P-30 =1 does NOT roll back on the first ambiguous observation" '"event":"sweep_rollback"' "$P30B_JOURNAL"
 rm -rf "$P30B_FIX"
 
+# F5 (code-council W4) — =0 must restore the BASE disposition, and the base
+# disposition was NEVER unconditional: at base the OPERATOR ESCAPE sat
+# BEFORE the chain (base 941cb6321: :984-1122 escape vs :1129 chain).
+# Pre-fix the switch short-circuited STRAIGHT to the chain ⇒ this shape
+# HALTED FOR HUMAN (the chain's manifest gate) instead of committing.
+P30C_FIX="$(mktemp -d -t p30c.XXXXXX)"; _register_fixture "$P30C_FIX"
+make_install_fixture "$P30C_FIX" "$TARGET" "$PREV" "false"   # prev NOT rollback-safe
+seed_journal "$P30C_FIX" "$TARGET" "$PREV" "true" "1"        # + intent_flip
+ln -sfn "releases/$TARGET" "$P30C_FIX/current"
+printf 'PORT=19999\n' > "$P30C_FIX/.env"
+SWEEP_SERVING_GREEN_ENABLED=0 run_sweep "$P30C_FIX" 19999 >/dev/null
+P30C_JOURNAL="$(cat "$P30C_FIX/releases/state.json")"
+assert_contains "P-30 (=0) the OPERATOR ESCAPE runs BEFORE the chain (the BASE order)" \
+    '"event":"boot_sweep_commit_and_continue"' "$P30C_JOURNAL"
+assert_not_contains "P-30 (=0) the chain's manifest gate no longer halts this shape" \
+    '"event":"halt"' "$P30C_JOURNAL"
+assert_not_contains "P-30 (=0) no sweep_rollback on the escape shape" \
+    '"event":"sweep_rollback"' "$P30C_JOURNAL"
+rm -rf "$P30C_FIX"
+
+# and =0 on a shape the escape does NOT cover still takes the chain
+# (today's never-green protection is intact under the legacy switch).
+P30D_FIX="$(mktemp -d -t p30d.XXXXXX)"; _register_fixture "$P30D_FIX"
+make_install_fixture "$P30D_FIX" "$TARGET" "$PREV" "true"
+seed_journal "$P30D_FIX" "$TARGET" "$PREV" "true" "1"
+ln -sfn "releases/$TARGET" "$P30D_FIX/current"
+printf 'PORT=19999\n' > "$P30D_FIX/.env"
+SWEEP_SERVING_GREEN_ENABLED=0 run_sweep "$P30D_FIX" 19999 >/dev/null
+P30D_JOURNAL="$(cat "$P30D_FIX/releases/state.json")"
+assert_contains "P-30 (=0) the chain still fires when the escape does not apply" \
+    '"event":"sweep_rollback"' "$P30D_JOURNAL"
+rm -rf "$P30D_FIX"
+
+# ===========================================================================
+section "F8 — the rung-2 authorization reader is PER-ENTRY (prefix collision + cross-entry)"
+
+# The rung-2 operator escape is gated on `intent_flip` evidence. The
+# pre-fix whole-array conjunction matched the event kind and the target
+# string ANYWHERE in the array ⇒ a false positive COMMIT-AND-CONTINUES a
+# flip whose authorization evidence names a DIFFERENT target.
+# Both legs below hold every OTHER escape gate (prev rollback_safe:false,
+# displaced_version present) so the reader is the only discriminator; a
+# positive control proves the escape CAN fire.
+f8_escape_fired() {
+    local name="$1" fix="$2" mode="$3"
+    local journal
+    journal="$(cat "$fix/releases/state.json")"
+    case "$mode" in
+        yes) assert_contains "$name" '"event":"boot_sweep_commit_and_continue"' "$journal" ;;
+        no)  assert_not_contains "$name" '"event":"boot_sweep_commit_and_continue"' "$journal" ;;
+    esac
+}
+
+# (a) POSITIVE CONTROL — the intent_flip names THIS target ⇒ the escape fires
+F8A_FIX="$(mktemp -d -t f8a.XXXXXX)"; _register_fixture "$F8A_FIX"
+make_install_fixture "$F8A_FIX" "$TARGET" "$PREV" "false"
+seed_journal "$F8A_FIX" "$TARGET" "$PREV" "true" "1"
+ln -sfn "releases/$TARGET" "$F8A_FIX/current"
+printf 'PORT=19999\n' > "$F8A_FIX/.env"
+run_sweep "$F8A_FIX" 19999 >/dev/null
+f8_escape_fired "F8 control: intent_flip naming the target ⇒ the escape fires" "$F8A_FIX" yes
+rm -rf "$F8A_FIX"
+
+# (b) PREFIX COLLISION — the evidence names ${TARGET}55, never ${TARGET}
+F8B_FIX="$(mktemp -d -t f8b.XXXXXX)"; _register_fixture "$F8B_FIX"
+make_install_fixture "$F8B_FIX" "$TARGET" "$PREV" "false"
+cat > "$F8B_FIX/releases/state.json" <<EOF
+{"current":"$PREV","previous":"$PREV","in_flight":{"kind":"promote","target":"$TARGET","started_at":"2026-10-07T09:00:00Z","flipped":true,"owner_pid":99999,"last_heartbeat":1728000000,"displaced_version":"$PREV"},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[{"ts":"2026-10-07T10:00:00Z","event":"intent_flip","detail":"preflight: intentional promote target ${TARGET}55 — integrity verified; operator-initiated"}]}
+EOF
+ln -sfn "releases/$TARGET" "$F8B_FIX/current"
+printf 'PORT=19999\n' > "$F8B_FIX/.env"
+run_sweep "$F8B_FIX" 19999 >/dev/null
+f8_escape_fired "F8 (a) a prefix collision (${TARGET}55) does NOT authorize the escape" "$F8B_FIX" no
+rm -rf "$F8B_FIX"
+
+# (c) CROSS-ENTRY — the event kind in one entry, the target string in another
+F8C_FIX="$(mktemp -d -t f8c.XXXXXX)"; _register_fixture "$F8C_FIX"
+make_install_fixture "$F8C_FIX" "$TARGET" "$PREV" "false"
+cat > "$F8C_FIX/releases/state.json" <<EOF
+{"current":"$PREV","previous":"$PREV","in_flight":{"kind":"promote","target":"$TARGET","started_at":"2026-10-07T09:00:00Z","flipped":true,"owner_pid":99999,"last_heartbeat":1728000000,"displaced_version":"$PREV"},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[{"ts":"2026-10-07T10:00:00Z","event":"intent_flip","detail":"preflight: intentional promote target v0.0.0-other — integrity verified; operator-initiated"},{"ts":"2026-10-07T10:01:00Z","event":"sweep","detail":"sweep: unrelated row mentioning target $TARGET run_id x"}]}
+EOF
+ln -sfn "releases/$TARGET" "$F8C_FIX/current"
+printf 'PORT=19999\n' > "$F8C_FIX/.env"
+run_sweep "$F8C_FIX" 19999 >/dev/null
+f8_escape_fired "F8 (b) a cross-entry split does NOT authorize the escape" "$F8C_FIX" no
+rm -rf "$F8C_FIX"
+
+# (d) the LEGACY arm (=0) shares the SAME reader (one implementation)
+F8D_FIX="$(mktemp -d -t f8d.XXXXXX)"; _register_fixture "$F8D_FIX"
+make_install_fixture "$F8D_FIX" "$TARGET" "$PREV" "false"
+cat > "$F8D_FIX/releases/state.json" <<EOF
+{"current":"$PREV","previous":"$PREV","in_flight":{"kind":"promote","target":"$TARGET","started_at":"2026-10-07T09:00:00Z","flipped":true,"owner_pid":99999,"last_heartbeat":1728000000,"displaced_version":"$PREV"},"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[{"ts":"2026-10-07T10:00:00Z","event":"intent_flip","detail":"preflight: intentional promote target ${TARGET}55 — integrity verified; operator-initiated"}]}
+EOF
+ln -sfn "releases/$TARGET" "$F8D_FIX/current"
+printf 'PORT=19999\n' > "$F8D_FIX/.env"
+SWEEP_SERVING_GREEN_ENABLED=0 run_sweep "$F8D_FIX" 19999 >/dev/null
+f8_escape_fired "F8 (c) the LEGACY (=0) arm uses the same per-entry reader" "$F8D_FIX" no
+rm -rf "$F8D_FIX"
+
 # ===========================================================================
 section "P-31 — the launcher purity scan (R-08)"
 

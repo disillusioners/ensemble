@@ -587,30 +587,35 @@ _js_quarantine() {
 # the conservative halt gates.
 #
 # History entries are {ts,event,detail}; `_js_json_sub` extracts the
-# array as raw text. We DO NOT parse JSON in shell (fragile); instead
-# we use a `case` glob with the conjunction of the two substrings.
-# Both substrings must appear in the SAME history array; false
-# positives require a hand-edit that puts both strings in the array —
-# the operator's intentionality is the sole producer (per the
-# writer-side comment in promote.sh).
+# array as raw text. We DO NOT parse JSON in shell (fragile) — the
+# matching itself is delegated (see the body).
+#
+# F8 (code-council A1, LEADER DECISION: fold in this lane) — THIS READER
+# NOW DELEGATES to the per-entry, delimiter-anchored reader. The
+# whole-array conjunction described above was the SOURCE of two named
+# hazards and it was STILL LIVE on the rung-2 operator-escape path
+# (`launcher.sh:1723` pre-fix):
+#   (1) PREFIX COLLISION — `target v0.28.5` occurs inside `target
+#       v0.28.55`;
+#   (2) CROSS-ENTRY FALSE POSITIVE — the event kind in entry A, the
+#       target string in entry B.
+# On the escape path a cross-entry false positive COMMIT-AND-CONTINUES a
+# flip whose authorization evidence names a DIFFERENT target (and a
+# prefix collision does the same for a near-miss version). One reader,
+# one contract — `_js_history_has_event_for_target`, the same per-entry
+# contract the daemon (`history_entry_matches`) and `lib.sh` implement.
 _js_history_has_intent_flip() {
-    local jp="$1" target="$2" json hist pattern
-    [ -n "$target" ] || return 1
-    json="$(_js_journal_read "$jp")" || return 1
-    hist="$(_js_json_sub "$json" "history")"
-    case "$hist" in
-        ''|null|\[\]) return 1 ;;
-    esac
-    # Build the conjunction pattern in a variable (case-glob expansion
-    # of inline literal escapes is fragile; a variable keeps the `*` and
-    # the `\"` stable). The pattern requires the array to carry BOTH
-    # the event-kind literal AND the `target <VERSION>` substring —
-    # promote's emit prefix is byte-identical (see promote.sh 2.2c).
-    pattern='*"event":"intent_flip"*target '"$target"'*'
-    case "$hist" in
-        $pattern) return 0 ;;
-    esac
-    return 1
+    local jp="$1" target="$2"
+    # F8 (code-council A1, LEADER DECISION: fold in this lane) — DELEGATES
+    # to the per-entry, delimiter-anchored reader
+    # `_js_history_has_event_for_target`. The whole-array conjunction this
+    # function used to implement carried BOTH named hazards, and it was
+    # STILL LIVE on the rung-2 operator-escape path: a cross-entry false
+    # positive there COMMIT-AND-CONTINUES a flip whose authorization
+    # evidence names a DIFFERENT target (and a prefix collision matches
+    # v0.28.5 inside v0.28.55). ONE reader, ONE contract — the same one
+    # the daemon (`history_entry_matches`) and lib.sh implement.
+    _js_history_has_event_for_target "$jp" "intent_flip" "$target" ""
 }
 
 # ── Phase 2 (promote-handback-halt): the serving-green stale-txn closer ────
@@ -729,9 +734,11 @@ _js_serving_txn_identity() {
 # optional `run_id <ID>` substring must ALL appear inside ONE history
 # entry — the entry-object boundary is `{"ts":`.
 #
-# TWO HAZARDS are closed by that shape (both are live in the pre-existing
-# whole-array reader `_js_history_has_intent_flip`, which is a NAMED
-# FOLLOW-UP (R-15) and is NOT changed here):
+# TWO HAZARDS are closed by that shape (both were live in the pre-existing
+# whole-array reader `_js_history_has_intent_flip`; F8 — the code-council's
+# A1, LEADER-DECIDED fold — RETIRED that reader's own matcher: it now
+# delegates here, so the rung-2 operator-escape path inherits this
+# contract):
 #   (1) PREFIX COLLISION — `target v0.28.5` occurs inside `target
 #       v0.28.55`; the delimiter anchor (a space, or the end of the
 #       detail string) closes it.
@@ -1641,6 +1648,65 @@ _js_sweep_rollback_chain() {
     return 0
 }
 
+# _js_sweep_operator_escape <install_dir> <journal> <json> <inf> <target>
+# <prev> <age> <owner> <kind> <lock_held> <run_id>
+#
+# RUNG 2 — the PRE-EXISTING boot_sweep_commit_and_continue ESCAPE
+# (ADR / upgrade-resilience 2026-10-07), extracted verbatim so the ladder
+# and the LEGACY kill-switch arm share ONE implementation (F5: the legacy
+# arm must reproduce the BASE order — escape BEFORE chain).
+#
+# Predicate (ALL must hold): a previous release exists · the journal
+# carries per-entry intent_flip evidence for THIS target (F8: the
+# per-entry reader, never the whole-array conjunction) · the previous
+# manifest declares rollback_safe:false (the operator's deliberate
+# incompatibility declaration).
+#
+# Returns 0 iff it FIRED (the txn is committed-and-continued, or the
+# old-format halt ran — the lock is released and the caller must stop);
+# returns 1 when the predicate does not hold (the caller continues).
+_js_sweep_operator_escape() {
+    local install_dir="$1" journal="$2" json="$3" inf="$4" target="$5"
+    local prev="$6" age="$7" owner="$8" kind="$9" lock_held="${10:-1}"
+    local run_id="${11:-}"
+    local displaced_v
+    if [ -n "$prev" ] && [ "$prev" != "null" ] \
+       && _js_history_has_intent_flip "$journal" "$target" \
+       && _js_manifest_field "$install_dir" "$prev" "rollback_safe" 2>/dev/null \
+         | grep -q '^false$'; then
+        displaced_v="$(_js_json_field "$inf" "displaced_version" 2>/dev/null)" || displaced_v=""
+        if [ "$displaced_v" = "null" ]; then
+            displaced_v=""
+        fi
+        if [ -z "$displaced_v" ]; then
+            _notify_once "sweep-halt-old-format" \
+                "HALT-FOR-HUMAN: stale flipped $kind txn (target=$target) has no in_flight.displaced_version field (old-format txn from pre-C-4 release); boot proceeds on current; see $install_dir/releases/state.json"
+            _js_history_append "$journal" "halt" \
+                "sweep: stale flipped $kind txn target=$target has no in_flight.displaced_version (old-format txn) — halt-for-human, txn left in place" \
+                || true
+            _log "HALT: journal sweep: flipped txn (age ${age}s) with no in_flight.displaced_version (old-format) — halt-for-human, boot proceeds on current"
+            _js_sweep_release "$install_dir" "$lock_held"
+            return 0
+        fi
+        _notify_once "sweep-commit" \
+            "sweep-commit-and-continue: stale flipped $kind txn (target=$target, prev=$prev, displaced_version=$displaced_v) — operator declared previous rollback_safe:false AND preflight emitted intent_flip evidence; commit+continue at target (NOT sweep-rollback)"
+        _js_journal_update "$journal" "current" "\"$target\"" \
+            || { _log "WARN: journal sweep: commit-and-continue journal current update FAILED — boot proceeds on existing current"; _js_sweep_release "$install_dir" "$lock_held"; return 0; }
+        _js_journal_update "$journal" "previous" "\"$displaced_v\"" \
+            || { _log "WARN: journal sweep: commit-and-continue previous=$displaced_v update FAILED — boot proceeds on existing previous"; }
+        _js_journal_update "$journal" "in_flight" "null" \
+            || { _log "WARN: journal sweep: commit-and-continue in_flight clear FAILED — boot proceeds"; }
+        _js_history_append "$journal" "boot_sweep_commit_and_continue" \
+            "sweep: flipped $kind txn (target=$target, prev=$prev, displaced_version=$displaced_v, owner pid ${owner:-?}, age ${age}s) committed and continued — intent_flip evidence + prev rollback_safe:false (operator-declared incompatibility); boot proceeds at target" \
+            || { _log "WARN: journal sweep: commit-and-continue history append FAILED — boot proceeds"; }
+        _js_defer_counter_delete "$install_dir" "$run_id"
+        _log "BOOT-SWEEP COMMIT-AND-CONTINUE: stale flipped $kind txn (age ${age}s, target=$target, prev=$prev, displaced_version=$displaced_v) — operator declared prev rollback_safe:false + preflight emitted intent_flip evidence; boot proceeds at target (NOT sweep-rollback; txn closed, counter NOT incremented, no cooldown)"
+        _js_sweep_release "$install_dir" "$lock_held"
+        return 0
+    fi
+    return 1
+}
+
 # _js_sweep_flipped_disposition <install_dir> [lock_held]
 # THE disposition for a stale, already-FLIPPED promote txn — the Phase-2
 # split closer's launcher half. Called by BOTH `_journal_sweep` (the
@@ -1747,11 +1813,26 @@ _js_sweep_flipped_disposition() {
         _js_sweep_release "$install_dir" "$lock_held"
         return 0
     fi
-    # ── the KILL-SWITCH (REV-R-3): =0 restores today's unconditional
-    # auto-rollback disposition (an escape hatch for an unverified
-    # platform — NEVER a permanent state).
+    # ── the KILL-SWITCH (REV-R-3): =0 restores the BASE (pre-Phase-2)
+    # disposition (an escape hatch for an unverified platform — NEVER a
+    # permanent state).
+    #
+    # F5 (code-council W4) — the switch used to short-circuit STRAIGHT to
+    # the rollback chain, which is NOT "today's disposition": at base the
+    # OPERATOR ESCAPE sat BEFORE the chain (base 941cb6321:
+    # `launcher.sh:984-1122` escape vs `:1129` chain) — the pre-Phase-2
+    # disposition was never unconditional. Consequence pre-fix: with the
+    # switch at 0 a stale flipped txn whose prev is rollback_safe:false
+    # HALTED FOR HUMAN (the chain's manifest gate) instead of
+    # commit-and-continuing — i.e. the switch silently changed the
+    # behaviour it documents as restoring. ⇒ the legacy arm is now
+    # rung 2 THEN the chain, exactly as at base.
     if [ "${SWEEP_SERVING_GREEN_ENABLED:-1}" = "0" ]; then
-        _log "journal sweep: SWEEP_SERVING_GREEN_ENABLED=0 — the serving-green ladder is DISABLED; the legacy disposition applies"
+        _log "journal sweep: SWEEP_SERVING_GREEN_ENABLED=0 — the serving-green ladder is DISABLED; the LEGACY (base) disposition applies: rung 2 (the operator escape) FIRST, then the auto-rollback chain"
+        if _js_sweep_operator_escape "$install_dir" "$journal" "$json" "$inf" "$target" \
+             "$prev" "$age" "$owner" "$kind" "$lock_held" "$run_id"; then
+            return 0
+        fi
         _js_sweep_rollback_chain "$install_dir" "$journal" "$json" "$inf" "$target" \
             "$prev" "$age" "$owner" "$kind" "serving_green_disabled" "$lock_held"
         return 0
@@ -1839,42 +1920,10 @@ _js_sweep_flipped_disposition() {
         _js_sweep_release "$install_dir" "$lock_held"
         return 0
     fi
-    # ── rung 2: the OPERATOR ESCAPE (the existing boot_sweep_commit_and_continue
-    # gate — UNCHANGED): the operator declared the previous release NOT
-    # rollback-safe ⇒ rolling back would be strictly worse ⇒ commit and
-    # continue at the target.
-    if [ -n "$prev" ] && [ "$prev" != "null" ] \
-       && _js_history_has_intent_flip "$journal" "$target" \
-       && _js_manifest_field "$install_dir" "$prev" "rollback_safe" 2>/dev/null \
-         | grep -q '^false$'; then
-        displaced_v="$(_js_json_field "$inf" "displaced_version" 2>/dev/null)" || displaced_v=""
-        if [ "$displaced_v" = "null" ]; then
-            displaced_v=""
-        fi
-        if [ -z "$displaced_v" ]; then
-            _notify_once "sweep-halt-old-format" \
-                "HALT-FOR-HUMAN: stale flipped $kind txn (target=$target) has no in_flight.displaced_version field (old-format txn from pre-C-4 release); boot proceeds on current; see $install_dir/releases/state.json"
-            _js_history_append "$journal" "halt" \
-                "sweep: stale flipped $kind txn target=$target has no in_flight.displaced_version (old-format txn) — halt-for-human, txn left in place" \
-                || true
-            _log "HALT: journal sweep: flipped txn (age ${age}s) with no in_flight.displaced_version (old-format) — halt-for-human, boot proceeds on current"
-            _js_sweep_release "$install_dir" "$lock_held"
-            return 0
-        fi
-        _notify_once "sweep-commit" \
-            "sweep-commit-and-continue: stale flipped $kind txn (target=$target, prev=$prev, displaced_version=$displaced_v) — operator declared previous rollback_safe:false AND preflight emitted intent_flip evidence; commit+continue at target (NOT sweep-rollback)"
-        _js_journal_update "$journal" "current" "\"$target\"" \
-            || { _log "WARN: journal sweep: commit-and-continue journal current update FAILED — boot proceeds on existing current"; _js_sweep_release "$install_dir" "$lock_held"; return 0; }
-        _js_journal_update "$journal" "previous" "\"$displaced_v\"" \
-            || { _log "WARN: journal sweep: commit-and-continue previous=$displaced_v update FAILED — boot proceeds on existing previous"; }
-        _js_journal_update "$journal" "in_flight" "null" \
-            || { _log "WARN: journal sweep: commit-and-continue in_flight clear FAILED — boot proceeds"; }
-        _js_history_append "$journal" "boot_sweep_commit_and_continue" \
-            "sweep: flipped $kind txn (target=$target, prev=$prev, displaced_version=$displaced_v, owner pid ${owner:-?}, age ${age}s) committed and continued — intent_flip evidence + prev rollback_safe:false (operator-declared incompatibility); boot proceeds at target" \
-            || { _log "WARN: journal sweep: commit-and-continue history append FAILED — boot proceeds"; }
-        _js_defer_counter_delete "$install_dir" "$run_id"
-        _log "BOOT-SWEEP COMMIT-AND-CONTINUE: stale flipped $kind txn (age ${age}s, target=$target, prev=$prev, displaced_version=$displaced_v) — operator declared prev rollback_safe:false + preflight emitted intent_flip evidence; boot proceeds at target (NOT sweep-rollback; txn closed, counter NOT incremented, no cooldown)"
-        _js_sweep_release "$install_dir" "$lock_held"
+    # ── rung 2: the OPERATOR ESCAPE — the extracted helper (the legacy
+    # kill-switch arm calls the SAME function; F5).
+    if _js_sweep_operator_escape "$install_dir" "$journal" "$json" "$inf" "$target" \
+         "$prev" "$age" "$owner" "$kind" "$lock_held" "$run_id"; then
         return 0
     fi
     # ── rung 3: classify the non-green observation (AM-P2-10.1) ──
