@@ -72,9 +72,18 @@
 #   2d4a001cd14d153a8580ac45c791275019ddc03ccda8930e3c21a93072bdfbb5  HEAD.fixed.3.out
 #   7b3581db5c1da667d8bb87ace5611dcd563d22843526d485002d57d36a5d70bb  gate.log
 #
-## p3-scratch/
+## p3-scratch/  (8 members — the mutation ledger, the sweep comparator, the FIXED comparator
+#   and its repair patch, and the three adjudication/proof drivers added by the adjudication
+#   round; the section was re-read from the directory on 2026-11-02 because it had grown
+#   from 2 members to 8 and the listing no longer matched the directory)
+#   a592aca7509f3efc3727837c93e804b9e1977a87b55ec34f63a10f8de2a5862e  adjudicate_diff_ids.py
 #   e0c49396d5208cf26f5fcd975911f77697d908907b3138a183402ca05aab7cdd  mutation-ledger.json
+#   7068a58ff9b8602f52e1c57399610e298f1fa1487bc4d9ae8c33ebb54610b68d  prove_grouping_signature.py
+#   d1d0e139f74bafa2330c2be883dc496b1ffdf6041c6dd5a2d37801c6063a36c3  rederive_adjudication_verdict.py
+#   466db3cdeb4824ec5283e1292077c2af1c987334fd7f80834b1c521c0738304c  summarise_grouping_proof.py
+#   f2a47cbb9ab11a5c0b67bf0ba90060ba380c4a9dcac2485c7b0a8f3955d9cc35  sweep_digest_verdict.sh
 #   b00ee10ee7b678e5e61a70f315f1edd50128c59c0eb801898263935ae599b1ef  sweep_sharded.sh
+#   5ae2e20fce20893e12f4276279945ab4877546a63be5ec16f344f782d6e71813  sweep_sharded.verdict-block.patch
 #
 ## p3-sweep-crash/  (the single-shot -n auto attempt: rc=3 on BOTH legs)
 #   0029e7e9b635117685f5ff4f9fd577a0fe4c78060a295bb902aa27dc85a29a75  BASE.out
