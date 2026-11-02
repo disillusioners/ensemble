@@ -427,7 +427,7 @@ figures appear only in the correction notes below the table.
 | Extension delta — full-IN | **+217** (**ten** families; **F2 was adjudicated IN (full, 22 series)** — its removal changes the full-IN family set **11→10**; it was NOT a partial) | F0.3 8 · F1 9 · F3 6 · F4 8 · F5 3 · F6 15 · F9 53 · F10 6 · F12 69 · F17 40 (catalog §1 rows, pointer discipline) |
 | Extension delta — partial-IN | **+57 (6 families)** | F7 +10 (21→31) · F8 4 · F11 16 · F13 19 · **F18 5** (sessions 1 + tombstones 1 + audit_total{ok,error,timeout} 3 — D-5/D-6 applied) · F21 3 |
 | **Total extension delta** | **+274** | 217 + 57 (F2's 22 is **not** included — AM-25/LR-2 drop) |
-| **Post-lane registered (catalog convention)** — **the PINNED PROJECTION** (the shipped constant `adjudication.BUDGET_SERIES = 363`) | **363 ≈ 18.2 %** (F7c-inclusive) · 361 (ledger basis) · 364 (if D-6's 4-value F18 audit set is ever admitted) · 355 (if WS-A is absent and F0.3 defers, −8) | 89 + 274 |
+| **Post-lane registered (catalog convention)** — **the PINNED PROJECTION** (the shipped constant `adjudication.CATALOG_LIVE_ESTIMATE_SERIES_PROJECTION = 363` — the A-6 rename of the old `BUDGET_SERIES` (the value is unchanged; the old name read like an enforced budget). It is a **CATALOG LIVE-ESTIMATE PROJECTION**, not a machine-enforced bound, and it must **never** be compared with the **measured closed label space** (a different convention — a live estimate vs a ceiling)) | **363 ≈ 18.2 %** (F7c-inclusive) · 361 (ledger basis) · 364 (if D-6's 4-value F18 audit set is ever admitted) · 355 (if WS-A is absent and F0.3 defers, −8) | 89 + 274 |
 | **Bytes/point** | **16 B (array)** — the deque form was rejected at **129–161 B measured** | AM-9: `array('d')` values + `array('q')` timestamps, head/tail ring index, O(1) drop-oldest |
 | Buffer worst case | **11.4 MiB** (750 k points, array) vs FR-C4's 32 MiB ceiling | 2.8× under the Must ceiling; 4.2× under the superseded 48 MB deque envelope |
 | Effective point interval | **max(publish 15 s, sampler 10 s) = 15 s**; observed 15–25 s | AM-15: reported `interval_s` is OBSERVED, not configured; age eviction is the backstop |
@@ -444,7 +444,8 @@ rows summed to 76). Both are OVERTURNED; the table above is the single source of
 ### The MEASURED figures (Phase 6 close-out, 2026-11-02)
 
 The rows above are the **plan-time re-derivation** — a **projection**, now pinned as the shipped
-constant `adjudication.BUDGET_SERIES = 363`. The rows below are what the lane **MEASURED** against
+constant `adjudication.CATALOG_LIVE_ESTIMATE_SERIES_PROJECTION = 363` — the A-6 rename of the old `BUDGET_SERIES` (the value is unchanged; the old name read like an enforced budget). It is a **CATALOG LIVE-ESTIMATE PROJECTION**, not a machine-enforced bound, and it must **never** be compared with the **measured closed label space** (a different convention — a live estimate vs a ceiling).
+The rows below are what the lane **MEASURED** against
 its own shipped wiring. **They are different quantities and neither replaces the other.**
 
 | Quantity | Measured value | The recipe (reproducible) | Where the detail lives |
