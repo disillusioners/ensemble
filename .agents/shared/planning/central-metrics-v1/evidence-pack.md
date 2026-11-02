@@ -529,6 +529,28 @@ label space** — different conventions, **never compared**.
 **The net-new verdict on the FE dual-side legs is EMPTY** — head (2 reds) matches base-1dde
 (2 reds) id-for-id, and base-36c's extra red is a **base-side** flake that the head does not have.
 
+### 14.5 Delta-3 — the final fix cycle (ND-1…ND-5 + the ceremony text)
+
+`4023515ee` (ND-3) · `7018162fd` (ND-2) · `575faba9a` (ND-4) · `dd3d7d95d` (ND-5 + the
+observation file's ND-1 correction) · `cafe77951` (ND-1's disclosure correction + the ceremony
+text). The scoped dual-side gate is preserved in **`evidence/delta-3-gate/`** (+ its
+`VERDICT.md`):
+
+| Leg | Result | Digest (BARE-ID / GREP-FULL) |
+|---|---|---|
+| BASE `0ae9720f0` | 560 nodes · `1 failed, 559 passed` · exit 1 | `d78b09cf2549c371` / `d9bff11a731d8ba3` |
+| HEAD `cafe77951` | 570 nodes · `1 failed, 569 passed` · exit 1 | `d78b09cf2549c371` / `d9bff11a731d8ba3` — **IDENTICAL both sides** |
+
+**NET-NEW = EMPTY** (the one red on both legs is the lane's own base-proven debt). The pack legs:
+the pagination pack **38 passed**, the contract-doc pack **21 passed**, the lane's full suite
+**383 passed**. The mutation matrix is in the gate's `VERDICT.md` (M-ND2 → 4 legs RED, M-ND4 →
+2, M-ND5 → 2; every other leg in each pack stayed GREEN).
+
+**ND-3 (the evidence index):** the superseded aggregate is restored to `76a69edd…` beside the
+canonical `50d74e64…`; the §13 set rows are **re-anchored** to the canonical aggregates (all ten
+re-derived, 10/10); and the P3 adjudication manifest is now the **two-column house form**, so
+`sha256sum -c p3-adjudication.sha256.txt` reports **21/21 OK** (the set aggregate is unchanged).
+
 ---
 
 ## 15. The routed items (for the leader — owners named)
