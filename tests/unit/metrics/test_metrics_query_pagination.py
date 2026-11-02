@@ -19,10 +19,13 @@ ceiling) · ``P3-M12`` (``max_points`` default raised above 240, or
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from daemon.services.metrics_query.constants import (
     DEFAULT_MAX_POINTS,
+    MAX_FAMILIES,
     MAX_NAMES,
     MAX_POINTS_CEILING,
     RESPONSE_BYTE_CEILING,
@@ -434,3 +437,105 @@ class TestBounds:
         response = build_client(_provider()).get("/api/metrics/series?max_points=abc")
         assert response.status_code == 400, response.text
         assert error_code(response) == "invalid_label_filter"
+
+
+class TestCursorWalkTerminates:
+    """ND-2 — a cursor walk TERMINATES (the delta-3 bug broke every route).
+
+    The delta-3 change OR-ed the DISPLAY fact ("offset > 0 ⇒ this page
+    is a partial view") into the cursor minting.  The consequence on
+    every route: the LAST non-empty page minted a cursor, the client
+    followed it into an EMPTY page, and the empty page re-minted the
+    BYTE-IDENTICAL cursor (the position unchanged) — an endless walk.
+    Pre-delta the chains TERMINATED.
+
+    THE FIX (ND-2): the continuation signal is the BUILDER's own
+    "more remain" flag plus the byte-ceiling TRIM, captured BEFORE the
+    display flag mutates the envelope.  The display flag states a true
+    fact about the BODY; it says nothing about whether another page
+    exists.
+
+    THE WALK: three pages over ``2 × MAX_FAMILIES + 1`` families — the
+    first two are partial (each carries a cursor), the third holds the
+    last family and must carry NONE.
+    """
+
+    def _provider(self, count: int) -> RecordingProvider:
+        return RecordingProvider(
+            families=[{"id": f"ensemble_nd2_family_{index:04d}"} for index in range(count)]
+        )
+
+    def _client(self, count: int):
+        return build_client(self._provider(count))
+
+    def test_a_three_page_walk_terminates(self):
+        """The walk visits three pages and then STOPS."""
+        client = self._client(2 * MAX_FAMILIES + 1)
+        seen: list[str] = []
+        pages = 0
+        cursor: str | None = None
+        while pages < 6:
+            url = "/api/metrics/families" + (f"?cursor={cursor}" if cursor else "")
+            body = client.get(url).json()
+            pages += 1
+            cursor = body.get("next_cursor")
+            if not cursor:
+                break
+            assert cursor not in seen, (
+                "the walk re-minted a cursor — the client would spin on the "
+                "same position forever"
+            )
+            seen.append(cursor)
+        assert pages == 3, f"the walk must terminate after 3 pages; it took {pages}"
+
+    def test_the_last_non_empty_page_mints_no_cursor(self):
+        """The LAST page that still holds data carries NO cursor."""
+        client = self._client(2 * MAX_FAMILIES + 1)
+        first = client.get("/api/metrics/families").json()
+        assert first["truncated"] is True
+        assert first["next_cursor"], "a partial page must carry its cursor"
+        second = client.get(
+            f"/api/metrics/families?cursor={first['next_cursor']}"
+        ).json()
+        assert len(second["families"]) == MAX_FAMILIES
+        assert second["truncated"] is True
+        assert second["next_cursor"], "a partial page must carry its cursor"
+        third = client.get(
+            f"/api/metrics/families?cursor={second['next_cursor']}"
+        ).json()
+        assert len(third["families"]) == 1, "the last page holds the last family"
+        assert not third.get("next_cursor"), (
+            "the LAST non-empty page must NOT mint a cursor — the walk would "
+            "follow it into an empty page"
+        )
+
+    def test_an_empty_page_never_re_mints_the_cursor(self):
+        """An EMPTY page carries NO cursor (it never re-mints its input)."""
+        client = self._client(2 * MAX_FAMILIES + 1)
+        stale = encode_cursor(
+            {"v": 1, "t": int(time.time()), "o": 2 * MAX_FAMILIES + 1}
+        )
+        body = client.get(f"/api/metrics/families?cursor={stale}").json()
+        assert body["families"] == []
+        assert not body.get("next_cursor"), (
+            "an empty page must not re-mint a cursor — the walk would spin on "
+            "the same position forever"
+        )
+
+    def test_the_display_flag_still_states_the_partial_view(self):
+        """ND-2 — the display fact is NOT lost: the body still says so."""
+        client = self._client(2 * MAX_FAMILIES + 1)
+        first = client.get("/api/metrics/families").json()
+        third = client.get(
+            f"/api/metrics/families?cursor={first['next_cursor']}"
+        ).json()
+        # …the page reached with a cursor is a partial view of the set,
+        # and the BODY says so even when no further page exists.
+        last = client.get(
+            f"/api/metrics/families?cursor={third['next_cursor']}"
+        ).json()
+        assert last["truncated"] is True, (
+            "the display flag must still mark a partial view — only the "
+            "CURSOR minting changed"
+        )
+        assert not last.get("next_cursor")

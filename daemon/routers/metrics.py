@@ -335,9 +335,25 @@ def _bound_page(
     A bounded body is never SILENTLY truncated: it carries the opaque
     ``next_cursor`` that resumes it (AM-6).
 
-    A body that is ALREADY marked ``truncated`` by its builder (the
-    series/snapshot ceilings, W-2/W-4) ALWAYS mints the cursor — the
-    truncation is then resumable, never silent.
+    THE CONTINUATION SIGNAL IS COMPUTED BEFORE THE BODY FLAG MUTATES
+    ------------------------------------------------------------------
+    There are TWO different facts in this function and they must never
+    be conflated (ND-2):
+
+    * the CONTINUATION signal — "is there MORE to fetch?" — is the
+      BUILDER's own flag (``more`` / the envelope's ``truncated`` as the
+      builder set it) plus the byte-ceiling TRIM.  Only these may mint
+      a cursor.
+    * the DISPLAY flag — ``offset > 0`` means "this page is a partial
+      view of a larger set".  It is a true statement about the BODY and
+      it belongs in the body's ``truncated`` field, but it says NOTHING
+      about whether another page exists.
+
+    OR-ing the display flag into the cursor minting (the delta-3 bug)
+    broke the walk on every route: the LAST non-empty page minted a
+    cursor, the client followed it into an EMPTY page, and the empty
+    page re-minted the byte-identical cursor (``o=`` unchanged) — an
+    endless walk.  Pre-delta the chains TERMINATED.
 
     THE BYTE-CEILING PROBE AND THE TRIM RUN INSIDE THE OFF-LOOP BUILD
     ------------------------------------------------------------------
@@ -350,19 +366,27 @@ def _bound_page(
     from daemon.services.metrics_query.envelope import encode_cursor
 
     items = list(envelope.get(key) or [])
-    truncated = bool(envelope.get("truncated"))
+    # THE CONTINUATION SIGNAL — captured FIRST, before the display flag
+    # mutates the envelope.  `more` is the route's restatement of the
+    # builder's own "more remain" flag.
+    builder_more = bool(envelope.get("truncated")) or bool(more)
+    truncated = builder_more
     if offset > 0:
+        # The DISPLAY fact only: this page is a partial view.  It must
+        # never feed cursor minting (ND-2).
         truncated = True
     kept = items
     if _encoded_size(envelope) > RESPONSE_BYTE_CEILING:
         kept = _trim_to_ceiling(envelope, key=key, items=items)
-    if len(kept) < len(items):
+    trimmed = len(kept) < len(items)
+    if trimmed:
         truncated = True
-    if truncated:
-        more = True
+    # The cursor is minted ONLY for a real continuation: the builder
+    # says more remain, or the byte-ceiling trim shortened the page.
+    continuation = builder_more or trimmed
     envelope[key] = kept
     envelope["truncated"] = truncated
-    if more:
+    if continuation:
         envelope["next_cursor"] = encode_cursor(
             {"v": _CURSOR_VERSION, "t": int(instant), "o": offset + len(kept)}
         )
