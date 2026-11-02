@@ -10,6 +10,25 @@ digest are logged in §11 · **Compat** Prometheus scrape model + Grafana, **Pro
 (NOT OpenMetrics — MA-16 corrects the v1 mislabel); m9 —
 VictoriaMetrics/Mimir **dropped**, no compatibility asserted for an untested stack.
 
+**Published docs (the consumer-facing pages for this catalog).** This catalog is the **authoring
+truth** (names, vocabularies, counts); the shipped code is the **serving truth**. The pages that
+describe the shipped query door to operators and consumers are:
+
+- [`docs/architecture/metrics-query-api.md`](../../../../docs/architecture/metrics-query-api.md) —
+  the **query API page**: the three routes, the envelope, the error vocabulary, the pagination
+  bounds + the cursor, the availability reasons, the `restart_epoch` semantics, the activation
+  posture + the runbook, the scope over-grant disclosure, the OUT-list, the non-Prometheus
+  deviations clause, and the Prometheus-text coexistence statement.
+- [`docs/architecture/metrics-fe-charts.md`](../../../../docs/architecture/metrics-fe-charts.md) —
+  the **FE charts page**: the three tabs, the polling discipline, the chart mode, the window, and
+  the availability-driven states.
+- [`docs/architecture/metrics-query-contract.md`](../../../../docs/architecture/metrics-query-contract.md)
+  — the **frozen contract** both pages are written against.
+
+**Evidence citations** in these and in any other committed document point at the **vendored**
+copies under `central-metrics-v1/inventory-vendor/` (AM-24) — never at the untracked
+main-checkout path alone.
+
 ---
 
 ## 0. Conventions
