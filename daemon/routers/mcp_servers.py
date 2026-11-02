@@ -362,6 +362,42 @@ def _normalize_probe_url(raw: Any) -> str:
     return value.rstrip("/")
 
 
+def _plane_workspace_write_refusal(server_name: str) -> str | None:
+    """Commit B (reviewer-adjudicated tidier must-fix, 2026-11-02) —
+    the operator write routes (``POST /configure-builtin`` /
+    ``POST /{id}/reset-builtin``) are RESOLVER-GATED for the ``plane``
+    builtin.
+
+    A refused workspace resolution means the operator write route may
+    not touch the plane row AT ALL: no row created, no idempotent
+    replay reactivation, no config rewrite. Without this gate the
+    configure path would persist a row built by
+    ``PlaneServerDefinition.get_base_config`` whose refused resolution
+    emits an EMPTY ``x-workspace-slug`` (the ``""`` emission —
+    write-reachable only through this route; the boot path skips the
+    row entirely on a refusal).
+
+    PLANE-SCOPED ONLY — a refused plane resolution never gates a
+    non-plane builtin (context7/webfetch configure normally on any
+    env). LIVE IS NEVER REFUSED (ADJ-1 live-exempt) ⇒ live responses
+    are byte-identical.
+
+    Returns:
+        The typed refusal message (interpolating the resolver's typed
+        reason verbatim), or ``None`` when the operation may proceed.
+    """
+    if server_name != "plane":
+        return None
+    resolution = current_plane_workspace()
+    if resolution.allowed:
+        return None
+    return (
+        "Plane workspace policy refused this operation: "
+        f"{resolution.reason} — the operator write route is refused "
+        "before any row is created or modified"
+    )
+
+
 def _plane_probe_refusal(config: dict[str, Any]) -> str | None:
     """P3-D (``plane-pm-issue-tools``): the plane-shape refusal probe.
 
@@ -677,6 +713,21 @@ async def configure_builtin_server(request: Request, config_request: BuiltinServ
     manager = _get_manager(request)
     if manager.is_write_paused:
         raise HTTPException(status_code=503, detail="Writes are paused for database migration")
+
+    # Commit B (reviewer-adjudicated tidier must-fix, 2026-11-02): the
+    # plane operator write route is resolver-gated BEFORE any lookup or
+    # write — a refused resolution creates no row, reactivates no
+    # idempotent replay, and rewrites no config. Live is never refused.
+    write_refusal = _plane_workspace_write_refusal(config_request.template_name)
+    if write_refusal is not None:
+        raise HTTPException(
+            status_code=403,
+            detail=ErrorResponse(
+                code=ErrorCodes.BUILTIN_SERVER_PROTECTED,
+                message=write_refusal,
+            ).model_dump()
+        )
+
     registry = get_registry()
 
     # Look up the template definition
@@ -1085,6 +1136,21 @@ async def reset_builtin_server(server_id: str, request: Request):
             detail=ErrorResponse(
                 code=ErrorCodes.BUILTIN_SERVER_PROTECTED,
                 message="Server is not a built-in server"
+            ).model_dump()
+        )
+
+    # Commit B (reviewer-adjudicated tidier must-fix, 2026-11-02): the
+    # plane reset route is resolver-gated — a refused resolution means
+    # NO config rewrite (the reset would re-materialise the template
+    # config whose refused resolution carries the empty slug).
+    # Live is never refused.
+    write_refusal = _plane_workspace_write_refusal(existing.name)
+    if write_refusal is not None:
+        raise HTTPException(
+            status_code=403,
+            detail=ErrorResponse(
+                code=ErrorCodes.BUILTIN_SERVER_PROTECTED,
+                message=write_refusal,
             ).model_dump()
         )
 
