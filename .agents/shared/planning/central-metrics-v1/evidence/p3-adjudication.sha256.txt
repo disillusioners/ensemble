@@ -4,12 +4,41 @@
 # evidence (the sweep's own verdict block was empty by construction — a
 # `;` vs `|` shell bug — and the two earlier runs' verdicts were vacuous).
 #
-# The set digest below is the sha256 over the sorted per-file manifest
-# (the same form the lane's other preservation manifests use).
+# ── THE SET AGGREGATE — RE-ANCHORED (the W-7 fix, 2026-11-02) ────────────────
 #
-# Generated 2026-11-02 (the P3 evidence-repair round).
+# CANONICAL RECIPE (one form for EVERY set — the same recipe the other sets use;
+# see evidence/set-digests.txt for the full statement):
+#
+#     cd <the evidence dir>
+#     sha256sum <the set's members, named explicitly> | LC_ALL=C sort | sha256sum
+#
+# THE SET DIGEST (the identifier that now identifies this set):
+#
+#     50d74e64a325e56bed2640d1d85b697fe9d2e80f100f07960ded7c23bc9dc78f
+#
+# The members are the 21 files listed below (6 from `p3-scratch/` + 15 from
+# `p3-adjudication/`) — the set SPANS TWO DIRECTORIES, which is exactly why the
+# previous per-set-dir recipe could not express it.
+#
+# THE SUPERSEDED AGGREGATE — NOT RE-DERIVABLE:
+#
+#     76a69edd9bd3ec454541b4d81ecce0cf5e88151d6a36602d4f3373df8f85c218
+#
+# This was the previous aggregate. It is NOT re-derivable: the manifest stated
+# NO recipe, and 28 candidate recipes were tried and EXCLUDED (the two-column
+# manifest sorted by line / by path / with LC_ALL=C; the three-column
+# `sha256 SIZE path` form sorted by line / by path; the manifest body's own
+# text with and without the trailing file count; the per-directory recipes; the
+# `./`-prefixed and absolute-path forms; the tab-separated form; the
+# unsorted form; the digest-sorted form; and the concatenated-contents form).
+# The recipe that produced it was not preserved with it, so it is recorded here
+# as SUPERSEDED rather than re-stated as live. **The PER-FILE content below is
+# INTACT — 21/21 files, each with its own sha256 — so the defect was confined
+# to the aggregate's reproducibility, never to the evidence itself.**
+#
+# Generated 2026-11-02 (the P3 evidence-repair round); aggregate re-anchored the
+# same day.
 
-# the SET digest (sha256 over the sorted per-file manifest): 76a69edd9bd3ec454541b4d81ecce0cf5e88151d6a36602d4f3373df8f85c218
 f2a47cbb9ab11a5c0b67bf0ba90060ba380c4a9dcac2485c7b0a8f3955d9cc35        4783  p3-scratch/sweep_digest_verdict.sh
 5ae2e20fce20893e12f4276279945ab4877546a63be5ec16f344f782d6e71813        1498  p3-scratch/sweep_sharded.verdict-block.patch
 a592aca7509f3efc3727837c93e804b9e1977a87b55ec34f63a10f8de2a5862e       10615  p3-scratch/adjudicate_diff_ids.py
