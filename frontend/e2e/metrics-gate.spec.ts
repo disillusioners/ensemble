@@ -293,5 +293,8 @@ test('[P5] gear menu → /metrics → Overview stat cards → Charts → Familie
 test('[P5] deep-link /metrics renders without a daemon', async ({ page }) => {
   await page.goto('/metrics');
   await expect(page.locator('[data-test="overview-grid"]')).toBeVisible();
+  // The Families body is mounted lazily — the table exists once its tab
+  // is selected.
+  await page.getByRole('tab', { name: 'Families' }).click();
   await expect(page.locator('[data-test="families-table"]')).toBeVisible();
 });

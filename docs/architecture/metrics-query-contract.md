@@ -632,3 +632,123 @@ collection-time error emits no `ERROR <nodeid>` line).
   mechanical-list file is touched by this lane; the fold ledger's `DEF-1` row carries the
   deferral and its rationale, and the F12 accumulation is correct regardless of the
   docstring (the metrics layer's own accumulation is the disambiguator).
+
+---
+
+### The re-derived node counts + the P5 evidence (P5-G1, 2026-11-02)
+
+The figures below are the executor's derived numbers — NOT the plan's projections. They are the
+registration input for the pack rows the tester lane owns.
+
+**The D1 set (lane-owned, HEAD-only).** The FE has no `--collect-only` equivalent, so the node
+counts are the per-file `Tests: N` summaries of the registered pack's own jest leg.
+
+| Pack id | Leg | D1 / D2 | Re-derived nodes | Per-file breakdown |
+|---|---|---|---|---|
+| `metrics-fe-models` | P5-G1 | D1 | **18** | `frontend/src/app/models/metrics.model.spec.ts` |
+| `metrics-fe-service` | P5-G1 | D1 | **9** | `frontend/src/app/services/metrics.service.spec.ts` |
+| `metrics-fe-svg-chart` | P5-G1 | D1 | **29** | `frontend/src/app/components/charts/svg-line-chart/svg-line-chart.component.spec.ts` |
+| `metrics-fe-page` | P5-G1 | D1 | **46** | `metrics.component.spec.ts` 14 · `metrics-gear-menu.spec.ts` 9 · `overview-tab.component.spec.ts` 11 · `charts-tab.component.spec.ts` 7 · `families-tab.component.spec.ts` 5 |
+| `metrics-fe-bindings-pins` | P5-G1 | D1 | **17** | `frontend/src/app/pages/metrics/metrics.bindings.pins.spec.ts` |
+| **the D1 total** | P5-G1 | D1 | **119** | 9 spec files (the plan's projection was ~35 — the derivation is the truth) |
+| `metrics_fe_dual_side` | P5-G1 | D2 | **138** (HEAD) / **137** (BASE) | the 5 declared files: `app.routes.spec.ts` · `app.component.spec.ts` · `resources-gear-menu.spec.ts` · `mcps-gateway.pins.spec.ts` · `maintenance.bindings.pins.spec.ts` |
+| `metrics_fe_dual_side` (the WIDENED derived leg) | P5-G1 | D2 | **1801** (HEAD) / **1791** (BASE) | the **38** derived files (37 at the base) — the specs that import the MODELS BARREL (the barrel gained `export * from './metrics.model'` — a name collision would break any of them) plus the specs that READ the route table / the gear menu |
+
+**The D2 composition (derived, not declared).** The plan's declared composition is "the
+`resources-gear-menu` ordering pin + the FE pack affected by the route table" (5 files). The
+DERIVATION reaches **38** dual-side files: every spec that imports `frontend/src/app/models`
+(the barrel) plus every spec that reads `app.routes.ts` / `app.ts` / `app.html`. The widened set
+ran as a DISCLOSED supplementary dual-side leg (the recipe's rule from P2/P3/P4): **33 further
+files / 1663 nodes**, both sides, FAILED digests byte-identical ⇒ net-new EMPTY. The registered
+composition should be the DERIVED set.
+
+**The gate results (Tier 1 — `metrics_fe_dual_side`, the D1 + D2 legs).**
+
+| Leg | HEAD (D1 + D2) | BASE (D2) | FAILED digest (BARE-ID / GREP-FULL) | Verdict |
+|---|---|---|---|---|
+| the D1 leg (HEAD-only) | 119 passed · 0 failed · **exit 0** | SKIPPED-BY-CONSTRUCTION (the files do not exist at the base) | — | the lane's own corpus is green |
+| the D2 DECLARED leg | 138 passed · 0 failed · **exit 0** | 137 passed · 0 failed · **exit 0** | (empty both sides) | net-new **EMPTY** |
+| the D2 DERIVED leg (the widened supplementary) | 1799 passed · 2 failed · **exit 1** | 1789 passed · 2 failed · **exit 1** | `95c48e0111632e3` / `92b3ecbf67931b30` — **IDENTICAL both sides** | net-new **EMPTY** |
+| the scoped type-check leg (`tsconfig.metrics-fe.json`) | **exit 0** | SKIPPED-BY-CONSTRUCTION | — | the P5-M9 surface |
+| the AOT build leg (`ng build --configuration development`) | **exit 0** | SKIPPED-BY-CONSTRUCTION | — | 0 errors |
+| the budgets build leg (`ng build --configuration production`) | **exit 0** | SKIPPED-BY-CONSTRUCTION | — | 0 errors; the budget WARNINGS are RECORDED FINDINGS (below) |
+| the `package.json` dependency diff | **0 lines** | 0 lines | — | the D2 zero-dependency guard holds |
+
+**The TWO failures on the derived leg are the KNOWN base red** — `settings.component.spec.ts`'s
+two timezone-picker expectations assert the New York **DST** offset (`UTC-04:00`) and the host
+date (2026-11-02) is **standard** time (`UTC-05:00`). The nodes are byte-identical on both legs
+⇒ a pre-existing, DATE-DEPENDENT rot, not a branch regression. The digest is recorded in BOTH
+forms (BARE-ID `95c48e0111632e3…`, GREP-FULL `92b3ecbf67931b30…`); the jest output embeds a
+per-file wall-clock (`(5.54 s)`), so the digest strips the timing suffix — the raw digest would
+false-mismatch on the timing alone.
+
+**The mutation table — P5-M1..P5-M11, planted independently, 11/11 RED→GREEN.** The harness is
+`test/packs/metrics_fe_mutation_matrix_test.py` (it refuses to run on a dirty tree; each mutation
+is restored with `git checkout --` and the restore is asserted BYTE-IDENTICAL).
+
+| Label | Mutation | RED node |
+|---|---|---|
+| `P5-M1` | the named `POLL_INTERVAL_MS` renamed | `metrics-fe-bindings-pins` (+ the overview spec, which reads the constant) |
+| `P5-M2` | the `clearInterval` teardown removed | `metrics-fe-bindings-pins` (+ the overview spec's runtime teardown assertion) |
+| `P5-M3` | the supersede token check inverted (the older response wins) | `metrics-fe-page` (the overview spec's supersede pins) |
+| `P5-M4` | the empty-state condition switched from "no family live" to "no families at all" | `metrics-fe-page` (the OFF-state spec) |
+| `P5-M5` | the model mirror's field name drifted from the wire | `metrics-fe-models` (the contract-doc-parsed field-set pin) |
+| `P5-M6` | the SVG scale function's normalisation removed | `metrics-fe-svg-chart` (the y-scale pins) |
+| `P5-M7` | the gear-menu ordering pin's expected position changed | the D2 ordering pin (`resources-gear-menu.spec.ts`) |
+| `P5-M8` | `JSON_HEADERS` dropped from the service call | `metrics-fe-service` |
+| `P5-M9` | the availability union narrowed to a closed literal set | the TYPE-CHECK leg — `metrics.model.spec.ts(141,11) TS2322` (jest does not type-check, so the union is invisible to the jest corpus; that is why the type leg exists) |
+| `P5-M10` | the panel copy reverted to "metrics disabled" | `metrics-fe-page` (the copy pin) |
+| `P5-M11` | the production-config build leg dropped from the gate | `metrics-fe-bindings-pins` (the build-leg pin) |
+
+**The e2e.** `frontend/e2e/metrics-gate.spec.ts` under `frontend/playwright.metrics-gate.config.ts`
+(own proxy config + gate pattern; the door routes are stubbed pre-network; zero daemon):
+**2/2 PASS** (31.3 s) — the journey (gear menu → `/metrics` → Overview stat cards → Charts →
+Families, a dark family with its reason) and the deep-link. The load-bearing assertion is the
+**STEP-RENDERING** one: the counter series' path carries `data-render-mode="step"` and its `d`
+contains the horizontal-then-vertical commands (`H`/`V`) and NO diagonal segment, while the gauge
+series' path carries `data-render-mode="line"` with `L` and neither `H` nor `V`.
+
+**The budget WARNINGS (the production leg) — RECORDED FINDINGS, never auto-fixed.** Every one of
+them is PRE-EXISTING and in ANOTHER component's SCSS: the initial bundle (5.91 MB vs the 1 MB
+warn budget) · `agent-selector.scss` 8.77 kB · `add-source-modal.scss` 8.32 kB ·
+`blueprint.component.scss` 18.32 kB · `checkpoint-cleanup.component.scss` 8.70 kB ·
+`snapshot-detail-drawer.component.scss` 8.70 kB · `snapshots.component.scss` 12.29 kB ·
+`instance-list.scss` 10.17 kB · `jobs.component.scss` 14.77 kB · `chat-interface.scss` 16.15 kB.
+**NONE of the lane's own components is over the 8 kB warn budget.** The build exits 0 (the budgets
+are WARN-level except the initial total's 6 MB error ceiling, which is not breached).
+
+**The FE-manifest delta (the Phase-6 stage-prep checklist).** The staged `frontend` tree is the
+BUILT bundle (`frontend/dist/frontend/browser`), not the source tree, and the chunk names are
+content-hashed — so ANY source change renames the whole chunk set. The STABLE statements:
+* the `frontend_manifest` entry count goes **93 → 95** (+2 `chunk-*.js` entries: the metrics
+  page's lazy chunk — 25,938 B in the local production build, carrying the
+  `metrics-empty-panel` marker — plus one shared chunk split by the new import graph);
+* `frontend_tree_sha256` **CHANGES** (recomputed at stage time — it cannot be predicted pre-stage);
+* `fe_index_sha256` **CHANGES** (`index.html` references the new `main-*.js` hash);
+* the per-file map therefore shows a full chunk-hash cascade (83 added / 81 removed / 1 changed
+  against the v0.28.5 staged manifest) — the cascade is the hash naming, NOT a payload change.
+* the `agents/` and `plugins/` trees are UNCHANGED by this phase.
+
+**The deviations (recorded, never silent).**
+1. **P5-M7's ordering pin lives in the D2 file.** The plan points P5-M7 at "the ordering pin
+   (D2 leg)"; the Metrics entry's position is asserted in the D2 `resources-gear-menu.spec.ts`
+   (the house's gear-menu ordering pin) AND in the lane's own `metrics-gear-menu.spec.ts`. The
+   D2 file gained ONE describe block (the shared ordering surface every gear entry depends on);
+   the base leg runs the pre-existing version of that file, so the two-class asymmetry is
+   unchanged.
+2. **The D1 set is 119 nodes, not the plan's ~35 projection.** The projection was made before the
+   specs existed; the derived number is the truth (the plan's own rule: projections only).
+3. **The type-check leg is SCOPED** (`tsconfig.metrics-fe.json`) rather than the whole
+   `tsconfig.spec.json`, because the latter carries a PRE-EXISTING syntax error at
+   `src/app/app.component.spec.ts:2127` (a stray `});`; jest tolerates it — ts-jest transpiles
+   best-effort — but `tsc` does not). That defect is NOT this lane's file and is left untouched;
+   it is reported to the FE owner.
+4. **The route placement.** The plan says "placed BEFORE any `:id` routes"; the `/metrics` route
+   is declared before the `skills/:id` family (the static-vs-dynamic family that could shadow a
+   static path — the `/skills/bank` + `/skills/triggers` + `/persona` precedent). The two
+   earlier `:id` routes (`instances/:instanceId`, `projects/:projectId/…`) are in a different
+   first-segment namespace and cannot shadow a top-level static path.
+5. **The chart mode source.** The per-series mode comes from the catalog's per-name
+   `chart_role` (the roster's truth, contract §4.3) with the door's own kind-derived fallback
+   (a counter renders STEP) when the catalog names no mode — the FE never invents a mode the
+   door did not publish.
