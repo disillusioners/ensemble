@@ -100,6 +100,7 @@ from .repositories.task.repository import (
 # writes propagate to every claim without a second truth.
 from .registry import get_registry
 from .mcp.builtin_servers import get_registry as get_mcp_registry, is_builtin_disabled
+from .plane_workspace import current_plane_workspace
 from .mcp.warmup_pool import McpWarmupPool, get_mcp_warmup_pool, build_pooled_stdio_config
 from .mcp import warmup_pool as _warmup_pool_module
 from .mcp.config import McpStdioConfig
@@ -3051,6 +3052,12 @@ class InstanceManager:
 
         logger.info(f"Bootstrapping {len(definitions)} built-in MCP servers...")
 
+        # P2-G (plane-pm-issue-tools, 2026-11-02): builtin names whose row
+        # was DEACTIVATED on a workspace refusal this boot. The layer-3
+        # cross-check reads this so a policy-refused server is never
+        # classified as "never registered" (P3-E).
+        policy_refused: set[str] = set()
+
         for definition in definitions:
             try:
                 # Check if server is disabled via env var (FIRST)
@@ -3070,19 +3077,99 @@ class InstanceManager:
                 # intent wins. If a DB record exists for a now-unavailable
                 # builtin, the disable path above already deactivated it; we
                 # just need to NOT create a fresh record.
-                if not definition.is_available():
+                #
+                # Resolved ONCE here and threaded through the whole body —
+                # the heal site below re-uses the same answer (P2-H's
+                # conditionality gate), so the two can never disagree.
+                available = definition.is_available()
+                if not available:
                     pkg = definition.required_package
-                    if pkg is not None:
+                    # W-7 / P5 / P5c (plane-pm-issue-tools Phase 3): the
+                    # skip is LOUD and TYPED. The base INFO line named
+                    # neither the agents that expected the server nor the
+                    # env vars that were missing — which is exactly why a
+                    # project-manager with ``mcp_full_access: ["plane"]``
+                    # and zero plane tools produced no error anywhere.
+                    # R-3: this WARNING is the ONLY reason interpolator —
+                    # every other emitter points at it.
+                    referencing = self._agents_referencing_builtin_mcp(
+                        definition.name
+                    )
+                    agents_part = (
+                        f"; agents with mcp_full_access=['{definition.name}']: "
+                        f"{', '.join(referencing)}"
+                        if referencing
+                        else "; no agent references it via mcp_full_access"
+                    )
+                    cause = definition.unavailability_cause()
+                    if cause == "workspace-refused":
+                        reason = definition.unavailable_reason() or (
+                            "workspace resolution refused"
+                        )
+                        # P2-G: deactivate any pre-existing ACTIVE row so
+                        # the warmup pool, the schema discovery, and the
+                        # layer-3 cross-check never treat a refused server
+                        # as registered. Mirrors the MCP_DISABLE_BUILT_IN_*
+                        # path above. AD2 boundary: the row's
+                        # config.headers is NEVER logged or echoed here.
+                        existing = self._mcp_server_repository.get_mcp_server_by_name(
+                            definition.name
+                        )
+                        if (
+                            existing is not None
+                            and existing.is_builtin
+                            and existing.is_active
+                        ):
+                            self._mcp_server_repository.update_mcp_server(
+                                existing.id, is_active=False
+                            )
+                            policy_refused.add(definition.name)
+                            logger.warning(
+                                "Builtin '%s' deactivated — workspace refused "
+                                "(POLICY): %s%s",
+                                definition.name,
+                                reason,
+                                agents_part,
+                            )
+                        else:
+                            if existing is not None:
+                                policy_refused.add(definition.name)
+                            logger.warning(
+                                "Builtin '%s' skipped — workspace refused "
+                                "(POLICY): %s%s",
+                                definition.name,
+                                reason,
+                                agents_part,
+                            )
+                    elif cause == "deliberately-disabled":
+                        # An operator decision is NOT an operational
+                        # warning (P5c: the deliberately-disabled cause
+                        # produces no WARNING). The one-line notice is
+                        # already emitted by the definition itself.
                         logger.info(
-                            f"Builtin '{definition.name}' skipped — package "
-                            f"'{pkg}' not installed "
-                            f"(pip install {pkg})"
+                            "Builtin '%s' skipped — deliberately disabled%s",
+                            definition.name,
+                            agents_part,
+                        )
+                    elif pkg is not None:
+                        logger.warning(
+                            "Builtin '%s' skipped — package '%s' not installed "
+                            "(pip install %s)%s",
+                            definition.name,
+                            pkg,
+                            pkg,
+                            agents_part,
                         )
                     else:
-                        logger.info(
-                            f"Builtin '{definition.name}' skipped — "
-                            f"missing environment configuration "
-                            f"(see server definition docs)"
+                        missing = ", ".join(definition.missing_env_vars()) or (
+                            "unknown"
+                        )
+                        logger.warning(
+                            "Builtin '%s' skipped — missing environment "
+                            "configuration: %s (see server definition docs)%s",
+                            definition.name,
+                            missing,
+                            agents_part,
                         )
                     continue
 
@@ -3104,6 +3191,15 @@ class InstanceManager:
                     )
                     logger.info(f"Created built-in MCP server: {definition.name}")
                 elif existing.is_builtin:
+                    # P2-H (plane-pm-issue-tools): the heal is CONDITIONAL
+                    # on availability — a workspace refusal defers it, so a
+                    # refusal boot leaves the row's config_schema_version
+                    # UNCHANGED. Structurally the skip branch above already
+                    # returned; this explicit gate states the invariant so
+                    # a future refactor that reorders the two cannot
+                    # silently heal a refused row.
+                    if not available:  # pragma: no cover — defensive double gate
+                        continue
                     # Check if previously disabled (is_active=False) and reactivate
                     if not existing.is_active:
                         self._mcp_server_repository.update_mcp_server(
@@ -3111,8 +3207,31 @@ class InstanceManager:
                             is_active=True,
                         )
                         logger.info(f"Reactivated built-in MCP server: {definition.name}")
-                    # Check schema version drift
-                    if existing.config_schema_version != schema_version:
+                    # P2-I (plane-pm-issue-tools): the plane-scoped
+                    # SLUG-EQUALITY heal trigger. The schema-version heal
+                    # is one-shot; under the ADJ-1 live-exempt rule a
+                    # permitted-slug change on live would otherwise leave
+                    # the persisted headers['x-workspace-slug'] STALE
+                    # until the next schema bump. A plane row whose
+                    # persisted slug differs from the RESOLVED slug heals
+                    # NOW (headers re-materialised from the current env;
+                    # operator env axis preserved). PLANE-SCOPED ONLY —
+                    # webfetch/context7 rows are untouched.
+                    slug_drift = False
+                    if definition.name == "plane":
+                        resolved_slug = current_plane_workspace().slug or ""
+                        existing_headers = (
+                            existing.config.get("headers")
+                            if isinstance(existing.config, dict)
+                            else None
+                        )
+                        persisted_slug = (
+                            existing_headers.get("x-workspace-slug")
+                            if isinstance(existing_headers, dict)
+                            else None
+                        )
+                        slug_drift = persisted_slug != resolved_slug
+                    if existing.config_schema_version != schema_version or slug_drift:
                         # C3 / BLOCKING 3: the heal is ENV-PRESERVING.
                         # The operator-set env (the pinned
                         # ``CONTEXT7_API_URL``) and the KMS-marker keys
@@ -3130,12 +3249,21 @@ class InstanceManager:
                             config_schema=schema_dicts,
                             config_schema_version=schema_version,
                         )
-                        logger.warning(
-                            "Built-in MCP server '%s' config refreshed due to schema version change (%s → %s) — operator-set env keys PRESERVED, template defaults rebuilt",
-                            definition.name,
-                            existing.config_schema_version,
-                            schema_version,
-                        )
+                        if slug_drift and existing.config_schema_version == schema_version:
+                            logger.warning(
+                                "Built-in MCP server '%s' config refreshed — persisted "
+                                "workspace slug differed from the resolved slug "
+                                "(slug-equality trigger; operator-set env keys "
+                                "PRESERVED, template defaults rebuilt)",
+                                definition.name,
+                            )
+                        else:
+                            logger.warning(
+                                "Built-in MCP server '%s' config refreshed due to schema version change (%s → %s) — operator-set env keys PRESERVED, template defaults rebuilt",
+                                definition.name,
+                                existing.config_schema_version,
+                                schema_version,
+                            )
                     else:
                         logger.debug(f"Built-in MCP server already exists: {definition.name}")
                 else:
@@ -3151,7 +3279,126 @@ class InstanceManager:
 
         self._deactivate_orphaned_builtin_servers(registered_names)
 
+        # W-7 layer 3 (plane-pm-issue-tools Phase 3): the REGISTRY-vs-ROW
+        # cross-check. ``mcp_full_access`` is validated against the builtin
+        # REGISTRY (a definition exists) but never against a ROW — so a
+        # defined-but-unavailable server passed validation while the agent
+        # silently received nothing. This single check covers both failure
+        # shapes (skipped server AND absent/deactivated row) and is exactly
+        # where the original incident was invisible.
+        self._cross_check_mcp_full_access_rows(
+            registry, policy_refused
+        )
+
         logger.info("Built-in MCP server bootstrap complete")
+
+    def _agents_referencing_builtin_mcp(self, server_name: str) -> list[str]:
+        """Agent IDs whose ``mcp_full_access`` names ``server_name``.
+
+        Read-only registry query (``AgentRegistry.
+        agents_referencing_builtin_mcp``); degrades to an empty list when
+        the registry cannot be reached — the skip WARNING must still fire.
+        """
+        try:
+            from daemon.registry import get_registry
+
+            return get_registry().agents_referencing_builtin_mcp(server_name)
+        except Exception as exc:  # noqa: BLE001 — observability must not crash boot
+            logger.debug(
+                "Could not enumerate agents referencing builtin '%s': %s",
+                server_name,
+                exc,
+            )
+            return []
+
+    def _cross_check_mcp_full_access_rows(
+        self,
+        registry: Any,
+        policy_refused: set[str],
+    ) -> None:
+        """Layer 3 — declared capability vs DELIVERED capability.
+
+        For every agent's ``mcp_full_access`` entry, if no registered
+        (``is_active=True``) ``mcp_servers`` row of that name exists,
+        emit a WARNING naming the agent + the server. P3-E: the
+        cross-check is POINTER-ONLY — it emits agent + server + a pointer
+        to the R-3 skip WARNING above and never re-interpolates the
+        reason (that would create a second, divergent rendering of the
+        same fact).
+
+        Buckets:
+        * **policy-refused** (P2-G deactivated the row on a workspace
+          refusal) ⇒ stays at **WARNING** — it still costs the agent its
+          tools;
+        * **deliberately off** (``MCP_DISABLE_BUILT_IN_*`` or the plane
+          kill-switch) ⇒ a DEBUG line, not a WARNING — an intentional
+          integration-off environment must not warn on every boot;
+        * anything else (definition unavailable, row absent, unknown
+          builtin name) ⇒ WARNING.
+        """
+        try:
+            from daemon.registry import get_registry
+
+            agent_registry = get_registry()
+            declarations: dict[str, list[str]] = {}
+            for meta in agent_registry.list_all():
+                for entry in getattr(meta, "mcp_full_access", None) or []:
+                    if isinstance(entry, str) and entry:
+                        declarations.setdefault(entry, []).append(meta.id)
+        except Exception as exc:  # noqa: BLE001 — observability must not crash boot
+            logger.debug(
+                "mcp_full_access cross-check skipped (registry unavailable): %s",
+                exc,
+            )
+            return
+
+        for server_name in sorted(declarations):
+            agents = sorted(declarations[server_name])
+            try:
+                row = self._mcp_server_repository.get_mcp_server_by_name(
+                    server_name
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "mcp_full_access cross-check could not read the "
+                    "'%s' row: %s",
+                    server_name,
+                    exc,
+                )
+                continue
+            delivered = row is not None and row.is_active
+            if delivered:
+                continue
+            definition = registry.get_by_name(server_name)
+            if server_name in policy_refused:
+                # P3-E: policy-refused, NOT never-registered — still a
+                # WARNING (the agent still loses its tools).
+                logger.warning(
+                    "Agent capability gap: %s declare(s) mcp_full_access "
+                    "['%s'] but the builtin was POLICY-REFUSED this boot "
+                    "(deactivated; see the workspace-refused WARNING above)",
+                    ", ".join(agents),
+                    server_name,
+                )
+            elif definition is not None and (
+                is_builtin_disabled(server_name)
+                or definition.unavailability_cause() == "deliberately-disabled"
+            ):
+                logger.debug(
+                    "Agent(s) %s declare(s) mcp_full_access ['%s'] but the "
+                    "builtin is deliberately disabled — intentional, not a "
+                    "warning",
+                    ", ".join(agents),
+                    server_name,
+                )
+            else:
+                logger.warning(
+                    "Agent capability gap: %s declare(s) mcp_full_access "
+                    "['%s'] but no registered MCP server row exists for it "
+                    "(see the builtin skip WARNING above)",
+                    ", ".join(agents),
+                    server_name,
+                )
 
     def _deactivate_orphaned_builtin_servers(self, registered_names: set[str]) -> None:
         """Deactivate built-in MCP server DB rows no longer in the registry.

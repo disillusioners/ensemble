@@ -1458,6 +1458,31 @@ class AgentRegistry:
 
         return warnings
 
+    def agents_referencing_builtin_mcp(self, server_name: str) -> list[str]:
+        """Agent IDs whose ``mcp_full_access`` names ``server_name``.
+
+        Phase-3 support (lane ``plane-pm-issue-tools``, W-7/lean #3): the
+        manager's loud-skip WARNING and the registry-vs-row cross-check
+        need the agents that EXPECT a given built-in MCP server, so a
+        skipped server is attributed to the agents it costs tools to.
+
+        READ-ONLY; no change to the ``mcp_full_access`` validation
+        semantics (NR5) — this enumerates the same field
+        :meth:`validate_tool_configs` checks.
+
+        Args:
+            server_name: A built-in MCP server name (e.g. ``"plane"``).
+
+        Returns:
+            Sorted agent IDs (file-defined + non-deleted custom agents).
+        """
+        referencing = [
+            meta.id
+            for meta in self.list_all()
+            if server_name in (getattr(meta, "mcp_full_access", None) or [])
+        ]
+        return sorted(referencing)
+
     def exists(self, agent_id: str) -> bool:
         """Check if agent exists (with alias support).
 
