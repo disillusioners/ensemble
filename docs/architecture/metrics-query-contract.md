@@ -448,3 +448,64 @@ assertions; they were re-pointed at the adjudicated vocabulary (a DISCLOSED test
 edit — the file's own premises were void under the D-7 ruling). **The registered
 composition should be widened to include that file**, otherwise the next lane that
 narrows a vocabulary repeats the miss.
+
+### The re-derived node counts (P3-G1/P3-G2, 2026-11-02 — the PROJECTIONS re-derived)
+
+The figures below are the executor's `--collect-only -q` output, NOT the plan's
+projections. They are the registration input for the pack rows the tester lane owns.
+
+| Pack id | Leg | D1 / D2 | Re-derived nodes | Per-file breakdown |
+|---|---|---|---|---|
+| `metrics_query_routes` | P3-G1 | D1 | **30** | `tests/unit/metrics/test_metrics_query_routes.py` 30 |
+| `metrics_query_auth_matrix` | P3-G1 | D1 | **25** | `tests/unit/metrics/test_metrics_query_auth_matrix.py` 25 |
+| `metrics_query_pagination` | P3-G1 | D1 | **24** | `tests/unit/metrics/test_metrics_query_pagination.py` 24 |
+| `metrics_query_switch_invariance` | P3-G1 | D1 | **18** | `tests/unit/metrics/test_metrics_query_switch_invariance.py` 18 |
+| `metrics_query_api_wiring` | P3-G1 | D1 | **13** | `tests/unit/metrics/test_metrics_query_api_wiring.py` 13 |
+| `metrics_query_scope_cage` | P3-G2 | D1 | **7** | `tests/unit/metrics/test_metrics_query_scope_cage.py` 7 |
+| `metrics_p3_dual_side` | P3-G1 | D2 | **302** | the `metrics_p2_dual_side` constituents 281 · `tests/unit/routers/test_metrics_route.py` 9 · `tests/unit/services/test_metrics_api_wiring.py` 12 |
+| `metrics_scope_cage_dual_side` | P3-G2 | D2 | **12** | `tests/unit/test_router_scope_manifest.py` 7 · `tests/integration/test_router_class_manifest.py` 5 |
+
+**The `gate-pack-ids` block above is the PLAN's declared set (nine ids) and is NOT
+widened.** The P3-G2 D1 pin (the three-way cage form) has no id in the plan's table —
+its home is `tests/unit/metrics/test_metrics_query_scope_cage.py` (7 nodes), recorded
+here as the registration input. A tenth id would widen the frozen nine-id block, which
+the `central_metrics_contract_doc` pack pins at exactly nine.
+
+**The P3-G2 D1 pin lives in its OWN file on purpose:** the two-way cage form is the
+defect class the fold ledger recorded, and a D1 pin embedded in a D2 file would change
+that file's node count between the legs — the slicing proof would no longer hold.
+
+**A FINDING for the pack registration (P3-G1) — the declared composition does not
+reach the lane's own blast radius.** The derivation (the changed production surfaces
+`daemon/api.py` · `daemon/routers/metrics.py` · `daemon/services/metrics_query/**` and
+the two router manifests, and the test files that reach them) reaches **13 files** the
+declared `metrics_p3_dual_side` composition does not carry:
+
+`tests/unit/persistence/test_checkpoint_perf_logging.py` (the P2-G1 finding, still
+open) · `tests/unit/persistence/test_checkpoint_read_instrumentation.py` ·
+`tests/unit/checkpoint_adapter/test_checkpoint_read_cache.py` ·
+`tests/unit/test_log_hygiene.py` ·
+`tests/unit/tools/test_readiness_leak_signal_consumer.py` ·
+`tests/unit/tools/test_tool_category_artifact.py` ·
+`tests/unit/test_post_restart_arm_notify_no_parallel.py` ·
+`tests/test_custom_agents_router_authz.py` · `tests/integration/test_scope_matrix.py` ·
+`tests/integration/test_consumer_enablement.py` ·
+`tests/integration/test_get_instance_messages_observed_count_zero.py` ·
+`tests/integration/test_message_metadata_retry_recovery.py` ·
+`tests/integration/test_message_metadata_send_message_revive.py`.
+
+They ran as a **DISCLOSED supplementary dual-side leg** (226 nodes; both legs green;
+the FAILED digests byte-identical ⇒ net-new EMPTY). The REGISTERED composition should
+be widened so the next lane inherits the coverage — the same finding the P2-G1 leg
+recorded, now closed on the evidence rather than on the declaration.
+
+**P3 DEVIATION (recorded, not silent) — the 3-carrier allowlist's THIRD carrier is
+spelled TWO ways.** The contract names `# HELP ensemble_checkpoint_op_seconds …` — the
+ALIAS spelling of the saver-op-latency histogram. The same metric renders the IDENTICAL
+help text under its CANONICAL name (`message_api_saver_op_latency_seconds`), and an
+alias-only mask leaves that canonical line as a FALSE delta: the masked BASE and HEAD
+bodies differed on exactly that one line. The mask therefore covers BOTH spellings of
+the ONE carrier — an allowlist that covered one spelling of a two-spelling carrier would
+be incomplete against its own carrier (the same class as the P2-G1
+composition-vs-blast-radius finding). The contract's own text is unchanged: it names
+the CARRIER, not its spellings.
