@@ -1,3 +1,95 @@
+## Commission central-metrics-v1 — gate packs REGISTERED (2026-11-02, tester functional gate)
+
+> **Why this block exists.** The frozen query contract (`docs/architecture/metrics-query-contract.md`)
+> §8 declares **nine gate-leg pack ids** and states plainly that *"today `.agents/tester/PACKS.md`
+> carries 0 of the nine"*, with the rows landing with the lane's evidence — **the tester lane owns
+> this file**. A leg invokes its D2 set **by pack id**, so an unregistered id makes the leg
+> unrunnable. This block is that registration.
+>
+> **Composition rule (load-bearing).** Where the plan's DECLARED composition was **short of the
+> blast-radius DERIVATION**, the registered composition below is the **DERIVED** one — the contract
+> records that finding five times (P2-G1, P3-G1, P4, P5, and the widened supplementary legs). The
+> declared sets were run as disclosed supplements and read green; the registrations must carry the
+> wider set so the NEXT lane that narrows a vocabulary / widens a union inherits the coverage
+> instead of repeating the miss.
+>
+> **Node counts** are MECHANICAL `pytest --collect-only -q` counts (PACKS.md node-count convention).
+> The figures below are the contract §8 re-derived counts (the registration input, recorded there so
+> this is a copy not a re-derivation); the gate leg's own `--collect-only` **slicing proof is
+> authoritative** and any delta is a recorded finding, not a silent correction.
+>
+> **Fences (identical in every row unless stated).** `WT=/home/nea/ensemble-src-wt-central-metrics-v1`
+> (worktree-local `.venv/bin/python` — python 3.14.7; **never** the main checkout's);
+> explicit **per-variable** `env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT
+> -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT` scrubs (the `POSTGRES_*` GLOB form is a **SILENT
+> NO-OP** — bash does not glob env names); `-p no:randomly`; dual-layer timeout
+> (`timeout 300` outer + `--timeout=120` inner). **PG rows** additionally use
+> `--override-ini="addopts=" -m postgres` (the default addopts deselect the marker ⇒ **vacuous
+> green**), `PG_TEST_*` scratch role/DB, and run **SERIALLY** (schema races).
+> **BASE legs** run the same command from a throwaway detached worktree at the true base
+> `941cb6321` (`git worktree add --detach /tmp/<name>-base 941cb6321`), driven by the HEAD tree's
+> venv interpreter with `cwd` = the base worktree.
+
+### The nine declared leg ids (contract §8 `gate-pack-ids`) — 9/9 now registered
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `central_metrics_contract_doc` | `cd $WT && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT .venv/bin/python -m pytest tests/unit/metrics/test_central_metrics_contract_doc.py -q --tb=short -rfE -p no:randomly --timeout=120` | **Leg P1-G1 (Tier 0).** The frozen contract's own pins: the nine-id `gate-pack-ids` block is exactly nine, the five `truth-table-invariants`, the closed `availability-reasons` set, the check-site census pinned at two, the query package never reads the switch, the auth-before-registry ordering, the 403 `SCOPE_INSUFFICIENT` token (D-c), the disclosure text. **21 nodes.** This pack is the reason the nine-id block must NOT be widened — it pins the count. | 2026-11-02 | ✅ registered (gate re-run recorded in `RESULTS/2026-11-02-central-metrics-v1-functional-gate.md`) |
+| `metrics_p2_dual_side` | `cd $WT && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT .venv/bin/python -m pytest tests/unit/persistence/test_checkpoint_metrics_registry.py tests/unit/persistence/test_checkpoint_metrics_vocabulary.py tests/unit/services/test_metrics_gate.py tests/unit/services/test_metrics_listener.py tests/unit/services/test_metrics_listener_registry.py tests/unit/services/test_metrics_census.py tests/unit/services/test_metrics_managed_keys.py tests/unit/services/test_metrics_live_managed_values.py tests/unit/services/test_metrics_refresh_path.py tests/unit/persistence/test_checkpoint_perf_logging.py -q --tb=line -rfE -p no:randomly --timeout=120` | **Leg P2-G1 (Tier 1).** The registry/gate/listener/census substrate the lane extends. **WIDENED** per the P2-G1 finding: the declared nine-file composition did NOT reach `tests/unit/persistence/test_checkpoint_perf_logging.py`, which the blast-radius derivation reaches (it imports `daemon.checkpoint_metrics` and pins the F7 op vocabulary — the F7 narrowing re-pointed two of its assertions). **281 declared + the widened file.** | 2026-11-02 | ✅ registered |
+| `metrics_p3_dual_side` | `cd $WT && timeout 300 … .venv/bin/python -m pytest <the p2 nine files> tests/unit/routers/test_metrics_route.py tests/unit/services/test_metrics_api_wiring.py <the 13 widened files below> -q --tb=line -rfE -p no:randomly --timeout=120` — **widened 13 files:** `tests/unit/persistence/test_checkpoint_perf_logging.py`, `tests/unit/persistence/test_checkpoint_read_instrumentation.py`, `tests/unit/checkpoint_adapter/test_checkpoint_read_cache.py`, `tests/unit/test_log_hygiene.py`, `tests/unit/tools/test_readiness_leak_signal_consumer.py`, `tests/unit/tools/test_tool_category_artifact.py`, `tests/unit/test_post_restart_arm_notify_no_parallel.py`, `tests/test_custom_agents_router_authz.py`, `tests/integration/test_scope_matrix.py`, `tests/integration/test_consumer_enablement.py`, `tests/integration/test_get_instance_messages_observed_count_zero.py`, `tests/integration/test_message_metadata_retry_recovery.py`, `tests/integration/test_message_metadata_send_message_revive.py` | **Leg P3-G1 (Tier 2).** Query door + router manifests. **Declared 302** (the p2 nine 281 + `test_metrics_route` 9 + `test_metrics_api_wiring` 12). **WIDENED per the P3-G1 finding:** the derivation reaches **13 files / 226 nodes** the declared set does not carry (the finding is closed on the evidence — the widened leg ran both sides, FAILED digests byte-identical ⇒ net-new EMPTY — so the registration must carry it). NOTE the integration files are deselected by default addopts; this row runs them **explicitly by path** (path selection wins over the `-m` deselection), which is the sanctioned form. | 2026-11-02 | ✅ registered |
+| `metrics_scope_cage_dual_side` | `cd $WT && timeout 300 … .venv/bin/python -m pytest tests/unit/test_router_scope_manifest.py tests/integration/test_router_class_manifest.py -q --tb=short -rfE -p no:randomly --timeout=120` | **Leg P3-G2 (Tier 0/1).** The three-way scope-cage form. **12 nodes** (7 + 5). Its D1 pin (`metrics_query_scope_cage`, 7 nodes) lives in its OWN file on purpose: a D1 pin inside a D2 file would change that file's node count between legs and break the slicing proof. | 2026-11-02 | ✅ registered |
+| `metrics_p4_w1_dual_side` / `metrics_p4_w2_dual_side` / `metrics_p4_w3_dual_side` | `cd $WT && timeout 300 … .venv/bin/python -m pytest <the 21-file derived set> -q --tb=line -rfE -p no:randomly --timeout=120` — **21 files:** the p2 nine (281) + `tests/unit/persistence/test_checkpoint_perf_logging.py` + `tests/unit/persistence/test_checkpoint_read_instrumentation.py` + `tests/unit/persistence/test_get_instance_messages_no_alist.py` + the whole `tests/unit/metrics/` substrate (sampler, provider, ring, the five query-door packs, narrowing, vocabulary, contract-doc) + `tests/test_persistence.py` + `tests/test_checkpoint_adapter_resilience.py` + `tests/unit/test_persistence_*` | **Legs P4-G1/G2/G3 (Tier 1 ×3).** **494 nodes each.** The plan's declared composition was "vocabulary (18) + registry (45) + the changed family's own base pack" ≈ **4 files / ~120 nodes**; the DERIVATION (the blast-radius recipe's three passes over the stage diff — `daemon/persistence.py`, `daemon/services/metrics_query/sampler.py`, the new `wiring/` package) reaches **21 files / 494 nodes**. Registered as the DERIVED set — the finding is the same class as P2/P3/P5 and the declared set's "own base pack" is INSIDE it. | 2026-11-02 | ✅ registered |
+| `metrics_fe_dual_side` | `cd $WT && timeout 900 bash test/packs/metrics_fe_dual_side_test.sh` (self-capped `PACK_BUDGET_S=900`; legs: D1 jest · D2 declared jest · D2 **derived** jest · scoped type-check · `ng build --configuration development` (AOT) · `ng build --configuration production` (budgets+outputHashing — **AM-23**) · `package.json` dependency diff. BASE leg via `METRICS_FE_PROJECT_DIR=<base worktree>`) | **Leg P5-G1 (Tier 1).** D1 **119 nodes** (9 specs). D2 declared **138/137**; D2 **WIDENED derived 1801 (HEAD) / 1791 (BASE)** — the 38 files that import the models BARREL (`export * from './metrics.model'` — a name collision breaks any of them) plus the specs that read the route table / gear menu. The declared 5-file set is registered as leg 2 inside the script; the DERIVED set is leg 3. **Zero new npm dependencies** is asserted by leg 7, not by inspection. | 2026-11-02 | ✅ registered |
+| `central_metrics_ledger_reconciliation` | static: `cd $WT && grep -c …` over the ledger/contract token sets (P6-G1, docs-only) | **Leg P6-G1 (Tier 0).** The ledger-vs-evidence reconciliation: case counts, the R-i..R-v routing table, the disclosure set. Docs-only diff ⇒ changed-pack PASS; no dual-side leg. | 2026-11-02 | ✅ registered |
+
+### The D1 (lane-owned, HEAD-only) pack rows — tests/unit/metrics/ 16 modules
+
+> D1 exists only at HEAD; its absence at BASE is **expected** and is neither a net-new failure nor a
+> fix (the D1/D2 asymmetry statement, contract §8). HEAD runs D1 + D2; BASE runs D2 only, identical
+> command shape.
+
+| Pack | Invocation (same fences) | Nodes | Last run |
+|---|---|---|---|
+| `metrics_query_provider` | `… -m pytest tests/unit/metrics/test_metrics_query_provider.py …` | 66 | 2026-11-02 ✅ |
+| `metrics_history_ring` | `… tests/unit/metrics/test_metrics_history_ring.py …` | 28 | 2026-11-02 ✅ |
+| `metrics_sampler` | `… tests/unit/metrics/test_metrics_sampler.py …` | 20 | 2026-11-02 ✅ |
+| `metrics_registry_narrowing` | `… tests/unit/metrics/test_metrics_registry_narrowing.py …` | 12 | 2026-11-02 ✅ |
+| `metrics_vocabulary_amendment` | `… tests/unit/metrics/test_metrics_vocabulary_amendment.py …` | 11 | 2026-11-02 ✅ |
+| `metrics_query_routes` | `… tests/unit/metrics/test_metrics_query_routes.py …` | 30 | 2026-11-02 ✅ |
+| `metrics_query_auth_matrix` | `… tests/unit/metrics/test_metrics_query_auth_matrix.py …` | 25 | 2026-11-02 ✅ |
+| `metrics_query_pagination` | `… tests/unit/metrics/test_metrics_query_pagination.py …` | **41** — ⚠️ **BOOKKEEPING DELTA 38 → 41** | 2026-11-02 ✅ |
+| `metrics_query_switch_invariance` | `… tests/unit/metrics/test_metrics_query_switch_invariance.py …` | 18 | 2026-11-02 ✅ |
+| `metrics_query_api_wiring` | `… tests/unit/metrics/test_metrics_query_api_wiring.py …` | 13 | 2026-11-02 ✅ |
+| `metrics_query_scope_cage` | `… tests/unit/metrics/test_metrics_query_scope_cage.py …` | 7 | 2026-11-02 ✅ |
+| `metrics_family_w1` | `… tests/unit/metrics/test_metrics_family_w1.py …` (F0.3 · F1 · F3 · F4/F5 · F6 — class-scoped ids `metrics_family_f0_3`, `_f1`, `_f3`, `_f4_f5`, `_f6`) | per-file (class-scoped) | 2026-11-02 ✅ |
+| `metrics_family_w2` | `… tests/unit/metrics/test_metrics_family_w2.py …` (F7 completion · F8 · F9 · F10 · F11 · F12 · F13) | per-file (class-scoped) | 2026-11-02 ✅ |
+| `metrics_family_w3` | `… tests/unit/metrics/test_metrics_family_w3.py …` (F17 · F18 partial · F21 partial) | per-file (class-scoped) | 2026-11-02 ✅ |
+| `metrics_family_adjudication_w1/w2/w3` | `… tests/unit/metrics/test_metrics_family_adjudication.py …` | 24 | 2026-11-02 ✅ |
+
+> ⚠️ **The 38 → 41 pagination delta (recorded, not silent).** The contract §8 P3-G1 table records
+> **24** for this file as a `--collect-only` count at P3-G1 time; the lane's own later closure note
+> measured **38/38** for "the pagination pack", and commit `0b9de2797` (**ND-5** — pin the
+> cursor-expiry probe's precedence over the family check) then added **+3 nodes ⇒ 41**. The three
+> figures are three different moments in the lane's life, not three different packs. **The
+> registered figure is 41, verified by the gate leg's collect-only slicing proof**; the contract's 24
+> is a STALE P3-G1-time snapshot and must not be used for sizing. Same class of bookkeeping drift as
+> the `0b9de2797` / `2fb9a014d` deltas — record the moment, never the memory.
+
+### The two in-tree gate scripts
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `metrics_fe_dual_side_test` | `cd $WT && timeout 900 bash test/packs/metrics_fe_dual_side_test.sh` | The Phase-5 FE gate as a runnable pack (D1 jest / D2 declared / D2 derived / type-check / **both AM-23 build legs** / `package.json` diff). Fences: no dependency install (a missing `node_modules` is a LOUD FAIL, never a green skip), no daemon, no live port. | 2026-11-02 | ✅ registered |
+| `metrics_census_pg_test` | `cd $WT && timeout 300 env -u POSTGRES_USER … PG_TEST_DB=<scratch> PG_TEST_USER=<role> PG_TEST_PASSWORD=<pw> PG_TEST_ALLOWED_DBS=<scratch> .venv/bin/python -m pytest tests/postgres/test_metrics_census_pg.py --override-ini="addopts=" -m postgres -q --tb=short -p no:randomly` | The real-PG half of the census sampler (the `census_not_running` / `census_gated` order property needs a live sampler over PG). **Serial only.** Scratch role+DB, DROP at cleanup. | 2026-11-02 | ✅ registered |
+
+### The FE e2e gate + the ND-5 mutation row
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `metrics_fe_e2e` | `cd $WT/frontend && npx playwright test --config=playwright.metrics-gate.config.ts` (own proxy config + gate pattern; door routes stubbed pre-network ⇒ **zero daemon**) **plus** the live-daemon leg: the same journey against a fenced daemon on `:8079` with `ENSEMBLE_SELF_ENV=dev` / `POSTGRES_DB=ensemble_dev` (TrueAuto FE requirement — the live leg is the Release-Gate-sanctioned exception to the no-daemon rule) | `frontend/e2e/metrics-gate.spec.ts`: gear menu → `/metrics` → Overview stat cards → Charts → Families (a dark family WITH its reason) + the deep-link. **The load-bearing assertion is STEP-RENDERING:** a counter series' path carries `data-render-mode="step"` with `H`/`V` commands and **no** diagonal segment, while a gauge series carries `data-render-mode="line"` with `L` and neither `H` nor `V`. | 2026-11-02 | ✅ registered |
+| `metrics_p3_nd5_mutation` | harness: plant the ND-5 defect (move the family check BEFORE the cursor-expiry probe) → run `metrics_query_pagination` → expect RED on exactly the ND-5 pin → `git checkout --` → expect GREEN | **The ND-5 mutation row (P3 mutation table).** Commit `0b9de2797` added the precedence pin; a pin that cannot catch its own defect is the class this row exists to exclude. Restore asserted BYTE-IDENTICAL. | 2026-11-02 | ✅ registered |
+
+
 # Test Packs
 
 ## Commission report-obligation-visibility (wi-1fbee2ec) — gate packs REGISTERED (2026-11-01)
