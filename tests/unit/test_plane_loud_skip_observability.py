@@ -492,7 +492,14 @@ class TestUnavailableStaleRowNotice:
         self, env, caplog
     ):
         env(self_env="dev", slug="e2e", mcp_url=None, mcp_key=None)
-        row = _FakeRow(config={"headers": {"x-workspace-slug": "nea"}})
+        row = _FakeRow(
+            config={
+                "headers": {
+                    "Authorization": "Bearer AD2-SENTINEL",
+                    "x-workspace-slug": "nea",
+                }
+            }
+        )
         repo = _FakeRepo([row])
         mgr = _make_manager(repo)
 
@@ -512,6 +519,10 @@ class TestUnavailableStaleRowNotice:
             "NOT delivered to agents" in notice
         )
         assert "project-manager" in notice  # the referencing agents
+        # AD2 boundary (W1): the notice echoes the x-workspace-slug SCALAR
+        # only — never the config.headers dict (it carries the bearer).
+        assert "AD2-SENTINEL" not in notice
+        assert "Authorization" not in notice
 
     def test_notice_does_not_mutate_the_row(self, env, caplog):
         """The (b)-shape contract: the notice is SIGNAL ONLY — the row
