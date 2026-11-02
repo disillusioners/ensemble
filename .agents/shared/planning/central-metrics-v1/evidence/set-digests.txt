@@ -54,7 +54,7 @@
 #   p4-gate                                     24  7ddb778696753614  a95b79e74fa0159b  re-anchored: explicit members + LC_ALL=C + the path prefix
 #   p4-mutations                                 1  ed737facd21f39bf  d7acd358d4aa1c30  re-anchored: explicit members + LC_ALL=C + the path prefix
 #   p5                                           5  5a65e01e5c7a137d  8819c59f01fdfce3  re-anchored: explicit members + LC_ALL=C + the path prefix
-#   p3-adjudication                             21  76a69edd9bd3ec45  50d74e64a325e56b  re-anchored: the OLD aggregate is NOT re-derivable (28 candidate recipes excluded) - see p3-adjudication.sha256.txt
+#   p3-adjudication                             21  76a69edd9bd3ec45  aa5cd9d6d00f093e  re-anchored: the OLD aggregate is NOT re-derivable (28 candidate recipes excluded) - see p3-adjudication.sha256.txt
 
 # The p3-adjudication set is the 21 members named in `p3-adjudication.sha256.txt`
 # (6 from `p3-scratch/` + 15 from `p3-adjudication/`). It SPANS TWO DIRECTORIES,

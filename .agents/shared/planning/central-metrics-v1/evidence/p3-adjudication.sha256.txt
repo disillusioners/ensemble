@@ -14,7 +14,7 @@
 #
 # THE SET DIGEST (the identifier that now identifies this set):
 #
-#     50d74e64a325e56bed2640d1d85b697fe9d2e80f100f07960ded7c23bc9dc78f
+#     aa5cd9d6d00f093e546d3a33f33ee12e5676628f5acb4cc3cdc84c98c382dba7
 #
 # The members are the 21 files listed below (6 from `p3-scratch/` + 15 from
 # `p3-adjudication/`) — the set SPANS TWO DIRECTORIES, which is exactly why the
@@ -34,7 +34,7 @@
 #
 # THE SET AGGREGATE IS **NOT** A HASH OF THIS FILE'S LINES: it is the canonical
 # recipe over the MEMBERS (`sha256sum <members> | LC_ALL=C sort | sha256sum`),
-# re-derived above as 50d74e64…. Hashing this file's own lines yields a
+# re-derived above as aa5cd9d6d00f093e…. Hashing this file's own lines yields a
 # different number — do not expect otherwise.
 #
 # THE SUPERSEDED AGGREGATE — NOT RE-DERIVABLE:
@@ -62,7 +62,7 @@ a592aca7509f3efc3727837c93e804b9e1977a87b55ec34f63a10f8de2a5862e  p3-scratch/adj
 d1d0e139f74bafa2330c2be883dc496b1ffdf6041c6dd5a2d37801c6063a36c3  p3-scratch/rederive_adjudication_verdict.py
 7068a58ff9b8602f52e1c57399610e298f1fa1487bc4d9ae8c33ebb54610b68d  p3-scratch/prove_grouping_signature.py
 466db3cdeb4824ec5283e1292077c2af1c987334fd7f80834b1c521c0738304c  p3-scratch/summarise_grouping_proof.py
-4d41d895a4de6d2dc97bed3300ce8135770ba1100215b0a13b3ef4a112fb58e0  p3-adjudication/BASE.collected-nodes.txt
+18541a900c57669bfa941e7e71547d2cec252624957adad2df85d1641c0c8741  p3-adjudication/BASE.collected-nodes.txt
 a259e0a6c27863f540fb3f43c640f7748344c36130c121ccc6069e9d2f2fb836  p3-adjudication/BASE.shard-002.txt
 7f3ac16d611176b43b99f1ad06ef28336c91436b4a3ab177f42cb6896009be75  p3-adjudication/BASE.shard-005.txt
 e9915e32455da5005a851f3d2d98b35f25a9bfcc3f26c7af2bac37cbddc82fcb  p3-adjudication/adjudication-matrix.tsv

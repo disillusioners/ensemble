@@ -23562,6 +23562,12 @@ tests/unit/test_nestops_pg_fixtures.py::TestToolLookupHelpers::test_by_name_retu
 tests/unit/test_nestops_pg_fixtures.py::TestToolLookupHelpers::test_call_invokes_and_json_decodes
 tests/unit/test_no_env_flag_remnants.py::test_checkpoint_prune_no_dual_arm_gate_function_call_load_bearing
 tests/unit/test_no_env_flag_remnants.py::test_delete_blobs_anti_join_signature_unchanged
+# NOTE (2026-11-02) — the node ids below name the RETIRED env flags
+# CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE and CHECKPOINT_BLOB_PRUNE_DRY_RUN; they are
+# preserved here ONLY as the base-side pytest --collect-only record.
+# superseded 2026-10-11: dual-arm gate removed, destructive prune default-on,
+# see feature/blob-prune-default-on — both flags are gone from every operative
+# surface (the retire is documented, not re-litigated here).
 tests/unit/test_no_env_flag_remnants.py::test_env_flag_absent_from_load_bearing_live_surfaces[CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE]
 tests/unit/test_no_env_flag_remnants.py::test_env_flag_absent_from_load_bearing_live_surfaces[CHECKPOINT_BLOB_PRUNE_DRY_RUN]
 tests/unit/test_no_env_flag_remnants.py::test_env_flag_remains_in_historical_planning_with_supersession_note[CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE]

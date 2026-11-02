@@ -100,7 +100,7 @@
 ## difference is a parallel-shard COMPOSITION artefact, not a behavioural difference
 ## between the two trees. NO product code was changed in this round.
 #   evidence: evidence/p3-adjudication/ (+ evidence/p3-adjudication.sha256.txt,
-#              set digest 50d74e64a325e56bed2640d1d85b697fe9d2e80f100f07960ded7c23bc9dc78f
+#              set digest aa5cd9d6d00f093e546d3a33f33ee12e5676628f5acb4cc3cdc84c98c382dba7
 #              — the CANONICAL recipe, re-anchored 2026-11-02 (W-7). The previous aggregate
 #              76a69edd9bd3ec454541b4d81ecce0cf5e88151d6a36602d4f3373df8f85c218 is SUPERSEDED and
 #              NOT re-derivable — 28 candidate recipes excluded; the per-file content is intact 21/21)
