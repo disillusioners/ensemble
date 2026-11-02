@@ -1,0 +1,25 @@
+--- /home/nea/ensemble-src-wt-central-metrics-v1/.agents/shared/planning/central-metrics-v1/evidence/p3-scratch/sweep_sharded.sh	2026-11-02 06:13:16.313492316 +0000
++++ /tmp/p3r/sweep_sharded.fixed.sh	2026-11-02 11:29:55.837081786 +0000
+@@ -161,8 +161,20 @@
+ if cmp -s "$b" "$h"; then
+   log "DIGEST-EQUAL: the FAILED sets are byte-identical (net-new = EMPTY)"
+ else
+-  log "-- base-only (FIXED at head) --"; comm -23 "$b" "$h" | sed 's/^/  /'
+-  log "-- head-only (NET-NEW reds) --"; comm -13 "$b" "$h" | sed 's/^/  /'
++  # THE FIX (2026-11-02, the P3 evidence-repair round): the diff lists go to
++  # FILES first and are then LOGGED through the log function. The old form
++  # used `;` after the log call, so `comm`'s output went to the caller's
++  # STDOUT and NEVER into the sweep log — the verdict block was EMPTY BY
++  # CONSTRUCTION and the run recorded NO net-new verdict.
++  # LC_ALL=C on BOTH sort and comm: a collation mismatch silently DROPS
++  # entries from the diff.
++  LC_ALL=C comm -23 "$b" "$h" > "$SWEEP_DIR/BASE.base-only.txt"
++  LC_ALL=C comm -13 "$b" "$h" > "$SWEEP_DIR/HEAD.head-only.txt"
++  log "-- base-only (FIXED at head) --"
++  sed 's/^/  /' "$SWEEP_DIR/BASE.base-only.txt" | tee -a "$SWEEP_DIR/sweep.log"
++  log "-- head-only (NET-NEW reds) --"
++  sed 's/^/  /' "$SWEEP_DIR/HEAD.head-only.txt" | tee -a "$SWEEP_DIR/sweep.log"
++  log "NET-NEW = $(wc -l < "$SWEEP_DIR/HEAD.head-only.txt") (NOT EMPTY - the sets differ)"
+ fi
+ log ""
+ log "=== sweep dir: $SWEEP_DIR ==="
