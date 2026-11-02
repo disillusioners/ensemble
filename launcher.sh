@@ -495,8 +495,30 @@ _js_history_append() {
 # window rollover (a window_start >24h old resets the count; this rollback
 # re-opens the window) and arm cooldown_until = now + SWEEP_COOLDOWN_S
 # (ADR-024: sweep rollbacks count + cooldown). Prints the new count.
+#
+# COOLDOWN ARM (promote-handback-halt Phase 3 — the RIDER). The stamp is
+# epoch → ISO, and `date(1)`'s BSD dialect (`date -jur <epoch>`) is
+# BSD-ONLY: GNU coreutils REJECTS `-j` outright, so the old single-site
+# form fell through to its `|| until="$(_js_now_iso)"` fallback and armed
+# a BORN-EXPIRED cooldown — the ADR-005 10-minute anti-flapping window was
+# silently DISARMED on every GNU host. Live-corroborated 2026-11-01: the
+# `cooldown_until` stamp PREDATED the sweep row that armed it (a
+# zero-length cooldown). The arm is now a TWO-ARM `uname` dispatch in this
+# file's own idiom (_js_iso_to_epoch / _js_flip_current): ONE `_now()`
+# call feeds both arms, so the target instant is computed exactly once.
+#
+# UNRECOGNIZED PLATFORM (OQ-C-17, ARCHITECT AM-P3-1 — (iii)-scoped): the
+# arm writes an explicitly UNPARSEABLE marker — NOT a timestamp and NOT
+# "now". The ceremony-side consumer (lib.sh `journal_cooldown_active`)
+# reads an unparseable cooldown as ACTIVE (fail-closed, ADR-005) ⇒ the
+# anti-flapping window stays ARMED instead of being silently disabled.
+# Loud stderr + a journal history row make the refusal visible. (Option
+# (i) — writing "now" — is exactly the corrupt state that made the
+# incident hard to read; option (ii) — writing nothing — leaves the field
+# ABSENT, which the same consumer also reads as ACTIVE but WITHOUT the
+# loudness the ruling asks for.)
 _js_count_rollback() {
-    local jp="$1" json counts cnt wstart wstart_epoch new_cnt until
+    local jp="$1" json counts cnt wstart wstart_epoch new_cnt until until_epoch
     json="$(_js_journal_read "$jp")" || return 1
     counts="$(_js_json_sub "$json" "rollback_window_count")"
     cnt="$(_js_json_field "$counts" "24h" 2>/dev/null)"
@@ -510,8 +532,25 @@ _js_count_rollback() {
     new_cnt=$((cnt + 1))
     _js_journal_update "$jp" "rollback_window_count" \
         "{\"24h\": $new_cnt, \"window_start\": \"$(_js_now_iso)\"}" || return 1
-    until="$(date -jur "$(( $(_now) + SWEEP_COOLDOWN_S ))" +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)" \
-        || until="$(_js_now_iso)"
+    # ── the cooldown arm (Phase 3 rider) — see the block comment above ──
+    until_epoch="$(( $(_now) + SWEEP_COOLDOWN_S ))"
+    case "$(uname -s)" in
+        Darwin|*BSD*|*bsd*)
+            until="$(date -jur "$until_epoch" +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)" \
+                || until="$(_js_now_iso)" ;;
+        Linux|GNU*|*GNU*)
+            until="$(date -u -d "@$until_epoch" +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)" \
+                || until="$(_js_now_iso)" ;;
+        *)
+            # (iii)-scoped fail-closed: an UNPARSEABLE marker ⇒ the
+            # ceremony-side consumer reads ACTIVE (the anti-flapping window
+            # stays armed). NEVER "now" (that DISARMS the window — tonight's
+            # defect) and never a fabricated timestamp.
+            until="unparseable-unknown-platform"
+            echo "_js_count_rollback: unrecognized platform '$(uname -s)' — cooldown_until armed as an UNPARSEABLE marker (fail-closed: the ceremony-side consumer treats it as ACTIVE, so the ADR-005 anti-flapping window stays ARMED)" >&2
+            _js_history_append "$jp" "cooldown_unavailable" "unrecognized platform '$(uname -s)' — cooldown_until armed unparseable (fail-closed ACTIVE; the anti-flapping window stays armed)" || true
+            ;;
+    esac
     _js_journal_update "$jp" "cooldown_until" "\"$until\"" || return 1
     printf '%s' "$new_cnt"
 }
