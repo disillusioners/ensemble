@@ -1,0 +1,84 @@
+=== P1-M1 (delete a surface row) ===
+    def test_the_surfaces_block_lists_exactly_the_six_surfaces(self) -> None:
+>       assert _block(_doc_text(), "activation-surfaces") == list(EXPECTED_SURFACES)
+E       AssertionError: assert ['api_metrics...arts_polling'] == ['listener_bo...arts_polling']
+E         
+E         At index 0 diff: 'api_metrics_text' != 'listener_body'
+E         Right contains one more item: 'fe_charts_polling'
+E         Use -v to get more diff
+
+tests/unit/metrics/test_central_metrics_contract_doc.py:121: AssertionError
+_________ TestActivationSurfaces.test_every_surface_is_named_in_prose __________
+
+self = <tests.unit.metrics.test_central_metrics_contract_doc.TestActivationSurfaces object at 0x7756d1047390>
+
+    def test_every_surface_is_named_in_prose(self) -> None:
+        text = _doc_text()
+        for surface in EXPECTED_SURFACES:
+>           assert surface in text, f"surface {surface} is not named"
+E           AssertionError: surface listener_body is not named
+E           assert 'listener_body' in '# Metrics Query Contract — central-metrics-v1 (P1 frozen contract)\n\nDate: 2026-11-02 (UTC)\nLane: `feature/central-...t.** Every leg names its `.agents/tester/PACKS.md` pack; bare\n`pytest <file>` is not an acceptable gate invocation.\n'
+
+tests/unit/metrics/test_central_metrics_contract_doc.py:126: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/metrics/test_central_metrics_contract_doc.py::TestActivationSurfaces::test_the_surfaces_block_lists_exactly_the_six_surfaces
+FAILED tests/unit/metrics/test_central_metrics_contract_doc.py::TestActivationSurfaces::test_every_surface_is_named_in_prose
+2 failed, 19 passed in 0.43s
+RED-OK (P1-M1 (delete a surface row)): FAILED tests/unit/metrics/test_central_metrics_contract_doc.py::TestActivationSurfaces::test_the_surfaces_block_lists_exactly_the_six_surfaces
+FAILED tests/unit/metrics/test_central_metrics_contract_doc.py::TestActivationSurfaces::test_every_surface_is_named_in_prose
+RED-TARGET-OK (P1-M1 (delete a surface row)): expected node 'test_the_surfaces_block_lists_exactly_the_six_surfaces' failed
+=== P1-M2 (widen the availability set) ===
+        )
+E       AssertionError: assert ['proc_unavai...ner_disabled'] == ['census_gate...ner_disabled']
+E         
+E         At index 0 diff: 'proc_unavailable' != 'census_gated'
+E         Left contains one more item: 'listener_disabled'
+E         Use -v to get more diff
+
+tests/unit/metrics/test_central_metrics_contract_doc.py:151: AssertionError
+_______ TestAvailabilityModel.test_proc_unavailable_is_not_in_the_v1_set _______
+
+self = <tests.unit.metrics.test_central_metrics_contract_doc.TestAvailabilityModel object at 0x75e8d9b43b10>
+
+    def test_proc_unavailable_is_not_in_the_v1_set(self) -> None:
+>       assert "proc_unavailable" not in _block(
+            _doc_text(), "availability-reasons"
+        )
+E       AssertionError: assert 'proc_unavailable' not in ['proc_unavailable', 'census_gated', 'census_not_running', 'capture_off', 'series_absent', 'listener_disabled']
+E        +  where ['proc_unavailable', 'census_gated', 'census_not_running', 'capture_off', 'series_absent', 'listener_disabled'] = _block('# Metrics Query Contract — central-metrics-v1 (P1 frozen contract)\n\nDate: 2026-11-02 (UTC)\nLane: `feature/central-...t.** Every leg names its `.agents/tester/PACKS.md` pack; bare\n`pytest <file>` is not an acceptable gate invocation.\n', 'availability-reasons')
+E        +    where '# Metrics Query Contract — central-metrics-v1 (P1 frozen contract)\n\nDate: 2026-11-02 (UTC)\nLane: `feature/central-...t.** Every leg names its `.agents/tester/PACKS.md` pack; bare\n`pytest <file>` is not an acceptable gate invocation.\n' = _doc_text()
+
+tests/unit/metrics/test_central_metrics_contract_doc.py:156: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/metrics/test_central_metrics_contract_doc.py::TestAvailabilityModel::test_the_availability_set_is_closed_and_exact
+FAILED tests/unit/metrics/test_central_metrics_contract_doc.py::TestAvailabilityModel::test_proc_unavailable_is_not_in_the_v1_set
+2 failed, 19 passed in 0.42s
+RED-OK (P1-M2 (widen the availability set)): FAILED tests/unit/metrics/test_central_metrics_contract_doc.py::TestAvailabilityModel::test_the_availability_set_is_closed_and_exact
+FAILED tests/unit/metrics/test_central_metrics_contract_doc.py::TestAvailabilityModel::test_proc_unavailable_is_not_in_the_v1_set
+RED-TARGET-OK (P1-M2 (widen the availability set)): expected node 'test_the_availability_set_is_closed_and_exact' failed
+=== P1-M3 (drop a truth-table invariant) ===
+.............F.......                                                    [100%]
+=================================== FAILURES ===================================
+____ TestTruthTableInvariants.test_the_invariants_block_lists_exactly_five _____
+
+self = <tests.unit.metrics.test_central_metrics_contract_doc.TestTruthTableInvariants object at 0x79c4b3d47ed0>
+
+    def test_the_invariants_block_lists_exactly_five(self) -> None:
+        block = _block(_doc_text(), "truth-table-invariants")
+>       assert block == list(EXPECTED_INVARIANTS)
+E       AssertionError: assert ['auth_behavi...uery_package'] == ['auth_behavi...uery_package']
+E         
+E         At index 3 diff: 'no_direct_switch_read_in_query_package' != 'check_site_census_equals_two'
+E         Right contains one more item: 'no_direct_switch_read_in_query_package'
+E         Use -v to get more diff
+
+tests/unit/metrics/test_central_metrics_contract_doc.py:182: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/metrics/test_central_metrics_contract_doc.py::TestTruthTableInvariants::test_the_invariants_block_lists_exactly_five
+1 failed, 20 passed in 0.42s
+RED-OK (P1-M3 (drop a truth-table invariant)): FAILED tests/unit/metrics/test_central_metrics_contract_doc.py::TestTruthTableInvariants::test_the_invariants_block_lists_exactly_five
+RED-TARGET-OK (P1-M3 (drop a truth-table invariant)): expected node 'test_the_invariants_block_lists_exactly_five' failed
+=== RESTORED (expect GREEN) ===
+.....................                                                    [100%]
+21 passed in 0.36s
+GREEN-OK

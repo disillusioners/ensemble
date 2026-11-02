@@ -1,0 +1,522 @@
+=== P2-M1 (provider reads a live lock) ===
+        metric = _published(_metric("ensemble_provider_wedged_gauge"))
+        provider = RegistryMetricsQueryProvider(metrics_provider=lambda: [metric])
+        held = threading.Event()
+        release = threading.Event()
+    
+        def _wedge() -> None:
+            held.set()
+            metric.lock.acquire()
+            release.wait(5.0)
+            metric.lock.release()
+    
+        worker = threading.Thread(target=_wedge, daemon=True)
+        worker.start()
+        try:
+            assert held.wait(2.0)
+            started = time.monotonic()
+            assert provider.snapshot()
+            assert provider.families()
+            elapsed = time.monotonic() - started
+>           assert elapsed < 1.0, (
+                f"the provider must not wait on a metric lock; it took {elapsed:.3f}s"
+            )
+E           AssertionError: the provider must not wait on a metric lock; it took 5.001s
+E           assert 5.000504752009874 < 1.0
+
+tests/unit/metrics/test_metrics_query_provider.py:425: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/metrics/test_metrics_query_provider.py::TestReadPathPurity::test_the_provider_never_reaches_for_a_metric_lock
+FAILED tests/unit/metrics/test_metrics_query_provider.py::TestContention::test_a_wedged_writer_cannot_block_the_provider
+2 failed, 64 passed in 9.37s
+RED-OK (P2-M1 (provider reads a live lock)) rc=1
+FAILED tests/unit/metrics/test_metrics_query_provider.py::TestReadPathPurity::test_the_provider_never_reaches_for_a_metric_lock
+FAILED tests/unit/metrics/test_metrics_query_provider.py::TestContention::test_a_wedged_writer_cannot_block_the_provider
+RED-TARGET-OK (P2-M1 (provider reads a live lock)): 'test_the_provider_never_reaches_for_a_metric_lock' failed
+=== P2-M2 (provider calls render_metrics) ===
+F.................................................................       [100%]
+=================================== FAILURES ===================================
+___ TestReadPathPurity.test_the_provider_never_calls_the_exposition_renderer ___
+
+self = <tests.unit.metrics.test_metrics_query_provider.TestReadPathPurity object at 0x7ccad6177390>
+
+    def test_the_provider_never_calls_the_exposition_renderer(self) -> None:
+>       assert "render_metrics" not in _provider_source()
+E       assert 'render_metrics' not in '"""The regi...Provider"]\n'
+E         
+E         'render_metrics' is contained here:
+E                  cm.render_metrics()
+E                       snapshot = metric.published_snapshot()
+E                   except Exception:  # pragma: no cover
+E                       return None
+E                   if not snapshot:...
+E         
+E         ...Full output truncated (224 lines hidden), use '-vv' to show
+
+tests/unit/metrics/test_metrics_query_provider.py:86: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/metrics/test_metrics_query_provider.py::TestReadPathPurity::test_the_provider_never_calls_the_exposition_renderer
+1 failed, 65 passed in 4.36s
+RED-OK (P2-M2 (provider calls render_metrics)) rc=1
+FAILED tests/unit/metrics/test_metrics_query_provider.py::TestReadPathPurity::test_the_provider_never_calls_the_exposition_renderer
+RED-TARGET-OK (P2-M2 (provider calls render_metrics)): 'test_the_provider_never_calls_the_exposition_renderer' failed
+=== P2-M3 (the depth clamp floor is removed) ===
+...F........................                                             [100%]
+=================================== FAILURES ===================================
+___________________ TestDepthRule.test_the_clamp_floor_holds ___________________
+
+self = <tests.unit.metrics.test_metrics_history_ring.TestDepthRule object at 0x765270889350>
+
+    def test_the_clamp_floor_holds(self) -> None:
+        """P2-M3 — the depth never falls below MIN_DEPTH."""
+>       assert (
+            compute_depth(ring_series=10_000_000, effective_interval_s=15.0)
+            == MIN_DEPTH
+        )
+E       assert 0 == 60
+E        +  where 0 = compute_depth(ring_series=10000000, effective_interval_s=15.0)
+
+tests/unit/metrics/test_metrics_history_ring.py:62: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestDepthRule::test_the_clamp_floor_holds
+1 failed, 27 passed in 2.54s
+RED-OK (P2-M3 (the depth clamp floor is removed)) rc=1
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestDepthRule::test_the_clamp_floor_holds
+RED-TARGET-OK (P2-M3 (the depth clamp floor is removed)): 'test_the_clamp_floor_holds' failed
+=== P2-M4 (the eviction drops the newest) ===
+        ring = TrendRing(3)
+        for index in range(5):
+            ring.append(1_000 + index, float(index))
+>       assert [timestamp for timestamp, _ in ring.points()] == [1_002, 1_003, 1_004]
+E       assert [1000, 1001, 1002] == [1002, 1003, 1004]
+E         
+E         At index 0 diff: 1000 != 1002
+E         Use -v to get more diff
+
+tests/unit/metrics/test_metrics_history_ring.py:118: AssertionError
+___________ TestEviction.test_the_newest_samples_survive_an_overflow ___________
+
+self = <tests.unit.metrics.test_metrics_history_ring.TestEviction object at 0x7be904494cd0>
+
+    def test_the_newest_samples_survive_an_overflow(self) -> None:
+        ring = TrendRing(3)
+        for index in range(5):
+            ring.append(1_000 + index, float(index))
+        values = [value for _, value in ring.points()]
+>       assert values == [2.0, 3.0, 4.0]
+E       assert [0.0, 1.0, 2.0] == [2.0, 3.0, 4.0]
+E         
+E         At index 0 diff: 0.0 != 2.0
+E         Use -v to get more diff
+
+tests/unit/metrics/test_metrics_history_ring.py:125: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestEviction::test_the_oldest_is_dropped_when_the_ring_is_full
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestEviction::test_the_newest_samples_survive_an_overflow
+2 failed, 26 passed in 2.62s
+RED-OK (P2-M4 (the eviction drops the newest)) rc=1
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestEviction::test_the_oldest_is_dropped_when_the_ring_is_full
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestEviction::test_the_newest_samples_survive_an_overflow
+RED-TARGET-OK (P2-M4 (the eviction drops the newest)): 'test_the_oldest_is_dropped_when_the_ring_is_full' failed
+=== P2-M5 (the sampler stops on the first adapter exception) ===
+    
+        def _boom(_sampler) -> None:
+            raise RuntimeError("adapter exploded")
+    
+        sampler = MetricsSampler(
+            ring=ring, adapters=[_boom], metrics_provider=lambda: []
+        )
+>       sampler.tick()  # must not raise
+        ^^^^^^^^^^^^^^
+
+tests/unit/metrics/test_metrics_sampler.py:81: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+daemon/services/metrics_query/sampler.py:124: in tick
+    appended = self._run_adapters()
+               ^^^^^^^^^^^^^^^^^^^^
+daemon/services/metrics_query/sampler.py:140: in _run_adapters
+    adapter(self)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+_sampler = <daemon.services.metrics_query.sampler.MetricsSampler object at 0x7fddf9d91f90>
+
+    def _boom(_sampler) -> None:
+>       raise RuntimeError("adapter exploded")
+E       RuntimeError: adapter exploded
+
+tests/unit/metrics/test_metrics_sampler.py:76: RuntimeError
+=========================== short test summary info ============================
+FAILED tests/unit/metrics/test_metrics_sampler.py::TestAdapterIsolation::test_a_raising_adapter_does_not_stop_the_tick
+FAILED tests/unit/metrics/test_metrics_sampler.py::TestAdapterIsolation::test_a_raising_adapter_never_escapes_the_tick
+2 failed, 16 passed in 0.61s
+RED-OK (P2-M5 (the sampler stops on the first adapter exception)) rc=1
+FAILED tests/unit/metrics/test_metrics_sampler.py::TestAdapterIsolation::test_a_raising_adapter_does_not_stop_the_tick
+FAILED tests/unit/metrics/test_metrics_sampler.py::TestAdapterIsolation::test_a_raising_adapter_never_escapes_the_tick
+RED-TARGET-OK (P2-M5 (the sampler stops on the first adapter exception)): 'test_a_raising_adapter_never_escapes_the_tick' failed
+=== P2-M6 (the identity-dedupe is removed) ===
+        metric.set(99.0)  # not published
+>       assert sampler.tick() == 0
+E       assert 1 == 0
+E        +  where 1 = tick()
+E        +    where tick = <daemon.services.metrics_query.sampler.MetricsSampler object at 0x7ba4bdbc9c70>.tick
+
+tests/unit/metrics/test_metrics_sampler.py:126: AssertionError
+_____ TestGarbageCollection.test_an_idle_but_live_family_is_never_dropped ______
+
+self = <tests.unit.metrics.test_metrics_sampler.TestGarbageCollection object at 0x7ba4bdbb8f50>
+
+    def test_an_idle_but_live_family_is_never_dropped(self) -> None:
+        """AM-13 — a metric that still HAS a published entry stays."""
+        ring = TrendRingStore(effective_interval_s=15.0)
+        metric = _metric("ensemble_sampler_idle_live_gauge")
+        sampler = MetricsSampler(ring=ring, metrics_provider=lambda: [metric])
+        sampler.tick()
+        for _ in range(5):
+            sampler.tick()
+>       assert ring.total_points() == 1
+E       assert 6 == 1
+E        +  where 6 = total_points()
+E        +    where total_points = <daemon.services.metrics_query.ring.TrendRingStore object at 0x7ba4bdc464e0>.total_points
+
+tests/unit/metrics/test_metrics_sampler.py:191: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/metrics/test_metrics_sampler.py::TestIdentityDedupe::test_an_unchanged_snapshot_appends_nothing
+FAILED tests/unit/metrics/test_metrics_sampler.py::TestIdentityDedupe::test_a_changed_value_without_a_publish_appends_nothing
+FAILED tests/unit/metrics/test_metrics_sampler.py::TestGarbageCollection::test_an_idle_but_live_family_is_never_dropped
+3 failed, 15 passed in 0.78s
+RED-OK (P2-M6 (the identity-dedupe is removed)) rc=1
+FAILED tests/unit/metrics/test_metrics_sampler.py::TestIdentityDedupe::test_an_unchanged_snapshot_appends_nothing
+FAILED tests/unit/metrics/test_metrics_sampler.py::TestIdentityDedupe::test_a_changed_value_without_a_publish_appends_nothing
+FAILED tests/unit/metrics/test_metrics_sampler.py::TestGarbageCollection::test_an_idle_but_live_family_is_never_dropped
+RED-TARGET-OK (P2-M6 (the identity-dedupe is removed)): 'test_an_unchanged_snapshot_appends_nothing' failed
+=== P2-M7 (the op enum is re-widened) ===
+
+    def test_an_observation_with_a_legacy_op_folds_to_other(self) -> None:
+        """A disallowed value folds to ``other`` and is counted."""
+        metric = cm.Metric(
+            "ensemble_narrowing_probe",
+            "histogram",
+            ("op",),
+            {"op": cm.CHECKPOINT_OP_VOCABULARY},
+            "",
+            (1.0, 2.0),
+            False,
+        )
+        metric.observe(0.5, {"op": "aput"})
+        metric.publish(force=True)
+        snapshot = metric.published_snapshot()
+        assert snapshot is not None
+        labels = [dict(key) for key in snapshot]
+>       assert labels == [{"op": "other"}]
+E       AssertionError: assert [{'op': 'aput'}] == [{'op': 'other'}]
+E         
+E         At index 0 diff: {'op': 'aput'} != {'op': 'other'}
+E         Use -v to get more diff
+
+tests/unit/metrics/test_metrics_registry_narrowing.py:65: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/metrics/test_metrics_registry_narrowing.py::TestNarrowedOpEnum::test_the_frozen_op_vocabulary_is_the_adjudicated_set
+FAILED tests/unit/metrics/test_metrics_registry_narrowing.py::TestNarrowedOpEnum::test_the_registered_metric_declares_the_narrowed_set
+FAILED tests/unit/metrics/test_metrics_registry_narrowing.py::TestNarrowedOpEnum::test_the_legacy_values_are_not_declarable
+FAILED tests/unit/metrics/test_metrics_registry_narrowing.py::TestNarrowedOpEnum::test_an_observation_with_a_legacy_op_folds_to_other
+4 failed, 8 passed in 0.46s
+RED-OK (P2-M7 (the op enum is re-widened)) rc=1
+FAILED tests/unit/metrics/test_metrics_registry_narrowing.py::TestNarrowedOpEnum::test_the_frozen_op_vocabulary_is_the_adjudicated_set
+FAILED tests/unit/metrics/test_metrics_registry_narrowing.py::TestNarrowedOpEnum::test_the_registered_metric_declares_the_narrowed_set
+FAILED tests/unit/metrics/test_metrics_registry_narrowing.py::TestNarrowedOpEnum::test_the_legacy_values_are_not_declarable
+FAILED tests/unit/metrics/test_metrics_registry_narrowing.py::TestNarrowedOpEnum::test_an_observation_with_a_legacy_op_folds_to_other
+RED-TARGET-OK (P2-M7 (the op enum is re-widened)): 'test_the_frozen_op_vocabulary_is_the_adjudicated_set' failed
+=== P2-M8 (VOCABULARY_VERSION left at 1) ===
+F.........F                                                              [100%]
+=================================== FAILURES ===================================
+________________ TestVocabularyVersion.test_the_version_is_two _________________
+
+self = <tests.unit.metrics.test_metrics_vocabulary_amendment.TestVocabularyVersion object at 0x734391276ad0>
+
+    def test_the_version_is_two(self) -> None:
+        """P2-M8 — the bump rides this lane."""
+>       assert cm.VOCABULARY_VERSION == 2
+E       assert 1 == 2
+E        +  where 1 = cm.VOCABULARY_VERSION
+
+tests/unit/metrics/test_metrics_vocabulary_amendment.py:18: AssertionError
+_________ TestQueryVocabularyMirror.test_the_two_axes_are_independent __________
+
+self = <tests.unit.metrics.test_metrics_vocabulary_amendment.TestQueryVocabularyMirror object at 0x734391287490>
+
+    def test_the_two_axes_are_independent(self) -> None:
+        """AM-7 — the shape axis and the vocabulary axis are separate."""
+        from daemon.services.metrics_query.constants import QUERY_SCHEMA_VERSION
+    
+>       assert QUERY_SCHEMA_VERSION != cm.VOCABULARY_VERSION
+E       assert 1 != 1
+E        +  where 1 = cm.VOCABULARY_VERSION
+
+tests/unit/metrics/test_metrics_vocabulary_amendment.py:86: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/metrics/test_metrics_vocabulary_amendment.py::TestVocabularyVersion::test_the_version_is_two
+FAILED tests/unit/metrics/test_metrics_vocabulary_amendment.py::TestQueryVocabularyMirror::test_the_two_axes_are_independent
+2 failed, 9 passed in 0.99s
+RED-OK (P2-M8 (VOCABULARY_VERSION left at 1)) rc=1
+FAILED tests/unit/metrics/test_metrics_vocabulary_amendment.py::TestVocabularyVersion::test_the_version_is_two
+FAILED tests/unit/metrics/test_metrics_vocabulary_amendment.py::TestQueryVocabularyMirror::test_the_two_axes_are_independent
+RED-TARGET-OK (P2-M8 (VOCABULARY_VERSION left at 1)): 'test_the_version_is_two' failed
+=== P2-M9 (the ring is switched back to deque(maxlen)) ===
+self = <tests.unit.metrics.test_metrics_history_ring.TestRepresentation object at 0x7cc877d8c690>
+
+    def test_the_ring_is_array_backed(self) -> None:
+        ring = TrendRing(16)
+>       assert type(ring._values).__name__ == "array"
+                    ^^^^^^^^^^^^
+E       AttributeError: 'TrendRing' object has no attribute '_values'
+
+tests/unit/metrics/test_metrics_history_ring.py:91: AttributeError
+___ TestRepresentation.test_the_measured_bytes_per_point_stay_at_the_budget ____
+
+self = <tests.unit.metrics.test_metrics_history_ring.TestRepresentation object at 0x7cc877d8c910>
+
+    def test_the_measured_bytes_per_point_stay_at_the_budget(self) -> None:
+        """P2-M9 — a deque form measured 129-161 B/point."""
+        ring = TrendRing(4_096)
+        for index in range(4_096):
+            ring.append(1_000 + index, float(index))
+        per_point = ring.measured_bytes() / len(ring)
+>       assert per_point <= BYTES_PER_POINT + 8, (
+            f"the ring must stay array-backed (16 B/point); measured {per_point} B/point"
+        )
+E       AssertionError: the ring must stay array-backed (16 B/point); measured 64.435546875 B/point
+E       assert 64.435546875 <= (16 + 8)
+
+tests/unit/metrics/test_metrics_history_ring.py:100: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestRepresentation::test_the_ring_is_array_backed
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestRepresentation::test_the_measured_bytes_per_point_stay_at_the_budget
+2 failed, 26 passed in 1.30s
+RED-OK (P2-M9 (the ring is switched back to deque(maxlen))) rc=1
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestRepresentation::test_the_ring_is_array_backed
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestRepresentation::test_the_measured_bytes_per_point_stay_at_the_budget
+RED-TARGET-OK (P2-M9 (the ring is switched back to deque(maxlen))): 'test_the_measured_bytes_per_point_stay_at_the_budget' failed
+=== P2-M10 (the age eviction is removed) ===
+
+self = <tests.unit.metrics.test_metrics_history_ring.TestEviction object at 0x7d125dd89480>
+
+    def test_the_age_eviction_drops_the_outdated_samples(self) -> None:
+        """P2-M10 — the window tracks ``window_s``."""
+        ring = TrendRing(60)
+        for index in range(10):
+            ring.append(1_000 + index, float(index))
+        dropped = ring.evict_before(1_005)
+>       assert dropped == 5
+E       assert 0 == 5
+
+tests/unit/metrics/test_metrics_history_ring.py:133: AssertionError
+_________ TestEviction.test_the_store_evicts_by_age_across_every_ring __________
+
+self = <tests.unit.metrics.test_metrics_history_ring.TestEviction object at 0x7d125ddb1a30>
+
+    def test_the_store_evicts_by_age_across_every_ring(self) -> None:
+        store = TrendRingStore(window_s=100, effective_interval_s=15.0)
+        store.append("a|", 1_000, 1.0)
+        store.append("b|", 1_000, 2.0)
+        dropped = store.evict_before(1_050)
+>       assert dropped == 2
+E       assert 0 == 2
+
+tests/unit/metrics/test_metrics_history_ring.py:153: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestEviction::test_the_age_eviction_drops_the_outdated_samples
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestEviction::test_the_store_evicts_by_age_across_every_ring
+2 failed, 26 passed in 2.80s
+RED-OK (P2-M10 (the age eviction is removed)) rc=1
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestEviction::test_the_age_eviction_drops_the_outdated_samples
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestEviction::test_the_store_evicts_by_age_across_every_ring
+RED-TARGET-OK (P2-M10 (the age eviction is removed)): 'test_the_age_eviction_drops_the_outdated_samples' failed
+=== P2-M11 (the depth divisor is the catalog count) ===
+        store = TrendRingStore(effective_interval_s=15.0)
+        assert store.depth == 480
+>       assert store.set_series_count(10_000) is True
+E       assert False is True
+E        +  where False = set_series_count(10000)
+E        +    where set_series_count = <daemon.services.metrics_query.ring.TrendRingStore object at 0x752b43cb4c20>.set_series_count
+
+tests/unit/metrics/test_metrics_history_ring.py:74: AssertionError
+_____________ TestBudget.test_the_depth_shrinks_as_the_ring_grows ______________
+
+self = <tests.unit.metrics.test_metrics_history_ring.TestBudget object at 0x752b43c9ce10>
+
+    def test_the_depth_shrinks_as_the_ring_grows(self) -> None:
+        """The budget is held BY CONSTRUCTION, not by a later check."""
+        store = TrendRingStore(effective_interval_s=15.0)
+        assert store.depth == 480
+        for index in range(2_000):
+            store.append(f"k{index}", 1_000 + index, float(index))
+>       assert store.depth < 480
+E       assert 480 < 480
+E        +  where 480 = <daemon.services.metrics_query.ring.TrendRingStore object at 0x752b4536ac40>.depth
+
+tests/unit/metrics/test_metrics_history_ring.py:170: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestDepthRule::test_the_count_bound_wins_when_the_series_count_is_large
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestDepthRule::test_the_divisor_is_the_series_count
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestDepthRule::test_the_clamp_floor_holds
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestDepthRule::test_the_store_recomputes_the_depth_when_the_series_count_changes
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestBudget::test_the_depth_shrinks_as_the_ring_grows
+5 failed, 23 passed in 0.55s
+RED-OK (P2-M11 (the depth divisor is the catalog count)) rc=1
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestDepthRule::test_the_count_bound_wins_when_the_series_count_is_large
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestDepthRule::test_the_divisor_is_the_series_count
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestDepthRule::test_the_clamp_floor_holds
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestDepthRule::test_the_store_recomputes_the_depth_when_the_series_count_changes
+FAILED tests/unit/metrics/test_metrics_history_ring.py::TestBudget::test_the_depth_shrinks_as_the_ring_grows
+RED-TARGET-OK (P2-M11 (the depth divisor is the catalog count)): 'test_the_divisor_is_the_series_count' failed
+=== P2-M12 (the private _last_publish is read) ===
+...F..............................................................       [100%]
+=================================== FAILURES ===================================
+_ TestReadPathPurity.test_the_provider_never_reaches_for_the_private_publish_field _
+
+self = <tests.unit.metrics.test_metrics_query_provider.TestReadPathPurity object at 0x797ba39a9480>
+
+    def test_the_provider_never_reaches_for_the_private_publish_field(self) -> None:
+>       assert "_last_publish" not in _provider_source()
+E       assert '_last_publish' not in '"""The regi...Provider"]\n'
+E         
+E         '_last_publish' is contained here:
+E           at(metric._last_publish)
+E                   except Exception:  # pragma: no cover
+E                       return 0.0
+E                   if last <= 0:
+E                       return 0.0...
+E         
+E         ...Full output truncated (213 lines hidden), use '-vv' to show
+
+tests/unit/metrics/test_metrics_query_provider.py:97: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/metrics/test_metrics_query_provider.py::TestReadPathPurity::test_the_provider_never_reaches_for_the_private_publish_field
+1 failed, 65 passed in 4.00s
+RED-OK (P2-M12 (the private _last_publish is read)) rc=1
+FAILED tests/unit/metrics/test_metrics_query_provider.py::TestReadPathPurity::test_the_provider_never_reaches_for_the_private_publish_field
+RED-TARGET-OK (P2-M12 (the private _last_publish is read)): 'test_the_provider_never_reaches_for_the_private_publish_field' failed
+=== P2-M13 (a direct switch read in the query package) ===
+E                       return metrics_gate.metrics_enabled()
+E               
+E                   @property...
+E             
+E             ...Full output truncated (1300 lines hidden), use '-vv' to show
+
+tests/unit/metrics/test_metrics_query_provider.py:102: AssertionError
+____ TestReadPathPurity.test_the_check_site_census_over_daemon_stays_at_two ____
+
+self = <tests.unit.metrics.test_metrics_query_provider.TestReadPathPurity object at 0x7df4d4d2f550>
+
+    def test_the_check_site_census_over_daemon_stays_at_two(self) -> None:
+        """The switch is consulted at exactly two behavioural sites."""
+        repo = Path(__file__).resolve().parents[3]
+        hits: list[str] = []
+        for path in sorted((repo / "daemon").rglob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            for number, line in enumerate(text.splitlines(), start=1):
+                if "metrics_gate.metrics_enabled()" in line:
+                    hits.append(f"{path.relative_to(repo)}:{number}")
+>       assert len(hits) == 2, f"the behavioural check-site census drifted: {hits}"
+E       AssertionError: the behavioural check-site census drifted: ['daemon/services/metrics_census.py:355', 'daemon/services/metrics_listener.py:419', 'daemon/services/metrics_query/provider.py:99']
+E       assert 3 == 2
+E        +  where 3 = len(['daemon/services/metrics_census.py:355', 'daemon/services/metrics_listener.py:419', 'daemon/services/metrics_query/provider.py:99'])
+
+tests/unit/metrics/test_metrics_query_provider.py:124: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/metrics/test_metrics_query_provider.py::TestReadPathPurity::test_the_package_never_reads_the_kill_switch
+FAILED tests/unit/metrics/test_metrics_query_provider.py::TestReadPathPurity::test_the_check_site_census_over_daemon_stays_at_two
+2 failed, 64 passed in 4.52s
+RED-OK (P2-M13 (a direct switch read in the query package)) rc=1
+FAILED tests/unit/metrics/test_metrics_query_provider.py::TestReadPathPurity::test_the_package_never_reads_the_kill_switch
+FAILED tests/unit/metrics/test_metrics_query_provider.py::TestReadPathPurity::test_the_check_site_census_over_daemon_stays_at_two
+RED-TARGET-OK (P2-M13 (a direct switch read in the query package)): 'test_the_package_never_reads_the_kill_switch' failed
+=== P2-M13b (the public CensusSampler.gated property is removed) ===
+........F.........................................................       [100%]
+=================================== FAILURES ===================================
+_ TestReadPathPurity.test_the_census_sampler_exposes_the_public_gated_property _
+
+self = <tests.unit.metrics.test_metrics_query_provider.TestReadPathPurity object at 0x72140910b650>
+
+    def test_the_census_sampler_exposes_the_public_gated_property(self) -> None:
+        from daemon.services.metrics_census import CensusSampler
+    
+>       assert hasattr(CensusSampler, "gated")
+E       AssertionError: assert False
+E        +  where False = hasattr(<class 'daemon.services.metrics_census.CensusSampler'>, 'gated')
+
+tests/unit/metrics/test_metrics_query_provider.py:129: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/metrics/test_metrics_query_provider.py::TestReadPathPurity::test_the_census_sampler_exposes_the_public_gated_property
+1 failed, 65 passed in 4.10s
+RED-OK (P2-M13b (the public CensusSampler.gated property is removed)) rc=1
+FAILED tests/unit/metrics/test_metrics_query_provider.py::TestReadPathPurity::test_the_census_sampler_exposes_the_public_gated_property
+RED-TARGET-OK (P2-M13b (the public CensusSampler.gated property is removed)): 'test_the_census_sampler_exposes_the_public_gated_property' failed
+=== P2-M14 (the family-metadata kwargs are mandatory) ===
+    from .project.repository import SQLModelProjectRepository
+  File "/home/nea/ensemble-src-wt-central-metrics-v1/daemon/repositories/project/__init__.py", line 3, in <module>
+    from .repository import SQLModelProjectRepository
+  File "/home/nea/ensemble-src-wt-central-metrics-v1/daemon/repositories/project/repository.py", line 38, in <module>
+    from daemon.repositories.instance.models import Instance, InstanceStatus, InstanceHierarchy
+  File "/home/nea/ensemble-src-wt-central-metrics-v1/daemon/repositories/instance/__init__.py", line 3, in <module>
+    from .repository import SQLModelInstanceRepository, get_agent_name
+  File "/home/nea/ensemble-src-wt-central-metrics-v1/daemon/repositories/instance/repository.py", line 22, in <module>
+    from daemon.repositories.task.models import Task
+  File "/home/nea/ensemble-src-wt-central-metrics-v1/daemon/repositories/task/__init__.py", line 4, in <module>
+    from .repository import TaskRepository
+  File "/home/nea/ensemble-src-wt-central-metrics-v1/daemon/repositories/task/repository.py", line 31, in <module>
+    from daemon.services.job_state_machine import InvalidTransitionError
+  File "/home/nea/ensemble-src-wt-central-metrics-v1/daemon/services/__init__.py", line 18, in <module>
+    from daemon.services.instance_messaging import InstanceMessagingService
+  File "/home/nea/ensemble-src-wt-central-metrics-v1/daemon/services/instance_messaging.py", line 32, in <module>
+    from ..persistence import get_instance_messages
+  File "/home/nea/ensemble-src-wt-central-metrics-v1/daemon/persistence.py", line 44, in <module>
+    from daemon.checkpoint_adapter import CheckpointerAdapter, SqliteCheckpointerAdapter
+  File "/home/nea/ensemble-src-wt-central-metrics-v1/daemon/checkpoint_adapter.py", line 58, in <module>
+    from daemon.checkpoint_metrics import (
+    ...<3 lines>...
+    )
+  File "/home/nea/ensemble-src-wt-central-metrics-v1/daemon/checkpoint_metrics.py", line 1292, in <module>
+    _registry_measurements = register_gauge(
+        "ensemble_metrics_registry_measurements",
+    ...<3 lines>...
+        ),
+    )
+TypeError: register_gauge() missing 3 required keyword-only arguments: 'source_idiom', 'durability', and 'cardinality_weight'
+RED-OK (P2-M14 (the family-metadata kwargs are mandatory)) rc=1
+
+RED-TARGET-OK (P2-M14 (the family-metadata kwargs are mandatory)): COLLECTION-BREAK form (rc=1, no node id — the mutation's stated symptom is that the pre-existing registrations break)
+=== P2-M15 (buckets are dropped from the name shape) ===
+...........F......................................................       [100%]
+=================================== FAILURES ===================================
+_________________ TestFamilyShape.test_buckets_are_on_the_wire _________________
+
+self = <tests.unit.metrics.test_metrics_query_provider.TestFamilyShape object at 0x72b5553d5810>
+
+    def test_buckets_are_on_the_wire(self) -> None:
+        """B3 — the deferred consumers need the bucket sets off-box."""
+        metric = _published(
+            _metric(
+                "ensemble_provider_bucket_histogram",
+                "histogram",
+                buckets=(1.0, 5.0, 10.0),
+            )
+        )
+        provider = RegistryMetricsQueryProvider(metrics_provider=lambda: [metric])
+        entry = provider.families()[0]["names"][0]
+>       assert entry["buckets"] == [1.0, 5.0, 10.0]
+E       assert None == [1.0, 5.0, 10.0]
+
+tests/unit/metrics/test_metrics_query_provider.py:177: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/metrics/test_metrics_query_provider.py::TestFamilyShape::test_buckets_are_on_the_wire
+1 failed, 65 passed in 4.22s
+RED-OK (P2-M15 (buckets are dropped from the name shape)) rc=1
+FAILED tests/unit/metrics/test_metrics_query_provider.py::TestFamilyShape::test_buckets_are_on_the_wire
+RED-TARGET-OK (P2-M15 (buckets are dropped from the name shape)): 'test_buckets_are_on_the_wire' failed
+=== RESTORED (expect GREEN across every P2 pack) ===
+........................................................................ [ 46%]
+........................................................................ [ 92%]
+............                                                             [100%]
+156 passed in 7.11s
+GREEN-OK

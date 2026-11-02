@@ -8,8 +8,10 @@
 > **Contract:** [`docs/architecture/metrics-query-contract.md`](../../../../docs/architecture/metrics-query-contract.md)
 > carries the per-phase evidence blocks this pack cites.
 > **Machine-readable evidence preserved in this directory:**
-> `evidence/am16-exposition-{base,head}.txt` (the AM-16 structural diff inputs) and
-> `evidence/p4-failed-digests.txt` (the recomputed P4 FAILED digests).
+> `evidence/am16-exposition-{base,head}.txt` (the AM-16 structural diff inputs),
+> `evidence/p4-failed-digests.txt` (the recomputed P4 FAILED digests),
+> `evidence/p1-mutations-final.log` + `evidence/p2-mutations-final.log` (the surviving Stage-A
+> mutation logs) and `evidence/p1-p2-mutation-logs.sha256.txt` (their sha256 table + leg census).
 
 **How to read this pack.** Every leg is recorded with its **declared tier**, its **D1/D2
 split**, the **slicing proof**, the **pre-exclusion record** and the **expected-skip census**.
@@ -98,21 +100,30 @@ recorded in the contract doc's per-phase tables.
 | Phase | Declared legs | Observed | Where the table lives |
 |---|---|---|---|
 | P1 | `P1-M1…P1-M3` (3) | **3/3** RED→GREEN | `phase1-plan.md` |
-| P2 | `P2-M1…P2-M15` (15) | the dispatcher's Stage-A report says **3/3 + 16/16** — see the **DISCREPANCY** note below | `phase2-plan.md` |
+| P2 | `P2-M1…P2-M15` (15) | **16 observed** (P2-M1..M15 **+ the M13b variant**) — a **superset** of the declared 15 | `phase2-plan.md` |
 | P3 | `P3-M1…P3-M12` (12) | **12/12** RED→GREEN | `phase3-plan.md` |
 | P4 | `P4-M1…P4-M13` (13) | **13/13** RED→GREEN | the contract doc §"The P4 evidence" (the table carries the RED node per leg) |
 | P5 | `P5-M1…P5-M11` (11) | **11/11** RED→GREEN | the contract doc §"The P5 evidence" (the table carries the RED node per leg) |
 | P6 | `P6-M1…P6-M12` (12) | declared for the reconciliation pack | `phase6-plan.md` |
 
-> **DISCREPANCY (recorded, not silently reconciled).** The plan set declares **15** mutation
-> legs for P2 (`P2-M1…P2-M15` — the fold ledger's NB2 explicitly raised the count from 14 to 15
-> "so an executor stopping at 14 would never plant P2-M15"). The dispatcher's Stage-A measured
-> report records **"3/3 + 16/16"** for Stage A (P1+P2) — i.e. it reads as P1's 3 and P2's
-> **16**. The **plan's declared count is 15**; the observed count is reported as 16. The pack
-> records **both** and does not assert which is right: the P2 per-leg RED→GREEN log is **not
-> recoverable** from the repository or from the surviving `/tmp` evidence (only the P5 mutation
-> summary survives, machine-readable, at the lane's own path). **This is an open question for the
-> reviewer** — see §9.
+> **The P2 count — RESOLVED BY SURVIVING EVIDENCE.** The **16** observed legs are the plan's
+> declared **15** (`P2-M1…P2-M15`) **plus an explicitly-named `P2-M13b` variant** — a **second
+> planted form of the M13 pin** (M13 plants a *direct switch read* in the query package; M13b
+> plants the *removal of the public `CensusSampler.gated` property*). It is therefore an observed
+> **SUPERSET** of the declared 15 — **not** a discrepancy and **not** a supersession: the declared
+> 15 all ran, and one extra leg ran beside them.
+>
+> **The surviving Stage-A log is preserved** at `evidence/p2-mutations-final.log` (sha256
+> `be0fe2e24da1ce20e254dc5c14fa1e584b6bb21e468e5e3435af370b44fd29c1`; byte-identical to the
+> `/tmp` original) — it records **16** `RED-OK` legs and ends with the **RESTORED** leg
+> (`156 passed` → `GREEN-OK`). The P1 log is preserved beside it at
+> `evidence/p1-mutations-final.log` (sha256
+> `f59dd12b5b22bbef3777761047688c046ae0e3f518608943da1fea7e514e835e`; **3** legs, `GREEN-OK`).
+> The sha256 table + the leg census are in `evidence/p1-p2-mutation-logs.sha256.txt`.
+>
+> **A tester re-run is OPTIONAL at functional-gate time — never a blocker.** The surviving log
+> is the evidence; the declared 15 and the observed 16 agree in substance (the extra leg is a
+> second form of a declared pin, not an undeclared behaviour).
 
 ### 2.2 The observed digests
 
@@ -120,12 +131,15 @@ The **observed digests** are the FAILED-list digests of §1.2 (BARE-ID and GREP-
 are the digest evidence for the net-new verdict on every dual-side leg, and they are the
 **equality** the gate asserts — not the pass/fail counts.
 
-### 2.3 The P5 mutation machine-readable summary (surviving evidence)
+### 2.3 The surviving machine-readable mutation evidence
 
-`/tmp/metrics-fe-mutations/summary.json` (the lane's own evidence dir) records each of the 11
-P5 mutation legs with `red_exit`, `green_exit`, `restored_byte_identical` and the log path. All
-11 carry `status: PASS` and `restored_byte_identical: true` — i.e. **every mutation was reverted
-byte-identically** after planting, so no mutation leaked into the tree.
+| Evidence | Where | What it records |
+|---|---|---|
+| the **P1** mutation log | `evidence/p1-mutations-final.log` (sha256 `f59dd12b5b22bbef3777761047688c046ae0e3f518608943da1fea7e514e835e`) | **3** legs (`P1-M1…P1-M3`), each `RED-OK`, ending with the RESTORED leg (`21 passed` → `GREEN-OK`) |
+| the **P2** mutation log | `evidence/p2-mutations-final.log` (sha256 `be0fe2e24da1ce20e254dc5c14fa1e584b6bb21e468e5e3435af370b44fd29c1`) | **16** legs (`P2-M1…P2-M15` **+ `P2-M13b`**), each `RED-OK` with its RED target node, ending with the RESTORED leg (`156 passed` → `GREEN-OK`) |
+| their sha256 table + leg census | `evidence/p1-p2-mutation-logs.sha256.txt` | the digests, the `/tmp` source paths + sizes + mtimes, the leg census and the RESTORED-leg lines |
+| the **P5** mutation summary (machine-readable) | the lane's own evidence dir (`/tmp/metrics-fe-mutations/summary.json`) | each of the 11 P5 mutation legs with `red_exit`, `green_exit`, `restored_byte_identical` and the log path. All 11 carry `status: PASS` and `restored_byte_identical: true` — i.e. **every mutation was reverted byte-identically** after planting, so no mutation leaked into the tree |
+| the **P4** FAILED digests | `evidence/p4-failed-digests.txt` | the recomputed digests for all six D2 legs and all six widened-leg legs (bare-id + grep-full forms, both sides) |
 
 ---
 
@@ -375,20 +389,28 @@ budget.** They are **recorded findings, never auto-fixed.**
 
 ## 13. The open questions this pack could not close
 
-1. **The P2 mutation count.** The plan declares **15** (`P2-M1…P2-M15`); the dispatcher's Stage-A
-   report says **16/16**. The per-leg P2 RED→GREEN log is **NOT RECOVERABLE** from the
-   repository or from the surviving `/tmp` evidence. The pack records both and asserts neither.
-   **Resolution path:** the Stage-A executor's own transcript, or a re-run of the P2 mutation
-   matrix by the tester lane.
+1. ~~**The P2 mutation count.**~~ **RESOLVED (2026-11-02) — by surviving evidence, not by
+   re-derivation.** The Stage-A mutation logs survive on disk and are now **preserved in this
+   lane** (`evidence/p1-mutations-final.log` · `evidence/p2-mutations-final.log` + the sha256
+   table `evidence/p1-p2-mutation-logs.sha256.txt`). The P2 log records **16** legs — the declared
+   `P2-M1…P2-M15` **plus the explicitly-named `P2-M13b` variant** (a second planted form of the
+   M13 pin) — each `RED-OK`, ending `RESTORED → 156 passed → GREEN-OK`. The observed 16 is a
+   **superset** of the declared 15, not a discrepancy. **A tester re-run is OPTIONAL at
+   functional-gate time — never a blocker.**
 2. **The exact live series count.** Observation-dependent, therefore **not statically
-   derivable** (§3.2). **Resolution path:** read `live_series_count` from `/api/metrics/families`
-   once the door is live.
+   derivable** (§3.2). The disclosure carries the **measured closed label space (425)** as-is,
+   with the non-derivability statement, and **no live number is asserted** (the running daemons do
+   not carry the lane). **Resolution path:** read `live_series_count` from
+   `/api/metrics/families` at the **staged boot smoke** — once, from the staged artefact — and
+   record it in the disclosure before the flip (see the stage-prep checklist §3).
 3. **The P2/P3 per-leg FAILED digests.** The contract doc records the P4 and P5 digests; the P2
    and P3 legs are recorded as "digest-equal" without their digest values, and the P2/P3 gate
    logs did not survive in `/tmp`. **Resolution path:** the Stage-A/B executor's transcripts, or
-   a re-run by the tester lane.
+   a re-run by the tester lane. **Not a blocker** — the mutation legs are separately evidenced by
+   the preserved Stage-A logs (§2.3).
 4. **The P6-G1 reconciliation pack.** The pack id `central_metrics_ledger_reconciliation` is
    **declared** by the plan; `.agents/tester/PACKS.md` is the **tester lane's** file and the
    brief forbids this lane from touching it, so the pack's **registration** (and hence its
-   execution) is the tester lane's to make. This phase produced the **docs** the pack asserts
-   against; it did not register or run the pack.
+   execution) is the tester lane's to make — **the standing pattern for every lane pack id**.
+   This phase produced the **docs** the pack asserts against; it did not register or run the
+   pack. **Not a blocker.**
