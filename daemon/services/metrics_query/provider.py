@@ -44,9 +44,6 @@ from daemon.services.metrics_query.selectors import (
 
 logger = logging.getLogger(__name__)
 
-#: The registry-native label-combination count the depth divisor uses
-#: (AM-10).  It is the count of the LIVE series, not the catalog count.
-
 
 def _default_metrics_provider() -> list[Any]:
     """The registered metric objects (the registry-level lock).
@@ -79,6 +76,11 @@ class RegistryMetricsQueryProvider:
         self._metrics_provider = metrics_provider or _default_metrics_provider
         self._sampler_interval_s = float(sampler_interval_s)
         self._publisher_cadence = publisher_cadence or cm.publisher_cadence
+        #: Whether the LAST registry read succeeded (H5).  It flips to
+        #: ``False`` only when a read RAISED — a successful read of an
+        #: empty registry leaves it ``True`` (the two are otherwise
+        #: indistinguishable on the wire).
+        self._registry_read_ok = True
 
     # ── the facts the envelope needs ────────────────────────────────────
 
@@ -92,6 +94,17 @@ class RegistryMetricsQueryProvider:
         differences).
         """
         return self._listener_enabled
+
+    @property
+    def registry_read_ok(self) -> bool:
+        """Whether the LAST registry read succeeded (H5's degraded flag).
+
+        ``False`` means the registry read RAISED — the door answered an
+        EMPTY body (byte-identical to an empty registry), so this fact
+        is the only way a client can tell the two apart.  A successful
+        read of an EMPTY registry leaves it ``True``.
+        """
+        return self._registry_read_ok
 
     @property
     def census_enabled(self) -> bool:
@@ -138,10 +151,13 @@ class RegistryMetricsQueryProvider:
 
     def _metrics(self) -> list[Any]:
         try:
-            return list(self._metrics_provider())
+            metrics = list(self._metrics_provider())
         except Exception:  # pragma: no cover — a broken registry never 500s the door
+            self._registry_read_ok = False
             logger.warning("metrics query provider: registry read failed", exc_info=True)
             return []
+        self._registry_read_ok = True
+        return metrics
 
     def _published(self, metric: Any) -> Mapping[Any, Mapping[str, Any]] | None:
         """The metric's published snapshot (lock-free, never mutated)."""

@@ -149,7 +149,6 @@ class _FakeSweep:
 def _reset_registry() -> Any:
     cm.reset_for_tests()
     w2._sweep_deltas.reset()
-    w2._readiness_observations.reset()
     yield
     cm.reset_for_tests()
     wiring_sources.unbind_sources()

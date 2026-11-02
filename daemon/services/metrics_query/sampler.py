@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable
 
 from daemon import checkpoint_metrics as cm
 from daemon.services.metrics_query.ring import TrendRingStore, series_key

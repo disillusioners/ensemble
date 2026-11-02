@@ -3758,9 +3758,13 @@ async def lifespan(app: FastAPI):
     # ── Metrics trend sampler stop (central-metrics-v1 P3) ─────────────
     # Drain order: the sampler stops FIRST — it is the LAST thing that
     # STARTS (AM-13), so it is the FIRST thing that stops.  Its own
-    # ``stop()`` is DETACHED (a stop event on a daemon thread) — the
-    # event loop is NEVER blocked on a join (the house precedent: the
-    # listener stop block below).
+    # ``stop()`` is NOT detached: it joins the sampler thread on the
+    # CALLING thread with a BOUND of ``max(5.0, interval_s)`` seconds,
+    # so the event loop is blocked on that bounded join (never an
+    # unbounded one).  The bound is what keeps a stuck adapter from
+    # wedging the shutdown — the join is given up after the bound and
+    # the drain continues.  (The LISTENER stop block below is the
+    # detached shape: it is not the precedent for the sampler.)
     _metrics_sampler = getattr(app.state, "metrics_sampler", None)
     if _metrics_sampler is not None:
         try:

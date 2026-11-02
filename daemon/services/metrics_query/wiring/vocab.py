@@ -31,7 +31,6 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Iterable
 
 # ── the reserved residual (the fold target for every disallowed value) ────
 RESERVED = "other"
@@ -268,11 +267,6 @@ def _release_versions() -> tuple[str, ...]:
 RELEASE_VERSIONS: tuple[str, ...] = _release_versions()
 
 
-def allowed(mapping: dict[str, Iterable[str]]) -> dict[str, frozenset[str]]:
-    """Freeze a label→values mapping into the registry's shape."""
-    return {str(key): frozenset(str(v) for v in values) for key, values in mapping.items()}
-
-
 # The lazily-resolved vocabularies are exposed through FUNCTIONS (the
 # import-time evaluation of the enum-derived sets would drag the
 # repository models into every importer of this module).
@@ -312,6 +306,5 @@ __all__ = [
     "WORKER_POOL_EVENTS",
     "WORKER_POOL_NAMES",
     "admission_states",
-    "allowed",
     "instance_statuses",
 ]

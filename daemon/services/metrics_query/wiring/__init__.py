@@ -50,16 +50,9 @@ from daemon.services.metrics_query.wiring.w1 import register_w1_adapters
 from daemon.services.metrics_query.wiring.w2 import register_w2_adapters
 from daemon.services.metrics_query.wiring.w3 import register_w3_adapters
 
-#: The cluster order of the registration (the sampler's stage A order).
-CLUSTER_ORDER: tuple[str, ...] = ("W1", "W2", "W3")
-
-_register_w1 = register_w1_adapters
-_register_w2 = register_w2_adapters
-_register_w3 = register_w3_adapters
-
-_register_w1()
-_register_w2()
-_register_w3()
+register_w1_adapters()
+register_w2_adapters()
+register_w3_adapters()
 
 
 def default_adapters() -> tuple[PullAdapter, ...]:
@@ -68,7 +61,6 @@ def default_adapters() -> tuple[PullAdapter, ...]:
 
 
 __all__ = [
-    "CLUSTER_ORDER",
     "DeltaAccumulator",
     "FAMILY_SPECS",
     "FamilySpec",

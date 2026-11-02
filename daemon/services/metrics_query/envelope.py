@@ -19,7 +19,7 @@ import base64
 import binascii
 import json
 import time
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 from daemon.checkpoint_metrics import VOCABULARY_VERSION
 from daemon.services.metrics_query.constants import (
@@ -29,7 +29,6 @@ from daemon.services.metrics_query.constants import (
     MAX_SNAPSHOT_SERIES,
     MAX_TOTAL_POINTS,
     QUERY_SCHEMA_VERSION,
-    RESPONSE_BYTE_CEILING,
     STALE_INTERVAL_MULTIPLIER,
     WINDOW_SECONDS,
 )
@@ -55,11 +54,20 @@ def restart_epoch() -> str:
 
 
 def activation_block(provider: MetricsQueryProvider) -> dict[str, Any]:
-    """The ``activation`` block — the posture of the three surfaces."""
+    """The ``activation`` block — the posture of the three surfaces.
+
+    ``registry_read_ok`` is the DEGRADED flag (H5): it is ``False`` only
+    when the provider's registry read raised.  A failed read answers
+    ``200`` with an EMPTY body — byte-identical to a legitimately empty
+    registry — so without this flag a client cannot tell the two apart.
+    It is ADDITIVE and DEFAULT-SAFE: a provider that does not carry the
+    fact (a duck-typed fake, any pre-H5 provider) reads as ``True``.
+    """
     return {
         "listener_enabled": bool(getattr(provider, "listener_enabled", False)),
         "census_enabled": bool(getattr(provider, "census_enabled", False)),
         "query_api": "auth-gated-always-on",
+        "registry_read_ok": bool(getattr(provider, "registry_read_ok", True)),
     }
 
 
@@ -286,29 +294,9 @@ def cursor_is_expired(
     return False
 
 
-def bound_body(
-    payload: dict[str, Any], *, byte_ceiling: int = RESPONSE_BYTE_CEILING
-) -> tuple[dict[str, Any], bool]:
-    """Bound a response body to the byte ceiling.
-
-    Returns ``(payload, truncated)``.  The body is bounded, never
-    SILENTLY truncated: the caller carries the cursor that resumes it.
-    """
-    encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    if len(encoded) <= byte_ceiling:
-        return payload, False
-    return payload, True
-
-
-def family_limit() -> int:
-    """The families-per-response ceiling."""
-    return MAX_FAMILIES
-
-
 __all__ = [
     "InvalidCursor",
     "activation_block",
-    "bound_body",
     "build_families_envelope",
     "build_series_envelope",
     "build_snapshot_envelope",
@@ -317,6 +305,5 @@ __all__ = [
     "effective_interval_s",
     "encode_cursor",
     "envelope_header",
-    "family_limit",
     "restart_epoch",
 ]

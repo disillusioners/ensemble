@@ -65,9 +65,8 @@ BYTES_PER_POINT: int = 16
 
 #: Bytes per histogram point, EXCLUDING the bucket array:
 #: ``ts f64`` (8) + ``count i64`` (8) + ``sum f64`` (8) = 24 B, plus
-#: 8 B per bucket.
-HISTOGRAM_BASE_BYTES: int = 24
-HISTOGRAM_BYTES_PER_BUCKET: int = 8
+#: 8 B per bucket.  (The ring's memory model — the two sizes are
+#: DOCUMENTATION; no runtime code reads them.)
 
 
 def compute_depth(
@@ -582,8 +581,6 @@ def series_key(name: str, label_key: Sequence[tuple[str, str]]) -> str:
 
 __all__ = [
     "BYTES_PER_POINT",
-    "HISTOGRAM_BASE_BYTES",
-    "HISTOGRAM_BYTES_PER_BUCKET",
     "HistogramTrendRing",
     "TrendRing",
     "TrendRingStore",

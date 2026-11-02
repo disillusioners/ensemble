@@ -76,7 +76,6 @@ from daemon.services.metrics_query.roster import (
 from daemon.services.metrics_query.sampler import MetricsSampler, PullAdapter
 from daemon.services.metrics_query.selectors import (
     InvalidLabelFilter,
-    format_series_selector,
     parse_series_selector,
     selector_matches,
 )
@@ -118,7 +117,6 @@ __all__ = [
     "effective_interval_s",
     "encode_cursor",
     "envelope_header",
-    "format_series_selector",
     "parse_series_selector",
     "restart_epoch",
     "roster_family_names",

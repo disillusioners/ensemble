@@ -31,7 +31,7 @@ metric, and it makes the two architect amendments STRUCTURAL:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping
 
 from daemon import checkpoint_metrics as cm
@@ -164,7 +164,16 @@ def register_family_metric(
             seam=seam,
             metrics=(name,),
         )
-    elif spec.metrics != (spec.metrics + (name,)):
+    else:
+        # NOTE: the DUPLICATE-NAME guard this branch was meant to be
+        # (``name not in spec.metrics``) is NOT implemented — it is
+        # routed to Reviewer.  The former condition
+        # (``spec.metrics != (spec.metrics + (name,))``) was a TAUTOLOGY
+        # — a length-n tuple never equals its length-(n+1) extension —
+        # so it was ALWAYS taken; it is dropped because it read as a
+        # guard while being no guard at all.  The accumulation below is
+        # UNCHANGED (the branch still fires for every new metric of an
+        # already-registered family).
         FAMILY_SPECS[family] = FamilySpec(
             family=spec.family,
             cluster=spec.cluster,

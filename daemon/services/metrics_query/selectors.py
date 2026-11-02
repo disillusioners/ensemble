@@ -20,7 +20,7 @@ invalid_label_filter`` — never a 500.
 
 from __future__ import annotations
 
-from typing import Mapping, Sequence
+from typing import Mapping
 
 from daemon.checkpoint_metrics import label_key
 
@@ -61,19 +61,6 @@ def parse_series_selector(text: str) -> tuple[str, dict[str, str]]:
     return name, labels
 
 
-def format_series_selector(name: str, labels: Mapping[str, str] | Sequence[tuple[str, str]]) -> str:
-    """Render a selector for a series (the inverse of the parser)."""
-    pairs = (
-        list(labels.items())
-        if isinstance(labels, Mapping)
-        else [(str(k), str(v)) for k, v in labels]
-    )
-    if not pairs:
-        return name
-    rendered = ",".join(f"{key}={value}" for key, value in sorted(pairs))
-    return f"{name}{{{rendered}}}"
-
-
 def selector_matches(
     metric_name: str, labels: Mapping[str, str], selector: tuple[str, dict[str, str]]
 ) -> bool:
@@ -92,7 +79,6 @@ def selector_matches(
 
 __all__ = [
     "InvalidLabelFilter",
-    "format_series_selector",
     "parse_series_selector",
     "selector_matches",
 ]

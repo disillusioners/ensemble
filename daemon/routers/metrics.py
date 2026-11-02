@@ -13,13 +13,39 @@ the read instrumentation (``checkpoint_read_*`` counters + the
 ``checkpoint_read_size_bytes`` histogram) to be OBSERVABLE from outside
 the process, and the read-path PR-2 gate needs a scrapeable baseline.
 
-SCOPE GUARD — this is the MINIMAL wiring, deliberately:
+SCOPE GUARD (the exposition route) — this is the MINIMAL wiring,
+deliberately:
 
 * ONE endpoint, calling ONE existing function;
 * NO Prometheus client dependency, NO scrape framework, NO new metric
   registry, NO per-metric filtering;
 * the response is the registry's full text exposition, exactly as
 :func:`render_metrics` produces it.
+
+THE QUERY DOOR (the three JSON routes) — a SEPARATE half of this
+module:
+
+* ``GET /api/metrics/families``, ``GET /api/metrics/snapshot`` and
+  ``GET /api/metrics/series`` are the query door.  They are the
+  READ side of the same registry, served from the query package
+  (:mod:`daemon.services.metrics_query`) behind the SAME
+  ``maintenance:read`` scope — no new scope is minted, and the scope
+  declaration rides the route's ``dependencies=[scope_required(...)]``
+  form exactly as the exposition route's does;
+* they are BOUNDED: the ``offset``/``limit`` pair pages the body, the
+  byte ceiling bounds the page, and a bounded body carries the opaque
+  ``next_cursor`` that resumes it — a bounded body is never a SILENT
+  truncation;
+* the cursor is OPAQUE and pins the evaluation instant; an invalid or
+  EXPIRED cursor is an EXPECTED condition (``400 invalid_cursor``),
+  never a 500 and never a silently answered gap;
+* the body is built OFF the event loop (the off-loop seam) and the
+  cursor-expiry probe runs inside that off-loop build — the event loop
+  never pays for the registry read or the body encode.
+
+The published contract (the wire vocabulary, the bounds and the error
+codes) lives in ``docs/architecture/metrics-query-contract.md`` — this
+docstring states the SHAPE, the doc states the CONTRACT.
 
 AUTH POSTURE — the metric registry carries INTERNAL counters, so the
 route is deliberately NOT world-readable:

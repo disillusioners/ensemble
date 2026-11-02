@@ -446,8 +446,6 @@ waiting_children_max_age_seconds = register_family_metric(
 
 # ── the accumulators (the metrics layer's own accumulation) ───────────────
 _sweep_deltas = DeltaAccumulator()
-_readiness_observations = DeltaAccumulator()
-_queue_created = DeltaAccumulator()
 
 
 # ── the F8 adapter ────────────────────────────────────────────────────────

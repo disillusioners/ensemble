@@ -161,19 +161,6 @@ def _locate_app() -> Any | None:
     return app
 
 
-def _locate_app_state() -> Any | None:
-    """The live app's ``state`` — WITHOUT importing ``daemon.api``.
-
-    The state is resolved FRESH on every call: the app's ``state``
-    object is never replaced by the daemon, but a REPLACEMENT must be
-    visible to the adapters all the same (the C-1 invariant).
-    """
-    app = _locate_app()
-    if app is None:
-        return None
-    return getattr(app, "state", None)
-
-
 def _read_app_handle(app: Any, name: str) -> Any:
     """Read a handle off the app's CURRENT state.
 
