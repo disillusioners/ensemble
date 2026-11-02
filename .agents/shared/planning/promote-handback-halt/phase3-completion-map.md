@@ -83,3 +83,60 @@
 4. **The `daemon/constants.py` seal tripwire stays red on BOTH legs** (OQ-C-24 leader ruling: NO re-pin — the pre-existing base debt stays visible); recorded in the Tier-2 pre-exclusion registry.
 5. **`test_release_journal.sh`** exceeds a 420 s per-pack cap on this host at BOTH legs (pre-existing; Phase-2 gate recorded the same); compensating pins: `test_boot_sweep_commit_and_continue.sh` + the two lane D1 packs cover the journal/disposition surface.
 6. **The BASE-only single-node hang** `tests/test_post_restart_arm_notify_drill_smoke.py::test_drill_smoke` (hangs alone at BASE; green at HEAD) — routed to the owning lane as a base-side anomaly; it never reached either digest (unresolved at BASE, green at HEAD ⇒ no net-new signal either way).
+
+## FIX-CYCLE record (2026-11-02) — the code-review council's 1C/6W/8A, ONE cycle
+
+**Council:** REJECT (unanimous, 2 models / 3 rounds) · **Leader:** accepted ALL findings · **Scope:** ONE fix cycle, then a scoped delta re-review on the preserved council context. Commits `2446ffa22` (F1) · `c8338b619` (F3/F9/F11) · `dca5b974a` (F5/F8) · `307e69358` (F6/F7) · `aa709e377` (F2/F4/A5/A6/A7) — each with its plan-doc amendment in the SAME commit (the leader instruction).
+
+### Per-finding disposition
+
+| # | Finding | Disposition | Site |
+|---|---|---|---|
+| **F1** | 🔴 C1 — the T15 run-loop path acquires the pipeline lock and never releases it | **FIXED** — `_JS_SWEEP_LOCK_OWNED` local ownership flag (set at the one self-acquire site, cleared on release); `_js_sweep_release` releases caller-held OR helper-acquired; EVERY helper exit path releases (incl. the two GREEN arms that leaked); a belt-and-braces release at the run-loop call site; the boot path unchanged. Pin **P-32 re-shaped** (F1a defer / F1b commit-close / F1c closed-txn / F1d the call-site net) | `launcher.sh` (`_js_sweep_release`, `_js_sweep_flipped_disposition`, `run_loop`) |
+| **F2** | 🟡 W3 — the daemon reads P9 outside the journal lock | **FIXED** — `_closer_authorized_under_lock` re-checks the authorization against the ALREADY-LOADED under-lock history in **BOTH** arms (no extra read; the same `uj.history_entry_matches` contract); new reason `no_intent_flip_under_lock`; the FALSE "AM-P2-3 ALREADY CORRECT" plan row corrected. Pins `test_f2_*` ×3 | `daemon/services/upgrade_journal_sweep.py` |
+| **F3** | 🟡 W1 — a probe-configuration failure counted as an observation | **FIXED** — the FIFTH class `unprobeable` (no-port / non-numeric / out-of-range); never counted, never rollback-eligible (**rung 0 defers a `rollback_requested` rather than executing it unverified** — disclosed deviation, justified in the plan fold); greppable defer marker + WARN. Pin **P-5u** | `launcher.sh` (`_js_serving_probe`, the ladder) |
+| **F4** | 🟡 W2 — the boot-grace not coupled to `HANDBACK_VERIFY_BUDGET_S` | **FIXED** — the effective grace is `max(UPGRADE_CLOSER_BOOT_GRACE_S, HANDBACK_VERIFY_BUDGET_S)`; the budget read from the env (garbage ⇒ ignored); the clamp logged ONCE at WARNING with the effective value; the knob `export`ed beside its definition in `lib.sh` (the transport = the .env export seam + lib.sh children). Pins `test_f4_*` ×2 | `upgrade_journal_sweep.py` + `scripts/upgrade/lib.sh:225` |
+| **F5** | 🟡 W4 — `=0` does not restore today's behaviour | **FIXED** (with a disclosed DEVIATION, see below) — the escape is extracted into `_js_sweep_operator_escape`; the `=0` arm runs **rung 2 THEN the chain** (the BASE order, verified at base `941cb6321:984-1122` vs `:1129`); the docstrings corrected; **P-30 extended** (prev.rollback_safe:false + intent_flip under `=0` ⇒ the escape fires, no halt; + the chain-still-fires leg) | `launcher.sh` |
+| **F6** | 🟡 W5 — unbounded `sweep_deferred` growth disarms the never-green chain | **FIXED** — **write-once per (txn, reason)** via `_js_history_has_defer_reason` (per-entry, comma-anchored — the defer writer's `=`-form detail); the log line still fires every observation; the counter still tallies every observation. Pin **F6** (one row per (txn,reason) + `absent=2` + the ceiling still fires) | `launcher.sh` (`_js_serving_defer`) |
+| **F7** | 🟡 W6 — the sticky `green=1` flag is never set | **AMENDED (leader-adopted), NOT implemented** — the `green=` line is REMOVED from the counter format; `never-green-observed` is the journal check alone; the safety argument recorded (the qualifying predicate's `intent_flip` conjunct carries the GREEN ∧ ¬intent_flip shape). **P-24 EXTENDED** (the GREEN ∧ ¬intent_flip leg + the format assertion). Plan `AM-P2-10.3a` | `launcher.sh` (`_js_defer_counter_write`) |
+| **F8** | 🟢 A1 — two `intent_flip` readers | **FIXED** — `_js_history_has_intent_flip` **delegates** to `_js_history_has_event_for_target` (one reader, one contract); **R-15 closed**. Pin **F8** (positive control + prefix collision + cross-entry through the escape path + the `=0` arm sharing the reader) | `launcher.sh` |
+| **F9** | 🟢 A2 — the probe port source | **FIXED** — `_js_sweep_probe_port`: PORT is the daemon's effective port (**verified in-tree**: the yaml `daemon.port: ${PORT:-8088}` interpolation wins over the `DAEMON_PORT` env — the pydantic init source beats env, `D(port=8088).port == 8088` with `DAEMON_PORT=9999`); a divergence is logged LOUDLY; no port is guessed. Pin **P-5v** | `launcher.sh` |
+| **F10** | 🟢 small items | A4 **fixed** (the docstring says P1–P9); A5 **fixed** (the verdict WARNING mirrors the write-once; repeats at DEBUG); A6 **fixed** (the commit pre-checks `current`/`previous` BEFORE the first write — no half-applied commit); A7 **fixed** (the per-TARGET semantics + the emit-before-open ordering invariant stated in the reader docstring and at the gate); A8 **fixed** (the P3-PIN-19 relabel below); A3 **DISCLOSED, NO ACTION — the premise is FALSE** (see below) | `upgrade_journal_sweep.py`, `upgrade_journal.py`, this map |
+| **F11** | portability — the fd-open can kill the launcher | **FIXED** — the fd-open + the whole `/dev/tcp` probe body run in a SUBSHELL (`exit`-safe, the caller's fd 3 never clobbered). Pin **P-5w** (the behavioural fd-isolation leg — RED at the pre-fix tip — + the execfail-survival leg + the structural assertion) | `launcher.sh` (`_js_serving_probe`) |
+| **F12** | leader decisions | (a) the Tier-2 artifact gap is **OWNED BY THE TESTER LANE** (below); (b) A1 → F8 folded ✓; (c) W6 → F7 ✓ | — |
+
+### The F5 deviation (disclosed, with justification)
+
+The council's literal shape — "run rung 2 **BEFORE** the kill-switch check" — evaluates the escape FIRST in **both** switch states, which makes the `=1` ladder's escape **preempt rung 1** (the serving-green commit-close). In the (prev.rollback_safe=false ∧ serving-green ∧ wrongly-quarantined) shape that would **skip `quarantine_cleared_serving_green`** — re-introducing tonight's *quarantine-refusal* punishment the lane exists to fix (the escape's commit makes no serving-green claim and therefore no clearance). Implemented instead: **the escape runs first only in the `=0` (legacy) arm** (`legacy =0 ⇒ rung 2 → chain` — the BASE order, exactly as the council's parenthetical states), while the `=1` state keeps the canonical rungs **0/1/2/3** (`=1 ⇒ rungs 0/1/2/3` — exactly as the council's parenthetical states). BOTH clauses of the council's prescription are satisfied; the `=1` ordering is the deviation, taken to protect the P-7/P-8 quarantine-clearance property.
+
+### The A3 correction (the council's premise is false — disclosed, byte-preserved)
+
+The finding asserts the BSD arm's `date -jur <epoch> +'%Y-%m-%dT%H:%M:%SZ'` emits a **TZ-local** stamp. The `-jur` cluster is BSD `date`'s **`-j -u -r`** — the **`-u` flag (UTC) is IN the cluster** (`date(1)` BSD/macOS: `-u` = display in UTC; `-j` = don't set; `-r <seconds>` = the epoch). The stamp is therefore **UTC**, matching the `Z` suffix — no TZ=UTC change is needed and none is applied (the arm stays byte-preserved per the plan's Option A). The pre-existing residual #2 in this map carried the same false premise and is corrected by this note. If a maintainer wants belt-and-braces, the shape `TZ=UTC date -jur …` is behaviour-identical on both BSDs — routed as a no-action note, not a change.
+
+### OQ-C-06 — the council's adjudication, RECORDED (the brief's verbatim record)
+
+**Premise FALSE** — no 6h `in_flight` reaper exists (`21600` → zero hits in-tree; only `DEFAULT_REAPER_TIMEOUT_SECONDS=660` executor-wait and `EXECUTOR_STALENESS_WINDOW_S=900` executor-liveness); a **tempfail-75** child exit is NOT counted (the T15 hook's own arm); a **clean-exit-0** child exit yields exactly ONE counted observation (`Restart=on-failure` — the launcher exits 0 on clean stop, the next **operator** start is the next observation); the shapes are **system-unbounded but OPERATOR-bounded** (the counter persists per txn identity ⇒ ≤3 operator restarts to the ceiling); the runbook §6 row (`:142`) already delivers the backstop ⇒ **RESIDUAL, disclosed, explicitly NOT a blocker**, per the leader ruling. The daemon-side closer CANNOT bound these shapes (it is in-process and the daemon is dead in them) ⇒ **future hardening must be HOST-LEVEL**.
+
+### P3-PIN-19 — RELABELLED (A8)
+
+The row label said "the promote-wake reader is **run_id-scoped**". The implemented mechanism is **option (b): the explicit wake-set exclusion** (`WAKE_EXCLUDED_EVENTS` — `serving_green_commit` is excluded from the wake set so an unrelated commit-close cannot drop a pending promote-wake). The pin and the implementation are unchanged; only the row's mechanism label is corrected (this fold).
+
+### The Tier-2 whole-tree artifact — OWNED BY THE TESTER LANE (F12(a))
+
+The council's one material doubt: the lane's **net-new-reds=0** claim for the Phase-3 Tier-2 leg is **doc-attested, not artifact-attested** (no `.agents/tester/RESULTS/` artifact exists). Per the leader decision, the tester lane owns **both** the Tier-2 artifact and any whole-tree re-run for this fix cycle — this lane does NOT fabricate a RESULTS artifact and does NOT re-run the whole tree (no Tier-2 in this cycle). The scoped Tier-1 legs below are the cycle's gate.
+
+### The scoped Tier-1 gate legs (this fix cycle — the touched surface only)
+
+| Pack | HEAD | Pre-fix tip `eac1492c5` | Wall |
+|---|---|---|---|
+| `tests/packs/promote_handback_halt_serving_green_test.sh` | **128/0** | 97P/**17F** (the mutation evidence — every new pin RED at the tip, all launcher legs GREEN at HEAD) | ~4 min |
+| `tests/test_launcher.sh` | 216P/0F/1S | 216P/0F/1S (unchanged) | 92 s |
+| `tests/test_boot_sweep_commit_and_continue.sh` | 50/0 | 50/0 (unchanged) | 31 s |
+| `tests/test_supervision_stop_handback.sh` (+ the BASE leg `HB_BASE_LIBSH=941cb6321`) | **166/0/0 skipped** (the base leg runs green: the base verifier still gives up on the same slow-boot fixture — the incident's shape) | — | 334 s |
+| `tests/test_launcher_cooldown_arm.sh` | 22/0 | — (documented RED-at-BASE by design) | ~10 s |
+| `tests/test_pipeline_scripts_floor_stamp.sh` | 22/0 (stamp @ `aa709e377`) | 22/0 | 1 s |
+| `tests/unit/tools/test_upgrade_serving_green_closer.py` | **27/27** | 21P/**6F** (the F2/F4/A5/A6 mutation evidence) | ~9 s |
+| `tests/unit/tools/test_upgrade_journal_sweep_liveness.py` | 11/11 (in the 38 below) | — | — |
+| the standing daemon set (`test_post_restart_arm_notify_sweep.py` + `test_upgrade_tools.py`) | **210/210** | — | ~16 s |
+
+**Net-new reds verdict: 0** — every previously-green plan pin stayed green (94→128 shell, 20→27 pytest, 50/50, 22/22, 22/22, 216/216); every new pin is RED at `eac1492c5` and GREEN at HEAD. Env: the per-variable scrub (`env -u POSTGRES_DB …` — the ambient shell here IS prod-poisoned and the packs' fence caught it, as designed), no frozen-binary boot (P3-PIN-15 stays NON-APPLICABLE — no pack in this cycle boots a frozen binary).
