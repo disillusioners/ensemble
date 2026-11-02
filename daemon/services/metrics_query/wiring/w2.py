@@ -503,7 +503,10 @@ def adapt_f9(sampler: Any) -> None:
     for component in vocab.READINESS_COMPONENTS:
         failure_class = str(classes.get(component, "unknown"))
         healthy = failure_class == "ok"
-        readiness_component_state.set(0 if healthy else 1, component=component)
+        # 1 = the component is HEALTHY (the conventional "is up"
+        # semantics); 0 = it is degraded.  The failure CLASS itself is
+        # carried by the probe_total counter's outcome label.
+        readiness_component_state.set(1 if healthy else 0, component=component)
         try:
             readiness_failure_streak.set(int(streaks.get(component, 0)), component=component)
         except (TypeError, ValueError):
