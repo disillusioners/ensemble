@@ -334,3 +334,50 @@ cages **108→111 / 37 / 33** · `max_points` 240 with the **≤ 12 000 points �
 canonical frozen shape token-identical at 4/4 sites · broken markdown table rows **0** ·
 architect files v1/v2 **untouched** (sha `d0f573c3…` / `199ef838…`) · shared main checkout **untouched** ·
 **no version string, no promote**.
+
+## PLAN-AUTHORITY — the ordering/census pins (D-e)
+
+**The durable rule:** every **ordering** or **census** pin is quoted from the plan set
+**VERBATIM, with its `file:line`**. A dispatch brief, a task summary, a chat instruction or a
+paraphrase is **never** the authority for an ordering pin — **the plan row is**.
+
+**The authoritative order row — `phase3-plan.md:36` (task 3.4, AM-13).** Verbatim:
+
+> start the sampler **LAST of the metrics trio** — after the census block (`api.py:2467-2483`),
+> and **the listener starts FIRST and must NOT be reordered** (AM-13 corrects the earlier
+> un-implementable "after census, before listener" instruction); on shutdown, the sampler stops
+> **FIRST**, before the listener stop (`api.py:3700-3709`) with the detached-join discipline
+> (listener `stop()` precedent `:551-593`).
+
+and its acceptance clause, verbatim:
+
+> The wiring test asserts the exact start order (listener → census → sampler) and the reverse
+> stop order (sampler → listener)
+
+**So the order IS `listener → census → sampler`** — the sampler is **LAST of the trio** — with
+the **reverse stop order `sampler → listener`**. The earlier "census before listener start"
+phrasing is **EXPLICITLY FORBIDDEN**: the row quoted above says so in its own words ("AM-13
+corrects the earlier un-implementable 'after census, before listener' instruction"), and the
+plan's own risk row records it — `plan-overview.md:511` — *"Lifespan start order ('before the
+listener start' was un-implementable)"*, mitigated by *"Sampler starts **LAST** of the trio;
+stops **FIRST** (AM-13)"*.
+
+**The precedent (recorded, per the council):** *the developer's Stage-B dispatch brief inverted
+this pin; the code followed the plan and was RIGHT; the brief was WRONG.* The brief's own text is
+**not** in the repository, so this is recorded as the **council's ruling**, not as a quote of the
+brief — the quotable authority is the plan row above.
+
+**Why the rule exists (the pin surface):** `phase3-plan.md:92` (`P3-M5`) plants the defect that
+the order forbids — *"the **listener start moved AFTER the census block** (the order AM-13
+forbids: the listener starts FIRST, the sampler starts LAST of the trio)"* — and
+`phase3-plan.md:98` (`P3-M10`) plants the un-implementable form — *"the sampler start moved
+before the listener start (the un-implementable instruction)"*. Both are **RED-when-planted**
+pins on the D1 pack `metrics_query_api_wiring`, so an inverted brief surfaces as a **RED leg**,
+never as a shipped inversion. That is the whole point of quoting the row: the brief is not the
+authority, and the authority is machine-checked.
+
+**Census pins are covered by the same rule.** The census-related pins in the same row — the
+census block at `api.py:2467-2483`, the check-site census (exactly **2**), and the
+`CensusSampler.gated` public property (the read-through of the EXISTING private `_gate()`,
+**no new check site**) — are quoted from `phase3-plan.md:36` and `decisions.md` §D1/§D3 with
+their `file:line`, never from a summary.
