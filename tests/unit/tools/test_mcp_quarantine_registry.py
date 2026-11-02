@@ -131,10 +131,24 @@ def test_plane_override_consults_super_first():
 
 
 def test_quarantine_skips_plane_too(monkeypatch):
-    """A quarantined plane is unavailable even with its own gates met."""
+    """A quarantined plane is unavailable even with its own gates met.
+
+    The workspace resolver (E3 gate, plane-pm-issue-tools) must permit the
+    configured slug, so the env below mirrors the plane lane's own
+    availability cases (ENSEMBLE_SELF_ENV=dev + e2e slug + ensemble_dev db)
+    before the quarantine is recorded. Without these the resolver refuses
+    and is_available() is False for the wrong reason.
+    """
+    from daemon.plane_workspace import reset_resolution_cache
+
     monkeypatch.setenv("PLANE_MCP_URL", "https://plane.example.com")
     monkeypatch.setenv("PLANE_MCP_API_KEY", "test-key")
     monkeypatch.delenv("PLANE_MCP_ENABLED", raising=False)
+    monkeypatch.setenv("ENSEMBLE_SELF_ENV", "dev")
+    monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", "e2e")
+    monkeypatch.setenv("POSTGRES_DB", "ensemble_dev")
+    monkeypatch.setenv("POSTGRES_HOST", "localhost")
+    reset_resolution_cache()
 
     definition = PlaneServerDefinition()
     assert definition.is_available() is True
