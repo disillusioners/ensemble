@@ -1352,10 +1352,37 @@ _js_manifest_field() {
 # _js_sweep_release <install_dir> <lock_held> — release the D5 lock ONLY if
 # this call owns it (lock_held=1 ⇒ the caller — _journal_sweep — took it;
 # lock_held=0 ⇒ this helper took it itself, the T15 run-loop path).
+#
+# F1 (code-council CRITICAL, fix cycle): the helper's OWN acquisition is
+# tracked by `_JS_SWEEP_LOCK_OWNED` — SET at the one self-acquire site in
+# `_js_sweep_flipped_disposition` and CLEARED here on release. A blanket
+# "owner == $$" test is NOT sufficient: the launcher-boot path holds the
+# SAME lock (owner == $$ too — the launcher IS the process) across a
+# broader scope, so the helper must release EXACTLY what IT acquired.
+#
+# Why this is load-bearing: without it the T15 run-loop path leaked the
+# lock with owner=$$ (the LAUNCHER pid — alive; the launcher IS the
+# systemd ExecStart) ⇒ BOTH stale-break paths need a DEAD owner ⇒ they
+# never fire ⇒ every later promote is refused pipeline-busy ⇒ the
+# daemon-side closer is refused `lock_busy` on EVERY tick ⇒ with the
+# closer inert the launcher ladder accumulates AMBIGUOUS observations ⇒
+# after CEILING the auto-rollback chain rolls back + QUARANTINES a
+# SERVING-GREEN release — tonight's class, re-armed by its own fix.
+#
+# The global (not a function-local) is deliberate: the T15 call site in
+# `run_loop` carries a belt-and-braces release that is a NO-OP unless the
+# helper left the flag set (a future missed exit path degrades to "the
+# call site cleans up" instead of "the lock leaks forever").
+_JS_SWEEP_LOCK_OWNED=0
 _js_sweep_release() {
     local install_dir="$1" lock_held="${2:-1}"
     if [ "$lock_held" = "1" ]; then
         _js_lock_release "$install_dir"
+        return 0
+    fi
+    if [ "${_JS_SWEEP_LOCK_OWNED:-0}" = "1" ]; then
+        _js_lock_release "$install_dir"
+        _JS_SWEEP_LOCK_OWNED=0
     fi
     return 0
 }
@@ -1558,6 +1585,10 @@ _js_sweep_flipped_disposition() {
     local journal="$install_dir/releases/state.json"
     local json inf kind target started flipped owner prev age
     local started_epoch now hb hb_stale owner_dead cur_link jcur run_id
+    # F1: the helper-owned-lock flag starts CLEAR on every call (see
+    # `_js_sweep_release`). The belt-and-braces release at the T15 call
+    # site depends on this reset.
+    _JS_SWEEP_LOCK_OWNED=0
     local probe_out probe_class probe_detail intent_flip=0 request_present=0
     local counter_path absent mismatch unready broken green total
     local jsize displaced_v
@@ -1608,6 +1639,9 @@ _js_sweep_flipped_disposition() {
         if ! _js_lock_acquire "$install_dir"; then
             return 0
         fi
+        # F1: record LOCAL ownership — `_js_sweep_release` releases it on
+        # EVERY exit path of this helper (and only for lock_held=0).
+        _JS_SWEEP_LOCK_OWNED=1
     fi
     # re-read + revalidate UNDER the lock (the launcher's discipline — the
     # txn OBJECT is the identity: any change ⇒ the owner acted ⇒ no-op)
@@ -1692,6 +1726,9 @@ _js_sweep_flipped_disposition() {
                     "$prev" "$age" "$owner" "$kind" "rollback_requested" "$lock_held"
                 ;;
         esac
+        # F1: rung 0's GREEN arms commit-close / defer — BOTH must release
+        # the lock the helper took (a second release is a no-op).
+        _js_sweep_release "$install_dir" "$lock_held"
         return 0
     fi
     # ── rung 1: the serving probe ──
@@ -1700,6 +1737,8 @@ _js_sweep_flipped_disposition() {
             _js_serving_commit_close "$install_dir" "$journal" "$target" "$prev" \
                 "$(_js_json_field "$inf" "displaced_version" 2>/dev/null)" "$run_id" "$age" \
                 "$owner" "$probe_detail" "serving-green"
+            # F1: EVERY exit path of the helper releases the lock IT took.
+            _js_sweep_release "$install_dir" "$lock_held"
             return 0
         fi
         if [ "$intent_flip" != "1" ]; then
@@ -1708,11 +1747,13 @@ _js_sweep_flipped_disposition() {
                 "the target is serving green but there is NO intent_flip evidence — the flip is unauthorized: never commit-close an unauthorized flip, never roll back a serving-green release"
             _notify_once "sweep-defer-unauthorized" \
                 "DEFERRED: stale flipped txn (target=$target) is SERVING GREEN but the journal carries NO intent_flip evidence for it — the flip is unauthorized: not committed and not rolled back. The txn stays OPEN for operator resolution — see $install_dir/releases/state.json"
+            _js_sweep_release "$install_dir" "$lock_held"
             return 0
         fi
         _js_serving_defer "$journal" "$target" "$run_id" "$age" \
             "green-owner-alive" \
             "the target is serving green but its owner is still alive — the txn belongs to a live owner; not the sweep's to dispose of"
+        _js_sweep_release "$install_dir" "$lock_held"
         return 0
     fi
     # ── rung 2: the OPERATOR ESCAPE (the existing boot_sweep_commit_and_continue
@@ -2347,6 +2388,12 @@ run_loop() {
         # txn ⇒ no action.
         _JS_SWEEP_HOOK_EXIT="$child_exit"
         _js_sweep_flipped_disposition "$INSTALL_DIR" 0
+        # F1 belt-and-braces (code-council CRITICAL): the helper releases
+        # the lock IT acquired on every exit path; this second call is a
+        # NO-OP unless the helper left the ownership flag set (a future
+        # missed exit path degrades to "the call site cleans up" instead
+        # of "the lock leaks with owner=$$ — alive — forever").
+        _js_sweep_release "$INSTALL_DIR" 0
         _JS_SWEEP_HOOK_EXIT=0
 
         case "$verdict" in

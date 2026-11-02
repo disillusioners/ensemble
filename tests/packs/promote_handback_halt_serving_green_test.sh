@@ -123,6 +123,24 @@ run_sweep() {
     ' 2>&1
 }
 
+# run_hook <fix> [port] [child_exit] — drive the T15 run-loop HOOK's own
+# path: the flipped-branch helper called with lock_held=0, i.e. it TAKES
+# THE PIPELINE LOCK ITSELF. Deliberately does NOT mimic the call site's
+# belt-and-braces release — the pin proves the HELPER releases what it
+# acquired.
+run_hook() {
+    local fix="$1" port="${2:-19999}" child_exit="${3:-0}"
+    INSTALL_DIR="$fix" PORT="$port" \
+    SWEEP_STALE_S=0 HEARTBEAT_STALE_S=0 LOCK_HEARTBEAT_S=30 LOCK_STALE_S=300 \
+    SWEEP_DEFER_CEILING="${SWEEP_DEFER_CEILING:-3}" \
+    bash -c '
+        . "'"$REPO_ROOT"'/launcher.sh" >/dev/null 2>&1
+        _JS_SWEEP_HOOK_EXIT="'"$child_exit"'"
+        _js_sweep_flipped_disposition "$INSTALL_DIR" 0
+        echo "hook-rc=$?"
+    ' 2>&1
+}
+
 # free_port — a free TCP port on the loopback (never a fixed/privileged one).
 free_port() {
     python3 - <<'PY'
@@ -816,6 +834,67 @@ case "$P32_SRC" in
     *) _pass "P-32 the hook does NOT clear a stale pre-flip txn" ;;
 esac
 assert_contains "P-32 the run loop calls the flipped-branch helper" '_js_sweep_flipped_disposition "$INSTALL_DIR" 0' "$(cat "$REPO_ROOT/launcher.sh")"
+
+# F1 (code-council CRITICAL) — THE LOCK-ABSENCE PIN. The P-32 legs above
+# are INSUFFICIENT for the lock: the idempotence leg drives
+# `_journal_sweep` (lock_held=1 — the caller owns the lock), never the
+# hook's lock_held=0 path where the HELPER takes the lock itself. Pre-fix
+# that path leaked releases/rollback.lock.d with owner=$$ (the launcher —
+# ALIVE) ⇒ no stale-break could ever fire ⇒ every later promote refused
+# pipeline-busy ⇒ the daemon closer lock_busy on every tick ⇒ the ladder
+# accumulated to the ceiling ⇒ a SERVING-GREEN release rolled back +
+# quarantined. Drive the hook's OWN path.
+f1_lock_absent() {
+    local name="$1" fix="$2"
+    if [ -e "$fix/releases/rollback.lock.d" ]; then
+        _fail "$name" "lock ABSENT after the hook" \
+            "present: $(ls -d "$fix"/releases/rollback.lock.d 2>/dev/null)"
+    else
+        _pass
+    fi
+}
+
+# F1a — the DEFER exit path (an ambiguous observation, no listener)
+F1A_FIX="$(mktemp -d -t f1a.XXXXXX)"; _register_fixture "$F1A_FIX"
+make_install_fixture "$F1A_FIX" "$TARGET" "$PREV" "true"
+seed_journal "$F1A_FIX" "$TARGET" "$PREV" "true" "1"
+ln -sfn "releases/$TARGET" "$F1A_FIX/current"
+printf 'PORT=19999\n' > "$F1A_FIX/.env"
+F1A_OUT="$(run_hook "$F1A_FIX" 19999 0)"
+assert_contains "F1a the hook actually ran the disposition (a defer row landed)" '"event":"sweep_deferred"' "$(cat "$F1A_FIX/releases/state.json")"
+f1_lock_absent "F1a the T15 hook path (defer) releases the pipeline lock" "$F1A_FIX"
+rm -rf "$F1A_FIX"
+
+# F1b — the COMMIT-CLOSE exit path (serving green + intent_flip): the
+# green arms returned WITHOUT a release pre-fix, a second leak site.
+F1B_FIX="$(mktemp -d -t f1b.XXXXXX)"; _register_fixture "$F1B_FIX"
+make_install_fixture "$F1B_FIX" "$TARGET" "$PREV" "true"
+seed_journal "$F1B_FIX" "$TARGET" "$PREV" "true" "1"
+ln -sfn "releases/$TARGET" "$F1B_FIX/current"
+printf 'PORT=19999\n' > "$F1B_FIX/.env"
+F1B_PORT="$(start_listener green 9.9.9-test-target)"
+run_hook "$F1B_FIX" "$F1B_PORT" 0 >/dev/null
+assert_contains "F1b the hook committed serving-green on this leg" '"event":"serving_green_commit"' "$(cat "$F1B_FIX/releases/state.json")"
+f1_lock_absent "F1b the T15 hook path (commit-close) releases the pipeline lock" "$F1B_FIX"
+rm -rf "$F1B_FIX"; cleanup_listeners
+
+# F1c — the pre-flip / already-closed fast path must not create a lock at
+# all (no txn ⇒ nothing to dispose of)
+F1C_FIX="$(mktemp -d -t f1c.XXXXXX)"; _register_fixture "$F1C_FIX"
+make_install_fixture "$F1C_FIX" "$TARGET" "$PREV" "true"
+cat > "$F1C_FIX/releases/state.json" <<EOF
+{"current":"$PREV","previous":"$PREV","in_flight":null,"rollback_window_count":{"24h":0,"window_start":null},"cooldown_until":null,"quarantined":[],"history":[]}
+EOF
+printf 'PORT=19999\n' > "$F1C_FIX/.env"
+run_hook "$F1C_FIX" 19999 0 >/dev/null
+f1_lock_absent "F1c the hook on a closed txn takes no lock" "$F1C_FIX"
+rm -rf "$F1C_FIX"
+
+# F1d — STRUCTURAL: the belt-and-braces release at the run-loop call site
+# exists (the net that degrades a future missed helper exit path from
+# "the lock leaks forever" to "the call site cleans up").
+assert_contains "F1d the run-loop hook carries the belt-and-braces release" \
+    '_js_sweep_release "$INSTALL_DIR" 0' "$(cat "$REPO_ROOT/launcher.sh")"
 
 # idempotence: a second helper call on a closed txn is a no-op
 P32_FIX="$(mktemp -d -t p32.XXXXXX)"; _register_fixture "$P32_FIX"
