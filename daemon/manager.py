@@ -104,6 +104,10 @@ from .mcp.builtin_servers import (
     get_registry as get_mcp_registry,
     is_builtin_disabled,
 )
+from .mcp.builtin_servers.base import (
+    CAUSE_DELIBERATELY_DISABLED,
+    CAUSE_WORKSPACE_REFUSED,
+)
 from .plane_workspace import current_plane_workspace
 from .mcp.warmup_pool import McpWarmupPool, get_mcp_warmup_pool, build_pooled_stdio_config
 from .mcp import warmup_pool as _warmup_pool_module
@@ -3106,7 +3110,7 @@ class InstanceManager:
                         else "; no agent references it via mcp_full_access"
                     )
                     cause = definition.unavailability_cause()
-                    if cause == "workspace-refused":
+                    if cause == CAUSE_WORKSPACE_REFUSED:
                         reason = definition.unavailable_reason() or (
                             "workspace resolution refused"
                         )
@@ -3145,7 +3149,7 @@ class InstanceManager:
                                 reason,
                                 agents_part,
                             )
-                    elif cause == "deliberately-disabled":
+                    elif cause == CAUSE_DELIBERATELY_DISABLED:
                         # An operator decision is NOT an operational
                         # warning (P5c: the deliberately-disabled cause
                         # produces no WARNING). The one-line notice is
@@ -3448,7 +3452,7 @@ class InstanceManager:
                 )
             elif definition is not None and (
                 is_builtin_disabled(server_name)
-                or definition.unavailability_cause() == "deliberately-disabled"
+                or definition.unavailability_cause() == CAUSE_DELIBERATELY_DISABLED
             ):
                 logger.debug(
                     "Agent(s) %s declare(s) mcp_full_access ['%s'] but the "

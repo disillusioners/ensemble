@@ -62,7 +62,13 @@ import logging
 import os
 from typing import Any
 
-from daemon.mcp.builtin_servers.base import BuiltinServerDefinition
+from daemon.mcp.builtin_servers.base import (
+    CAUSE_AVAILABLE,
+    CAUSE_DELIBERATELY_DISABLED,
+    CAUSE_UNAVAILABLE,
+    CAUSE_WORKSPACE_REFUSED,
+    BuiltinServerDefinition,
+)
 from daemon.mcp.config import _sanitize_quoted_url, _strip_wrapping_quotes
 from daemon.plane_workspace import (
     PlaneWorkspaceResolution,
@@ -349,27 +355,27 @@ class PlaneServerDefinition(BuiltinServerDefinition):
         """
         if not super().is_available():
             return (
-                "unavailable",
+                CAUSE_UNAVAILABLE,
                 "unavailable (quarantined for this boot or package missing)",
                 None,
             )
         if not _mcp_kill_switch_enabled():
             return (
-                "deliberately-disabled",
+                CAUSE_DELIBERATELY_DISABLED,
                 "deliberately disabled by kill-switch (PLANE_MCP_ENABLED=false)",
                 None,
             )
         url, api_key = cls._env_presence()
         if not (url and api_key):
-            return ("unavailable", "missing environment configuration", None)
+            return (CAUSE_UNAVAILABLE, "missing environment configuration", None)
         resolution = current_plane_workspace()
         if not resolution.allowed:
             return (
-                "workspace-refused",
+                CAUSE_WORKSPACE_REFUSED,
                 resolution.reason or "workspace resolution refused",
                 resolution,
             )
-        return ("available", None, resolution)
+        return (CAUSE_AVAILABLE, None, resolution)
 
     @classmethod
     def is_available(cls) -> bool:
@@ -416,7 +422,7 @@ class PlaneServerDefinition(BuiltinServerDefinition):
         """
         cause, _reason, resolution = cls._gate_state()
         # The kill-switch notice fires ONLY in the kill-switch branch.
-        if cause == "deliberately-disabled":
+        if cause == CAUSE_DELIBERATELY_DISABLED:
             cls._log_kill_switch_once()
         # R-2 (P3-A): the ONE-SHOT envelope notice — label + source +
         # effective slug, NEVER the reason (the skip WARNING owns that).
@@ -425,7 +431,7 @@ class PlaneServerDefinition(BuiltinServerDefinition):
         # refused outcome, and for neither short-circuit.
         if resolution is not None:
             cls._log_envelope_notice_once(resolution)
-        return cause == "available"
+        return cause == CAUSE_AVAILABLE
 
     @classmethod
     def _log_kill_switch_once(cls) -> None:

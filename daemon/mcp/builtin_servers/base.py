@@ -9,6 +9,30 @@ from typing import Any, ClassVar
 logger = logging.getLogger(__name__)
 
 
+# ── The unavailability-cause vocabulary ──────────────────────────────────
+#
+# The fixed set of causes a builtin can be unavailable for (see
+# ``BuiltinServerDefinition.unavailability_cause``). They live HERE so
+# the definition, the manager's skip site and the cross-check all speak
+# ONE vocabulary — a bare literal in two places is how the two drift
+# apart.
+
+#: The builtin is up.
+CAUSE_AVAILABLE = "available"
+
+#: An operator switch is OFF (a deliberate decision, NOT an operational
+#: warning).
+CAUSE_DELIBERATELY_DISABLED = "deliberately-disabled"
+
+#: The workspace policy refused the integration (a POLICY refusal,
+#: never rendered as a missing-env-var case).
+CAUSE_WORKSPACE_REFUSED = "workspace-refused"
+
+#: Unexpectedly unavailable (missing configuration, missing package,
+#: quarantined).
+CAUSE_UNAVAILABLE = "unavailable"
+
+
 class BuiltinServerDefinition(ABC):
     """Abstract base class for built-in MCP server definitions."""
 
@@ -223,21 +247,23 @@ class BuiltinServerDefinition(ABC):
     def unavailability_cause(cls) -> str:
         """The CAUSE of unavailability — one of the fixed vocabulary:
 
-        * ``"available"`` — the builtin is up;
-        * ``"deliberately-disabled"`` — an operator switch is OFF (a
-          deliberate decision, NOT an operational warning);
-        * ``"workspace-refused"`` — the workspace policy refused the
-          integration (a POLICY refusal, never rendered as a
-          missing-env-var case);
-        * ``"unavailable"`` — unexpectedly unavailable (missing
-          configuration, missing package, quarantined).
+        * ``CAUSE_AVAILABLE`` (``"available"``) — the builtin is up;
+        * ``CAUSE_DELIBERATELY_DISABLED`` (``"deliberately-disabled"``) —
+          an operator switch is OFF (a deliberate decision, NOT an
+          operational warning);
+        * ``CAUSE_WORKSPACE_REFUSED`` (``"workspace-refused"``) — the
+          workspace policy refused the integration (a POLICY refusal,
+          never rendered as a missing-env-var case);
+        * ``CAUSE_UNAVAILABLE`` (``"unavailable"``) — unexpectedly
+          unavailable (missing configuration, missing package,
+          quarantined).
 
         The manager's skip site (R-3) uses this to pick the message
         shape; the cross-check (R-4) uses it to separate the
         deliberately-off case (debug line) from the policy-refused case
         (stays WARNING). Base default: derived from ``is_available``.
         """
-        return "available" if cls.is_available() else "unavailable"
+        return CAUSE_AVAILABLE if cls.is_available() else CAUSE_UNAVAILABLE
 
     def get_base_config(self) -> dict[str, Any]:
         """
