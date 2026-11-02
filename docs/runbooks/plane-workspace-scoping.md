@@ -43,6 +43,15 @@ Rules that follow:
 3. Key liveness is not a config property — the daemon's availability gate is
    presence-only; liveness is surfaced by the observability layer (see §5)
    and fixed by the operator's credential re-mint (see §8).
+4. **Slug normalization precision (F5):** the configured slug is normalized
+   (whitespace trim + one outer quote-pair strip —
+   `daemon/plane_workspace.py::normalize_workspace_slug`) on **every**
+   environment, live included, before the policy evaluates. A
+   pathologically padded live value (`PLANE_MCP_WORKSPACE_SLUG="  nea  "`)
+   is therefore **emitted trimmed as `nea`** — REST path, MCP
+   `x-workspace-slug` header, and the stale-row heal all consume the
+   normalized value. No observable change for clean values (a clean `nea`
+   or `e2e` passes through byte-identically).
 
 ## 3. The resolver — behaviour and typed refusals
 
@@ -68,6 +77,24 @@ The typed refusal reasons (interpolated verbatim into the boot WARNING):
 | `workspace '{slug}' is not permitted in a non-production environment; expected 'e2e'` | non-live + any third slug (e.g. a copied `your-workspace-slug` placeholder) |
 | `environment could not be classified as production; refusing to target the 'nea' workspace` | unclassified env (fail-closed) — fix `ENSEMBLE_SELF_ENV` or the own-DB name |
 | `environment marker '{marker}' is not a recognized environment (expected one of dev, demo, live, sandbox); refusing to classify as production` | garbage marker — fix `ENSEMBLE_SELF_ENV` |
+
+**Garbage-marker semantics (F4, reviewer fold 2026-11-02 — deliberate):** a
+garbage or typo'd `ENSEMBLE_SELF_ENV` marker (non-empty, not one of
+`dev`/`demo`/`live`/`sandbox` — e.g. `lve`, `prod `, `dev-mode`) is
+**REFUSED**, not downgraded: the daemon treats the environment as
+unclassified ⇒ Plane is **disabled** (refused resolution ⇒ no row, no
+`plane_*` tools) rather than silently falling back to `e2e`. Fail-closed is
+the point — a typo must never quietly re-point a possibly-live install at
+the test workspace (or vice versa). **Operator remediation: fix the marker**
+(`ENSEMBLE_SELF_ENV=dev|demo|live|sandbox` exactly — see the case rule
+below); the refusal clears on the next boot.
+
+**Case asymmetry (deliberate, pinned):** the `VALID_ENVS` match is
+**case-SENSITIVE** (`LIVE`/`Dev` are garbage ⇒ refused), mirroring the house
+`daemon/tools/upgrade_tools.py` marker semantics without importing it; the
+explicit opt-out set `{0, false, no, off}` is **case-INSENSITIVE**
+(`FALSE`/`No`/`OFF` all count as opt-out ⇒ non-live). Surrounding
+whitespace is trimmed before either comparison.
 
 ## 4. Why live detection is lane-local (D-1)
 

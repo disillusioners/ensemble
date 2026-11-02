@@ -214,6 +214,8 @@ Seeded from `technical-analysis.md` §Risk register (R1–R14). Severity column 
 | NR8 | **No privileged-category change** (lean #6) ⇒ the 16-member privileged set is untouched. | Phase 2/3 diff review |
 | NR9 | **`plane_sync_service`'s REST behaviour is unchanged** on live/demo (REST key absent ⇒ inert). | Phase 2 pack |
 
+> **> Precision on "byte-identical" live slug emission (F5, reviewer fold 2026-11-02):** the live resolution returns the **P2-C-normalized** slug — `PLANE_MCP_WORKSPACE_SLUG` is normalized (whitespace trim + one outer quote-pair strip, `daemon/plane_workspace.py::normalize_workspace_slug`) **before** the live-exempt policy evaluates, so a pathologically padded live value (`"  nea  "` / `"'nea'"`) is **emitted trimmed as `nea`** (REST path, MCP header, and the P2-I heal all consume the normalized value). This is the ONE normalization nuance inside NR1's "byte-identical": **no observable change on any clean value** — this install's live `nea` is clean, so live behaviour is unchanged in practice.
+
 ---
 
 ## 9. Config / env contract per environment

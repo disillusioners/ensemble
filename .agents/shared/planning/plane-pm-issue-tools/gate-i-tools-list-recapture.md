@@ -245,6 +245,14 @@ Per-tool values are in the committed fixture (`tool_schemas[name].schema_tokens`
 
 **Worktree cleanliness:** `git status --porcelain` after all boots shows only the lane's own untracked planning dir — the boots wrote nothing into the tree.
 
+### 7.3 Baseline comparability disclosure + re-baseline instruction (fix-cycle F1, 2026-11-02)
+
+**The recorded `baseline_tokens = 20 111` (measured 08:12Z) PREDATES the prefix-sweep ownership guard** (commit `95e999b20`, 10:54Z) — the fix that removed `plane_sync_project` from PM's resolved toolset (assertion 3 above disclosed it as IN the baseline's 47-tool toolset: the `plane_sync` REST tool swept into the empty `plane` category). That tool contributed **≈105 tokens** of the measured `tool_schema_tokens`.
+
+**Consequence for FC9:** Phase-5's present-leg, measured on the post-guard tree, will **NOT** contain `plane_sync_project` ⇒ the growth delta `present − baseline` computed against this 08:12Z figure is **UNDERSTATED by ≈105 tokens** (~0.5 % of baseline; ~2 % of the 5 028 ceiling = 25 % growth band) — a bias **AGAINST** the breach firing. The two legs would not be measured on the same code.
+
+**RE-BASELINE INSTRUCTION (binding at Phase-5 start):** before evaluating FC9, **re-measure the baseline with the IDENTICAL formula** — plane-absent boot (`PLANE_MCP_URL` unset for the process only), same fences F1–F11, same measurement point (`estimate_tokens(PM system prompt) + Σ estimate_tokens(convert_to_openai_tool(t))`, tiktoken `cl100k_base`) — **on the then-current tree**, and use THAT number as the FC9 baseline. The 20 111 figure above stands as the historical record of the 08:12Z measurement; it is not the FC9 comparison input.
+
 ---
 
 ## 8. Artifact map (this gate's outputs)
