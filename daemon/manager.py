@@ -3372,11 +3372,16 @@ class InstanceManager:
             definition = registry.get_by_name(server_name)
             if server_name in policy_refused:
                 # P3-E: policy-refused, NOT never-registered — still a
-                # WARNING (the agent still loses its tools).
+                # WARNING (the agent still loses its tools). F8 wording
+                # truthfulness: the row's TRUE state at this point is
+                # INACTIVE in BOTH policy paths (deactivated this boot OR a
+                # pre-existing inactive row skipped) — the message states
+                # the row state, never the action.
                 logger.warning(
                     "Agent capability gap: %s declare(s) mcp_full_access "
                     "['%s'] but the builtin was POLICY-REFUSED this boot "
-                    "(deactivated; see the workspace-refused WARNING above)",
+                    "(the row is INACTIVE; see the workspace-refused "
+                    "WARNING above)",
                     ", ".join(agents),
                     server_name,
                 )
@@ -3392,13 +3397,25 @@ class InstanceManager:
                     server_name,
                 )
             else:
-                logger.warning(
-                    "Agent capability gap: %s declare(s) mcp_full_access "
-                    "['%s'] but no registered MCP server row exists for it "
-                    "(see the builtin skip WARNING above)",
-                    ", ".join(agents),
-                    server_name,
-                )
+                # F8 wording truthfulness: "no row exists" renders ONLY when
+                # none exists — an INACTIVE row is a different true state.
+                if row is None:
+                    logger.warning(
+                        "Agent capability gap: %s declare(s) mcp_full_access "
+                        "['%s'] but no registered MCP server row exists for it "
+                        "(see the builtin skip WARNING above)",
+                        ", ".join(agents),
+                        server_name,
+                    )
+                else:
+                    logger.warning(
+                        "Agent capability gap: %s declare(s) mcp_full_access "
+                        "['%s'] but the registered row exists yet is INACTIVE "
+                        "(not delivered to agents; see the builtin skip "
+                        "WARNING above)",
+                        ", ".join(agents),
+                        server_name,
+                    )
 
     def _deactivate_orphaned_builtin_servers(self, registered_names: set[str]) -> None:
         """Deactivate built-in MCP server DB rows no longer in the registry.

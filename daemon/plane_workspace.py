@@ -389,7 +389,22 @@ def resolve_plane_workspace(
 
 
 def _env_fingerprint(env_map: Mapping[str, str]) -> tuple[str, str, str]:
-    """The three env inputs the resolution depends on."""
+    """The three env inputs the resolution depends on.
+
+    Known limitation (F6, reviewer fold 2026-11-02 — documented, deliberately
+    NOT widened): the fingerprint omits ``ENSEMBLE_DATA_DIR`` / ``DATA_DIR`` —
+    the inputs that locate the daemon's own ``ensemble.json`` (the P2-B
+    fallback DB-name source consulted only when ``POSTGRES_DB`` is absent).
+    On an env-var-less install, a change to the own ``ensemble.json`` (or to
+    those data-dir vars) mid-process therefore does NOT invalidate the memo:
+    :func:`current_plane_workspace` can keep serving a stale resolution until
+    a fingerprinted input changes or :func:`reset_resolution_cache` runs.
+    Accepted because it is non-exploitable in practice — the daemon does not
+    rewrite its own ``ensemble.json`` mid-run, and every seam in one
+    operation shares the SAME resolution object (no split-brain within an
+    operation, by construction). Keeping the data-dir inputs out also keeps
+    the memo path free of filesystem access.
+    """
     return (
         str(env_map.get("ENSEMBLE_SELF_ENV") or ""),
         str(env_map.get("PLANE_MCP_WORKSPACE_SLUG") or ""),

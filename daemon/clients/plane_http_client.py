@@ -63,7 +63,6 @@ import httpx
 from daemon.plane_workspace import (
     PlaneWorkspaceResolution,
     current_plane_workspace,
-    normalize_workspace_slug,
 )
 from daemon.sources.circuit_breaker import CircuitBreaker
 
@@ -447,11 +446,10 @@ class PlaneHttpClient:
 
         self._base_url = base_url if base_url is not None else _rest_base_url(resolution)
         self._api_key = api_key if api_key is not None else _env("PLANE_API_KEY")
-        # P2-D: the resolved slug wins. ``workspace_slug`` is validated for
-        # shape only (so a poisoned quoted value can never reach the header)
-        # and then DISCARDED as an authority.
-        if workspace_slug is not None:
-            normalize_workspace_slug(workspace_slug)
+        # P2-D: the resolved slug wins — ``workspace_slug`` is accepted for
+        # backward compatibility and has NO effect on the constructed
+        # client (not even a normalization side-channel: the parameter is
+        # simply never consulted; the RESOLVED slug is the only authority).
         self._workspace_slug = resolved_slug
 
     def _base_url_error(self) -> str:

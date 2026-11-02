@@ -514,6 +514,35 @@ class TestRegistryRowCrossCheck:
         assert policy_lines
         assert "project-manager" in policy_lines[0]
 
+    def test_inactive_row_renders_its_true_state_not_no_row(self, env, caplog):
+        """F8 (reviewer fold) — an INACTIVE pre-existing row is NOT
+        "no registered MCP server row exists": the message must state the
+        row's TRUE state. The unavailable cause (missing env) with a stale
+        inactive row hits exactly this branch (no deactivation ran, so it
+        is never in ``policy_refused``)."""
+        env(self_env="dev", slug="e2e", mcp_url=None)
+        row = _FakeRow(
+            config={"headers": {"x-workspace-slug": "e2e"}},
+            is_active=False,
+        )
+        repo = _FakeRepo([row])
+        mgr = _make_manager(repo)
+
+        _bootstrap(mgr, repo, [_agent_meta("project-manager", ["plane"])], caplog)
+
+        gap_lines = [
+            r.getMessage()
+            for r in _warnings(caplog)
+            if "capability gap" in r.getMessage()
+        ]
+        assert gap_lines, "the cross-check must still WARN (tools are lost)"
+        assert any("exists yet is INACTIVE" in line for line in gap_lines)
+        for line in gap_lines:
+            assert "no registered MCP server row exists" not in line, (
+                "an INACTIVE row was rendered as 'no row exists'"
+            )
+            assert "see the" in line  # the pointer form survives
+
     def test_cross_check_is_pointer_only(self, env, caplog):
         """P6b — the cross-check emits agent + server + a POINTER; it does
         NOT re-interpolate the typed reason."""
