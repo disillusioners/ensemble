@@ -490,6 +490,66 @@ class TestReasonSlugEscaping:
         assert "'E2E'" in (r.reason or "")
 
 
+# ── S7: the garbage-marker template fill is escaped (the C4 asymmetry
+# closed) ─────────────────────────────────────────────────────────────────────
+
+
+class TestReasonGarbageMarkerEscaping:
+    """S7 (delta hardening round 2, 2026-11-02) — C4 escaped
+    ``REASON_OTHER_SLUG`` but the sibling ``REASON_GARBAGE_MARKER``
+    stayed raw, and its reason reaches THREE agent-visible plane_sync
+    surfaces. The marker (``ENSEMBLE_SELF_ENV``) is equally
+    operator-controlled env input — a newline/control character in it
+    must not forge a second agent-visible line. Mirrors the C4 pins
+    one for one."""
+
+    def test_newline_marker_cannot_forge_a_second_line(self):
+        r = _r(
+            {
+                "ENSEMBLE_SELF_ENV": "evil\nFAKE-WARNING: injected",
+                "PLANE_MCP_WORKSPACE_SLUG": "e2e",
+            }
+        )
+        assert r.allowed is False
+        assert r.reason is not None
+        assert "\n" not in r.reason, (
+            "a raw newline survived into the garbage-marker reason"
+        )
+        assert "\r" not in r.reason
+        # the escaped form IS visible — the operator sees the
+        # pathological marker without it forging a log line
+        assert "\\n" in r.reason
+        assert "is not a recognized environment" in r.reason
+
+    def test_control_characters_render_escaped(self):
+        r = _r(
+            {
+                "ENSEMBLE_SELF_ENV": "a\tb\x00c",
+                "PLANE_MCP_WORKSPACE_SLUG": "e2e",
+            }
+        )
+        assert r.allowed is False
+        assert r.reason is not None
+        assert "\t" not in r.reason
+        assert "\x00" not in r.reason
+        assert "\\t" in r.reason and "\\x00" in r.reason
+
+    def test_clean_marker_renders_byte_identically(self):
+        """A clean garbage marker renders EXACTLY as before S7 — no
+        behavioral change on legitimate values."""
+        r = _r(
+            {
+                "ENSEMBLE_SELF_ENV": "production",
+                "PLANE_MCP_WORKSPACE_SLUG": "e2e",
+            }
+        )
+        assert r.reason == (
+            "environment marker 'production' is not a recognized "
+            "environment (expected one of dev, demo, live, sandbox); "
+            "refusing to classify as production"
+        )
+
+
 # ── P2-M: resolve-once threading ─────────────────────────────────────────────
 
 

@@ -66,6 +66,8 @@ __all__ = [
     "current_plane_workspace",
     "reset_resolution_cache",
     "_header_value",
+    "_has_header",
+    "_escape_for_reason",
 ]
 
 
@@ -118,6 +120,13 @@ _DB_NAME_TO_ENV_LABEL: dict[str, str] = {
 # never forge a second agent-visible log line. Clean values render
 # byte-identically; VALUE case-sensitivity is UNCHANGED (only the
 # rendering escapes, never the value compared).
+#
+# S7 (delta hardening round 2, 2026-11-02) closes the escaping
+# ASYMMETRY inside this template family: ``REASON_GARBAGE_MARKER``
+# interpolates the ``ENSEMBLE_SELF_ENV`` marker — equally
+# operator-controlled, and its reason reaches THREE agent-visible
+# plane_sync surfaces — so it is escaped with the SAME helper now.
+# Every operator-controlled template fill in this module is escaped.
 
 REASON_UNSET_SLUG: str = (
     "PLANE_MCP_WORKSPACE_SLUG is unset in a non-production environment; "
@@ -229,6 +238,52 @@ def _header_value(headers: Any, name: str) -> Any:
         if isinstance(key, str) and key.lower() == lowered:
             return value
     return None
+
+
+def _has_header(headers: Any, name: str) -> bool:
+    """Case-insensitive header-NAME **PRESENCE** test (S5, delta
+    hardening round 2, 2026-11-02).
+
+    Commit A consolidated the four ``x-workspace-slug`` read sites onto
+    :func:`_header_value` — correct for the three VALUE sites, but the
+    PROBE SHAPE PREDICATE was silently narrowed with it: the old
+    ``"x-workspace-slug" in headers`` test recognized a header whose
+    VALUE is JSON ``null`` as plane-shaped (presence), while
+    ``_header_value(...) is not None`` requires a value — so a
+    ``{"x-workspace-slug": null}`` config with a non-canonical URL
+    escaped the guard entirely (a fail-open narrowing introduced by
+    the hardening commit itself).
+
+    Recognition (is this the plane integration at all ⇒ kill-switch +
+    workspace policy apply) and authority (does the header CLAIM a
+    workspace slug ⇒ F2 comparison) are DIFFERENT concerns: presence
+    drives recognition; the value drives authority. This helper
+    restores the presence semantics for recognition.
+
+    Semantics:
+
+    * ``name`` is matched case-insensitively against the dict's STRING
+      keys (non-string keys are skipped);
+    * the VALUE is irrelevant — including ``None`` (present) and any
+      non-string value;
+    * ``False`` when ``headers`` is not a dict or no string key
+      matches.
+
+    Args:
+        headers: the config ``headers`` mapping (``None`` / non-dict ⇒
+            ``False``).
+        name: the header name to look up (matched lowercased).
+
+    Returns:
+        ``True`` when a case-insensitive name match EXISTS.
+    """
+    if not isinstance(headers, dict):
+        return False
+    lowered = name.lower()
+    return any(
+        isinstance(key, str) and key.lower() == lowered
+        for key in headers
+    )
 
 
 def normalize_workspace_slug(raw: str | None) -> str:
@@ -382,7 +437,12 @@ def resolve_plane_workspace(
         env_label, env_source = None, "unclassified"
     elif is_garbage:
         env_label, env_source = None, "unclassified"
-        classification_reason = REASON_GARBAGE_MARKER.format(marker=marker)
+        # S7: the marker is operator-controlled env input rendered into
+        # a reason that reaches agent-visible plane_sync surfaces —
+        # escape it exactly like the C4 slug fills.
+        classification_reason = REASON_GARBAGE_MARKER.format(
+            marker=_escape_for_reason(marker)
+        )
     elif marker == "live":
         env_label, env_source = "live", "explicit-marker"
     elif marker in ("dev", "demo", "sandbox"):

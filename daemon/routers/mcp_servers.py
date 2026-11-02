@@ -48,6 +48,8 @@ from daemon.mcp.builtin_servers.base import BuiltinServerDefinition
 from daemon.mcp.builtin_servers.validation import validate_config_values, McpConfigValidationError as BuiltinConfigValidationError
 from daemon.mcp.builtin_servers.plane import _mcp_kill_switch_enabled
 from daemon.plane_workspace import (
+    _escape_for_reason,
+    _has_header,
     _header_value,
     current_plane_workspace,
     normalize_workspace_slug,
@@ -355,15 +357,50 @@ def _mcp_server_health_state(server_name: str) -> str | None:
 #: ``Bearer <token>`` — the auth scheme word plus the credential run
 #: (any case; the scheme word is consumed so the response contains
 #: neither the credential NOR the literal ``"Bearer "``).
-_BEARER_ECHO_RE = re.compile(r"(?i)\bbearer\b[ \t]*[A-Za-z0-9._~+/=\-]+")
+#:
+#: S1 (delta hardening round 2, 2026-11-02): the run consumes
+#: QUOTED/DELIMITER-BEARING tokens WHOLE — a quote-OPENED credential
+#: (``Bearer "tok"`` / ``Bearer 'tok'``) is consumed including both
+#: quotes, and the bare run no longer stops at ``:``/``,``/quotes (a
+#: delimiter-bearing credential like ``tok:tail`` or a quote-leaking
+#: env loader's ``tok"`` fragment is consumed whole). The bare run
+#: still stops at whitespace, ``,``, ``}`` and ``]``.
+_BEARER_ECHO_RE = re.compile(
+    r"(?i)\bbearer\b[ \t]*(?:\"[^\"]*\"|'[^']*'|[^\s,}\]]+)"
+)
 
-#: ``Authorization[:=]'value'`` — a raw Authorization assignment whose
+#: ``Authorization[:=] value`` — a raw Authorization assignment whose
 #: value is not Bearer-shaped (``Basic xyz``, raw keys). The keyword and
 #: punctuation are kept; only the credential (which may span several
 #: whitespace-separated tokens — ``Basic dXNlcjpwYXNz``) is replaced.
+#:
+#: S1 (delta hardening round 2, 2026-11-02), three changes:
+#:
+#: * a run may be a QUOTE-DELIMITED token consumed WHOLE (``"a b"``,
+#:   ``'a,b'`` — including the quotes and any commas inside them). The
+#:   old value class stopped at a quote that OPENED a credential, so a
+#:   quote-leaking config (``""tok""``) matched nothing and survived
+#:   verbatim; group1 no longer grabs the post-colon quote — the
+#:   alternation consumes both quotes of a quote-opened credential
+#:   instead, which is what keeps the closing quote of the credential
+#:   attached to the consumed run;
+#: * the bare run EXCLUDES ``[`` — brackets are not part of any
+#:   realistic credential alphabet (base64/JWT/api keys), and the
+#:   exclusion eliminates the ``[REDACTED]]`` double-bracket artifact:
+#:   the bearer arm runs FIRST and emits ``Authorization: [REDACTED]``,
+#:   which the assign arm must never re-consume (the old class ate
+#:   ``[REDACTED`` and left the ``]`` dangling). This also makes the
+#:   scrub IDEMPOTENT on its own output;
+#: * the bare run no longer stops at ``:`` — a delimiter-bearing
+#:   credential (``tok:tail``) is consumed whole. Prose following the
+#:   credential (or a surrounding repr quote) can be mangled past the
+#:   credential run — ACCEPTED DIAGNOSTIC TRADE: this is a redaction
+#:   seam on an error message, not a formatter; the credential is
+#:   never left partially exposed.
 _AUTH_ASSIGN_ECHO_RE = re.compile(
-    r"(?i)(\bauthorization\b['\"]?[ \t]*[:=][ \t]*['\"]?)"
-    r"(?:[^\s'\",}\]]+[ \t]*)+"
+    r"(?i)(\bauthorization\b['\"]?[ \t]*[:=][ \t]*)"
+    r"(?:\"[^\"]+\"|'[^']+'|[^\s,}\]\[]+)"
+    r"(?:[ \t]+(?:\"[^\"]+\"|'[^']+'|[^\s,}\]\[]+))*"
 )
 
 
@@ -374,6 +411,12 @@ def _scrub_auth_echo(message: str) -> str:
     client) on every ``McpConfigValidationError`` render site in this
     router. A scrubbed message contains neither the credential NOR the
     literal ``"Bearer "`` prefix.
+
+    S1 (delta hardening round 2, 2026-11-02): both credential runs
+    consume quoted/delimiter-bearing tokens WHOLE, and the scrub is
+    IDEMPOTENT (applying it to already-scrubbed text is a no-op —
+    necessary because the S3 ``McpError`` arm scrubs values that may
+    already have passed a scrubbed render).
     """
     scrubbed = _BEARER_ECHO_RE.sub("[REDACTED]", message)
     scrubbed = _AUTH_ASSIGN_ECHO_RE.sub(r"\1[REDACTED]", scrubbed)
@@ -407,6 +450,15 @@ def _plane_workspace_write_refusal(server_name: str) -> str | None:
     ``POST /{id}/reset-builtin``) are RESOLVER-GATED for the ``plane``
     builtin.
 
+    S8 (delta hardening round 2, 2026-11-02) extends the SAME gate to
+    the GENERIC create route (``POST /api/mcp-servers``) when the
+    submitted ``name == "plane"``: a gate-by-name sweep must cover
+    EVERY write route to the protected name — pre-S8 the generic create
+    persisted a user-shaped row named ``plane`` (with a prod
+    ``x-workspace-slug`` header) on a refused env with a 201. The
+    reserved name is matched on the SUBMITTED name, before any lookup
+    or write.
+
     A refused workspace resolution means the operator write route may
     not touch the plane row AT ALL: no row created, no idempotent
     replay reactivation, no config rewrite. Without this gate the
@@ -418,8 +470,8 @@ def _plane_workspace_write_refusal(server_name: str) -> str | None:
 
     PLANE-SCOPED ONLY — a refused plane resolution never gates a
     non-plane builtin (context7/webfetch configure normally on any
-    env). LIVE IS NEVER REFUSED (ADJ-1 live-exempt) ⇒ live responses
-    are byte-identical.
+    env) or a non-plane user-created name. LIVE IS NEVER REFUSED
+    (ADJ-1 live-exempt) ⇒ live responses are byte-identical.
 
     Returns:
         The typed refusal message (interpolating the resolver's typed
@@ -483,14 +535,21 @@ def _plane_probe_refusal(config: dict[str, Any]) -> str | None:
                 and _normalize_probe_url(url) == plane_url
             )
             or (
-                # A1: case-insensitive header-NAME lookup — the header
+                # A1/S5: case-insensitive header-NAME lookup — the header
                 # name is case-insensitive by RFC 9110 §5.1; a
                 # case-variant ``X-Workspace-Slug`` claims the same
-                # workspace authority. A present-but-null value makes
-                # NO authority claim (``None`` ⇒ not plane-shaped via
-                # this arm — it never did via the F2 authority check).
+                # workspace authority. S5 (delta hardening round 2,
+                # 2026-11-02): the shape predicate is PRESENCE-based
+                # again (``_has_header``) — a present-but-null VALUE is
+                # still a plane-shaped config (the Commit A consolidation
+                # onto ``_header_value`` narrowed this to value-based and
+                # let a ``{"x-workspace-slug": null}`` config with a
+                # non-canonical URL escape the guard entirely; the
+                # narrowing is ELIMINATED, not disclosed). The F2
+                # authority check below still uses ``_header_value`` — a
+                # null value makes no authority CLAIM.
                 isinstance(headers, dict)
-                and _header_value(headers, "x-workspace-slug") is not None
+                and _has_header(headers, "x-workspace-slug")
             )
         )
         if not is_plane_shape:
@@ -516,10 +575,22 @@ def _plane_probe_refusal(config: dict[str, Any]) -> str | None:
             if isinstance(submitted, str) and submitted.strip():
                 normalized = normalize_workspace_slug(submitted)
                 if normalized != (resolution.slug or ""):
+                    # S6 (delta hardening round 2, 2026-11-02): the ONE
+                    # probe-seam raw submitted-slug render — escape it
+                    # repr-style (the same C4 helper the resolver's
+                    # REASON_* fills use) so a newline/control character
+                    # in the SUBMITTED slug cannot forge a second
+                    # agent-visible line inside this refusal message.
+                    # The resolved slug on the other side of the
+                    # comparison is necessarily the clean constant
+                    # 'e2e' here (a mismatch message only renders on a
+                    # permitted non-live resolution).
                     return (
                         f"Plane workspace mismatch: the submitted "
-                        f"x-workspace-slug '{normalized}' is not the workspace "
-                        f"this environment resolves to ('{resolution.slug}') "
+                        f"x-workspace-slug "
+                        f"'{_escape_for_reason(normalized)}' is not the "
+                        f"workspace this environment resolves to "
+                        f"('{resolution.slug}') "
                         f"— non-production environments target 'e2e' only "
                         f"(P2-D resolved-slug authority); the probe is "
                         f"refused before dialing"
@@ -647,11 +718,17 @@ async def test_mcp_server_connection(test_request: McpServerTestConnectionReques
         error_message = "Unknown MCP error"
         if hasattr(e, 'error') and e.error is not None:
             if hasattr(e.error, 'message') and e.error.message:
-                error_message = e.error.message
+                # S3 (delta hardening round 2, 2026-11-02): the remote
+                # can ECHO submitted headers back in its protocol error
+                # — this was the file's last raw str(e)-into-response
+                # seam. Scrub every derivation site; the response render
+                # below then carries only scrubbed text (the scrub is
+                # idempotent, so an already-scrubbed value stays clean).
+                error_message = _scrub_auth_echo(str(e.error.message))
             else:
-                error_message = str(e.error)
+                error_message = _scrub_auth_echo(str(e.error))
         else:
-            error_message = str(e)
+            error_message = _scrub_auth_echo(str(e))
         logger.warning("MCP server error during test connection: %s", error_message)
         return McpServerTestConnectionResponse(
             success=False,
@@ -690,6 +767,23 @@ async def create_mcp_server(mcp_server_create: McpServerCreate, request: Request
     manager = _get_manager(request)
     if manager.is_write_paused:
         raise HTTPException(status_code=503, detail="Writes are paused for database migration")
+
+    # S8 (delta hardening round 2, 2026-11-02): the generic create
+    # route is gated on the RESERVED NAME "plane" — the one write route
+    # to the protected name that Commit B did not cover. A refused
+    # resolution ⇒ 403 BEFORE validation/lookup/write (zero rows, zero
+    # mutations); live is never refused (the gate returns None and the
+    # route is byte-identical); any other name is untouched by the
+    # gate.
+    write_refusal = _plane_workspace_write_refusal(mcp_server_create.name)
+    if write_refusal is not None:
+        raise HTTPException(
+            status_code=403,
+            detail=ErrorResponse(
+                code=ErrorCodes.BUILTIN_SERVER_PROTECTED,
+                message=write_refusal,
+            ).model_dump()
+        )
 
     # Validate MCP server config
     try:

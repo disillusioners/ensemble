@@ -299,6 +299,101 @@ class _SingleDefinitionRegistry:
         return self._definition if name == self._definition.name else None
 
 
+# ── the generic create route (S8) ────────────────────────────────────────────
+
+
+class TestGenericCreateRouteGate:
+    """S8 (delta hardening round 2, 2026-11-02) — a gate-by-name sweep
+    must cover EVERY write route to the protected name: the generic
+    ``POST /api/mcp-servers`` create persisted a user-shaped row named
+    ``plane`` (with a prod ``x-workspace-slug`` header) on a refused
+    env with a 201 before this gate. Three legs: refused env ⇒ 403 +
+    zero-write; live ⇒ 201 unchanged; non-plane names ⇒ untouched."""
+
+    _VALID_CONFIG = {"transport": "stdio", "command": "echo"}
+
+    def test_refused_env_create_named_plane_is_403_zero_write(
+        self, env, repo, test_client
+    ):
+        env(self_env="dev", slug="nea")  # dev + 'nea' ⇒ refused
+
+        response = test_client.post(
+            "/api/mcp-servers",
+            json={
+                "name": "plane",
+                "description": "reserved-name probe",
+                "config": {
+                    "transport": "streamable-http",
+                    "url": MCP_URL,
+                    "headers": {
+                        "Authorization": "Bearer dummy",
+                        "x-workspace-slug": "nea",
+                    },
+                },
+                "is_active": True,
+            },
+        )
+
+        assert response.status_code == 403
+        detail = response.json()["detail"]
+        assert detail["code"] == "BUILTIN_SERVER_PROTECTED"
+        assert (
+            "workspace 'nea' is production-only; this environment "
+            "resolves to dev" in detail["message"]
+        )
+        assert "refused before any row is created or modified" in detail["message"]
+        assert repo.rows == {}
+        assert repo.creates == []
+        assert repo.updates == []
+
+    def test_live_create_named_plane_is_201_unchanged(
+        self, env, repo, test_client
+    ):
+        """Live is never refused (ADJ-1) — the create proceeds exactly
+        as before the gate: 201, row created, response shape
+        unchanged."""
+        env(self_env="live", slug="nea", db="ensemble_prod")
+
+        response = test_client.post(
+            "/api/mcp-servers",
+            json={
+                "name": "plane",
+                "description": "live reserved-name create",
+                "config": self._VALID_CONFIG,
+                "is_active": True,
+            },
+        )
+
+        assert response.status_code == 201, response.text
+        data = response.json()
+        assert data["name"] == "plane"
+        assert data["is_builtin"] is False
+        assert data["is_active"] is True
+        assert "plane" in repo.rows
+        assert len(repo.creates) == 1
+
+    def test_non_plane_name_is_untouched_by_the_gate(
+        self, env, repo, test_client
+    ):
+        """The gate is NAME-SCOPED: a refused plane resolution never
+        blocks creating an unrelated server by another name."""
+        env(self_env="dev", slug="nea")  # plane refused…
+
+        response = test_client.post(
+            "/api/mcp-servers",
+            json={
+                "name": "my-own-server",
+                "description": "not the reserved name",
+                "config": self._VALID_CONFIG,
+                "is_active": True,
+            },
+        )
+
+        assert response.status_code == 201, response.text
+        assert "my-own-server" in repo.rows
+        assert repo.creates[0]["name"] == "my-own-server"
+
+
 # ── reset-builtin ────────────────────────────────────────────────────────────
 
 

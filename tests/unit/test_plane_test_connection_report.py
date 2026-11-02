@@ -438,6 +438,188 @@ class TestProbeGuardHardening:
         conn_mgr.create_test_session.assert_not_awaited()
 
 
+# ── S5: presence semantics RESTORED (the Commit A narrowing eliminated) ──────
+
+
+class TestPresenceSemanticsRestored:
+    """S5 (delta hardening round 2, 2026-11-02) — the probe shape
+    predicate is PRESENCE-based again (``_has_header``). Commit A's
+    consolidation onto ``_header_value`` narrowed the predicate to
+    value-based, so a ``{"x-workspace-slug": null}`` config with a
+    non-canonical URL escaped the guard ENTIRELY (a fail-open
+    narrowing introduced by the hardening commit itself). The OLD code
+    (``"x-workspace-slug" in headers``) refused this shape; the parity
+    leg pins that the narrowing is ELIMINATED, not disclosed."""
+
+    def test_null_value_header_with_kill_switch_off_is_refused(
+        self, env, test_client
+    ):
+        """The parity leg: present-but-null header value + kill-switch
+        OFF + non-canonical URL ⇒ the probe is REFUSED (the guard
+        applied) — the old code refused this shape."""
+        env(self_env="dev", slug="e2e", mcp_enabled="false")
+        conn_mgr = MagicMock()
+        conn_mgr.create_test_session = AsyncMock()
+
+        with patch(
+            "daemon.routers.mcp_servers.get_mcp_connection_manager",
+            return_value=conn_mgr,
+        ):
+            response = test_client.post(
+                "/api/mcp-servers/test-connection",
+                json={
+                    "config": {
+                        "transport": "streamable-http",
+                        "url": "https://other.example.test/mcp",
+                        "headers": {"x-workspace-slug": None},
+                    }
+                },
+            )
+
+        data = response.json()
+        assert data["success"] is False, (
+            "the null-value header escaped the guard and dialed"
+        )
+        assert "PLANE_MCP_ENABLED" in data["message"]
+        assert "deliberately disabled" in data["message"]
+        conn_mgr.create_test_session.assert_not_awaited()
+
+    def test_null_value_header_with_refused_workspace_is_refused(
+        self, env, test_client
+    ):
+        """The resolver arm through the same restored presence: dev +
+        'nea' resolution refused + null-value header + non-canonical
+        URL ⇒ the typed workspace refusal, not a dial."""
+        env(self_env="dev", slug="nea")
+        conn_mgr = MagicMock()
+        conn_mgr.create_test_session = AsyncMock()
+
+        with patch(
+            "daemon.routers.mcp_servers.get_mcp_connection_manager",
+            return_value=conn_mgr,
+        ):
+            response = test_client.post(
+                "/api/mcp-servers/test-connection",
+                json={
+                    "config": {
+                        "transport": "streamable-http",
+                        "url": "https://other.example.test/mcp",
+                        "headers": {"X-Workspace-Slug": None},
+                    }
+                },
+            )
+
+        data = response.json()
+        assert data["success"] is False
+        assert "production-only" in data["message"]
+        conn_mgr.create_test_session.assert_not_awaited()
+
+    def test_null_value_header_makes_no_authority_claim(
+        self, env, test_client
+    ):
+        """The F2 authority check still uses the VALUE (``_header_value``):
+        a null value claims no workspace, so a PERMITTED resolution with
+        a null-value header dials normally (the pre-A behavior on the
+        authority side is unchanged)."""
+        env(self_env="dev", slug="e2e")
+        session = MagicMock()
+        tools = MagicMock()
+        tools.tools = []
+        session.list_tools = AsyncMock(return_value=tools)
+        session.stop = AsyncMock()
+        streams_cm = MagicMock()
+        streams_cm.__aexit__ = AsyncMock(return_value=None)
+        conn_mgr = MagicMock()
+        conn_mgr.create_test_session = AsyncMock(return_value=(session, streams_cm))
+
+        with patch(
+            "daemon.routers.mcp_servers.get_mcp_connection_manager",
+            return_value=conn_mgr,
+        ):
+            response = test_client.post(
+                "/api/mcp-servers/test-connection",
+                json={
+                    "config": {
+                        "transport": "streamable-http",
+                        "url": MCP_URL,
+                        "headers": {"x-workspace-slug": None},
+                    }
+                },
+            )
+
+        assert response.json()["success"] is True
+        conn_mgr.create_test_session.assert_awaited_once()
+
+
+# ── S6: the probe-seam submitted-slug render is escaped ──────────────────────
+
+
+class TestSubmittedSlugEscaping:
+    """S6 (delta hardening round 2, 2026-11-02) — the ONE probe-seam raw
+    submitted-slug render (the F2 mismatch refusal) escapes the
+    submitted slug repr-style (the same C4 helper the resolver's
+    REASON_* fills use): a newline/control character in the SUBMITTED
+    slug can never forge a second agent-visible line inside the refusal
+    message."""
+
+    def test_newline_in_submitted_slug_cannot_forge_a_second_line(
+        self, env, test_client
+    ):
+        env(self_env="dev", slug="e2e")
+        conn_mgr = MagicMock()
+        conn_mgr.create_test_session = AsyncMock()
+
+        with patch(
+            "daemon.routers.mcp_servers.get_mcp_connection_manager",
+            return_value=conn_mgr,
+        ):
+            response = test_client.post(
+                "/api/mcp-servers/test-connection",
+                json={
+                    "config": _plane_config(
+                        slug="evil\nFAKE-WARNING: injected"
+                    )
+                },
+            )
+
+        data = response.json()
+        assert data["success"] is False
+        message = data["message"]
+        assert "workspace mismatch" in message
+        assert "\n" not in message, (
+            "a raw newline survived into the mismatch refusal"
+        )
+        assert "\\n" in message  # the escaped form IS visible
+        conn_mgr.create_test_session.assert_not_awaited()
+
+    def test_clean_submitted_slug_renders_byte_identically(
+        self, env, test_client
+    ):
+        """Escaping is RENDER-ONLY — a clean (mismatching) slug renders
+        exactly as before S6."""
+        env(self_env="dev", slug="e2e")
+        conn_mgr = MagicMock()
+        conn_mgr.create_test_session = AsyncMock()
+
+        with patch(
+            "daemon.routers.mcp_servers.get_mcp_connection_manager",
+            return_value=conn_mgr,
+        ):
+            response = test_client.post(
+                "/api/mcp-servers/test-connection",
+                json={"config": _plane_config(slug="nea")},
+            )
+
+        message = response.json()["message"]
+        assert message == (
+            "Plane workspace mismatch: the submitted x-workspace-slug "
+            "'nea' is not the workspace this environment resolves to "
+            "('e2e') — non-production environments target 'e2e' only "
+            "(P2-D resolved-slug authority); the probe is refused "
+            "before dialing"
+        )
+
+
 class TestScopeBoundary:
     def test_non_plane_config_is_untouched_by_the_guard(
         self, env, test_client

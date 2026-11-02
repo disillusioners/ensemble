@@ -27,13 +27,14 @@ from typing import Any
 import pytest
 from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from daemon.mcp.config import McpConfigValidationError
 from daemon.routers.mcp_servers import (
     _scrub_auth_echo,
     router as mcp_servers_router,
 )
+from mcp.shared.exceptions import McpError
 from tests.helpers.plane_workspace_fixtures import (
     make_plane_env_fixture,
     reset_plane_workspace_cache,  # noqa: F401 — the autouse fixture
@@ -152,6 +153,177 @@ def _assert_scrubbed(payload_text: str) -> None:
         'the literal "Bearer " survived in the response'
     )
     assert "[REDACTED]" in payload_text  # the scrub, not an omission
+
+
+# ── S1: quoted/delimiter-bearing credential runs are consumed whole ──────────
+
+
+class TestScrubWidening:
+    """S1 (delta hardening round 2, 2026-11-02) — the scrub is pinned
+    against the ADVERSARIAL shapes it exists for, not the common case:
+    quoted and delimiter-bearing (comma/colon) credentials must be
+    consumed WHOLE, the ``[REDACTED]]`` double-bracket artifact must
+    never appear, and the scrub must be idempotent on its own output
+    (the bearer arm runs before the assign arm inside one
+    ``_scrub_auth_echo`` call)."""
+
+    def test_bearer_double_quoted_credential_is_consumed_whole(self):
+        out = _scrub_auth_echo(f'Authorization: Bearer "{SENTINEL}"')
+        assert SENTINEL not in out
+        assert "Bearer " not in out
+        assert "[REDACTED]" in out
+        # the quotes of the credential do not survive either
+        assert out == "Authorization: [REDACTED]"
+
+    def test_bearer_single_quoted_credential_is_consumed_whole(self):
+        out = _scrub_auth_echo(f"got 'bearer {SENTINEL}'")
+        assert SENTINEL not in out
+        assert "[REDACTED]" in out
+
+    def test_assign_quoted_credential_is_consumed_whole(self):
+        out = _scrub_auth_echo(f'Authorization: "{SENTINEL}"')
+        assert SENTINEL not in out
+        assert "Authorization: [REDACTED]" == out
+
+    def test_quote_leaking_env_shape_is_consumed_whole(self):
+        """The known-realistic quote-leak shape (a quote-leaking .env
+        loader) — doubled quotes around the credential. The OLD value
+        class stopped at the quote that OPENED the credential, so this
+        shape matched nothing and survived verbatim."""
+        out = _scrub_auth_echo(f'Authorization: ""{SENTINEL}""')
+        assert SENTINEL not in out
+        assert "Authorization: " in out
+        assert "[REDACTED]" in out
+
+    def test_comma_bearing_credential_is_consumed(self):
+        # quoted comma run — the comma is INSIDE the credential
+        out = _scrub_auth_echo(f'Bearer "{SENTINEL},x"')
+        assert SENTINEL not in out
+        assert "Bearer " not in out
+        assert "[REDACTED]" in out
+        # bare run stops AT the delimiter — the credential itself is gone
+        out = _scrub_auth_echo(f"Authorization: {SENTINEL},extra")
+        assert SENTINEL not in out
+        assert "Authorization: [REDACTED]" in out
+
+    def test_colon_bearing_credential_is_consumed_whole(self):
+        out = _scrub_auth_echo(f"Authorization: {SENTINEL}:tail")
+        assert SENTINEL not in out
+        assert ":tail" not in out or out == "Authorization: [REDACTED]"
+        assert "Authorization: [REDACTED]" == out
+
+    def test_authorization_without_colon_stays_intact(self):
+        """The CONTROL leg — the bare word 'authorization' in prose (no
+        ``:``/``=`` assignment) is not a credential and must survive."""
+        text = "the authorization header is required for this server"
+        assert _scrub_auth_echo(text) == text
+
+    def test_no_double_bracket_artifact_on_bearer_then_assign(self):
+        """The delta-observed artifact: the bearer arm emits
+        ``Authorization: [REDACTED]`` and the assign arm re-consumed
+        ``[REDACTED`` leaving a dangling ``]`` ⇒ ``[REDACTED]]``. The
+        assign bare run now excludes ``[`` so its own output is never
+        re-consumed."""
+        for text in (
+            f"Authorization: Bearer {SENTINEL}",
+            f'input_value="Authorization: Bearer {SENTINEL}"',
+            f"input_value='Authorization: Basic {SENTINEL}'",
+        ):
+            out = _scrub_auth_echo(text)
+            assert "]]" not in out, f"double-bracket artifact in {out!r}"
+            assert SENTINEL not in out
+
+    def test_scrub_is_idempotent_on_its_own_output(self):
+        """Applying the scrub to already-scrubbed text is a no-op —
+        required because the S3 ``McpError`` arm scrubs values that may
+        already have passed a scrubed render."""
+        for text in (
+            f"Authorization: Bearer {SENTINEL}",
+            f'Authorization: Bearer "{SENTINEL}"',
+            f'Authorization: "{SENTINEL}"',
+            f'Authorization: ""{SENTINEL}""',
+            f"Authorization: Basic dXNlcjpwYXNz",
+            f'input_value="Authorization: Bearer {SENTINEL}"',
+        ):
+            once = _scrub_auth_echo(text)
+            assert once == _scrub_auth_echo(once), (
+                f"scrub not idempotent: {once!r} -> {_scrub_auth_echo(once)!r}"
+            )
+
+
+# ── S3: the McpError render arm is scrubbed ──────────────────────────────────
+
+
+class _FakeErrorData:
+    """A minimal ``ErrorData`` double — ``McpError.__init__`` requires
+    ``error.message``."""
+
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+
+class TestMcpErrorScrub:
+    """S3 (delta hardening round 2, 2026-11-02) — the ``McpError`` arm
+    of ``POST /test-connection`` was the file's last raw
+    ``str(e)``-into-response seam: a remote that ECHOES submitted
+    headers back in its protocol error would re-leak the credential
+    through the "Server error: …" message."""
+
+    def test_remote_echoed_bearer_in_mcp_error_is_scrubbed(
+        self, env, test_client
+    ):
+        env(self_env="dev", slug="e2e")
+        conn_mgr = MagicMock()
+        conn_mgr.create_test_session = AsyncMock(
+            side_effect=McpError(
+                _FakeErrorData(
+                    f"session terminated: Authorization: Bearer {SENTINEL}"
+                )
+            )
+        )
+
+        with patch(
+            "daemon.routers.mcp_servers.get_mcp_connection_manager",
+            return_value=conn_mgr,
+        ):
+            response = test_client.post(
+                "/api/mcp-servers/test-connection",
+                json={"config": {"transport": "stdio", "command": "echo"}},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is False
+        assert data["message"].startswith("Server error:")
+        _assert_scrubbed(data["message"])
+
+    def test_remote_echoed_basic_in_mcp_error_is_scrubbed(
+        self, env, test_client
+    ):
+        """A different echo shape — the bare scheme word without the
+        ``Authorization:`` keyword (still a recognizable credential
+        run)."""
+        env(self_env="dev", slug="e2e")
+        conn_mgr = MagicMock()
+        conn_mgr.create_test_session = AsyncMock(
+            side_effect=McpError(
+                _FakeErrorData(f"invalid request: Bearer {SENTINEL}")
+            )
+        )
+
+        with patch(
+            "daemon.routers.mcp_servers.get_mcp_connection_manager",
+            return_value=conn_mgr,
+        ):
+            response = test_client.post(
+                "/api/mcp-servers/test-connection",
+                json={"config": {"transport": "stdio", "command": "echo"}},
+            )
+
+        data = response.json()
+        assert data["success"] is False
+        assert SENTINEL not in data["message"]
+        assert "Server error:" in data["message"]
 
 
 # ── the helper itself ────────────────────────────────────────────────────────
