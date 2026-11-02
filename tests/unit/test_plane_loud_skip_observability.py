@@ -32,12 +32,13 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-import pytest
-
 from daemon.manager import InstanceManager
 from daemon.mcp.builtin_servers.plane import PlaneServerDefinition
-from daemon.plane_workspace import current_plane_workspace, reset_resolution_cache
 from daemon.registry import AgentMetadata, AgentRegistry
+from tests.helpers.plane_workspace_fixtures import (
+    make_plane_env_fixture,
+    reset_plane_workspace_cache,  # noqa: F401 — the autouse fixture
+)
 
 MCP_URL = "https://mcp.example.test/plane/http/api-key/mcp"
 
@@ -143,51 +144,18 @@ def _make_manager(repo: _FakeRepo) -> InstanceManager:
     return mgr
 
 
-@pytest.fixture(autouse=True)
-def _reset_cache():
-    reset_resolution_cache()
-    yield
-    reset_resolution_cache()
-
-
-@pytest.fixture
-def env(monkeypatch):
-    def _set(
-        *,
-        self_env="dev",
-        slug="nea",
-        db="ensemble_dev",
-        mcp_url=MCP_URL,
-        mcp_key="dummy-plane-mcp-key",
-        mcp_enabled: str | None = None,
-        disable_builtin: str | None = None,
-    ):
-        monkeypatch.setenv("ENSEMBLE_SELF_ENV", self_env)
-        monkeypatch.setenv("POSTGRES_DB", db)
-        if slug is None:
-            monkeypatch.delenv("PLANE_MCP_WORKSPACE_SLUG", raising=False)
-        else:
-            monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", slug)
-        if mcp_url is None:
-            monkeypatch.delenv("PLANE_MCP_URL", raising=False)
-        else:
-            monkeypatch.setenv("PLANE_MCP_URL", mcp_url)
-        if mcp_key is None:
-            monkeypatch.delenv("PLANE_MCP_API_KEY", raising=False)
-        else:
-            monkeypatch.setenv("PLANE_MCP_API_KEY", mcp_key)
-        for var, value in (
-            ("PLANE_MCP_ENABLED", mcp_enabled),
-            ("MCP_DISABLE_BUILT_IN_PLANE", disable_builtin),
-        ):
-            if value is None:
-                monkeypatch.delenv(var, raising=False)
-            else:
-                monkeypatch.setenv(var, value)
-        reset_resolution_cache()
-        return current_plane_workspace()
-
-    return _set
+env = make_plane_env_fixture(
+    (
+        ("self_env", "ENSEMBLE_SELF_ENV", "dev"),
+        ("db", "POSTGRES_DB", "ensemble_dev"),
+        ("slug", "PLANE_MCP_WORKSPACE_SLUG", "nea"),
+        ("mcp_url", "PLANE_MCP_URL", MCP_URL),
+        ("mcp_key", "PLANE_MCP_API_KEY", "dummy-plane-mcp-key"),
+        ("mcp_enabled", "PLANE_MCP_ENABLED", None),
+        ("disable_builtin", "MCP_DISABLE_BUILT_IN_PLANE", None),
+    ),
+    return_resolution=True,
+)
 
 
 def _bootstrap(mgr, repo, agents, caplog) -> None:

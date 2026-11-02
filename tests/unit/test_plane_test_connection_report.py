@@ -16,17 +16,13 @@ import pytest
 from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 
-from daemon.plane_workspace import reset_resolution_cache
 from daemon.routers.mcp_servers import router as mcp_servers_router
+from tests.helpers.plane_workspace_fixtures import (
+    make_plane_env_fixture,
+    reset_plane_workspace_cache,  # noqa: F401 — the autouse fixture
+)
 
 MCP_URL = "https://mcp.example.test/plane/http/api-key/mcp"
-
-
-@pytest.fixture(autouse=True)
-def _reset_cache():
-    reset_resolution_cache()
-    yield
-    reset_resolution_cache()
 
 
 @pytest.fixture
@@ -43,27 +39,16 @@ def test_client(mock_app):
     return TestClient(mock_app)
 
 
-@pytest.fixture
-def env(monkeypatch):
-    def _set(
-        *,
-        self_env="dev",
-        slug="nea",
-        db="ensemble_dev",
-        mcp_enabled: str | None = None,
-    ):
-        monkeypatch.setenv("ENSEMBLE_SELF_ENV", self_env)
-        monkeypatch.setenv("POSTGRES_DB", db)
-        monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", slug)
-        monkeypatch.setenv("PLANE_MCP_URL", MCP_URL)
-        monkeypatch.setenv("PLANE_MCP_API_KEY", "dummy-plane-mcp-key")
-        if mcp_enabled is None:
-            monkeypatch.delenv("PLANE_MCP_ENABLED", raising=False)
-        else:
-            monkeypatch.setenv("PLANE_MCP_ENABLED", mcp_enabled)
-        reset_resolution_cache()
-
-    return _set
+env = make_plane_env_fixture(
+    (
+        ("self_env", "ENSEMBLE_SELF_ENV", "dev"),
+        ("db", "POSTGRES_DB", "ensemble_dev"),
+        ("slug", "PLANE_MCP_WORKSPACE_SLUG", "nea"),
+        (None, "PLANE_MCP_URL", MCP_URL),
+        (None, "PLANE_MCP_API_KEY", "dummy-plane-mcp-key"),
+        ("mcp_enabled", "PLANE_MCP_ENABLED", None),
+    ),
+)
 
 
 def _plane_config(slug: str = "nea"):

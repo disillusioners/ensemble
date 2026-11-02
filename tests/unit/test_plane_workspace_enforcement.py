@@ -21,53 +21,28 @@ from daemon.clients.plane_http_client import (
     _rest_base_url,
 )
 from daemon.mcp.builtin_servers.plane import PlaneServerDefinition
-from daemon.plane_workspace import (
-    current_plane_workspace,
-    reset_resolution_cache,
+from daemon.plane_workspace import current_plane_workspace
+from tests.helpers.plane_workspace_fixtures import (
+    make_plane_env_fixture,
+    reset_plane_workspace_cache,  # noqa: F401 — the autouse fixture
 )
 
 MCP_URL = "https://mcp.example.test/plane/http/api-key/mcp"
 REST_URL = "https://plane.example.test"
 
 
-@pytest.fixture(autouse=True)
-def _reset_cache():
-    reset_resolution_cache()
-    yield
-    reset_resolution_cache()
-
-
-@pytest.fixture
-def env(monkeypatch):
-    """A fully-controlled Plane environment (no ambient leakage)."""
-
-    def _set(
-        *,
-        self_env: str | None = "dev",
-        slug: str | None = "e2e",
-        db: str = "ensemble_dev",
-        mcp_url: str | None = MCP_URL,
-        mcp_key: str | None = "dummy-plane-mcp-key",
-        base_url: str | None = REST_URL,
-        api_key: str | None = "dummy-plane-rest-key",
-    ):
-        for name, value in (
-            ("ENSEMBLE_SELF_ENV", self_env),
-            ("PLANE_MCP_WORKSPACE_SLUG", slug),
-            ("POSTGRES_DB", db),
-            ("PLANE_MCP_URL", mcp_url),
-            ("PLANE_MCP_API_KEY", mcp_key),
-            ("PLANE_BASE_URL", base_url),
-            ("PLANE_API_KEY", api_key),
-        ):
-            if value is None:
-                monkeypatch.delenv(name, raising=False)
-            else:
-                monkeypatch.setenv(name, value)
-        reset_resolution_cache()
-        return current_plane_workspace()
-
-    return _set
+env = make_plane_env_fixture(
+    (
+        ("self_env", "ENSEMBLE_SELF_ENV", "dev"),
+        ("slug", "PLANE_MCP_WORKSPACE_SLUG", "e2e"),
+        ("db", "POSTGRES_DB", "ensemble_dev"),
+        ("mcp_url", "PLANE_MCP_URL", MCP_URL),
+        ("mcp_key", "PLANE_MCP_API_KEY", "dummy-plane-mcp-key"),
+        ("base_url", "PLANE_BASE_URL", REST_URL),
+        ("api_key", "PLANE_API_KEY", "dummy-plane-rest-key"),
+    ),
+    return_resolution=True,
+)
 
 
 # ── P3: the MCP lane (E3) ────────────────────────────────────────────────────

@@ -13,51 +13,23 @@ the missing key.
 
 from __future__ import annotations
 
-import pytest
-
-from daemon.plane_workspace import reset_resolution_cache
 from daemon.services.plane_sync_service import PlaneSyncService
+from tests.helpers.plane_workspace_fixtures import (
+    make_plane_env_fixture,
+    reset_plane_workspace_cache,  # noqa: F401 — the autouse fixture
+)
 
 
-@pytest.fixture(autouse=True)
-def _reset_cache():
-    reset_resolution_cache()
-    yield
-    reset_resolution_cache()
-
-
-@pytest.fixture
-def env(monkeypatch):
-    def _set(
-        *,
-        self_env="dev",
-        slug="e2e",
-        db="ensemble_dev",
-        sync_enabled: str | None = None,
-        base_url: str | None = "https://plane.example.test",
-        api_key: str | None = "dummy-rest-key",
-    ):
-        monkeypatch.setenv("ENSEMBLE_SELF_ENV", self_env)
-        if slug is None:
-            monkeypatch.delenv("PLANE_MCP_WORKSPACE_SLUG", raising=False)
-        else:
-            monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", slug)
-        monkeypatch.setenv("POSTGRES_DB", db)
-        if sync_enabled is None:
-            monkeypatch.delenv("PLANE_SYNC_ENABLED", raising=False)
-        else:
-            monkeypatch.setenv("PLANE_SYNC_ENABLED", sync_enabled)
-        if base_url is None:
-            monkeypatch.delenv("PLANE_BASE_URL", raising=False)
-        else:
-            monkeypatch.setenv("PLANE_BASE_URL", base_url)
-        if api_key is None:
-            monkeypatch.delenv("PLANE_API_KEY", raising=False)
-        else:
-            monkeypatch.setenv("PLANE_API_KEY", api_key)
-        reset_resolution_cache()
-
-    return _set
+env = make_plane_env_fixture(
+    (
+        ("self_env", "ENSEMBLE_SELF_ENV", "dev"),
+        ("slug", "PLANE_MCP_WORKSPACE_SLUG", "e2e"),
+        ("db", "POSTGRES_DB", "ensemble_dev"),
+        ("sync_enabled", "PLANE_SYNC_ENABLED", None),
+        ("base_url", "PLANE_BASE_URL", "https://plane.example.test"),
+        ("api_key", "PLANE_API_KEY", "dummy-rest-key"),
+    ),
+)
 
 
 class TestSyncUnavailableReason:

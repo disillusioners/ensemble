@@ -15,37 +15,26 @@ this file proves the template-rebuild mechanism the heal relies on.
 
 from __future__ import annotations
 
-import pytest
-
 from daemon.manager import _heal_config_preserving_env
 from daemon.mcp.builtin_servers.plane import PlaneServerDefinition
-from daemon.plane_workspace import current_plane_workspace, reset_resolution_cache
+from tests.helpers.plane_workspace_fixtures import (
+    make_plane_env_fixture,
+    reset_plane_workspace_cache,  # noqa: F401 — the autouse fixture
+)
 
 MCP_URL = "https://mcp.example.test/plane/http/api-key/mcp"
 
 
-@pytest.fixture(autouse=True)
-def _reset_cache():
-    reset_resolution_cache()
-    yield
-    reset_resolution_cache()
-
-
-@pytest.fixture
-def env(monkeypatch):
-    def _set(*, self_env="dev", slug="e2e", db="ensemble_dev"):
-        monkeypatch.setenv("ENSEMBLE_SELF_ENV", self_env)
-        if slug is None:
-            monkeypatch.delenv("PLANE_MCP_WORKSPACE_SLUG", raising=False)
-        else:
-            monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", slug)
-        monkeypatch.setenv("POSTGRES_DB", db)
-        monkeypatch.setenv("PLANE_MCP_URL", MCP_URL)
-        monkeypatch.setenv("PLANE_MCP_API_KEY", "dummy-plane-mcp-key")
-        reset_resolution_cache()
-        return current_plane_workspace()
-
-    return _set
+env = make_plane_env_fixture(
+    (
+        ("self_env", "ENSEMBLE_SELF_ENV", "dev"),
+        ("slug", "PLANE_MCP_WORKSPACE_SLUG", "e2e"),
+        ("db", "POSTGRES_DB", "ensemble_dev"),
+        (None, "PLANE_MCP_URL", MCP_URL),
+        (None, "PLANE_MCP_API_KEY", "dummy-plane-mcp-key"),
+    ),
+    return_resolution=True,
+)
 
 
 class TestSchemaVersionBump:
