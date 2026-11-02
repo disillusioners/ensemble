@@ -141,6 +141,32 @@ run_hook() {
     ' 2>&1
 }
 
+# run_sweep_unset_port <fix> [daemon_port] — drive the sweep with PORT
+# ASSIGNED NOWHERE (the F3 shape: the .env carries no PORT). DAEMON_PORT
+# is optionally set (the F9 divergence shape).
+run_sweep_unset_port() {
+    local fix="$1" dport="${2:-}"
+    if [ -n "$dport" ]; then
+        env -u PORT DAEMON_PORT="$dport" INSTALL_DIR="$fix" \
+            SWEEP_STALE_S=0 HEARTBEAT_STALE_S=0 LOCK_HEARTBEAT_S=30 LOCK_STALE_S=300 \
+            SWEEP_DEFER_CEILING="${SWEEP_DEFER_CEILING:-3}" \
+            bash -c '
+                . "'"$REPO_ROOT"'/launcher.sh" >/dev/null 2>&1
+                _journal_sweep "$INSTALL_DIR"
+                echo "sweep-rc=$?"
+            ' 2>&1
+    else
+        env -u PORT -u DAEMON_PORT INSTALL_DIR="$fix" \
+            SWEEP_STALE_S=0 HEARTBEAT_STALE_S=0 LOCK_HEARTBEAT_S=30 LOCK_STALE_S=300 \
+            SWEEP_DEFER_CEILING="${SWEEP_DEFER_CEILING:-3}" \
+            bash -c '
+                . "'"$REPO_ROOT"'/launcher.sh" >/dev/null 2>&1
+                _journal_sweep "$INSTALL_DIR"
+                echo "sweep-rc=$?"
+            ' 2>&1
+    fi
+}
+
 # free_port — a free TCP port on the loopback (never a fixed/privileged one).
 free_port() {
     python3 - <<'PY'
@@ -242,6 +268,90 @@ if [ "$P_ELAPSED" -le 12 ]; then
 else
     _fail "P-5 the never-answer leg stayed inside the probe budget" "<=12s" "${P_ELAPSED}s"
 fi
+cleanup_listeners
+
+# ===========================================================================
+section "P-5u / P-5v / P-5w — the probe-configuration class (F3), the port source (F9), the fd isolation (F11)"
+
+# ─ P-5u (F3, code-council W1) ─────────────────────────────────────────────
+# An unusable PORT is a PROBE-CONFIGURATION failure, NOT an observation:
+# class `unprobeable`, never counted, never rollback-eligible. Pre-fix it
+# collapsed into `absent` (detail `no-probe-target`) and WAS counted ⇒
+# three launcher boots on a host whose .env lacks PORT rolled back a
+# healthy release.
+PV_EMPTY="$(probe_once "" "v0.28.5")"
+assert_eq "P-5u an EMPTY port ⇒ UNPROBEABLE (never an observation)" "unprobeable" "${PV_EMPTY%% *}"
+PV_ALPHA="$(probe_once "abc" "v0.28.5")"
+assert_eq "P-5u a NON-NUMERIC port ⇒ UNPROBEABLE" "unprobeable" "${PV_ALPHA%% *}"
+PV_RANGE="$(probe_once "70000" "v0.28.5")"
+assert_eq "P-5u an OUT-OF-RANGE port ⇒ UNPROBEABLE" "unprobeable" "${PV_RANGE%% *}"
+
+# the SWEEP-level leg: 4 observations (one past the default ceiling of 3)
+# with PORT assigned nowhere ⇒ NO rollback, NO count, a journaled defer.
+P5U_FIX="$(mktemp -d -t p5u.XXXXXX)"; _register_fixture "$P5U_FIX"
+make_install_fixture "$P5U_FIX" "$TARGET" "$PREV" "true"
+seed_journal "$P5U_FIX" "$TARGET" "$PREV" "true" "1"
+ln -sfn "releases/$TARGET" "$P5U_FIX/current"
+i=0
+while [ "$i" -lt 4 ]; do
+    run_sweep_unset_port "$P5U_FIX" >/dev/null
+    i=$(( i + 1 ))
+done
+P5U_J="$(cat "$P5U_FIX/releases/state.json")"
+assert_not_contains "P-5u PORT-unset observations NEVER reach the absent-ceiling" '"event":"sweep_rollback"' "$P5U_J"
+assert_not_contains "P-5u PORT-unset observations never quarantine" "\"quarantined\":\[\"$TARGET\"" "$P5U_J"
+assert_contains "P-5u the probe-unprobeable defer is journaled (greppable marker)" 'probe-unprobeable-no-port' "$P5U_J"
+if ls "$P5U_FIX"/.sweep-defer-* >/dev/null 2>&1; then
+    _fail "P-5u a probe-configuration failure is NOT counted (no counter file)" "absent" "present"
+else
+    _pass
+fi
+rm -rf "$P5U_FIX"
+
+# ─ P-5v (F9, code-council A2) ─────────────────────────────────────────────
+# The probe targets the daemon's EFFECTIVE port. A PORT/DAEMON_PORT
+# divergence must be logged LOUDLY (a wrong target silently makes the
+# serving-green arm inert); a PORT-less .env with DAEMON_PORT set must say
+# so (the daemon binds the config.yaml default, not DAEMON_PORT).
+P5V_FIX="$(mktemp -d -t p5v.XXXXXX)"; _register_fixture "$P5V_FIX"
+make_install_fixture "$P5V_FIX" "$TARGET" "$PREV" "true"
+seed_journal "$P5V_FIX" "$TARGET" "$PREV" "true" "1"
+ln -sfn "releases/$TARGET" "$P5V_FIX/current"
+P5V_DIV="$(PORT=19001 DAEMON_PORT=19002 run_sweep "$P5V_FIX" 19001 2>&1)"
+assert_contains "P-5v a PORT/DAEMON_PORT divergence is logged loudly" "PORT=19001 but DAEMON_PORT=19002" "$P5V_DIV"
+P5V_NP="$(run_sweep_unset_port "$P5V_FIX" 19003)"
+assert_contains "P-5v PORT unset + DAEMON_PORT set is surfaced (the daemon binds the yaml default)" "PORT is unset while DAEMON_PORT=19003" "$P5V_NP"
+rm -rf "$P5V_FIX"
+
+# ─ P-5w (F11, portability) ────────────────────────────────────────────────
+# The fd-open and the /dev/tcp probe are ISOLATED in a subshell: a failing
+# `exec 3<>` can never kill (bash 3.2 + execfail) or clobber the caller.
+# Behavioural discriminator: the probe is called IN THE CURRENT SHELL (not
+# through `$( )`, which would hide the difference). Pre-fix it re-pointed
+# and then CLOSED the caller's fd 3; post-fix the caller's fd survives.
+P5W_PORT="$(start_listener green 0.28.5)"
+P5W_OUT="$(bash -c '
+    . "'"$REPO_ROOT"'/launcher.sh" >/dev/null 2>&1
+    exec 3<>/dev/null
+    _js_serving_probe "'"$P5W_PORT"'" v0.28.5 >/dev/null 2>&1 || true
+    if : >&3 2>/dev/null; then echo ALIVE; else echo CLOBBERED; fi
+' 2>/dev/null)"
+assert_eq "P-5w the probe does not clobber the caller's fd 3 (subshell isolation)" "ALIVE" "$P5W_OUT"
+# execfail safety: the probe stays non-fatal with `set -e` + `execfail`
+# ON against a DOWN port (a probe failure must never take the shell down).
+P5W_EXECFAIL="$(bash -c '
+    shopt -s execfail
+    . "'"$REPO_ROOT"'/launcher.sh" >/dev/null 2>&1
+    out="$(_js_serving_probe 1 v0.28.5 2>/dev/null)"
+    printf "%s SURVIVED" "${out%% *}"
+' 2>/dev/null)"
+assert_eq "P-5w a failed fd-open under execfail leaves the launcher alive" "absent SURVIVED" "$P5W_EXECFAIL"
+# structural: the exec 3<> inside the probe sits INSIDE a subshell
+P5W_SRC="$(sed -n '/^_js_serving_probe() {/,/^}/p' "$REPO_ROOT/launcher.sh")"
+case "$P5W_SRC" in
+    *'( '*"exec 3<>"*) _pass ;;
+    *) _fail "P-5w the fd-open + probe body are wrapped in a subshell" "a subshell opener before exec 3<>" "flat" ;;
+esac
 cleanup_listeners
 
 # ===========================================================================

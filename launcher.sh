@@ -661,6 +661,40 @@ _js_serving_version_strip() {
     esac
 }
 
+# _js_sweep_probe_port — resolve the port the SERVING PROBE targets.
+#
+# F9 (code-council A2) — the probe and the daemon must agree on the port.
+# The daemon's EFFECTIVE port is the config.yaml-interpolated value
+# (`daemon.port: ${PORT:-8088}`, config.yaml:113): pydantic-settings gives
+# the INIT (yaml) source priority over the env source, so `PORT` IS the
+# source of truth and `DAEMON_PORT` (DaemonConfig's env_prefix) only takes
+# effect when the yaml carries no `daemon.port` key. (Verified empirically
+# at the fix cycle: `D(port=8088).port == 8088` with DAEMON_PORT=9999 set.)
+# The launcher exports every .env key, so both are visible here.
+#
+# Prints the port and returns 0 when PORT is usable; returns 1 and prints
+# NOTHING when it is unresolvable (the caller's probe then reports the
+# `unprobeable` class — F3). A PORT/DAEMON_PORT divergence is logged
+# LOUDLY: it silently redirects the daemon's binding to the yaml default
+# when the config has no `daemon.port` key.
+_js_sweep_probe_port() {
+    local p="${PORT:-}" d="${DAEMON_PORT:-}"
+    # numeric-only: the /dev/tcp path needs a port literal
+    case "$p" in ''|*[!0-9]*) p="" ;; esac
+    case "$d" in ''|*[!0-9]*) d="" ;; esac
+    if [ -n "$p" ] && [ -n "$d" ] && [ "$p" != "$d" ]; then
+        _log "WARN: journal sweep: PORT=$p but DAEMON_PORT=$d — the daemon binds the config.yaml-interpolated PORT (the pydantic init source wins over the DAEMON_ env prefix); the probe targets $p. If config.yaml carries no daemon.port key the daemon binds $d instead — reconcile the .env (a wrong probe target makes the serving-green arm silently inert)"
+    fi
+    if [ -n "$p" ]; then
+        printf '%s' "$p"
+        return 0
+    fi
+    if [ -n "$d" ]; then
+        _log "WARN: journal sweep: PORT is unset while DAEMON_PORT=$d — the daemon's effective port is the config.yaml default, NOT DAEMON_PORT; the serving probe is UNPROBEABLE (never counted, never rollback-eligible). Set PORT in the .env to enable the launcher-side serving-green arm"
+    fi
+    return 1
+}
+
 # _js_serving_txn_identity <in_flight_json> <target> — the txn identity used
 # by the write-once key, the request detail and the readers. The RESTART
 # lane stamps `run_id` into in_flight; the PROMOTE lane does NOT (the
@@ -931,16 +965,27 @@ _js_http_request() {
 # serving probe. Prints "<class> <detail>" and returns 0 only for GREEN.
 #
 # The CLASS is the AM-P2-10.1 taxonomy:
-#   green      — /livez 200 ∧ version == the v-stripped target ∧ /readyz
-#                200 whose body reports ready
-#   broken     — /livez ANSWERED with a non-200 status (affirmative
-#                unhealthy: the zero-DB liveness endpoint is broken)
-#   absent     — no answer at all (no listener / no response / the version
-#                field absent or unparseable — "cannot tell")
-#   mismatch   — /livez 200 but the version ≠ the target (the OLD daemon is
-#                still bound, or the flip's binary never took effect)
-#   unready    — /livez 200 + the right version but /readyz is not 200 /
-#                not "ready" (the boot window: MCP warmup + auto-continue)
+#   green       — /livez 200 ∧ version == the v-stripped target ∧ /readyz
+#                 200 whose body reports ready
+#   broken      — /livez ANSWERED with a non-200 status (affirmative
+#                 unhealthy: the zero-DB liveness endpoint is broken)
+#   absent      — no answer at all (no listener / no response / the version
+#                 field absent or unparseable — "cannot tell")
+#   mismatch    — /livez 200 but the version ≠ the target (the OLD daemon is
+#                 still bound, or the flip's binary never took effect)
+#   unready     — /livez 200 + the right version but /readyz is not 200 /
+#                 not "ready" (the boot window: MCP warmup + auto-continue)
+#   unprobeable — FIX-CYCLE F3 (code-council W1): THE PROBE ITSELF cannot
+#                 run (no PORT / a non-numeric or out-of-range PORT). This
+#                 is a PROBE-CONFIGURATION failure, NOT a serving
+#                 observation: the caller DEFERS, never counts it toward
+#                 the absent-ceiling and never treats it as
+#                 rollback-eligible. Pre-fix this collapsed into `absent`
+#                 (the `no-probe-target` detail) and WAS counted ⇒ three
+#                 launcher boots on a host whose .env lacks PORT rolled
+#                 back a healthy release. (The daemon-side GREEN predicate
+#                 is in-process and needs no port, so the only mitigation
+#                 such an install has is the daemon closer.)
 #
 # NOT-POSITIVELY-GREEN ⇒ DEFER, NEVER rollback (A6): the launcher's port
 # down is ambiguous by construction (this very boot may be starting the
@@ -954,11 +999,33 @@ _js_serving_probe() {
     local budget="${SWEEP_SERVING_PROBE_BUDGET_S:-5}"
     local v_target deadline status body version rstatus
     v_target="$(_js_serving_version_strip "$target")"
-    if [ -z "$port" ] || [ -z "$v_target" ]; then
+    if [ -z "$v_target" ]; then
         printf 'absent no-probe-target'
         return 1
     fi
+    # F3: the probe-configuration checks come FIRST — an unusable port is
+    # not an observation of the target.
+    case "$port" in
+        ''|*[!0-9]*)
+            printf 'unprobeable no-port'
+            return 1
+            ;;
+    esac
+    if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        printf 'unprobeable port-out-of-range'
+        return 1
+    fi
     deadline=$(( $(_now) + budget ))
+    # F11 (code-council doubt register #2) — THE FD-OPEN AND THE WHOLE
+    # PROBE RUN IN A SUBSHELL. Under bash 3.2 with `execfail` ON (macOS /
+    # launchd is a supported substrate — scripts/ensemble-prod.plist,
+    # Makefile:293) a failing `exec 3<>` CAN KILL THE SHELL: the failure
+    # would be LOUD at exactly the "port down" moment the ladder exists
+    # for. Isolated in a subshell the `exec` failure kills only the
+    # subshell, which then prints the class and exits; the launcher is
+    # untouched. The fd-3 protocol (`_js_http_request` reads/writes fd 3)
+    # is entirely contained: every consumer runs INSIDE this subshell.
+    (
     # The group form (NOT `exec 3<>... 2>/dev/null`): the redirections are
     # applied left-to-right, so the failing 3<> would print bash's
     # "connect: Connection refused" to the launcher's stderr BEFORE the
@@ -1024,6 +1091,7 @@ _js_serving_probe() {
     fi
     printf 'green livez-200 version-%s readyz-200' "$version"
     return 0
+    )
 }
 
 # _js_quarantine_remove <path> <ver> — remove from quarantined[] (the
@@ -1697,7 +1765,12 @@ _js_sweep_flipped_disposition() {
         request_present=1
     fi
     # ── the serving probe (rung 1) ──
-    probe_out="$(_js_serving_probe "${PORT:-}" "$target")" || true
+    # F9: the probe targets the DAEMON's effective port (PORT — the
+    # config.yaml interpolation), not a bare `${PORT:-}` that silently
+    # degrades into an "absent" observation when the .env lacks it.
+    local probe_port
+    probe_port="$(_js_sweep_probe_port)" || probe_port=""
+    probe_out="$(_js_serving_probe "$probe_port" "$target")" || true
     probe_class="${probe_out%% *}"
     probe_detail="${probe_out#* }"
     if [ "$probe_class" = "$probe_out" ]; then
@@ -1718,6 +1791,16 @@ _js_sweep_flipped_disposition() {
                     _notify_once "sweep-defer-unauthorized" \
                         "DEFERRED: stale flipped txn (target=$target) is SERVING GREEN and carries a rollback_requested, but the journal carries NO intent_flip evidence for it — the flip is unauthorized: not committed (never commit-close an unauthorized flip) and not rolled back (serving-green = stay). The txn stays OPEN for operator resolution — see $install_dir/releases/state.json"
                 fi
+                ;;
+            unprobeable)
+                # F3: a PROBE-CONFIGURATION failure is NOT evidence of
+                # anything about the target — never execute a rollback on
+                # it (an UNVERIFIED execution of the daemon's request is
+                # exactly tonight's punishment class).
+                _log "WARN: journal sweep: the serving probe is UNPROBEABLE ($probe_detail) — a probe-CONFIGURATION failure, not a serving observation; the daemon's rollback_requested is NOT executed this tick (no count, no rollback)"
+                _js_serving_defer "$journal" "$target" "$run_id" "$age" \
+                    "request-probe-unprobeable-$probe_detail" \
+                    "a rollback_requested was seen but the serving probe cannot run ($probe_detail — a probe-configuration failure): the request is NOT executed unverified; no count, no rollback"
                 ;;
             *)
                 # BROKEN / AMBIGUOUS — the daemon's post-grace verdict is the
@@ -1848,6 +1931,20 @@ _js_sweep_flipped_disposition() {
         _js_sweep_release "$install_dir" "$lock_held"
         return 0
     fi
+    # F3 (code-council W1) — a PROBE-CONFIGURATION failure is NOT an
+    # observation: no count, no ceiling progress, never rollback-eligible.
+    # Placed beside the tempfail arm for the same reason: the two classes
+    # are both "the observation tells us nothing about the release".
+    case "$probe_class" in
+        unprobeable)
+            _log "WARN: journal sweep: the serving probe is UNPROBEABLE ($probe_detail) — a probe-CONFIGURATION failure (PORT unset/invalid), NOT a serving observation: not counted toward the absent-ceiling, never rollback-eligible"
+            _js_serving_defer "$journal" "$target" "$run_id" "$age" \
+                "ambiguous-probe-unprobeable-$probe_detail" \
+                "the serving probe cannot run ($probe_detail — a probe-configuration failure: PORT unset or invalid); the observation is NOT counted toward the absent-ceiling and is never rollback-eligible"
+            _js_sweep_release "$install_dir" "$lock_held"
+            return 0
+            ;;
+    esac
     case "$probe_class" in
         absent) absent=$(( absent + 1 )) ;;
         mismatch) mismatch=$(( mismatch + 1 )) ;;

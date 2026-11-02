@@ -631,6 +631,21 @@ The taxonomy is the load-bearing input to the ladder. It is **new** (the plan pr
 
 **⇒ Consequence for the canonical never-green shape (the council's REJECT basis, now closed):** in that shape the daemon either never answers (**ABSENT**), answers the **previous** version (**VERSION-MISMATCH**), or answers the target but **not ready** (**UNREADY**) — **all three are AMBIGUOUS**. The bounded ceiling covers all three. (If the ceiling covered only the ABSENT class, the shape would still not roll back whenever the daemon answers at all — the council's finding would survive in a narrower form.)
 
+#### AM-P2-10.1a 🟡 — FIX-CYCLE (code-council W1 + A2 + the doubt register): a FIFTH class, `unprobeable`, and the probe's port source
+
+**F3 (W1) — the class the taxonomy was missing.** The four classes above all describe **observations of the target**. A probe that **cannot run** is not one: an empty / non-numeric / out-of-range `PORT` makes `_js_serving_probe` print `unprobeable <detail>` (`no-port` / `port-out-of-range`), and the ladder treats it as a **PROBE-CONFIGURATION failure**:
+
+- **never counted** toward the absent-ceiling;
+- **never rollback-eligible** — including on **rung 0**: an `unprobeable` probe DEFERS a `rollback_requested` rather than executing it (executing a rollback the launcher cannot verify is tonight's punishment class);
+- **journaled** as a `sweep_deferred` row whose reason marker is greppable (`ambiguous-probe-unprobeable-<detail>` / `request-probe-unprobeable-<detail>`), and logged at WARN;
+- the argument is structural: `PORT` is assigned **nowhere** in `launcher.sh` — it arrives solely via `load_env_file` (`:2441` → `export :226`). Pre-fix the empty-port case satisfied **every** ceiling conjunct — the whole ladder was silently armed against a host whose `.env` lacks `PORT`.
+
+**F9 (A2) — the probe's port source, stated.** The probe targets the port the **daemon actually binds**. In-tree that is the **`config.yaml` interpolation** `daemon.port: ${PORT:-8088}` (`config.yaml:113`): pydantic-settings gives the **INIT (yaml) source** priority over the env source, so `PORT` is the source of truth and `DAEMON_PORT` (`DaemonConfig.env_prefix="DAEMON_"`) only takes effect when the yaml carries no `daemon.port` key. (Verified empirically at the fix cycle: a `DaemonConfig` built from `port=<yaml>` ignores `DAEMON_PORT`.) ⇒ `_js_sweep_probe_port` uses `PORT`, logs the `PORT`/`DAEMON_PORT` divergence **loudly** (a wrong target silently makes the serving-green arm inert — the AM-P2-9 mirror), and logs when `PORT` is absent while `DAEMON_PORT` is set. It does **not** guess a port from `DAEMON_PORT` (a guess would manufacture `absent` observations, i.e. F3's defect in a new disguise).
+
+**F11 (portability) — the fd-open and the probe body are ISOLATED in a subshell.** Under bash 3.2 with `execfail` ON (macOS/launchd is a supported substrate — `scripts/ensemble-prod.plist`, `Makefile:293`) a failing `exec 3<>` can kill the shell; and in the current shell the probe re-points then closes the **caller's** fd 3. Both are contained by running the fd-open + every `_js_http_request` inside one subshell (the fd-3 protocol is wholly internal). Pin **P-5w** drives it behaviourally (the caller's fd 3 survives) plus the structural shape assertion.
+
+**Pins (RED at the pre-fix tip `eac1492c5`, GREEN after — verified: 8 legs).** `P-5u` (the unprobeable class ×3 + the 4-observation sweep leg: no rollback, no count, the greppable defer marker + the counter file absent), `P-5v` (the divergence log + the PORT-unset-with-DAEMON_PORT log), `P-5w` (the fd isolation behavioural leg + the execfail-survival leg + the structural subshell assertion).
+
 #### AM-P2-10.2 — The counter mechanics (inside AM-P2-5's re-homed launcher-local file)
 
 Counter home (AM-P2-5, unchanged): **`<INSTALL_DIR>/.sweep-defer-<run_id>`** — a sibling of `.launcher-state`, O(1), survives launcher restarts, no journal schema change, not in `releases/` (release-machinery-scanned). Lifecycle: **AM-P2-20**.
