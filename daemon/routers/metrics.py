@@ -186,6 +186,10 @@ class _UnknownFamily(LookupError):
     """A requested ``?family=`` is not registered (→ 404 unknown_family)."""
 
 
+class _ExpiredCursor(ValueError):
+    """A cursor that can no longer be resumed (→ 400 invalid_cursor)."""
+
+
 def _query_provider(request: Request) -> Any:
     """The provider the door serves from (``app.state.metrics_query``).
 
@@ -220,12 +224,16 @@ def _oldest_sample_timestamp(provider: Any) -> int | None:
         return None
 
 
-def _cursor_state(request: Request, provider: Any) -> dict[str, Any]:
-    """Decode ``?cursor=`` into ``{"offset": int, "instant": int | None}``.
+def _cursor_state(request: Request) -> dict[str, Any]:
+    """Decode + shape-validate ``?cursor=`` into the resume state.
 
-    An INVALID or EXPIRED cursor is an EXPECTED condition: it is a
-    typed ``400 invalid_cursor`` — never a 500, and never a silently
-    answered gap.
+    An INVALID cursor is an EXPECTED condition: it is a typed
+    ``400 invalid_cursor`` — never a 500, and never a silently answered
+    gap.
+
+    NO PROVIDER READ happens here: the EXPIRY probe needs the ring's
+    oldest sample, so it runs INSIDE the off-loop body build — never on
+    the event loop.
     """
     raw = request.query_params.get("cursor")
     if raw is None or not str(raw).strip():
@@ -247,10 +255,22 @@ def _cursor_state(request: Request, provider: Any) -> dict[str, Any]:
     offset = cursor.get("o", 0)
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
         raise _err(400, _ERR_INVALID_CURSOR, "The cursor carries an invalid position")
-    oldest = _oldest_sample_timestamp(provider)
-    if oldest is not None and instant < oldest:
-        raise _err(400, _ERR_INVALID_CURSOR, "The cursor has expired")
     return {"offset": offset, "instant": instant}
+
+
+def _expire_cursor(provider: Any, cursor: dict[str, Any]) -> None:
+    """The cursor's EXPIRY probe — runs OFF the event loop.
+
+    A cursor whose pinned evaluation instant predates the buffer's
+    oldest sample can no longer be resumed faithfully, so it is refused
+    (``400 invalid_cursor``) rather than silently answered with a gap.
+    """
+    instant = cursor.get("instant")
+    if instant is None:
+        return
+    oldest = _oldest_sample_timestamp(provider)
+    if oldest is not None and int(instant) < oldest:
+        raise _ExpiredCursor("The cursor has expired")
 
 
 def _encoded_size(payload: Any) -> int:
@@ -349,10 +369,13 @@ async def _build_off_loop(fn: Any, *args: Any, **kwargs: Any) -> Any:
     return await _offload(fn, *args, **kwargs)
 
 
-def _build_families_page(provider: Any, *, offset: int) -> dict[str, Any]:
+def _build_families_page(
+    provider: Any, *, offset: int, cursor: dict[str, Any]
+) -> dict[str, Any]:
     """The ``/families`` page (built off the loop)."""
     from daemon.services.metrics_query.envelope import build_families_envelope
 
+    _expire_cursor(provider, cursor)
     return build_families_envelope(provider, offset=offset)
 
 
@@ -382,10 +405,12 @@ def _build_series_page(
     max_points: int,
     instant: int,
     offset: int,
+    cursor: dict[str, Any],
 ) -> dict[str, Any]:
     """The ``/series`` page (built off the loop)."""
     from daemon.services.metrics_query.envelope import build_series_envelope
 
+    _expire_cursor(provider, cursor)
     return build_series_envelope(
         provider,
         names=names,
@@ -426,10 +451,15 @@ async def get_metrics_families(request: Request) -> dict[str, Any]:
     """
     _require_auth_on(request)
     provider = _query_provider(request)
-    cursor = _cursor_state(request, provider)
+    cursor = _cursor_state(request)
     offset = cursor["offset"]
     instant = cursor["instant"] if cursor["instant"] is not None else int(time.time())
-    envelope = await _build_off_loop(_build_families_page, provider, offset=offset)
+    try:
+        envelope = await _build_off_loop(
+            _build_families_page, provider, offset=offset, cursor=cursor
+        )
+    except _ExpiredCursor as exc:
+        raise _err(400, _ERR_INVALID_CURSOR, str(exc)) from exc
     return _bound_page(
         envelope, key="families", offset=offset, instant=instant, more=bool(
             envelope.get("truncated")
@@ -571,7 +601,7 @@ async def get_metrics_series(request: Request) -> dict[str, Any]:
         # is the daemon's own budget, not the caller's to widen.
         max_points = min(requested, MAX_POINTS_CEILING)
 
-    cursor = _cursor_state(request, provider)
+    cursor = _cursor_state(request)
     offset = cursor["offset"]
     instant = cursor["instant"] if cursor["instant"] is not None else int(time.time())
     try:
@@ -584,7 +614,10 @@ async def get_metrics_series(request: Request) -> dict[str, Any]:
             max_points=max_points,
             instant=instant,
             offset=offset,
+            cursor=cursor,
         )
+    except _ExpiredCursor as exc:
+        raise _err(400, _ERR_INVALID_CURSOR, str(exc)) from exc
     except InvalidLabelFilter as exc:
         raise _err(400, _ERR_INVALID_LABEL_FILTER, str(exc)) from exc
     return _bound_page(

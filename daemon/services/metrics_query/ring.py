@@ -135,6 +135,22 @@ class TrendRing:
             out.append((int(self._timestamps[index]), float(self._values[index])))
         return out
 
+    def first_timestamp(self) -> int | None:
+        """The OLDEST sample's timestamp — O(1), NO copy.
+
+        ``points()[0][0]`` without the O(depth) materialisation: the
+        cursor's expiry probe must never copy the whole trend buffer.
+        """
+        if not self._size:
+            return None
+        return int(self._timestamps[self._start])
+
+    def last_timestamp(self) -> int | None:
+        """The NEWEST sample's timestamp — O(1), NO copy."""
+        if not self._size:
+            return None
+        return int(self._timestamps[(self._start + self._size - 1) % self._depth])
+
     def resized(self, depth: int) -> "TrendRing":
         """A copy of this ring at a new depth (the newest samples kept)."""
         clone = TrendRing(depth)
@@ -223,6 +239,18 @@ class HistogramTrendRing:
                 }
             )
         return out
+
+    def first_timestamp(self) -> int | None:
+        """The OLDEST sample's timestamp — O(1), NO copy."""
+        if not self._size:
+            return None
+        return int(self._timestamps[self._start])
+
+    def last_timestamp(self) -> int | None:
+        """The NEWEST sample's timestamp — O(1), NO copy."""
+        if not self._size:
+            return None
+        return int(self._timestamps[(self._start + self._size - 1) % self._depth])
 
     def resized(self, depth: int) -> "HistogramTrendRing":
         clone = HistogramTrendRing(depth)
@@ -412,29 +440,34 @@ class TrendRingStore:
         return ring.points()
 
     def oldest_timestamp(self) -> int | None:
-        """The oldest sample's timestamp (the cursor's expiry horizon)."""
+        """The oldest sample's timestamp (the cursor's expiry horizon).
+
+        O(rings), NOT O(points): the per-ring probe reads the ring's
+        FIRST timestamp directly, so the cursor's expiry check NEVER
+        materialises the trend buffer.
+        """
         oldest: int | None = None
         for ring in self._rings.values():
-            points = ring.points()
-            if points and (oldest is None or points[0][0] < oldest):
-                oldest = points[0][0]
+            timestamp = ring.first_timestamp()
+            if timestamp is not None and (oldest is None or timestamp < oldest):
+                oldest = timestamp
         for ring in self._hist_rings.values():
-            points = ring.points()
-            if points and (oldest is None or points[0]["timestamp"] < oldest):
-                oldest = points[0]["timestamp"]
+            timestamp = ring.first_timestamp()
+            if timestamp is not None and (oldest is None or timestamp < oldest):
+                oldest = timestamp
         return oldest
 
     def newest_timestamp(self) -> int | None:
         """The newest sample's timestamp (``None`` when the ring is empty)."""
         newest: int | None = None
         for ring in self._rings.values():
-            points = ring.points()
-            if points and (newest is None or points[-1][0] > newest):
-                newest = points[-1][0]
+            timestamp = ring.last_timestamp()
+            if timestamp is not None and (newest is None or timestamp > newest):
+                newest = timestamp
         for ring in self._hist_rings.values():
-            points = ring.points()
-            if points and (newest is None or points[-1]["timestamp"] > newest):
-                newest = points[-1]["timestamp"]
+            timestamp = ring.last_timestamp()
+            if timestamp is not None and (newest is None or timestamp > newest):
+                newest = timestamp
         return newest
 
 

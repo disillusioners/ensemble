@@ -116,6 +116,7 @@ class RecordingProvider:
         return list(self._history)
 
     def oldest_sample_timestamp(self) -> int | None:
+        self.threads.append(threading.current_thread().name)
         return self._oldest
 
 

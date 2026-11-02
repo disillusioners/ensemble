@@ -209,6 +209,45 @@ class TestByteCeiling:
         assert second["series"][0]["name"] == "ensemble_p3_bulk"
 
 
+class TestCursorExpiryProbe:
+    """The expiry probe is O(rings) and runs OFF the event loop."""
+
+    def test_the_expiry_probe_never_materialises_the_trend_buffer(self):
+        """O(rings), NOT O(points) — the probe must not copy the buffer."""
+        from daemon.services.metrics_query import ring as ring_module
+
+        store = ring_module.TrendRingStore()
+        ring = ring_module.TrendRing(depth=8)
+        ring.append(1_000, 1.0)
+        ring.append(1_015, 2.0)
+        store._rings["k"] = ring
+
+        def _boom(self):
+            raise AssertionError(
+                "the cursor's expiry probe must not copy the ring's points"
+            )
+
+        original = ring_module.TrendRing.points
+        ring_module.TrendRing.points = _boom
+        try:
+            assert store.oldest_timestamp() == 1_000
+            assert store.newest_timestamp() == 1_015
+        finally:
+            ring_module.TrendRing.points = original
+
+    def test_the_expiry_probe_runs_off_the_event_loop(self):
+        cursor = encode_cursor({"v": 1, "t": 6_000, "o": 0})
+        provider = _provider(oldest_sample_timestamp=5_000)
+        response = build_client(provider).get(f"/api/metrics/series?cursor={cursor}")
+        assert response.status_code == 200, response.text
+        assert provider.threads, "the provider must have been consulted"
+        for thread_name in provider.threads:
+            assert thread_name.startswith("db-offload"), (
+                "the cursor's expiry probe must run OFF the event loop — it "
+                f"ran on {thread_name!r}"
+            )
+
+
 class TestBounds:
     """``max_points`` and ``window_s`` are clamped."""
 
