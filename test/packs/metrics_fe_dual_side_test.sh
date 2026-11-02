@@ -49,6 +49,12 @@ PACK_BUDGET_S=900
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# The dual-side BASE leg runs THIS script (the HEAD tree's copy) against a
+# throwaway DETACHED base worktree — the base tree does not carry the
+# script, so the project dir is overridable.
+if [ -n "${METRICS_FE_PROJECT_DIR:-}" ]; then
+    PROJECT_DIR="$METRICS_FE_PROJECT_DIR"
+fi
 FRONTEND_DIR="$PROJECT_DIR/frontend"
 LOG_DIR="${METRICS_FE_LOG_DIR:-/tmp/metrics-fe-gate}"
 
