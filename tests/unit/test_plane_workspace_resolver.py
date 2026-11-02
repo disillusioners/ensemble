@@ -393,7 +393,6 @@ class TestCanonicalSlugNormalization:
 
 # ── A1: the case-insensitive header-NAME lookup ─────────────────────────────
 
-
 class TestHeaderValueLookup:
     """A1 (reviewer-adjudicated tidier must-fix, 2026-11-02) — ONE
     helper for the ``x-workspace-slug`` reads: case-insensitive on the
@@ -430,6 +429,65 @@ class TestHeaderValueLookup:
         import daemon.plane_workspace as pw
 
         assert "_header_value" in pw.__all__
+
+
+# ── C4: the reason templates escape the slug ────────────────────────────────
+
+
+class TestReasonSlugEscaping:
+    """C4 (reviewer-adjudicated tidier must-fix, 2026-11-02) — the
+    ``REASON_*`` template fills escape the operator-controlled slug
+    repr-style: a newline/control character in
+    ``PLANE_MCP_WORKSPACE_SLUG`` can never forge a second
+    agent-visible log line. Clean values render byte-identically;
+    value case-sensitivity is UNCHANGED."""
+
+    def test_newline_slug_cannot_forge_a_second_line(self):
+        r = _r(
+            {
+                "ENSEMBLE_SELF_ENV": "dev",
+                "PLANE_MCP_WORKSPACE_SLUG": "evil\nFAKE-WARNING: injected",
+            }
+        )
+        assert r.allowed is False
+        assert r.reason is not None
+        assert "\n" not in r.reason, (
+            "a raw newline survived into the typed reason"
+        )
+        assert "\r" not in r.reason
+        # The escaped form IS visible (repr-style) — the operator sees
+        # the pathological value without it forging a log line.
+        assert "\\n" in r.reason
+        assert "not permitted in a non-production environment" in r.reason
+
+    def test_control_characters_render_escaped(self):
+        r = _r(
+            {
+                "ENSEMBLE_SELF_ENV": "dev",
+                "PLANE_MCP_WORKSPACE_SLUG": "a\tb\x00c",
+            }
+        )
+        assert r.allowed is False
+        assert r.reason is not None
+        assert "\t" not in r.reason
+        assert "\x00" not in r.reason
+        assert "\\t" in r.reason and "\\x00" in r.reason
+
+    def test_clean_slug_renders_byte_identically(self):
+        """A clean third slug renders EXACTLY as before the escaping —
+        no behavioral change on legitimate values."""
+        r = _r({"ENSEMBLE_SELF_ENV": "dev", "PLANE_MCP_WORKSPACE_SLUG": "team-ws"})
+        assert r.reason == (
+            "workspace 'team-ws' is not permitted in a non-production "
+            "environment; expected 'e2e'"
+        )
+
+    def test_value_case_sensitivity_is_unchanged(self):
+        """Escaping is RENDER-ONLY — ``E2E`` is still refused (the
+        comparison stays exact on values)."""
+        r = _r({"ENSEMBLE_SELF_ENV": "dev", "PLANE_MCP_WORKSPACE_SLUG": "E2E"})
+        assert r.allowed is False
+        assert "'E2E'" in (r.reason or "")
 
 
 # ── P2-M: resolve-once threading ─────────────────────────────────────────────

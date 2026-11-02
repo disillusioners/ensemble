@@ -106,6 +106,7 @@ from .mcp.builtin_servers import (
 )
 from .mcp.builtin_servers.base import (
     CAUSE_DELIBERATELY_DISABLED,
+    CAUSE_UNAVAILABLE,
     CAUSE_WORKSPACE_REFUSED,
 )
 from .plane_workspace import _header_value, current_plane_workspace
@@ -3103,12 +3104,26 @@ class InstanceManager:
                     referencing = self._agents_referencing_builtin_mcp(
                         definition.name
                     )
-                    agents_part = (
-                        f"; agents with mcp_full_access=['{definition.name}']: "
-                        f"{', '.join(referencing)}"
-                        if referencing
-                        else "; no agent references it via mcp_full_access"
-                    )
+                    # C1 (reviewer-adjudicated tidier must-fix
+                    # 2026-11-02): a FAILED enumeration (None) renders
+                    # as "could not be determined" — never as the false
+                    # fact "no agent references it" (the empty-list
+                    # case, which IS assertable).
+                    if referencing is None:
+                        agents_part = (
+                            "; the referencing agents could not be "
+                            "determined (registry unavailable)"
+                        )
+                    elif referencing:
+                        agents_part = (
+                            f"; agents with mcp_full_access="
+                            f"['{definition.name}']: "
+                            f"{', '.join(referencing)}"
+                        )
+                    else:
+                        agents_part = (
+                            "; no agent references it via mcp_full_access"
+                        )
                     cause = definition.unavailability_cause()
                     if cause == CAUSE_WORKSPACE_REFUSED:
                         reason = definition.unavailable_reason() or (
@@ -3169,16 +3184,42 @@ class InstanceManager:
                             agents_part,
                         )
                     else:
-                        missing = ", ".join(definition.missing_env_vars()) or (
-                            "unknown"
-                        )
-                        logger.warning(
-                            "Builtin '%s' skipped — missing environment "
-                            "configuration: %s (see server definition docs)%s",
-                            definition.name,
-                            missing,
-                            agents_part,
-                        )
+                        missing_names = definition.missing_env_vars()
+                        if not missing_names and cause == CAUSE_UNAVAILABLE:
+                            # C3 (reviewer-adjudicated tidier must-fix
+                            # 2026-11-02): an UNAVAILABLE cause with NO
+                            # missing env vars is the quarantine/package
+                            # shape — the config is PRESENT, so "missing
+                            # environment configuration: unknown" was a
+                            # FALSE fact. Render the typed
+                            # unavailable_reason() (which names the
+                            # quarantine / missing package) VERBATIM,
+                            # with the init-guard remediation pointer.
+                            detail = definition.unavailable_reason() or (
+                                "unknown"
+                            )
+                            cause_display = detail
+                            logger.warning(
+                                "Builtin '%s' skipped — %s "
+                                "(see the init-guard quarantine state on "
+                                "GET /api/mcp-servers)%s",
+                                definition.name,
+                                detail,
+                                agents_part,
+                            )
+                        else:
+                            missing = ", ".join(missing_names) or (
+                                "unknown"
+                            )
+                            cause_display = f"missing: {missing}"
+                            logger.warning(
+                                "Builtin '%s' skipped — missing environment "
+                                "configuration: %s (see server definition "
+                                "docs)%s",
+                                definition.name,
+                                missing,
+                                agents_part,
+                            )
                         # F3 (reviewer fold 2026-11-02): the stale-row NOTICE —
                         # shape (b), deliberately NOT deactivation. P2-G scoped
                         # deactivation to the workspace-REFUSED cause (a policy
@@ -3191,6 +3232,10 @@ class InstanceManager:
                         # slug and would otherwise emit NO signal at all.
                         # AD2 boundary: echo the x-workspace-slug SCALAR only —
                         # never the config.headers dict (it carries the bearer).
+                        # C3: the cause line is cause-aware — the quarantine
+                        # shape names the quarantine, the missing-env shape
+                        # names the vars.
+                        unavailable_detail = cause_display
                         stale = (
                             self._mcp_server_repository.get_mcp_server_by_name(
                                 definition.name
@@ -3217,16 +3262,17 @@ class InstanceManager:
                                 "Builtin '%s' has a STALE ACTIVE row while the "
                                 "server is unavailable this boot — the row is "
                                 "NOT delivered to agents while unavailable "
-                                "(per-instance availability gate skips it); it "
-                                "self-heals (reactivate/heal) on the next "
-                                "available boot. Persisted "
-                                "x-workspace-slug: %r. Missing: %s. "
+                                "(per-instance availability gate skips it); "
+                                "the row stays ACTIVE and is re-delivered on "
+                                "the next available boot. Persisted "
+                                "x-workspace-slug: %r. Cause: %s. "
                                 "Remediation: restore the missing environment "
-                                "configuration, or disable the builtin "
-                                "deliberately (PLANE_MCP_ENABLED=false)%s",
+                                "configuration (or clear the quarantine), or "
+                                "disable the builtin deliberately "
+                                "(PLANE_MCP_ENABLED=false)%s",
                                 definition.name,
                                 persisted_slug,
-                                missing,
+                                unavailable_detail,
                                 agents_part,
                             )
                     continue
@@ -3357,12 +3403,17 @@ class InstanceManager:
 
         logger.info("Built-in MCP server bootstrap complete")
 
-    def _agents_referencing_builtin_mcp(self, server_name: str) -> list[str]:
+    def _agents_referencing_builtin_mcp(self, server_name: str) -> list[str] | None:
         """Agent IDs whose ``mcp_full_access`` names ``server_name``.
 
         Read-only registry query (``AgentRegistry.
-        agents_referencing_builtin_mcp``); degrades to an empty list when
-        the registry cannot be reached — the skip WARNING must still fire.
+        agents_referencing_builtin_mcp``); degrades to ``None`` when
+        the registry cannot be reached — the skip WARNING must still
+        fire, and it must state that the referencing agents could NOT
+        be determined rather than asserting the false fact "no agent
+        references it" (C1, reviewer-adjudicated tidier must-fix
+        2026-11-02: an empty list and a failed enumeration are
+        DIFFERENT facts; the caller renders them differently).
         """
         try:
             # FUNCTION-LOCAL on purpose: the module-level ``get_registry``
@@ -3379,7 +3430,7 @@ class InstanceManager:
                 server_name,
                 exc,
             )
-            return []
+            return None
 
     def _cross_check_mcp_full_access_rows(
         self,
@@ -3418,7 +3469,13 @@ class InstanceManager:
                 agent_registry.agents_by_mcp_full_access()
             )
         except Exception as exc:  # noqa: BLE001 — observability must not crash boot
-            logger.debug(
+            # C2 (reviewer-adjudicated tidier must-fix 2026-11-02): a
+            # failed cross-check enumeration is a LOST capability-gap
+            # signal — the layer exists to catch declared-but-undelivered
+            # tools, and a registry outage silencing it at DEBUG made
+            # the loss invisible. WARNING, matching the severity of the
+            # gap it failed to check.
+            logger.warning(
                 "mcp_full_access cross-check skipped (registry unavailable): %s",
                 exc,
             )

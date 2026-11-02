@@ -110,6 +110,14 @@ _DB_NAME_TO_ENV_LABEL: dict[str, str] = {
 # template ONCE, at the point of refusal; every DOWNSTREAM emitter — the
 # manager's skip WARNING included — receives the ALREADY-FORMATTED string
 # and interpolates that VERBATIM. No emitter re-renders a template.
+#
+# C4 (reviewer-adjudicated tidier must-fix, 2026-11-02): template
+# fills ESCAPE operator-controlled values (the slug) via
+# :func:`_escape_for_reason` — repr-style control-character rendering —
+# so a newline/control character in ``PLANE_MCP_WORKSPACE_SLUG`` can
+# never forge a second agent-visible log line. Clean values render
+# byte-identically; VALUE case-sensitivity is UNCHANGED (only the
+# rendering escapes, never the value compared).
 
 REASON_UNSET_SLUG: str = (
     "PLANE_MCP_WORKSPACE_SLUG is unset in a non-production environment; "
@@ -135,6 +143,22 @@ REASON_GARBAGE_MARKER: str = (
     "(expected one of dev, demo, live, sandbox); refusing to classify as "
     "production"
 )
+
+
+def _escape_for_reason(value: str) -> str:
+    """Render a value repr-style MINUS the outer quotes (C4).
+
+    ``repr()`` renders control characters as visible escape sequences
+    (``\\n``, ``\\r``, ``\\t`` …) — the house F3-notice precedent
+    interpolates the persisted slug via ``%r`` for exactly this
+    reason. Stripping the OUTER quote pair keeps CLEAN values
+    byte-identical inside the templates' own quoting (``'{slug}'``),
+    so live/dev messages on legitimate slugs are unchanged; only
+    pathological values (newline/control characters) render visibly
+    escaped — a forged second log line becomes impossible.
+    """
+    rendered = repr(value)
+    return rendered[1:-1] if len(rendered) >= 2 else rendered
 
 # ── The resolution ───────────────────────────────────────────────────────────
 
@@ -413,7 +437,12 @@ def resolve_plane_workspace(
             else REASON_PRODUCTION_ONLY.format(label=env_label)
         )
     else:
-        reason = REASON_OTHER_SLUG.format(slug=slug)
+        # C4: the operator-controlled slug is ESCAPED repr-style — a
+        # newline/control character in the value can never forge a
+        # second agent-visible log line. Value case-sensitivity is
+        # unchanged (the comparison above is exact); only the RENDERED
+        # form escapes.
+        reason = REASON_OTHER_SLUG.format(slug=_escape_for_reason(slug))
 
     return PlaneWorkspaceResolution(
         env_label=env_label,

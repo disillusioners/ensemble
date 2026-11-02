@@ -179,6 +179,51 @@ def _bootstrap(mgr, repo, agents, caplog) -> None:
     return caplog
 
 
+def _bootstrap_registry_broken(mgr, repo, caplog) -> None:
+    """Run the bootstrap with the AGENT REGISTRY unreachable (C1/C2 —
+    the function-local ``daemon.registry.get_registry`` seam raises)."""
+    with (
+        patch(
+            "daemon.manager.get_mcp_registry",
+            return_value=_FakeBuiltinRegistry([PlaneServerDefinition()]),
+        ),
+        patch(
+            "daemon.registry.get_registry",
+            side_effect=RuntimeError("planted registry outage"),
+        ),
+        caplog.at_level(logging.DEBUG, logger="daemon.manager"),
+    ):
+        mgr._bootstrap_builtin_servers()
+    return caplog
+
+
+def _bootstrap_quarantined(mgr, repo, agents, caplog) -> None:
+    """Run the bootstrap with the plane definition's BASE availability
+    gate forced False (C3 — the quarantine/package shape: env vars
+    PRESENT, ``super().is_available()`` False ⇒ CAUSE_UNAVAILABLE with
+    NO missing env vars)."""
+    from daemon.mcp.builtin_servers.base import BuiltinServerDefinition
+
+    with (
+        patch(
+            "daemon.manager.get_mcp_registry",
+            return_value=_FakeBuiltinRegistry([PlaneServerDefinition()]),
+        ),
+        patch(
+            "daemon.registry.get_registry",
+            return_value=_FakeAgentRegistry(agents),
+        ),
+        patch.object(
+            BuiltinServerDefinition,
+            "is_available",
+            new=classmethod(lambda cls: False),
+        ),
+        caplog.at_level(logging.DEBUG, logger="daemon.manager"),
+    ):
+        mgr._bootstrap_builtin_servers()
+    return caplog
+
+
 def _warnings(caplog):
     return [r for r in caplog.records if r.levelno >= logging.WARNING]
 
@@ -605,6 +650,170 @@ class TestUnavailableStaleRowNotice:
             "missing environment configuration" in r.getMessage()
             for r in _warnings(caplog)
         )
+
+
+# ── C1-C3: observability truthfulness (tidier must-fix 2026-11-02) ──────────
+
+
+class TestRegistryFailureTruthfulness:
+    """C1 — a FAILED agent enumeration (registry unavailable) is a
+    DIFFERENT fact from an EMPTY enumeration. The skip WARNING must say
+    "could not be determined", never assert the false fact "no agent
+    references it"."""
+
+    def test_registry_failure_says_undetermined_not_none_reference(
+        self, env, caplog
+    ):
+        env(self_env="dev", slug="e2e", mcp_url=None)
+        repo = _FakeRepo()
+        mgr = _make_manager(repo)
+
+        _bootstrap_registry_broken(mgr, repo, caplog)
+
+        skip_lines = [
+            r.getMessage()
+            for r in caplog.records
+            if "skipped" in r.getMessage()
+        ]
+        assert skip_lines, "no skip record was emitted"
+        joined = "\n".join(skip_lines)
+        assert "could not be determined (registry unavailable)" in joined
+        assert "no agent references it" not in joined, (
+            "a FAILED enumeration was rendered as the false fact "
+            "'no agent references it'"
+        )
+
+    def test_registry_failure_does_not_name_any_agent(self, env, caplog):
+        """The undetermined rendering names NO agent — an empty
+        enumeration is not being fabricated from a failure."""
+        env(self_env="dev", slug="e2e", mcp_url=None)
+        repo = _FakeRepo()
+        mgr = _make_manager(repo)
+
+        _bootstrap_registry_broken(mgr, repo, caplog)
+
+        skip_lines = [
+            r.getMessage()
+            for r in caplog.records
+            if "skipped" in r.getMessage()
+        ]
+        assert skip_lines
+        assert "project-manager" not in "\n".join(skip_lines)
+
+    def test_cross_check_registry_failure_is_a_warning(self, env, caplog):
+        """C2 — a silenced cross-check is a LOST capability-gap signal:
+        the registry-fail line is WARNING, not DEBUG."""
+        env(self_env="dev", slug="e2e", mcp_url=None)
+        repo = _FakeRepo()
+        mgr = _make_manager(repo)
+
+        _bootstrap_registry_broken(mgr, repo, caplog)
+
+        skipped_lines = [
+            r
+            for r in caplog.records
+            if "cross-check skipped" in r.getMessage()
+        ]
+        assert skipped_lines, "no cross-check-skip record was emitted"
+        assert all(
+            r.levelno >= logging.WARNING for r in skipped_lines
+        ), "the registry-fail cross-check line is not at WARNING level"
+
+
+class TestQuarantineCauseRendering:
+    """C3 — an UNAVAILABLE cause with NO missing env vars (the
+    quarantine / missing-package shape) renders the typed
+    ``unavailable_reason()`` (which names the quarantine), never the
+    false "missing environment configuration: unknown"."""
+
+    def test_quarantine_cause_names_the_quarantine_not_env_vars(
+        self, env, caplog
+    ):
+        env(self_env="dev", slug="e2e")  # URL + KEY present
+        repo = _FakeRepo()
+        mgr = _make_manager(repo)
+
+        _bootstrap_quarantined(
+            mgr, repo, [_agent_meta("project-manager", ["plane"])], caplog
+        )
+
+        skip_records = [
+            r for r in caplog.records if "skipped" in r.getMessage()
+        ]
+        assert skip_records
+        text = "\n".join(r.getMessage() for r in skip_records)
+        assert "quarantined for this boot" in text, (
+            "the quarantine cause did not name the quarantine"
+        )
+        assert "missing environment configuration" not in text, (
+            "the quarantine cause was rendered as a missing-env case"
+        )
+        assert "GET /api/mcp-servers" in text  # the remediation pointer
+
+    def test_quarantine_stale_row_notice_names_the_quarantine(
+        self, env, caplog
+    ):
+        """The F3 stale-row notice's cause line is cause-aware for the
+        quarantine shape too."""
+        env(self_env="dev", slug="e2e")
+        row = _FakeRow(config={"headers": {"x-workspace-slug": "e2e"}})
+        repo = _FakeRepo([row])
+        mgr = _make_manager(repo)
+
+        _bootstrap_quarantined(
+            mgr, repo, [_agent_meta("project-manager", ["plane"])], caplog
+        )
+
+        notice_lines = [
+            r.getMessage()
+            for r in _warnings(caplog)
+            if "STALE ACTIVE row" in r.getMessage()
+        ]
+        assert notice_lines
+        notice = notice_lines[0]
+        assert "quarantined for this boot" in notice
+        assert "PLANE_MCP_URL" not in notice  # the env vars are PRESENT
+
+    def test_genuine_missing_env_rendering_is_unchanged(self, env, caplog):
+        """The REAL missing-env shape keeps its exact rendering (the
+        C3 branch must not swallow it)."""
+        env(self_env="dev", slug="e2e", mcp_url=None, mcp_key=None)
+        repo = _FakeRepo()
+        mgr = _make_manager(repo)
+
+        _bootstrap(mgr, repo, [_agent_meta("project-manager", ["plane"])], caplog)
+
+        skip_records = [
+            r for r in caplog.records if "skipped" in r.getMessage()
+        ]
+        assert skip_records
+        text = "\n".join(r.getMessage() for r in skip_records)
+        assert "missing environment configuration: PLANE_MCP_URL, PLANE_MCP_API_KEY" in text
+        assert "quarantined" not in text
+
+
+class TestStaleRowNoticeRewording:
+    """C3 — the notice's future wording states the ROW's true
+    lifecycle ("stays ACTIVE and is re-delivered"), not the internal
+    mechanism name ("reactivate/heal")."""
+
+    def test_notice_uses_the_row_lifecycle_wording(self, env, caplog):
+        env(self_env="dev", slug="e2e", mcp_url=None, mcp_key=None)
+        row = _FakeRow(config={"headers": {"x-workspace-slug": "nea"}})
+        repo = _FakeRepo([row])
+        mgr = _make_manager(repo)
+
+        _bootstrap(mgr, repo, [_agent_meta("project-manager", ["plane"])], caplog)
+
+        notice_lines = [
+            r.getMessage()
+            for r in _warnings(caplog)
+            if "STALE ACTIVE row" in r.getMessage()
+        ]
+        assert notice_lines
+        notice = notice_lines[0]
+        assert "the row stays ACTIVE and is re-delivered" in notice
+        assert "reactivate/heal" not in notice
 
 
 # ── P6 / P6b: the registry-vs-row cross-check ───────────────────────────────

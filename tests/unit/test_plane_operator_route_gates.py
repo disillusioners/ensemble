@@ -115,7 +115,7 @@ def repo() -> _FakeRepo:
 
 
 @pytest.fixture
-def mock_app(repo) -> FastAPI:
+def mock_app(repo, monkeypatch) -> FastAPI:
     app = FastAPI()
     api_router = APIRouter(prefix="/api")
     api_router.include_router(mcp_servers_router)
@@ -123,6 +123,16 @@ def mock_app(repo) -> FastAPI:
 
     manager: Any = _SimpleManager(repo)
     app.state.manager = manager
+
+    # The configure/reset SUCCESS legs reach ``_write_install_audit``,
+    # whose real append targets the REPO's tracked
+    # ``.agents/shared/planning/designer-agent/install-audit.jsonl``
+    # (the audit service's preferred path). A test must never append
+    # to a tracked repo file — stub the writer for the whole pack.
+    monkeypatch.setattr(
+        "daemon.routers.mcp_servers._write_install_audit",
+        lambda *args, **kwargs: None,
+    )
     return app
 
 
