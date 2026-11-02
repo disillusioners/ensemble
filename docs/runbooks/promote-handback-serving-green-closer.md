@@ -166,3 +166,69 @@ shape (a release that is serving green and gets quarantined by a halt).
 | the journal vocabulary + the alert map | `daemon/tools/upgrade_journal.py` (`ALERT_KIND_BY_EVENT`, `_TERMINAL_EVENTS`, `WAKE_EXCLUDED_EVENTS`, the per-entry readers) |
 | the shell readers + the gate amendment + the adopt path | `scripts/upgrade/lib.sh` (`journal_history_has_intent_flip`, `journal_quarantine_cleared_serving_green`, `promote_entry_check`, `adopt_stale_txn`) |
 | the operator pins | `tests/packs/promote_handback_halt_serving_green_test.sh`, `tests/unit/tools/test_upgrade_serving_green_closer.py` |
+
+---
+
+## 9. Phase 3 — the ceremony preconditions (the cooldown rider + the scripts-pin advance)
+
+**The rider.** The launcher's rollback-cooldown arm (`_js_count_rollback`)
+was BSD-only (`date -jur`): on GNU the dialect fails, the fallback wrote
+`cooldown_until = NOW`, and the ADR-005 10-minute anti-flapping window was
+**silently disarmed** — the same incident night, the armed stamp *predated*
+the sweep row that armed it. The arm is now a two-`uname` dispatch; on an
+**unrecognized platform** it writes an **unparseable marker** so the
+ceremony-side consumer (`lib.sh` `journal_cooldown_active`) reads the
+cooldown as **ACTIVE** (fail-closed — the window stays armed, never silently
+disabled). The fix ships **inside `launcher.sh`**, i.e. in the release
+payload ⇒ it reaches live **at the next promote** (interim protection = the
+daemon-side closer + the launcher defer path above). Pins:
+`tests/test_launcher_cooldown_arm.sh`.
+
+### 9.1 The two-sided release-bump requirement (giter-owned, stage-time)
+
+The release bump commit MUST set **BOTH** of these to the **SAME merge
+commit** (the commit that introduces this lane's ceremony-relevant
+`scripts/upgrade` + promote semantics):
+
+| Channel | Site |
+|---|---|
+| the daemon-side arm-time floor | `daemon/tools/upgrade_tools.py` → `PIPELINE_SCRIPTS_FLOOR_COMMIT` |
+| the scripts-side stamp | `scripts/upgrade/lib.sh` → `PIPELINE_SCRIPTS_REV` |
+
+They are two provenance channels for one fact ("the two travel together",
+D6-8/T6.15/AC15). `stage.sh` **refuses to stage (exit 78)** when either side
+is unset / not a sha / unresolvable / not an ancestor of the built tree, or
+when the two differ; the staged manifest carries
+`pipeline_scripts_floor_commit` so the artifact is self-describing. The
+executable proof lives in `tests/test_pipeline_scripts_floor_stamp.sh`
+(P3-PIN-13/-14 + the in-tree equality pin).
+
+### 9.2 The USER-OWNED ceremony precondition (stated — not this lane's work)
+
+> **Before the next scripted ceremony, the live `.env`
+> `ENSEMBLE_UPGRADE_SCRIPTS_DIR` pin must be advanced to a tree whose HEAD
+> has the new floor commit as an ancestor.**
+
+* Enforcement: the **arm-time provenance guard**
+  (`daemon/tools/upgrade_tools.py`, phase 6 Check 4) is judged **BEFORE**
+  `consume_pending_action` — a refusal **never burns the nonce**. An
+  **explicit** pin that predates the floor ⇒ **REFUSE pre-nonce** (the guard
+  working, not a regression); a **fallback** resolution is a WARNING only.
+* The current pin target (`ensemble-src-wt-scripts-pin` @ `22fe83317`)
+  predates this lane's floor ⇒ as-is, the ceremony **refuses pre-nonce by
+  design**. Advance the pin (or ff the pinned checkout) to a tree containing
+  the new floor.
+* Second enumerated pre-step: confirm the launcher kill-switch
+  **`SWEEP_SERVING_GREEN_ENABLED=1`** (the default) is in force on the
+  ceremony's launcher, and **state the value in the ceremony notes** (`=0`
+  restores the pre-lane unconditional auto-rollback — an escape hatch,
+  never a steady state).
+
+### 9.3 The disposition doctrine at the gate (the reconciled sentence)
+
+**Serving-green ⇒ NEVER rolled back** (the owner ruling, absolute) ·
+**serving-unhealthy ⇒ the existing chain still fires, BOUNDED** by the
+absent-ceiling (≥3 qualifying AMBIGUOUS observations ∧ owner-dead ∧
+`intent_flip` ∧ never-green-observed). The commission's literal *"NEVER
+rollback"* wording is **not** the ratified rule — the bounded ceiling is a
+leader-ratified bounded ceiling, and this runbook and the register agree.

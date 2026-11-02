@@ -1,6 +1,6 @@
 # Phase 3 — Rider (launcher cooldown) + Consolidated Test-Surface Map + Payload/Scripts-Pin Deployment Mapping
 
-**Commission:** `promote-handback-halt` (incident `r-20261021-212542-8279`, target v0.28.5)
+**Commission:** `promote-handback-halt` (incident `r-20261101-212542-8279`, target v0.28.5)
 **Plan set:** `.agents/shared/planning/promote-handback-halt/` — Phase 3 of 3
 **Base tree:** worktree `/home/nea/ensemble-src-wt-promote-handback-halt`, branch `fix/promote-handback-halt`, base `941cb6321` (== `origin/latest` tip at lane creation)
 **Artifact status:** PLANNING ONLY. No code modified. No `launcher.sh` / `promote.sh` / `lib.sh` executed. No live-install (`/home/nea/agents-ensemble`) contact.
@@ -19,7 +19,7 @@ Phase 3 delivers three artifacts that the rest of the commission depends on:
 
 ---
 
-## 2. Background (incident `r-20261021-212542-8279`, 2026-11-01)
+## 2. Background (incident `r-20261101-212542-8279`, 2026-11-01)
 
 A promote of v0.28.5 flipped the release, then the hand-back verifier aborted at a fixed 180 s budget while the daemon was still finishing its ~3 min unit-active→serving boot (MCP warmup + auto-continue resume). The halt path marked v0.28.5 **QUARANTINED**; at 22:25:53Z an operator restart ran the launcher's boot sweep, which found the stale flipped txn (age 3540 s, computed — **not** a constant) and took the **AUTO-ROLLBACK** path, leaving live on v0.28.4 with v0.28.5 quarantined — while v0.28.5 was serving all-green (livez + readyz receipts at 21:49:50Z). The subsequent re-promote was refused: *"version 'v0.28.5' is QUARANTINED — cleared only by re-staging"*.
 
