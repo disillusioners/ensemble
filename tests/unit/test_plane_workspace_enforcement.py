@@ -22,7 +22,6 @@ from daemon.clients.plane_http_client import (
 )
 from daemon.mcp.builtin_servers.plane import PlaneServerDefinition
 from daemon.plane_workspace import (
-    HISTORICAL_STRICT_LIVE_REASON,
     current_plane_workspace,
     reset_resolution_cache,
 )
@@ -112,7 +111,7 @@ class TestMcpChokepoint:
         assert PlaneServerDefinition.is_available() is True
         config = PlaneServerDefinition().get_base_config()
         assert config["headers"]["x-workspace-slug"] == "e2e"
-        assert HISTORICAL_STRICT_LIVE_REASON not in str(config)
+        assert "workspace 'e2e' is not permitted in the production environment" not in str(config)
 
     def test_live_with_third_slug_is_allowed(self, env):
         env(self_env="live", slug="other", db="ensemble_prod")

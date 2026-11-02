@@ -61,7 +61,6 @@ __all__ = [
     "REASON_OTHER_SLUG",
     "REASON_UNCLASSIFIED",
     "REASON_GARBAGE_MARKER",
-    "HISTORICAL_STRICT_LIVE_REASON",
     "normalize_workspace_slug",
     "resolve_plane_workspace",
     "current_plane_workspace",
@@ -135,14 +134,6 @@ REASON_GARBAGE_MARKER: str = (
     "(expected one of dev, demo, live, sandbox); refusing to classify as "
     "production"
 )
-
-#: The STRICT live variant's reason string. Under ADJ-1 (live-exempt) this
-#: string is **NEVER emitted** — it is retained only so the pin can assert
-#: its absence (a strict-variant re-introduction goes RED).
-HISTORICAL_STRICT_LIVE_REASON: str = (
-    "workspace 'e2e' is not permitted in the production environment"
-)
-
 
 # ── The resolution ───────────────────────────────────────────────────────────
 

@@ -23,7 +23,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests"))
 
 import daemon.plane_workspace as daemon_plane_workspace
 from daemon.plane_workspace import (
-    HISTORICAL_STRICT_LIVE_REASON,
     PlaneWorkspaceResolution,
     TEST_WORKSPACE_SLUG,
     normalize_workspace_slug,
@@ -69,7 +68,7 @@ class TestPolicyMatrix:
         assert r.allowed is True
         assert r.slug == "e2e"
         assert r.reason is None
-        assert HISTORICAL_STRICT_LIVE_REASON not in (r.reason or "")
+        assert "workspace 'e2e' is not permitted in the production environment" not in (r.reason or "")
 
     def test_explicit_live_with_third_slug_is_allowed(self):
         """G2 fold NB5: live permits ANY configured slug — the rule is about
@@ -444,11 +443,18 @@ class TestStrictVariantNeverEmitted:
     def test_live_is_never_refused(self, env):
         assert resolve_plane_workspace(env, postgres_db="ensemble_prod").reason is None
 
-    def test_historical_string_only_lives_as_a_constant(self):
+    def test_historical_string_is_absent_from_the_module(self):
         """The strict string appears in the module ONLY as the documented
-        historical constant — the resolver never formats it."""
+        historical constant — the resolver never formats it.
+
+        Fold C11 (``plane-pm-issue-tools``): the production-dead constant
+        was DROPPED (no production path can emit it), so the strict
+        string now appears NOWHERE in the resolver module — the
+        invariant is STRICTER: the resolver never formats it AND no
+        constant keeps it alive.
+        """
         source = RESOLVER_PATH.read_text(encoding="utf-8")
-        assert source.count("not permitted in the production environment") == 1
+        assert source.count("not permitted in the production environment") == 0
 
 
 class TestR1ResolverNeverLogs:
