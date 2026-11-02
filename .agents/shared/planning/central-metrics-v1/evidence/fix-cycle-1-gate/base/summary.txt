@@ -1,0 +1,3 @@
+=========================== short test summary info ============================
+FAILED tests/unit/persistence/test_checkpoint_metrics_vocabulary.py::TestSweepLaneVocabulary::test_rdrs_lanes_come_from_the_config_kill_switchs
+1 failed, 532 passed, 1 warning in 29.22s
