@@ -93,12 +93,18 @@ def _observe_saver_op_bytes(op: str, state: Any) -> None:
         from daemon.services.metrics_query.wiring.w2 import checkpoint_op_bytes
     except Exception:  # noqa: BLE001 — the metrics layer is optional
         return
-    try:
-        from daemon.services.resource_monitor.charge import bounded_deep_size
+    if state is None:
+        # A MISS is still a read (a DB round trip that returned no
+        # checkpoint) — it counts with ZERO bytes (the read-lane
+        # precedent), never with the size of the ``None`` object.
+        size = 0
+    else:
+        try:
+            from daemon.services.resource_monitor.charge import bounded_deep_size
 
-        size, _nodes, _partial = bounded_deep_size(state)
-    except Exception:  # noqa: BLE001 — a failed walk records nothing
-        return
+            size, _nodes, _partial = bounded_deep_size(state)
+        except Exception:  # noqa: BLE001 — a failed walk records nothing
+            return
     try:
         checkpoint_op_bytes.labels(op=op).observe(float(size))
     except Exception:  # noqa: BLE001 — a metrics problem never breaks a read

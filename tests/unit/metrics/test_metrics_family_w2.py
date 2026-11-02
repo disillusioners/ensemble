@@ -176,6 +176,15 @@ class TestF7Completion:
         assert w2.checkpoint_op_bytes.get_count(op="aget") >= 1
         assert w2.checkpoint_op_bytes.get_sum(op="aget") > 0
 
+    def test_a_miss_records_zero_bytes(self) -> None:
+        """A MISS is a read with ZERO bytes (the read-lane precedent)."""
+        from daemon import persistence
+
+        before = w2.checkpoint_op_bytes.get_count(op="aget")
+        persistence._observe_saver_op_bytes("aget", None)
+        assert w2.checkpoint_op_bytes.get_count(op="aget") == before + 1
+        assert w2.checkpoint_op_bytes.get_sum(op="aget") == 0.0
+
     def test_the_call_site_observes_the_state(self) -> None:
         """The EXISTING observe point gains the real value.
 
