@@ -24,24 +24,29 @@ key). **These three are not catalog verbs and are not checked against the
 catalog; no other identifier is exempt** — the exclusion set is not widened
 by judgement.
 
-**Surface scope note (recorded deviation).** The plan's P11 wording says
-"the two daemon docstrings" — ``plane.py:143-152`` (``tool_name_prefix``)
-and ``daemon/tools/plane_tools.py:14`` (``CATEGORY_DOC``). The Phase-4
-dispatch fence permits **one** daemon docstring edit only
-(``daemon/mcp/builtin_servers/plane.py``), so this check covers the four
-PM prompt files + the ``tool_name_prefix`` docstring (extracted
-structurally via ``ast`` — robust to line drift). The ``plane_tools.py``
-``CATEGORY_DOC`` still names ``plane_list_issues`` and
-``daemon/tools/mcp_tools.py:17`` still documents a nonexistent
-``call_mcp_tool`` (plan §2.2 + O6) — both **routed** to the owning lane
-(dispatch fence); widening this check to them would go RED on files this
-phase may not touch.
+**Surface scope note (widened — closure of the Phase-4 routing).** The
+plan's P11 wording says "the two daemon docstrings" — ``plane.py:143-152``
+(``tool_name_prefix``) and ``daemon/tools/plane_tools.py:14``
+(``CATEGORY_DOC``). The Phase-4 dispatch fence permitted **one** daemon
+docstring edit only (``daemon/mcp/builtin_servers/plane.py``), so the
+original check covered the four PM prompt files + the
+``tool_name_prefix`` docstring (extracted structurally via ``ast`` —
+robust to line drift); the ``plane_tools.py`` ``CATEGORY_DOC`` (then
+naming ``plane_list_issues``) and ``daemon/tools/mcp_tools.py`` (then
+documenting a nonexistent ``call_mcp_tool``, plan §2.2 + O6) were
+**routed** to the owning lane. **Closed in the Phase-4 follow-up:** both
+docstrings were fixed and this check's surface now covers all three
+daemon docstrings — the four PM prompt files, ``tool_name_prefix``, and
+both ``CATEGORY_DOC`` module strings (plus the O6 generic-caller absence
+guard below).
 
 **RED legs demonstrated here** (house discipline — a pin that cannot go RED
 is vacuous): an invented verb planted in prompt text ⇒ the scanner reports
-it; a widened exclusion set ⇒ the exact-three assertion fails; and the
+it; a widened exclusion set ⇒ the exact-three assertion fails; the
 repo-state assertions were captured RED against the pre-Phase-4 files
-(seven distinct invented names) before the rewrite.
+(seven distinct invented names) before the rewrite; and each routed
+``CATEGORY_DOC`` drift planted (``plane_list_issues`` example /
+``call_mcp_tool`` sentence) ⇒ its leg goes RED.
 """
 
 from __future__ import annotations
@@ -65,6 +70,18 @@ PM_PROMPT_FILES = (
 )
 PLANE_PY = "daemon/mcp/builtin_servers/plane.py"
 PLANE_PY_DOCSTRING_OWNER = "tool_name_prefix"  # §2.2 names :143-152
+
+#: The routed ``CATEGORY_DOC`` docstrings (plan §2.2 + O6) — closed in the
+#: Phase-4 follow-up and now part of the scanned surface.
+CATEGORY_DOC_FILES = (
+    "daemon/tools/plane_tools.py",
+    "daemon/tools/mcp_tools.py",
+)
+
+#: A nonexistent generic MCP-caller tool the docstrings must not document
+#: (plan §2.2 O6). MCP invocation is per discovered tool, by its own name
+#: and schema — there is no ``call_mcp_tool``.
+_GENERIC_CALLER = "call_mcp_tool"
 
 #: THE EXPLICIT EXCLUSION SET — exactly three names (P11/X4.1 verbatim).
 #: ``plane_sync_project`` (daemon-native tool), ``plane_sync`` (category),
@@ -125,6 +142,52 @@ def plane_py_docstring() -> str:
     )
 
 
+def category_doc(rel: str) -> str:
+    """The module-level ``CATEGORY_DOC`` string, extracted structurally.
+
+    Same robustness contract as :func:`plane_py_docstring`: the value is
+    located by AST assignment shape, not by line number.
+    """
+    tree = ast.parse(
+        (_REPO_ROOT / rel).read_text(encoding="utf-8"),
+        filename=rel,
+    )
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "CATEGORY_DOC":
+                    value = node.value
+                    assert isinstance(value, ast.Constant) and isinstance(
+                        value.value, str
+                    ), f"{rel}::CATEGORY_DOC is no longer a string literal"
+                    return value.value
+    raise AssertionError(
+        f"{rel} no longer defines CATEGORY_DOC — P11's docstring anchor "
+        "moved; update the structural extraction"
+    )
+
+
+def scan_docstring_surface(
+    docs: dict[str, str] | None = None,
+) -> list[str]:
+    """Docstring-surface violations beyond the verb rule (plan §2.2 O6).
+
+    The ``CATEGORY_DOC`` strings must not document a generic MCP-caller
+    tool that does not exist. ``docs`` is injectable so the mutation legs
+    can plant the pre-closure text without touching the daemon files.
+    """
+    if docs is None:
+        docs = {rel: category_doc(rel) for rel in CATEGORY_DOC_FILES}
+    violations: list[str] = []
+    for rel in CATEGORY_DOC_FILES:
+        if _GENERIC_CALLER in docs[rel]:
+            violations.append(
+                f"{rel}::CATEGORY_DOC documents nonexistent generic caller "
+                f"{_GENERIC_CALLER!r} (plan §2.2 O6 — no such tool exists)"
+            )
+    return violations
+
+
 def scan_text(
     label: str,
     text: str,
@@ -167,6 +230,11 @@ def scan_repo_surface() -> list[str]:
         plane_py_docstring(),
         allowed,
     )
+    for rel in CATEGORY_DOC_FILES:
+        violations += scan_text(
+            f"{rel}::CATEGORY_DOC (docstring)", category_doc(rel), allowed
+        )
+    violations += scan_docstring_surface()
     return violations
 
 
@@ -261,6 +329,37 @@ class TestP11MutationLegs:
             "invented Plane MCP verb 'plane_teleport_work_item'" in v
             for v in violations
         ), violations
+
+    def test_category_doc_drift_planted_goes_red(self):
+        """The routed CATEGORY_DOC drifts planted ⇒ RED (plan §2.2 + O6).
+
+        The exact pre-closure texts: the invented ``plane_list_issues``
+        example in ``plane_tools.py`` (verb rule) and the nonexistent
+        ``call_mcp_tool`` sentence in ``mcp_tools.py`` (O6 absence guard).
+        """
+        allowed = allowed_daemon_names()
+        plane_tools_drift = (
+            "- Tool names are prefixed with `plane_` "
+            "(e.g., `plane_list_issues`)\n"
+        )
+        violations = scan_text(
+            "daemon/tools/plane_tools.py::CATEGORY_DOC (planted)",
+            plane_tools_drift,
+            allowed,
+        )
+        assert any("plane_list_issues" in v for v in violations), violations
+        mcp_tools_drift = (
+            "**Usage**:\n"
+            "- Use `call_mcp_tool(name, arguments)` to invoke a specific "
+            "tool\n"
+        )
+        planted_docs = {
+            rel: category_doc(rel) for rel in CATEGORY_DOC_FILES
+        } | {"daemon/tools/mcp_tools.py": mcp_tools_drift}
+        caller_violations = scan_docstring_surface(planted_docs)
+        assert any(
+            _GENERIC_CALLER in v for v in caller_violations
+        ), caller_violations
 
     def test_widened_exclusion_masks_the_invented_verb(self):
         """What a widened exclusion set would do — and why it is pinned.

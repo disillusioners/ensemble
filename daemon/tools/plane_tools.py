@@ -11,6 +11,7 @@ Tools from the built-in Plane MCP server (project management).
 
 **Dynamic Discovery**:
 - Tools are loaded from the Plane MCP server at runtime
-- Tool names are prefixed with `plane_` (e.g., `plane_list_issues`)
-- Requires PLANE_MCP_URL, PLANE_MCP_API_KEY, PLANE_MCP_WORKSPACE_SLUG env vars
+- Tool names are prefixed with `plane_` (e.g., `plane_list_work_items`)
+- Requires `PLANE_MCP_URL` + `PLANE_MCP_API_KEY`; the workspace slug is
+  resolved per environment — non-production environments resolve to `e2e`
 """

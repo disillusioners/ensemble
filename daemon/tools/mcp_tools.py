@@ -12,7 +12,4 @@ Tools from external MCP (Model Context Protocol) servers.
 - Tools are loaded from configured MCP servers at runtime
 - Available tools depend on the MCP server configuration
 - Tool names and schemas vary by server implementation
-
-**Usage**:
-- Use `call_mcp_tool(name, arguments)` to invoke a specific tool
 """
