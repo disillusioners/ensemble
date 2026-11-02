@@ -415,7 +415,6 @@ class PlaneHttpClient:
         """
         if resolution is None:
             resolution = current_plane_workspace()
-        self._resolution = resolution
         self._inert_reason: str | None = None
         self._breaker = breaker if breaker is not None else _plane_breaker
         self._timeout = timeout if timeout is not None else self.DEFAULT_TIMEOUT_S
