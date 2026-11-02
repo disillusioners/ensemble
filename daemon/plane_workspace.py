@@ -103,6 +103,13 @@ _DB_NAME_TO_ENV_LABEL: dict[str, str] = {
 # ``daemon/services/plane_sync_service.py::unavailable_reason``), never a log
 # phrase. The manager's skip WARNING interpolates them VERBATIM; no other
 # emitter may re-render them.
+#
+# Two shapes exist: a PLAIN string (interpolated as-is) and a
+# ``.format()`` TEMPLATE (``REASON_PRODUCTION_ONLY`` carries ``{label}``,
+# ``REASON_OTHER_SLUG`` carries ``{slug}``). The resolver fills the
+# template ONCE, at the point of refusal; every DOWNSTREAM emitter — the
+# manager's skip WARNING included — receives the ALREADY-FORMATTED string
+# and interpolates that VERBATIM. No emitter re-renders a template.
 
 REASON_UNSET_SLUG: str = (
     "PLANE_MCP_WORKSPACE_SLUG is unset in a non-production environment; "

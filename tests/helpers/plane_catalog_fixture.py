@@ -3,8 +3,12 @@
 The fixture ``tests/fixtures/plane_catalog.json`` is the committed copy of the
 lane's gate-(i) ``tools/list`` re-capture (2026-11-02, HTTP 200, 177 tools —
 ``.agents/shared/planning/plane-pm-issue-tools/gate-i-tools-list-recapture.md``).
-It is the **hermetic** test input the Phase-2 coverage pack consumes: it must
-not depend on a planning-dir file that is not shipped.
+It is the **hermetic** test input the Phase-2 coverage pack consumes: the
+CATALOG itself is committed under ``tests/fixtures/`` and depends on no
+planning-dir file. The KEEP-SET it is checked against is a COMMITTED
+planning artifact (``.agents/shared/planning/plane-pm-issue-tools/
+gate-i-keep-set.json``) reached via a repo-root-relative path — it ships
+with the repository, but it is not part of the hermetic catalog fixture.
 
 This module is the fixture's single producer-side loader. It exposes:
 

@@ -3086,9 +3086,9 @@ class InstanceManager:
                 # builtin, the disable path above already deactivated it; we
                 # just need to NOT create a fresh record.
                 #
-                # Resolved ONCE here and threaded through the whole body —
-                # the heal site below re-uses the same answer (P2-H's
-                # conditionality gate), so the two can never disagree.
+                # Resolved ONCE here: the BOOLEAN is threaded through the
+                # body; the heal site below re-reads the MEMOISED
+                # resolution (same object — P2-H's conditionality gate).
                 available = definition.is_available()
                 if not available:
                     pkg = definition.required_package
