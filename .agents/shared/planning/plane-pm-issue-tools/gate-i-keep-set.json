@@ -1,0 +1,234 @@
+{
+  "artifact": "gate-i-keep-set",
+  "artifact_integrity": {
+    "all_raw_verbs_in_catalog": true,
+    "fc1_fires": false,
+    "missing_raw_verbs": []
+  },
+  "consumers": [
+    "gate (i) criterion 4 (set-membership input)",
+    "Phase 4 \u00a72.1 (the charter rewrite's verb vocabulary)",
+    "FC8 minimum-toolset input for the A' branch (phase5-plan.md \u00a75.6)"
+  ],
+  "created": "2026-11-02T08:12:00Z",
+  "keep_set": [
+    {
+      "daemon_name": "plane_create_work_item",
+      "family": "work-item-crud",
+      "raw_verb": "create_work_item"
+    },
+    {
+      "daemon_name": "plane_update_work_item",
+      "family": "work-item-crud",
+      "raw_verb": "update_work_item"
+    },
+    {
+      "daemon_name": "plane_delete_work_item",
+      "family": "work-item-crud",
+      "raw_verb": "delete_work_item"
+    },
+    {
+      "daemon_name": "plane_retrieve_work_item",
+      "family": "work-item-crud",
+      "raw_verb": "retrieve_work_item"
+    },
+    {
+      "daemon_name": "plane_retrieve_work_item_by_identifier",
+      "family": "work-item-crud",
+      "raw_verb": "retrieve_work_item_by_identifier"
+    },
+    {
+      "daemon_name": "plane_list_work_items",
+      "family": "work-item-crud",
+      "raw_verb": "list_work_items"
+    },
+    {
+      "daemon_name": "plane_search_work_items",
+      "family": "work-item-crud",
+      "raw_verb": "search_work_items"
+    },
+    {
+      "daemon_name": "plane_count_work_items",
+      "family": "work-item-crud",
+      "raw_verb": "count_work_items"
+    },
+    {
+      "daemon_name": "plane_create_work_item_comment",
+      "family": "comments",
+      "raw_verb": "create_work_item_comment"
+    },
+    {
+      "daemon_name": "plane_list_work_item_comments",
+      "family": "comments",
+      "raw_verb": "list_work_item_comments"
+    },
+    {
+      "daemon_name": "plane_update_work_item_comment",
+      "family": "comments",
+      "raw_verb": "update_work_item_comment"
+    },
+    {
+      "daemon_name": "plane_delete_work_item_comment",
+      "family": "comments",
+      "raw_verb": "delete_work_item_comment"
+    },
+    {
+      "daemon_name": "plane_retrieve_work_item_comment",
+      "family": "comments",
+      "raw_verb": "retrieve_work_item_comment"
+    },
+    {
+      "daemon_name": "plane_create_cycle",
+      "family": "cycles",
+      "raw_verb": "create_cycle"
+    },
+    {
+      "daemon_name": "plane_update_cycle",
+      "family": "cycles",
+      "raw_verb": "update_cycle"
+    },
+    {
+      "daemon_name": "plane_delete_cycle",
+      "family": "cycles",
+      "raw_verb": "delete_cycle"
+    },
+    {
+      "daemon_name": "plane_list_cycles",
+      "family": "cycles",
+      "raw_verb": "list_cycles"
+    },
+    {
+      "daemon_name": "plane_retrieve_cycle",
+      "family": "cycles",
+      "raw_verb": "retrieve_cycle"
+    },
+    {
+      "daemon_name": "plane_complete_cycle",
+      "family": "cycles",
+      "raw_verb": "complete_cycle"
+    },
+    {
+      "daemon_name": "plane_manage_cycle_work_items",
+      "family": "cycles",
+      "raw_verb": "manage_cycle_work_items"
+    },
+    {
+      "daemon_name": "plane_transfer_cycle_work_items",
+      "family": "cycles",
+      "raw_verb": "transfer_cycle_work_items"
+    },
+    {
+      "daemon_name": "plane_list_cycle_work_items",
+      "family": "cycles",
+      "raw_verb": "list_cycle_work_items"
+    },
+    {
+      "daemon_name": "plane_manage_cycle_archive",
+      "family": "cycles",
+      "raw_verb": "manage_cycle_archive"
+    },
+    {
+      "daemon_name": "plane_manage_work_item_assignee",
+      "family": "assignee",
+      "raw_verb": "manage_work_item_assignee"
+    },
+    {
+      "daemon_name": "plane_list_projects",
+      "family": "discovery-typing-reads",
+      "raw_verb": "list_projects"
+    },
+    {
+      "daemon_name": "plane_list_work_item_types",
+      "family": "discovery-typing-reads",
+      "raw_verb": "list_work_item_types"
+    },
+    {
+      "daemon_name": "plane_resolve_work_item_type",
+      "family": "discovery-typing-reads",
+      "raw_verb": "resolve_work_item_type"
+    },
+    {
+      "daemon_name": "plane_list_states",
+      "family": "discovery-typing-reads",
+      "raw_verb": "list_states"
+    }
+  ],
+  "keep_set_count": 28,
+  "keep_set_daemon_names": [
+    "plane_complete_cycle",
+    "plane_count_work_items",
+    "plane_create_cycle",
+    "plane_create_work_item",
+    "plane_create_work_item_comment",
+    "plane_delete_cycle",
+    "plane_delete_work_item",
+    "plane_delete_work_item_comment",
+    "plane_list_cycle_work_items",
+    "plane_list_cycles",
+    "plane_list_projects",
+    "plane_list_states",
+    "plane_list_work_item_comments",
+    "plane_list_work_item_types",
+    "plane_list_work_items",
+    "plane_manage_cycle_archive",
+    "plane_manage_cycle_work_items",
+    "plane_manage_work_item_assignee",
+    "plane_resolve_work_item_type",
+    "plane_retrieve_cycle",
+    "plane_retrieve_work_item",
+    "plane_retrieve_work_item_by_identifier",
+    "plane_retrieve_work_item_comment",
+    "plane_search_work_items",
+    "plane_transfer_cycle_work_items",
+    "plane_update_cycle",
+    "plane_update_work_item",
+    "plane_update_work_item_comment"
+  ],
+  "keep_set_raw_verbs": [
+    "complete_cycle",
+    "count_work_items",
+    "create_cycle",
+    "create_work_item",
+    "create_work_item_comment",
+    "delete_cycle",
+    "delete_work_item",
+    "delete_work_item_comment",
+    "list_cycle_work_items",
+    "list_cycles",
+    "list_projects",
+    "list_states",
+    "list_work_item_comments",
+    "list_work_item_types",
+    "list_work_items",
+    "manage_cycle_archive",
+    "manage_cycle_work_items",
+    "manage_work_item_assignee",
+    "resolve_work_item_type",
+    "retrieve_cycle",
+    "retrieve_work_item",
+    "retrieve_work_item_by_identifier",
+    "retrieve_work_item_comment",
+    "search_work_items",
+    "transfer_cycle_work_items",
+    "update_cycle",
+    "update_work_item",
+    "update_work_item_comment"
+  ],
+  "keep_set_sorted_names_sha256": "6bee850167039216624088e2c2fe2ef63042871c6bdebcdf8b9a34d103bebcbe",
+  "lane": "plane-pm-issue-tools",
+  "phase": "1 (gate (i))",
+  "provenance": {
+    "catalog_re_captured_at": "2026-11-02T08:12:00Z",
+    "catalog_sorted_names_sha256": "0df212f44bc11cda84c1fb92171eef3c999436d03f978fff28fcb4f0b66e745a",
+    "catalog_source": "live-recapture",
+    "catalog_tool_count": 177,
+    "enumeration_source": "phase1-plan.md \u00a73 (the architect's family description, literally enumerated: 8 work-item CRUD + 5 comments + 10 cycles + 1 assignee + 4 discovery/typing reads)",
+    "fallback": false,
+    "membership_verified_against": "the 2026-11-02 live re-capture (HTTP 200, 177 tools)",
+    "note": "no fallback branch was taken: the dev-context credential was LIVE at re-capture time (initialize HTTP 200, credential_state=accepted)"
+  },
+  "pruned_count": 149,
+  "pruning_note": "the pruned set (customer, release, project-admin, module, milestone, initiative, page, property families + out-of-scope deletes) is recorded as a COUNT + the catalog sha256 only \u2014 NOT as a second name list; the 28 above are the whole keep-set",
+  "schema_version": 1,
+  "sorted_names_sha256_algorithm": "sha256( \"\\n\".join(sorted_names) + \"\\n\" ) over UTF-8"
+}
