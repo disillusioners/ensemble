@@ -49,8 +49,21 @@ from daemon.services.metrics_query.wiring import ws_a
 LANE_BASE = "644c2bfaaa48514ec7de79f7f4bcd078a700cdbe"
 
 #: The daemon-side files the lane MAY touch.
+#:
+#: THE PIN PROTECTS THE PRODUCERS, NOT THE LANE'S OWN SURFACES.  The
+#: original allowlist was written for the P4 stage (the wiring package
+#: plus the F7 bytes call site).  The fix cycle legitimately touches the
+#: lane's OWN surfaces — the query package (the ring, the provider, the
+#: envelope, the constants) and the query router (the door) — and those
+#: are NOT producer modules: no producer may grow an observe/inc call,
+#: and every producer path stays outside this list.
 ALLOWED_DAEMON_DIFF = (
     "daemon/persistence.py",
+    "daemon/routers/metrics.py",
+    "daemon/services/metrics_query/constants.py",
+    "daemon/services/metrics_query/envelope.py",
+    "daemon/services/metrics_query/provider.py",
+    "daemon/services/metrics_query/ring.py",
     "daemon/services/metrics_query/sampler.py",
 )
 

@@ -28,7 +28,10 @@ PUBLISHED registry state only — never this module.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
+import threading
+import time
 from typing import Any, Callable, Iterator
 
 logger = logging.getLogger(__name__)
@@ -41,6 +44,38 @@ STATEMENT_TIMEOUT_MS = 5_000
 
 #: The application name prefix of the metrics-query readers.
 APPLICATION_NAME = "ensemble-metrics-query"
+
+#: The rate limit of the failure log (seconds, per statement
+#: fingerprint).  A family whose query keeps failing used to be
+#: swallowed at DEBUG — invisible in a live log, so a persistently
+#: broken family looked exactly like a family with no observations
+#: (A-3).  The failure is now a WARNING, but RATE LIMITED so a broken
+#: family cannot flood the log at the sampler's cadence.
+FAILURE_LOG_INTERVAL_S = 60.0
+
+#: The last-logged timestamp per statement fingerprint.
+_FAILURE_LOG_LOCK = threading.Lock()
+_FAILURE_LOGGED_AT: dict[str, float] = {}
+
+
+def _log_failure_rate_limited(kind: str, statement: str, exc: Exception) -> None:
+    """Log a DB failure at WARNING, at most once per minute per query."""
+    fingerprint = hashlib.sha256(
+        f"{kind}:{statement}".encode("utf-8", "replace")
+    ).hexdigest()[:12]
+    now = time.monotonic()
+    with _FAILURE_LOG_LOCK:
+        last = _FAILURE_LOGGED_AT.get(fingerprint)
+        if last is not None and (now - last) < FAILURE_LOG_INTERVAL_S:
+            return
+        _FAILURE_LOGGED_AT[fingerprint] = now
+    logger.warning(
+        "metrics wiring: DB %s failed (rate-limited to one line per %.0fs "
+        "per query): %s",
+        kind,
+        FAILURE_LOG_INTERVAL_S,
+        exc,
+    )
 
 
 def connect_once(
@@ -84,8 +119,11 @@ def one_shot(
     conn = None
     try:
         conn = opener(dsn, application_name=application_name)
-    except Exception:  # noqa: BLE001 — a dead DB degrades the family
-        logger.debug("metrics wiring: DB connect failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — a dead DB degrades the family
+        # A-3 — a persistently failing connect is a WARNING (rate
+        # limited), not a DEBUG line: a family whose database is gone
+        # must be VISIBLE in the log, and it must not flood it.
+        _log_failure_rate_limited("connect", application_name, exc)
         yield None
         return
     try:
@@ -101,6 +139,11 @@ def fetch_rows(conn: Any, sql: str, params: tuple[Any, ...] = ()) -> list[tuple[
     """Run one query on a one-shot connection and return the rows.
 
     ``None`` connection ⇒ no rows (the family renders no series).
+
+    A failing query is a WARNING (rate limited per statement, A-3): the
+    family degrades to "no series", and the log says WHY — a silently
+    broken family is indistinguishable from a family with no
+    observations.
     """
     if conn is None:
         return []
@@ -108,8 +151,8 @@ def fetch_rows(conn: Any, sql: str, params: tuple[Any, ...] = ()) -> list[tuple[
         with conn.cursor() as cur:
             cur.execute(sql, params)
             return list(cur.fetchall())
-    except Exception:  # noqa: BLE001 — a failed query degrades the family
-        logger.debug("metrics wiring: DB query failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — a failed query degrades the family
+        _log_failure_rate_limited("query", sql, exc)
         return []
 
 

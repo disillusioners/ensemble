@@ -125,9 +125,30 @@ class MetricsSampler:
         return True
 
     def stop(self) -> threading.Thread | None:
-        """Stop the sampler thread and return it (detached-join)."""
+        """Stop the sampler thread and JOIN it (bounded).
+
+        THE JOIN IS THE POINT (A-2): a detached stop leaves the tick in
+        flight running — and that tick may still hold a one-shot DB
+        connection (the DB adapters open and close one PER TICK, so the
+        window is short but real) after the daemon has asked the sampler
+        to stop.  The join closes that window.
+
+        The join is BOUNDED (the tick cadence, at least 5 s) so a stuck
+        adapter can never wedge the daemon's shutdown; a thread that
+        outlives the bound is LOGGED, not waited on forever.
+        """
         thread = self._thread
         self._stop.set()
+        if thread is not None and thread.is_alive():
+            timeout = max(5.0, float(self._interval_s))
+            thread.join(timeout=timeout)
+            if thread.is_alive():
+                logger.warning(
+                    "metrics trend sampler: the thread did not stop within "
+                    "%.1fs — the shutdown continues (the tick may still be "
+                    "finishing)",
+                    timeout,
+                )
         self._thread = None
         return thread
 

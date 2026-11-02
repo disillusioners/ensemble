@@ -24,7 +24,36 @@ module up in ``sys.modules``.  In the running daemon ``daemon.api`` is
 always imported (the uvicorn entry point is ``daemon.api:app``), so
 the lookup succeeds; in a unit test the module is usually absent and
 the lookup returns ``None`` — every family then degrades to "no
-series", which is the honest absent-≠-zero posture.
+series", which is the honest absent-≠-zero posture.  That absence is
+LOGGED (once per process) — a silent "no series" with no word would be
+unreadable in a live log (A-8).
+
+NO CONTENT CACHE — THE BUNDLE IS REBUILT ON EVERY RESOLUTION
+-------------------------------------------------------------
+An earlier revision cached the bundle's CONTENTS under ``id(app.state)``
+and served the cached bundle on every later resolution.  That was
+WRONG, and the failure was PERMANENT rather than a race: the sampler
+starts BEFORE the lifespan assigns the producer handles
+(``daemon/api.py`` starts the sampler ~200 lines before
+``app.state.manager`` is assigned), so the FIRST resolution froze a
+bundle of ``None`` handles — and because ``app.state`` is never
+replaced, ``id(app.state)`` never changed and the stale bundle was
+served for the life of the process.
+
+THE BLAST RADIUS WAS TWELVE OF THE SIXTEEN ADMITTED FAMILIES: seven of
+them were dark SOLELY because ``dsn`` stayed ``None`` (the DB-backed
+adapters skip their queries when there is no DSN), and the rest were
+dark because their producer handle was ``None``.  Only F6, F7, F9 and
+F21 stayed live.  NOTE THE FAILURE MODE: there was NO ambient-DSN
+exposure — ``resolve_dsn`` is called ONLY inside ``if engine is not
+None``, so the DSN stayed ``None`` and the adapters skipped their
+queries entirely.  The families were SILENTLY ABSENT, not wrong.
+
+So the bundle is rebuilt on EVERY resolution.  The cost is a handful of
+attribute reads plus one ``engine.url.render_as_string()`` —
+microseconds at the sampler's 10 s cadence — and the price of that
+microsecond is never serving a stale handle again.  There is NO
+content cache and NO identity key.
 
 THE EXPLICIT OVERRIDE
 ---------------------
@@ -105,8 +134,6 @@ def bind_sources(sources: WiringSources | None) -> None:
     """
     global _BOUND_SOURCES
     _BOUND_SOURCES = sources
-    global _RUNTIME_CACHE
-    _RUNTIME_CACHE = None
 
 
 def unbind_sources() -> None:
@@ -114,8 +141,8 @@ def unbind_sources() -> None:
     bind_sources(None)
 
 
-def _locate_app_state() -> Any | None:
-    """The live app's ``state`` — WITHOUT importing ``daemon.api``.
+def _locate_app() -> Any | None:
+    """The live FastAPI app — WITHOUT importing ``daemon.api``.
 
     ``sys.modules`` lookup only: importing ``daemon.api`` from here
     would (a) create a circular import (``daemon.api`` imports this
@@ -131,7 +158,33 @@ def _locate_app_state() -> Any | None:
     app = getattr(module, "app", None)
     if app is None:
         return None
+    return app
+
+
+def _locate_app_state() -> Any | None:
+    """The live app's ``state`` — WITHOUT importing ``daemon.api``.
+
+    The state is resolved FRESH on every call: the app's ``state``
+    object is never replaced by the daemon, but a REPLACEMENT must be
+    visible to the adapters all the same (the C-1 invariant).
+    """
+    app = _locate_app()
+    if app is None:
+        return None
     return getattr(app, "state", None)
+
+
+def _read_app_handle(app: Any, name: str) -> Any:
+    """Read a handle off the app's CURRENT state.
+
+    The state object is resolved at CALL time, not captured at build
+    time: a REPLACED ``app.state`` must be visible to the callable
+    handles exactly like a replaced handle is.
+    """
+    state = getattr(app, "state", None)
+    if state is None:
+        return None
+    return getattr(state, name, None)
 
 
 def _resolve_install_dir() -> Any:
@@ -149,8 +202,16 @@ def _resolve_install_dir() -> Any:
         return None
 
 
-def _build_runtime_sources(state: Any) -> WiringSources:
-    """Build the bundle from the live app state."""
+def _build_runtime_sources(app: Any) -> WiringSources:
+    """Build the bundle from the live app state.
+
+    The bundle is built FRESH on every resolution (no content cache):
+    the producer handles are assigned ACROSS the lifespan, so a cached
+    bundle would freeze the handles that happened to exist at the first
+    resolution — and the first resolution happens at the sampler's first
+    tick, before the lifespan has assigned any of them.
+    """
+    state = getattr(app, "state", None)
     if state is None:
         return WiringSources()
 
@@ -184,7 +245,7 @@ def _build_runtime_sources(state: Any) -> WiringSources:
         resource_monitor=getattr(state, "resource_monitor", None),
         wedge_watchdog=getattr(state, "wedge_capture_watchdog", None),
         census=getattr(state, "metrics_census", None),
-        readiness_composite=lambda: getattr(state, "readiness_composite", None),
+        readiness_composite=lambda: _read_app_handle(app, "readiness_composite"),
         mcp_snapshot=lambda: _read_mcp_snapshot(),
         mcps_gateway_service=getattr(state, "mcps_gateway_service", None),
         sweeps=sweeps,
@@ -222,34 +283,93 @@ def _read_mcp_snapshot() -> Mapping[str, Any] | None:
         return None
 
 
-#: The cached runtime bundle — keyed by the app state's identity.  The
-#: bundle's CONTENTS are stable (the manager, the monitor, the census);
-#: the mutable facts it exposes are read through CALLABLES (the
-#: readiness composite) or read fresh per tick (the census snapshot).
-_RUNTIME_CACHE: tuple[int, WiringSources] | None = None
+#: The runtime probe — the resolved bundle's handle PRESENCE, logged the
+#: FIRST time a bundle is resolved and again whenever the presence
+#: CHANGES.  It is the C-1 ⑤ probe: a daemon-side log line that shows
+#: which producer handles the locator actually resolved, so the
+#: dark→live transition is OBSERVABLE in a live log instead of being
+#: inferred from a static read of the source.
+_PROBE_PRESENCE: dict[str, bool] | None = None
+
+#: The locator-absence latch — the "no ``daemon.api`` in this process"
+#: line is emitted ONCE per process (A-8: the fallback was SILENT).
+_ABSENCE_LOGGED: bool = False
+
+
+def bundle_handle_presence(bundle: WiringSources) -> dict[str, bool]:
+    """The bundle's handle-presence map (the probe's payload).
+
+    The map is about HANDLES, never about series: a handle that is
+    present but has published nothing is still PRESENT (absent ≠ zero).
+    """
+    return {
+        "manager": bundle.manager is not None,
+        "resource_monitor": bundle.resource_monitor is not None,
+        "wedge_watchdog": bundle.wedge_watchdog is not None,
+        "census": bundle.census is not None,
+        "readiness_composite": bundle.readiness_composite is not None,
+        "mcp_snapshot": bundle.mcp_snapshot is not None,
+        "mcps_gateway_service": bundle.mcps_gateway_service is not None,
+        "sweeps": bool(bundle.sweeps),
+        "install_dir": bundle.install_dir is not None,
+        "dsn": bundle.dsn is not None,
+        "db_connect": bundle.db_connect is not None,
+    }
+
+
+def _emit_runtime_probe(bundle: WiringSources) -> None:
+    """Log the resolved bundle's handles (once, then on every CHANGE)."""
+    global _PROBE_PRESENCE
+    presence = bundle_handle_presence(bundle)
+    if _PROBE_PRESENCE is not None and presence == _PROBE_PRESENCE:
+        return
+    _PROBE_PRESENCE = presence
+    present = sorted(name for name, live in presence.items() if live)
+    absent = sorted(name for name, live in presence.items() if not live)
+    logger.info(
+        "[Metrics] runtime source bundle resolved: present=%s absent=%s",
+        ",".join(present) or "none",
+        ",".join(absent) or "none",
+    )
+
+
+def _emit_locator_absence() -> None:
+    """Say ONCE that this process has no ``daemon.api`` to resolve from."""
+    global _ABSENCE_LOGGED
+    if _ABSENCE_LOGGED:
+        return
+    _ABSENCE_LOGGED = True
+    logger.info(
+        "[Metrics] runtime source locator: daemon.api is not in "
+        "sys.modules — the pull adapters have no producer handles "
+        "(every family renders no series; absent is not zero)"
+    )
+
+
+def _reset_runtime_probe() -> None:
+    """Reset the probe/absence latches (the pin's fixture hook)."""
+    global _PROBE_PRESENCE, _ABSENCE_LOGGED
+    _PROBE_PRESENCE = None
+    _ABSENCE_LOGGED = False
 
 
 def current_sources() -> WiringSources:
     """The bundle the adapters read from RIGHT NOW.
 
     The explicit bundle wins; otherwise the live app state is resolved
-    (and CACHED by the state's identity — the bundle's members are
-    stable, and the readiness composite is read through a callable so
-    it is never stale).
+    FRESH — there is NO content cache (see the module docstring: the
+    cached bundle froze the ``None`` handles that existed at the
+    sampler's first tick, and the stale bundle was PERMANENT).
     """
     if _BOUND_SOURCES is not None:
         return _BOUND_SOURCES
-    global _RUNTIME_CACHE
     try:
-        state = _locate_app_state()
-        if state is None:
+        app = _locate_app()
+        if app is None:
+            _emit_locator_absence()
             return WiringSources()
-        key = id(state)
-        cached = _RUNTIME_CACHE
-        if cached is not None and cached[0] == key:
-            return cached[1]
-        bundle = _build_runtime_sources(state)
-        _RUNTIME_CACHE = (key, bundle)
+        bundle = _build_runtime_sources(app)
+        _emit_runtime_probe(bundle)
         return bundle
     except Exception:  # noqa: BLE001 — a locator failure degrades, never raises
         logger.debug("metrics wiring: source locator failed", exc_info=True)
@@ -259,6 +379,7 @@ def current_sources() -> WiringSources:
 __all__ = [
     "WiringSources",
     "bind_sources",
+    "bundle_handle_presence",
     "current_sources",
     "unbind_sources",
 ]

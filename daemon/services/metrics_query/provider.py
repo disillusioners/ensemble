@@ -25,6 +25,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from daemon import checkpoint_metrics as cm
 from daemon.services.metrics_query.availability import (
+    AVAILABILITY_REASONS,
     AvailabilityFacts,
     derive_availability,
 )
@@ -231,16 +232,28 @@ class RegistryMetricsQueryProvider:
                 if any(member.is_chart_primary() for member in members)
                 else cm.FAMILY_ROLE_STAT
             )
+            availability = derive_availability(
+                source_idiom=source_idiom,
+                live_series_count=live_series_count,
+                facts=facts,
+            )
+            # A-9 — the BACKEND-side reason-set assertion.  The frontend
+            # widens its availability union with an ``unknown(<value>)``
+            # fallback, so a NEW reason would be invisible there: the
+            # frontend would render a reason nobody can match.  The
+            # backend therefore refuses to emit a reason outside the
+            # CLOSED v1 set — the surface stays observable.
+            reason = availability.get("reason")
+            assert reason is None or reason in AVAILABILITY_REASONS, (
+                f"availability reason {reason!r} for family {family!r} is "
+                f"outside the v1 set {AVAILABILITY_REASONS!r}"
+            )
             out.append(
                 {
                     "id": family,
                     "names": names,
                     "live_series_count": live_series_count,
-                    "availability": derive_availability(
-                        source_idiom=source_idiom,
-                        live_series_count=live_series_count,
-                        facts=facts,
-                    ),
+                    "availability": availability,
                     "role": role,
                     "source_idiom": source_idiom,
                     "durability": durability,
@@ -294,6 +307,7 @@ class RegistryMetricsQueryProvider:
         window_s: int | None = None,
         max_points: int | None = None,
         now: int | None = None,
+        max_series: int | None = None,
     ) -> list[dict[str, Any]]:
         """The windowed trend points of the matching series.
 
@@ -301,6 +315,11 @@ class RegistryMetricsQueryProvider:
         ``names`` holds NAME-level selectors (every label variant).
         A malformed selector raises :class:`InvalidLabelFilter` (the
         route maps it to ``400 invalid_label_filter``).
+
+        ``max_series`` caps the WORK: the provider stops collecting once
+        it holds that many entries (W-2).  The cap is a work bound, not
+        a silent truncation of the ANSWER — the caller knows the cap it
+        asked for and mints the continuation cursor itself.
         """
         if self._ring is None:
             return []
@@ -316,6 +335,7 @@ class RegistryMetricsQueryProvider:
         window = max(1, min(window, WINDOW_SECONDS))
         instant = int(now) if now is not None else int(time.time())
         limit = max_points if max_points is not None else DEFAULT_MAX_POINTS
+        cap = max(1, int(max_series)) if max_series is not None else None
 
         out: list[dict[str, Any]] = []
         for metric in self._metrics():
@@ -352,6 +372,8 @@ class RegistryMetricsQueryProvider:
                         ],
                     }
                 )
+                if cap is not None and len(out) >= cap:
+                    return out
         return out
 
     # ── the trend's freshness ───────────────────────────────────────────

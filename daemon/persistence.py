@@ -77,8 +77,25 @@ CHECKPOINT_ADAPTER_APPLICATION_NAME = "ensemble-checkpoint-adapter"
 # ------------------------------
 # ``bounded_deep_size`` is the bounded, memoised deep-size walk the
 # resource-charge seam and the read-instrumentation family (F7b) both
-# use — so the F7 bytes histogram and the F7b read-size histogram report
-# the SAME number for the same read.
+# use — so the F7 bytes histogram and the F7b read-size histogram
+# report the SAME number for the same read.
+#
+# THE GATE IS THE HOUSE'S HOT-PATH-COST GATE (W-1)
+# ------------------------------------------------
+# The observe point runs on the POLLED ``GET /messages`` path, and on
+# THAT path the walk is an EXTRA walk: the read uses the RAW saver
+# (``checkpointer.raw_saver``), which BYPASSES the adapter's proxy, so
+# the adapter's own shared walk (``daemon/checkpoint_adapter.py``) never
+# runs for this read.  The walk is O(payload) and it lands on the EVENT
+# LOOP of a polled endpoint — the 2026-10-26 incident class.
+#
+# So the whole F7 seam (the walk AND the observation) is behind
+# ``checkpoint_perf_logs_enabled()`` — the house's existing gate for
+# exactly this shape ("call sites that conditionally pay a hot-path
+# cost", ``daemon/checkpoint_perf.py``).  With the switch off, NO walk
+# happens and the family renders no series (absent ≠ zero).  With the
+# switch on, the walk runs on the event loop — the operator's lever,
+# and the same posture the read-instrumentation lane documents.
 #
 # FAIL-SOFT, ALWAYS
 # -----------------
@@ -88,7 +105,15 @@ CHECKPOINT_ADAPTER_APPLICATION_NAME = "ensemble-checkpoint-adapter"
 
 
 def _observe_saver_op_bytes(op: str, state: Any) -> None:
-    """Record the saver-op payload size on the F7 bytes histogram."""
+    """Record the saver-op payload size on the F7 bytes histogram.
+
+    GATED by ``checkpoint_perf_logs_enabled()``: the walk this needs is
+    O(payload) and runs on the event loop of the polled GET /messages
+    path (W-1).  With the gate off, no walk happens and nothing is
+    recorded.
+    """
+    if not checkpoint_perf_logs_enabled():
+        return
     try:
         from daemon.services.metrics_query.wiring.w2 import checkpoint_op_bytes
     except Exception:  # noqa: BLE001 — the metrics layer is optional
@@ -681,9 +706,15 @@ async def get_instance_messages(
     # under-reported: the hot path forwarded ``bytes_=0``.  The size is
     # the HOUSE's bounded deep-size measure — the same number the
     # read-instrumentation family (F7b) records — so the two families
-    # agree.  This is the EXISTING observe point (no new observe site);
-    # the only cost is the one bounded walk the read already pays for
-    # its own instrumentation.
+    # agree.  This is the EXISTING observe point (no new observe site).
+    #
+    # THE COST IS NOT FREE ON THIS PATH (W-1): this read uses the RAW
+    # saver, which bypasses the adapter's proxy, so the adapter's own
+    # shared walk does NOT run for it — the walk below is an EXTRA
+    # O(payload) walk ON THE EVENT LOOP of a POLLED endpoint.  The whole
+    # seam is therefore behind ``checkpoint_perf_logs_enabled()`` (the
+    # house's hot-path-cost gate); with the switch off, no walk happens
+    # and the F7 family renders no series.
     _observe_saver_op_bytes("aget", state)
     if state is None:
         return []

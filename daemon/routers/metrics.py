@@ -237,7 +237,7 @@ def _cursor_state(request: Request) -> dict[str, Any]:
     """
     raw = request.query_params.get("cursor")
     if raw is None or not str(raw).strip():
-        return {"offset": 0, "instant": None}
+        return {"offset": 0, "instant": None, "present": False}
     from daemon.services.metrics_query.envelope import (
         InvalidCursor,
         decode_cursor,
@@ -255,7 +255,27 @@ def _cursor_state(request: Request) -> dict[str, Any]:
     offset = cursor.get("o", 0)
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
         raise _err(400, _ERR_INVALID_CURSOR, "The cursor carries an invalid position")
-    return {"offset": offset, "instant": instant}
+    return {"offset": offset, "instant": instant, "present": True}
+
+
+def _bounded_int_param(
+    request: Request, name: str, default: int, *, low: int, high: int
+) -> int:
+    """Read an integer query parameter, CLAMPED to ``[low, high]``.
+
+    A malformed value is a typed ``400 invalid_label_filter`` — never a
+    500 and never a silently ignored parameter.
+    """
+    raw = request.query_params.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = int(str(raw).strip())
+    except ValueError as exc:
+        raise _err(
+            400, _ERR_INVALID_LABEL_FILTER, f"{name} must be an integer"
+        ) from exc
+    return max(low, min(value, high))
 
 
 def _expire_cursor(provider: Any, cursor: dict[str, Any]) -> None:
@@ -314,6 +334,17 @@ def _bound_page(
 
     A bounded body is never SILENTLY truncated: it carries the opaque
     ``next_cursor`` that resumes it (AM-6).
+
+    A body that is ALREADY marked ``truncated`` by its builder (the
+    series/snapshot ceilings, W-2/W-4) ALWAYS mints the cursor — the
+    truncation is then resumable, never silent.
+
+    THE BYTE-CEILING PROBE AND THE TRIM RUN INSIDE THE OFF-LOOP BUILD
+    ------------------------------------------------------------------
+    The probe is a FULL JSON dump of the body and the trim is a binary
+    search over it (worst case ~9 dumps of ~1 MiB ⇒ 20-30 ms).  Both
+    run inside the page builders — the off-loop body — never on the
+    event loop (W-3).
     """
     from daemon.services.metrics_query.constants import RESPONSE_BYTE_CEILING
     from daemon.services.metrics_query.envelope import encode_cursor
@@ -327,6 +358,7 @@ def _bound_page(
         kept = _trim_to_ceiling(envelope, key=key, items=items)
     if len(kept) < len(items):
         truncated = True
+    if truncated:
         more = True
     envelope[key] = kept
     envelope["truncated"] = truncated
@@ -370,22 +402,45 @@ async def _build_off_loop(fn: Any, *args: Any, **kwargs: Any) -> Any:
 
 
 def _build_families_page(
-    provider: Any, *, offset: int, cursor: dict[str, Any]
+    provider: Any, *, offset: int, instant: int, cursor: dict[str, Any]
 ) -> dict[str, Any]:
-    """The ``/families`` page (built off the loop)."""
+    """The ``/families`` page — built AND bounded off the loop.
+
+    The byte-ceiling probe and the trim live here (W-3): they are the
+    expensive part of the body build and they must never run on the
+    event loop.
+    """
     from daemon.services.metrics_query.envelope import build_families_envelope
 
     _expire_cursor(provider, cursor)
-    return build_families_envelope(provider, offset=offset)
+    envelope = build_families_envelope(provider, offset=offset)
+    return _bound_page(
+        envelope,
+        key="families",
+        offset=offset,
+        instant=instant,
+        more=bool(envelope.get("truncated")),
+    )
 
 
 def _build_snapshot_page(
-    provider: Any, *, family: str | None, name_prefix: str | None
+    provider: Any,
+    *,
+    family: str | None,
+    name_prefix: str | None,
+    offset: int,
+    limit: int,
+    instant: int,
+    cursor: dict[str, Any],
 ) -> dict[str, Any]:
-    """The ``/snapshot`` page (built off the loop).
+    """The ``/snapshot`` page — built AND bounded off the loop.
 
     An UNKNOWN ``?family=`` is a typed 404 (the contract's error
     vocabulary) — never an empty 200 that reads like "no observations".
+
+    The route is BOUNDED like the other two (W-4): ``offset``/``limit``
+    page the series and the byte ceiling bounds the page — a bounded
+    body carries the continuation cursor, never a silent truncation.
     """
     from daemon.services.metrics_query.envelope import build_snapshot_envelope
 
@@ -393,7 +448,20 @@ def _build_snapshot_page(
         known = {entry.get("id") for entry in provider.families()}
         if family not in known:
             raise _UnknownFamily(family)
-    return build_snapshot_envelope(provider, family=family, name_prefix=name_prefix)
+    envelope = build_snapshot_envelope(
+        provider,
+        family=family,
+        name_prefix=name_prefix,
+        offset=offset,
+        limit=limit,
+    )
+    return _bound_page(
+        envelope,
+        key="series",
+        offset=offset,
+        instant=instant,
+        more=bool(envelope.get("truncated")),
+    )
 
 
 def _build_series_page(
@@ -407,11 +475,11 @@ def _build_series_page(
     offset: int,
     cursor: dict[str, Any],
 ) -> dict[str, Any]:
-    """The ``/series`` page (built off the loop)."""
+    """The ``/series`` page — built AND bounded off the loop."""
     from daemon.services.metrics_query.envelope import build_series_envelope
 
     _expire_cursor(provider, cursor)
-    return build_series_envelope(
+    envelope = build_series_envelope(
         provider,
         names=names,
         series=series,
@@ -419,6 +487,13 @@ def _build_series_page(
         max_points=max_points,
         now=instant,
         offset=offset,
+    )
+    return _bound_page(
+        envelope,
+        key="series",
+        offset=offset,
+        instant=instant,
+        more=bool(envelope.get("truncated")),
     )
 
 
@@ -455,16 +530,15 @@ async def get_metrics_families(request: Request) -> dict[str, Any]:
     offset = cursor["offset"]
     instant = cursor["instant"] if cursor["instant"] is not None else int(time.time())
     try:
-        envelope = await _build_off_loop(
-            _build_families_page, provider, offset=offset, cursor=cursor
+        return await _build_off_loop(
+            _build_families_page,
+            provider,
+            offset=offset,
+            instant=instant,
+            cursor=cursor,
         )
     except _ExpiredCursor as exc:
         raise _err(400, _ERR_INVALID_CURSOR, str(exc)) from exc
-    return _bound_page(
-        envelope, key="families", offset=offset, instant=instant, more=bool(
-            envelope.get("truncated")
-        )
-    )
 
 
 @router.get(
@@ -501,15 +575,38 @@ async def get_metrics_snapshot(
     provider = _query_provider(request)
     family = request.query_params.get("family") or None
     name_prefix = request.query_params.get("name_prefix") or None
+    from daemon.services.metrics_query.constants import MAX_SNAPSHOT_SERIES
+
+    cursor = _cursor_state(request)
+    # The offset comes from the CURSOR when one is supplied (the cursor
+    # pins the position); otherwise from ``?offset=``.  The page size
+    # comes from ``?limit=`` and is CLAMPED to the ceiling (W-4).
+    offset = (
+        cursor["offset"]
+        if cursor["present"]
+        else _bounded_int_param(request, "offset", 0, low=0, high=10**9)
+    )
+    limit = _bounded_int_param(
+        request, "limit", MAX_SNAPSHOT_SERIES, low=1, high=MAX_SNAPSHOT_SERIES
+    )
+    instant = cursor["instant"] if cursor["instant"] is not None else int(time.time())
     try:
-        envelope = await _build_off_loop(
-            _build_snapshot_page, provider, family=family, name_prefix=name_prefix
+        return await _build_off_loop(
+            _build_snapshot_page,
+            provider,
+            family=family,
+            name_prefix=name_prefix,
+            offset=offset,
+            limit=limit,
+            instant=instant,
+            cursor=cursor,
         )
     except _UnknownFamily as exc:
         raise _err(
             404, _ERR_UNKNOWN_FAMILY, f"No such metric family: {exc.args[0]}"
         ) from exc
-    return envelope
+    except _ExpiredCursor as exc:
+        raise _err(400, _ERR_INVALID_CURSOR, str(exc)) from exc
 
 
 @router.get(
@@ -605,7 +702,7 @@ async def get_metrics_series(request: Request) -> dict[str, Any]:
     offset = cursor["offset"]
     instant = cursor["instant"] if cursor["instant"] is not None else int(time.time())
     try:
-        envelope = await _build_off_loop(
+        return await _build_off_loop(
             _build_series_page,
             provider,
             names=names or None,
@@ -620,9 +717,6 @@ async def get_metrics_series(request: Request) -> dict[str, Any]:
         raise _err(400, _ERR_INVALID_CURSOR, str(exc)) from exc
     except InvalidLabelFilter as exc:
         raise _err(400, _ERR_INVALID_LABEL_FILTER, str(exc)) from exc
-    return _bound_page(
-        envelope, key="series", offset=offset, instant=instant, more=False
-    )
 
 
 __all__ = ["METRICS_MEDIA_TYPE", "router"]

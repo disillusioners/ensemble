@@ -25,6 +25,9 @@ from daemon.checkpoint_metrics import VOCABULARY_VERSION
 from daemon.services.metrics_query.constants import (
     DEFAULT_MAX_POINTS,
     MAX_FAMILIES,
+    MAX_SERIES,
+    MAX_SNAPSHOT_SERIES,
+    MAX_TOTAL_POINTS,
     QUERY_SCHEMA_VERSION,
     RESPONSE_BYTE_CEILING,
     STALE_INTERVAL_MULTIPLIER,
@@ -100,10 +103,25 @@ def build_snapshot_envelope(
     *,
     family: str | None = None,
     name_prefix: str | None = None,
+    offset: int = 0,
+    limit: int = MAX_SNAPSHOT_SERIES,
 ) -> dict[str, Any]:
-    """The ``/snapshot`` envelope."""
+    """The ``/snapshot`` envelope.
+
+    The route is BOUNDED like the other two (W-4): ``offset`` resumes a
+    PAGE and ``limit`` caps its size, so a snapshot response can never
+    outgrow the byte ceiling silently — the caller gets a
+    ``truncated`` flag and a continuation cursor.
+    """
     series = provider.snapshot(family=family, name_prefix=name_prefix)
-    return {**envelope_header(provider), "series": series}
+    total = len(series)
+    start = max(0, int(offset))
+    page = series[start : start + max(1, int(limit))]
+    return {
+        **envelope_header(provider),
+        "series": page,
+        "truncated": start + len(page) < total,
+    }
 
 
 def _provider_float(provider: MetricsQueryProvider, attribute: str, default: float) -> float:
@@ -134,6 +152,8 @@ def build_series_envelope(
     max_points: int | None = None,
     now: int | None = None,
     offset: int = 0,
+    max_series: int = MAX_SERIES,
+    max_total_points: int = MAX_TOTAL_POINTS,
 ) -> dict[str, Any]:
     """The ``/series`` envelope (the trend view).
 
@@ -143,16 +163,46 @@ def build_series_envelope(
     sampler surfaces as STALENESS, never a silently frozen line.
 
     ``offset`` resumes a PAGE (AM-6) over the returned series list.
+
+    THE EMITTED BOUNDS (W-2) — THE AM-12 CLAIM MADE REAL
+    ---------------------------------------------------
+    The AM-12 bound ("≤ 240 points × ≤ 50 selectors ⇒ ≤ 12 000 points
+    ≈ 3.6 ms of residual on-loop encode") was a CONSTANT IDENTITY, not
+    an enforcement: the selector ceiling bounds the REQUESTED
+    selectors, and a request with NO selector matched EVERY published
+    series — each carrying up to ``max_points`` points.  So the page is
+    bounded here, during the OFF-LOOP build, on two axes:
+
+    * the SERIES ceiling (:data:`MAX_SERIES`) — how many series the
+      page carries;
+    * the TOTAL-POINT ceiling (:data:`MAX_TOTAL_POINTS`) — how many
+      points the page carries ACROSS every series (this is the number
+      the on-loop encode pays for).
+
+    A bound that drops something sets ``truncated`` — the route mints
+    the continuation cursor, so a bounded page is never a SILENT
+    truncation.
     """
     window = int(window_s) if window_s else WINDOW_SECONDS
     window = max(1, min(window, WINDOW_SECONDS))
     instant = int(now) if now is not None else int(time.time())
     limit = max_points if max_points is not None else DEFAULT_MAX_POINTS
-    payload = provider.history(
-        names=names, series=series, window_s=window, max_points=limit, now=instant
-    )
     start = max(0, int(offset))
-    page = payload[start:]
+    ceiling = max(1, int(max_series))
+    # The WORK bound: the provider collects only what this page needs
+    # plus ONE probe entry, which tells us whether more series remain
+    # (the continuation condition) without materialising the rest.
+    payload = provider.history(
+        names=names,
+        series=series,
+        window_s=window,
+        max_points=limit,
+        now=instant,
+        max_series=start + ceiling + 1,
+    )
+    more_available = len(payload) > start + ceiling
+    page = payload[start : start + ceiling]
+    page, points_dropped = _bound_page_points(page, max_total_points)
     interval = effective_interval_s(provider)
     age = _provider_float(provider, "last_sample_age_s", 0.0)
     return {
@@ -166,7 +216,30 @@ def build_series_envelope(
         "last_sample_age_s": age,
         "stale": age > STALE_INTERVAL_MULTIPLIER * interval,
         "series": page,
+        "truncated": bool(more_available or points_dropped),
     }
+
+
+def _bound_page_points(
+    page: list[dict[str, Any]], max_total_points: int
+) -> tuple[list[dict[str, Any]], bool]:
+    """Bound a page's TOTAL point count (the AM-12 claim, enforced).
+
+    Returns ``(kept, dropped)``.  A single series is never dropped for
+    being too large on its own — the per-series point count is already
+    bounded by ``max_points`` (240) — so the budget is spent series by
+    series and the remainder is dropped.
+    """
+    budget = max(1, int(max_total_points))
+    kept: list[dict[str, Any]] = []
+    total = 0
+    for entry in page:
+        points = entry.get("points") or []
+        if kept and total + len(points) > budget:
+            return kept, True
+        kept.append(entry)
+        total += len(points)
+    return kept, False
 
 
 def _iso(instant: int) -> str:

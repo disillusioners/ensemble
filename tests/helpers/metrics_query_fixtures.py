@@ -110,6 +110,7 @@ class RecordingProvider:
         window_s: int | None = None,
         max_points: int | None = None,
         now: int | None = None,
+        max_series: int | None = None,
     ) -> list[dict[str, Any]]:
         self.reads.append("history")
         self.threads.append(threading.current_thread().name)

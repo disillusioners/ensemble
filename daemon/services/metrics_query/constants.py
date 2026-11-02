@@ -58,6 +58,30 @@ MAX_POINTS_CEILING: int = 240
 #: carries.
 MAX_FAMILIES: int = 500
 
+#: The hard ceiling of the SERIES a single ``/series`` response
+#: carries (the ``MAX_FAMILIES`` analogue for the trend view).
+#:
+#: The selector ceiling (:data:`MAX_NAMES`) bounds the REQUESTED
+#: selectors, NOT the emitted series: a request with NO selector
+#: matched EVERY published series, so the response could carry the
+#: whole registry's trend.  This is the emitted-series ceiling that
+#: makes the AM-12 bound real (W-2).
+MAX_SERIES: int = 500
+
+#: The hard ceiling of the TOTAL POINTS a single ``/series`` response
+#: carries — across every series, not per series.  This is the number
+#: the AM-12 claim is ABOUT: ``240 × 50 = 12 000`` points ≈ 3.6 ms of
+#: residual on-loop encode.  Before W-2 that figure was a CONSTANT
+#: IDENTITY (a product of two constants), not an enforcement: a
+#: no-selector response carried every published series × up to 240
+#: points, which is unbounded in the registry's size.
+MAX_TOTAL_POINTS: int = 12_000
+
+#: The hard ceiling of the series entries a single ``/snapshot``
+#: response carries (the snapshot's page size).  The snapshot route is
+#: bounded by the byte ceiling like the other two (W-4).
+MAX_SNAPSHOT_SERIES: int = 500
+
 #: The byte ceiling of a single response body.  A response that would
 #: exceed it is BOUNDED and carries a cursor — never silently truncated.
 RESPONSE_BYTE_CEILING: int = 1_048_576
