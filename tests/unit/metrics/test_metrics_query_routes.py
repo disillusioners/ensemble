@@ -41,6 +41,8 @@ from daemon.services.metrics_query.constants import (
     DEFAULT_MAX_POINTS,
     MAX_NAMES,
     MAX_POINTS_CEILING,
+    MAX_SERIES,
+    MAX_TOTAL_POINTS,
     QUERY_SCHEMA_VERSION,
 )
 from tests.helpers.metrics_query_fixtures import (
@@ -270,9 +272,53 @@ class TestResponseBound:
     def test_the_selector_ceiling_is_50(self):
         assert MAX_NAMES == 50
 
-    def test_the_residual_point_bound_is_12000(self):
-        """240 points x 50 selectors = 12 000 points ≈ 3.6 ms."""
-        assert MAX_POINTS_CEILING * MAX_NAMES == 12_000
+    def test_the_emitted_point_bound_is_measured_not_a_constant_identity(self):
+        """W-2 — the AM-12 bound is a MEASUREMENT of the emitted body.
+
+        The bound used to be a CONSTANT IDENTITY (``240 × 50 == 12 000``
+        — a product of two constants), which enforced NOTHING: the
+        selector ceiling bounds the REQUESTED selectors, and a request
+        with NO selector matched EVERY published series, each carrying
+        up to ``max_points`` points.  The pin therefore MEASURES the
+        emitted body: many series, many points in, a bounded body out.
+        """
+        points_per_series = MAX_POINTS_CEILING
+        series = [
+            {
+                "name": f"ensemble_p3_bulk_gauge_{index}",
+                "labels": {"index": str(index)},
+                "kind": "gauge",
+                "monotonic": False,
+                "points": [
+                    [1_700_000_000 + 15 * step, float(step)]
+                    for step in range(points_per_series)
+                ],
+            }
+            for index in range(MAX_SERIES + 400)
+        ]
+        provider = RecordingProvider(
+            families=[_family()],
+            snapshot=[],
+            history=series,
+        )
+        response = build_client(provider).get("/api/metrics/series")
+        assert response.status_code == 200
+        body = response.json()
+        emitted_points = sum(len(entry["points"]) for entry in body["series"])
+        emitted_series = len(body["series"])
+        assert emitted_series <= MAX_SERIES, emitted_series
+        assert emitted_points <= MAX_TOTAL_POINTS, emitted_points
+        # The bound is NEVER SILENT: the body says it was truncated and
+        # carries the cursor that resumes it.
+        assert body["truncated"] is True
+        assert body.get("next_cursor")
+
+    def test_a_small_body_is_not_truncated(self):
+        """The bound must not manufacture a truncation it did not make."""
+        response = build_client(_provider()).get("/api/metrics/series")
+        body = response.json()
+        assert body["truncated"] is False
+        assert not body.get("next_cursor")
 
 
 class TestLatency:

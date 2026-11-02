@@ -20,6 +20,9 @@ Mutation table: ``P2-M3`` (the depth clamp floor removed) · ``P2-M4``
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
 from daemon.services.metrics_query.constants import (
@@ -239,3 +242,107 @@ class TestStoreReads:
     def test_a_zero_depth_ring_is_rejected(self) -> None:
         with pytest.raises(ValueError):
             TrendRing(0)
+
+
+class TestTheRingIsLocked:
+    """W-5 — the ring is SHARED between the sampler thread and the loop.
+
+    The ring is written by the sampler thread and read by the event
+    loop.  The value and the timestamp live in two parallel arrays, and
+    ``points()`` reads the size once but the start index per iteration —
+    so an unlocked ring can pair a value with a FOREIGN timestamp (a
+    torn point) when a writer drops the oldest sample mid-read.
+
+    THE PINS ARE BEHAVIOURAL, NOT STRUCTURAL: a concurrent reader must
+    not proceed while the ring is locked, and a concurrent append/read
+    must never produce a torn pair.
+    """
+
+    def test_a_concurrent_read_does_not_proceed_while_the_lock_is_held(self) -> None:
+        ring = TrendRing(4)
+        ring.append(1, 1.0)
+        done = threading.Event()
+
+        def _read() -> None:
+            ring.points()
+            done.set()
+
+        with ring._lock:
+            thread = threading.Thread(target=_read, daemon=True)
+            thread.start()
+            proceeded = done.wait(0.2)
+        assert not proceeded, (
+            "the read path must take the ring's lock — a read proceeded "
+            "while the lock was held"
+        )
+        assert done.wait(2.0), "the read must complete once the lock is free"
+
+    def test_a_concurrent_append_does_not_proceed_while_the_lock_is_held(self) -> None:
+        ring = TrendRing(4)
+        done = threading.Event()
+
+        def _append() -> None:
+            ring.append(2, 2.0)
+            done.set()
+
+        with ring._lock:
+            thread = threading.Thread(target=_append, daemon=True)
+            thread.start()
+            proceeded = done.wait(0.2)
+        assert not proceeded, (
+            "the mutation path must take the ring's lock — an append "
+            "proceeded while the lock was held"
+        )
+        assert done.wait(2.0), "the append must complete once the lock is free"
+
+    def test_a_concurrent_append_and_read_never_torn_a_point(self) -> None:
+        """The torn-point regression — every pair stays self-consistent.
+
+        The value written is the timestamp, so a torn pair (a value with
+        a foreign timestamp) is visible as ``value != timestamp``.
+        """
+        ring = TrendRing(4)
+        for index in range(4):
+            ring.append(index, float(index))
+        stop = threading.Event()
+        torn: list[tuple[int, float]] = []
+
+        def _writer() -> None:
+            tick = 100
+            while not stop.is_set():
+                ring.append(tick, float(tick))
+                tick += 1
+
+        def _reader() -> None:
+            while not stop.is_set():
+                for timestamp, value in ring.points():
+                    if value != float(timestamp):
+                        torn.append((timestamp, value))
+
+        writer = threading.Thread(target=_writer, daemon=True)
+        reader = threading.Thread(target=_reader, daemon=True)
+        writer.start()
+        reader.start()
+        time.sleep(0.4)
+        stop.set()
+        writer.join(2.0)
+        reader.join(2.0)
+        assert torn == [], f"torn points observed: {torn[:5]}"
+
+    def test_the_store_serialises_its_own_maps(self) -> None:
+        store = TrendRingStore(effective_interval_s=15.0)
+        store.append("a|", 1, 1.0)
+        done = threading.Event()
+
+        def _append() -> None:
+            store.append("b|", 2, 2.0)
+            done.set()
+
+        with store._lock:
+            thread = threading.Thread(target=_append, daemon=True)
+            thread.start()
+            proceeded = done.wait(0.2)
+        assert not proceeded, (
+            "the store's map mutations must take the store's lock"
+        )
+        assert done.wait(2.0)

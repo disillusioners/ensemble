@@ -157,6 +157,45 @@ class TestLifecycle:
         if thread is not None:
             thread.join(2.0)
 
+    def test_stop_waits_for_the_in_flight_tick(self) -> None:
+        """A-2 — ``stop()`` JOINS the thread.
+
+        A detached stop leaves the tick in flight running — and that
+        tick may still hold a one-shot DB connection after the daemon
+        has asked the sampler to stop.  The pin is BEHAVIOURAL: while a
+        tick is in flight, ``stop()`` must NOT return.
+        """
+        ring = TrendRingStore(effective_interval_s=15.0)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _blocking_provider():
+            entered.set()
+            release.wait(5.0)
+            return []
+
+        sampler = MetricsSampler(
+            ring=ring, interval_s=0.01, metrics_provider=_blocking_provider
+        )
+        assert sampler.start() is True
+        assert entered.wait(2.0), "the tick must have started"
+        stopped = threading.Event()
+
+        def _stop() -> None:
+            sampler.stop()
+            stopped.set()
+
+        stopper = threading.Thread(target=_stop, daemon=True)
+        stopper.start()
+        try:
+            assert not stopped.wait(0.3), (
+                "stop() returned while a tick was still in flight — the "
+                "thread must be JOINED"
+            )
+        finally:
+            release.set()
+        assert stopped.wait(5.0), "stop() must return once the tick is finished"
+
     def test_the_tick_count_advances(self) -> None:
         ring = TrendRingStore(effective_interval_s=15.0)
         sampler = MetricsSampler(ring=ring, metrics_provider=lambda: [])

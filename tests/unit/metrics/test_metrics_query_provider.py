@@ -356,6 +356,65 @@ class TestAvailability:
         provider = RegistryMetricsQueryProvider(metrics_provider=lambda: [metric])
         assert provider.families()[0]["availability"] == {"state": "live"}
 
+    def test_every_emitted_reason_is_inside_the_closed_v1_set(self) -> None:
+        """A-9 — the BACKEND-side reason-set assertion.
+
+        The frontend widens its availability union with an
+        ``unknown(<value>)`` fallback, so a NEW reason would be
+        INVISIBLE there: the frontend would render a reason nobody can
+        match, and the reason would never be observed.  The backend
+        therefore refuses to emit a reason outside the closed v1 set.
+        """
+        from daemon.services.metrics_query.availability import AVAILABILITY_REASONS
+
+        emitted: set[str] = set()
+        for metric in (
+            _metric("ensemble_provider_reason_absent_gauge"),
+            _published(
+                _metric(
+                    "ensemble_provider_reason_census_gauge",
+                    source_idiom="postgres_census",
+                )
+            ),
+            _published(
+                _metric(
+                    "ensemble_provider_reason_capture_gauge",
+                    source_idiom="wedge_capture",
+                )
+            ),
+        ):
+            provider = RegistryMetricsQueryProvider(
+                capture_active=False, metrics_provider=lambda m=metric: [m]
+            )
+            reason = provider.families()[0]["availability"].get("reason")
+            if reason is not None:
+                emitted.add(reason)
+        assert emitted, "the legs must have produced at least one reason"
+        assert emitted <= set(AVAILABILITY_REASONS), emitted - set(AVAILABILITY_REASONS)
+
+    def test_a_reason_outside_the_v1_set_is_refused(self) -> None:
+        """A-9 — the assertion is REAL: a foreign reason does not pass.
+
+        The availability model is monkeypatched to emit a reason that is
+        not in the v1 set; the provider must refuse it (the assertion
+        fires) instead of serving an unobservable reason.
+        """
+        from daemon.services.metrics_query import provider as provider_module
+
+        metric = _metric("ensemble_provider_foreign_reason_gauge")
+        original = provider_module.derive_availability
+
+        def _foreign(**kwargs):
+            return {"state": "dark", "reason": "not_a_v1_reason"}
+
+        provider_module.derive_availability = _foreign  # type: ignore[assignment]
+        try:
+            provider = RegistryMetricsQueryProvider(metrics_provider=lambda: [metric])
+            with pytest.raises(AssertionError):
+                provider.families()
+        finally:
+            provider_module.derive_availability = original  # type: ignore[assignment]
+
 
 class TestSnapshot:
     def test_the_snapshot_carries_the_staleness_metadata(self) -> None:

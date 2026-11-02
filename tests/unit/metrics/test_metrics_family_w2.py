@@ -185,6 +185,33 @@ class TestF7Completion:
         assert w2.checkpoint_op_bytes.get_count(op="aget") == before + 1
         assert w2.checkpoint_op_bytes.get_sum(op="aget") == 0.0
 
+    def test_the_walk_is_gated_by_the_hot_path_cost_switch(self, monkeypatch):
+        """W-1 — the saver-op byte walk is GATED.
+
+        The observe point sits on the POLLED ``GET /messages`` path and
+        uses the RAW saver, so the adapter's own walk never runs for it:
+        the walk here is an EXTRA O(payload) walk ON THE EVENT LOOP.
+        The whole seam is therefore behind ``checkpoint_perf_logs_enabled()``
+        — with the switch off, NO walk happens and nothing is recorded.
+        """
+        from daemon import persistence
+
+        monkeypatch.setenv("CHECKPOINT_PERF_LOGS", "0")
+        before = w2.checkpoint_op_bytes.get_count(op="aget")
+        persistence._observe_saver_op_bytes(
+            "aget", {"channel_values": {"messages": [{"content": "hello world"}]}}
+        )
+        assert w2.checkpoint_op_bytes.get_count(op="aget") == before, (
+            "with the kill-switch off the gated seam must record nothing"
+        )
+        monkeypatch.delenv("CHECKPOINT_PERF_LOGS", raising=False)
+        persistence._observe_saver_op_bytes(
+            "aget", {"channel_values": {"messages": [{"content": "hello world"}]}}
+        )
+        assert w2.checkpoint_op_bytes.get_count(op="aget") == before + 1, (
+            "with the kill-switch on the gated seam must record the read"
+        )
+
     def test_the_call_site_observes_the_state(self) -> None:
         """The EXISTING observe point gains the real value.
 

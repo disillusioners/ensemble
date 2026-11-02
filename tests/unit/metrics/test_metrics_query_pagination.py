@@ -209,6 +209,137 @@ class TestByteCeiling:
         assert second["series"][0]["name"] == "ensemble_p3_bulk"
 
 
+class TestByteCeilingRunsOffTheEventLoop:
+    """W-3 — the byte-ceiling PROBE and the TRIM run off the loop.
+
+    The probe is a FULL JSON dump of the body and the trim is a binary
+    search over it (worst case ~9 dumps of ~1 MiB ⇒ 20-30 ms).  Both
+    used to run in the route handler — ON THE EVENT LOOP.  They now run
+    inside the off-loop page builder.
+    """
+
+    def test_the_probe_and_the_trim_run_off_the_event_loop(self, monkeypatch):
+        from daemon.routers import metrics as metrics_router
+
+        threads: list[str] = []
+        original = metrics_router._encoded_size
+
+        def _record(payload):
+            import threading
+
+            threads.append(threading.current_thread().name)
+            return original(payload)
+
+        monkeypatch.setattr(metrics_router, "_encoded_size", _record)
+        provider = RecordingProvider(
+            history=[
+                {
+                    "name": "ensemble_p3_bulk",
+                    "labels": {"payload": "z" * 4_000},
+                    "kind": "gauge",
+                    "monotonic": False,
+                    "points": [[1_700_000_000, 1.0]],
+                }
+                for _ in range(400)
+            ]
+        )
+        response = build_client(provider).get("/api/metrics/series")
+        assert response.status_code == 200
+        assert response.json()["truncated"] is True
+        assert threads, "the byte-ceiling probe must have run"
+        for name in threads:
+            assert name.startswith("db-offload"), (
+                f"the byte-ceiling probe ran on {name!r} — it must run on the "
+                "off-loop worker, never on the event loop"
+            )
+
+
+class TestSnapshotBounds:
+    """W-4 — the snapshot route is BOUNDED like the other two.
+
+    The leader's ruling: the ceiling promise is the contract's safety
+    property, so the snapshot route is NOT exempt — it carries
+    ``?offset=`` / ``?limit=``, the byte ceiling applies, and a bounded
+    body carries the continuation cursor.
+    """
+
+    def _provider(self, count: int = 40) -> RecordingProvider:
+        return RecordingProvider(
+            snapshot=[
+                {
+                    "name": f"ensemble_p3_snapshot_gauge_{index}",
+                    "labels": {"index": str(index)},
+                    "kind": "gauge",
+                    "monotonic": False,
+                    "value": float(index),
+                    "last_publish_age_s": 0.1,
+                }
+                for index in range(count)
+            ]
+        )
+
+    def test_the_limit_bounds_the_page(self):
+        response = build_client(self._provider()).get("/api/metrics/snapshot?limit=10")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["series"]) == 10
+        assert body["truncated"] is True
+        assert body.get("next_cursor"), "a bounded snapshot must carry its cursor"
+
+    def test_the_cursor_resumes_where_the_page_stopped(self):
+        provider = self._provider()
+        first = build_client(provider).get("/api/metrics/snapshot?limit=10").json()
+        cursor = first["next_cursor"]
+        second = build_client(provider).get(
+            f"/api/metrics/snapshot?cursor={cursor}"
+        ).json()
+        assert second["series"], "the cursor must resume with more series"
+        assert second["series"][0]["name"] == "ensemble_p3_snapshot_gauge_10"
+
+    def test_a_full_snapshot_is_not_truncated(self):
+        response = build_client(self._provider(count=3)).get("/api/metrics/snapshot")
+        body = response.json()
+        assert len(body["series"]) == 3
+        assert body["truncated"] is False
+        assert not body.get("next_cursor")
+
+    def test_the_limit_above_the_ceiling_is_clamped(self):
+        response = build_client(self._provider()).get(
+            "/api/metrics/snapshot?limit=100000"
+        )
+        assert response.status_code == 200
+        assert len(response.json()["series"]) == 40
+
+    def test_a_non_numeric_limit_is_rejected(self):
+        response = build_client(self._provider()).get("/api/metrics/snapshot?limit=abc")
+        assert response.status_code == 400, response.text
+        assert error_code(response) == "invalid_label_filter"
+
+    def test_the_snapshot_body_respects_the_byte_ceiling(self):
+        provider = RecordingProvider(
+            snapshot=[
+                {
+                    "name": f"ensemble_p3_snapshot_gauge_{index}",
+                    "labels": {"index": str(index), "payload": "w" * 4_000},
+                    "kind": "gauge",
+                    "monotonic": False,
+                    "value": 1.0,
+                    "last_publish_age_s": 0.1,
+                }
+                for index in range(400)
+            ]
+        )
+        response = build_client(provider).get("/api/metrics/snapshot")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["truncated"] is True
+        assert body.get("next_cursor")
+        assert len(response.content) <= RESPONSE_BYTE_CEILING, (
+            f"the bounded snapshot is {len(response.content)} bytes — over the "
+            "ceiling"
+        )
+
+
 class TestCursorExpiryProbe:
     """The expiry probe is O(rings) and runs OFF the event loop."""
 

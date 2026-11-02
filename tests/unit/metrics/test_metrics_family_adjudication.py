@@ -248,6 +248,44 @@ class TestDbPullDiscipline:
             for forbidden in ("from sqlalchemy", "import sqlalchemy", "AsyncConnectionPool", "ConnectionPool"):
                 assert forbidden not in source, (path.name, forbidden)
 
+    def test_a_failing_query_is_logged_at_warning_rate_limited(self, caplog) -> None:
+        """A-3 — a persistently failing family query must be VISIBLE.
+
+        The failure used to be swallowed at DEBUG: a family whose
+        database is gone was indistinguishable, in the log, from a
+        family that simply had no observations.  The failure is now a
+        WARNING — but RATE LIMITED, so a broken family cannot flood the
+        log at the sampler's cadence.
+        """
+        import logging
+
+        from daemon.services.metrics_query.wiring import db
+
+        class _BadConn:
+            def cursor(self) -> Any:
+                raise RuntimeError("the probe connection is broken")
+
+        statement = "SELECT the_a3_rate_limited_probe"
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.metrics_query.wiring.db"
+        ):
+            assert db.fetch_rows(_BadConn(), statement) == []
+            first = [
+                record
+                for record in caplog.records
+                if "DB query failed" in record.getMessage()
+            ]
+            assert len(first) == 1, "the first failure must be logged at WARNING"
+            assert db.fetch_rows(_BadConn(), statement) == []
+            second = [
+                record
+                for record in caplog.records
+                if "DB query failed" in record.getMessage()
+            ]
+            assert len(second) == 1, (
+                "the second failure inside the window must be rate limited"
+            )
+
     def test_a_db_adapter_opens_and_closes_one_connection_per_tick(self) -> None:
         """AM-11 — a persistent per-adapter connection must go RED."""
         from daemon.services.metrics_query.wiring import w2

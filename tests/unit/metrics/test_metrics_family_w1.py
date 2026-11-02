@@ -23,6 +23,8 @@ WHAT EACH PACK PROVES
 
 from __future__ import annotations
 
+import sys
+import types
 from typing import Any
 
 import pytest
@@ -206,6 +208,47 @@ class TestF03ResourceSpine:
             wiring_sources.WiringSources(resource_monitor=_FakeMonitor(ticks=5, errors=0))
         )
         adapt_f0_3(None)
+        for table in vocab.SPINE_TABLES:
+            assert spine_tables_accepting_rows.get(table=table) == 1.0
+
+    def test_the_adapter_reads_the_spine_through_the_LOCATOR_path(self) -> None:
+        """C-1 ④ — the family pack must run through the LOCATOR path.
+
+        EVERY family pack binds an EXPLICIT bundle (``bind_sources``) —
+        so the packs exercised a seam PRODUCTION NEVER USES, and the C-1
+        defect (a bundle cached at the sampler's FIRST tick, before the
+        lifespan assigned the handles) passed the whole P4 gate.  This
+        leg runs the SAME family through the REAL locator, in the
+        PRODUCTION ORDER: the locator resolves FIRST (the sampler's
+        first tick), the handle is assigned AFTERWARDS (the lifespan
+        continues), and the adapter must then SEE the live handle.
+
+        THE PIN IS THE ADAPTER'S OBSERVATION, NOT THE BUNDLE: it
+        asserts that the family rendered the spine counters, which can
+        only happen when the locator resolved the live handle.
+        """
+        from daemon.services.metrics_query.wiring.w1 import spine_tables_accepting_rows
+
+        module = types.ModuleType("daemon.api")
+        state = types.SimpleNamespace()
+        module.app = types.SimpleNamespace(state=state)  # type: ignore[attr-defined]
+        saved = sys.modules.get("daemon.api")
+        sys.modules["daemon.api"] = module
+        wiring_sources._reset_runtime_probe()
+        try:
+            # THE FIRST TICK — the lifespan has not assigned the handle
+            # yet (this is the production order: the sampler starts
+            # before ``app.state.manager`` is assigned).
+            assert wiring_sources.current_sources().resource_monitor is None
+            # THE LIFESPAN CONTINUES — the handle appears.
+            state.resource_monitor = _FakeMonitor(ticks=5, errors=0)
+            adapt_f0_3(None)
+        finally:
+            if saved is None:
+                sys.modules.pop("daemon.api", None)
+            else:
+                sys.modules["daemon.api"] = saved
+            wiring_sources._reset_runtime_probe()
         for table in vocab.SPINE_TABLES:
             assert spine_tables_accepting_rows.get(table=table) == 1.0
 
