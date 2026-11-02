@@ -557,6 +557,40 @@ re-derived, 10/10); and the P3 adjudication manifest is now the **two-column hou
 
 ---
 
+### 14.6 The tester-gate fix cycle (the Tier-2 gate's 5 net-new reds)
+
+The Tier-2 functional gate (`.agents/tester/RESULTS/2026-11-02-central-metrics-v1-functional-gate.md`,
+`e49905261`) passed 10 of 11 legs; the whole-tree leg found **5 lane-caused net-new reds**
+(1,1,1 at the tip / 0,0,0 at base).  All five are landed:
+
+| id | disposition | commit |
+|---|---|---|
+| `job_state/test_constitution_drift.py::test_known_admission_state_writers_matches_source_exactly_no_drift` | **R1** — the lane NEVER writes `admission_state`; `wiring/w2.py:196` was the F10 **registration's** `allowed_values` dict literal, which the constitution's "dict-key writer" scanner reads as a write site.  Fixed by sourcing the label key through the vocabulary (`vocab.ADMISSION_STATE_KEY`) — the seam stays a STRICT READ-ONLY PULL over `daemon/repositories/job_queue/models.py:40-43` (`adapt_f10` SELECTs `admission_state, COUNT(*) … GROUP BY admission_state` and publishes COUNTS into the metric registry) | `7e21175eb` |
+| `job_queue/test_defer_self_witness_watchdog.py::…::test_constitution_drift_test_passes` | **R2** — the same drift, second pin site (the same fix clears it) | `7e21175eb` |
+| `test_no_env_flag_remnants.py::…[CHECKPOINT_BLOB_PRUNE_DESTRUCTIVE]` | **R3** — a dated supersession note was inserted into the lane's OWN evidence file `evidence/p3-adjudication/BASE.collected-nodes.txt`, immediately before the two node-id lines that name the retired flags.  The node ids are **preserved byte-for-byte** (they are the base-side `--collect-only` record) — annotated, never falsified | `eee076cd0` |
+| `…[CHECKPOINT_BLOB_PRUNE_DRY_RUN]` | **R4** — the same note (it names both flags) | `eee076cd0` |
+| `tools/test_dbpool_census_families.py::…::test_family_f_is_the_audited_site…` | **R5** — the lane's one-shot `psycopg.connect` (`wiring/db.py:94`) is individually AUDITED on all four benign criteria (never pooled · bounded by connect_timeout=3 s + statement_timeout=5000 ms · closed in the `finally:` on every path via the sole caller `one_shot` · never handed out) and REGISTERED as family-F site 3 in `FAMILY_F_SITES`, with the audit record in-code | `2eac3760f` |
+
+**The measured drift shape (the R5 audit's own evidence):** the scanner at BASE `941cb6321` gives
+`A=466 B=177 C=4 D=151 E=15 F=2` and at HEAD `A=466 B=177 C=4 D=151 E=15 F=3` — the **only** delta is
+F (2 → 3).  The A/B/D/E drift the same pack reports is **BASE-PROVEN** (both ids are red at the base
+too — a stale 2026-10-29 baseline, not a lane effect) and is **not** touched here.
+
+**`data/ensemble.json` — the disposition (leader ruling, KEEP):** the worktree's
+`data/ensemble.json` stays **repointed to the dev database** (`postgres` · `127.0.0.1:5432` ·
+`ensemble_dev` · the dev role), with the original preserved at
+`/tmp/ensemble.json.orig.2078076`.  The file is **untracked and gitignored**
+(`.gitignore:28:data/`), so it cannot ride the branch; the giter teardown sweeps it.  The
+repoint makes the fence REAL — the file silently outranks the env, and a sqlite pin is the poison
+vector.  **No other action.**
+
+**The tester's DERIVED compositions (adopted as a note, no action):** the tester registered the
+plan's compositions as **DERIVED** — the plan's own compositions were short of the blast radius
+**5×** (P2 +1 file · P3 +13 · P4 4→21 · P5 138→1801/1791).  *"A frozen contract must not freeze
+node counts."*
+
+---
+
 ## 15. The routed items (for the leader — owners named)
 
 These are the **findings this phase recorded but did not fix**. None is in this lane's file set;
