@@ -225,6 +225,33 @@ class TestAgeEviction:
         assert ring.total_points() == 1, "the old sample is age-evicted"
 
 
+class TestTheRegistryNativeDivisor:
+    """AM-10 — the depth's divisor is the REGISTRY-NATIVE count."""
+
+    def test_the_sampler_feeds_the_live_label_combination_count(self) -> None:
+        ring = TrendRingStore(effective_interval_s=15.0)
+        first = _metric("ensemble_sampler_divisor_a")
+        second = cm.Metric(
+            "ensemble_sampler_divisor_b", "gauge", ("k",), None, "", None, False
+        )
+        second.set(1, {"k": "x"})
+        second.set(2, {"k": "y"})
+        second.publish(force=True)
+        sampler = MetricsSampler(
+            ring=ring, metrics_provider=lambda: [first, second]
+        )
+        sampler.tick()
+        # 1 (unlabeled) + 2 (labeled) live label combinations.
+        assert ring.declared_series_count() == 3
+
+    def test_the_declared_count_drives_the_depth(self) -> None:
+        ring = TrendRingStore(effective_interval_s=15.0)
+        assert ring.declared_series_count() == 0
+        ring.set_series_count(10_000)
+        assert ring.declared_series_count() == 10_000
+        assert ring.depth == 75
+
+
 class TestTheReusedManagedKey:
     """Plan task 2.8 — the description-only amendment of the sampler key.
 

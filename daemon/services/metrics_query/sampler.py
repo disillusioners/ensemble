@@ -134,6 +134,24 @@ class MetricsSampler:
             logger.warning("metrics trend sampler: registry read failed", exc_info=True)
             return []
 
+    def _registry_native_series_count(self) -> int:
+        """The REGISTRY-NATIVE label-combination count (AM-10).
+
+        This is the divisor of the ring depth — the count of the LIVE
+        label combinations, NOT the catalog-convention count.  A
+        catalog-count divisor mis-scales the ring (a 720-deep count
+        bound would retain 3 h, not 2 h).
+        """
+        total = 0
+        for metric in self._metrics():
+            try:
+                snapshot = metric.published_snapshot()
+            except Exception:  # pragma: no cover
+                continue
+            if snapshot:
+                total += len(snapshot)
+        return total
+
     def _run_adapters(self) -> int:
         """Stage A — the pull adapters (each isolated from the others)."""
         for adapter in self._adapters:
@@ -152,6 +170,9 @@ class MetricsSampler:
         appended = 0
         now = int(self._wall_clock())
         seen: set[str] = set()
+        # The depth follows the REGISTRY-NATIVE series count (AM-10) —
+        # it recomputes when a registration event changes the count.
+        self._ring.set_series_count(self._registry_native_series_count())
         for metric in self._metrics():
             name = metric.name
             seen.add(name)

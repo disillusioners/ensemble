@@ -236,7 +236,9 @@ GET /api/metrics/series
 ```
 
 - `404` unknown family (typed body)
-- `400` invalid label filter
+- `400` invalid label filter — a malformed label-aware selector, or a
+  `?names=` request that exceeds the 50-name ceiling (the filter is
+  REJECTED, never silently truncated)
 - `400 invalid_cursor` (expired/invalid cursor — AM-6)
 - `503` registry unavailable
 - `503 AUTH_NOT_CONFIGURED` (fail-closed, **before any registry read**)

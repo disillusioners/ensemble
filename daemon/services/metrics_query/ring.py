@@ -282,6 +282,14 @@ class TrendRingStore:
         """The number of ring series currently held."""
         return len(self._rings) + len(self._hist_rings)
 
+    def declared_series_count(self) -> int:
+        """The REGISTRY-NATIVE label-combination count (the divisor).
+
+        The sampler feeds it in every tick (AM-10): it is the count of
+        the LIVE label combinations, NOT the catalog-convention count.
+        """
+        return self._series_count
+
     def total_points(self) -> int:
         """The total sample count across every ring."""
         return sum(len(ring) for ring in self._rings.values()) + sum(
