@@ -1,5 +1,24 @@
 # Test Packs
 
+## Lane plane-pm-issue-tools — Phase-4 static packs REGISTERED (2026-11-02) — P10 shell-scrub content + the two static-check host files
+
+> Phase 4 (charter reconciliation + durable doc persistence) owns the STATIC content pins
+> (phase4-plan.md §2.5: "Phase 3 owns the *runtime* guards; Phase 4 owns the *static* content pins").
+> **X2.8/X3.6 disposition (deferred by instance 2, resolved here):** the Phase-2/3 *runtime* pack
+> registration belongs to the **tester lane** (Phase 6 G13 functional gate runs and registers them) —
+> phase4-plan §5 carries ONLY the P10 row, so this section registers the Phase-4 artifacts and leaves
+> the Phase-2/3 rows to the gate that exercises them.
+>
+> Fences: the P10 pack is pure static content (bash, no pytest, no daemon boot, no DB); the two
+> static-check host files run under the house fence (`timeout 300` + `--timeout=120`, `-p no:randomly`,
+> main-checkout `.venv` interpreter with `cd` into the lane worktree, per-variable `env -u` scrubs).
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `plane_shell_scrub_content` | `cd <wt> && timeout 300 bash tests/packs/plane_shell_scrub_content.sh` | **P10** (NR2): `scripts/deploy.sh` still carries the `PLANE_MCP_WORKSPACE_SLUG=e2e` sed-pin + grep-assert; `scripts/run_tests_scrubbed.sh` still carries the per-variable unset + leak-gate case arm + `exit 78`; + 5 scratch-copy mutation legs (weakened copies ⇒ the same assertions go RED). READS the shell files, never modifies them. | 2026-11-02 | ✅ **10/10 PASS** (5 repo assertions + 5 mutation legs) @ Phase-4 commit |
+| `test_plane_prompt_verb_check` (P11 host file) | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT /home/nea/ensemble-src/.venv/bin/python -m pytest tests/unit/test_plane_prompt_verb_check.py -q --tb=short -rfE -p no:randomly --timeout=120` | **P11/X4.1**: every `plane_*` MCP verb on the charter surface (4 PM prompt files + the `tool_name_prefix` docstring) is a member of the gate-(i) catalog (`gate-i-keep-set.json` + `tests/fixtures/plane_catalog.json`); exclusion set EXACTLY 3 names (`plane_sync_project`/`plane_sync`/`plane_sync_state`); no `*_issue` verb remains; + planted-verb mutation legs. | 2026-11-02 | ✅ **8/8 PASS** (planted `plane_create_issue`/`plane_assign_issue` ⇒ RED, restored ⇒ GREEN) |
+| `test_plane_env_example_defaults` (P30 host file) | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT /home/nea/ensemble-src/.venv/bin/python -m pytest tests/unit/test_plane_env_example_defaults.py -q --tb=short -rfE -p no:randomly --timeout=120` | **P30/X4.9+X4.11**: `.env.example` carries NO active `PLANE_*` assignment (all three Plane sample lines commented); commented `#PLANE_MCP_WORKSPACE_SLUG=e2e` present; doctrine prose carries the per-environment rule; stale "silently targets the account-default" sentence absent; + 5 tmp-copy mutation legs. | 2026-11-02 | ✅ **7/7 PASS** (RED baseline leg captured pre-edit: 7 real violations on the active `:207-209`) |
+
 ## Commission report-obligation-visibility (wi-1fbee2ec) — gate packs REGISTERED (2026-11-01)
 
 > Tester functional gate @ HEAD `8e76897e3` (base `f7039c3ff`). Same fences as the block below: explicit

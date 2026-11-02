@@ -165,15 +165,18 @@ class PlaneServerDefinition(BuiltinServerDefinition):
         """Override the tool name prefix to drop the standard ``mcp_``.
 
         With this override, Plane's tools are exposed as
-        ``plane_list_issues``, ``plane_create_issue``, etc. instead
-        of ``mcp_plane_list_issues`` — the ``is_mcp_tool()`` check
-        no longer matches them, so they bypass any
-        ``tools.deny: ["mcp"]`` filter and feel native to the
-        project-manager agent.
+        ``plane_list_work_items``, ``plane_create_work_item``, etc.
+        instead of ``mcp_plane_list_work_items`` — the
+        ``is_mcp_tool()`` check no longer matches them, so they
+        bypass any ``tools.deny: ["mcp"]`` filter and feel native to
+        the project-manager agent. (Plane's entity is the *work
+        item*: the upstream 177-verb catalog exposes no ``*_issue``
+        verbs — work-item CRUD, comments, cycles and assignee
+        management are all ``*_work_item`` / ``*_cycle`` verbs.)
 
         The dispatch to the MCP server is unaffected: the lazy
         coroutine in ``create_lazy_mcp_tools`` closes over the
-        ORIGINAL ``original_tool_name`` (e.g. ``list_issues``) and
+        ORIGINAL ``original_tool_name`` (e.g. ``list_work_items``) and
         calls ``session.call_tool(original_tool_name, kwargs)`` —
         only the EXPOSED ``StructuredTool.name`` changes.
         """
