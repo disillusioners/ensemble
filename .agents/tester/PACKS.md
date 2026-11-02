@@ -1,5 +1,24 @@
 # Test Packs
 
+## Lane plane-pm-issue-tools — GATE D Tier-2 whole-tree leg REGISTERED (2026-11-02, GATE D)
+
+> Registered by GATE D (Tier-2 whole-tree dual-side regression leg, RESUMED). Whole-tree
+> corpus both legs (BASE 941cb6321 = 32,450 executed; HEAD 31869158e = 32,728 executed;
+> mandatory ignores: `tests/packs/g7_unique_index_smoke_test.py` + `tests/e2e/test_context_injection_hybrid.py`),
+> closure exact both legs (UNPARSED=0), digest form = sorted bare node-ids:
+> base `093e906e…`, head `2b349a4b…` — **NET-NEW = ∅ after 3× solo adjudication (zero deterministic
+> regressions; 19 shard-context candidates all FLAKY/order-sensitive)**. Pre-existing 424: 39 cited
+> from Tier-1 (stable 3× both legs there) + 385 re-proven 3× both legs (rep sets byte-identical,
+> head==base digest `dd166c19…`). Evidence: `.agents/tester/RESULTS/2026-11-02-plane-pm-tier2-whole-tree.md`
+> + `.agents/tester/EVIDENCE/plane-pm-tier2-2026-11-02/`. Shard fences: per-var `env -u POSTGRES_*`
+> scrubs (glob = SILENT NO-OP), dead-LLM-port fence (`OPENAI_BASE_URL=http://127.0.0.1:9/v1` + retry=1),
+> `HOME=$(mktemp -d)`, outer `timeout 1500` + `--timeout=120`, `-p no:randomly`, xdist `-n auto` within
+> a shard only, legs never concurrent, worktree-local `.venv` with `cd` import proof per leg.
+
+| Gate leg | Corpus | Net-new | Pre-existing | Status |
+|---|---|---|---|---|
+| GATE D tier-2 whole-tree | 32,728 HEAD / 32,450 BASE executed | **∅ deterministic** (19 FLAKY adjudicated solo ×3 both legs) | 424 stable+symmetric (39 Tier-1-cited, 385 re-proven 3×) | ✅ **PASS-WITH-NOTES (2026-11-02)** |
+
 ## Lane plane-pm-issue-tools — Phase-2/3 runtime packs REGISTERED (2026-11-02, GATE C)
 
 > Registered by GATE C (Tier-1 blast-radius leg, this gate). The 7 runtime packs
