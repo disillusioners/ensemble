@@ -58,3 +58,46 @@
 #      37 base-only and
 #      33 head-only entries.
 #      (the per-id lists are in the two *.nodeids.txt files preserved beside this record)
+#
+## THE RE-AFFIRMED VERDICT (2026-11-02, the P3 evidence-repair round)
+#
+## the FIXED comparator (evidence/p3-scratch/sweep_digest_verdict.sh) re-derives the
+## comparison from the preserved node-id lists and LOGS it (the diff lists go to FILES
+## first; the original's `;` vs `|` bug sent `comm`'s output to stdout, never to the log)
+#   VERDICT [FORM=grepfull]: NET-NEW = 33 (NOT EMPTY — the sets differ)
+#   VERDICT [FORM=bareid]:   NET-NEW = 33 (NOT EMPTY — the sets differ)
+#   BASE unique ids (GREP-FULL): 488   HEAD unique ids (GREP-FULL): 484
+#   the BARE-ID (node-id-only) form: 479 BASE / 476 HEAD  (9 / 8 captured lines are LOG
+#     lines, not test outcomes)
+#   base-only: 37 (GREP-FULL) / 36 (BARE-ID)    head-only: 33 (both forms)
+#
+## the ADJUDICATION of every diff id (each id in ISOLATION, 3 runs per side, both legs)
+#   69 ids x 2 sides x 3 runs = 414 single-node pytest processes
+#      60  ORDER/LOAD-SENSITIVE (green on both sides in isolation)
+#       7  PRE-EXISTING (red on BOTH sides)
+#       2  RESOLVED-AT-HEAD (red on BASE only — the base-only side of the diff)
+#   LANE CANDIDATES (red on HEAD only, green on BASE): 0
+#
+## the file level (15 files x 3 runs x 2 sides): 13/15 files carry a BYTE-IDENTICAL red
+##   set on both sides — including all five files that own the 33 head-only ids
+##   (test_injection_api.py 23/23 · test_defer_blocked_api.py 20/20 ·
+##    test_slash_commands_router.py 25/25 · test_work_router.py 10/10 ·
+##    test_instance_list_order_api.py 1/1); the two that differ are BASE-side flaky
+##   concurrency tests (their red set is unstable across BASE's OWN three runs)
+##
+## the batch level (the whole 69-id diff set as ONE session, 3 runs per side):
+##   BASE union 56 reds · HEAD union 55 reds · symmetric difference 1
+##   (the known BASE-side flaky concurrency test)
+##
+## the SHARD-DETERMINISM leg (the SAME shard, the SAME tree, TWICE) — THE DECISIVE ONE:
+#   BASE/shard-002 run1: 82 reds   run2: 80 reds  => 14 ids only in run 1, 12 only in run 2
+#   BASE/shard-005 run1: 61 reds   run2: 68 reds  =>  2 ids only in run 1,  9 only in run 2
+#   -> the shard-level FAILED set is NOT a reproducible artefact: the same tree, the same
+#      shard, the same command, two runs => different red sets, and the run1-only /
+#      run2-only ids are EXACTLY the families in the sweep's base-only/head-only diff.
+#
+## THE VERDICT: NET-NEW = 0 — RE-AFFIRMED. The two legs' FAILED-id sets differ, but the
+## difference is a parallel-shard COMPOSITION artefact, not a behavioural difference
+## between the two trees. NO product code was changed in this round.
+#   evidence: evidence/p3-adjudication/ (+ evidence/p3-adjudication.sha256.txt,
+#              set digest 76a69edd9bd3ec454541b4d81ecce0cf5e88151d6a36602d4f3373df8f85c218)
