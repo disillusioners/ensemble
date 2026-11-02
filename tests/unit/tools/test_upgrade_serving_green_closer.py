@@ -954,3 +954,20 @@ def test_a5_the_unhealthy_verdict_logs_once(
     ]
     assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
     assert len(debugs) == 1, [r.getMessage() for r in caplog.records]
+
+
+def test_adv1_daemonconfig_port_premise_init_source_beats_env(monkeypatch) -> None:
+    """Council ADV-1 (delta re-review, final fold) — the F9 port premise:
+    pydantic gives the INIT (config.yaml) source priority over the
+    DAEMON_PORT env (``env_prefix="DAEMON_"``, daemon/config.py:566), so
+    the yaml-interpolated ``daemon.port: ${PORT:-8088}`` (config.yaml:113)
+    IS the daemon's effective port whenever the key is present — the
+    launcher probe's port source (``_js_sweep_probe_port``) depends on
+    this. A config.py refactor that silently lets env outrank init would
+    invalidate the probe's port source; the second assert proves the env
+    prefix is genuinely live (the pin is not vacuous)."""
+    from daemon.config import DaemonConfig
+
+    monkeypatch.setenv("DAEMON_PORT", "9999")
+    assert DaemonConfig(port=8088).port == 8088  # init source wins over env
+    assert DaemonConfig().port == 9999  # env prefix live when the key is absent

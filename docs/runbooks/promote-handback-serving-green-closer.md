@@ -223,6 +223,23 @@ executable proof lives in `tests/test_pipeline_scripts_floor_stamp.sh`
   ceremony's launcher, and **state the value in the ceremony notes** (`=0`
   restores the pre-lane unconditional auto-rollback — an escape hatch,
   never a steady state).
+* **Third enumerated pre-step (council A-1, final fold):** if the ceremony
+  raises `HANDBACK_VERIFY_BUDGET_S`, the raised value must live in the
+  **INSTALL `.env`** — NOT the ceremony shell. `launcher.sh` never sources
+  `lib.sh`, so the lib.sh `export` reaches only the pipeline's own
+  children (promote/stage/rollback shells); the daemon child sees the knob
+  ONLY through the `.env` seam (launcher.sh:226 exports every `.env`
+  key). A shell-exported raise is INVISIBLE to the daemon-side grace
+  floor (`max(UPGRADE_CLOSER_BOOT_GRACE_S, HANDBACK_VERIFY_BUDGET_S)`).
+* **Fourth enumerated pre-step (council A-4, final fold):** ensure
+  **`PORT` is set** in the install `.env` before the ceremony. A PORT-less
+  boot makes the launcher's serving probe **unprobeable** (never counted,
+  never rollback-eligible) — and therefore **defers even a
+  `rollback_requested`** rather than executing it unverified; the request
+  rides the next correctly-configured boot. While unset, also verify
+  `config.yaml` carries a `daemon.port` key — otherwise the daemon
+  silently binds the pydantic default (8079) and the probe's target would
+  be wrong even with `PORT` set (the launcher now WARNs on that shape).
 
 ### 9.3 The disposition doctrine at the gate (the reconciled sentence)
 

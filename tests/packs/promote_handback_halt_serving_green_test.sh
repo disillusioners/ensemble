@@ -271,7 +271,7 @@ fi
 cleanup_listeners
 
 # ===========================================================================
-section "P-5u / P-5v / P-5w — the probe-configuration class (F3), the port source (F9), the fd isolation (F11)"
+section "P-5u / P-5v / P-5w — the probe-configuration class (F3), the port source (F9 + the A-2 final-fold DAEMON_PORT-unset leg), the fd isolation (F11)"
 
 # ─ P-5u (F3, code-council W1) ─────────────────────────────────────────────
 # An unusable PORT is a PROBE-CONFIGURATION failure, NOT an observation:
@@ -321,6 +321,24 @@ P5V_DIV="$(PORT=19001 DAEMON_PORT=19002 run_sweep "$P5V_FIX" 19001 2>&1)"
 assert_contains "P-5v a PORT/DAEMON_PORT divergence is logged loudly" "PORT=19001 but DAEMON_PORT=19002" "$P5V_DIV"
 P5V_NP="$(run_sweep_unset_port "$P5V_FIX" 19003)"
 assert_contains "P-5v PORT unset + DAEMON_PORT set is surfaced (the daemon binds the yaml default)" "PORT is unset while DAEMON_PORT=19003" "$P5V_NP"
+# council A-2 (delta re-review, final fold) — the DAEMON_PORT-UNSET
+# divergence: PORT set (the probe target) + DAEMON_PORT unset was INVISIBLE
+# pre-fold, yet a custom config.yaml WITHOUT a daemon.port key makes the
+# daemon bind the pydantic default (8079) SILENTLY while the probe targets
+# PORT. The shape must at least be VISIBLE (a loud WARN; refusing would
+# change the reviewed disposition semantics). The port-return assert is
+# the no-behavior-change control (green at BOTH tips); the WARN assert is
+# the discriminator (RED pre-fold, GREEN post-fold).
+P5V_DPU_PORT="$(env -u DAEMON_PORT PORT=19004 bash -c '
+    . "'"$REPO_ROOT"'/launcher.sh" >/dev/null 2>&1
+    _js_sweep_probe_port
+' 2>/dev/null)"
+P5V_DPU_ERR="$(env -u DAEMON_PORT PORT=19004 bash -c '
+    . "'"$REPO_ROOT"'/launcher.sh" >/dev/null 2>&1
+    _js_sweep_probe_port
+' 2>&1 >/dev/null)"
+assert_eq "P-5v PORT set + DAEMON_PORT unset: the helper still returns the port (no behavior change)" "19004" "$P5V_DPU_PORT"
+assert_contains "P-5v PORT set + DAEMON_PORT unset => the silent-bind shape is logged (custom yaml w/o daemon.port binds 8079)" "DAEMON_PORT unset" "$P5V_DPU_ERR"
 rm -rf "$P5V_FIX"
 
 # ─ P-5w (F11, portability) ────────────────────────────────────────────────

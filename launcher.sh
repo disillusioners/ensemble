@@ -681,7 +681,11 @@ _js_serving_version_strip() {
 # NOTHING when it is unresolvable (the caller's probe then reports the
 # `unprobeable` class — F3). A PORT/DAEMON_PORT divergence is logged
 # LOUDLY: it silently redirects the daemon's binding to the yaml default
-# when the config has no `daemon.port` key.
+# when the config has no `daemon.port` key. The DAEMON_PORT-UNSET shape is
+# logged too (delta re-review A-2, final fold): PORT set + DAEMON_PORT
+# unset leaves a custom config.yaml WITHOUT a daemon.port key binding the
+# pydantic default (8079) silently while the probe targets PORT — visible,
+# not refused (refusing would change the reviewed disposition semantics).
 _js_sweep_probe_port() {
     local p="${PORT:-}" d="${DAEMON_PORT:-}"
     # numeric-only: the /dev/tcp path needs a port literal
@@ -689,6 +693,9 @@ _js_sweep_probe_port() {
     case "$d" in ''|*[!0-9]*) d="" ;; esac
     if [ -n "$p" ] && [ -n "$d" ] && [ "$p" != "$d" ]; then
         _log "WARN: journal sweep: PORT=$p but DAEMON_PORT=$d — the daemon binds the config.yaml-interpolated PORT (the pydantic init source wins over the DAEMON_ env prefix); the probe targets $p. If config.yaml carries no daemon.port key the daemon binds $d instead — reconcile the .env (a wrong probe target makes the serving-green arm silently inert)"
+    fi
+    if [ -n "$p" ] && [ -z "$d" ]; then
+        _log "WARN: journal sweep: PORT=$p with DAEMON_PORT unset — the daemon binds the config.yaml-interpolated PORT only while config.yaml carries a daemon.port key; a custom config.yaml WITHOUT one makes the daemon silently bind the pydantic default (8079) while this probe targets $p (the serving-green arm would be silently inert). Ensure config.yaml carries daemon.port or set DAEMON_PORT=$p in the .env"
     fi
     if [ -n "$p" ]; then
         printf '%s' "$p"
