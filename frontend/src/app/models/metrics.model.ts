@@ -83,9 +83,29 @@ export type MetricsAvailabilityReason =
   | MetricsKnownAvailabilityReason
   | (string & {});
 
-/** The label set of a series — the complete discriminator (AM-1). */
+/**
+ * The CONCRETE label set of a series — the complete discriminator
+ * (AM-1). This is what `/snapshot` and `/series` carry: one entry per
+ * LIVE label combination, every value a string (the runtime observation
+ * §3.2 — e.g. `{pool: "native", quantity: "checked_out"}`).
+ */
 export interface MetricsLabels {
   readonly [key: string]: string;
+}
+
+/**
+ * The DECLARED label VALUE SETS of a registered name (W-6). This is
+ * what `/families` carries on `names[].labels` — the contract's frozen
+ * `labels:{key:[values]}|null` shape (§4.3) and what the provider
+ * serves (`_declared_labels` → `{key: sorted allowed values}`). A
+ * closed name declares the full allowed set (e.g.
+ * `{op: ["aget", "aget_tuple"]}`); an `open` or label-less name
+ * declares `null` (AM-2). It is NOT a concrete labelling — rendering a
+ * declared set as `op=aget,aget_tuple` presents a whole vocabulary as
+ * if it were one observed value.
+ */
+export interface MetricsDeclaredLabels {
+  readonly [key: string]: readonly string[];
 }
 
 /** The posture block — the same on all three routes (AM-18). */
@@ -115,8 +135,12 @@ export interface MetricsEnvelope {
 export interface MetricsFamilyName {
   readonly name: string;
   readonly kind: MetricsMetricKind;
-  /** The declared label VALUES — `null` for an open-ended name (AM-2). */
-  readonly labels: MetricsLabels | null;
+  /**
+   * The DECLARED label VALUE SETS (W-6) — `null` for an open or
+   * label-less name (AM-2). List-valued: the closed vocabulary of the
+   * name, never a concrete observation.
+   */
+  readonly labels: MetricsDeclaredLabels | null;
   readonly help: string;
   /** The bucket boundaries — `null` for a non-histogram kind (B3). */
   readonly buckets: readonly number[] | null;
@@ -149,6 +173,12 @@ export interface MetricsFamiliesPayload extends MetricsEnvelope {
   readonly families: readonly MetricsFamily[];
   /** More families remain after this page — the cursor resumes them. */
   readonly truncated: boolean;
+  /**
+   * The continuation cursor — PRESENT ONLY when the body is bounded
+   * (the door pops the member when unbounded, `_bound_page`), so it is
+   * optional in the mirror. Opaque: never parsed by the FE.
+   */
+  readonly next_cursor?: string;
 }
 
 /** The stored histogram of a histogram series (as stored, not cumulative). */
@@ -174,6 +204,13 @@ export interface MetricsSnapshotSeries {
 /** `GET /api/metrics/snapshot`. */
 export interface MetricsSnapshotPayload extends MetricsEnvelope {
   readonly series: readonly MetricsSnapshotSeries[];
+  /**
+   * The W-4 bound flag — the route is bounded like the other two
+   * (offset/limit clamped to 500 + the byte ceiling). ADDITIVE.
+   */
+  readonly truncated: boolean;
+  /** Present ONLY when the body is bounded (see `MetricsFamiliesPayload`). */
+  readonly next_cursor?: string;
 }
 
 /** The window the trend was evaluated over (contract §4.5). */
@@ -204,6 +241,14 @@ export interface MetricsSeriesPayload extends MetricsEnvelope {
   /** True when the newest sample is older than 3× the effective interval. */
   readonly stale: boolean;
   readonly series: readonly MetricsSeriesEntry[];
+  /**
+   * The W-2 bound flag — the page is bounded on TWO axes (the emitted
+   * series ceiling AND the total emitted-points ceiling). A bound hit
+   * is never silent: this flag is true and the cursor follows.
+   */
+  readonly truncated: boolean;
+  /** Present ONLY when the body is bounded (see `MetricsFamiliesPayload`). */
+  readonly next_cursor?: string;
 }
 
 /** The placeholder a nullable scalar renders as (task 5.1). */
@@ -261,4 +306,106 @@ export function formatMetricsLabels(labels: MetricsLabels | null | undefined): s
     .sort()
     .map((key) => `${key}=${labels[key]}`)
     .join(' ');
+}
+
+/**
+ * The DECLARED label value sets as a sorted string (W-6).
+ *
+ * A declared set is a VOCABULARY, not an observation, so the values
+ * render as a set — `op∈{aget, aget_tuple}` — never as the concrete
+ * `key=value` pair `formatMetricsLabels` renders (a declared set passed
+ * to that helper would string-ify the array into `op=aget,aget_tuple`
+ * and present the whole vocabulary as one observed value).
+ */
+export function formatMetricsDeclaredLabels(
+  labels: MetricsDeclaredLabels | null | undefined,
+): string {
+  if (!labels) {
+    return '';
+  }
+  return Object.keys(labels)
+    .sort()
+    .map((key) => {
+      const values = [...labels[key]].sort().join(', ');
+      return `${key}∈{${values}}`;
+    })
+    .join(' ');
+}
+
+// ── The door's error vocabulary → human copy (A-5, contract §5) ─────────
+
+/**
+ * The decoded shape of a failed metrics-door read (A-5). The door's
+ * error vocabulary is CLOSED and frozen (contract §5): 401 / 403
+ * scope / 400 invalid_label_filter | invalid_cursor / 404
+ * unknown_family / 503 AUTH_NOT_CONFIGURED | registry_unavailable.
+ * The shipped 403 body token is UPPERCASE `SCOPE_INSUFFICIENT` (D-c:
+ * the doc gets amended, never the wire).
+ */
+export type MetricsDoorErrorCode =
+  | 'scope_insufficient'
+  | 'auth_not_configured'
+  | 'registry_unavailable'
+  | 'network'
+  | 'unexpected';
+
+/** The copy the page banners for each decoded failure class (A-5). */
+export const METRICS_DOOR_ERROR_COPY: Readonly<Record<MetricsDoorErrorCode, string>> = {
+  scope_insufficient:
+    'The metrics door rejected this session — the signed-in token lacks the maintenance:read scope.',
+  auth_not_configured:
+    'The metrics door is fail-closed — auth is not configured on the daemon, so it serves no metrics.',
+  registry_unavailable:
+    'The metrics door has no provider wired — the metrics service is unavailable on this daemon.',
+  network: 'The metrics door is unreachable.',
+  unexpected: 'The metrics door returned an unexpected error.',
+};
+
+/** Structural read of an `HttpErrorResponse`-like value (no Angular import — the model stays dependency-free). */
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null;
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/**
+ * Decode a failed door read into `{code, copy}` (A-5).
+ *
+ * The BODY is decoded FIRST and the status last — the house precedent
+ * (`mcps-gateway.service.ts` `decodeError`): a 403 whose body names
+ * `SCOPE_INSUFFICIENT` is a scope failure, and any OTHER 403 (CSRF
+ * guard, reverse proxy) must NOT wear that label. `503` branches on
+ * the body code (`AUTH_NOT_CONFIGURED` vs `registry_unavailable`).
+ * `status === 0` is the transport never answering (network/timeout).
+ * Everything else — 401, 400, 404, a proxied HTML page — is the
+ * honest fallback, never the "unreachable" claim.
+ */
+export function decodeMetricsDoorError(err: unknown): {
+  code: MetricsDoorErrorCode;
+  copy: string;
+} {
+  const response = asRecord(err);
+  const status = typeof response?.['status'] === 'number' ? (response['status'] as number) : 0;
+  const body = asRecord(response?.['error']);
+  const detail = asRecord(body?.['detail']) ?? body ?? {};
+  const rawCode = asString(detail['error']) ?? asString(body?.['error']);
+
+  if (rawCode === 'SCOPE_INSUFFICIENT' || (status === 403 && rawCode !== null)) {
+    return { code: 'scope_insufficient', copy: METRICS_DOOR_ERROR_COPY.scope_insufficient };
+  }
+  if (status === 503) {
+    if (rawCode === 'AUTH_NOT_CONFIGURED') {
+      return { code: 'auth_not_configured', copy: METRICS_DOOR_ERROR_COPY.auth_not_configured };
+    }
+    if (rawCode === 'registry_unavailable') {
+      return { code: 'registry_unavailable', copy: METRICS_DOOR_ERROR_COPY.registry_unavailable };
+    }
+    return { code: 'unexpected', copy: METRICS_DOOR_ERROR_COPY.unexpected };
+  }
+  if (status === 0) {
+    return { code: 'network', copy: METRICS_DOOR_ERROR_COPY.network };
+  }
+  return { code: 'unexpected', copy: METRICS_DOOR_ERROR_COPY.unexpected };
 }

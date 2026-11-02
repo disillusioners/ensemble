@@ -18,6 +18,7 @@ import { MetricsService } from '../../../services/metrics.service';
 import {
   MetricsSnapshotPayload,
   MetricsSnapshotSeries,
+  decodeMetricsDoorError,
   formatMetricsLabels,
   formatMetricsValue,
 } from '../../../models/metrics.model';
@@ -68,6 +69,9 @@ import {
         <p class="tab-meta" data-test="overview-meta">
           schema v{{ payload.schema_version }} · vocabulary v{{ payload.vocabulary_version }} ·
           boot {{ payload.restart_epoch }}
+          @if (payload.truncated) {
+            · page bounded — more series remain on the door
+          }
         </p>
         <div class="stat-grid" data-test="overview-grid">
           @for (card of cards(); track card.key) {
@@ -281,12 +285,14 @@ export class OverviewTabComponent implements OnInit, OnDestroy {
           this.error.set(null);
           this.stale.set(false);
         },
-        error: () => {
+        error: (err: unknown) => {
           this.inFlight -= 1;
           if (token !== this.requestSeq) {
             return;
           }
-          this.error.set('The metrics door is unreachable — the last known values are kept.');
+          // A-5: the copy branches on the decoded failure class; the
+          // last-known values are kept in EVERY branch.
+          this.error.set(`${decodeMetricsDoorError(err).copy} — the last known values are kept.`);
           this.stale.set(this.snapshot() !== null);
         },
       });

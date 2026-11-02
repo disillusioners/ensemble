@@ -46,6 +46,7 @@ function snapshotPayload(name: string, value: number): MetricsSnapshotPayload {
         last_publish_age_s: 1,
       },
     ],
+    truncated: false,
   };
 }
 
@@ -239,5 +240,35 @@ describe('OverviewTabComponent — the degraded / stale view', () => {
     expect(cards[0].name).toBe('kept');
     expect(cards[0].value).toBe('7');
     expect(cards[0].labels).toBe('stat=p50');
+  });
+
+  it('surfaces a bounded snapshot page — the W-4 truncated flag is never silent', () => {
+    fixture.componentRef.setInput('active', true);
+    fixture.detectChanges();
+    service.snapshotCalls[0].next({
+      ...snapshotPayload('kept', 7),
+      truncated: true,
+      next_cursor: 'opaque',
+    });
+    fixture.detectChanges();
+
+    const meta = fixture.nativeElement.querySelector('[data-test="overview-meta"]');
+    expect(meta).not.toBeNull();
+    const text = (meta.textContent ?? '').toLowerCase();
+    expect(text).toContain('bounded');
+    // The data itself is still rendered (never blank, never wrong).
+    expect(component.cards()).toHaveLength(1);
+  });
+
+  it('renders no bound note when the snapshot page is complete', () => {
+    fixture.componentRef.setInput('active', true);
+    fixture.detectChanges();
+    service.snapshotCalls[0].next(snapshotPayload('kept', 7));
+    fixture.detectChanges();
+
+    const text = (
+      fixture.nativeElement.querySelector('[data-test="overview-meta"]')?.textContent ?? ''
+    ).toLowerCase();
+    expect(text).not.toContain('bounded');
   });
 });

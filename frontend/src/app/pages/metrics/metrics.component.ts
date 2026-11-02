@@ -17,6 +17,7 @@ import { MetricsService } from '../../services/metrics.service';
 import {
   MetricsChartRole,
   MetricsFamily,
+  decodeMetricsDoorError,
   metricsChartRoleForKind,
 } from '../../models/metrics.model';
 import { OverviewTabComponent } from './overview/overview-tab.component';
@@ -90,6 +91,12 @@ export class MetricsComponent implements OnInit {
   readonly catalogError = signal<string | null>(null);
   readonly catalogStale = signal(false);
   readonly catalogLoaded = signal(false);
+  /**
+   * The W-4 bound flag of the LAST catalog load — true when the door
+   * served a bounded page (more families remain). Surfaced, never
+   * silently dropped.
+   */
+  readonly catalogTruncated = signal(false);
 
   /** The selected section — the visibility gate the tab bodies poll on. */
   readonly activeTabId = signal<string>('overview');
@@ -190,12 +197,18 @@ export class MetricsComponent implements OnInit {
           this.catalogError.set(null);
           this.catalogStale.set(false);
           this.catalogLoaded.set(true);
+          // The door may serve a BOUNDED page (W-4) — surfaced, never
+          // silently dropped.
+          this.catalogTruncated.set(payload.truncated === true);
         },
-        error: () => {
+        error: (err: unknown) => {
           if (token !== this.catalogSeq) {
             return;
           }
-          this.catalogError.set('The metrics door is unreachable.');
+          // A-5: decode the BODY and branch the copy — a 403 scope miss
+          // or a 503 fail-closed door is NOT an unreachable door. The
+          // last-good catalog is retained in EVERY branch.
+          this.catalogError.set(decodeMetricsDoorError(err).copy);
           this.catalogStale.set(this.families().length > 0);
           this.catalogLoaded.set(true);
         },

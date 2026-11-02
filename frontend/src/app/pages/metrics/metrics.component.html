@@ -24,6 +24,12 @@
     <span class="stale-badge" data-test="metrics-catalog-stale">STALE — last known catalog</span>
   }
 
+  @if (catalogTruncated() && !catalogError()) {
+    <span class="metrics-truncated-hint" data-test="metrics-catalog-truncated">
+      the catalog page is bounded — more families remain on the door
+    </span>
+  }
+
   @if (showEmptyPanel()) {
     <section class="metrics-empty" data-test="metrics-empty-panel">
       <h2 class="metrics-empty-title">{{ emptyCopy }}</h2>

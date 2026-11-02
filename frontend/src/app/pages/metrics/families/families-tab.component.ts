@@ -9,8 +9,9 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 
 import {
   MetricsFamily,
+  MetricsFamilyName,
   formatAvailabilityReason,
-  formatMetricsLabels,
+  formatMetricsDeclaredLabels,
 } from '../../../models/metrics.model';
 
 /**
@@ -74,6 +75,11 @@ import {
                   <span class="name-chip" [matTooltip]="name.help || name.name">
                     {{ name.name }}<span class="name-kind">{{ name.kind }}</span>
                   </span>
+                  @if (declaredLabelsOf(family, name); as declared) {
+                    <span class="declared-labels" [attr.data-test]="'declared-labels-' + name.name">{{
+                      declared
+                    }}</span>
+                  }
                 }
               </td>
             </tr>
@@ -179,6 +185,14 @@ import {
         word-break: break-all;
       }
 
+      .declared-labels {
+        display: block;
+        margin: 0 0 0.3rem 0.25rem;
+        color: #475569;
+        font-size: 0.66rem;
+        word-break: break-all;
+      }
+
       .name-kind {
         color: #475569;
         margin-left: 0.3rem;
@@ -223,8 +237,13 @@ export class FamiliesTabComponent {
     return formatAvailabilityReason(family.availability.reason);
   }
 
-  /** The label set of a family's first name (the table's detail column). */
-  labelsOf(family: MetricsFamily): string {
-    return formatMetricsLabels(family.names[0]?.labels ?? null);
+  /**
+   * The DECLARED label value sets of one name, rendered as a set
+   * (W-6) — `op∈{aget, aget_tuple}` — never as a concrete
+   * `key=value` pair. An empty rendering (no declared set) renders
+   * nothing at all.
+   */
+  declaredLabelsOf(family: MetricsFamily, name: MetricsFamilyName): string {
+    return formatMetricsDeclaredLabels(name.labels);
   }
 }

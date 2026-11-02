@@ -18,7 +18,7 @@ function family(overrides: Partial<MetricsFamily> = {}): MetricsFamily {
       {
         name: 'ensemble_loop_lag_seconds',
         kind: 'gauge',
-        labels: { stat: 'p50' },
+        labels: { stat: ['p50', 'p95'] },
         help: '',
         buckets: null,
         cardinality_class: 'closed',
@@ -105,6 +105,60 @@ describe('FamiliesTabComponent — the availability rendering', () => {
     expect((reason.textContent ?? '').trim()).toBe(
       'unknown(a_reason_the_door_has_not_defined_yet)',
     );
+  });
+
+  it('renders the DECLARED label value sets as a set, never as a concrete pair (W-6)', () => {
+    fixture.componentRef.setInput('families', [
+      family({
+        id: 'F7',
+        names: [
+          {
+            name: 'ensemble_checkpoint_op_bytes',
+            kind: 'histogram',
+            labels: { op: ['aget_tuple', 'aget'] },
+            help: '',
+            buckets: [1024, 65536],
+            cardinality_class: 'closed',
+            monotonic: false,
+            chart_role: 'line',
+          },
+        ],
+      }),
+    ]);
+    fixture.detectChanges();
+    const declared = fixture.nativeElement.querySelector(
+      '[data-test="declared-labels-ensemble_checkpoint_op_bytes"]',
+    );
+    expect(declared).not.toBeNull();
+    const text = (declared.textContent ?? '').trim();
+    // A DECLARED vocabulary renders as a SET (op∈{…}) — the W-6
+    // symptom (`op=aget,aget_tuple`, one concrete value) never appears.
+    expect(text).toBe('op∈{aget, aget_tuple}');
+    expect(text).not.toContain('op=aget');
+  });
+
+  it('renders NO declared-labels line for a name without a declared set', () => {
+    fixture.componentRef.setInput('families', [
+      family({
+        id: 'F4',
+        names: [
+          {
+            name: 'ensemble_db_pool_requests_errors_total',
+            kind: 'counter',
+            labels: null,
+            help: '',
+            buckets: null,
+            cardinality_class: 'open',
+            monotonic: true,
+            chart_role: 'step',
+          },
+        ],
+      }),
+    ]);
+    fixture.detectChanges();
+    expect(
+      fixture.nativeElement.querySelector('[data-test="declared-labels-ensemble_db_pool_requests_errors_total"]'),
+    ).toBeNull();
   });
 
   it('invokes the reload callback the shell handed over', () => {

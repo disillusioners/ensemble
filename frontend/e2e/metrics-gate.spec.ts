@@ -62,7 +62,10 @@ const FAMILIES_PAYLOAD = {
         {
           name: 'ensemble_db_pool_native',
           kind: 'gauge',
-          labels: { pool: 'native', quantity: 'checked_out' },
+          // W-6: /families carries the DECLARED value sets (list-valued
+          // per key) — the frozen `labels:{key:[values]}` shape, never a
+          // concrete labelling.
+          labels: { pool: ['native', 'overflow'], quantity: ['checked_out', 'in_transit'] },
           help: 'native pool gauge',
           buckets: null,
           cardinality_class: 'closed',
@@ -83,7 +86,7 @@ const FAMILIES_PAYLOAD = {
         {
           name: 'ensemble_pg_backends',
           kind: 'gauge',
-          labels: { state: 'active' },
+          labels: { state: ['active', 'idle'] },
           help: 'postgres backends',
           buckets: null,
           cardinality_class: 'closed',
@@ -103,6 +106,8 @@ const FAMILIES_PAYLOAD = {
 
 const SNAPSHOT_PAYLOAD = {
   ...ENVELOPE,
+  // W-4: the snapshot is bounded like the other two routes.
+  truncated: false,
   series: [
     {
       name: 'ensemble_db_pool_native',
@@ -134,6 +139,9 @@ const SERIES_PAYLOAD = {
   },
   last_sample_age_s: 2,
   stale: false,
+  // W-2: the series page is bounded on two axes; the stub carries the
+  // additive flag exactly as the door emits it.
+  truncated: false,
   series: [
     {
       name: 'ensemble_db_pool_requests_errors_total',
@@ -284,6 +292,17 @@ test('[P5] gear menu → /metrics → Overview stat cards → Charts → Familie
   await expect(page.locator('[data-reason="census_gated"]')).toContainText(
     'the census sampler is gated',
   );
+
+  // ── W-6: the DECLARED value sets render as a SET, never as one
+  // concrete value. The stub carries {op-style list values}; the
+  // Families tab renders `pool∈{native, overflow}`.
+  const declared = page.locator('[data-test="declared-labels-ensemble_db_pool_native"]');
+  await expect(declared).toBeVisible();
+  await expect(declared).toContainText('pool∈{native, overflow}');
+  await expect(declared).toContainText('quantity∈{checked_out, in_transit}');
+  // The W-6 defect rendering — a vocabulary presented as one observed
+  // value — never appears.
+  await expect(page.locator('[data-test="families-table"]')).not.toContainText('pool=native');
 
   // ── The FE never polls the exposition listener surface. ──
   expect(doorCalls.some((url) => url.includes('/api/metrics/'))).toBe(true);

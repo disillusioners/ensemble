@@ -65,7 +65,7 @@ function family(overrides: Partial<MetricsFamily> = {}): MetricsFamily {
       {
         name: 'ensemble_loop_lag_seconds',
         kind: 'gauge',
-        labels: { stat: 'p50' },
+        labels: { stat: ['p50', 'p95'] },
         help: '',
         buckets: null,
         cardinality_class: 'closed',
@@ -142,6 +142,7 @@ describe('MetricsComponent — the section registry', () => {
 describe('MetricsComponent — the availability-driven empty state (P5-M4 / P5-M10)', () => {
   let fixture: ComponentFixture<MetricsComponent>;
   let component: MetricsComponent;
+  let stub: StubMetricsService;
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
@@ -151,6 +152,7 @@ describe('MetricsComponent — the availability-driven empty state (P5-M4 / P5-M
         { provide: MetricsService, useClass: StubMetricsService },
       ],
     }).compileComponents();
+    stub = TestBed.inject(MetricsService) as unknown as StubMetricsService;
     fixture = TestBed.createComponent(MetricsComponent);
     component = fixture.componentInstance;
     fixture.detectChanges();
@@ -213,6 +215,66 @@ describe('MetricsComponent — the availability-driven empty state (P5-M4 / P5-M
     fixture.detectChanges();
     expect(component.showEmptyPanel()).toBe(false);
     expect(fixture.nativeElement.querySelector('[data-test="metrics-catalog-error"]')).not.toBeNull();
+  });
+
+  it('a 403 scope miss banners the SCOPE copy, not the unreachable copy (A-5)', () => {
+    component.loadCatalog();
+    stub.families$.error({
+      status: 403,
+      error: { detail: { error: 'SCOPE_INSUFFICIENT', message: 'Token lacks required scope' } },
+    });
+    fixture.detectChanges();
+    const banner = fixture.nativeElement.querySelector('[data-test="metrics-catalog-error"]');
+    expect(banner).not.toBeNull();
+    const text = (banner.textContent ?? '').trim();
+    expect(text).toContain('maintenance:read scope');
+    expect(text).not.toContain('unreachable');
+    // The last-good catalog is retained in every branch.
+    expect(component.catalogStale()).toBe(false);
+  });
+
+  it('a 503 fail-closed door banners the AUTH copy, not the unreachable copy (A-5)', () => {
+    component.loadCatalog();
+    stub.families$.error({
+      status: 503,
+      error: { detail: { error: 'AUTH_NOT_CONFIGURED', message: 'Auth not configured (fail-closed)' } },
+    });
+    fixture.detectChanges();
+    const text = (
+      fixture.nativeElement.querySelector('[data-test="metrics-catalog-error"]')?.textContent ?? ''
+    ).trim();
+    expect(text).toContain('fail-closed');
+    expect(text).not.toContain('unreachable');
+  });
+
+  it('a transport failure banners the unreachable copy (A-5)', () => {
+    component.loadCatalog();
+    stub.families$.error({ status: 0 });
+    fixture.detectChanges();
+    // The banner TEXT span only — the banner also carries the Retry CTA.
+    const text = (
+      fixture.nativeElement.querySelector(
+        '[data-test="metrics-catalog-error"] .metrics-banner-text',
+      )?.textContent ?? ''
+    ).trim();
+    expect(text).toBe('The metrics door is unreachable.');
+  });
+
+  it('surfaces a bounded catalog page (the W-4 truncated flag is never silently dropped)', () => {
+    component.loadCatalog();
+    stub.families$.next(payload([]));
+    fixture.detectChanges();
+    expect(component.catalogTruncated()).toBe(false);
+    expect(
+      fixture.nativeElement.querySelector('[data-test="metrics-catalog-truncated"]'),
+    ).toBeNull();
+
+    component.loadCatalog();
+    stub.families$.next({ ...payload([family()]), truncated: true, next_cursor: 'opaque' });    fixture.detectChanges();
+    expect(component.catalogTruncated()).toBe(true);
+    const hint = fixture.nativeElement.querySelector('[data-test="metrics-catalog-truncated"]');
+    expect(hint).not.toBeNull();
+    expect((hint.textContent ?? '').toLowerCase()).toContain('bounded');
   });
 });
 

@@ -18,6 +18,7 @@ import { MetricsService } from '../../../services/metrics.service';
 import {
   MetricsChartRole,
   MetricsSeriesPayload,
+  decodeMetricsDoorError,
   formatMetricsLabels,
   metricsChartRoleForKind,
 } from '../../../models/metrics.model';
@@ -97,6 +98,9 @@ const CHART_COLORS: readonly string[] = [
           newest sample {{ payload.last_sample_age_s | number: '1.0-1' }}s old
           @if (payload.stale) {
             · door reports a stale trend
+          }
+          @if (payload.truncated) {
+            · page bounded — some series were left out
           }
         </p>
       }
@@ -297,12 +301,14 @@ export class ChartsTabComponent implements OnInit, OnDestroy {
           this.error.set(null);
           this.stale.set(payload.stale === true);
         },
-        error: () => {
+        error: (err: unknown) => {
           this.inFlight -= 1;
           if (token !== this.requestSeq) {
             return;
           }
-          this.error.set('The metrics door is unreachable — the last known trend is kept.');
+          // A-5: the copy branches on the decoded failure class; the
+          // last-known trend is kept in EVERY branch.
+          this.error.set(`${decodeMetricsDoorError(err).copy} — the last known trend is kept.`);
           this.stale.set(this.payload() !== null);
         },
       });

@@ -74,7 +74,7 @@ describe('MetricsService — the URL constants', () => {
     service.getSnapshot().subscribe();
     const req = http.expectOne(MetricsService.SNAPSHOT_URL);
     expect(req.request.headers.get('Accept')).toBe('application/json');
-    req.flush({ ...envelope(), series: [] } as MetricsSnapshotPayload);
+    req.flush({ ...envelope(), series: [], truncated: false } as MetricsSnapshotPayload);
   });
 
   it('sends the JSON accept header on the series call (P5-M8)', () => {
@@ -92,6 +92,7 @@ describe('MetricsService — the URL constants', () => {
       last_sample_age_s: 1,
       stale: false,
       series: [],
+      truncated: false,
     } as MetricsSeriesPayload);
   });
 
@@ -114,6 +115,7 @@ describe('MetricsService — the URL constants', () => {
       last_sample_age_s: 1,
       stale: false,
       series: [],
+      truncated: false,
     } as MetricsSeriesPayload);
   });
 
@@ -132,6 +134,7 @@ describe('MetricsService — the URL constants', () => {
       last_sample_age_s: 1,
       stale: false,
       series: [],
+      truncated: false,
     } as MetricsSeriesPayload);
   });
 });

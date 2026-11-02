@@ -64,6 +64,7 @@ function trendPayload(): MetricsSeriesPayload {
     },
     last_sample_age_s: 2,
     stale: false,
+    truncated: false,
     series: [
       {
         name: 'ensemble_db_pool_requests_errors_total',
@@ -178,5 +179,35 @@ describe('ChartsTabComponent — the request + the rendering mode', () => {
     fixture.detectChanges();
     service.seriesCalls[0].subject.next({ ...trendPayload(), stale: true });
     expect(component.stale()).toBe(true);
+  });
+
+  it('surfaces a bounded series page — the W-2 two-axis bound is never silent', () => {
+    fixture.componentRef.setInput('active', true);
+    fixture.detectChanges();
+    service.seriesCalls[0].subject.next({
+      ...trendPayload(),
+      truncated: true,
+      next_cursor: 'opaque',
+    });
+    fixture.detectChanges();
+
+    const meta = fixture.nativeElement.querySelector('[data-test="charts-meta"]');
+    expect(meta).not.toBeNull();
+    const text = (meta.textContent ?? '').toLowerCase();
+    expect(text).toContain('bounded');
+    // The returned series still render (never blank, never wrong).
+    expect(component.charts()).toHaveLength(2);
+  });
+
+  it('renders no bound note when the series page is complete', () => {
+    fixture.componentRef.setInput('active', true);
+    fixture.detectChanges();
+    service.seriesCalls[0].subject.next(trendPayload());
+    fixture.detectChanges();
+
+    const text = (
+      fixture.nativeElement.querySelector('[data-test="charts-meta"]')?.textContent ?? ''
+    ).toLowerCase();
+    expect(text).not.toContain('bounded');
   });
 });

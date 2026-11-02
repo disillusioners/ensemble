@@ -44,6 +44,16 @@
   letter-spacing: 0.04em;
 }
 
+.metrics-truncated-hint {
+  display: inline-block;
+  margin: 0 0 0.5rem 0.5rem;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid #1e293b;
+  border-radius: 4px;
+  color: #64748b;
+  font-size: 0.72rem;
+}
+
 .metrics-empty {
   border: 1px solid #1e293b;
   border-radius: 8px;
