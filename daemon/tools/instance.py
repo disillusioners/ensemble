@@ -506,8 +506,32 @@ def resolve_tool_filter(
                 # Category already populated (statically registered tools
                 # or caller-supplied) — trust it, never clobber.
                 continue
+            # W-8 (plane-pm-issue-tools, 2026-11-02): the OWNERSHIP guard —
+            # the mirror of the ``mcp_`` lane's ``owned_elsewhere`` pattern
+            # above. A tool whose NAME matches this prefix but is already
+            # owned by ANOTHER registered category must not be swept in:
+            # ``plane_sync_project`` is registered under ``plane_sync``
+            # (``daemon/tools/plane_sync.py``) while its name starts with
+            # ``plane_``, so without this guard the sweep populates the
+            # empty ``plane`` category with it whenever the plane MCP
+            # server did not register — and PM's ``tools.allow: ["plane"]``
+            # then grants a tool that has nothing to do with the server.
+            # Same ``meta.json``, two different toolsets depending on
+            # server-registration state: a determinism defect, not merely
+            # a permission one (FC9 boot empirically confirmed the leak).
+            #
+            # The exclusion is computed PER ``category_key`` — the union of
+            # every OTHER category's tools — so a legitimately-discovered
+            # ``plane_*`` tool is never dropped (only the target category
+            # itself is excluded, exactly like the ``mcp_`` guard).
+            owned_elsewhere: set[str] = set()
+            for other_key, other_tools in tool_categories.items():
+                if other_key == category_key:
+                    continue
+                owned_elsewhere.update(other_tools)
             tool_categories[category_key] = sorted(
-                name for name in all_tool_names if name.startswith(prefix)
+                name for name in all_tool_names
+                if name.startswith(prefix) and name not in owned_elsewhere
             )
 
     if allow is None or len(allow) == 0:

@@ -323,6 +323,57 @@ def _mcp_server_health_state(server_name: str) -> str | None:
 # ==================== Endpoints ====================
 
 
+def _plane_probe_refusal(config: dict[str, Any]) -> str | None:
+    """P3-D (``plane-pm-issue-tools``): the plane-shape refusal probe.
+
+    When the submitted config is PLANE-shaped — its URL matches the
+    configured ``PLANE_MCP_URL`` or it carries the plane MCP's
+    ``x-workspace-slug`` header — consult the plane kill-switch and the
+    workspace resolver BEFORE dialing. The operator's "is Plane up?"
+    probe must not report a stale success while the integration is
+    refused or deliberately disabled (the D7/AD7 lie).
+
+    Returns ``None`` when the config is not plane-shaped or the plane
+    lanes are permitted (the probe proceeds unchanged — non-plane
+    configs are untouched by this guard).
+    """
+    try:
+        if not isinstance(config, dict):
+            return None
+        import os
+
+        url = config.get("url")
+        headers = config.get("headers")
+        plane_url = (os.environ.get("PLANE_MCP_URL") or "").strip().strip('"').strip("'")
+        is_plane_shape = (
+            (isinstance(url, str) and bool(plane_url) and url.strip() == plane_url)
+            or (
+                isinstance(headers, dict)
+                and "x-workspace-slug" in headers
+            )
+        )
+        if not is_plane_shape:
+            return None
+        from daemon.mcp.builtin_servers.plane import (
+            PlaneServerDefinition,
+            _mcp_kill_switch_enabled,
+        )
+        from daemon.plane_workspace import current_plane_workspace
+
+        if not _mcp_kill_switch_enabled():
+            return (
+                "Plane MCP is deliberately disabled by kill-switch "
+                "(PLANE_MCP_ENABLED=false) — the probe is refused before "
+                "dialing"
+            )
+        resolution = current_plane_workspace()
+        if not resolution.allowed:
+            return f"Plane workspace refused: {resolution.reason}"
+        return None
+    except Exception:  # noqa: BLE001 — the probe guard must never break the endpoint
+        return None
+
+
 @router.get("", response_model=McpServerListResponse, dependencies=[scope_required("mcp:read")])
 async def list_mcp_servers(request: Request):
     """List all MCP servers."""
@@ -347,7 +398,25 @@ async def test_mcp_server_connection(test_request: McpServerTestConnectionReques
     enforces NO builtin-availability kill-switch, so a future builtin
     that needs probe-path protection must reintroduce a
     registry-aware guard here.
+
+    P3-D (``plane-pm-issue-tools``, 2026-11-02): a PLANE-shaped config
+    additionally consults the workspace resolver and the plane
+    kill-switch BEFORE dialing — the operator's natural "is Plane up?"
+    probe must report the typed refusal (and the deliberately-disabled
+    state) instead of a stale ``success=true, 177 tools`` while the
+    switch is OFF (the D7/AD7 lie).
     """
+    # P3-D: the plane-relevant reporting path (scope boundary: ONLY this
+    # path changes; the endpoint is not redesigned and redact_secrets /
+    # AD2 stay untouched).
+    plane_refusal = _plane_probe_refusal(test_request.config)
+    if plane_refusal is not None:
+        return McpServerTestConnectionResponse(
+            success=False,
+            message=plane_refusal,
+            tools_count=None,
+        )
+
     conn_mgr = get_mcp_connection_manager()
     timeout = 15.0
 
