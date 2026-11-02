@@ -341,6 +341,45 @@ def _mcp_server_health_state(server_name: str) -> str | None:
 # ==================== Endpoints ====================
 
 
+# ── D1 (reviewer-adjudicated tidier must-fix, 2026-11-02): the auth-echo
+# scrub at the response seam ─────────────────────────────────────────────────
+#
+# ``McpConfigValidationError`` messages interpolate the SUBMITTED config
+# (pydantic renders the offending ``input_value`` repr into the message),
+# so a headers-as-string config carries its ``Authorization: Bearer …``
+# value VERBATIM into the API response. The VALIDATOR
+# (``daemon/mcp/config.py``) is outside this lane's surface — the scrub
+# therefore happens at the RESPONSE SEAM, on every site that renders
+# ``str(e)`` back to the client.
+
+#: ``Bearer <token>`` — the auth scheme word plus the credential run
+#: (any case; the scheme word is consumed so the response contains
+#: neither the credential NOR the literal ``"Bearer "``).
+_BEARER_ECHO_RE = re.compile(r"(?i)\bbearer\b[ \t]*[A-Za-z0-9._~+/=\-]+")
+
+#: ``Authorization[:=]'value'`` — a raw Authorization assignment whose
+#: value is not Bearer-shaped (``Basic xyz``, raw keys). The keyword and
+#: punctuation are kept; only the credential (which may span several
+#: whitespace-separated tokens — ``Basic dXNlcjpwYXNz``) is replaced.
+_AUTH_ASSIGN_ECHO_RE = re.compile(
+    r"(?i)(\bauthorization\b['\"]?[ \t]*[:=][ \t]*['\"]?)"
+    r"(?:[^\s'\",}\]]+[ \t]*)+"
+)
+
+
+def _scrub_auth_echo(message: str) -> str:
+    """Scrub ``Bearer``/Authorization material from a validator message.
+
+    Applied at the response seam (BEFORE the message reaches the
+    client) on every ``McpConfigValidationError`` render site in this
+    router. A scrubbed message contains neither the credential NOR the
+    literal ``"Bearer "`` prefix.
+    """
+    scrubbed = _BEARER_ECHO_RE.sub("[REDACTED]", message)
+    scrubbed = _AUTH_ASSIGN_ECHO_RE.sub(r"\1[REDACTED]", scrubbed)
+    return scrubbed
+
+
 def _normalize_probe_url(raw: Any) -> str:
     """Normalize ONE side of the plane-shape URL comparison (A2).
 
@@ -597,7 +636,10 @@ async def test_mcp_server_connection(test_request: McpServerTestConnectionReques
     except McpConfigValidationError as e:
         return McpServerTestConnectionResponse(
             success=False,
-            message=f"Invalid configuration: {e}",
+            # D1: the validator message interpolates the SUBMITTED
+            # config — scrub Bearer/Authorization material at the
+            # response seam before it reaches the client.
+            message=f"Invalid configuration: {_scrub_auth_echo(str(e))}",
         )
     except McpError as e:
         # MCP protocol errors (e.g., "Session terminated", "Invalid request")
@@ -657,7 +699,10 @@ async def create_mcp_server(mcp_server_create: McpServerCreate, request: Request
             status_code=422,
             detail=ErrorResponse(
                 code=ErrorCodes.INVALID_REQUEST,
-                message=str(e)
+                # D1: scrub Bearer/Authorization echo at the seam (the
+                # same class as the three sites below — the create
+                # route renders the identical str(e)).
+                message=_scrub_auth_echo(str(e))
             ).model_dump()
         )
 
@@ -778,7 +823,8 @@ async def configure_builtin_server(request: Request, config_request: BuiltinServ
             status_code=422,
             detail=ErrorResponse(
                 code=ErrorCodes.INVALID_REQUEST,
-                message=str(e)
+                # D1: scrub Bearer/Authorization echo at the seam.
+                message=_scrub_auth_echo(str(e))
             ).model_dump()
         )
     schema_as_dicts = definition.get_config_schema()
@@ -1009,7 +1055,8 @@ async def update_mcp_server(
                 status_code=422,
                 detail=ErrorResponse(
                     code=ErrorCodes.INVALID_REQUEST,
-                    message=str(e)
+                    # D1: scrub Bearer/Authorization echo at the seam.
+                    message=_scrub_auth_echo(str(e))
                 ).model_dump()
             )
 
