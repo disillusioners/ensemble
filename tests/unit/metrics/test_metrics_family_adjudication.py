@@ -338,6 +338,19 @@ class TestWsAAncestryVerdict:
 
 
 class TestTheBudget:
+    def test_the_vocabulary_version_is_not_double_bumped(self) -> None:
+        """THE FINDING — P4 requires NO further vocabulary bump.
+
+        The P1 contract freezes ``vocabulary_version: 2`` ("2 after this
+        lane") and P2's success criterion is ``VOCABULARY_VERSION == 2``
+        — Stage A delivered that bump (the F7 op narrowing).  P4's new
+        families' label vocabularies are part of the SAME frozen annex
+        (the D5 F18 row puts the amended audit vocabulary on the 1→2
+        bump), so the registry-side version stays 2.  A bump to 3 here
+        would break the frozen contract's pinned value.
+        """
+        assert cm.VOCABULARY_VERSION == 2
+
     def test_each_family_stays_inside_its_declared_band(self) -> None:
         specs = registry.registered_families()
         metrics = list(registry.registered_family_metrics())

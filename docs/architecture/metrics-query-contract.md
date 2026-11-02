@@ -509,3 +509,126 @@ the ONE carrier — an allowlist that covered one spelling of a two-spelling car
 be incomplete against its own carrier (the same class as the P2-G1
 composition-vs-blast-radius finding). The contract's own text is unchanged: it names
 the CARRIER, not its spellings.
+
+### The re-derived node counts + the P4 evidence (P4-G1/G2/G3, 2026-11-02)
+
+The figures below are the executor's `--collect-only -q` output and the recorded gate
+digests — NOT the plan's projections. They are the registration input for the pack rows the
+tester lane owns.
+
+| Pack id | Leg | D1 / D2 | Re-derived nodes | Per-file breakdown |
+|---|---|---|---|---|
+| `metrics_family_f0_3` | P4-G1 | D1 | (in `metrics_family_w1`) | `tests/unit/metrics/test_metrics_family_w1.py` |
+| `metrics_family_f1` | P4-G1 | D1 | (in `metrics_family_w1`) | the same file |
+| `metrics_family_f3` | P4-G1 | D1 | (in `metrics_family_w1`) | the same file |
+| `metrics_family_f4_f5` | P4-G1 | D1 | (in `metrics_family_w1`) | the same file |
+| `metrics_family_f6` | P4-G1 | D1 | (in `metrics_family_w1`) | the same file |
+| `metrics_family_f7_completion` | P4-G2 | D1 | (in `metrics_family_w2`) | `tests/unit/metrics/test_metrics_family_w2.py` |
+| `metrics_family_f8_partial` | P4-G2 | D1 | (in `metrics_family_w2`) | the same file |
+| `metrics_family_f9` | P4-G2 | D1 | (in `metrics_family_w2`) | the same file |
+| `metrics_family_f10` | P4-G2 | D1 | (in `metrics_family_w2`) | the same file |
+| `metrics_family_f11_partial` | P4-G2 | D1 | (in `metrics_family_w2`) | the same file |
+| `metrics_family_f12` | P4-G2 | D1 | (in `metrics_family_w2`) | the same file |
+| `metrics_family_f13_partial` | P4-G2 | D1 | (in `metrics_family_w2`) | the same file |
+| `metrics_family_f17` | P4-G3 | D1 | (in `metrics_family_w3`) | `tests/unit/metrics/test_metrics_family_w3.py` |
+| `metrics_family_f18_partial` | P4-G3 | D1 | (in `metrics_family_w3`) | the same file |
+| `metrics_family_f21_partial` | P4-G3 | D1 | (in `metrics_family_w3`) | the same file |
+| `metrics_family_adjudication_w1/w2/w3` | P4-G1..G3 | D1 | **24** | `tests/unit/metrics/test_metrics_family_adjudication.py` |
+| `metrics_p4_w1_dual_side` | P4-G1 | D2 | **494** | the 21 derived files (below) |
+| `metrics_p4_w2_dual_side` | P4-G2 | D2 | **494** | the same 21 files |
+| `metrics_p4_w3_dual_side` | P4-G3 | D2 | **494** | the same 21 files |
+
+**The D1 pack ids are CLASSES inside three files** (one file per cluster + the shared
+adjudication file) — the per-family ids above name the CLASS each family pack's pins live
+in, so the pack rows the tester lane registers are one row per family with its class's node
+count.
+
+**The D2 composition (derived, not declared).** The plan's declared composition is
+"vocabulary (18) + registry (45) + the changed family's own base pack". The DERIVATION
+(the blast-radius recipe's three passes over the stage's diff — `daemon/persistence.py`,
+`daemon/services/metrics_query/sampler.py` and the new `wiring/` package) reaches **21**
+dual-side files / **494** nodes: the two checkpoint-metrics packs (45 + 18), the persistence
+mirror (`test_checkpoint_perf_logging`, `test_checkpoint_read_instrumentation`,
+`test_get_instance_messages_no_alist`), the whole `tests/unit/metrics/` substrate (the
+sampler, the provider, the ring, the five query-door packs, the narrowing + vocabulary
+packs, the contract-doc pack), the persistence module's own packs
+(`tests/test_persistence.py`, `test_checkpoint_adapter_resilience.py`, the two
+`tests/unit/test_persistence_*` files) and the contract doc's own pack. The declared
+composition's "the changed family's own base pack" is INSIDE this set.
+
+**A FINDING for the pack registration (P4) — the declared composition is short by 17 files.**
+The plan's declared D2 set (vocabulary + registry + one base pack) reaches **4** files /
+~120 nodes; the derivation reaches **21** files / **494** nodes. The widened set ran as a
+DISCLOSED supplementary dual-side leg (the recipe's rule from P2-G1/P3-G1): **20 further
+files / 280 nodes**, both sides, FAILED digests byte-identical ⇒ net-new EMPTY. The
+registered composition should be the DERIVED set.
+
+**The gate results (Tier 1 ×3).**
+
+| Leg | HEAD (D1 + D2) | BASE (D2) | FAILED digest (BARE-ID / GREP-FULL) | Verdict |
+|---|---|---|---|---|
+| P4-G1 (W1) | 533 passed · 1 failed · **exit 1** | 493 passed · 1 failed · **exit 1** | `d78b09cf2549c371` / `d9bff11a731d8ba3` — **IDENTICAL both sides** | net-new **EMPTY** |
+| P4-G2 (W2) | 534 passed · 1 failed · **exit 1** | 493 passed · 1 failed · **exit 1** | `d78b09cf2549c371` / `d9bff11a731d8ba3` — **IDENTICAL both sides** | net-new **EMPTY** |
+| P4-G3 (W3) | 527 passed · 1 failed · **exit 1** | 493 passed · 1 failed · **exit 1** | `d78b09cf2549c371` / `d9bff11a731d8ba3` — **IDENTICAL both sides** | net-new **EMPTY** |
+| the widened supplementary leg (all three) | 295/296/289 passed · 2 failed · **exit 1** | 278 passed · 2 failed · **exit 1** | `ec0572e69c9ab178` / `041380df27ec0d4e` — **IDENTICAL both sides** | net-new **EMPTY** |
+
+**The ONE failure on every D2 leg is the KNOWN base red**
+(`test_rdrs_lanes_come_from_the_config_kill_switchs` — the 8-vs-7 RDRS lane drift, identical
+on both legs, base-proven). The widened leg's two failures are also base-proven
+(`test_the_stop_event_is_honored_mid_batch`,
+`test_the_field_defaults_mirror_the_constants`). **Zero collection errors on every leg**
+(the `N errors` summary line is empty everywhere — the discipline finding from P2/P3: a
+collection-time error emits no `ERROR <nodeid>` line).
+
+**The mutation table — P4-M1..P4-M13, planted independently, 13/13 RED→GREEN.**
+
+| Label | Mutation | RED node |
+|---|---|---|
+| `P4-M1` | an OUT metric registered (F11's claim latency) | `metrics_family_adjudication_*` (the OUT-absence pin) |
+| `P4-M2` | a producer module grows an edit | the no-producer-instrumentation diff pin |
+| `P4-M3` | the F12 accumulation removed (the per-tick value published raw) | `metrics_family_f12` (the exact-value pin) |
+| `P4-M4` | F4's native and F5's derived collapsed into one family | `metrics_family_f4_f5` |
+| `P4-M5` | F6 rendered on a non-postgres runtime | `metrics_family_f6` |
+| `P4-M6` | the F18 `timeout` folded into `error` | `metrics_family_f18_partial` |
+| `P4-M7` | the F21 phase families registered | the F21 absence pin |
+| `P4-M8` | the F7 bytes call site reverted to 0 | `metrics_family_f7_completion` |
+| `P4-M9` | a label key registered without `allowed_values` | `metrics_family_adjudication_*` (the AM-2 pin) |
+| `P4-M10` | a family registered without its metadata kwargs | `metrics_family_adjudication_*` (the AM-3 pin) |
+| `P4-M11` | a persistent per-adapter DB connection | the DB-pull discipline pin |
+| `P4-M12` | F2 registered (the value ruling inverted) | `metrics_family_adjudication_w1` |
+| `P4-M13` | the WS-A ancestry check inverted (rc=1 treated as a PASS) | the F0.3 conditional pack |
+
+**The P4 VERDICTS (recorded, not silent).**
+
+* **WS-A ancestry (task 4.4):** `git merge-base --is-ancestor 53547b915 HEAD` ⇒ **rc=0 ⇒
+  PASS**. F0.3 ships (+8 series) and its family pack runs. (The first implementation of the
+  probe compared a COMMIT to a PATH — git answers 128, which the rc semantics map to STOP;
+  the probe now compares two commit-ishs. The rc SEMANTICS are pinned by the pack: rc=0 ⇒
+  PASS, rc=1 ⇒ DEFER, anything else ⇒ STOP.)
+* **F21 conditionality (task 4.8):** **OUT — confirmed on the evidence.**
+  `journal_history_append` writes `{ts, event, detail}` with `event` drawn from the
+  ALERT-CLASS kind set (`upgrade_journal.py:645-649` — halt / refusal / rollback /
+  sweep_rollback / quarantine), and the promote PHASE trail lives in the journal's EXTENSION
+  fields, not in `history[]` ⇒ no clean pure-read derivation ⇒ the F21 phase families stay
+  OUT (+30 series not claimed) and their absence is pinned (`P4-M7`).
+* **F13 waiting children (task 4.6):** the durable query EXISTS —
+  `SELECT COUNT(*), EXTRACT(EPOCH FROM (NOW() - MIN(last_activity_at))) FROM instances WHERE
+  status = 'waiting_children'` — so the two gauges stay IN.
+* **The vocabulary version:** **NOTHING to bump.** The P1 contract freezes
+  `vocabulary_version: 2` ("2 after this lane") and P2's criterion is
+  `VOCABULARY_VERSION == 2` — Stage A delivered that bump. P4's new families' label
+  vocabularies are part of the SAME frozen annex (D5's F18 row puts the amended audit
+  vocabulary on the 1→2 bump), so the registry-side version stays **2**. A bump to 3 would
+  break the frozen contract's pinned value. The finding is pinned.
+* **DISCLOSED SHORTFALLS against the catalog's series estimates** (the families land BELOW
+  their estimates — never above): F12's `ensemble_sweep_cycle_seconds` is **OUT** (no sweep
+  service publishes an observed cycle DURATION; publishing the CONFIGURED interval under an
+  "observed duration" name would be a fabrication), and the seven RDRS lanes + three
+  standalone sweeps that expose no `counters()` reader render **no series** (the vocabulary
+  stays the closed 13-lane set). F4's manager-pool `max` / `available` render no series (the
+  SQLAlchemy pool exposes neither natively). The cumulative count is therefore under the
+  pinned budget.
+* **The C17 docstring fix (task 4.9):** **DEFERRED and RECORDED** (council W5) — no
+  mechanical-list file is touched by this lane; the fold ledger's `DEF-1` row carries the
+  deferral and its rationale, and the F12 accumulation is correct regardless of the
+  docstring (the metrics layer's own accumulation is the disambiguator).
