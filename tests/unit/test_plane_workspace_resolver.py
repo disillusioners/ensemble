@@ -450,3 +450,34 @@ class TestStrictVariantNeverEmitted:
         historical constant — the resolver never formats it."""
         source = RESOLVER_PATH.read_text(encoding="utf-8")
         assert source.count("not permitted in the production environment") == 1
+
+
+class TestR1ResolverNeverLogs:
+    """X3.7 / R-1 — the resolver NEVER logs. Structural pin: the module
+    does not import ``logging`` and holds no logger, so no call site can
+    emit from inside the resolution path (the manager's skip WARNING is
+    the sole reason interpolator)."""
+
+    def test_module_has_no_logger(self):
+        source = RESOLVER_PATH.read_text(encoding="utf-8")
+        assert "import logging" not in source
+        assert "getLogger" not in source
+        assert "logger." not in source
+
+    def test_resolution_emits_no_log_records(self, caplog):
+        import logging as _logging
+
+        with caplog.at_level(_logging.DEBUG):
+            # Every classification path, refused and allowed alike.
+            resolve_plane_workspace(
+                {"ENSEMBLE_SELF_ENV": "dev", "PLANE_MCP_WORKSPACE_SLUG": "nea"},
+                postgres_db="ensemble_dev",
+            )
+            resolve_plane_workspace(
+                {"ENSEMBLE_SELF_ENV": "Live", "PLANE_MCP_WORKSPACE_SLUG": "e2e"},
+                postgres_db="ensemble_prod",
+            )
+            resolve_plane_workspace(
+                {"PLANE_MCP_WORKSPACE_SLUG": "nea"}, postgres_db="ensemble_prod"
+            )
+        assert caplog.records == []

@@ -296,6 +296,61 @@ class TestOneCanonicalNormalization:
             )
 
 
+# ── P5e: the R-2 one-shot envelope notice ───────────────────────────────────
+
+
+class TestOneShotEnvelopeNotice:
+    """P5e (P3-A/R-2) — ``is_available`` emits AT MOST ONE process-wide
+    envelope notice (label + source + effective slug, NEVER the reason),
+    however many of its five call sites consult it."""
+
+    def test_five_calls_emit_exactly_one_notice(self, env, caplog):
+        import logging
+
+        from daemon.mcp.builtin_servers.plane import PlaneServerDefinition
+
+        env(self_env="dev", slug="e2e")
+        PlaneServerDefinition._envelope_notice_emitted = False
+        try:
+            with caplog.at_level(logging.INFO, logger="daemon.mcp.builtin_servers.plane"):
+                for _ in range(5):
+                    PlaneServerDefinition.is_available()
+        finally:
+            PlaneServerDefinition._envelope_notice_emitted = False
+        notices = [
+            r
+            for r in caplog.records
+            if "Plane workspace resolution" in r.getMessage()
+        ]
+        assert len(notices) == 1
+
+    def test_the_notice_never_carries_the_reason(self, env, caplog):
+        import logging
+
+        from daemon.mcp.builtin_servers.plane import PlaneServerDefinition
+
+        env(self_env="dev", slug="nea")  # a REFUSAL
+        PlaneServerDefinition._envelope_notice_emitted = False
+        try:
+            with caplog.at_level(logging.INFO, logger="daemon.mcp.builtin_servers.plane"):
+                PlaneServerDefinition.is_available()
+        finally:
+            PlaneServerDefinition._envelope_notice_emitted = False
+        notices = [
+            r
+            for r in caplog.records
+            if "Plane workspace resolution" in r.getMessage()
+        ]
+        assert len(notices) == 1
+        message = notices[0].getMessage()
+        assert "env=dev" in message
+        assert "source=explicit-marker" in message
+        assert "slug=(account-default)" in message or "slug=" in message
+        # NEVER the reason — that belongs to the skip WARNING (R-3).
+        assert "production-only" not in message
+        assert "expected 'e2e'" not in message
+
+
 # ── NR1: live is byte-identical ──────────────────────────────────────────────
 
 
