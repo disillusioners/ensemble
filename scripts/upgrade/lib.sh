@@ -663,6 +663,41 @@ _pipeline_scripts_stamp_verdict() {
     return 0
 }
 
+# _pipeline_scripts_floor_verdict <floor> <repo_root> — W-2's DAEMON-side
+# twin (T6.15/AC15): the RELEASE-TIME validity check for the
+# `PIPELINE_SCRIPTS_FLOOR_COMMIT` constant in daemon/tools/upgrade_tools.py.
+# Two mechanical conditions, the same ancestry rule the stamp uses:
+#   1. the value is set and looks like a commit sha (the stage-time extract
+#      accepts 7..40 lowercase hex chars — an abbreviated sha is a legal
+#      `git merge-base` argument, so the check MUST NOT be stricter than
+#      the extract or the release would refuse a tree it used to accept);
+#   2. the value RESOLVES and IS AN ANCESTOR of the built tree — the floor
+#      names a commit the release itself contains, so a daemon built from
+#      this tree can never demand a fix commit its own history lacks.
+# CONTRACT: prints "" / returns 0 when valid; prints the human REFUSAL
+# REASON (one line, no trailing newline) / returns 1 when not. It writes
+# nothing and exits nothing, so the caller owns the wording prefix and the
+# halt. Extracted from stage.sh's inline block so the gate is EXECUTABLE in
+# a pack (the real stage.sh cannot run without a full PyInstaller build) —
+# the same discipline as the stamp verdict above (phase3-plan.md P3-D5 /
+# P3-PIN-14).
+_pipeline_scripts_floor_verdict() {
+    local floor="${1:-}" repo="${2:-.}"
+    if [ -z "$floor" ]; then
+        printf 'PIPELINE_SCRIPTS_FLOOR_COMMIT is unset (or not a commit sha) in daemon/tools/upgrade_tools.py — the daemon-side arm-time stale-scripts guard (phase 6) would refuse every explicitly-pinned ceremony. The release bump MUST set it to the merge commit introducing the ceremony-relevant scripts/upgrade semantics (T6.15/AC15, cadence D6-8). No release ships without a provably-valid floor.'
+        return 1
+    fi
+    if ! printf '%s' "$floor" | grep -Eq '^[0-9a-f]{7,40}$'; then
+        printf 'PIPELINE_SCRIPTS_FLOOR_COMMIT="%s" is not a commit sha (T6.15/AC15 — the floor must name a commit this release itself contains).' "$floor"
+        return 1
+    fi
+    if ! git -C "$repo" merge-base --is-ancestor "$floor" HEAD >/dev/null 2>&1; then
+        printf 'PIPELINE_SCRIPTS_FLOOR_COMMIT=%s is unresolvable or NOT an ancestor of the built tree %s (T6.15/AC15 — the floor must name a commit this release itself contains; git merge-base --is-ancestor failed). Fix the constant to the merge commit introducing the ceremony-relevant scripts/upgrade semantics and re-stage.' "$floor" "$(git -C "$repo" rev-parse --short HEAD 2>/dev/null || echo '?')"
+        return 1
+    fi
+    return 0
+}
+
 # _log_phase_marker <step> -- the D3-8/T3.3 mid-phase marker: ONE
 # timestamped line naming the phase, the step and the elapsed seconds
 # since the preflight armed (_PREFLIGHT_T0). Written through _log, so it
