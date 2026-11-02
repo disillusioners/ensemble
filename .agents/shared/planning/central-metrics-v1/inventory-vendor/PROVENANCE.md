@@ -39,6 +39,58 @@ done
 # each digest must equal the source digest in the table above
 ```
 
+## Verification round 2 — the implementation lane's independent re-verification (2026-11-02T10:39Z)
+
+Phase 6 task 6.1 requires the implementation lane to **verify and resolve** the vendored copies.
+It did — **the vendored copies ARE the current sources; NO re-copy was needed and none was made.**
+
+**The apparent discrepancy is the provenance header, not a content drift.** The vendored files are
+**larger** than their sources (33 218 / 51 065 / 2 125 bytes vs 32 446 / 50 294 / 1 382). The
+difference is **exactly the 8-line HTML-comment header** (7 comment lines + 1 blank separator),
+which the plan row 6.1 mandates: "each with a provenance header … and byte-identical content below
+the header". Stripping the header leaves a body that is **byte-identical** to the source.
+
+| File | Vendored bytes | Source bytes | Delta | Delta explained by | Body verdict |
+|---|---|---|---|---|---|
+| `README.md` | 2 125 | 1 382 | **+743** | the 8-line header | **BYTE-IDENTICAL** |
+| `metrics-inventory-backend-producers.md` | 33 218 | 32 446 | **+772** | the 8-line header | **BYTE-IDENTICAL** |
+| `metrics-inventory-surfaces-fe-deps.md` | 51 065 | 50 294 | **+771** | the 8-line header | **BYTE-IDENTICAL** |
+
+**Full-file sha256 of the vendored copies** (the file AS COMMITTED — header included; this is the
+digest a reader can reproduce with a plain `sha256sum`):
+
+| File | Vendored full-file sha256 |
+|---|---|
+| `README.md` | `0898ffe5a25101777145e639a769cb7d65503fef4240b756db9b89abe482d547` |
+| `metrics-inventory-backend-producers.md` | `c250df508ab03cb00fae3d86aad96bf6c36981e1176e5d7036aec86cce5a4619` |
+| `metrics-inventory-surfaces-fe-deps.md` | `8f8d3c9a8bd42577a00daf691c565f9a8bb47333531c883fe61d5b421f03aa08` |
+
+**The source-side integrity was re-confirmed** (`git status --porcelain` + mtimes, 2026-11-02T10:39Z):
+
+- All three source files are still **`??` (untracked)** in the shared main checkout — `git log --all
+  -- .agents/shared/planning/metrics-unification/` returns **0 commits**, so they remain absent from
+  git history (the dangling-citation problem AM-24 exists to solve is still live).
+- The source mtimes are **unchanged** (README 2026-11-01 19:59:16Z · backend-producers 2026-11-01
+  19:59:08Z · surfaces 2026-11-01 19:46:50Z) — i.e. **older than** the vendoring (2026-11-02
+  00:39Z), so nothing in the source has moved since the copy was taken.
+- **Nothing in the shared main checkout was created, modified or deleted** by this lane.
+
+**Re-verification recipe used by the implementation lane** (the one recorded above, executed
+verbatim against the live sources — it re-derives the body digest by stripping the header):
+
+```bash
+cd <lane>/.agents/shared/planning/central-metrics-v1/inventory-vendor
+SRC=/home/nea/ensemble-src/.agents/shared/planning/metrics-unification
+for f in README.md metrics-inventory-backend-producers.md metrics-inventory-surfaces-fe-deps.md; do
+  tail -n +9 "$f" > /tmp/body_$f          # strip the 8-line header
+  cmp /tmp/body_$f "$SRC/$f" && echo "$f: BODY BYTE-IDENTICAL"   # cmp is byte-exact
+  sha256sum /tmp/body_$f "$SRC/$f"        # the two digests MUST be equal
+done
+```
+
+**Verdict: PROVENANCED — no re-copy, no rewrite.** The vendored evidence is the current source
+content, with a provenance header on top; the sha256 table above is authoritative.
+
 ## Source-side integrity
 
 The shared main checkout was **read only** during vendoring: `git status --porcelain` on the source
