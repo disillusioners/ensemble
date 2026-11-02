@@ -30,7 +30,7 @@ the *behavioural check site* as `<file>:<call line>`):
 | 1 | `:9798` exposition **listener body** | YES — default-OFF **at the body level**: the socket still binds and serves a valid empty 200 while OFF (AM-19(a)) | NO — unauthenticated, loopback-only in-constructor (`metrics_listener.py:361-368`) | HTTP 200 with a VALID EMPTY body — no `ensemble_metrics_up`, no family series; the socket is still bound | gate method `metrics_listener.py:408-419`; call line `:419` |
 | 2 | `/api/metrics` **text exposition** | NO — never consults the switch | YES — `maintenance:read` (`daemon/routers/metrics.py:96`, `:143`) | served in both switch states | auth seam `metrics.py:117-133` |
 | 3 | **Query routes** (`families` / `snapshot` / `series`) | NO — never switch-gated (D-11b / D1(b) wins; AM-17) | YES — `maintenance:read` on all three + the same fail-closed 503 seam | **availability, not emptiness** — the door serves live registry data in both switch states | this contract §6 |
-| 4 | **Census DB work** | YES — the census sampler performs NO database work while OFF | n/a (internal thread) | the sampler keeps ticking; its DB leg is skipped; F6 families go dark with `availability.reason="census_gated"` | gate method `metrics_census.py:332-340`; call line `:340` |
+| 4 | **Census DB work** | YES — the census sampler performs NO database work while OFF | n/a (internal thread) | the sampler keeps ticking; its DB leg is skipped; F6 families go dark with `availability.reason="census_gated"` | gate method `metrics_census.py:347-355`; call line `:355` |
 | 5 | **Registry accumulation** | NO — ungated, always on | n/a (in-process) | writers flip dirty flags and increment regardless of the switch; switch-OFF does NOT stop data collection | `checkpoint_metrics.py` observe paths carry no gate |
 | 6 | **FE charts polling** (the third activation surface, leader F6) | NO — polls the query door only; the FE **never polls the listener surface** | YES — the caller's session scope | the FE polls `/snapshot` (10 s) and `/series` (15 s); when the door is unreachable or the session has expired the tab **degrades to its cached/last-good view, marked stale** (`phase5-plan.md` task 5.4) rather than polling harder or blanking | `phase5-plan.md` 5.4 |
 
@@ -107,14 +107,14 @@ activation: { listener_enabled: bool,              # process fact — the exposi
 ```
 
 `census_enabled` is sourced from the **public `CensusSampler.gated` property** (phase-2 task 2.4a,
-a read-through of the EXISTING private `_gate()` at `metrics_census.py:332-340` — **no new check
+a read-through of the EXISTING private `_gate()` at `metrics_census.py:347-355` — **no new check
 site**; the census over `daemon/` stays exactly 2). **The query package NEVER reads the switch.**
 
 ### 4.2 Series identity (AM-1)
 
 A series is `(name, labels)`; the labels are the complete discriminator; the canonical
 serialization is the registry's `_label_key` (sorted `(k, v)` pairs,
-`daemon/checkpoint_metrics.py:430`). Ring keys and any future item-#2 watch-tool reference use the
+`daemon/checkpoint_metrics.py:481`). Ring keys and any future item-#2 watch-tool reference use the
 same serialization. The door therefore exposes a **label-aware selector**
 `?series=<name>{<k>=<v>,…}` (RFC-3986-escaped) alongside `?names=`; `?names=` stays **name-level**
 and returns every label variant.
@@ -176,7 +176,7 @@ exempt from it. The body carries `truncated: bool` (additive — the other two r
 carried it).
 
 Typing honesty (AM-4): `kind ∈ {gauge, counter, histogram}` (**no `summary`** — the registry never
-produces it; `register_summary` renders as a histogram, `checkpoint_metrics.py:985`). Every series
+produces it; `register_summary` renders as a histogram, `checkpoint_metrics.py:1188`). Every series
 carries `monotonic: bool` (counters are non-decreasing **within one `restart_epoch`**). Histogram
 series carry `value: null` + `histogram: {count, sum, buckets}` **as stored** (not Prom-cumulative).
 
