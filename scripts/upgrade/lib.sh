@@ -154,12 +154,23 @@ READYZ_BUDGET_S="$(_numeric_knob READYZ_BUDGET_S "${READYZ_BUDGET_S:-}" 120)"
 # behavior is fine — we timed out on ceremony procedures only). The
 # 900s ceiling is the absolute hard cap; all-budgets-max (stop worst
 # 755s + every budget max + adaptive soak squeeze) = 1400s → halt.
-# Per the C-10a reconciled arithmetic (decisions.md (d) §C-10a):
-#   preflight 45 / stop 225 / flip 30 / handback 90 / livez 180 /
-#   readyz 120 / version 30 / soak 120 / commit 30 = 870s non-stop
-#   worst (+30s slack inside the 900s ceiling). The conservative
-#   mode preserves the v0.18-era envelope (soak 300s flat) so
-#   total ≤ 900s + slack remains the conservative floor.
+# C-10a BOUND TABLE (corrected 2026-11-02, promote-handback-halt
+# Phase 1 / D-P1-8 — the previous "handback 90 … = 870s" line was
+# fiction: it mixed measured values with budget ceilings and never
+# described the code): the 900s ceiling is a STOP-LOSS, not a
+# budgets-fit guarantee. Worst-case budget knobs in force:
+#   preflight 300 (PREFLIGHT_PHASE_BUDGET_S) / stop ~225 (derived) /
+#   launcher swap ~0 / atomic flip ~0 /
+#   hand-back verify 300 + one 60s progress-gated grace
+#     (HANDBACK_VERIFY_BUDGET_S — ceremony-clamped:
+#     clamp(remaining−HANDBACK_TAIL_RESERVE_S, FLOOR=180, 300); a
+#     SUB-BUDGET of the ceremony, not an addition to it) /
+#   livez 180 / readyz 120 / version ~5 / soak ≤120 (adaptive,
+#   ceremony-coupled) / commit ~30 ⇒ all-worst ≈1340s > 900s (the
+#   1400s all-budgets-max line above stands). Typical healthy run
+#   ≈330s. Do NOT re-derive a "fits inside 900s" schedule from this
+#   table — it is a bound table; a combined-slow ceremony halts at a
+#   downstream boundary with the daemon up (disclosed, OQ-P1-1).
 PROMOTE_TOTAL_DEADLINE_S="$(_numeric_knob PROMOTE_TOTAL_DEADLINE_S "${PROMOTE_TOTAL_DEADLINE_S:-}" 900)"
 
 # Subprocess-wait budgets (2.2b, upgrade-resilience 2026-10-07). Rationale
@@ -178,6 +189,43 @@ PROMOTE_TOTAL_DEADLINE_S="$(_numeric_knob PROMOTE_TOTAL_DEADLINE_S "${PROMOTE_TO
 # journals every site for forensic correlation.
 STOP_SCRIPT_BUDGET_S="$(_numeric_knob STOP_SCRIPT_BUDGET_S "${STOP_SCRIPT_BUDGET_S:-}" 120)"     # placeholder; effective bound derived at call site (see _derive_parent_stop_budget)
 HANDBACK_START_BUDGET_S="$(_numeric_knob HANDBACK_START_BUDGET_S "${HANDBACK_START_BUDGET_S:-}" 60)"  # unit hand-back start (the §9 culprit)
+# D-P1-1..D-P1-2 (promote-handback-halt Phase 1, 2026-11-02) — the
+# hand-back VERIFY budget family. The verifier `_supervision_unit_serving`
+# previously BORROWED LIVEZ_BUDGET_S (180) — an unrelated knob governing
+# the /livez health GATE (gate_livez, lib.sh:5986) — while the flipped
+# unit takes ~3 min from unit-active to serving (MCP warmup +
+# auto-continue resume; incident r-20261101-212542-8279 missed by
+# seconds at 180s; the v0.28.3 ceremony confirmed at 175/180s). The
+# quartet replaces that borrow:
+#   HANDBACK_VERIFY_BUDGET_S  300  CEILING — the most the verify may wait
+#                                     (~1.6x the measured ~185s worst
+#                                     boot — same headroom shape the
+#                                     house uses for LIVEZ_BUDGET_S)
+#   HANDBACK_VERIFY_FLOOR_S   180  FLOOR — the least it may ever be
+#                                     given (today's effective budget;
+#                                     makes the change monotone-safe —
+#                                     never LESS time than before)
+#   HANDBACK_VERIFY_GRACE_S    60  ONE progress-gated extension at the
+#                                     first expiry (new MainPID ∧ bound
+#                                     port ⇒ the daemon is demonstrably
+#                                     coming up; no progress ⇒ no
+#                                     extension — D-P1-6)
+#   HANDBACK_TAIL_RESERVE_S  120  Downstream room (livez+readyz+version+
+#                                     soak+commit) reserved when the
+#                                     ceremony clock is known.
+# Effective budget: CEILING when no ceremony clock is known (restart.sh /
+# rollback.sh); else clamp(remaining − TAIL_RESERVE, FLOOR, CEILING) —
+# the same deadline-coupling shape as the adaptive soak (D-P3.5). Grace:
+# min(GRACE, max(0, remaining − effective)) when the clock is known
+# (AM-P1-5); the floor-wins bands carry the DISTINCT "ceremony time
+# exhausted" verdict. All four env-overridable via _numeric_knob
+# (garbage ⇒ documented default, loud stderr). Phase-2 coupling
+# (R-P1-15): UPGRADE_CLOSER_BOOT_GRACE_S (daemon-side) must stay ≥
+# HANDBACK_VERIFY_BUDGET_S — both windows cover the same measured boot.
+HANDBACK_VERIFY_BUDGET_S="$(_numeric_knob HANDBACK_VERIFY_BUDGET_S "${HANDBACK_VERIFY_BUDGET_S:-}" 300)"
+HANDBACK_VERIFY_FLOOR_S="$(_numeric_knob HANDBACK_VERIFY_FLOOR_S "${HANDBACK_VERIFY_FLOOR_S:-}" 180)"
+HANDBACK_VERIFY_GRACE_S="$(_numeric_knob HANDBACK_VERIFY_GRACE_S "${HANDBACK_VERIFY_GRACE_S:-}" 60)"
+HANDBACK_TAIL_RESERVE_S="$(_numeric_knob HANDBACK_TAIL_RESERVE_S "${HANDBACK_TAIL_RESERVE_S:-}" 120)"
 SYSTEMCTL_PROBE_BUDGET_S="$(_numeric_knob SYSTEMCTL_PROBE_BUDGET_S "${SYSTEMCTL_PROBE_BUDGET_S:-}" 5)"  # reset-failed / is-active probes
 SCOPE_START_BUDGET_S="$(_numeric_knob SCOPE_START_BUDGET_S "${SCOPE_START_BUDGET_S:-}" 10)"      # scope-arm/opt-in launcher start
 # D1 (promote-preflight-hang) — per-tree cap for the stage manifest checksum
@@ -471,6 +519,13 @@ _budget_in_force() {
         STAGE_TREE_BUDGET_S)       printf '%s' "$STAGE_TREE_BUDGET_S" ;;
         SYSTEMCTL_PROBE_BUDGET_S)  printf '%s' "$SYSTEMCTL_PROBE_BUDGET_S" ;;
         JOURNAL_LEGACY_READ_BUDGET_S) printf '%s' "$JOURNAL_LEGACY_READ_BUDGET_S" ;;
+        # D-P1-10 (promote-handback-halt Phase 1) — the hand-back verify
+        # budget family, so any future breach row can NAME the value in
+        # force (unknown names still fail loudly below).
+        HANDBACK_VERIFY_BUDGET_S)  printf '%s' "$HANDBACK_VERIFY_BUDGET_S" ;;
+        HANDBACK_VERIFY_FLOOR_S)   printf '%s' "$HANDBACK_VERIFY_FLOOR_S" ;;
+        HANDBACK_VERIFY_GRACE_S)   printf '%s' "$HANDBACK_VERIFY_GRACE_S" ;;
+        HANDBACK_TAIL_RESERVE_S)   printf '%s' "$HANDBACK_TAIL_RESERVE_S" ;;
         *) return 1 ;;
     esac
 }
@@ -1376,6 +1431,19 @@ journal_init() {
 JOURNAL_SIZE_GUARD_BYTES="${JOURNAL_SIZE_GUARD_BYTES:-98304}"
 JOURNAL_LEGACY_READ_BUDGET_S="$(_numeric_knob JOURNAL_LEGACY_READ_BUDGET_S "${JOURNAL_LEGACY_READ_BUDGET_S:-}" 120)"
 JOURNAL_READ_STRICT="${JOURNAL_READ_STRICT:-0}"
+# D-P1-3 / D-P1-9 (promote-handback-halt Phase 1) — the hand-back
+# verifier's two promote-threaded inputs, on the JOURNAL_READ_STRICT
+# channel: set by promote.sh PER INVOCATION as PLAIN (non-exported)
+# shell variables, never persisted, never in .env, never inherited by
+# the child scripts. Empty = unknown:
+#   PROMOTE_CEREMONY_DEADLINE_EPOCH — the ceremony wall-clock deadline
+#     (epoch seconds). Empty (restart.sh / rollback.sh contexts) ⇒ the
+#     verifier uses its CEILING budget, no squeeze, full grace.
+#   PROMOTE_EXPECTED_VERSION — the manifest binary_version the flipped
+#     release must report on /livez. Empty ⇒ the serving check degrades
+#     to "2xx, no version comparison" (still proves SERVING).
+PROMOTE_CEREMONY_DEADLINE_EPOCH="${PROMOTE_CEREMONY_DEADLINE_EPOCH:-}"
+PROMOTE_EXPECTED_VERSION="${PROMOTE_EXPECTED_VERSION:-}"
 
 # _journal_read_helper_path — absolute path to the read helper. Mirrors
 # `_splice_journal_path`: BASH_SOURCE-anchored so the helper is found even
@@ -4737,23 +4805,144 @@ _supervision_host_allows_unit() {
     return 0
 }
 
+# _handback_serving_probe — the hand-back's SERVING conjunct
+# (D-P1-4/D-P1-5, promote-handback-halt Phase 1). Called ONLY when PORT
+# is set and curl is available; assumes the port-listener fast condition
+# was already established (or lsof is absent — degraded, serving-only).
+# Reuses the house classifier `_probe_once_classified` VERBATIM
+# (AM-P1-2: taxonomy 0 green / 1 red / 2 transient / 3 suppressed —
+# never derive a second one): 503 + curl rc 7/28 are transient, other
+# 4xx/5xx are red. /livez ONLY — the hand-back deliberately does NOT
+# probe /readyz (D-P1-4 rejected alternative (ii): readyz carries
+# readiness components legitimately not green during the ~3 min boot —
+# demanding ready here would halt-for-human on every slow-but-healthy
+# boot, re-creating the incident class; readiness is the GATE's
+# question at the promote.sh readyz boundary).
+#
+# Return: 0 = serving the expected release (2xx ∧ version==expected —
+#           version compared only when PROMOTE_EXPECTED_VERSION is set);
+#         1 = fail-fast (probe-level): 2xx with the WRONG version, 2xx
+#           with the version field absent/unparseable while the expected
+#           version is KNOWN (AM-P1-1: definitively unverifiable as the
+#           right release), or a house-classifier RED answer. Probe-level
+#           vocabulary ONLY (REV-R-4): "fails fast" says the PROBE stops
+#           probing — it prescribes NO disposition (no rollback, no
+#           quarantine language); the CALLER owns the halt.
+#         2 = transient (keep polling — the daemon is booting).
+_handback_serving_probe() {
+    local running hspc_rc=0
+    _probe_once_classified "/livez" "${PORT:-}" || hspc_rc=$?
+    case "$hspc_rc" in
+        0)
+            # green-class (green or busy-amnesty) — the body is in _PROBE_BODY
+            if [ -n "${PROMOTE_EXPECTED_VERSION:-}" ]; then
+                running="$(_json_field "${_PROBE_BODY:-}" version 2>/dev/null)" || running=""
+                if [ -z "$running" ]; then
+                    _warn "hand-back verify: /livez answered 2xx but the version field is absent/unparseable while the expected version is known (${PROMOTE_EXPECTED_VERSION}) — definitively unverifiable as the right release (probe-level fail-fast); NOT success"
+                    return 1
+                fi
+                if [ "$running" != "$PROMOTE_EXPECTED_VERSION" ]; then
+                    _warn "hand-back verify: /livez reports version=${running} but the flipped release is ${PROMOTE_EXPECTED_VERSION} — the daemon on :${PORT:-?} is NOT serving the right release (probe-level fail-fast: no amount of waiting fixes a wrong version); NOT success"
+                    return 1
+                fi
+            fi
+            return 0
+            ;;
+        1)
+            # house-classifier RED (non-2xx outside the 503/7/28 transient
+            # classes — the daemon answers HTTP but wrongly). Probe-level
+            # fail-fast, mirroring _probe's hard-red handling.
+            _warn "hand-back verify: /livez hard fail (red — non-transient HTTP error, class=${_PROBE_STATUS:-red} code=${_PROBE_CODE:-?}) on :${PORT:-?} (probe-level fail-fast, house classifier); NOT success"
+            return 1
+            ;;
+        *)
+            # 2 = transient (connection refused / timeout / 503), 3 =
+            # boot-grace-suppressed — both are "still booting": poll on.
+            return 2
+            ;;
+    esac
+}
+
 # _supervision_unit_serving <unit> <prestop_pid> — hand-back VERIFIER.
-# Polls (deadline-bounded by LIVEZ_BUDGET_S, lock-heartbeat every
-# iteration — the _probe precedent) until the unit's MainPID is a NEW
-# nonzero pid — ≠ <prestop_pid> whenever one was captured — AND the port
-# is serving (lsof conjunct, PATH-stubbable; lsof absent or PORT unknown
-# → the MainPID check alone decides — never fault on a missing tool,
-# _unit_stopped precedent in stop-ensemble.sh). Prints the new MainPID on
-# success; returns 1 with a loud warn otherwise. A MainPID EQUAL to the
-# pre-stop pid fails FAST (no retry loop can fix it: the old daemon never
-# left — the start no-op'd on an active unit, or the stop
+# Polls (deadline-bounded, lock-heartbeat every iteration — the _probe
+# precedent) until the unit's MainPID is a NEW nonzero pid — ≠
+# <prestop_pid> whenever one was captured — AND the port is serving AND
+# (when the tools allow) the daemon ANSWERS /livez with the expected
+# version (the serving conjunct, D-P1-4). A MainPID EQUAL to the
+# pre-stop pid fails FAST (no retry loop can fix it: the old daemon
+# never left — the start no-op'd on an active unit, or the stop
 # false-succeeded).
+#
+# Budget (D-P1-1/D-P1-2, replacing the LIVEZ_BUDGET_S borrow — the
+# incident r-20261101-212542-8279 race): effective = CEILING
+# (HANDBACK_VERIFY_BUDGET_S=300) when no ceremony clock is known;
+# else clamp(remaining − HANDBACK_TAIL_RESERVE_S, FLOOR, CEILING) with
+# FLOOR=HANDBACK_VERIFY_FLOOR_S=180 — monotone-safe, never less than
+# today's 180s. Grace (D-P1-6 + AM-P1-5, deadline-aware):
+#   grace = min(HANDBACK_VERIFY_GRACE_S, max(0, remaining − effective))
+# when the clock is known (full GRACE otherwise); ONE progress-gated
+# extension at the first expiry, only with a new MainPID ∧ bound port.
+# Floor-wins bands (remaining < FLOOR + TAIL_RESERVE at entry) carry
+# the DISTINCT "ceremony time exhausted" verdict (T-P1-12: the abort is
+# the ceremony's arithmetic, not the release's health — the post-mortem
+# must be able to tell them apart).
+#
+# Degenerate branches preserved (never fault on a missing tool,
+# _unit_stopped precedent): PORT unset → MainPID-alone; lsof+curl both
+# absent → MainPID-alone; lsof absent + curl present → serving-only
+# (the port-listener check is skipped, not failed); lsof present +
+# curl absent → MainPID + port-listener (today's verdict, AM-P1-1).
+# Prints the new MainPID on success; returns 1 with a loud warn
+# otherwise.
+#
+# [7b SUBSTRING TRAP — no success-path log line below may contain the
+# banned systemctl-start literal; every _log/_warn string stays free
+# of it.]
 _supervision_unit_serving() {
-    local unit="$1" prestop="$2" deadline now mp
-    deadline=$(( $(_now_epoch) + LIVEZ_BUDGET_S ))
+    local unit="$1" prestop="$2"
+    local deadline now mp entry_remaining effective grace total
+    local clock_known=0 floor_band=0 budget_source extended=0 progress=0
+    entry_remaining=0
+    if [ -n "${PROMOTE_CEREMONY_DEADLINE_EPOCH:-}" ] \
+       && case "${PROMOTE_CEREMONY_DEADLINE_EPOCH:-}" in *[!0-9]*) false ;; *) true ;; esac; then
+        clock_known=1
+        entry_remaining="$(_effective_ceremony_remaining_s "$PROMOTE_CEREMONY_DEADLINE_EPOCH")"
+    fi
+    if [ "$clock_known" = "1" ]; then
+        effective=$(( entry_remaining - HANDBACK_TAIL_RESERVE_S ))
+        [ "$effective" -lt "$HANDBACK_VERIFY_FLOOR_S" ] && effective="$HANDBACK_VERIFY_FLOOR_S"
+        [ "$effective" -gt "$HANDBACK_VERIFY_BUDGET_S" ] && effective="$HANDBACK_VERIFY_BUDGET_S"
+        # grace (AM-P1-5 ruled form): min(GRACE, max(0, remaining − effective))
+        grace=$(( entry_remaining - effective ))
+        [ "$grace" -lt 0 ] && grace=0
+        [ "$grace" -gt "$HANDBACK_VERIFY_GRACE_S" ] && grace="$HANDBACK_VERIFY_GRACE_S"
+        if [ "$entry_remaining" -lt "$HANDBACK_VERIFY_FLOOR_S" ]; then
+            floor_band=3   # the clock cannot accommodate an honest verify
+            budget_source="ceremony-floor(clock-too-short)"
+        elif [ "$effective" -eq "$HANDBACK_VERIFY_FLOOR_S" ] \
+             && [ "$(( entry_remaining - HANDBACK_TAIL_RESERVE_S ))" -lt "$HANDBACK_VERIFY_FLOOR_S" ]; then
+            floor_band=2   # floor wins, tail reserve unavailable
+            budget_source="ceremony-floor(tail-reserve-unavailable)"
+        else
+            budget_source="ceremony-clamped"
+        fi
+    else
+        effective="$HANDBACK_VERIFY_BUDGET_S"
+        grace="$HANDBACK_VERIFY_GRACE_S"
+        budget_source="handback-ceiling(no-ceremony-clock)"
+    fi
+    total=$(( effective + grace ))
+    deadline=$(( $(_now_epoch) + effective ))
+    # Truthful budget line (T-P1-8): names the EFFECTIVE budget, its
+    # source, the grace, and the total — the post-mortem's arithmetic.
+    # STDERR, NOT _log: this function's stdout is CAPTURED by the caller
+    # (`newpid="$(_supervision_unit_serving ...)"`) — the pid must be the
+    # ONLY thing on stdout (_warn's stderr shape, INFO semantics).
+    printf '%s[%s]: %s\n' "$LOG_TAG" "${UP_TARGET:-lib}" "hand-back verify: budget effective=${effective}s source=${budget_source} grace=${grace}s total=${total}s$( [ "$clock_known" = "1" ] && printf ' ceremony-remaining=%ss' "$entry_remaining" ) (knobs: HANDBACK_VERIFY_BUDGET_S=${HANDBACK_VERIFY_BUDGET_S} FLOOR=${HANDBACK_VERIFY_FLOOR_S} TAIL=${HANDBACK_TAIL_RESERVE_S} GRACE=${HANDBACK_VERIFY_GRACE_S})" >&2 2>/dev/null
     while :; do
         lock_heartbeat
         mp="$("$SYSTEMCTL_BIN" show "$unit" -p MainPID --value 2>/dev/null || true)"
+        progress=0
         case "$mp" in
             ''|0) ;;  # not up yet — keep polling
             *)
@@ -4763,21 +4952,79 @@ _supervision_unit_serving() {
                 fi
                 if [ -n "${PORT:-}" ] && command -v lsof >/dev/null 2>&1; then
                     if lsof -ti:"$PORT" >/dev/null 2>&1; then
-                        printf '%s\n' "$mp"
-                        return 0
+                        # Port bound (necessary fast condition — it proves
+                        # the socket). The serving conjunct decides below.
+                        if command -v curl >/dev/null 2>&1; then
+                            hsp_rc=0
+                            _handback_serving_probe || hsp_rc=$?
+                            case "$hsp_rc" in
+                                0)
+                                    printf '%s\n' "$mp"
+                                    return 0
+                                    ;;
+                                1) return 1 ;;   # probe-level fail-fast
+                                *) ;;             # transient — poll to the deadline
+                            esac
+                        else
+                            # lsof present, curl absent: today's verdict
+                            # (MainPID + port-listener), unchanged (AM-P1-1).
+                            printf '%s\n' "$mp"
+                            return 0
+                        fi
+                        progress=1   # new MainPID ∧ bound port
                     fi
-                    # port not serving yet — fall through to the deadline
+                    # port not listening yet — transient, fall through
+                elif [ -n "${PORT:-}" ] && command -v curl >/dev/null 2>&1; then
+                    # lsof absent, curl present — degraded: serving-only
+                    # (the port-listener check is skipped, not failed).
+                    hsp_rc=0
+                    _handback_serving_probe || hsp_rc=$?
+                    case "$hsp_rc" in
+                        0)
+                            printf '%s\n' "$mp"
+                            return 0
+                            ;;
+                        1) return 1 ;;
+                        *) ;;
+                    esac
+                    progress=1   # new MainPID; port uncheckable ⇒ not held against it
                 else
+                    # PORT unset, or lsof+curl both absent: MainPID alone
+                    # decides (degenerate branch, unchanged).
                     printf '%s\n' "$mp"
                     return 0
                 fi
                 ;;
         esac
         now="$(_now_epoch)"
-        [ "$now" -lt "$deadline" ] || break
+        if [ "$now" -ge "$deadline" ]; then
+            # ONE progress-gated extension (D-P1-6): only while the daemon
+            # is demonstrably coming up (new MainPID ∧ bound port / port
+            # uncheckable). A dead daemon is never granted extra time.
+            if [ "$extended" = "0" ] && [ "$grace" -gt 0 ] && [ "$progress" = "1" ]; then
+                extended=1
+                deadline=$(( deadline + grace ))
+                _warn "hand-back verify: budget ${effective}s expired with the daemon demonstrably coming up (new MainPID ∧ bound port) — ONE progress-gated grace extension of ${grace}s in force (HANDBACK_VERIFY_GRACE_S; total wait cap ${total}s)"
+                continue
+            fi
+            break
+        fi
         sleep 2
     done
-    _warn "hand-back verify: unit $unit not confirmed (new MainPID ≠ ${prestop:-<none>} + port ${PORT:-?} serving) within ${LIVEZ_BUDGET_S}s"
+    # Distinct floor-wins verdicts (T-P1-12 / AM-P1-5): in these bands the
+    # ceremony clock itself could not accommodate an honest verify — the
+    # abort is the CEREMONY'S arithmetic, not the release's health, and a
+    # post-mortem must be able to tell this apart from an unhealthy daemon
+    # (the ordinary wording would blame a healthy-but-slow release).
+    if [ "$floor_band" = "3" ]; then
+        _warn "hand-back verify: ceremony time exhausted — the ceremony clock had ${entry_remaining}s left (< floor ${HANDBACK_VERIFY_FLOOR_S}s): the hand-back cannot succeed inside the ceremony budget no matter how healthy the daemon is; deliberate bounded overshoot $(( HANDBACK_VERIFY_FLOOR_S - entry_remaining ))s (FLOOR − remaining), grace 0; unit $unit not confirmed within ${effective}s (effective hand-back budget; source ${budget_source})"
+        return 1
+    fi
+    if [ "$floor_band" = "2" ]; then
+        _warn "hand-back verify: ceremony time exhausted — the ceremony clock had ${entry_remaining}s left (< floor ${HANDBACK_VERIFY_FLOOR_S}s + tail reserve ${HANDBACK_TAIL_RESERVE_S}s): the tail reserve was unavailable so the floor pinned the budget at ${effective}s and the grace was clamped to ${grace}s (total ${total}s ≤ remaining); unit $unit not confirmed within ${effective}s (effective hand-back budget; source ${budget_source})"
+        return 1
+    fi
+    _warn "hand-back verify: unit $unit not confirmed (new MainPID ≠ ${prestop:-<none>} + port ${PORT:-?} serving + /livez answering) within ${effective}s (HANDBACK_VERIFY_BUDGET_S effective budget; grace ${grace}s $( [ "$extended" = "1" ] && printf consumed || printf unused ))"
     return 1
 }
 

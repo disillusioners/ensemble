@@ -273,6 +273,18 @@ J
 exit 0
 L
     chmod +x "$LSOF_OK/lsof"
+    # promote-handback-halt Phase 1: the hand-back verifier's serving
+    # conjunct (/livez 2xx) — a PATH-stub curl in ok mode satisfies it for
+    # the happy-path leg (PROMOTE_EXPECTED_VERSION unset ⇒ 2xx alone
+    # confirms serving, the restart/rollback degraded contract).
+    cat > "$LSOF_OK/curl" <<'C'
+#!/bin/bash
+out=""
+while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; -w) shift 2;; --max-time) shift 2;; -sS) shift;; *) shift;; esac; done
+[ -n "$out" ] && printf '{"status":"alive","version":"0.28.5"}\n' > "$out"
+printf '200'
+C
+    chmod +x "$LSOF_OK/curl"
 
     run_handback() {
         local setup="$2"
@@ -282,6 +294,11 @@ L
             export SC_LOG="'"$CFIX"'/sc.log"
             export PORT=19987
             export LIVEZ_BUDGET_S=2
+            # promote-handback-halt Phase 1: the verify loop no longer
+            # borrows LIVEZ_BUDGET_S — bound it with the NEW knob so the
+            # S3/S4 legs (MainPID=0 ⇒ verify times out) stay fast; the
+            # legs semantics are unchanged (bounded verify → rc 1).
+            export HANDBACK_VERIFY_BUDGET_S="${HANDBACK_VERIFY_BUDGET_S:-2}"
             unset ENSEMBLE_SUPERVISION 2>/dev/null || true
             . "'"$UPGRADE_DIR"'/lib.sh" >/dev/null 2>&1
             '"$setup"'

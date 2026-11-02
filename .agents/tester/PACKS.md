@@ -3347,3 +3347,36 @@ Ad-hoc A/B gate packs, both legs executed (full evidence: `RESULTS/2026-10-26-mc
 | d2_incident_repro (M1) | in-process pinned-clock cross-tree scenario (`/tmp/mcps-gate/m1/scenario.py`, scratch + worktree legs) | PASS both legs — 4/4 symptoms reproduced on BASE, 4/4 gone on HEAD with positive counterparts | 5–6s each |
 
 Lane-keeper notes: (1) ALWAYS prefix unit lanes with `env -u MCPS_GATEWAY_ENABLED -u MCPS_GATEWAY_TOKENS` — this host exports both; without the prefix `TestDefaultConstantsArePinned::{test_the_enabled_default_is_off, test_the_token_and_machine_defaults_are_empty}` report 2 false reds. (2) NEVER run d2_l2_match_set_integration / d2_mcps_gateway_integration / d2_p3_attempts concurrently against one fence DB — `reset_audit_table` wipes the shared audit ledger mid-lane (observed). (3) BASE legs run the file list that exists at BASE; HEAD-only files make the exact list exit 4 with zero collected — record as a structural finding. (4) The worktree is shared: `tests/integration/mcps_gateway/p0_gate.py` APPENDS to the tracked `.agents/shared/planning/mcps-gateway-interop/p0-gate-evidence.md` by design — every P0-gate run dirties the tree; restore from the HEAD blob before status-sensitive checks.
+
+## Gate packs 2026-11-02 — promote-handback-halt Phase 1 hand-back verify (fix/promote-handback-halt @ Phase-1 implementation, base `941cb6321`)
+
+Tier-1 blast-radius leg (recipe: blast-radius-leg v1.0.3; two-class declaration — D1 lane-owned HEAD-only, D2 dual-side). Scope: `scripts/upgrade/lib.sh` + `scripts/upgrade/promote.sh` (hand-back verify budget quartet + /livez serving conjunct + deadline-aware grace per phase1-plan.md §4/§9). Fence: mktemp FAKE_HOME; sibling-env assertion + per-variable scrubs (ambient POSTGRES_DB=ensemble_prod observed and scrubbed); ports untouched (lsof/curl are PATH stubs); BASE leg in its own detached worktree @941cb6321.
+
+| Pack | Invocation | Scope | Result |
+|---|---|---|---|
+| `handback_verify_budget_test` (D1, NEW) | `timeout 420 bash tests/packs/handback_verify_budget_test.sh` | legs L1-L15 + mutation matrix P1-M1..M13 (phase1-plan §9 incl. AM-P1-5 close-out, AM-P1-1 absent-version cell, AM-P1-2 classifier-reuse structural pin) | ✅ 82/0, 2:05 wall (HEAD; absent at BASE by construction — D1) |
+| `supervision_stop_handback` (D2, standing) | `timeout 300 bash tests/test_supervision_stop_handback.sh` | full suite + Phase-1 surgical updates (curl-stub seam default; C4 re-bound to the new knob; C3 = the L5 pin re-annotation) | ✅ BASE 152/0/0 ≡ HEAD 152/0/0 (2:15) — FAILED-diff EMPTY |
+| `ceremony_wallclock` (D2) | `timeout 300 bash tests/test_ceremony_wallclock.sh` | lib.sh budget-identity consumer | ✅ BASE 36/0 ≡ HEAD 36/0 — EMPTY |
+| `bounded_subprocess_waits` (D2) | `timeout 300 bash tests/test_bounded_subprocess_waits.sh` | _supervision_handback_unit bounded-start consumer (S3/S4/R legs re-fenced to the new knob) | ✅ BASE 57/0/0 (23s) ≡ HEAD 57/0/0 (23s) — EMPTY |
+
+Slicing proof (shell packs — node count = each pack's own PASS counter, the mechanical collect-equivalent for non-pytest packs): declared set D2 = {152, 36, 57} both legs, executed == declared on both; D1 = {82} HEAD-only. FAILED-digest (form=PACK-SUMMARY, sha over the packs' FAILED lines): BASE and HEAD both empty-digest for all three D2 packs — `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` (sha256 of the empty string) on both legs; net-new reds = 0.
+
+Mutation→test table (P1-Mn namespace per the v1.0.2 fold; every mutation sed-verified planted — a silent no-op mutation is a loud FAIL, not a vacuous pass):
+
+| Mutation | Planted defect | Turns RED |
+|---|---|---|
+| P1-M1 | verifier deadline reverts to the LIVEZ_BUDGET_S borrow | L1 (grace-neutral variant; needle "not confirmed") |
+| P1-M2 | serving probe forced green (conjunct dropped) | L6a |
+| P1-M3 | version mismatch made non-fatal | L6b |
+| P1-M4 | floor clamp removed | L7 |
+| P1-M5 | deadline-aware squeeze removed (always ceiling) | L8b (mid-band 350→230) |
+| P1-M6 | grace extension removed | L9 |
+| P1-M7 | grace unconditional (progress conjunct dropped) | L10 |
+| P1-M8 | declared default 300→180 | L3 (static, run against the mutated copy) |
+| P1-M9 | timeout warn names LIVEZ_BUDGET_S again | L4 |
+| P1-M10 | banned `systemctl start` literal on the budget line | L12 (via L6c/L9 outputs) |
+| P1-M11 | pre-r2 grace formula `min(GRACE, remaining−TAIL)` | L14 (clock+6 variant — deterministic) |
+| P1-M12 | grace granted regardless of remaining | L13 (clock+7, clamped-grace band) |
+| P1-M13 | floor-band verdict reuses the ordinary wording | L13 + L14 |
+
+Leg-vs-plan numbering notes (disclosed): L5 = the standing C3 leg (re-annotated, byte-unchanged branch); L8 carries a mid-band sub-leg (350s remaining → effective=230s) because the plan's ~800s-only shape saturates to the ceiling under BOTH the mutated and unmutated arithmetic — the mid-band is what makes P1-M5 discriminating; L13/L14 use scaled knobs (floor 6 / tail 4 / grace 2 / ceiling 30) preserving the plan's band relationships — at the plan's literal 240/150 numbers min(60,60) saturates and P1-M12 would be vacuous; the scaled clock+7 leg clamps the grace so the unconditional-grace mutation is observable.

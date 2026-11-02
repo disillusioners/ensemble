@@ -182,6 +182,62 @@ STUB
     chmod +x "$dir/lsof"
 }
 
+# ── curl stub (the Phase-1 serving conjunct — promote-handback-halt) ────────
+# lib.sh's hand-back verifier calls bare curl through
+# _probe_once_classified ("curl -sS -o <tmp> -w '%{http_code}' --max-time 5
+# <url>") so a PATH stub controls it exactly like the real binary. Modes via
+# CURL_MODE (default ok); CURL_VERSION sets the body version; CURL_DELAY_S +
+# CURL_START_EPOCH serve ok-mode only after the delay (the slow-boot seam).
+make_curl_stub() {
+    local dir="$1"
+    mkdir -p "$dir"
+    cat > "$dir/curl" <<'STUB'
+#!/bin/bash
+out=""; url=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) out="$2"; shift 2 ;;
+        -w) shift 2 ;;
+        --max-time) shift 2 ;;
+        -sS|-s|-S) shift ;;
+        *) url="$1"; shift ;;
+    esac
+done
+mode="${CURL_MODE:-ok}"
+if [ -n "${CURL_DELAY_S:-}" ] && [ -n "${CURL_START_EPOCH:-}" ]; then
+    now="$(date +%s)"
+    if [ $(( now - CURL_START_EPOCH )) -lt "${CURL_DELAY_S}" ]; then
+        mode="unreachable"
+    fi
+fi
+case "$mode" in
+    ok)
+        [ -n "$out" ] && printf '{"status":"alive","version":"%s"}\n' "${CURL_VERSION:-0.28.5}" > "$out"
+        printf '200'
+        exit 0 ;;
+    wrongver)
+        [ -n "$out" ] && printf '{"status":"alive","version":"0.0.0"}\n' > "$out"
+        printf '200'
+        exit 0 ;;
+    noversion)
+        [ -n "$out" ] && printf '{"status":"alive"}\n' > "$out"
+        printf '200'
+        exit 0 ;;
+    non2xx)
+        [ -n "$out" ] && : > "$out"
+        printf '404'
+        exit 0 ;;
+    unreachable)
+        printf '000'
+        exit 7 ;;
+    *)
+        printf '000'
+        exit 7 ;;
+esac
+STUB
+    chmod +x "$dir/curl"
+}
+
 # Fixture install with a stub launcher (comp7 precedent).
 make_fixture() {
     local d="$1"
@@ -651,12 +707,20 @@ JOURNAL
     SC4="$STUBBIN4/systemctl"
     LSOF_OK="$(mktemp -d -t suphb-lsofok.XXXXXX)";  make_lsof_stub "$LSOF_OK" 0
     LSOF_NO="$(mktemp -d -t suphb-lsofno.XXXXXX)";  make_lsof_stub "$LSOF_NO" 1
+    # Phase 1 (promote-handback-halt): the hand-back verifier's serving
+    # conjunct (/livez 2xx via _probe_once_classified) is satisfied by a
+    # PATH-injected curl stub in ok mode for every pre-existing leg —
+    # PROMOTE_EXPECTED_VERSION is unset in these contexts, so the version
+    # comparison is skipped (the 2xx alone confirms serving), exactly the
+    # restart.sh/rollback.sh degraded contract.
+    CURL_DIR="$(mktemp -d -t suphb-curl.XXXXXX)"
+    make_curl_stub "$CURL_DIR"
 
     # run_rvl <path-extra> <globals-setup> — sources lib.sh, applies the
     # supervision globals (consumed contract), runs restart_via_launcher.
     run_rvl() {
         local path_extra="$1" setup="$2"
-        PATH="$path_extra:$PATH" bash -c '
+        PATH="$path_extra:$CURL_DIR:$PATH" bash -c '
             export INSTALL_DIR="'"$CFIX"'"
             export SYSTEMCTL_BIN="'"$SC4"'"
             export SC_LOG="'"$CFIX"'/sc4.log"
@@ -703,6 +767,10 @@ JOURNAL
     assert_not_contains "C2 no COMPLETE line on failure" "hand-back COMPLETE" "$C2_OUT"
 
     # C3 stale MainPID (new == prestop): fail FAST, no retry loop.
+    # [Phase 1 / promote-handback-halt: this leg IS leg L5 of
+    # phase1-plan.md §9 — the equal-to-prestop fast-fail is byte-unchanged
+    # under the Phase-1 verifier rewrite (knob quartet + serving conjunct)
+    # and re-pinned here under the new budget; exactly ONE MainPID poll.]
     reset_stub_state "$CFIX/sc4.log"
     SC_START_RC=0; unset SC_START_ERR; export SC_START_RC
     SC_MAINPID=777; export SC_MAINPID
@@ -716,14 +784,20 @@ JOURNAL
     MPN="$(cat "$CFIX/sc4.log.mp.n" 2>/dev/null || echo 0)"
     assert_eq "C3 fail-fast: exactly ONE MainPID poll (no retry loop)" "1" "$MPN"
 
-    # C4 never-appears timeout: MainPID stays 0 → LIVEZ_BUDGET_S-bounded
-    # timeout → rc 1.
+    # C4 never-appears timeout: MainPID stays 0 → budget-bounded timeout
+    # → rc 1. [Phase 1 / promote-handback-halt: the verifier no longer
+    # borrows LIVEZ_BUDGET_S — the leg now pins the timeout against the
+    # NEW knob (HANDBACK_VERIFY_BUDGET_S=2 keeps the wall time bounded);
+    # the warn still says "within 2s" but as the EFFECTIVE hand-back
+    # budget, not the livez gate's borrow.]
     reset_stub_state "$CFIX/sc4.log"
     SC_MAINPID=0; export SC_MAINPID
+    export HANDBACK_VERIFY_BUDGET_S=2
     C4_OUT="$(run_rvl "$LSOF_OK" '
         SUPERVISION_MODE=unit; SUPERVISION_STATE=UNIT_MANAGED
         SUPERVISION_UNIT=ensemble-c4.service; SUPERVISION_PRESTOP_MAINPID=777
     ')"
+    unset HANDBACK_VERIFY_BUDGET_S
     assert_eq "C4 never-appears: rc 1 (timeout)" "rvl-rc=1" "$(rvl_rc "$C4_OUT")"
     assert_contains "C4 timeout warn names unit + budget" "hand-back verify: unit ensemble-c4.service not confirmed" "$C4_OUT"
     assert_contains "C4 timeout cites the budget" "within 2s" "$C4_OUT"
@@ -911,7 +985,7 @@ STUB
     reset_stub_state "$CFIX/sc4.log"; rm -f "$CFIX/sc4.log".*
     SC_MAINPID=9999 SC_IS_ACTIVE=inactive SC_START_RC=0
     export SC_MAINPID SC_IS_ACTIVE SC_START_RC
-    C12A_OUT="$(PATH="$LSOF_OK:$PATH" SUPERVISION_UNIT_DIR="$C12_UNITS" bash -c '
+    C12A_OUT="$(PATH="$LSOF_OK:$CURL_DIR:$PATH" SUPERVISION_UNIT_DIR="$C12_UNITS" bash -c '
             export INSTALL_DIR="'"$CFIX"'"
             export SYSTEMCTL_BIN="'"$SC4"'"
             export SC_LOG="'"$CFIX"'/sc4.log"
@@ -933,7 +1007,7 @@ STUB
     # C12b: .env rung — pin sourced from INSTALL_DIR/.env (env-var
     # unset). Same convergence contract: hand-back uses the .env pin.
     reset_stub_state "$CFIX/sc4.log"; rm -f "$CFIX/sc4.log".*
-    C12B_OUT="$(PATH="$LSOF_OK:$PATH" SUPERVISION_UNIT_DIR="$C12_UNITS" bash -c '
+    C12B_OUT="$(PATH="$LSOF_OK:$CURL_DIR:$PATH" SUPERVISION_UNIT_DIR="$C12_UNITS" bash -c '
             export INSTALL_DIR="'"$CFIX"'"
             export SYSTEMCTL_BIN="'"$SC4"'"
             export SC_LOG="'"$CFIX"'/sc4.log"
@@ -958,7 +1032,7 @@ STUB
     # that can fire from the executor; the env-var rung is unreachable.
     # Hand-back must still declare the pin.
     reset_stub_state "$CFIX/sc4.log"; rm -f "$CFIX/sc4.log".*
-    C12B2_OUT="$(PATH="$LSOF_OK:$PATH" SUPERVISION_UNIT_DIR="$C12_UNITS" bash -c '
+    C12B2_OUT="$(PATH="$LSOF_OK:$CURL_DIR:$PATH" SUPERVISION_UNIT_DIR="$C12_UNITS" bash -c '
             export INSTALL_DIR="'"$CFIX"'"
             export SYSTEMCTL_BIN="'"$SC4"'"
             export SC_LOG="'"$CFIX"'/sc4.log"
@@ -991,7 +1065,7 @@ STUB
     # C12b absent pin: NO ENSEMBLE_RESTART_UNIT, no .env pin → hand-back
     # declares the cgroup leaf (fallback contract).
     reset_stub_state "$CFIX/sc4.log"; rm -f "$CFIX/sc4.log".*
-    C12B_ABSENT_OUT="$(PATH="$LSOF_OK:$PATH" SUPERVISION_UNIT_DIR="$C12B_UNITS" bash -c '
+    C12B_ABSENT_OUT="$(PATH="$LSOF_OK:$CURL_DIR:$PATH" SUPERVISION_UNIT_DIR="$C12B_UNITS" bash -c '
             export INSTALL_DIR="'"$CFIX"'"
             export SYSTEMCTL_BIN="'"$SC4"'"
             export SC_LOG="'"$CFIX"'/sc4.log"
@@ -1010,7 +1084,7 @@ STUB
     # C12b invalid pin (non-conforming name): ENSEMBLE_RESTART_UNIT
     # set but not ensemble-*.service → cgroup leaf (with WARN).
     reset_stub_state "$CFIX/sc4.log"; rm -f "$CFIX/sc4.log".*
-    C12B_INVALID_OUT="$(PATH="$LSOF_OK:$PATH" SUPERVISION_UNIT_DIR="$C12B_UNITS" bash -c '
+    C12B_INVALID_OUT="$(PATH="$LSOF_OK:$CURL_DIR:$PATH" SUPERVISION_UNIT_DIR="$C12B_UNITS" bash -c '
             export INSTALL_DIR="'"$CFIX"'"
             export SYSTEMCTL_BIN="'"$SC4"'"
             export SC_LOG="'"$CFIX"'/sc4.log"
@@ -1031,7 +1105,7 @@ STUB
     # C12b invalid pin (unit file missing): ENSEMBLE_RESTART_UNIT
     # set + conforming name + NO unit file → cgroup leaf (with WARN).
     reset_stub_state "$CFIX/sc4.log"; rm -f "$CFIX/sc4.log".*
-    C12B_NOF_OUT="$(PATH="$LSOF_OK:$PATH" SUPERVISION_UNIT_DIR="$C12B_UNITS" bash -c '
+    C12B_NOF_OUT="$(PATH="$LSOF_OK:$CURL_DIR:$PATH" SUPERVISION_UNIT_DIR="$C12B_UNITS" bash -c '
             export INSTALL_DIR="'"$CFIX"'"
             export SYSTEMCTL_BIN="'"$SC4"'"
             export SC_LOG="'"$CFIX"'/sc4.log"

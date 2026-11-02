@@ -253,13 +253,36 @@ _PREFLIGHT_T0="$(_now_epoch)"
 # releases the lock + exits 78 on breach. The breach routes to the
 # EXISTING halt machinery at promote.sh:459-496 — it does NOT
 # trigger auto-rollback (the existing auto-rollback is for gate-
-# fail halts, not for ceremony timing halts). C-10a arithmetic
-# (decisions.md (d) §C-10a, single source of truth):
-#   preflight 45 / stop 225 / flip 30 / handback 90 / livez 180 /
-#   readyz 120 / version 30 / soak 120 / commit 30 = 870s non-stop
-#   worst (+30s slack inside the 900s ceiling). All-budgets-max
-#   ceiling 1400s → halt.
+# fail halts, not for ceremony timing halts). The 900s ceiling is a
+# STOP-LOSS, not a budgets-fit guarantee.
+# C-10a BOUND TABLE (corrected 2026-11-02, promote-handback-halt
+# Phase 1 / D-P1-8 — the previous "handback 90 … = 870s" line was
+# fiction: it mixed measured values with budget ceilings and never
+# described the code): the 900s ceiling is a STOP-LOSS, not a
+# budgets-fit guarantee. Worst-case budget knobs in force:
+#   preflight 300 (PREFLIGHT_PHASE_BUDGET_S) / stop ~225 (derived) /
+#   launcher swap ~0 / atomic flip ~0 /
+#   hand-back verify 300 + one 60s progress-gated grace
+#     (HANDBACK_VERIFY_BUDGET_S — ceremony-clamped:
+#     clamp(remaining−HANDBACK_TAIL_RESERVE_S, FLOOR=180, 300); a
+#     SUB-BUDGET of the ceremony, not an addition to it) /
+#   livez 180 / readyz 120 / version ~5 / soak ≤120 (adaptive,
+#   ceremony-coupled) / commit ~30 ⇒ all-worst ≈1340s > 900s (the
+#   1400s all-budgets-max line above stands). Typical healthy run
+#   ≈330s. Do NOT re-derive a "fits inside 900s" schedule from this
+#   table — it is a bound table; a combined-slow ceremony halts at a
+#   downstream boundary with the daemon up (disclosed, OQ-P1-1).
+# This block is byte-identical to the copy in lib.sh (the "single
+# source of truth" holds only while BOTH carry the same table).
 promote_deadline=$(( $(_now_epoch) + PROMOTE_TOTAL_DEADLINE_S ))
+# D-P1-3 (promote-handback-halt Phase 1) — thread the ceremony clock
+# to the lib.sh hand-back verifier through the JOURNAL_READ_STRICT
+# channel: a PLAIN (non-exported) shell variable read by lib.sh with
+# an empty default (empty = no ceremony clock known ⇒ the verifier
+# uses its ceiling). NEVER exported — the child scripts this run
+# launches (stop-ensemble.sh, ...) must not inherit it and mis-derive
+# their own budgets.
+PROMOTE_CEREMONY_DEADLINE_EPOCH="$promote_deadline"
 
 # 1a-pre. python3 ≥ 3.7 floor probe (P2 / C-7 / T2.0a) — gate ANY
 # destructive step on a working stdlib interpreter BEFORE the splice
@@ -461,6 +484,17 @@ if [ -z "$BIN_VERSION" ]; then
     _warn "target manifest missing binary_version — refusing"
     exit 78
 fi
+# D-P1-9 (promote-handback-halt Phase 1) — thread the expected release
+# to the lib.sh hand-back verifier through the same PLAIN-variable
+# channel as PROMOTE_CEREMONY_DEADLINE_EPOCH above (never exported;
+# the child scripts must not inherit it). The value is the manifest's
+# binary_version — the SAME value gate_version compares post-gate
+# (promote.sh:670-era site below) — and the /livez version field is the
+# daemon's bare __version__ (same shape, AM-P1-4: bare == bare, NO
+# v-strip needed here). Unset contexts (restart.sh / rollback.sh) read
+# an empty default in lib.sh ⇒ the serving check degrades to "2xx,
+# no version comparison".
+PROMOTE_EXPECTED_VERSION="$BIN_VERSION"
 
 # 2.2c (upgrade-resilience 2026-10-07) — emit the `intent_flip` journal
 # event. This is the EVIDENCE the boot-sweep commit-and-continue path
