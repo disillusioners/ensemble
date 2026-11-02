@@ -91,7 +91,14 @@ def repo(engine) -> SQLModelProjectRepository:
 def mock_plane_env(monkeypatch):
     """Enable the integration AND clear both kill-switches (opt-in
     fixture shadows the conftest autouse clearing, so the switches
-    must be cleared explicitly here)."""
+    must be cleared explicitly here).
+
+    BR-A remediation (lane ``plane-pm-issue-tools``): the environment is
+    pinned to LIVE so the workspace resolution permits the configured
+    slug (the refusal behaviour is pinned in
+    ``tests/unit/test_plane_workspace_enforcement.py``)."""
+    monkeypatch.setenv("ENSEMBLE_SELF_ENV", "live")
+    monkeypatch.setenv("POSTGRES_DB", "ensemble_prod")
     monkeypatch.setenv("PLANE_BASE_URL", "https://plane.example.com")
     monkeypatch.setenv("PLANE_API_KEY", "test-api-key-xyz")
     monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", "test-ws")
