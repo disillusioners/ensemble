@@ -93,6 +93,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **DB note** — the `mcp_servers` row `computer-use` was soft-deactivated (`is_active=false`) out of band; the boot orphan sweep (`_deactivate_orphaned_builtin_servers`) deactivates any re-appearance.
 - **Tests** — `tests/unit/test_computer_use_mcp.py` (1726 lines) is deleted; its GENERIC half (the S1 built-in availability gate, the privilege-stamp helper's non-stamping contract, `is_mcp_tool`'s standard-shape detection and the empty-allow privileged-category strip) is ported to `tests/unit/test_mcp_builtin_availability_gate.py`. The nine `PRIVILEGED_TOOL_CATEGORIES` same-PR pins drop the `cu` member (16 → 15).
 
+## [0.28.6] — 2026-11-02
+
+### Added — central metrics system v1, backend + frontend (`feature/central-metrics-v1`, merge `d91fa6291`)
+
+- Central metrics registry, sampler, and query surface (`/api/metrics/*`, including the `/api/metrics/families` live-count observation) backed by the metrics vocabulary indirection seam; pinned by `tests/unit/metrics/*` (vocabulary amendment, query switch invariance, query scope cage, registry narrowing, sampler).
+- Frontend central-metrics surface (FE manifest re-derived at stage time: 93 → 95 entries).
+- Gates: code council DELTA-3-CLEAR (4-round arc); tidier pass; tester functional gate PASS 11/11 + scoped re-verify 15/15 with mutation re-proof (`.agents/tester/RESULTS/2026-11-02-central-metrics-v1-functional-gate.md` + addendum @ `9dc459d35`).
+- Behavior-only payload: migration delta EMPTY (119==119 vs base), BE deps (`pyproject.toml`/`uv.lock`) empty, FE `package.json` empty.
 ## [0.28.3] — 2026-11-01
 
 ### Added — project skill source loader: file-backed project skills (`.agents/*/skills/` canon) integrated into the skill system (`feature/project-skill-loader`, base `b56444244`; commission `project-skill-loader`)
