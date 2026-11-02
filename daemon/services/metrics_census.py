@@ -320,6 +320,21 @@ class CensusSampler:
         return self._started
 
     @property
+    def gated(self) -> bool:
+        """Whether the census sampler's DB work is currently gated OFF.
+
+        The PUBLIC read-through of the EXISTING private ``_gate()`` — a
+        reader (the metrics query door) that needs to know whether the
+        census families are dark must NOT read the kill-switch itself:
+        that would add a THIRD behavioural check site and break the
+        "the switch is consulted at exactly two sites" invariant.
+
+        This property adds NO new check site: it calls the same
+        ``_gate()`` the census tick already calls.
+        """
+        return self._gate()
+
+    @property
     def dsn(self) -> str | None:
         """The effective DSN (resolved lazily)."""
         if self._dsn:

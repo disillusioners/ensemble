@@ -1,0 +1,9 @@
+tests/unit/persistence/test_checkpoint_metrics_registry.py
+tests/unit/persistence/test_checkpoint_metrics_vocabulary.py
+tests/unit/services/test_metrics_census.py
+tests/unit/services/test_metrics_gate.py
+tests/unit/services/test_metrics_listener.py
+tests/unit/services/test_metrics_listener_registry.py
+tests/unit/services/test_metrics_live_managed_values.py
+tests/unit/services/test_metrics_managed_keys.py
+tests/unit/services/test_metrics_refresh_path.py

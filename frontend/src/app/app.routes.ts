@@ -48,6 +48,14 @@ export const routes: Routes = [
   { path: 'sources', loadComponent: () => import('./components/source-list/source-list.component').then(m => m.SourceListComponent) },
   { path: 'jobs', loadComponent: () => import('./pages/jobs/jobs.component').then(m => m.JobsComponent) },
   { path: 'settings', loadComponent: () => import('./pages/settings/settings.component').then(m => m.SettingsComponent) },
+  // Metrics — the central-metrics charts page (Phase 5 of the
+  // central-metrics-v1 lane): the Overview / Charts / Families tabs on
+  // the `/api/metrics/*` query door.
+  //
+  // Declared BEFORE the `:id` route family (`skills/:id`) so Angular's
+  // first-match-wins can never shadow a static path — the
+  // `/skills/bank` + `/skills/triggers` + `/persona` precedent.
+  { path: 'metrics', loadComponent: () => import('./pages/metrics/metrics.component').then(m => m.MetricsComponent), title: 'Metrics' },
   { path: 'skills', loadComponent: () => import('./pages/skills/skills.component').then(m => m.SkillsComponent) },
   // /skills/bank MUST come before /skills/:id — Angular first-match wins
   { path: 'skills/bank', loadComponent: () => import('./pages/skill-bank/skill-bank.component').then(m => m.SkillBankComponent) },

@@ -1,0 +1,22 @@
+# P4 gate FAILED-digest evidence — recomputed 2026-11-02 from the surviving gate logs
+# (the digest is sha256 over the FAILED node-id list; .bare = the bare node id, .full = the grep-full form)
+
+leg                        bare-id digest     grep-full digest   failed count
+W1/head_d1d2               d78b09cf2549c371   d9bff11a731d8ba3   1
+W1/base_d2                 d78b09cf2549c371   d9bff11a731d8ba3   1
+W1/head_wide               ec0572e69c9ab178   041380df27ec0d4e   2
+W1/base_wide               ec0572e69c9ab178   041380df27ec0d4e   2
+W2/head_d1d2               d78b09cf2549c371   d9bff11a731d8ba3   1
+W2/base_d2                 d78b09cf2549c371   d9bff11a731d8ba3   1
+W2/head_wide               ec0572e69c9ab178   041380df27ec0d4e   2
+W2/base_wide               ec0572e69c9ab178   041380df27ec0d4e   2
+W3/head_d1d2               d78b09cf2549c371   d9bff11a731d8ba3   1
+W3/base_d2                 d78b09cf2549c371   d9bff11a731d8ba3   1
+W3/head_wide               ec0572e69c9ab178   041380df27ec0d4e   2
+W3/base_wide               ec0572e69c9ab178   041380df27ec0d4e   2
+
+# the failing node ids (D2 leg):
+tests/unit/persistence/test_checkpoint_metrics_vocabulary.py::TestSweepLaneVocabulary::test_rdrs_lanes_come_from_the_config_kill_switchs
+# the failing node ids (widened supplementary leg):
+tests/unit/test_mission_reconciliation_sweep.py::TestTheLaneWiring::test_the_stop_event_is_honored_mid_batch
+tests/unit/tools/test_checkpoint_pool_config.py::TestCheckpointPoolConfigLadder::test_the_field_defaults_mirror_the_constants

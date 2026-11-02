@@ -1,0 +1,14 @@
+# c2-fe-gate — the SCOPED type-check leg, run STANDALONE — the same command, outside the pack.
+#
+# THE EXIT CODE IS CAPTURED INTO THIS LOG.  `tsc --noEmit` prints NOTHING
+# on success, so the earlier 0-byte capture of this leg had the VACUOUS-DIGEST
+# shape (sha256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855):
+# an empty log is NOT the evidence of a pass — the verdict has to be readable
+# in the artefact itself.
+command: cd frontend && ./node_modules/.bin/tsc --noEmit -p tsconfig.metrics-fe.json
+cwd: frontend/            (the pack runs its legs with cwd=FRONTEND)
+git_head: 604d85bd4d45d40e42d246a38b8991f1609cd1f4
+tsc: frontend/node_modules/.bin/tsc -> ../typescript/bin/tsc   (the frontend's LOCAL devDependency — never a bare or npx tsc)
+tsc_version: Version 5.9.3
+--- typecheck_scoped ---
+TYPECHECK_EXIT=0

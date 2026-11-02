@@ -1051,3 +1051,9 @@ export * from "./snapshot.model";
 // the wire-contract notes (snake_case as-is, ISO-8601 UTC strings, the
 // `count` == page-length rule).
 export * from './mcps-gateway.model';
+
+// Metrics query door (central-metrics-v1 Phase 5) — the VERBATIM mirror of
+// the FROZEN envelope + the three route payloads. The door is
+// `docs/architecture/metrics-query-contract.md`; the mirror is
+// `models/metrics.model.ts` (its own spec is the field-set pin).
+export * from './metrics.model';

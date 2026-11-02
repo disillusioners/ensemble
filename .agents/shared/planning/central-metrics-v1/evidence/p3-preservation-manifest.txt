@@ -1,0 +1,120 @@
+# P3 — the whole-tree gate evidence, preserved 2026-11-02 (Phase 6 close-out).
+# Source: /tmp/p3-gate-final/ (64 files, copied IN FULL), /tmp/p3-scratch/ (the
+# mutation ledger + the sweep comparator), /tmp/p3-sweep-20261102T051334Z-FAILED-worker-crash/
+# (the abort-bearing outputs), and the two /tmp/p3-sweep-sharded-*/ dirs (the failed-id
+# lists, the node-id lists, the progress tables and the sweep log).
+# The multi-MB bulk (.collect.txt / .nodes.txt / .shard-*.out) is DELIBERATELY NOT COPIED;
+# the per-shard FAILED/ERROR excerpts are extracted instead (*.per-shard-failed-ids.excerpt.txt).
+#
+## p3-gate-final/  (the P3-G1 gate dir, in full)
+#   f8a3dd1691fc8fcda9aeb436b173814d42da9a43b4d4f516949fa5ac4c6f650b  BASE.adjudicate.1.out
+#   f8a3dd1691fc8fcda9aeb436b173814d42da9a43b4d4f516949fa5ac4c6f650b  BASE.adjudicate.2.out
+#   6b6c2550aa0bf2d761212e71e84a6ff51e9735d4d5589bae87bc2aa90e1ee2a6  BASE.adjudicate.3.out
+#   f8a3dd1691fc8fcda9aeb436b173814d42da9a43b4d4f516949fa5ac4c6f650b  BASE.adjudicate.fixed.1.out
+#   6f6d72e61c23c72ee9f34354a97452fd23999ec98b0b9a0c2ba625525aa005cb  BASE.adjudicate.fixed.2.out
+#   6f6d72e61c23c72ee9f34354a97452fd23999ec98b0b9a0c2ba625525aa005cb  BASE.adjudicate.fixed.3.out
+#   7ab39b2859a26df50362b8a1cb6397566e3e2aa6efcc558da12b6c9166fb09d8  BASE.adjudicate.netnew.1.out
+#   ef7baa0442c14aca3736a3db6d5ba287eacf3b8f6a81498ad2ff6e3e1e27e2d7  BASE.adjudicate.netnew.2.out
+#   fd76d079110d4806c2fa0a053a07eab67a29e54308daf8bfff0beda66b5f3c41  BASE.adjudicate.netnew.3.out
+#   301b2f842042e30ffb0e352bdb518581064d19d16ca29df48ec6ca920778912a  BASE.br.collect.txt
+#   e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  BASE.br.nodeids.txt
+#   c696dbe5397fc83936a128532321efb3b539961e2afb372ceb344af0e8ddff65  BASE.br.nodes.txt
+#   baad2193ebface62a246ba41219aeddd40630b59c1d6cb0dc5b3b3e580d40a40  BASE.br.out
+#   852d716673549e52d0c4369a9e394bb4093c146f292184c4b80989dd46e77beb  BASE.d2.collect.txt
+#   476d9c45894733cd7f02f4f89c86ee3075b0d4e893386224a86fac2690f57d61  BASE.d2.nodeids-collect.txt
+#   d78b09cf2549c37191a10c3dcbe540b3ec9d37ce0dcce75eeeb36fa4bb0d6b6d  BASE.d2.nodeids.txt
+#   7cca3e48afea83c129d450022aea1419f807dc23ebf91aba82bbfc48a5e73c9b  BASE.d2.out
+#   4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865  BASE.d2.rc
+#   ba7c6c081347d39f0f15258b3dae188045c7aa44dc2990c058426bbca2d2c01d  BASE.d2.summary
+#   4d1bf6597dccc2ad4b774d57bd52a5f4c02adc9ff822582873ab94229fbd3bf2  BASE.d2cage.collect.txt
+#   7b1ece8ee7691c8123118501c70d8bc957c4e49ba4a134d00d0dd848a2ccd87b  BASE.d2cage.nodeids-collect.txt
+#   e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  BASE.d2cage.nodeids.txt
+#   fccc16832177ca1b27153cb0fd1933af62d14600f9422f1c828b81e07e342b54  BASE.d2cage.out
+#   9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa  BASE.d2cage.rc
+#   4ab3d1db22cfa43960010f303ebf278668d19ffb553069287b69128a13075014  BASE.d2cage.summary
+#   f03c54e68563b7049b18804b49a803748a620bd1f1d6451ebb14e7cb4c352988  BASE.exposition.txt
+#   3062335533ed58482860c7baab7ad45c2d1b0379666efc83fc3082bc5c6405c2  BASE.fixed.1.out
+#   56cd8063c2bb8fcf13b90b300742fe8a517628870f78506b165c7a80743a8a32  BASE.fixed.2.out
+#   6eac6e8a7fb9f6bab697c14d11a9c52e4c175894e8c926690085bd8a38f66a75  BASE.fixed.3.out
+#   eabff20133a529ed743d19b967a514d82961157ab4a3e27eb5f21e6575f90229  HEAD.adjudicate.1.out
+#   8a424bbbeee0702ab53fa97c287e10a782ffde7fd30d5035651426d6eab52cd9  HEAD.adjudicate.2.out
+#   24076783ce1f81c83160b362be520398eca94e6a28279baced2fd8f7dd3f6d1b  HEAD.adjudicate.3.out
+#   c8a9af068b49be3f8485e1d0899dbf4338d3fe416266a0393f5d646077a15ae2  HEAD.adjudicate.netnew.1.out
+#   6bc743c0974723eb3da7dd9002977c3dd0c0712893bb1641a5cf0b24556570a9  HEAD.adjudicate.netnew.2.out
+#   d5d4052adcca2b603447906bc34f34cc45763133ca71999c849e661f502e5d85  HEAD.adjudicate.netnew.3.out
+#   8f86c8f5205904d199054ba3086411c06ade14d9d0683bc3fbe7a1d2be0b0fd9  HEAD.br.collect.txt
+#   e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  HEAD.br.nodeids.txt
+#   c696dbe5397fc83936a128532321efb3b539961e2afb372ceb344af0e8ddff65  HEAD.br.nodes.txt
+#   85fba9a302dcd2ad6e005aac3f8848d06962fadfa4d3ac9848b129ce892771de  HEAD.br.out
+#   e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  HEAD.d1.nodeids.txt
+#   a674eb4f1eb4f8f4c6793173f5eda8cf3b0d3f2fdc6112b5424998b0b33d2460  HEAD.d1.out
+#   9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa  HEAD.d1.rc
+#   8822bd29f94f53c60a3ff29e6e3e999b90263b17dd30f276bc3cf50aae29f47d  HEAD.d1.summary
+#   e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  HEAD.d1cage.nodeids.txt
+#   47aa39d2bc51d3b6ded21238f2108854d13569e202c5e14d3ec00fa7db429a93  HEAD.d1cage.out
+#   9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa  HEAD.d1cage.rc
+#   c679dc048bc1748f109ecd9e2c03f2f4c123bcf9a415b383f61b319bcf93f04d  HEAD.d1cage.summary
+#   9bb2b22f0c33060b9a44c706a38ebdf31eafc970341b11b186a486d1618f3f93  HEAD.d2.collect.txt
+#   476d9c45894733cd7f02f4f89c86ee3075b0d4e893386224a86fac2690f57d61  HEAD.d2.nodeids-collect.txt
+#   d78b09cf2549c37191a10c3dcbe540b3ec9d37ce0dcce75eeeb36fa4bb0d6b6d  HEAD.d2.nodeids.txt
+#   8b0b8e75b52e243ec35ed6d59ead0e50a72b8f693b15b8c7e0d424c72cc74bc5  HEAD.d2.out
+#   4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865  HEAD.d2.rc
+#   76376b3d9c70db250143309aca50ccc7f016c5a4cf22cd110fdbecc16fbf0ef2  HEAD.d2.summary
+#   703bdf436df4c0032115041ea8b3d150a3d161511c1a54acb2624c145ef1ddb9  HEAD.d2cage.collect.txt
+#   7b1ece8ee7691c8123118501c70d8bc957c4e49ba4a134d00d0dd848a2ccd87b  HEAD.d2cage.nodeids-collect.txt
+#   e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  HEAD.d2cage.nodeids.txt
+#   80fc8c9ddba4a6146aa7aed0cebfae96f1f94780e505b644110afb45a739b904  HEAD.d2cage.out
+#   9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa  HEAD.d2cage.rc
+#   b856f7bfabf1ec55477359bbf66a843f19412d9b732a2524367561cd2754c37e  HEAD.d2cage.summary
+#   f03c54e68563b7049b18804b49a803748a620bd1f1d6451ebb14e7cb4c352988  HEAD.exposition.txt
+#   c8bedfcbd672fb1e152e0cc40f3c050d8c9cc46566698c071c73f72badefac23  HEAD.fixed.1.out
+#   a6927f265297c6a00282294484dad0eb14a2a2cb1e96b01ee96e60ce95deebfc  HEAD.fixed.2.out
+#   2d4a001cd14d153a8580ac45c791275019ddc03ccda8930e3c21a93072bdfbb5  HEAD.fixed.3.out
+#   7b3581db5c1da667d8bb87ace5611dcd563d22843526d485002d57d36a5d70bb  gate.log
+#
+## p3-scratch/  (8 members — the mutation ledger, the sweep comparator, the FIXED comparator
+#   and its repair patch, and the three adjudication/proof drivers added by the adjudication
+#   round; the section was re-read from the directory on 2026-11-02 because it had grown
+#   from 2 members to 8 and the listing no longer matched the directory)
+#   a592aca7509f3efc3727837c93e804b9e1977a87b55ec34f63a10f8de2a5862e  adjudicate_diff_ids.py
+#   e0c49396d5208cf26f5fcd975911f77697d908907b3138a183402ca05aab7cdd  mutation-ledger.json
+#   7068a58ff9b8602f52e1c57399610e298f1fa1487bc4d9ae8c33ebb54610b68d  prove_grouping_signature.py
+#   d1d0e139f74bafa2330c2be883dc496b1ffdf6041c6dd5a2d37801c6063a36c3  rederive_adjudication_verdict.py
+#   466db3cdeb4824ec5283e1292077c2af1c987334fd7f80834b1c521c0738304c  summarise_grouping_proof.py
+#   f2a47cbb9ab11a5c0b67bf0ba90060ba380c4a9dcac2485c7b0a8f3955d9cc35  sweep_digest_verdict.sh
+#   b00ee10ee7b678e5e61a70f315f1edd50128c59c0eb801898263935ae599b1ef  sweep_sharded.sh
+#   5ae2e20fce20893e12f4276279945ab4877546a63be5ec16f344f782d6e71813  sweep_sharded.verdict-block.patch
+#
+## p3-sweep-crash/  (the single-shot -n auto attempt: rc=3 on BOTH legs)
+#   0029e7e9b635117685f5ff4f9fd577a0fe4c78060a295bb902aa27dc85a29a75  BASE.out
+#   1121cfccd5913f0a63fec40a6ffd44ea64f9dc135c66634ba001d10bcf4302a2  BASE.rc
+#   3509fa75ce003f564e7f5a6092f8209bc645b7f796769dd031b6a7d2c285efbf  HEAD.out
+#   1121cfccd5913f0a63fec40a6ffd44ea64f9dc135c66634ba001d10bcf4302a2  HEAD.rc
+#   0ac01f4411eecd41f4eab697816dddc643fbf1f7ff7999a1346bf27ed804500e  sweep.log
+#
+## p3-sweep-sharded/20261102T060325Z/
+#   e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  BASE.failed_ids.txt
+#   e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  BASE.nodeids.txt
+#   c3c56f43226408dbb8bf2a48356699cad0f9493c3481ba647118b6fcfe3bf338  BASE.per-shard-failed-ids.excerpt.txt
+#   d5782108b68c2e345fb4bf847cf3045b4cbbc1ccc42a70fe92465eb26a6cc3be  BASE.progress.tsv
+#   e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  BASE.singles.tsv
+#   e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  HEAD.failed_ids.txt
+#   e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  HEAD.nodeids.txt
+#   95059c656f0bf14c7624b3aa17fd3dea4b9b6a1d397a79b68031c8cd65e05f63  HEAD.per-shard-failed-ids.excerpt.txt
+#   9495a7a4ba5210d883b44bcadc1cae749e04829f58ffd1f82230dd1b964a33c6  HEAD.progress.tsv
+#   e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  HEAD.singles.tsv
+#   ae56365fb324c7f84c5c308faa9a47de14a08b6ab4d80b722e3126c2c414aaf5  sweep.log
+#
+## p3-sweep-sharded/20261102T061340Z/
+#   09874a5ec60ace6d65baa9aef76f9dcdbb95aa031276b6d03dbcf845f3bfa34d  BASE.failed_ids.txt
+#   341def50afc03f3b0aa069d6fd0b497c4d57178d2d7aed608915a811b377ee50  BASE.nodeids.txt
+#   65ea9a34041be343f6c0220ec1e1184d9ff3a571010d3b3d670c935adf84e174  BASE.per-shard-failed-ids.excerpt.txt
+#   4b42ed06dabbe2433b2293a3bed608fffb6bf1d5a286467b3f2108ab1bdd51bb  BASE.progress.tsv
+#   e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  BASE.singles.tsv
+#   4ce90ae40a8583b7a255b6ab3dabdccf3aaa7d6d5680f101b58f1633477d9acb  HEAD.failed_ids.txt
+#   0b04686a331bec960af1726098fba744e0a2a0ada150b5b3cf2abc78f6b301ab  HEAD.nodeids.txt
+#   03c5d479a07d7b33c2e9866f9cf665778dd7e664c1bebfa11171fe9a09cb0611  HEAD.per-shard-failed-ids.excerpt.txt
+#   db2457e52dfbf076baf920173c7fe60e433de0a2b7261cf7e2dfdc6d19365428  HEAD.progress.tsv
+#   e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  HEAD.singles.tsv
+#   b81966284864832c436502a4eee216499a40482aa91b17c837654b8b176f4b1b  sweep.log
+#

@@ -1,0 +1,79 @@
+:host {
+  display: block;
+  padding: 1rem 1.25rem;
+}
+
+.metrics-container {
+  max-width: 100%;
+}
+
+.metrics-header h1 {
+  margin: 0;
+  font-size: 1.25rem;
+  color: #f1f5f9;
+}
+
+.metrics-subtitle {
+  margin: 0.15rem 0 0.9rem;
+  color: #64748b;
+  font-size: 0.8rem;
+}
+
+.metrics-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.6rem;
+  border: 1px solid #7f1d1d;
+  border-radius: 6px;
+  background: #2a1414;
+  color: #fca5a5;
+  font-size: 0.8rem;
+}
+
+.stale-badge {
+  display: inline-block;
+  margin-bottom: 0.5rem;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid #92400e;
+  border-radius: 4px;
+  color: #fbbf24;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+}
+
+.metrics-truncated-hint {
+  display: inline-block;
+  margin: 0 0 0.5rem 0.5rem;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid #1e293b;
+  border-radius: 4px;
+  color: #64748b;
+  font-size: 0.72rem;
+}
+
+.metrics-empty {
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  background: #0f172a;
+  padding: 1rem 1.1rem;
+  margin-bottom: 0.9rem;
+}
+
+.metrics-empty-title {
+  margin: 0 0 0.3rem;
+  font-size: 0.95rem;
+  color: #e2e8f0;
+}
+
+.metrics-empty-text {
+  margin: 0;
+  color: #64748b;
+  font-size: 0.8rem;
+}
+
+.metrics-tabs-host {
+  display: block;
+}

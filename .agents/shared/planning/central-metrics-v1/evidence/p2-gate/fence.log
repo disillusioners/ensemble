@@ -1,0 +1,2 @@
+ambient POSTGRES_DB=ensemble_prod POSTGRES_HOST=10.44.0.2 (prod-poisoned by design — the scrub is the fence)
+FENCE-OK (ambient): the scrubbed env carries no POSTGRES_/DATABASE_URL/PG* variable

@@ -1,0 +1,11 @@
+........................................................................ [ 31%]
+........................................................................ [ 63%]
+........................................................................ [ 95%]
+..........                                                               [100%]
+=============================== warnings summary ===============================
+tests/test_custom_agents_router_authz.py::TestAuthOffNoBypass::test_session_cookie_returns_503
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/starlette/testclient.py:445: DeprecationWarning: Setting per-request cookies=<...> is being deprecated, because the expected behaviour on cookie persistence is ambiguous. Set cookies directly on the client instance instead.
+    return super().request(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+226 passed, 1 warning in 20.38s

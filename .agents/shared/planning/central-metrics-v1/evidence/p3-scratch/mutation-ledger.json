@@ -1,0 +1,194 @@
+[
+  {
+    "label": "P3-M1",
+    "defect": "the fail-closed auth seam moved AFTER the registry read",
+    "pack": "tests/unit/metrics/test_metrics_query_auth_matrix.py",
+    "files": [
+      "daemon/routers/metrics.py"
+    ],
+    "red_rc": 1,
+    "red_failing_nodes": [
+      "tests/unit/metrics/test_metrics_query_auth_matrix.py::TestAuthOffIsFailClosed::test_auth_off_never_reads_the_registry[/api/metrics/families]"
+    ],
+    "green_rc": 0,
+    "green_failing_nodes": [],
+    "status": "RED->GREEN"
+  },
+  {
+    "label": "P3-M2",
+    "defect": "one route's scope dependency dropped",
+    "pack": "tests/unit/metrics/test_metrics_query_auth_matrix.py",
+    "files": [
+      "daemon/routers/metrics.py"
+    ],
+    "red_rc": 1,
+    "red_failing_nodes": [
+      "tests/unit/metrics/test_metrics_query_auth_matrix.py::TestAuthOnMatrix::test_a_session_without_the_scope_returns_403[/api/metrics/snapshot]",
+      "tests/unit/metrics/test_metrics_query_auth_matrix.py::TestAuthOnMatrix::test_an_unrelated_scope_does_not_satisfy_the_route[/api/metrics/snapshot]",
+      "tests/unit/metrics/test_metrics_query_auth_matrix.py::TestScopeDeclaration::test_the_route_declares_the_maintenance_read_scope[/api/metrics/snapshot]"
+    ],
+    "green_rc": 0,
+    "green_failing_nodes": [],
+    "status": "RED->GREEN"
+  },
+  {
+    "label": "P3-M3",
+    "defect": "the query routes consult the kill-switch directly",
+    "pack": "tests/unit/metrics/test_metrics_query_switch_invariance.py",
+    "files": [
+      "daemon/routers/metrics.py"
+    ],
+    "red_rc": 1,
+    "red_failing_nodes": [
+      "tests/unit/metrics/test_metrics_query_switch_invariance.py::TestCheckSiteCensus::test_the_behavioural_check_site_census_is_two",
+      "tests/unit/metrics/test_metrics_query_switch_invariance.py::TestNoDirectSwitchRead::test_the_query_routes_never_read_the_switch"
+    ],
+    "green_rc": 0,
+    "green_failing_nodes": [],
+    "status": "RED->GREEN"
+  },
+  {
+    "label": "P3-M4",
+    "defect": "the pagination ceiling raised above the byte ceiling",
+    "pack": "tests/unit/metrics/test_metrics_query_pagination.py",
+    "files": [
+      "daemon/services/metrics_query/constants.py"
+    ],
+    "red_rc": 1,
+    "red_failing_nodes": [
+      "tests/unit/metrics/test_metrics_query_pagination.py::TestByteCeiling::test_the_ceiling_is_the_frozen_constant",
+      "tests/unit/metrics/test_metrics_query_pagination.py::TestByteCeiling::test_an_oversized_body_is_bounded_and_carries_a_cursor",
+      "tests/unit/metrics/test_metrics_query_pagination.py::TestByteCeiling::test_the_cursor_resumes_where_the_trim_stopped"
+    ],
+    "green_rc": 0,
+    "green_failing_nodes": [],
+    "status": "RED->GREEN"
+  },
+  {
+    "label": "P3-M5",
+    "defect": "the listener start moved AFTER the census block",
+    "pack": "tests/unit/metrics/test_metrics_query_api_wiring.py",
+    "files": [
+      "daemon/api.py"
+    ],
+    "red_rc": 1,
+    "red_failing_nodes": [
+      "tests/unit/metrics/test_metrics_query_api_wiring.py::TestStartOrder::test_the_listener_starts_first"
+    ],
+    "green_rc": 0,
+    "green_failing_nodes": [],
+    "status": "RED->GREEN"
+  },
+  {
+    "label": "P3-M6",
+    "defect": "the sampler stop removed from the shutdown path",
+    "pack": "tests/unit/metrics/test_metrics_query_api_wiring.py",
+    "files": [
+      "daemon/api.py"
+    ],
+    "red_rc": 1,
+    "red_failing_nodes": [
+      "tests/unit/metrics/test_metrics_query_api_wiring.py::TestStopOrder::test_the_sampler_stops_before_the_listener",
+      "tests/unit/metrics/test_metrics_query_api_wiring.py::TestStopOrder::test_the_sampler_stop_is_present",
+      "tests/unit/metrics/test_metrics_query_api_wiring.py::TestStopOrder::test_the_sampler_stop_is_detached"
+    ],
+    "green_rc": 0,
+    "green_failing_nodes": [],
+    "status": "RED->GREEN"
+  },
+  {
+    "label": "P3-M7",
+    "defect": "the declared-route census left at 108",
+    "pack": "tests/unit/test_router_scope_manifest.py tests/unit/metrics/test_metrics_query_scope_cage.py",
+    "files": [
+      "tests/unit/test_router_scope_manifest.py"
+    ],
+    "red_rc": 1,
+    "red_failing_nodes": [
+      "tests/unit/test_router_scope_manifest.py::TestScopeManifestCage::test_declared_route_count_pinned"
+    ],
+    "green_rc": 0,
+    "green_failing_nodes": [],
+    "status": "RED->GREEN"
+  },
+  {
+    "label": "P3-M8",
+    "defect": "a delta outside the 3-carrier allowlist leaked into the exposition body",
+    "pack": "tests/unit/metrics/test_metrics_query_routes.py",
+    "files": [
+      "daemon/checkpoint_metrics.py"
+    ],
+    "red_rc": 1,
+    "red_failing_nodes": [
+      "tests/unit/metrics/test_metrics_query_routes.py::TestExpositionStructuralIdentity::test_the_exposition_body_matches_the_masked_base_artifact"
+    ],
+    "green_rc": 0,
+    "green_failing_nodes": [],
+    "status": "RED->GREEN"
+  },
+  {
+    "label": "P3-M9",
+    "defect": "the response body build moved back onto the event loop",
+    "pack": "tests/unit/metrics/test_metrics_query_routes.py",
+    "files": [
+      "daemon/routers/metrics.py"
+    ],
+    "red_rc": 1,
+    "red_failing_nodes": [
+      "tests/unit/metrics/test_metrics_query_routes.py::TestOffLoopBuild::test_the_body_is_built_on_an_offload_worker_thread[/api/metrics/families]"
+    ],
+    "green_rc": 0,
+    "green_failing_nodes": [],
+    "status": "RED->GREEN"
+  },
+  {
+    "label": "P3-M10",
+    "defect": "the sampler start moved before the listener start",
+    "pack": "tests/unit/metrics/test_metrics_query_api_wiring.py",
+    "files": [
+      "daemon/api.py"
+    ],
+    "red_rc": 1,
+    "red_failing_nodes": [
+      "tests/unit/metrics/test_metrics_query_api_wiring.py::TestStartOrder::test_the_sampler_starts_last",
+      "tests/unit/metrics/test_metrics_query_api_wiring.py::TestStartOrder::test_the_listener_start_precedes_the_sampler_start",
+      "tests/unit/metrics/test_metrics_query_api_wiring.py::TestStartOrder::test_the_census_block_precedes_the_sampler_construction"
+    ],
+    "green_rc": 0,
+    "green_failing_nodes": [],
+    "status": "RED->GREEN"
+  },
+  {
+    "label": "P3-M11",
+    "defect": "census_gated sourced from a direct switch read in the query package",
+    "pack": "tests/unit/metrics/test_metrics_query_switch_invariance.py",
+    "files": [
+      "daemon/services/metrics_query/provider.py"
+    ],
+    "red_rc": 1,
+    "red_failing_nodes": [
+      "tests/unit/metrics/test_metrics_query_switch_invariance.py::TestOnlyPermittedDifferences::test_the_permitted_differences_are_exactly_those_three",
+      "tests/unit/metrics/test_metrics_query_switch_invariance.py::TestCheckSiteCensus::test_the_behavioural_check_site_census_is_two",
+      "tests/unit/metrics/test_metrics_query_switch_invariance.py::TestNoDirectSwitchRead::test_the_query_package_never_reads_the_switch",
+      "tests/unit/metrics/test_metrics_query_switch_invariance.py::TestNoDirectSwitchRead::test_the_census_gated_reason_comes_from_the_public_property"
+    ],
+    "green_rc": 0,
+    "green_failing_nodes": [],
+    "status": "RED->GREEN"
+  },
+  {
+    "label": "P3-M12",
+    "defect": "max_points default raised above 240",
+    "pack": "tests/unit/metrics/test_metrics_query_routes.py",
+    "files": [
+      "daemon/services/metrics_query/constants.py"
+    ],
+    "red_rc": 1,
+    "red_failing_nodes": [
+      "tests/unit/metrics/test_metrics_query_routes.py::TestResponseBound::test_the_max_points_default_is_240"
+    ],
+    "green_rc": 0,
+    "green_failing_nodes": [],
+    "status": "RED->GREEN"
+  }
+]

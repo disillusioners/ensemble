@@ -1,0 +1,206 @@
+==============================================================================
+THE WHOLE-TREE NET-NEW VERDICT — the P3 evidence-repair round (2026-11-02)
+==============================================================================
+
+THE CLAIM RE-AFFIRMED: the P3 whole-tree leg's net-new failures = 0.
+
+The sweep's OWN verdict block was empty by construction (a `;` vs `|`
+shell bug: the `comm` output went to stdout, never into the log), so the
+run recorded NO net-new verdict. The two EARLIER runs recorded
+'DIGEST-EQUAL ... net-new = EMPTY' over the EMPTY-STRING digest
+e3b0c442...b855 (= sha256(""), nodes=0) — vacuous. This round
+re-derives the comparison with the FIXED comparator, then ADJUDICATES
+every diff id to establish whether the sets' difference is a lane
+regression or a measurement artefact.
+
+THE TREES (the ones the sweep ran against — NOT the later P4/P5 tree):
+  BASE = 941cb6321 (the lane base)
+  HEAD = 644c2bfaa (the P3 close-out; code-identical to the sweep's
+         HEAD tree e408cccab — the delta is docs-only)
+
+------------------------------------------------------------------------------
+1. THE RECONCILIATION — every count the record carries
+------------------------------------------------------------------------------
+
+  BASE unique captured lines (GREP-FULL): 488
+  HEAD unique captured lines (GREP-FULL): 484
+    of those, the NODE-ID form (BARE-ID): 479 BASE / 476 HEAD
+    the remainder are LOG lines that happen to start with 'ERROR '
+      (a daemon shutdown/teardown message, NOT a test outcome):
+        BASE-only log line: daemon.manager:manager.py:15748 Error during shutdown step 'dispose_db_pools': object MagicMock can't be used in 'await'
+
+  => 479 + 9 = 488 (BASE)   and   476 + 8 = 484 (HEAD).
+     The 488/484 figure is the GREP-FULL form; the 479/476 figure is
+     the BARE-ID form. The contract's FORM-TAG discipline applies: each
+     form is compared ONLY against itself.
+
+  GREP-FULL diff:  base-only = 37   head-only = 33
+  BARE-ID   diff:  base-only = 36   head-only = 33
+    (the 37th base-only entry is the LOG line above — it is not a test
+     id and cannot be run; the runnable base-only set is 36)
+
+  THE '35 vs 37' DELTA: the lane's earlier report said '35 base-only'.
+  That was a MISCOUNT of the 37-entry list (the list is reproduced in
+  bareid.base-only.txt + the one log line). The comparator's
+  recomputation from the preserved node-id lists gives 37 (GREP-FULL)
+  and 36 (BARE-ID) — the 37 is CORRECT and the 35 was wrong.
+  The adjudication ran against the 36 runnable base-only ids + the 33
+  head-only ids = 69 ids.
+
+------------------------------------------------------------------------------
+2. LEG 1 — THE PER-ID ADJUDICATION (each id in ISOLATION, 3 runs per side)
+------------------------------------------------------------------------------
+
+  matrix: 69 ids x 2 sides x 3 runs = 414 single-node pytest processes
+
+     60  ORDER/LOAD-SENSITIVE (green on both sides in isolation)
+      7  PRE-EXISTING (red on BOTH sides)
+      2  RESOLVED-AT-HEAD (red on BASE only — the base-only side of the diff)
+
+  LANE CANDIDATES (red on HEAD only, green on BASE): 0
+
+  >>> EVERY one of the 33 head-only ids is GREEN on HEAD in isolation
+      (3/3) and green on BASE (3/3). A lane regression REPRODUCES in
+      isolation; these do not.
+
+------------------------------------------------------------------------------
+3. LEG 1 — THE FILE LEVEL (15 files, 3 runs per side)
+------------------------------------------------------------------------------
+
+  files with an IDENTICAL red set on both sides: 13 / 15
+
+    SAME    2 reds   tests/integration/test_get_instance_messages_response_shape_frozen_fixture.py
+    SAME    3 reds   tests/integration/test_persistence_w1_markers.py
+    SAME    1 reds   tests/message_queue_redesign/test_atomic_status_transitions.py   (the red set is UNSTABLE across the 3 runs on a side)
+    SAME    0 reds   tests/test_dependency_bus.py
+    SAME    0 reds   tests/test_initiative_message.py
+    SAME   23 reds   tests/test_injection_api.py
+    SAME    1 reds   tests/test_instance_list_order_api.py
+    SAME    1 reds   tests/test_manager_shutdown.py   (the red set is UNSTABLE across the 3 runs on a side)
+    SAME   20 reds   tests/unit/routers/test_defer_blocked_api.py
+    SAME   25 reds   tests/unit/routers/test_slash_commands_router.py
+    SAME   10 reds   tests/unit/routers/test_work_router.py
+    SAME    0 reds   tests/unit/test_ari_user_ruling_wake_semantics.py
+    SAME    0 reds   tests/unit/tools/test_frozen_tool_name_discovery.py
+
+  files whose red set DIFFERS between the sides: 2
+    DIFF  tests/message_queue_redesign/test_atomic_dequeue.py
+          BASE reds=1 (stable=False)   HEAD reds=0 (stable=True)
+            base-only: tests/message_queue_redesign/test_atomic_dequeue.py::TestDequeueAtomicClaim::test_dequeue_with_instance_filter_under_concurrency
+    DIFF  tests/unit/test_plane_sync.py
+          BASE reds=1 (stable=False)   HEAD reds=0 (stable=True)
+            base-only: tests/unit/test_plane_sync.py::TestEdgeCaseConcurrentSync::test_service_concurrent_calls_dont_crash
+
+  >>> ALL FIVE files that own the 33 head-only ids have a BYTE-IDENTICAL
+      red set on both sides (test_injection_api.py 23/23,
+      test_defer_blocked_api.py 20/20, test_slash_commands_router.py 25/25,
+      test_work_router.py 10/10, test_instance_list_order_api.py 1/1).
+      The two that differ are BASE-side FLAKY concurrency tests — their
+      red set is UNSTABLE across BASE's OWN three runs.
+
+------------------------------------------------------------------------------
+4. LEG 1b — THE WHOLE DIFF SET AS ONE BATCH (69 ids, one session, 3 per side)
+------------------------------------------------------------------------------
+
+  the BASE union red set: 56 ids
+  the HEAD union red set: 55 ids
+  the symmetric difference: 1 ids
+    base-only: tests/message_queue_redesign/test_atomic_status_transitions.py::TestUpdateActivityAtomic::test_update_activity_concurrent_does_not_clobber_terminal_status
+
+------------------------------------------------------------------------------
+5. LEG 2 — THE SHARD DETERMINISM (the SAME shard, the SAME tree, TWICE)
+------------------------------------------------------------------------------
+
+  THIS IS THE DECISIVE LEG. The sweep ran each shard with xdist INSIDE
+  it, so the node order inside a shard varies with worker timing. If the
+  SAME shard on the SAME tree yields DIFFERENT red sets across two runs,
+  the shard-level FAILED set is not a reproducible artefact and the
+  whole-tree comparison at shard granularity is inherently NOISY.
+
+  shard-002 on the BASE tree:
+    run1: 82 reds
+    run2: 80 reds
+    => NON-DETERMINISTIC: 14 ids only in run 1, 12 only in run 2
+         run1-only: tests/test_chart_tools_reuse_integration.py::TestT1RealDispatchReviveWalk::test_second_call_revives_same_charter_via_real_enqueue
+         run1-only: tests/test_dependency_bus.py::TestGenerationCounterBump::test_per_parent_lock_serializes_db_insert
+         run1-only: tests/test_initiative_message.py::TestAPIDetailEndpoint::test_get_returns_initiative_message_even_without_title
+         run1-only: tests/test_initiative_message.py::TestAPIDetailEndpoint::test_get_returns_initiative_message_when_set
+         run1-only: tests/test_initiative_message.py::TestAPIDetailEndpoint::test_get_returns_null_when_absent
+         run1-only: tests/test_initiative_message.py::TestAPIListEndpoint::test_list_includes_initiative_message_per_row
+         run1-only: tests/test_initiative_message.py::TestAPIListEndpoint::test_search_combines_title_and_initiative_message_via_api
+         run1-only: tests/test_initiative_message.py::TestAPIListEndpoint::test_search_via_initiative_message_via_api
+         run2-only: tests/test_injection_api.py::TestEnqueuePath::test_non_running_status_routes_to_enqueue_with_200[queued]
+         run2-only: tests/test_injection_api.py::TestEnqueuePath::test_non_running_status_routes_to_enqueue_with_200[terminated]
+         run2-only: tests/test_injection_api.py::TestInjectionPath::test_pending_count_reflects_post_set_state
+         run2-only: tests/test_injection_api.py::TestInjectionPath::test_post_time_user_message_survives_sse_outage
+         run2-only: tests/test_injection_api.py::TestInjectionPath::test_running_202_body_includes_message_id_existing_keys_unchanged
+         run2-only: tests/test_injection_api.py::TestInjectionPath::test_running_does_not_enqueue_message_job
+         run2-only: tests/test_injection_api.py::TestInjectionPath::test_running_routes_to_injection_with_202
+         run2-only: tests/test_instance_search_api.py::TestSearchFieldMatching::test_search_matches_agent_name
+         ... (the full sets are in shard-determinism-matrix.tsv)
+  shard-005 on the BASE tree:
+    run1: 61 reds
+    run2: 68 reds
+    => NON-DETERMINISTIC: 2 ids only in run 1, 9 only in run 2
+         run1-only: tests/unit/routers/test_work_router.py::TestListWorkBasic::test_empty_result_returns_empty_array
+         run1-only: tests/unit/routers/test_work_router.py::TestListWorkBasic::test_list_work_returns_jobs_and_tasks
+         run2-only: tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_unknown_command_returns_400_with_available_list
+         run2-only: tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_unknown_command_short_circuits_before_idle_enqueue
+         run2-only: tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_unknown_command_with_empty_registry
+         run2-only: tests/unit/routers/test_slash_commands_router.py::TestTerminalInstanceAckRejection::test_completed_compact_accepts_at_router
+         run2-only: tests/unit/routers/test_slash_commands_router.py::TestTerminalInstanceAckRejection::test_every_compact_reject_status_rejects_at_router[error]
+         run2-only: tests/unit/routers/test_slash_commands_router.py::TestTerminalInstanceAckRejection::test_every_compact_reject_status_rejects_at_router[failed]
+         run2-only: tests/unit/routers/test_slash_commands_router.py::TestTerminalInstanceAckRejection::test_every_compact_reject_status_rejects_at_router[terminated]
+         run2-only: tests/unit/routers/test_work_router.py::TestSerialization::test_none_fields_serialized_as_null
+         ... (the full sets are in shard-determinism-matrix.tsv)
+
+  >>> The run1-only / run2-only ids are EXACTLY the families that make up
+      the sweep's base-only/head-only diff (test_injection_api.py,
+      test_slash_commands_router.py, test_work_router.py,
+      test_initiative_message.py, test_instance_list_order_api.py,
+      test_instance_search_api.py, test_dependency_bus.py).
+      The same tree, the same shard, the same command, two runs =>
+      different red sets. The sweep-level delta is therefore a
+      COMPOSITION ARTEFACT of the parallel shard, NOT a behavioural
+      difference between the two trees.
+
+------------------------------------------------------------------------------
+6. THE STRUCTURAL SIGNATURE (why a regression would have looked different)
+------------------------------------------------------------------------------
+
+  All 33 head-only ids live in TWO shards (shard-002: 12, shard-005: 21);
+  the base-only ids are spread over EIGHT shards (0:5, 1:3, 2:10, 3:1,
+  5:13, 6:1, 9:2, 11:1) — i.e. the churn is CONFINED to the two shards
+  that carry the unstable files.
+
+  Decisively: FIVE files appear on BOTH sides of the diff with DIFFERENT
+  ids inside them (test_injection_api.py, test_slash_commands_router.py,
+  test_work_router.py). A lane regression produces a SUPERSET relation
+  (the lane's ids fail at HEAD and pass at BASE) — a SHIFT inside the
+  same files is the signature of a non-deterministic measurement.
+
+==============================================================================
+THE VERDICT
+==============================================================================
+
+  NET-NEW = 0 — RE-AFFIRMED, with in-repo evidence.
+
+  The whole-tree leg's two FAILED-id sets differ (37 base-only / 33
+  head-only in the GREP-FULL form), but the difference is a MEASUREMENT
+  ARTEFACT of the parallel shard, proven by:
+    (a) the per-id adjudication (69 ids x 3 runs x 2 sides): 0 lane
+        candidates — every head-only id is green in isolation on both
+        sides;
+    (b) the file-level leg (15 files x 3 runs x 2 sides): 13/15 files
+        carry a BYTE-IDENTICAL red set on both sides, including all five
+        files that own the head-only ids; the two that differ are
+        BASE-side flaky concurrency tests;
+    (c) the batch leg (the whole 69-id set as ONE session, 3 runs per
+        side): the symmetric difference is ONE id — the known BASE-side
+        flaky concurrency test;
+    (d) the shard-determinism leg: the SAME shard on the SAME tree
+        yields DIFFERENT red sets across two runs — the shard-level
+        digest is not a reproducible instrument.
+
+  NO lane regression surfaced. No product code was changed in this round.
+

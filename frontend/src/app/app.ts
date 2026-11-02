@@ -586,7 +586,15 @@ export class App implements OnInit {
     // and BEFORE the conditional Database/Maintenance appends so those
     // appends still land at the menu tail (the resources ordering pin
     // in resources-gear-menu.spec.ts must stay green).
-    { label: 'MCP Gateway', icon: 'computer', route: '/mcps-gateway' }
+    { label: 'MCP Gateway', icon: 'computer', route: '/mcps-gateway' },
+    // Metrics — the central-metrics charts page (Phase 5 of the
+    // central-metrics-v1 lane). Appended AFTER MCP Gateway and BEFORE
+    // the conditional Database/Maintenance appends so those appends
+    // still land at the menu tail (the resources ordering pin in
+    // resources-gear-menu.spec.ts and the gateway ordering pin in
+    // mcps-gateway.pins.spec.ts must stay green). Static: the query
+    // door is never switch-gated, so the entry is always reachable.
+    { label: 'Metrics', icon: 'query_stats', route: '/metrics' }
   ]);
 
   constructor() {

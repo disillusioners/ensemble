@@ -1,0 +1,125 @@
+[1A[2K[WebServer] [1m[33m[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mNG8107: NG8107: The left side of this optional chain operation does not include 'null' or 'undefined' in its type, therefore the '?.' operator can be replaced with the '.' operator. Find more at https://v21.angular.dev/extended-diagnostics/NG8107[0m [1m[35m[plugin angular-compiler][0m
+[WebServer] 
+[WebServer]     src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.html:233:32:
+[WebServer] [37m      233 │             @if (d.domain_tags?.[32mlength[37m) {
+[WebServer]           ╵                                 [32m~~~~~~[0m
+[WebServer] 
+[WebServer]   Warning occurs in the template of component SnapshotDetailDrawerComponent.
+[WebServer] 
+[WebServer]     src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.ts:81:15:
+[WebServer] [37m      81 │   templateUrl: [32m'./snapshot-detail-drawer.component.html'[37m,
+[WebServer]          ╵                [32m~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~[0m
+[WebServer] 
+[WebServer] 
+[WebServer] [33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mNG8113: All imports are unused[0m [1m[35m[plugin angular-compiler][0m
+[WebServer] 
+[WebServer]     src/app/components/vscode-editor-cache/vscode-editor-cache.component.ts:57:2:
+[WebServer] [37m      57 │   [32mimports[37m: [VsCodeViewerComponent],
+[WebServer]          ╵   [32m~~~~~~~[0m
+[WebServer] 
+[WebServer] 
+[WebServer] [33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mNG8113: CheckpointCleanupComponent is not used within the template of MaintenanceComponent[0m [1m[35m[plugin angular-compiler][0m
+[WebServer] 
+[WebServer]     src/app/pages/maintenance/maintenance.component.ts:47:64:
+[WebServer] [37m      47 │ ...let, MatTabsModule, MatTooltipModule, [32mCheckpointCleanupComponent[37m],
+[WebServer]          ╵                                          [32m~~~~~~~~~~~~~~~~~~~~~~~~~~[0m
+[WebServer] 
+[WebServer] 
+[WebServer] [33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mNG8113: OverviewTabComponent is not used within the template of MetricsComponent[0m [1m[35m[plugin angular-compiler][0m
+[WebServer] 
+[WebServer]     src/app/pages/metrics/metrics.component.ts:70:4:
+[WebServer] [37m      70 │     [32mOverviewTabComponent[37m,
+[WebServer]          ╵     [32m~~~~~~~~~~~~~~~~~~~~[0m
+[WebServer] 
+[WebServer] 
+[WebServer] [33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mNG8113: ChartsTabComponent is not used within the template of MetricsComponent[0m [1m[35m[plugin angular-compiler][0m
+[WebServer] 
+[WebServer]     src/app/pages/metrics/metrics.component.ts:71:4:
+[WebServer] [37m      71 │     [32mChartsTabComponent[37m,
+[WebServer]          ╵     [32m~~~~~~~~~~~~~~~~~~[0m
+[WebServer] 
+[WebServer] 
+[WebServer] [33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mNG8113: FamiliesTabComponent is not used within the template of MetricsComponent[0m [1m[35m[plugin angular-compiler][0m
+[WebServer] 
+[WebServer]     src/app/pages/metrics/metrics.component.ts:72:4:
+[WebServer] [37m      72 │     [32mFamiliesTabComponent[37m,
+[WebServer]          ╵     [32m~~~~~~~~~~~~~~~~~~~~[0m
+[WebServer] 
+[WebServer] 
+[WebServer] [33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mNG8113: LiveTabComponent is not used within the template of ResourcesComponent[0m [1m[35m[plugin angular-compiler][0m
+[WebServer] 
+[WebServer]     src/app/pages/resources/resources.component.ts:38:46:
+[WebServer] [37m      38 │ ...entOutlet, MatTabsModule, [32mLiveTabComponent[37m, TimelineTabComponent],
+[WebServer]          ╵                              [32m~~~~~~~~~~~~~~~~[0m
+[WebServer] 
+[WebServer] 
+[WebServer] [33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mNG8113: TimelineTabComponent is not used within the template of ResourcesComponent[0m [1m[35m[plugin angular-compiler][0m
+[WebServer] 
+[WebServer]     src/app/pages/resources/resources.component.ts:38:64:
+[WebServer] [37m      38 │ ...entOutlet, MatTabsModule, LiveTabComponent, [32mTimelineTabComponent[37m],
+[WebServer]          ╵                                                [32m~~~~~~~~~~~~~~~~~~~~[0m
+[WebServer] 
+[WebServer] 
+[WebServer] [33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mDeprecation[0m [1m[35m[plugin angular-sass][0m
+[WebServer] 
+[WebServer]     src/app/components/chat-interface/chat-interface.scss:1170:11:
+[WebServer] [37m      1170 │     color: [32m[37mlighten($cyan, 8%);
+[WebServer]            ╵            [32m^[0m
+[WebServer] 
+[WebServer] 
+[WebServer]   Global built-in functions are deprecated and will be removed in Dart Sass 3.0.0.
+[WebServer]   Use color.adjust instead.
+[WebServer]   
+[WebServer]   More info and automated migrator: [4mhttps://sass-lang.com/d/import[0m
+[WebServer] 
+[WebServer] 
+[WebServer] [33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mDeprecation[0m [1m[35m[plugin angular-sass][0m
+[WebServer] 
+[WebServer]     src/app/components/chat-interface/chat-interface.scss:1170:11:
+[WebServer] [37m      1170 │     color: [32m[37mlighten($cyan, 8%);
+[WebServer]            ╵            [32m^[0m
+[WebServer] 
+[WebServer] 
+[WebServer]   lighten() is deprecated. Suggestions:
+[WebServer]   
+[WebServer]   color.scale($color, $lightness: 13.9726027397%)
+[WebServer]   color.adjust($color, $lightness: 8%)
+[WebServer]   
+[WebServer]   More info: [4mhttps://sass-lang.com/d/color-functions[0m
+[WebServer] 
+[WebServer] 
+[WebServer] [33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mDeprecation[0m [1m[35m[plugin angular-sass][0m
+[WebServer] 
+[WebServer]     src/app/pages/settings/settings.component.scss:167:18:
+[WebServer] [37m      167 │     border-color: [32m[37mlighten($border-color, 8%);
+[WebServer]           ╵                   [32m^[0m
+[WebServer] 
+[WebServer] 
+[WebServer]   Global built-in functions are deprecated and will be removed in Dart Sass 3.0.0.
+[WebServer]   Use color.adjust instead.
+[WebServer]   
+[WebServer]   More info and automated migrator: [4mhttps://sass-lang.com/d/import[0m
+[WebServer] 
+[WebServer] 
+[WebServer] [33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mDeprecation[0m [1m[35m[plugin angular-sass][0m
+[WebServer] 
+[WebServer]     src/app/pages/settings/settings.component.scss:167:18:
+[WebServer] [37m      167 │     border-color: [32m[37mlighten($border-color, 8%);
+[WebServer]           ╵                   [32m^[0m
+[WebServer] 
+[WebServer] 
+[WebServer]   lighten() is deprecated. Suggestions:
+[WebServer]   
+[WebServer]   color.scale($color, $lightness: 10.9090909091%)
+[WebServer]   color.adjust($color, $lightness: 8%)
+[WebServer]   
+[WebServer]   More info: [4mhttps://sass-lang.com/d/color-functions[0m
+[WebServer] 
+[WebServer] [39m[22m
+
+
+Running 2 tests using 1 worker
+
+[1A[2K[1/2] [chromium] › e2e/metrics-gate.spec.ts:235:5 › [P5] gear menu → /metrics → Overview stat cards → Charts → Families
+[1A[2K[2/2] [chromium] › e2e/metrics-gate.spec.ts:312:5 › [P5] deep-link /metrics renders without a daemon
+[1A[2K  2 passed (31.2s)

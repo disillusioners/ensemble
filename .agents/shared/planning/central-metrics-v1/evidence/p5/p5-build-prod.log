@@ -1,0 +1,220 @@
+❯ Building...
+✔ Building...
+Initial chunk files | Names                     |  Raw size | Estimated transfer size
+scripts-DN54Y2NQ.js | scripts                   |   3.56 MB |               737.45 kB
+styles-S2UMLXTA.css | styles                    | 655.43 kB |                58.41 kB
+chunk-K3LECV3O.js   | -                         | 316.34 kB |               100.15 kB
+chunk-QU4CTU7Q.js   | -                         | 263.46 kB |                74.89 kB
+main-RPI6KUFY.js    | main                      | 215.50 kB |                76.04 kB
+chunk-LT5I6VNL.js   | -                         | 177.43 kB |                51.76 kB
+chunk-ECODFYU5.js   | -                         | 176.95 kB |                41.93 kB
+chunk-A7FB3L3Z.js   | -                         |  83.22 kB |                20.65 kB
+chunk-BS4DYTL4.js   | -                         |  58.70 kB |                14.46 kB
+chunk-RFSAQAHW.js   | -                         |  54.25 kB |                14.99 kB
+chunk-KDL6OUIX.js   | -                         |  48.60 kB |                 7.68 kB
+chunk-MJ6TYYFY.js   | -                         |  43.20 kB |                 8.92 kB
+chunk-O2QJKYEZ.js   | -                         |  28.72 kB |                 6.72 kB
+chunk-MUMAWL6B.js   | -                         |  27.49 kB |                 5.04 kB
+chunk-47DYYZT6.js   | -                         |  27.48 kB |                 8.87 kB
+chunk-6PBQAVJ3.js   | -                         |  25.45 kB |                 6.78 kB
+chunk-HWXUMSD4.js   | -                         |  23.08 kB |                 4.67 kB
+chunk-2SRTJ5ZV.js   | -                         |  19.06 kB |                 4.70 kB
+chunk-LQO3FN7L.js   | -                         |  17.82 kB |                 4.78 kB
+chunk-PVDC7TWX.js   | -                         |  15.31 kB |                 4.16 kB
+chunk-IXR6NFZX.js   | -                         |  12.47 kB |                 3.80 kB
+chunk-H7E72XS4.js   | -                         |   9.75 kB |                 2.31 kB
+chunk-ZG3SQOHY.js   | -                         |   9.74 kB |                 2.76 kB
+chunk-PXTU7IYH.js   | -                         |   8.14 kB |                 2.38 kB
+chunk-7NSQQT23.js   | -                         |   6.63 kB |                 1.98 kB
+chunk-OUSHLOUM.js   | -                         |   4.57 kB |               990 bytes
+chunk-RYWH4HKR.js   | -                         |   4.08 kB |               984 bytes
+chunk-YNYIAMT5.js   | -                         |   3.53 kB |                 1.08 kB
+chunk-LWHOR42B.js   | -                         |   3.16 kB |                 1.01 kB
+chunk-NQBLKQAK.js   | -                         |   3.15 kB |                 1.19 kB
+chunk-PHV6DMPS.js   | -                         |   1.71 kB |               487 bytes
+chunk-LX7Q7JLT.js   | -                         |   1.55 kB |               520 bytes
+chunk-ARO7TAIK.js   | -                         | 832 bytes |               832 bytes
+chunk-5CZJKLDN.js   | -                         | 631 bytes |               631 bytes
+chunk-XZY2XTFQ.js   | -                         | 523 bytes |               523 bytes
+chunk-T47LDKCK.js   | -                         | 417 bytes |               417 bytes
+
+                    | Initial total             |   5.91 MB |                 1.27 MB
+
+Lazy chunk files    | Names                     |  Raw size | Estimated transfer size
+chunk-QS2K3YLH.js   | -                         | 157.14 kB |                25.64 kB
+chunk-HNKUMJNH.js   | jobs-component            | 135.69 kB |                28.14 kB
+chunk-VB6YWT2W.js   | skill-detail-component    | 113.27 kB |                24.23 kB
+chunk-XHFI3MDH.js   | -                         |  96.41 kB |                21.61 kB
+chunk-WNKO3NE6.js   | maintenance-component     |  88.93 kB |                17.44 kB
+chunk-AB7N6YMB.js   | snapshots-component       |  85.31 kB |                16.39 kB
+chunk-KD7VOIYI.js   | chat-component            |  78.59 kB |                17.03 kB
+chunk-MUMRXH4Z.js   | -                         |  68.73 kB |                11.64 kB
+chunk-6OD53EWF.js   | -                         |  67.24 kB |                 7.96 kB
+chunk-5VEIII2F.js   | blueprint-component       |  65.77 kB |                12.28 kB
+chunk-UZQRF4O3.js   | -                         |  60.60 kB |                13.24 kB
+chunk-5BBZQFKM.js   | mcp-server-list-component |  58.60 kB |                11.95 kB
+chunk-H546GGUK.js   | schedules-component       |  54.28 kB |                11.76 kB
+chunk-6Y6F4JKW.js   | -                         |  43.69 kB |                 9.28 kB
+chunk-ZCJXJHZ4.js   | -                         |  38.98 kB |                 8.77 kB
+...and 37 more lazy chunks files. Use "--verbose" to show all the files.
+
+Application bundle generation complete. [28.700 seconds] - 2026-11-02T09:54:31.879Z
+
+▲ [WARNING] NG8107: NG8107: The left side of this optional chain operation does not include 'null' or 'undefined' in its type, therefore the '?.' operator can be replaced with the '.' operator. Find more at https://v21.angular.dev/extended-diagnostics/NG8107 [plugin angular-compiler]
+
+    src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.html:233:32:
+      233 │             @if (d.domain_tags?.length) {
+          ╵                                 ~~~~~~
+
+  Warning occurs in the template of component SnapshotDetailDrawerComponent.
+
+    src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.ts:81:15:
+      81 │   templateUrl: './snapshot-detail-drawer.component.html',
+         ╵                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: All imports are unused [plugin angular-compiler]
+
+    src/app/components/vscode-editor-cache/vscode-editor-cache.component.ts:57:2:
+      57 │   imports: [VsCodeViewerComponent],
+         ╵   ~~~~~~~
+
+
+▲ [WARNING] NG8113: CheckpointCleanupComponent is not used within the template of MaintenanceComponent [plugin angular-compiler]
+
+    src/app/pages/maintenance/maintenance.component.ts:47:64:
+      47 │ ...let, MatTabsModule, MatTooltipModule, CheckpointCleanupComponent],
+         ╵                                          ~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: DecimalPipe is not used within the template of FamiliesTabComponent [plugin angular-compiler]
+
+    src/app/pages/metrics/families/families-tab.component.ts:33:12:
+      33 │   imports: [DecimalPipe, MatButtonModule, MatTooltipModule],
+         ╵             ~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: OverviewTabComponent is not used within the template of MetricsComponent [plugin angular-compiler]
+
+    src/app/pages/metrics/metrics.component.ts:69:4:
+      69 │     OverviewTabComponent,
+         ╵     ~~~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: ChartsTabComponent is not used within the template of MetricsComponent [plugin angular-compiler]
+
+    src/app/pages/metrics/metrics.component.ts:70:4:
+      70 │     ChartsTabComponent,
+         ╵     ~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: FamiliesTabComponent is not used within the template of MetricsComponent [plugin angular-compiler]
+
+    src/app/pages/metrics/metrics.component.ts:71:4:
+      71 │     FamiliesTabComponent,
+         ╵     ~~~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: LiveTabComponent is not used within the template of ResourcesComponent [plugin angular-compiler]
+
+    src/app/pages/resources/resources.component.ts:38:46:
+      38 │ ...entOutlet, MatTabsModule, LiveTabComponent, TimelineTabComponent],
+         ╵                              ~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: TimelineTabComponent is not used within the template of ResourcesComponent [plugin angular-compiler]
+
+    src/app/pages/resources/resources.component.ts:38:64:
+      38 │ ...entOutlet, MatTabsModule, LiveTabComponent, TimelineTabComponent],
+         ╵                                                ~~~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] Deprecation [plugin angular-sass]
+
+    src/app/components/chat-interface/chat-interface.scss:1170:11:
+      1170 │     color: lighten($cyan, 8%);
+           ╵            ^
+
+
+  Global built-in functions are deprecated and will be removed in Dart Sass 3.0.0.
+  Use color.adjust instead.
+  
+  More info and automated migrator: https://sass-lang.com/d/import
+
+
+▲ [WARNING] Deprecation [plugin angular-sass]
+
+    src/app/components/chat-interface/chat-interface.scss:1170:11:
+      1170 │     color: lighten($cyan, 8%);
+           ╵            ^
+
+
+  lighten() is deprecated. Suggestions:
+  
+  color.scale($color, $lightness: 13.9726027397%)
+  color.adjust($color, $lightness: 8%)
+  
+  More info: https://sass-lang.com/d/color-functions
+
+
+▲ [WARNING] Deprecation [plugin angular-sass]
+
+    src/app/pages/settings/settings.component.scss:167:18:
+      167 │     border-color: lighten($border-color, 8%);
+          ╵                   ^
+
+
+  Global built-in functions are deprecated and will be removed in Dart Sass 3.0.0.
+  Use color.adjust instead.
+  
+  More info and automated migrator: https://sass-lang.com/d/import
+
+
+▲ [WARNING] Deprecation [plugin angular-sass]
+
+    src/app/pages/settings/settings.component.scss:167:18:
+      167 │     border-color: lighten($border-color, 8%);
+          ╵                   ^
+
+
+  lighten() is deprecated. Suggestions:
+  
+  color.scale($color, $lightness: 10.9090909091%)
+  color.adjust($color, $lightness: 8%)
+  
+  More info: https://sass-lang.com/d/color-functions
+
+
+▲ [WARNING] bundle initial exceeded maximum budget. Budget 1.00 MB was not met by 4.91 MB with a total of 5.91 MB.
+
+
+▲ [WARNING] src/app/components/agent-selector/agent-selector.scss exceeded maximum budget. Budget 8.00 kB was not met by 765 bytes with a total of 8.77 kB.
+
+
+▲ [WARNING] src/app/components/add-source-modal/add-source-modal.scss exceeded maximum budget. Budget 8.00 kB was not met by 318 bytes with a total of 8.32 kB.
+
+
+▲ [WARNING] src/app/pages/blueprint/blueprint.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 10.32 kB with a total of 18.32 kB.
+
+
+▲ [WARNING] src/app/pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 701 bytes with a total of 8.70 kB.
+
+
+▲ [WARNING] src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 697 bytes with a total of 8.70 kB.
+
+
+▲ [WARNING] src/app/pages/snapshots/snapshots.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 4.29 kB with a total of 12.29 kB.
+
+
+▲ [WARNING] src/app/components/instance-list/instance-list.scss exceeded maximum budget. Budget 8.00 kB was not met by 2.17 kB with a total of 10.17 kB.
+
+
+▲ [WARNING] src/app/pages/jobs/jobs.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 6.77 kB with a total of 14.77 kB.
+
+
+▲ [WARNING] src/app/components/chat-interface/chat-interface.scss exceeded maximum budget. Budget 8.00 kB was not met by 8.15 kB with a total of 16.15 kB.
+
+
+Output location: /home/nea/ensemble-src-wt-central-metrics-v1/frontend/dist/frontend
+
+BUILD_PROD_EXIT=0

@@ -1,0 +1,39 @@
+# D-c — the contract's 403 token: the shipped pack's pin, measured.
+#
+# The council ruled (D-c): the contract doc's error-vocabulary block must render the 403
+# token as the SHIPPED uppercase 'SCOPE_INSUFFICIENT'. The contract is amended.
+#
+# CONSEQUENCE (measured, not assumed): the shipped D1 pack
+# 'central_metrics_contract_doc' pins that block against a literal tuple in the TEST
+# file, and that tuple still carries the superseded lowercase token:
+#
+#   tests/unit/metrics/test_central_metrics_contract_doc.py:59  ->  "403 scope_insufficient",
+#
+# so the pack goes RED on exactly that one assertion until the pin follows the ruling.
+# The test file is OUTSIDE this lane's fence (zero code, no tests/) — the pin update is
+# the OWNING test lane's, authorised by the same council ruling.
+#
+# The measured run (2026-11-02, the fenced dev env, the pack's own invocation):
+#
+#   ...........F.........                                                    [100%]
+#   =================================== FAILURES ===================================
+#   ____________ TestErrorVocabulary.test_the_error_vocabulary_is_exact ____________
+#   
+#   self = <tests.unit.metrics.test_central_metrics_contract_doc.TestErrorVocabulary object at 0x7e7b56dfbd90>
+#   
+#       def test_the_error_vocabulary_is_exact(self) -> None:
+#   >       assert _block(_doc_text(), "error-vocabulary") == list(
+#               EXPECTED_ERROR_VOCABULARY
+#           )
+#   E       AssertionError: assert ['404 unknown...INSUFFICIENT'] == ['404 unknown...insufficient']
+#   E         
+#   E         At index 5 diff: '403 SCOPE_INSUFFICIENT' != '403 scope_insufficient'
+#   E         Use -v to get more diff
+#   
+#   tests/unit/metrics/test_central_metrics_contract_doc.py:169: AssertionError
+#   =========================== short test summary info ============================
+#   FAILED tests/unit/metrics/test_central_metrics_contract_doc.py::TestErrorVocabulary::test_the_error_vocabulary_is_exact
+#   1 failed, 20 passed in 0.49s
+#
+# VERDICT: 1 failed, 20 passed — the failure is the INTENDED change and nothing else
+# (the assertion's diff is index 5 only: '403 SCOPE_INSUFFICIENT' != '403 scope_insufficient').

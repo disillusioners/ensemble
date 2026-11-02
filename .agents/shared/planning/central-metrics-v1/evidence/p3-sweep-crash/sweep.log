@@ -1,0 +1,24 @@
+=== sweep dir: /tmp/p3-sweep-20261102T051334Z ===
+=== CPUs: 16 ===
+BASE collected: 32450 nodes
+HEAD collected: 32723 nodes
+COLLECT-DIFF (the additive lane's own files are HEAD-only — expected):
+=== sweep leg: BASE ===
+BASE rc=3
+INTERNALERROR> assert not 'tests/test_custom_agent_lifecycle.py::TestCustomAgentCreation::test_creates_config_and_v1_soul_in_one_txn'
+
+82 failed, 2323 passed, 74 skipped, 1886 warnings in 180.99s (0:03:00)
+BASE digest (BARE-ID): e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  nodes=0
+BASE skips: 74 skipped
+=== sweep leg: HEAD ===
+HEAD rc=3
+INTERNALERROR> assert not 'tests/test_loader_empty_content_m16.py::TestCoreClassEmptyContent::test_selected_empty_string_preserved'
+
+76 failed, 2053 passed, 67 skipped, 1743 warnings in 170.13s (0:02:50)
+HEAD digest (BARE-ID): e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  nodes=0
+HEAD skips: 67 skipped
+
+=== SWEEP DIGEST DIFF ===
+DIGEST-EQUAL: the FAILED sets are byte-identical (net-new = EMPTY)
+
+=== sweep dir: /tmp/p3-sweep-20261102T051334Z ===

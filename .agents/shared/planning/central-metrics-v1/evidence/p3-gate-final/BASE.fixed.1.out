@@ -1,0 +1,30 @@
+FFFFF...........FF.FFFFFFFFFFFFF....                                     [100%]
+=============================== warnings summary ===============================
+tests/message_queue_redesign/test_atomic_dequeue.py: 12 warnings
+tests/message_queue_redesign/test_atomic_status_transitions.py: 2 warnings
+  /home/nea/ensemble-src/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/integration/test_get_instance_messages_response_shape_frozen_fixture.py::test_frozen_fixture_no_alist_on_shape_run
+FAILED tests/integration/test_get_instance_messages_response_shape_frozen_fixture.py::test_response_shape_frozen_fixture
+FAILED tests/integration/test_persistence_w1_markers.py::test_w1_d12_caller_keeps_own_injected_context
+FAILED tests/integration/test_persistence_w1_markers.py::test_w1_d12_structured_filter_drops_descendant_injected_context
+FAILED tests/integration/test_persistence_w1_markers.py::test_w1_markers_survive_real_checkpoint_round_trip
+FAILED tests/test_injection_api.py::TestInjectionPath::test_running_202_body_includes_message_id_existing_keys_unchanged
+FAILED tests/test_injection_api.py::TestInjectionPath::test_running_does_not_enqueue_message_job
+FAILED tests/unit/routers/test_slash_commands_router.py::TestEscapePathSingleWrite::test_running_state_one_injection_zero_enqueue
+FAILED tests/unit/routers/test_slash_commands_router.py::TestEscapePathSingleWrite::test_waiting_children_routes_through_enqueue
+FAILED tests/unit/routers/test_slash_commands_router.py::TestNonCommandTrafficByteIdentity::test_existing_404_path_unchanged
+FAILED tests/unit/routers/test_slash_commands_router.py::TestNonCommandTrafficByteIdentity::test_existing_empty_content_400_unchanged
+FAILED tests/unit/routers/test_slash_commands_router.py::TestNonCommandTrafficByteIdentity::test_idle_passthrough_with_dispatcher_disabled
+FAILED tests/unit/routers/test_slash_commands_router.py::TestNonCommandTrafficByteIdentity::test_idle_passthrough_with_dispatcher_enabled
+FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_unknown_command_short_circuits_before_idle_enqueue
+FAILED tests/unit/routers/test_slash_commands_router.py::TestSlashCommandIntercept::test_unknown_command_with_empty_registry
+FAILED tests/unit/routers/test_slash_commands_router.py::TestTerminalInstanceAckRejection::test_completed_compact_accepts_at_router
+FAILED tests/unit/routers/test_slash_commands_router.py::TestTerminalInstanceAckRejection::test_every_compact_reject_status_rejects_at_router[error]
+FAILED tests/unit/routers/test_work_router.py::TestListWorkBasic::test_empty_result_returns_empty_array
+FAILED tests/unit/routers/test_work_router.py::TestListWorkBasic::test_list_work_returns_jobs_and_tasks
+FAILED tests/unit/routers/test_work_router.py::TestProjectFilter::test_project_id_filter_on_jobs
+20 failed, 16 passed, 14 warnings in 8.98s

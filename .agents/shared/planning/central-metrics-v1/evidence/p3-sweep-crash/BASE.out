@@ -1,0 +1,1327 @@
+bringing up nodes...
+bringing up nodes...
+
+.............sss..ss.........s.......................................... [  0%]
+....................................................................F... [  0%]
+........................................................................ [  0%]
+.........F......s....................................................... [  0%]
+........................................................................ [  1%]
+.................................................................F...... [  1%]
+F..........F.....................F..................F........F.F.....F.. [  1%]
+.......F.........F........F..........F......F......F..F.....F.F......... [  1%]
+.....F..F........F....F........F........................................ [  1%]
+.................F.F.....................F....F.....F.F................. [  2%]
+F.....F................................................................. [  2%]
+...........F............................................................ [  2%]
+.........F...................sss..ss.......F...........F..............F. [  2%]
+..............................F......................................... [  3%]
+...............ssss.ssssss.ss.sssssssssssss............................. [  3%]
+.F......................F.F............................................F [  3%]
+........................................F............................... [  3%]
+..F..F...............F.FF.FF.F.F.........FF.F..F.F.....FF.F.F........... [  3%]
+.................................................FFF.F.......F...F...... [  4%]
+...........F............................................................ [  4%]
+.......................................FFF........................F..F.. [  4%]
+....................................F...F.....F.....ss.sss......ssssssss [  4%]
+ss...................................................................... [  5%]
+........................................................................ [  5%]
+........................................................................ [  5%]
+....F.F................................................................. [  5%]
+.............ss.ssss...................ssssssssssssss................... [  5%]
+..........................................s............................. [  6%]
+........................................................................ [  6%]
+............................................................F........... [  6%]
+........F..........................................................F.... [  6%]
+........................................................................ [  7%]
+............................F........................................... [  7%]
+........................................................................ [  7%]
+..............................--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=9d80ce97-545d-4ba7-ad7e-50619b3d061c, name=planning-strategy, project_id=None, agent_id=planner, auto_load=True'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=e5dd30ea-539c-4e46-8580-81eff1e1c266, name=plan-creation, project_id=None, agent_id=planner, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=dd88ac78-d442-47a9-a897-769f6566cc29, name=roadmap-strategy, project_id=None, agent_id=planner, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=687721df-27b9-4367-ad8b-6c5e7b984138, name=requirements-analysis, project_id=None, agent_id=planner, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=df0ff72d-03c0-443f-ab2f-71a0309ade26, name=technical-analysis, project_id=None, agent_id=planner, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=169a9485-8c7e-4125-98dc-be40059b8682, name=review-strategy, project_id=None, agent_id=reviewer, auto_load=True'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=605815eb-a16f-4164-96c1-fa4715a1f04b, name=code-review, project_id=None, agent_id=reviewer, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=687a967c-de76-46f0-843b-ffeb707d2190, name=plan-review, project_id=None, agent_id=reviewer, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=79d42582-da7c-4d74-812c-4eb80e3c1b03, name=architecture-review, project_id=None, agent_id=reviewer, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=11e0e8be-8e05-44ba-b9c3-229692ac0876, name=security-review, project_id=None, agent_id=reviewer, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=3812ea96-912e-4e0e-b337-71c1cf923d99, name=pr-review, project_id=None, agent_id=reviewer, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=b215e4ba-b4ae-498c-a191-593cdfce2260, name=business-logic-review, project_id=None, agent_id=reviewer, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=50cf8fd8-5651-4144-8456-6a92ef5d9354, name=opendesign.generate-pipeline, project_id=None, agent_id=sketcher, auto_load=True'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=b05ab8e2-3ac9-47e9-9edd-3fd0d726a194, name=opendesign.list_systems, project_id=None, agent_id=sketcher, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=cb0beb34-f6f6-4633-ae7a-0bd82652c070, name=test-strategy, project_id=None, agent_id=tester, auto_load=True'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=adffefd6-3db1-41c9-9a62-d216fde8c83e, name=test-pack-execution, project_id=None, agent_id=tester, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=cc3c2c83-a3b7-4ab7-a7a9-96629cad4c26, name=mock-test, project_id=None, agent_id=tester, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=1364fa4e-b046-4708-95ef-4ec12f07c9aa, name=unit-test, project_id=None, agent_id=tester, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=717111ea-6f7e-467d-a316-8801a1031905, name=integration-test, project_id=None, agent_id=tester, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=044590f0-670f-4362-b86a-508f3237fdcc, name=e2e-test, project_id=None, agent_id=tester, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=bccadb29-d032-454b-a4a8-7cf28e4721c8, name=ensure-validation, project_id=None, agent_id=tester, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=7341b07e-47c6-4681-a5e1-cd3dd903a25f, name=flaky-test-management, project_id=None, agent_id=tester, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=ddb30c45-425b-4548-b1e9-3a9d553fda9f, name=quick-fix, project_id=None, agent_id=tester, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=f78be950-fbad-4c33-858e-f2491d5a8710, name=tidier-strategy, project_id=None, agent_id=tidier, auto_load=True'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=506db5af-8706-42ff-b999-192020be275f, name=tidier-readable-code, project_id=None, agent_id=tidier, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=a81acbf4-f200-4e7d-ba82-9a5fb1c8ef0d, name=tidier-static-hygiene, project_id=None, agent_id=tidier, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=46defa80-d621-4873-909c-87082daf6c6e, name=tidier-robustness, project_id=None, agent_id=tidier, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=ac5075f6-ad2e-418f-9f58-0cc143057af1, name=investigation-strategy, project_id=None, agent_id=wanderer, auto_load=True'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=48789a94-4fda-48d8-bb53-85286d30789c, name=codebase-mapping, project_id=None, agent_id=wanderer, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=4d6beb46-d1a5-482a-b8c5-cfc7fee2b3af, name=root-cause-analysis, project_id=None, agent_id=wanderer, auto_load=False'
+Arguments: ()
+  File "<string>", line 1, in <module>
+    import sys;exec(eval(sys.stdin.readline()))
+  File "<string>", line 8, in <module>
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 1806, in serve
+    WorkerGateway(io=io, id=id, _startcount=2).serve()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 1273, in serve
+    self._execpool.integrate_as_primary_thread()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 389, in integrate_as_primary_thread
+    self._perform_spawn(reply)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 411, in _perform_spawn
+    reply.run()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 341, in run
+    self._result = func(*args, **kwargs)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 1291, in executetask
+    exec(co, loc)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/xdist/remote.py", line 427, in <module>
+    config.hook.pytest_cmdline_main(config=config)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/main.py", line 365, in pytest_cmdline_main
+    return wrap_session(config, _main)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/main.py", line 353, in wrap_session
+    config.hook.pytest_sessionfinish(
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 112, in pytest_sessionfinish
+    session._setupstate.teardown_exact(None)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 555, in teardown_exact
+    fin()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1042, in finish
+    fin()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 924, in _teardown_yield_fixture
+    next(it)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/tests/job_queue/conftest.py", line 532, in dependency_bus
+    set_dependency_bus(None)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/dependency_bus.py", line 2812, in set_dependency_bus
+    logger.info("DependencyBus unregistered")
+Message: 'DependencyBus unregistered'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=c39395b0-f5ab-4582-8e9a-02950d27aceb, name=library-research, project_id=None, agent_id=wanderer, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 420, in seed_agent
+    self._bank_repo.create(
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/repositories/skill/skill_bank_repository.py", line 123, in create
+    logger.info(
+Message: 'Created skill bank item: id=a19e349a-c5e6-4513-b768-83e35a788cec, name=code-investigation, project_id=None, agent_id=wanderer, auto_load=False'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 292, in seed_all
+    result = self.seed_agent(agent_id, agent_dir, skill_set_path)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 342, in seed_agent
+    logger.info(
+Message: "No skills to seed for agent 'worker' (empty or unparseable skill-set file: skill-set.yaml)"
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1015, in _bootstrap
+    self._bootstrap_inner()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 1044, in _bootstrap_inner
+    self.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/threading.py", line 995, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 93, in _worker
+    work_item.run()
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/skill_seed_service.py", line 301, in seed_all
+    logger.info(
+Message: 'Skill seeding complete: 64 new, 0 updated, 20 unchanged, 0 errors'
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/asyncio/runners.py", line 119, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/asyncio/base_events.py", line 726, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/tests/integration/test_checkpoint_pool_knob_boot_resolution.py", line 202, in test_boot_config_limits_reach_the_saver_pool
+    await manager.initialize()
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/manager.py", line 4196, in initialize
+    seed_result = await asyncio.to_thread(seed_service.seed_all)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/asyncio/threads.py", line 26, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/main.py", line 318, in wrap_session
+    session.exitstatus = doit(config, session) or 0
+                         ~~~~^^^^^^^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/main.py", line 372, in _main
+    config.hook.pytest_runtestloop(session=session)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 167, in _multicall
+    raise exception
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/logging.py", line 801, in pytest_runtestloop
+    return (yield)  # Run all the tests.
+            ^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/terminal.py", line 707, in pytest_runtestloop
+    result = yield
+             ^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/xdist/remote.py", line 206, in pytest_runtestloop
+    self.run_one_test()
+    ~~~~~~~~~~~~~~~~~^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/xdist/remote.py", line 227, in run_one_test
+    self.config.hook.pytest_runtest_protocol(item=item, nextitem=nextitem)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 167, in _multicall
+    raise exception
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/warnings.py", line 89, in pytest_runtest_protocol
+    return (yield)
+            ^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/assertion/__init__.py", line 192, in pytest_runtest_protocol
+    return (yield)
+            ^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 53, in run_old_style_hookwrapper
+    return result.get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_result.py", line 103, in get_result
+    raise exc.with_traceback(tb)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 38, in run_old_style_hookwrapper
+    res = yield
+          ^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/unittest.py", line 587, in pytest_runtest_protocol
+    return (yield)
+            ^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/faulthandler.py", line 102, in pytest_runtest_protocol
+    return (yield)
+            ^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 118, in pytest_runtest_protocol
+    runtestprotocol(item, nextitem=nextitem)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 137, in runtestprotocol
+    reports.append(call_and_report(item, "call", log))
+                   ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 244, in call_and_report
+    call = CallInfo.from_call(
+        lambda: runtest_hook(item=item, **kwds),
+        when=when,
+        reraise=get_reraise_exceptions(item.config),
+    )
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 353, in from_call
+    result: TResult | None = func()
+                             ~~~~^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 245, in <lambda>
+    lambda: runtest_hook(item=item, **kwds),
+            ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 167, in _multicall
+    raise exception
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/logging.py", line 850, in pytest_runtest_call
+    yield
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/capture.py", line 900, in pytest_runtest_call
+    return (yield)
+            ^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 53, in run_old_style_hookwrapper
+    return result.get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_result.py", line 103, in get_result
+    raise exc.with_traceback(tb)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 38, in run_old_style_hookwrapper
+    res = yield
+          ^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 53, in run_old_style_hookwrapper
+    return result.get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_result.py", line 103, in get_result
+    raise exc.with_traceback(tb)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 38, in run_old_style_hookwrapper
+    res = yield
+          ^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 53, in run_old_style_hookwrapper
+    return result.get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_result.py", line 103, in get_result
+    raise exc.with_traceback(tb)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 38, in run_old_style_hookwrapper
+    res = yield
+          ^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/skipping.py", line 268, in pytest_runtest_call
+    return (yield)
+            ^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 179, in pytest_runtest_call
+    item.runtest()
+    ~~~~~~~~~~~~^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pytest_asyncio/plugin.py", line 469, in runtest
+    super().runtest()
+    ~~~~~~~~~~~~~~~^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/python.py", line 1720, in runtest
+    self.ihook.pytest_pyfunc_call(pyfuncitem=self)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+           ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 167, in _multicall
+    raise exception
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+    teardown.throw(exception)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 53, in run_old_style_hookwrapper
+    return result.get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_result.py", line 103, in get_result
+    raise exc.with_traceback(tb)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 38, in run_old_style_hookwrapper
+    res = yield
+          ^^^^^
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/python.py", line 166, in pytest_pyfunc_call
+    result = testfunction(**testargs)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pytest_asyncio/plugin.py", line 716, in inner
+    runner.run(coro, context=context)
+    ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/asyncio/runners.py", line 124, in run
+    raise KeyboardInterrupt()
+KeyboardInterrupt
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "<string>", line 1, in <module>
+    import sys;exec(eval(sys.stdin.readline()))
+  File "<string>", line 8, in <module>
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 1806, in serve
+    WorkerGateway(io=io, id=id, _startcount=2).serve()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 1273, in serve
+    self._execpool.integrate_as_primary_thread()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 389, in integrate_as_primary_thread
+    self._perform_spawn(reply)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 411, in _perform_spawn
+    reply.run()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 341, in run
+    self._result = func(*args, **kwargs)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 1291, in executetask
+    exec(co, loc)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/xdist/remote.py", line 427, in <module>
+    config.hook.pytest_cmdline_main(config=config)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/main.py", line 365, in pytest_cmdline_main
+    return wrap_session(config, _main)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/main.py", line 332, in wrap_session
+    config.hook.pytest_keyboard_interrupt(excinfo=excinfo)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/terminal.py", line 999, in pytest_keyboard_interrupt
+    self._keyboardinterrupt_memo = excinfo.getrepr(funcargs=True)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/_code/code.py", line 765, in getrepr
+    return fmt.repr_excinfo(self)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/_code/code.py", line 1200, in repr_excinfo
+    reprtraceback = self.repr_traceback(excinfo_)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/_code/code.py", line 1133, in repr_traceback
+    self.repr_traceback_entry(entry, excinfo if last == entry else None)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/_code/code.py", line 1063, in repr_traceback_entry
+    source = self._getentrysource(entry)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/_code/code.py", line 901, in _getentrysource
+    source = entry.getsource(self.astcache)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/_code/code.py", line 299, in getsource
+    astnode, _, end = getstatementrange_ast(
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/_code/source.py", line 191, in getstatementrange_ast
+    astnode = ast.parse(content, "source", "exec")
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/ast.py", line 50, in parse
+    return compile(source, filename, mode, flags,
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/asyncio/base_events.py", line 1918, in call_exception_handler
+    self.default_exception_handler(context)
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/asyncio/base_events.py", line 1890, in default_exception_handler
+    logger.error('\n'.join(log_lines), exc_info=exc_info)
+Message: "Task was destroyed but it is pending!\ntask: <Task pending name='mcp-stdio-client' coro=<TaskScopedContextManager._run() done, defined at /home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/mcp/stdio_wrapper.py:532> wait_for=<Future pending cb=[Task.task_wakeup()]>>"
+Arguments: ()
+--- Logging error ---
+Traceback (most recent call last):
+  File "/home/nea/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/logging/__init__.py", line 1154, in emit
+    stream.write(msg + self.terminator)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: I/O operation on closed file.
+Call stack:
+  File "<string>", line 1, in <module>
+    import sys;exec(eval(sys.stdin.readline()))
+  File "<string>", line 8, in <module>
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 1806, in serve
+    WorkerGateway(io=io, id=id, _startcount=2).serve()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 1273, in serve
+    self._execpool.integrate_as_primary_thread()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 389, in integrate_as_primary_thread
+    self._perform_spawn(reply)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 411, in _perform_spawn
+    reply.run()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 341, in run
+    self._result = func(*args, **kwargs)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/execnet/gateway_base.py", line 1291, in executetask
+    exec(co, loc)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/xdist/remote.py", line 427, in <module>
+    config.hook.pytest_cmdline_main(config=config)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/main.py", line 365, in pytest_cmdline_main
+    return wrap_session(config, _main)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/main.py", line 353, in wrap_session
+    config.hook.pytest_sessionfinish(
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+    return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+    return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+    res = hook_impl.function(*args)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 112, in pytest_sessionfinish
+    session._setupstate.teardown_exact(None)
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/runner.py", line 555, in teardown_exact
+    fin()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 1042, in finish
+    fin()
+  File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/fixtures.py", line 924, in _teardown_yield_fixture
+    next(it)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/tests/job_queue/conftest.py", line 532, in dependency_bus
+    set_dependency_bus(None)
+  File "/home/nea/ensemble-src-wt-central-metrics-v1-base/daemon/services/dependency_bus.py", line 2812, in set_dependency_bus
+    logger.info("DependencyBus unregistered")
+Message: 'DependencyBus unregistered'
+Arguments: ()
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:33: RuntimeWarning: coroutine 'InstanceMessagingService._maybe_store_initiative_message' was never awaited
+  gc.collect()
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:33: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+  gc.collect()
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:33: RuntimeWarning: coroutine 'InstanceMessagingService._maybe_store_initiative_message' was never awaited
+  gc.collect()
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:33: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+  gc.collect()
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/unraisableexception.py:33: RuntimeWarning: coroutine 'InstanceMessagingService._maybe_store_initiative_message' was never awaited
+  gc.collect()
+RuntimeWarning: Enable tracemalloc to get the object allocation traceback
+INTERNALERROR> Traceback (most recent call last):
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/main.py", line 318, in wrap_session
+INTERNALERROR>     session.exitstatus = doit(config, session) or 0
+INTERNALERROR>                          ~~~~^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/main.py", line 372, in _main
+INTERNALERROR>     config.hook.pytest_runtestloop(session=session)
+INTERNALERROR>     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_hooks.py", line 512, in __call__
+INTERNALERROR>     return self._hookexec(self.name, self._hookimpls.copy(), kwargs, firstresult)
+INTERNALERROR>            ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_manager.py", line 120, in _hookexec
+INTERNALERROR>     return self._inner_hookexec(hook_name, methods, kwargs, firstresult)
+INTERNALERROR>            ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 167, in _multicall
+INTERNALERROR>     raise exception
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+INTERNALERROR>     teardown.throw(exception)
+INTERNALERROR>     ~~~~~~~~~~~~~~^^^^^^^^^^^
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/logging.py", line 801, in pytest_runtestloop
+INTERNALERROR>     return (yield)  # Run all the tests.
+INTERNALERROR>             ^^^^^
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 139, in _multicall
+INTERNALERROR>     teardown.throw(exception)
+INTERNALERROR>     ~~~~~~~~~~~~~~^^^^^^^^^^^
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/_pytest/terminal.py", line 707, in pytest_runtestloop
+INTERNALERROR>     result = yield
+INTERNALERROR>              ^^^^^
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/pluggy/_callers.py", line 121, in _multicall
+INTERNALERROR>     res = hook_impl.function(*args)
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/xdist/dsession.py", line 138, in pytest_runtestloop
+INTERNALERROR>     self.loop_once()
+INTERNALERROR>     ~~~~~~~~~~~~~~^^
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/xdist/dsession.py", line 163, in loop_once
+INTERNALERROR>     call(**kwargs)
+INTERNALERROR>     ~~~~^^^^^^^^^^
+INTERNALERROR>   File "/home/nea/ensemble-src/.venv/lib/python3.13/site-packages/xdist/dsession.py", line 217, in worker_workerfinished
+INTERNALERROR>     assert not crashitem, (crashitem, node)
+INTERNALERROR> AssertionError: ('tests/test_custom_agent_lifecycle.py::TestCustomAgentCreation::test_creates_config_and_v1_soul_in_one_txn', <WorkerController gw10>)
+INTERNALERROR> assert not 'tests/test_custom_agent_lifecycle.py::TestCustomAgentCreation::test_creates_config_and_v1_soul_in_one_txn'
+
+82 failed, 2323 passed, 74 skipped, 1886 warnings in 180.99s (0:03:00)

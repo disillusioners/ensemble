@@ -1,0 +1,190 @@
+❯ Building...
+✔ Building...
+Initial chunk files | Names                     |  Raw size
+scripts.js          | scripts                   |   4.77 MB | 
+chunk-WUCLJATE.js   | -                         | 889.15 kB | 
+styles.css          | styles                    | 789.11 kB | 
+chunk-5CRFOXMX.js   | -                         | 561.92 kB | 
+chunk-R6RD6PYH.js   | -                         | 549.18 kB | 
+main.js             | main                      | 518.54 kB | 
+chunk-ZT7XH5PC.js   | -                         | 463.75 kB | 
+chunk-47WHQDQK.js   | -                         | 209.51 kB | 
+chunk-GISWR7BA.js   | -                         | 177.10 kB | 
+chunk-JEGHDFMB.js   | -                         | 152.86 kB | 
+chunk-JXWSU3TW.js   | -                         | 152.86 kB | 
+chunk-LVYMWM5O.js   | -                         |  83.19 kB | 
+chunk-TRUAL2ZD.js   | -                         |  62.75 kB | 
+chunk-ZY5F7XDJ.js   | -                         |  61.39 kB | 
+chunk-4GI5JZIG.js   | -                         |  61.10 kB | 
+chunk-YTJDKQBX.js   | -                         |  60.25 kB | 
+chunk-QIP3I4SZ.js   | -                         |  50.42 kB | 
+chunk-7DJLUB3C.js   | -                         |  49.61 kB | 
+chunk-KMBSFJDZ.js   | -                         |  34.57 kB | 
+chunk-ZVFFR4XJ.js   | -                         |  33.75 kB | 
+chunk-23YOKGUK.js   | -                         |  29.00 kB | 
+chunk-JFNPDCIE.js   | -                         |  26.73 kB | 
+chunk-QDZI77XE.js   | -                         |  25.12 kB | 
+chunk-LQK2O2WL.js   | -                         |  24.70 kB | 
+chunk-EE4INPT4.js   | -                         |  23.34 kB | 
+chunk-VZBZDVZJ.js   | -                         |  18.39 kB | 
+chunk-YGCBF2NE.js   | -                         |  11.23 kB | 
+chunk-5RZQ6Y55.js   | -                         |  10.25 kB | 
+chunk-VGKOJDSO.js   | -                         |  10.18 kB | 
+chunk-WU7CYYCB.js   | -                         |   6.88 kB | 
+chunk-RWPF6PXA.js   | -                         |   5.51 kB | 
+chunk-F2IABJDD.js   | -                         |   3.48 kB | 
+chunk-XGTHGRU5.js   | -                         |   3.47 kB | 
+chunk-MAVNEO7N.js   | -                         |   2.11 kB | 
+chunk-IAFNJIUL.js   | -                         |   1.24 kB | 
+chunk-BLUS7JO6.js   | -                         | 816 bytes | 
+
+                    | Initial total             |   9.93 MB
+
+Lazy chunk files    | Names                     |  Raw size
+chunk-KLYLRUSP.js   | -                         | 428.22 kB | 
+chunk-R2WBFIB7.js   | jobs-component            | 422.23 kB | 
+chunk-KP7YMPF5.js   | skill-detail-component    | 338.86 kB | 
+chunk-BS3FGHJ3.js   | maintenance-component     | 297.27 kB | 
+chunk-YA5PWAEX.js   | -                         | 287.54 kB | 
+chunk-7YXMJQS6.js   | snapshots-component       | 246.04 kB | 
+chunk-IHNP7SOL.js   | chat-component            | 244.57 kB | 
+chunk-2TZDWJQN.js   | -                         | 227.37 kB | 
+chunk-OPONLWDT.js   | -                         | 204.81 kB | 
+chunk-P4MVJAIY.js   | blueprint-component       | 201.10 kB | 
+chunk-NTKCQRYI.js   | -                         | 171.39 kB | 
+chunk-BUFED4P5.js   | mcp-server-list-component | 165.72 kB | 
+chunk-YK2OUMDK.js   | -                         | 161.83 kB | 
+chunk-XBYD32FW.js   | schedules-component       | 145.00 kB | 
+chunk-URY3ERSL.js   | -                         | 139.39 kB | 
+...and 37 more lazy chunks files. Use "--verbose" to show all the files.
+
+Application bundle generation complete. [22.369 seconds] - 2026-11-02T09:53:39.238Z
+
+▲ [WARNING] NG8107: NG8107: The left side of this optional chain operation does not include 'null' or 'undefined' in its type, therefore the '?.' operator can be replaced with the '.' operator. Find more at https://v21.angular.dev/extended-diagnostics/NG8107 [plugin angular-compiler]
+
+    src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.html:233:32:
+      233 │             @if (d.domain_tags?.length) {
+          ╵                                 ~~~~~~
+
+  Warning occurs in the template of component SnapshotDetailDrawerComponent.
+
+    src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.ts:81:15:
+      81 │   templateUrl: './snapshot-detail-drawer.component.html',
+         ╵                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: All imports are unused [plugin angular-compiler]
+
+    src/app/components/vscode-editor-cache/vscode-editor-cache.component.ts:57:2:
+      57 │   imports: [VsCodeViewerComponent],
+         ╵   ~~~~~~~
+
+
+▲ [WARNING] NG8113: CheckpointCleanupComponent is not used within the template of MaintenanceComponent [plugin angular-compiler]
+
+    src/app/pages/maintenance/maintenance.component.ts:47:64:
+      47 │ ...let, MatTabsModule, MatTooltipModule, CheckpointCleanupComponent],
+         ╵                                          ~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: DecimalPipe is not used within the template of FamiliesTabComponent [plugin angular-compiler]
+
+    src/app/pages/metrics/families/families-tab.component.ts:33:12:
+      33 │   imports: [DecimalPipe, MatButtonModule, MatTooltipModule],
+         ╵             ~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: OverviewTabComponent is not used within the template of MetricsComponent [plugin angular-compiler]
+
+    src/app/pages/metrics/metrics.component.ts:69:4:
+      69 │     OverviewTabComponent,
+         ╵     ~~~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: ChartsTabComponent is not used within the template of MetricsComponent [plugin angular-compiler]
+
+    src/app/pages/metrics/metrics.component.ts:70:4:
+      70 │     ChartsTabComponent,
+         ╵     ~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: FamiliesTabComponent is not used within the template of MetricsComponent [plugin angular-compiler]
+
+    src/app/pages/metrics/metrics.component.ts:71:4:
+      71 │     FamiliesTabComponent,
+         ╵     ~~~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: LiveTabComponent is not used within the template of ResourcesComponent [plugin angular-compiler]
+
+    src/app/pages/resources/resources.component.ts:38:46:
+      38 │ ...entOutlet, MatTabsModule, LiveTabComponent, TimelineTabComponent],
+         ╵                              ~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: TimelineTabComponent is not used within the template of ResourcesComponent [plugin angular-compiler]
+
+    src/app/pages/resources/resources.component.ts:38:64:
+      38 │ ...entOutlet, MatTabsModule, LiveTabComponent, TimelineTabComponent],
+         ╵                                                ~~~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] Deprecation [plugin angular-sass]
+
+    src/app/components/chat-interface/chat-interface.scss:1170:11:
+      1170 │     color: lighten($cyan, 8%);
+           ╵            ^
+
+
+  Global built-in functions are deprecated and will be removed in Dart Sass 3.0.0.
+  Use color.adjust instead.
+  
+  More info and automated migrator: https://sass-lang.com/d/import
+
+
+▲ [WARNING] Deprecation [plugin angular-sass]
+
+    src/app/components/chat-interface/chat-interface.scss:1170:11:
+      1170 │     color: lighten($cyan, 8%);
+           ╵            ^
+
+
+  lighten() is deprecated. Suggestions:
+  
+  color.scale($color, $lightness: 13.9726027397%)
+  color.adjust($color, $lightness: 8%)
+  
+  More info: https://sass-lang.com/d/color-functions
+
+
+▲ [WARNING] Deprecation [plugin angular-sass]
+
+    src/app/pages/settings/settings.component.scss:167:18:
+      167 │     border-color: lighten($border-color, 8%);
+          ╵                   ^
+
+
+  Global built-in functions are deprecated and will be removed in Dart Sass 3.0.0.
+  Use color.adjust instead.
+  
+  More info and automated migrator: https://sass-lang.com/d/import
+
+
+▲ [WARNING] Deprecation [plugin angular-sass]
+
+    src/app/pages/settings/settings.component.scss:167:18:
+      167 │     border-color: lighten($border-color, 8%);
+          ╵                   ^
+
+
+  lighten() is deprecated. Suggestions:
+  
+  color.scale($color, $lightness: 10.9090909091%)
+  color.adjust($color, $lightness: 8%)
+  
+  More info: https://sass-lang.com/d/color-functions
+
+
+Output location: /home/nea/ensemble-src-wt-central-metrics-v1/frontend/dist/frontend
+
+BUILD_DEV_EXIT=0

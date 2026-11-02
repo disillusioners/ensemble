@@ -1019,14 +1019,21 @@ class TestMetricsSurface:
             saver_op_latency_seconds.observe(0.001, ops="aget")  # typo
 
     def test_histogram_separates_label_combos(self):
-        """Different ``op`` labels are independent series."""
+        """Different ``op`` labels are independent series.
+
+        The declarable ops are ``aget`` and the reserved fold target
+        ``other`` — the F7 op enum was narrowed to the adjudicated
+        observable set (``VOCABULARY_VERSION`` 2; the legacy ``aput``
+        / ``adelete`` / ``alist`` values have no producer and are not
+        declarable).
+        """
         reset_metrics_for_tests()
         saver_op_latency_seconds.observe(0.005, op="aget")
-        saver_op_latency_seconds.observe(0.050, op="aput")
+        saver_op_latency_seconds.observe(0.050, op="other")
         assert saver_op_latency_seconds.get_count(op="aget") == 1
-        assert saver_op_latency_seconds.get_count(op="aput") == 1
+        assert saver_op_latency_seconds.get_count(op="other") == 1
         assert abs(saver_op_latency_seconds.get_sum(op="aget") - 0.005) < 1e-9
-        assert abs(saver_op_latency_seconds.get_sum(op="aput") - 0.050) < 1e-9
+        assert abs(saver_op_latency_seconds.get_sum(op="other") - 0.050) < 1e-9
 
     def test_log_saver_op_records_into_histogram(self, caplog):
         """``log_saver_op`` side-effects into the histogram (NOT gated by env)."""
@@ -1043,16 +1050,23 @@ class TestMetricsSurface:
     ):
         """Metric records REGARDLESS of ``CHECKPOINT_PERF_LOGS`` — the log
         line is suppressed, the metric is not. Operator SLO surface is
-        independent of log volume."""
+        independent of log volume.
+
+        The op is ``aget`` — the only observed saver op.  (``aput`` /
+        ``adelete`` / ``alist`` are no longer declarable: the F7 op
+        enum was narrowed to ``{aget, other}`` with
+        ``VOCABULARY_VERSION`` 2, and a disallowed value folds to the
+        reserved ``other``.)
+        """
         reset_metrics_for_tests()
         monkeypatch.setenv("CHECKPOINT_PERF_LOGS", "0")
         with caplog.at_level(logging.INFO, logger="daemon.checkpoint_perf"):
-            log_saver_op("aput", "thread-aaaa", 100)
+            log_saver_op("aget", "thread-aaaa", 100)
         # Log line suppressed.
         assert not any("[CheckpointPerf]" in r.message for r in caplog.records)
         # Histogram still recorded.
-        assert saver_op_latency_seconds.get_count(op="aput") == 1
-        assert abs(saver_op_latency_seconds.get_sum(op="aput") - 0.100) < 1e-9
+        assert saver_op_latency_seconds.get_count(op="aget") == 1
+        assert abs(saver_op_latency_seconds.get_sum(op="aget") - 0.100) < 1e-9
 
     def test_render_metrics_is_prometheus_text_exposition(self):
         """``render_metrics()`` emits the Prometheus text-exposition format.

@@ -175,6 +175,17 @@ def _publisher_cadence() -> float:
     return value if value >= 0 else DEFAULT_PUBLISHER_CADENCE_SECONDS
 
 
+def publisher_cadence() -> float:
+    """The PUBLIC publisher cadence (AM-15).
+
+    The cadence is LIVE-adjustable (the managed scrape-interval hint),
+    so a reader that reports the OBSERVED effective spacing must read
+    it LIVE — reading it once at boot would pin a stale value.  This
+    is the public face of the private ``_publisher_cadence``.
+    """
+    return _publisher_cadence()
+
+
 def _cardinality_cap() -> int:
     try:
         value = int(_cardinality_cap_provider())
@@ -187,7 +198,47 @@ def _cardinality_cap() -> int:
 
 #: The frozen vocabulary version.  Any change to a frozen vocabulary set
 #: bumps this integer (the F0.4/A24 bump contract).
-VOCABULARY_VERSION: int = 1
+#:
+#: **2** (central-metrics-v1) — the F7 checkpoint ``op`` enum was narrowed
+#: to the adjudicated observable set ``{aget, other}`` (plan flag D-7:
+#: ``aget`` is the only observed producer; ``other`` is the reserved fold
+#: target and MUST stay declarable or the fold target itself falls out of
+#: the vocabulary).  The catalog's §14.4 row is amended in the ledger
+#: phase.
+VOCABULARY_VERSION: int = 2
+
+
+# ─── Registration-time family metadata (AM-3) ───────────────────────────────
+#
+# The query door serves a family catalog DERIVED FROM THE REGISTRY, so the
+# family metadata has to live AT REGISTRATION — a second family table would
+# force every onboarding wave to edit the door (breaking the incremental
+# onboarding fence) and would serve zero families when the door lands.
+#
+# Every kwarg below is ADDITIVE with a DERIVED DEFAULT, so the 18 existing
+# registrations keep rendering exactly as before.
+
+#: Where a family's values come from.  ``registry`` = the in-process
+#: registry (the default); ``postgres_census`` = the F6 census sampler
+#: (a one-shot, non-pooled DB pull); ``wedge_capture`` = the F1/F3
+#: wedge-capture families.
+SOURCE_IDIOMS: frozenset[str] = frozenset(
+    {"registry", "postgres_census", "wedge_capture"}
+)
+
+#: How durable a family's values are.  ``process`` = in-RAM, reset on
+#: restart (the default — the registry's own semantics); ``durable`` = a
+#: durable store behind the family.
+DURABILITIES: frozenset[str] = frozenset({"process", "durable"})
+
+#: The chart rendering mode of a series.  Counters render STEP and gauges
+#: render LINEAR — a linear interpolation between counter samples would
+#: assert values that were never observed (data honesty).
+CHART_ROLES: frozenset[str] = frozenset({"line", "step"})
+
+#: The chart-primary / stat-primary classification of a FAMILY (FR-C2).
+FAMILY_ROLE_CHART = "chart"
+FAMILY_ROLE_STAT = "stat"
 
 
 # ─── Vocabulary freeze (T6, catalog §8 rule A1) ─────────────────────────────
@@ -431,6 +482,48 @@ def _label_key(labels: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
     return tuple(sorted((str(k), str(v)) for k, v in labels.items()))
 
 
+def label_key(labels: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+    """The canonical series-identity serialization (AM-1).
+
+    A series is ``(name, labels)`` and the labels are the complete
+    discriminator.  This is the ONE canonical serialization of a label
+    set — the door's label-aware selector, the ring's keys and any
+    future watch-tool reference all speak it, so they can never
+    disagree about which series a selector names.
+
+    It is the PUBLIC face of the private ``_label_key``; the private
+    name stays the internal implementation.
+    """
+    return _label_key(labels)
+
+
+def _validate_family_metadata(
+    field: str, value: str, allowed: frozenset[str]
+) -> str:
+    """Validate one registration-time family metadata value.
+
+    The vocabularies are CLOSED (AM-3): an unknown value is a registration
+    bug and fails LOUD at registration time, never silently at read time.
+    """
+    if value not in allowed:
+        raise ValueError(
+            f"{field}={value!r} is not a known value; expected one of "
+            f"{sorted(allowed)}"
+        )
+    return value
+
+
+def _validate_cardinality_weight(weight: int) -> int:
+    """Validate the family's cardinality weight (a non-negative integer)."""
+    if isinstance(weight, bool) or not isinstance(weight, int):
+        raise ValueError(
+            f"cardinality_weight must be an int; got {type(weight).__name__}"
+        )
+    if weight < 0:
+        raise ValueError(f"cardinality_weight must be >= 0; got {weight}")
+    return weight
+
+
 class Metric:
     """A registered measurement object (counter / gauge / histogram).
 
@@ -453,6 +546,11 @@ class Metric:
         "help",
         "buckets",
         "internal",
+        "family",
+        "source_idiom",
+        "durability",
+        "cardinality_weight",
+        "chart_role",
         "_lock",
         "_series",
         "_dirty",
@@ -471,6 +569,12 @@ class Metric:
         help: str = "",
         buckets: Optional[Iterable[float]] = None,
         internal: bool = False,
+        *,
+        family: Optional[str] = None,
+        source_idiom: str = "registry",
+        durability: str = "process",
+        cardinality_weight: int = 1,
+        chart_role: Optional[str] = None,
     ) -> None:
         self.name = name
         self.kind = kind
@@ -479,6 +583,24 @@ class Metric:
         self.help = help or ""
         self.buckets = tuple(float(b) for b in buckets) if buckets is not None else None
         self.internal = internal
+        # ── registration-time family metadata (AM-3) ──────────────────────
+        # The DERIVED defaults keep the pre-existing registrations
+        # untouched: a metric without an explicit family IS its own
+        # family, and without an explicit chart role its rendering mode
+        # follows its kind (counters STEP, everything else LINEAR).
+        self.family = str(family) if family else name
+        self.source_idiom = _validate_family_metadata(
+            "source_idiom", source_idiom, SOURCE_IDIOMS
+        )
+        self.durability = _validate_family_metadata(
+            "durability", durability, DURABILITIES
+        )
+        self.cardinality_weight = _validate_cardinality_weight(cardinality_weight)
+        self.chart_role = (
+            None
+            if chart_role is None
+            else _validate_family_metadata("chart_role", chart_role, CHART_ROLES)
+        )
         self._lock = threading.Lock()
         self._series: dict[tuple[tuple[str, str], ...], dict[str, Any]] = {}
         self._dirty = False
@@ -502,6 +624,39 @@ class Metric:
     @alias_names.setter
     def alias_names(self, value: Iterable[str]) -> None:
         self._alias_names = [str(v) for v in value]
+
+    def last_publish_monotonic(self) -> float:
+        """The monotonic instant of the last publish (``0.0`` if never).
+
+        The PUBLIC accessor for the publish age (AM-13).  The private
+        ``_last_publish`` attribute is not an acceptable dependency for a
+        reader — a reader that wants the age asks the metric.
+
+        The value is in the ``time.monotonic()`` domain, so a reader
+        computes the age with the SAME clock (``time.monotonic() - ts``).
+        """
+        return self._last_publish
+
+    def effective_chart_role(self) -> str:
+        """The chart rendering mode of this series (``line`` / ``step``).
+
+        An EXPLICIT registration-time ``chart_role`` wins.  Otherwise the
+        mode is DERIVED from the kind: a counter renders STEP (a linear
+        interpolation between counter samples would assert values that
+        were never observed), everything else renders LINEAR.
+        """
+        if self.chart_role is not None:
+            return self.chart_role
+        return "step" if self.kind == "counter" else "line"
+
+    def is_chart_primary(self) -> bool:
+        """Whether this metric DECLARES a chart role (FR-C2).
+
+        A metric that never declared one is stat-primary (current value
+        only) — the FR-C2 default.  The declaration, not the derived
+        rendering mode, is what makes a family chart-primary.
+        """
+        return self.chart_role is not None
 
     def _empty_series(self) -> dict[str, Any]:
         if self.kind == "histogram":
@@ -931,11 +1086,30 @@ def register_counter(
     label_keys: Iterable[str] = (),
     allowed_values: Optional[Mapping[str, Iterable[str]]] = None,
     help: Optional[str] = None,
+    *,
+    family: Optional[str] = None,
+    source_idiom: str = "registry",
+    durability: str = "process",
+    cardinality_weight: int = 1,
+    chart_role: Optional[str] = None,
 ) -> Metric:
     """Register a counter and return its handle."""
     _validate_metric_name(name)
     keys = tuple(label_keys)
-    metric = Metric(name, "counter", keys, allowed_values, help or "")
+    metric = Metric(
+        name,
+        "counter",
+        keys,
+        allowed_values,
+        help or "",
+        None,
+        False,
+        family=family,
+        source_idiom=source_idiom,
+        durability=durability,
+        cardinality_weight=cardinality_weight,
+        chart_role=chart_role,
+    )
     return _register(metric)
 
 
@@ -944,11 +1118,30 @@ def register_gauge(
     label_keys: Iterable[str] = (),
     allowed_values: Optional[Mapping[str, Iterable[str]]] = None,
     help: Optional[str] = None,
+    *,
+    family: Optional[str] = None,
+    source_idiom: str = "registry",
+    durability: str = "process",
+    cardinality_weight: int = 1,
+    chart_role: Optional[str] = None,
 ) -> Metric:
     """Register a gauge and return its handle."""
     _validate_metric_name(name)
     keys = tuple(label_keys)
-    metric = Metric(name, "gauge", keys, allowed_values, help or "")
+    metric = Metric(
+        name,
+        "gauge",
+        keys,
+        allowed_values,
+        help or "",
+        None,
+        False,
+        family=family,
+        source_idiom=source_idiom,
+        durability=durability,
+        cardinality_weight=cardinality_weight,
+        chart_role=chart_role,
+    )
     return _register(metric)
 
 
@@ -958,18 +1151,37 @@ def register_histogram(
     buckets: Optional[Iterable[float]] = None,
     allowed_values: Optional[Mapping[str, Iterable[str]]] = None,
     help: Optional[str] = None,
+    *,
+    family: Optional[str] = None,
+    source_idiom: str = "registry",
+    durability: str = "process",
+    cardinality_weight: int = 1,
+    chart_role: Optional[str] = None,
 ) -> Metric:
     """Register a histogram and return its handle."""
     _validate_metric_name(name)
     keys = tuple(label_keys)
     bounds = tuple(float(b) for b in buckets) if buckets is not None else DEFAULT_LATENCY_BUCKETS
-    ordered = sorted(set(bounds))
+    ordered = tuple(sorted(set(bounds)))
     for previous, current in zip(ordered, ordered[1:]):
         if current <= previous:
             raise ValueError(
                 f"Histogram buckets must be strictly increasing; got {previous} >= {current}."
             )
-    metric = Metric(name, "histogram", keys, allowed_values, help or "", ordered)
+    metric = Metric(
+        name,
+        "histogram",
+        keys,
+        allowed_values,
+        help or "",
+        ordered,
+        False,
+        family=family,
+        source_idiom=source_idiom,
+        durability=durability,
+        cardinality_weight=cardinality_weight,
+        chart_role=chart_role,
+    )
     return _register(metric)
 
 
@@ -978,11 +1190,30 @@ def register_summary(
     label_keys: Iterable[str] = (),
     allowed_values: Optional[Mapping[str, Iterable[str]]] = None,
     help: Optional[str] = None,
+    *,
+    family: Optional[str] = None,
+    source_idiom: str = "registry",
+    durability: str = "process",
+    cardinality_weight: int = 1,
+    chart_role: Optional[str] = None,
 ) -> Metric:
     """Register a summary-style metric (rendered as a histogram)."""
     _validate_metric_name(name)
     keys = tuple(label_keys)
-    metric = Metric(name, "histogram", keys, allowed_values, help or "", DEFAULT_LATENCY_BUCKETS)
+    metric = Metric(
+        name,
+        "histogram",
+        keys,
+        allowed_values,
+        help or "",
+        DEFAULT_LATENCY_BUCKETS,
+        False,
+        family=family,
+        source_idiom=source_idiom,
+        durability=durability,
+        cardinality_weight=cardinality_weight,
+        chart_role=chart_role,
+    )
     return _register(metric)
 
 
@@ -1002,16 +1233,28 @@ ensemble_checkpoint_list_total = register_counter(
 )
 ensemble_checkpoint_list_total.alias_names = ["message_api_checkpoint_list_total"]
 
+#: The F7 checkpoint ``op`` enum — the adjudicated observable set
+#: (``VOCABULARY_VERSION`` 2).  ``aget`` is the only OBSERVED producer
+#: (``daemon/persistence.py``); ``other`` is the reserved fold target and
+#: MUST stay declarable — a disallowed value folds INTO it, so dropping it
+#: would push the fold target itself out of the vocabulary.  The legacy
+#: ``aput`` / ``adelete`` / ``alist`` values have no producer today
+#: (the write path bypasses the saver-op seam and ``alist`` is
+#: migration-only), so they are NOT declarable — a value outside the set
+#: folds to ``other`` and is counted as an invalid label.
+CHECKPOINT_OP_VOCABULARY: frozenset[str] = frozenset({"aget", "other"})
+
 #: The canonical histogram handle (the canonical metric name is
 #: ``ensemble_checkpoint_op_seconds``).
 ensemble_checkpoint_op_seconds = register_histogram(
     "ensemble_checkpoint_op_seconds",
     label_keys=("op",),
     buckets=CHECKPOINT_OP_BUCKETS,
-    allowed_values={"op": frozenset({"aget", "aput", "adelete", "alist", "other"})},
+    allowed_values={"op": CHECKPOINT_OP_VOCABULARY},
     help=(
-        "Saver op latency in seconds, labeled by op. Ops: aget, aput, "
-        "adelete, alist (migration-only). Buckets are Prometheus-style."
+        "Saver op latency in seconds, labeled by op. Ops: aget (the only "
+        "observed saver op) and other (the reserved fold target). "
+        "Buckets are Prometheus-style."
     ),
 )
 ensemble_checkpoint_op_seconds.alias_names = ["message_api_saver_op_latency_seconds"]
@@ -1522,10 +1765,16 @@ def _render_family_lines(metric: Metric, deadline: float) -> list[str]:
 
 
 __all__ = [
+    "CHART_ROLES",
     "CHECKPOINT_OP_BUCKETS",
+    "CHECKPOINT_OP_VOCABULARY",
+    "DURABILITIES",
+    "FAMILY_ROLE_CHART",
+    "FAMILY_ROLE_STAT",
     "INSTANCE_STATUS_VOCABULARY",
     "MCP_ROSTER",
     "MCP_ROSTER_VOCABULARY",
+    "SOURCE_IDIOMS",
     "SWEEP_LANES",
     "SWEEP_LANE_VOCABULARY",
     "VERSION_LABEL_POLICY",
@@ -1557,6 +1806,8 @@ __all__ = [
     "ensemble_checkpoint_read_size_bucket_hits_total",
     "ensemble_checkpoint_read_size_bytes",
     "known_label_keys",
+    "label_key",
+    "publisher_cadence",
     "read_size_bucket_label",
     "register_counter",
     "register_gauge",

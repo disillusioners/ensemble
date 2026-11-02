@@ -1,0 +1,15 @@
+.................................................F...................... [ 23%]
+........................................................................ [ 47%]
+........................................................................ [ 71%]
+........................................................................ [ 95%]
+..............                                                           [100%]
+=================================== FAILURES ===================================
+__ TestSweepLaneVocabulary.test_rdrs_lanes_come_from_the_config_kill_switchs ___
+tests/unit/persistence/test_checkpoint_metrics_vocabulary.py:83: in test_rdrs_lanes_come_from_the_config_kill_switchs
+    assert len(lane_fields) == 7, f"RDRS lane count drifted: {sorted(lane_fields)}"
+E   AssertionError: RDRS lane count drifted: ['report_delivery_recovery_lane_deferred', 'report_delivery_recovery_lane_mission_reconciliation', 'report_delivery_recovery_lane_no_row_backstop', 'report_delivery_recovery_lane_orphan', 'report_delivery_recovery_lane_pending_age', 'report_delivery_recovery_lane_recovery_retry', 'report_delivery_recovery_lane_stuck_wake', 'report_delivery_recovery_lane_wc_orphan_detector']
+E   assert 8 == 7
+E    +  where 8 = len(['report_delivery_recovery_lane_deferred', 'report_delivery_recovery_lane_no_row_backstop', 'report_delivery_recovery_...recovery_lane_recovery_retry', 'report_delivery_recovery_lane_orphan', 'report_delivery_recovery_lane_stuck_wake', ...])
+=========================== short test summary info ============================
+FAILED tests/unit/persistence/test_checkpoint_metrics_vocabulary.py::TestSweepLaneVocabulary::test_rdrs_lanes_come_from_the_config_kill_switchs
+1 failed, 301 passed in 10.72s
