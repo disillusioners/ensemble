@@ -738,6 +738,73 @@ assert_not_contains "P-19 prefix B never rolls back" '"event":"sweep_rollback"' 
 rm -rf "$P19B_FIX"
 
 # ===========================================================================
+section "P-9 — the adopt-path polarity (the promote-entry mirror, BEHAVIOURAL)"
+
+# The GREEN arm: a stale flipped txn + a serving-green listener + intent_flip
+# ⇒ the adopt path COMMITS (history-before-close) and the promote CONTINUES
+# (rc 0 — no exit 78).
+P9G_FIX="$(mktemp -d -t p9g.XXXXXX)"; _register_fixture "$P9G_FIX"
+make_install_fixture "$P9G_FIX" "$TARGET" "$PREV" "true"
+seed_journal "$P9G_FIX" "$TARGET" "$PREV" "true" "1"
+ln -sfn "releases/$TARGET" "$P9G_FIX/current"
+P9G_PORT="$(start_listener green 9.9.9-test-target)"
+P9G_RC=0
+INSTALL_DIR="$P9G_FIX" PORT="$P9G_PORT" bash -c '
+    . "'"$REPO_ROOT"'/scripts/upgrade/lib.sh" >/dev/null 2>&1
+    adopt_stale_txn
+' >/dev/null 2>&1 || P9G_RC=$?
+assert_eq "P-9 GREEN ⇒ the adopt path returns 0 (the promote continues)" "0" "$P9G_RC"
+P9G_JOURNAL="$(cat "$P9G_FIX/releases/state.json")"
+assert_contains "P-9 GREEN ⇒ serving_green_commit at promote entry" '"event":"serving_green_commit"' "$P9G_JOURNAL"
+assert_not_contains "P-9 GREEN ⇒ NO sweep_rollback" '"event":"sweep_rollback"' "$P9G_JOURNAL"
+P9G_QUAR="$(printf '%s' "$P9G_JOURNAL" | grep -oE '"quarantined": ?\[[^]]*\]')"
+case "$P9G_QUAR" in
+    *"$TARGET"*) _fail "P-9 GREEN ⇒ NO quarantine" "absent" "$P9G_QUAR" ;;
+    *) _pass "P-9 GREEN ⇒ NO quarantine" ;;
+esac
+assert_re "P-9 GREEN ⇒ the counter is untouched" '"24h": ?0' "$P9G_JOURNAL"
+case "$P9G_JOURNAL" in
+    *'"in_flight":null'*|*'"in_flight": null'*) _pass "P-9 GREEN ⇒ the txn is closed" ;;
+    *) _fail "P-9 GREEN ⇒ the txn is closed" '"in_flight":null' "$(printf '%s' "$P9G_JOURNAL" | grep -oE '"in_flight":[^,}]*')" ;;
+esac
+rm -rf "$P9G_FIX"; cleanup_listeners
+
+# The GREEN-without-intent_flip arm: the EXISTING chain (§D.4 (a-i) — the
+# documented divergence; this lane does not rewrite the adopt path's
+# pre-ruling behaviour).
+P9X_FIX="$(mktemp -d -t p9x.XXXXXX)"; _register_fixture "$P9X_FIX"
+make_install_fixture "$P9X_FIX" "$TARGET" "$PREV" "true"
+seed_journal "$P9X_FIX" "$TARGET" "$PREV" "true" "0"
+ln -sfn "releases/$TARGET" "$P9X_FIX/current"
+P9X_PORT="$(start_listener green 9.9.9-test-target)"
+P9X_RC=0
+INSTALL_DIR="$P9X_FIX" PORT="$P9X_PORT" bash -c '
+    . "'"$REPO_ROOT"'/scripts/upgrade/lib.sh" >/dev/null 2>&1
+    adopt_stale_txn
+' >/dev/null 2>&1 || P9X_RC=$?
+assert_eq "P-9 the existing chain completes (the promote continues past it)" "0" "$P9X_RC"
+P9X_JOURNAL="$(cat "$P9X_FIX/releases/state.json")"
+assert_contains "P-9 GREEN-without-intent_flip ⇒ the EXISTING chain (sweep_rollback)" '"event":"sweep_rollback"' "$P9X_JOURNAL"
+assert_not_contains "P-9 GREEN-without-intent_flip ⇒ no serving_green_commit" '"event":"serving_green_commit"' "$P9X_JOURNAL"
+rm -rf "$P9X_FIX"; cleanup_listeners
+
+# The NOT-GREEN arm: no listener ⇒ the existing chain UNCHANGED (§D.4 (a-ii)
+# — no defer, no grace on the adopt path).
+P9N_FIX="$(mktemp -d -t p9n.XXXXXX)"; _register_fixture "$P9N_FIX"
+make_install_fixture "$P9N_FIX" "$TARGET" "$PREV" "true"
+seed_journal "$P9N_FIX" "$TARGET" "$PREV" "true" "1"
+ln -sfn "releases/$TARGET" "$P9N_FIX/current"
+P9N_RC=0
+INSTALL_DIR="$P9N_FIX" PORT=19999 bash -c '
+    . "'"$REPO_ROOT"'/scripts/upgrade/lib.sh" >/dev/null 2>&1
+    adopt_stale_txn
+' >/dev/null 2>&1 || P9N_RC=$?
+assert_eq "P-9 NOT-GREEN ⇒ the existing chain completes" "0" "$P9N_RC"
+P9N_JOURNAL="$(cat "$P9N_FIX/releases/state.json")"
+assert_contains "P-9 NOT-GREEN ⇒ sweep_rollback (the existing chain unchanged)" '"event":"sweep_rollback"' "$P9N_JOURNAL"
+rm -rf "$P9N_FIX"
+
+# ===========================================================================
 section "P-32 — the T15 hook (narrow, idempotent, never clears a pre-flip txn)"
 
 # The hook is the flipped-branch helper called after a child exit. Its
