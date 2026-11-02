@@ -427,8 +427,8 @@ figures appear only in the correction notes below the table.
 | Extension delta — full-IN | **+217** (**ten** families; **F2 was adjudicated IN (full, 22 series)** — its removal changes the full-IN family set **11→10**; it was NOT a partial) | F0.3 8 · F1 9 · F3 6 · F4 8 · F5 3 · F6 15 · F9 53 · F10 6 · F12 69 · F17 40 (catalog §1 rows, pointer discipline) |
 | Extension delta — partial-IN | **+57 (6 families)** | F7 +10 (21→31) · F8 4 · F11 16 · F13 19 · **F18 5** (sessions 1 + tombstones 1 + audit_total{ok,error,timeout} 3 — D-5/D-6 applied) · F21 3 |
 | **Total extension delta** | **+274** | 217 + 57 (F2's 22 is **not** included — AM-25/LR-2 drop) |
-| **Post-lane registered (catalog convention)** | **363 ≈ 18.2 %** (F7c-inclusive) · 361 (ledger basis) · 364 (if D-6's 4-value F18 audit set is ever admitted) · 355 (if WS-A is absent and F0.3 defers, −8) | 89 + 274 |
-| Bytes/point | **16 B (array)** — the deque form was rejected at **129–161 B measured** | AM-9: `array('d')` values + `array('q')` timestamps, head/tail ring index, O(1) drop-oldest |
+| **Post-lane registered (catalog convention)** — **the PINNED PROJECTION** (the shipped constant `adjudication.BUDGET_SERIES = 363`) | **363 ≈ 18.2 %** (F7c-inclusive) · 361 (ledger basis) · 364 (if D-6's 4-value F18 audit set is ever admitted) · 355 (if WS-A is absent and F0.3 defers, −8) | 89 + 274 |
+| **Bytes/point** | **16 B (array)** — the deque form was rejected at **129–161 B measured** | AM-9: `array('d')` values + `array('q')` timestamps, head/tail ring index, O(1) drop-oldest |
 | Buffer worst case | **11.4 MiB** (750 k points, array) vs FR-C4's 32 MiB ceiling | 2.8× under the Must ceiling; 4.2× under the superseded 48 MB deque envelope |
 | Effective point interval | **max(publish 15 s, sampler 10 s) = 15 s**; observed 15–25 s | AM-15: reported `interval_s` is OBSERVED, not configured; age eviction is the backstop |
 | Points per 2 h window | **≈480** (a 720-deep count-bound would retain 3 h) | AM-10: count-bound + age eviction together |
@@ -441,16 +441,43 @@ figures appear only in the correction notes below the table.
 printed **+296 / 385 ≈19.3 %** (before AM-25's F2 drop) and decisions D5 printed **+295 / ≈384** (its own
 rows summed to 76). Both are OVERTURNED; the table above is the single source of truth.
 
-**Derivation recipe (R-a):** the 89/87 baseline is re-derivable without archaeology via catalog §1
-(`:224` total 582 · `:251` trail with the `+2 (F7c)` term · `:232` phase row-sum P1b 265 · `:206` the F7c
-row worth 2) versus §14.1 (`:1057` "F0.1–F21 + F7b" — F7c absent) / §14.2 (`:1783-1790` P1b 263 · `:1075`
-trail without the term) / §14.3 (no F7c row) ⇒ **582 wins; the ledger is stale-by-2**. The registered-today
-set F0.1 16 + F0.2 3 + F0.4 1 + F7-today 21 + F7b 46 + F7c 2 = **89**, and that set minus F7c's 2 = **87**.
-The full recipe is written out as a standalone step in **phase6 task 6.2**.
+### The MEASURED figures (Phase 6 close-out, 2026-11-02)
 
-**Pin:** the implementation lane re-measures both numbers at the family-pack level (each family pack asserts
-its own label-space `live_series_count`), and Phase 6 updates catalog §14 with the pointer-disciplined
-delta. Any family pack that measures outside its declared band ⇒ stop, report, do not widen.
+The rows above are the **plan-time re-derivation** — a **projection**, now pinned as the shipped
+constant `adjudication.BUDGET_SERIES = 363`. The rows below are what the lane **MEASURED** against
+its own shipped wiring. **They are different quantities and neither replaces the other.**
+
+| Quantity | Measured value | The recipe (reproducible) | Where the detail lives |
+|---|---|---|---|
+| **The lane's closed label space** (the CEILING the shipped gate measures) | **336** lane series ⇒ **425** against the 89 baseline | the shipped pack's own `_closed_label_space` recipe (a gauge/counter contributes one series per label combination; a histogram contributes `buckets + 2` per combination), applied to `registry.registered_family_metrics()` | the evidence pack §3.1 (the per-family table) |
+| **The lane's LIVE count** | **at or UNDER the pinned 363** | three named shortfalls, each independently re-verified: (i) F12's `ensemble_sweep_cycle_seconds` is **OUT** (no sweep service publishes an observed cycle DURATION — publishing the configured interval under an observed name would be a fabrication); (ii) **10 of the 13** sweep lanes render no series (only `watch_reconcile_sweep` / `eligible_pending_sweep` / `orphan_watcher_sweep` expose a `counters()` reader); (iii) F4's manager-pool `max` / `available` render no series (the SQLAlchemy pool exposes neither natively) | the evidence pack §3.2 |
+| **The exact live total** | **NOT statically derivable** — it is observation-dependent (which lanes publish at runtime × the observed `(lane, outcome)` combinations). **It is not asserted.** | resolution path: read `live_series_count` from `/api/metrics/families` once the door is live | the evidence pack §13 (the open questions) |
+| **What the shipped gate actually asserts** | `BASELINE_SERIES + measured_closed_space <= GLOBAL_SERIES_CAP` ⇒ **425 ≤ 2 000 ✓** — the gate compares the **ceiling** against the **global ≤2 000 cap**, **not** against the 363 planning projection | `daemon/services/metrics_query/wiring/adjudication.py`; the assertion lives in `tests/unit/metrics/test_metrics_family_adjudication.py` | the evidence pack §3.1 |
+
+**The reconciliation in one line.** The **catalog's** 582 / 265 are the catalog's **plan-time
+family budget** for the whole program (F0.1→F22); the **lane's** measured count is a **different
+number** with a different convention (the closed label space is a **ceiling**; the plan's +274 is a
+**live estimate**). The catalog's ledger is amended for **F7c** (582 / 265) — the two quantities
+are recorded side by side, each with its provenance, and **neither overwrites the other**.
+
+**Derivation recipe (R-a):** the 89/87 baseline is re-derivable without archaeology via catalog §1
+(`:243` total 582 · `:270` trail with the `+2 (F7c)` term · `:251` phase row-sum P1b 265 · `:225` the
+F7c row worth 2) versus §14.1 (`:1796` — "F0.1–F21 + F7b + F7c" after the Phase-6 amendment) / §14.2
+(`:1870` P1b **265**) / §14.3 (`:1880` — the F7c row) ⇒ **582 wins; the ledger was stale-by-2 and
+is now amended**. The registered-today set F0.1 16 + F0.2 3 + F0.4 1 + F7-today 21 + F7b 46 + F7c 2 =
+**89**, and that set minus F7c's 2 = **87**.
+**The full recipe is now written out as a standalone step in the catalog's §14.1** ("The standalone
+derivation recipe — the 89 / 87 baseline (R-a; reproducible WITHOUT archaeology)") — the four numbered
+steps, the two published denominators, and the three-quantity non-conflation table. It was
+**implemented in Phase 6 task 6.2** (catalog §14.1/§14.2/§14.3/§14.4 + §8's freeze marker + §7's
+roll-up; the correction entries are §11 **C97** (the F7 op narrowing) · **C98** (the F18 audit
+outcome) · **C99** (the F7c ledger reconciliation)).
+
+**Pin (as planned, now discharged):** the implementation lane re-measured the numbers at the
+family-pack level (each family pack asserts its own label-space `live_series_count`), and Phase 6
+updated catalog §14 with the pointer-disciplined delta. **No family pack measured outside its
+declared band** ⇒ no stop, no report, no band widening. The measured figures are recorded above
+under *The MEASURED figures* and in the evidence pack §3.
 
 ---
 
@@ -599,6 +626,14 @@ delta. Any family pack that measures outside its declared band ⇒ stop, report,
 | `inventory-vendor/` (3 vendored copies + `PROVENANCE.md` — listed individually above) | **AM-24 vendored copies** of the untracked metrics-unification inventory, each with a provenance header (source path, untracked status, evidence ref `origin/latest@62627265f`); byte-identical below the header, sha256 recorded in **`inventory-vendor/PROVENANCE.md`** (approver N-d — the hash table lives there, not in the vendored README) |
 | `requirements.md` *(folded, plan-set-owned per LR-3)* | the requirements file — the AC-A.5 / FR-A7 / FR-D3 / AC-A.6 / AC-D.1 re-scopes and the FR-A.6 annotation are folded in **commission-style** with provenance |
 | `decisions.md` *(folded)* | the technical-analysis decisions record — AM-3/8/9/10/14/15/19/20/21/25/26/27 folded in, plus the new **§D6** (LR-1's named scope-split commitment) |
+| `evidence-pack.md` *(Phase 6, task 6.6 — NEW)* | the **evidence pack**: the per-leg results (tier · D1/D2 split · slicing proof · pre-exclusion · expected-skip census), the mutation→test tables with the observed digests, the **measured** budget table, the F7c reconciliation outcome, the WS-A verdict, the F21 conditionality evidence, the AM-16 structural diff, the vendor provenance table, the FE-manifest delta, and a disposition for **every** flag (D-1…D-11) and **every** deviation (DEV-1…DEV-8) |
+| `evidence/am16-exposition-base.txt` *(Phase 6 — NEW)* | the **BASE** exposition body for the AM-16 structural diff — the input to the 3-carrier allowlist check |
+| `evidence/am16-exposition-head.txt` *(Phase 6 — NEW)* | the **HEAD** exposition body for the same diff |
+| `evidence/p4-failed-digests.txt` *(Phase 6 — NEW)* | the **recomputed** P4 FAILED-digests (bare-id + grep-full forms, both legs, all six legs) — preserved so the digests are verifiable without re-running the gate |
+| `stage-prep-checklist.md` *(Phase 6, task 6.7 — NEW)* | the **stage-prep checklist**: the three EMPTY deltas (migration · backend dependency · npm dependency), the vendored inventory with its provenance, the declared FE-manifest delta, the untouched live surface, and the two **hand-overs** (the version slot → giter; the promote → the user's nonce ceremony) |
+| `docs/architecture/metrics-query-api.md` *(Phase 6, task 6.4 — NEW, outside the plan set)* | the **query API page** — the three routes, the envelope, the error vocabulary, the pagination bounds + the cursor, the availability reasons, the `restart_epoch` semantics, the activation posture + the runbook, the scope over-grant (AM-20) + the LR-1 commitment, the OUT-list with each excluded metric's named seam, the non-Prometheus deviations clause (AM-8), and the Prometheus-text coexistence statement |
+| `docs/architecture/metrics-fe-charts.md` *(Phase 6, task 6.4 — NEW, outside the plan set)* | the **FE charts page** — the three tabs, the polling discipline, the chart mode, the window, and the availability-driven states |
+| `docs/architecture/metrics-promote-disclosure.md` *(Phase 6, task 6.5 — NEW, outside the plan set)* | the **FINAL** promote-time disclosure text (the eight cross-cutting items, each verified against the shipped constants) + the **ceremony checklist**. It supersedes the Phase-1 draft in `docs/architecture/metrics-query-contract.md` §7, which is retained as the frozen contract's record |
 
 ---
 
@@ -621,3 +656,21 @@ delta. Any family pack that measures outside its declared band ⇒ stop, report,
 **Remaining, non-blocking (v2 §3):** the post-lane registry-native ring count (re-measure at family-pack
 time; 822 proxy until then) and the exact per-request cost of the largest encode (the off-loop amendment
 AM-12 makes the loop question moot). Neither blocks the plan council.
+
+### The FINAL verdict for every open question (Phase 6 close-out, 2026-11-02)
+
+| # | Question | The final verdict — what the lane actually SHIPPED | The evidence |
+|---|---|---|---|
+| **Q1** | F7 enum membership | **`{aget, other}`** — SHIPPED as the runtime's canonical `CHECKPOINT_OP_VOCABULARY` (2 values). The catalog's §8.9 + §14.4 rows were amended to **2** (§11 **C97**), and the §8 freeze marker now records the 1→2 bump | `daemon/checkpoint_metrics.py:1245`; the catalog §8 + §14.4 |
+| **Q2** | F18 amendment target | **`{ok, error, timeout}`** — SHIPPED as the registered label set (3 values, measured from the runtime). The catalog's §8.10 + §14.4 rows were amended to **3** (§11 **C98**) | the measured F18 label set; the catalog §8.10 + §14.4 |
+| **Q3** | F8 / F21 re-admission | **Both stay OUT** — CONFIRMED on the evidence: F8's prune outcome counter does not exist, and F21's phase trail lives in the journal's **extension** fields (no pure-read derivation). Their **absence is pinned** (`P4-M1` / `P4-M7`) | the evidence pack §6 + the adjudication table |
+| **Q4** | FR-E5 vs D1 FE contract | **Availability-driven panel** — SHIPPED: the panel appears when **no family is live** and reads *"No metrics available yet"*. The forbidden copy "metrics disabled" is **absent** from the shipped copy | `METRICS_EMPTY_PANEL_COPY`; the published FE page §6 |
+| **Q5** | Which convention governs ≤2000 | **The catalog convention CONFIRMED** — and the phase sharpened it: the shipped gate asserts the **closed label space** against the **global ≤2 000 cap** (425 ≤ 2 000 ✓), while the **planning projection** (363) is the catalog's live-estimate convention. **Both are now recorded side by side**, and neither is substituted for the other | the evidence pack §3 |
+| **Q6** | P3 Tier-2 D2 scope | **ACCEPT-WITH-AMENDMENTS** — discharged: the hang-class provision was met (the whole-tree leg was re-run in the **sharded** form after the single-shot `-n auto` form aborted rc=3 on **both** legs), the expected-skip census is recorded (no skip-count divergence on any leg), and the node counts are the executor's re-derivations, never the projections | the evidence pack §1 |
+| **(OQ-3)** | F2 sequencing | **DROPPED from v1** by the VALUE ruling (AM-25 / LR-2), with the flip condition recorded **verbatim** and published in the OUT-list | the published query-API page §6.1 |
+| **(OQ-4)** | Sampler key | **AM-15 synthesis SHIPPED** — the key is the TICK; the reported `interval_s` is the **observed** effective spacing (15 s at the defaults); age eviction is the backstop | `constants.py`; the published query-API page §2.3 |
+| **(Pending #1)** | the `metrics:read` scope split | **NAMED COMMITMENT, not built now** (LR-1) — the over-grant is **published** in the query-API page §5 with the four-line retrofit map stated as **binding guidance** for the deferred lanes | the published query-API page §5 |
+| **(Pending #2)** | F2 drop confirmation | **CONFIRMED DROP** (LR-2) — F2 is absent from the registry and its absence is pinned | the adjudication table |
+| **(Pending #3)** | requirements ownership | **PLAN-SET-OWNED** (LR-3) — the re-scopes are folded directly; the non-foldable residue is the **eight disclosed adjudicated deviations DEV-1…DEV-8**, each with a disposition recorded in the evidence pack §11 | the evidence pack §11 |
+| **(v2 §3, remaining 1)** | the post-lane registry-native ring count | **CLOSED as far as this lane can close it** — the **measured** closed label space is **336** lane series (the shipped gate's own recipe) against the 822 proxy. The exact **live** ring count is observation-dependent and is **not asserted** | the evidence pack §3.1 + §13 |
+| **(v2 §3, remaining 2)** | the exact per-request cost of the largest encode | **MOOT** — AM-12 builds the response **body** off the event loop; the residual on-loop **encode** is bounded at `240 points × ≤ 50 names ⇒ ≤ 12 000 points ≈ 3.6 ms` | the published query-API page §3.2 |
