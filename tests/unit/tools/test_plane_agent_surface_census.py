@@ -41,7 +41,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from helpers.plane_catalog_fixture import catalog_names, load_catalog
+from helpers.plane_catalog_fixture import (
+    assert_keep_set_matches_catalog,
+    catalog_names,
+    compute_sorted_names_sha256,
+    load_catalog,
+    load_keep_set,
+)
 
 from daemon.mcp.builtin_servers.plane import PlaneServerDefinition
 from daemon.mcp.resilience import is_read_tool
@@ -60,6 +66,20 @@ PM_AGENT = "project-manager"
 #: (phase3-plan §2.5 E3): any GROWTH beyond this set is a RED.
 DISCLOSED_READ_HOLDERS: frozenset[str] = frozenset({"watcher"})
 
+#: The A' (FC9-breach) narrowed grant — the reconciled 28-verb keep-set in
+#: its DAEMON-EXPOSED form (``plane_<raw verb>``). PM's ``tools.allow``
+#: names these 28 literals (the ``plane`` CATEGORY entry was REPLACED, not
+#: supplemented) — see phase5-plan §5.6 A'.1.
+KEEP_SET_COUNT: int = 28
+
+#: The keep-set's sorted-name-set sha256, PINNED (A'.6 (b) — the gate-(i)
+#: drift detector). Recomputed from the artifact at import time and
+#: compared against this literal: a silent edit of the keep-set (a verb
+#: added, removed or renamed) turns the pin RED.
+PINNED_KEEP_SET_SORTED_NAMES_SHA256: str = (
+    "6bee850167039216624088e2c2fe2ef63042871c6bdebcdf8b9a34d103bebcbe"
+)
+
 
 def _load_agent_metas() -> list[dict]:
     metas = []
@@ -74,6 +94,12 @@ def _load_agent_metas() -> list[dict]:
 def _plane_daemon_names() -> set[str]:
     """The daemon-shaped plane tool names (``plane_<raw verb>``)."""
     return {f"plane_{name}" for name in catalog_names(load_catalog())}
+
+
+def _keep_set_daemon_names() -> set[str]:
+    """The A' keep-set in daemon-exposed form (``plane_<raw verb>``)."""
+    ks = load_keep_set()
+    return {e["daemon_name"] for e in ks["keep_set"]}
 
 
 def _classifier():
@@ -176,17 +202,39 @@ class TestE1RegisteredCensus:
     """E1 — the census must run with the plane server REGISTERED."""
 
     def test_the_census_resolves_plane_tools_for_pm(self, agent_metas):
+        """E1 — the census must resolve a REAL, NON-VACUOUS plane surface.
+
+        A'-restated: PM's grant is the explicit 28-verb keep-set (literal
+        names), so the resolved surface is the keep-set — a strict subset
+        of the catalog's 177 verbs. Non-vacuous means it resolves a REAL
+        set of verbs, not zero and not the whole catalog.
+        """
         pm = next(m for m in agent_metas if m.get("id") == PM_AGENT)
         resolved = _resolved_plane_tools(pm)
         assert resolved, (
             "VACUOUS CENSUS: the plane server is not REGISTERED in the "
             "census — zero plane_* tools resolved for PM"
         )
-        assert len(resolved) == 177
+        assert resolved == _keep_set_daemon_names()
+        assert len(resolved) == KEEP_SET_COUNT
+        # a strict subset of the catalog — the census measures a real,
+        # NARROWED surface (the A' premise), not the full 177.
+        assert resolved < _plane_daemon_names()
 
     def test_the_unregistered_state_would_be_vacuous(self, agent_metas):
-        """The vacuity tripwire: with NO plane names in the universe the
-        census resolves nothing — which is why E1 exists."""
+        """The vacuity tripwire, restated for the A' literal grant.
+
+        Under the A' grant the FILTER resolves LITERAL names, so the filter
+        alone can no longer distinguish a registered server from an
+        unregistered one — the MCP layer is the runtime gate. With the
+        plane server NOT registered the runtime universe of plane_* tools
+        is EMPTY, so the census would resolve nothing at runtime (proved on
+        a real boot by the Gate-B negative legs: a REFUSED workspace
+        resolves ZERO plane_* tools). This test pins the two halves of
+        that statement: the category sweep contributes nothing when the
+        universe is empty, and the literal grant's names are absent from
+        the empty runtime universe (so none of them can be bound).
+        """
         categories = _production_categories()
         categories["plane"] = []
         pm = next(m for m in agent_metas if m.get("id") == PM_AGENT)
@@ -197,7 +245,12 @@ class TestE1RegisteredCensus:
             tool_categories=categories,
             all_tool_names=set(),  # server NOT registered
         )
-        assert not {n for n in (resolved or set()) if n.startswith("plane_")}
+        # the CATEGORY expansion contributed NOTHING — the sweep is empty
+        assert categories["plane"] == []
+        # the runtime universe is empty ⇒ not one of the resolved names can
+        # be bound ⇒ the census would be vacuous
+        runtime_universe: set[str] = set()
+        assert not (set(resolved or set()) & runtime_universe)
 
 
 class TestE2WriteSurface:
@@ -215,10 +268,22 @@ class TestE2WriteSurface:
                 leaks[meta.get("id")] = sorted(leaked)
         assert leaks == {}, f"plane WRITE surface leaked to: {leaks}"
 
-    def test_pm_keeps_the_full_write_surface(self, agent_metas):
+    def test_pm_keeps_the_keep_set_write_surface(self, agent_metas):
+        """A'-restated: PM keeps the WRITE members of the keep-set.
+
+        The A' narrowing deliberately PRUNES the customer / release /
+        project-admin / module / milestone / initiative / page / property
+        families and the out-of-scope deletes — so PM no longer holds the
+        whole 104-verb write set. What MUST hold is that every write verb
+        the keep-set names is still PM's, and that PM's surface is exactly
+        the keep-set (no drift in either direction).
+        """
         pm = next(m for m in agent_metas if m.get("id") == PM_AGENT)
-        write = {f"plane_{verb}" for verb in _write_verbs()}
-        assert write <= _effective_surface(pm)
+        keep_set = _keep_set_daemon_names()
+        keep_set_write = keep_set & {f"plane_{verb}" for verb in _write_verbs()}
+        surface = _effective_surface(pm)
+        assert keep_set_write <= surface
+        assert surface == keep_set
 
 
 class TestE3ReadExposureDisclosure:
@@ -305,3 +370,70 @@ class TestE5ClassifierConsistency:
                 verb.startswith(p) for p in cfg.write_tool_patterns
             )
             assert classified, f"verb {verb!r} is unclassified"
+
+
+class TestFC8NarrowedGrant:
+    """FC8 (the A' branch's two mandatory obligations, phase5-plan §5.6 A'.6).
+
+    A narrowed grant converts an upstream rename into **silent capability
+    loss** — so the A' flip must ship BOTH:
+
+    * **(a) the MINIMUM-TOOLSET assertion** — PM's resolved plane surface is
+      a SUPERSET of the keep-set and is at least keep-set-sized. A narrowing
+      that dropped a verb (or a rename that stopped resolving it) is RED;
+    * **(b) the gate-(i) DRIFT DETECTOR** — the shipped grant is EXACTLY the
+      keep-set, the keep-set's sorted-name-set sha256 is pinned, and every
+      keep-set verb is still a member of the re-captured catalog (FC10).
+
+    Both ride the SAME atomic commit as the grant + the charter + the
+    161/161 re-stamp + the SEALED re-pin.
+    """
+
+    def test_a_minimum_toolset_assertion(self, agent_metas):
+        """(a) — resolved ⊇ keep-set, and |resolved| ≥ |keep-set|."""
+        pm = next(m for m in agent_metas if m.get("id") == PM_AGENT)
+        resolved = _resolved_plane_tools(pm)
+        keep_set = _keep_set_daemon_names()
+        assert keep_set <= resolved, (
+            "MINIMUM-TOOLSET VIOLATION: the narrowed grant no longer "
+            "resolves the whole keep-set — missing: "
+            f"{sorted(keep_set - resolved)}"
+        )
+        assert len(resolved) >= len(keep_set)
+
+    def test_b_the_grant_is_exactly_the_keep_set(self, agent_metas):
+        """(b) — the SHIPPED grant is exactly the keep-set (no drift)."""
+        pm = next(m for m in agent_metas if m.get("id") == PM_AGENT)
+        allow = list((pm.get("tools") or {}).get("allow") or [])
+        granted = {n for n in allow if n.startswith("plane_")}
+        assert granted == _keep_set_daemon_names(), (
+            "the shipped grant drifted from the keep-set — extra: "
+            f"{sorted(granted - _keep_set_daemon_names())}, missing: "
+            f"{sorted(_keep_set_daemon_names() - granted)}"
+        )
+        # the CATEGORY entry was REPLACED, not supplemented
+        assert "plane" not in allow
+
+    def test_b_the_keep_set_sorted_names_sha256_is_pinned(self):
+        """(b) — the keep-set's sorted-name-set sha256 (the FC10 digest).
+
+        A silent edit of the keep-set artifact (a verb added, removed or
+        renamed) changes the digest ⇒ RED. This is the gate-(i) drift
+        detector bound to the SHIPPED grant.
+        """
+        ks = load_keep_set()
+        raws = [e["raw_verb"] for e in ks["keep_set"]]
+        actual = compute_sorted_names_sha256(sorted(raws))
+        assert actual == PINNED_KEEP_SET_SORTED_NAMES_SHA256, (
+            "the keep-set drifted — sorted-name-set sha256 "
+            f"{actual} != pinned {PINNED_KEEP_SET_SORTED_NAMES_SHA256}"
+        )
+        assert ks["keep_set_sorted_names_sha256"] == actual
+
+    def test_b_every_keep_set_verb_is_still_in_the_catalog(self):
+        """(b) — the FC1 condition: a keep-set verb absent from the
+        re-captured catalog means the upstream rename silently dropped it
+        from PM's grant."""
+        verdict = assert_keep_set_matches_catalog()
+        assert verdict["keep_set_count"] == KEEP_SET_COUNT
+        assert verdict["all_raw_verbs_in_catalog"] is True

@@ -1488,15 +1488,15 @@ SEALED_SHA_BASELINES: dict[str, str] = {
     "agents/planner/rule.md": "4282ce61b58736026b5d2e72b7e2112925e4515bf95ffc88032104b4e4c4b6fb",
     "agents/planner[v2]/tools_note.md": "113547dcd535656316802ef8b066c6134ea09c36f0caec4f79fc21a1ecb3b31f",
     # agents/project-manager/workflow.md re-pinned 2026-11-02 (plane-pm-
-    # issue-tools Phase 4, charter reconciliation): the charter's Plane verb
-    # vocabulary was drifted at the ENTITY level (zero *_issue verbs exist
-    # in the 177-tool catalog; the entity is work_item) — seven distinct
-    # non-existent names across ten occurrences were replaced with the
-    # gate-(i) keep-set verbs (lean #5). Delta is EXACTLY the §2.1 drift
-    # rows + the same-class entity corrections; no chart/sealed-segment
-    # semantics changed. Prior value bde479095bbda6a3…c123ad (the 2026-10-20
-    # B3-closure re-pin).
-    "agents/project-manager/workflow.md": "feab3210ebc178835390d0235b0e6b74f30479331017fba1b056999e14b5aaad",
+    # issue-tools Phase 5 A' branch, FC9 BREACH — the narrowed grant): the
+    # charter gained the explicit 28-verb keep-set vocabulary (the A' grant
+    # names the verbs literally, so the prose must name them too — an
+    # upstream rename must not be able to silently drop a verb from PM's
+    # vocabulary). Delta is EXACTLY the A'.2 vocabulary paragraph; no
+    # chart/sealed-segment semantics changed. Prior value
+    # feab3210ebc178835390d0235b0e6b74f30479331017fba1b056999e14b5aaad (the
+    # 2026-11-02 Phase-4 charter-reconciliation re-pin).
+    "agents/project-manager/workflow.md": "357263bd9ce19f2cd264717e9e8054293f89335c8c0ca5ea1ed264bbb951b0d2",
     "agents/reviewer/rule.md": "77c75b6dd1f17431ab0e4a7927863cdfd5cc5975658686e2adb9fd293230200b",
     "agents/reviewer[v2]/rule.md": "77c75b6dd1f17431ab0e4a7927863cdfd5cc5975658686e2adb9fd293230200b",
     "agents/tidier/rule.md": "73624de075b1f599a4d39ab703e278050066dc8d850d14d30f3c49aff6cf604c",
