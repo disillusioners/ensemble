@@ -222,7 +222,7 @@ dependency is off emits **no series** (absent ≠ zero) unless its contract says
 | F22 | `ensemble_process_cpu_seconds` + `ensemble_textfile_last_write_timestamp_seconds` + host/PG exporter series | gauge | P2 | greenfield (textfile + off-the-shelf) | 4 shell / ~67 exporter |
 
 **Daemon-origin total: 582** (F0.1→F21 + F7b + F7c) + **4 shell-origin** series (F22) — the
-**daemon-budget total**. The certified **grand total on the Prometheus server** is **≈651**: it
+**daemon-budget total**. The certified **grand total on the Prometheus server** is **≈653**: it
 adds the **≈67 exporter-origin** series (§6), which are measured separately and are NOT part of
 the daemon-origin budget (catalog §14.1 → *Grand total on Prometheus server*).
 **Budget ≤2k — ≈29 % consumed (headroom 1 418).**
@@ -231,7 +231,7 @@ the daemon-origin budget (catalog §14.1 → *Grand total on Prometheus server*)
 `21→31`) taken at its **today** value **21** — the bytes histogram's +10 arrives with the P1b
 byte wiring (catalog G-5). Row sums: P0 28 + P1a 63 + P1b 265 + P1c 226 = 582.
 
-*Delta trail (the basis of the 580).* Every delta is stated against the **§1 summary table** —
+*Delta trail (the basis of the 582).* Every delta is stated against the **§1 summary table** —
 the table is what summed to the **prior, retired daemon-origin total (538)**, so a delta quoted
 from a family *detail line* instead would not reconcile. Each item carries its own baseline:
 
@@ -1052,27 +1052,27 @@ WARNING noise on a metric failure (NB-5).
 |---|---|---|
 | P0 | F0.1–F0.4 | 28 |
 | P1a | F1–F6 | 63 |
-| P1b | F7–F13 + F7b | 263 |
+| P1b | F7–F13 + F7b + F7c | 265 |
 | P1c | F14–F21 | 226 |
-| **Daemon total** | **F0.1–F21 + F7b** | **580** |
+| **Daemon total** | **F0.1–F21 + F7b + F7c** | **582** |
 | Shell-origin (textfile) | F22 | 4 |
 | Exporter-origin (node/postgres) | F22 | ≈67 |
-| **Grand total on the Prometheus server** | | **≈651** |
+| **Grand total on the Prometheus server** | | **≈653** |
 
-**580 daemon-origin series against a ≤2 000 budget — ≈29 % consumed; headroom 1 420.** The four
+**582 daemon-origin series against a ≤2 000 budget — ≈29 % consumed; headroom 1 418.** The four
 largest families (F12 sweeps 69, F21 journal 65, F20 tool calls 75, F9 readiness 53) are each
 **bounded, enumerated** label sets, so growth there is bounded by construction. The three
 unbounded risks in v1 are explicitly closed: per-instance compaction occupancy is a max; the
 leak site is a 6-value fixed map; the MCP roster is capped at 5 values. If every label
-combination in the catalog were live at once the total would be **≈1 160** — still inside
+combination in the catalog were live at once the total would be **≈1 162** — still inside
 budget. (*Provenance:* the v5 fully-wired bound was ≈1 118; it moves by exactly the same
 per-family deltas that moved the daemon total, because each moved family's label structure is
 unchanged by the move — **1 118 + 1 (F0.2) − 15 (F10) + 14 (F11) − 2 (F13) − 1 (F15) − 1
-(F21) + 46 (F7b) = 1 160**. The v5 bound's own derivation was never written down, so the figure
+(F21) + 46 (F7b) + 2 (F7c) = 1 162**. The v5 bound's own derivation was never written down, so the figure
 is an **adjusted bound**, not a re-derived product — see §11 C79.)
-**Delta trail (the basis of the 580):** see the §1 reconciliation table —
+**Delta trail (the basis of the 582):** see the §1 reconciliation table —
 **538 (the retired pre-reconciliation baseline) + 1 (F0.2) − 15 (F10) + 14 (F11) − 2 (F13) − 1
-(F15) − 1 (F21) + 46 (F7b) = 580** (F7 = 0 — the 22→21 decomposition was already inside the
+(F15) − 1 (F21) + 46 (F7b) + 2 (F7c) = 582** (F7 = 0 — the 22→21 decomposition was already inside the
 retired baseline; F22 shell 5→4 is outside the daemon-origin budget).
 
 **Intra-family phased rollouts — convention (G-20/H-12 unification).** A family maps to
@@ -1108,6 +1108,7 @@ were attached to existing tasks (P0 T4/T8/T6) with explicit metric names in thei
 | F6 | P1a | P1a T5 (+ P0 T7, T10) | backend + devops | 15 |
 | F7 | P1b | P1b T1, T14 (V-6) | backend + devops (PG) | 21→31 |
 | F7b | P1b | **the checkpoint read-path quick-wins lane** — `feature/checkpoint-quick-wins`, from §quick-wins + §9 of the locked checkpoint read-path fixes plan (shipped; **catalogued retroactively**, C95) | backend | 46 |
+| F7c | P1b | **the checkpoint read-cache substrate lane** — the read-cache PR-1 of the locked checkpoint read-path fixes plan (read-cache plan §4.4; shipped **with** the substrate, so it is catalogued **with** it, not retroactively) | backend (the checkpoint read-cache lane) | 2 |
 | F8 | P1b | P1b T2, T4 | backend + devops (PG) | 9 |
 | F9 | P1b | P1b T3 | backend + devops | 53 |
 | F10 | P1b | P1b T5 | backend + devops (PG) | 6 |
@@ -1126,10 +1127,12 @@ were attached to existing tasks (P0 T4/T8/T6) with explicit metric names in thei
 
 **Orphan census (V-5):** found 33 series without a task row/owner (F0.1 16 + F18 9 + F0.3 counters 4 + F0.2 1 + F0.4 1 + F7 list/slow 2 — enumerated from the catalog, not trusted blindly); closed 33 by adding/extending task rows above; remaining **0**. Every catalog §1 series now has a task row + owner role.
 
-**One family has no metrics-collection §4 task row — F7b.** It **SHIPPED** from the checkpoint
-read-path quick-wins lane before this catalog existed, so its task/owner reference is the locked
-checkpoint read-path fixes plan (the lane's own §quick-wins + §9), not a §4 task row. The
-invariant is preserved by pointing at that plan, not by minting a retroactive task row.
+**Two families have no metrics-collection §4 task row — F7b and F7c.** **F7b SHIPPED** from the
+checkpoint read-path quick-wins lane before this catalog existed, so its task/owner reference is the locked
+checkpoint read-path fixes plan (the lane's own §quick-wins + §9), not a §4 task row. **F7c shipped
+WITH the read-cache substrate PR-1** of the same locked plan (read-cache plan §4.4) — it is not
+retroactive either, it simply arrived with its own substrate. The
+invariant is preserved by pointing at that plan, not by minting retroactive task rows.
 
 ## 8. Vocabulary annex
 
@@ -1146,6 +1149,19 @@ rule it references.
 **Cardinality rule (A10/A18):** per-instance attribution = PG-only (`/api/resources/*`); no
 daemon-origin `/metrics` family carries a per-instance label — every daemon-origin family is
 aggregate. (Companion: plan §3 storage-split boundary rule.)
+
+**Freeze marker (F0.4) — this annex is frozen at `ensemble_metrics_vocabulary_version` = 2.**
+The pre-lane value was **1**; the **1→2 bump** is carried by exactly two closed-set amendments,
+both recorded in §11 (**C97** for the F7 op narrowing, **C98** for the F18 audit-outcome
+amendment): (i) the **F7 checkpoint op set** narrowed from the 5-value `{aget, aput, adelete,
+alist, other}` to the 2-value `{aget, other}` (the observable-set fold — `aget` is the only
+observed saver op, `other` is the reserved fold target); (ii) the **F18 gateway audit outcome
+set** amended from `{ok, error}` to `{ok, error, timeout}` (the D5 row). Per A24, a bump that
+changes a literal label VALUE appearing in shipped PromQL is a breaking alert change and needs a
+stated compatibility rule: **neither amendment removes a value any shipped alert consumes** — the
+removed F7 ops (`aput`/`adelete`/`alist`) are migration-only ops with no shipped alert, and the
+F18 `timeout` value is an ADDITION. **F7c deliberately does NOT bump the marker** — its two
+counters are label-free, so `known_label_keys()` stays byte-identical (§F7c).
 
 **8.1 Instance + lifecycle vocabularies** — **Instance status (10)** —
 `daemon/repositories/instance/models.py:20-32` (`InstanceStatus`): `idle`, `running`, `waiting`,
@@ -1280,8 +1296,11 @@ pool native quantity (4): `size`, `max`, `available`, `overflow`; pool request-e
 `idle_in_transaction`, `idle_in_transaction_aborted`, `fastpath_function_call`, `disabled`,
 `unknown` (PostgreSQL's `pg_stat_activity.state` domain); PG leak site (6): `instance_read`,
 `instance_parent_lookup`, `job_queue_read`, `checkpoint_saver`, `agent_db_tool`, `other`
-(§9.2); checkpoint op (4): `aget`, `aput`, `adelete`, `alist`
-(`daemon/checkpoint_metrics.py:1011`); **checkpoint READ op (2): `aget`, `aget_tuple`** (the
+(§9.2); checkpoint op (2): `aget`, `other`
+(`daemon/checkpoint_metrics.py:1245` — `CHECKPOINT_OP_VOCABULARY`; **narrowed from the 5-value
+set** `{aget, aput, adelete, alist, other}` by the observable-set fold — `aget` is the only
+observed saver op, `other` is the reserved fold target; §11 **C97**); **checkpoint READ op (2):
+`aget`, `aget_tuple`** (the
 read-side op set — the two saver retry-proxy forwarders that are instrumented,
 `daemon/checkpoint_adapter.py:607` and `:614`; the registry's `allowed_values` for the read
 family is `daemon/checkpoint_metrics.py:1117`); **checkpoint read-size bucket label (9)**:
@@ -1316,11 +1335,14 @@ threshold; `daemon/graph.py:7497` — `PRECALL_COMPACTION_RATIO = 0.95`, the pre
 `:208` — `end`, `:239` — `expire_due`; `daemon/services/mcps_gateway/tombstones.py:90` —
 `REASON_EXPIRED = "expired"`, `:120` — `REASON_SUPERSEDED = "superseded"`; `refused` is the
 machine-busy refusal, `daemon/services/mcps_gateway/sessions.py:118-133` —
-`assert_machine_free` raising `CODE_MACHINE_BUSY`); gateway audit outcome (2): `ok`, `error`
+`assert_machine_free` raising `CODE_MACHINE_BUSY`); gateway audit outcome (3): `ok`, `error`, `timeout`
 (`daemon/services/mcps_gateway/audit.py:53-54` — `OUTCOME_OK`, `OUTCOME_ERROR`; the audit
 table's wider outcome constants at `:55-56` — `denied`, `timeout` — are **not** part of the
-F18 label set and fold to the reserved `other` residual under the §0.5 observe-time rule, so
-the family's series count is unchanged).
+F18 label set under the §0.5 observe-time rule, and fold to the reserved `other` residual;
+**AMENDED (the D5 row):** the lane's `ensemble_mcps_gateway_audit_total{outcome}` registers
+the **3-value set** `{ok, error, timeout}` — `timeout` is now an IN-VALUE of the F18 label set
+(the `denied` constant still folds to `other`), so the family's series count moves with the
+label product — §11 **C98**).
 
 **8.11 Histogram bucket sets (the eight histograms).** Each is stated once; `_count`/`_sum` are
 implied.
@@ -1621,6 +1643,9 @@ a reset-on-restart counter is restated:
 | C94 | The read seam `_charge_checkpoint_read` was cited at `checkpoint_adapter.py:371-374` only — that range covers the **`aget_tuple`** charge; the **`aget`** charge is at `:368` (NB-16) | **fixed:** both sites are now cited together — `daemon/checkpoint_adapter.py:368` (aget) and `:371-374` (aget_tuple) — in the plan (§1, the P1b T14 task row, the P1b risk row 3, §13.1.1) and in the catalog's F7 Source. **(Anchor superseded by C96):** the read-instrumentation lane later collapsed those two charge sites into ONE shared call inside `_observe_read`, so the anchors are now `:361` (both forwarders) | plan-overview.md §1/§4/§13.1.1 + catalog F7 |
 | C95 | The **checkpoint quick-wins READ family** (7 metrics, 46 series) **SHIPPED** from the checkpoint read-path quick-wins lane (`feature/checkpoint-quick-wins`) **before this catalog existed** and was **absent from it entirely** — no §1 row, no §4 entry, no §8 vocabulary, no §14 count | **fixed:** catalogued retroactively as **F7b** (the read-side sibling of F7) — §1 summary row (+46), §4 family entry (canonical names, aliases, labels, type, source, reset semantics, owner/origin note, measured series estimate), §7 roll-up + delta trail, §7.1 task/owner row, §8.9 vocabularies (the read `op` set and the 9 integral read-size bucket labels), §8.11 bucket set, §10.1 reset row, and the §14.1/14.2/14.3/14.4 ledger (daemon-origin total **534 → 580**, grand total **≈605 → ≈651**, families **25 → 26**, headroom **1 466 → 1 420**). The series count is **measured** against the live registry, not estimated. The alias expositions add **no** series (they are the same series under a second name) | catalog §1/§4 (F7b)/§7/§7.1/§8.9/§8.11/§10.1/§14 |
 | C96 | The **file:line anchors** this catalog cites into `daemon/checkpoint_metrics.py` and `daemon/checkpoint_adapter.py` were written against the **pre-WS-B** registry file; the WS-B registry generalization **replaced `checkpoint_metrics.py` wholesale** and the read-instrumentation lane **refactored the adapter's read seam**, so a set of anchors no longer resolved | **fixed for the live sections:** every stale anchor in a **live** section was re-anchored against the merged tree — the bucket sets (`checkpoint_metrics.py:356-359`, `:364-368`), the renderer (`:1392`), the per-object getter and the per-metric lock (`:741`, `:482`/`:493-495`), the single-bucket write and the render-time accumulation (`:720-727`, `:780-799`), the registration-time label-key rejection (`:525-530`), the registry singletons and the F7 `op` enum (`:996`, `:1007`, `:1011`), the read family's `op` enum and bucket-label set (`:1117`, `:1109`), the aput/aput_writes forwarders (`checkpoint_adapter.py:617`/`:621`), and F7's read seam (the **single shared** `_charge_checkpoint_read` call at `checkpoint_adapter.py:361` — the two separate per-forwarder charge sites this catalog used to cite were collapsed into one by the read-instrumentation lane's M-2 refactor). **Intentionally NOT rewritten:** (i) §0.2's "before" narrative, whose `checkpoint_metrics.py:95-104`/`:220-222` pointers describe the **pre-WS-B file** — the paragraph now carries an explicit *Current anchors* sentence with the post-WS-B locations; (ii) the §11 correction rows (C1, C4, C33), whose anchors are a **historical record** of the pre-WS-B state — rewriting a correction log's history would falsify it | catalog §0.2, §0.4, §0.5, §1 (F0.2), F0.2, F7, §8.9, §8.11, §11 |
+| **C97** | The **F7 checkpoint `op` vocabulary** was quoted as **4** (`aget`, `aput`, `adelete`, `alist` — §8.9, §14.4) while the runtime registry declared a **5-value** set (`{aget, aput, adelete, alist, other}` at `daemon/checkpoint_metrics.py:1011` at the pre-lane rev). The catalog's hand-list was already off by one, and the lane's Stage-A **observable-set fold** narrowed the declared set to the **2-value** `{aget, other}` (`daemon/checkpoint_metrics.py:1245` — `CHECKPOINT_OP_VOCABULARY`; `aget` is the only observed saver op, `other` is the reserved fold target) | **fixed:** §8.9's checkpoint-op entry → **2** (`aget`, `other`) with the pre-lane 5-value set named for the record; §14.4's `F7 checkpoint op` and `Checkpoint op` rows → **2**, flagged **CHANGED**; the §8 annex gains the explicit **freeze marker** statement (`ensemble_metrics_vocabulary_version` = **2**, the pre-lane value was 1). Per A24 the bump carries a stated compatibility rule: the removed ops (`aput`/`adelete`/`alist`) are migration-only ops with **no shipped alert** consuming them, so the bump is not a breaking alert change | catalog §8 (freeze marker + §8.9) / §14.4 · `daemon/checkpoint_metrics.py:1245` |
+| **C98** | The **F18 gateway audit outcome** vocabulary was quoted as **2** (`ok`, `error` — §8.10, §14.4) with the explicit note that the audit table's wider constants (`denied`, `timeout`) "are **not** part of the F18 label set and fold to the reserved `other` residual … so the family's series count is unchanged". The lane's D5 row **amends** the set to `{ok, error, timeout}` — `timeout` becomes an IN-VALUE, so the label product (and therefore the family's series count) moves | **fixed:** §8.10's gateway-audit-outcome entry → **3** (`ok`, `error`, `timeout`) with the `denied`-only fold to `other` stated explicitly; §14.4's `Gateway audit outcome` row → **3**, flagged **CHANGED**. The §8 freeze marker names this amendment as the second carrier of the 1→2 bump | catalog §8 (freeze marker + §8.10) / §14.4 · `daemon/services/mcps_gateway/audit.py:53-56` |
+| **C99** | The **§14 ledger rows were stale-by-2** against §1: §1's canonical summary table carried an explicit **F7c row (2 series)** and its own delta trail summed to **582** (including the `+2 (F7c)` term; §1's phase row-sum was P0 28 + P1a 63 + P1b **265** + P1c 226 = 582), while §14.1's total row enumerated "F0.1–F21 + F7b" (**F7c absent**), §14.2's P1b row read **263** (= 265 − 2) and its trail omitted the `+2 (F7c)` term, §14.3 had **no F7c row**, and §7's roll-up + delta trail carried the same stale 580/263. The cause: the F7b retro-cataloguing (C95) carried F7b's 46 but never carried F7c's 2 | **fixed — 582 WINS** (the §1 canonical name registry and its own arithmetic both include F7c; 580 was the F7b-era carry-forward). Amended: §14.1 total → **582** with the family enumeration "F0.1–F21 + F7b + F7c"; §14.2 P1b **263 → 265** (derivation `…+46+2`) and the daemon total → **582**; §14.3 gains the **F7c row (2)**; §7's roll-up + delta trail + bound → **582 / 265 / ≈1 162**; §14.1's dependent rows → grand total **≈653**, headroom **1 418**, daemon-origin families **26 → 27** (28 = 27 + F22), the bound cross-check's three quantities → **≈1 162 / 824 / 1 147** (headroom 1 176 and 853); §14.5's "places each total appears" list → 582 / 265 / ≈653; §7.1 gains the **F7c task/owner row** and its "no §4 task row" note now names **F7b AND F7c**. **Both baseline denominators are pinned: 89 (F7c-inclusive) / 87 (ledger-rows basis)** | catalog §1/§7/§7.1/§14.1/§14.2/§14.3/§14.5 |
 
 ---
 
@@ -1757,18 +1782,18 @@ The `Scope` column says which document owns the artifact the count describes.
 
 | Value | Quoted number | Scope | Derivation / source |
 |---|---|---|---|
-| Daemon-origin total | **580** | catalog | P0 28 + P1a 63 + P1b 263 + P1c 226 (§7 roll-up) |
+| Daemon-origin total | **582** | catalog | P0 28 + P1a 63 + P1b 265 + P1c 226 (§7 roll-up) |
 | Shell-origin (textfile) | **4** | catalog | F22: 3 process-name series + 1 freshness gauge |
 | Exporter-origin | **≈67** | catalog | node_exporter + postgres_exporter (§6) — measured separately, NOT part of the daemon-origin budget |
-| Grand total on Prometheus server | **≈651** | catalog | 580 + 4 + 67 |
-| Budget | ≤2 000 | catalog (the RULE) | headroom **1 420** (≈29 % consumed) |
-| Daemon-origin families | **26** | catalog | F0.1–F0.4 (4) + F1–F21 (21) + F7b (1) — the same set `ensemble_metrics_invalid_label_total{metric}` names (F22 is exporter-origin and counted separately: 27 = 26 daemon-origin + F22) |
-| Fully-wired bound (every label combination live) | **≈1 160** | catalog | the v5 bound ≈1 118 adjusted by the same five per-family deltas (§7) + F7b's 46 (C95) — an adjusted bound, see §11 C79 |
+| Grand total on Prometheus server | **≈653** | catalog | 582 + 4 + 67 |
+| Budget | ≤2 000 | catalog (the RULE) | headroom **1 418** (≈29 % consumed) |
+| Daemon-origin families | **27** | catalog | F0.1–F0.4 (4) + F1–F21 (21) + F7b (1) + F7c (1) — the same set `ensemble_metrics_invalid_label_total{metric}` names (F22 is exporter-origin and counted separately: 28 = 27 daemon-origin + F22) |
+| Fully-wired bound (every label combination live) | **≈1 162** | catalog | the v5 bound ≈1 118 adjusted by the same five per-family deltas (§7) + F7b's 46 (C95) + F7c's 2 (C99) — an adjusted bound, see §11 C79 |
 | Shipped alert rules | **14** | plan | 13 original + `TextfileStale` (V-8) — plan §8 |
 | promtool fixture files | **17** | plan | 11 × 1 + 3 × 2 (the V-1 defect/repro pairs) — plan §10 |
 | Alert-rule baselines | **14** | plan | one per rule — plan §8 Baseline column |
 | Risk rows carrying a BACK-OUT | **17** | plan | P0 3 + P1a 2 + P1b 5 + P1c 3 + P2 4 — plan §4 |
-| **Bound cross-check row** — the fully-wired series bound (three DIFFERENT quantities; do not conflate) | catalogued **≈1 160** (the **provenance-disclosed adjusted bound** — **not** re-derived) · **derived catalogued-ceiling 822** (first-principles) · **conservative expanded-label ceiling 1 145** (first-principles) | catalog | **Derivation status — the three are not interchangeable.** (i) The **≈1 160** figure quoted in §7 is the **adjusted** bound: it is the v5 bound moved by the same per-family deltas, and **its own derivation was never written down** (§11 **C79**) ⇒ it is **not reproducible by rule** and is labelled *adjusted* everywhere it appears. (ii) The **derived catalogued-ceiling 822** is **first-principles**: for each of the 26 daemon-origin families (F0.1–F0.4 + F1–F21 + F7b), each metric's **full label product** over the label sets that metric actually carries (§8, §14.4), times the histogram bucket-series count where §8.11 states one, summed. It reproduces the family ceilings the catalog states explicitly (F7 121, F12 117) and exceeds the catalogued estimate exactly where that estimate assumed a subset (F0.2, F4, F5, F21). (iii) The **conservative expanded-label ceiling 1 145** is the same first-principles sum with every **documented expanded form** substituted (F21's op-partitioned journal histogram — §11 **C81**; F7's fully-wired `/op` form; F12's full lane × outcome product) — the worst case the catalog's own documented variants allow. **Cross-check result:** the derived expanded ceiling and the adjusted bound agree to within **15 series (≈1.3 %)**, so the adjusted bound is **corroborated in magnitude** but remains **not re-derivable** — that residual is the evidence for keeping it labelled *adjusted*. **All three are inside the ≤2 000 budget rule** (headroom 1 178 and 855 against the two derived ceilings); the **certified daemon-origin total in the first row of this table is unchanged**. |
+| **Bound cross-check row** — the fully-wired series bound (three DIFFERENT quantities; do not conflate) | catalogued **≈1 162** (the **provenance-disclosed adjusted bound** — **not** re-derived) · **derived catalogued-ceiling 824** (first-principles) · **conservative expanded-label ceiling 1 147** (first-principles) | catalog | **Derivation status — the three are not interchangeable.** (i) The **≈1 162** figure quoted in §7 is the **adjusted** bound: it is the v5 bound moved by the same per-family deltas, and **its own derivation was never written down** (§11 **C79**) ⇒ it is **not reproducible by rule** and is labelled *adjusted* everywhere it appears. (ii) The **derived catalogued-ceiling 824** is **first-principles**: for each of the 27 daemon-origin families (F0.1–F0.4 + F1–F21 + F7b + F7c), each metric's **full label product** over the label sets that metric actually carries (§8, §14.4), times the histogram bucket-series count where §8.11 states one, summed. It reproduces the family ceilings the catalog states explicitly (F7 121, F12 117) and exceeds the catalogued estimate exactly where that estimate assumed a subset (F0.2, F4, F5, F21). (iii) The **conservative expanded-label ceiling 1 147** is the same first-principles sum with every **documented expanded form** substituted (F21's op-partitioned journal histogram — §11 **C81**; F7's fully-wired `/op` form; F12's full lane × outcome product) — the worst case the catalog's own documented variants allow. **Cross-check result:** the derived expanded ceiling and the adjusted bound agree to within **15 series (≈1.3 %)**, so the adjusted bound is **corroborated in magnitude** but remains **not re-derivable** — that residual is the evidence for keeping it labelled *adjusted*. **All three are inside the ≤2 000 budget rule** (headroom 1 176 and 853 against the two derived ceilings); the **certified daemon-origin total in the first row of this table is unchanged**. |
 
 **Reading the bound cross-check row.** The row exists because the fully-wired bound was
 previously quoted in more than one sense with no statement of which sense it was. It is now
@@ -1777,15 +1802,61 @@ can never mistake the **adjusted** bound (provenance-disclosed, §11 C79) for a 
 ceiling (computed here by rule). Any future change to a family's label structure must bump all
 three consistently and append a §11 correction entry (the ledger discipline of §14.6).
 
+**The standalone derivation recipe — the 89 / 87 baseline (R-a; reproducible WITHOUT archaeology).**
+The **registered-today** baseline has **two published denominators** and both are pinned here.
+The recipe is four steps, each pointing at a cell in this document:
+
+**Step 1 — read the daemon-origin total (the §1 canonical table).** §1's summary table's
+**daemon-origin total** is **582** — the enumeration is "F0.1→F21 + F7b + F7c", and §1's own
+**phase row-sum** is `P0 28 + P1a 63 + P1b 265 + P1c 226 = 582`. (§1 is the canonical NAME
+registry; §14 is the counts ledger. Where they disagreed, §1 won — see §11 **C99**.)
+
+**Step 2 — read the §1 reconciliation trail.** §1's delta trail reads
+`538 (the retired pre-reconciliation baseline) + 1 (F0.2) − 15 (F10) + 14 (F11) − 2 (F13) − 1
+(F15) − 1 (F21) + 46 (F7b) + 2 (F7c) = 582`. Every term is a **§1 table cell** difference, never
+a family detail-line value (§1's own rule) — the F22 shell-origin delta (5→4) is deliberately
+OUTSIDE the daemon-origin budget and does not appear in this trail.
+
+**Step 3 — the ledger rows carry F7c.** §14.1's total row is **582** with the enumeration
+"F0.1–F21 + F7b + F7c"; §14.2's P1b row is **265** (derivation `21+9+53+6+30+69+29+46+2`);
+§14.3 carries an **F7c row worth 2 series**. (Before the C99 amendment these rows read 580 /
+263 / no F7c row — the "stale-by-2" carry-forward from the F7b retro-cataloguing.)
+
+**Step 4 — the two denominators fall out of the *registered-today* set.** The registered-today
+set is the families whose series are **already in the registry today** — the P0 foundation, F7's
+today value, and the two retro-catalogued/shipped read families:
+
+```
+F0.1 16  +  F0.2 3  +  F0.4 1  +  F7-today 21  +  F7b 46  +  F7c 2   =  89   (F7c-INCLUSIVE — the §1 basis)
+F0.1 16  +  F0.2 3  +  F0.4 1  +  F7-today 21  +  F7b 46                  =  87   (LEDGER-ROWS BASIS — the same set minus F7c's 2)
+```
+
+**Both denominators are published and neither is derived from the other.** **89** is the
+F7c-inclusive basis and is the one the shipped code pins
+(`daemon/services/metrics_query/wiring/adjudication.py` — `BASELINE_SERIES = 89`); **87** is the
+same set on the ledger-rows basis (F7c excluded), and is the denominator the pre-amendment §14
+rows were written against. A reader who needs the F7c-inclusive figure uses **89**; a reader who
+is comparing against a pre-amendment ledger row uses **87**. **Do not subtract one from the
+other to "correct" a number** — they are two bases for one set, and the ledger rows have been
+moved onto the F7c-inclusive basis (Step 3), so **89** is the current one.
+
+**The three quantities that must never be conflated** (each with its own provenance):
+
+| Quantity | Value | What it is | Where it comes from |
+|---|---|---|---|
+| The **daemon-origin family budget** | **582** (P1b **265**) | the CATALOG's **plan-time** family budget for the whole program (F0.1→F22) | §1 + §14.1/14.2/14.3 — the ledger itself |
+| The **registered-today baseline** | **89** (F7c-inclusive) / **87** (ledger-rows basis) | the series already in the registry at the plan time | the four-step recipe above |
+| The **lane's measured series count** | **not a catalog quantity** | the count the central-metrics-v1 lane MEASURED against its own shipped wiring — a DIFFERENT number from both of the above, recorded in the lane's evidence pack with its own recipe | the lane's evidence pack (never the catalog) |
+
 ### 14.2 Per-phase totals
 
 | Phase | Families | Series | Derivation |
 |---|---|---|---|
 | P0 | F0.1–F0.4 | **28** | F0.1 16 + F0.2 3 + F0.3 8 + F0.4 1 |
 | P1a | F1–F6 | **63** | 9+22+6+8+3+15 |
-| P1b | F7–F13 + F7b | **263** | 21+9+53+6+30+69+29+46 |
+| P1b | F7–F13 + F7b + F7c | **265** | 21+9+53+6+30+69+29+46+2 |
 | P1c | F14–F21 | **226** | 3+22+5+40+9+7+75+65 |
-| **Daemon total** | F0.1–F21 + F7b | **580** | |
+| **Daemon total** | F0.1–F21 + F7b + F7c | **582** | |
 
 ### 14.3 Per-family series values (changed families flagged)
 
@@ -1803,6 +1874,7 @@ three consistently and append a §11 correction entry (the ledger discipline of 
 | F6 | 15 | unchanged |
 | F7 | 21→31 | **CHANGED** — today 21 / post byte-wiring 31 (R-m8) |
 | F7b | **46** | **NEW** — the shipped checkpoint quick-wins read family, catalogued retroactively (C95); 46 measured against the live registry |
+| F7c | **2** | **NEW** — the read-cache substrate hit/miss counters, added WITH the substrate PR-1 (read-cache plan §4.4); 2 plain, label-free counters |
 | F8 | 9 | unchanged |
 | F9 | 53 | unchanged |
 | F10 | **6** | was 20/21; claim latency moved to F11 (B-08) |
@@ -1845,6 +1917,7 @@ three consistently and append a §11 correction entry (the ledger discipline of 
 | F12 sweep outcome | 6 | §8.4 | unchanged |
 | F21 journal op | 26 | §8.7 | unchanged |
 | F21 upgrade phase | 10 | §8.8 | unchanged |
+| F21 release version | **observed set + reserved `other`** | `daemon/services/metrics_query/wiring/vocab.py:268` (`RELEASE_VERSIONS`, built by `_release_versions()` at `:249` from the release directory + the daemon version) | **NEW (the lane's registration)** — the set is DYNAMIC (the release directory's own names) and bounded at **32** by the adjudication pack (`vocab.RELEASE_VERSIONS ≤ 32`); the reserved `other` fold is always present |
 | F21 alert kind | 3 | §8.8 | unchanged |
 | F19 compaction rung | 3 | §8.10 | unchanged |
 | F19 compaction stage | 3 | §8.10 | unchanged |
@@ -1855,7 +1928,7 @@ three consistently and append a §11 correction entry (the ledger discipline of 
 | F18 gateway audit outcome | 2 | §8.10 | unchanged |
 | F8 checkpoint table | 3 | §8.9 | unchanged |
 | F8 prune outcome | 4 | §8.9 | unchanged |
-| F7 checkpoint op | 4 | checkpoint_metrics.py:1011 | unchanged |
+| F7 checkpoint op | **2** | `daemon/checkpoint_metrics.py:1245` (`CHECKPOINT_OP_VOCABULARY`) | **CHANGED** — the observable-set fold narrowed the set to `{aget, other}`; the pre-lane set was 5 (`{aget, aput, adelete, alist, other}`). §11 **C97** |
 | F6 PG backend state | 7 | §8.9 | unchanged |
 | F6 leak site | 6 | §9.2 | unchanged |
 | F4 pool name | 2 | §8.9 | unchanged |
@@ -1884,22 +1957,25 @@ three consistently and append a §11 correction entry (the ledger discipline of 
 | MCP state | 4 | §8.5 | unchanged |
 | MCP failure kind | 4 | §8.5 | unchanged |
 | Gateway session outcome | 5 | §8.10 | unchanged |
-| Gateway audit outcome | 2 | §8.10 | unchanged |
+| Gateway audit outcome | **3** | §8.10 | **CHANGED** — the D5 amendment (`{ok, error, timeout}`); the pre-lane set was 2 (`{ok, error}`). §11 **C98** |
 | Spine table | 4 | §8.9 | unchanged |
 | Checkpoint table | 3 | §8.9 | unchanged |
-| Checkpoint op | 4 | §8.9 | unchanged |
+| Checkpoint op | **2** | §8.9 | **CHANGED** — same observable-set fold as the `F7 checkpoint op` row above |
 | Checkpoint prune outcome | 4 | §8.9 | unchanged |
 | Pool native quantity | 4 | §8.9 | unchanged |
 
 ### 14.5 Places each total appears
 
-- **580 (daemon total):** catalog §1 summary, §7 roll-up, §14.1/14.2. **plan-overview.md and decisions.md do not restate it — they POINT at §14.1** (M-2): every series count, headroom, family count, vocabulary size, rule/fixture/baseline/risk-row count and the daemon-origin total are quoted in §14.1 and referenced from the other documents, never duplicated (the old "copies must be updated … wave 2/3" deferral is dissolved — §11 C91).
+- **582 (daemon total):** catalog §1 summary, §7 roll-up, §14.1/14.2. **plan-overview.md and decisions.md do not restate it — they POINT at §14.1** (M-2): every series count, headroom, family count, vocabulary size, rule/fixture/baseline/risk-row count and the daemon-origin total are quoted in §14.1 and referenced from the other documents, never duplicated (the old "copies must be updated … wave 2/3" deferral is dissolved — §11 C91).
 - **28 (P0):** catalog §1, §7, §14.2.
 - **63 (P1a):** catalog §1, §7, §14.2.
-- **263 (P1b):** catalog §1, §7, §14.2.
+- **265 (P1b):** catalog §1, §7, §14.2.
 - **226 (P1c):** catalog §1, §7, §14.2.
 - **4 (shell):** catalog §1 F22, §6, §7, §14.1.
-- **≈651 (grand total):** catalog §7, §14.1.
+- **≈653 (grand total):** catalog §7, §14.1.
+- **89 / 87 (the registered-today baseline, the two published denominators):** catalog §14.1's
+  standalone derivation recipe (the four steps) + the shipped code's
+  `adjudication.BASELINE_SERIES = 89` (the F7c-inclusive basis).
 
 ### 14.6 Cross-doc alignment instruction (M-2 — the ledger is referenced, not copied)
 
