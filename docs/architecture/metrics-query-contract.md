@@ -700,6 +700,14 @@ is restored with `git checkout --` and the restore is asserted BYTE-IDENTICAL).
 | `P5-M10` | the panel copy reverted to "metrics disabled" | `metrics-fe-page` (the copy pin) |
 | `P5-M11` | the production-config build leg dropped from the gate | `metrics-fe-bindings-pins` (the build-leg pin) |
 
+**The FULL FE corpus (the whole-tree reference for an FE-only lane).** `jest --ci --silent
+--runInBand` over `frontend/` (every `**/*.spec.ts`): HEAD **4279 passed · 9 failed · 4288
+total** (134 suites, 110 s) against BASE **9 failed** on the same four files — the 9 failing node
+ids are BYTE-IDENTICAL on both sides (digest `05d054bb483a90b0c769e8f270d6ba2e15ecc375bc61c22d8c8c4d73830c1b7d`)
+⇒ net-new **EMPTY**. The nine are the pre-existing family: the timezone picker's date-dependent
+New York DST expectation (settings ×2 + schedule-create-dialog ×3) and the two documented
+`jobs-grouping` (×3) / `jobs-filter-state` (×1) live reds.
+
 **The e2e.** `frontend/e2e/metrics-gate.spec.ts` under `frontend/playwright.metrics-gate.config.ts`
 (own proxy config + gate pattern; the door routes are stubbed pre-network; zero daemon):
 **2/2 PASS** (31.3 s) — the journey (gear menu → `/metrics` → Overview stat cards → Charts →
