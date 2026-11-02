@@ -30,7 +30,11 @@
 #       missing → halt fires (conservative). NO commit.
 #   C4 rollback_safe missing key — halt fires. NO commit.
 #   C5 rollback_safe TRUE — sweep-rollback path taken (not commit path).
-#   C7 cooldown uname fix (lib.sh:982 BSD/GNU dispatch) — bonus check.
+#   C7 cooldown uname fix (lib.sh:2099-2107 BSD/GNU dispatch; the pre-Phase-3
+#      cite "lib.sh:982" was STALE — corrected promote-handback-halt
+#      Phase 3, OQ-C-20/Q5) — bonus check. The LAUNCHER twin of this
+#      dispatch is pinned by tests/test_launcher_cooldown_arm.sh (the
+#      rider; P3-PIN-01..04).
 #
 # Run:
 #   bash tests/test_boot_sweep_commit_and_continue.sh
@@ -425,7 +429,7 @@ else
 fi
 
 # ===========================================================================
-section "C7 — Cooldown uname dispatch fix (lib.sh:982 — opportunistic)"
+section "C7 — Cooldown uname dispatch fix (lib.sh:2099-2107 — opportunistic; cite corrected OQ-C-20)"
 
 LIB_SH="$REPO_ROOT/scripts/upgrade/lib.sh"
 if grep -q 'Darwin|\*BSD\*|\*bsd\*)' "$LIB_SH" \

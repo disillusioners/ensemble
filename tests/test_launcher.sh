@@ -419,7 +419,7 @@ _js_fixture() {
 # ("<target>@<started_at>", or the bare target when started_at is empty —
 # the SAME rule the launcher and the daemon use).
 _js_seed() {
-    local d="$1" started="$2" flipped="$3" cnt="${4:-1}" wstart="${5:-$2}" cd_raw="${6:-null}" kind="${7:-promote}" request="${8:-0}"
+    local d="$1" started="$2" flipped="$3" cnt="${4:-1}" wstart="${5:-$2}" cd_raw="${6:-null}" kind="${7:-promote}" request="${8:-0}" owner_pid="${9:-999999}"
     local hist="[]" req_ident="v0.10.6"
     if [ -n "$started" ]; then
         req_ident="v0.10.6@$started"
@@ -427,8 +427,8 @@ _js_seed() {
     if [ "$request" = "1" ]; then
         hist="[{\"ts\":\"$started\",\"event\":\"rollback_requested\",\"detail\":\"target v0.10.6 run_id $req_ident reason not-ready\"}]"
     fi
-    printf '{"current":"v0.10.5","previous":"v0.10.5","in_flight":{"kind":"%s","target":"v0.10.6","started_at":"%s","flipped":%s,"owner_pid":999999},"rollback_window_count":{"24h":%s,"window_start":"%s"},"cooldown_until":%s,"quarantined":[],"history":%s}\n' \
-        "$kind" "$started" "$flipped" "$cnt" "$wstart" "$cd_raw" "$hist" > "$d/releases/state.json"
+    printf '{"current":"v0.10.5","previous":"v0.10.5","in_flight":{"kind":"%s","target":"v0.10.6","started_at":"%s","flipped":%s,"owner_pid":%s},"rollback_window_count":{"24h":%s,"window_start":"%s"},"cooldown_until":%s,"quarantined":[],"history":%s}\n' \
+        "$kind" "$started" "$flipped" "$owner_pid" "$cnt" "$wstart" "$cd_raw" "$hist" > "$d/releases/state.json"
 }
 
 _js_run() {  # run the sweep against <dir> in a fresh launcher shell
@@ -447,9 +447,26 @@ _js_count() {   # rollback_window_count "24h" value
     ( . "$LAUNCHER"; _js_json_field "$(_js_json_sub "$(_js_journal "$1")" rollback_window_count 2>/dev/null)" 24h 2>/dev/null )
 }
 
-STALE_TS="$(date -ju -v-700S +%Y-%m-%dT%H:%M:%SZ)"
-FRESH_TS="$(date -ju -v-30S +%Y-%m-%dT%H:%M:%SZ)"
-OLD25H_TS="$(date -ju -v-90000S +%Y-%m-%dT%H:%M:%SZ)"
+# Portable ISO stamp helper (GNU + BSD). The BSD-only `date -ju -v-700S`
+# form silently produced an EMPTY string on GNU hosts (coreutils rejects
+# `-j`/`-v`), so every fixture below was seeded with an EMPTY started_at —
+# a shape the pins do not describe, which left 8c/8g RED on every Linux
+# host (the pre-existing reds this lane re-shapes — phase3-plan.md
+# §4.2.2 note under P3-PIN-01..04). The helper keeps the fixtures' INTENT
+# (a 700s-stale txn, a 30s-fresh txn, a 25h-old window, a 300s-future
+# cooldown) and makes them real on both dialects.
+_ts_off() {
+    local off="$1" now
+    now="$(date -u +%s)"
+    case "$(uname -s)" in
+        Darwin|*BSD*|*bsd*) date -u -v"${off}"S +%Y-%m-%dT%H:%M:%SZ ;;
+        *) date -u -d "@$(( now + off ))" +%Y-%m-%dT%H:%M:%SZ ;;
+    esac
+}
+
+STALE_TS="$(_ts_off -700)"
+FRESH_TS="$(_ts_off -30)"
+OLD25H_TS="$(_ts_off -90000)"
 
 # 8a. stale + flipped:true → sweep-rollback: current repointed to previous,
 #     sweep_rollback history event, counter incremented, cooldown armed,
@@ -490,12 +507,32 @@ assert_eq "8b rollback counter NOT incremented" "1" "$(_js_count "$JS_B")"
 assert_eq "8b cooldown NOT armed" "null" "$(_js_field "$JS_B" cooldown_until)"
 
 # 8c. fresh (≤600s) in_flight → left completely alone (owner may be alive).
-JS_C="$JS_TEST_DIR/c"; _js_fixture "$JS_C"; _js_seed "$JS_C" "$FRESH_TS" true
+# [Phase 3 re-shape, promote-handback-halt: the fixture's BSD-only
+# `date -ju -v-30S` produced an EMPTY started_at on GNU hosts — the fixture
+# was vacuous and the pin RED on every Linux host. The timestamps are now
+# REAL (the portable _ts_off helper above). Two shapes are pinned:
+#   (i)  fresh ∧ owner ALIVE — the pin's stated intent ("the owner may be
+#        alive"): COMPLETELY untouched, byte-identical journal;
+#   (ii) fresh ∧ owner DEAD + no heartbeat (8c′) — the Phase-2 contract
+#        (AM-P2-18 owner-liveness conjunct): the txn DEFERS (a journaled
+#        HOLD) — the sweep never disposes of it (no rollback, no
+#        quarantine, no counter, no cooldown; in_flight stays open).]
+JS_C="$JS_TEST_DIR/c"; _js_fixture "$JS_C"; _js_seed "$JS_C" "$FRESH_TS" true 1 "$FRESH_TS" null promote 0 "$$"
 JS_C_BEFORE="$(_js_journal "$JS_C")"
 _js_run "$JS_C"
-assert_eq "8c fresh txn: rc 0" "0" "$?"
+assert_eq "8c fresh txn (owner alive): rc 0" "0" "$?"
 assert_eq "8c journal byte-identical (untouched)" "$JS_C_BEFORE" "$(_js_journal "$JS_C")"
 assert_eq "8c current symlink untouched" "releases/v0.10.6" "$(readlink "$JS_C/current")"
+
+# 8c′. fresh ∧ owner DEAD (no heartbeat) → DEFER, never dispose.
+JS_C2="$JS_TEST_DIR/c2"; _js_fixture "$JS_C2"; _js_seed "$JS_C2" "$FRESH_TS" true 1 "$FRESH_TS" null promote 0 999999
+_js_run "$JS_C2"
+assert_eq "8c′ fresh txn (owner dead): rc 0" "0" "$?"
+assert_contains "8c′ the defer is JOURNALED (sweep_deferred HOLD)" '"event":"sweep_deferred"' "$(_js_journal "$JS_C2")"
+assert_contains "8c′ the txn stays OPEN (in_flight not null)" '"owner_pid":999999' "$(_js_journal "$JS_C2")"
+assert_eq "8c′ current symlink untouched (no rollback)" "releases/v0.10.6" "$(readlink "$JS_C2/current")"
+assert_eq "8c′ rollback counter NOT incremented" "1" "$(_js_count "$JS_C2")"
+assert_eq "8c′ cooldown NOT armed" "null" "$(_js_field "$JS_C2" cooldown_until)"
 
 # 8d. no journal → silent no-op (pre-existing behavior preserved).
 JS_D="$JS_TEST_DIR/d"; mkdir -p "$JS_D/releases"
@@ -515,7 +552,7 @@ assert_eq "8e in_flight cleared (recovery completed)" "null" "$(_js_field "$JS_E
 # 8f. D-FA4.2: active cooldown NEVER refuses the sweep — cooldown_until in
 #     the FUTURE + stale flipped → rollback still executes + cooldown re-armed.
 JS_F="$JS_TEST_DIR/f"; _js_fixture "$JS_F"
-_js_seed "$JS_F" "$STALE_TS" true 1 "$STALE_TS" "\"$(date -ju -v+300S +%Y-%m-%dT%H:%M:%SZ)\"" promote 1
+_js_seed "$JS_F" "$STALE_TS" true 1 "$STALE_TS" "\"$(_ts_off 300)\"" promote 1
 _js_run "$JS_F"
 assert_eq "8f cooldown-active sweep-rollback still executes: rc 0" "0" "$?"
 assert_eq "8f current repointed despite cooldown" "releases/v0.10.5" "$(readlink "$JS_F/current")"
