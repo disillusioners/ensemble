@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import ast
 import subprocess
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -413,9 +414,99 @@ class TestTheBudget:
             assert measured <= band, (family, measured, band)
 
     def test_the_cumulative_count_stays_inside_the_global_cap(self) -> None:
+        """The ONE enforced series bound (A-6) — the GLOBAL cap.
+
+        THE CONVENTION IS EXPLICIT, because the plan's projection is a
+        DIFFERENT convention: the plan's 363 is the catalog's LIVE
+        ESTIMATE (only the combinations that fire), while this pack
+        MEASURES the CLOSED label space (every declared combination).
+        The ceiling convention OVER-COUNTS the dynamic vocabularies, so
+        the measured count is NOT comparable with the projection —
+        family by family or in total — and no band assertion may
+        straddle them (it would be a false red by construction).
+
+        So the enforced bound is the convention-INSENSITIVE one: the
+        measured closed-label-space count plus the registered baseline,
+        against the 2000 planning cap.
+        """
         metrics = list(registry.registered_family_metrics())
         measured = _closed_label_space(metrics)
-        assert adjudication.BASELINE_SERIES + measured <= adjudication.GLOBAL_SERIES_CAP
+        total = adjudication.BASELINE_SERIES + measured
+        assert total <= adjudication.GLOBAL_SERIES_CAP, (
+            f"the measured closed-label-space total {total} "
+            f"({adjudication.BASELINE_SERIES} baseline + {measured} measured) "
+            f"is over the {adjudication.GLOBAL_SERIES_CAP} global cap"
+        )
+
+
+class TestThePlanningProjectionIsNeverEnforced:
+    r"""A-6 — the plan's projection is a NUMBER, never a bound.
+
+    The constant used to be named ``BUDGET_SERIES``: the NAME read like
+    an enforced budget, and the constant had ZERO consumers.  The
+    leader's ruling renames it to a planning-time projection and states
+    that it is NEVER machine-enforced.
+
+    THE PIN IS THE STRUCTURE, not the number: the projection must have
+    NO consumer anywhere — not in the daemon, not in a pack.  That is
+    what makes the two counting conventions safe: a future change that
+    compared a MEASURED count against the plan's LIVE-ESTIMATE
+    projection would be a false red by construction (the ceiling
+    convention over-counts the dynamic vocabularies), and this pin
+    makes that change impossible to merge silently.
+
+    It is NOT a vacuous pin: adding a consumer (in ``daemon/`` or in a
+    pack) turns it RED.
+    """
+
+    _PROJECTION = "CATALOG_LIVE_ESTIMATE_SERIES_PROJECTION"
+
+    def test_the_projection_has_no_machine_enforced_consumer(self) -> None:
+        root = Path(__file__).resolve().parents[3]
+        hits: list[str] = []
+        for base in ("daemon", "tests"):
+            for path in sorted((root / base).rglob("*.py")):
+                text = path.read_text(encoding="utf-8")
+                # The text pre-filter keeps the scan cheap (the whole
+                # tree is read, but only the files that MENTION the
+                # name are parsed) — the AST pass is what decides
+                # whether a mention is a real reference.
+                if self._PROJECTION not in text:
+                    continue
+                with warnings.catch_warnings():
+                    # An unrelated file's docstring escape warning is
+                    # not this pin's business (the repo's own test run
+                    # surfaces those when the module is imported).
+                    warnings.simplefilter("ignore", SyntaxWarning)
+                    tree = ast.parse(text)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Name) and node.id == self._PROJECTION:
+                        hits.append(f"{path.relative_to(root)}:{node.lineno}")
+                    elif (
+                        isinstance(node, ast.Attribute)
+                        and node.attr == self._PROJECTION
+                    ):
+                        hits.append(f"{path.relative_to(root)}:{node.lineno}")
+                    elif isinstance(node, ast.alias) and (
+                        node.name == self._PROJECTION
+                        or node.asname == self._PROJECTION
+                    ):
+                        hits.append(f"{path.relative_to(root)}:{node.lineno}")
+        # EXACTLY ONE reference: the constant's own definition.  A
+        # consumer anywhere (the daemon or a pack) adds a second hit and
+        # turns this RED — that is the whole point of the pin.
+        assert len(hits) == 1, hits
+        assert hits[0].startswith(
+            "daemon/services/metrics_query/wiring/adjudication.py:"
+        ), hits
+        # The rename is COMPLETE — the old name is gone, the new one is
+        # exported, and the figure is the plan's.  The constant is held
+        # BY NAME (a string + getattr) on purpose: a static reference
+        # here would register this pin as a consumer of its own
+        # subject, and the scan would stop meaning anything.
+        assert "BUDGET_SERIES" not in adjudication.__all__
+        assert self._PROJECTION in adjudication.__all__
+        assert getattr(adjudication, self._PROJECTION) == 363
 
     def test_the_f21_release_vocabulary_is_bounded(self) -> None:
         """The release-version label is bounded by the retention set."""

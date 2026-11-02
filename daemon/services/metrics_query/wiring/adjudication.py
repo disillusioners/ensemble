@@ -170,8 +170,40 @@ FAMILY_SERIES_BANDS: dict[str, int] = {
 #: The registered baseline (the catalog convention, F7c-inclusive).
 BASELINE_SERIES = 89
 
-#: The plan's pinned post-lane budget (the catalog convention).
-BUDGET_SERIES = 363
+#: The PLAN'S catalog live-estimate projection — a PLANNING-TIME
+#: NUMBER, never a runtime budget (A-6).
+#:
+#: (a) WHAT IT IS — the plan's post-lane series projection under the
+#:     CATALOG convention: the subset of each family's label
+#:     combinations that the catalog's live estimate says will
+#:     actually fire.  It is authored in the plan set and copied here
+#:     so the plan and the code quote ONE figure.
+#:
+#: (b) IT IS NEVER MACHINE-ENFORCED — no gate, pack or runtime path
+#:     compares any measured count against this constant.  It is a
+#:     RECORD of the plan's projection, NOT a bound.  The only
+#:     enforced bound is the convention-insensitive global cap
+#:     (:data:`GLOBAL_SERIES_CAP`), which the adjudication pack
+#:     asserts against the MEASURED count.  A band assertion across
+#:     the two would be a FALSE RED BY CONSTRUCTION — see (c).
+#:
+#: (c) THE TWO COUNTING CONVENTIONS DIFFER — the plan's 363 is the
+#:     catalog's LIVE ESTIMATE (only the combinations that fire);
+#:     the lane's shipped pack MEASURES the CLOSED label space (every
+#:     declared combination, with a histogram counting its buckets +
+#:     count + sum).  The ceiling convention OVER-COUNTS the dynamic
+#:     vocabularies, so the two are NOT comparable — neither family by
+#:     family nor in total.  Today the lane MEASURES 336 (closed
+#:     space) ⇒ 425 against the 89-series baseline, while the plan
+#:     PROJECTS 363 under the other convention.  Neither figure is
+#:     "wrong": they answer different questions, and no assertion may
+#:     straddle them.
+#:
+#: (d) THE RENAME (A-6, leader ruling) — the constant used to be named
+#:     ``BUDGET_SERIES``, which read like an enforced budget and had
+#:     ZERO consumers.  It is renamed so that nothing downstream can
+#:     mistake a planning-time projection for a machine-enforced bound.
+CATALOG_LIVE_ESTIMATE_SERIES_PROJECTION = 363
 
 #: The global cap (the ≤2000 planning convention).
 GLOBAL_SERIES_CAP = 2000
@@ -179,7 +211,7 @@ GLOBAL_SERIES_CAP = 2000
 
 __all__ = [
     "BASELINE_SERIES",
-    "BUDGET_SERIES",
+    "CATALOG_LIVE_ESTIMATE_SERIES_PROJECTION",
     "CATALOG_FAMILY_VERDICTS",
     "FAMILY_SERIES_BANDS",
     "GLOBAL_SERIES_CAP",
