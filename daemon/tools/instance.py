@@ -1,7 +1,8 @@
 """Instance management tools for multi-agent orchestration.
 
-Module size: ~6100 lines (post-unify-spawn-tools tidy pass,
-2026-10-05; +749 since the 2026-09-14 dispatch-lane stranding fix).
+Module size: ~7273 lines (post-unify-spawn-tools tidy pass,
+2026-10-05; +1922 since the 2026-09-14 dispatch-lane stranding fix;
+refreshed 2026-11-02).
 Originally aimed for the 1000-3000 line band; post-move we are
 ~3000 lines over the band (the >3000 band obligation applies).
 Routing logic (``_route_send_message``, ``_make_workdir_aware``,

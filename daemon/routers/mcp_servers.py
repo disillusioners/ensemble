@@ -1,4 +1,15 @@
-"""MCP Server Management API endpoints."""
+"""MCP Server Management API endpoints.
+
+Size rationale (~1054 lines, refreshed 2026-11-02): this router is
+the MCP-server management REST surface — config CRUD (create /
+update / delete), the builtin catalog + configure path, the
+builtin PROBE path (the operator's "is Plane up?" test-connection
+endpoint) and the reset-builtin path. The four surfaces share one
+redaction helper and one install-audit sink, so splitting the router
+would duplicate those seams; the file sits in the 1000-3000 band
+(the band obligation applies) and a split is a future extraction
+candidate, not an aspiration.
+"""
 
 import asyncio
 import copy
