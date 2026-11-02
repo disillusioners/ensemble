@@ -37,7 +37,7 @@ import pytest
 from daemon.manager import InstanceManager
 from daemon.mcp.builtin_servers.plane import PlaneServerDefinition
 from daemon.plane_workspace import current_plane_workspace, reset_resolution_cache
-from daemon.registry import AgentMetadata
+from daemon.registry import AgentMetadata, AgentRegistry
 
 MCP_URL = "https://mcp.example.test/plane/http/api-key/mcp"
 
@@ -113,7 +113,15 @@ def _agent_meta(
     )
 
 
-class _FakeAgentRegistry:
+class _FakeAgentRegistry(AgentRegistry):
+    """A registry double that inherits the REAL bulk enumeration.
+
+    ``AgentRegistry`` is a plain class (no ABC, no I/O in
+    ``__init__``), so subclassing it gives the fake the production
+    ``agents_by_mcp_full_access`` — one implementation, no drift
+    between the double and the code under test.
+    """
+
     def __init__(self, metas: list[AgentMetadata]) -> None:
         self._metas = metas
 

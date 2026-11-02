@@ -3405,11 +3405,9 @@ class InstanceManager:
             from daemon.registry import get_registry
 
             agent_registry = get_registry()
-            declarations: dict[str, list[str]] = {}
-            for meta in agent_registry.list_all():
-                for entry in getattr(meta, "mcp_full_access", None) or []:
-                    if isinstance(entry, str) and entry:
-                        declarations.setdefault(entry, []).append(meta.id)
+            declarations: dict[str, list[str]] = (
+                agent_registry.agents_by_mcp_full_access()
+            )
         except Exception as exc:  # noqa: BLE001 — observability must not crash boot
             logger.debug(
                 "mcp_full_access cross-check skipped (registry unavailable): %s",
