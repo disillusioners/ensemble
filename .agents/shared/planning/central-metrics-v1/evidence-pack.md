@@ -43,7 +43,7 @@ guessed.
 | Leg | HEAD (D1 + D2) | BASE (D2) | FAILED digest (BARE-ID / GREP-FULL) | Verdict |
 |---|---|---|---|---|
 | P1-G1 | 21 nodes, changed-pack PASS | n/a (docs-only) | — | PASS |
-| P2-G1 | D1 137 + D2 281 green | D2 281 green | digest-equal | net-new **EMPTY** |
+| P2-G1 | D1 137 + D2 281 green | D2 281 green | **bare-id `d78b09cf2549c371` / grep-full `d9bff11a731d8ba3` — IDENTICAL both sides** (recomputed from the preserved Stage-A gate artefacts, `evidence/p2-gate-digests.txt`; the D2 leg: `1 failed, 280 passed` on both sides) | net-new **EMPTY** |
 | P3-G1 | D1 110 + D2 302 green | D2 302 green | digest-equal | net-new **EMPTY** |
 | P3-G1 blast-radius supplementary | 226 nodes, both legs green | 226 nodes, both legs green | digest-equal | net-new **EMPTY** |
 | P3-G1 whole-tree (sharded) | HEAD **32 725** nodes | BASE **32 450** nodes | net-new **0** | net-new **EMPTY** |
@@ -404,11 +404,17 @@ budget.** They are **recorded findings, never auto-fixed.**
    not carry the lane). **Resolution path:** read `live_series_count` from
    `/api/metrics/families` at the **staged boot smoke** — once, from the staged artefact — and
    record it in the disclosure before the flip (see the stage-prep checklist §3).
-3. **The P2/P3 per-leg FAILED digests.** The contract doc records the P4 and P5 digests; the P2
-   and P3 legs are recorded as "digest-equal" without their digest values, and the P2/P3 gate
-   logs did not survive in `/tmp`. **Resolution path:** the Stage-A/B executor's transcripts, or
-   a re-run by the tester lane. **Not a blocker** — the mutation legs are separately evidenced by
-   the preserved Stage-A logs (§2.3).
+3. **The P3 per-leg FAILED digests.** The contract doc records the P4 and P5 digests, and the
+   **P2** digests are now **RECOVERED and RECORDED** (bare-id `d78b09cf2549c371` / grep-full
+   `d9bff11a731d8ba3`, IDENTICAL on both sides — recomputed from the preserved Stage-A gate
+   artefacts, `evidence/p2-gate-digests.txt` + `evidence/p2-gate/`). They are also the **same
+   digests as the P4 D2 legs** — the FAILED set is the single known base red on both. **The P3
+   half remains open:** the P3 artefacts also survive on disk (`/tmp/p3-gate-20261102T051039Z/`,
+   `/tmp/p3-gate-final/`, the sweep dirs incl. the `FAILED-worker-crash` and the two
+   `sweep-sharded` legs, and the `p3mut_*.log` mutation logs), so the P3 digest is recoverable —
+   but preserving them was **not** in this phase's mandate, so they are **not** yet in the lane.
+   **Not a blocker** — the mutation legs are separately evidenced by the preserved Stage-A logs
+   (§2.3) and the P2 leg is now digest-recorded.
 4. **The P6-G1 reconciliation pack.** The pack id `central_metrics_ledger_reconciliation` is
    **declared** by the plan; `.agents/tester/PACKS.md` is the **tester lane's** file and the
    brief forbids this lane from touching it, so the pack's **registration** (and hence its
