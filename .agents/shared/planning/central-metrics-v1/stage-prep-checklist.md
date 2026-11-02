@@ -82,6 +82,26 @@ The full verification is in `inventory-vendor/PROVENANCE.md` (§"Verification ro
 | the per-file map | a full chunk-hash cascade — **83 added / 81 removed / 1 changed** against the v0.28.5 staged manifest. **The cascade is the hash naming, NOT a payload change** |
 | `agents/` and `plugins/` trees | **UNCHANGED** by this phase |
 
+> **⚠ AS-OF `c8310a89b` — RE-DERIVE AT STAGE TIME.** The figures in this table
+> (**93 → 95**, the **25 938 B** metrics lazy chunk, the **83 added / 81 removed / 1 changed**
+> chunk-hash cascade, and the `frontend_tree_sha256` / `fe_index_sha256` changes) were measured at
+> the **Phase-6 close-out** commit **`c8310a89b`**. **The FE surface has changed SINCE** — the
+> fix-cycle 2 FE commit (**`cd06d2a0b`**: the W-6 declared/concrete label-type split, the A-5
+> door-error copy branches, the W-2/W-3/W-4 truncated + cursor mirror, the A-7 harness restore +
+> pre-run manifest + interruption pins) is part of the FE surface, and the A-6 rename
+> (**`cf12edcfb`**) is **daemon-side** and does not touch the FE tree.
+> **Therefore: every FE-manifest number in this section is STALE and MUST be re-derived at stage
+> time** — the `frontend_manifest` entry count, the chunk set and its sizes, the per-file
+> chunk-hash cascade, `frontend_tree_sha256` and `fe_index_sha256`. **Do not promote against these
+> figures**; the stage-time re-derivation supersedes them. The `agents/` and `plugins/` trees are
+> re-checked at the same time (the fix cycles touched neither, but the re-derivation must confirm
+> it rather than assume it).
+>
+> **What is NOT stale:** the three EMPTY deltas of §1 (migration · backend dependency · npm
+> dependency) — they are **diff-based**, not figure-based, and the fix cycles added no `.sql`, no
+> backend dependency and no npm dependency. Re-confirm them at stage time by the same diff, but
+> they are not affected by the FE change.
+
 **The build legs.** dev AOT **exit 0**; production **exit 0** with **10 budget WARNINGS** — every
 one **pre-existing** and in **another component's SCSS**; **none** of the lane's own components is
 over the 8 kB warn budget. They are **recorded findings, never auto-fixed**.
