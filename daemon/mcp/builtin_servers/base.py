@@ -186,6 +186,59 @@ class BuiltinServerDefinition(ABC):
             # find_spec on relative imports / weird sys.path setups.
             return False
 
+    # ── Layer 1 observability: "say WHY" (plane-pm-issue-tools Phase 3) ──
+    #
+    # House precedent: ``daemon/services/plane_sync_service.py::
+    # unavailable_reason`` — a TYPED reason string, never a log phrase.
+    # The manager's skip WARNING (R-3) is the ONLY reason interpolator;
+    # these classmethods are the typed supply line.
+
+    @classmethod
+    def unavailable_reason(cls) -> str | None:
+        """A typed reason this builtin is unavailable, or ``None`` when up.
+
+        Base default: ``None`` (available — no behaviour change for the
+        builtins that do not override). Subclasses override to say WHY
+        ``is_available()`` is False; the value is a TYPED string the
+        manager interpolates VERBATIM (never a paraphrase).
+
+        Emitter contract (R-1…R-5, phase3-plan §2.2): this method MUST
+        NOT log — the resolver never logs, ``is_available`` owns the
+        one-shot envelope notice, and the skip WARNING interpolates.
+        """
+        return None
+
+    @classmethod
+    def missing_env_vars(cls) -> list[str]:
+        """The NAMES of the env vars whose absence makes this builtin
+        unavailable (empty when none / when configured).
+
+        NAMES ONLY — never values (a missing var has no value, but a
+        future contributor must not be able to leak a present one here).
+        Base default: ``[]``.
+        """
+        return []
+
+    @classmethod
+    def unavailability_cause(cls) -> str:
+        """The CAUSE of unavailability — one of the fixed vocabulary:
+
+        * ``"available"`` — the builtin is up;
+        * ``"deliberately-disabled"`` — an operator switch is OFF (a
+          deliberate decision, NOT an operational warning);
+        * ``"workspace-refused"`` — the workspace policy refused the
+          integration (a POLICY refusal, never rendered as a
+          missing-env-var case);
+        * ``"unavailable"`` — unexpectedly unavailable (missing
+          configuration, missing package, quarantined).
+
+        The manager's skip site (R-3) uses this to pick the message
+        shape; the cross-check (R-4) uses it to separate the
+        deliberately-off case (debug line) from the policy-refused case
+        (stays WARNING). Base default: derived from ``is_available``.
+        """
+        return "available" if cls.is_available() else "unavailable"
+
     def get_base_config(self) -> dict[str, Any]:
         """
         Return base configuration including transport, command, and fixed args.

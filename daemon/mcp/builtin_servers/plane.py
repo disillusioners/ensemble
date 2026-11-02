@@ -361,7 +361,11 @@ class PlaneServerDefinition(BuiltinServerDefinition):
         # Resolve ONCE per operation (memoized on the env fingerprint) so
         # ``get_base_config`` — which runs microseconds later in the same
         # bootstrap pass — sees the SAME resolution. No env TOCTOU.
-        return current_plane_workspace().allowed
+        resolution = current_plane_workspace()
+        # R-2 (P3-A): the ONE-SHOT envelope notice — label + source +
+        # effective slug, NEVER the reason (the skip WARNING owns that).
+        cls._log_envelope_notice_once(resolution)
+        return resolution.allowed
 
     @classmethod
     def _log_kill_switch_once(cls) -> None:
@@ -387,6 +391,86 @@ class PlaneServerDefinition(BuiltinServerDefinition):
             "Plane MCP server disabled by kill-switch "
             "(PLANE_MCP_ENABLED=false) — builtin skipped at registration"
         )
+
+    # One-shot flag for the R-2 envelope notice (see
+    # ``_log_envelope_notice_once``).
+    _envelope_notice_emitted: bool = False
+
+    @classmethod
+    def _log_envelope_notice_once(
+        cls, resolution: "PlaneWorkspaceResolution"
+    ) -> None:
+        """R-2 (P3-A): ONE process-wide envelope notice — label + source +
+        effective slug. NEVER the reason.
+
+        ``is_available()`` is consulted from five sites (bootstrap skip,
+        warmup, schema warm, preload gate, the REST-adjacent sync lane),
+        so any per-call logging would spam five renderings of the same
+        fact. The envelope names the resolution INPUTS (what the operator
+        can go fix); the typed refusal reason belongs to the manager's
+        skip WARNING (R-3, the only reason interpolator) — interpolating
+        it here would create a second, divergent rendering.
+        """
+        if cls._envelope_notice_emitted:
+            return
+        cls._envelope_notice_emitted = True
+        logger.info(
+            "Plane workspace resolution: env=%s source=%s slug=%s",
+            resolution.env_label or "unclassified",
+            resolution.env_source,
+            resolution.slug or "(account-default)",
+        )
+
+    # ── Layer 1 observability (Phase 3, W-7): say WHY ───────────────────
+
+    @classmethod
+    def unavailable_reason(cls) -> str | None:
+        """The typed unavailability reason, or ``None`` when up.
+
+        Precedence mirrors ``is_available`` (the outermost gate first):
+        quarantine/package → kill-switch (deliberate) → missing env vars
+        (unexpected) → workspace refusal (policy). The manager's skip
+        WARNING interpolates the returned string VERBATIM.
+        """
+        if not super().is_available():
+            return "unavailable (quarantined for this boot or package missing)"
+        if not _mcp_kill_switch_enabled():
+            return "deliberately disabled by kill-switch (PLANE_MCP_ENABLED=false)"
+        url = _sanitize_quoted_url(os.environ.get("PLANE_MCP_URL", ""))
+        api_key = _strip_wrapping_quotes(os.environ.get("PLANE_MCP_API_KEY", ""))
+        if not (url and api_key):
+            # The missing-env shape — the manager renders the NAMES via
+            # ``missing_env_vars()``; this string never names a value.
+            return "missing environment configuration"
+        resolution = current_plane_workspace()
+        if not resolution.allowed:
+            return resolution.reason or "workspace resolution refused"
+        return None
+
+    @classmethod
+    def missing_env_vars(cls) -> list[str]:
+        """The NAMES of the missing env vars (never values)."""
+        missing: list[str] = []
+        if not _sanitize_quoted_url(os.environ.get("PLANE_MCP_URL", "")):
+            missing.append("PLANE_MCP_URL")
+        if not _strip_wrapping_quotes(os.environ.get("PLANE_MCP_API_KEY", "")):
+            missing.append("PLANE_MCP_API_KEY")
+        return missing
+
+    @classmethod
+    def unavailability_cause(cls) -> str:
+        """One of the fixed cause vocabulary — see the base docstring."""
+        if not super().is_available():
+            return "unavailable"
+        if not _mcp_kill_switch_enabled():
+            return "deliberately-disabled"
+        url = _sanitize_quoted_url(os.environ.get("PLANE_MCP_URL", ""))
+        api_key = _strip_wrapping_quotes(os.environ.get("PLANE_MCP_API_KEY", ""))
+        if not (url and api_key):
+            return "unavailable"
+        if not current_plane_workspace().allowed:
+            return "workspace-refused"
+        return "available"
 
     def get_base_config(
         self,
