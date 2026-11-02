@@ -1,0 +1,31 @@
+=== LEG s2  self_env=sandbox slug_mode=e2e port=8951 db=ens_v0287_s2_1793663324_2972 ===
+port 8951 bound: LISTEN 0 2048 127.0.0.1:8951 0.0.0.0:* users:(("ensemble-prod",pid=2404386,fd=25))
+livez http=200
+readyz http=200
+livez:  {"status":"alive","uptime_seconds":22.13015866279602,"version":"0.28.7"}
+readyz: status=ready components={'database': True, 'queue_freshness': True, 'services': True, 'checkpoint_saver': True} reasons=[]
+mcp-servers http=200
+DB plane row: plane|t|t|3|e2e|Bearer <redacted,len=38>|streamable-http|https://mcp.ensem.dev/plane/http/api-key/mcp
+DB plane row count: 1
+scratch ensemble.json: {
+  "database": "postgres",
+  "postgres": {
+    "host": "localhost",
+    "port": 5432,
+    "db": "ensemble",
+    "user": "ensemble",
+    "password": ""
+  },
+  "sqlite": {
+    "instances_db": "./data/instances.db",
+    "checkpoints_db": "./data/checkpoints.db"
+  }
+}
+--- boot log: plane / builtin / workspace lines ---
+--- vacuity tripwire ---
+  env-name census (names only): 24 names
+  PRESENT: PLANE_MCP_URL
+  PRESENT: PLANE_MCP_API_KEY
+  PRESENT: PLANE_MCP_WORKSPACE_SLUG
+  TRIPWIRE CLEAR: no missing-credential skip reason in the log
+=== END LEG s2 ===

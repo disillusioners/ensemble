@@ -1,0 +1,57 @@
+STAGED  : /home/nea/agents-ensemble/releases/v0.28.7/ensemble-prod
+CONTROL : /home/nea/agents-ensemble/releases/v0.28.4/ensemble-prod
+plane schema_version  STAGED=['3']  CONTROL=['2']
+
+family                       module                                   k  token                                                STAGED   CONTROL  verdict
+-------------------------------------------------------------------------------------------------------------------------------------------------------
+(a) resolver + D-1 marker    daemon.plane_workspace                   N  resolve_plane_workspace                              PRESENT  ABSENT   OK
+(a) resolver + D-1 marker    daemon.plane_workspace                   N  normalize_workspace_slug                             PRESENT  ABSENT   OK
+(a) resolver + D-1 marker    daemon.plane_workspace                   N  current_plane_workspace                              PRESENT  ABSENT   OK
+(a) resolver + D-1 marker    daemon.plane_workspace                   N  reset_resolution_cache                               PRESENT  ABSENT   OK
+(a) resolver + D-1 marker    daemon.plane_workspace                   N  _escape_for_reason                                   PRESENT  ABSENT   OK
+(a) resolver + D-1 marker    daemon.plane_workspace                   N  _header_value                                        PRESENT  ABSENT   OK
+(a) resolver + D-1 marker    daemon.plane_workspace                   N  _has_header                                          PRESENT  ABSENT   OK
+(a) resolver + D-1 marker    daemon.plane_workspace                   N  VALID_ENVS                                           PRESENT  ABSENT   OK
+(a) resolver + D-1 marker    daemon.plane_workspace                   N  PRODUCTION_WORKSPACE_SLUG                            PRESENT  ABSENT   OK
+(a) resolver + D-1 marker    daemon.plane_workspace                   N  TEST_WORKSPACE_SLUG                                  PRESENT  ABSENT   OK
+(a) resolver + D-1 marker    daemon.plane_workspace                   N  REASON_PRODUCTION_ONLY                               PRESENT  ABSENT   OK
+(a) resolver + D-1 marker    daemon.plane_workspace                   N  REASON_UNSET_SLUG                                    PRESENT  ABSENT   OK
+(a) resolver + D-1 marker    daemon.plane_workspace                   S  explicit-marker                                      PRESENT  ABSENT   OK
+(a) resolver + D-1 marker    daemon.plane_workspace                   S  PLANE_MCP_WORKSPACE_SLUG                             PRESENT  ABSENT   OK
+(a) resolver + D-1 marker    daemon.plane_workspace                   S  ensemble_prod                                        PRESENT  ABSENT   OK
+(a) resolver + D-1 marker    daemon.mcp.builtin_servers.plane         S  Plane workspace resolution: env=%s source=%s sl...   PRESENT  ABSENT   OK
+(a) resolver + D-1 marker    daemon.mcp.builtin_servers.plane         N  current_plane_workspace                              PRESENT  ABSENT   OK
+(a) resolver + D-1 marker    daemon.mcp.builtin_servers.plane         N  PlaneWorkspaceResolution                             PRESENT  ABSENT   OK
+(b) READ tuple EXACT         daemon.mcp.builtin_servers.plane         T  ('list_', 'get_', 'search_', 'retrieve_', 'coun...   PRESENT  ABSENT   OK
+(b) WRITE tuple EXACT        daemon.mcp.builtin_servers.plane         T  ('create_', 'update_', 'delete_', 'remove_', 's...   PRESENT  ABSENT   OK
+(b) pre-lane READ tuple      daemon.mcp.builtin_servers.plane         T  ('list_', 'get_', 'search_')                         ABSENT   PRESENT  OK
+(b) pre-lane WRITE tuple     daemon.mcp.builtin_servers.plane         T  ('create_', 'update_', 'delete_', 'add_', 'remo...   ABSENT   PRESENT  OK
+(c) schema-v3 heal           daemon.mcp.builtin_servers.plane         S  workspace scoping                                    PRESENT  ABSENT   OK
+(c) schema-v3 heal           daemon.manager                           S  config refreshed — persisted workspace slug dif...   PRESENT  ABSENT   OK
+(c) schema-v3 heal           daemon.manager                           N  slug_drift                                           PRESENT  ABSENT   OK
+(c) schema-v3 heal           daemon.manager                           N  resolved_slug                                        PRESENT  ABSENT   OK
+(d) prefix-sweep guard       daemon.tools.instance                    N  _owned_elsewhere                                     PRESENT  ABSENT   OK
+(d) prefix-sweep guard       daemon.tools.instance                    N  owned_elsewhere                                      PRESENT  PRESENT  OK
+(e) probe/scrub/escape       daemon.routers.mcp_servers               N  _scrub_auth_echo                                     PRESENT  ABSENT   OK
+(e) probe/scrub/escape       daemon.routers.mcp_servers               N  _normalize_probe_url                                 PRESENT  ABSENT   OK
+(e) probe/scrub/escape       daemon.routers.mcp_servers               N  _plane_probe_refusal                                 PRESENT  ABSENT   OK
+(e) probe/scrub/escape       daemon.routers.mcp_servers               N  _escape_for_reason                                   PRESENT  ABSENT   OK
+(e) probe/scrub/escape       daemon.routers.mcp_servers               N  _BEARER_ECHO_RE                                      PRESENT  ABSENT   OK
+(e) probe/scrub/escape       daemon.routers.mcp_servers               N  _AUTH_ASSIGN_ECHO_RE                                 PRESENT  ABSENT   OK
+(e) probe/scrub/escape       daemon.routers.mcp_servers               N  _mcp_kill_switch_enabled                             PRESENT  ABSENT   OK
+(f) operator route gates     daemon.routers.mcp_servers               N  _plane_workspace_write_refusal                       PRESENT  ABSENT   OK
+(f) operator route gates     daemon.routers.mcp_servers               S  the operator write route is refused before any ...   PRESENT  ABSENT   OK
+(f) operator route gates     daemon.routers.mcp_servers               S  Plane workspace policy refused this operation:       PRESENT  ABSENT   OK
+(f) operator route gates     daemon.routers.mcp_servers               S  PLANE_MCP_ENABLED=false                              PRESENT  ABSENT   OK
+(f) operator route gates     daemon.routers.mcp_servers               S  Plane workspace mismatch: the submitted x-works...   PRESENT  ABSENT   OK
+(g) loud-skip reasons        daemon.plane_workspace                   S  workspace 'nea' is production-only; this enviro...   PRESENT  ABSENT   OK
+(g) loud-skip reasons        daemon.plane_workspace                   S  PLANE_MCP_WORKSPACE_SLUG is unset in a non-prod...   PRESENT  ABSENT   OK
+(g) loud-skip reasons        daemon.manager                           S  Builtin '%s' skipped — workspace refused (POLIC...   PRESENT  ABSENT   OK
+(g) loud-skip reasons        daemon.manager                           S  Builtin '%s' deactivated — workspace refused (P...   PRESENT  ABSENT   OK
+(g) loud-skip reasons        daemon.manager                           N  CAUSE_WORKSPACE_REFUSED                              PRESENT  ABSENT   OK
+(g) loud-skip reasons        daemon.mcp.builtin_servers.base          N  CAUSE_WORKSPACE_REFUSED                              PRESENT  ABSENT   OK
+(g) loud-skip reasons        daemon.manager                           S  the builtin was POLICY-REFUSED this boot             PRESENT  ABSENT   OK
+(h) registry attribution     daemon.registry                          N  agents_referencing_builtin_mcp                       PRESENT  ABSENT   OK
+(h) registry attribution     daemon.registry                          N  agents_by_mcp_full_access                            PRESENT  ABSENT   OK
+
+ASSERTIONS: 49   MISMATCHES: 0

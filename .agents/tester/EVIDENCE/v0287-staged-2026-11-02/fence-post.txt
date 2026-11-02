@@ -1,0 +1,8 @@
+=== LIVE FENCE post (2026-11-02T23:51:02Z) ===
+state.json sha256 : 0fecefc399d52471db4269bc8c36f12807a92d2896aa1335b50158ebb52feb90
+current symlink   : releases/v0.28.7
+live :9797 pid    : 2400252
+demo :7979 pid    : 525852
+live livez        : {"status":"alive","uptime_seconds":697.0195291042328,"version":"0.28.7"}
+demo livez        : {"status":"alive","uptime_seconds":138458.13268613815,"version":"0.16.3"}
+live uptime       : None
