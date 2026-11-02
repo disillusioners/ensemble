@@ -3171,6 +3171,54 @@ class InstanceManager:
                             missing,
                             agents_part,
                         )
+                        # F3 (reviewer fold 2026-11-02): the stale-row NOTICE —
+                        # shape (b), deliberately NOT deactivation. P2-G scoped
+                        # deactivation to the workspace-REFUSED cause (a policy
+                        # verdict); an unavailable boot is a TRANSIENT config
+                        # absence and P2-H's posture is to DEFER mutations on
+                        # non-available boots (the heal defers — same posture).
+                        # The availability gate (mcp_service) already blocks
+                        # delivery, so this is OPERATOR SIGNAL only: a
+                        # pre-existing ACTIVE row survives with its persisted
+                        # slug and would otherwise emit NO signal at all.
+                        # AD2 boundary: echo the x-workspace-slug SCALAR only —
+                        # never the config.headers dict (it carries the bearer).
+                        stale = (
+                            self._mcp_server_repository.get_mcp_server_by_name(
+                                definition.name
+                            )
+                        )
+                        if (
+                            stale is not None
+                            and stale.is_builtin
+                            and stale.is_active
+                        ):
+                            stale_headers = (
+                                stale.config.get("headers")
+                                if isinstance(stale.config, dict)
+                                else None
+                            )
+                            persisted_slug = (
+                                stale_headers.get("x-workspace-slug")
+                                if isinstance(stale_headers, dict)
+                                else None
+                            )
+                            logger.warning(
+                                "Builtin '%s' has a STALE ACTIVE row while the "
+                                "server is unavailable this boot — the row is "
+                                "NOT delivered to agents while unavailable "
+                                "(per-instance availability gate skips it); it "
+                                "self-heals (reactivate/heal) on the next "
+                                "available boot. Persisted "
+                                "x-workspace-slug: %r. Missing: %s. "
+                                "Remediation: restore the missing environment "
+                                "configuration, or disable the builtin "
+                                "deliberately (PLANE_MCP_ENABLED=false)%s",
+                                definition.name,
+                                persisted_slug,
+                                missing,
+                                agents_part,
+                            )
                     continue
 
                 default_config = definition.build_config({})

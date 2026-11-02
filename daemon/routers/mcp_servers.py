@@ -336,6 +336,14 @@ def _plane_probe_refusal(config: dict[str, Any]) -> str | None:
     Returns ``None`` when the config is not plane-shaped or the plane
     lanes are permitted (the probe proceeds unchanged — non-plane
     configs are untouched by this guard).
+
+    F2 (reviewer fold 2026-11-02): P2-D's resolved-slug authority,
+    MIRRORED on the probe path — on non-live, a SUBMITTED
+    ``x-workspace-slug`` that disagrees with the RESOLVED slug is a
+    typed refusal BEFORE dialing (previously a permitted e2e resolution
+    still dialed whatever slug the operator submitted — e.g. ``nea`` ⇒
+    the prod MCP endpoint, bounded to ``list_tools``). Live is exempt
+    (ADJ-1: any configured slug permitted).
     """
     try:
         if not isinstance(config, dict):
@@ -358,7 +366,10 @@ def _plane_probe_refusal(config: dict[str, Any]) -> str | None:
             PlaneServerDefinition,
             _mcp_kill_switch_enabled,
         )
-        from daemon.plane_workspace import current_plane_workspace
+        from daemon.plane_workspace import (
+            current_plane_workspace,
+            normalize_workspace_slug,
+        )
 
         if not _mcp_kill_switch_enabled():
             return (
@@ -369,6 +380,23 @@ def _plane_probe_refusal(config: dict[str, Any]) -> str | None:
         resolution = current_plane_workspace()
         if not resolution.allowed:
             return f"Plane workspace refused: {resolution.reason}"
+        # F2: the submitted header may never name a workspace the resolver
+        # did not return (non-live). Checked ONLY when the header is
+        # present — a plane-shaped config without the header makes no
+        # authority claim (mirrors P2-D's embedded-slug-None ⇒ no check).
+        if resolution.env_label != "live" and isinstance(headers, dict):
+            submitted = headers.get("x-workspace-slug")
+            if isinstance(submitted, str) and submitted.strip():
+                normalized = normalize_workspace_slug(submitted)
+                if normalized != (resolution.slug or ""):
+                    return (
+                        f"Plane workspace mismatch: the submitted "
+                        f"x-workspace-slug '{normalized}' is not the workspace "
+                        f"this environment resolves to ('{resolution.slug}') "
+                        f"— non-production environments target 'e2e' only "
+                        f"(P2-D resolved-slug authority); the probe is "
+                        f"refused before dialing"
+                    )
         return None
     except Exception:  # noqa: BLE001 — the probe guard must never break the endpoint
         return None

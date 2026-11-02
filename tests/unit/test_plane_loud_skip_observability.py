@@ -475,6 +475,80 @@ class TestHealGates:
         ], "no heal may fire when nothing drifted"
 
 
+# ── F3: the unavailable-cause stale-row NOTICE (shape (b)) ──────────────────
+
+
+class TestUnavailableStaleRowNotice:
+    """F3 (reviewer fold 2026-11-02) — with ``PLANE_MCP_URL``/``KEY`` absent
+    (the *unavailable* cause, NOT workspace-refused), a pre-existing ACTIVE
+    row survives with its persisted slug and previously emitted NO operator
+    signal (the cross-check reads an active row as delivered ⇒ silent).
+    Disposition: a NOTICE (WARNING naming the row, its persisted slug, the
+    missing env vars, remediation) — deliberately NOT deactivation: P2-G
+    scoped deactivation to the workspace-REFUSED cause (a policy verdict);
+    P2-H's posture defers row mutations on non-available boots."""
+
+    def test_unavailable_boot_with_stale_active_row_emits_notice(
+        self, env, caplog
+    ):
+        env(self_env="dev", slug="e2e", mcp_url=None, mcp_key=None)
+        row = _FakeRow(config={"headers": {"x-workspace-slug": "nea"}})
+        repo = _FakeRepo([row])
+        mgr = _make_manager(repo)
+
+        _bootstrap(mgr, repo, [_agent_meta("project-manager", ["plane"])], caplog)
+
+        notice_lines = [
+            r.getMessage()
+            for r in _warnings(caplog)
+            if "STALE ACTIVE row" in r.getMessage()
+        ]
+        assert notice_lines, "no stale-row notice was emitted"
+        notice = notice_lines[0]
+        assert "'nea'" in notice  # the persisted slug (repr form)
+        assert "PLANE_MCP_URL" in notice  # the missing env var
+        assert "Remediation" in notice
+        assert "not delivered to agents" in notice.lower() or (
+            "NOT delivered to agents" in notice
+        )
+        assert "project-manager" in notice  # the referencing agents
+
+    def test_notice_does_not_mutate_the_row(self, env, caplog):
+        """The (b)-shape contract: the notice is SIGNAL ONLY — the row
+        stays ACTIVE and untouched on a transient config absence (an
+        (a)-shape deactivation here is a regression)."""
+        env(self_env="dev", slug="e2e", mcp_url=None, mcp_key=None)
+        row = _FakeRow(config={"headers": {"x-workspace-slug": "nea"}})
+        repo = _FakeRepo([row])
+        mgr = _make_manager(repo)
+
+        _bootstrap(mgr, repo, [_agent_meta("project-manager", ["plane"])], caplog)
+
+        assert row.is_active is True  # NOT deactivated on the unavailable cause
+        assert not [
+            u for u in repo.updates if "is_active" in u
+        ], "the unavailable cause mutated the row"
+
+    def test_notice_absent_when_no_row_exists(self, env, caplog):
+        """No stale row ⇒ no notice (the plain missing-env skip WARNING
+        stands alone)."""
+        env(self_env="dev", slug="e2e", mcp_url=None, mcp_key=None)
+        repo = _FakeRepo()
+        mgr = _make_manager(repo)
+
+        _bootstrap(mgr, repo, [_agent_meta("project-manager", ["plane"])], caplog)
+
+        assert not [
+            r
+            for r in _warnings(caplog)
+            if "STALE ACTIVE row" in r.getMessage()
+        ]
+        assert any(
+            "missing environment configuration" in r.getMessage()
+            for r in _warnings(caplog)
+        )
+
+
 # ── P6 / P6b: the registry-vs-row cross-check ───────────────────────────────
 
 
