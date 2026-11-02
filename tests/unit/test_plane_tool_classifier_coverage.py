@@ -36,7 +36,7 @@ from helpers.plane_catalog_fixture import (
 )
 
 from daemon.mcp.builtin_servers.plane import PlaneServerDefinition
-from daemon.mcp.resilience import is_read_tool
+from daemon.mcp.resilience import ResilienceConfig, is_read_tool
 
 # The PRE-fix on-disk classifier (plane.py @ base 941cb6321) — kept as a
 # literal so the R18 arithmetic is computed against a frozen "today", not
@@ -64,11 +64,13 @@ def raw_names() -> list[str]:
 
 
 @pytest.fixture(scope="module")
-def classifier():
+def classifier() -> ResilienceConfig:
     return PlaneServerDefinition().resilience_config
 
 
-def _classify(patterns, raw_names):
+def _classify(
+    patterns: ResilienceConfig, raw_names: list[str]
+) -> tuple[set[str], set[str]]:
     """(kept, dropped) for a non-full-access agent, via the REAL is_read_tool."""
     kept, dropped = set(), set()
     for raw in raw_names:

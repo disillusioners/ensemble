@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -59,13 +60,13 @@ class _FakeRepo:
         self.rows: dict[str, _FakeRow] = {r.name: r for r in (rows or [])}
         self.updates: list[dict] = []
 
-    def get_mcp_server_by_name(self, name: str):
+    def get_mcp_server_by_name(self, name: str) -> _FakeRow | None:
         return self.rows.get(name)
 
-    def list_mcp_servers(self, **kwargs):
+    def list_mcp_servers(self, **kwargs) -> list[_FakeRow]:
         return [r for r in self.rows.values() if r.is_active]
 
-    def create_mcp_server(self, **kwargs):
+    def create_mcp_server(self, **kwargs) -> _FakeRow:
         name = kwargs["name"]
         row = _FakeRow(
             name=name,
@@ -75,7 +76,7 @@ class _FakeRepo:
         self.rows[name] = row
         return row
 
-    def update_mcp_server(self, row_id, **kwargs):
+    def update_mcp_server(self, row_id, **kwargs) -> _FakeRow:
         self.updates.append({"id": row_id, **kwargs})
         for row in self.rows.values():
             if row.id == row_id:
@@ -89,17 +90,19 @@ class _FakeRepo:
 
 
 class _FakeBuiltinRegistry:
-    def __init__(self, definitions):
+    def __init__(self, definitions: list[Any]) -> None:
         self._definitions = {d.name: d for d in definitions}
 
-    def get_all(self):
+    def get_all(self) -> list[Any]:
         return list(self._definitions.values())
 
-    def get_by_name(self, name):
+    def get_by_name(self, name: str) -> Any | None:
         return self._definitions.get(name)
 
 
-def _agent_meta(agent_id: str, mcp_full_access: list[str] | None = None):
+def _agent_meta(
+    agent_id: str, mcp_full_access: list[str] | None = None
+) -> AgentMetadata:
     return AgentMetadata(
         id=agent_id,
         name=agent_id,
@@ -111,13 +114,13 @@ def _agent_meta(agent_id: str, mcp_full_access: list[str] | None = None):
 
 
 class _FakeAgentRegistry:
-    def __init__(self, metas):
+    def __init__(self, metas: list[AgentMetadata]) -> None:
         self._metas = metas
 
-    def list_all(self):
+    def list_all(self) -> list[AgentMetadata]:
         return list(self._metas)
 
-    def agents_referencing_builtin_mcp(self, server_name):
+    def agents_referencing_builtin_mcp(self, server_name: str) -> list[str]:
         return sorted(
             m.id
             for m in self._metas
@@ -179,7 +182,7 @@ def env(monkeypatch):
     return _set
 
 
-def _bootstrap(mgr, repo, agents, caplog):
+def _bootstrap(mgr, repo, agents, caplog) -> None:
     """Run the bootstrap with the plane-only builtin registry + fake agents.
 
     Captured at DEBUG so the INFO-level shapes (the deliberately-disabled

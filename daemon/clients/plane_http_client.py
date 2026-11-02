@@ -305,7 +305,7 @@ def sanitize_plane_name(name: str) -> str:
 
 
 def _rest_base_url(
-    resolution: "PlaneWorkspaceResolution | None" = None,
+    resolution: PlaneWorkspaceResolution | None = None,
 ) -> str | None:
     """Compose the REST base URL from the RESOLVED workspace.
 

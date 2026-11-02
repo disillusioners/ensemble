@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests"))
 import daemon.plane_workspace as daemon_plane_workspace
 from daemon.plane_workspace import (
     HISTORICAL_STRICT_LIVE_REASON,
+    PlaneWorkspaceResolution,
     TEST_WORKSPACE_SLUG,
     normalize_workspace_slug,
     resolve_plane_workspace,
@@ -40,7 +41,9 @@ def _clean_resolution_cache():
     reset_resolution_cache()
 
 
-def _r(env: dict | None = None, *, postgres_db: str | None = None):
+def _r(
+    env: dict | None = None, *, postgres_db: str | None = None
+) -> PlaneWorkspaceResolution:
     """Shorthand: resolve with a fully-controlled env."""
     return resolve_plane_workspace(env or {}, postgres_db=postgres_db)
 

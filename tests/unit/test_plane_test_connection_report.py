@@ -30,7 +30,7 @@ def _reset_cache():
 
 
 @pytest.fixture
-def mock_app():
+def mock_app() -> FastAPI:
     app = FastAPI()
     api_router = APIRouter(prefix="/api")
     api_router.include_router(mcp_servers_router)

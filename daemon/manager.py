@@ -99,7 +99,11 @@ from .repositories.task.repository import (
 # ``claim_pending_task`` reads the flag PER-CLAIM, so the orchestrator
 # writes propagate to every claim without a second truth.
 from .registry import get_registry
-from .mcp.builtin_servers import get_registry as get_mcp_registry, is_builtin_disabled
+from .mcp.builtin_servers import (
+    BuiltinServerRegistry,
+    get_registry as get_mcp_registry,
+    is_builtin_disabled,
+)
 from .plane_workspace import current_plane_workspace
 from .mcp.warmup_pool import McpWarmupPool, get_mcp_warmup_pool, build_pooled_stdio_config
 from .mcp import warmup_pool as _warmup_pool_module
@@ -3366,7 +3370,7 @@ class InstanceManager:
 
     def _cross_check_mcp_full_access_rows(
         self,
-        registry: Any,
+        builtin_registry: BuiltinServerRegistry,
         policy_refused: set[str],
     ) -> None:
         """Layer 3 — declared capability vs DELIVERED capability.
@@ -3426,7 +3430,7 @@ class InstanceManager:
             delivered = row is not None and row.is_active
             if delivered:
                 continue
-            definition = registry.get_by_name(server_name)
+            definition = builtin_registry.get_by_name(server_name)
             if server_name in policy_refused:
                 # P3-E: policy-refused, NOT never-registered — still a
                 # WARNING (the agent still loses its tools). F8 wording

@@ -401,7 +401,7 @@ class PlaneServerDefinition(BuiltinServerDefinition):
 
     @classmethod
     def _log_envelope_notice_once(
-        cls, resolution: "PlaneWorkspaceResolution"
+        cls, resolution: PlaneWorkspaceResolution
     ) -> None:
         """R-2 (P3-A): ONE process-wide envelope notice — label + source +
         effective slug. NEVER the reason.
