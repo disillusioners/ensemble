@@ -455,6 +455,37 @@ fi
 rm -rf "$P4_FIX"
 
 # ===========================================================================
+section "F6 — the defer row is WRITE-ONCE per (txn, reason): the never-green chain stays armed"
+
+# The crash-loop shape: the T15 hook fires per CHILD EXIT, every firing
+# appends a ~150-200B sweep_deferred row, and the journal crossed the
+# launcher-side 98,304B size guard in ~1-2 days. Past the guard this
+# branch defers FOREVER ("the daemon-side closer is the only automatic
+# rollback path") -- but in a crash loop the daemon is not alive long
+# enough to run it (stale > 600s PLUS a 300s boot-grace) => the
+# never-green chain was silently disarmed. Write-once per (txn, reason)
+# bounds the growth by the distinct-reason count.
+F6_FIX="$(mktemp -d -t f6.XXXXXX)"; _register_fixture "$F6_FIX"
+make_install_fixture "$F6_FIX" "$TARGET" "$PREV" "true"
+seed_journal "$F6_FIX" "$TARGET" "$PREV" "true" "1"
+ln -sfn "releases/$TARGET" "$F6_FIX/current"
+printf 'PORT=19999\n' > "$F6_FIX/.env"
+i=0
+while [ "$i" -lt 2 ]; do          # TWO ambiguous observations, SAME reason
+    run_sweep "$F6_FIX" 19999 >/dev/null
+    i=$(( i + 1 ))
+done
+F6_ROWS="$(grep -o '"event":"sweep_deferred"' "$F6_FIX/releases/state.json" | wc -l | tr -d ' ')"
+assert_eq "F6 write-once: two identical (txn, reason) observations ⇒ ONE defer row" "1" "$F6_ROWS"
+F6_CNT="$(cat "$(ls "$F6_FIX"/.sweep-defer-* 2>/dev/null | head -1)" 2>/dev/null)"
+assert_contains "F6 the counter still tallies every observation (the ceiling logic is untouched)" "absent=2" "$F6_CNT"
+# the never-green chain STAYS ARMED: the third qualifying observation
+# fires the EXISTING chain (the ceiling is reachable despite write-once)
+run_sweep "$F6_FIX" 19999 >/dev/null
+assert_contains "F6 the never-green chain stays armed (the ceiling still fires the chain)"     '"event":"sweep_rollback"' "$(cat "$F6_FIX/releases/state.json")"
+rm -rf "$F6_FIX"
+
+# ===========================================================================
 section "P-24 — never-green-observed is STICKY (a green observation freezes the ceiling)"
 
 P24_FIX="$(mktemp -d -t p24.XXXXXX)"; _register_fixture "$P24_FIX"
@@ -502,6 +533,42 @@ P24B_JOURNAL="$(cat "$P24B_FIX/releases/state.json")"
 assert_not_contains "P-24 a serving_green_commit row makes the ceiling ineligible" '"event":"sweep_rollback"' "$P24B_JOURNAL"
 assert_contains "P-24 the observation still defers" '"event":"sweep_deferred"' "$P24B_JOURNAL"
 rm -rf "$P24B_FIX"
+
+# F7 (code-council W6, leader-adopted AMEND) — the GREEN ∧ ¬intent_flip leg.
+# The sticky `green=1` flag was plan-mandated (AM-P2-10.3) but NEVER SET;
+# the declared mechanism is `intent_flip` itself: a persistently-GREEN txn
+# WITHOUT intent_flip can NEVER reach the absent-ceiling (the intent_flip
+# conjunct of the qualifying predicate fails on every observation), so it
+# is terminal-by-design (defer + operator surfacing), never a rollback.
+# NOTE: the intent_flip append in promote.sh is BEST-EFFORT (non-fatal),
+# so the GREEN ∧ ¬intent_flip shape IS reachable in production — this leg
+# pins the safety property the flag was supposed to carry.
+P24C_FIX="$(mktemp -d -t p24c.XXXXXX)"; _register_fixture "$P24C_FIX"
+make_install_fixture "$P24C_FIX" "$TARGET" "$PREV" "true"
+seed_journal "$P24C_FIX" "$TARGET" "$PREV" "true" "0"      # NO intent_flip
+ln -sfn "releases/$TARGET" "$P24C_FIX/current"
+printf 'PORT=19999\n' > "$P24C_FIX/.env"
+P24C_PORT="$(start_listener green 9.9.9-test-target)"
+i=0
+while [ "$i" -lt 4 ]; do          # one PAST the default ceiling of 3
+    run_sweep "$P24C_FIX" "$P24C_PORT" >/dev/null
+    i=$(( i + 1 ))
+done
+P24C_JOURNAL="$(cat "$P24C_FIX/releases/state.json")"
+assert_not_contains "P-24 (F7) GREEN ∧ ¬intent_flip NEVER rolls back" '"event":"sweep_rollback"' "$P24C_JOURNAL"
+assert_not_contains "P-24 (F7) GREEN ∧ ¬intent_flip is never committed" '"event":"serving_green_commit"' "$P24C_JOURNAL"
+assert_contains "P-24 (F7) the GREEN ∧ ¬intent_flip shape defers with the greppable marker"     'green-without-intent-flip' "$P24C_JOURNAL"
+if ls "$P24C_FIX"/.sweep-defer-* >/dev/null 2>&1; then
+    _fail "P-24 (F7) a non-qualifying observation writes NO counter" "no .sweep-defer-* file" "present"
+else
+    _pass
+fi
+rm -rf "$P24C_FIX"; cleanup_listeners
+# the counter format no longer advertises the dropped flag (F7)
+case "$(sed -n '/^_js_defer_counter_write() {/,/^}/p' "$REPO_ROOT/launcher.sh")" in
+    *'green='*) _fail "P-24 (F7) the counter format drops the never-set green= line" "no green= line" "present" ;;
+    *) _pass ;;
+esac
 
 # ===========================================================================
 section "P-27 — the version-mismatch split (the symlink decides)"

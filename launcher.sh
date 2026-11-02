@@ -797,6 +797,67 @@ _js_history_has_event_for_target() {
     return 1
 }
 
+# _js_history_has_defer_reason <journal> <target> <run_id> <reason>
+# Per-(txn, reason) DEFER-row reader (F6): true iff the history already
+# carries a `sweep_deferred` row for THIS txn with THIS reason marker.
+# Same per-entry, delimiter-anchored contract as the other readers. NOTE
+# the anchor shape: the DEFER writer's detail is
+#   "sweep: stale flipped txn (target=$target, run_id=$run_id, age=…) —
+#    DEFERRED ($reason) — …"
+# so the txn anchors are the `=`-form ("target=<ver>,") with the COMMA as
+# the delimiter (the comma closes the v0.28.5-inside-v0.28.55 prefix
+# collision exactly the way the space does for the space-form writers),
+# and the reason marker `DEFERRED (<reason>)` is stable across ticks
+# (unlike the row's age field).
+_js_history_has_defer_reason() {
+    local jp="$1" target="$2" run_id="$3" reason="$4"
+    local json hist rest entry t_eq r_eq marker
+    [ -n "$target" ] || return 1
+    [ -n "$reason" ] || return 1
+    json="$(_js_journal_read "$jp")" || return 1
+    hist="$(_js_json_sub "$json" "history")"
+    case "$hist" in
+        ''|null|'[]') return 1 ;;
+    esac
+    marker="DEFERRED ($reason)"
+    t_eq="target=$target,"
+    r_eq="run_id=$run_id,"
+    rest="$hist"
+    while :; do
+        case "$rest" in
+            *'{"ts":'*) rest="${rest#*'{"ts":'}" ;;
+            *) break ;;
+        esac
+        case "$rest" in
+            *'{"ts":'*) entry="${rest%%'{"ts":'*}" ;;
+            *) entry="$rest" ;;
+        esac
+        # the EVENT KIND must be in THIS entry (compact or spaced form)
+        case "$entry" in
+            *"\"event\":\"sweep_deferred\""*|*"\"event\": \"sweep_deferred\""*) ;;
+            *) continue ;;
+        esac
+        # the REASON marker must be in THIS entry
+        case "$entry" in
+            *"$marker"*) ;;
+            *) continue ;;
+        esac
+        # the TXN identity must be in THIS entry, delimiter-anchored
+        if [ -n "$run_id" ]; then
+            case "$entry" in
+                *"$r_eq"*) ;;
+                *) continue ;;
+            esac
+        fi
+        case "$entry" in
+            *"$t_eq"*) ;;
+            *) continue ;;
+        esac
+        return 0
+    done
+    return 1
+}
+
 # _js_sanitise_run_id <run_id> — filename-safe form (AM-P2-20). The
 # counter file is `<INSTALL_DIR>/.sweep-defer-<run_id>`; the run_id must
 # be safe as a filename (no "/", no whitespace).
@@ -847,17 +908,26 @@ _js_defer_counter_read() {
 }
 
 # _js_defer_counter_write <path> <absent> <mismatch> <unready> <broken>
-# <green> — atomic write (temp + mv), the file format pinned by
-# AM-P2-10.2.
+# — atomic write (temp + mv), the file format pinned by AM-P2-10.2.
+#
+# F7 (code-council W6, leader-adopted AMEND — the sticky `green=` line is
+# DROPPED): the flag was plan-mandated (AM-P2-10.3) but NEVER SET — the
+# ladder's increment case covers only absent/mismatch/unready, so `green=`
+# was dead weight in the format. The declared mechanism is
+# `intent_flip` + the JOURNAL history check below (`serving_green_commit`
+# / `quarantine_cleared_serving_green` rows): the ceiling requires
+# intent_flip ∧ owner-dead ∧ never-green-observed, so a GREEN-but-
+# UNAUTHORIZED txn can never reach the ceiling either (the intent_flip
+# conjunct fails) and a GREEN-and-authorized txn is COMMITTED (the
+# journal row exists from then on). Nothing safety-relevant is lost.
 _js_defer_counter_write() {
-    local path="$1" absent="$2" mismatch="$3" unready="$4" broken="$5" green="$6" tmp
+    local path="$1" absent="$2" mismatch="$3" unready="$4" broken="$5" tmp
     tmp="$path.tmp.$$"
     {
         printf 'absent=%s\n' "$absent"
         printf 'mismatch=%s\n' "$mismatch"
         printf 'unready=%s\n' "$unready"
         printf 'broken=%s\n' "$broken"
-        printf 'green=%s\n' "$green"
     } > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
     mv -f "$tmp" "$path" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
     return 0
@@ -1479,6 +1549,20 @@ _js_defer_counter_delete() {
 # GREPPABLE reason marker (which conjunct was missing) — matrix row 6.
 _js_serving_defer() {
     local journal="$1" target="$2" run_id="$3" age="$4" reason="$5" detail="$6"
+    # F6 (code-council W5) — WRITE-ONCE per (txn, reason). The defer row is
+    # ~150-200B and the T15 hook fires per CHILD EXIT; in a crash loop the
+    # journal crossed the launcher-side 98,304B size guard in ~1-2 days,
+    # and past that guard this branch DEFERS FOREVER ("the daemon-side
+    # closer is the only automatic rollback path") — but in the crash-loop
+    # shape the daemon is not alive long enough to run it (it needs
+    # stale > 600s PLUS its 300s boot-grace) ⇒ the never-green chain was
+    # SILENTLY DISARMED. One row per (txn, reason) bounds the growth by
+    # the distinct-reason count; the log line still fires every time so
+    # the observation stays visible.
+    if _js_history_has_defer_reason "$journal" "$target" "$run_id" "$reason"; then
+        _log "journal sweep: stale flipped txn (target=$target, run_id=$run_id, age=${age}s) — DEFERRED ($reason — already journaled for this txn, write-once per (txn, reason)) — txn left OPEN"
+        return 0
+    fi
     _js_history_append "$journal" "sweep_deferred" \
         "sweep: stale flipped txn (target=$target, run_id=$run_id, age=${age}s) — DEFERRED ($reason) — txn left OPEN; no quarantine, no counter, no cooldown, no rollback; $detail" \
         || { _log "WARN: journal sweep: sweep_deferred history append FAILED"; return 1; }
@@ -1724,7 +1808,7 @@ _js_sweep_flipped_disposition() {
     # site depends on this reset.
     _JS_SWEEP_LOCK_OWNED=0
     local probe_out probe_class probe_detail intent_flip=0 request_present=0
-    local counter_path absent mismatch unready broken green total
+    local counter_path absent mismatch unready broken total
     local jsize displaced_v
     [ -f "$journal" ] || return 0
     json="$(_js_journal_read "$journal")" || return 0
@@ -1943,13 +2027,13 @@ _js_sweep_flipped_disposition() {
     mismatch="$(_js_defer_counter_read "$counter_path" mismatch)"
     unready="$(_js_defer_counter_read "$counter_path" unready)"
     broken="$(_js_defer_counter_read "$counter_path" broken)"
-    green="$(_js_defer_counter_read "$counter_path" green)"
-    # never-green-observed (AM-P2-10.3): the sticky flag AND the journal
-    # check (the AM-P2-1 crash-prefix shape — a serving_green_commit row
-    # with the txn still open). EITHER ⇒ the ceiling is PERMANENTLY
-    # ineligible for this txn ⇒ defer (the operator backstop).
-    if [ "$green" = "1" ] \
-       || _js_history_has_event_for_target "$journal" "serving_green_commit" "$target" "" \
+    # never-green-observed (AM-P2-10.3, F7-amended): the JOURNAL check — a
+    # `serving_green_commit` or `quarantine_cleared_serving_green` row for
+    # this target (the AM-P2-1 crash-prefix shape: the event landed with
+    # the txn still open). The plan-mandated sticky `green=` counter flag
+    # is DROPPED (F7/W6): it was never implemented and `intent_flip` is
+    # the declared mechanism (see _js_defer_counter_write).
+    if _js_history_has_event_for_target "$journal" "serving_green_commit" "$target" "" \
        || _js_history_has_event_for_target "$journal" "quarantine_cleared_serving_green" "$target" ""; then
         _js_serving_defer "$journal" "$target" "$run_id" "$age" \
             "never-green-observed-violated" \
@@ -2000,7 +2084,7 @@ _js_sweep_flipped_disposition() {
         unready) unready=$(( unready + 1 )) ;;
     esac
     total=$(( absent + mismatch + unready ))
-    _js_defer_counter_write "$counter_path" "$absent" "$mismatch" "$unready" "$broken" "$green" \
+    _js_defer_counter_write "$counter_path" "$absent" "$mismatch" "$unready" "$broken" \
         || _log "WARN: journal sweep: defer counter write FAILED ($counter_path) — the tally restarts (bounded, not unbounded)"
     if [ "$total" -ge "$SWEEP_DEFER_CEILING" ]; then
         _log "journal sweep: the BOUNDED ABSENT-CEILING reached (qualifying observations=$total ≥ ceiling=$SWEEP_DEFER_CEILING; owner-dead ∧ intent_flip ∧ never-green-observed) — the existing auto-rollback chain fires"
