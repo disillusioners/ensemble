@@ -191,7 +191,7 @@ class TestTruthTableInvariants:
         text = _doc_text()
         assert "remains exactly 2" in text
         assert "metrics_listener.py:419" in text
-        assert "metrics_census.py:340" in text
+        assert "metrics_census.py:355" in text
 
     def test_the_query_package_never_reads_the_switch(self) -> None:
         assert "The query package NEVER reads the switch" in _doc_text()

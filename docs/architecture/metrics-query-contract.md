@@ -341,7 +341,7 @@ no_direct_switch_read_in_query_package
    (ii) `activation.census_enabled` → false, (iii) `last_publish_age_s` growth — all by design and
    excluded from the invariance claim.
 4. **The check-site census over `daemon/` remains exactly 2** (the listener body call line
-   `metrics_listener.py:419`; the census tick call line `metrics_census.py:340`).
+   `metrics_listener.py:419`; the census tick call line `metrics_census.py:355`).
 5. **No direct switch read in the query package or the routes** — `census_gated` is sourced from
    the public `CensusSampler.gated` property (created by phase-2 task 2.4a; a read-through of the
    EXISTING private `_gate()`; **no new check site**), and the query package NEVER reads the
