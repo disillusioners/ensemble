@@ -177,3 +177,29 @@ Registered the 7 Phase-2/3 runtime packs in `.agents/tester/PACKS.md` (new secti
 ## 13. Commit
 
 `test(plane-pm): tier-1 blast-radius gate evidence + pack registration` — evidence file + raw artifacts + PACKS.md rows (one commit). SHA recorded in the report-back.
+
+---
+
+## 14. Fix cycle — `test_no_forbidden_system_tokens[tools_note.md]` (GATE C continuation)
+
+**Root cause**: A′ commit `262dff12c` (A′.2) rewrote `agents/project-manager/tools_note.md` and introduced the daemon-internal tokens `meta.json` and `tools.allow` (3 occurrences: `'meta.json'@L24`, `'tools.allow'@L23`, `'tools.allow'@L37`). The `FORBIDDEN_TOKENS` house convention (project-manager agent only) bans these; PM was clean at BASE (`941cb6321`). Genuine convention breach, not a stale expectation.
+
+**Fix** (production-side prose reword, <20 lines, no daemon behavior change): `agents/project-manager/tools_note.md`, 3 insertions / 3 deletions:
+- L23: `(literal tool names in \`tools.allow\`, NOT the whole \`plane\` category)` → `(the literal verb names I am allowed to call, NOT the whole \`plane\` category)`
+- L24: `agents/worker/meta.json`'s \`plane_sync\` allow entry` → `agents/worker`'s \`plane_sync\` allow entry`
+- L37: `My \`tools.allow\` names these 28 verbs **literally** (not the \`plane\` category), so a verb outside the keep-set is not bound into my prompt at all — the grant is the vocabulary.` → `I am granted these 28 verbs **literally** (not the whole \`plane\` category), so a verb outside the keep-set is never bound into my vocabulary at all — the grant is the vocabulary.`
+
+**Preserved (verified)**: all 28 keep-set `plane_*` verb names still present in `tools_note.md` (0 missing); `plane_sync_project` ownership statement intact; no new forbidden tokens of any class (`meta.json`, `tools.allow`, `tools.deny`, `daemon/`, `_tool_registry`, `skill-set.yaml`, `agent_id=`, `seed_all`, `innate_skills`, `default_agent_versions` all absent post-fix).
+
+**Regenerated baseline**: `python3 scripts/protection/generate_prompt_artifact_baseline.py` → `PROMPT-BASELINE: GENERATED — 161 artifact(s)`; `--check` → `PROMPT-BASELINE: OK — 161 versioned artifact(s) match` (rc=0). `agents/.prompt-artifacts.sha256` updated (+1 line in the diff).
+
+**Re-verification**:
+- `test_no_forbidden_system_tokens[tools_note.md]`: 0 failed → **1 passed** (was 1 failed) ✓
+- Full `tests/unit/test_project_manager_agent.py`: 63 passed, 2 failed — the 2 remaining are the pre-existing `TestPromptComposition` reds (`test_soul_cites_rule_for_severity_framing`, `test_workflow_cites_soul_and_rule`), byte-identical at BASE (pre-existing, attributed, not fixed).
+- `tests/unit/test_plane_prompt_verb_check.py` (P11, scans the 4 charter files incl. tools_note.md): **9/9 PASS** — reword did not break verb membership.
+- Seal tripwire `tests/test_prompt_artifact_baseline.py`: **19/19 PASS** (regenerated baseline correct).
+- Seal tripwire `tests/test_chart_image_delivery_e2e.py`: 1 failed (pre-existing — `TestPhaseDDoesNotModifySealedArtifacts`, 4 sealed artifacts `agents/ari/workflow.md`, `daemon/sources/registry.py`, `daemon/constants.py`, `agents/ari/rule.md` differ; attributed to other lanes, NOT introduced by this edit — `tools_note.md` is not in the sealed set).
+
+**Post-fix net-new verdict: 0.** The `[tools_note.md]` param is green; the only remaining reds in the pack scope are the 2 pre-existing `TestPromptComposition` reds (attributed, not fixed). Combined with the earlier fix cycle (2 test-side fixes), the full net-new set is now empty.
+
+**Fingerprint**: tools_note.md 3 insertions / 3 deletions (6 lines); baseline file 1 line changed. No daemon production-code behavior change. No other files modified.
