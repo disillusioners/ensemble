@@ -169,6 +169,12 @@ value: `last_publish_age_s` = seconds since the metric's last publish, via the *
 `Metric.last_publish_monotonic()` accessor** (AM-13 — the private `_last_publish` is not an
 acceptable dependency).
 
+The route is **bounded** (W-4): `?offset=` / `?limit=` page the series (the limit is clamped to
+`MAX_SNAPSHOT_SERIES` = 500), the byte ceiling applies, and a bounded body carries the
+continuation cursor — the ceiling promise is the contract's safety property, so this route is not
+exempt from it. The body carries `truncated: bool` (additive — the other two routes already
+carried it).
+
 Typing honesty (AM-4): `kind ∈ {gauge, counter, histogram}` (**no `summary`** — the registry never
 produces it; `register_summary` renders as a histogram, `checkpoint_metrics.py:985`). Every series
 carries `monotonic: bool` (counters are non-decreasing **within one `restart_epoch`**). Histogram
@@ -247,6 +253,29 @@ GET /api/metrics/series
 **Pagination/bounds:** max families per response, max samples per response, cursor; a single
 response must stay under a stated byte ceiling; `max_points` defaults **≤ 240** (AM-12, approver
 B1 + leader ruling) so the off-loop body stays bounded.
+
+**THE THREE ROUTES ARE BOUNDED THE SAME WAY (W-2 / W-3 / W-4, fix cycle 1).**
+
+* **`/snapshot` is bounded like the other two** — it was NOT exempt from
+  the byte ceiling. It now accepts `?offset=` / `?limit=` (the limit is
+  CLAMPED to the snapshot ceiling, `MAX_SNAPSHOT_SERIES` = 500), the body
+  is bounded by the byte ceiling, and a bounded body carries the
+  continuation cursor. The response additionally carries `truncated:
+  bool` — an ADDITIVE field (the other two routes already carried it),
+  never a wire break.
+* **`/series` bounds the EMITTED body, not only the REQUEST** — the
+  selector ceiling (50) bounds the *requested* selectors, and a request
+  with no selector matched EVERY published series. The page is therefore
+  bounded on two axes during the OFF-LOOP build: the emitted-series
+  ceiling (`MAX_SERIES` = 500) and the **total emitted-points** ceiling
+  (`MAX_TOTAL_POINTS` = 12 000 — the number the AM-12 claim is about: it
+  is now an ENFORCEMENT, not the constant identity `240 × 50`).
+* **A bound that drops something is never silent** — the builder sets
+  `truncated`, and a truncated body ALWAYS carries the continuation
+  cursor (on all three routes).
+* **THE BYTE-CEILING PROBE AND THE TRIM RUN OFF THE EVENT LOOP** — the
+  probe is a full JSON dump and the trim is a binary search over it; both
+  run inside the off-loop page builder, never in the route handler.
 
 **Cursor (AM-6):** `next_cursor: string|null`; opaque; pins the evaluation instant + position; an
 invalid/expired cursor (older than the buffer's oldest point) ⇒ `400 invalid_cursor`; the byte
