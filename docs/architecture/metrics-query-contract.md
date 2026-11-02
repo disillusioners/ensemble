@@ -418,3 +418,33 @@ comparisons load `.agents/tester/skills/failed-digest-equality-gate/failed-diges
 
 **Packs, never bare pytest.** Every leg names its `.agents/tester/PACKS.md` pack; bare
 `pytest <file>` is not an acceptable gate invocation.
+
+### The re-derived node counts (P2-G1, 2026-11-02 — the PROJECTIONS re-derived)
+
+The figures below are the executor's `--collect-only -q` output, NOT the plan's
+projections. They are the registration input for the pack rows the tester lane owns.
+
+| Pack id | Leg | D1 / D2 | Re-derived nodes | Per-file breakdown |
+|---|---|---|---|---|
+| `central_metrics_contract_doc` | P1-G1 | D1 | **21** | `tests/unit/metrics/test_central_metrics_contract_doc.py` 21 |
+| `metrics_p2_dual_side` | P2-G1 | D2 | **281** | `test_checkpoint_metrics_registry` 45 · `test_checkpoint_metrics_vocabulary` 18 · `test_metrics_gate` 35 · `test_metrics_listener` 41 · `test_metrics_listener_registry` 15 · `test_metrics_census` 34 · `test_metrics_managed_keys` 65 · `test_metrics_live_managed_values` 16 · `test_metrics_refresh_path` 12 |
+| `metrics_query_provider` | P2-G1 | D1 | **66** | `tests/unit/metrics/test_metrics_query_provider.py` 66 |
+| `metrics_history_ring` | P2-G1 | D1 | **28** | `tests/unit/metrics/test_metrics_history_ring.py` 28 |
+| `metrics_sampler` | P2-G1 | D1 | **20** | `tests/unit/metrics/test_metrics_sampler.py` 20 |
+| `metrics_registry_narrowing` | P2-G1 | D1 | **12** | `tests/unit/metrics/test_metrics_registry_narrowing.py` 12 |
+| `metrics_vocabulary_amendment` | P2-G1 | D1 | **11** | `tests/unit/metrics/test_metrics_vocabulary_amendment.py` 11 |
+
+**The P2-G1 leg's D2 set was invoked by its declared COMPOSITION** (the nine files
+above), not by pack id: the nine pack ids are still **unregistered** in
+`.agents/tester/PACKS.md` (the tester lane owns that file and the rows land with
+this lane's evidence). The pack id + the node scope + the re-derived count are
+recorded here so the registration is a copy, not a re-derivation.
+
+**A FINDING for the pack registration (P2-G1):** the declared `metrics_p2_dual_side`
+composition does **not** reach `tests/unit/persistence/test_checkpoint_perf_logging.py`,
+which the blast-radius derivation DOES reach (it imports `daemon.checkpoint_metrics`
+and pins the F7 op vocabulary). The F7 narrowing invalidates two of that file's
+assertions; they were re-pointed at the adjudicated vocabulary (a DISCLOSED test
+edit — the file's own premises were void under the D-7 ruling). **The registered
+composition should be widened to include that file**, otherwise the next lane that
+narrows a vocabulary repeats the miss.
