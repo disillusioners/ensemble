@@ -368,7 +368,7 @@ budget.** They are **recorded findings, never auto-fixed.**
 
 ---
 
-## 12. The implementation-phase deviations (recorded, never silent)
+## 12. The implementation-phase deviations + the open-for-council row (recorded, never silent)
 
 | # | The deviation | Where it is recorded |
 |---|---|---|
@@ -384,6 +384,7 @@ budget.** They are **recorded findings, never auto-fixed.**
 | 10 | The FE's **9 pre-existing reds** (the date-dependent timezone-DST family + the jobs-grouping / jobs-filter-state) are byte-identical on both legs; `tsconfig.spec.json` is **RED at base** (a stray `});` at `src/app/app.component.spec.ts:2127`) — **not a lane file**, untouched, reported | §1.2 |
 | 11 | The FE **chart mode** comes from the catalog's per-name `chart_role` with the door's **kind-derived fallback** (counter ⇒ step, else line) | the published FE page §3 |
 | 12 | Stage A's disclosed items: the family-level `role='chart'\|'stat'` + the per-name `chart_role='line'\|'step'` (contract §4.3); **three added public accessors**; `?names=` over the 50-name ceiling ⇒ **400 `invalid_label_filter`** (never a silent truncation); the histogram series carry the **stored cumulative observation count** as the point value; **one disclosed test edit** re-pointing two stale saver-op assertions | the contract doc §4.3 + the lane's P2 evidence |
+| 13 | **OPEN FOR THE COUNCIL — the frozen contract's error-vocabulary token does not match the shipped body.** The contract's error-vocabulary block renders the scope miss lowercase as `scope_insufficient`; the **shipped** body is uppercase **`SCOPE_INSUFFICIENT`** (`daemon/auth/decorators.py:75-78` — `_SCOPE_403_DETAIL = {"error": "SCOPE_INSUFFICIENT", "message": "Token lacks required scope"}`). The status (403) and the meaning are identical — it is a **token-rendering** difference, not a behavioural one. The shipped spelling is what a consumer sees on the wire, and the published query-API page documents it. **Recommendation (for the council):** amend the **CONTRACT TOKEN** via a **disclosed one-line edit** if the council agrees — **docs-only**. **NEVER the auth decorator** — changing that would be a **behaviour change outside this lane's scope** (and the auth seam is pre-existing, shared, and out of the lane's file set) | the published query-API page §3.1 (the rendering note) · `daemon/auth/decorators.py:75-78` |
 
 ---
 
