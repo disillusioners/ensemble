@@ -151,9 +151,11 @@ An expected condition is **never** a 500.
 > wire. **The contract now carries the shipped spelling** (the D-c ruling; the wire and the
 > decorator are untouched). The shipped pack `central_metrics_contract_doc` pins that block
 > against a literal in the test file that still carried the superseded lowercase token, so it
-> goes red on exactly that one assertion until the pin follows the ruling — the pin lives in
-> the test surface (outside this lane's fence) and is **routed**, not silently ignored. The
-> measured run is preserved in `evidence/d-c-contract-token-pin.txt`.
+> went red on exactly that one assertion until the pin followed the ruling — and it HAS now
+> followed (**the test-surface commit `604d85bd4`**, "follow the D-c ruling in the contract-doc
+> pin's 403 token"), so the pack is **GREEN again** (measured: the contract-doc pack **21/21**
+> and the pagination pack **38/38** — **59 passed, 0 failed**). The measured red run is kept as
+> the record of the transition in `evidence/d-c-contract-token-pin.txt`.
 
 ### 3.2 The bounds
 
@@ -173,6 +175,14 @@ points ≈ 3.6 ms`.
 evaluation instant and the position. An invalid or expired cursor (older than the buffer's
 oldest point) returns **`400 invalid_cursor`**. When the byte ceiling is reached the response is
 **bounded and carries a cursor** — it is never silently truncated.
+
+**Cursor precedence (ND-5).** The cursor-expiry probe runs **first** on all three routes
+(each page builder calls `_expire_cursor` before any other check). On
+`GET /api/metrics/snapshot` the unknown-family check sits downstream of it, so **an expired
+cursor combined with an unknown `family` answers `400 invalid_cursor` — not `404
+unknown_family`** (`daemon/routers/metrics.py:478` — the probe precedes the family check at
+`:479-482`). **The pin for this precedence is routed to the tidier; this page documents the
+semantics and adds no pin.**
 
 ---
 

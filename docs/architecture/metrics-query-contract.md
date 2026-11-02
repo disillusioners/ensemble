@@ -281,8 +281,9 @@ B1 + leader ruling) so the off-loop body stays bounded.
   (`MAX_TOTAL_POINTS` = 12 000 — the number the AM-12 claim is about: it
   is now an ENFORCEMENT, not the constant identity `240 × 50`).
 * **A bound that drops something is never silent** — the builder sets
-  `truncated`, and a truncated body ALWAYS carries the continuation
-  cursor (on all three routes).
+  `truncated` when it drops something, and a body that dropped something
+  ALWAYS carries the continuation cursor; `truncated` also marks a partial
+  view (a page reached with a cursor) and such a page may carry no cursor.
 * **THE BYTE-CEILING PROBE AND THE TRIM RUN OFF THE EVENT LOOP** — the
   probe is a full JSON dump and the trim is a binary search over it; both
   run inside the off-loop page builder, never in the route handler.
@@ -291,6 +292,15 @@ B1 + leader ruling) so the off-loop body stays bounded.
 invalid/expired cursor (older than the buffer's oldest point) ⇒ `400 invalid_cursor`; the byte
 ceiling produces a bounded body + a cursor, **never a silent truncation**; the families route is
 bounded the same way. (AC-A.8 is unsatisfiable without this.)
+
+**Cursor precedence (ND-5).** The cursor-expiry probe runs **FIRST**: all three page
+builders call `_expire_cursor(provider, cursor)` before any other check
+(`daemon/routers/metrics.py:439` families · `:478` snapshot · `:513` series). On
+`GET /api/metrics/snapshot` the **unknown-family check sits downstream of it** — so an
+**expired cursor combined with an unknown `family` answers `400 invalid_cursor`, not
+`404 unknown_family`** (the probe at `:478` precedes the family check at `:479-482`, so the
+expiry wins). `/snapshot` is the only route with a family check downstream of the probe; the
+other two routes have no family check in the builder at all.
 
 **Window semantics (AM-5):** `window_s` anchors at the server's `generated_at_utc`; a cursor pins
 its evaluation instant; `max_points` downsample is **bucket-max**, named, never every-kth. The

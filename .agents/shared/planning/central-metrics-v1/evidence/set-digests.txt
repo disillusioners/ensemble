@@ -16,16 +16,18 @@
 #
 #     cd <the evidence dir> && sha256sum -c <the manifest>
 #
-# (ND-3: the P3 adjudication manifest had been captured in `sha256sum`'s
-# THREE-COLUMN default form — `sha256 SIZE path` — which `sha256sum -c` cannot
-# parse: it took the SIZE column for the filename and reported "21 listed files
-# could not be read". It is now the two-column form and `sha256sum -c
-# p3-adjudication.sha256.txt` reports **21/21 OK**. The per-file digests were
-# never wrong; only the LAYOUT was.)
+# (ND-3, cause corrected 2026-11-02: the P3 adjudication manifest had been captured
+# with an EXTRA SIZE COLUMN — a three-column LAYOUT, `sha256 SIZE path`, written by
+# the manifest's generator. That layout is NOT `sha256sum`'s default form: `sha256sum`
+# prints TWO columns (`<sha256>  <path>`). The extra column is what `sha256sum -c`
+# cannot parse — it took the SIZE column for the filename and reported "21 listed
+# files could not be read". The manifest is now the two-column form and
+# `sha256sum -c p3-adjudication.sha256.txt` reports **21/21 OK**. The per-file
+# digests were never wrong; only the LAYOUT was.)
 #
 # THE AGGREGATE IS **NOT** A HASH OF A MANIFEST'S OWN LINES: it is the canonical
-# recipe over the set's MEMBERS (their `sha256sum` output, three-column, sorted
-# with LC_ALL=C). Hashing a manifest's own two-column lines yields a DIFFERENT
+# recipe over the set's MEMBERS (their `sha256sum` output — `sha256sum`'s own
+# TWO-column form, `<sha256>  <path>` — sorted with LC_ALL=C). Hashing a manifest's own two-column lines yields a DIFFERENT
 # number — the per-file digests are the same, the aggregate is the recipe's.
 # The per-set membership is stated in each set's own manifest file where one
 # exists, and every aggregate below was RE-DERIVED with the recipe above.

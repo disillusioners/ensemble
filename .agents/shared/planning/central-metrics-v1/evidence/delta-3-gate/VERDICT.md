@@ -38,7 +38,7 @@
 
 | pack | result |
 |---|---|
-| `tests/unit/metrics/test_metrics_query_pagination.py` | **38 passed** (35 + the 4 ND-2 walk legs + the 3 ND-4 expiry legs) |
+| `tests/unit/metrics/test_metrics_query_pagination.py` | **38 passed** (31 + the 4 ND-2 walk legs + the 3 ND-4 expiry legs — the pack held **31** tests before the two ND commits added 7, verified against `7018162fd~1`: 31 → +4 (ND-2) → +3 (ND-4) → 38) |
 | `tests/unit/metrics/test_central_metrics_contract_doc.py` | **21 passed** |
 | `tests/unit/metrics/` (the lane's full suite) | **383 passed** |
 

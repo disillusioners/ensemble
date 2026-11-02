@@ -25,10 +25,12 @@
 #
 #     cd <the evidence dir> && sha256sum -c p3-adjudication.sha256.txt
 #
-# …which reports 21/21 OK. (The earlier capture was `sha256sum`'s THREE-COLUMN
-# default form — `sha256 SIZE path` — which `sha256sum -c` cannot parse: it took
-# the SIZE column for the filename and reported "21 listed files could not be
-# read". The per-file digests were never wrong; only the LAYOUT was.)
+# …which reports 21/21 OK. (The earlier capture carried an EXTRA SIZE COLUMN — a
+# three-column LAYOUT, `sha256 SIZE path`, written by the manifest's generator, NOT
+# by `sha256sum`, whose own default output is the two-column `<sha256>  <path>`
+# form. That extra column is what `sha256sum -c` cannot parse: it took the SIZE
+# column for the filename and reported "21 listed files could not be read". The
+# per-file digests were never wrong; only the LAYOUT was.)
 #
 # THE SET AGGREGATE IS **NOT** A HASH OF THIS FILE'S LINES: it is the canonical
 # recipe over the MEMBERS (`sha256sum <members> | LC_ALL=C sort | sha256sum`),
