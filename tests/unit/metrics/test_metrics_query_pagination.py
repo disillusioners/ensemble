@@ -539,3 +539,48 @@ class TestCursorWalkTerminates:
             "CURSOR minting changed"
         )
         assert not last.get("next_cursor")
+
+
+class TestSnapshotCursorExpiry:
+    """ND-4 — a STALE snapshot cursor expires (400 invalid_cursor).
+
+    The snapshot builder was the only one of the three that did not
+    call ``_expire_cursor``, so a stale cursor never expired there and
+    the route's ``except _ExpiredCursor → 400`` was DEAD on that route.
+    The expiry probe is the same O(rings) read the sibling builders
+    make, and it runs OFF the event loop.
+    """
+
+    def test_a_stale_snapshot_cursor_is_refused(self):
+        # the cursor's pinned instant is OLDER than the buffer's oldest
+        # sample (1 000 < 5 000) — it can no longer resume faithfully
+        cursor = encode_cursor({"v": 1, "t": 1_000, "o": 0})
+        provider = _provider(oldest_sample_timestamp=5_000)
+        response = build_client(provider).get(
+            f"/api/metrics/snapshot?cursor={cursor}"
+        )
+        assert response.status_code == 400, response.text
+        assert error_code(response) == "invalid_cursor"
+
+    def test_a_live_snapshot_cursor_is_accepted(self):
+        """The probe must not refuse a LIVE cursor (the sibling behaviour)."""
+        cursor = encode_cursor({"v": 1, "t": 6_000, "o": 0})
+        provider = _provider(oldest_sample_timestamp=1_000)
+        response = build_client(provider).get(
+            f"/api/metrics/snapshot?cursor={cursor}"
+        )
+        assert response.status_code == 200, response.text
+
+    def test_the_snapshot_expiry_probe_runs_off_the_event_loop(self):
+        cursor = encode_cursor({"v": 1, "t": 1_000, "o": 0})
+        provider = _provider(oldest_sample_timestamp=5_000)
+        response = build_client(provider).get(
+            f"/api/metrics/snapshot?cursor={cursor}"
+        )
+        assert response.status_code == 400
+        assert provider.threads, "the provider must have been consulted"
+        for thread_name in provider.threads:
+            assert thread_name.startswith("db-offload"), (
+                "the expiry probe must run OFF the event loop — it ran on "
+                f"{thread_name!r}"
+            )

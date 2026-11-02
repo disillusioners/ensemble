@@ -465,9 +465,17 @@ def _build_snapshot_page(
     The route is BOUNDED like the other two (W-4): ``offset``/``limit``
     page the series and the byte ceiling bounds the page — a bounded
     body carries the continuation cursor, never a silent truncation.
+
+    THE EXPIRY PROBE RUNS HERE TOO (ND-4): this builder was the only
+    one of the three that did NOT call ``_expire_cursor``, so a stale
+    snapshot cursor never expired — the route's ``except _ExpiredCursor
+    → 400 invalid_cursor`` was DEAD on this route.  The probe is the
+    same O(rings) read the sibling builders make (and it runs OFF the
+    event loop, inside this off-loop build).
     """
     from daemon.services.metrics_query.envelope import build_snapshot_envelope
 
+    _expire_cursor(provider, cursor)
     if family is not None:
         known = {entry.get("id") for entry in provider.families()}
         if family not in known:
