@@ -1,0 +1,31 @@
+{
+  "artifact": "resolution.json",
+  "lane": "plane-pm-issue-tools",
+  "gate": "B / Phase-5 Step 2 — resolution proof (positive leg)",
+  "tree": "964778d484650f909fdb84e4e3a9484d97a1c821",
+  "evidence_source": "the daemon's OWN surface — the boot log line emitted by daemon/mcp/builtin_servers/plane.py (the resolver's only typed-reason emitter) + the resolver invoked in-process",
+  "boot_log_line_verbatim": "Plane workspace resolution: env=dev source=explicit-marker slug=e2e",
+  "classification_env_label": "dev",
+  "env_source": "explicit-marker",
+  "effective_slug_from_boot_log": "e2e",
+  "allowed": true,
+  "reason": null,
+  "assertions": {
+    "classification_is_non_live": true,
+    "source_is_explicit_marker": true,
+    "effective_slug_is_e2e": true,
+    "allowed": true
+  },
+  "negative_leg_resolutions_observed_at_the_daemon_surface": {
+    "slug=nea": {
+      "boot_log_line_verbatim": "18:17:58 - daemon.manager - WARNING - Builtin 'plane' deactivated — workspace refused (POLICY): workspace 'nea' is production-only; this environment resolves to dev; agents with mcp_full_access=['plane']: project-manager"
+    },
+    "slug UNSET": {
+      "boot_log_line_verbatim": "18:20:06 - daemon.manager - WARNING - Builtin 'plane' skipped — workspace refused (POLICY): PLANE_MCP_WORKSPACE_SLUG is unset in a non-production environment; expected 'e2e'; agents with mcp_full_access=['plane']: project-manager"
+    },
+    "slug=other": {
+      "boot_log_line_verbatim": "18:21:00 - daemon.manager - WARNING - Builtin 'plane' skipped — workspace refused (POLICY): workspace 'other' is not permitted in a non-production environment; expected 'e2e'; agents with mcp_full_access=['plane']: project-manager"
+    }
+  },
+  "no_secrets": true
+}

@@ -1,0 +1,100 @@
+{
+  "artifact": "workitem_readback.json",
+  "lane": "plane-pm-issue-tools",
+  "gate": "B / Phase-5 Step 5",
+  "workspace_slug": "e2e",
+  "work_item_id": "f445a1cd-f55b-48cf-945e-8043e2a0055c",
+  "project_id": "0e9e0143-c9ad-4f58-9114-0d8b549ddea6",
+  "no_secrets": true,
+  "channel_a_rest": {
+    "channel": "Plane REST (X-Api-Key) — independent of the MCP write lane",
+    "url": "https://plane.ensem.dev/api/v1/workspaces/e2e/projects/0e9e0143-c9ad-4f58-9114-0d8b549ddea6/work-items/f445a1cd-f55b-48cf-945e-8043e2a0055c/activities/",
+    "http_status": 200,
+    "activity_count": 1,
+    "activity_verb": "created",
+    "activity_comment": "created the issue",
+    "activity_created_at": "2026-11-02T18:03:45.124227Z",
+    "activity_issue_id": "f445a1cd-f55b-48cf-945e-8043e2a0055c",
+    "activity_project_id": "0e9e0143-c9ad-4f58-9114-0d8b549ddea6",
+    "activity_workspace_id": "80859836-bd99-4b6e-bebe-cd29a0cc9dda",
+    "activity_actor": "fafea040-c3fe-42f3-8afa-33a57e015e44",
+    "exists_assertion": true,
+    "in_e2e_workspace_assertion": true,
+    "in_e2e_project_assertion": true,
+    "work_item_detail_probe": {
+      "url": "https://plane.ensem.dev/api/v1/workspaces/e2e/projects/0e9e0143-c9ad-4f58-9114-0d8b549ddea6/work-items/f445a1cd-f55b-48cf-945e-8043e2a0055c/",
+      "http_status": 404,
+      "body_head": "{\"error\":\"The requested resource does not exist.\"}",
+      "explanation": "Plane's `Issue.issue_objects` manager excludes DRAFT work items (apps/api/plane/db/models/issue.py), and BOTH the external work-item LIST and DETAIL endpoints query through it (apps/api/plane/api/views/issue.py — IssueListCreateAPIEndpoint.get_queryset / IssueDetailAPIEndpoint.get_queryset). The MCP server proxies the same REST route, so `plane_retrieve_work_item` and `plane_retrieve_work_item_by_identifier` return the same 404. => A byte-exact REST-lane CONTENT read-back of a DRAFT is STRUCTURALLY IMPOSSIBLE against this Plane edition. The activities sub-resource uses `Issue.objects` (the unfiltered soft-deletion manager) and therefore IS the REST lane that can address a draft."
+    },
+    "work_item_list_probe": {
+      "url": "https://plane.ensem.dev/api/v1/workspaces/e2e/projects/0e9e0143-c9ad-4f58-9114-0d8b549ddea6/work-items/?per_page=100",
+      "http_status": 200,
+      "total_count": 7,
+      "draft_present_in_list": false,
+      "note": "the list endpoint also excludes drafts (same manager)"
+    }
+  },
+  "channel_b_server_response": {
+    "channel": "the Plane server's own serialization of the stored row (the plane_create_work_item response)",
+    "tool_call_id": "call_d79ef78821084d5c90036561",
+    "tool_name": "plane_create_work_item",
+    "work_item_id": "f445a1cd-f55b-48cf-945e-8043e2a0055c",
+    "sequence_id": 8,
+    "project": "0e9e0143-c9ad-4f58-9114-0d8b549ddea6",
+    "workspace": "80859836-bd99-4b6e-bebe-cd29a0cc9dda",
+    "state": "ae248ddc-c861-4bbb-8404-bdc0d7f9f352",
+    "is_draft": true,
+    "is_draft_assertion": true,
+    "name": "Draft: Guidelines system — fixed dev-team-managed reference docs with intelligent agent loading",
+    "name_matches_verbatim_title": true,
+    "created_at": "2026-11-02T18:03:45.039202Z",
+    "created_by": "fafea040-c3fe-42f3-8afa-33a57e015e44"
+  },
+  "pm_create_call_arguments": {
+    "captured_verbatim_from_pm_tool_call": true,
+    "tool": "plane_create_work_item",
+    "name": "Draft: Guidelines system — fixed dev-team-managed reference docs with intelligent agent loading",
+    "name_matches_verbatim_title": true,
+    "description_stripped_matches_verbatim_body": true,
+    "description_stripped_sha256": "76de12f877c362cc4af82cfd105041aef5761bc540d0af9851ac5fd99adf60d8",
+    "expected_body_sha256": "76de12f877c362cc4af82cfd105041aef5761bc540d0af9851ac5fd99adf60d8",
+    "is_draft": true,
+    "is_draft_assertion": true,
+    "project_id": "0e9e0143-c9ad-4f58-9114-0d8b549ddea6",
+    "project_id_assertion": true,
+    "argument_names": [
+      "description_stripped",
+      "is_draft",
+      "name",
+      "project_id"
+    ]
+  },
+  "server_stored_body": {
+    "field": "description_html (the field Plane persists; description_stripped is excluded from the serializer's read representation)",
+    "html_length": 1630,
+    "text_length": 1601,
+    "expected_body_length": 1601,
+    "text_matches_verbatim_body": true,
+    "sections_present": {
+      "(1) PROBLEM STATEMENT:": true,
+      "(2) PROPOSED CONCEPT:": true,
+      "(3) EXAMPLE GUIDELINE TYPES:": true,
+      "(4) OPEN QUESTIONS FOR DEV TEAM:": true
+    },
+    "all_four_sections_present": true,
+    "text_sha256": "76de12f877c362cc4af82cfd105041aef5761bc540d0af9851ac5fd99adf60d8",
+    "expected_body_sha256": "76de12f877c362cc4af82cfd105041aef5761bc540d0af9851ac5fd99adf60d8"
+  },
+  "verdict": {
+    "exists": true,
+    "landed_in_e2e_workspace": true,
+    "landed_in_e2e_project": true,
+    "is_draft_true": true,
+    "title_verbatim": true,
+    "body_verbatim": true,
+    "body_verbatim_as_stored": true,
+    "single_create_no_delete": true,
+    "readback_channel_deviation": "Plane's external REST work-item endpoints (LIST + DETAIL) query through `Issue.issue_objects`, which EXCLUDES draft work items — so no REST work-item route can render a draft's payload, and the MCP retrieve verbs inherit the same 404. The REST lane therefore proves EXISTENCE + WORKSPACE + PROJECT + CREATION EVENT through the activities sub-resource (which uses the unfiltered `Issue.objects`), while the CONTENT + is_draft assertions come from the Plane server's own create response and from PM's captured create arguments. This is a PLATFORM CONSTRAINT of the Plane edition, not an agent or lane defect."
+  }
+}
