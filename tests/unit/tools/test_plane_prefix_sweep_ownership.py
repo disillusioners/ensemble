@@ -26,7 +26,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from daemon.registry import AgentMetadata, ToolFilter
 from daemon.tools.instance import _apply_tool_filter, resolve_tool_filter

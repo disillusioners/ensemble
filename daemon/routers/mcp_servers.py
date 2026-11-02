@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -34,6 +35,11 @@ from daemon.mcp import get_mcp_connection_manager
 from daemon.mcp.builtin_servers import get_registry
 from daemon.mcp.builtin_servers.base import BuiltinServerDefinition
 from daemon.mcp.builtin_servers.validation import validate_config_values, McpConfigValidationError as BuiltinConfigValidationError
+from daemon.mcp.builtin_servers.plane import _mcp_kill_switch_enabled
+from daemon.plane_workspace import (
+    current_plane_workspace,
+    normalize_workspace_slug,
+)
 from daemon.services.install_audit import EVENT_MCP_INSTALL, append_install_audit
 from daemon.services.env_key_policy import (
     REDACT_ONLY_MARKER_WORDS,
@@ -348,7 +354,6 @@ def _plane_probe_refusal(config: dict[str, Any]) -> str | None:
     try:
         if not isinstance(config, dict):
             return None
-        import os
 
         url = config.get("url")
         headers = config.get("headers")
@@ -362,15 +367,6 @@ def _plane_probe_refusal(config: dict[str, Any]) -> str | None:
         )
         if not is_plane_shape:
             return None
-        from daemon.mcp.builtin_servers.plane import (
-            PlaneServerDefinition,
-            _mcp_kill_switch_enabled,
-        )
-        from daemon.plane_workspace import (
-            current_plane_workspace,
-            normalize_workspace_slug,
-        )
-
         if not _mcp_kill_switch_enabled():
             return (
                 "Plane MCP is deliberately disabled by kill-switch "

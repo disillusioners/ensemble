@@ -14,7 +14,6 @@ here needs to touch the process environment.
 from __future__ import annotations
 
 import ast
-import os
 import sys
 from pathlib import Path
 
@@ -22,12 +21,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests"))
 
-import daemon.plane_workspace as pw
 import daemon.plane_workspace as daemon_plane_workspace
 from daemon.plane_workspace import (
     HISTORICAL_STRICT_LIVE_REASON,
-    PlaneWorkspaceResolution,
-    PRODUCTION_WORKSPACE_SLUG,
     TEST_WORKSPACE_SLUG,
     normalize_workspace_slug,
     resolve_plane_workspace,
@@ -404,17 +400,17 @@ class TestResolveOnceThreading:
         monkeypatch.setenv("ENSEMBLE_SELF_ENV", "dev")
         monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", "e2e")
         monkeypatch.setenv("POSTGRES_DB", "ensemble_dev")
-        first = pw.current_plane_workspace()
-        second = pw.current_plane_workspace()
+        first = daemon_plane_workspace.current_plane_workspace()
+        second = daemon_plane_workspace.current_plane_workspace()
         assert first is second
 
     def test_env_change_re_resolves(self, monkeypatch):
         monkeypatch.setenv("ENSEMBLE_SELF_ENV", "dev")
         monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", "e2e")
         monkeypatch.setenv("POSTGRES_DB", "ensemble_dev")
-        assert pw.current_plane_workspace().allowed is True
+        assert daemon_plane_workspace.current_plane_workspace().allowed is True
         monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", "nea")
-        r = pw.current_plane_workspace()
+        r = daemon_plane_workspace.current_plane_workspace()
         assert r.allowed is False
         assert r.reason is not None
 

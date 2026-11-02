@@ -3348,6 +3348,11 @@ class InstanceManager:
         the registry cannot be reached — the skip WARNING must still fire.
         """
         try:
+            # FUNCTION-LOCAL on purpose: the module-level ``get_registry``
+            # binding (daemon/manager.py:101) is resolved at IMPORT time, so
+            # ``patch("daemon.registry.get_registry", ...)`` would not reach it.
+            # A local import re-reads the module attribute at CALL time and
+            # keeps the observability seam patchable.
             from daemon.registry import get_registry
 
             return get_registry().agents_referencing_builtin_mcp(server_name)
@@ -3385,6 +3390,10 @@ class InstanceManager:
           builtin name) ⇒ WARNING.
         """
         try:
+            # FUNCTION-LOCAL on purpose — see the note in
+            # ``_agents_referencing_builtin_mcp`` above: the module-level
+            # binding is import-time resolved and would bypass the
+            # ``daemon.registry.get_registry`` patch seam.
             from daemon.registry import get_registry
 
             agent_registry = get_registry()

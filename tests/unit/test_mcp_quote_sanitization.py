@@ -39,6 +39,7 @@ import pytest
 from pydantic import ValidationError
 
 from daemon.mcp.builtin_servers.plane import PlaneServerDefinition
+from daemon.plane_workspace import normalize_workspace_slug
 from daemon.mcp.config import (
     McpConfigValidationError,
     McpSseConfig,
@@ -310,8 +311,6 @@ class TestPlaneBuiltinEnvSanitization:
         """P2-C pin re-point: the quote stripping for the workspace slug is
         the RESOLVER's canonical normalization now — one implementation,
         consumed by both lanes."""
-        from daemon.plane_workspace import normalize_workspace_slug
-
         assert normalize_workspace_slug('"nea"') == "nea"
         assert normalize_workspace_slug(" 'e2e' ") == "e2e"
 

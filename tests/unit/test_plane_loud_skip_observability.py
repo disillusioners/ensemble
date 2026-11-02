@@ -29,12 +29,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-import daemon.manager as manager_module
 from daemon.manager import InstanceManager
 from daemon.mcp.builtin_servers.plane import PlaneServerDefinition
 from daemon.plane_workspace import current_plane_workspace, reset_resolution_cache

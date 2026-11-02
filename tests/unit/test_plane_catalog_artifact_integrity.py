@@ -22,6 +22,7 @@ Covers:
 from __future__ import annotations
 
 import copy
+import json
 
 import pytest
 
@@ -81,8 +82,6 @@ def test_fixture_is_valid_and_sorted(catalog: dict) -> None:
     # no credential VALUE rides in the fixture: key NAMES are allowed (the
     # plan mandates key-names-only), but no bearer/authorization material and
     # no PLANE_* mention outside the declared env_names_read list may appear
-    import json
-
     raw = json.dumps(catalog)
     assert "Bearer " not in raw
     assert "Authorization" not in raw
