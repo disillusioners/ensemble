@@ -61,11 +61,18 @@ LANE_BASE = "644c2bfaaa48514ec7de79f7f4bcd078a700cdbe"
 ALLOWED_DAEMON_DIFF = (
     "daemon/persistence.py",
     "daemon/routers/metrics.py",
+    # The craftsmanship fold (H2/D-items): the shutdown COMMENT in the
+    # app factory (a comment — no observe/inc call) and the query
+    # package's own selector + re-export surfaces (dead exports
+    # removed; the package NEVER reads or writes a metric).
+    "daemon/api.py",
+    "daemon/services/metrics_query/__init__.py",
     "daemon/services/metrics_query/constants.py",
     "daemon/services/metrics_query/envelope.py",
     "daemon/services/metrics_query/provider.py",
     "daemon/services/metrics_query/ring.py",
     "daemon/services/metrics_query/sampler.py",
+    "daemon/services/metrics_query/selectors.py",
 )
 
 #: The wiring package's root (the new module).

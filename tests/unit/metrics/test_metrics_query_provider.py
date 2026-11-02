@@ -584,8 +584,19 @@ class TestEnvelope:
         from daemon.services.metrics_query.envelope import activation_block
 
         activation = activation_block(RegistryMetricsQueryProvider())
-        assert set(activation) == {"listener_enabled", "census_enabled", "query_api"}
+        # The THREE SURFACES (listener_enabled / census_enabled /
+        # query_api) plus the DEGRADED registry flag (H5).  The flag is
+        # an ADDITIVE envelope member: the frozen contract's §4 rule
+        # says an additive change (a new optional field) does NOT bump
+        # ``schema_version`` and consumers must ignore unknown members.
+        assert set(activation) == {
+            "listener_enabled",
+            "census_enabled",
+            "query_api",
+            "registry_read_ok",
+        }
         assert activation["query_api"] == "auth-gated-always-on"
+        assert activation["registry_read_ok"] is True
 
     def test_the_families_envelope_carries_the_families(self) -> None:
         from daemon.services.metrics_query.envelope import build_families_envelope

@@ -171,6 +171,9 @@ class TestEnvelopeShape:
             "listener_enabled": True,
             "census_enabled": True,
             "query_api": "auth-gated-always-on",
+            # The ADDITIVE degraded flag (H5) — a provider that does not
+            # carry the fact reads as True (the default-safe path).
+            "registry_read_ok": True,
         }
 
     @pytest.mark.parametrize("path", QUERY_PATHS)
