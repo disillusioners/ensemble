@@ -124,3 +124,22 @@ The FE e2e live leg observed all three availability reasons (`capture_off`, `ser
 - The R-v canon and the PACKS registration are durable in-repo; the whole-tree raw evidence is
   preserved under `.agents/tester/EVIDENCE/2026-11-02-central-metrics-v1-whole-tree/`.
 - Budget breach (109 vs 90 min) is disclosed above with its drivers.
+
+---
+
+## ADDENDUM — SCOPED RE-VERIFY @ `986e4676b` (2026-11-02): **GATE FLIPS TO PASS**
+
+The 5 lane-caused net-new reds are fixed and independently verified. Receipts were INPUT, not proof.
+
+| Step | Result |
+|---|---|
+| 5 ids × 3 fresh runs | **15/15 green** (5 passed ×3, exit 0, ~29 s each) |
+| R1/R2 disposition | **Empirical scanner run**: 23 writers discovered == 23 in `KNOWN_ADMISSION_STATE_WRITERS` (merged == known), **ZERO metrics_query paths in either set — the constitution was NOT widened.** Every `admission_state` hit in the package classified READ (the `SELECT … GROUP BY` pull, the gauge LABEL publish, the chart format placeholder, the tuple/dict metadata). Vocab indirection in place (`vocab.py:149`), in-code read-only justification + seam citation quoted. |
+| R3/R4 disposition | DATED (`2026-11-02`) supersession note precedes the two node-id lines; node ids **byte-preserved**; re-derived aggregate `aa5cd9d6…` confirmed in the sibling digest evidence. |
+| R5 disposition | `FAMILY_F_SITES` 2→**3** (`wiring/db.py` registered); all four audit criteria code-cited (never pooled — no pool/engine param in the factory signature; bounded — connect 3 s / statement 5 s; closed on every path — `conn.close()` in `finally`, a raising connect leaves nothing to close; never handed out — function-local, adapters get rows only). Census one-shot per tick, per AM-11. |
+| **Mutation re-proof (R1)** | Planted the raw dict-key literal back at `w2.py:200` → drift pin **RED** with the exact drift (`only_in_source=['…w2.py:module:200']`) → restored **byte-identical** (sha `b463964e…` == HEAD) → **GREEN**. The pin catches its own defect; the fix is not masking. |
+| The 2 NOT-gated ids | Ran once, RED as expected — family **A** drift (baseline 438/439 vs observed 466/467), baselines last set `9d9c0b71f` **2026-10-29 (pre-lane)**; the lane's diff to that file is exactly the FAMILY_F_SITES addition; **zero family-A sites in metrics_query** (`Session|sessionmaker` grep = 0). Disclosed not-gated, untouched, routed to the base-debt lane. |
+
+Pre-conditions verified: HEAD `986e4676b`, porcelain EMPTY, gate commit `e49905261` an ancestor.
+
+## FINAL VERDICT: **PASS — all 11 gates green at `986e4676b`. The lane is cleared for giter staging.**
