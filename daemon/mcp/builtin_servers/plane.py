@@ -311,6 +311,67 @@ class PlaneServerDefinition(BuiltinServerDefinition):
         )
 
     @classmethod
+    def _env_presence(cls) -> tuple[str, str]:
+        """The sanitized ``(url, api_key)`` pair — PRESENCE only.
+
+        Both env reads pass through the quote-leak sanitizers
+        (``_sanitize_quoted_url`` / ``_strip_wrapping_quotes``) so a
+        shell loader's leftover quote characters never read as a
+        configured value. The values are NEVER logged here — only
+        their presence is.
+        """
+        url = _sanitize_quoted_url(os.environ.get("PLANE_MCP_URL", ""))
+        api_key = _strip_wrapping_quotes(os.environ.get("PLANE_MCP_API_KEY", ""))
+        return url, api_key
+
+    @classmethod
+    def _gate_state(
+        cls,
+    ) -> tuple[str, str | None, PlaneWorkspaceResolution | None]:
+        """THE availability ladder — the ONE home for the gate order.
+
+        Returns ``(cause, reason, resolution)``:
+
+        * ``cause`` — one of the fixed cause vocabulary (see
+          :meth:`unavailability_cause`);
+        * ``reason`` — the typed reason string (the manager's skip
+          WARNING interpolates it VERBATIM), or ``None`` when the
+          server is up;
+        * ``resolution`` — the workspace resolution, or ``None`` when
+          the ladder short-circuited BEFORE the policy consult.
+
+        Gate order (the outermost gate first): quarantine/package →
+        kill-switch (deliberate) → missing env vars (unexpected) →
+        workspace refusal (policy).
+
+        The ladder NEVER logs — ``is_available`` owns the two one-shot
+        notices (the kill-switch notice and the envelope notice).
+        """
+        if not super().is_available():
+            return (
+                "unavailable",
+                "unavailable (quarantined for this boot or package missing)",
+                None,
+            )
+        if not _mcp_kill_switch_enabled():
+            return (
+                "deliberately-disabled",
+                "deliberately disabled by kill-switch (PLANE_MCP_ENABLED=false)",
+                None,
+            )
+        url, api_key = cls._env_presence()
+        if not (url and api_key):
+            return ("unavailable", "missing environment configuration", None)
+        resolution = current_plane_workspace()
+        if not resolution.allowed:
+            return (
+                "workspace-refused",
+                resolution.reason or "workspace resolution refused",
+                resolution,
+            )
+        return ("available", None, resolution)
+
+    @classmethod
     def is_available(cls) -> bool:
         """Plane is available only when enabled AND BOTH URL and API key are set.
 
@@ -336,8 +397,9 @@ class PlaneServerDefinition(BuiltinServerDefinition):
         This override bypassed ``super().is_available()`` entirely, so a
         quarantined plane would NOT have been skipped (the W-5
         quarantine hole). The ``super()`` call is therefore the FIRST
-        statement: the base class consults the quarantine registry (and
-        the ``required_package`` check) before the plane-specific gates.
+        gate of the shared ladder (:meth:`_gate_state`): the base class
+        consults the quarantine registry (and the ``required_package``
+        check) before the plane-specific gates.
 
         E3 (plane-pm-issue-tools, 2026-11-02) — the WORKSPACE gate. After
         the three pre-existing gates pass, the workspace resolution
@@ -352,23 +414,18 @@ class PlaneServerDefinition(BuiltinServerDefinition):
         permitted on live, and an unset slug keeps the account-default
         behavior — byte-identical to the pre-lane daemon).
         """
-        if not super().is_available():
-            return False
-        if not _mcp_kill_switch_enabled():
+        cause, _reason, resolution = cls._gate_state()
+        # The kill-switch notice fires ONLY in the kill-switch branch.
+        if cause == "deliberately-disabled":
             cls._log_kill_switch_once()
-            return False
-        url = _sanitize_quoted_url(os.environ.get("PLANE_MCP_URL", ""))
-        api_key = _strip_wrapping_quotes(os.environ.get("PLANE_MCP_API_KEY", ""))
-        if not (url and api_key):
-            return False
-        # Resolve ONCE per operation (memoized on the env fingerprint) so
-        # ``get_base_config`` — which runs microseconds later in the same
-        # bootstrap pass — sees the SAME resolution. No env TOCTOU.
-        resolution = current_plane_workspace()
         # R-2 (P3-A): the ONE-SHOT envelope notice — label + source +
         # effective slug, NEVER the reason (the skip WARNING owns that).
-        cls._log_envelope_notice_once(resolution)
-        return resolution.allowed
+        # It fires only when the ladder REACHED the policy consult
+        # (a resolution exists) — for BOTH the permitted and the
+        # refused outcome, and for neither short-circuit.
+        if resolution is not None:
+            cls._log_envelope_notice_once(resolution)
+        return cause == "available"
 
     @classmethod
     def _log_kill_switch_once(cls) -> None:
@@ -430,50 +487,39 @@ class PlaneServerDefinition(BuiltinServerDefinition):
     def unavailable_reason(cls) -> str | None:
         """The typed unavailability reason, or ``None`` when up.
 
-        Precedence mirrors ``is_available`` (the outermost gate first):
-        quarantine/package → kill-switch (deliberate) → missing env vars
-        (unexpected) → workspace refusal (policy). The manager's skip
-        WARNING interpolates the returned string VERBATIM.
+        The precedence is owned by the shared ladder
+        (:meth:`_gate_state`): quarantine/package → kill-switch
+        (deliberate) → missing env vars (unexpected) → workspace refusal
+        (policy). The manager's skip WARNING interpolates the returned
+        string VERBATIM.
         """
-        if not super().is_available():
-            return "unavailable (quarantined for this boot or package missing)"
-        if not _mcp_kill_switch_enabled():
-            return "deliberately disabled by kill-switch (PLANE_MCP_ENABLED=false)"
-        url = _sanitize_quoted_url(os.environ.get("PLANE_MCP_URL", ""))
-        api_key = _strip_wrapping_quotes(os.environ.get("PLANE_MCP_API_KEY", ""))
-        if not (url and api_key):
-            # The missing-env shape — the manager renders the NAMES via
-            # ``missing_env_vars()``; this string never names a value.
-            return "missing environment configuration"
-        resolution = current_plane_workspace()
-        if not resolution.allowed:
-            return resolution.reason or "workspace resolution refused"
-        return None
+        return cls._gate_state()[1]
 
     @classmethod
     def missing_env_vars(cls) -> list[str]:
-        """The NAMES of the missing env vars (never values)."""
+        """The NAMES of the missing env vars (never values).
+
+        DELIBERATELY INDEPENDENT of the ladder: the names are reported
+        even when the kill-switch is off (the operator still wants to
+        know which vars are unset), so this must NOT be derived from a
+        ladder that short-circuits at the kill-switch.
+        """
         missing: list[str] = []
-        if not _sanitize_quoted_url(os.environ.get("PLANE_MCP_URL", "")):
+        url, api_key = cls._env_presence()
+        if not url:
             missing.append("PLANE_MCP_URL")
-        if not _strip_wrapping_quotes(os.environ.get("PLANE_MCP_API_KEY", "")):
+        if not api_key:
             missing.append("PLANE_MCP_API_KEY")
         return missing
 
     @classmethod
     def unavailability_cause(cls) -> str:
-        """One of the fixed cause vocabulary — see the base docstring."""
-        if not super().is_available():
-            return "unavailable"
-        if not _mcp_kill_switch_enabled():
-            return "deliberately-disabled"
-        url = _sanitize_quoted_url(os.environ.get("PLANE_MCP_URL", ""))
-        api_key = _strip_wrapping_quotes(os.environ.get("PLANE_MCP_API_KEY", ""))
-        if not (url and api_key):
-            return "unavailable"
-        if not current_plane_workspace().allowed:
-            return "workspace-refused"
-        return "available"
+        """One of the fixed cause vocabulary — see the base docstring.
+
+        The precedence is owned by the shared ladder
+        (:meth:`_gate_state`) — this method no longer re-derives it.
+        """
+        return cls._gate_state()[0]
 
     def get_base_config(
         self,
