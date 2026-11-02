@@ -319,6 +319,13 @@ registered family with no observation ⇒ `series_absent`.
 
 ## 7. Promote-time disclosure (AM-19-corrected, D1/D2/D3/D4/D5 + the cross-cutting list)
 
+> **SUPERSEDED as the ceremony text — the FINAL disclosure is published at
+> [`docs/architecture/metrics-promote-disclosure.md`](metrics-promote-disclosure.md)** (Phase 6,
+> task 6.5), together with the ceremony checklist. The block below is the **Phase-1 draft**,
+> retained as the frozen contract's record of what the disclosure must carry; the final text
+> carries the same eight cross-cutting items, **verified against the shipped code's constants**
+> rather than copied from this draft. Where the two differ, the **final text governs**.
+
 > central-metrics-v1 ships the metrics query API (`GET /api/metrics/families`,
 > `GET /api/metrics/snapshot`, `GET /api/metrics/series`) AUTH-GATED ONLY — scope
 > `maintenance:read`, 503 `AUTH_NOT_CONFIGURED` fail-closed before any registry read — and
