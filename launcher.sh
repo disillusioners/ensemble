@@ -694,8 +694,11 @@ _js_history_has_event_for_target() {
             *) entry="$rest" ;;
         esac
         # the EVENT KIND must be in THIS entry
+        # the event-kind literal — the house writers emit the COMPACT form
+        # ("event":"x"); the spaced form ("event": "x") is tolerated too
+        # (a hand-edited journal must not silently change a verdict).
         case "$entry" in
-            *"\"event\":\"$event\""*) ;;
+            *"\"event\":\"$event\""*|*"\"event\": \"$event\""*) ;;
             *) continue ;;
         esac
         # the TARGET must be in THIS entry, delimiter-anchored
@@ -792,18 +795,30 @@ _js_defer_counter_write() {
 # which bash 3.2 lacks).
 _js_http_request() {
     local path="$1" deadline="$2" status_var="$3" body_var="$4"
-    local remaining now status_line status line content_length=0 body body_len=0
+    # The locals are NAMED DISTINCTIVELY on purpose: the caller's
+    # variables are assigned through the eval below, and a local with the
+    # same name as the caller's target would shadow it (the eval runs in
+    # THIS function's scope) — the caller would read an empty value.
+    local remaining now status_line _js_http_status line content_length=0 _js_http_body body_len=0
     now="$(_now)"
     remaining=$(( deadline - now ))
     [ "$remaining" -lt 1 ] && remaining=1
-    printf 'GET %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n' \
-        "$path" >&3 2>/dev/null || return 1
+    # The write runs in a SUBSHELL: when the peer already closed the
+    # connection (the HTTP/1.0 shape) the write raises SIGPIPE, and a
+    # SIGPIPE in the launcher itself would KILL it. In the subshell only
+    # the writer dies; the exit status (141) is caught by the `||`.
+    ( printf 'GET %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n' \
+        "$path" >&3 ) 2>/dev/null || return 1
     if ! IFS= read -r -t "$remaining" status_line <&3 2>/dev/null; then
         return 1
     fi
-    status="${status_line#* }"
-    status="${status%% *}"
-    case "$status" in
+    # CRLF: bash's `read` strips the newline but NOT the carriage return —
+    # the header-terminating blank line would arrive as "\r" (never empty)
+    # and the header loop would run into the body. Strip it.
+    status_line="${status_line%$'\r'}"
+    _js_http_status="${status_line#* }"
+    _js_http_status="${_js_http_status%% *}"
+    case "$_js_http_status" in
         [0-9][0-9][0-9]) ;;
         *) return 1 ;;
     esac
@@ -815,6 +830,7 @@ _js_http_request() {
         if ! IFS= read -r -t "$remaining" line <&3 2>/dev/null; then
             return 1
         fi
+        line="${line%$'\r'}"
         case "$line" in
             '') break ;;
             Content-Length:*|content-length:*)
@@ -825,22 +841,24 @@ _js_http_request() {
     done
     # body — read until the advertised length is covered (a truncated body
     # is NOT-GREEN, never green).
-    body=""
+    _js_http_body=""
     if [ "${content_length:-0}" -gt 0 ] 2>/dev/null; then
         while [ "$body_len" -lt "$content_length" ]; do
             now="$(_now)"
             remaining=$(( deadline - now ))
             [ "$remaining" -lt 1 ] && remaining=1
             if ! IFS= read -r -t "$remaining" line <&3 2>/dev/null; then
-                [ -n "$line" ] && { body="$body$line"; body_len=$(( body_len + ${#line} )); }
+                line="${line%$'\r'}"
+                [ -n "$line" ] && { _js_http_body="$_js_http_body$line"; body_len=$(( body_len + ${#line} )); }
                 break
             fi
-            body="$body$line"
+            line="${line%$'\r'}"
+            _js_http_body="$_js_http_body$line"
             body_len=$(( body_len + ${#line} + 1 ))
         done
     fi
-    eval "$status_var=\"\$status\""
-    eval "$body_var=\"\$body\""
+    eval "$status_var=\"\$_js_http_status\""
+    eval "$body_var=\"\$_js_http_body\""
     return 0
 }
 
@@ -1482,6 +1500,9 @@ _js_sweep_rollback_chain() {
     fi
     _notify_once "sweep-rollback" \
         "sweep-rollback executed: orphaned flipped txn (age ${age}s) rolled current back to $prev (from target ${target:-?}); counted toward the 3/24h cap + cooldown armed (ADR-024, disposition=${disposition})"
+    # AM-P2-20 — the counter file's lifecycle: the txn is CLOSED ⇒ the
+    # tally is meaningless ⇒ the file is deleted (on ANY rollback path).
+    _js_defer_counter_delete "$install_dir" "$(_js_serving_txn_identity "$inf" "$target")"
     _js_sweep_release "$install_dir" "$lock_held"
     return 0
 }

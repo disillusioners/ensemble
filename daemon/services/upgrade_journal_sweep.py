@@ -242,6 +242,7 @@ class UpgradeJournalSweepService:
         reaper_timeout_seconds: int = DEFAULT_REAPER_TIMEOUT_SECONDS,
         manager: "InstanceManager | None" = None,
         readiness_provider: "Callable[[], Any] | None" = None,
+        closer_boot_grace_seconds: int | None = None,
     ) -> None:
         """Initialize the sweep service.
 
@@ -270,6 +271,15 @@ class UpgradeJournalSweepService:
                 ⇒ the closer lane is a no-op (the same posture as
                 ``manager=None`` — dev/unwired installs). Wired at the
                 SAME lifespan seam as the manager (api.py).
+            closer_boot_grace_seconds: INTERNAL TEST SEAM — overrides the
+                closer's boot-grace horizon. The OPERATOR surface is the
+                env knob ``UPGRADE_CLOSER_BOOT_GRACE_S``, which can only
+                RAISE the horizon (the one-way derivation rule: never
+                below the hand-back budget's 300s floor). A test that
+                must exercise the post-grace verdict cannot wait 300s, so
+                the seam exists — the same precedent as
+                ``reaper_timeout_seconds`` (a constructor-only seam; the
+                production value is unchanged).
         """
         self._install_dir = install_dir
         self._interval_seconds = max(1, int(reconcile_interval_seconds))
@@ -291,6 +301,13 @@ class UpgradeJournalSweepService:
         # would go stale (the closer would judge a long-dead snapshot).
         # ``None`` ⇒ the closer lane no-ops (dev/unwired installs).
         self._readiness_provider: "Callable[[], Any] | None" = readiness_provider
+        # Phase 2 — the internal test seam for the boot-grace horizon (see
+        # the constructor docstring). ``None`` ⇒ the env/default applies.
+        self._closer_boot_grace_override: int | None = (
+            int(closer_boot_grace_seconds)
+            if closer_boot_grace_seconds is not None
+            else None
+        )
         # Phase 2 — the closer's OWN boot-grace state (observation-relative
         # arm, never extended, re-armed only for a NEW txn identity).
         self._closer_grace_key: str | None = None
@@ -2057,13 +2074,16 @@ class UpgradeJournalSweepService:
         ``rollback_requested`` (the stale txn is left untouched)."""
         return os.environ.get(SERVING_GREEN_CLOSER_ENV, "1") != "0"
 
-    @staticmethod
-    def _closer_boot_grace_s() -> int:
+    def _closer_boot_grace_s(self) -> int:
         """The closer's effective boot-grace horizon (seconds).
 
-        The env override can only RAISE the horizon above the declared
-        default — the one-way derivation rule (AM-P2-24 fold (b)):
-        ``UPGRADE_CLOSER_BOOT_GRACE_S`` ≥ ``HANDBACK_VERIFY_BUDGET_S``."""
+        The OPERATOR env override can only RAISE the horizon above the
+        declared default — the one-way derivation rule (AM-P2-24 fold (b)):
+        ``UPGRADE_CLOSER_BOOT_GRACE_S`` ≥ ``HANDBACK_VERIFY_BUDGET_S``. The
+        constructor test seam bypasses that clamp (it is not an operator
+        surface)."""
+        if self._closer_boot_grace_override is not None:
+            return max(1, int(self._closer_boot_grace_override))
         raw = os.environ.get(UPGRADE_CLOSER_BOOT_GRACE_ENV, "")
         try:
             value = int(float(raw))
@@ -2271,6 +2291,13 @@ class UpgradeJournalSweepService:
                 target, run_id,
             )
             return result
+        # The closer's OWN boot-grace window (P8, first conjunct) — armed
+        # on the FIRST tick where the pre-grace predicates (P1-P7) hold
+        # ("it is armed on the first tick where P1-P7 hold, and it does not
+        # re-arm per tick"). It is evaluated HERE, before the health read,
+        # so the window starts at the first OBSERVATION of the txn — not at
+        # the first tick that happens to reach the verdict branch.
+        closer_boot_grace_elapsed = self._closer_grace_elapsed(run_id)
         # Health read (in-process — no HTTP self-call, no DB).
         composite = None
         provider = self._readiness_provider
@@ -2305,21 +2332,30 @@ class UpgradeJournalSweepService:
         except Exception:  # noqa: BLE001 — an unreadable composite = not ready
             ready = False
             grace_active = True
-        # P8 (second conjunct) + the RESTORED INVARIANT: a grace-held
-        # observation NEVER produces a verdict or a request.
-        if grace_active:
-            result["action"] = "deferred"
-            result["reason"] = "grace-held"
-            return result
-        if not self._closer_grace_elapsed(run_id):
-            result["action"] = "deferred"
-            result["reason"] = "boot-grace"
-            return result
         if version_match and ready:
+            # GREEN ⇒ commit-close. The closer's OWN boot-grace gates the
+            # NOT-GREEN VERDICT ONLY (AM-P2-24's normative sentence: "the
+            # closer's NOT-GREEN verdict — and therefore every write of
+            # serving_unhealthy and rollback_requested — additionally
+            # requires grace_active == False"). A POSITIVE verdict needs no
+            # grace: the grace exists so the daemon does not judge ITSELF
+            # unhealthy while it is still booting — deferring a good
+            # outcome would only keep the txn open (and grow the
+            # launcher's defer counter) for no safety gain.
             action = await self._closer_commit_green(
                 data, in_flight, target, run_id, age_s, _daemon_version
             )
             result.update(action)
+            return result
+        # The NOT-GREEN path — the RESTORED INVARIANT applies HERE: a
+        # grace-held observation NEVER produces a verdict or a request.
+        if grace_active:
+            result["action"] = "deferred"
+            result["reason"] = "grace-held"
+            return result
+        if not closer_boot_grace_elapsed:
+            result["action"] = "deferred"
+            result["reason"] = "boot-grace"
             return result
         reason = "version-mismatch" if not version_match else "not-ready"
         action = await self._closer_verdict_unhealthy(
@@ -2531,7 +2567,7 @@ class UpgradeJournalSweepService:
                         install_dir,
                         SERVING_UNHEALTHY_EVENT,
                         f"target {target} run_id {run_id} reason {reason} — "
-                        f"serving unhealthy (age {age}s); NOT rolled back by "
+                        f"serving unhealthy (age {age_s}s); NOT rolled back by "
                         f"the daemon — the launcher executes the disposition "
                         f"at its next boot",
                     )

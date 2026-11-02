@@ -2085,8 +2085,11 @@ _journal_history_has_event() {
     esac
     while IFS= read -r entry; do
         [ -n "$entry" ] || continue
+        # the event-kind literal — the house writers emit the COMPACT form
+        # ("event":"x"); the spaced form ("event": "x") is tolerated too
+        # (a hand-edited journal must not silently change a verdict).
         case "$entry" in
-            *"\"event\":\"$event\""*) ;;
+            *"\"event\":\"$event\""*|*"\"event\": \"$event\""*) ;;
             *) continue ;;
         esac
         case "$entry" in

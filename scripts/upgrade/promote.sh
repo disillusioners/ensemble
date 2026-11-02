@@ -594,9 +594,13 @@ OLD_CUR="$CUR"
 # ═══════════════════════════ 4. ATOMIC FLIP ════════════════════════════════
 if ! atomic_flip "$VERSION"; then
     # B4 leave-txn-open (same policy): current untouched at LKG; the next
-    # launcher start boots it and the sweep clears this stale pre-flip txn.
-    _warn "ATOMIC FLIP FAILED — current untouched; aborting (txn left open — the sweep clears it at the next launcher start, which boots the untouched current = LKG)"
-    journal_history_append halt "promote aborted: flip failed for $VERSION (current untouched) — txn left open for sweep recovery"
+    # launcher start boots it and the sweep DISPOSITIONS this stale
+    # pre-flip txn (promote-handback-halt Phase 2: the sweep's disposition
+    # for a stale PRE-FLIP txn is still the clear — the flip never
+    # happened — but the owner-liveness conjunct applies, so a txn whose
+    # owner is still alive is LEFT OPEN rather than cleared).
+    _warn "ATOMIC FLIP FAILED — current untouched; aborting (txn left open — the sweep dispositions it at the next launcher start, which boots the untouched current = LKG)"
+    journal_history_append halt "promote aborted: flip failed for $VERSION (current untouched) — txn left open for sweep disposition"
     exit 1
 fi
 # P3 / decision (d) — phase boundary (post-flip, pre-restart). Daemon is
