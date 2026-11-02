@@ -48,7 +48,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 __all__ = [
     "PlaneWorkspaceResolution",
@@ -65,6 +65,7 @@ __all__ = [
     "resolve_plane_workspace",
     "current_plane_workspace",
     "reset_resolution_cache",
+    "_header_value",
 ]
 
 
@@ -164,6 +165,46 @@ class PlaneWorkspaceResolution:
 
 
 # ── Canonical slug normalization (P2-C) ──────────────────────────────────────
+
+
+def _header_value(headers: Any, name: str) -> Any:
+    """Case-insensitive header NAME lookup — VALUES untouched.
+
+    Commit A (reviewer-adjudicated tidier must-fix, 2026-11-02): the
+    four ``x-workspace-slug`` read sites each used an exact-case
+    ``dict.get`` / membership test, so a config whose header NAME case
+    varies (``X-Workspace-Slug`` — legal HTTP; header names are
+    case-insensitive by RFC 9110 §5.1) silently escaped the probe
+    guard, the F3 stale-row notice, and the P2-I heal drift
+    computation. ONE helper, adopted at all four sites, closes the
+    class.
+
+    Semantics:
+
+    * ``name`` is matched case-insensitively against the dict's STRING
+      keys (non-string keys are skipped);
+    * the VALUE is returned UNTOUCHED — no case-folding, no trimming,
+      no normalization (value case-sensitivity is a separate, unchanged
+      contract);
+    * ``None`` is returned when ``headers`` is not a dict or no
+      string key matches — callers treat ``None`` as "the header makes
+      no authority claim".
+
+    Args:
+        headers: the config ``headers`` mapping (``None`` / non-dict ⇒
+            ``None``).
+        name: the header name to look up (matched lowercased).
+
+    Returns:
+        The header VALUE, or ``None`` when absent.
+    """
+    if not isinstance(headers, dict):
+        return None
+    lowered = name.lower()
+    for key, value in headers.items():
+        if isinstance(key, str) and key.lower() == lowered:
+            return value
+    return None
 
 
 def normalize_workspace_slug(raw: str | None) -> str:

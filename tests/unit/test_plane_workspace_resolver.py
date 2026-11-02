@@ -391,6 +391,47 @@ class TestCanonicalSlugNormalization:
         assert r.slug == "e2e"
 
 
+# ── A1: the case-insensitive header-NAME lookup ─────────────────────────────
+
+
+class TestHeaderValueLookup:
+    """A1 (reviewer-adjudicated tidier must-fix, 2026-11-02) — ONE
+    helper for the ``x-workspace-slug`` reads: case-insensitive on the
+    header NAME, VALUES untouched."""
+
+    @pytest.mark.parametrize(
+        ("headers", "expected"),
+        [
+            ({"x-workspace-slug": "e2e"}, "e2e"),
+            ({"X-Workspace-Slug": "nea"}, "nea"),  # case-variant NAME
+            ({"X-WORKSPACE-SLUG": "E2E"}, "E2E"),  # any case + value kept
+            ({"Authorization": "Bearer k", "x-workspace-slug": "a"}, "a"),
+            ({"authorization": "Bearer k"}, None),  # different header
+            ({}, None),
+            (None, None),
+            ("not-a-dict", None),
+            ([("x-workspace-slug", "e2e")], None),  # non-dict shape
+        ],
+    )
+    def test_lookup_matrix(self, headers, expected):
+        from daemon.plane_workspace import _header_value
+
+        assert _header_value(headers, "x-workspace-slug") == expected
+
+    def test_first_match_wins_and_values_are_untouched(self):
+        from daemon.plane_workspace import _header_value
+
+        headers = {"X-Workspace-Slug": " MixedCase ", "x-workspace-slug": "other"}
+        # The first case-insensitive match is returned VERBATIM — no
+        # trimming, no case-folding on the value.
+        assert _header_value(headers, "x-workspace-slug") == " MixedCase "
+
+    def test_helper_is_exported(self):
+        import daemon.plane_workspace as pw
+
+        assert "_header_value" in pw.__all__
+
+
 # ── P2-M: resolve-once threading ─────────────────────────────────────────────
 
 

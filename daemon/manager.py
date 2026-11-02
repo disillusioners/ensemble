@@ -108,7 +108,7 @@ from .mcp.builtin_servers.base import (
     CAUSE_DELIBERATELY_DISABLED,
     CAUSE_WORKSPACE_REFUSED,
 )
-from .plane_workspace import current_plane_workspace
+from .plane_workspace import _header_value, current_plane_workspace
 from .mcp.warmup_pool import McpWarmupPool, get_mcp_warmup_pool, build_pooled_stdio_config
 from .mcp import warmup_pool as _warmup_pool_module
 from .mcp.config import McpStdioConfig
@@ -3206,10 +3206,12 @@ class InstanceManager:
                                 if isinstance(stale.config, dict)
                                 else None
                             )
-                            persisted_slug = (
-                                stale_headers.get("x-workspace-slug")
-                                if isinstance(stale_headers, dict)
-                                else None
+                            # A1: case-insensitive header-NAME lookup —
+                            # a case-variant ``X-Workspace-Slug`` key in
+                            # a persisted row reads the same as the
+                            # canonical lowercase key.
+                            persisted_slug = _header_value(
+                                stale_headers, "x-workspace-slug"
                             )
                             logger.warning(
                                 "Builtin '%s' has a STALE ACTIVE row while the "
@@ -3281,10 +3283,17 @@ class InstanceManager:
                             if isinstance(existing.config, dict)
                             else None
                         )
-                        persisted_slug = (
-                            existing_headers.get("x-workspace-slug")
-                            if isinstance(existing_headers, dict)
-                            else None
+                        # A1: the drift computation reads the
+                        # ACTUALLY-PERSISTED value — a case-variant
+                        # header NAME (``X-Workspace-Slug``) reads the
+                        # same as the canonical key, so drift is
+                        # computed from the real value instead of a
+                        # spurious ``None`` (a None-vs-resolved mismatch
+                        # healed rows whose slug actually MATCHED).
+                        # Value case-sensitivity is UNCHANGED — the
+                        # comparison stays exact.
+                        persisted_slug = _header_value(
+                            existing_headers, "x-workspace-slug"
                         )
                         slug_drift = persisted_slug != resolved_slug
                     if existing.config_schema_version != schema_version or slug_drift:

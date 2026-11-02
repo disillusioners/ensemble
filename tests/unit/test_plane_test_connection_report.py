@@ -10,6 +10,7 @@ configs proceed through the endpoint unchanged (the scope boundary).
 
 from __future__ import annotations
 
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -61,6 +62,18 @@ def _plane_config(slug: str = "nea"):
             "Authorization": "Bearer dummy-plane-mcp-key",
             "x-workspace-slug": slug,
         },
+    }
+
+
+def _case_variant_header_config(slug: str = "nea"):
+    """Plane-shaped via the HEADER arm only — a NON-plane URL plus a
+    case-variant header NAME (``X-Workspace-Slug``; RFC 9110 §5.1 —
+    header names are case-insensitive). If the shape predicate were
+    exact-case, this config would escape the guard entirely."""
+    return {
+        "transport": "streamable-http",
+        "url": "https://other.example.test/mcp",
+        "headers": {"X-Workspace-Slug": slug},
     }
 
 
@@ -247,6 +260,182 @@ class TestSubmittedSlugAuthority:
 
         assert response.json()["success"] is True
         conn_mgr.create_test_session.assert_awaited_once()
+
+
+class TestProbeGuardHardening:
+    """A1-A3 (reviewer-adjudicated tidier must-fix, 2026-11-02) — the
+    probe guard's shape predicate is case-insensitive on the header
+    NAME, normalizes BOTH sides of the URL comparison, and FAILS
+    CLOSED on internal errors."""
+
+    def test_case_variant_header_name_still_refuses_on_mismatch(
+        self, env, test_client
+    ):
+        """A1(i) — a case-variant header NAME (``X-Workspace-Slug``;
+        RFC 9110 §5.1 makes header names case-insensitive) claims the
+        same workspace authority: the guard applies and the refusal is
+        typed, not a silent dial."""
+        env(self_env="dev", slug="nea")
+        conn_mgr = MagicMock()
+        conn_mgr.create_test_session = AsyncMock()
+
+        with patch(
+            "daemon.routers.mcp_servers.get_mcp_connection_manager",
+            return_value=conn_mgr,
+        ):
+            response = test_client.post(
+                "/api/mcp-servers/test-connection",
+                json={"config": _case_variant_header_config()},
+            )
+
+        data = response.json()
+        assert data["success"] is False
+        assert "production-only" in data["message"]
+        conn_mgr.create_test_session.assert_not_awaited()
+
+    def test_case_variant_header_name_honors_the_kill_switch(
+        self, env, test_client
+    ):
+        """A1(i) — the kill-switch arm is reached through a
+        case-variant header name too (the operator's explicit OFF is
+        honored on every plane-shaped config)."""
+        env(self_env="dev", slug="e2e", mcp_enabled="false")
+        conn_mgr = MagicMock()
+        conn_mgr.create_test_session = AsyncMock()
+
+        with patch(
+            "daemon.routers.mcp_servers.get_mcp_connection_manager",
+            return_value=conn_mgr,
+        ):
+            response = test_client.post(
+                "/api/mcp-servers/test-connection",
+                json={"config": _case_variant_header_config(slug="e2e")},
+            )
+
+        data = response.json()
+        assert data["success"] is False
+        assert "PLANE_MCP_ENABLED" in data["message"]
+        assert "deliberately disabled" in data["message"]
+        conn_mgr.create_test_session.assert_not_awaited()
+
+    def test_case_variant_header_name_live_is_still_exempt(
+        self, env, test_client
+    ):
+        """A1(i) — the live exemption is unchanged: a case-variant
+        header name on live still dials (ADJ-1)."""
+        env(self_env="live", slug="nea", db="ensemble_prod")
+        session = MagicMock()
+        tools = MagicMock()
+        tools.tools = []
+        session.list_tools = AsyncMock(return_value=tools)
+        session.stop = AsyncMock()
+        streams_cm = MagicMock()
+        streams_cm.__aexit__ = AsyncMock(return_value=None)
+        conn_mgr = MagicMock()
+        conn_mgr.create_test_session = AsyncMock(return_value=(session, streams_cm))
+
+        with patch(
+            "daemon.routers.mcp_servers.get_mcp_connection_manager",
+            return_value=conn_mgr,
+        ):
+            response = test_client.post(
+                "/api/mcp-servers/test-connection",
+                json={"config": _case_variant_header_config()},
+            )
+
+        assert response.json()["success"] is True
+        conn_mgr.create_test_session.assert_awaited_once()
+
+    def test_internal_error_refuses_instead_of_passing_through(
+        self, env, test_client
+    ):
+        """A1(ii)/A3 — a raising ``normalize`` inside the guard is a
+        typed REFUSAL, never a pass-through dial."""
+        env(self_env="dev", slug="e2e")
+        conn_mgr = MagicMock()
+        conn_mgr.create_test_session = AsyncMock()
+
+        with (
+            patch(
+                "daemon.routers.mcp_servers.get_mcp_connection_manager",
+                return_value=conn_mgr,
+            ),
+            patch(
+                "daemon.routers.mcp_servers.normalize_workspace_slug",
+                side_effect=RuntimeError("planted internal error"),
+            ),
+        ):
+            response = test_client.post(
+                "/api/mcp-servers/test-connection",
+                json={"config": _plane_config(slug="nea")},
+            )
+
+        data = response.json()
+        assert data["success"] is False
+        assert "could not evaluate the workspace policy" in data["message"]
+        assert "refused before dialing" in data["message"]
+        conn_mgr.create_test_session.assert_not_awaited()
+
+    def test_trailing_slash_url_env_side_still_matches_the_shape(
+        self, env, test_client
+    ):
+        """A2(iii) — a trailing slash on the CONFIGURED
+        ``PLANE_MCP_URL`` previously UN-matched the shape (the probe
+        dialed past a kill-switch OFF); both sides are normalized
+        now."""
+        env(self_env="dev", slug="e2e", mcp_enabled="false")
+        # The fixture pins PLANE_MCP_URL as a FIXED variable; re-pin it
+        # with a trailing slash for this leg only.
+        with patch.dict(os.environ, {"PLANE_MCP_URL": MCP_URL + "/"}):
+            conn_mgr = MagicMock()
+            conn_mgr.create_test_session = AsyncMock()
+
+            with patch(
+                "daemon.routers.mcp_servers.get_mcp_connection_manager",
+                return_value=conn_mgr,
+            ):
+                response = test_client.post(
+                    "/api/mcp-servers/test-connection",
+                    json={
+                        "config": {
+                            "transport": "streamable-http",
+                            "url": MCP_URL,
+                        }
+                    },
+                )
+
+        data = response.json()
+        assert data["success"] is False
+        assert "PLANE_MCP_ENABLED" in data["message"]
+        conn_mgr.create_test_session.assert_not_awaited()
+
+    def test_trailing_slash_url_config_side_still_matches_the_shape(
+        self, env, test_client
+    ):
+        """A2(iii) — the mirror leg: the trailing slash on the
+        SUBMITTED url."""
+        env(self_env="dev", slug="e2e", mcp_enabled="false")
+        conn_mgr = MagicMock()
+        conn_mgr.create_test_session = AsyncMock()
+
+        with patch(
+            "daemon.routers.mcp_servers.get_mcp_connection_manager",
+            return_value=conn_mgr,
+        ):
+            response = test_client.post(
+                "/api/mcp-servers/test-connection",
+                json={
+                    "config": {
+                        "transport": "streamable-http",
+                        "url": MCP_URL + "/",
+                    }
+                },
+            )
+
+        data = response.json()
+        assert data["success"] is False
+        assert "PLANE_MCP_ENABLED" in data["message"]
+        conn_mgr.create_test_session.assert_not_awaited()
 
 
 class TestScopeBoundary:

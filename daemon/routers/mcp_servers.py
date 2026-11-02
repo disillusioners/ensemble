@@ -48,6 +48,7 @@ from daemon.mcp.builtin_servers.base import BuiltinServerDefinition
 from daemon.mcp.builtin_servers.validation import validate_config_values, McpConfigValidationError as BuiltinConfigValidationError
 from daemon.mcp.builtin_servers.plane import _mcp_kill_switch_enabled
 from daemon.plane_workspace import (
+    _header_value,
     current_plane_workspace,
     normalize_workspace_slug,
 )
@@ -340,12 +341,35 @@ def _mcp_server_health_state(server_name: str) -> str | None:
 # ==================== Endpoints ====================
 
 
+def _normalize_probe_url(raw: Any) -> str:
+    """Normalize ONE side of the plane-shape URL comparison (A2).
+
+    Whitespace trim + ONE outer matching quote-pair strip (the house
+    :func:`daemon.plane_workspace.normalize_workspace_slug` shape) +
+    a trailing-slash ``rstrip`` — applied to BOTH the configured
+    ``PLANE_MCP_URL`` and the submitted ``url`` so a cosmetic
+    trailing slash on either side can no longer hide a plane-shaped
+    config from the probe guard.
+
+    Non-string input normalizes to ``""`` (never matches a configured
+    non-empty URL).
+    """
+    if not isinstance(raw, str):
+        return ""
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1].strip()
+    return value.rstrip("/")
+
+
 def _plane_probe_refusal(config: dict[str, Any]) -> str | None:
     """P3-D (``plane-pm-issue-tools``): the plane-shape refusal probe.
 
     When the submitted config is PLANE-shaped — its URL matches the
-    configured ``PLANE_MCP_URL`` or it carries the plane MCP's
-    ``x-workspace-slug`` header — consult the plane kill-switch and the
+    configured ``PLANE_MCP_URL`` (both sides normalized: trim + one
+    outer quote pair + trailing-slash ``rstrip``, A2) or it carries
+    the plane MCP's ``x-workspace-slug`` header (header NAME matched
+    case-insensitively, A1) — consult the plane kill-switch and the
     workspace resolver BEFORE dialing. The operator's "is Plane up?"
     probe must not report a stale success while the integration is
     refused or deliberately disabled (the D7/AD7 lie).
@@ -353,6 +377,10 @@ def _plane_probe_refusal(config: dict[str, Any]) -> str | None:
     Returns ``None`` when the config is not plane-shaped or the plane
     lanes are permitted (the probe proceeds unchanged — non-plane
     configs are untouched by this guard).
+
+    A3 (reviewer-adjudicated tidier must-fix, 2026-11-02): the guard
+    FAILS CLOSED — an internal error while evaluating the policy is a
+    typed refusal, never a pass-through dial.
 
     F2 (reviewer fold 2026-11-02): P2-D's resolved-slug authority,
     MIRRORED on the probe path — on non-live, a SUBMITTED
@@ -368,12 +396,26 @@ def _plane_probe_refusal(config: dict[str, Any]) -> str | None:
 
         url = config.get("url")
         headers = config.get("headers")
-        plane_url = (os.environ.get("PLANE_MCP_URL") or "").strip().strip('"').strip("'")
+        # A2: BOTH sides of the URL comparison are normalized (trim +
+        # one outer quote pair + trailing-slash rstrip) — a cosmetic
+        # slash on either side previously UN-matched the shape and let
+        # the config dial past the guard.
+        plane_url = _normalize_probe_url(os.environ.get("PLANE_MCP_URL"))
         is_plane_shape = (
-            (isinstance(url, str) and bool(plane_url) and url.strip() == plane_url)
+            (
+                isinstance(url, str)
+                and bool(plane_url)
+                and _normalize_probe_url(url) == plane_url
+            )
             or (
+                # A1: case-insensitive header-NAME lookup — the header
+                # name is case-insensitive by RFC 9110 §5.1; a
+                # case-variant ``X-Workspace-Slug`` claims the same
+                # workspace authority. A present-but-null value makes
+                # NO authority claim (``None`` ⇒ not plane-shaped via
+                # this arm — it never did via the F2 authority check).
                 isinstance(headers, dict)
-                and "x-workspace-slug" in headers
+                and _header_value(headers, "x-workspace-slug") is not None
             )
         )
         if not is_plane_shape:
@@ -392,7 +434,10 @@ def _plane_probe_refusal(config: dict[str, Any]) -> str | None:
         # present — a plane-shaped config without the header makes no
         # authority claim (mirrors P2-D's embedded-slug-None ⇒ no check).
         if resolution.env_label != "live" and isinstance(headers, dict):
-            submitted = headers.get("x-workspace-slug")
+            # A1: the same case-insensitive NAME lookup as the shape
+            # predicate — a case-variant header name cannot smuggle a
+            # slug past the authority check.
+            submitted = _header_value(headers, "x-workspace-slug")
             if isinstance(submitted, str) and submitted.strip():
                 normalized = normalize_workspace_slug(submitted)
                 if normalized != (resolution.slug or ""):
@@ -405,8 +450,20 @@ def _plane_probe_refusal(config: dict[str, Any]) -> str | None:
                         f"refused before dialing"
                     )
         return None
-    except Exception:  # noqa: BLE001 — the probe guard must never break the endpoint
-        return None
+    except Exception:  # noqa: BLE001 — A3: the probe guard fails CLOSED
+        # A3 (reviewer-adjudicated tidier must-fix): the previous arm
+        # returned ``None`` (pass-through) — an internal error while
+        # EVALUATING the policy let the probe dial exactly when the
+        # guard existed to prevent that. The refusal is typed so the
+        # operator sees the guard itself failed, not a stale success.
+        logger.debug(
+            "plane probe guard could not evaluate the workspace policy",
+            exc_info=True,
+        )
+        return (
+            "Plane probe guard could not evaluate the workspace policy — "
+            "the probe is refused before dialing"
+        )
 
 
 @router.get("", response_model=McpServerListResponse, dependencies=[scope_required("mcp:read")])

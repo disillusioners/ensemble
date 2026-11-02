@@ -452,6 +452,76 @@ class TestHealGates:
         ], "no heal may fire when nothing drifted"
 
 
+# ── A1(iv): the heal reads the ACTUALLY-persisted slug ──────────────────────
+
+
+class TestHealReadsTheActuallyPersistedSlug:
+    """A1(iv) (reviewer-adjudicated tidier must-fix, 2026-11-02) — the
+    drift computation reads the value under the header name
+    CASE-INSENSITIVELY, so a case-variant header NAME (``X-Workspace-Slug``)
+    reads the same as the canonical key.
+
+    Pre-fix, the exact-case ``dict.get`` returned ``None`` for a
+    case-variant name and ``None != resolved`` is True — the heal fired
+    on rows whose slug actually MATCHED. Value case-sensitivity is
+    UNCHANGED (``E2E`` still drifts from ``e2e``)."""
+
+    def test_case_variant_name_with_matching_value_does_not_heal(
+        self, env, caplog
+    ):
+        """The case-variant ``'e2e'`` row no longer heals — the
+        actually-read value matches the resolved slug, so there is NO
+        drift."""
+        env(self_env="dev", slug="e2e")
+        row = _FakeRow(
+            config={"headers": {"X-Workspace-Slug": "e2e"}},
+            config_schema_version="3",
+        )
+        repo = _FakeRepo([row])
+        mgr = _make_manager(repo)
+
+        _bootstrap(mgr, repo, [_agent_meta("project-manager", ["plane"])], caplog)
+
+        assert row.config["headers"]["X-Workspace-Slug"] == "e2e"
+        assert not [
+            u for u in repo.updates if "config" in u
+        ], "a case-variant header NAME must not fabricate slug drift"
+
+    def test_case_variant_name_with_nea_value_heals_to_lowercase_e2e(
+        self, env, caplog
+    ):
+        """A case-variant ``'nea'`` row DOES drift on a dev/e2e boot —
+        and the healed value is the resolver's lowercase ``'e2e'``
+        (headers re-materialised from the template)."""
+        env(self_env="dev", slug="e2e")
+        row = _FakeRow(
+            config={"headers": {"X-Workspace-Slug": "nea"}},
+            config_schema_version="3",
+        )
+        repo = _FakeRepo([row])
+        mgr = _make_manager(repo)
+
+        _bootstrap(mgr, repo, [_agent_meta("project-manager", ["plane"])], caplog)
+
+        assert row.config["headers"]["x-workspace-slug"] == "e2e"
+        assert "slug-equality trigger" in _messages(caplog)
+
+    def test_case_variant_VALUE_still_drifts_and_heals(self, env, caplog):
+        """Value case-sensitivity UNCHANGED — ``E2E`` is a real drift
+        from ``e2e`` (the comparison stays exact on values)."""
+        env(self_env="dev", slug="e2e")
+        row = _FakeRow(
+            config={"headers": {"x-workspace-slug": "E2E"}},
+            config_schema_version="3",
+        )
+        repo = _FakeRepo([row])
+        mgr = _make_manager(repo)
+
+        _bootstrap(mgr, repo, [_agent_meta("project-manager", ["plane"])], caplog)
+
+        assert row.config["headers"]["x-workspace-slug"] == "e2e"
+
+
 # ── F3: the unavailable-cause stale-row NOTICE (shape (b)) ──────────────────
 
 
