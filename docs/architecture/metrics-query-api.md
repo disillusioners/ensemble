@@ -143,11 +143,17 @@ An expected condition is **never** a 500.
 | 503 | `AUTH_NOT_CONFIGURED` | auth is **not configured** — fail-closed, **before any registry read** |
 | 503 | `registry_unavailable` | the query provider is not wired |
 
-> **Rendering note.** The frozen contract's error-vocabulary block renders the scope miss
-> lowercase as `scope_insufficient`; the **shipped** body code is uppercase
-> `SCOPE_INSUFFICIENT` (`daemon/auth/decorators.py:75-78`). This is a **rendering** difference
-> in the contract's prose, **not** a behavioural one — the status (403) and the meaning are
-> identical, and the shipped spelling is the one a consumer will see on the wire.
+> **Rendering note (resolved — D-c).** The frozen contract's error-vocabulary block used to
+> render the scope miss lowercase as `scope_insufficient`; the **shipped** body code is
+> uppercase `SCOPE_INSUFFICIENT` (`daemon/auth/decorators.py:75-78`). That was a **token-
+> rendering** difference in the contract's prose, **not** a behavioural one — the status (403)
+> and the meaning are identical, and the shipped spelling is the one a consumer sees on the
+> wire. **The contract now carries the shipped spelling** (the D-c ruling; the wire and the
+> decorator are untouched). The shipped pack `central_metrics_contract_doc` pins that block
+> against a literal in the test file that still carried the superseded lowercase token, so it
+> goes red on exactly that one assertion until the pin follows the ruling — the pin lives in
+> the test surface (outside this lane's fence) and is **routed**, not silently ignored. The
+> measured run is preserved in `evidence/d-c-contract-token-pin.txt`.
 
 ### 3.2 The bounds
 

@@ -42,16 +42,52 @@
 > capability (`daemon/routers/maintenance.py`). The scope split (`metrics:read`) is a NAMED
 > COMMITMENT (LR-1, `decisions.md` §D6), not built in v1.
 >
-> **Cardinality budget (AM-26/LR-2):** the extension subset wires **16 of the 26** daemon-origin
-> families (10 full + 6 partial) — the plan's pinned budget is **+274 series → post-lane 363**
-> (F7c-inclusive; 361 on the ledger-rows basis). The lane's **measured closed label space** is
-> **336** lane series ⇒ **425** against the 89 baseline — that is the **CEILING** the shipped gate
-> measures, and it is what the gate asserts against the **global ≤2 000 cap**; the **live** count
-> is at or **under** the pinned figure, because three families render short (F12's
-> `ensemble_sweep_cycle_seconds` is OUT — no sweep service publishes an observed cycle duration;
-> 10 of the 13 sweep lanes have no `counters()` reader and render no series; F4's manager-pool
-> `max`/`available` are absent). `VOCABULARY_VERSION` bumps **1→2** (the F7 checkpoint-op
-> observable-set fold + the F18 audit-outcome amendment).
+> **Cardinality budget (AM-26/LR-2) — THREE conventions, never compared.** The extension
+> subset wires **16 of the 26** daemon-origin families (10 full + 6 partial).
+> (i) The **catalog live-estimate projection** is **+274 series → post-lane 363** (F7c-inclusive;
+> 361 on the ledger-rows basis). It is a **PLANNING-TIME PROJECTION**, now shipped as the
+> constant `adjudication.CATALOG_LIVE_ESTIMATE_SERIES_PROJECTION = 363` (renamed from
+> `BUDGET_SERIES` by A-6 — the old name read like an enforced budget).
+> (ii) The **measured closed label space** (the lane's own ceiling, the shipped pack's recipe) is
+> **336** lane series ⇒ **425** against the 89 baseline.
+> (iii) The **MEASURED LIVE counts** — from the fenced-dev observation
+> (`evidence/c1-runtime-observation.md`): **10 of the 16** families **live**, **6 dark**, **99
+> live series** across the lane families, **112 snapshot series**, `/series` **104 series /
+> 335 points**. The live count is **observation-dependent and NOT statically derivable** — it
+> depends on which families publish at runtime (D-a).
+> **The projection constant is NEVER MACHINE-ENFORCED.** The only enforced bound is the
+> **convention-insensitive global cap**: the shipped pack asserts
+> `BASELINE_SERIES + measured_closed_space <= GLOBAL_SERIES_CAP` ⇒ **425 ≤ 2 000** — against the
+> **≤2 000 cap**, never against the 363 projection. `VOCABULARY_VERSION` bumps **1→2** (the F7
+> checkpoint-op observable-set fold + the F18 audit-outcome amendment).
+>
+> **The live exposition body GROWS by the 16 P4 families.** The AM-16 structural diff compared
+> only the **PRE-WIRING registry state** (the same registry on both sides of the P4 commit), so it
+> does not cover the new families' series — the live body carries them. The AM-16 verdict is a
+> claim about the **frozen carriers**, not about the body's total series count.
+>
+> **The six dark families — each with a NAMED cause, none of them the C-1 locator** (measured at
+> the fenced-dev observation): **F1** and **F3** — `capture_off`, because the provider's
+> `capture_active` is never wired (`daemon/api.py:2528-2533` constructs the provider without it);
+> **F6** — `census_gated`, and that reason is **INVERTED** (the census published 15 live series
+> while the door reported dark); **F7** — `series_absent`, because the non-internal histogram
+> never publishes (`daemon/checkpoint_metrics.py:830-874`); **F18** — `series_absent`, the
+> MCPS-gateway store is empty in dev; **F21** — `series_absent`, the journal family needs an
+> install dir and **dev has none by design**. The seven families that were dark solely because
+> the C-1 locator left `dsn` unbound (F4, F5, F8, F10, F11, F13 and — with the F6 correction —
+> F6) are **live** now.
+>
+> **The `stale_pause` sweep lane is DOCUMENTED-DARK for TWO independent reasons.** (i) The
+> service exposes **no `counters()` reader**, so it would render no series even if it were
+> published; (ii) it is **never assigned to `app.state`** (`daemon/api.py:3058-3074` calls
+> `sweep_stale_pauses(...)` inline on the lifespan loop), so the locator cannot see it either.
+> **Publishing it alone would change nothing** — covering the lane needs **BOTH** an `app.state`
+> publication **AND** a `counters()` reader on the service. `job_lock_sweep` and
+> `upgrade_journal_sweep` ARE published and still render no series (no reader). The measured
+> consequence: the observed F12 lanes were `['eligible_pending', 'orphan_watcher',
+> 'watch_reconcile']` — the three whose services expose a reader. **No family verdict changes**
+> (F12 stays IN). **Owner: the sweeps' own lane (the `counters()` readers) + the mechanical-file
+> lane (the `app.state` publication)** — neither is this lane.
 >
 > **FE panel copy:** "no metrics available yet" — never "metrics disabled" (AM-19(d)).
 >
@@ -66,10 +102,22 @@
 | 2 | **Zero FE deps** | the FE adds **no** npm dependency — the charts are a hand-rolled SVG primitive | `git diff 941cb6321..HEAD -- frontend/package.json` ⇒ **0 lines changed** |
 | 3 | **In-RAM buffer envelope** | array-backed ring, **16 B/point**, `POINT_BUDGET = 750 000` ⇒ **11.4 MiB** worst case; window **2 h**; lost on restart by design | `daemon/services/metrics_query/constants.py` — `POINT_BUDGET: int = 750_000`, `WINDOW_SECONDS: int = 7200` |
 | 4 | **Route/cage arithmetic** | the three routes **extend** the existing `/api/metrics` mount: the **declared-route** census **108 → 111**, the **mount** census stays **37**, the **class-manifest** family count stays **33**; all three carry `maintenance:read` | `tests/unit/metrics/test_metrics_query_scope_cage.py:37-40` (`DECLARED_ROUTE_CENSUS = 111`, `MOUNT_CENSUS = 37`, `CLASS_MANIFEST_FAMILIES = 33`); the lane's diff adds **exactly 3** scope-decorated `@router.get` routes (`git diff 941cb6321..HEAD -- daemon/routers/metrics.py`) ⇒ the pre-lane census was 108 |
-| 5 | **Extension subset + `VOCABULARY_VERSION` 2** | **16 of 26** families (10 full + 6 partial); the exclusions and each excluded metric's named seam are published in [`docs/architecture/metrics-query-api.md`](metrics-query-api.md) §6; `VOCABULARY_VERSION` = **2** (F7's op set → `{aget, other}`; F18's audit outcome → `{ok, error, timeout}`); the catalog's §14 F7c reconciliation to **582** | `daemon/services/metrics_query/wiring/adjudication.py` — `BASELINE_SERIES = 89`, `BUDGET_SERIES = 363`, `GLOBAL_SERIES_CAP = 2000`, `REGISTERED_FAMILIES` (16); `daemon/checkpoint_metrics.py` — `VOCABULARY_VERSION` |
+| 5 | **Extension subset + `VOCABULARY_VERSION` 2** | **16 of 26** families (10 full + 6 partial); the exclusions and each excluded metric's named seam are published in [`docs/architecture/metrics-query-api.md`](metrics-query-api.md) §6; `VOCABULARY_VERSION` = **2** (F7's op set → `{aget, other}`; F18's audit outcome → `{ok, error, timeout}`); the catalog's §14 F7c reconciliation to **582**. **The 363 is a CATALOG LIVE-ESTIMATE PROJECTION, not an enforced budget** — the shipped constant is `adjudication.CATALOG_LIVE_ESTIMATE_SERIES_PROJECTION = 363` (renamed from `BUDGET_SERIES` by A-6, because the old name read like an enforced budget; the value is unchanged and the constant has **zero consumers**). It must **never** be compared with the **measured closed label space** (336 ⇒ 425) — the two are **different conventions** (a live estimate vs a ceiling) | `daemon/services/metrics_query/wiring/adjudication.py` — `BASELINE_SERIES = 89`, `CATALOG_LIVE_ESTIMATE_SERIES_PROJECTION = 363`, `GLOBAL_SERIES_CAP = 2000`, `REGISTERED_FAMILIES` (16); `daemon/checkpoint_metrics.py` — `VOCABULARY_VERSION` |
 | 6 | **The now-wired `metrics_sampler_interval_s`** | the key was previously unwired; it is now the trend sampler's TICK. Its **description** names **both** consumers (the host-side samplers **and** the in-RAM trend-history sampler); its default (10), bounds (1–60), type (int) and restart column (boot-applied) are **unchanged** | `git diff 941cb6321..HEAD -- daemon/config.py` ⇒ a **description-only** change to `metrics_sampler_interval_s`; `daemon/config.py:825-834` |
 | 7 | **The C17 docstring correction** | **DEFERRED, not shipped.** `daemon/services/job_queue_service.py:828-836` documents `orphan_released` as a cumulative counter; the code returns it **per-tick** (`orphan_released = 0`, reset each call). The one-line comment fix is disproportionate against a whole-tree Tier-2 leg (plan council W5), so it is **recorded in the fold ledger (`DEF-1`) and the deferred list** instead. The metrics layer's own accumulation is the disambiguator, so the F12 accumulation is correct regardless | `daemon/services/job_queue_service.py:828-836`; the plan set's `fold-ledger.md` (`DEF-1`) |
 | 8 | **No promote in this lane** | the lane stages nothing, promotes nothing, and touches no live surface. The version slot belongs to **giter** (W9) and the flip belongs to the user's **3-factor nonce ceremony** | the plan set's `plan-overview.md` (version-slot discipline, P-R12) and the stage-prep checklist |
+
+### 1.2 The fix-cycle findings added to the disclosure (A-1 · D-a · Q1)
+
+The **eight** rows above are the council's cross-cutting list and stay eight. The fix-cycle
+findings below are **additional** and are carried in the ceremony text of §1 as well.
+
+| Finding | What the ceremony must be told | Anchor |
+|---|---|---|
+| **A-1** | **The live exposition body GROWS by the 16 P4 families.** The AM-16 structural diff compared only the **PRE-WIRING registry state** — the same registry on both sides of the P4 commit — so it does not cover the new families' series. **The AM-16 verdict is a claim about the frozen carriers, not about the body's total series count.** | `docs/architecture/metrics-query-contract.md` §4.6 + the contract's AM-16 clause; the diff inputs in `evidence/am16-exposition-{base,head}.txt` |
+| **D-a (i)** | **The live count is observation-dependent and NOT statically derivable.** The measured live figures (10/16 live · 6 dark · 99 live series · 112 snapshot series) are a **point observation** at the fenced-dev boot, not a derived constant — they depend on which families publish at runtime. | `evidence/c1-runtime-observation.md` §3.1–§3.2 |
+| **D-a (ii)** | **The projection constant is NEVER machine-enforced.** `CATALOG_LIVE_ESTIMATE_SERIES_PROJECTION = 363` is a **planning-time catalog live estimate** with **zero consumers**; the **only** enforced bound is the **convention-insensitive global cap** — the shipped pack asserts `BASELINE_SERIES + measured_closed_space <= GLOBAL_SERIES_CAP` ⇒ **425 ≤ 2 000**. The projection and the measured closed label space are **different conventions and must never be compared**. | `daemon/services/metrics_query/wiring/adjudication.py` (the constant + the zero-consumer pin); the assertion in `tests/unit/metrics/test_metrics_family_adjudication.py` |
+| **Q1** | **The `stale_pause` sweep lane is DOCUMENTED-DARK for TWO independent reasons** — no `counters()` reader on the service, and no `app.state` publication (`daemon/api.py:3058-3074` calls `sweep_stale_pauses(...)` inline). **Publishing it alone would change nothing** — covering the lane needs **BOTH**. `job_lock_sweep` and `upgrade_journal_sweep` ARE published and still render no series (no reader). **No family verdict changes** (F12 stays IN). **Owner: the sweeps' own lane + the mechanical-file lane.** | `evidence/c1-runtime-observation.md` §5; `daemon/api.py:3058-3074`; `daemon/services/{job_lock,upgrade_journal,stale_pause}_sweep.py` (no `counters` reader) |
 
 ---
 

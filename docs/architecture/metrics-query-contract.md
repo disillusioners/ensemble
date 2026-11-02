@@ -238,8 +238,18 @@ GET /api/metrics/series
 400 invalid_cursor
 503 registry_unavailable
 503 AUTH_NOT_CONFIGURED
-403 scope_insufficient
+403 SCOPE_INSUFFICIENT
 ```
+
+> **The 403 token is the SHIPPED spelling** — `SCOPE_INSUFFICIENT`
+> (`daemon/auth/decorators.py:75-78` — `_SCOPE_403_DETAIL = {"error":
+> "SCOPE_INSUFFICIENT", "message": "Token lacks required scope"}`). This block previously
+> rendered it lowercase as `scope_insufficient`; that was a **token-rendering** defect in the
+> documentation, not a behavioural one, and it is amended here to the shipped form. **The wire
+> and the decorator are NOT changed** — the decorator is the pre-existing auth seam and is
+> outside this lane's file set. The sibling blocks in this contract already use the shipped
+> spelling (`AUTH_NOT_CONFIGURED`, `registry_unavailable`, `unknown_family`,
+> `invalid_label_filter`, `invalid_cursor`).
 
 - `404` unknown family (typed body)
 - `400` invalid label filter — a malformed label-aware selector, or a
