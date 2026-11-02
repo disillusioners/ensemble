@@ -396,6 +396,7 @@ budget.** They are **recorded findings, never auto-fixed.**
 | 12 | Stage A's disclosed items: the family-level `role='chart'\|'stat'` + the per-name `chart_role='line'\|'step'` (contract §4.3); **three added public accessors**; `?names=` over the 50-name ceiling ⇒ **400 `invalid_label_filter`** (never a silent truncation); the histogram series carry the **stored cumulative observation count** as the point value; **one disclosed test edit** re-pointing two stale saver-op assertions | the contract doc §4.3 + the lane's P2 evidence |
 | 13 | **COUNCIL-RULED AND APPLIED (D-c) — the contract's 403 token now matches the shipped body.** The contract's error-vocabulary block rendered the scope miss lowercase as `scope_insufficient`; the **shipped** body is uppercase **`SCOPE_INSUFFICIENT`** (`daemon/auth/decorators.py:75-78` — `_SCOPE_403_DETAIL = {"error": "SCOPE_INSUFFICIENT", "message": "Token lacks required scope"}`). The status (403) and the meaning are identical — a **token-rendering** difference, not a behavioural one. **The council ruled (D-c): amend the CONTRACT TOKEN, never the wire and never the decorator.** **APPLIED** — `docs/architecture/metrics-query-contract.md`'s error-vocabulary block now reads `403 SCOPE_INSUFFICIENT`, with the amendment note beside it (the sibling blocks already used the shipped spelling). **CONSEQUENCE, measured and routed:** the shipped D1 pack `central_metrics_contract_doc` pins that block against a literal tuple in the TEST file (`tests/unit/metrics/test_central_metrics_contract_doc.py:59` → `"403 scope_insufficient"`), so the pack goes **RED on exactly that one assertion** until the pin follows the ruling — the measured run (1 failed, 20 passed; the diff is index 5 only) is preserved in `evidence/d-c-contract-token-pin.txt`. The test file is **outside this lane's fence** (zero code, no tests/), so the pin update is the **owning test lane's**, authorised by the same ruling | the published query-API page §3.1 (the resolved rendering note) · `daemon/auth/decorators.py:75-78` · `evidence/d-c-contract-token-pin.txt` |
 
+
 ---
 
 ## 13. The open questions this pack could not close
@@ -415,7 +416,9 @@ budget.** They are **recorded findings, never auto-fixed.**
    `/api/metrics/families` at the **staged boot smoke** — once, from the staged artefact — and
    record it in the disclosure before the flip (see the stage-prep checklist §3).
 3. **The per-leg FAILED digests — CLOSED (2026-11-02).** Every leg's digest is now **preserved
-   in-repo** and **digest-backed**, across P2, P3, P4 AND P5.
+   in-repo** and **digest-backed**, across P2, P3, P4, P5 **AND the fix-cycle FE legs** (the
+   cycle-1 and cycle-2 dual-side legs are folded in §14.1–§14.2 with their digests; the
+   cycle-2 artefacts are preserved in `evidence/c2-fe-gate/`).
    **The P3 whole-tree leg's net-new verdict is now CLOSED TOO (2026-11-02, the P3
    evidence-repair round): the comparator's verdict block was FIXED and the 69 diff ids
    were ADJUDICATED (each id in isolation, 3 runs per side, both legs) ⇒ 0 lane
@@ -470,3 +473,75 @@ lists are preserved beside the record and the question belongs to the council.
    execution) is the tester lane's to make — **the standing pattern for every lane pack id**.
    This phase produced the **docs** the pack asserts against; it did not register or run the
    pack. **Not a blocker.**
+
+---
+
+## 14. The fix-cycle record (cycles 1–3 — the DELTA re-review's single record)
+
+This section folds the three fix cycles into **one** record so the delta re-review reads a
+single coherent story instead of three separate artefacts.
+
+### 14.1 Cycle 1 — the backend fix (C-1 + W-1…W-5 + A-2/A-3/A-4/A-8/A-9)
+
+| Item | What it was | Commits |
+|---|---|---|
+| **C-1** | the runtime source bundle was a permanent snapshot taken before the handles exist ⇒ the live handles never reached the provider | `690130c27` (the fix) · `61e5c6b30` (the locator-invariant pin + the W-1…W-5 bounds, mutation-verified) |
+| **W-1…W-5** | the bounds pinned in `61e5c6b30` | `61e5c6b30` |
+| **A-2/A-3/A-4/A-8/A-9** | the architect's advisories folded in the same cycle | `690130c27` · `61e5c6b30` |
+| the **runtime observation** | the fenced-dev boot that PROVED the dark→live transition — the probe's presence map flipped `dsn`/`manager`/`mcps_gateway_service`/`wedge_watchdog` from ABSENT to PRESENT between the sampler's first and second tick | `36c46aa1a` (the observation doc) — **`evidence/c1-runtime-observation.md`** |
+| the **Tier-1 gate** | the blast-radius leg: BASE `bfc3a233a` vs HEAD `36c46aa1a`, the same command and the same file list, slicing proof 533 → 559 nodes, the FAILED digest `d78b09cf2549c371…` **identical on both sides** ⇒ net-new EMPTY, the single red on both legs being the lane's own base-proven `test_rdrs_lanes_come_from_the_config_kill_switchs` | `1dde26faf` — **`evidence/fix-cycle-1-gate/`** (+ its `VERDICT.md`) |
+
+### 14.2 Cycle 2 — the FE fix (W-6 + A-5 + A-7 + the contract alignment)
+
+`cd06d2a0b` — the FE surface. The preserved gate evidence is
+**`evidence/c2-fe-gate/`** + **`evidence/c2-fe-gate-preservation-manifest.txt`** (8 files, all
+byte-identical to `/tmp/c2-fe-gate/`; all five dispatch-cited digests recomputed and matching):
+
+| Leg | Result | Digest |
+|---|---|---|
+| dual-side **head** `cd06d2a0b` | 2 failed · 1 799 passed · **1 801** total | `29a74f92a37c668a` |
+| dual-side **base** `1dde26faf` | 2 failed · 1 799 passed · **1 801** total | `e8fd5e396e0b022a` |
+| dual-side **base** `36c46aa1a` | 3 failed · 1 798 passed · **1 801** total | `8d1a03e0633aa67f` |
+| the **e2e** (Playwright, own proxy config, no daemon) | **2 passed (31.2 s)** | `492dd44bda9f2625` |
+| the **mutation matrix** | **13/13 PASS** (P5-M1…P5-M11 + `FIX2-W6` + `FIX2-A5`), every leg `red_exit≠0` / `green_exit=0` / `restored=True`, plus the **POST-RUN GUARD: OK** | `cf582ac6096f447d` |
+| the **scoped type-check** ×2 | the logs are **0 bytes** — `tsc --noEmit` is silent on success — so their digest is the **empty-string** digest `e3b0c442…b855`. **The PASS is carried by the exit code, which these logs do not contain** — an empty log is not the evidence of a pass | `e3b0c44298fc1c14` (both) |
+
+### 14.3 The A-6 rename
+
+`cf12edcfb` — `BUDGET_SERIES` → **`CATALOG_LIVE_ESTIMATE_SERIES_PROJECTION`** (the value **363**
+is unchanged; the constant has **zero consumers** and is pinned as such). The old name read like
+an enforced budget. The three docs that quoted the old name are updated in this phase:
+`plan-overview.md` (§Re-derived budget, two sites), this pack (§3, row 3) and
+`docs/architecture/metrics-promote-disclosure.md` (§1.1 row 5). **The two-conventions note rides
+every site:** the 363 is a **catalog live-estimate projection** and the 425 is a **measured closed
+label space** — different conventions, **never compared**.
+
+### 14.4 The FE base-debt rows (the cycle-2 dual-side legs)
+
+| Row | What it is | Where it appears |
+|---|---|---|
+| the **timezone-DST pair** | `settings.component.spec.ts` — "Timezone preference (user-timezone-setting) › renders the timezone section with the native picker when `Intl.supportedValuesOf` is available" and "… uses the API list when the `GET /api/settings/timezones` response is non-empty" | **on head `cd06d2a0b` AND on base `1dde26faf` AND on base `36c46aa1a`** — the same two ids on every side ⇒ **not** lane-attributable |
+| the **`36c46aa1a`-only JobQueueIndicator flake** | `JobQueueIndicatorComponent Logic › recentJobs (public computed) › should filter out pending, processing, and paused jobs (terminal only via isTerminalStatus)` | **base-side only, on `36c46aa1a` alone** — **absent at `1dde26faf` and absent at HEAD**. It is the reason base-36c carries **3** reds where the other two sides carry **2** ⇒ net-new stays EMPTY |
+| the **`tsconfig.spec.json` stray `});`** | a **pre-existing syntax error** at `src/app/app.component.spec.ts:2127` — **RED at base**, not a lane file, untouched, reported | see §12 row 10 (the FE base-debt row) |
+
+**The net-new verdict on the FE dual-side legs is EMPTY** — head (2 reds) matches base-1dde
+(2 reds) id-for-id, and base-36c's extra red is a **base-side** flake that the head does not have.
+
+---
+
+## 15. The routed items (for the leader — owners named)
+
+These are the **findings this phase recorded but did not fix**. None is in this lane's file set;
+each names its owner. **Nothing here is a blocker for the lane's own gates** — they are the
+council's/leader's to route.
+
+| # | The finding | The anchor | Why it is NOT fixed here | The owner |
+|---|---|---|---|---|
+| **R-i** | **F6's availability reason is INVERTED.** The census's `gated` property is documented as *"whether the census sampler's DB work is currently gated OFF"* but returns `_gate()`, which is **True when the census's DB work is ALLOWED** (`collect()` runs `if self._gate():`). **The observed consequence:** with the switch ON the census published **15 live series** while the door reported F6 as `dark / census_gated` (and `activation.census_enabled` false) — **AM-18 is broken in production**. The lane's own switch-invariance pack pins the *documented* polarity against a **fake** census, so the production census and the lane's contract disagree. | `daemon/services/metrics_census.py:323-335` (`gated`) · `:347-355` (`_gate()`) · consumed at `daemon/services/metrics_query/provider.py:103-109` | the census file is the **metrics-collection P0 lane's** surface (the lane's F6 seam), not this lane's; inverting the provider's read instead would break the lane's own frozen switch-invariance contract | **the metrics-collection lane** — a one-line polarity fix in the census's `gated` property (or at its call site) |
+| **R-ii** | **F1/F3's `capture_active` is never wired.** The provider is constructed with `census` / `ring` / `listener_enabled` / `sampler_interval_s` **only**; `capture_active` keeps its `False` default. **The observed consequence:** F1 published **9 live series** while the door reported it `dark / capture_off`. | `daemon/api.py:2528-2533` (the construction site) · `daemon/services/metrics_query/provider.py:70/:78/:134` (`capture_active`) | `daemon/api.py` is the lane's **Tier-2 mechanical file**, which the council's C-1 ⑥ forbids the lane from touching at fix-cycle time | **the mechanical-file lane** — pass the capture-active fact in at the api.py construction site (or derive it from the watchdog's state) |
+| **R-iii** | **F7's `live_series_count` is always 0 — a non-internal histogram never publishes.** The non-internal histogram `observe()` path sets `_dirty` but **never calls `_maybe_publish_locked()`** (only the `internal` branch does), so `published_snapshot()` stays `None` and the door's family count is 0 for histogram families. **The observed consequence:** F7 reported `live_series_count = 0` while the exposition carried the observation (`_count{op="aget"} 1`) — the metric IS live; the door cannot see it. | `daemon/checkpoint_metrics.py:830-874` | the registry's publish path is the **canonical registry's** surface (F0.2), not this lane's; making F7 `internal=True` would change the **exposition shape** and the **frozen series census** — a contract decision, not a fix-cycle edit | **the canonical-registry lane** — either the registry publishes non-internal histograms on the writer path, or the lane's family count reads the histogram's live state |
+| **R-iv** | **The `stale_pause` sweep lane is DOCUMENTED-DARK for TWO independent reasons**, and **publishing it alone would change nothing.** (i) `StalePauseSweepService` exposes **no `counters()` reader** ⇒ it would render no series even if published; (ii) it is **never assigned to `app.state`** — `daemon/api.py:3058-3074` calls `sweep_stale_pauses(...)` inline on the lifespan loop. Covering the lane needs **BOTH**. `job_lock_sweep` and `upgrade_journal_sweep` **ARE** published and still render no series (no reader). The measured consequence: the observed F12 lanes were `['eligible_pending', 'orphan_watcher', 'watch_reconcile']` — the three with readers. **No family verdict changes** (F12 stays IN). | `daemon/api.py:3058-3074` · `daemon/services/pool_orchestrator.py:341-345` (the instance lives on the manager) · `daemon/services/{job_lock,upgrade_journal,stale_pause}_sweep.py` (no `counters` reader) | the gap is **pre-existing** (the lane did not create it — it only made the locator look for it) and both halves live outside this lane | **the sweeps' own lane** (the `counters()` readers) **+ the mechanical-file lane** (the `app.state` publication) |
+| **R-v** | **The house canon needs the FIXED comparator.** Adopt into the sweep tool: **files-first → log** (the diff lists go to files first and are then logged — the original's `;` after the log call sent `comm`'s output to stdout, never to the log), **`LC_ALL=C` on BOTH `sort` and `comm`** (a collation mismatch silently drops entries from the diff), and **FORM-tagged verdict lines** (GREP-FULL and BARE-ID are never compared across forms). **And: a sweep whose verdict block is EMPTY must FAIL LOUD** — the two vacuous `sha256("") = e3b0c442…b855` "passes" are exactly that evidence class. **`LC_ALL=C` into the house gate-script conventions.** | the FIXED comparator is preserved at `evidence/p3-scratch/sweep_digest_verdict.sh`; the buggy original is preserved byte-identical at `evidence/p3-scratch/sweep_sharded.sh` with the repair at `evidence/p3-scratch/sweep_sharded.verdict-block.patch`; the vacuous class is recorded in §12 row 4 + `evidence/p3-verdict-lines.txt` | the sweep tool and the house gate-script conventions are **not this lane's files** | **the tester lane / the house canon** |
+| **R-vi** | **The D-c contract token needs its pin updated.** The council ruled (D-c): the contract's error-vocabulary block must render the 403 token as the **shipped** uppercase `SCOPE_INSUFFICIENT`. **APPLIED** — the contract now carries it. **CONSEQUENCE:** the shipped D1 pack `central_metrics_contract_doc` pins that block against a literal tuple in the **test** file that still carries the superseded lowercase token, so the pack goes **RED on exactly that one assertion** (measured: 1 failed, 20 passed; the diff is index 5 only). | `tests/unit/metrics/test_central_metrics_contract_doc.py:59` (`"403 scope_insufficient"`) · the assertion at `:169` · the measured run in `evidence/d-c-contract-token-pin.txt` | the test file is **outside this lane's fence** (zero code, no tests/) | **the owning test lane** — the pin follows the ruling it is pinning (the wire and the decorator are NOT to be changed) |
+
+---

@@ -1,0 +1,632 @@
+=== Test Pack: metrics_fe_dual_side_test ===
+PROJECT_DIR=/tmp/c2-base-1dde26faf
+
+--- Stage 0: worktree bracket ---
+BRANCH=HEAD
+GIT_SHA=1dde26faf
+EXPECTED_BRANCH=feature/central-metrics-v1
+BASE_REF=origin/latest
+DETACHED: the branch gate is waived for this leg (ALLOW_DETACHED=1)
+
+--- Stage 0b: dependency fence ---
+local bins: jest tsc ng — OK
+LEG_KIND=HEAD
+
+--- d1 ---
+ts-jest[config] (WARN) [94mmessage[0m[90m TS151001: [0mIf you have issues related to imports, you should consider setting `esModuleInterop` to `true` in your TypeScript configuration file (usually `tsconfig.json`). See https://blogs.msdn.microsoft.com/typescript/2018/01/31/announcing-typescript-2-7/#easier-ecmascript-module-interoperability for more information.
+PASS src/app/pages/metrics/metrics.component.spec.ts (5.967 s)
+PASS src/app/models/metrics.model.spec.ts
+PASS src/app/pages/metrics/overview/overview-tab.component.spec.ts
+PASS src/app/components/charts/svg-line-chart/svg-line-chart.component.spec.ts
+PASS src/app/pages/metrics/charts/charts-tab.component.spec.ts
+PASS src/app/services/metrics.service.spec.ts
+PASS src/app/pages/metrics/metrics.bindings.pins.spec.ts
+PASS src/app/pages/metrics/metrics-gear-menu.spec.ts
+PASS src/app/pages/metrics/families/families-tab.component.spec.ts
+
+Test Suites: 9 passed, 9 total
+Tests:       119 passed, 119 total
+Snapshots:   0 total
+Time:        10.992 s
+d1_EXIT=0
+d1_COUNTS: Tests:       119 passed, 119 total
+d1_ERROR_SUMMARY:
+  (none)
+
+--- d2_declared ---
+ts-jest[config] (WARN) [94mmessage[0m[90m TS151001: [0mIf you have issues related to imports, you should consider setting `esModuleInterop` to `true` in your TypeScript configuration file (usually `tsconfig.json`). See https://blogs.msdn.microsoft.com/typescript/2018/01/31/announcing-typescript-2-7/#easier-ecmascript-module-interoperability for more information.
+PASS src/app/app.component.spec.ts
+PASS src/app/pages/maintenance/maintenance.bindings.pins.spec.ts
+PASS src/app/app.routes.spec.ts
+PASS src/app/pages/mcps-gateway/mcps-gateway.pins.spec.ts
+PASS src/app/pages/resources/resources-gear-menu.spec.ts
+
+Test Suites: 5 passed, 5 total
+Tests:       138 passed, 138 total
+Snapshots:   0 total
+Time:        4.448 s
+d2_declared_EXIT=0
+d2_declared_COUNTS: Tests:       138 passed, 138 total
+d2_declared_ERROR_SUMMARY:
+  (none)
+
+--- d2_derived ---
+ts-jest[config] (WARN) [94mmessage[0m[90m TS151001: [0mIf you have issues related to imports, you should consider setting `esModuleInterop` to `true` in your TypeScript configuration file (usually `tsconfig.json`). See https://blogs.msdn.microsoft.com/typescript/2018/01/31/announcing-typescript-2-7/#easier-ecmascript-module-interoperability for more information.
+PASS src/app/pages/chat/chat.component.spec.ts (5.489 s)
+PASS src/app/pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.component.spec.ts
+PASS src/app/components/job-queue-indicator/job-queue-indicator.component.spec.ts
+FAIL src/app/pages/settings/settings.component.spec.ts (5.837 s)
+  ● Timezone preference (user-timezone-setting) › renders the timezone section with the native picker when Intl.supportedValuesOf is available
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected value: "America/New_York (UTC-04:00)"
+    Received array: ["Auto / not set", "Asia/Bangkok (UTC+07:00)", "America/New_York (UTC-05:00)", "UTC (UTC+00:00)"]
+
+    [0m [90m 1504 |[39m     [90m// and a non-empty offset.[39m
+     [90m 1505 |[39m     expect(labels)[33m.[39mtoContain([32m'Asia/Bangkok (UTC+07:00)'[39m)[33m;[39m
+    [31m[1m>[22m[39m[90m 1506 |[39m     expect(labels)[33m.[39mtoContain([32m'America/New_York (UTC-04:00)'[39m)[33m;[39m
+     [90m      |[39m                    [31m[1m^[22m[39m
+     [90m 1507 |[39m     expect(labels)[33m.[39mtoContain([32m'UTC (UTC+00:00)'[39m)[33m;[39m
+     [90m 1508 |[39m
+     [90m 1509 |[39m     [90m// The Auto sentinel is the first option in the list.[39m[0m
+
+      at src/app/pages/settings/settings.component.spec.ts:1506:20
+      at _ZoneDelegate.invoke (../../../home/nea/ensemble-src-wt-central-metrics-v1/frontend/node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (../../../home/nea/ensemble-src-wt-central-metrics-v1/frontend/node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (../../../home/nea/ensemble-src-wt-central-metrics-v1/frontend/node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (../../../home/nea/ensemble-src-wt-central-metrics-v1/frontend/node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (../../../home/nea/ensemble-src-wt-central-metrics-v1/frontend/node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+  ● Timezone preference (user-timezone-setting) › uses the API list when the GET /api/settings/timezones response is non-empty
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected value: "America/New_York (UTC-04:00)"
+    Received array: ["Auto / not set", "Asia/Ho_Chi_Minh (UTC+07:00)", "Asia/Bangkok (UTC+07:00)", "America/New_York (UTC-05:00)", "UTC (UTC+00:00)"]
+
+    [0m [90m 1739 |[39m     expect(labels)[33m.[39mtoContain([32m'Asia/Ho_Chi_Minh (UTC+07:00)'[39m)[33m;[39m
+     [90m 1740 |[39m     expect(labels)[33m.[39mtoContain([32m'Asia/Bangkok (UTC+07:00)'[39m)[33m;[39m
+    [31m[1m>[22m[39m[90m 1741 |[39m     expect(labels)[33m.[39mtoContain([32m'America/New_York (UTC-04:00)'[39m)[33m;[39m
+     [90m      |[39m                    [31m[1m^[22m[39m
+     [90m 1742 |[39m     expect(labels)[33m.[39mtoContain([32m'UTC (UTC+00:00)'[39m)[33m;[39m
+     [90m 1743 |[39m     [90m// Picker is shown (the API list was non-empty).[39m
+     [90m 1744 |[39m     expect(component[33m.[39misTzNativeSupported())[33m.[39mtoBe([36mtrue[39m)[33m;[39m[0m
+
+      at src/app/pages/settings/settings.component.spec.ts:1741:20
+      at _ZoneDelegate.invoke (../../../home/nea/ensemble-src-wt-central-metrics-v1/frontend/node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (../../../home/nea/ensemble-src-wt-central-metrics-v1/frontend/node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (../../../home/nea/ensemble-src-wt-central-metrics-v1/frontend/node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (../../../home/nea/ensemble-src-wt-central-metrics-v1/frontend/node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (../../../home/nea/ensemble-src-wt-central-metrics-v1/frontend/node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+PASS src/app/pages/workspace/workspace.component.spec.ts (7.819 s)
+PASS src/app/components/mcp-server-dialog/mcp-server-dialog.component.spec.ts
+PASS src/app/components/chat-interface/chat-interface.component.spec.ts
+PASS src/app/services/instance.service.spec.ts
+PASS src/app/components/instance-list/instance-list.component.spec.ts
+PASS src/app/services/sse.service.spec.ts
+PASS src/app/pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.service.spec.ts
+PASS src/app/services/message-merge.util.spec.ts
+PASS src/app/services/command-state.service.spec.ts
+PASS src/app/components/instance-delete-dialog/instance-delete-dialog.component.spec.ts
+PASS src/app/pages/home/home.component.spec.ts
+PASS src/app/components/agent-switcher/agent-switcher.component.spec.ts
+PASS src/app/pages/mcps-gateway/mcps-gateway.service.spec.ts
+PASS src/app/components/mcp-server-list/mcp-server-list.component.spec.ts
+PASS src/app/services/mcp-server.service.spec.ts
+PASS src/app/components/agent-selector/agent-selector.component.spec.ts
+PASS src/app/pages/mcps-gateway/mcps-gateway.component.spec.ts
+PASS src/app/services/sse-error-row.spec.ts
+PASS src/app/pages/instances/instances.component.spec.ts
+PASS src/app/components/edit-source-modal/edit-source-modal.component.spec.ts
+PASS src/app/components/chat-interface/live-view-chip.spec.ts
+PASS src/app/services/parse-command-ack.spec.ts
+PASS src/app/components/file-tree/file-tree.component.spec.ts
+PASS src/app/components/file-tabs/file-tabs.component.spec.ts
+PASS src/app/services/sse-command-progress.spec.ts
+PASS src/app/components/message-input/slash-command-palette.util.spec.ts
+PASS src/app/components/add-source-modal/add-source-modal.component.spec.ts
+PASS src/app/utils/agent-dedup.spec.ts
+PASS src/app/app.component.spec.ts
+PASS src/app/app.routes.spec.ts
+PASS src/app/pages/maintenance/maintenance.bindings.pins.spec.ts
+PASS src/app/pages/metrics/metrics-gear-menu.spec.ts
+PASS src/app/pages/mcps-gateway/mcps-gateway.pins.spec.ts
+PASS src/app/pages/resources/resources-gear-menu.spec.ts
+
+Summary of all failing tests
+FAIL src/app/pages/settings/settings.component.spec.ts (5.837 s)
+  ● Timezone preference (user-timezone-setting) › renders the timezone section with the native picker when Intl.supportedValuesOf is available
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected value: "America/New_York (UTC-04:00)"
+    Received array: ["Auto / not set", "Asia/Bangkok (UTC+07:00)", "America/New_York (UTC-05:00)", "UTC (UTC+00:00)"]
+
+    [0m [90m 1504 |[39m     [90m// and a non-empty offset.[39m
+     [90m 1505 |[39m     expect(labels)[33m.[39mtoContain([32m'Asia/Bangkok (UTC+07:00)'[39m)[33m;[39m
+    [31m[1m>[22m[39m[90m 1506 |[39m     expect(labels)[33m.[39mtoContain([32m'America/New_York (UTC-04:00)'[39m)[33m;[39m
+     [90m      |[39m                    [31m[1m^[22m[39m
+     [90m 1507 |[39m     expect(labels)[33m.[39mtoContain([32m'UTC (UTC+00:00)'[39m)[33m;[39m
+     [90m 1508 |[39m
+     [90m 1509 |[39m     [90m// The Auto sentinel is the first option in the list.[39m[0m
+
+      at src/app/pages/settings/settings.component.spec.ts:1506:20
+      at _ZoneDelegate.invoke (../../../home/nea/ensemble-src-wt-central-metrics-v1/frontend/node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (../../../home/nea/ensemble-src-wt-central-metrics-v1/frontend/node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (../../../home/nea/ensemble-src-wt-central-metrics-v1/frontend/node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (../../../home/nea/ensemble-src-wt-central-metrics-v1/frontend/node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (../../../home/nea/ensemble-src-wt-central-metrics-v1/frontend/node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+  ● Timezone preference (user-timezone-setting) › uses the API list when the GET /api/settings/timezones response is non-empty
+
+    expect(received).toContain(expected) // indexOf
+
+    Expected value: "America/New_York (UTC-04:00)"
+    Received array: ["Auto / not set", "Asia/Ho_Chi_Minh (UTC+07:00)", "Asia/Bangkok (UTC+07:00)", "America/New_York (UTC-05:00)", "UTC (UTC+00:00)"]
+
+    [0m [90m 1739 |[39m     expect(labels)[33m.[39mtoContain([32m'Asia/Ho_Chi_Minh (UTC+07:00)'[39m)[33m;[39m
+     [90m 1740 |[39m     expect(labels)[33m.[39mtoContain([32m'Asia/Bangkok (UTC+07:00)'[39m)[33m;[39m
+    [31m[1m>[22m[39m[90m 1741 |[39m     expect(labels)[33m.[39mtoContain([32m'America/New_York (UTC-04:00)'[39m)[33m;[39m
+     [90m      |[39m                    [31m[1m^[22m[39m
+     [90m 1742 |[39m     expect(labels)[33m.[39mtoContain([32m'UTC (UTC+00:00)'[39m)[33m;[39m
+     [90m 1743 |[39m     [90m// Picker is shown (the API list was non-empty).[39m
+     [90m 1744 |[39m     expect(component[33m.[39misTzNativeSupported())[33m.[39mtoBe([36mtrue[39m)[33m;[39m[0m
+
+      at src/app/pages/settings/settings.component.spec.ts:1741:20
+      at _ZoneDelegate.invoke (../../../home/nea/ensemble-src-wt-central-metrics-v1/frontend/node_modules/zone.js/bundles/zone.umd.js:409:168)
+      at _ProxyZoneSpec.onInvoke (../../../home/nea/ensemble-src-wt-central-metrics-v1/frontend/node_modules/zone.js/bundles/zone-testing.umd.js:1079:43)
+      at _ZoneDelegate.invoke (../../../home/nea/ensemble-src-wt-central-metrics-v1/frontend/node_modules/zone.js/bundles/zone.umd.js:409:56)
+      at _ZoneImpl.run (../../../home/nea/ensemble-src-wt-central-metrics-v1/frontend/node_modules/zone.js/bundles/zone.umd.js:162:47)
+      at Object.wrappedFunc (../../../home/nea/ensemble-src-wt-central-metrics-v1/frontend/node_modules/zone.js/bundles/zone-testing.umd.js:407:38)
+
+
+Test Suites: 1 failed, 37 passed, 38 total
+Tests:       2 failed, 1799 passed, 1801 total
+Snapshots:   0 total
+Time:        46.095 s
+d2_derived_EXIT=1
+d2_derived_COUNTS: Tests:       2 failed, 1799 passed, 1801 total
+d2_derived_ERROR_SUMMARY:
+  (none)
+d2_derived_file_count=38
+
+--- typecheck_scoped ---
+typecheck_scoped_EXIT=0
+typecheck_scoped_ERROR_SUMMARY:
+  (none)
+
+--- build_development (the AOT leg) ---
+❯ Building...
+✔ Building...
+Initial chunk files | Names                     |  Raw size
+scripts.js          | scripts                   |   4.77 MB | 
+chunk-NTE76LCT.js   | -                         | 896.84 kB | 
+styles.css          | styles                    | 789.17 kB | 
+chunk-ZXX4OQTN.js   | -                         | 562.48 kB | 
+chunk-PHN5J6U4.js   | -                         | 552.10 kB | 
+main.js             | main                      | 518.83 kB | 
+chunk-JOIMQKQN.js   | -                         | 464.86 kB | 
+chunk-TEIRLOII.js   | -                         | 209.63 kB | 
+chunk-H3ZUKA5Q.js   | -                         | 177.22 kB | 
+chunk-YD267JTL.js   | -                         | 153.30 kB | 
+chunk-BSM2XCGY.js   | -                         | 152.92 kB | 
+chunk-P77M4OWO.js   | -                         |  83.31 kB | 
+chunk-ICSQMK3D.js   | -                         |  62.81 kB | 
+chunk-STLYWF7A.js   | -                         |  61.45 kB | 
+chunk-JYA3DWBN.js   | -                         |  61.23 kB | 
+chunk-QHRW3J2N.js   | -                         |  60.31 kB | 
+chunk-EIYG3YZR.js   | -                         |  50.42 kB | 
+chunk-3MBGU2Z4.js   | -                         |  49.68 kB | 
+chunk-BMFVD6LX.js   | -                         |  34.70 kB | 
+chunk-TH7SA2JN.js   | -                         |  33.81 kB | 
+chunk-FMLFXHAR.js   | -                         |  29.00 kB | 
+chunk-3LTNHTQQ.js   | -                         |  26.73 kB | 
+chunk-MVFUC6CL.js   | -                         |  25.24 kB | 
+chunk-KL7HMZNG.js   | -                         |  24.70 kB | 
+chunk-LGH3RCDB.js   | -                         |  23.40 kB | 
+chunk-7XP24XSO.js   | -                         |  18.39 kB | 
+chunk-WELEHQ2N.js   | -                         |  11.23 kB | 
+chunk-X2YFEXGI.js   | -                         |  10.25 kB | 
+chunk-EZRSFIJ7.js   | -                         |  10.24 kB | 
+chunk-IMY434OD.js   | -                         |   7.07 kB | 
+chunk-5O5PODTV.js   | -                         |   5.51 kB | 
+chunk-DKAFLSOR.js   | -                         |   3.53 kB | 
+chunk-6LAKNZQN.js   | -                         |   3.48 kB | 
+chunk-I47ZKFGY.js   | -                         |   2.11 kB | 
+chunk-IAFNJIUL.js   | -                         |   1.24 kB | 
+chunk-BLUS7JO6.js   | -                         | 816 bytes | 
+
+                    | Initial total             |   9.94 MB
+
+Lazy chunk files    | Names                     |  Raw size
+chunk-5MQJHXWQ.js   | -                         | 428.22 kB | 
+chunk-SGE3ADP2.js   | jobs-component            | 422.20 kB | 
+chunk-A34NZXCJ.js   | skill-detail-component    | 338.98 kB | 
+chunk-VH6PPAEC.js   | maintenance-component     | 297.39 kB | 
+chunk-FTLPXZ7E.js   | -                         | 287.54 kB | 
+chunk-EHB6TC44.js   | snapshots-component       | 246.04 kB | 
+chunk-OIB6ZYVN.js   | chat-component            | 244.57 kB | 
+chunk-3M2KYPW2.js   | -                         | 227.43 kB | 
+chunk-EXUWAS52.js   | -                         | 204.87 kB | 
+chunk-UN6I2OFF.js   | blueprint-component       | 201.10 kB | 
+chunk-WTZ5OHJ4.js   | -                         | 171.39 kB | 
+chunk-FJMSSGML.js   | mcp-server-list-component | 165.72 kB | 
+chunk-4JHHWKKK.js   | -                         | 162.20 kB | 
+chunk-T5QPTT5R.js   | schedules-component       | 145.00 kB | 
+chunk-3U3UJBHA.js   | -                         | 139.45 kB | 
+...and 37 more lazy chunks files. Use "--verbose" to show all the files.
+
+Application bundle generation complete. [20.507 seconds] - 2026-11-02T15:39:38.423Z
+
+▲ [WARNING] NG8107: NG8107: The left side of this optional chain operation does not include 'null' or 'undefined' in its type, therefore the '?.' operator can be replaced with the '.' operator. Find more at https://v21.angular.dev/extended-diagnostics/NG8107 [plugin angular-compiler]
+
+    src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.html:233:32:
+      233 │             @if (d.domain_tags?.length) {
+          ╵                                 ~~~~~~
+
+  Warning occurs in the template of component SnapshotDetailDrawerComponent.
+
+    src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.ts:81:15:
+      81 │   templateUrl: './snapshot-detail-drawer.component.html',
+         ╵                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: All imports are unused [plugin angular-compiler]
+
+    src/app/components/vscode-editor-cache/vscode-editor-cache.component.ts:57:2:
+      57 │   imports: [VsCodeViewerComponent],
+         ╵   ~~~~~~~
+
+
+▲ [WARNING] NG8113: CheckpointCleanupComponent is not used within the template of MaintenanceComponent [plugin angular-compiler]
+
+    src/app/pages/maintenance/maintenance.component.ts:47:64:
+      47 │ ...let, MatTabsModule, MatTooltipModule, CheckpointCleanupComponent],
+         ╵                                          ~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: OverviewTabComponent is not used within the template of MetricsComponent [plugin angular-compiler]
+
+    src/app/pages/metrics/metrics.component.ts:69:4:
+      69 │     OverviewTabComponent,
+         ╵     ~~~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: ChartsTabComponent is not used within the template of MetricsComponent [plugin angular-compiler]
+
+    src/app/pages/metrics/metrics.component.ts:70:4:
+      70 │     ChartsTabComponent,
+         ╵     ~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: FamiliesTabComponent is not used within the template of MetricsComponent [plugin angular-compiler]
+
+    src/app/pages/metrics/metrics.component.ts:71:4:
+      71 │     FamiliesTabComponent,
+         ╵     ~~~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: LiveTabComponent is not used within the template of ResourcesComponent [plugin angular-compiler]
+
+    src/app/pages/resources/resources.component.ts:38:46:
+      38 │ ...entOutlet, MatTabsModule, LiveTabComponent, TimelineTabComponent],
+         ╵                              ~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: TimelineTabComponent is not used within the template of ResourcesComponent [plugin angular-compiler]
+
+    src/app/pages/resources/resources.component.ts:38:64:
+      38 │ ...entOutlet, MatTabsModule, LiveTabComponent, TimelineTabComponent],
+         ╵                                                ~~~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] Deprecation [plugin angular-sass]
+
+    src/app/components/chat-interface/chat-interface.scss:1170:11:
+      1170 │     color: lighten($cyan, 8%);
+           ╵            ^
+
+
+  Global built-in functions are deprecated and will be removed in Dart Sass 3.0.0.
+  Use color.adjust instead.
+  
+  More info and automated migrator: https://sass-lang.com/d/import
+
+
+▲ [WARNING] Deprecation [plugin angular-sass]
+
+    src/app/components/chat-interface/chat-interface.scss:1170:11:
+      1170 │     color: lighten($cyan, 8%);
+           ╵            ^
+
+
+  lighten() is deprecated. Suggestions:
+  
+  color.scale($color, $lightness: 13.9726027397%)
+  color.adjust($color, $lightness: 8%)
+  
+  More info: https://sass-lang.com/d/color-functions
+
+
+▲ [WARNING] Deprecation [plugin angular-sass]
+
+    src/app/pages/settings/settings.component.scss:167:18:
+      167 │     border-color: lighten($border-color, 8%);
+          ╵                   ^
+
+
+  Global built-in functions are deprecated and will be removed in Dart Sass 3.0.0.
+  Use color.adjust instead.
+  
+  More info and automated migrator: https://sass-lang.com/d/import
+
+
+▲ [WARNING] Deprecation [plugin angular-sass]
+
+    src/app/pages/settings/settings.component.scss:167:18:
+      167 │     border-color: lighten($border-color, 8%);
+          ╵                   ^
+
+
+  lighten() is deprecated. Suggestions:
+  
+  color.scale($color, $lightness: 10.9090909091%)
+  color.adjust($color, $lightness: 8%)
+  
+  More info: https://sass-lang.com/d/color-functions
+
+
+Output location: /tmp/c2-base-1dde26faf/frontend/dist/frontend
+
+build_development_EXIT=0
+build_development_ERROR_SUMMARY:
+  (none)
+
+--- build_production (the budgets leg — AM-23) ---
+❯ Building...
+✔ Building...
+Initial chunk files | Names                     |  Raw size | Estimated transfer size
+scripts-DN54Y2NQ.js | scripts                   |   3.56 MB |               737.45 kB
+styles-S2UMLXTA.css | styles                    | 655.43 kB |                58.41 kB
+chunk-XUGYUR5T.js   | -                         | 316.34 kB |               100.34 kB
+chunk-RW2V5WE3.js   | -                         | 263.46 kB |                74.84 kB
+main-F7Q4BLCF.js    | main                      | 215.50 kB |                76.11 kB
+chunk-P77UAISO.js   | -                         | 177.43 kB |                51.76 kB
+chunk-FRO3BYVV.js   | -                         | 176.95 kB |                41.91 kB
+chunk-M5DEH7FQ.js   | -                         |  83.22 kB |                20.65 kB
+chunk-66BFRSFT.js   | -                         |  58.70 kB |                14.47 kB
+chunk-WI4MSJTE.js   | -                         |  54.25 kB |                15.00 kB
+chunk-M23TQXFS.js   | -                         |  48.60 kB |                 7.70 kB
+chunk-H7N5PDK3.js   | -                         |  43.20 kB |                 8.92 kB
+chunk-G557TSGH.js   | -                         |  28.72 kB |                 6.73 kB
+chunk-6H2RNYHD.js   | -                         |  27.49 kB |                 5.05 kB
+chunk-MDR56RCU.js   | -                         |  27.48 kB |                 8.88 kB
+chunk-QA4ECTUH.js   | -                         |  25.45 kB |                 6.78 kB
+chunk-6ITRGLG2.js   | -                         |  23.08 kB |                 4.67 kB
+chunk-RZ6S6WMI.js   | -                         |  19.06 kB |                 4.70 kB
+chunk-2CKJWD6J.js   | -                         |  17.82 kB |                 4.79 kB
+chunk-TTKG4TSB.js   | -                         |  15.31 kB |                 4.16 kB
+chunk-DGL33OUV.js   | -                         |  12.47 kB |                 3.81 kB
+chunk-4JR3C4K4.js   | -                         |   9.75 kB |                 2.31 kB
+chunk-OFJKWUPP.js   | -                         |   9.74 kB |                 2.76 kB
+chunk-3RDHNGPY.js   | -                         |   8.14 kB |                 2.39 kB
+chunk-VL226SCV.js   | -                         |   6.63 kB |                 1.98 kB
+chunk-JO6DRFLI.js   | -                         |   4.57 kB |               994 bytes
+chunk-ZLUSPWTI.js   | -                         |   4.08 kB |               985 bytes
+chunk-DQ25OO5S.js   | -                         |   3.53 kB |                 1.08 kB
+chunk-OBOFPCHQ.js   | -                         |   3.16 kB |                 1.01 kB
+chunk-WCJE2HCY.js   | -                         |   3.15 kB |                 1.19 kB
+chunk-KGTZ5776.js   | -                         |   1.71 kB |               487 bytes
+chunk-RBBECHQS.js   | -                         |   1.55 kB |               520 bytes
+chunk-QFZS6KG5.js   | -                         | 832 bytes |               832 bytes
+chunk-5CZJKLDN.js   | -                         | 631 bytes |               631 bytes
+chunk-Y7L3YKQ5.js   | -                         | 523 bytes |               523 bytes
+chunk-T47LDKCK.js   | -                         | 417 bytes |               417 bytes
+
+                    | Initial total             |   5.91 MB |                 1.28 MB
+
+Lazy chunk files    | Names                     |  Raw size | Estimated transfer size
+chunk-6Q5MPJCC.js   | -                         | 157.14 kB |                25.65 kB
+chunk-PY7M4ZAR.js   | jobs-component            | 135.69 kB |                28.19 kB
+chunk-BDVOHUWU.js   | skill-detail-component    | 113.27 kB |                24.22 kB
+chunk-L4CNGG3Z.js   | -                         |  96.41 kB |                21.57 kB
+chunk-QSN6KZSM.js   | maintenance-component     |  88.93 kB |                17.41 kB
+chunk-B5JDKS2U.js   | snapshots-component       |  85.31 kB |                16.42 kB
+chunk-SEPD5MCE.js   | chat-component            |  78.59 kB |                17.02 kB
+chunk-O5TOGA6U.js   | -                         |  68.73 kB |                11.62 kB
+chunk-PXWQ7PAB.js   | -                         |  67.24 kB |                 7.97 kB
+chunk-V2GJY7RH.js   | blueprint-component       |  65.77 kB |                12.29 kB
+chunk-BNCTIERR.js   | -                         |  60.60 kB |                13.27 kB
+chunk-B2OD63FW.js   | mcp-server-list-component |  58.60 kB |                11.96 kB
+chunk-F6OVXNEL.js   | schedules-component       |  54.28 kB |                11.76 kB
+chunk-LYQA5UYI.js   | -                         |  43.69 kB |                 9.26 kB
+chunk-KMS33EYD.js   | -                         |  38.98 kB |                 8.76 kB
+...and 37 more lazy chunks files. Use "--verbose" to show all the files.
+
+Application bundle generation complete. [31.300 seconds] - 2026-11-02T15:40:11.151Z
+
+▲ [WARNING] NG8107: NG8107: The left side of this optional chain operation does not include 'null' or 'undefined' in its type, therefore the '?.' operator can be replaced with the '.' operator. Find more at https://v21.angular.dev/extended-diagnostics/NG8107 [plugin angular-compiler]
+
+    src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.html:233:32:
+      233 │             @if (d.domain_tags?.length) {
+          ╵                                 ~~~~~~
+
+  Warning occurs in the template of component SnapshotDetailDrawerComponent.
+
+    src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.ts:81:15:
+      81 │   templateUrl: './snapshot-detail-drawer.component.html',
+         ╵                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: All imports are unused [plugin angular-compiler]
+
+    src/app/components/vscode-editor-cache/vscode-editor-cache.component.ts:57:2:
+      57 │   imports: [VsCodeViewerComponent],
+         ╵   ~~~~~~~
+
+
+▲ [WARNING] NG8113: CheckpointCleanupComponent is not used within the template of MaintenanceComponent [plugin angular-compiler]
+
+    src/app/pages/maintenance/maintenance.component.ts:47:64:
+      47 │ ...let, MatTabsModule, MatTooltipModule, CheckpointCleanupComponent],
+         ╵                                          ~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: OverviewTabComponent is not used within the template of MetricsComponent [plugin angular-compiler]
+
+    src/app/pages/metrics/metrics.component.ts:69:4:
+      69 │     OverviewTabComponent,
+         ╵     ~~~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: ChartsTabComponent is not used within the template of MetricsComponent [plugin angular-compiler]
+
+    src/app/pages/metrics/metrics.component.ts:70:4:
+      70 │     ChartsTabComponent,
+         ╵     ~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: FamiliesTabComponent is not used within the template of MetricsComponent [plugin angular-compiler]
+
+    src/app/pages/metrics/metrics.component.ts:71:4:
+      71 │     FamiliesTabComponent,
+         ╵     ~~~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: LiveTabComponent is not used within the template of ResourcesComponent [plugin angular-compiler]
+
+    src/app/pages/resources/resources.component.ts:38:46:
+      38 │ ...entOutlet, MatTabsModule, LiveTabComponent, TimelineTabComponent],
+         ╵                              ~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] NG8113: TimelineTabComponent is not used within the template of ResourcesComponent [plugin angular-compiler]
+
+    src/app/pages/resources/resources.component.ts:38:64:
+      38 │ ...entOutlet, MatTabsModule, LiveTabComponent, TimelineTabComponent],
+         ╵                                                ~~~~~~~~~~~~~~~~~~~~
+
+
+▲ [WARNING] Deprecation [plugin angular-sass]
+
+    src/app/components/chat-interface/chat-interface.scss:1170:11:
+      1170 │     color: lighten($cyan, 8%);
+           ╵            ^
+
+
+  Global built-in functions are deprecated and will be removed in Dart Sass 3.0.0.
+  Use color.adjust instead.
+  
+  More info and automated migrator: https://sass-lang.com/d/import
+
+
+▲ [WARNING] Deprecation [plugin angular-sass]
+
+    src/app/components/chat-interface/chat-interface.scss:1170:11:
+      1170 │     color: lighten($cyan, 8%);
+           ╵            ^
+
+
+  lighten() is deprecated. Suggestions:
+  
+  color.scale($color, $lightness: 13.9726027397%)
+  color.adjust($color, $lightness: 8%)
+  
+  More info: https://sass-lang.com/d/color-functions
+
+
+▲ [WARNING] Deprecation [plugin angular-sass]
+
+    src/app/pages/settings/settings.component.scss:167:18:
+      167 │     border-color: lighten($border-color, 8%);
+          ╵                   ^
+
+
+  Global built-in functions are deprecated and will be removed in Dart Sass 3.0.0.
+  Use color.adjust instead.
+  
+  More info and automated migrator: https://sass-lang.com/d/import
+
+
+▲ [WARNING] Deprecation [plugin angular-sass]
+
+    src/app/pages/settings/settings.component.scss:167:18:
+      167 │     border-color: lighten($border-color, 8%);
+          ╵                   ^
+
+
+  lighten() is deprecated. Suggestions:
+  
+  color.scale($color, $lightness: 10.9090909091%)
+  color.adjust($color, $lightness: 8%)
+  
+  More info: https://sass-lang.com/d/color-functions
+
+
+▲ [WARNING] bundle initial exceeded maximum budget. Budget 1.00 MB was not met by 4.91 MB with a total of 5.91 MB.
+
+
+▲ [WARNING] src/app/components/agent-selector/agent-selector.scss exceeded maximum budget. Budget 8.00 kB was not met by 765 bytes with a total of 8.77 kB.
+
+
+▲ [WARNING] src/app/pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 701 bytes with a total of 8.70 kB.
+
+
+▲ [WARNING] src/app/pages/snapshots/snapshots.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 4.29 kB with a total of 12.29 kB.
+
+
+▲ [WARNING] src/app/components/add-source-modal/add-source-modal.scss exceeded maximum budget. Budget 8.00 kB was not met by 318 bytes with a total of 8.32 kB.
+
+
+▲ [WARNING] src/app/pages/jobs/jobs.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 6.77 kB with a total of 14.77 kB.
+
+
+▲ [WARNING] src/app/components/chat-interface/chat-interface.scss exceeded maximum budget. Budget 8.00 kB was not met by 8.15 kB with a total of 16.15 kB.
+
+
+▲ [WARNING] src/app/pages/blueprint/blueprint.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 10.32 kB with a total of 18.32 kB.
+
+
+▲ [WARNING] src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 697 bytes with a total of 8.70 kB.
+
+
+▲ [WARNING] src/app/components/instance-list/instance-list.scss exceeded maximum budget. Budget 8.00 kB was not met by 2.17 kB with a total of 10.17 kB.
+
+
+Output location: /tmp/c2-base-1dde26faf/frontend/dist/frontend
+
+build_production_EXIT=0
+build_production_ERROR_SUMMARY:
+  (none)
+build_production_BUDGET_WARNINGS (RECORDED FINDINGS, not auto-fixed):
+  ▲ [WARNING] NG8107: NG8107: The left side of this optional chain operation does not include 'null' or 'undefined' in its type, therefore the '?.' operator can be replaced with the '.' operator. Find more at https://v21.angular.dev/extended-diagnostics/NG8107 [plugin angular-compiler]
+  ▲ [WARNING] NG8113: All imports are unused [plugin angular-compiler]
+  ▲ [WARNING] NG8113: CheckpointCleanupComponent is not used within the template of MaintenanceComponent [plugin angular-compiler]
+  ▲ [WARNING] NG8113: OverviewTabComponent is not used within the template of MetricsComponent [plugin angular-compiler]
+  ▲ [WARNING] NG8113: ChartsTabComponent is not used within the template of MetricsComponent [plugin angular-compiler]
+  ▲ [WARNING] NG8113: FamiliesTabComponent is not used within the template of MetricsComponent [plugin angular-compiler]
+  ▲ [WARNING] NG8113: LiveTabComponent is not used within the template of ResourcesComponent [plugin angular-compiler]
+  ▲ [WARNING] NG8113: TimelineTabComponent is not used within the template of ResourcesComponent [plugin angular-compiler]
+  ▲ [WARNING] Deprecation [plugin angular-sass]
+  ▲ [WARNING] Deprecation [plugin angular-sass]
+  ▲ [WARNING] Deprecation [plugin angular-sass]
+  ▲ [WARNING] Deprecation [plugin angular-sass]
+  ▲ [WARNING] bundle initial exceeded maximum budget. Budget 1.00 MB was not met by 4.91 MB with a total of 5.91 MB.
+  ▲ [WARNING] src/app/components/agent-selector/agent-selector.scss exceeded maximum budget. Budget 8.00 kB was not met by 765 bytes with a total of 8.77 kB.
+  ▲ [WARNING] src/app/pages/maintenance/checkpoint-cleanup/checkpoint-cleanup.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 701 bytes with a total of 8.70 kB.
+  ▲ [WARNING] src/app/pages/snapshots/snapshots.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 4.29 kB with a total of 12.29 kB.
+  ▲ [WARNING] src/app/components/add-source-modal/add-source-modal.scss exceeded maximum budget. Budget 8.00 kB was not met by 318 bytes with a total of 8.32 kB.
+  ▲ [WARNING] src/app/pages/jobs/jobs.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 6.77 kB with a total of 14.77 kB.
+  ▲ [WARNING] src/app/components/chat-interface/chat-interface.scss exceeded maximum budget. Budget 8.00 kB was not met by 8.15 kB with a total of 16.15 kB.
+  ▲ [WARNING] src/app/pages/blueprint/blueprint.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 10.32 kB with a total of 18.32 kB.
+  ▲ [WARNING] src/app/components/snapshot-detail-drawer/snapshot-detail-drawer.component.scss exceeded maximum budget. Budget 8.00 kB was not met by 697 bytes with a total of 8.70 kB.
+  ▲ [WARNING] src/app/components/instance-list/instance-list.scss exceeded maximum budget. Budget 8.00 kB was not met by 2.17 kB with a total of 10.17 kB.
+
+--- package_json_dependency_diff (D2 zero-dependency guard) ---
+package_json_diff_lines=0
+
+GIT_SHA_END=1dde26faf
+
+RESULT: FAIL (failed legs: 1)

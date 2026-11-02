@@ -1,0 +1,208 @@
+{
+  "mutations": [
+    {
+      "label": "P5-M1",
+      "intent": "the named POLL_INTERVAL_MS is renamed",
+      "file": "frontend/src/app/pages/metrics/overview/overview-tab.component.ts",
+      "kind": "jest",
+      "red_exit": 1,
+      "green_exit": 0,
+      "red_nodes": [],
+      "restored_byte_identical": true,
+      "extra_red_expected": [
+        "the overview spec (it reads the constant)"
+      ],
+      "status": "PASS",
+      "detail": "",
+      "log": "/tmp/metrics-fe-mutations/P5-M1.log"
+    },
+    {
+      "label": "P5-M2",
+      "intent": "the clearInterval teardown is removed",
+      "file": "frontend/src/app/pages/metrics/overview/overview-tab.component.ts",
+      "kind": "jest",
+      "red_exit": 1,
+      "green_exit": 0,
+      "red_nodes": [],
+      "restored_byte_identical": true,
+      "extra_red_expected": [
+        "the overview spec (the runtime teardown assertion)"
+      ],
+      "status": "PASS",
+      "detail": "",
+      "log": "/tmp/metrics-fe-mutations/P5-M2.log"
+    },
+    {
+      "label": "P5-M3",
+      "intent": "the supersede token check is inverted (the older response wins)",
+      "file": "frontend/src/app/pages/metrics/overview/overview-tab.component.ts",
+      "kind": "jest",
+      "red_exit": 1,
+      "green_exit": 0,
+      "red_nodes": [],
+      "restored_byte_identical": true,
+      "extra_red_expected": [],
+      "status": "PASS",
+      "detail": "",
+      "log": "/tmp/metrics-fe-mutations/P5-M3.log"
+    },
+    {
+      "label": "P5-M4",
+      "intent": "the empty-state condition switches from 'no family live' to 'no families at all'",
+      "file": "frontend/src/app/pages/metrics/metrics.component.ts",
+      "kind": "jest",
+      "red_exit": 1,
+      "green_exit": 0,
+      "red_nodes": [],
+      "restored_byte_identical": true,
+      "extra_red_expected": [],
+      "status": "PASS",
+      "detail": "",
+      "log": "/tmp/metrics-fe-mutations/P5-M4.log"
+    },
+    {
+      "label": "P5-M5",
+      "intent": "the model mirror's field name drifts from the wire",
+      "file": "frontend/src/app/models/metrics.model.ts",
+      "kind": "jest",
+      "red_exit": 1,
+      "green_exit": 0,
+      "red_nodes": [],
+      "restored_byte_identical": true,
+      "extra_red_expected": [],
+      "status": "PASS",
+      "detail": "",
+      "log": "/tmp/metrics-fe-mutations/P5-M5.log"
+    },
+    {
+      "label": "P5-M6",
+      "intent": "the SVG scale function's normalisation is removed",
+      "file": "frontend/src/app/components/charts/svg-line-chart/svg-line-chart.component.ts",
+      "kind": "jest",
+      "red_exit": 1,
+      "green_exit": 0,
+      "red_nodes": [],
+      "restored_byte_identical": true,
+      "extra_red_expected": [],
+      "status": "PASS",
+      "detail": "",
+      "log": "/tmp/metrics-fe-mutations/P5-M6.log"
+    },
+    {
+      "label": "P5-M7",
+      "intent": "the gear-menu ordering pin's expected position changes",
+      "file": "frontend/src/app/pages/resources/resources-gear-menu.spec.ts",
+      "kind": "jest",
+      "red_exit": 1,
+      "green_exit": 0,
+      "red_nodes": [],
+      "restored_byte_identical": true,
+      "extra_red_expected": [],
+      "status": "PASS",
+      "detail": "",
+      "log": "/tmp/metrics-fe-mutations/P5-M7.log"
+    },
+    {
+      "label": "P5-M8",
+      "intent": "the JSON_HEADERS are dropped from the service call",
+      "file": "frontend/src/app/services/metrics.service.ts",
+      "kind": "jest",
+      "red_exit": 1,
+      "green_exit": 0,
+      "red_nodes": [],
+      "restored_byte_identical": true,
+      "extra_red_expected": [],
+      "status": "PASS",
+      "detail": "",
+      "log": "/tmp/metrics-fe-mutations/P5-M8.log"
+    },
+    {
+      "label": "P5-M9",
+      "intent": "the availability union is narrowed to a closed literal set",
+      "file": "frontend/src/app/models/metrics.model.ts",
+      "kind": "tsc",
+      "red_exit": 2,
+      "green_exit": 0,
+      "red_nodes": [
+        "src/app/models/metrics.model.spec.ts(193,11): error TS2322: Type '\"a_reason_the_door_has_not_defined_yet\"' is not assignable to type 'MetricsKnownAvailabilityReason'.",
+        "src/app/pages/metrics/families/families-tab.component.spec.ts(97,40): error TS2322: Type '\"a_reason_the_door_has_not_defined_yet\"' is not assignable to type 'MetricsKnownAvailabilityReason | undefined'."
+      ],
+      "restored_byte_identical": true,
+      "extra_red_expected": [],
+      "status": "PASS",
+      "detail": "",
+      "log": "/tmp/metrics-fe-mutations/P5-M9.log"
+    },
+    {
+      "label": "P5-M10",
+      "intent": "the panel copy reverts to 'metrics disabled'",
+      "file": "frontend/src/app/pages/metrics/metrics.component.ts",
+      "kind": "jest",
+      "red_exit": 1,
+      "green_exit": 0,
+      "red_nodes": [],
+      "restored_byte_identical": true,
+      "extra_red_expected": [],
+      "status": "PASS",
+      "detail": "",
+      "log": "/tmp/metrics-fe-mutations/P5-M10.log"
+    },
+    {
+      "label": "P5-M11",
+      "intent": "the production-config build leg is dropped from the gate",
+      "file": "test/packs/metrics_fe_dual_side_test.sh",
+      "kind": "jest",
+      "red_exit": 1,
+      "green_exit": 0,
+      "red_nodes": [],
+      "restored_byte_identical": true,
+      "extra_red_expected": [],
+      "status": "PASS",
+      "detail": "",
+      "log": "/tmp/metrics-fe-mutations/P5-M11.log"
+    },
+    {
+      "label": "FIX2-W6",
+      "intent": "the declared/concrete label VALUE-TYPE split is re-merged (the W-6 defect: one string-valued labels type serves both the DECLARED sets and the CONCRETE series)",
+      "file": "frontend/src/app/models/metrics.model.ts",
+      "kind": "tsc",
+      "red_exit": 2,
+      "green_exit": 0,
+      "red_nodes": [
+        "src/app/models/metrics.model.spec.ts(373,17): error TS2322: Type 'string[]' is not assignable to type 'string'.",
+        "src/app/models/metrics.model.spec.ts(381,40): error TS2345: Argument of type 'MetricsLabels | null' is not assignable to parameter of type 'MetricsDeclaredLabels | null | undefined'.",
+        "src/app/pages/metrics/families/families-tab.component.spec.ts(21,19): error TS2322: Type 'string[]' is not assignable to type 'string'.",
+        "src/app/pages/metrics/families/families-tab.component.spec.ts(118,23): error TS2322: Type 'string[]' is not assignable to type 'string'.",
+        "src/app/pages/metrics/families/families-tab.component.ts(247,40): error TS2345: Argument of type 'MetricsLabels | null' is not assignable to parameter of type 'MetricsDeclaredLabels | null | undefined'.",
+        "src/app/pages/metrics/metrics.component.spec.ts(68,19): error TS2322: Type 'string[]' is not assignable to type 'string'."
+      ],
+      "restored_byte_identical": true,
+      "extra_red_expected": [
+        "the model pack (the source-shape pin asserts the declared type)"
+      ],
+      "status": "PASS",
+      "detail": "",
+      "log": "/tmp/metrics-fe-mutations/FIX2-W6.log"
+    },
+    {
+      "label": "FIX2-A5",
+      "intent": "the error-copy branches collapse back to ONE copy (the A-5 defect: every failure wears the unreachable copy)",
+      "file": "frontend/src/app/models/metrics.model.ts",
+      "kind": "jest",
+      "red_exit": 1,
+      "green_exit": 0,
+      "red_nodes": [],
+      "restored_byte_identical": true,
+      "extra_red_expected": [
+        "the page pack (the shell banners branch on the same decoder)"
+      ],
+      "status": "PASS",
+      "detail": "",
+      "log": "/tmp/metrics-fe-mutations/FIX2-A5.log"
+    }
+  ],
+  "failures": 0,
+  "total": 13,
+  "manifest": "/tmp/metrics-fe-mutations/pre_run_manifest.json",
+  "head": "cd06d2a0bc7879a4ee7f64351404bfe8717f9200"
+}
