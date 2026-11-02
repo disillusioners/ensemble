@@ -420,12 +420,9 @@ class PlaneHttpClient:
         self._timeout = timeout if timeout is not None else self.DEFAULT_TIMEOUT_S
 
         if not resolution.allowed:
-            self._inert_reason = (
+            self._make_inert(
                 resolution.reason or "workspace resolution refused"
             )
-            self._base_url = None
-            self._api_key = ""
-            self._workspace_slug = ""
             return
 
         resolved_slug = resolution.slug or ""
@@ -434,13 +431,10 @@ class PlaneHttpClient:
         # path — the header would then disagree with the URL.
         embedded = _base_url_workspace_slug(base_url)
         if embedded is not None and embedded != resolved_slug:
-            self._inert_reason = (
+            self._make_inert(
                 f"explicit base URL targets workspace '{embedded}' but the "
                 f"resolver permits '{resolved_slug}'"
             )
-            self._base_url = None
-            self._api_key = ""
-            self._workspace_slug = ""
             return
 
         self._base_url = base_url if base_url is not None else _rest_base_url(resolution)
@@ -450,6 +444,18 @@ class PlaneHttpClient:
         # client (not even a normalization side-channel: the parameter is
         # simply never consulted; the RESOLVED slug is the only authority).
         self._workspace_slug = resolved_slug
+
+    def _make_inert(self, reason: str) -> None:
+        """Put the client in the INERT state (P2-D) — no request can be issued.
+
+        Both inert paths (a REFUSED workspace resolution and an explicit
+        base URL that targets a DIFFERENT workspace) blank the request
+        surface identically; only the typed reason differs.
+        """
+        self._inert_reason = reason
+        self._base_url = None
+        self._api_key = ""
+        self._workspace_slug = ""
 
     def _base_url_error(self) -> str:
         """The error message for a client that cannot issue requests."""
