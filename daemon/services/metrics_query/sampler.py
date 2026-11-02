@@ -42,6 +42,26 @@ logger = logging.getLogger(__name__)
 PullAdapter = Callable[["MetricsSampler"], None]
 
 
+def _default_adapters() -> tuple[PullAdapter, ...]:
+    """The P4 pull adapters (the wiring module's registry).
+
+    The import is LAZY and inside a guard: the wiring package imports
+    the metrics substrate, so a module-level import here would be a
+    cycle.  A wiring import failure degrades to "no adapters" — the
+    sampler still runs, the ring stays empty, and the daemon continues.
+    """
+    try:
+        from daemon.services.metrics_query.wiring import default_adapters
+
+        return tuple(default_adapters())
+    except Exception:  # noqa: BLE001 — the ring degrades, the tick survives
+        logger.warning(
+            "metrics trend sampler: the pull-adapter wiring is unavailable",
+            exc_info=True,
+        )
+        return ()
+
+
 class MetricsSampler:
     """The sampler thread — it fills the trend rings."""
 
@@ -50,7 +70,7 @@ class MetricsSampler:
         *,
         ring: TrendRingStore,
         interval_s: float = 10.0,
-        adapters: Iterable[PullAdapter] = (),
+        adapters: Iterable[PullAdapter] | None = None,
         metrics_provider: Callable[[], list[Any]] | None = None,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
@@ -58,7 +78,9 @@ class MetricsSampler:
     ) -> None:
         self._ring = ring
         self._interval_s = float(interval_s)
-        self._adapters: list[PullAdapter] = list(adapters)
+        self._adapters: list[PullAdapter] = list(
+            _default_adapters() if adapters is None else adapters
+        )
         self._metrics_provider = metrics_provider or cm.registered_metrics
         self._clock = clock
         self._wall_clock = wall_clock

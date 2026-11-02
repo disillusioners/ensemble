@@ -65,6 +65,46 @@ logger = logging.getLogger(__name__)
 CHECKPOINT_ADAPTER_APPLICATION_NAME = "ensemble-checkpoint-adapter"
 
 
+# ── the F7 saver-op bytes observation (central-metrics-v1 P4) ─────────────
+#
+# The F7 bytes histogram (``ensemble_checkpoint_op_bytes{op}``) is a
+# REUSE observation of the saver-op seam: the byte count is measured
+# ONCE, at the EXISTING observe point, from the payload the read
+# actually returned.  Before this, the hot path forwarded ``bytes_=0``
+# and the histogram was permanently under-reported.
+#
+# THE MEASURE IS THE HOUSE'S OWN
+# ------------------------------
+# ``bounded_deep_size`` is the bounded, memoised deep-size walk the
+# resource-charge seam and the read-instrumentation family (F7b) both
+# use — so the F7 bytes histogram and the F7b read-size histogram report
+# the SAME number for the same read.
+#
+# FAIL-SOFT, ALWAYS
+# -----------------
+# The metrics layer may be unwired (a test, a partial boot).  The
+# import is lazy and every step is guarded: a metrics problem NEVER
+# breaks a read.
+
+
+def _observe_saver_op_bytes(op: str, state: Any) -> None:
+    """Record the saver-op payload size on the F7 bytes histogram."""
+    try:
+        from daemon.services.metrics_query.wiring.w2 import checkpoint_op_bytes
+    except Exception:  # noqa: BLE001 — the metrics layer is optional
+        return
+    try:
+        from daemon.services.resource_monitor.charge import bounded_deep_size
+
+        size, _nodes, _partial = bounded_deep_size(state)
+    except Exception:  # noqa: BLE001 — a failed walk records nothing
+        return
+    try:
+        checkpoint_op_bytes.labels(op=op).observe(float(size))
+    except Exception:  # noqa: BLE001 — a metrics problem never breaks a read
+        return
+
+
 # ── row_absent WARNING emission gate (Phase-5 review fix F7) ─────────────────
 #
 # The ``row_absent`` WARNING in :func:`get_instance_messages` fires when the
@@ -630,6 +670,15 @@ async def get_instance_messages(
 
     # Get the current state from async checkpointer
     state = await time_saver_op("aget", instance_id, saver.aget(config))
+    # F7 completion (central-metrics-v1 P4) — the saver-op seam gains a
+    # REAL byte count.  The bytes histogram used to be permanently
+    # under-reported: the hot path forwarded ``bytes_=0``.  The size is
+    # the HOUSE's bounded deep-size measure — the same number the
+    # read-instrumentation family (F7b) records — so the two families
+    # agree.  This is the EXISTING observe point (no new observe site);
+    # the only cost is the one bounded walk the read already pays for
+    # its own instrumentation.
+    _observe_saver_op_bytes("aget", state)
     if state is None:
         return []
 
