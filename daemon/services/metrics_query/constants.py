@@ -45,6 +45,15 @@ DEFAULT_MAX_POINTS: int = 240
 #: encode is bounded at 240 x 50 = 12 000 points ≈ 3.6 ms).
 MAX_NAMES: int = 50
 
+#: The hard ceiling of the ``?max_points=`` a single request may ask
+#: for.  The DEFAULT (:data:`DEFAULT_MAX_POINTS`) and this CEILING are
+#: the SAME number by construction: the residual on-loop encode is
+#: bounded at ``MAX_POINTS_CEILING x MAX_NAMES`` = 240 x 50 = 12 000
+#: points ≈ 3.6 ms (AM-12), so a request ABOVE the ceiling is CLAMPED
+#: down to it — never honoured.  (The clamp is the bound's enforcement:
+#: a caller may not widen the daemon's own budget.)
+MAX_POINTS_CEILING: int = 240
+
 #: The hard ceiling of the families a single ``/families`` response
 #: carries.
 MAX_FAMILIES: int = 500

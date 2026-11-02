@@ -342,7 +342,11 @@ class TestScopeManifestCage:
         routes (GET "" (list), GET /status, POST /capture, GET
         /{capture_id} — every one @require_scope decorated) + the 1
         /api/metrics route (GET "" — the metric registry surface, now
-        scope-decorated with ``maintenance:read``) = 108
+        scope-decorated with ``maintenance:read``) + the 3
+        central-metrics-v1 QUERY routes (GET /api/metrics/families,
+        GET /api/metrics/snapshot, GET /api/metrics/series — the ONE
+        query door, each carrying the SAME ``maintenance:read`` scope
+        the family already declares) = 111
         declared routes. A drift is a decoration added/removed without
         a manifest row change.
 
@@ -383,6 +387,17 @@ class TestScopeManifestCage:
         M-1 (review gate) added ONE decorated route under /api/metrics
         (GET "" — the metric registry surface, now carrying
         ``maintenance:read``), growing the cage count 107 → 108.
+
+        central-metrics-v1 (P3) added THREE decorated routes under the
+        SAME /api/metrics family (GET /families, GET /snapshot,
+        GET /series — the one query door; NO new router module, NO new
+        mount, NO new scope — each carries the family's existing
+        ``maintenance:read``), growing the cage count 108 → 111. The
+        MOUNT census stays 37 (the family extends an existing mount)
+        and the CLASS-manifest family count stays 33 (the family is
+        already pinned as protected-default) — the three-way cage form
+        (declared-route 111 · mount 37 · class manifest 33) is pinned
+        by the P3 scope-cage pack.
         """
         declared = [
             r
@@ -391,8 +406,8 @@ class TestScopeManifestCage:
             and getattr(r, "path", "").startswith("/api/")
             and _route_required_scopes(r) is not None
         ]
-        assert len(declared) == 108, (
-            f"declared-route census drifted: {len(declared)} (pinned 108)"
+        assert len(declared) == 111, (
+            f"declared-route census drifted: {len(declared)} (pinned 111)"
         )
 
     def test_manifest_entries_valid(self):

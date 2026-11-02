@@ -371,5 +371,17 @@ class RegistryMetricsQueryProvider:
             return None
         return self._ring.newest_timestamp()
 
+    def oldest_sample_timestamp(self) -> int | None:
+        """The OLDEST ring sample's timestamp (``None`` when empty).
+
+        The cursor's EXPIRY probe: a cursor whose pinned evaluation
+        instant predates the buffer's oldest sample can no longer be
+        resumed faithfully, so it is refused (``400 invalid_cursor``)
+        rather than silently answered with a gap.
+        """
+        if self._ring is None:
+            return None
+        return self._ring.oldest_timestamp()
+
 
 __all__ = ["InvalidLabelFilter", "RegistryMetricsQueryProvider"]

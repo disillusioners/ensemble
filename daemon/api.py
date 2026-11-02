@@ -2482,6 +2482,70 @@ async def lifespan(app: FastAPI):
             exc_info=True,
         )
 
+    # ── Metrics query provider + trend sampler (central-metrics-v1 P3) ──
+    # The query door's READ SUBSTRATE + the cadence-driven sampler that
+    # fills the in-RAM trend rings the ``/series`` route serves.
+    #
+    # START ORDER (AM-13 — load-bearing): the metrics listener starts
+    # FIRST, the census block runs SECOND, and the sampler starts LAST of
+    # the trio.  The census PUBLISHES into the registry, so the sampler
+    # must see a settled registry; the listener must never wait on
+    # either.  The inverse holds at shutdown: the sampler stops FIRST.
+    #
+    # The provider is NOT a ``/readyz`` component (AM-24): the
+    # readiness composite is parsed by the soak-gate grace discipline and
+    # the query door must not grow that surface.
+    #
+    # DEGRADATION: a construction/start failure disables the sampler and
+    # logs it — the daemon CONTINUES (the census/listener blocks above
+    # are the pattern).
+    try:
+        from daemon import checkpoint_metrics as _cm_boot
+        from daemon.services.metrics_query import (
+            MetricsSampler,
+            RegistryMetricsQueryProvider,
+            TrendRingStore,
+        )
+
+        _metrics_sampler_interval_s = float(
+            getattr(config.limits, "metrics_sampler_interval_s", 10) or 10
+        )
+        # The OBSERVED effective spacing (max(sampler, publisher)) — the
+        # ring's depth divisor and the envelope's ``interval_s`` share it.
+        try:
+            _metrics_effective_interval_s = max(
+                _metrics_sampler_interval_s, float(_cm_boot.publisher_cadence())
+            )
+        except Exception:  # noqa: BLE001 — the default is the fallback
+            _metrics_effective_interval_s = max(
+                _metrics_sampler_interval_s,
+                float(_cm_boot.DEFAULT_PUBLISHER_CADENCE_SECONDS),
+            )
+        _metrics_ring = TrendRingStore(
+            effective_interval_s=_metrics_effective_interval_s,
+        )
+        _metrics_query_provider = RegistryMetricsQueryProvider(
+            census=app.state.metrics_census,
+            ring=_metrics_ring,
+            listener_enabled=app.state.metrics_listener is not None,
+            sampler_interval_s=_metrics_sampler_interval_s,
+        )
+        app.state.metrics_query = _metrics_query_provider
+        _metrics_sampler = MetricsSampler(
+            ring=_metrics_ring,
+            interval_s=_metrics_sampler_interval_s,
+        )
+        _metrics_sampler.start()
+        app.state.metrics_sampler = _metrics_sampler
+    except Exception as metrics_query_boot_exc:
+        app.state.metrics_query = None
+        app.state.metrics_sampler = None
+        logger.error(
+            "[Metrics] query provider/sampler DISABLED — boot failed: %s",
+            metrics_query_boot_exc,
+            exc_info=True,
+        )
+
     # Registry providers (metrics-collection P0 T5): the publisher
     # cadence and the HARD cardinality cap are LIVE managed keys (plan
     # §5: "No (per-request)"; §13's back-out relies on "raise the cap …
@@ -3690,6 +3754,24 @@ async def lifespan(app: FastAPI):
                 wedge_join_exc,
             )
     app.state.wedge_capture_watchdog = None
+
+    # ── Metrics trend sampler stop (central-metrics-v1 P3) ─────────────
+    # Drain order: the sampler stops FIRST — it is the LAST thing that
+    # STARTS (AM-13), so it is the FIRST thing that stops.  Its own
+    # ``stop()`` is DETACHED (a stop event on a daemon thread) — the
+    # event loop is NEVER blocked on a join (the house precedent: the
+    # listener stop block below).
+    _metrics_sampler = getattr(app.state, "metrics_sampler", None)
+    if _metrics_sampler is not None:
+        try:
+            _metrics_sampler.stop()
+        except Exception as metrics_sampler_stop_exc:  # noqa: BLE001
+            logger.warning(
+                "[Metrics] trend sampler stop failed: %s",
+                metrics_sampler_stop_exc,
+            )
+    app.state.metrics_sampler = None
+    app.state.metrics_query = None
 
     # ── Metrics exposition listener stop (metrics-collection P0 T1) ─────
     # Drain order: AFTER the resource-monitor stop and the wedge-capture

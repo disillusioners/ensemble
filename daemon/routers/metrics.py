@@ -50,6 +50,10 @@ metric is read — the same shape the prompts family uses.
 
 from __future__ import annotations
 
+import json
+import time
+from typing import Any
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
@@ -136,6 +140,456 @@ async def get_metrics(request: Request) -> PlainTextResponse:
     """
     _require_auth_on(request)
     return PlainTextResponse(content=render_metrics(), media_type=METRICS_MEDIA_TYPE)
+
+
+# ── the query door (central-metrics-v1, phase 3) ───────────────────────────
+#
+# ONE door, THREE routes, ONE provider (decisions.md D4 — Option A):
+#
+# * ``GET /api/metrics/families`` — the family catalog AS SERVED;
+# * ``GET /api/metrics/snapshot`` — the current published values;
+# * ``GET /api/metrics/series``   — the windowed trend.
+#
+# The routes EXTEND the existing family — no new router module, no new
+# mount, no new scope (the family's EXISTING ``maintenance:read``).
+#
+# POSTURE (the contract's truth table — docs/architecture/
+# metrics-query-contract.md §6):
+#
+# * the SAME fail-closed ``_require_auth_on`` seam runs BEFORE any
+#   provider read: an auth-OFF deployment answers 503
+#   AUTH_NOT_CONFIGURED and never reads the registry;
+# * the door is NEVER switch-gated (AM-17/AM-18).  The kill-switch's
+#   emergency-off lever for THIS surface is TOKEN REVOCATION of the
+#   ``maintenance:read`` grant — not the switch.  The query package
+#   never reads the switch (the ``census_gated`` reason comes from the
+#   public ``CensusSampler.gated`` property);
+# * the response BODY is BUILT off the event loop (``db_offload.offload``
+#   — the ``/api/work`` precedent).  AM-12 is BUILD-OFF-LOOP ONLY: the
+#   offload returns a Python object and FastAPI still ENCODES it on the
+#   loop, so the residual encode is BOUNDED and PINNED — ``max_points``
+#   ≤ 240 × the selector ceiling ≤ 50 ⇒ ≤ 12 000 points ≈ 3.6 ms.
+
+#: The error vocabulary of the query door (the contract's closed set).
+_ERR_UNKNOWN_FAMILY = "unknown_family"
+_ERR_INVALID_LABEL_FILTER = "invalid_label_filter"
+_ERR_INVALID_CURSOR = "invalid_cursor"
+_ERR_REGISTRY_UNAVAILABLE = "registry_unavailable"
+
+#: The cursor payload's shape version (the token is opaque to callers;
+#: the version lets the daemon evolve the payload without confusing an
+#: old token with a new one).
+_CURSOR_VERSION = 1
+
+
+class _UnknownFamily(LookupError):
+    """A requested ``?family=`` is not registered (→ 404 unknown_family)."""
+
+
+def _query_provider(request: Request) -> Any:
+    """The provider the door serves from (``app.state.metrics_query``).
+
+    Its ABSENCE is the "registry unavailable" condition (503) — the
+    lifespan stores it there at boot, so an unwired deployment answers
+    a typed 503 instead of a 500.
+    """
+    provider = getattr(getattr(request.app, "state", None), "metrics_query", None)
+    if provider is None:
+        raise _err(
+            503,
+            _ERR_REGISTRY_UNAVAILABLE,
+            "The metrics query provider is not available",
+        )
+    return provider
+
+
+def _oldest_sample_timestamp(provider: Any) -> int | None:
+    """The provider's OLDEST buffered sample (``None`` when unknown)."""
+    getter = getattr(provider, "oldest_sample_timestamp", None)
+    if getter is None:
+        return None
+    try:
+        value = getter()
+    except Exception:  # pragma: no cover — a broken provider never 500s the door
+        return None
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):  # pragma: no cover
+        return None
+
+
+def _cursor_state(request: Request, provider: Any) -> dict[str, Any]:
+    """Decode ``?cursor=`` into ``{"offset": int, "instant": int | None}``.
+
+    An INVALID or EXPIRED cursor is an EXPECTED condition: it is a
+    typed ``400 invalid_cursor`` — never a 500, and never a silently
+    answered gap.
+    """
+    raw = request.query_params.get("cursor")
+    if raw is None or not str(raw).strip():
+        return {"offset": 0, "instant": None}
+    from daemon.services.metrics_query.envelope import (
+        InvalidCursor,
+        decode_cursor,
+    )
+
+    try:
+        cursor = decode_cursor(str(raw))
+    except InvalidCursor as exc:
+        raise _err(400, _ERR_INVALID_CURSOR, str(exc)) from exc
+    instant = cursor.get("t")
+    if not isinstance(instant, int) or isinstance(instant, bool):
+        raise _err(
+            400, _ERR_INVALID_CURSOR, "The cursor carries no evaluation instant"
+        )
+    offset = cursor.get("o", 0)
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        raise _err(400, _ERR_INVALID_CURSOR, "The cursor carries an invalid position")
+    oldest = _oldest_sample_timestamp(provider)
+    if oldest is not None and instant < oldest:
+        raise _err(400, _ERR_INVALID_CURSOR, "The cursor has expired")
+    return {"offset": offset, "instant": instant}
+
+
+def _encoded_size(payload: Any) -> int:
+    """The encoded byte size of a payload (the byte-ceiling probe)."""
+    try:
+        return len(
+            json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8")
+        )
+    except (TypeError, ValueError):  # pragma: no cover — defensive
+        return 0
+
+
+def _trim_to_ceiling(envelope: dict[str, Any], *, key: str, items: list[Any]) -> list[Any]:
+    """Trim ``items`` until the encoded body fits the byte ceiling.
+
+    The trim is a BOUND, never a silent truncation: the caller mints
+    the cursor that resumes exactly where the trim stopped.
+    """
+    from daemon.services.metrics_query.constants import RESPONSE_BYTE_CEILING
+
+    low, high, best = 0, len(items), 0
+    while low <= high:
+        mid = (low + high) // 2
+        if _encoded_size({**envelope, key: items[:mid]}) <= RESPONSE_BYTE_CEILING:
+            best = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+    return items[:best]
+
+
+def _bound_page(
+    envelope: dict[str, Any],
+    *,
+    key: str,
+    offset: int,
+    instant: int,
+    more: bool,
+) -> dict[str, Any]:
+    """Apply the byte ceiling and mint the continuation cursor.
+
+    A bounded body is never SILENTLY truncated: it carries the opaque
+    ``next_cursor`` that resumes it (AM-6).
+    """
+    from daemon.services.metrics_query.constants import RESPONSE_BYTE_CEILING
+    from daemon.services.metrics_query.envelope import encode_cursor
+
+    items = list(envelope.get(key) or [])
+    truncated = bool(envelope.get("truncated"))
+    if offset > 0:
+        truncated = True
+    kept = items
+    if _encoded_size(envelope) > RESPONSE_BYTE_CEILING:
+        kept = _trim_to_ceiling(envelope, key=key, items=items)
+    if len(kept) < len(items):
+        truncated = True
+        more = True
+    envelope[key] = kept
+    envelope["truncated"] = truncated
+    if more:
+        envelope["next_cursor"] = encode_cursor(
+            {"v": _CURSOR_VERSION, "t": int(instant), "o": offset + len(kept)}
+        )
+    else:
+        envelope.pop("next_cursor", None)
+    return envelope
+
+
+def _selectors(request: Request, *keys: str) -> list[str]:
+    """The raw selector values of the given query parameters.
+
+    Both the REPEATED form (``?names=a&names=b``) and the COMMA-SEPARATED
+    form (``?names=a,b``) are accepted — the comma form is what a browser
+    address bar produces.
+    """
+    out: list[str] = []
+    for key in keys:
+        for raw in request.query_params.getlist(key):
+            for piece in str(raw).split(","):
+                piece = piece.strip()
+                if piece:
+                    out.append(piece)
+    return out
+
+
+async def _build_off_loop(fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """Build the response body OFF the event loop (AM-12).
+
+    The offload is the ``/api/work`` precedent (``db_offload.offload``).
+    The claim is BUILD-OFF-LOOP ONLY — the offload returns a Python
+    object and FastAPI still encodes it on the loop; the residual is
+    bounded by the ``max_points``/selector ceilings.
+    """
+    from daemon.services.db_offload import offload as _offload
+
+    return await _offload(fn, *args, **kwargs)
+
+
+def _build_families_page(provider: Any, *, offset: int) -> dict[str, Any]:
+    """The ``/families`` page (built off the loop)."""
+    from daemon.services.metrics_query.envelope import build_families_envelope
+
+    return build_families_envelope(provider, offset=offset)
+
+
+def _build_snapshot_page(
+    provider: Any, *, family: str | None, name_prefix: str | None
+) -> dict[str, Any]:
+    """The ``/snapshot`` page (built off the loop).
+
+    An UNKNOWN ``?family=`` is a typed 404 (the contract's error
+    vocabulary) — never an empty 200 that reads like "no observations".
+    """
+    from daemon.services.metrics_query.envelope import build_snapshot_envelope
+
+    if family is not None:
+        known = {entry.get("id") for entry in provider.families()}
+        if family not in known:
+            raise _UnknownFamily(family)
+    return build_snapshot_envelope(provider, family=family, name_prefix=name_prefix)
+
+
+def _build_series_page(
+    provider: Any,
+    *,
+    names: list[str] | None,
+    series: list[str] | None,
+    window_s: int | None,
+    max_points: int,
+    instant: int,
+    offset: int,
+) -> dict[str, Any]:
+    """The ``/series`` page (built off the loop)."""
+    from daemon.services.metrics_query.envelope import build_series_envelope
+
+    return build_series_envelope(
+        provider,
+        names=names,
+        series=series,
+        window_s=window_s,
+        max_points=max_points,
+        now=instant,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/families",
+    dependencies=[scope_required(_SCOPE_READ)],
+    responses={
+        200: {"description": "The registered metric families, as served."},
+        401: {"description": "Auth is ON and the caller is unauthenticated."},
+        403: {"description": "The caller lacks the ``maintenance:read`` scope."},
+        503: {
+            "description": (
+                "Auth is OFF (fail-closed) or the query provider is "
+                "unavailable."
+            )
+        },
+    },
+)
+async def get_metrics_families(request: Request) -> dict[str, Any]:
+    """``GET /api/metrics/families`` — the family catalog AS SERVED.
+
+    The catalog is DERIVED FROM THE REGISTRY (the registered objects +
+    their registration-time family metadata) — there is no second family
+    table, so a newly wired family is discoverable without a door edit.
+
+    Raises:
+        HTTPException: ``503 AUTH_NOT_CONFIGURED`` when auth is OFF
+            (the fail-closed gate fires BEFORE any provider read);
+            ``503 registry_unavailable`` when the provider is not wired.
+    """
+    _require_auth_on(request)
+    provider = _query_provider(request)
+    cursor = _cursor_state(request, provider)
+    offset = cursor["offset"]
+    instant = cursor["instant"] if cursor["instant"] is not None else int(time.time())
+    envelope = await _build_off_loop(_build_families_page, provider, offset=offset)
+    return _bound_page(
+        envelope, key="families", offset=offset, instant=instant, more=bool(
+            envelope.get("truncated")
+        )
+    )
+
+
+@router.get(
+    "/snapshot",
+    dependencies=[scope_required(_SCOPE_READ)],
+    responses={
+        200: {"description": "The current published values."},
+        400: {"description": "The requested filters are invalid."},
+        401: {"description": "Auth is ON and the caller is unauthenticated."},
+        403: {"description": "The caller lacks the ``maintenance:read`` scope."},
+        404: {"description": "The requested family is not registered."},
+        503: {
+            "description": (
+                "Auth is OFF (fail-closed) or the query provider is "
+                "unavailable."
+            )
+        },
+    },
+)
+async def get_metrics_snapshot(
+    request: Request,
+) -> dict[str, Any]:
+    """``GET /api/metrics/snapshot`` — the current published values.
+
+    Staleness is EXPLICIT metadata (``last_publish_age_s``), never a
+    silently stale number.
+
+    Raises:
+        HTTPException: ``503 AUTH_NOT_CONFIGURED`` (auth OFF — before any
+            provider read); ``404 unknown_family`` for an unregistered
+            ``?family=``; ``503 registry_unavailable`` when unwired.
+    """
+    _require_auth_on(request)
+    provider = _query_provider(request)
+    family = request.query_params.get("family") or None
+    name_prefix = request.query_params.get("name_prefix") or None
+    try:
+        envelope = await _build_off_loop(
+            _build_snapshot_page, provider, family=family, name_prefix=name_prefix
+        )
+    except _UnknownFamily as exc:
+        raise _err(
+            404, _ERR_UNKNOWN_FAMILY, f"No such metric family: {exc.args[0]}"
+        ) from exc
+    return envelope
+
+
+@router.get(
+    "/series",
+    dependencies=[scope_required(_SCOPE_READ)],
+    responses={
+        200: {"description": "The windowed trend series."},
+        400: {"description": "The selector or the cursor is invalid."},
+        401: {"description": "Auth is ON and the caller is unauthenticated."},
+        403: {"description": "The caller lacks the ``maintenance:read`` scope."},
+        503: {
+            "description": (
+                "Auth is OFF (fail-closed) or the query provider is "
+                "unavailable."
+            )
+        },
+    },
+)
+async def get_metrics_series(request: Request) -> dict[str, Any]:
+    """``GET /api/metrics/series`` — the windowed trend.
+
+    ``?series=`` is the LABEL-AWARE selector (``<name>{<k>=<v>,…}``) and
+    ``?names=`` is NAME-level (every label variant).  ``?max_points=`` is
+    the server-side bucket-max downsample; it is CLAMPED to the
+    ``max_points`` ceiling so the residual on-loop encode stays bounded.
+
+    Raises:
+        HTTPException: ``503 AUTH_NOT_CONFIGURED`` (auth OFF — before any
+            provider read); ``400 invalid_label_filter`` for a malformed
+            or over-ceiling selector; ``400 invalid_cursor`` for an
+            invalid or expired cursor; ``503 registry_unavailable`` when
+            unwired.
+    """
+    _require_auth_on(request)
+    provider = _query_provider(request)
+    from daemon.services.metrics_query.constants import (
+        DEFAULT_MAX_POINTS,
+        MAX_NAMES,
+        MAX_POINTS_CEILING,
+        WINDOW_SECONDS,
+    )
+    from daemon.services.metrics_query.selectors import (
+        InvalidLabelFilter,
+        parse_series_selector,
+    )
+
+    names = _selectors(request, "names")
+    series = _selectors(request, "series")
+    # The selector ceiling bounds the residual on-loop encode
+    # (max_points × selectors ≤ 240 × 50 = 12 000 points ≈ 3.6 ms).
+    # An over-ceiling request is REJECTED, never silently truncated.
+    if len(set(names)) + len(series) > MAX_NAMES:
+        raise _err(
+            400,
+            _ERR_INVALID_LABEL_FILTER,
+            f"at most {MAX_NAMES} selectors may be requested",
+        )
+    for selector in series:
+        try:
+            parse_series_selector(selector)
+        except InvalidLabelFilter as exc:
+            raise _err(400, _ERR_INVALID_LABEL_FILTER, str(exc)) from exc
+
+    window_raw = request.query_params.get("window_s")
+    window_s: int | None = None
+    if window_raw is not None and str(window_raw).strip():
+        try:
+            window_s = int(str(window_raw).strip())
+        except ValueError as exc:
+            raise _err(
+                400, _ERR_INVALID_LABEL_FILTER, "window_s must be an integer"
+            ) from exc
+        window_s = max(1, min(window_s, WINDOW_SECONDS))
+
+    max_raw = request.query_params.get("max_points")
+    max_points = DEFAULT_MAX_POINTS
+    if max_raw is not None and str(max_raw).strip():
+        try:
+            requested = int(str(max_raw).strip())
+        except ValueError as exc:
+            raise _err(
+                400, _ERR_INVALID_LABEL_FILTER, "max_points must be an integer"
+            ) from exc
+        if requested < 1:
+            raise _err(
+                400, _ERR_INVALID_LABEL_FILTER, "max_points must be positive"
+            )
+        # CLAMPED, never honoured above the ceiling — the encode bound
+        # is the daemon's own budget, not the caller's to widen.
+        max_points = min(requested, MAX_POINTS_CEILING)
+
+    cursor = _cursor_state(request, provider)
+    offset = cursor["offset"]
+    instant = cursor["instant"] if cursor["instant"] is not None else int(time.time())
+    try:
+        envelope = await _build_off_loop(
+            _build_series_page,
+            provider,
+            names=names or None,
+            series=series or None,
+            window_s=window_s,
+            max_points=max_points,
+            instant=instant,
+            offset=offset,
+        )
+    except InvalidLabelFilter as exc:
+        raise _err(400, _ERR_INVALID_LABEL_FILTER, str(exc)) from exc
+    return _bound_page(
+        envelope, key="series", offset=offset, instant=instant, more=False
+    )
 
 
 __all__ = ["METRICS_MEDIA_TYPE", "router"]

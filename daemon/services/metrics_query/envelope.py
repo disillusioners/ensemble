@@ -75,14 +75,23 @@ def build_families_envelope(
     provider: MetricsQueryProvider,
     *,
     limit: int = MAX_FAMILIES,
+    offset: int = 0,
 ) -> dict[str, Any]:
-    """The ``/families`` envelope."""
+    """The ``/families`` envelope.
+
+    ``offset`` resumes a PAGE (AM-6): the cursor pins the position, so a
+    bounded response is never SILENTLY truncated — the caller resumes
+    where the previous page stopped.  ``truncated`` means "more families
+    remain AFTER this page" (the cursor's continuation condition).
+    """
     families = list(provider.families())
-    truncated = len(families) > limit
+    total = len(families)
+    start = max(0, int(offset))
+    page = families[start : start + limit]
     return {
         **envelope_header(provider),
-        "families": families[:limit],
-        "truncated": truncated,
+        "families": page,
+        "truncated": start + len(page) < total,
     }
 
 
@@ -124,6 +133,7 @@ def build_series_envelope(
     window_s: int | None = None,
     max_points: int | None = None,
     now: int | None = None,
+    offset: int = 0,
 ) -> dict[str, Any]:
     """The ``/series`` envelope (the trend view).
 
@@ -131,6 +141,8 @@ def build_series_envelope(
     pins a different evaluation instant.  ``stale`` is true when the
     newest sample is older than 3x the effective interval — a wedged
     sampler surfaces as STALENESS, never a silently frozen line.
+
+    ``offset`` resumes a PAGE (AM-6) over the returned series list.
     """
     window = int(window_s) if window_s else WINDOW_SECONDS
     window = max(1, min(window, WINDOW_SECONDS))
@@ -139,6 +151,8 @@ def build_series_envelope(
     payload = provider.history(
         names=names, series=series, window_s=window, max_points=limit, now=instant
     )
+    start = max(0, int(offset))
+    page = payload[start:]
     interval = effective_interval_s(provider)
     age = _provider_float(provider, "last_sample_age_s", 0.0)
     return {
@@ -151,7 +165,7 @@ def build_series_envelope(
         },
         "last_sample_age_s": age,
         "stale": age > STALE_INTERVAL_MULTIPLIER * interval,
-        "series": payload,
+        "series": page,
     }
 
 
