@@ -232,18 +232,45 @@ REBASELINED_DELTA_SITES = (
     ),
 )
 
-#: The TWO family-F sites — audited-clean one-shot psycopg.connect
+#: The THREE family-F sites — audited-clean one-shot psycopg.connect
 #: calls (contract F5.3: closes in a finally, holds no pool, cannot
-#: leak). Named explicitly so a THIRD raw-psycopg borrow is a loud
+#: leak). Named explicitly so a FOURTH raw-psycopg borrow is a loud
 #: failure. Path-only (no line number): the line drifts with every
 #: upstream merge, and the pin's MEANING is "this file holds an
 #: audited raw-psycopg borrow" (the statement text is asserted
 #: separately). Site 2 (metrics_census.py) added by the 2026-10-29
 #: §7.3 re-baseline (WS-B, bf673fdbe) — benign on all four criteria;
 #: see the module docstring's re-baseline record.
+#:
+#: SITE 3 (central-metrics-v1, the lane's own DB-pull helper) — added
+#: 2026-11-02 (the Tier-2 gate's family-F drift 2 → 3).  The site is
+#: ``daemon/services/metrics_query/wiring/db.py:94`` — the metrics
+#: sampler's ONE-SHOT connect (``connect_once``), the AM-11 discipline
+#: the lane's own wiring package implements (one connection per tick,
+#: closed inside the tick, never a pool).  All four benign criteria
+#: hold, code-cited: **(i) NEVER POOLED** — a direct
+#: ``psycopg.connect`` at :94 taking a DSN STRING; the factory
+#: signature (:81-99) has NO pool/engine parameter at all, and the
+#: production wiring passes ``sources.dsn`` (a string from
+#: ``resolve_dsn(engine)``) with ``sources.db_connect`` (None in
+#: production → the default factory at :118) — no pool object anywhere
+#: in the path.  **(ii) BOUNDED** — ``connect_timeout=3`` s at :96
+#: (``CONNECT_TIMEOUT_S``) and ``statement_timeout=5000`` ms set at the
+#: site via ``options`` at :98 (``STATEMENT_TIMEOUT_MS``) — the AM-11
+#: budget.  **(iii) GUARANTEED CLOSED on every path** — the sole
+#: production caller is ``one_shot`` (:103-133): the connect sits in a
+#: ``try/except`` (:120-127) so a raising connect leaves NO connection
+#: to close, and the successful connection is closed in the
+#: ``finally:`` at :131-133 on every exit path; the seven adapter call
+#: sites use it as a context manager (``with db.one_shot(...) as
+#: conn:``).  **(iv) NEVER HANDED OUT** — ``conn`` is function-local;
+#: the adapters receive only the ROWS (``fetch_rows`` → a list), and
+#: the bundle stores the FACTORY callable (``db_connect``), never a
+#: connection.
 FAMILY_F_SITES = (
     "daemon/services/wedge_capture/db_capture.py",
     "daemon/services/metrics_census.py",
+    "daemon/services/metrics_query/wiring/db.py",
 )
 
 #: The §7.2 / §3.2 pattern cross-check constants.
