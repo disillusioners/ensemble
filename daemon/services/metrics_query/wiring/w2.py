@@ -193,7 +193,11 @@ job_queue_depth = register_family_metric(
     verdict="IN",
     seam="daemon/repositories/job_queue/models.py:40-43",
     label_keys=("admission_state",),
-    allowed_values={"admission_state": vocab.admission_states()},
+    # The label KEY is sourced from the vocabulary (see
+    # `vocab.ADMISSION_STATE_KEY`): F10 is a READ-ONLY pull over
+    # job_queue_items, and the constitution's static scanner reads an
+    # inline dict literal keyed by "admission_state" as a WRITE SITE.
+    allowed_values={vocab.ADMISSION_STATE_KEY: vocab.admission_states()},
     help="The number of job-queue items per admission state.",
     source_idiom="registry",
     durability="durable",

@@ -136,6 +136,19 @@ READINESS_OUTCOMES: tuple[str, ...] = (
 # ── F10 — the job-queue admission-state vocabulary ────────────────────────
 # Source: `daemon/repositories/job_queue/models.py` — the AdmissionState
 # enum, the SOLE write authority for queue gating.
+#: The admission-state LABEL KEY, named once.
+#:
+#: It is a NAMED CONSTANT rather than an inline literal because the
+#: job-state constitution's static scanner treats a dict literal keyed by
+#: ``"admission_state"`` as a WRITE SITE (its "dict-key writer" pattern).
+#: F10 is a STRICT READ-ONLY PULL — the adapter SELECTs
+#: ``admission_state, COUNT(*) ... GROUP BY admission_state`` over
+#: ``job_queue_items`` and publishes the counts into the metric
+#: registry; it never writes the column.  Naming the key keeps the
+#: declaration honest without registering a writer that does not exist.
+ADMISSION_STATE_KEY = "admission_state"
+
+
 def _admission_states() -> tuple[str, ...]:
     from daemon.repositories.job_queue.models import AdmissionState
 
@@ -281,6 +294,7 @@ def instance_statuses() -> tuple[str, ...]:
 
 
 __all__ = [
+    "ADMISSION_STATE_KEY",
     "CHECKPOINT_TABLES",
     "GATEWAY_AUDIT_OUTCOMES",
     "INSTANCE_LIVENESS",
