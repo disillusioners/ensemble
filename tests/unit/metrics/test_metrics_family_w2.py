@@ -176,12 +176,17 @@ class TestF7Completion:
         assert w2.checkpoint_op_bytes.get_count(op="aget") >= 1
         assert w2.checkpoint_op_bytes.get_sum(op="aget") > 0
 
-    def test_the_call_site_observes(self) -> None:
-        """The EXISTING observe point gains the real value."""
+    def test_the_call_site_observes_the_state(self) -> None:
+        """The EXISTING observe point gains the real value.
+
+        The pin is on the CALL FORM: the state the read returned must
+        reach the observation.  A call site reverted to a literal 0 (the
+        pre-P4 behaviour) is RED (the P4-M8 mutation).
+        """
         from daemon import persistence
 
         source = inspect.getsource(persistence.get_instance_messages)
-        assert "_observe_saver_op_bytes(" in source
+        assert '_observe_saver_op_bytes("aget", state)' in source
 
 
 class TestF8StoreSizes:
@@ -285,21 +290,26 @@ class TestF12Sweeps:
     """``metrics_family_f12`` — the sweep counters."""
 
     def test_the_counters_accumulate_across_ticks(self) -> None:
-        """P4-M3 — the accumulation removed must go RED."""
-        sweep = _FakeSweep({"ticks": 3, "fired_total": 2, "errors_total": 1})
+        """P4-M3 — the accumulation removed must go RED.
+
+        The pin is on the EXACT accumulated value: the first read is the
+        baseline (0), and the second read contributes the DELTA (5 - 3
+        = 2).  Publishing the per-tick values raw would give 3 + 5 = 8.
+        """
         wiring_sources.bind_sources(
-            wiring_sources.WiringSources(sweeps={"watch_reconcile": sweep})
+            wiring_sources.WiringSources(
+                sweeps={"watch_reconcile": _FakeSweep({"ticks": 3, "fired_total": 2, "errors_total": 1})}
+            )
         )
         w2.adapt_f12(None)
-        first = w2.sweep_cycles_total.get(lane="watch_reconcile")
+        assert w2.sweep_cycles_total.get(lane="watch_reconcile") == 0.0
         wiring_sources.bind_sources(
             wiring_sources.WiringSources(
                 sweeps={"watch_reconcile": _FakeSweep({"ticks": 5, "fired_total": 3, "errors_total": 1})}
             )
         )
         w2.adapt_f12(None)
-        second = w2.sweep_cycles_total.get(lane="watch_reconcile")
-        assert second > first
+        assert w2.sweep_cycles_total.get(lane="watch_reconcile") == 2.0
 
     def test_a_per_tick_producer_is_accumulated_too(self) -> None:
         """The C17 shape — a producer that RESETS each call."""

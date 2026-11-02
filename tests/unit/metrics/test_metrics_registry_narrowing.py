@@ -117,9 +117,29 @@ class TestRegistrationMetadata:
         assert counter.chart_role == "step"
 
     def test_the_pre_existing_registrations_carry_the_derived_defaults(self) -> None:
-        """The 18 pre-existing registrations are untouched (AM-3)."""
+        """The 18 pre-existing registrations are untouched (AM-3).
+
+        SCOPED (central-metrics-v1 P4 — a disclosed test edit): the
+        registry now ALSO carries the P4 extension families, and those
+        registrations DECLARE their metadata (AM-3) — the derived
+        defaults are the PRE-P4 registrations' premise, not the
+        extension subset's.  The scope is the P4 family set, so a new
+        pre-existing registration with an explicit family would still
+        be caught.
+        """
+        p4_families = set()
+        try:
+            from daemon.services.metrics_query.wiring.adjudication import (
+                REGISTERED_FAMILIES,
+            )
+
+            p4_families = set(REGISTERED_FAMILIES)
+        except Exception:  # noqa: BLE001 — the wiring module may be absent
+            p4_families = set()
         for metric in cm.registered_metrics():
             if metric.name.startswith("ensemble_narrowing_meta_"):
+                continue
+            if metric.family in p4_families:
                 continue
             assert metric.source_idiom == "registry"
             assert metric.durability == "process"

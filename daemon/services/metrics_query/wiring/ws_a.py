@@ -49,11 +49,15 @@ def _default_runner(argv: list[str]) -> int:
 
 def ws_a_ancestry_verdict(
     *,
-    repo: str = ".",
+    repo: str = "HEAD",
     commit: str = WS_A_COMMIT,
     runner: Callable[[list[str]], int] | None = None,
 ) -> tuple[str, int]:
     """The F0.3 gate verdict — ``(verdict, rc)``.
+
+    ``repo`` is a COMMIT-ISH (``HEAD`` by default) — NOT a path: the
+    ancestry probe compares two commits, and a path makes git fail with
+    128 (an unknown state, which the rc semantics map to STOP).
 
     ``runner`` is the injection seam (the pack drives it with a fake rc
     to prove the rc semantics; production uses ``git``).

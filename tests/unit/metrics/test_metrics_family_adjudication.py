@@ -177,9 +177,14 @@ class TestRegistrationStructure:
 
 class TestNoProducerInstrumentation:
     def test_the_daemon_diff_is_confined_to_the_allowed_files(self) -> None:
-        """P4-M2 — a new increment at a producer site must go RED."""
+        """P4-M2 — a new increment at a producer site must go RED.
+
+        The probe compares the lane's BASE to the WORKING TREE (the
+        two-dot form) — an uncommitted producer-site edit is exactly
+        the defect class this pin exists for.
+        """
         completed = subprocess.run(
-            ["git", "diff", "--name-only", f"{LANE_BASE}...HEAD"],
+            ["git", "diff", "--name-only", LANE_BASE],
             capture_output=True,
             text=True,
             check=False,
@@ -327,7 +332,7 @@ class TestWsAAncestryVerdict:
         assert rc == 128
 
     def test_the_live_verdict_is_recorded(self) -> None:
-        verdict, rc = ws_a.ws_a_ancestry_verdict(repo=".")
+        verdict, rc = ws_a.ws_a_ancestry_verdict(repo="HEAD")
         assert verdict in ("PASS", "DEFER", "STOP")
         assert rc in (0, 1) or verdict == "STOP"
 
