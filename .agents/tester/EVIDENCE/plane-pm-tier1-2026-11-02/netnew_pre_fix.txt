@@ -1,0 +1,3 @@
+tests/unit/test_project_manager_agent.py::TestConventionCompliance::test_no_forbidden_system_tokens[tools_note.md]
+tests/unit/test_project_manager_agent.py::TestToolAllowanceSecurity::test_all_allow_entries_resolve
+tests/unit/tools/test_mcp_quarantine_registry.py::test_quarantine_skips_plane_too

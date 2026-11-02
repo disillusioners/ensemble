@@ -103,24 +103,52 @@ def test_plane_override_consults_super_first():
 
     Without the ``super()`` call a quarantined plane would NOT be
     skipped (the whole registry consult lives in the base class).
+
+    Fold C5 (``plane-pm-issue-tools``): the plane availability ladder
+    now has ONE home — ``PlaneServerDefinition._gate_state`` — and
+    ``is_available`` reads it. The W-5 invariant therefore lives in the
+    LADDER: the ``super()`` consult must come before the plane's own
+    gates, AND ``is_available`` must route THROUGH the ladder (a
+    bypass would re-open the hole the consult closed).
     """
-    src = inspect.getsource(PlaneServerDefinition.is_available)
-    body = src.split('"""', 2)[-1]
+    ladder = inspect.getsource(PlaneServerDefinition._gate_state)
+    body = ladder.split('"""', 2)[-1]
     super_idx = body.find("super().is_available()")
     kill_idx = body.find("_mcp_kill_switch_enabled()")
-    assert super_idx != -1, "the plane override MUST call super().is_available()"
+    assert super_idx != -1, "the plane ladder MUST call super().is_available()"
     assert kill_idx != -1
     assert super_idx < kill_idx, (
         "the super() consult MUST come FIRST — otherwise the plane's own "
         "gates can return True for a quarantined server"
     )
+    # ...and the public entry point must not bypass the ladder.
+    entry = inspect.getsource(PlaneServerDefinition.is_available)
+    entry_body = entry.split('"""', 2)[-1]
+    assert "_gate_state" in entry_body, (
+        "is_available MUST route through the shared ladder — a bypass "
+        "re-opens the W-5 hole"
+    )
 
 
 def test_quarantine_skips_plane_too(monkeypatch):
-    """A quarantined plane is unavailable even with its own gates met."""
+    """A quarantined plane is unavailable even with its own gates met.
+
+    The workspace resolver (E3 gate, plane-pm-issue-tools) must permit the
+    configured slug, so the env below mirrors the plane lane's own
+    availability cases (ENSEMBLE_SELF_ENV=dev + e2e slug + ensemble_dev db)
+    before the quarantine is recorded. Without these the resolver refuses
+    and is_available() is False for the wrong reason.
+    """
+    from daemon.plane_workspace import reset_resolution_cache
+
     monkeypatch.setenv("PLANE_MCP_URL", "https://plane.example.com")
     monkeypatch.setenv("PLANE_MCP_API_KEY", "test-key")
     monkeypatch.delenv("PLANE_MCP_ENABLED", raising=False)
+    monkeypatch.setenv("ENSEMBLE_SELF_ENV", "dev")
+    monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", "e2e")
+    monkeypatch.setenv("POSTGRES_DB", "ensemble_dev")
+    monkeypatch.setenv("POSTGRES_HOST", "localhost")
+    reset_resolution_cache()
 
     definition = PlaneServerDefinition()
     assert definition.is_available() is True

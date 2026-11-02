@@ -39,6 +39,7 @@ import pytest
 from pydantic import ValidationError
 
 from daemon.mcp.builtin_servers.plane import PlaneServerDefinition
+from daemon.plane_workspace import normalize_workspace_slug
 from daemon.mcp.config import (
     McpConfigValidationError,
     McpSseConfig,
@@ -280,7 +281,20 @@ class TestQuotedSSRFNegativePin:
 
 
 class TestPlaneBuiltinEnvSanitization:
-    """Write-side healing: poisoned env must produce a clean base config."""
+    """Write-side healing: poisoned env must produce a clean base config.
+
+    BR-A remediation (lane ``plane-pm-issue-tools``): the quote-
+    sanitization assertions now follow the resolver's CANONICAL slug
+    normalization (P2-C) — the class-level fixture pins the environment
+    to LIVE so the ``nea`` slug is permitted (on a non-live environment
+    only ``e2e`` is; that refusal is pinned in
+    ``tests/unit/test_plane_workspace_enforcement.py``).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _pin_live_env(self, monkeypatch):
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", "live")
+        monkeypatch.setenv("POSTGRES_DB", "ensemble_prod")
 
     def test_get_base_config_sanitizes_poisoned_env(self, monkeypatch):
         monkeypatch.setenv("PLANE_MCP_URL", '"https://mcp.ensem.dev/plane/http/api-key/mcp"')
@@ -293,6 +307,13 @@ class TestPlaneBuiltinEnvSanitization:
         assert config["headers"]["Authorization"] == "Bearer plane_api_test_token"
         assert config["headers"]["x-workspace-slug"] == "nea"
 
+    def test_canonical_slug_normalization_lives_in_the_resolver(self, monkeypatch):
+        """P2-C pin re-point: the quote stripping for the workspace slug is
+        the RESOLVER's canonical normalization now — one implementation,
+        consumed by both lanes."""
+        assert normalize_workspace_slug('"nea"') == "nea"
+        assert normalize_workspace_slug(" 'e2e' ") == "e2e"
+
     def test_clean_env_unchanged(self, monkeypatch):
         monkeypatch.setenv("PLANE_MCP_URL", "https://mcp.ensem.dev/plane/http/api-key/mcp")
         monkeypatch.setenv("PLANE_MCP_API_KEY", "plane_api_test_token")
@@ -303,8 +324,9 @@ class TestPlaneBuiltinEnvSanitization:
         assert config["headers"]["x-workspace-slug"] == "nea"
 
     def test_schema_version_bumped_for_row_refresh(self):
-        """Schema drift (1→2) is the sanctioned poisoned-row refresh path."""
-        assert PlaneServerDefinition().schema_version == "2"
+        """Schema drift is the sanctioned poisoned-row refresh path
+        (1→2 quote-leak; 2→3 workspace scoping — E4)."""
+        assert PlaneServerDefinition().schema_version == "3"
 
 
 # The end-to-end harness: loopback MCP server speaking mcp.ensem.dev's

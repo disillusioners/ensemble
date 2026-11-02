@@ -371,6 +371,16 @@ class TestClientWireNameSanitized:
         client._request = AsyncMock(return_value={"id": "plane-1"})
         return client
 
+    @pytest.fixture(autouse=True)
+    def _pin_live_env(self, monkeypatch):
+        """BR-A remediation (G1 fold B7): the explicit ``workspace_slug="nea"``
+        collides with P2-D's constructor gate unless the resolver permits
+        ``nea`` — pin the environment to LIVE so the resolution matches the
+        fixture's explicit base URL (whose path also carries ``nea``)."""
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", "live")
+        monkeypatch.setenv("POSTGRES_DB", "ensemble_prod")
+        monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", "nea")
+
     @pytest.mark.asyncio
     async def test_create_payload_name_is_sanitized(self):
         client = self._client()

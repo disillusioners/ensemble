@@ -1,0 +1,2701 @@
+{
+  "artifact": "plane_catalog",
+  "capture": {
+    "credential_state": "accepted",
+    "env_file": "/home/nea/ensemble-src/.env",
+    "env_names_read": [
+      "PLANE_MCP_URL",
+      "PLANE_MCP_API_KEY",
+      "PLANE_MCP_WORKSPACE_SLUG"
+    ],
+    "initialize_http_status": 200,
+    "initialized_notification_http_status": 202,
+    "no_secrets": "no credential value appears in this file",
+    "probe": ".agents/shared/planning/plane-pm-issue-tools/probe_plane_mcp.py",
+    "server_info": {
+      "name": "Plane MCP Server (header-http)",
+      "protocolVersion": "2025-06-18",
+      "version": "3.2.0"
+    },
+    "tools_list_http_status": 200,
+    "verb": "tools/list",
+    "workspace_slug_used": "e2e"
+  },
+  "captured_at": "2026-11-02T08:12:00Z",
+  "catalog_source": "live-recapture",
+  "lane": "plane-pm-issue-tools",
+  "schema_token_total": 16264,
+  "schema_version": 1,
+  "sorted_names": [
+    "attach_page_to_work_item",
+    "complete_cycle",
+    "count_work_items",
+    "create_customer",
+    "create_customer_property",
+    "create_customer_request",
+    "create_cycle",
+    "create_initiative",
+    "create_intake_work_item",
+    "create_label",
+    "create_milestone",
+    "create_module",
+    "create_page",
+    "create_project",
+    "create_project_estimate",
+    "create_project_estimate_points",
+    "create_release",
+    "create_release_label",
+    "create_release_tag",
+    "create_state",
+    "create_work_item",
+    "create_work_item_comment",
+    "create_work_item_link",
+    "create_work_item_property",
+    "create_work_item_property_option",
+    "create_work_item_relation",
+    "create_work_item_relation_definition",
+    "create_work_item_type",
+    "create_work_log",
+    "delete_customer",
+    "delete_customer_property",
+    "delete_customer_request",
+    "delete_cycle",
+    "delete_initiative",
+    "delete_intake_work_item",
+    "delete_label",
+    "delete_milestone",
+    "delete_module",
+    "delete_project",
+    "delete_project_estimate",
+    "delete_project_estimate_point",
+    "delete_release",
+    "delete_release_label",
+    "delete_release_tag",
+    "delete_state",
+    "delete_work_item",
+    "delete_work_item_attachment",
+    "delete_work_item_comment",
+    "delete_work_item_link",
+    "delete_work_item_property",
+    "delete_work_item_property_option",
+    "delete_work_item_property_value",
+    "delete_work_item_relation_definition",
+    "delete_work_item_type",
+    "delete_work_log",
+    "detach_page_from_work_item",
+    "get_customer_property_values",
+    "get_features",
+    "get_me",
+    "get_pql_reference",
+    "get_project_estimate",
+    "get_project_members",
+    "get_project_worklog_summary",
+    "get_release_changelog",
+    "get_work_item_attachment_download_url",
+    "get_work_item_property_value",
+    "get_workspace_members",
+    "import_work_item_types_to_project",
+    "link_estimate_to_project",
+    "list_archived_work_items",
+    "list_customer_properties",
+    "list_customer_requests",
+    "list_customer_work_items",
+    "list_customers",
+    "list_cycle_work_items",
+    "list_cycles",
+    "list_initiative_projects",
+    "list_initiatives",
+    "list_intake_work_items",
+    "list_labels",
+    "list_milestone_work_items",
+    "list_milestones",
+    "list_module_work_items",
+    "list_modules",
+    "list_pages",
+    "list_project_estimate_points",
+    "list_projects",
+    "list_release_labels",
+    "list_release_tags",
+    "list_release_work_items",
+    "list_releases",
+    "list_roles",
+    "list_states",
+    "list_work_item_activities",
+    "list_work_item_attachments",
+    "list_work_item_comments",
+    "list_work_item_links",
+    "list_work_item_pages",
+    "list_work_item_properties",
+    "list_work_item_property_options",
+    "list_work_item_relation_definitions",
+    "list_work_item_relations",
+    "list_work_item_types",
+    "list_work_items",
+    "list_work_logs",
+    "manage_customer_work_items",
+    "manage_cycle_archive",
+    "manage_cycle_work_items",
+    "manage_initiative_projects",
+    "manage_milestone_work_items",
+    "manage_module_archive",
+    "manage_module_work_items",
+    "manage_project_archive",
+    "manage_release_labels",
+    "manage_release_work_items",
+    "manage_work_item_archive",
+    "manage_work_item_assignee",
+    "manage_work_item_label",
+    "manage_work_item_type_properties",
+    "read_work_item_attachment",
+    "remove_work_item_relation",
+    "resolve_work_item_type",
+    "retrieve_customer",
+    "retrieve_customer_property",
+    "retrieve_customer_request",
+    "retrieve_cycle",
+    "retrieve_initiative",
+    "retrieve_intake_work_item",
+    "retrieve_label",
+    "retrieve_milestone",
+    "retrieve_module",
+    "retrieve_page",
+    "retrieve_project",
+    "retrieve_release",
+    "retrieve_release_tag",
+    "retrieve_role",
+    "retrieve_state",
+    "retrieve_work_item",
+    "retrieve_work_item_activity",
+    "retrieve_work_item_by_identifier",
+    "retrieve_work_item_comment",
+    "retrieve_work_item_link",
+    "retrieve_work_item_property",
+    "retrieve_work_item_property_option",
+    "retrieve_work_item_type",
+    "search_work_items",
+    "set_customer_property_values",
+    "set_work_item_property_value",
+    "transfer_cycle_work_items",
+    "update_customer",
+    "update_customer_property",
+    "update_customer_request",
+    "update_cycle",
+    "update_initiative",
+    "update_intake_work_item",
+    "update_label",
+    "update_milestone",
+    "update_module",
+    "update_project",
+    "update_project_estimate",
+    "update_project_estimate_point",
+    "update_project_features",
+    "update_release",
+    "update_release_changelog",
+    "update_release_label",
+    "update_release_tag",
+    "update_state",
+    "update_work_item",
+    "update_work_item_comment",
+    "update_work_item_link",
+    "update_work_item_property",
+    "update_work_item_property_option",
+    "update_work_item_relation_definition",
+    "update_work_item_type",
+    "update_work_log",
+    "update_workspace_features",
+    "upload_work_item_attachment_from_url"
+  ],
+  "sorted_names_sha256": "0df212f44bc11cda84c1fb92171eef3c999436d03f978fff28fcb4f0b66e745a",
+  "sorted_names_sha256_algorithm": "sha256( \"\\n\".join(sorted_names) + \"\\n\" ) over UTF-8",
+  "tokeniser": "tiktoken cl100k_base (daemon.loader.estimate_tokens)",
+  "tool_count": 177,
+  "tool_schemas": {
+    "attach_page_to_work_item": {
+      "properties": [
+        "page_id",
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "page_id",
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 47,
+      "tool_total_tokens": 115
+    },
+    "complete_cycle": {
+      "properties": [
+        "cycle_id",
+        "project_id"
+      ],
+      "required": [
+        "cycle_id",
+        "project_id"
+      ],
+      "schema_tokens": 35,
+      "tool_total_tokens": 137
+    },
+    "count_work_items": {
+      "properties": [
+        "group_by",
+        "pql",
+        "sub_group_by"
+      ],
+      "required": [],
+      "schema_tokens": 203,
+      "tool_total_tokens": 493
+    },
+    "create_customer": {
+      "properties": [
+        "contract_status",
+        "description_html",
+        "domain",
+        "email",
+        "employees",
+        "external_id",
+        "external_source",
+        "name",
+        "revenue",
+        "stage",
+        "website_url"
+      ],
+      "required": [
+        "name"
+      ],
+      "schema_tokens": 209,
+      "tool_total_tokens": 558
+    },
+    "create_customer_property": {
+      "properties": [
+        "default_value",
+        "description",
+        "display_name",
+        "external_id",
+        "external_source",
+        "is_active",
+        "is_multi",
+        "is_required",
+        "name",
+        "options",
+        "property_type",
+        "relation_type",
+        "settings"
+      ],
+      "required": [
+        "display_name",
+        "name",
+        "property_type"
+      ],
+      "schema_tokens": 252,
+      "tool_total_tokens": 630
+    },
+    "create_customer_request": {
+      "properties": [
+        "customer_id",
+        "description_html",
+        "link",
+        "name",
+        "work_item_ids"
+      ],
+      "required": [
+        "customer_id",
+        "name"
+      ],
+      "schema_tokens": 96,
+      "tool_total_tokens": 227
+    },
+    "create_cycle": {
+      "properties": [
+        "description",
+        "end_date",
+        "external_id",
+        "external_source",
+        "name",
+        "owned_by",
+        "project_id",
+        "start_date",
+        "timezone"
+      ],
+      "required": [
+        "name",
+        "owned_by",
+        "project_id"
+      ],
+      "schema_tokens": 155,
+      "tool_total_tokens": 280
+    },
+    "create_initiative": {
+      "properties": [
+        "description_html",
+        "end_date",
+        "lead",
+        "logo_props",
+        "name",
+        "start_date",
+        "state"
+      ],
+      "required": [
+        "name"
+      ],
+      "schema_tokens": 168,
+      "tool_total_tokens": 347
+    },
+    "create_intake_work_item": {
+      "properties": [
+        "data",
+        "project_id"
+      ],
+      "required": [
+        "data",
+        "project_id"
+      ],
+      "schema_tokens": 38,
+      "tool_total_tokens": 108
+    },
+    "create_label": {
+      "properties": [
+        "color",
+        "description",
+        "external_id",
+        "external_source",
+        "name",
+        "parent",
+        "project_id",
+        "sort_order"
+      ],
+      "required": [
+        "name",
+        "project_id"
+      ],
+      "schema_tokens": 144,
+      "tool_total_tokens": 246
+    },
+    "create_milestone": {
+      "properties": [
+        "external_id",
+        "external_source",
+        "project_id",
+        "target_date",
+        "title"
+      ],
+      "required": [
+        "project_id",
+        "title"
+      ],
+      "schema_tokens": 90,
+      "tool_total_tokens": 171
+    },
+    "create_module": {
+      "properties": [
+        "description",
+        "external_id",
+        "external_source",
+        "lead",
+        "members",
+        "name",
+        "project_id",
+        "start_date",
+        "status",
+        "target_date"
+      ],
+      "required": [
+        "name",
+        "project_id"
+      ],
+      "schema_tokens": 187,
+      "tool_total_tokens": 341
+    },
+    "create_page": {
+      "properties": [
+        "access",
+        "archived_at",
+        "color",
+        "description_html",
+        "external_id",
+        "external_source",
+        "is_locked",
+        "logo_props",
+        "name",
+        "project_id",
+        "view_props"
+      ],
+      "required": [
+        "description_html",
+        "name"
+      ],
+      "schema_tokens": 213,
+      "tool_total_tokens": 369
+    },
+    "create_project": {
+      "properties": [
+        "archive_in",
+        "close_in",
+        "cover_image",
+        "cycle_view",
+        "default_assignee",
+        "description",
+        "emoji",
+        "external_id",
+        "external_source",
+        "guest_view_all_features",
+        "identifier",
+        "intake_view",
+        "is_issue_type_enabled",
+        "issue_views_view",
+        "module_view",
+        "name",
+        "page_view",
+        "project_lead",
+        "timezone"
+      ],
+      "required": [
+        "identifier",
+        "name"
+      ],
+      "schema_tokens": 358,
+      "tool_total_tokens": 576
+    },
+    "create_project_estimate": {
+      "properties": [
+        "description",
+        "external_id",
+        "external_source",
+        "last_used",
+        "name",
+        "project_id",
+        "type"
+      ],
+      "required": [
+        "name",
+        "project_id"
+      ],
+      "schema_tokens": 118,
+      "tool_total_tokens": 240
+    },
+    "create_project_estimate_points": {
+      "properties": [
+        "estimate_id",
+        "points",
+        "project_id"
+      ],
+      "required": [
+        "estimate_id",
+        "points",
+        "project_id"
+      ],
+      "schema_tokens": 54,
+      "tool_total_tokens": 241
+    },
+    "create_release": {
+      "properties": [
+        "description_html",
+        "external_id",
+        "external_source",
+        "is_prerelease",
+        "lead_id",
+        "name",
+        "release_date",
+        "status",
+        "tag_id",
+        "target_date"
+      ],
+      "required": [
+        "name"
+      ],
+      "schema_tokens": 204,
+      "tool_total_tokens": 425
+    },
+    "create_release_label": {
+      "properties": [
+        "color",
+        "name",
+        "sort_order"
+      ],
+      "required": [
+        "name"
+      ],
+      "schema_tokens": 60,
+      "tool_total_tokens": 149
+    },
+    "create_release_tag": {
+      "properties": [
+        "commit_hash",
+        "description",
+        "git_tag",
+        "version"
+      ],
+      "required": [
+        "version"
+      ],
+      "schema_tokens": 79,
+      "tool_total_tokens": 170
+    },
+    "create_state": {
+      "properties": [
+        "color",
+        "default",
+        "description",
+        "external_id",
+        "external_source",
+        "group",
+        "is_triage",
+        "name",
+        "project_id",
+        "sequence"
+      ],
+      "required": [
+        "color",
+        "name",
+        "project_id"
+      ],
+      "schema_tokens": 171,
+      "tool_total_tokens": 300
+    },
+    "create_work_item": {
+      "properties": [
+        "assignees",
+        "description_html",
+        "description_stripped",
+        "estimate_point",
+        "external_id",
+        "external_source",
+        "is_draft",
+        "labels",
+        "name",
+        "parent",
+        "point",
+        "priority",
+        "project_id",
+        "sort_order",
+        "start_date",
+        "state",
+        "target_date",
+        "type",
+        "type_id"
+      ],
+      "required": [
+        "name",
+        "project_id"
+      ],
+      "schema_tokens": 364,
+      "tool_total_tokens": 639
+    },
+    "create_work_item_comment": {
+      "properties": [
+        "access",
+        "comment_html",
+        "comment_json",
+        "external_id",
+        "external_source",
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 136,
+      "tool_total_tokens": 244
+    },
+    "create_work_item_link": {
+      "properties": [
+        "project_id",
+        "url",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "url",
+        "work_item_id"
+      ],
+      "schema_tokens": 45,
+      "tool_total_tokens": 109
+    },
+    "create_work_item_property": {
+      "properties": [
+        "default_value",
+        "description",
+        "display_name",
+        "external_id",
+        "external_source",
+        "is_active",
+        "is_multi",
+        "is_required",
+        "options",
+        "project_id",
+        "property_type",
+        "relation_type",
+        "settings",
+        "validation_rules",
+        "work_item_type_id"
+      ],
+      "required": [
+        "display_name",
+        "property_type"
+      ],
+      "schema_tokens": 308,
+      "tool_total_tokens": 668
+    },
+    "create_work_item_property_option": {
+      "properties": [
+        "color",
+        "description",
+        "external_id",
+        "external_source",
+        "is_default",
+        "name",
+        "project_id",
+        "property_id"
+      ],
+      "required": [
+        "name",
+        "property_id"
+      ],
+      "schema_tokens": 145,
+      "tool_total_tokens": 270
+    },
+    "create_work_item_relation": {
+      "properties": [
+        "project_id",
+        "relation_definition_id",
+        "relation_definition_label",
+        "relation_type",
+        "work_item_id",
+        "work_item_ids"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id",
+        "work_item_ids"
+      ],
+      "schema_tokens": 114,
+      "tool_total_tokens": 320
+    },
+    "create_work_item_relation_definition": {
+      "properties": [
+        "color",
+        "inward",
+        "is_active",
+        "name",
+        "outward"
+      ],
+      "required": [
+        "name"
+      ],
+      "schema_tokens": 98,
+      "tool_total_tokens": 242
+    },
+    "create_work_item_type": {
+      "properties": [
+        "description",
+        "external_id",
+        "external_source",
+        "is_active",
+        "name",
+        "project_id",
+        "project_ids"
+      ],
+      "required": [
+        "name"
+      ],
+      "schema_tokens": 142,
+      "tool_total_tokens": 288
+    },
+    "create_work_log": {
+      "properties": [
+        "description",
+        "duration",
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 73,
+      "tool_total_tokens": 148
+    },
+    "delete_customer": {
+      "properties": [
+        "customer_id",
+        "external_id",
+        "external_source"
+      ],
+      "required": [],
+      "schema_tokens": 70,
+      "tool_total_tokens": 169
+    },
+    "delete_customer_property": {
+      "properties": [
+        "property_id"
+      ],
+      "required": [
+        "property_id"
+      ],
+      "schema_tokens": 25,
+      "tool_total_tokens": 64
+    },
+    "delete_customer_request": {
+      "properties": [
+        "customer_id",
+        "request_id"
+      ],
+      "required": [
+        "customer_id",
+        "request_id"
+      ],
+      "schema_tokens": 35,
+      "tool_total_tokens": 84
+    },
+    "delete_cycle": {
+      "properties": [
+        "cycle_id",
+        "project_id"
+      ],
+      "required": [
+        "cycle_id",
+        "project_id"
+      ],
+      "schema_tokens": 35,
+      "tool_total_tokens": 83
+    },
+    "delete_initiative": {
+      "properties": [
+        "initiative_id"
+      ],
+      "required": [
+        "initiative_id"
+      ],
+      "schema_tokens": 27,
+      "tool_total_tokens": 98
+    },
+    "delete_intake_work_item": {
+      "properties": [
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 37,
+      "tool_total_tokens": 114
+    },
+    "delete_label": {
+      "properties": [
+        "label_id",
+        "project_id"
+      ],
+      "required": [
+        "label_id",
+        "project_id"
+      ],
+      "schema_tokens": 35,
+      "tool_total_tokens": 74
+    },
+    "delete_milestone": {
+      "properties": [
+        "milestone_id",
+        "project_id"
+      ],
+      "required": [
+        "milestone_id",
+        "project_id"
+      ],
+      "schema_tokens": 37,
+      "tool_total_tokens": 77
+    },
+    "delete_module": {
+      "properties": [
+        "module_id",
+        "project_id"
+      ],
+      "required": [
+        "module_id",
+        "project_id"
+      ],
+      "schema_tokens": 35,
+      "tool_total_tokens": 83
+    },
+    "delete_project": {
+      "properties": [
+        "project_id"
+      ],
+      "required": [
+        "project_id"
+      ],
+      "schema_tokens": 25,
+      "tool_total_tokens": 64
+    },
+    "delete_project_estimate": {
+      "properties": [
+        "project_id"
+      ],
+      "required": [
+        "project_id"
+      ],
+      "schema_tokens": 25,
+      "tool_total_tokens": 57
+    },
+    "delete_project_estimate_point": {
+      "properties": [
+        "estimate_id",
+        "estimate_point_id",
+        "project_id"
+      ],
+      "required": [
+        "estimate_id",
+        "estimate_point_id",
+        "project_id"
+      ],
+      "schema_tokens": 47,
+      "tool_total_tokens": 101
+    },
+    "delete_release": {
+      "properties": [
+        "release_id"
+      ],
+      "required": [
+        "release_id"
+      ],
+      "schema_tokens": 25,
+      "tool_total_tokens": 55
+    },
+    "delete_release_label": {
+      "properties": [
+        "label_id"
+      ],
+      "required": [
+        "label_id"
+      ],
+      "schema_tokens": 25,
+      "tool_total_tokens": 87
+    },
+    "delete_release_tag": {
+      "properties": [
+        "tag_id"
+      ],
+      "required": [
+        "tag_id"
+      ],
+      "schema_tokens": 25,
+      "tool_total_tokens": 58
+    },
+    "delete_state": {
+      "properties": [
+        "project_id",
+        "state_id"
+      ],
+      "required": [
+        "project_id",
+        "state_id"
+      ],
+      "schema_tokens": 35,
+      "tool_total_tokens": 74
+    },
+    "delete_work_item": {
+      "properties": [
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 37,
+      "tool_total_tokens": 80
+    },
+    "delete_work_item_attachment": {
+      "properties": [
+        "attachment_id",
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "attachment_id",
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 47,
+      "tool_total_tokens": 116
+    },
+    "delete_work_item_comment": {
+      "properties": [
+        "comment_id",
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "comment_id",
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 47,
+      "tool_total_tokens": 101
+    },
+    "delete_work_item_link": {
+      "properties": [
+        "link_id",
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "link_id",
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 47,
+      "tool_total_tokens": 101
+    },
+    "delete_work_item_property": {
+      "properties": [
+        "project_id",
+        "work_item_property_id",
+        "work_item_type_id"
+      ],
+      "required": [
+        "work_item_property_id"
+      ],
+      "schema_tokens": 69,
+      "tool_total_tokens": 144
+    },
+    "delete_work_item_property_option": {
+      "properties": [
+        "option_id",
+        "project_id",
+        "property_id"
+      ],
+      "required": [
+        "option_id",
+        "property_id"
+      ],
+      "schema_tokens": 54,
+      "tool_total_tokens": 116
+    },
+    "delete_work_item_property_value": {
+      "properties": [
+        "project_id",
+        "property_id",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "property_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 47,
+      "tool_total_tokens": 124
+    },
+    "delete_work_item_relation_definition": {
+      "properties": [
+        "definition_id"
+      ],
+      "required": [
+        "definition_id"
+      ],
+      "schema_tokens": 25,
+      "tool_total_tokens": 61
+    },
+    "delete_work_item_type": {
+      "properties": [
+        "project_id",
+        "work_item_type_id"
+      ],
+      "required": [
+        "work_item_type_id"
+      ],
+      "schema_tokens": 48,
+      "tool_total_tokens": 101
+    },
+    "delete_work_log": {
+      "properties": [
+        "project_id",
+        "work_item_id",
+        "work_log_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id",
+        "work_log_id"
+      ],
+      "schema_tokens": 49,
+      "tool_total_tokens": 105
+    },
+    "detach_page_from_work_item": {
+      "properties": [
+        "project_id",
+        "work_item_id",
+        "work_item_page_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id",
+        "work_item_page_id"
+      ],
+      "schema_tokens": 51,
+      "tool_total_tokens": 117
+    },
+    "get_customer_property_values": {
+      "properties": [
+        "customer_id",
+        "property_id"
+      ],
+      "required": [
+        "customer_id"
+      ],
+      "schema_tokens": 44,
+      "tool_total_tokens": 122
+    },
+    "get_features": {
+      "properties": [
+        "project_id"
+      ],
+      "required": [],
+      "schema_tokens": 32,
+      "tool_total_tokens": 104
+    },
+    "get_me": {
+      "properties": [],
+      "required": [],
+      "schema_tokens": 14,
+      "tool_total_tokens": 43
+    },
+    "get_pql_reference": {
+      "properties": [
+        "detail"
+      ],
+      "required": [],
+      "schema_tokens": 29,
+      "tool_total_tokens": 187
+    },
+    "get_project_estimate": {
+      "properties": [
+        "project_id"
+      ],
+      "required": [
+        "project_id"
+      ],
+      "schema_tokens": 25,
+      "tool_total_tokens": 97
+    },
+    "get_project_members": {
+      "properties": [
+        "cursor",
+        "display_name",
+        "email",
+        "first_name",
+        "is_active",
+        "is_bot",
+        "last_name",
+        "order_by",
+        "per_page",
+        "project_id",
+        "role_slug"
+      ],
+      "required": [
+        "project_id"
+      ],
+      "schema_tokens": 213,
+      "tool_total_tokens": 372
+    },
+    "get_project_worklog_summary": {
+      "properties": [
+        "project_id"
+      ],
+      "required": [
+        "project_id"
+      ],
+      "schema_tokens": 25,
+      "tool_total_tokens": 88
+    },
+    "get_release_changelog": {
+      "properties": [
+        "release_id"
+      ],
+      "required": [
+        "release_id"
+      ],
+      "schema_tokens": 25,
+      "tool_total_tokens": 98
+    },
+    "get_work_item_attachment_download_url": {
+      "properties": [
+        "attachment_id",
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "attachment_id",
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 47,
+      "tool_total_tokens": 188
+    },
+    "get_work_item_property_value": {
+      "properties": [
+        "project_id",
+        "property_id",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "property_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 47,
+      "tool_total_tokens": 168
+    },
+    "get_workspace_members": {
+      "properties": [
+        "cursor",
+        "display_name",
+        "email",
+        "first_name",
+        "is_active",
+        "is_bot",
+        "last_name",
+        "order_by",
+        "per_page",
+        "role_slug"
+      ],
+      "required": [],
+      "schema_tokens": 201,
+      "tool_total_tokens": 351
+    },
+    "import_work_item_types_to_project": {
+      "properties": [
+        "project_id",
+        "work_item_type_ids"
+      ],
+      "required": [
+        "project_id",
+        "work_item_type_ids"
+      ],
+      "schema_tokens": 45,
+      "tool_total_tokens": 163
+    },
+    "link_estimate_to_project": {
+      "properties": [
+        "estimate_id",
+        "project_id"
+      ],
+      "required": [
+        "estimate_id",
+        "project_id"
+      ],
+      "schema_tokens": 35,
+      "tool_total_tokens": 95
+    },
+    "list_archived_work_items": {
+      "properties": [
+        "cursor",
+        "expand",
+        "fields",
+        "order_by",
+        "per_page",
+        "pql",
+        "project_id"
+      ],
+      "required": [
+        "project_id"
+      ],
+      "schema_tokens": 268,
+      "tool_total_tokens": 429
+    },
+    "list_customer_properties": {
+      "properties": [
+        "cursor",
+        "per_page"
+      ],
+      "required": [],
+      "schema_tokens": 50,
+      "tool_total_tokens": 176
+    },
+    "list_customer_requests": {
+      "properties": [
+        "cursor",
+        "customer_id",
+        "per_page",
+        "query"
+      ],
+      "required": [
+        "customer_id"
+      ],
+      "schema_tokens": 80,
+      "tool_total_tokens": 225
+    },
+    "list_customer_work_items": {
+      "properties": [
+        "customer_id",
+        "customer_request_id",
+        "search"
+      ],
+      "required": [
+        "customer_id"
+      ],
+      "schema_tokens": 63,
+      "tool_total_tokens": 149
+    },
+    "list_customers": {
+      "properties": [
+        "cursor",
+        "per_page",
+        "query"
+      ],
+      "required": [],
+      "schema_tokens": 68,
+      "tool_total_tokens": 173
+    },
+    "list_cycle_work_items": {
+      "properties": [
+        "cursor",
+        "cycle_id",
+        "expand",
+        "fields",
+        "order_by",
+        "per_page",
+        "pql",
+        "project_id"
+      ],
+      "required": [
+        "cycle_id",
+        "project_id"
+      ],
+      "schema_tokens": 278,
+      "tool_total_tokens": 447
+    },
+    "list_cycles": {
+      "properties": [
+        "archived",
+        "cursor",
+        "order_by",
+        "per_page",
+        "project_id",
+        "status"
+      ],
+      "required": [
+        "project_id"
+      ],
+      "schema_tokens": 124,
+      "tool_total_tokens": 344
+    },
+    "list_initiative_projects": {
+      "properties": [
+        "initiative_id",
+        "params"
+      ],
+      "required": [
+        "initiative_id"
+      ],
+      "schema_tokens": 50,
+      "tool_total_tokens": 110
+    },
+    "list_initiatives": {
+      "properties": [
+        "params"
+      ],
+      "required": [],
+      "schema_tokens": 36,
+      "tool_total_tokens": 127
+    },
+    "list_intake_work_items": {
+      "properties": [
+        "params",
+        "project_id"
+      ],
+      "required": [
+        "project_id"
+      ],
+      "schema_tokens": 48,
+      "tool_total_tokens": 125
+    },
+    "list_labels": {
+      "properties": [
+        "params",
+        "project_id"
+      ],
+      "required": [
+        "project_id"
+      ],
+      "schema_tokens": 48,
+      "tool_total_tokens": 99
+    },
+    "list_milestone_work_items": {
+      "properties": [
+        "milestone_id",
+        "params",
+        "project_id"
+      ],
+      "required": [
+        "milestone_id",
+        "project_id"
+      ],
+      "schema_tokens": 60,
+      "tool_total_tokens": 129
+    },
+    "list_milestones": {
+      "properties": [
+        "params",
+        "project_id"
+      ],
+      "required": [
+        "project_id"
+      ],
+      "schema_tokens": 48,
+      "tool_total_tokens": 102
+    },
+    "list_module_work_items": {
+      "properties": [
+        "cursor",
+        "expand",
+        "fields",
+        "module_id",
+        "order_by",
+        "per_page",
+        "pql",
+        "project_id"
+      ],
+      "required": [
+        "module_id",
+        "project_id"
+      ],
+      "schema_tokens": 278,
+      "tool_total_tokens": 447
+    },
+    "list_modules": {
+      "properties": [
+        "archived",
+        "cursor",
+        "order_by",
+        "per_page",
+        "project_id"
+      ],
+      "required": [
+        "project_id"
+      ],
+      "schema_tokens": 92,
+      "tool_total_tokens": 237
+    },
+    "list_pages": {
+      "properties": [
+        "params",
+        "project_id"
+      ],
+      "required": [],
+      "schema_tokens": 55,
+      "tool_total_tokens": 137
+    },
+    "list_project_estimate_points": {
+      "properties": [
+        "estimate_id",
+        "project_id"
+      ],
+      "required": [
+        "estimate_id",
+        "project_id"
+      ],
+      "schema_tokens": 35,
+      "tool_total_tokens": 253
+    },
+    "list_projects": {
+      "properties": [
+        "cursor",
+        "order_by",
+        "per_page"
+      ],
+      "required": [],
+      "schema_tokens": 69,
+      "tool_total_tokens": 212
+    },
+    "list_release_labels": {
+      "properties": [
+        "cursor",
+        "per_page",
+        "release_id"
+      ],
+      "required": [],
+      "schema_tokens": 69,
+      "tool_total_tokens": 200
+    },
+    "list_release_tags": {
+      "properties": [
+        "cursor",
+        "per_page"
+      ],
+      "required": [],
+      "schema_tokens": 50,
+      "tool_total_tokens": 178
+    },
+    "list_release_work_items": {
+      "properties": [
+        "cursor",
+        "per_page",
+        "release_id"
+      ],
+      "required": [
+        "release_id"
+      ],
+      "schema_tokens": 62,
+      "tool_total_tokens": 161
+    },
+    "list_releases": {
+      "properties": [
+        "cursor",
+        "per_page"
+      ],
+      "required": [],
+      "schema_tokens": 50,
+      "tool_total_tokens": 136
+    },
+    "list_roles": {
+      "properties": [
+        "cursor",
+        "namespace",
+        "per_page"
+      ],
+      "required": [],
+      "schema_tokens": 74,
+      "tool_total_tokens": 234
+    },
+    "list_states": {
+      "properties": [
+        "params",
+        "project_id"
+      ],
+      "required": [
+        "project_id"
+      ],
+      "schema_tokens": 48,
+      "tool_total_tokens": 99
+    },
+    "list_work_item_activities": {
+      "properties": [
+        "params",
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 60,
+      "tool_total_tokens": 126
+    },
+    "list_work_item_attachments": {
+      "properties": [
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 37,
+      "tool_total_tokens": 138
+    },
+    "list_work_item_comments": {
+      "properties": [
+        "params",
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 60,
+      "tool_total_tokens": 126
+    },
+    "list_work_item_links": {
+      "properties": [
+        "params",
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 60,
+      "tool_total_tokens": 126
+    },
+    "list_work_item_pages": {
+      "properties": [
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 37,
+      "tool_total_tokens": 96
+    },
+    "list_work_item_properties": {
+      "properties": [
+        "params",
+        "project_id",
+        "work_item_type_id"
+      ],
+      "required": [],
+      "schema_tokens": 76,
+      "tool_total_tokens": 433
+    },
+    "list_work_item_property_options": {
+      "properties": [
+        "params",
+        "project_id",
+        "property_id"
+      ],
+      "required": [
+        "property_id"
+      ],
+      "schema_tokens": 67,
+      "tool_total_tokens": 140
+    },
+    "list_work_item_relation_definitions": {
+      "properties": [
+        "is_active",
+        "is_default"
+      ],
+      "required": [],
+      "schema_tokens": 51,
+      "tool_total_tokens": 203
+    },
+    "list_work_item_relations": {
+      "properties": [
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 37,
+      "tool_total_tokens": 111
+    },
+    "list_work_item_types": {
+      "properties": [
+        "params",
+        "project_id"
+      ],
+      "required": [],
+      "schema_tokens": 55,
+      "tool_total_tokens": 121
+    },
+    "list_work_items": {
+      "properties": [
+        "cursor",
+        "expand",
+        "external_id",
+        "external_source",
+        "fields",
+        "order_by",
+        "per_page",
+        "pql",
+        "project_id"
+      ],
+      "required": [],
+      "schema_tokens": 313,
+      "tool_total_tokens": 681
+    },
+    "list_work_logs": {
+      "properties": [
+        "params",
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 60,
+      "tool_total_tokens": 127
+    },
+    "manage_customer_work_items": {
+      "properties": [
+        "action",
+        "customer_id",
+        "customer_request_id",
+        "work_item_ids"
+      ],
+      "required": [
+        "action",
+        "customer_id",
+        "work_item_ids"
+      ],
+      "schema_tokens": 77,
+      "tool_total_tokens": 207
+    },
+    "manage_cycle_archive": {
+      "properties": [
+        "archive",
+        "cycle_id",
+        "project_id"
+      ],
+      "required": [
+        "archive",
+        "cycle_id",
+        "project_id"
+      ],
+      "schema_tokens": 43,
+      "tool_total_tokens": 164
+    },
+    "manage_cycle_work_items": {
+      "properties": [
+        "add_ids",
+        "cycle_id",
+        "project_id",
+        "remove_ids"
+      ],
+      "required": [
+        "cycle_id",
+        "project_id"
+      ],
+      "schema_tokens": 85,
+      "tool_total_tokens": 178
+    },
+    "manage_initiative_projects": {
+      "properties": [
+        "action",
+        "initiative_id",
+        "project_ids"
+      ],
+      "required": [
+        "action",
+        "initiative_id",
+        "project_ids"
+      ],
+      "schema_tokens": 57,
+      "tool_total_tokens": 143
+    },
+    "manage_milestone_work_items": {
+      "properties": [
+        "add_ids",
+        "milestone_id",
+        "project_id",
+        "remove_ids"
+      ],
+      "required": [
+        "milestone_id",
+        "project_id"
+      ],
+      "schema_tokens": 87,
+      "tool_total_tokens": 181
+    },
+    "manage_module_archive": {
+      "properties": [
+        "archive",
+        "module_id",
+        "project_id"
+      ],
+      "required": [
+        "archive",
+        "module_id",
+        "project_id"
+      ],
+      "schema_tokens": 43,
+      "tool_total_tokens": 99
+    },
+    "manage_module_work_items": {
+      "properties": [
+        "add_ids",
+        "module_id",
+        "project_id",
+        "remove_ids"
+      ],
+      "required": [
+        "module_id",
+        "project_id"
+      ],
+      "schema_tokens": 85,
+      "tool_total_tokens": 178
+    },
+    "manage_project_archive": {
+      "properties": [
+        "archive",
+        "project_id"
+      ],
+      "required": [
+        "archive",
+        "project_id"
+      ],
+      "schema_tokens": 33,
+      "tool_total_tokens": 107
+    },
+    "manage_release_labels": {
+      "properties": [
+        "action",
+        "label_ids",
+        "release_id"
+      ],
+      "required": [
+        "action",
+        "label_ids",
+        "release_id"
+      ],
+      "schema_tokens": 55,
+      "tool_total_tokens": 148
+    },
+    "manage_release_work_items": {
+      "properties": [
+        "action",
+        "release_id",
+        "work_item_ids"
+      ],
+      "required": [
+        "action",
+        "release_id",
+        "work_item_ids"
+      ],
+      "schema_tokens": 57,
+      "tool_total_tokens": 147
+    },
+    "manage_work_item_archive": {
+      "properties": [
+        "archive",
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "archive",
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 45,
+      "tool_total_tokens": 135
+    },
+    "manage_work_item_assignee": {
+      "properties": [
+        "add_user_id",
+        "project_id",
+        "remove_user_id",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 77,
+      "tool_total_tokens": 215
+    },
+    "manage_work_item_label": {
+      "properties": [
+        "add_label_id",
+        "project_id",
+        "remove_label_id",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 77,
+      "tool_total_tokens": 207
+    },
+    "manage_work_item_type_properties": {
+      "properties": [
+        "attach_ids",
+        "detach_ids",
+        "project_id",
+        "work_item_type_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_type_id"
+      ],
+      "schema_tokens": 89,
+      "tool_total_tokens": 221
+    },
+    "read_work_item_attachment": {
+      "properties": [
+        "attachment_id",
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "attachment_id",
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 47,
+      "tool_total_tokens": 294
+    },
+    "remove_work_item_relation": {
+      "properties": [
+        "is_dependency",
+        "project_id",
+        "related_work_item_id",
+        "work_item_id"
+      ],
+      "required": [
+        "is_dependency",
+        "project_id",
+        "related_work_item_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 61,
+      "tool_total_tokens": 214
+    },
+    "resolve_work_item_type": {
+      "properties": [
+        "name",
+        "project_id"
+      ],
+      "required": [
+        "name",
+        "project_id"
+      ],
+      "schema_tokens": 33,
+      "tool_total_tokens": 349
+    },
+    "retrieve_customer": {
+      "properties": [
+        "customer_id"
+      ],
+      "required": [
+        "customer_id"
+      ],
+      "schema_tokens": 25,
+      "tool_total_tokens": 63
+    },
+    "retrieve_customer_property": {
+      "properties": [
+        "property_id"
+      ],
+      "required": [
+        "property_id"
+      ],
+      "schema_tokens": 25,
+      "tool_total_tokens": 74
+    },
+    "retrieve_customer_request": {
+      "properties": [
+        "customer_id",
+        "request_id"
+      ],
+      "required": [
+        "customer_id",
+        "request_id"
+      ],
+      "schema_tokens": 35,
+      "tool_total_tokens": 86
+    },
+    "retrieve_cycle": {
+      "properties": [
+        "cycle_id",
+        "project_id"
+      ],
+      "required": [
+        "cycle_id",
+        "project_id"
+      ],
+      "schema_tokens": 35,
+      "tool_total_tokens": 91
+    },
+    "retrieve_initiative": {
+      "properties": [
+        "initiative_id"
+      ],
+      "required": [
+        "initiative_id"
+      ],
+      "schema_tokens": 27,
+      "tool_total_tokens": 106
+    },
+    "retrieve_intake_work_item": {
+      "properties": [
+        "params",
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 60,
+      "tool_total_tokens": 167
+    },
+    "retrieve_label": {
+      "properties": [
+        "label_id",
+        "project_id"
+      ],
+      "required": [
+        "label_id",
+        "project_id"
+      ],
+      "schema_tokens": 35,
+      "tool_total_tokens": 82
+    },
+    "retrieve_milestone": {
+      "properties": [
+        "milestone_id",
+        "project_id"
+      ],
+      "required": [
+        "milestone_id",
+        "project_id"
+      ],
+      "schema_tokens": 37,
+      "tool_total_tokens": 86
+    },
+    "retrieve_module": {
+      "properties": [
+        "module_id",
+        "project_id"
+      ],
+      "required": [
+        "module_id",
+        "project_id"
+      ],
+      "schema_tokens": 35,
+      "tool_total_tokens": 91
+    },
+    "retrieve_page": {
+      "properties": [
+        "page_id",
+        "project_id"
+      ],
+      "required": [
+        "page_id"
+      ],
+      "schema_tokens": 44,
+      "tool_total_tokens": 118
+    },
+    "retrieve_project": {
+      "properties": [
+        "project_id"
+      ],
+      "required": [
+        "project_id"
+      ],
+      "schema_tokens": 25,
+      "tool_total_tokens": 72
+    },
+    "retrieve_release": {
+      "properties": [
+        "release_id"
+      ],
+      "required": [
+        "release_id"
+      ],
+      "schema_tokens": 25,
+      "tool_total_tokens": 63
+    },
+    "retrieve_release_tag": {
+      "properties": [
+        "tag_id"
+      ],
+      "required": [
+        "tag_id"
+      ],
+      "schema_tokens": 25,
+      "tool_total_tokens": 67
+    },
+    "retrieve_role": {
+      "properties": [
+        "role_id"
+      ],
+      "required": [
+        "role_id"
+      ],
+      "schema_tokens": 25,
+      "tool_total_tokens": 71
+    },
+    "retrieve_state": {
+      "properties": [
+        "project_id",
+        "state_id"
+      ],
+      "required": [
+        "project_id",
+        "state_id"
+      ],
+      "schema_tokens": 35,
+      "tool_total_tokens": 82
+    },
+    "retrieve_work_item": {
+      "properties": [
+        "expand",
+        "external_id",
+        "external_source",
+        "fields",
+        "order_by",
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 130,
+      "tool_total_tokens": 251
+    },
+    "retrieve_work_item_activity": {
+      "properties": [
+        "activity_id",
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "activity_id",
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 47,
+      "tool_total_tokens": 112
+    },
+    "retrieve_work_item_by_identifier": {
+      "properties": [
+        "expand",
+        "external_id",
+        "external_source",
+        "fields",
+        "order_by",
+        "work_item_identifier"
+      ],
+      "required": [
+        "work_item_identifier"
+      ],
+      "schema_tokens": 120,
+      "tool_total_tokens": 407
+    },
+    "retrieve_work_item_comment": {
+      "properties": [
+        "comment_id",
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "comment_id",
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 47,
+      "tool_total_tokens": 112
+    },
+    "retrieve_work_item_link": {
+      "properties": [
+        "link_id",
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "link_id",
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 47,
+      "tool_total_tokens": 112
+    },
+    "retrieve_work_item_property": {
+      "properties": [
+        "project_id",
+        "work_item_property_id",
+        "work_item_type_id"
+      ],
+      "required": [
+        "work_item_property_id"
+      ],
+      "schema_tokens": 69,
+      "tool_total_tokens": 154
+    },
+    "retrieve_work_item_property_option": {
+      "properties": [
+        "option_id",
+        "project_id",
+        "property_id"
+      ],
+      "required": [
+        "option_id",
+        "property_id"
+      ],
+      "schema_tokens": 54,
+      "tool_total_tokens": 129
+    },
+    "retrieve_work_item_type": {
+      "properties": [
+        "project_id",
+        "work_item_type_id"
+      ],
+      "required": [
+        "work_item_type_id"
+      ],
+      "schema_tokens": 48,
+      "tool_total_tokens": 111
+    },
+    "search_work_items": {
+      "properties": [
+        "expand",
+        "external_id",
+        "external_source",
+        "fields",
+        "order_by",
+        "query"
+      ],
+      "required": [
+        "query"
+      ],
+      "schema_tokens": 116,
+      "tool_total_tokens": 285
+    },
+    "set_customer_property_values": {
+      "properties": [
+        "customer_id",
+        "values"
+      ],
+      "required": [
+        "customer_id",
+        "values"
+      ],
+      "schema_tokens": 46,
+      "tool_total_tokens": 222
+    },
+    "set_work_item_property_value": {
+      "properties": [
+        "external_id",
+        "external_source",
+        "project_id",
+        "property_id",
+        "value",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "property_id",
+        "value",
+        "work_item_id"
+      ],
+      "schema_tokens": 120,
+      "tool_total_tokens": 396
+    },
+    "transfer_cycle_work_items": {
+      "properties": [
+        "cycle_id",
+        "new_cycle_id",
+        "project_id"
+      ],
+      "required": [
+        "cycle_id",
+        "new_cycle_id",
+        "project_id"
+      ],
+      "schema_tokens": 47,
+      "tool_total_tokens": 116
+    },
+    "update_customer": {
+      "properties": [
+        "contract_status",
+        "customer_id",
+        "description_html",
+        "domain",
+        "email",
+        "employees",
+        "external_id",
+        "external_source",
+        "logo_props",
+        "name",
+        "revenue",
+        "stage",
+        "website_url"
+      ],
+      "required": [
+        "customer_id"
+      ],
+      "schema_tokens": 253,
+      "tool_total_tokens": 531
+    },
+    "update_customer_property": {
+      "properties": [
+        "default_value",
+        "description",
+        "display_name",
+        "external_id",
+        "external_source",
+        "is_active",
+        "is_required",
+        "options",
+        "property_id",
+        "relation_type"
+      ],
+      "required": [
+        "property_id"
+      ],
+      "schema_tokens": 211,
+      "tool_total_tokens": 451
+    },
+    "update_customer_request": {
+      "properties": [
+        "customer_id",
+        "description_html",
+        "link",
+        "name",
+        "request_id"
+      ],
+      "required": [
+        "customer_id",
+        "request_id"
+      ],
+      "schema_tokens": 90,
+      "tool_total_tokens": 198
+    },
+    "update_cycle": {
+      "properties": [
+        "cycle_id",
+        "description",
+        "end_date",
+        "external_id",
+        "external_source",
+        "name",
+        "owned_by",
+        "project_id",
+        "start_date",
+        "timezone"
+      ],
+      "required": [
+        "cycle_id",
+        "project_id"
+      ],
+      "schema_tokens": 184,
+      "tool_total_tokens": 319
+    },
+    "update_initiative": {
+      "properties": [
+        "description_html",
+        "end_date",
+        "initiative_id",
+        "lead",
+        "logo_props",
+        "name",
+        "start_date",
+        "state"
+      ],
+      "required": [
+        "initiative_id"
+      ],
+      "schema_tokens": 190,
+      "tool_total_tokens": 357
+    },
+    "update_intake_work_item": {
+      "properties": [
+        "duplicate_to",
+        "project_id",
+        "snoozed_till",
+        "source",
+        "source_email",
+        "status",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 134,
+      "tool_total_tokens": 373
+    },
+    "update_label": {
+      "properties": [
+        "color",
+        "description",
+        "external_id",
+        "external_source",
+        "label_id",
+        "name",
+        "parent",
+        "project_id",
+        "sort_order"
+      ],
+      "required": [
+        "label_id",
+        "project_id"
+      ],
+      "schema_tokens": 164,
+      "tool_total_tokens": 276
+    },
+    "update_milestone": {
+      "properties": [
+        "external_id",
+        "external_source",
+        "milestone_id",
+        "project_id",
+        "target_date",
+        "title"
+      ],
+      "required": [
+        "milestone_id",
+        "project_id"
+      ],
+      "schema_tokens": 112,
+      "tool_total_tokens": 203
+    },
+    "update_module": {
+      "properties": [
+        "description",
+        "external_id",
+        "external_source",
+        "lead",
+        "members",
+        "module_id",
+        "name",
+        "project_id",
+        "start_date",
+        "status",
+        "target_date"
+      ],
+      "required": [
+        "module_id",
+        "project_id"
+      ],
+      "schema_tokens": 207,
+      "tool_total_tokens": 371
+    },
+    "update_project": {
+      "properties": [
+        "archive_in",
+        "close_in",
+        "cover_image",
+        "cycle_view",
+        "default_assignee",
+        "default_state",
+        "description",
+        "emoji",
+        "estimate",
+        "external_id",
+        "external_source",
+        "guest_view_all_features",
+        "identifier",
+        "intake_view",
+        "is_issue_type_enabled",
+        "is_time_tracking_enabled",
+        "issue_views_view",
+        "module_view",
+        "name",
+        "network",
+        "page_view",
+        "project_id",
+        "project_lead",
+        "timezone"
+      ],
+      "required": [
+        "project_id"
+      ],
+      "schema_tokens": 464,
+      "tool_total_tokens": 721
+    },
+    "update_project_estimate": {
+      "properties": [
+        "description",
+        "external_id",
+        "external_source",
+        "name",
+        "project_id"
+      ],
+      "required": [
+        "project_id"
+      ],
+      "schema_tokens": 99,
+      "tool_total_tokens": 172
+    },
+    "update_project_estimate_point": {
+      "properties": [
+        "description",
+        "estimate_id",
+        "estimate_point_id",
+        "external_id",
+        "external_source",
+        "key",
+        "project_id",
+        "value"
+      ],
+      "required": [
+        "estimate_id",
+        "estimate_point_id",
+        "project_id"
+      ],
+      "schema_tokens": 139,
+      "tool_total_tokens": 259
+    },
+    "update_project_features": {
+      "properties": [
+        "cycles",
+        "intakes",
+        "modules",
+        "pages",
+        "project_id",
+        "views",
+        "work_item_types"
+      ],
+      "required": [
+        "project_id"
+      ],
+      "schema_tokens": 136,
+      "tool_total_tokens": 240
+    },
+    "update_release": {
+      "properties": [
+        "description_html",
+        "is_prerelease",
+        "lead_id",
+        "name",
+        "release_date",
+        "release_id",
+        "status",
+        "tag_id",
+        "target_date"
+      ],
+      "required": [
+        "release_id"
+      ],
+      "schema_tokens": 186,
+      "tool_total_tokens": 368
+    },
+    "update_release_changelog": {
+      "properties": [
+        "description_html",
+        "description_json",
+        "description_stripped",
+        "release_id"
+      ],
+      "required": [
+        "release_id"
+      ],
+      "schema_tokens": 82,
+      "tool_total_tokens": 270
+    },
+    "update_release_label": {
+      "properties": [
+        "color",
+        "label_id",
+        "name",
+        "sort_order"
+      ],
+      "required": [
+        "label_id"
+      ],
+      "schema_tokens": 80,
+      "tool_total_tokens": 164
+    },
+    "update_release_tag": {
+      "properties": [
+        "commit_hash",
+        "description",
+        "git_tag",
+        "tag_id",
+        "version"
+      ],
+      "required": [
+        "tag_id"
+      ],
+      "schema_tokens": 99,
+      "tool_total_tokens": 198
+    },
+    "update_state": {
+      "properties": [
+        "color",
+        "default",
+        "description",
+        "external_id",
+        "external_source",
+        "group",
+        "is_triage",
+        "name",
+        "project_id",
+        "sequence",
+        "state_id"
+      ],
+      "required": [
+        "project_id",
+        "state_id"
+      ],
+      "schema_tokens": 201,
+      "tool_total_tokens": 340
+    },
+    "update_work_item": {
+      "properties": [
+        "assignees",
+        "description_html",
+        "description_stripped",
+        "estimate_point",
+        "external_id",
+        "external_source",
+        "is_draft",
+        "labels",
+        "name",
+        "parent",
+        "point",
+        "priority",
+        "project_id",
+        "sort_order",
+        "start_date",
+        "state",
+        "target_date",
+        "type",
+        "type_id",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 386,
+      "tool_total_tokens": 670
+    },
+    "update_work_item_comment": {
+      "properties": [
+        "access",
+        "comment_html",
+        "comment_id",
+        "comment_json",
+        "external_id",
+        "external_source",
+        "project_id",
+        "work_item_id"
+      ],
+      "required": [
+        "comment_id",
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 146,
+      "tool_total_tokens": 263
+    },
+    "update_work_item_link": {
+      "properties": [
+        "link_id",
+        "project_id",
+        "url",
+        "work_item_id"
+      ],
+      "required": [
+        "link_id",
+        "project_id",
+        "work_item_id"
+      ],
+      "schema_tokens": 65,
+      "tool_total_tokens": 139
+    },
+    "update_work_item_property": {
+      "properties": [
+        "default_value",
+        "description",
+        "display_name",
+        "external_id",
+        "external_source",
+        "is_active",
+        "is_multi",
+        "is_required",
+        "project_id",
+        "property_type",
+        "relation_type",
+        "settings",
+        "validation_rules",
+        "work_item_property_id",
+        "work_item_type_id"
+      ],
+      "required": [
+        "work_item_property_id"
+      ],
+      "schema_tokens": 311,
+      "tool_total_tokens": 600
+    },
+    "update_work_item_property_option": {
+      "properties": [
+        "color",
+        "description",
+        "external_id",
+        "external_source",
+        "is_default",
+        "name",
+        "option_id",
+        "project_id",
+        "property_id"
+      ],
+      "required": [
+        "option_id",
+        "property_id"
+      ],
+      "schema_tokens": 165,
+      "tool_total_tokens": 299
+    },
+    "update_work_item_relation_definition": {
+      "properties": [
+        "color",
+        "definition_id",
+        "inward",
+        "is_active",
+        "name",
+        "outward"
+      ],
+      "required": [
+        "definition_id"
+      ],
+      "schema_tokens": 118,
+      "tool_total_tokens": 212
+    },
+    "update_work_item_type": {
+      "properties": [
+        "description",
+        "external_id",
+        "external_source",
+        "is_active",
+        "name",
+        "project_id",
+        "project_ids",
+        "work_item_type_id"
+      ],
+      "required": [
+        "work_item_type_id"
+      ],
+      "schema_tokens": 166,
+      "tool_total_tokens": 286
+    },
+    "update_work_log": {
+      "properties": [
+        "description",
+        "duration",
+        "project_id",
+        "work_item_id",
+        "work_log_id"
+      ],
+      "required": [
+        "project_id",
+        "work_item_id",
+        "work_log_id"
+      ],
+      "schema_tokens": 85,
+      "tool_total_tokens": 171
+    },
+    "update_workspace_features": {
+      "properties": [
+        "customers",
+        "initiatives",
+        "pi",
+        "project_grouping",
+        "teams",
+        "wiki"
+      ],
+      "required": [],
+      "schema_tokens": 125,
+      "tool_total_tokens": 213
+    },
+    "upload_work_item_attachment_from_url": {
+      "properties": [
+        "name",
+        "project_id",
+        "url",
+        "work_item_id"
+      ],
+      "required": [
+        "project_id",
+        "url",
+        "work_item_id"
+      ],
+      "schema_tokens": 63,
+      "tool_total_tokens": 236
+    }
+  },
+  "tool_total_token_total": 36805
+}

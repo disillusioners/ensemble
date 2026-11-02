@@ -1,0 +1,1 @@
+plane|t|t|3|e2e|Bearer <redacted,len=38>|streamable-http|https://mcp.ensem.dev/plane/http/api-key/mcp

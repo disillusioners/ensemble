@@ -77,6 +77,15 @@ def client(repo):
 
 @pytest.fixture
 def mock_plane_env(monkeypatch):
+    """Set the env vars required by ``PlaneHttpClient.is_available``.
+
+    BR-A remediation (lane ``plane-pm-issue-tools``): the environment is
+    pinned to LIVE so the workspace resolution permits the configured slug
+    (the refusal behaviour is pinned in
+    ``tests/unit/test_plane_workspace_enforcement.py``).
+    """
+    monkeypatch.setenv("ENSEMBLE_SELF_ENV", "live")
+    monkeypatch.setenv("POSTGRES_DB", "ensemble_prod")
     monkeypatch.setenv("PLANE_BASE_URL", "https://plane.example.com")
     monkeypatch.setenv("PLANE_API_KEY", "test-api-key-xyz")
     monkeypatch.setenv("PLANE_MCP_WORKSPACE_SLUG", "test-ws")
@@ -94,7 +103,13 @@ class TestPlaneSyncEndpoint:
     def test_disabled_returns_503(
         self, client, repo, monkeypatch
     ):
-        """No PLANE_API_KEY → 503 with disabled reason; no state mutation."""
+        """No PLANE_API_KEY → 503 with disabled reason; no state mutation.
+
+        BR-A remediation: the env is pinned to LIVE so the disabled
+        message reflects the missing REST key (on a non-live environment
+        the unset-slug refusal takes precedence — P2-L precedence)."""
+        monkeypatch.setenv("ENSEMBLE_SELF_ENV", "live")
+        monkeypatch.setenv("POSTGRES_DB", "ensemble_prod")
         monkeypatch.delenv("PLANE_BASE_URL", raising=False)
         monkeypatch.delenv("PLANE_API_KEY", raising=False)
         monkeypatch.delenv("PLANE_MCP_WORKSPACE_SLUG", raising=False)

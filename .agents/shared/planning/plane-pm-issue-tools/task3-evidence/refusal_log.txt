@@ -1,0 +1,56 @@
+# GATE B — Step 6 refusal log (N-1..N-4)
+# Source: the daemon's OWN boot WARNING (daemon/manager.py — the ONLY
+# typed-reason interpolator) + the REST lane's test-connection refusal.
+# Env var NAMES only — no value of any credential appears below.
+
+=== N-1 — non-live + slug 'nea' ===
+  18:17:57 - daemon.mcp.builtin_servers.plane - INFO - Plane workspace resolution: env=dev source=explicit-marker slug=(account-default)
+  18:17:58 - daemon.manager - WARNING - Builtin 'plane' deactivated — workspace refused (POLICY): workspace 'nea' is production-only; this environment resolves to dev; agents with mcp_full_access=['plane']: project-manager
+  18:17:58 - daemon.manager - WARNING - Agent capability gap: project-manager declare(s) mcp_full_access ['plane'] but the builtin was POLICY-REFUSED this boot (the row is INACTIVE; see the workspace-refused WARNING above)
+  REST lane (POST /api/mcp-servers/test-connection):
+    {"success":false,"message":"Plane workspace refused: workspace 'nea' is production-only; this environment resolves to dev","tools_count":null}
+
+=== N-2 — non-live + slug UNSET ===
+  18:20:05 - daemon.mcp.builtin_servers.plane - INFO - Plane workspace resolution: env=dev source=explicit-marker slug=(account-default)
+  18:20:06 - daemon.manager - WARNING - Builtin 'plane' skipped — workspace refused (POLICY): PLANE_MCP_WORKSPACE_SLUG is unset in a non-production environment; expected 'e2e'; agents with mcp_full_access=['plane']: project-manager
+  18:20:06 - daemon.manager - WARNING - Agent capability gap: project-manager declare(s) mcp_full_access ['plane'] but the builtin was POLICY-REFUSED this boot (the row is INACTIVE; see the workspace-refused WARNING above)
+  REST lane (POST /api/mcp-servers/test-connection):
+    {"success":false,"message":"Plane workspace refused: PLANE_MCP_WORKSPACE_SLUG is unset in a non-production environment; expected 'e2e'","tools_count":null}
+
+=== N-3 — non-live + slug 'other' ===
+  18:20:59 - daemon.mcp.builtin_servers.plane - INFO - Plane workspace resolution: env=dev source=explicit-marker slug=(account-default)
+  18:21:00 - daemon.manager - WARNING - Builtin 'plane' skipped — workspace refused (POLICY): workspace 'other' is not permitted in a non-production environment; expected 'e2e'; agents with mcp_full_access=['plane']: project-manager
+  18:21:00 - daemon.manager - WARNING - Agent capability gap: project-manager declare(s) mcp_full_access ['plane'] but the builtin was POLICY-REFUSED this boot (the row is INACTIVE; see the workspace-refused WARNING above)
+  REST lane (POST /api/mcp-servers/test-connection):
+    {"success":false,"message":"Plane workspace refused: workspace 'other' is not permitted in a non-production environment; expected 'e2e'","tools_count":null}
+
+=== N-4 — the four-part P15a assertion (the 'nea' re-boot) ===
+  (i)   NO NEW plane row created:
+         plane rows before the refused boot : 1 (id db742a0d-5232-4a8a-8c48-d13fc9d94dfa)
+         plane rows after  the refused boot : 1 (SAME id)  ⇒ no NEW row
+  (ii)  the pre-existing row's config_schema_version UNCHANGED: '3' → '3'
+         (the E4 heal is DEFERRED on a refused boot — P2-H)
+         and the persisted x-workspace-slug header stayed 'e2e' (not re-materialised)
+  (iii) PM's RESOLVED toolset contains NO plane_* tool:
+         resolved_toolset_size = 46, plane_tool_count = 0, resolved_plane_prefixed_tools = []
+         (identical to the plane-ABSENT baseline toolset of 46)
+         mcp_tool_names stored-fallback carries NO stale plane_* entry:
+         preloaded_mcp_tool_names = ['mcp_context7_query-docs', 'mcp_context7_resolve-library-id']
+  (iv)  the WARNING IS logged (agent + server + typed reason) — see the
+         'Builtin 'plane' deactivated — workspace refused (POLICY)' lines above
+         plus 'Agent capability gap: project-manager declare(s) mcp_full_access
+         ['plane'] but the builtin was POLICY-REFUSED this boot'.
+
+=== N-5 — mechanism-level P15b ===
+  The resolver NEVER permitted 'nea' in any non-live resolution (N-1 proves it).
+  The explicit-constructor bypass is CLOSED (P2-D): daemon/clients/plane_http_client.py
+  __init__ accepts workspace_slug for BACKWARD COMPATIBILITY ONLY and never consults it
+  ('the RESOLVED slug is the only authority'); a REFUSED resolution makes the client
+  INERT (every method raises with the typed reason); an explicit base_url whose path
+  carries a DIFFERENT workspace slug also makes the client INERT.
+  The MCP header comes from the resolver's effective slug
+  (daemon/mcp/builtin_servers/plane.py::get_base_config — E3), so the MCP header
+  can never carry 'nea' on a non-live environment.
+  No observational 'nea' read was performed (the lane's own no-nea-contact fence;
+  the G2 fold DROPPED that optional clause — the guarantee is structural).
+

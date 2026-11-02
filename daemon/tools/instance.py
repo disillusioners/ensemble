@@ -1,7 +1,8 @@
 """Instance management tools for multi-agent orchestration.
 
-Module size: ~6100 lines (post-unify-spawn-tools tidy pass,
-2026-10-05; +749 since the 2026-09-14 dispatch-lane stranding fix).
+Module size: ~7273 lines (post-unify-spawn-tools tidy pass,
+2026-10-05; +1922 since the 2026-09-14 dispatch-lane stranding fix;
+refreshed 2026-11-02).
 Originally aimed for the 1000-3000 line band; post-move we are
 ~3000 lines over the band (the >3000 band obligation applies).
 Routing logic (``_route_send_message``, ``_make_workdir_aware``,
@@ -400,6 +401,26 @@ def _load_mcp_tools(manager: Any, instance_id: str) -> list[Any]:
     return []
 
 
+def _owned_elsewhere(
+    tool_categories: dict[str, list[str]], category_key: str
+) -> set[str]:
+    """The union of every OTHER category's tools.
+
+    A category map is the ownership map: a tool owned by ANY other
+    registered category is not a discovery candidate of the sweep for
+    ``category_key``. Both the ``mcp_`` lane and the dynamic-prefix
+    lane exclude exactly their own target category — a legitimately
+    discovered tool of the target category is never dropped, and a tool
+    another category owns is never swept in.
+    """
+    owned: set[str] = set()
+    for other_key, other_tools in tool_categories.items():
+        if other_key == category_key:
+            continue
+        owned.update(other_tools)
+    return owned
+
+
 def resolve_tool_filter(
     allow: list[str] | None, 
     deny: list[str] | None,
@@ -463,11 +484,7 @@ def resolve_tool_filter(
             # The category map is the ownership map: it is populated by
             # ``scan_tools_for_full_docs`` BEFORE ``_apply_tool_filter``
             # runs (the production order in ``create_instance_tools``).
-            owned_elsewhere: set[str] = set()
-            for category_key, category_tools in tool_categories.items():
-                if category_key == "mcp":
-                    continue
-                owned_elsewhere.update(category_tools)
+            owned_elsewhere = _owned_elsewhere(tool_categories, "mcp")
             # Find all MCP tools: names starting with "mcp_" and contain at least 2 underscores
             mcp_tools = {
                 name for name in all_tool_names
@@ -506,8 +523,28 @@ def resolve_tool_filter(
                 # Category already populated (statically registered tools
                 # or caller-supplied) — trust it, never clobber.
                 continue
+            # W-8 (plane-pm-issue-tools, 2026-11-02): the OWNERSHIP guard —
+            # the mirror of the ``mcp_`` lane's ``owned_elsewhere`` pattern
+            # above. A tool whose NAME matches this prefix but is already
+            # owned by ANOTHER registered category must not be swept in:
+            # ``plane_sync_project`` is registered under ``plane_sync``
+            # (``daemon/tools/plane_sync.py``) while its name starts with
+            # ``plane_``, so without this guard the sweep populates the
+            # empty ``plane`` category with it whenever the plane MCP
+            # server did not register — and PM's ``tools.allow: ["plane"]``
+            # then grants a tool that has nothing to do with the server.
+            # Same ``meta.json``, two different toolsets depending on
+            # server-registration state: a determinism defect, not merely
+            # a permission one (FC9 boot empirically confirmed the leak).
+            #
+            # The exclusion is computed PER ``category_key`` — the union of
+            # every OTHER category's tools — so a legitimately-discovered
+            # ``plane_*`` tool is never dropped (only the target category
+            # itself is excluded, exactly like the ``mcp_`` guard).
+            owned_elsewhere = _owned_elsewhere(tool_categories, category_key)
             tool_categories[category_key] = sorted(
-                name for name in all_tool_names if name.startswith(prefix)
+                name for name in all_tool_names
+                if name.startswith(prefix) and name not in owned_elsewhere
             )
 
     if allow is None or len(allow) == 0:

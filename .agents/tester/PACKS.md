@@ -92,6 +92,67 @@
 
 # Test Packs
 
+## Lane plane-pm-issue-tools — GATE D Tier-2 whole-tree leg REGISTERED (2026-11-02, GATE D)
+
+> Registered by GATE D (Tier-2 whole-tree dual-side regression leg, RESUMED). Whole-tree
+> corpus both legs (BASE 941cb6321 = 32,450 executed; HEAD 31869158e = 32,728 executed;
+> mandatory ignores: `tests/packs/g7_unique_index_smoke_test.py` + `tests/e2e/test_context_injection_hybrid.py`),
+> closure exact both legs (UNPARSED=0), digest form = sorted bare node-ids:
+> base `093e906e…`, head `2b349a4b…` — **NET-NEW = ∅ after 3× solo adjudication (zero deterministic
+> regressions; 19 shard-context candidates all FLAKY/order-sensitive)**. Pre-existing 424: 39 cited
+> from Tier-1 (stable 3× both legs there) + 385 re-proven 3× both legs (rep sets byte-identical,
+> head==base digest `dd166c19…`). Evidence: `.agents/tester/RESULTS/2026-11-02-plane-pm-tier2-whole-tree.md`
+> + `.agents/tester/EVIDENCE/plane-pm-tier2-2026-11-02/`. Shard fences: per-var `env -u POSTGRES_*`
+> scrubs (glob = SILENT NO-OP), dead-LLM-port fence (`OPENAI_BASE_URL=http://127.0.0.1:9/v1` + retry=1),
+> `HOME=$(mktemp -d)`, outer `timeout 1500` + `--timeout=120`, `-p no:randomly`, xdist `-n auto` within
+> a shard only, legs never concurrent, worktree-local `.venv` with `cd` import proof per leg.
+
+| Gate leg | Corpus | Net-new | Pre-existing | Status |
+|---|---|---|---|---|
+| GATE D tier-2 whole-tree | 32,728 HEAD / 32,450 BASE executed | **∅ deterministic** (19 FLAKY adjudicated solo ×3 both legs) | 424 stable+symmetric (39 Tier-1-cited, 385 re-proven 3×) | ✅ **PASS-WITH-NOTES (2026-11-02)** |
+
+## Lane plane-pm-issue-tools — Phase-2/3 runtime packs REGISTERED (2026-11-02, GATE C)
+
+> Registered by GATE C (Tier-1 blast-radius leg, this gate). The 7 runtime packs
+> are lane-owned (D1) and all green at HEAD: 277 collected, 0 failed, 0 error
+> (slice of the GATE C leg; evidence `.agents/tester/RESULTS/2026-11-02-plane-pm-tier1-blast-radius.md`).
+> Fences: same as the Phase-4 block below — explicit per-variable `env -u POSTGRES_*`
+> scrubs (glob form is a SILENT NO-OP), `timeout 300` + `--timeout=120` dual layer,
+> `-p no:randomly`, main-checkout `.venv` interpreter with `cd` into the lane worktree
+> (worktrees carry no `.venv`). Counts are mechanical `--collect-only` node counts.
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `plane_workspace_resolver_unit_test` | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT /home/nea/ensemble-src/.venv/bin/python -m pytest tests/unit/test_plane_workspace_resolver.py -q --tb=short -rfE -p no:randomly --timeout=120` | **P2/P4** — Gate (iv) environment-classification proof: explicit live/demo/sandbox ⇒ live/demo/non-live; no marker + own db `ensemble_dev` ⇒ NON-LIVE; no marker + own db `ensemble_prod` ⇒ live; opt-out ⇒ non-live even with own-db=prod; garbage marker ⇒ non-live + WARNING; empty marker ⇒ absent; exact non-normalizing `VALID_ENVS` match; canonical DB-name input; grep pin + zero-file-access test. | 2026-11-02 (GATE C) | ✅ **79/79 PASS** |
+| `plane_workspace_enforcement_unit_test` | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT /home/nea/ensemble-src/.venv/bin/python -m pytest tests/unit/test_plane_workspace_enforcement.py -q --tb=short -rfE -p no:randomly --timeout=120` | **P3** — E2/E3 chokepoint behaviour: non-live + `nea` ⇒ refuse; non-live + unset ⇒ refuse; live + `nea`/`e2e`/third slug ⇒ allowed; live + unset ⇒ account-default (MCP) / absent (REST); P2-D constructor bypass closed; P2-C one canonical slug normalization. | 2026-11-02 (GATE C) | ✅ **35/35 PASS** |
+| `plane_loud_skip_observability_unit_test` | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT /home/nea/ensemble-src/.venv/bin/python -m pytest tests/unit/test_plane_loud_skip_observability.py -q --tb=short -rfE -p no:randomly --timeout=120` | **P5/P6** — WARNING names server + agents + missing env vars at WARNING level; registry-vs-row cross-check; policy-refused bucket (P3-E); typed reason verbatim (P3-C). | 2026-11-02 (GATE C) | ✅ **33/33 PASS** |
+| `plane_mcp_row_heal_unit_test` | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT /home/nea/ensemble-src/.venv/bin/python -m pytest tests/unit/test_plane_mcp_row_heal.py -q --tb=short -rfE -p no:randomly --timeout=120` | **P8** — schema-version bump re-points the persisted slug; `config.env` sentinel survives the heal; heal conditional on availability (P2-H); slug-equality trigger (P2-I). | 2026-11-02 (GATE C) | ✅ **6/6 PASS** |
+| `plane_test_connection_report_unit_test` | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT /home/nea/ensemble-src/.venv/bin/python -m pytest tests/unit/test_plane_test_connection_report.py -q --tb=short -rfE -p no:randomly --timeout=120` | **P5d/P3-D** — `POST /api/mcp-servers/test-connection` consults the resolver and surfaces the typed refusal + kill-switch state instead of the stale `success=true, 177 tools` report. | 2026-11-02 (GATE C) | ✅ **19/19 PASS** |
+| `plane_operator_route_gates_unit_test` | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT /home/nea/ensemble-src/.venv/bin/python -m pytest tests/unit/test_plane_operator_route_gates.py -q --tb=short -rfE -p no:randomly --timeout=120` | **P3-D** — operator write routes (`POST /configure-builtin`, `POST /{id}/reset-builtin`) are resolver-gated for the plane builtin: refused ⇒ house 403 `BUILTIN_SERVER_PROTECTED` with the typed reason; no row created / no reactivation / no config rewrite. | 2026-11-02 (GATE C) | ✅ **9/9 PASS** |
+| `plane_bearer_echo_scrub_unit_test` | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT /home/nea/ensemble-src/.venv/bin/python -m pytest tests/unit/test_plane_bearer_echo_scrub.py -q --tb=short -rfE -p no:randomly --timeout=120` | **P3** — bearer-token echo scrub in the operator route responses (no `__KMS_REF__`/token leakage). | 2026-11-02 (GATE C) | ✅ **19/19 PASS** |
+| `test_plane_sync_endpoint` (supplementary) | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT /home/nea/ensemble-src/.venv/bin/python -m pytest tests/integration/test_plane_sync_endpoint.py -q --tb=short -rfE -p no:randomly --timeout=120 -m integration` | **BR-A #4** — endpoint integration tests (7 nodes) are deselected by the global `not integration` addopts on both legs (symmetric, 11 deselected); run explicitly with `-m integration` for coverage. | 2026-11-02 (GATE C) | ✅ **7/7 PASS** (both legs) |
+
+## Lane plane-pm-issue-tools — Phase-4 static packs REGISTERED (2026-11-02) — P10 shell-scrub content + the two static-check host files
+
+## Lane plane-pm-issue-tools — Phase-4 static packs REGISTERED (2026-11-02) — P10 shell-scrub content + the two static-check host files
+
+> Phase 4 (charter reconciliation + durable doc persistence) owns the STATIC content pins
+> (phase4-plan.md §2.5: "Phase 3 owns the *runtime* guards; Phase 4 owns the *static* content pins").
+> **X2.8/X3.6 disposition (deferred by instance 2, resolved here):** the Phase-2/3 *runtime* pack
+> registration belongs to the **tester lane** (Phase 6 G13 functional gate runs and registers them) —
+> phase4-plan §5 carries ONLY the P10 row, so this section registers the Phase-4 artifacts and leaves
+> the Phase-2/3 rows to the gate that exercises them.
+>
+> Fences: the P10 pack is pure static content (bash, no pytest, no daemon boot, no DB); the two
+> static-check host files run under the house fence (`timeout 300` + `--timeout=120`, `-p no:randomly`,
+> main-checkout `.venv` interpreter with `cd` into the lane worktree, per-variable `env -u` scrubs).
+
+| Pack | Invocation | Scope | Last run | Status |
+|---|---|---|---|---|
+| `plane_shell_scrub_content` | `cd <wt> && timeout 300 bash tests/packs/plane_shell_scrub_content.sh` | **P10** (NR2): `scripts/deploy.sh` still carries the `PLANE_MCP_WORKSPACE_SLUG=e2e` sed-pin + grep-assert; `scripts/run_tests_scrubbed.sh` still carries the per-variable unset + leak-gate case arm + `exit 78`; + 5 scratch-copy mutation legs (weakened copies ⇒ the same assertions go RED). READS the shell files, never modifies them. | 2026-11-02 | ✅ **10/10 PASS** (5 repo assertions + 5 mutation legs) @ Phase-4 commit |
+| `test_plane_prompt_verb_check` (P11 host file) | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT /home/nea/ensemble-src/.venv/bin/python -m pytest tests/unit/test_plane_prompt_verb_check.py -q --tb=short -rfE -p no:randomly --timeout=120` | **P11/X4.1**: every `plane_*` MCP verb on the charter surface (4 PM prompt files + the `tool_name_prefix` docstring + the two daemon `CATEGORY_DOC` strings) is a member of the gate-(i) catalog (`gate-i-keep-set.json` + `tests/fixtures/plane_catalog.json`); exclusion set EXACTLY 3 names (`plane_sync_project`/`plane_sync`/`plane_sync_state`); no `*_issue` verb remains; `mcp_tools.py::CATEGORY_DOC` must not document the nonexistent `call_mcp_tool` (O6 guard); + planted-verb/docstring mutation legs. | 2026-11-02 | ✅ **9/9 PASS** (widened surface + O6 guard closed in the Phase-4 follow-up; planted `plane_create_issue`/`CATEGORY_DOC` drifts ⇒ RED, restored ⇒ GREEN) |
+| `test_plane_env_example_defaults` (P30 host file) | `cd <wt> && timeout 300 env -u POSTGRES_USER -u POSTGRES_DB -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_PASSWORD -u DATABASE_URL -u PORT /home/nea/ensemble-src/.venv/bin/python -m pytest tests/unit/test_plane_env_example_defaults.py -q --tb=short -rfE -p no:randomly --timeout=120` | **P30/X4.9+X4.11**: `.env.example` carries NO active `PLANE_*` assignment (all three Plane sample lines commented); commented `#PLANE_MCP_WORKSPACE_SLUG=e2e` present; doctrine prose carries the per-environment rule; stale "silently targets the account-default" sentence absent; + 5 tmp-copy mutation legs. | 2026-11-02 | ✅ **7/7 PASS** (RED baseline leg captured pre-edit: 7 real violations on the active `:207-209`) |
+
 ## Commission report-obligation-visibility (wi-1fbee2ec) — gate packs REGISTERED (2026-11-01)
 
 > Tester functional gate @ HEAD `8e76897e3` (base `f7039c3ff`). Same fences as the block below: explicit

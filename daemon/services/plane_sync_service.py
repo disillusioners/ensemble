@@ -133,6 +133,7 @@ from daemon.constants import (
     PLANE_SYNC_WATCHDOG_MAX_ATTEMPTS,
     PLANE_SYNCED_AT_METADATA_KEY,
 )
+from daemon.plane_workspace import current_plane_workspace
 from daemon.repositories.project.models import Project, ProjectMetadataRecord
 from daemon.repositories.project.repository import SQLModelProjectRepository
 
@@ -373,9 +374,24 @@ class PlaneSyncService:
 
     @classmethod
     def unavailable_reason(cls) -> str | None:
-        """Return a human-readable unavailability reason, or None when up."""
+        """Return a human-readable unavailability reason, or None when up.
+
+        P2-L (``plane-pm-issue-tools``, 2026-11-02): a **workspace
+        refusal** is reported with the resolver's TYPED reason, verbatim —
+        not as "API key not set". Rendering a policy refusal as a
+        missing-key diagnostic is exactly the "the refusal looks like
+        something else" class this lane exists to prevent: the operator
+        would go looking for a credential that is present and working.
+
+        The order matters: the kill-switch first (an operator decision
+        outranks everything), then the workspace resolution (the policy),
+        then the key presence (the configuration).
+        """
         if not plane_sync_enabled():
             return "disabled by kill-switch (PLANE_SYNC_ENABLED=false)"
+        resolution = current_plane_workspace()
+        if not resolution.allowed:
+            return resolution.reason or "workspace resolution refused"
         if not PlaneHttpClient.is_available():
             return "not configured (PLANE_BASE_URL / PLANE_API_KEY not set)"
         return None
@@ -385,8 +401,26 @@ class PlaneSyncService:
 
         Returns ``None`` when feature gating fails so :meth:`sync_project`
         can short-circuit without raising.
+
+        P2-D (NB3, ``plane-pm-issue-tools``): the **injection seam is
+        gated**. An explicitly injected client whose effective slug is not
+        the currently-resolved slug — or any injected client under a
+        refused resolution — is REJECTED here (treated as unavailable).
+        The parameter exists for tests; no production caller injects, so
+        this closure changes no production behaviour — it prevents a
+        future caller from reintroducing the split-brain the constructor
+        gate closed. Test doubles whose ``workspace_slug`` is not a plain
+        string (a ``MagicMock`` attribute) are not slug-bearing and pass
+        through — the gate governs real (or realistic) clients only.
         """
         if self._http_client is not None:
+            resolution = current_plane_workspace()
+            if not resolution.allowed:
+                return None
+            injected_slug = getattr(self._http_client, "workspace_slug", None)
+            if isinstance(injected_slug, str):
+                if injected_slug != (resolution.slug or ""):
+                    return None
             return self._http_client
         return PlaneHttpClient.create()
 
