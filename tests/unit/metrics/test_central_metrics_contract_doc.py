@@ -50,13 +50,19 @@ EXPECTED_AVAILABILITY_REASONS = (
 )
 
 #: The error vocabulary — every expected condition has a typed status.
+#:
+#: The 403 token is the SHIPPED UPPERCASE spelling (the council's D-c
+#: ruling): ``daemon/auth/decorators.py`` emits ``SCOPE_INSUFFICIENT``,
+#: and the contract doc carries that exact token.  The literal below
+#: follows the ruling it pins — the DOC is the pinned artefact and the
+#: wire is untouched.
 EXPECTED_ERROR_VOCABULARY = (
     "404 unknown_family",
     "400 invalid_label_filter",
     "400 invalid_cursor",
     "503 registry_unavailable",
     "503 AUTH_NOT_CONFIGURED",
-    "403 scope_insufficient",
+    "403 SCOPE_INSUFFICIENT",
 )
 
 #: The five pinned truth-table invariants (phase 1 task 1.6).
