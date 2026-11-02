@@ -1,7 +1,9 @@
 # Fix cycle 2 — the FE gate evidence, preserved 2026-11-02 (Phase 6 close-out).
 #
 # Source: /tmp/c2-fe-gate/ (8 files, copied with cp -p; mtimes preserved).
-# Every file is byte-identical to its source (cmp).
+# Every file is byte-identical to its source (cmp) — EXCEPT the two
+# type-check logs, which were RE-CAPTURED in the closure round (their exit
+# codes are now captured INTO the artefacts); see their row below.
 #
 # The five digests the cycle-2 dispatch cited are RECOMPUTED here and all five match:
 #
@@ -18,8 +20,8 @@
 #   492dd44bda9f2625a8a2064c2a540e1069345b420354b03b6d0eb5b5581dd44b  e2e-metrics-gate.log
 #   cf582ac6096f447d296f2896eee4b6ab8426b717a2aa01c9878124d400e8b26e  mutation-matrix.log
 #   557027eda0b51886443e3f1cdfc74425f9f29fabad482a8d2e560a3935f8d34f  mutation-summary.json
-#   e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  typecheck-scoped-pack-leg4.log
-#   e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  typecheck-scoped-standalone.log
+#   cc642451671c1065e1cb3b9225f684e1c0c8b8e7ab9da539c8916a504cfa07a1  typecheck-scoped-pack-leg4.log
+#   5e73233a4faa1753eb51ef99693ea914be49af754ebc16094ab2de5e6811d3fd  typecheck-scoped-standalone.log
 #
 # ── WHAT EACH FILE PROVES ─────────────────────────────────────────────────────
 #
@@ -49,10 +51,17 @@
 #   cycle-1 matrix). The two files are DIFFERENT matrices and are kept apart on purpose.
 #
 # * typecheck-scoped-pack-leg4.log / typecheck-scoped-standalone.log — the SCOPED
-#   type-check legs. BOTH ARE 0 BYTES, and their sha256 is therefore the EMPTY-STRING
-#   digest e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 — the same
-#   vacuous-digest shape the P3 whole-tree leg had. The reason is benign here: `tsc
-#   --noEmit` prints NOTHING on success. But the PASS itself is carried by the EXIT CODE,
-#   which these logs do NOT contain — so an empty log is NOT the evidence of a pass, and the
-#   exit code must come from the cycle-2 gate record. Recorded here rather than passed
-#   over.
+#   type-check legs. RE-CAPTURED (closure round): the earlier captures were 0 BYTES
+#   (the vacuous-digest class — sha256("") = e3b0c442…b855), because `tsc --noEmit`
+#   prints NOTHING on success; the PASS was carried by exit codes that the logs did
+#   not contain, so an empty log was NOT the evidence of a pass.  Both logs are now
+#   re-run with the EXIT CODE CAPTURED INTO THE ARTEFACT (`TYPECHECK_EXIT=0`), plus
+#   the command, the cwd, the git_head and the tsc version.
+#     typecheck-scoped-pack-leg4.log  862 bytes
+#       cc642451671c1065e1cb3b9225f684e1c0c8b8e7ab9da539c8916a504cfa07a1
+#     typecheck-scoped-standalone.log  851 bytes
+#       5e73233a4faa1753eb51ef99693ea914be49af754ebc16094ab2de5e6811d3fd
+#   The command is the cycle-2 pack's scoped leg, run through the frontend's LOCAL
+#   devDependency (never a bare/npx tsc):
+#     cd frontend && ./node_modules/.bin/tsc --noEmit -p tsconfig.metrics-fe.json
+#   Both legs: TYPECHECK_EXIT=0 (tsc 5.9.3, git_head 604d85bd4).

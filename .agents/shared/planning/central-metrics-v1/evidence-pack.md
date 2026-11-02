@@ -504,7 +504,7 @@ byte-identical to `/tmp/c2-fe-gate/`; all five dispatch-cited digests recomputed
 | dual-side **base** `36c46aa1a` | 3 failed · 1 798 passed · **1 801** total | `8d1a03e0633aa67f` |
 | the **e2e** (Playwright, own proxy config, no daemon) | **2 passed (31.2 s)** | `492dd44bda9f2625` |
 | the **mutation matrix** | **13/13 PASS** (P5-M1…P5-M11 + `FIX2-W6` + `FIX2-A5`), every leg `red_exit≠0` / `green_exit=0` / `restored=True`, plus the **POST-RUN GUARD: OK** | `cf582ac6096f447d` |
-| the **scoped type-check** ×2 | the logs are **0 bytes** — `tsc --noEmit` is silent on success — so their digest is the **empty-string** digest `e3b0c442…b855`. **The PASS is carried by the exit code, which these logs do not contain** — an empty log is not the evidence of a pass | `e3b0c44298fc1c14` (both) |
+| the **scoped type-check** ×2 | the logs are **0 bytes** — `tsc --noEmit` is silent on success — so their digest is the **empty-string** digest `e3b0c442…b855`. **The PASS is carried by the exit code, which these logs do not contain** — an empty log is not the evidence of a pass | `e3b0c44298fc1c14` (both) — **RE-CAPTURED in the closure round: both logs now carry their own `TYPECHECK_EXIT=0`** (862 B `cc642451…` / 851 B `5e73233a…`), so the verdict is readable in the artefact itself |
 
 ### 14.3 The A-6 rename
 
